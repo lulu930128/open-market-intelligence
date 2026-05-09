@@ -46,3 +46,7 @@ build/
 .cache/
 .pytest_cache/
 coverage/
+
+
+# Local notes
+上傳說明.txt
