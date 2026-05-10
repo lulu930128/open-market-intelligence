@@ -1,4 +1,10 @@
-﻿from pydantic_settings import BaseSettings, SettingsConfigDict
+﻿from pathlib import Path
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "open_market_intelligence.db"
 
 
 class Settings(BaseSettings):
@@ -7,7 +13,7 @@ class Settings(BaseSettings):
     app_host: str = "127.0.0.1"
     app_port: int = 8000
 
-    database_url: str = "sqlite:///./data/open_market_intelligence.db"
+    database_url: str = f"sqlite:///{DEFAULT_DB_PATH.as_posix()}"
 
     enable_scheduler: bool = False
     timezone: str = "Asia/Taipei"

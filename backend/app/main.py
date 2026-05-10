@@ -1,11 +1,22 @@
-﻿from fastapi import FastAPI
+﻿from contextlib import asynccontextmanager
 
-from app.routers import system, sources, reports
+from fastapi import FastAPI
+
+from app.db.session import init_db
+from app.routers import reports, sources, system
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    yield
+
 
 app = FastAPI(
     title="Open Market Intelligence API",
     description="A public-data-driven market intelligence system.",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 app.include_router(system.router, prefix="/api/system", tags=["system"])
