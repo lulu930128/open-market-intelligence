@@ -1,7 +1,7 @@
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.db.models import SourceRegistry
+from app.db.models import FetchLog, RawFetchResult, SourceRegistry
 from app.sources.schemas import SourceCreate, SourceUpdate
 
 
@@ -72,3 +72,48 @@ def delete_source(db: Session, source_id: int) -> None:
 
     db.delete(source)
     db.commit()
+
+
+def list_source_logs(
+    db: Session,
+    source_id: int,
+    limit: int = 50,
+) -> list[FetchLog]:
+    get_source(db, source_id)
+
+    return (
+        db.query(FetchLog)
+        .filter(FetchLog.source_id == source_id)
+        .order_by(FetchLog.started_at.desc(), FetchLog.id.desc())
+        .limit(limit)
+        .all()
+    )
+
+
+def list_source_raw_results(
+    db: Session,
+    source_id: int,
+    limit: int = 50,
+) -> list[RawFetchResult]:
+    get_source(db, source_id)
+
+    return (
+        db.query(RawFetchResult)
+        .filter(RawFetchResult.source_id == source_id)
+        .order_by(RawFetchResult.fetched_at.desc(), RawFetchResult.id.desc())
+        .limit(limit)
+        .all()
+    )
+
+
+def get_raw_result(db: Session, raw_result_id: int) -> RawFetchResult:
+    raw_result = (
+        db.query(RawFetchResult)
+        .filter(RawFetchResult.id == raw_result_id)
+        .first()
+    )
+
+    if raw_result is None:
+        raise SourceNotFoundError(f"Raw fetch result id={raw_result_id} not found.")
+
+    return raw_result

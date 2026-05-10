@@ -68,3 +68,64 @@ class SourceRunRead(BaseModel):
     error_message: str | None = None
 
     fetched_at: datetime
+
+
+class FetchLogRead(BaseModel):
+    id: int
+
+    source_id: int | None = None
+    job_name: str
+    status: str
+
+    started_at: datetime
+    ended_at: datetime | None = None
+    duration_ms: int | None = None
+
+    message: str | None = None
+    error_message: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RawFetchResultListRead(BaseModel):
+    id: int
+
+    source_id: int
+    fetch_log_id: int | None = None
+
+    fetched_at: datetime
+
+    url: str | None = None
+    method: str
+    status_code: int | None = None
+    content_type: str | None = None
+    content_hash: str | None = None
+
+    raw_text_length: int | None = None
+    parser_version: str | None = None
+    error_message: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RawFetchResultRead(BaseModel):
+    id: int
+
+    source_id: int
+    fetch_log_id: int | None = None
+
+    fetched_at: datetime
+
+    url: str | None = None
+    method: str
+    status_code: int | None = None
+    content_type: str | None = None
+    content_hash: str | None = None
+
+    raw_text_preview: str | None = None
+    raw_text_length: int | None = None
+    raw_text_truncated: bool = False
+
+    raw_file_path: str | None = None
+    parser_version: str | None = None
+    error_message: str | None = None

@@ -3,7 +3,7 @@
 from fastapi import FastAPI
 
 from app.db.session import init_db
-from app.routers import reports, sources, system
+from app.routers import raw_results,reports, sources, system
 
 
 @asynccontextmanager
@@ -22,7 +22,7 @@ app = FastAPI(
 app.include_router(system.router, prefix="/api/system", tags=["system"])
 app.include_router(sources.router, prefix="/api/sources", tags=["sources"])
 app.include_router(reports.router, prefix="/api/reports", tags=["reports"])
-
+app.include_router(raw_results.router, prefix="/api/raw-results", tags=["raw-results"])
 
 @app.get("/")
 def root():
