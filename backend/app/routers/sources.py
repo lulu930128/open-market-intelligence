@@ -1,9 +1,9 @@
 ﻿from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-
+from app.pipelines.fetch_pipeline import run_source_fetch
 from app.db.session import get_db
 from app.sources import service
-from app.sources.schemas import SourceCreate, SourceRead, SourceUpdate
+from app.sources.schemas import SourceCreate, SourceRead, SourceRunRead, SourceUpdate
 
 router = APIRouter()
 
@@ -54,6 +54,17 @@ def update_source(
             detail=str(exc),
         ) from exc
 
+
+@router.post("/{source_id}/run", response_model=SourceRunRead)
+def run_source(source_id: int, db: Session = Depends(get_db)):
+    try:
+        return run_source_fetch(db, source_id)
+    except service.SourceNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    
 
 @router.delete("/{source_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_source(source_id: int, db: Session = Depends(get_db)):

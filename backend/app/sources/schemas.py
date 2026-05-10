@@ -50,3 +50,21 @@ class SourceRead(SourceBase):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+class SourceRunRead(BaseModel):
+    source_id: int
+    source_name: str
+
+    fetch_log_id: int
+    raw_result_id: int | None = None
+
+    status: str
+    status_code: int | None = None
+    content_hash: str | None = None
+
+    duration_ms: int | None = None
+
+    message: str | None = None
+    error_message: str | None = None
+
+    fetched_at: datetime
