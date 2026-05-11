@@ -3,7 +3,7 @@
 from fastapi import FastAPI
 
 from app.db.session import init_db
-from app.routers import market,raw_results,reports, sources, system
+from app.routers import market, raw_results, reports, sources, system
 
 
 @asynccontextmanager

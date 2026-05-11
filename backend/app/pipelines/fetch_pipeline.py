@@ -137,4 +137,83 @@ def run_source_fetch(db: Session, source_id: int) -> dict:
         raise
 
 
+def refresh_source(db: Session, source_id: int) -> dict:
+    source = get_source(db, source_id)
+
+    fetch_result = run_source_fetch(db, source_id)
+
+    if fetch_result["status"] != "success":
+        return {
+            "source_id": source.id,
+            "source_name": source.source_name,
+            "fetch_status": fetch_result["status"],
+            "fetch_log_id": fetch_result["fetch_log_id"],
+            "raw_result_id": fetch_result["raw_result_id"],
+            "parse_status": None,
+            "parser_type": source.parser_type,
+            "parsed_count": None,
+            "skipped_count": None,
+            "inserted_count": None,
+            "message": "Fetch failed. Parse skipped.",
+            "error_message": fetch_result["error_message"],
+            "fetched_at": fetch_result["fetched_at"],
+        }
+
+    raw_result_id = fetch_result["raw_result_id"]
+
+    if raw_result_id is None:
+        return {
+            "source_id": source.id,
+            "source_name": source.source_name,
+            "fetch_status": fetch_result["status"],
+            "fetch_log_id": fetch_result["fetch_log_id"],
+            "raw_result_id": None,
+            "parse_status": "skipped",
+            "parser_type": source.parser_type,
+            "parsed_count": None,
+            "skipped_count": None,
+            "inserted_count": None,
+            "message": "Fetch completed but no raw result was created.",
+            "error_message": None,
+            "fetched_at": fetch_result["fetched_at"],
+        }
+
+    if source.parser_type != "twse_daily_trading":
+        return {
+            "source_id": source.id,
+            "source_name": source.source_name,
+            "fetch_status": fetch_result["status"],
+            "fetch_log_id": fetch_result["fetch_log_id"],
+            "raw_result_id": raw_result_id,
+            "parse_status": "skipped",
+            "parser_type": source.parser_type,
+            "parsed_count": None,
+            "skipped_count": None,
+            "inserted_count": None,
+            "message": f"No auto parser configured for parser_type='{source.parser_type}'.",
+            "error_message": None,
+            "fetched_at": fetch_result["fetched_at"],
+        }
+
+    from app.pipelines.parse_pipeline import parse_twse_daily_raw_result
+
+    parse_result = parse_twse_daily_raw_result(db, raw_result_id)
+
+    return {
+        "source_id": source.id,
+        "source_name": source.source_name,
+        "fetch_status": fetch_result["status"],
+        "fetch_log_id": fetch_result["fetch_log_id"],
+        "raw_result_id": raw_result_id,
+        "parse_status": parse_result["status"],
+        "parser_type": parse_result["parser_type"],
+        "parsed_count": parse_result["parsed_count"],
+        "skipped_count": parse_result["skipped_count"],
+        "inserted_count": parse_result["inserted_count"],
+        "message": "Source refreshed and parsed successfully.",
+        "error_message": None,
+        "fetched_at": fetch_result["fetched_at"],
+    }
+
+
 __all__ = ["run_source_fetch", "SourceNotFoundError"]

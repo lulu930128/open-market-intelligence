@@ -1,6 +1,6 @@
 ﻿from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from app.pipelines.fetch_pipeline import run_source_fetch
+from app.pipelines.fetch_pipeline import refresh_source,run_source_fetch
 from app.db.session import get_db
 from app.sources import service
 from app.sources.schemas import (
@@ -8,6 +8,7 @@ from app.sources.schemas import (
     RawFetchResultListRead,
     SourceCreate,
     SourceRead,
+    SourceRefreshRead,
     SourceRunRead,
     SourceUpdate,
 )
@@ -72,6 +73,22 @@ def run_source(source_id: int, db: Session = Depends(get_db)):
             detail=str(exc),
         ) from exc
     
+
+@router.post("/{source_id}/refresh", response_model=SourceRefreshRead)
+def refresh_source_data(source_id: int, db: Session = Depends(get_db)):
+    try:
+        return refresh_source(db, source_id)
+    except service.SourceNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
 
 @router.get("/{source_id}/logs", response_model=list[FetchLogRead])
 def list_source_logs(

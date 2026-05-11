@@ -129,3 +129,23 @@ class RawFetchResultRead(BaseModel):
     raw_file_path: str | None = None
     parser_version: str | None = None
     error_message: str | None = None
+
+
+class SourceRefreshRead(BaseModel):
+    source_id: int
+    source_name: str
+
+    fetch_status: str
+    fetch_log_id: int
+    raw_result_id: int | None = None
+
+    parse_status: str | None = None
+    parser_type: str | None = None
+    parsed_count: int | None = None
+    skipped_count: int | None = None
+    inserted_count: int | None = None
+
+    message: str | None = None
+    error_message: str | None = None
+
+    fetched_at: datetime | None = None
