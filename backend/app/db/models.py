@@ -190,3 +190,33 @@ class MarketDailyPrice(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class StockMaster(Base):
+    __tablename__ = "stock_master"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "stock_id",
+            name="uq_stock_master_stock_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    stock_id: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+    stock_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+    market: Mapped[str] = mapped_column(String(50), default="unknown", index=True)
+    instrument_type: Mapped[str] = mapped_column(String(50), default="unknown", index=True)
+    industry: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    category: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
