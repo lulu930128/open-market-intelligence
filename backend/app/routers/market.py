@@ -2,9 +2,13 @@ from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
-
+from app.market.backfill import backfill_twse_stock_day
 from app.db.session import get_db
-from app.market.schemas import MarketDailyChartRead, MarketDailyPriceRead
+from app.market.schemas import (
+    MarketDailyChartRead,
+    MarketDailyPriceRead,
+    TwseBackfillResultRead,
+)
 from app.market.service import (
     get_latest_stock_daily_price,
     list_latest_market_daily_prices,
@@ -14,6 +18,31 @@ from app.market.service import (
 )
 
 router = APIRouter()
+
+
+@router.post("/backfill/twse/{stock_id}", response_model=TwseBackfillResultRead)
+def backfill_twse_stock_daily_prices(
+    stock_id: str,
+    start_date: date,
+    end_date: date,
+    source_id: int = 1,
+    sleep_seconds: float = 0.8,
+    db: Session = Depends(get_db),
+):
+    try:
+        return backfill_twse_stock_day(
+            db=db,
+            stock_id=stock_id,
+            start_date=start_date,
+            end_date=end_date,
+            source_id=source_id,
+            sleep_seconds=sleep_seconds,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
 
 
 @router.get("/daily/latest", response_model=list[MarketDailyPriceRead])
