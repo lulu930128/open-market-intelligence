@@ -3,7 +3,8 @@ from time import perf_counter
 from sqlalchemy.orm import Session
 
 from app.connectors.factory import UnsupportedConnectorError, get_connector
-from app.db.models import FetchLog, RawFetchResult, SourceRegistry, utc_now
+from app.db.models import DataQualityCheck, FetchLog, RawFetchResult, SourceRegistry, utc_now
+from app.quality.checker import check_raw_data_quality
 from app.sources.service import SourceNotFoundError, get_source
 from app.utils.hash import sha256_text
 
@@ -20,6 +21,10 @@ def run_source_fetch(db: Session, source_id: int) -> dict:
             "source_name": source.source_name,
             "fetch_log_id": 0,
             "raw_result_id": None,
+            "data_quality_status": None,
+            "data_quality_message": None,
+            "data_quality_row_count": None,
+            "is_duplicate": None,
             "status": "skipped",
             "status_code": None,
             "content_hash": None,
@@ -52,9 +57,20 @@ def run_source_fetch(db: Session, source_id: int) -> dict:
         raw_text = result.raw_text
 
         if raw_text and len(raw_text) > MAX_RAW_TEXT_CHARS:
-            raw_text = raw_text[:MAX_RAW_TEXT_CHARS]
+            stored_raw_text = raw_text[:MAX_RAW_TEXT_CHARS]
+        else:
+            stored_raw_text = raw_text
 
         content_hash = sha256_text(result.raw_text)
+
+        quality_result = check_raw_data_quality(
+            db=db,
+            source=source,
+            raw_text=result.raw_text,
+            status_code=result.status_code,
+            content_type=result.content_type,
+            content_hash=content_hash,
+        )
 
         raw_result = RawFetchResult(
             source_id=source.id,
@@ -65,24 +81,54 @@ def run_source_fetch(db: Session, source_id: int) -> dict:
             status_code=result.status_code,
             content_type=result.content_type,
             content_hash=content_hash,
-            raw_text=raw_text,
+            raw_text=stored_raw_text,
             parser_version=None,
             error_message=result.error_message,
         )
 
         db.add(raw_result)
+        db.flush()
 
-        fetch_log.status = result.status
-        fetch_log.message = result.message
-        fetch_log.error_message = result.error_message
+        data_quality_check = DataQualityCheck(
+            source_id=source.id,
+            fetch_log_id=fetch_log.id,
+            raw_result_id=raw_result.id,
+            status=quality_result.status,
+            check_name=quality_result.check_name,
+            message=quality_result.message,
+            row_count=quality_result.row_count,
+            is_duplicate=quality_result.is_duplicate,
+            detail_json=quality_result.detail_json,
+        )
 
-        if result.status == "success":
+        db.add(data_quality_check)
+
+        effective_status = result.status
+
+        if result.status == "success" and quality_result.status == "error":
+            effective_status = "error"
+
+        fetch_log.status = effective_status
+
+        fetch_log.message = (
+            f"{result.message or 'Fetch completed.'} "
+            f"Data quality: {quality_result.status}. {quality_result.message}"
+        )
+
+        if result.error_message:
+            fetch_log.error_message = result.error_message
+        elif quality_result.status == "error":
+            fetch_log.error_message = quality_result.message
+        else:
+            fetch_log.error_message = None
+
+        if effective_status == "success":
             source.last_success_at = utc_now()
             source.last_error_at = None
             source.last_error_message = None
         else:
             source.last_error_at = utc_now()
-            source.last_error_message = result.error_message
+            source.last_error_message = fetch_log.error_message
 
         ended_at = utc_now()
         fetch_log.ended_at = ended_at
@@ -91,6 +137,7 @@ def run_source_fetch(db: Session, source_id: int) -> dict:
         db.commit()
         db.refresh(fetch_log)
         db.refresh(raw_result)
+        db.refresh(data_quality_check)
 
         return {
             "source_id": source.id,
@@ -104,6 +151,10 @@ def run_source_fetch(db: Session, source_id: int) -> dict:
             "message": fetch_log.message,
             "error_message": fetch_log.error_message,
             "fetched_at": raw_result.fetched_at,
+            "data_quality_status": data_quality_check.status,
+            "data_quality_message": data_quality_check.message,
+            "data_quality_row_count": data_quality_check.row_count,
+            "is_duplicate": data_quality_check.is_duplicate,
         }
 
     except UnsupportedConnectorError as exc:
@@ -159,17 +210,21 @@ def refresh_source(db: Session, source_id: int) -> dict:
         return {
             "source_id": source.id,
             "source_name": source.source_name,
-            "fetch_status": "skipped",
-            "fetch_log_id": 0,
-            "raw_result_id": None,
-            "parse_status": "skipped",
-            "parser_type": source.parser_type,
-            "parsed_count": None,
-            "skipped_count": None,
-            "inserted_count": None,
-            "message": "Source is disabled. Refresh skipped.",
+            "fetch_status": fetch_result["status"],
+            "fetch_log_id": fetch_result["fetch_log_id"],
+            "raw_result_id": raw_result_id,
+            "parse_status": parse_result["status"],
+            "parser_type": parse_result["parser_type"],
+            "parsed_count": parse_result["parsed_count"],
+            "skipped_count": parse_result["skipped_count"],
+            "inserted_count": parse_result["inserted_count"],
+            "data_quality_status": fetch_result.get("data_quality_status"),
+            "data_quality_message": fetch_result.get("data_quality_message"),
+            "data_quality_row_count": fetch_result.get("data_quality_row_count"),
+            "is_duplicate": fetch_result.get("is_duplicate"),
+            "message": "Source refreshed and parsed successfully.",
             "error_message": None,
-            "fetched_at": None,
+            "fetched_at": fetch_result["fetched_at"],
         }
 
     fetch_result = run_source_fetch(db, source_id)

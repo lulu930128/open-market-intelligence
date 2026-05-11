@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.sources import service
-from app.sources.schemas import RawFetchResultRead
+from app.sources.schemas import DataQualityCheckRead, RawFetchResultRead
 from app.market.schemas import ParseTwseDailyResultRead
 from app.pipelines.parse_pipeline import parse_twse_daily_raw_result
 
@@ -67,5 +67,19 @@ def parse_twse_daily(
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    
+
+@router.get("/{raw_result_id}/quality", response_model=list[DataQualityCheckRead])
+def list_raw_result_quality_checks(
+    raw_result_id: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        return service.list_raw_result_quality_checks(db, raw_result_id)
+    except service.SourceNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
             detail=str(exc),
         ) from exc

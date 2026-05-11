@@ -58,6 +58,11 @@ class SourceRunRead(BaseModel):
     fetch_log_id: int
     raw_result_id: int | None = None
 
+    data_quality_status: str | None = None
+    data_quality_message: str | None = None
+    data_quality_row_count: int | None = None
+    is_duplicate: bool | None = None
+
     status: str
     status_code: int | None = None
     content_hash: str | None = None
@@ -139,6 +144,11 @@ class SourceRefreshRead(BaseModel):
     fetch_log_id: int
     raw_result_id: int | None = None
 
+    data_quality_status: str | None = None
+    data_quality_message: str | None = None
+    data_quality_row_count: int | None = None
+    is_duplicate: bool | None = None
+
     parse_status: str | None = None
     parser_type: str | None = None
     parsed_count: int | None = None
@@ -179,3 +189,23 @@ class SourceStatusRead(BaseModel):
     latest_raw_result_id: int | None = None
     latest_raw_status_code: int | None = None
     latest_raw_content_hash: str | None = None
+
+
+class DataQualityCheckRead(BaseModel):
+    id: int
+
+    source_id: int
+    fetch_log_id: int | None = None
+    raw_result_id: int | None = None
+
+    status: str
+    check_name: str
+    message: str
+
+    row_count: int | None = None
+    is_duplicate: bool
+    detail_json: str | None = None
+
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)

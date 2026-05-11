@@ -2,7 +2,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.db.models import FetchLog, RawFetchResult, SourceRegistry
+from app.db.models import DataQualityCheck,FetchLog, RawFetchResult, SourceRegistry
 from app.sources.schemas import SourceCreate, SourceUpdate
 
 
@@ -215,3 +215,17 @@ def get_source_status(db: Session, source_id: int) -> dict:
         "latest_raw_status_code": latest_raw_result.status_code if latest_raw_result else None,
         "latest_raw_content_hash": latest_raw_result.content_hash if latest_raw_result else None,
     }
+
+
+def list_raw_result_quality_checks(
+    db: Session,
+    raw_result_id: int,
+) -> list[DataQualityCheck]:
+    get_raw_result(db, raw_result_id)
+
+    return (
+        db.query(DataQualityCheck)
+        .filter(DataQualityCheck.raw_result_id == raw_result_id)
+        .order_by(DataQualityCheck.created_at.desc(), DataQualityCheck.id.desc())
+        .all()
+    )

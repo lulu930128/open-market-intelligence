@@ -111,6 +111,41 @@ class RawFetchResult(Base):
     source: Mapped["SourceRegistry"] = relationship(back_populates="raw_results")
 
 
+class DataQualityCheck(Base):
+    __tablename__ = "data_quality_check"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("source_registry.id"),
+        nullable=False,
+        index=True,
+    )
+
+    fetch_log_id: Mapped[int | None] = mapped_column(
+        ForeignKey("fetch_log.id"),
+        nullable=True,
+        index=True,
+    )
+
+    raw_result_id: Mapped[int | None] = mapped_column(
+        ForeignKey("raw_fetch_result.id"),
+        nullable=True,
+        index=True,
+    )
+
+    status: Mapped[str] = mapped_column(String(30), index=True)
+    check_name: Mapped[str] = mapped_column(String(120), index=True)
+
+    message: Mapped[str] = mapped_column(Text)
+    row_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    is_duplicate: Mapped[bool] = mapped_column(Boolean, default=False)
+    detail_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class MarketDailyPrice(Base):
     __tablename__ = "market_daily_price"
 
