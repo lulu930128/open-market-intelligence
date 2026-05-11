@@ -43,3 +43,16 @@ class ParseTwseDailyResultRead(BaseModel):
     replaced_trade_dates: list[date]
 
     message: str | None = None
+
+
+class MarketDailyChartRead(BaseModel):
+    time: date
+
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    close: float | None = None
+
+    volume: int | None = None
+    trade_value: int | None = None
+    transaction_count: int | None = None

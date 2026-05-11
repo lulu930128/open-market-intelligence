@@ -4,11 +4,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.market.schemas import MarketDailyPriceRead
+from app.market.schemas import MarketDailyChartRead, MarketDailyPriceRead
 from app.market.service import (
     get_latest_stock_daily_price,
     list_latest_market_daily_prices,
     list_market_daily_prices,
+    list_stock_chart_data,
+    list_stock_daily_history,
 )
 
 router = APIRouter()
@@ -41,6 +43,41 @@ def get_latest_stock_daily_price_api(
         )
 
     return result
+
+
+@router.get("/daily/{stock_id}/history", response_model=list[MarketDailyPriceRead])
+def get_stock_daily_history(
+    stock_id: str,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    limit: int = Query(default=250, ge=1, le=5000),
+    db: Session = Depends(get_db),
+):
+    return list_stock_daily_history(
+        db=db,
+        stock_id=stock_id,
+        from_date=from_date,
+        to_date=to_date,
+        limit=limit,
+        ascending=True,
+    )
+
+
+@router.get("/daily/{stock_id}/chart", response_model=list[MarketDailyChartRead])
+def get_stock_daily_chart_data(
+    stock_id: str,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    limit: int = Query(default=250, ge=1, le=5000),
+    db: Session = Depends(get_db),
+):
+    return list_stock_chart_data(
+        db=db,
+        stock_id=stock_id,
+        from_date=from_date,
+        to_date=to_date,
+        limit=limit,
+    )
 
 
 @router.get("/daily", response_model=list[MarketDailyPriceRead])
