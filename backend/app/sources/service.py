@@ -1,3 +1,4 @@
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -117,3 +118,100 @@ def get_raw_result(db: Session, raw_result_id: int) -> RawFetchResult:
         raise SourceNotFoundError(f"Raw fetch result id={raw_result_id} not found.")
 
     return raw_result
+
+
+def list_enabled_sources(db: Session) -> list[SourceRegistry]:
+    return (
+        db.query(SourceRegistry)
+        .filter(SourceRegistry.enabled.is_(True))
+        .order_by(SourceRegistry.priority.asc(), SourceRegistry.id.asc())
+        .all()
+    )
+
+
+def set_source_enabled(
+    db: Session,
+    source_id: int,
+    enabled: bool,
+) -> SourceRegistry:
+    source = get_source(db, source_id)
+
+    source.enabled = enabled
+
+    db.commit()
+    db.refresh(source)
+
+    return source
+
+
+def get_source_status(db: Session, source_id: int) -> dict:
+    source = get_source(db, source_id)
+
+    total_fetch_count = (
+        db.query(func.count(FetchLog.id))
+        .filter(FetchLog.source_id == source_id)
+        .scalar()
+        or 0
+    )
+
+    success_fetch_count = (
+        db.query(func.count(FetchLog.id))
+        .filter(FetchLog.source_id == source_id)
+        .filter(FetchLog.status == "success")
+        .scalar()
+        or 0
+    )
+
+    error_fetch_count = (
+        db.query(func.count(FetchLog.id))
+        .filter(FetchLog.source_id == source_id)
+        .filter(FetchLog.status == "error")
+        .scalar()
+        or 0
+    )
+
+    raw_result_count = (
+        db.query(func.count(RawFetchResult.id))
+        .filter(RawFetchResult.source_id == source_id)
+        .scalar()
+        or 0
+    )
+
+    latest_fetch_log = (
+        db.query(FetchLog)
+        .filter(FetchLog.source_id == source_id)
+        .order_by(FetchLog.started_at.desc(), FetchLog.id.desc())
+        .first()
+    )
+
+    latest_raw_result = (
+        db.query(RawFetchResult)
+        .filter(RawFetchResult.source_id == source_id)
+        .order_by(RawFetchResult.fetched_at.desc(), RawFetchResult.id.desc())
+        .first()
+    )
+
+    return {
+        "id": source.id,
+        "source_name": source.source_name,
+        "source_type": source.source_type,
+        "category": source.category,
+        "enabled": source.enabled,
+        "parser_type": source.parser_type,
+        "reliability_level": source.reliability_level,
+        "last_success_at": source.last_success_at,
+        "last_error_at": source.last_error_at,
+        "last_error_message": source.last_error_message,
+        "total_fetch_count": total_fetch_count,
+        "success_fetch_count": success_fetch_count,
+        "error_fetch_count": error_fetch_count,
+        "raw_result_count": raw_result_count,
+        "latest_fetch_log_id": latest_fetch_log.id if latest_fetch_log else None,
+        "latest_fetch_status": latest_fetch_log.status if latest_fetch_log else None,
+        "latest_fetch_message": latest_fetch_log.message if latest_fetch_log else None,
+        "latest_fetch_error_message": latest_fetch_log.error_message if latest_fetch_log else None,
+        "latest_fetch_duration_ms": latest_fetch_log.duration_ms if latest_fetch_log else None,
+        "latest_raw_result_id": latest_raw_result.id if latest_raw_result else None,
+        "latest_raw_status_code": latest_raw_result.status_code if latest_raw_result else None,
+        "latest_raw_content_hash": latest_raw_result.content_hash if latest_raw_result else None,
+    }

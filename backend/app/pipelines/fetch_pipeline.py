@@ -14,6 +14,21 @@ MAX_RAW_TEXT_CHARS = 2_000_000
 def run_source_fetch(db: Session, source_id: int) -> dict:
     source: SourceRegistry = get_source(db, source_id)
 
+    if not source.enabled:
+        return {
+            "source_id": source.id,
+            "source_name": source.source_name,
+            "fetch_log_id": 0,
+            "raw_result_id": None,
+            "status": "skipped",
+            "status_code": None,
+            "content_hash": None,
+            "duration_ms": 0,
+            "message": "Source is disabled. Fetch skipped.",
+            "error_message": None,
+            "fetched_at": utc_now(),
+        }
+
     started_perf = perf_counter()
 
     fetch_log = FetchLog(
@@ -139,6 +154,23 @@ def run_source_fetch(db: Session, source_id: int) -> dict:
 
 def refresh_source(db: Session, source_id: int) -> dict:
     source = get_source(db, source_id)
+
+    if not source.enabled:
+        return {
+            "source_id": source.id,
+            "source_name": source.source_name,
+            "fetch_status": "skipped",
+            "fetch_log_id": 0,
+            "raw_result_id": None,
+            "parse_status": "skipped",
+            "parser_type": source.parser_type,
+            "parsed_count": None,
+            "skipped_count": None,
+            "inserted_count": None,
+            "message": "Source is disabled. Refresh skipped.",
+            "error_message": None,
+            "fetched_at": None,
+        }
 
     fetch_result = run_source_fetch(db, source_id)
 

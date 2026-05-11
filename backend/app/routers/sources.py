@@ -10,6 +10,7 @@ from app.sources.schemas import (
     SourceRead,
     SourceRefreshRead,
     SourceRunRead,
+    SourceStatusRead,
     SourceUpdate,
 )
 
@@ -32,10 +33,48 @@ def create_source(payload: SourceCreate, db: Session = Depends(get_db)):
         ) from exc
 
 
+@router.get("/enabled", response_model=list[SourceRead])
+def list_enabled_sources(db: Session = Depends(get_db)):
+    return service.list_enabled_sources(db)
+
+
 @router.get("/{source_id}", response_model=SourceRead)
 def get_source(source_id: int, db: Session = Depends(get_db)):
     try:
         return service.get_source(db, source_id)
+    except service.SourceNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get("/{source_id}/status", response_model=SourceStatusRead)
+def get_source_status(source_id: int, db: Session = Depends(get_db)):
+    try:
+        return service.get_source_status(db, source_id)
+    except service.SourceNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+
+@router.patch("/{source_id}/enable", response_model=SourceRead)
+def enable_source(source_id: int, db: Session = Depends(get_db)):
+    try:
+        return service.set_source_enabled(db, source_id, enabled=True)
+    except service.SourceNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+
+@router.patch("/{source_id}/disable", response_model=SourceRead)
+def disable_source(source_id: int, db: Session = Depends(get_db)):
+    try:
+        return service.set_source_enabled(db, source_id, enabled=False)
     except service.SourceNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

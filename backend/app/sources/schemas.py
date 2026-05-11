@@ -149,3 +149,33 @@ class SourceRefreshRead(BaseModel):
     error_message: str | None = None
 
     fetched_at: datetime | None = None
+
+
+class SourceStatusRead(BaseModel):
+    id: int
+    source_name: str
+    source_type: str
+    category: str
+
+    enabled: bool
+    parser_type: str | None = None
+    reliability_level: str
+
+    last_success_at: datetime | None = None
+    last_error_at: datetime | None = None
+    last_error_message: str | None = None
+
+    total_fetch_count: int
+    success_fetch_count: int
+    error_fetch_count: int
+    raw_result_count: int
+
+    latest_fetch_log_id: int | None = None
+    latest_fetch_status: str | None = None
+    latest_fetch_message: str | None = None
+    latest_fetch_error_message: str | None = None
+    latest_fetch_duration_ms: int | None = None
+
+    latest_raw_result_id: int | None = None
+    latest_raw_status_code: int | None = None
+    latest_raw_content_hash: str | None = None
