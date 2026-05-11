@@ -220,3 +220,55 @@ class StockMaster(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class WatchlistGroup(Base):
+    __tablename__ = "watchlist_group"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    parent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("watchlist_group.id"),
+        nullable=True,
+        index=True,
+    )
+
+    group_name: Mapped[str] = mapped_column(String(120), index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    sort_order: Mapped[int] = mapped_column(Integer, default=100, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class WatchlistItem(Base):
+    __tablename__ = "watchlist_item"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "group_id",
+            "stock_id",
+            name="uq_watchlist_item_group_stock",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    group_id: Mapped[int] = mapped_column(
+        ForeignKey("watchlist_group.id"),
+        nullable=False,
+        index=True,
+    )
+
+    stock_id: Mapped[str] = mapped_column(String(20), index=True)
+
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    priority: Mapped[int] = mapped_column(Integer, default=100, index=True)
+
+    tags: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
