@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -109,3 +109,49 @@ class RawFetchResult(Base):
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     source: Mapped["SourceRegistry"] = relationship(back_populates="raw_results")
+
+
+class MarketDailyPrice(Base):
+    __tablename__ = "market_daily_price"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source_id",
+            "stock_id",
+            "trade_date",
+            name="uq_market_daily_source_stock_date",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("source_registry.id"),
+        nullable=False,
+        index=True,
+    )
+
+    raw_result_id: Mapped[int] = mapped_column(
+        ForeignKey("raw_fetch_result.id"),
+        nullable=False,
+        index=True,
+    )
+
+    trade_date: Mapped[datetime.date] = mapped_column(Date, index=True)
+
+    stock_id: Mapped[str] = mapped_column(String(20), index=True)
+    stock_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+    trade_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    trade_value: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    open_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    close_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    price_change: Mapped[float | None] = mapped_column(Float, nullable=True)
+    transaction_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
