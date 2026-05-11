@@ -3,7 +3,7 @@
 from fastapi import FastAPI
 
 from app.db.session import init_db
-from app.routers import market, raw_results, reports, sources, stocks, system
+from app.routers import indicators, market, raw_results, reports, sources, stocks, system
 
 
 @asynccontextmanager
@@ -23,6 +23,7 @@ app.include_router(system.router, prefix="/api/system", tags=["system"])
 app.include_router(sources.router, prefix="/api/sources", tags=["sources"])
 app.include_router(raw_results.router, prefix="/api/raw-results", tags=["raw-results"])
 app.include_router(market.router, prefix="/api/market", tags=["market"])
+app.include_router(indicators.router, prefix="/api/market/indicators", tags=["market-indicators"])
 app.include_router(stocks.router, prefix="/api/stocks", tags=["stocks"])
 app.include_router(reports.router, prefix="/api/reports", tags=["reports"])
 

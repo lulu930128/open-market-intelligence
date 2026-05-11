@@ -96,3 +96,16 @@ class TwseBackfillResultRead(BaseModel):
     message: str
 
     months: list[TwseBackfillMonthRead]
+
+
+class DailyIndicatorPointRead(BaseModel):
+    time: date
+
+    close: float | None = None
+    volume: int | None = None
+
+    change: float | None = None
+    change_pct: float | None = None
+
+    ma: dict[str, float | None]
+    volume_ma: dict[str, float | None]
