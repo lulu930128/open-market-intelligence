@@ -1,6 +1,7 @@
 "use client";
 
 import SidebarWatchlistExplorer from "@/components/SidebarWatchlistExplorer";
+import StockDetailPanel from "@/components/StockDetailPanel";
 import { fetchJson } from "@/lib/api";
 import type {
   IndicatorsResponse,
@@ -61,6 +62,9 @@ export default function Home() {
   const [selectedGroupId, setSelectedGroupId] = useState<number | null>(null);
   const [selectedGroup, setSelectedGroup] = useState<WatchlistGroupNode | null>(null);
   const [rankBy, setRankBy] = useState("score");
+
+  const [selectedStockId, setSelectedStockId] = useState<string | null>(null);
+  const [selectedStockName, setSelectedStockName] = useState<string | null>(null);
 
   const [ranking, setRanking] = useState<RankingResponse | null>(null);
   const [signals, setSignals] = useState<SignalsResponse | null>(null);
@@ -143,6 +147,11 @@ export default function Home() {
     }
   }
 
+  function handleSelectStock(stockId: string, stockName: string | null) {
+    setSelectedStockId(stockId);
+    setSelectedStockName(stockName);
+  }
+
   function handleRankByChange(value: string) {
     setRankBy(value);
 
@@ -159,6 +168,7 @@ export default function Home() {
         <SidebarWatchlistExplorer
           selectedGroupId={selectedGroupId}
           onSelectGroup={handleSelectGroup}
+          onSelectStock={handleSelectStock}
           onChanged={async (nextGroupId) => {
             const groupId = nextGroupId === undefined ? selectedGroupId : nextGroupId;
 
@@ -252,7 +262,8 @@ export default function Home() {
               </div>
             </div>
           </div>
-
+          <StockDetailPanel stockId={selectedStockId} stockName={selectedStockName} />
+          
           <div className="overflow-hidden rounded-3xl border border-white/70 bg-white/80 shadow-sm backdrop-blur">
             <div className="flex items-center justify-between border-b border-slate-100 px-6 py-4">
               <div>
@@ -288,7 +299,11 @@ export default function Home() {
                     const indicator = indicatorByStockId.get(row.stock_id);
 
                     return (
-                      <tr key={row.stock_id} className="hover:bg-slate-50/80">
+                      <tr
+                          key={row.stock_id}
+                          onClick={() => handleSelectStock(row.stock_id, row.stock_name)}
+                          className="cursor-pointer hover:bg-slate-50/80"
+                        >
                         <td className="px-6 py-4 font-semibold text-slate-500">
                           #{row.rank}
                         </td>

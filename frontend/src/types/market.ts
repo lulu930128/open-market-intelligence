@@ -119,3 +119,24 @@ export type IndicatorsResponse = {
   error_count: number;
   results: IndicatorItem[];
 };
+
+export type ChartPoint = {
+  time: string;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  close: number | null;
+  volume: number | null;
+  trade_value: number | null;
+  transaction_count: number | null;
+};
+
+export type StockIndicatorPoint = {
+  time: string;
+  close: number | null;
+  volume: number | null;
+  change: number | null;
+  change_pct: number | null;
+  ma: Record<string, number | null>;
+  volume_ma: Record<string, number | null>;
+};

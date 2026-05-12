@@ -11,6 +11,7 @@ import type {
 type Props = {
   selectedGroupId: number | null;
   onSelectGroup: (group: WatchlistGroupNode | null) => void;
+  onSelectStock?: (stockId: string, stockName: string | null) => void;
   onChanged: (nextGroupId?: number | null) => Promise<void> | void;
 };
 
@@ -82,6 +83,7 @@ function getTodayDate() {
 export default function SidebarWatchlistExplorer({
   selectedGroupId,
   onSelectGroup,
+  onSelectStock,
   onChanged,
 }: Props) {
   const [tree, setTree] = useState<WatchlistGroupNode[]>([]);
@@ -545,14 +547,15 @@ export default function SidebarWatchlistExplorer({
           <div className="mt-1 space-y-1">
             {groupItems.map((item) => (
               <div
-                key={item.id}
-                className={[
-                  "group flex items-center gap-2 rounded-lg py-1.5 pr-2 text-xs",
+              key={item.id}
+              onClick={() => onSelectStock?.(item.stock_id, item.stock_name)}
+              className={[
+                  "group flex cursor-pointer items-center gap-2 rounded-lg py-1.5 pr-2 text-xs",
                   item.enabled
-                    ? "text-slate-500 hover:bg-white"
-                    : "text-slate-300",
-                ].join(" ")}
-                style={{ paddingLeft: `${34 + depth * 16}px` }}
+                  ? "text-slate-500 hover:bg-white"
+                  : "text-slate-300",
+              ].join(" ")}
+              style={{ paddingLeft: `${34 + depth * 16}px` }}
               >
                 <span className="text-slate-300">●</span>
 
@@ -570,15 +573,21 @@ export default function SidebarWatchlistExplorer({
 
                 <button
                   type="button"
-                  onClick={() => void toggleStockItem(item)}
-                  className="hidden rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500 group-hover:inline"
-                >
-                  {item.enabled ? "off" : "on"}
+                  onClick={(event) => {
+                      event.stopPropagation();
+                      void toggleStockItem(item);
+                  }}
+                    className="hidden rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500 group-hover:inline"
+                  >
+                    {item.enabled ? "off" : "on"}
                 </button>
 
                 <button
                   type="button"
-                  onClick={() => void deleteStockItem(item)}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void deleteStockItem(item);
+                  }}
                   className="hidden rounded bg-rose-100 px-1.5 py-0.5 text-[10px] text-rose-600 group-hover:inline"
                 >
                   del
