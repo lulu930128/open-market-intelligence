@@ -1,5 +1,5 @@
 ﻿from contextlib import asynccontextmanager
-
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI
 
 from app.db.session import init_db
@@ -17,6 +17,17 @@ app = FastAPI(
     description="A public-data-driven market intelligence system.",
     version="0.1.0",
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(system.router, prefix="/api/system", tags=["system"])
