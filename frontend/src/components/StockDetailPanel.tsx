@@ -1,5 +1,6 @@
 "use client";
 
+import StockKLineChart from "@/components/StockKLineChart";
 import { useEffect, useMemo, useState } from "react";
 import { fetchJson } from "@/lib/api";
 import type { ChartPoint, StockIndicatorPoint } from "@/types/market";
@@ -215,7 +216,7 @@ export default function StockDetailPanel({ stockId, stockName }: Props) {
       ) : null}
 
       <div className="mt-5 grid grid-cols-1 gap-4 xl:grid-cols-[1.4fr_1fr]">
-        <Sparkline points={chartData} />
+        <StockKLineChart chartData={chartData} indicatorData={indicatorData} />
 
         <div className="grid grid-cols-2 gap-3 text-sm">
           <div className="rounded-2xl bg-slate-50 p-4">
