@@ -242,6 +242,34 @@ export default function SidebarWatchlistExplorer({
     onSelectGroup(group);
     setRenameValue(group.group_name);
   }
+  
+  async function createRootFolder() {
+    const name = folderName.trim();
+
+    if (!name) {
+      setMessage({ type: "error", text: "資料夾名稱不可為空。" });
+      return;
+    }
+
+    await runAction(
+      async () => {
+        await requestJson<WatchlistGroupRead>("/api/watchlists/groups", {
+          method: "POST",
+          body: JSON.stringify({
+            parent_id: null,
+            group_name: name,
+            description: null,
+            sort_order: 100,
+            is_active: true,
+          }),
+        });
+
+        setFolderName("");
+      },
+      "已新增根資料夾。",
+      { keepSelection: false }
+    );
+  }
 
   async function createChildFolder() {
     const name = folderName.trim();
@@ -648,26 +676,41 @@ export default function SidebarWatchlistExplorer({
       </div>
 
       <div className="mt-4 rounded-2xl bg-slate-50 p-4">
-        <p className="text-xs font-semibold text-slate-500">Add Child Folder</p>
+      <p className="text-xs font-semibold text-slate-500">Add Folder</p>
 
-        <div className="mt-3 space-y-2">
+      <div className="mt-3 space-y-2">
           <input
-            className={inputClass()}
-            placeholder="例如：PCB / CCL"
-            value={folderName}
-            onChange={(event) => setFolderName(event.target.value)}
+          className={inputClass()}
+          placeholder="例如：ETF / AI Server / PCB"
+          value={folderName}
+          onChange={(event) => setFolderName(event.target.value)}
           />
 
+          <div className="flex gap-2">
           <button
-            type="button"
-            className={smallButtonClass("primary")}
-            disabled={loading || selectedGroupId === null}
-            onClick={() => void createChildFolder()}
+              type="button"
+              className={smallButtonClass("secondary")}
+              disabled={loading}
+              onClick={() => void createRootFolder()}
           >
-            + Folder
+              + Root
           </button>
-        </div>
+
+          <button
+              type="button"
+              className={smallButtonClass("primary")}
+              disabled={loading || selectedGroupId === null}
+              onClick={() => void createChildFolder()}
+          >
+              + Child
+          </button>
+          </div>
+
+          <p className="text-[11px] leading-5 text-slate-400">
+          Root 會建立最上層資料夾；Child 會建立在目前選取的資料夾底下。
+          </p>
       </div>
+    </div>
     
       <div className="mt-4 rounded-2xl bg-slate-50 p-4">
         <p className="text-xs font-semibold text-slate-500">Add Stock</p>
