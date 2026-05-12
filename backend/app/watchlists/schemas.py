@@ -141,3 +141,43 @@ class WatchlistGroupLatestIndicatorsRead(BaseModel):
     error_count: int
 
     results: list[WatchlistLatestIndicatorRead]
+
+
+class WatchlistSignalRead(BaseModel):
+    key: str
+    label: str
+    direction: str
+    level: str
+    message: str
+    value: float | None = None
+    reference: float | None = None
+
+
+class WatchlistStockLatestSignalsRead(BaseModel):
+    stock_id: str
+    stock_name: str | None = None
+
+    time: date | None = None
+    close: float | None = None
+    volume: int | None = None
+    change_pct: float | None = None
+
+    score: int
+    status: str
+
+    signals: list[WatchlistSignalRead] = Field(default_factory=list)
+    error_message: str | None = None
+
+
+class WatchlistGroupLatestSignalsRead(BaseModel):
+    group_id: int
+    include_children: bool
+
+    requested_stock_count: int
+    bullish_count: int
+    bearish_count: int
+    neutral_count: int
+    no_data_count: int
+    error_count: int
+
+    results: list[WatchlistStockLatestSignalsRead]
