@@ -2,11 +2,12 @@ from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
-from app.watchlists import backfill_service, service
+from app.watchlists import backfill_service, indicator_service, service
 from app.db.session import get_db
 from app.watchlists.schemas import (
     WatchlistGroupBackfillResultRead,
     WatchlistGroupCreate,
+    WatchlistGroupLatestIndicatorsRead,
     WatchlistGroupRead,
     WatchlistGroupTreeRead,
     WatchlistGroupUpdate,
@@ -187,3 +188,28 @@ def delete_watchlist_item(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     return None
+
+
+@router.get(
+    "/groups/{group_id}/indicators/latest",
+    response_model=WatchlistGroupLatestIndicatorsRead,
+)
+def get_watchlist_group_latest_indicators(
+    group_id: int,
+    include_children: bool = True,
+    enabled_only: bool = True,
+    ma_windows: str = "5,20,60",
+    volume_ma_windows: str = "5,20",
+    db: Session = Depends(get_db),
+):
+    try:
+        return indicator_service.get_watchlist_group_latest_indicators(
+            db=db,
+            group_id=group_id,
+            include_children=include_children,
+            enabled_only=enabled_only,
+            ma_windows=ma_windows,
+            volume_ma_windows=volume_ma_windows,
+        )
+    except service.WatchlistGroupNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc

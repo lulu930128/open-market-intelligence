@@ -111,3 +111,33 @@ class WatchlistGroupBackfillResultRead(BaseModel):
     skipped_count: int
 
     results: list[WatchlistBackfillStockResultRead]
+
+
+class WatchlistLatestIndicatorRead(BaseModel):
+    stock_id: str
+    stock_name: str | None = None
+
+    time: date | None = None
+    close: float | None = None
+    volume: int | None = None
+
+    change: float | None = None
+    change_pct: float | None = None
+
+    ma: dict[str, float | None] = Field(default_factory=dict)
+    volume_ma: dict[str, float | None] = Field(default_factory=dict)
+
+    status: str
+    error_message: str | None = None
+
+
+class WatchlistGroupLatestIndicatorsRead(BaseModel):
+    group_id: int
+    include_children: bool
+
+    requested_stock_count: int
+    success_count: int
+    no_data_count: int
+    error_count: int
+
+    results: list[WatchlistLatestIndicatorRead]
