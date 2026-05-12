@@ -132,7 +132,11 @@ export default function Home() {
 
   useEffect(() => {
     if (selectedGroupId !== null) {
-      void loadDashboard(selectedGroupId);
+      const timerId = window.setTimeout(() => {
+        void loadDashboard(selectedGroupId);
+      }, 0);
+
+      return () => window.clearTimeout(timerId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedGroupId]);

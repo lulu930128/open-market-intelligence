@@ -202,23 +202,21 @@ export default function SidebarWatchlistExplorer({
   }
 
   useEffect(() => {
-    reloadExplorerData().catch((error) => {
-      setMessage({
-        type: "error",
-        text:
-          error instanceof Error
-            ? error.message
-            : "Failed to load watchlist explorer.",
+    const timerId = window.setTimeout(() => {
+      reloadExplorerData().catch((error) => {
+        setMessage({
+          type: "error",
+          text:
+            error instanceof Error
+              ? error.message
+              : "Failed to load watchlist explorer.",
+        });
       });
-    });
+    }, 0);
+
+    return () => window.clearTimeout(timerId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  useEffect(() => {
-    if (selectedGroup) {
-      setRenameValue(selectedGroup.group_name);
-    }
-  }, [selectedGroup]);
 
   function toggleExpanded(groupId: number) {
     setExpandedIds((previous) => {

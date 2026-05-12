@@ -39,60 +39,6 @@ function changeClass(value: number | null | undefined) {
   return "text-slate-600";
 }
 
-function Sparkline({ points }: { points: ChartPoint[] }) {
-  const closes = points
-    .map((point) => point.close)
-    .filter((value): value is number => value !== null && value !== undefined);
-
-  if (closes.length < 2) {
-    return (
-      <div className="flex h-28 items-center justify-center rounded-2xl bg-slate-50 text-sm text-slate-400">
-        Not enough chart data.
-      </div>
-    );
-  }
-
-  const min = Math.min(...closes);
-  const max = Math.max(...closes);
-  const range = max - min || 1;
-
-  const width = 600;
-  const height = 120;
-  const padding = 12;
-
-  const path = closes
-    .map((close, index) => {
-      const x =
-        padding + (index / Math.max(closes.length - 1, 1)) * (width - padding * 2);
-      const y =
-        height - padding - ((close - min) / range) * (height - padding * 2);
-
-      return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
-    })
-    .join(" ");
-
-  return (
-    <div className="rounded-2xl bg-slate-50 p-3">
-      <svg viewBox={`0 0 ${width} ${height}`} className="h-32 w-full">
-        <path
-          d={path}
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="3"
-          className="text-indigo-500"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      </svg>
-
-      <div className="mt-1 flex justify-between text-xs text-slate-400">
-        <span>{points[0]?.time ?? "-"}</span>
-        <span>{points[points.length - 1]?.time ?? "-"}</span>
-      </div>
-    </div>
-  );
-}
-
 export default function StockDetailPanel({ stockId, stockName }: Props) {
   const [chartData, setChartData] = useState<ChartPoint[]>([]);
   const [indicatorData, setIndicatorData] = useState<StockIndicatorPoint[]>([]);
@@ -160,14 +106,21 @@ export default function StockDetailPanel({ stockId, stockName }: Props) {
 
   useEffect(() => {
     if (!stockId) {
-      setChartData([]);
-      setIndicatorData([]);
-      setLoadState("idle");
-      setErrorMessage(null);
-      return;
+      const timerId = window.setTimeout(() => {
+        setChartData([]);
+        setIndicatorData([]);
+        setLoadState("idle");
+        setErrorMessage(null);
+      }, 0);
+
+      return () => window.clearTimeout(timerId);
     }
 
-    void loadStockDetail(stockId);
+    const timerId = window.setTimeout(() => {
+      void loadStockDetail(stockId);
+    }, 0);
+
+    return () => window.clearTimeout(timerId);
   }, [stockId]);
 
   if (!stockId) {

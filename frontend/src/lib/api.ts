@@ -1,8 +1,21 @@
 const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
+  process.env.NEXT_PUBLIC_API_BASE_URL?.trim() || undefined;
+const API_PROXY_PATH =
+  process.env.NEXT_PUBLIC_API_PROXY_PATH?.trim() || "/omi-data";
+
+function buildSameOriginPath(path: string) {
+  if (path.startsWith("/api/watchlists")) {
+    return path.replace(/^\/api\/watchlists(?=\/|$)/, `${API_PROXY_PATH}/wl`);
+  }
+
+  return path.replace(/^\/api(?=\/|$)/, API_PROXY_PATH);
+}
 
 export function buildApiUrl(path: string, params?: Record<string, string | number | boolean>) {
-  const url = new URL(path, API_BASE_URL);
+  const sameOriginPath = buildSameOriginPath(path);
+  const url = API_BASE_URL
+    ? new URL(path, API_BASE_URL)
+    : new URL(sameOriginPath, window.location.origin);
 
   if (params) {
     Object.entries(params).forEach(([key, value]) => {
