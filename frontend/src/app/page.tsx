@@ -68,6 +68,7 @@ export default function Home() {
 
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
 
   const indicatorByStockId = useMemo(() => {
     const map = new Map<string, IndicatorsResponse["results"][number]>();
@@ -112,6 +113,11 @@ export default function Home() {
       setRanking(rankingData);
       setSignals(signalsData);
       setIndicators(indicatorsData);
+      setLastUpdatedAt(
+        new Date().toLocaleString("zh-TW", {
+          hour12: false,
+        })
+      );
       setLoadState("success");
     } catch (error) {
       setLoadState("error");
@@ -177,6 +183,11 @@ export default function Home() {
                 <p className="mt-2 text-sm text-slate-500">
                   {selectedGroup?.description ?? "選擇左側分類後會載入資料。"}
                 </p>
+                {lastUpdatedAt ? (
+                  <p className="mt-2 text-xs text-slate-400">
+                    Last refresh: {lastUpdatedAt}
+                  </p>
+                ) : null}
               </div>
 
               <div className="flex flex-wrap items-center gap-3">

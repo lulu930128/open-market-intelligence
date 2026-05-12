@@ -21,6 +21,30 @@ type Message =
     }
   | null;
 
+
+type WatchlistGroupBackfillResult = {
+  group_id: number;
+  include_children: boolean;
+  start_date: string;
+  end_date: string;
+  requested_stock_count: number;
+  success_count: number;
+  warning_count: number;
+  error_count: number;
+  skipped_count: number;
+  results: {
+    stock_id: string;
+    stock_name: string | null;
+    status: string;
+    parsed_count: number;
+    inserted_count: number;
+    skipped_count: number;
+    message: string | null;
+    error_message: string | null;
+  }[];
+};
+
+
 function flattenGroups(nodes: WatchlistGroupNode[]): WatchlistGroupNode[] {
   return nodes.flatMap((node) => [node, ...flattenGroups(node.children)]);
 }
@@ -41,6 +65,20 @@ function smallButtonClass(kind: "primary" | "secondary" | "danger" = "secondary"
   return "rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-200";
 }
 
+function toDateInputValue(date: Date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function getDefaultBackfillStartDate() {
+  const date = new Date();
+  date.setMonth(date.getMonth() - 3);
+  return toDateInputValue(date);
+}
+
+function getTodayDate() {
+  return toDateInputValue(new Date());
+}
+
 export default function SidebarWatchlistExplorer({
   selectedGroupId,
   onSelectGroup,
@@ -57,6 +95,11 @@ export default function SidebarWatchlistExplorer({
   const [stockId, setStockId] = useState("");
   const [stockNote, setStockNote] = useState("");
   const [stockTags, setStockTags] = useState("");
+
+  const [backfillStartDate, setBackfillStartDate] = useState(
+    getDefaultBackfillStartDate()
+  );
+  const [backfillEndDate, setBackfillEndDate] = useState(getTodayDate());
 
   const [renameValue, setRenameValue] = useState("");
 
@@ -340,6 +383,48 @@ export default function SidebarWatchlistExplorer({
     );
   }
 
+
+  async function backfillSelectedFolder() {
+    if (selectedGroupId === null || !selectedGroup) {
+      setMessage({ type: "error", text: "請先選擇一個資料夾。" });
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `確定要補「${selectedGroup.group_name}」底下所有啟用股票的歷史資料嗎？\n\n範圍：${backfillStartDate} ~ ${backfillEndDate}`
+    );
+
+    if (!confirmed) return;
+
+    await runAction(
+      async () => {
+        const result = await requestJson<WatchlistGroupBackfillResult>(
+          `/api/watchlists/groups/${selectedGroupId}/backfill/twse`,
+          {
+            method: "POST",
+          },
+          {
+            start_date: backfillStartDate,
+            end_date: backfillEndDate,
+            source_id: 1,
+            include_children: true,
+            enabled_only: true,
+            sleep_seconds: 0.8,
+          }
+        );
+
+        if (result.error_count > 0) {
+          throw new Error(
+            `Backfill completed with ${result.error_count} error(s). Success: ${result.success_count}, requested: ${result.requested_stock_count}`
+          );
+        }
+      },
+      "已完成此資料夾的歷史資料補齊。",
+      { keepSelection: true }
+    );
+  }
+
+
   async function deleteStockItem(item: WatchlistItemRead) {
     const confirmed = window.confirm(
       `確定要刪除 ${item.stock_id} ${item.stock_name ?? ""} 嗎？`
@@ -583,7 +668,7 @@ export default function SidebarWatchlistExplorer({
           </button>
         </div>
       </div>
-
+    
       <div className="mt-4 rounded-2xl bg-slate-50 p-4">
         <p className="text-xs font-semibold text-slate-500">Add Stock</p>
 
@@ -619,6 +704,39 @@ export default function SidebarWatchlistExplorer({
           </button>
         </div>
       </div>
+
+      <div className="mt-4 rounded-2xl bg-slate-50 p-4">
+        <p className="text-xs font-semibold text-slate-500">Backfill Selected Folder</p>
+
+        <div className="mt-3 space-y-2">
+            <input
+            className={inputClass()}
+            type="date"
+            value={backfillStartDate}
+            onChange={(event) => setBackfillStartDate(event.target.value)}
+            />
+
+            <input
+            className={inputClass()}
+            type="date"
+            value={backfillEndDate}
+            onChange={(event) => setBackfillEndDate(event.target.value)}
+            />
+
+            <button
+            type="button"
+            className={smallButtonClass("primary")}
+            disabled={loading || selectedGroupId === null}
+            onClick={() => void backfillSelectedFolder()}
+            >
+            Backfill
+            </button>
+
+            <p className="text-[11px] leading-5 text-slate-400">
+            會補目前資料夾與子資料夾底下所有啟用股票的 TWSE 歷史日資料。
+            </p>
+        </div>
+        </div>
     </aside>
   );
 }
