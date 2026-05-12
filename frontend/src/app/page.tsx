@@ -126,9 +126,15 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedGroupId]);
 
-  function handleSelectGroup(group: WatchlistGroupNode) {
+  function handleSelectGroup(group: WatchlistGroupNode | null) {
     setSelectedGroup(group);
-    setSelectedGroupId(group.id);
+    setSelectedGroupId(group?.id ?? null);
+
+    if (group === null) {
+      setRanking(null);
+      setSignals(null);
+      setIndicators(null);
+    }
   }
 
   function handleRankByChange(value: string) {
@@ -147,9 +153,15 @@ export default function Home() {
         <SidebarWatchlistExplorer
           selectedGroupId={selectedGroupId}
           onSelectGroup={handleSelectGroup}
-          onChanged={async () => {
-            if (selectedGroupId !== null) {
-              await loadDashboard(selectedGroupId);
+          onChanged={async (nextGroupId) => {
+            const groupId = nextGroupId === undefined ? selectedGroupId : nextGroupId;
+
+            if (groupId !== null) {
+              await loadDashboard(groupId);
+            } else {
+              setRanking(null);
+              setSignals(null);
+              setIndicators(null);
             }
           }}
         />

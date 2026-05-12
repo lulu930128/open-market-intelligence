@@ -10,6 +10,10 @@ from app.watchlists.schemas import (
 )
 
 
+class WatchlistGroupNotEmptyError(Exception):
+    pass
+
+
 class WatchlistGroupNotFoundError(Exception):
     pass
 
@@ -319,3 +323,66 @@ def delete_item(db: Session, item_id: int) -> None:
 
     db.delete(item)
     db.commit()
+
+
+def delete_group(
+    db: Session,
+    group_id: int,
+    recursive: bool = False,
+) -> dict:
+    """
+    Delete a watchlist group.
+
+    If recursive=True:
+    - delete the selected group
+    - delete all descendant groups
+    - delete all watchlist items under those groups
+
+    If recursive=False:
+    - only allow deleting an empty group
+    """
+    get_group(db, group_id)
+
+    descendant_group_ids = _get_descendant_group_ids(db=db, group_id=group_id)
+
+    direct_child_count = (
+        db.query(WatchlistGroup)
+        .filter(WatchlistGroup.parent_id == group_id)
+        .count()
+    )
+
+    direct_item_count = (
+        db.query(WatchlistItem)
+        .filter(WatchlistItem.group_id == group_id)
+        .count()
+    )
+
+    if not recursive and (direct_child_count > 0 or direct_item_count > 0):
+        raise WatchlistGroupNotEmptyError(
+            "Watchlist group is not empty. Use recursive=true to delete children and items."
+        )
+
+    deleted_item_count = (
+        db.query(WatchlistItem)
+        .filter(WatchlistItem.group_id.in_(descendant_group_ids))
+        .count()
+    )
+
+    db.query(WatchlistItem).filter(
+        WatchlistItem.group_id.in_(descendant_group_ids)
+    ).delete(synchronize_session=False)
+
+    # Delete child groups before parent group.
+    for current_group_id in reversed(descendant_group_ids):
+        db.query(WatchlistGroup).filter(
+            WatchlistGroup.id == current_group_id
+        ).delete(synchronize_session=False)
+
+    db.commit()
+
+    return {
+        "group_id": group_id,
+        "recursive": recursive,
+        "deleted_group_count": len(descendant_group_ids),
+        "deleted_item_count": deleted_item_count,
+    }

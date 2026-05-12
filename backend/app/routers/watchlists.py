@@ -7,6 +7,7 @@ from app.db.session import get_db
 from app.watchlists.schemas import (
     WatchlistGroupBackfillResultRead,
     WatchlistGroupCreate,
+    WatchlistGroupDeleteResultRead,
     WatchlistGroupLatestIndicatorsRead,
     WatchlistGroupLatestSignalsRead,
     WatchlistGroupRankingRead,
@@ -70,6 +71,29 @@ def update_watchlist_group(
         raise _handle_group_error(exc) from exc
 
 
+
+@router.delete(
+    "/groups/{group_id}",
+    response_model=WatchlistGroupDeleteResultRead,
+)
+def delete_watchlist_group(
+    group_id: int,
+    recursive: bool = False,
+    db: Session = Depends(get_db),
+):
+    try:
+        return service.delete_group(
+            db=db,
+            group_id=group_id,
+            recursive=recursive,
+        )
+    except service.WatchlistGroupNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except service.WatchlistGroupNotEmptyError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    
+
+    
 @router.post("/items", response_model=WatchlistItemRead, status_code=status.HTTP_201_CREATED)
 def create_watchlist_item(
     payload: WatchlistItemCreate,

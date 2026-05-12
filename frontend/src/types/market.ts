@@ -8,6 +8,30 @@ export type WatchlistGroupNode = {
   children: WatchlistGroupNode[];
 };
 
+export type WatchlistGroupRead = {
+  id: number;
+  parent_id: number | null;
+  group_name: string;
+  description: string | null;
+  sort_order: number;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WatchlistItemRead = {
+  id: number;
+  group_id: number;
+  stock_id: string;
+  stock_name: string | null;
+  note: string | null;
+  priority: number;
+  tags: string | null;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
 export type RankingItem = {
   rank: number;
   stock_id: string;
@@ -95,49 +119,3 @@ export type IndicatorsResponse = {
   error_count: number;
   results: IndicatorItem[];
 };
-
-
-export async function requestJson<T>(
-  path: string,
-  options: RequestInit,
-  params?: Record<string, string | number | boolean>
-): Promise<T> {
-  const response = await fetch(buildApiUrl(path, params), {
-    ...options,
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      ...(options.headers ?? {}),
-    },
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`API ${response.status}: ${text}`);
-  }
-
-  if (response.status === 204) {
-    return null as T;
-  }
-
-  return response.json() as Promise<T>;
-}
-
-export async function deleteRequest(
-  path: string,
-  params?: Record<string, string | number | boolean>
-): Promise<void> {
-  const response = await fetch(buildApiUrl(path, params), {
-    method: "DELETE",
-    headers: {
-      Accept: "application/json",
-    },
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`API ${response.status}: ${text}`);
-  }
-}

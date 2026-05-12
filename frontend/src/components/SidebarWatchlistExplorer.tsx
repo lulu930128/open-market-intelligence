@@ -10,14 +10,16 @@ import type {
 
 type Props = {
   selectedGroupId: number | null;
-  onSelectGroup: (group: WatchlistGroupNode) => void;
-  onChanged: () => Promise<void> | void;
+  onSelectGroup: (group: WatchlistGroupNode | null) => void;
+  onChanged: (nextGroupId?: number | null) => Promise<void> | void;
 };
 
-type Message = {
-  type: "success" | "error";
-  text: string;
-} | null;
+type Message =
+  | {
+      type: "success" | "error";
+      text: string;
+    }
+  | null;
 
 function flattenGroups(nodes: WatchlistGroupNode[]): WatchlistGroupNode[] {
   return nodes.flatMap((node) => [node, ...flattenGroups(node.children)]);
@@ -47,6 +49,7 @@ export default function SidebarWatchlistExplorer({
   const [tree, setTree] = useState<WatchlistGroupNode[]>([]);
   const [items, setItems] = useState<WatchlistItemRead[]>([]);
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
+
   const [message, setMessage] = useState<Message>(null);
   const [loading, setLoading] = useState(false);
 
@@ -88,25 +91,60 @@ export default function SidebarWatchlistExplorer({
     setItems(itemData);
 
     const flattened = flattenGroups(treeData);
-    const nextExpanded = new Set(expandedIds);
 
-    treeData.forEach((root) => nextExpanded.add(root.id));
-    setExpandedIds(nextExpanded);
+    setExpandedIds((previous) => {
+      const next = new Set(previous);
 
-    if (!options?.keepSelection && selectedGroupId === null && flattened.length > 0) {
-      onSelectGroup(flattened[0]);
-      setRenameValue(flattened[0].group_name);
+      treeData.forEach((root) => next.add(root.id));
+
+      if (selectedGroupId !== null) {
+        next.add(selectedGroupId);
+      }
+
+      return next;
+    });
+
+    const selectedStillExists =
+      selectedGroupId !== null &&
+      flattened.some((group) => group.id === selectedGroupId);
+
+    if (!options?.keepSelection || !selectedStillExists) {
+      const nextGroup = flattened[0] ?? null;
+
+      onSelectGroup(nextGroup);
+      setRenameValue(nextGroup?.group_name ?? "");
+
+      return nextGroup;
     }
+
+    const currentGroup =
+      flattened.find((group) => group.id === selectedGroupId) ?? null;
+
+    if (currentGroup) {
+      onSelectGroup(currentGroup);
+      setRenameValue(currentGroup.group_name);
+    }
+
+    return currentGroup;
   }
 
-  async function runAction(action: () => Promise<void>, successText: string) {
+  async function runAction(
+    action: () => Promise<void>,
+    successText: string,
+    options?: { keepSelection?: boolean }
+  ) {
     setLoading(true);
     setMessage(null);
 
     try {
       await action();
-      await reloadExplorerData({ keepSelection: true });
-      await onChanged();
+
+      const nextGroup = await reloadExplorerData({
+        keepSelection: options?.keepSelection ?? true,
+      });
+
+      await onChanged(nextGroup?.id ?? null);
+
       setMessage({ type: "success", text: successText });
     } catch (error) {
       setMessage({
@@ -122,7 +160,10 @@ export default function SidebarWatchlistExplorer({
     reloadExplorerData().catch((error) => {
       setMessage({
         type: "error",
-        text: error instanceof Error ? error.message : "Failed to load watchlist explorer.",
+        text:
+          error instanceof Error
+            ? error.message
+            : "Failed to load watchlist explorer.",
       });
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -161,8 +202,9 @@ export default function SidebarWatchlistExplorer({
 
   async function createChildFolder() {
     const name = folderName.trim();
+    const parentId = selectedGroupId;
 
-    if (!selectedGroupId) {
+    if (parentId === null) {
       setMessage({ type: "error", text: "請先選擇一個資料夾。" });
       return;
     }
@@ -172,32 +214,37 @@ export default function SidebarWatchlistExplorer({
       return;
     }
 
-    await runAction(async () => {
-      await requestJson<WatchlistGroupRead>("/api/watchlists/groups", {
-        method: "POST",
-        body: JSON.stringify({
-          parent_id: selectedGroupId,
-          group_name: name,
-          description: null,
-          sort_order: 100,
-          is_active: true,
-        }),
-      });
+    await runAction(
+      async () => {
+        await requestJson<WatchlistGroupRead>("/api/watchlists/groups", {
+          method: "POST",
+          body: JSON.stringify({
+            parent_id: parentId,
+            group_name: name,
+            description: null,
+            sort_order: 100,
+            is_active: true,
+          }),
+        });
 
-      setFolderName("");
+        setFolderName("");
 
-      setExpandedIds((previous) => {
-        const next = new Set(previous);
-        next.add(selectedGroupId);
-        return next;
-      });
-    }, "已新增子資料夾。");
+        setExpandedIds((previous) => {
+          const next = new Set(previous);
+          next.add(parentId);
+          return next;
+        });
+      },
+      "已新增子資料夾。",
+      { keepSelection: true }
+    );
   }
 
   async function renameSelectedFolder() {
     const name = renameValue.trim();
+    const groupId = selectedGroupId;
 
-    if (!selectedGroupId || !selectedGroup) {
+    if (groupId === null || !selectedGroup) {
       setMessage({ type: "error", text: "請先選擇一個資料夾。" });
       return;
     }
@@ -211,40 +258,50 @@ export default function SidebarWatchlistExplorer({
       return;
     }
 
-    await runAction(async () => {
-      await requestJson<WatchlistGroupRead>(`/api/watchlists/groups/${selectedGroupId}`, {
-        method: "PATCH",
-        body: JSON.stringify({
-          group_name: name,
-        }),
-      });
-    }, "已重新命名資料夾。");
+    await runAction(
+      async () => {
+        await requestJson<WatchlistGroupRead>(`/api/watchlists/groups/${groupId}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            group_name: name,
+          }),
+        });
+      },
+      "已重新命名資料夾。",
+      { keepSelection: true }
+    );
   }
 
-  async function hideSelectedFolder() {
-    if (!selectedGroupId) {
+  async function deleteSelectedFolder() {
+    const groupId = selectedGroupId;
+
+    if (groupId === null || !selectedGroup) {
       setMessage({ type: "error", text: "請先選擇一個資料夾。" });
       return;
     }
 
-    const confirmed = window.confirm("目前先不做真刪除，會將此資料夾設為 inactive。確定隱藏？");
+    const confirmed = window.confirm(
+      `確定要刪除「${selectedGroup.group_name}」嗎？\n\n此操作會一併刪除底下所有子資料夾與股票，無法復原。`
+    );
 
     if (!confirmed) return;
 
-    await runAction(async () => {
-      await requestJson<WatchlistGroupRead>(`/api/watchlists/groups/${selectedGroupId}`, {
-        method: "PATCH",
-        body: JSON.stringify({
-          is_active: false,
-        }),
-      });
-    }, "已隱藏資料夾。");
+    await runAction(
+      async () => {
+        await deleteRequest(`/api/watchlists/groups/${groupId}`, {
+          recursive: true,
+        });
+      },
+      "已刪除資料夾。",
+      { keepSelection: false }
+    );
   }
 
   async function createStockItem() {
     const value = stockId.trim();
+    const groupId = selectedGroupId;
 
-    if (!selectedGroupId) {
+    if (groupId === null) {
       setMessage({ type: "error", text: "請先選擇一個資料夾。" });
       return;
     }
@@ -254,44 +311,64 @@ export default function SidebarWatchlistExplorer({
       return;
     }
 
-    await runAction(async () => {
-      await requestJson<WatchlistItemRead>("/api/watchlists/items", {
-        method: "POST",
-        body: JSON.stringify({
-          group_id: selectedGroupId,
-          stock_id: value,
-          note: stockNote.trim() || null,
-          priority: 100,
-          tags: stockTags.trim() || null,
-          enabled: true,
-        }),
-      });
+    await runAction(
+      async () => {
+        await requestJson<WatchlistItemRead>("/api/watchlists/items", {
+          method: "POST",
+          body: JSON.stringify({
+            group_id: groupId,
+            stock_id: value,
+            note: stockNote.trim() || null,
+            priority: 100,
+            tags: stockTags.trim() || null,
+            enabled: true,
+          }),
+        });
 
-      setStockId("");
-      setStockNote("");
-      setStockTags("");
-    }, "已加入自選股。");
+        setStockId("");
+        setStockNote("");
+        setStockTags("");
+
+        setExpandedIds((previous) => {
+          const next = new Set(previous);
+          next.add(groupId);
+          return next;
+        });
+      },
+      "已加入自選股。",
+      { keepSelection: true }
+    );
   }
 
   async function deleteStockItem(item: WatchlistItemRead) {
-    const confirmed = window.confirm(`確定要刪除 ${item.stock_id} ${item.stock_name ?? ""} 嗎？`);
+    const confirmed = window.confirm(
+      `確定要刪除 ${item.stock_id} ${item.stock_name ?? ""} 嗎？`
+    );
 
     if (!confirmed) return;
 
-    await runAction(async () => {
-      await deleteRequest(`/api/watchlists/items/${item.id}`);
-    }, "已刪除自選股。");
+    await runAction(
+      async () => {
+        await deleteRequest(`/api/watchlists/items/${item.id}`);
+      },
+      "已刪除自選股。",
+      { keepSelection: true }
+    );
   }
 
   async function toggleStockItem(item: WatchlistItemRead) {
-    await runAction(async () => {
-      await requestJson<WatchlistItemRead>(`/api/watchlists/items/${item.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({
-          enabled: !item.enabled,
-        }),
-      });
-    }, item.enabled ? "已停用自選股。" : "已啟用自選股。");
+    await runAction(
+      async () => {
+        await requestJson<WatchlistItemRead>(`/api/watchlists/items/${item.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            enabled: !item.enabled,
+          }),
+        });
+      },
+      item.enabled ? "已停用自選股。" : "已啟用自選股。",
+      { keepSelection: true }
+    );
   }
 
   function renderGroupNode(node: WatchlistGroupNode, depth = 0) {
@@ -305,7 +382,9 @@ export default function SidebarWatchlistExplorer({
         <div
           className={[
             "group flex items-center gap-1 rounded-xl py-1.5 pr-2 text-sm transition",
-            selected ? "bg-indigo-600 text-white shadow-sm" : "text-slate-600 hover:bg-white",
+            selected
+              ? "bg-indigo-600 text-white shadow-sm"
+              : "text-slate-600 hover:bg-white",
           ].join(" ")}
           style={{ paddingLeft: `${8 + depth * 16}px` }}
         >
@@ -317,10 +396,16 @@ export default function SidebarWatchlistExplorer({
             }}
             className={[
               "flex h-5 w-5 items-center justify-center rounded text-xs",
-              selected ? "text-white hover:bg-indigo-500" : "text-slate-400 hover:bg-slate-100",
+              selected
+                ? "text-white hover:bg-indigo-500"
+                : "text-slate-400 hover:bg-slate-100",
             ].join(" ")}
           >
-            {children.length > 0 || groupItems.length > 0 ? (expanded ? "▾" : "▸") : "·"}
+            {children.length > 0 || groupItems.length > 0
+              ? expanded
+                ? "▾"
+                : "▸"
+              : "·"}
           </button>
 
           <button
@@ -329,6 +414,7 @@ export default function SidebarWatchlistExplorer({
             className="min-w-0 flex-1 text-left"
           >
             <div className="truncate font-medium">{node.group_name}</div>
+
             {node.description ? (
               <div
                 className={[
@@ -349,15 +435,19 @@ export default function SidebarWatchlistExplorer({
                 key={item.id}
                 className={[
                   "group flex items-center gap-2 rounded-lg py-1.5 pr-2 text-xs",
-                  item.enabled ? "text-slate-500 hover:bg-white" : "text-slate-300",
+                  item.enabled
+                    ? "text-slate-500 hover:bg-white"
+                    : "text-slate-300",
                 ].join(" ")}
                 style={{ paddingLeft: `${34 + depth * 16}px` }}
               >
                 <span className="text-slate-300">●</span>
+
                 <div className="min-w-0 flex-1">
                   <div className="truncate font-semibold">
                     {item.stock_id} {item.stock_name ?? ""}
                   </div>
+
                   {item.tags || item.note ? (
                     <div className="truncate text-slate-400">
                       {item.tags || item.note}
@@ -396,14 +486,21 @@ export default function SidebarWatchlistExplorer({
         <p className="text-xs font-semibold uppercase tracking-[0.24em] text-indigo-500">
           Open Market Intelligence
         </p>
-        <h1 className="mt-2 text-2xl font-bold tracking-tight">Market Dashboard</h1>
+
+        <h1 className="mt-2 text-2xl font-bold tracking-tight">
+          Market Dashboard
+        </h1>
+
         <p className="mt-2 text-sm leading-6 text-slate-500">
           左側管理自選股，右側查看排名、訊號與指標。
         </p>
       </div>
 
       <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-slate-700">Watchlist Explorer</h2>
+        <h2 className="text-sm font-semibold text-slate-700">
+          Watchlist Explorer
+        </h2>
+
         <button
           type="button"
           onClick={() => void reloadExplorerData({ keepSelection: true })}
@@ -413,9 +510,7 @@ export default function SidebarWatchlistExplorer({
         </button>
       </div>
 
-      <div className="space-y-1">
-        {tree.map((node) => renderGroupNode(node))}
-      </div>
+      <div className="space-y-1">{tree.map((node) => renderGroupNode(node))}</div>
 
       {message ? (
         <div
@@ -432,6 +527,7 @@ export default function SidebarWatchlistExplorer({
 
       <div className="mt-5 rounded-2xl bg-slate-50 p-4">
         <p className="text-xs font-semibold text-slate-500">Selected Folder</p>
+
         <p className="mt-1 truncate text-sm font-bold text-slate-800">
           {selectedGroup?.group_name ?? "未選擇"}
         </p>
@@ -448,7 +544,7 @@ export default function SidebarWatchlistExplorer({
             <button
               type="button"
               className={smallButtonClass("primary")}
-              disabled={loading || !selectedGroupId}
+              disabled={loading || selectedGroupId === null}
               onClick={() => void renameSelectedFolder()}
             >
               Rename
@@ -457,10 +553,10 @@ export default function SidebarWatchlistExplorer({
             <button
               type="button"
               className={smallButtonClass("danger")}
-              disabled={loading || !selectedGroupId}
-              onClick={() => void hideSelectedFolder()}
+              disabled={loading || selectedGroupId === null}
+              onClick={() => void deleteSelectedFolder()}
             >
-              Hide
+              Delete
             </button>
           </div>
         </div>
@@ -480,7 +576,7 @@ export default function SidebarWatchlistExplorer({
           <button
             type="button"
             className={smallButtonClass("primary")}
-            disabled={loading || !selectedGroupId}
+            disabled={loading || selectedGroupId === null}
             onClick={() => void createChildFolder()}
           >
             + Folder
@@ -516,7 +612,7 @@ export default function SidebarWatchlistExplorer({
           <button
             type="button"
             className={smallButtonClass("primary")}
-            disabled={loading || !selectedGroupId}
+            disabled={loading || selectedGroupId === null}
             onClick={() => void createStockItem()}
           >
             + Stock

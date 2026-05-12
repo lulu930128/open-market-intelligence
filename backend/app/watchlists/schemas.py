@@ -219,3 +219,11 @@ class WatchlistGroupRankingRead(BaseModel):
     error_count: int
 
     results: list[WatchlistRankingItemRead]
+
+
+class WatchlistGroupDeleteResultRead(BaseModel):
+    group_id: int
+    recursive: bool
+
+    deleted_group_count: int
+    deleted_item_count: int
