@@ -95,3 +95,49 @@ export type IndicatorsResponse = {
   error_count: number;
   results: IndicatorItem[];
 };
+
+
+export async function requestJson<T>(
+  path: string,
+  options: RequestInit,
+  params?: Record<string, string | number | boolean>
+): Promise<T> {
+  const response = await fetch(buildApiUrl(path, params), {
+    ...options,
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      ...(options.headers ?? {}),
+    },
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`API ${response.status}: ${text}`);
+  }
+
+  if (response.status === 204) {
+    return null as T;
+  }
+
+  return response.json() as Promise<T>;
+}
+
+export async function deleteRequest(
+  path: string,
+  params?: Record<string, string | number | boolean>
+): Promise<void> {
+  const response = await fetch(buildApiUrl(path, params), {
+    method: "DELETE",
+    headers: {
+      Accept: "application/json",
+    },
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`API ${response.status}: ${text}`);
+  }
+}

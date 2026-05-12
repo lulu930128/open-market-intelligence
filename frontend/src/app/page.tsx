@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import SidebarWatchlistExplorer from "@/components/SidebarWatchlistExplorer";
 import { fetchJson } from "@/lib/api";
 import type {
   IndicatorsResponse,
@@ -9,12 +9,9 @@ import type {
   SignalsResponse,
   WatchlistGroupNode,
 } from "@/types/market";
+import { useEffect, useMemo, useState } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
-
-function flattenGroups(nodes: WatchlistGroupNode[]): WatchlistGroupNode[] {
-  return nodes.flatMap((node) => [node, ...flattenGroups(node.children)]);
-}
 
 function formatNumber(value: number | null | undefined) {
   if (value === null || value === undefined) return "-";
@@ -23,6 +20,7 @@ function formatNumber(value: number | null | undefined) {
 
 function formatPrice(value: number | null | undefined) {
   if (value === null || value === undefined) return "-";
+
   return value.toLocaleString("zh-TW", {
     minimumFractionDigits: 0,
     maximumFractionDigits: 2,
@@ -31,6 +29,7 @@ function formatPrice(value: number | null | undefined) {
 
 function formatPct(value: number | null | undefined) {
   if (value === null || value === undefined) return "-";
+
   const sign = value > 0 ? "+" : "";
   return `${sign}${value.toFixed(2)}%`;
 }
@@ -58,66 +57,9 @@ function changeClass(value: number | null | undefined) {
   return "text-slate-600";
 }
 
-function GroupTree({
-  nodes,
-  selectedGroupId,
-  onSelect,
-  depth = 0,
-}: {
-  nodes: WatchlistGroupNode[];
-  selectedGroupId: number | null;
-  onSelect: (group: WatchlistGroupNode) => void;
-  depth?: number;
-}) {
-  return (
-    <div className="space-y-1">
-      {nodes.map((node) => {
-        const selected = node.id === selectedGroupId;
-
-        return (
-          <div key={node.id}>
-            <button
-              type="button"
-              onClick={() => onSelect(node)}
-              className={[
-                "w-full rounded-xl px-3 py-2 text-left text-sm transition",
-                selected
-                  ? "bg-indigo-600 text-white shadow-sm"
-                  : "text-slate-600 hover:bg-white hover:text-slate-950",
-              ].join(" ")}
-              style={{ paddingLeft: `${12 + depth * 18}px` }}
-            >
-              <div className="font-medium">{node.group_name}</div>
-              {node.description ? (
-                <div
-                  className={[
-                    "mt-0.5 truncate text-xs",
-                    selected ? "text-indigo-100" : "text-slate-400",
-                  ].join(" ")}
-                >
-                  {node.description}
-                </div>
-              ) : null}
-            </button>
-
-            {node.children.length > 0 ? (
-              <GroupTree
-                nodes={node.children}
-                selectedGroupId={selectedGroupId}
-                onSelect={onSelect}
-                depth={depth + 1}
-              />
-            ) : null}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 export default function Home() {
-  const [groups, setGroups] = useState<WatchlistGroupNode[]>([]);
   const [selectedGroupId, setSelectedGroupId] = useState<number | null>(null);
+  const [selectedGroup, setSelectedGroup] = useState<WatchlistGroupNode | null>(null);
   const [rankBy, setRankBy] = useState("score");
 
   const [ranking, setRanking] = useState<RankingResponse | null>(null);
@@ -126,10 +68,6 @@ export default function Home() {
 
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-
-  const selectedGroup = useMemo(() => {
-    return flattenGroups(groups).find((group) => group.id === selectedGroupId) ?? null;
-  }, [groups, selectedGroupId]);
 
   const indicatorByStockId = useMemo(() => {
     const map = new Map<string, IndicatorsResponse["results"][number]>();
@@ -140,16 +78,6 @@ export default function Home() {
 
     return map;
   }, [indicators]);
-
-  async function loadGroups() {
-    const tree = await fetchJson<WatchlistGroupNode[]>("/api/watchlists/tree");
-    setGroups(tree);
-
-    const flattened = flattenGroups(tree);
-    if (!selectedGroupId && flattened.length > 0) {
-      setSelectedGroupId(flattened[0].id);
-    }
-  }
 
   async function loadDashboard(groupId: number, currentRankBy = rankBy) {
     setLoadState("loading");
@@ -192,22 +120,16 @@ export default function Home() {
   }
 
   useEffect(() => {
-    loadGroups().catch((error) => {
-      setLoadState("error");
-      setErrorMessage(error instanceof Error ? error.message : "Failed to load watchlist tree");
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
     if (selectedGroupId !== null) {
-      loadDashboard(selectedGroupId).catch((error) => {
-        setLoadState("error");
-        setErrorMessage(error instanceof Error ? error.message : "Failed to load dashboard");
-      });
+      void loadDashboard(selectedGroupId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedGroupId]);
+
+  function handleSelectGroup(group: WatchlistGroupNode) {
+    setSelectedGroup(group);
+    setSelectedGroupId(group.id);
+  }
 
   function handleRankByChange(value: string) {
     setRankBy(value);
@@ -220,40 +142,19 @@ export default function Home() {
   const rows: RankingItem[] = ranking?.results ?? [];
 
   return (
-    <main className="min-h-screen bg-slate-100 text-slate-950">
-      <div className="mx-auto flex max-w-7xl gap-5 px-5 py-5">
-        <aside className="sticky top-5 h-[calc(100vh-40px)] w-80 rounded-3xl border border-white/70 bg-white/80 p-5 shadow-sm backdrop-blur">
-          <div className="mb-5">
-            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-indigo-500">
-              Open Market Intelligence
-            </p>
-            <h1 className="mt-2 text-2xl font-bold tracking-tight">
-              Market Dashboard
-            </h1>
-            <p className="mt-2 text-sm leading-6 text-slate-500">
-              本機測試版，用來檢視 Watchlist、技術指標與訊號排名。
-            </p>
-          </div>
+    <main className="h-screen overflow-hidden bg-slate-100 text-slate-950">
+      <div className="flex h-full w-full min-w-[1280px] gap-5 px-5 py-5">
+        <SidebarWatchlistExplorer
+          selectedGroupId={selectedGroupId}
+          onSelectGroup={handleSelectGroup}
+          onChanged={async () => {
+            if (selectedGroupId !== null) {
+              await loadDashboard(selectedGroupId);
+            }
+          }}
+        />
 
-          <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-slate-700">Watchlist</h2>
-            <button
-              type="button"
-              onClick={() => void loadGroups()}
-              className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 hover:bg-slate-200"
-            >
-              Refresh
-            </button>
-          </div>
-
-          <GroupTree
-            nodes={groups}
-            selectedGroupId={selectedGroupId}
-            onSelect={(group) => setSelectedGroupId(group.id)}
-          />
-        </aside>
-
-        <section className="flex-1 space-y-5">
+        <section className="h-full flex-1 space-y-5 overflow-y-auto pr-1">
           <div className="rounded-3xl border border-white/70 bg-white/80 p-6 shadow-sm backdrop-blur">
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div>
@@ -266,7 +167,7 @@ export default function Home() {
                 </p>
               </div>
 
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-3">
                 <select
                   value={rankBy}
                   onChange={(event) => handleRankByChange(event.target.value)}
@@ -305,18 +206,21 @@ export default function Home() {
                   {ranking?.requested_stock_count ?? "-"}
                 </p>
               </div>
+
               <div className="rounded-2xl bg-emerald-50 p-4">
                 <p className="text-xs font-medium text-emerald-600">Bullish</p>
                 <p className="mt-2 text-2xl font-bold text-emerald-700">
                   {signals?.bullish_count ?? "-"}
                 </p>
               </div>
+
               <div className="rounded-2xl bg-rose-50 p-4">
                 <p className="text-xs font-medium text-rose-600">Bearish</p>
                 <p className="mt-2 text-2xl font-bold text-rose-700">
                   {signals?.bearish_count ?? "-"}
                 </p>
               </div>
+
               <div className="rounded-2xl bg-indigo-50 p-4">
                 <p className="text-xs font-medium text-indigo-600">Rank By</p>
                 <p className="mt-2 text-2xl font-bold text-indigo-700">
@@ -355,6 +259,7 @@ export default function Home() {
                     <th className="px-6 py-3">Primary Signal</th>
                   </tr>
                 </thead>
+
                 <tbody className="divide-y divide-slate-100">
                   {rows.map((row) => {
                     const indicator = indicatorByStockId.get(row.stock_id);
@@ -364,16 +269,20 @@ export default function Home() {
                         <td className="px-6 py-4 font-semibold text-slate-500">
                           #{row.rank}
                         </td>
+
                         <td className="px-6 py-4">
                           <div className="font-semibold">{row.stock_id}</div>
                           <div className="text-xs text-slate-500">
                             {row.stock_name ?? "-"}
                           </div>
                         </td>
+
                         <td className="px-6 py-4 text-slate-500">{row.time ?? "-"}</td>
+
                         <td className="px-6 py-4 text-right font-medium">
                           {formatPrice(row.close)}
                         </td>
+
                         <td
                           className={[
                             "px-6 py-4 text-right font-semibold",
@@ -382,12 +291,13 @@ export default function Home() {
                         >
                           {formatPct(row.change_pct)}
                         </td>
+
                         <td className="px-6 py-4 text-right text-slate-600">
                           {formatNumber(row.volume)}
                         </td>
-                        <td className="px-6 py-4 text-right font-semibold">
-                          {row.score}
-                        </td>
+
+                        <td className="px-6 py-4 text-right font-semibold">{row.score}</td>
+
                         <td className="px-6 py-4">
                           <span
                             className={[
@@ -398,12 +308,13 @@ export default function Home() {
                             {row.status}
                           </span>
                         </td>
+
                         <td className="px-6 py-4">
                           <div className="font-medium">
                             {row.primary_signal_label ?? "-"}
                           </div>
                           <div className="mt-1 text-xs text-slate-400">
-                            MA20: {formatPrice(indicator?.ma?.ma20)}
+                            MA20: {formatPrice(indicator?.ma?.["ma20"])}
                           </div>
                         </td>
                       </tr>
@@ -467,9 +378,7 @@ export default function Home() {
 
             <div className="rounded-3xl border border-white/70 bg-white/80 p-6 shadow-sm backdrop-blur">
               <h2 className="text-lg font-bold">Indicators</h2>
-              <p className="mt-1 text-sm text-slate-500">
-                最新均線與量均線摘要。
-              </p>
+              <p className="mt-1 text-sm text-slate-500">最新均線與量均線摘要。</p>
 
               <div className="mt-4 space-y-3">
                 {indicators?.results.map((item) => (
@@ -486,7 +395,12 @@ export default function Home() {
 
                       <div className="text-right">
                         <div className="font-semibold">{formatPrice(item.close)}</div>
-                        <div className={["text-xs font-medium", changeClass(item.change_pct)].join(" ")}>
+                        <div
+                          className={[
+                            "text-xs font-medium",
+                            changeClass(item.change_pct),
+                          ].join(" ")}
+                        >
                           {formatPct(item.change_pct)}
                         </div>
                       </div>
@@ -494,16 +408,16 @@ export default function Home() {
 
                     <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-600">
                       <div className="rounded-xl bg-white px-3 py-2">
-                        MA5: {formatPrice(item.ma.ma5)}
+                        MA5: {formatPrice(item.ma["ma5"])}
                       </div>
                       <div className="rounded-xl bg-white px-3 py-2">
-                        MA20: {formatPrice(item.ma.ma20)}
+                        MA20: {formatPrice(item.ma["ma20"])}
                       </div>
                       <div className="rounded-xl bg-white px-3 py-2">
-                        VMA5: {formatNumber(item.volume_ma.volume_ma5)}
+                        VMA5: {formatNumber(item.volume_ma["volume_ma5"])}
                       </div>
                       <div className="rounded-xl bg-white px-3 py-2">
-                        VMA20: {formatNumber(item.volume_ma.volume_ma20)}
+                        VMA20: {formatNumber(item.volume_ma["volume_ma20"])}
                       </div>
                     </div>
                   </div>
