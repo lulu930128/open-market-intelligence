@@ -1,8 +1,11 @@
+from datetime import date
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
-
+from app.watchlists import backfill_service, service
 from app.db.session import get_db
 from app.watchlists.schemas import (
+    WatchlistGroupBackfillResultRead,
     WatchlistGroupCreate,
     WatchlistGroupRead,
     WatchlistGroupTreeRead,
@@ -11,7 +14,6 @@ from app.watchlists.schemas import (
     WatchlistItemRead,
     WatchlistItemUpdate,
 )
-from app.watchlists import service
 
 router = APIRouter()
 
@@ -121,6 +123,36 @@ def list_watchlist_group_items(
             include_children=include_children,
             limit=limit,
             offset=offset,
+        )
+    except service.WatchlistGroupNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+
+@router.post(
+    "/groups/{group_id}/backfill/twse",
+    response_model=WatchlistGroupBackfillResultRead,
+)
+def backfill_watchlist_group_twse(
+    group_id: int,
+    start_date: date,
+    end_date: date,
+    source_id: int = 1,
+    include_children: bool = True,
+    enabled_only: bool = True,
+    sleep_seconds: float = Query(default=0.8, ge=0.2, le=10.0),
+    db: Session = Depends(get_db),
+):
+    try:
+        return backfill_service.backfill_watchlist_group_twse(
+            db=db,
+            group_id=group_id,
+            start_date=start_date,
+            end_date=end_date,
+            source_id=source_id,
+            include_children=include_children,
+            enabled_only=enabled_only,
+            sleep_seconds=sleep_seconds,
         )
     except service.WatchlistGroupNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc

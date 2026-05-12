@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, date
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -82,3 +82,32 @@ class WatchlistItemRead(BaseModel):
 
     created_at: datetime
     updated_at: datetime
+
+
+class WatchlistBackfillStockResultRead(BaseModel):
+    stock_id: str
+    stock_name: str | None = None
+
+    status: str
+    parsed_count: int = 0
+    inserted_count: int = 0
+    skipped_count: int = 0
+
+    message: str | None = None
+    error_message: str | None = None
+
+
+class WatchlistGroupBackfillResultRead(BaseModel):
+    group_id: int
+    include_children: bool
+
+    start_date: date
+    end_date: date
+
+    requested_stock_count: int
+    success_count: int
+    warning_count: int
+    error_count: int
+    skipped_count: int
+
+    results: list[WatchlistBackfillStockResultRead]
