@@ -181,3 +181,41 @@ class WatchlistGroupLatestSignalsRead(BaseModel):
     error_count: int
 
     results: list[WatchlistStockLatestSignalsRead]
+
+
+class WatchlistRankingItemRead(BaseModel):
+    rank: int
+
+    stock_id: str
+    stock_name: str | None = None
+
+    time: date | None = None
+    close: float | None = None
+    volume: int | None = None
+    change_pct: float | None = None
+
+    score: int
+    status: str
+
+    signal_count: int
+    signal_keys: list[str] = Field(default_factory=list)
+
+    primary_signal_key: str | None = None
+    primary_signal_label: str | None = None
+
+    error_message: str | None = None
+
+
+class WatchlistGroupRankingRead(BaseModel):
+    group_id: int
+    include_children: bool
+
+    rank_by: str
+    sort_order: str
+
+    requested_stock_count: int
+    ranked_count: int
+    no_data_count: int
+    error_count: int
+
+    results: list[WatchlistRankingItemRead]

@@ -2,13 +2,14 @@ from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
-from app.watchlists import backfill_service, indicator_service, service, signal_service
+from app.watchlists import backfill_service, indicator_service, ranking_service, service, signal_service
 from app.db.session import get_db
 from app.watchlists.schemas import (
     WatchlistGroupBackfillResultRead,
     WatchlistGroupCreate,
     WatchlistGroupLatestIndicatorsRead,
     WatchlistGroupLatestSignalsRead,
+    WatchlistGroupRankingRead,
     WatchlistGroupRead,
     WatchlistGroupTreeRead,
     WatchlistGroupUpdate,
@@ -243,3 +244,38 @@ def get_watchlist_group_latest_signals(
         )
     except service.WatchlistGroupNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    
+
+@router.get(
+    "/groups/{group_id}/rankings/latest",
+    response_model=WatchlistGroupRankingRead,
+)
+def get_watchlist_group_latest_ranking(
+    group_id: int,
+    include_children: bool = True,
+    enabled_only: bool = True,
+    rank_by: str = "score",
+    sort_order: str = "desc",
+    ma_windows: str = "5,20,60",
+    volume_ma_windows: str = "5,20",
+    limit: int = Query(default=100, ge=20, le=500),
+    volume_ratio_threshold: float = Query(default=1.5, ge=1.0, le=5.0),
+    db: Session = Depends(get_db),
+):
+    try:
+        return ranking_service.get_watchlist_group_latest_ranking(
+            db=db,
+            group_id=group_id,
+            include_children=include_children,
+            enabled_only=enabled_only,
+            rank_by=rank_by,
+            sort_order=sort_order,
+            ma_windows=ma_windows,
+            volume_ma_windows=volume_ma_windows,
+            limit=limit,
+            volume_ratio_threshold=volume_ratio_threshold,
+        )
+    except service.WatchlistGroupNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
