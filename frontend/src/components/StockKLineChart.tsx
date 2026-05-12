@@ -3,9 +3,12 @@
 import { useMemo, useState } from "react";
 import type { ChartPoint, StockIndicatorPoint } from "@/types/market";
 
+type StockChartRange = "1M" | "3M" | "6M" | "ALL";
+
 type Props = {
   chartData: ChartPoint[];
   indicatorData: StockIndicatorPoint[];
+  range?: StockChartRange;
 };
 
 type MergedPoint = ChartPoint & {
@@ -40,6 +43,13 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
+function getRangeCount(range: StockChartRange) {
+  if (range === "1M") return 22;
+  if (range === "3M") return 66;
+  if (range === "6M") return 132;
+  return null;
+}
+
 function buildLinePath(
   data: MergedPoint[],
   getValue: (point: MergedPoint) => number | null,
@@ -71,7 +81,11 @@ function buildLinePath(
   return path.trim();
 }
 
-export default function StockKLineChart({ chartData, indicatorData }: Props) {
+export default function StockKLineChart({
+  chartData,
+  indicatorData,
+  range = "3M",
+}: Props) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
 
   const data = useMemo<MergedPoint[]>(() => {
@@ -95,7 +109,10 @@ export default function StockKLineChart({ chartData, indicatorData }: Props) {
     });
   }, [chartData, indicatorData]);
 
-  const visibleData = useMemo(() => data.slice(-80), [data]);
+  const visibleData = useMemo(() => {
+    const count = getRangeCount(range);
+    return count === null ? data : data.slice(-count);
+  }, [data, range]);
 
   const hoveredPoint =
     hoverIndex !== null ? visibleData[hoverIndex] : visibleData[visibleData.length - 1];
@@ -190,7 +207,7 @@ export default function StockKLineChart({ chartData, indicatorData }: Props) {
         <div>
           <p className="text-sm font-semibold text-slate-700">K Line / Volume</p>
           <p className="mt-1 text-xs text-slate-400">
-            顯示最近 {visibleData.length} 筆日 K，含 MA5 / MA20。
+            顯示 {range} 區間，共 {visibleData.length} 筆日 K，含 MA5 / MA20。
           </p>
         </div>
 

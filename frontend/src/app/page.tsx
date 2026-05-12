@@ -10,7 +10,7 @@ import type {
   SignalsResponse,
   WatchlistGroupNode,
 } from "@/types/market";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
 
@@ -65,6 +65,7 @@ export default function Home() {
 
   const [selectedStockId, setSelectedStockId] = useState<string | null>(null);
   const [selectedStockName, setSelectedStockName] = useState<string | null>(null);
+  const stockDetailRef = useRef<HTMLDivElement | null>(null);
 
   const [ranking, setRanking] = useState<RankingResponse | null>(null);
   const [signals, setSignals] = useState<SignalsResponse | null>(null);
@@ -150,6 +151,13 @@ export default function Home() {
   function handleSelectStock(stockId: string, stockName: string | null) {
     setSelectedStockId(stockId);
     setSelectedStockName(stockName);
+
+    window.setTimeout(() => {
+      stockDetailRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    }, 0);
   }
 
   function handleRankByChange(value: string) {
@@ -262,7 +270,9 @@ export default function Home() {
               </div>
             </div>
           </div>
-          <StockDetailPanel stockId={selectedStockId} stockName={selectedStockName} />
+          <div ref={stockDetailRef}>
+            <StockDetailPanel stockId={selectedStockId} stockName={selectedStockName} />
+          </div>
           
           <div className="overflow-hidden rounded-3xl border border-white/70 bg-white/80 shadow-sm backdrop-blur">
             <div className="flex items-center justify-between border-b border-slate-100 px-6 py-4">
@@ -300,10 +310,13 @@ export default function Home() {
 
                     return (
                       <tr
-                          key={row.stock_id}
-                          onClick={() => handleSelectStock(row.stock_id, row.stock_name)}
-                          className="cursor-pointer hover:bg-slate-50/80"
-                        >
+                        key={row.stock_id}
+                        onClick={() => handleSelectStock(row.stock_id, row.stock_name)}
+                        className={[
+                          "cursor-pointer hover:bg-slate-50/80",
+                          row.stock_id === selectedStockId ? "bg-indigo-50/70" : "",
+                        ].join(" ")}
+                      >
                         <td className="px-6 py-4 font-semibold text-slate-500">
                           #{row.rank}
                         </td>

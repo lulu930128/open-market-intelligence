@@ -96,6 +96,7 @@ function Sparkline({ points }: { points: ChartPoint[] }) {
 export default function StockDetailPanel({ stockId, stockName }: Props) {
   const [chartData, setChartData] = useState<ChartPoint[]>([]);
   const [indicatorData, setIndicatorData] = useState<StockIndicatorPoint[]>([]);
+  const [chartRange, setChartRange] = useState<"1M" | "3M" | "6M" | "ALL">("3M");
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -136,15 +137,15 @@ export default function StockDetailPanel({ stockId, stockName }: Props) {
     try {
       const [chart, indicators] = await Promise.all([
         fetchJson<ChartPoint[]>(`/api/market/daily/${currentStockId}/chart`, {
-          limit: 80,
+        limit: 260,
         }),
         fetchJson<StockIndicatorPoint[]>(
-          `/api/market/indicators/${currentStockId}/daily`,
-          {
-            limit: 80,
+        `/api/market/indicators/${currentStockId}/daily`,
+        {
+            limit: 260,
             ma_windows: "5,20,60",
             volume_ma_windows: "5,20",
-          }
+        }
         ),
       ]);
 
@@ -207,6 +208,27 @@ export default function StockDetailPanel({ stockId, stockName }: Props) {
             {formatPct(latestIndicator?.change_pct)}
           </div>
         </div>
+        <div className="mt-5 flex flex-wrap items-center gap-2">
+            {(["1M", "3M", "6M", "ALL"] as const).map((range) => (
+                <button
+                key={range}
+                type="button"
+                onClick={() => setChartRange(range)}
+                className={[
+                    "rounded-xl px-3 py-1.5 text-xs font-semibold ring-1 transition",
+                    chartRange === range
+                    ? "bg-indigo-600 text-white ring-indigo-600"
+                    : "bg-white text-slate-600 ring-slate-200 hover:bg-slate-50",
+                ].join(" ")}
+                >
+                {range}
+                </button>
+            ))}
+
+            <span className="text-xs text-slate-400">
+                Range controls only affect the chart display.
+            </span>
+            </div>
       </div>
 
       {errorMessage ? (
@@ -215,10 +237,19 @@ export default function StockDetailPanel({ stockId, stockName }: Props) {
         </div>
       ) : null}
 
-      <div className="mt-5 grid grid-cols-1 gap-4 xl:grid-cols-[1.4fr_1fr]">
-        <StockKLineChart chartData={chartData} indicatorData={indicatorData} />
+      {chartData.length > 0 && chartData.length < 20 ? (
+        <div className="mt-5 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-700">
+          目前這檔股票的歷史資料偏少，建議在左側選取資料夾後執行 Backfill，讓 K 線與均線判斷更完整。
+        </div>
+      ) : null}
 
-        <div className="grid grid-cols-2 gap-3 text-sm">
+      <div className="mt-5 grid grid-cols-1 gap-4 xl:grid-cols-[1.4fr_1fr]">
+        <StockKLineChart
+          chartData={chartData}
+          indicatorData={indicatorData}
+          range={chartRange}
+          />
+          <div className="grid grid-cols-2 gap-3 text-sm">
           <div className="rounded-2xl bg-slate-50 p-4">
             <p className="text-xs font-medium text-slate-500">MA5</p>
             <p className="mt-2 font-bold">{formatPrice(latestIndicator?.ma?.["ma5"])}</p>
