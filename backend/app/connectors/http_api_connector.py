@@ -1,7 +1,21 @@
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import requests
 
 from app.connectors.base import BaseConnector, FetchResult, utc_now
 from app.db.models import SourceRegistry
+
+
+TAIPEI_TZ = ZoneInfo("Asia/Taipei")
+
+
+def _render_endpoint_url(endpoint_url: str) -> str:
+    today = datetime.now(TAIPEI_TZ).strftime("%Y%m%d")
+    return (
+        endpoint_url.replace("{today_yyyyMMdd}", today)
+        .replace("{today_yyyymmdd}", today)
+    )
 
 
 TEXT_DECODING_CANDIDATES = (
@@ -63,14 +77,16 @@ class HttpAPIConnector(BaseConnector):
                 error_message="endpoint_url is required for HTTP API source.",
             )
 
+        endpoint_url = _render_endpoint_url(source.endpoint_url)
+
         headers = {
-            "User-Agent": "OpenMarketIntelligence/0.3 (+local development)",
+            "User-Agent": "OpenMarketIntelligence/0.4 (+local development)",
             "Accept": "application/json,text/csv,text/plain,text/html,*/*",
         }
 
         try:
             response = requests.get(
-                source.endpoint_url,
+                endpoint_url,
                 headers=headers,
                 timeout=30,
             )
@@ -82,7 +98,7 @@ class HttpAPIConnector(BaseConnector):
                 source_name=source.source_name,
                 fetched_at=utc_now(),
                 status="success" if response.ok else "error",
-                url=source.endpoint_url,
+                url=endpoint_url,
                 method="GET",
                 status_code=response.status_code,
                 content_type=content_type,
@@ -96,7 +112,7 @@ class HttpAPIConnector(BaseConnector):
                 source_name=source.source_name,
                 fetched_at=utc_now(),
                 status="error",
-                url=source.endpoint_url,
+                url=endpoint_url,
                 method="GET",
                 error_message=str(exc),
             )

@@ -192,6 +192,69 @@ class MarketDailyPrice(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class InstitutionalTradeDaily(Base):
+    __tablename__ = "institutional_trade_daily"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source_id",
+            "stock_id",
+            "trade_date",
+            name="uq_institutional_trade_source_stock_date",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("source_registry.id"),
+        nullable=False,
+        index=True,
+    )
+
+    raw_result_id: Mapped[int] = mapped_column(
+        ForeignKey("raw_fetch_result.id"),
+        nullable=False,
+        index=True,
+    )
+
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+
+    stock_id: Mapped[str] = mapped_column(String(20), index=True)
+    stock_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+    foreign_investor_buy: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    foreign_investor_sell: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    foreign_investor_net: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    foreign_dealer_buy: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    foreign_dealer_sell: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    foreign_dealer_net: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    investment_trust_buy: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    investment_trust_sell: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    investment_trust_net: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    dealer_self_buy: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    dealer_self_sell: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    dealer_self_net: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    dealer_hedge_buy: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    dealer_hedge_sell: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    dealer_hedge_net: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    dealer_buy: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    dealer_sell: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    dealer_net: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    total_institutional_net: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+
+
 class StockMaster(Base):
     __tablename__ = "stock_master"
 

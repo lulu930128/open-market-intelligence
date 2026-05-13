@@ -28,6 +28,23 @@ DEFAULT_SOURCES = [
         "reliability_level": "official",
     },
     {
+        "source_name": "TWSE Institutional Trading T86",
+        "source_type": "api",
+        "category": "institutional_trade",
+        "endpoint_url": (
+            "https://www.twse.com.tw/rwd/zh/fund/T86"
+            "?response=json"
+            "&date={latest_market_trade_date_yyyyMMdd}"
+            "&selectType=ALL"
+        ),
+        "enabled": True,
+        "fetch_interval_minutes": 1440,
+        "priority": 30,
+        "parser_type": "twse_institutional_trade",
+        "auth_type": "none",
+        "reliability_level": "official",
+    },
+    {
         "source_name": "GDELT AI Semiconductor Events",
         "source_type": "api",
         "category": "international_event",

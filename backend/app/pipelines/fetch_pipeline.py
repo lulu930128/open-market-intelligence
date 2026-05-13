@@ -1,15 +1,73 @@
 from time import perf_counter
+from types import SimpleNamespace
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.connectors.factory import UnsupportedConnectorError, get_connector
-from app.db.models import DataQualityCheck, FetchLog, RawFetchResult, SourceRegistry, utc_now
+from app.db.models import DataQualityCheck, FetchLog, MarketDailyPrice, RawFetchResult, SourceRegistry, utc_now
 from app.quality.checker import check_raw_data_quality
 from app.sources.service import SourceNotFoundError, get_source
 from app.utils.hash import sha256_text
 
 
 MAX_RAW_TEXT_CHARS = 2_000_000
+
+
+LATEST_MARKET_TRADE_DATE_PLACEHOLDERS = (
+    "{latest_market_trade_date_yyyyMMdd}",
+    "{latest_market_trade_date_yyyymmdd}",
+)
+
+
+def _get_latest_market_trade_date_yyyymmdd(db: Session) -> str:
+    latest_trade_date = db.query(func.max(MarketDailyPrice.trade_date)).scalar()
+
+    if latest_trade_date is None:
+        raise ValueError(
+            "Cannot render source endpoint URL: no market_daily_price trade_date found. "
+            "Refresh TWSE OpenAPI Daily Trading before TWSE Institutional Trading T86."
+        )
+
+    return latest_trade_date.strftime("%Y%m%d")
+
+
+def _render_endpoint_url_with_db_context(db: Session, endpoint_url: str | None) -> str | None:
+    if endpoint_url is None:
+        return None
+
+    if not any(placeholder in endpoint_url for placeholder in LATEST_MARKET_TRADE_DATE_PLACEHOLDERS):
+        return endpoint_url
+
+    latest_trade_date = _get_latest_market_trade_date_yyyymmdd(db)
+
+    for placeholder in LATEST_MARKET_TRADE_DATE_PLACEHOLDERS:
+        endpoint_url = endpoint_url.replace(placeholder, latest_trade_date)
+
+    return endpoint_url
+
+
+def _build_source_for_fetch(db: Session, source: SourceRegistry) -> SourceRegistry | SimpleNamespace:
+    rendered_endpoint_url = _render_endpoint_url_with_db_context(db, source.endpoint_url)
+
+    if rendered_endpoint_url == source.endpoint_url:
+        return source
+
+    # Do not mutate the ORM source object. The rendered URL is only for this fetch run;
+    # source_registry.endpoint_url should keep the placeholder template.
+    return SimpleNamespace(
+        id=source.id,
+        source_name=source.source_name,
+        source_type=source.source_type,
+        category=source.category,
+        endpoint_url=rendered_endpoint_url,
+        enabled=source.enabled,
+        fetch_interval_minutes=source.fetch_interval_minutes,
+        priority=source.priority,
+        parser_type=source.parser_type,
+        auth_type=source.auth_type,
+        reliability_level=source.reliability_level,
+    )
 
 
 def run_source_fetch(db: Session, source_id: int) -> dict:
@@ -52,7 +110,8 @@ def run_source_fetch(db: Session, source_id: int) -> dict:
 
     try:
         connector = get_connector(source)
-        result = connector.fetch(source)
+        fetch_source = _build_source_for_fetch(db=db, source=source)
+        result = connector.fetch(fetch_source)
 
         raw_text = result.raw_text
 

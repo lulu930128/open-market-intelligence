@@ -109,3 +109,35 @@ class DailyIndicatorPointRead(BaseModel):
 
     ma: dict[str, float | None]
     volume_ma: dict[str, float | None]
+
+
+class InstitutionalTradeDailyRead(BaseModel):
+    id: int
+    source_id: int
+    raw_result_id: int
+    trade_date: date
+    stock_id: str
+    stock_name: str | None = None
+    foreign_investor_buy: int | None = None
+    foreign_investor_sell: int | None = None
+    foreign_investor_net: int | None = None
+    foreign_dealer_buy: int | None = None
+    foreign_dealer_sell: int | None = None
+    foreign_dealer_net: int | None = None
+    investment_trust_buy: int | None = None
+    investment_trust_sell: int | None = None
+    investment_trust_net: int | None = None
+    dealer_self_buy: int | None = None
+    dealer_self_sell: int | None = None
+    dealer_self_net: int | None = None
+    dealer_hedge_buy: int | None = None
+    dealer_hedge_sell: int | None = None
+    dealer_hedge_net: int | None = None
+    dealer_buy: int | None = None
+    dealer_sell: int | None = None
+    dealer_net: int | None = None
+    total_institutional_net: int | None = None
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
