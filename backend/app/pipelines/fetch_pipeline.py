@@ -265,7 +265,9 @@ def refresh_source(db: Session, source_id: int) -> dict:
             "fetched_at": fetch_result["fetched_at"],
         }
 
-    if source.parser_type != "twse_daily_trading":
+    from app.pipelines.parse_pipeline import has_parser, parse_raw_result_by_parser_type
+
+    if not has_parser(source.parser_type):
         return {
             "source_id": source.id,
             "source_name": source.source_name,
@@ -282,9 +284,11 @@ def refresh_source(db: Session, source_id: int) -> dict:
             "fetched_at": fetch_result["fetched_at"],
         }
 
-    from app.pipelines.parse_pipeline import parse_twse_daily_raw_result
-
-    parse_result = parse_twse_daily_raw_result(db, raw_result_id)
+    parse_result = parse_raw_result_by_parser_type(
+        db=db,
+        raw_result_id=raw_result_id,
+        parser_type=source.parser_type,
+    )
 
     return {
         "source_id": source.id,
@@ -303,4 +307,4 @@ def refresh_source(db: Session, source_id: int) -> dict:
     }
 
 
-__all__ = ["run_source_fetch", "SourceNotFoundError"]
+__all__ = ["run_source_fetch", "refresh_source", "SourceNotFoundError"]

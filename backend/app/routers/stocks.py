@@ -2,10 +2,20 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.stocks.schemas import StockMasterRead, StockMasterUpdate, StockSyncResultRead
+from app.stocks.schemas import (
+    StockMarketCapRead,
+    StockMasterRead,
+    StockMasterUpdate,
+    StockProfileRead,
+    StockSyncResultRead,
+)
 from app.stocks.service import (
     StockNotFoundError,
+    StockProfileNotFoundError,
+    get_latest_stock_market_cap,
     get_stock,
+    get_stock_profile,
+    list_stock_profiles,
     list_stocks,
     search_stocks,
     sync_stocks_from_market_daily,
@@ -33,6 +43,23 @@ def search_stock_master(
     )
 
 
+@router.get("/profiles", response_model=list[StockProfileRead])
+def list_stock_profile_master(
+    market: str | None = None,
+    industry: str | None = None,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    return list_stock_profiles(
+        db=db,
+        market=market,
+        industry=industry,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.get("/", response_model=list[StockMasterRead])
 def list_stock_master(
     market: str | None = None,
@@ -50,6 +77,28 @@ def list_stock_master(
         limit=limit,
         offset=offset,
     )
+
+
+@router.get("/{stock_id}/profile", response_model=StockProfileRead)
+def get_stock_profile_api(stock_id: str, db: Session = Depends(get_db)):
+    try:
+        return get_stock_profile(db=db, stock_id=stock_id)
+    except StockProfileNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get("/{stock_id}/market-cap/latest", response_model=StockMarketCapRead)
+def get_latest_stock_market_cap_api(stock_id: str, db: Session = Depends(get_db)):
+    try:
+        return get_latest_stock_market_cap(db=db, stock_id=stock_id)
+    except StockProfileNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
 
 
 @router.get("/{stock_id}", response_model=StockMasterRead)

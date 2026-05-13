@@ -16,6 +16,18 @@ DEFAULT_SOURCES = [
         "reliability_level": "official",
     },
     {
+        "source_name": "TWSE Listed Company Profile",
+        "source_type": "api",
+        "category": "company_profile",
+        "endpoint_url": "https://mopsfin.twse.com.tw/opendata/t187ap03_L.csv",
+        "enabled": True,
+        "fetch_interval_minutes": 43200,
+        "priority": 20,
+        "parser_type": "twse_company_profile",
+        "auth_type": "none",
+        "reliability_level": "official",
+    },
+    {
         "source_name": "GDELT AI Semiconductor Events",
         "source_type": "api",
         "category": "international_event",

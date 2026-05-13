@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Optional
 
 from sqlalchemy import BigInteger, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
@@ -172,7 +172,7 @@ class MarketDailyPrice(Base):
         index=True,
     )
 
-    trade_date: Mapped[datetime.date] = mapped_column(Date, index=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
 
     stock_id: Mapped[str] = mapped_column(String(20), index=True)
     stock_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
@@ -217,6 +217,61 @@ class StockMaster(Base):
 
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class StockProfile(Base):
+    __tablename__ = "stock_profile"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "stock_id",
+            name="uq_stock_profile_stock_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("source_registry.id"),
+        nullable=False,
+        index=True,
+    )
+
+    raw_result_id: Mapped[int] = mapped_column(
+        ForeignKey("raw_fetch_result.id"),
+        nullable=False,
+        index=True,
+    )
+
+    report_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+
+    stock_id: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+    company_name: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    short_name: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+
+    market: Mapped[str] = mapped_column(String(50), default="TWSE", index=True)
+    industry: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+
+    listed_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    established_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+
+    paid_in_capital: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    issued_shares: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    private_placement_shares: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    preferred_shares: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    chairman: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    general_manager: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    spokesman: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    spokesman_title: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+    phone: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    website: Mapped[str | None] = mapped_column(Text, nullable=True)
+    email: Mapped[str | None] = mapped_column(String(160), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)

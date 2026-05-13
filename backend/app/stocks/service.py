@@ -1,11 +1,15 @@
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app.db.models import MarketDailyPrice, SourceRegistry, StockMaster, utc_now
+from app.db.models import MarketDailyPrice, SourceRegistry, StockMaster, StockProfile, utc_now
 from app.stocks.schemas import StockMasterUpdate
 
 
 class StockNotFoundError(Exception):
+    pass
+
+
+class StockProfileNotFoundError(Exception):
     pass
 
 
@@ -33,7 +37,7 @@ def _infer_instrument_type(stock_id: str, stock_name: str | None) -> str:
     if stock_id.isdigit() and len(stock_id) == 4:
         return "stock"
 
-    if stock_name and "權證" in stock_name:
+    if stock_name and "甈?" in stock_name:
         return "warrant"
 
     return "unknown"
@@ -179,3 +183,65 @@ def update_stock(
     db.refresh(stock)
 
     return stock
+
+
+def list_stock_profiles(
+    db: Session,
+    market: str | None = None,
+    industry: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[StockProfile]:
+    query = db.query(StockProfile)
+
+    if market is not None:
+        query = query.filter(StockProfile.market == market)
+
+    if industry is not None:
+        query = query.filter(StockProfile.industry == industry)
+
+    return (
+        query.order_by(StockProfile.stock_id.asc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+
+def get_stock_profile(db: Session, stock_id: str) -> StockProfile:
+    profile = db.query(StockProfile).filter(StockProfile.stock_id == stock_id).first()
+
+    if profile is None:
+        raise StockProfileNotFoundError(f"Stock profile for stock_id='{stock_id}' not found.")
+
+    return profile
+
+
+def get_latest_stock_market_cap(db: Session, stock_id: str) -> dict:
+    profile = get_stock_profile(db=db, stock_id=stock_id)
+
+    latest_price = (
+        db.query(MarketDailyPrice)
+        .filter(MarketDailyPrice.stock_id == stock_id)
+        .filter(MarketDailyPrice.close_price.isnot(None))
+        .order_by(MarketDailyPrice.trade_date.desc())
+        .first()
+    )
+
+    close_price = latest_price.close_price if latest_price is not None else None
+    issued_shares = profile.issued_shares
+
+    market_cap: float | None = None
+
+    if close_price is not None and issued_shares is not None:
+        market_cap = close_price * issued_shares
+
+    return {
+        "stock_id": profile.stock_id,
+        "stock_name": profile.short_name or profile.company_name,
+        "trade_date": latest_price.trade_date if latest_price is not None else None,
+        "close_price": close_price,
+        "issued_shares": issued_shares,
+        "market_cap": market_cap,
+        "profile_report_date": profile.report_date,
+    }
