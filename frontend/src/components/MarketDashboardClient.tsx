@@ -5,7 +5,6 @@ import StockDetailPanel from "@/components/StockDetailPanel";
 import { fetchJson } from "@/lib/api";
 import type {
   ChartPoint,
-  IndicatorsResponse,
   RankingItem,
   RankingResponse,
   SignalsResponse,
@@ -22,6 +21,8 @@ type Props = {
   initialSelectedGroupId: number | null;
   initialChartData: ChartPoint[];
   initialIndicatorData: StockIndicatorPoint[];
+  initialRankingData: RankingResponse | null;
+  initialSignalsData: SignalsResponse | null;
 };
 
 const navItems = ["首頁", "自選股", "大盤指數", "ETF", "應用市集", "新聞話題", "名師專欄", "影音專區", "熱力圖", "更多"];
@@ -61,10 +62,26 @@ function statusLabel(status: string) {
   return "中性";
 }
 
-function statusClass(status: string) {
-  if (status.includes("bullish")) return "bg-red-50 text-red-700";
-  if (status.includes("bearish")) return "bg-emerald-50 text-emerald-700";
-  if (status === "error") return "bg-amber-50 text-amber-700";
+function rankLabel(rankBy: string) {
+  if (rankBy === "change_pct") return "漲幅";
+  if (rankBy === "volume") return "成交量";
+  if (rankBy === "close") return "收盤價";
+  return "Score";
+}
+
+function trendLabel(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "-";
+  if (value > 0) return "上漲";
+  if (value < 0) return "下跌";
+  return "持平";
+}
+
+function trendClass(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "bg-slate-100 text-slate-600";
+  }
+  if (value > 0) return "bg-red-50 text-red-700";
+  if (value < 0) return "bg-emerald-50 text-emerald-700";
   return "bg-slate-100 text-slate-600";
 }
 
@@ -78,6 +95,8 @@ export default function MarketDashboardClient({
   initialSelectedGroupId,
   initialChartData,
   initialIndicatorData,
+  initialRankingData,
+  initialSignalsData,
 }: Props) {
   const initialSelectedGroup = useMemo(() => {
     return flattenGroups(initialTree).find((group) => group.id === initialSelectedGroupId) ?? null;
@@ -103,25 +122,15 @@ export default function MarketDashboardClient({
   const [selectedStockName, setSelectedStockName] = useState<string | null>(
     initialSelectedItem?.stock_name ?? null
   );
-  const [rankBy, setRankBy] = useState("score");
-  const [ranking, setRanking] = useState<RankingResponse | null>(null);
-  const [signals, setSignals] = useState<SignalsResponse | null>(null);
-  const [indicators, setIndicators] = useState<IndicatorsResponse | null>(null);
+  const [rankBy, setRankBy] = useState("change_pct");
+  const [ranking, setRanking] = useState<RankingResponse | null>(initialRankingData);
+  const [signals, setSignals] = useState<SignalsResponse | null>(initialSignalsData);
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
 
   const rows = useMemo(() => ranking?.results ?? [], [ranking]);
-
-  const indicatorByStockId = useMemo(() => {
-    const map = new Map<string, IndicatorsResponse["results"][number]>();
-    indicators?.results.forEach((item) => map.set(item.stock_id, item));
-    return map;
-  }, [indicators]);
-
-  const topSignals = useMemo(() => {
-    return signals?.results.filter((item) => item.signals.length > 0).slice(0, 4) ?? [];
-  }, [signals]);
+  const activeGroupId = selectedGroupId ?? selectedGroup?.id ?? null;
 
   async function loadDashboard(groupId: number, currentRankBy = rankBy) {
     setLoadState("loading");
@@ -135,7 +144,7 @@ export default function MarketDashboardClient({
         volume_ma_windows: "5,20",
       };
 
-      const [rankingData, signalsData, indicatorsData] = await Promise.all([
+      const [rankingData, signalsData] = await Promise.all([
         fetchJson<RankingResponse>(`/api/watchlists/groups/${groupId}/rankings/latest`, {
           ...commonParams,
           rank_by: currentRankBy,
@@ -148,14 +157,10 @@ export default function MarketDashboardClient({
           limit: 100,
           volume_ratio_threshold: 1.5,
         }),
-        fetchJson<IndicatorsResponse>(`/api/watchlists/groups/${groupId}/indicators/latest`, {
-          ...commonParams,
-        }),
       ]);
 
       setRanking(rankingData);
       setSignals(signalsData);
-      setIndicators(indicatorsData);
       if (!selectedStockId && rankingData.results.length > 0) {
         setSelectedStockId(rankingData.results[0].stock_id);
         setSelectedStockName(rankingData.results[0].stock_name);
@@ -169,15 +174,15 @@ export default function MarketDashboardClient({
   }
 
   useEffect(() => {
-    if (selectedGroupId === null) return;
+    if (activeGroupId === null) return;
 
     const timer = window.setTimeout(() => {
-      void loadDashboard(selectedGroupId);
+      void loadDashboard(activeGroupId);
     }, 0);
 
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedGroupId]);
+  }, [activeGroupId]);
 
   function handleSelectGroup(group: WatchlistGroupNode | null) {
     setSelectedGroup(group);
@@ -189,7 +194,6 @@ export default function MarketDashboardClient({
     } else {
       setRanking(null);
       setSignals(null);
-      setIndicators(null);
     }
   }
 
@@ -200,14 +204,13 @@ export default function MarketDashboardClient({
 
   function handleRankByChange(value: string) {
     setRankBy(value);
-    if (selectedGroupId !== null) {
-      void loadDashboard(selectedGroupId, value);
+    if (activeGroupId !== null) {
+      void loadDashboard(activeGroupId, value);
     }
   }
 
   function renderRankingRow(row: RankingItem) {
     const selected = row.stock_id === selectedStockId;
-    const indicator = indicatorByStockId.get(row.stock_id);
 
     return (
       <button
@@ -215,7 +218,7 @@ export default function MarketDashboardClient({
         type="button"
         onClick={() => handleSelectStock(row.stock_id, row.stock_name)}
         className={[
-          "grid w-full grid-cols-[52px_minmax(120px,1fr)_88px_88px_88px_90px] items-center border-t border-slate-200 px-4 py-2 text-left text-sm",
+          "grid w-full grid-cols-[46px_minmax(120px,1fr)_80px_82px_72px_90px] items-center border-t border-slate-200 px-4 py-2 text-left text-sm",
           selected ? "bg-slate-900 text-white" : "bg-white text-slate-800 hover:bg-slate-50",
         ].join(" ")}
       >
@@ -225,27 +228,56 @@ export default function MarketDashboardClient({
             {row.stock_id} {row.stock_name ?? ""}
           </span>
           <span className={selected ? "block truncate text-xs text-slate-300" : "block truncate text-xs text-slate-500"}>
-            {row.primary_signal_label ?? statusLabel(row.status)}
+            {row.time ?? row.primary_signal_label ?? statusLabel(row.status)}
           </span>
         </span>
         <span className="text-right font-semibold">{formatPrice(row.close)}</span>
         <span className={`text-right font-semibold ${selected ? "" : valueTone(row.change_pct)}`}>
           {formatPct(row.change_pct)}
         </span>
-        <span className="text-right">{formatNumber(row.volume)}</span>
         <span className="text-right">
           <span
             className={[
               "px-2 py-1 text-xs font-semibold",
-              selected ? "bg-white text-slate-900" : statusClass(row.status),
+              selected ? "bg-white text-slate-900" : trendClass(row.change_pct),
             ].join(" ")}
           >
-            {indicator?.status ? statusLabel(indicator.status) : statusLabel(row.status)}
+            {trendLabel(row.change_pct)}
           </span>
         </span>
+        <span className="text-right">{formatNumber(row.volume)}</span>
       </button>
     );
   }
+
+  const rankingPanel = (
+    <section className="border border-slate-200 bg-white">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-3">
+        <h3 className="text-sm font-bold text-slate-950">自選股漲幅排行</h3>
+        <span className="text-xs text-slate-500">
+          {loadState === "loading"
+            ? "載入中"
+            : `${rows.length} 檔 · 依 ${rankLabel(ranking?.rank_by ?? rankBy)} 排序`}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-[46px_minmax(120px,1fr)_80px_82px_72px_90px] bg-slate-50 px-4 py-2 text-xs font-bold uppercase tracking-wide text-slate-500">
+        <span>名次</span>
+        <span>股票</span>
+        <span className="text-right">收盤</span>
+        <span className="text-right">漲幅</span>
+        <span className="text-right">漲跌</span>
+        <span className="text-right">成交量</span>
+      </div>
+      {rows.length > 0 ? (
+        rows.map(renderRankingRow)
+      ) : (
+        <div className="border-t border-slate-200 px-5 py-10 text-center text-sm text-slate-500">
+          尚無排行資料
+        </div>
+      )}
+    </section>
+  );
 
   return (
     <main className="h-screen overflow-hidden bg-slate-100 text-slate-950">
@@ -272,18 +304,17 @@ export default function MarketDashboardClient({
           <SidebarWatchlistExplorer
             initialTree={initialTree}
             initialItems={initialItems}
-            selectedGroupId={selectedGroupId}
+            selectedGroupId={activeGroupId}
             selectedStockId={selectedStockId}
             onSelectGroup={handleSelectGroup}
             onSelectStock={handleSelectStock}
             onChanged={async (nextGroupId) => {
-              const groupId = nextGroupId === undefined ? selectedGroupId : nextGroupId;
+              const groupId = nextGroupId === undefined ? activeGroupId : nextGroupId;
               if (groupId !== null) {
                 await loadDashboard(groupId);
               } else {
                 setRanking(null);
                 setSignals(null);
-                setIndicators(null);
               }
             }}
           />
@@ -309,18 +340,18 @@ export default function MarketDashboardClient({
                     onChange={(event) => handleRankByChange(event.target.value)}
                     className="h-9 border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-700 outline-none focus:border-red-700"
                   >
+                    <option value="change_pct">漲幅</option>
                     <option value="score">Score</option>
-                    <option value="change_pct">Change %</option>
-                    <option value="volume">Volume</option>
-                    <option value="close">Close</option>
+                    <option value="volume">成交量</option>
+                    <option value="close">收盤價</option>
                   </select>
                   <button
                     type="button"
                     onClick={() => {
-                      if (selectedGroupId !== null) void loadDashboard(selectedGroupId);
+                      if (activeGroupId !== null) void loadDashboard(activeGroupId);
                     }}
                     className="h-9 bg-slate-900 px-4 text-sm font-semibold text-white hover:bg-slate-700 disabled:bg-slate-300"
-                    disabled={selectedGroupId === null || loadState === "loading"}
+                    disabled={activeGroupId === null || loadState === "loading"}
                   >
                     Reload
                   </button>
@@ -348,7 +379,9 @@ export default function MarketDashboardClient({
                 </div>
                 <div className="border-l border-slate-200 px-5 py-3">
                   <div className="text-xs text-slate-500">排序</div>
-                  <div className="mt-1 text-xl font-bold">{ranking?.rank_by ?? rankBy}</div>
+                  <div className="mt-1 text-xl font-bold">
+                    {rankLabel(ranking?.rank_by ?? rankBy)}
+                  </div>
                 </div>
               </div>
             </div>
@@ -358,69 +391,8 @@ export default function MarketDashboardClient({
               stockName={selectedStockName}
               initialChartData={initialChartData}
               initialIndicatorData={initialIndicatorData}
+              watchlistRankingPanel={rankingPanel}
             />
-
-            <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
-              <section className="border border-slate-200 bg-white">
-                <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3">
-                  <h3 className="text-sm font-bold text-slate-950">自選股排行</h3>
-                  <span className="text-xs text-slate-500">
-                    {loadState === "loading" ? "載入中" : `${rows.length} 檔`}
-                  </span>
-                </div>
-                <div className="grid grid-cols-[52px_minmax(120px,1fr)_88px_88px_88px_90px] bg-slate-50 px-4 py-2 text-xs font-bold uppercase tracking-wide text-slate-500">
-                  <span>Rank</span>
-                  <span>Stock</span>
-                  <span className="text-right">Close</span>
-                  <span className="text-right">Change</span>
-                  <span className="text-right">Volume</span>
-                  <span className="text-right">Status</span>
-                </div>
-                {rows.length > 0 ? (
-                  rows.map(renderRankingRow)
-                ) : (
-                  <div className="border-t border-slate-200 px-5 py-10 text-center text-sm text-slate-500">
-                    尚無排行資料
-                  </div>
-                )}
-              </section>
-
-              <section className="border border-slate-200 bg-white">
-                <div className="border-b border-slate-200 px-5 py-3">
-                  <h3 className="text-sm font-bold text-slate-950">即時訊號摘要</h3>
-                </div>
-                <div className="divide-y divide-slate-200">
-                  {topSignals.length > 0 ? (
-                    topSignals.map((item) => (
-                      <button
-                        key={item.stock_id}
-                        type="button"
-                        onClick={() => handleSelectStock(item.stock_id, item.stock_name)}
-                        className="block w-full px-5 py-3 text-left hover:bg-slate-50"
-                      >
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="truncate text-sm font-bold text-slate-950">
-                              {item.stock_id} {item.stock_name ?? ""}
-                            </div>
-                            <div className="mt-1 truncate text-xs text-slate-500">
-                              {item.signals[0]?.label ?? statusLabel(item.status)}
-                            </div>
-                          </div>
-                          <div className={`text-sm font-bold ${valueTone(item.change_pct)}`}>
-                            {formatPct(item.change_pct)}
-                          </div>
-                        </div>
-                      </button>
-                    ))
-                  ) : (
-                    <div className="px-5 py-10 text-center text-sm text-slate-500">
-                      尚無訊號
-                    </div>
-                  )}
-                </div>
-              </section>
-            </div>
           </section>
         </div>
       </div>

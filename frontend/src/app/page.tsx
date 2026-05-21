@@ -2,6 +2,8 @@ import MarketDashboardClient from "@/components/MarketDashboardClient";
 import type {
   ChartPoint,
   OhlcChartResponse,
+  RankingResponse,
+  SignalsResponse,
   StockIndicatorPoint,
   WatchlistGroupNode,
   WatchlistItemRead,
@@ -57,6 +59,21 @@ export default async function Page({
     null;
   let initialChartData: ChartPoint[] = [];
   let initialIndicatorData: StockIndicatorPoint[] = [];
+  let initialRankingData: RankingResponse | null = null;
+  let initialSignalsData: SignalsResponse | null = null;
+
+  if (initialSelectedGroupId !== null) {
+    [initialRankingData, initialSignalsData] = await Promise.all([
+      fetchBackendJson<RankingResponse | null>(
+        `/api/watchlists/groups/${initialSelectedGroupId}/rankings/latest?include_children=true&enabled_only=true&rank_by=change_pct&sort_order=desc&limit=100&volume_ratio_threshold=1.5&ma_windows=5,20,60&volume_ma_windows=5,20`,
+        null
+      ),
+      fetchBackendJson<SignalsResponse | null>(
+        `/api/watchlists/groups/${initialSelectedGroupId}/signals/latest?include_children=true&enabled_only=true&limit=100&volume_ratio_threshold=1.5&ma_windows=5,20,60&volume_ma_windows=5,20`,
+        null
+      ),
+    ]);
+  }
 
   if (initialSelectedItem) {
     const initialOhlc = await fetchBackendJson<OhlcChartResponse>(
@@ -88,6 +105,8 @@ export default async function Page({
       initialSelectedGroupId={initialSelectedGroupId}
       initialChartData={initialChartData}
       initialIndicatorData={initialIndicatorData}
+      initialRankingData={initialRankingData}
+      initialSignalsData={initialSignalsData}
     />
   );
 }

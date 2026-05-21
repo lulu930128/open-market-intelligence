@@ -13,13 +13,14 @@ import type {
   StockIndicatorPoint,
   StockMasterRead,
 } from "@/types/market";
-import { useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 
 type Props = {
   stockId: string | null;
   stockName: string | null;
   initialChartData?: ChartPoint[];
   initialIndicatorData?: StockIndicatorPoint[];
+  watchlistRankingPanel?: ReactNode;
 };
 
 type Timeframe = "today" | "daily" | "weekly" | "monthly";
@@ -134,6 +135,7 @@ export default function StockDetailPanel({
   stockName,
   initialChartData = [],
   initialIndicatorData = [],
+  watchlistRankingPanel,
 }: Props) {
   const [timeframe, setTimeframe] = useState<Timeframe>("daily");
   const [chartData, setChartData] = useState<ChartPoint[]>(initialChartData);
@@ -224,10 +226,10 @@ export default function StockDetailPanel({
         }
 
         const ohlc = await fetchJson<OhlcChartResponse>(`/api/market/ohlc/${stockId}`, {
-            timeframe,
-            bars: 90,
-            ensure_history: true,
-          });
+          timeframe,
+          bars: 90,
+          ensure_history: true,
+        });
         const indicators = await fetchJson<StockIndicatorPoint[]>(
           `/api/market/indicators/${stockId}/daily`,
           {
@@ -339,24 +341,28 @@ export default function StockDetailPanel({
 
   if (!stockId) {
     return (
-      <section className="flex min-h-[520px] items-center justify-center border border-slate-200 bg-white">
-        <div className="max-w-md text-center">
-          <div className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-400">
-            Stock Detail
+      <section className="space-y-4">
+        <div className="flex min-h-[520px] items-center justify-center border border-slate-200 bg-white">
+          <div className="max-w-md text-center">
+            <div className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-400">
+              Stock Detail
+            </div>
+            <h2 className="mt-3 text-2xl font-bold text-slate-950">選一檔股票開始</h2>
+            <p className="mt-3 text-sm leading-6 text-slate-500">
+              從左側自選股或下方排行點選股票，這裡會顯示 K 線、技術分析與籌碼資料。
+            </p>
           </div>
-          <h2 className="mt-3 text-2xl font-bold text-slate-950">選一檔股票開始</h2>
-          <p className="mt-3 text-sm leading-6 text-slate-500">
-            從左側自選股或下方排行點選股票，這裡會顯示 K 線、技術分析與籌碼資料。
-          </p>
         </div>
+        {watchlistRankingPanel ? <div className="min-w-0">{watchlistRankingPanel}</div> : null}
       </section>
     );
   }
 
+  const technicalSpanClass = watchlistRankingPanel ? "xl:row-span-3" : "xl:row-span-2";
+
   return (
-    <section className="space-y-4">
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
-        <div className="border border-slate-200 bg-white">
+    <section className="grid w-full grid-cols-1 justify-start gap-4 xl:grid-cols-[minmax(0,7fr)_minmax(360px,5fr)]">
+      <div className="min-w-0 border border-slate-200 bg-white">
           <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 px-5 py-4">
             <div>
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
@@ -423,7 +429,9 @@ export default function StockDetailPanel({
           )}
         </div>
 
-        <aside className="border border-slate-200 bg-white">
+      <aside
+        className={`flex min-w-0 flex-col border border-slate-200 bg-white ${technicalSpanClass}`}
+      >
           <div className="border-b border-slate-200 px-5 py-4">
             <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
               Technical
@@ -477,10 +485,9 @@ export default function StockDetailPanel({
               ))}
             </div>
           </div>
-        </aside>
-      </div>
+      </aside>
 
-      <div className="border border-slate-200 bg-white">
+      <div className="min-w-0 border border-slate-200 bg-white">
         <div className="border-b border-slate-200 px-5 py-3">
           <h3 className="text-sm font-bold text-slate-950">資料摘要</h3>
         </div>
@@ -507,6 +514,7 @@ export default function StockDetailPanel({
           <DataCell label="資料日期" value={latestIndicator?.time ?? latestChart?.time ?? "-"} />
         </div>
       </div>
+      {watchlistRankingPanel ? <div className="min-w-0">{watchlistRankingPanel}</div> : null}
     </section>
   );
 }
