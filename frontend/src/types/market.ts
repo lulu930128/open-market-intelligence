@@ -131,6 +131,36 @@ export type ChartPoint = {
   transaction_count: number | null;
 };
 
+export type OhlcChartResponse = {
+  stock_id: string;
+  timeframe: "daily" | "weekly" | "monthly";
+  bars: number;
+  lookback_days: number;
+  from_date: string;
+  to_date: string;
+  point_count: number;
+  points: ChartPoint[];
+  backfill: Record<string, unknown> | null;
+};
+
+export type IntradayTrendPoint = {
+  time: string;
+  price: number;
+  volume: number | null;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+};
+
+export type IntradayTrendResponse = {
+  stock_id: string;
+  symbol: string | null;
+  source: string;
+  previous_close: number | null;
+  point_count: number;
+  points: IntradayTrendPoint[];
+};
+
 export type StockIndicatorPoint = {
   time: string;
   close: number | null;
@@ -139,4 +169,75 @@ export type StockIndicatorPoint = {
   change_pct: number | null;
   ma: Record<string, number | null>;
   volume_ma: Record<string, number | null>;
+};
+
+export type StockMasterRead = {
+  id: number;
+  stock_id: string;
+  stock_name: string | null;
+  market: string;
+  instrument_type: string;
+  industry: string | null;
+  category: string | null;
+  is_active: boolean;
+  notes: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type InstitutionalTradeDailyRead = {
+  id: number;
+  source_id: number;
+  raw_result_id: number;
+  trade_date: string;
+  stock_id: string;
+  stock_name: string | null;
+  foreign_investor_buy: number | null;
+  foreign_investor_sell: number | null;
+  foreign_investor_net: number | null;
+  foreign_dealer_buy: number | null;
+  foreign_dealer_sell: number | null;
+  foreign_dealer_net: number | null;
+  investment_trust_buy: number | null;
+  investment_trust_sell: number | null;
+  investment_trust_net: number | null;
+  dealer_self_buy: number | null;
+  dealer_self_sell: number | null;
+  dealer_self_net: number | null;
+  dealer_hedge_buy: number | null;
+  dealer_hedge_sell: number | null;
+  dealer_hedge_net: number | null;
+  dealer_buy: number | null;
+  dealer_sell: number | null;
+  dealer_net: number | null;
+  total_institutional_net: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type MarginTradingDailyRead = {
+  id: number;
+  source_id: number;
+  raw_result_id: number;
+  trade_date: string;
+  stock_id: string;
+  stock_name: string | null;
+  margin_buy: number | null;
+  margin_sell: number | null;
+  margin_cash_repayment: number | null;
+  margin_previous_balance: number | null;
+  margin_today_balance: number | null;
+  margin_next_limit: number | null;
+  short_covering: number | null;
+  short_sale: number | null;
+  short_stock_repayment: number | null;
+  short_previous_balance: number | null;
+  short_today_balance: number | null;
+  short_next_limit: number | null;
+  offset: number | null;
+  note: string | null;
+  created_at: string;
+  updated_at: string;
 };

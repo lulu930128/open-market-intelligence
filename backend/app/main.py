@@ -1,9 +1,14 @@
 ﻿from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
+from fastapi.responses import FileResponse
 
+from app.config import PROJECT_ROOT
 from app.db.session import init_db
 from app.routers import indicators, market, raw_results, reports, sources, stocks, system, watchlists
+
+
+FAVICON_PATH = PROJECT_ROOT / "frontend" / "src" / "app" / "favicon.ico"
 
 
 @asynccontextmanager
@@ -38,6 +43,15 @@ app.include_router(indicators.router, prefix="/api/market/indicators", tags=["ma
 app.include_router(stocks.router, prefix="/api/stocks", tags=["stocks"])
 app.include_router(watchlists.router, prefix="/api/watchlists", tags=["watchlists"])
 app.include_router(reports.router, prefix="/api/reports", tags=["reports"])
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    if FAVICON_PATH.exists():
+        return FileResponse(FAVICON_PATH, media_type="image/x-icon")
+
+    return Response(status_code=204)
+
 
 @app.get("/")
 def root():

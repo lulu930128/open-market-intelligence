@@ -253,6 +253,58 @@ class InstitutionalTradeDaily(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class MarginTradingDaily(Base):
+    __tablename__ = "margin_trading_daily"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source_id",
+            "stock_id",
+            "trade_date",
+            name="uq_margin_trading_source_stock_date",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("source_registry.id"),
+        nullable=False,
+        index=True,
+    )
+
+    raw_result_id: Mapped[int] = mapped_column(
+        ForeignKey("raw_fetch_result.id"),
+        nullable=False,
+        index=True,
+    )
+
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+
+    stock_id: Mapped[str] = mapped_column(String(20), index=True)
+    stock_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+    margin_buy: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    margin_sell: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    margin_cash_repayment: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    margin_previous_balance: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    margin_today_balance: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    margin_next_limit: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    short_covering: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    short_sale: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    short_stock_repayment: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    short_previous_balance: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    short_today_balance: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    short_next_limit: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    offset: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 
 
 class StockMaster(Base):

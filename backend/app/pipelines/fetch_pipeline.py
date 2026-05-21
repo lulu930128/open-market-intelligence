@@ -18,6 +18,10 @@ LATEST_MARKET_TRADE_DATE_PLACEHOLDERS = (
     "{latest_market_trade_date_yyyyMMdd}",
     "{latest_market_trade_date_yyyymmdd}",
 )
+LATEST_MARKET_TRADE_DATE_ROC_PLACEHOLDERS = (
+    "{latest_market_trade_date_roc_yyy_mm_dd}",
+    "{latest_market_trade_date_roc_yyy/MM/dd}",
+)
 
 
 def _get_latest_market_trade_date_yyyymmdd(db: Session) -> str:
@@ -26,23 +30,50 @@ def _get_latest_market_trade_date_yyyymmdd(db: Session) -> str:
     if latest_trade_date is None:
         raise ValueError(
             "Cannot render source endpoint URL: no market_daily_price trade_date found. "
-            "Refresh TWSE OpenAPI Daily Trading before TWSE Institutional Trading T86."
+            "Refresh a daily market price source before date-based sources."
         )
 
     return latest_trade_date.strftime("%Y%m%d")
+
+
+def _get_latest_market_trade_date_roc_yyy_mm_dd(db: Session) -> str:
+    latest_trade_date = db.query(func.max(MarketDailyPrice.trade_date)).scalar()
+
+    if latest_trade_date is None:
+        raise ValueError(
+            "Cannot render source endpoint URL: no market_daily_price trade_date found. "
+            "Refresh a daily market price source before date-based sources."
+        )
+
+    roc_year = latest_trade_date.year - 1911
+    return f"{roc_year:03d}/{latest_trade_date.month:02d}/{latest_trade_date.day:02d}"
 
 
 def _render_endpoint_url_with_db_context(db: Session, endpoint_url: str | None) -> str | None:
     if endpoint_url is None:
         return None
 
-    if not any(placeholder in endpoint_url for placeholder in LATEST_MARKET_TRADE_DATE_PLACEHOLDERS):
+    if not any(
+        placeholder in endpoint_url
+        for placeholder in (
+            *LATEST_MARKET_TRADE_DATE_PLACEHOLDERS,
+            *LATEST_MARKET_TRADE_DATE_ROC_PLACEHOLDERS,
+        )
+    ):
         return endpoint_url
 
-    latest_trade_date = _get_latest_market_trade_date_yyyymmdd(db)
+    latest_trade_date = None
+    latest_trade_date_roc = None
 
     for placeholder in LATEST_MARKET_TRADE_DATE_PLACEHOLDERS:
-        endpoint_url = endpoint_url.replace(placeholder, latest_trade_date)
+        if placeholder in endpoint_url:
+            latest_trade_date = latest_trade_date or _get_latest_market_trade_date_yyyymmdd(db)
+            endpoint_url = endpoint_url.replace(placeholder, latest_trade_date)
+
+    for placeholder in LATEST_MARKET_TRADE_DATE_ROC_PLACEHOLDERS:
+        if placeholder in endpoint_url:
+            latest_trade_date_roc = latest_trade_date_roc or _get_latest_market_trade_date_roc_yyy_mm_dd(db)
+            endpoint_url = endpoint_url.replace(placeholder, latest_trade_date_roc)
 
     return endpoint_url
 
@@ -295,6 +326,10 @@ def refresh_source(db: Session, source_id: int) -> dict:
             "fetch_status": fetch_result["status"],
             "fetch_log_id": fetch_result["fetch_log_id"],
             "raw_result_id": fetch_result["raw_result_id"],
+            "data_quality_status": fetch_result.get("data_quality_status"),
+            "data_quality_message": fetch_result.get("data_quality_message"),
+            "data_quality_row_count": fetch_result.get("data_quality_row_count"),
+            "is_duplicate": fetch_result.get("is_duplicate"),
             "parse_status": None,
             "parser_type": source.parser_type,
             "parsed_count": None,
@@ -314,6 +349,10 @@ def refresh_source(db: Session, source_id: int) -> dict:
             "fetch_status": fetch_result["status"],
             "fetch_log_id": fetch_result["fetch_log_id"],
             "raw_result_id": None,
+            "data_quality_status": fetch_result.get("data_quality_status"),
+            "data_quality_message": fetch_result.get("data_quality_message"),
+            "data_quality_row_count": fetch_result.get("data_quality_row_count"),
+            "is_duplicate": fetch_result.get("is_duplicate"),
             "parse_status": "skipped",
             "parser_type": source.parser_type,
             "parsed_count": None,
@@ -333,6 +372,10 @@ def refresh_source(db: Session, source_id: int) -> dict:
             "fetch_status": fetch_result["status"],
             "fetch_log_id": fetch_result["fetch_log_id"],
             "raw_result_id": raw_result_id,
+            "data_quality_status": fetch_result.get("data_quality_status"),
+            "data_quality_message": fetch_result.get("data_quality_message"),
+            "data_quality_row_count": fetch_result.get("data_quality_row_count"),
+            "is_duplicate": fetch_result.get("is_duplicate"),
             "parse_status": "skipped",
             "parser_type": source.parser_type,
             "parsed_count": None,
@@ -355,6 +398,10 @@ def refresh_source(db: Session, source_id: int) -> dict:
         "fetch_status": fetch_result["status"],
         "fetch_log_id": fetch_result["fetch_log_id"],
         "raw_result_id": raw_result_id,
+        "data_quality_status": fetch_result.get("data_quality_status"),
+        "data_quality_message": fetch_result.get("data_quality_message"),
+        "data_quality_row_count": fetch_result.get("data_quality_row_count"),
+        "is_duplicate": fetch_result.get("is_duplicate"),
         "parse_status": parse_result["status"],
         "parser_type": parse_result["parser_type"],
         "parsed_count": parse_result["parsed_count"],

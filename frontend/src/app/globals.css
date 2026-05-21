@@ -10,10 +10,7 @@ html {
 }
 
 body {
-  background:
-    radial-gradient(circle at top left, rgba(99, 102, 241, 0.14), transparent 34rem),
-    radial-gradient(circle at top right, rgba(14, 165, 233, 0.12), transparent 30rem),
-    var(--background);
+  background: var(--background);
   color: var(--foreground);
   font-family:
     "Segoe UI",
@@ -21,4 +18,27 @@ body {
     "Microsoft JhengHei",
     Arial,
     sans-serif;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+::-webkit-scrollbar {
+  height: 10px;
+  width: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f5f9;
 }

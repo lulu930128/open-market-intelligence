@@ -1,3 +1,5 @@
+import json
+
 from app.db.models import SourceRegistry
 from app.db.session import SessionLocal, init_db
 
@@ -41,6 +43,147 @@ DEFAULT_SOURCES = [
         "fetch_interval_minutes": 1440,
         "priority": 30,
         "parser_type": "twse_institutional_trade",
+        "auth_type": "none",
+        "reliability_level": "official",
+    },
+    {
+        "source_name": "TWSE Margin Trading MI_MARGN",
+        "source_type": "api",
+        "category": "margin_trading",
+        "endpoint_url": (
+            "https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN"
+            "?response=json"
+            "&date={latest_market_trade_date_yyyyMMdd}"
+            "&selectType=STOCK"
+        ),
+        "enabled": True,
+        "fetch_interval_minutes": 1440,
+        "priority": 35,
+        "parser_type": "twse_margin_trading",
+        "auth_type": "none",
+        "reliability_level": "official",
+    },
+    {
+        "source_name": "TPEx Mainboard Daily Quotes",
+        "source_type": "api",
+        "category": "market_data",
+        "endpoint_url": (
+            "https://www.tpex.org.tw/www/zh-tw/afterTrading/dailyQuotes"
+            "?date={latest_market_trade_date_roc_yyy_mm_dd}"
+            "&response=json"
+        ),
+        "enabled": True,
+        "fetch_interval_minutes": 1440,
+        "priority": 40,
+        "parser_type": "tpex_daily_quotes",
+        "auth_type": "none",
+        "reliability_level": "official",
+    },
+    {
+        "source_name": "TPEx Domestic Company Profile",
+        "source_type": "api",
+        "category": "company_profile",
+        "endpoint_url": (
+            "https://www.tpex.org.tw/www/zh-tw/company/otcSearch"
+            "?type=stkType"
+            "&stkType=%20"
+            "&response=json"
+        ),
+        "enabled": True,
+        "fetch_interval_minutes": 43200,
+        "priority": 45,
+        "parser_type": "tpex_company_profile",
+        "auth_type": "none",
+        "reliability_level": "official",
+    },
+    {
+        "source_name": "TPEx Foreign Company Profile",
+        "source_type": "api",
+        "category": "company_profile",
+        "endpoint_url": (
+            "https://www.tpex.org.tw/www/zh-tw/company/otcSearch"
+            "?type=stkType"
+            "&stkType=RR"
+            "&response=json"
+        ),
+        "enabled": True,
+        "fetch_interval_minutes": 43200,
+        "priority": 46,
+        "parser_type": "tpex_company_profile",
+        "auth_type": "none",
+        "reliability_level": "official",
+    },
+    {
+        "source_name": "TPEx Institutional Trading",
+        "source_type": "api_bundle",
+        "category": "institutional_trade",
+        "endpoint_url": json.dumps(
+            {
+                "foreign_buy": (
+                    "https://www.tpex.org.tw/www/zh-tw/insti/qfiiStat"
+                    "?date={latest_market_trade_date_roc_yyy_mm_dd}"
+                    "&type=Daily"
+                    "&searchType=buy"
+                    "&response=json"
+                ),
+                "foreign_sell": (
+                    "https://www.tpex.org.tw/www/zh-tw/insti/qfiiStat"
+                    "?date={latest_market_trade_date_roc_yyy_mm_dd}"
+                    "&type=Daily"
+                    "&searchType=sell"
+                    "&response=json"
+                ),
+                "investment_trust_buy": (
+                    "https://www.tpex.org.tw/www/zh-tw/insti/sitcStat"
+                    "?date={latest_market_trade_date_roc_yyy_mm_dd}"
+                    "&type=Daily"
+                    "&searchType=buy"
+                    "&response=json"
+                ),
+                "investment_trust_sell": (
+                    "https://www.tpex.org.tw/www/zh-tw/insti/sitcStat"
+                    "?date={latest_market_trade_date_roc_yyy_mm_dd}"
+                    "&type=Daily"
+                    "&searchType=sell"
+                    "&response=json"
+                ),
+                "dealer_buy": (
+                    "https://www.tpex.org.tw/www/zh-tw/insti/dealerStat"
+                    "?date={latest_market_trade_date_roc_yyy_mm_dd}"
+                    "&type=Daily"
+                    "&stype=buy"
+                    "&response=json"
+                ),
+                "dealer_sell": (
+                    "https://www.tpex.org.tw/www/zh-tw/insti/dealerStat"
+                    "?date={latest_market_trade_date_roc_yyy_mm_dd}"
+                    "&type=Daily"
+                    "&stype=sell"
+                    "&response=json"
+                ),
+            },
+            ensure_ascii=False,
+        ),
+        "enabled": True,
+        "fetch_interval_minutes": 1440,
+        "priority": 50,
+        "parser_type": "tpex_institutional_trade",
+        "auth_type": "none",
+        "reliability_level": "official",
+    },
+    {
+        "source_name": "TPEx Margin Trading Balance",
+        "source_type": "api",
+        "category": "margin_trading",
+        "endpoint_url": (
+            "https://www.tpex.org.tw/www/zh-tw/margin/balance"
+            "?date={latest_market_trade_date_roc_yyy_mm_dd}"
+            "&response=json"
+        ),
+        "enabled": True,
+        "fetch_interval_minutes": 1440,
+        "priority": 55,
+        "parser_type": "tpex_margin_trading",
         "auth_type": "none",
         "reliability_level": "official",
     },

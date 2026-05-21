@@ -87,6 +87,7 @@ class TwseBackfillResultRead(BaseModel):
 
     requested_month_count: int
     fetched_month_count: int
+    skipped_existing_month_count: int = 0
 
     parsed_count: int
     inserted_count: int
@@ -96,6 +97,36 @@ class TwseBackfillResultRead(BaseModel):
     message: str
 
     months: list[TwseBackfillMonthRead]
+
+
+class MarketOhlcChartRead(BaseModel):
+    stock_id: str
+    timeframe: str
+    bars: int
+    lookback_days: int
+    from_date: date
+    to_date: date
+    point_count: int
+    points: list[MarketDailyChartRead]
+    backfill: dict | None = None
+
+
+class IntradayTrendPointRead(BaseModel):
+    time: str
+    price: float
+    volume: int | None = None
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+
+
+class IntradayTrendRead(BaseModel):
+    stock_id: str
+    symbol: str | None = None
+    source: str
+    previous_close: float | None = None
+    point_count: int
+    points: list[IntradayTrendPointRead]
 
 
 class DailyIndicatorPointRead(BaseModel):
@@ -141,3 +172,28 @@ class InstitutionalTradeDailyRead(BaseModel):
     updated_at: datetime
     model_config = ConfigDict(from_attributes=True)
 
+
+class MarginTradingDailyRead(BaseModel):
+    id: int
+    source_id: int
+    raw_result_id: int
+    trade_date: date
+    stock_id: str
+    stock_name: str | None = None
+    margin_buy: int | None = None
+    margin_sell: int | None = None
+    margin_cash_repayment: int | None = None
+    margin_previous_balance: int | None = None
+    margin_today_balance: int | None = None
+    margin_next_limit: int | None = None
+    short_covering: int | None = None
+    short_sale: int | None = None
+    short_stock_repayment: int | None = None
+    short_previous_balance: int | None = None
+    short_today_balance: int | None = None
+    short_next_limit: int | None = None
+    offset: int | None = None
+    note: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
