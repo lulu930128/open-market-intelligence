@@ -32,6 +32,31 @@ export type WatchlistItemRead = {
   updated_at: string;
 };
 
+export type WatchlistBackfillStockResult = {
+  stock_id: string;
+  stock_name: string | null;
+  market: string | null;
+  status: string;
+  parsed_count: number;
+  inserted_count: number;
+  skipped_count: number;
+  message: string | null;
+  error_message: string | null;
+};
+
+export type WatchlistGroupBackfillResult = {
+  group_id: number;
+  include_children: boolean;
+  start_date: string;
+  end_date: string;
+  requested_stock_count: number;
+  success_count: number;
+  warning_count: number;
+  error_count: number;
+  skipped_count: number;
+  results: WatchlistBackfillStockResult[];
+};
+
 export type RankingItem = {
   rank: number;
   stock_id: string;

@@ -157,17 +157,19 @@ def list_watchlist_group_items(
 
 
 @router.post(
-    "/groups/{group_id}/backfill/twse",
+    "/groups/{group_id}/backfill",
     response_model=WatchlistGroupBackfillResultRead,
 )
-def backfill_watchlist_group_twse(
+def backfill_watchlist_group(
     group_id: int,
     start_date: date,
     end_date: date,
     source_id: int = 1,
+    tpex_source_id: int = 6,
     include_children: bool = True,
     enabled_only: bool = True,
     sleep_seconds: float = Query(default=0.8, ge=0.2, le=10.0),
+    skip_existing_months: bool = True,
     db: Session = Depends(get_db),
 ):
     try:
@@ -177,9 +179,44 @@ def backfill_watchlist_group_twse(
             start_date=start_date,
             end_date=end_date,
             source_id=source_id,
+            tpex_source_id=tpex_source_id,
             include_children=include_children,
             enabled_only=enabled_only,
             sleep_seconds=sleep_seconds,
+            skip_existing_months=skip_existing_months,
+        )
+    except service.WatchlistGroupNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.post(
+    "/groups/{group_id}/backfill/twse",
+    response_model=WatchlistGroupBackfillResultRead,
+)
+def backfill_watchlist_group_twse(
+    group_id: int,
+    start_date: date,
+    end_date: date,
+    source_id: int = 1,
+    tpex_source_id: int = 6,
+    include_children: bool = True,
+    enabled_only: bool = True,
+    sleep_seconds: float = Query(default=0.8, ge=0.2, le=10.0),
+    skip_existing_months: bool = True,
+    db: Session = Depends(get_db),
+):
+    try:
+        return backfill_service.backfill_watchlist_group_twse(
+            db=db,
+            group_id=group_id,
+            start_date=start_date,
+            end_date=end_date,
+            source_id=source_id,
+            tpex_source_id=tpex_source_id,
+            include_children=include_children,
+            enabled_only=enabled_only,
+            sleep_seconds=sleep_seconds,
+            skip_existing_months=skip_existing_months,
         )
     except service.WatchlistGroupNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc

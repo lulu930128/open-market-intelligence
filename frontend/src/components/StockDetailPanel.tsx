@@ -1,7 +1,12 @@
 "use client";
 
 import IntradayTrendChart from "@/components/IntradayTrendChart";
-import StockKLineChart from "@/components/StockKLineChart";
+import StockKLineChart, {
+  defaultIndicators,
+  indicatorOptions,
+  type IndicatorKey,
+  type IndicatorSettings,
+} from "@/components/StockKLineChart";
 import { fetchJson } from "@/lib/api";
 import type {
   ChartPoint,
@@ -138,6 +143,9 @@ export default function StockDetailPanel({
   watchlistRankingPanel,
 }: Props) {
   const [timeframe, setTimeframe] = useState<Timeframe>("daily");
+  const [indicatorMenuOpen, setIndicatorMenuOpen] = useState(false);
+  const [chartIndicators, setChartIndicators] =
+    useState<IndicatorSettings>(defaultIndicators);
   const [chartData, setChartData] = useState<ChartPoint[]>(initialChartData);
   const [todayTrend, setTodayTrend] = useState<IntradayTrendPoint[]>([]);
   const [todayPreviousClose, setTodayPreviousClose] = useState<number | null>(null);
@@ -149,6 +157,13 @@ export default function StockDetailPanel({
   const [stockInfo, setStockInfo] = useState<StockMasterRead | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  function toggleChartIndicator(key: IndicatorKey) {
+    setChartIndicators((current) => ({
+      ...current,
+      [key]: !current[key],
+    }));
+  }
 
   useEffect(() => {
     if (!stockId) {
@@ -340,22 +355,9 @@ export default function StockDetailPanel({
   }, [latestClose, ma5, ma20, totalInstitutionalNet, volumeRatio]);
 
   if (!stockId) {
-    return (
-      <section className="space-y-4">
-        <div className="flex min-h-[520px] items-center justify-center border border-slate-200 bg-white">
-          <div className="max-w-md text-center">
-            <div className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-400">
-              Stock Detail
-            </div>
-            <h2 className="mt-3 text-2xl font-bold text-slate-950">選一檔股票開始</h2>
-            <p className="mt-3 text-sm leading-6 text-slate-500">
-              從左側自選股或下方排行點選股票，這裡會顯示 K 線、技術分析與籌碼資料。
-            </p>
-          </div>
-        </div>
-        {watchlistRankingPanel ? <div className="min-w-0">{watchlistRankingPanel}</div> : null}
-      </section>
-    );
+    return watchlistRankingPanel ? (
+      <section className="min-w-0">{watchlistRankingPanel}</section>
+    ) : null;
   }
 
   const technicalSpanClass = watchlistRankingPanel ? "xl:row-span-3" : "xl:row-span-2";
@@ -387,22 +389,61 @@ export default function StockDetailPanel({
                 </div>
               </div>
 
-              <div className="flex border border-slate-200 bg-slate-50 p-1">
-                {(Object.keys(timeframeLabels) as Timeframe[]).map((item) => (
-                  <button
-                    key={item}
-                    type="button"
-                    onClick={() => setTimeframe(item)}
-                    className={[
-                      "h-8 min-w-12 px-3 text-sm font-semibold transition",
-                      timeframe === item
-                        ? "bg-red-700 text-white"
-                        : "text-slate-600 hover:bg-white",
-                    ].join(" ")}
-                  >
-                    {timeframeLabels[item]}
-                  </button>
-                ))}
+              <div className="flex flex-col items-end gap-2">
+                <div className="flex border border-slate-200 bg-slate-50 p-1">
+                  {(Object.keys(timeframeLabels) as Timeframe[]).map((item) => (
+                    <button
+                      key={item}
+                      type="button"
+                      onClick={() => setTimeframe(item)}
+                      className={[
+                        "h-8 min-w-12 px-3 text-sm font-semibold transition",
+                        timeframe === item
+                          ? "bg-red-700 text-white"
+                          : "text-slate-600 hover:bg-white",
+                      ].join(" ")}
+                    >
+                      {timeframeLabels[item]}
+                    </button>
+                  ))}
+                </div>
+
+                {timeframe !== "today" ? (
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setIndicatorMenuOpen((value) => !value)}
+                      className="h-8 border border-slate-900 bg-white px-3 text-sm font-semibold text-slate-900 hover:border-red-700 hover:text-red-700"
+                    >
+                      指標
+                    </button>
+                    {indicatorMenuOpen ? (
+                      <div className="absolute right-0 z-20 mt-2 w-48 border border-slate-200 bg-white p-2 text-left shadow-lg">
+                        {indicatorOptions.map((option) => (
+                          <label
+                            key={option.key}
+                            className="flex cursor-pointer items-start gap-2 px-2 py-2 text-xs hover:bg-slate-50"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={chartIndicators[option.key]}
+                              onChange={() => toggleChartIndicator(option.key)}
+                              className="mt-0.5"
+                            />
+                            <span>
+                              <span className="block font-semibold text-slate-800">
+                                {option.label}
+                              </span>
+                              <span className="block text-slate-500">
+                                {option.description}
+                              </span>
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             </div>
           </div>
@@ -425,6 +466,7 @@ export default function StockDetailPanel({
               chartData={chartData}
               indicatorData={indicatorForTimeframe}
               label={timeframeLabels[timeframe]}
+              indicators={chartIndicators}
             />
           )}
         </div>

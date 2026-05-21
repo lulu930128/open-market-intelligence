@@ -3,6 +3,7 @@
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
 import type {
   StockMasterRead,
+  WatchlistGroupBackfillResult,
   WatchlistGroupNode,
   WatchlistGroupRead,
   WatchlistItemRead,
@@ -20,6 +21,15 @@ type Props = {
 };
 
 type Message = { type: "success" | "error"; text: string } | null;
+type MarketRegion = "tw" | "us" | "jp" | "kr" | "hk";
+
+const marketOptions: Array<{ label: string; value: MarketRegion }> = [
+  { label: "台股", value: "tw" },
+  { label: "美股", value: "us" },
+  { label: "日股", value: "jp" },
+  { label: "韓股", value: "kr" },
+  { label: "港股", value: "hk" },
+];
 
 function flattenGroups(nodes: WatchlistGroupNode[]): WatchlistGroupNode[] {
   return nodes.flatMap((node) => [node, ...flattenGroups(node.children)]);
@@ -39,6 +49,22 @@ function buttonClass(kind: "primary" | "ghost" | "danger" = "ghost") {
   }
 
   return "h-8 bg-slate-100 px-3 text-xs font-semibold text-slate-700 hover:bg-slate-200 disabled:cursor-not-allowed disabled:text-slate-300";
+}
+
+function formatDateParam(value: Date) {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
+
+const WATCHLIST_REFRESH_LOOKBACK_YEARS = 8;
+
+function yearsAgo(years: number) {
+  const value = new Date();
+  value.setFullYear(value.getFullYear() - years);
+  return value;
 }
 
 function submitterValue(event: FormEvent<HTMLFormElement>) {
@@ -62,6 +88,7 @@ export default function SidebarWatchlistExplorer({
     new Set(initialTree.map((group) => group.id))
   );
   const [loading, setLoading] = useState(false);
+  const [refreshingMarketData, setRefreshingMarketData] = useState(false);
   const [message, setMessage] = useState<Message>(null);
   const [folderName, setFolderName] = useState("");
   const [renameValue, setRenameValue] = useState("");
@@ -69,6 +96,7 @@ export default function SidebarWatchlistExplorer({
   const [stockNote, setStockNote] = useState("");
   const [stockTags, setStockTags] = useState("");
   const [stockSuggestions, setStockSuggestions] = useState<StockMasterRead[]>([]);
+  const [selectedMarket, setSelectedMarket] = useState<MarketRegion>("tw");
 
   const allGroups = useMemo(() => flattenGroups(tree), [tree]);
   const selectedGroup = useMemo(() => {
@@ -124,6 +152,50 @@ export default function SidebarWatchlistExplorer({
     onSelectGroup(nextGroup);
     setRenameValue(nextGroup?.group_name ?? "");
     return nextGroup;
+  }
+
+  async function refreshSelectedGroupMarketData() {
+    if (selectedGroupId === null) {
+      await reloadExplorerData({ keepSelection: true });
+      return;
+    }
+
+    setRefreshingMarketData(true);
+    setMessage(null);
+
+    try {
+      const result = await requestJson<WatchlistGroupBackfillResult>(
+        `/api/watchlists/groups/${selectedGroupId}/backfill`,
+        { method: "POST" },
+        {
+          start_date: formatDateParam(yearsAgo(WATCHLIST_REFRESH_LOOKBACK_YEARS)),
+          end_date: formatDateParam(new Date()),
+          include_children: true,
+          enabled_only: true,
+          sleep_seconds: 0.2,
+          skip_existing_months: true,
+        }
+      );
+
+      const nextGroup = await reloadExplorerData({ keepSelection: true });
+      await onChanged(nextGroup?.id ?? selectedGroupId);
+
+      const problemCount = result.warning_count + result.error_count;
+      setMessage({
+        type: result.error_count > 0 ? "error" : "success",
+        text:
+          problemCount > 0
+            ? `已更新 ${result.requested_stock_count} 檔，成功 ${result.success_count}，需確認 ${problemCount}`
+            : `已更新 ${result.requested_stock_count} 檔自選股`,
+      });
+    } catch (error) {
+      setMessage({
+        type: "error",
+        text: error instanceof Error ? error.message : "自選股更新失敗",
+      });
+    } finally {
+      setRefreshingMarketData(false);
+    }
   }
 
   async function runAction(
@@ -405,10 +477,11 @@ export default function SidebarWatchlistExplorer({
       <div key={node.id}>
         <div
           className={[
-            "flex items-center gap-1 py-1 pr-1 text-sm",
+            "flex cursor-pointer items-center gap-1 py-1 pr-1 text-sm",
             selected ? "bg-red-700 text-white" : "text-slate-700 hover:bg-slate-100",
           ].join(" ")}
           style={{ paddingLeft: `${8 + depth * 14}px` }}
+          onClick={() => selectGroup(node)}
         >
           <button
             type="button"
@@ -427,7 +500,6 @@ export default function SidebarWatchlistExplorer({
 
           <button
             type="button"
-            onClick={() => selectGroup(node)}
             className="min-w-0 flex-1 text-left"
           >
             <div className="truncate font-semibold">{node.group_name}</div>
@@ -529,6 +601,23 @@ export default function SidebarWatchlistExplorer({
           Open Market Intelligence
         </div>
         <h1 className="mt-2 text-xl font-bold text-slate-950">Market Dashboard</h1>
+        <div className="mt-3 grid grid-cols-5 border border-slate-200 bg-slate-50 p-1">
+          {marketOptions.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => setSelectedMarket(option.value)}
+              className={[
+                "h-8 text-xs font-semibold transition",
+                selectedMarket === option.value
+                  ? "bg-red-700 text-white"
+                  : "text-slate-600 hover:bg-white",
+              ].join(" ")}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
@@ -541,10 +630,10 @@ export default function SidebarWatchlistExplorer({
         <button
           type="button"
           className={buttonClass("ghost")}
-          onClick={() => void reloadExplorerData({ keepSelection: true })}
-          disabled={loading}
+          onClick={() => void refreshSelectedGroupMarketData()}
+          disabled={loading || refreshingMarketData}
         >
-          重新整理
+          {refreshingMarketData ? "更新中" : "重新整理"}
         </button>
       </div>
 

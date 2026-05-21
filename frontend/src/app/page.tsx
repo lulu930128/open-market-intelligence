@@ -1,7 +1,6 @@
 import MarketDashboardClient from "@/components/MarketDashboardClient";
 import type {
   ChartPoint,
-  OhlcChartResponse,
   RankingResponse,
   SignalsResponse,
   StockIndicatorPoint,
@@ -51,14 +50,8 @@ export default async function Page({
   const initialSelectedGroupId = Number.isFinite(requestedGroupId)
     ? requestedGroupId
     : flattened[0]?.id ?? null;
-  const initialSelectedItem =
-    initialItems.find((item) => {
-      return initialSelectedGroupId === null || item.group_id === initialSelectedGroupId;
-    }) ??
-    initialItems[0] ??
-    null;
-  let initialChartData: ChartPoint[] = [];
-  let initialIndicatorData: StockIndicatorPoint[] = [];
+  const initialChartData: ChartPoint[] = [];
+  const initialIndicatorData: StockIndicatorPoint[] = [];
   let initialRankingData: RankingResponse | null = null;
   let initialSignalsData: SignalsResponse | null = null;
 
@@ -73,29 +66,6 @@ export default async function Page({
         null
       ),
     ]);
-  }
-
-  if (initialSelectedItem) {
-    const initialOhlc = await fetchBackendJson<OhlcChartResponse>(
-      `/api/market/ohlc/${initialSelectedItem.stock_id}?timeframe=daily&bars=90&ensure_history=true`,
-      {
-        stock_id: initialSelectedItem.stock_id,
-        timeframe: "daily",
-        bars: 90,
-        lookback_days: 90,
-        from_date: "",
-        to_date: "",
-        point_count: 0,
-        points: [],
-        backfill: null,
-      }
-    );
-
-    initialChartData = initialOhlc.points;
-    initialIndicatorData = await fetchBackendJson<StockIndicatorPoint[]>(
-      `/api/market/indicators/${initialSelectedItem.stock_id}/daily?limit=520&ma_windows=5,20,60&volume_ma_windows=5,20`,
-      []
-    );
   }
 
   return (

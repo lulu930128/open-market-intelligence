@@ -25,8 +25,6 @@ type Props = {
   initialSignalsData: SignalsResponse | null;
 };
 
-const navItems = ["首頁", "自選股", "大盤指數", "ETF", "應用市集", "新聞話題", "名師專欄", "影音專區", "熱力圖", "更多"];
-
 function formatNumber(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
   return new Intl.NumberFormat("zh-TW").format(value);
@@ -101,27 +99,14 @@ export default function MarketDashboardClient({
   const initialSelectedGroup = useMemo(() => {
     return flattenGroups(initialTree).find((group) => group.id === initialSelectedGroupId) ?? null;
   }, [initialTree, initialSelectedGroupId]);
-  const initialSelectedItem = useMemo(() => {
-    return (
-      initialItems.find((item) => {
-        return initialSelectedGroupId === null || item.group_id === initialSelectedGroupId;
-      }) ??
-      initialItems[0] ??
-      null
-    );
-  }, [initialItems, initialSelectedGroupId]);
   const [selectedGroupId, setSelectedGroupId] = useState<number | null>(
     initialSelectedGroup?.id ?? null
   );
   const [selectedGroup, setSelectedGroup] = useState<WatchlistGroupNode | null>(
     initialSelectedGroup
   );
-  const [selectedStockId, setSelectedStockId] = useState<string | null>(
-    initialSelectedItem?.stock_id ?? null
-  );
-  const [selectedStockName, setSelectedStockName] = useState<string | null>(
-    initialSelectedItem?.stock_name ?? null
-  );
+  const [selectedStockId, setSelectedStockId] = useState<string | null>(null);
+  const [selectedStockName, setSelectedStockName] = useState<string | null>(null);
   const [rankBy, setRankBy] = useState("change_pct");
   const [ranking, setRanking] = useState<RankingResponse | null>(initialRankingData);
   const [signals, setSignals] = useState<SignalsResponse | null>(initialSignalsData);
@@ -161,10 +146,6 @@ export default function MarketDashboardClient({
 
       setRanking(rankingData);
       setSignals(signalsData);
-      if (!selectedStockId && rankingData.results.length > 0) {
-        setSelectedStockId(rankingData.results[0].stock_id);
-        setSelectedStockName(rankingData.results[0].stock_name);
-      }
       setLastUpdatedAt(new Date().toLocaleString("zh-TW", { hour12: false }));
       setLoadState("success");
     } catch (error) {
@@ -282,24 +263,6 @@ export default function MarketDashboardClient({
   return (
     <main className="h-screen overflow-hidden bg-slate-100 text-slate-950">
       <div className="flex h-full min-w-[1180px] flex-col">
-        <nav className="flex h-12 shrink-0 items-center bg-red-700 px-8 text-white">
-          <div className="mr-8 text-sm font-bold tracking-[0.18em]">OMI</div>
-          <div className="flex h-full items-center">
-            {navItems.map((item) => (
-              <button
-                key={item}
-                type="button"
-                className={[
-                  "h-full px-5 text-base font-bold transition",
-                  item === "自選股" ? "bg-red-900" : "hover:bg-red-800",
-                ].join(" ")}
-              >
-                {item}
-              </button>
-            ))}
-          </div>
-        </nav>
-
         <div className="flex min-h-0 flex-1">
           <SidebarWatchlistExplorer
             initialTree={initialTree}

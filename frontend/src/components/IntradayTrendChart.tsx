@@ -56,6 +56,25 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
+function validNumber(value: number | null | undefined): value is number {
+  return value !== null && value !== undefined && !Number.isNaN(value);
+}
+
+function labelPosition(
+  x: number,
+  paddingLeft: number,
+  paddingRight: number,
+  width: number
+) {
+  const labelWidth = 84;
+  const isNearRight = x > width - paddingRight - labelWidth;
+
+  return {
+    x: isNearRight ? x - 10 : x + 10,
+    anchor: isNearRight ? "end" : "start",
+  } as const;
+}
+
 function buildLinePath(
   data: IntradayTrendPoint[],
   getX: (index: number) => number,
@@ -133,10 +152,30 @@ export default function IntradayTrendChart({
   const yRange = yMax - yMin || 1;
   const volumes = data
     .map((point) => point.volume)
-    .filter((value): value is number => {
-      return value !== null && value !== undefined && !Number.isNaN(value);
-    });
+    .filter(validNumber);
   const maxVolume = Math.max(...volumes, 1);
+  const rangeHigh = data.reduce<{ index: number; value: number } | null>(
+    (best, point, index) => {
+      const value = point.high ?? point.price;
+
+      if (!validNumber(value)) return best;
+      if (best === null || value > best.value) return { index, value };
+
+      return best;
+    },
+    null
+  );
+  const rangeLow = data.reduce<{ index: number; value: number } | null>(
+    (best, point, index) => {
+      const value = point.low ?? point.price;
+
+      if (!validNumber(value)) return best;
+      if (best === null || value < best.value) return { index, value };
+
+      return best;
+    },
+    null
+  );
 
   function getX(index: number) {
     if (data.length <= 1) return paddingLeft;
@@ -256,6 +295,72 @@ export default function IntradayTrendChart({
           strokeLinecap="round"
           strokeLinejoin="round"
         />
+
+        {rangeHigh ? (
+          <g>
+            {(() => {
+              const x = getX(rangeHigh.index);
+              const y = getPriceY(rangeHigh.value);
+              const label = labelPosition(x, paddingLeft, paddingRight, width);
+              const markerLabelY = clamp(y - 12, priceTop + 12, volumeTop - 8);
+
+              return (
+                <>
+                  <circle cx={x} cy={y} r="3.5" className="fill-red-600" />
+                  <line
+                    x1={x}
+                    x2={label.x}
+                    y1={y}
+                    y2={markerLabelY}
+                    className="stroke-red-400"
+                    strokeDasharray="3 3"
+                  />
+                  <text
+                    x={label.x}
+                    y={markerLabelY - 3}
+                    textAnchor={label.anchor}
+                    className="fill-red-600 text-[11px] font-semibold"
+                  >
+                    最高 {formatPrice(rangeHigh.value)}
+                  </text>
+                </>
+              );
+            })()}
+          </g>
+        ) : null}
+
+        {rangeLow ? (
+          <g>
+            {(() => {
+              const x = getX(rangeLow.index);
+              const y = getPriceY(rangeLow.value);
+              const label = labelPosition(x, paddingLeft, paddingRight, width);
+              const markerLabelY = clamp(y + 18, priceTop + 12, volumeTop - 8);
+
+              return (
+                <>
+                  <circle cx={x} cy={y} r="3.5" className="fill-emerald-600" />
+                  <line
+                    x1={x}
+                    x2={label.x}
+                    y1={y}
+                    y2={markerLabelY}
+                    className="stroke-emerald-400"
+                    strokeDasharray="3 3"
+                  />
+                  <text
+                    x={label.x}
+                    y={markerLabelY + 10}
+                    textAnchor={label.anchor}
+                    className="fill-emerald-600 text-[11px] font-semibold"
+                  >
+                    最低 {formatPrice(rangeLow.value)}
+                  </text>
+                </>
+              );
+            })()}
+          </g>
+        ) : null}
 
         {data.map((point, index) => {
           const volume = point.volume ?? 0;

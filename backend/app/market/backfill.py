@@ -136,7 +136,7 @@ def _should_skip_existing_month(
     if latest_existing_date >= effective_end - timedelta(days=4):
         return True
 
-    return existing_count >= 10
+    return False
 
 
 def _parse_roc_date(value: str | None) -> date | None:

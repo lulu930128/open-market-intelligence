@@ -87,6 +87,7 @@ class WatchlistItemRead(BaseModel):
 class WatchlistBackfillStockResultRead(BaseModel):
     stock_id: str
     stock_name: str | None = None
+    market: str | None = None
 
     status: str
     parsed_count: int = 0
