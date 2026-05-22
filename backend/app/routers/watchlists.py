@@ -1,11 +1,12 @@
 from datetime import date
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
-from app.watchlists import backfill_service, indicator_service, ranking_service, service, signal_service
+from app.watchlists import indicator_service, ranking_service, service, signal_service
 from app.db.session import get_db
+from app.jobs import backfill_tasks, service as job_service
+from app.jobs.schemas import JobRunRead
 from app.watchlists.schemas import (
-    WatchlistGroupBackfillResultRead,
     WatchlistGroupCreate,
     WatchlistGroupDeleteResultRead,
     WatchlistGroupLatestIndicatorsRead,
@@ -32,6 +33,54 @@ def _handle_group_error(exc: Exception) -> HTTPException:
         return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
     return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
+def _queue_group_backfill_job(
+    *,
+    db: Session,
+    background_tasks: BackgroundTasks,
+    group_id: int,
+    start_date: date,
+    end_date: date,
+    source_id: int | None,
+    tpex_source_id: int | None,
+    include_children: bool,
+    enabled_only: bool,
+    sleep_seconds: float,
+    skip_existing_months: bool,
+):
+    job = job_service.create_job(
+        db=db,
+        job_type="watchlist.group_daily_price_backfill",
+        target=str(group_id),
+        request={
+            "group_id": group_id,
+            "start_date": start_date,
+            "end_date": end_date,
+            "source_id": source_id,
+            "tpex_source_id": tpex_source_id,
+            "include_children": include_children,
+            "enabled_only": enabled_only,
+            "sleep_seconds": sleep_seconds,
+            "skip_existing_months": skip_existing_months,
+        },
+        progress_total=1,
+        message="Queued.",
+    )
+    background_tasks.add_task(
+        backfill_tasks.run_watchlist_group_backfill_job,
+        job.id,
+        group_id,
+        start_date,
+        end_date,
+        source_id,
+        tpex_source_id,
+        include_children,
+        enabled_only,
+        sleep_seconds,
+        skip_existing_months,
+    )
+    return job_service.serialize_job(job)
 
 
 @router.post("/groups", response_model=WatchlistGroupRead, status_code=status.HTTP_201_CREATED)
@@ -129,7 +178,7 @@ def list_watchlist_items(
     stock_id: str | None = None,
     enabled: bool | None = None,
     include_children: bool = False,
-    limit: int = Query(default=100, ge=1, le=1000),
+    limit: int = Query(default=100, ge=1, le=10000),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
@@ -152,7 +201,7 @@ def list_watchlist_group_items(
     group_id: int,
     include_children: bool = False,
     enabled: bool | None = None,
-    limit: int = Query(default=100, ge=1, le=1000),
+    limit: int = Query(default=100, ge=1, le=10000),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
@@ -172,68 +221,68 @@ def list_watchlist_group_items(
 
 @router.post(
     "/groups/{group_id}/backfill",
-    response_model=WatchlistGroupBackfillResultRead,
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 def backfill_watchlist_group(
     group_id: int,
     start_date: date,
     end_date: date,
-    source_id: int = 1,
-    tpex_source_id: int = 6,
+    background_tasks: BackgroundTasks,
+    source_id: int | None = None,
+    tpex_source_id: int | None = None,
     include_children: bool = True,
     enabled_only: bool = True,
     sleep_seconds: float = Query(default=0.8, ge=0.2, le=10.0),
     skip_existing_months: bool = True,
     db: Session = Depends(get_db),
 ):
-    try:
-        return backfill_service.backfill_watchlist_group_twse(
-            db=db,
-            group_id=group_id,
-            start_date=start_date,
-            end_date=end_date,
-            source_id=source_id,
-            tpex_source_id=tpex_source_id,
-            include_children=include_children,
-            enabled_only=enabled_only,
-            sleep_seconds=sleep_seconds,
-            skip_existing_months=skip_existing_months,
-        )
-    except service.WatchlistGroupNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return _queue_group_backfill_job(
+        db=db,
+        background_tasks=background_tasks,
+        group_id=group_id,
+        start_date=start_date,
+        end_date=end_date,
+        source_id=source_id,
+        tpex_source_id=tpex_source_id,
+        include_children=include_children,
+        enabled_only=enabled_only,
+        sleep_seconds=sleep_seconds,
+        skip_existing_months=skip_existing_months,
+    )
 
 
 @router.post(
     "/groups/{group_id}/backfill/twse",
-    response_model=WatchlistGroupBackfillResultRead,
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 def backfill_watchlist_group_twse(
     group_id: int,
     start_date: date,
     end_date: date,
-    source_id: int = 1,
-    tpex_source_id: int = 6,
+    background_tasks: BackgroundTasks,
+    source_id: int | None = None,
+    tpex_source_id: int | None = None,
     include_children: bool = True,
     enabled_only: bool = True,
     sleep_seconds: float = Query(default=0.8, ge=0.2, le=10.0),
     skip_existing_months: bool = True,
     db: Session = Depends(get_db),
 ):
-    try:
-        return backfill_service.backfill_watchlist_group_twse(
-            db=db,
-            group_id=group_id,
-            start_date=start_date,
-            end_date=end_date,
-            source_id=source_id,
-            tpex_source_id=tpex_source_id,
-            include_children=include_children,
-            enabled_only=enabled_only,
-            sleep_seconds=sleep_seconds,
-            skip_existing_months=skip_existing_months,
-        )
-    except service.WatchlistGroupNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return _queue_group_backfill_job(
+        db=db,
+        background_tasks=background_tasks,
+        group_id=group_id,
+        start_date=start_date,
+        end_date=end_date,
+        source_id=source_id,
+        tpex_source_id=tpex_source_id,
+        include_children=include_children,
+        enabled_only=enabled_only,
+        sleep_seconds=sleep_seconds,
+        skip_existing_months=skip_existing_months,
+    )
 
 
 @router.patch("/items/{item_id}", response_model=WatchlistItemRead)
@@ -345,8 +394,8 @@ def get_watchlist_group_latest_ranking(
     group_id: int,
     include_children: bool = True,
     enabled_only: bool = True,
-    rank_by: str = "score",
-    sort_order: str = "desc",
+    rank_by: str = "watchlist",
+    sort_order: str = "asc",
     ma_windows: str = "5,20,60",
     volume_ma_windows: str = "5,20",
     limit: int = Query(default=100, ge=20, le=500),

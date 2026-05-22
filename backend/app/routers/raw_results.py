@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.raw_results.retention import compact_raw_fetch_results
 from app.sources import service
 from app.sources.schemas import DataQualityCheckRead, RawFetchResultRead
 from app.market.schemas import ParseTwseDailyResultRead
@@ -9,6 +10,23 @@ from app.pipelines.parse_pipeline import parse_twse_daily_raw_result
 
 
 router = APIRouter()
+
+
+@router.post("/retention/compact")
+def compact_raw_results(
+    keep_latest_per_source: int = Query(default=200, ge=0, le=10000),
+    max_age_days: int | None = Query(default=None, ge=1, le=3650),
+    dry_run: bool = True,
+    limit: int = Query(default=1000, ge=1, le=10000),
+    db: Session = Depends(get_db),
+):
+    return compact_raw_fetch_results(
+        db=db,
+        keep_latest_per_source=keep_latest_per_source,
+        max_age_days=max_age_days,
+        dry_run=dry_run,
+        limit=limit,
+    )
 
 
 @router.get("/{raw_result_id}", response_model=RawFetchResultRead)

@@ -26,6 +26,31 @@ export function buildApiUrl(path: string, params?: Record<string, string | numbe
   return url.toString();
 }
 
+async function readApiError(response: Response) {
+  const text = await response.text();
+
+  if (!text) {
+    return response.statusText || "Request failed.";
+  }
+
+  try {
+    const payload = JSON.parse(text) as {
+      error?: {
+        message?: string;
+        code?: string;
+        request_id?: string | null;
+      };
+      detail?: string;
+    };
+    const message = payload.error?.message || payload.detail || text;
+    const requestId = payload.error?.request_id;
+
+    return requestId ? `${message} (request ${requestId})` : message;
+  } catch {
+    return text;
+  }
+}
+
 export async function fetchJson<T>(
   path: string,
   params?: Record<string, string | number | boolean>
@@ -38,8 +63,7 @@ export async function fetchJson<T>(
   });
 
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`API ${response.status}: ${text}`);
+    throw new Error(`API ${response.status}: ${await readApiError(response)}`);
   }
 
   return response.json() as Promise<T>;
@@ -61,8 +85,7 @@ export async function requestJson<T>(
   });
 
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`API ${response.status}: ${text}`);
+    throw new Error(`API ${response.status}: ${await readApiError(response)}`);
   }
 
   if (response.status === 204) {
@@ -85,7 +108,6 @@ export async function deleteRequest(
   });
 
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`API ${response.status}: ${text}`);
+    throw new Error(`API ${response.status}: ${await readApiError(response)}`);
   }
 }

@@ -7,7 +7,8 @@ import StockKLineChart, {
   type IndicatorKey,
   type IndicatorSettings,
 } from "@/components/StockKLineChart";
-import { fetchJson, requestJson } from "@/lib/api";
+import { fetchJson } from "@/lib/api";
+import { formatJobStatus, requestBackfillJob } from "@/lib/jobs";
 import {
   TAIWAN_INTRADAY_REFRESH_MS,
   getTaiwanMarketRefreshState,
@@ -17,6 +18,7 @@ import type {
   FinancialMetricQuarterlyRead,
   IntradayTrendPoint,
   IntradayTrendResponse,
+  InstitutionalHoldingRatioRead,
   InstitutionalTradeDailyRead,
   MarginTradingDailyRead,
   MonthlyRevenueRead,
@@ -571,6 +573,20 @@ function buildNumericLinePath<T>(
     .join(" ");
 }
 
+function chartEventViewX(event: ReactMouseEvent<SVGSVGElement>, viewWidth: number) {
+  const svg = event.currentTarget;
+  const screenMatrix = typeof svg.getScreenCTM === "function" ? svg.getScreenCTM() : null;
+
+  if (screenMatrix && typeof DOMPoint !== "undefined") {
+    return new DOMPoint(event.clientX, event.clientY).matrixTransform(screenMatrix.inverse()).x;
+  }
+
+  const rect = svg.getBoundingClientRect();
+  if (rect.width <= 0) return 0;
+
+  return ((event.clientX - rect.left) / rect.width) * viewWidth;
+}
+
 function nearestChartIndex(
   event: ReactMouseEvent<SVGSVGElement>,
   pointCount: number,
@@ -580,15 +596,22 @@ function nearestChartIndex(
 ) {
   if (pointCount <= 1) return 0;
 
-  const rect = event.currentTarget.getBoundingClientRect();
-  const viewX = ((event.clientX - rect.left) / rect.width) * viewWidth;
+  const viewX = chartEventViewX(event, viewWidth);
   const clampedX = Math.max(left, Math.min(left + width, viewX));
   const ratio = (clampedX - left) / width;
   return Math.max(0, Math.min(pointCount - 1, Math.round(ratio * (pointCount - 1))));
 }
 
 function tooltipX(x: number, tooltipWidth: number, viewWidth: number) {
-  return Math.max(8, Math.min(viewWidth - tooltipWidth - 8, x + 16));
+  const padding = 8;
+  const gap = 16;
+  const rightX = x + gap;
+
+  if (rightX + tooltipWidth <= viewWidth - padding) {
+    return rightX;
+  }
+
+  return Math.max(padding, x - tooltipWidth - gap);
 }
 
 function tooltipY(y: number, tooltipHeight: number, top: number, height: number) {
@@ -1498,16 +1521,22 @@ function InstitutionalFlowChart({
   title,
   netKey,
   cumulativeKey,
+  activeDate,
+  showXAxisLabels = false,
+  onHoverPointChange,
 }: {
   points: InstitutionalSeriesPoint[];
   title: string;
   netKey: InstitutionalNetKey;
   cumulativeKey: InstitutionalCumulativeKey;
+  activeDate?: string | null;
+  showXAxisLabels?: boolean;
+  onHoverPointChange?: (point: InstitutionalSeriesPoint | null) => void;
 }) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const chartPoints = points;
   const viewWidth = 860;
-  const viewHeight = 150;
+  const viewHeight = showXAxisLabels ? 150 : 126;
   const left = 64;
   const right = 72;
   const top = 24;
@@ -1535,6 +1564,12 @@ function InstitutionalFlowChart({
   );
   const latestPoint = chartPoints[chartPoints.length - 1] ?? null;
   const hoverPoint = hoverIndex === null ? null : chartPoints[hoverIndex] ?? null;
+  const activeIndex = activeDate
+    ? chartPoints.findIndex((point) => point.date === activeDate)
+    : -1;
+  const guideIndex = hoverIndex ?? (activeIndex >= 0 ? activeIndex : null);
+  const guideX =
+    guideIndex === null ? null : chartX(guideIndex, chartPoints.length, left, width);
   const hoverX =
     hoverIndex === null ? null : chartX(hoverIndex, chartPoints.length, left, width);
   const hoverNetY =
@@ -1573,12 +1608,16 @@ function InstitutionalFlowChart({
 
       <svg
         viewBox={`0 0 ${viewWidth} ${viewHeight}`}
-        className="h-[150px] w-full"
+        className={showXAxisLabels ? "h-[150px] w-full" : "h-[126px] w-full"}
         onMouseMove={(event) => {
           const nextIndex = nearestChartIndex(event, chartPoints.length, left, width, viewWidth);
           setHoverIndex((current) => (current === nextIndex ? current : nextIndex));
+          onHoverPointChange?.(chartPoints[nextIndex] ?? null);
         }}
-        onMouseLeave={() => setHoverIndex(null)}
+        onMouseLeave={() => {
+          setHoverIndex(null);
+          onHoverPointChange?.(null);
+        }}
       >
         {[0, 1, 2].map((tick) => {
           const y = top + (tick / 2) * height;
@@ -1616,22 +1655,30 @@ function InstitutionalFlowChart({
         <text x={left + width + 4} y={top + height} className="fill-slate-500 text-[10px]">
           {formatSignedLots(cumulativeScale.min)}
         </text>
-        <text x={left} y={top + height + 24} className="fill-slate-500 text-[10px]">
-          {formatMonthDay(chartPoints[0]?.date)}
-        </text>
-        <text x={left + width} y={top + height + 24} textAnchor="end" className="fill-slate-500 text-[10px]">
-          {formatMonthDay(chartPoints[chartPoints.length - 1]?.date)}
-        </text>
-        {hoverPoint && hoverX !== null ? (
+        {showXAxisLabels ? (
+          <>
+            <text x={left} y={top + height + 24} className="fill-slate-500 text-[10px]">
+              {formatMonthDay(chartPoints[0]?.date)}
+            </text>
+            <text x={left + width} y={top + height + 24} textAnchor="end" className="fill-slate-500 text-[10px]">
+              {formatMonthDay(chartPoints[chartPoints.length - 1]?.date)}
+            </text>
+          </>
+        ) : null}
+        {guideX !== null ? (
           <g pointerEvents="none">
             <line
-              x1={hoverX}
-              x2={hoverX}
+              x1={guideX}
+              x2={guideX}
               y1={top}
               y2={top + height}
               stroke="#94a3b8"
               strokeDasharray="4 4"
             />
+          </g>
+        ) : null}
+        {hoverPoint && hoverX !== null ? (
+          <g pointerEvents="none">
             {hoverNetY !== null ? (
               <g>
                 <rect x={8} y={hoverNetY - 12} width={52} height={22} rx={3} fill="#6b7280" />
@@ -1648,10 +1695,14 @@ function InstitutionalFlowChart({
                 </text>
               </g>
             ) : null}
-            <rect x={hoverX - 28} y={top + height + 28} width={56} height={20} rx={3} fill="#6b7280" />
-            <text x={hoverX} y={top + height + 42} textAnchor="middle" className="fill-white text-[11px] font-semibold">
-              {formatMonthDay(hoverPoint.date)}
-            </text>
+            {showXAxisLabels ? (
+              <>
+                <rect x={hoverX - 28} y={top + height + 28} width={56} height={20} rx={3} fill="#6b7280" />
+                <text x={hoverX} y={top + height + 42} textAnchor="middle" className="fill-white text-[11px] font-semibold">
+                  {formatMonthDay(hoverPoint.date)}
+                </text>
+              </>
+            ) : null}
             <g transform={`translate(${hoverTipX} ${hoverTipY})`}>
               <rect width={hoverTipWidth} height={hoverTipHeight} rx={4} fill="white" stroke="#cbd5e1" />
               <text x={12} y={20} className="fill-slate-500 text-[12px] font-semibold">
@@ -1708,9 +1759,12 @@ export default function StockDetailPanel({
     useState<FinancialMetricQuarterlyRead | null>(null);
   const [financialMetricHistory, setFinancialMetricHistory] = useState<FinancialMetricQuarterlyRead[]>([]);
   const [stockInfo, setStockInfo] = useState<StockMasterRead | null>(null);
+  const [institutionalHoldingRatio, setInstitutionalHoldingRatio] =
+    useState<InstitutionalHoldingRatioRead | null>(null);
   const [activeDataTab, setActiveDataTab] = useState<DataPanelTab>("chips");
   const [dataPanelLoading, setDataPanelLoading] = useState<DataPanelTab | null>(null);
   const [dataPanelMessage, setDataPanelMessage] = useState<string | null>(null);
+  const [institutionalHoverDate, setInstitutionalHoverDate] = useState<string | null>(null);
   const [largeHolderLots, setLargeHolderLots] = useState(1000);
   const [smallHolderLots, setSmallHolderLots] = useState(100);
   const [revenueView, setRevenueView] = useState<RevenueView>("monthly");
@@ -1755,9 +1809,11 @@ export default function StockDetailPanel({
         setFinancialMetric(null);
         setFinancialMetricHistory([]);
         setStockInfo(null);
+        setInstitutionalHoldingRatio(null);
         setActiveDataTab("chips");
         setDataPanelLoading(null);
         setDataPanelMessage(null);
+        setInstitutionalHoverDate(null);
         setLoadState("idle");
         setErrorMessage(null);
       }, 0);
@@ -1779,6 +1835,7 @@ export default function StockDetailPanel({
           financialData,
           financialHistoryData,
           stockData,
+          institutionalHoldingRatioData,
         ] = await Promise.all([
           fetchOptional<InstitutionalTradeDailyRead>(
             `/api/market/institutional/${stockId}/latest`,
@@ -1811,6 +1868,9 @@ export default function StockDetailPanel({
             { limit: financialHistoryLimit, ensure_history: false }
           ),
           fetchOptional<StockMasterRead>(`/api/stocks/${stockId}`),
+          fetchOptional<InstitutionalHoldingRatioRead>(
+            `/api/market/institutional/${stockId}/holding-ratios`
+          ),
         ]);
 
         if (cancelled) return;
@@ -1838,6 +1898,7 @@ export default function StockDetailPanel({
         }
 
         setStockInfo(stockData);
+        setInstitutionalHoldingRatio(institutionalHoldingRatioData);
       } catch {
         if (!cancelled) {
           const currentActiveTab = activeDataTabRef.current;
@@ -1863,6 +1924,7 @@ export default function StockDetailPanel({
           }
 
           setStockInfo(null);
+          setInstitutionalHoldingRatio(null);
         }
       }
     }
@@ -1974,7 +2036,7 @@ export default function StockDetailPanel({
         const ohlc = await fetchJson<OhlcChartResponse>(`/api/market/ohlc/${stockId}`, {
           timeframe,
           bars: 90,
-          ensure_history: true,
+          ensure_history: false,
         });
         const indicators = await fetchJson<StockIndicatorPoint[]>(
           `/api/market/indicators/${stockId}/daily`,
@@ -2254,13 +2316,38 @@ export default function StockDetailPanel({
     setDataPanelLoading(tab);
     setDataPanelMessage(null);
 
+    const runBackfill = (
+      path: string,
+      params?: Record<string, string | number | boolean>
+    ) =>
+      requestBackfillJob(
+        path,
+        { method: "POST" },
+        params,
+        {
+          onUpdate: (job) => {
+            if (activeStockIdRef.current === targetStockId) {
+              setDataPanelMessage(formatJobStatus(job));
+            }
+          },
+        }
+      );
+
     try {
       if (tab === "chips") {
-        await requestJson<Record<string, unknown>>(
+        await runBackfill(
           `/api/market/backfill/shareholding/${targetStockId}/history`,
-          { method: "POST" },
           {
             lookback_weeks: 52,
+            sleep_seconds: 0.05,
+            skip_existing: true,
+          }
+        );
+        await runBackfill(
+          `/api/market/backfill/daily-metrics/${targetStockId}/history`,
+          {
+            categories: "margin_trading",
+            lookback_days: 365,
             sleep_seconds: 0.05,
             skip_existing: true,
           }
@@ -2274,8 +2361,7 @@ export default function StockDetailPanel({
           fetchJson<MarginTradingDailyRead[]>(`/api/market/margin/${targetStockId}/history`, {
             lookback_days: 365,
             limit: 365,
-            ensure_history: true,
-            sleep_seconds: 0.05,
+            ensure_history: false,
           }),
         ]);
 
@@ -2288,13 +2374,22 @@ export default function StockDetailPanel({
       }
 
       if (tab === "institutional") {
+        await runBackfill(
+          `/api/market/backfill/daily-metrics/${targetStockId}/history`,
+          {
+            categories: "institutional_trade",
+            lookback_days: institutionalLookbackDays,
+            sleep_seconds: 0.05,
+            skip_existing: true,
+          }
+        );
+
         const institutionalRows = await fetchJson<InstitutionalTradeDailyRead[]>(
           `/api/market/institutional/${targetStockId}/history`,
           {
             lookback_days: institutionalLookbackDays,
             limit: institutionalHistoryLimit,
-            ensure_history: true,
-            sleep_seconds: 0.05,
+            ensure_history: false,
           }
         );
 
@@ -2307,13 +2402,20 @@ export default function StockDetailPanel({
       }
 
       if (tab === "revenue") {
+        await runBackfill(
+          `/api/market/backfill/revenue/${targetStockId}/history`,
+          {
+            lookback_months: revenueHistoryLimit,
+            sleep_seconds: 0.05,
+            skip_existing: true,
+          }
+        );
+
         const revenueRows = await fetchJson<MonthlyRevenueRead[]>(
           `/api/market/revenue/${targetStockId}/history`,
           {
             limit: revenueHistoryLimit,
-            ensure_history: true,
-            backfill_months: revenueHistoryLimit,
-            sleep_seconds: 0.05,
+            ensure_history: false,
           }
         );
 
@@ -2326,13 +2428,20 @@ export default function StockDetailPanel({
       }
 
       if (tab === "earnings") {
+        await runBackfill(
+          `/api/market/backfill/financials/${targetStockId}/history`,
+          {
+            lookback_quarters: financialHistoryLimit,
+            sleep_seconds: 0.05,
+            skip_existing: true,
+          }
+        );
+
         const financialRows = await fetchJson<FinancialMetricQuarterlyRead[]>(
           `/api/market/financials/${targetStockId}/history`,
           {
             limit: financialHistoryLimit,
-            ensure_history: true,
-            backfill_quarters: financialHistoryLimit,
-            sleep_seconds: 0.05,
+            ensure_history: false,
           }
         );
 
@@ -2469,7 +2578,20 @@ export default function StockDetailPanel({
       institutionalSeries.filter((point) => point.date >= displayStartDate)
     );
     const displayLatestPoint = recentPoints[recentPoints.length - 1] ?? latestPoint;
+    const activeDailyPoint =
+      recentPoints.find((point) => point.date === institutionalHoverDate) ?? displayLatestPoint;
+    const ratioHistory = institutionalHoldingRatio?.history ?? [];
+    const activeHoldingRatio = institutionalHoverDate
+      ? ratioHistory.find((point) => point.trade_date === institutionalHoverDate) ?? null
+      : institutionalHoldingRatio;
+    const ratioDate =
+      institutionalHoverDate ?? activeHoldingRatio?.trade_date ?? activeDailyPoint.date;
     const tableRows = recentPoints.slice().reverse();
+    const handleInstitutionalHoverPoint = (point: InstitutionalSeriesPoint | null) => {
+      setInstitutionalHoverDate((current) =>
+        current === point?.date ? current : point?.date ?? null
+      );
+    };
 
     return (
       <div className="space-y-5">
@@ -2505,19 +2627,65 @@ export default function StockDetailPanel({
             title="外資"
             netKey="foreignNet"
             cumulativeKey="foreignCumulative"
+            activeDate={institutionalHoverDate}
+            onHoverPointChange={handleInstitutionalHoverPoint}
           />
           <InstitutionalFlowChart
             points={recentPoints}
             title="投信"
             netKey="investmentTrustNet"
             cumulativeKey="investmentTrustCumulative"
+            activeDate={institutionalHoverDate}
+            onHoverPointChange={handleInstitutionalHoverPoint}
           />
           <InstitutionalFlowChart
             points={recentPoints}
             title="自營商"
             netKey="dealerNet"
             cumulativeKey="dealerCumulative"
+            activeDate={institutionalHoverDate}
+            showXAxisLabels
+            onHoverPointChange={handleInstitutionalHoverPoint}
           />
+        </div>
+
+        <div className="border border-slate-200 bg-white px-4 py-3">
+          <div className="mb-3 flex items-center justify-between gap-4">
+            <div>
+              <div className="text-sm font-bold text-slate-950">法人持有比例</div>
+              <div className="mt-1 text-[11px] text-slate-500">
+                實際持股比例
+              </div>
+            </div>
+            <div className="text-sm font-bold text-slate-900">
+              {formatDate(ratioDate)}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-2 text-center text-xs">
+            {[
+              {
+                label: "外資",
+                value: activeHoldingRatio?.foreign_investor_ratio ?? null,
+              },
+              {
+                label: "投信",
+                value: activeHoldingRatio?.investment_trust_ratio ?? null,
+              },
+              {
+                label: "自營商",
+                value: activeHoldingRatio?.dealer_ratio ?? null,
+              },
+            ].map((item) => (
+              <div key={item.label} className="border border-slate-200 px-3 py-3">
+                <div className="font-semibold text-slate-700">{item.label}</div>
+                <div className="mt-2 text-base font-bold text-slate-950">
+                  {formatRatioPct(item.value)}
+                </div>
+                <div className="mt-1 text-[11px] text-slate-500">持股比例</div>
+              </div>
+            ))}
+          </div>
         </div>
 
         <div className="overflow-hidden border border-slate-200">

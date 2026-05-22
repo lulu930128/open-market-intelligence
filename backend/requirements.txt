@@ -4,6 +4,7 @@ pydantic
 pydantic-settings
 python-dotenv
 sqlalchemy
+alembic
 apscheduler
 pandas
 requests

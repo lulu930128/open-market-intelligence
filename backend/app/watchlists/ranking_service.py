@@ -5,7 +5,7 @@ from app.market.signal_service import calculate_latest_stock_signals
 from app.watchlists import service as watchlist_service
 
 
-_ALLOWED_RANK_FIELDS = {"score", "change_pct", "volume", "close"}
+_ALLOWED_RANK_FIELDS = {"watchlist", "score", "change_pct", "volume"}
 _ALLOWED_SORT_ORDERS = {"asc", "desc"}
 
 
@@ -108,8 +108,8 @@ def get_watchlist_group_latest_ranking(
     group_id: int,
     include_children: bool = True,
     enabled_only: bool = True,
-    rank_by: str = "score",
-    sort_order: str = "desc",
+    rank_by: str = "watchlist",
+    sort_order: str = "asc",
     ma_windows: str = "5,20,60",
     volume_ma_windows: str = "5,20",
     limit: int = 100,
@@ -138,7 +138,7 @@ def get_watchlist_group_latest_ranking(
         group_id=group_id,
         enabled=True if enabled_only else None,
         include_children=include_children,
-        limit=1000,
+        limit=10000,
         offset=0,
     )
 
@@ -236,23 +236,27 @@ def get_watchlist_group_latest_ranking(
     no_data_count = sum(1 for row in rows if row["status"] == "no_data")
     error_count = sum(1 for row in rows if row["status"] == "error")
 
-    sortable_rows: list[dict] = []
-    unsortable_rows: list[dict] = []
+    if rank_by == "watchlist":
+        sortable_rows = rows
+        ranked_results = rows
+    else:
+        sortable_rows: list[dict] = []
+        unsortable_rows: list[dict] = []
 
-    for row in rows:
-        rank_value = _get_rank_value(row, rank_by)
+        for row in rows:
+            rank_value = _get_rank_value(row, rank_by)
 
-        if row["status"] in {"error", "no_data"} or rank_value is None:
-            unsortable_rows.append(row)
-        else:
-            sortable_rows.append(row)
+            if row["status"] in {"error", "no_data"} or rank_value is None:
+                unsortable_rows.append(row)
+            else:
+                sortable_rows.append(row)
 
-    sortable_rows.sort(
-        key=lambda row: _get_rank_value(row, rank_by),
-        reverse=sort_order == "desc",
-    )
+        sortable_rows.sort(
+            key=lambda row: _get_rank_value(row, rank_by),
+            reverse=sort_order == "desc",
+        )
 
-    ranked_results = sortable_rows + unsortable_rows
+        ranked_results = sortable_rows + unsortable_rows
 
     for index, row in enumerate(ranked_results, start=1):
         row["rank"] = index

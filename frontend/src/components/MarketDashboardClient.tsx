@@ -20,6 +20,7 @@ import type {
 import { useEffect, useMemo, useRef, useState } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
+type RankBy = "none" | "change_pct" | "score" | "volume";
 type Props = {
   initialTree: WatchlistGroupNode[];
   initialItems: WatchlistItemRead[];
@@ -57,6 +58,7 @@ function valueTone(value: number | null | undefined) {
 }
 
 function statusLabel(status: string) {
+  if (status === "pending") return "-";
   if (status.includes("bullish")) return "偏多";
   if (status.includes("bearish")) return "偏空";
   if (status === "no_data") return "無資料";
@@ -65,9 +67,9 @@ function statusLabel(status: string) {
 }
 
 function rankLabel(rankBy: string) {
+  if (rankBy === "none" || rankBy === "watchlist") return "正常排序";
   if (rankBy === "change_pct") return "漲幅";
   if (rankBy === "volume") return "成交量";
-  if (rankBy === "close") return "收盤價";
   return "Score";
 }
 
@@ -241,6 +243,73 @@ function flattenGroups(nodes: WatchlistGroupNode[]): WatchlistGroupNode[] {
   return nodes.flatMap((node) => [node, ...flattenGroups(node.children)]);
 }
 
+function buildWatchlistRows(
+  group: WatchlistGroupNode | null,
+  items: WatchlistItemRead[]
+): RankingItem[] {
+  if (!group) return [];
+
+  const itemsByGroupId = new Map<number, WatchlistItemRead[]>();
+  const seenStockIds = new Set<string>();
+  const rows: RankingItem[] = [];
+
+  items.forEach((item) => {
+    if (!item.enabled) return;
+
+    const groupItems = itemsByGroupId.get(item.group_id) ?? [];
+    groupItems.push(item);
+    itemsByGroupId.set(item.group_id, groupItems);
+  });
+
+  function appendGroupRows(currentGroup: WatchlistGroupNode) {
+    (itemsByGroupId.get(currentGroup.id) ?? []).forEach((item) => {
+      if (seenStockIds.has(item.stock_id)) return;
+
+      seenStockIds.add(item.stock_id);
+      rows.push({
+        rank: rows.length + 1,
+        stock_id: item.stock_id,
+        stock_name: item.stock_name,
+        time: null,
+        close: null,
+        volume: null,
+        change_pct: null,
+        score: null,
+        status: "pending",
+        signal_count: 0,
+        signal_keys: [],
+        primary_signal_key: null,
+        primary_signal_label: null,
+        intraday_previous_close: null,
+        intraday_points: [],
+        error_message: null,
+      });
+    });
+
+    currentGroup.children.forEach(appendGroupRows);
+  }
+
+  appendGroupRows(group);
+  return rows;
+}
+
+function mergeWatchlistRows(
+  baseRows: RankingItem[],
+  ranking: RankingResponse | null
+) {
+  if (!ranking) return baseRows;
+
+  const rankingByStockId = new Map(
+    ranking.results.map((row) => [row.stock_id, row])
+  );
+
+  return baseRows.map((row, index) => ({
+    ...row,
+    ...(rankingByStockId.get(row.stock_id) ?? {}),
+    rank: index + 1,
+  }));
+}
+
 export default function MarketDashboardClient({
   initialTree,
   initialItems,
@@ -260,16 +329,28 @@ export default function MarketDashboardClient({
   );
   const [selectedStockId, setSelectedStockId] = useState<string | null>(null);
   const [selectedStockName, setSelectedStockName] = useState<string | null>(null);
-  const [rankBy, setRankBy] = useState("change_pct");
+  const [watchlistTree, setWatchlistTree] = useState<WatchlistGroupNode[]>(initialTree);
+  const [watchlistItems, setWatchlistItems] = useState<WatchlistItemRead[]>(initialItems);
+  const [rankBy, setRankBy] = useState<RankBy>("none");
   const [ranking, setRanking] = useState<RankingResponse | null>(initialRankingData);
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
-  const dashboardRequestInFlight = useRef(false);
+  const dashboardRequestSeq = useRef(0);
   const finalDashboardRefreshDate = useRef<string | null>(null);
 
-  const rows = useMemo(() => ranking?.results ?? [], [ranking]);
   const activeGroupId = selectedGroupId ?? selectedGroup?.id ?? null;
+  const baseRows = useMemo(
+    () => buildWatchlistRows(selectedGroup, watchlistItems),
+    [selectedGroup, watchlistItems]
+  );
+  const rows = useMemo(() => {
+    if (rankBy === "none") {
+      return mergeWatchlistRows(baseRows, ranking);
+    }
+
+    return ranking?.results ?? baseRows;
+  }, [baseRows, rankBy, ranking]);
   const summary = useMemo(() => {
     const upCount = rows.filter((row) => {
       return row.change_pct !== null && row.change_pct !== undefined && row.change_pct > 0;
@@ -279,19 +360,19 @@ export default function MarketDashboardClient({
     }).length;
 
     return {
-      stockCount: ranking?.requested_stock_count ?? rows.length,
+      stockCount: baseRows.length,
       upCount,
       downCount,
     };
-  }, [ranking?.requested_stock_count, rows]);
+  }, [baseRows.length, rows]);
 
   async function loadDashboard(
     groupId: number,
     currentRankBy = rankBy,
     options?: { silent?: boolean }
   ) {
-    if (dashboardRequestInFlight.current) return;
-    dashboardRequestInFlight.current = true;
+    const requestSeq = dashboardRequestSeq.current + 1;
+    dashboardRequestSeq.current = requestSeq;
 
     if (!options?.silent) {
       setLoadState("loading");
@@ -310,22 +391,24 @@ export default function MarketDashboardClient({
         `/api/watchlists/groups/${groupId}/rankings/latest`,
         {
           ...commonParams,
-          rank_by: currentRankBy,
-          sort_order: "desc",
+          rank_by: currentRankBy === "none" ? "watchlist" : currentRankBy,
+          sort_order: currentRankBy === "none" ? "asc" : "desc",
           limit: 100,
           volume_ratio_threshold: 1.5,
-          use_intraday: true,
+          use_intraday: false,
         }
       );
+
+      if (dashboardRequestSeq.current !== requestSeq) return;
 
       setRanking(rankingData);
       setLastUpdatedAt(formatDashboardTime(new Date()));
       setLoadState("success");
     } catch (error) {
+      if (dashboardRequestSeq.current !== requestSeq) return;
+
       setLoadState("error");
       setErrorMessage(error instanceof Error ? error.message : "資料讀取失敗");
-    } finally {
-      dashboardRequestInFlight.current = false;
     }
   }
 
@@ -382,7 +465,7 @@ export default function MarketDashboardClient({
 
         scheduleRefresh();
       });
-    }, 0);
+    }, 120);
 
     return () => {
       disposed = true;
@@ -399,6 +482,9 @@ export default function MarketDashboardClient({
     if (group !== null) {
       setSelectedStockId(null);
       setSelectedStockName(null);
+      setRanking(null);
+      setLoadState("idle");
+      setErrorMessage(null);
     } else {
       setRanking(null);
     }
@@ -409,8 +495,11 @@ export default function MarketDashboardClient({
     setSelectedStockName(stockName);
   }
 
-  function handleRankByChange(value: string) {
+  function handleRankByChange(value: RankBy) {
     setRankBy(value);
+    setRanking(null);
+    setLoadState("idle");
+    setErrorMessage(null);
   }
 
   function renderRankingRow(row: RankingItem) {
@@ -460,11 +549,13 @@ export default function MarketDashboardClient({
   const rankingPanel = (
     <section className="border border-slate-200 bg-white">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-3">
-        <h3 className="text-sm font-bold text-slate-950">自選股漲幅排行</h3>
+        <h3 className="text-sm font-bold text-slate-950">自選股列表</h3>
         <span className="text-xs text-slate-500">
           {loadState === "loading"
             ? "載入中"
-            : `${rows.length} 檔 · 依 ${rankLabel(ranking?.rank_by ?? rankBy)} 排序`}
+            : rankBy === "none"
+              ? `${rows.length} 檔 · 正常排序`
+              : `${rows.length} 檔 · 依 ${rankLabel(ranking?.rank_by ?? rankBy)} 排序`}
         </span>
       </div>
 
@@ -492,16 +583,27 @@ export default function MarketDashboardClient({
       <div className="flex h-full min-w-[1180px] flex-col">
         <div className="flex min-h-0 flex-1">
           <SidebarWatchlistExplorer
-            initialTree={initialTree}
-            initialItems={initialItems}
+            initialTree={watchlistTree}
+            initialItems={watchlistItems}
             selectedGroupId={activeGroupId}
             selectedStockId={selectedStockId}
             onSelectGroup={handleSelectGroup}
             onSelectStock={handleSelectStock}
-            onChanged={async (nextGroupId) => {
+            onExplorerDataChanged={(nextTree, nextItems) => {
+              setWatchlistTree(nextTree);
+              setWatchlistItems(nextItems);
+
+              const nextSelectedGroup =
+                flattenGroups(nextTree).find((group) => group.id === activeGroupId) ?? null;
+
+              if (nextSelectedGroup) {
+                setSelectedGroup(nextSelectedGroup);
+              }
+            }}
+            onChanged={(nextGroupId) => {
               const groupId = nextGroupId === undefined ? activeGroupId : nextGroupId;
               if (groupId !== null) {
-                await loadDashboard(groupId);
+                void loadDashboard(groupId);
               } else {
                 setRanking(null);
               }
@@ -526,13 +628,13 @@ export default function MarketDashboardClient({
                 <div className="flex items-center gap-2">
                   <select
                     value={rankBy}
-                    onChange={(event) => handleRankByChange(event.target.value)}
+                    onChange={(event) => handleRankByChange(event.target.value as RankBy)}
                     className="h-9 border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-700 outline-none focus:border-red-700"
                   >
+                    <option value="none">正常排序</option>
                     <option value="change_pct">漲幅</option>
                     <option value="score">Score</option>
                     <option value="volume">成交量</option>
-                    <option value="close">收盤價</option>
                   </select>
                   <button
                     type="button"

@@ -173,6 +173,26 @@ class InstitutionalTradeDailyRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class InstitutionalHoldingRatioPointRead(BaseModel):
+    trade_date: date
+    foreign_investor_ratio: float | None = None
+    investment_trust_ratio: float | None = None
+    dealer_ratio: float | None = None
+
+
+class InstitutionalHoldingRatioRead(BaseModel):
+    stock_id: str
+    stock_name: str | None = None
+    trade_date: date | None = None
+    foreign_investor_ratio: float | None = None
+    investment_trust_ratio: float | None = None
+    dealer_ratio: float | None = None
+    source_name: str
+    source_url: str
+    fetched_at: datetime
+    history: list[InstitutionalHoldingRatioPointRead] = []
+
+
 class MarginTradingDailyRead(BaseModel):
     id: int
     source_id: int

@@ -1,14 +1,26 @@
 ﻿from contextlib import asynccontextmanager
+import logging
+import time
+import uuid
+
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import PROJECT_ROOT
 from app.db.session import init_db
-from app.routers import indicators, market, raw_results, reports, sources, stocks, system, watchlists
+from app.errors import (
+    http_exception_handler,
+    unhandled_exception_handler,
+    validation_exception_handler,
+)
+from app.routers import indicators, jobs, market, raw_results, reports, sources, stocks, system, watchlists
 
 
 FAVICON_PATH = PROJECT_ROOT / "frontend" / "src" / "app" / "favicon.ico"
+request_logger = logging.getLogger("app.requests")
 
 
 @asynccontextmanager
@@ -24,6 +36,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
+app.add_exception_handler(Exception, unhandled_exception_handler)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -35,9 +51,43 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def add_request_context(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+    request.state.request_id = request_id
+    started_at = time.perf_counter()
+
+    try:
+        response = await call_next(request)
+    except Exception:
+        duration_ms = (time.perf_counter() - started_at) * 1000
+        request_logger.exception(
+            "request failed method=%s path=%s duration_ms=%.1f request_id=%s",
+            request.method,
+            request.url.path,
+            duration_ms,
+            request_id,
+        )
+        raise
+
+    duration_ms = (time.perf_counter() - started_at) * 1000
+    response.headers["x-request-id"] = request_id
+    request_logger.info(
+        "request method=%s path=%s status=%s duration_ms=%.1f request_id=%s",
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration_ms,
+        request_id,
+    )
+    return response
+
+
 app.include_router(system.router, prefix="/api/system", tags=["system"])
 app.include_router(sources.router, prefix="/api/sources", tags=["sources"])
 app.include_router(raw_results.router, prefix="/api/raw-results", tags=["raw-results"])
+app.include_router(jobs.router, prefix="/api/jobs", tags=["jobs"])
 app.include_router(market.router, prefix="/api/market", tags=["market"])
 app.include_router(indicators.router, prefix="/api/market/indicators", tags=["market-indicators"])
 app.include_router(stocks.router, prefix="/api/stocks", tags=["stocks"])

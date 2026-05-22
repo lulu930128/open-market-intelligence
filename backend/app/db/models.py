@@ -111,6 +111,30 @@ class RawFetchResult(Base):
     source: Mapped["SourceRegistry"] = relationship(back_populates="raw_results")
 
 
+class JobRun(Base):
+    __tablename__ = "job_run"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    job_type: Mapped[str] = mapped_column(String(100), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    target: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
+
+    progress_current: Mapped[int] = mapped_column(Integer, default=0)
+    progress_total: Mapped[int] = mapped_column(Integer, default=1)
+
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    request_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class DataQualityCheck(Base):
     __tablename__ = "data_quality_check"
 

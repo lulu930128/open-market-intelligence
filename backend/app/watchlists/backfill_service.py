@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from datetime import date
 
 from sqlalchemy.orm import Session
@@ -5,6 +6,9 @@ from sqlalchemy.orm import Session
 from app.db.models import StockMaster
 from app.market.backfill import backfill_tpex_trading_stock, backfill_twse_stock_day
 from app.watchlists import service as watchlist_service
+
+
+ProgressCallback = Callable[[int, int, str], None]
 
 
 def _get_result_field(result, field_name: str, default=None):
@@ -36,8 +40,8 @@ def _backfill_stock_by_market(
     market: str | None,
     start_date: date,
     end_date: date,
-    twse_source_id: int,
-    tpex_source_id: int,
+    twse_source_id: int | None,
+    tpex_source_id: int | None,
     sleep_seconds: float,
     skip_existing_months: bool,
 ) -> dict:
@@ -86,12 +90,13 @@ def backfill_watchlist_group_twse(
     group_id: int,
     start_date: date,
     end_date: date,
-    source_id: int = 1,
-    tpex_source_id: int = 6,
+    source_id: int | None = None,
+    tpex_source_id: int | None = None,
     include_children: bool = True,
     enabled_only: bool = True,
     sleep_seconds: float = 0.8,
     skip_existing_months: bool = True,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict:
     """
     Backfill all enabled watchlist items under a group.
@@ -129,8 +134,12 @@ def backfill_watchlist_group_twse(
     warning_count = 0
     error_count = 0
     skipped_count = 0
+    total_count = len(unique_items)
 
-    for item in unique_items:
+    if progress_callback is not None:
+        progress_callback(0, total_count, "Watchlist backfill started.")
+
+    for index, item in enumerate(unique_items, start=1):
         stock_id = item["stock_id"]
         stock_name = item.get("stock_name")
         market = _get_stock_market(db=db, stock_id=stock_id)
@@ -177,6 +186,13 @@ def backfill_watchlist_group_twse(
                 }
             )
 
+            if progress_callback is not None:
+                progress_callback(
+                    index,
+                    total_count,
+                    f"Backfilled {stock_id} ({index}/{total_count}).",
+                )
+
         except Exception as exc:
             error_count += 1
 
@@ -194,12 +210,19 @@ def backfill_watchlist_group_twse(
                 }
             )
 
+            if progress_callback is not None:
+                progress_callback(
+                    index,
+                    total_count,
+                    f"Backfill failed for {stock_id} ({index}/{total_count}).",
+                )
+
     return {
         "group_id": group_id,
         "include_children": include_children,
         "start_date": start_date,
         "end_date": end_date,
-        "requested_stock_count": len(unique_items),
+        "requested_stock_count": total_count,
         "success_count": success_count,
         "warning_count": warning_count,
         "error_count": error_count,

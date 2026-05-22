@@ -2,11 +2,15 @@ import json
 
 from app.db.models import SourceRegistry
 from app.db.session import SessionLocal, init_db
+from app.sources.defaults import (
+    TPEX_DAILY_QUOTES_SOURCE_NAME,
+    TWSE_DAILY_TRADING_SOURCE_NAME,
+)
 
 
 DEFAULT_SOURCES = [
     {
-        "source_name": "TWSE OpenAPI Daily Trading",
+        "source_name": TWSE_DAILY_TRADING_SOURCE_NAME,
         "source_type": "api",
         "category": "market_data",
         "endpoint_url": "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL",
@@ -64,7 +68,7 @@ DEFAULT_SOURCES = [
         "reliability_level": "official",
     },
     {
-        "source_name": "TPEx Mainboard Daily Quotes",
+        "source_name": TPEX_DAILY_QUOTES_SOURCE_NAME,
         "source_type": "api",
         "category": "market_data",
         "endpoint_url": (

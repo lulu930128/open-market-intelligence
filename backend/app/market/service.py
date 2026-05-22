@@ -240,7 +240,6 @@ def _ensure_stock_history(
             stock_id=stock_id,
             start_date=start_date,
             end_date=end_date,
-            source_id=1,
             sleep_seconds=sleep_seconds,
             skip_existing_months=True,
         )
@@ -251,7 +250,6 @@ def _ensure_stock_history(
             stock_id=stock_id,
             start_date=start_date,
             end_date=end_date,
-            source_id=6,
             sleep_seconds=sleep_seconds,
             skip_existing_months=True,
         )
@@ -279,7 +277,7 @@ def list_stock_ohlc_chart_data(
     stock_id: str,
     timeframe: str = "daily",
     bars: int = 90,
-    ensure_history: bool = True,
+    ensure_history: bool = False,
     to_date: date | None = None,
     sleep_seconds: float = 0.1,
 ) -> dict:

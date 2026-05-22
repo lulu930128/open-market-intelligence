@@ -1,6 +1,7 @@
 "use client";
 
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
+import { formatJobStatus, getJobResult, requestBackfillJob } from "@/lib/jobs";
 import type {
   StockMasterRead,
   WatchlistGroupBackfillResult,
@@ -24,6 +25,10 @@ type Props = {
   selectedStockId: string | null;
   onSelectGroup: (group: WatchlistGroupNode | null) => void;
   onSelectStock: (stockId: string, stockName: string | null) => void;
+  onExplorerDataChanged?: (
+    tree: WatchlistGroupNode[],
+    items: WatchlistItemRead[]
+  ) => void;
   onChanged: (nextGroupId?: number | null) => Promise<void> | void;
 };
 
@@ -131,6 +136,7 @@ export default function SidebarWatchlistExplorer({
   selectedStockId,
   onSelectGroup,
   onSelectStock,
+  onExplorerDataChanged,
   onChanged,
 }: Props) {
   const [tree, setTree] = useState<WatchlistGroupNode[]>(initialTree);
@@ -196,13 +202,14 @@ export default function SidebarWatchlistExplorer({
     const [treeData, itemData] = await Promise.all([
       fetchJson<WatchlistGroupNode[]>("/api/watchlists/tree"),
       fetchJson<WatchlistItemRead[]>("/api/watchlists/items", {
-        limit: 1000,
+        limit: 5000,
         offset: 0,
       }),
     ]);
 
     setTree(treeData);
     setItems(itemData);
+    onExplorerDataChanged?.(treeData, itemData);
 
     const flattened = flattenGroups(treeData);
 
@@ -241,7 +248,7 @@ export default function SidebarWatchlistExplorer({
     setMessage(null);
 
     try {
-      const result = await requestJson<WatchlistGroupBackfillResult>(
+      const job = await requestBackfillJob(
         `/api/watchlists/groups/${selectedGroupId}/backfill`,
         { method: "POST" },
         {
@@ -251,8 +258,22 @@ export default function SidebarWatchlistExplorer({
           enabled_only: true,
           sleep_seconds: 0.2,
           skip_existing_months: true,
+        },
+        {
+          timeoutMs: 600000,
+          onUpdate: (updatedJob) => {
+            setMessage({
+              type: updatedJob.status === "error" ? "error" : "success",
+              text: formatJobStatus(updatedJob),
+            });
+          },
         }
       );
+      const result = getJobResult<WatchlistGroupBackfillResult>(job);
+
+      if (!result) {
+        throw new Error("Backfill job finished without a result.");
+      }
 
       const nextGroup = await reloadExplorerData({ keepSelection: true });
       await onChanged(nextGroup?.id ?? selectedGroupId);

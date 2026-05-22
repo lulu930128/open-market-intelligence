@@ -20,6 +20,10 @@ from app.parsers.twse_stock_day import (
     validate_twse_stock_day_payload,
 )
 from app.parsers.twse_common import parse_float, parse_int
+from app.sources.defaults import (
+    TPEX_DAILY_QUOTES_SOURCE_NAME,
+    TWSE_DAILY_TRADING_SOURCE_NAME,
+)
 from app.utils.hash import sha256_text
 
 
@@ -67,11 +71,25 @@ def _get_stock_name(db: Session, stock_id: str) -> str | None:
     return None
 
 
-def _get_source(db: Session, source_id: int) -> SourceRegistry:
-    source = db.query(SourceRegistry).filter(SourceRegistry.id == source_id).first()
+def _get_source(
+    db: Session,
+    source_id: int | None,
+    fallback_source_name: str,
+) -> SourceRegistry:
+    query = db.query(SourceRegistry)
+
+    if source_id is not None:
+        source = query.filter(SourceRegistry.id == source_id).first()
+
+        if source is None:
+            raise ValueError(f"Source id={source_id} not found.")
+
+        return source
+
+    source = query.filter(SourceRegistry.source_name == fallback_source_name).first()
 
     if source is None:
-        raise ValueError(f"Source id={source_id} not found.")
+        raise ValueError(f"Source name='{fallback_source_name}' not found.")
 
     return source
 
@@ -276,14 +294,18 @@ def backfill_twse_stock_day(
     stock_id: str,
     start_date: date,
     end_date: date,
-    source_id: int = 1,
+    source_id: int | None = None,
     sleep_seconds: float = 0.8,
     skip_existing_months: bool = False,
 ) -> dict:
     if end_date < start_date:
         raise ValueError("end_date must be greater than or equal to start_date.")
 
-    source = _get_source(db, source_id)
+    source = _get_source(
+        db=db,
+        source_id=source_id,
+        fallback_source_name=TWSE_DAILY_TRADING_SOURCE_NAME,
+    )
     stock_name = _get_stock_name(db, stock_id)
 
     month_starts = _month_starts(start_date, end_date)
@@ -543,14 +565,18 @@ def backfill_tpex_trading_stock(
     stock_id: str,
     start_date: date,
     end_date: date,
-    source_id: int = 6,
+    source_id: int | None = None,
     sleep_seconds: float = 0.8,
     skip_existing_months: bool = False,
 ) -> dict:
     if end_date < start_date:
         raise ValueError("end_date must be greater than or equal to start_date.")
 
-    source = _get_source(db, source_id)
+    source = _get_source(
+        db=db,
+        source_id=source_id,
+        fallback_source_name=TPEX_DAILY_QUOTES_SOURCE_NAME,
+    )
     stock_name = _get_stock_name(db, stock_id)
     month_starts = _month_starts(start_date, end_date)
 

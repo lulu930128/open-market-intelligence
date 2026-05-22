@@ -14,6 +14,19 @@ class SourceNotFoundError(Exception):
     pass
 
 
+def get_source_by_name(db: Session, source_name: str) -> SourceRegistry:
+    source = (
+        db.query(SourceRegistry)
+        .filter(SourceRegistry.source_name == source_name)
+        .first()
+    )
+
+    if source is None:
+        raise SourceNotFoundError(f"Source name='{source_name}' not found.")
+
+    return source
+
+
 def list_sources(db: Session) -> list[SourceRegistry]:
     return (
         db.query(SourceRegistry)

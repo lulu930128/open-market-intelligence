@@ -24,7 +24,7 @@ Open Market Intelligence 是一套以公開市場資料為基礎的本機化投�
 - 新聞、事件、話題資料尚未接入正式儀表板。
 - 非台股市場資料源尚未實作。
 - 法人圓餅圖、籌碼圖表與右側進階分析區仍是後續擴充項目。
-- 尚未導入正式 migration 工具，目前資料表由 SQLAlchemy model 初始化。
+- 已加入 Alembic baseline migration。既有本機資料庫可先 `stamp head`，新資料庫可用 `upgrade head` 建表。
 
 ## 系統架構
 
@@ -141,6 +141,7 @@ backend/
 | `source_registry` | 資料源註冊表 |
 | `fetch_log` | 每次抓取任務紀錄 |
 | `raw_fetch_result` | 原始 API 回應保存 |
+| `job_run` | backfill / maintenance job 狀態、進度與錯誤紀錄 |
 | `data_quality_check` | 資料品質檢查結果 |
 | `stock_master` | 股票主檔 |
 | `stock_profile` | 公司基本資料 |
@@ -315,6 +316,77 @@ cd backend
 python -m app.scripts.seed_sources
 ```
 
+## 資料庫 Migration
+
+後端已加入 Alembic 設定，migration 設定檔位於專案根目錄 `alembic.ini`，版本檔位於 `backend/alembic/versions/`。
+
+既有本機資料庫已經有目前 schema 時，只需要標記 baseline：
+
+```powershell
+cd "C:\Open Market Intelligence"
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r backend\requirements.txt
+python -m alembic stamp head
+```
+
+新建空資料庫時，使用 migration 建表：
+
+```powershell
+cd "C:\Open Market Intelligence"
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r backend\requirements.txt
+python -m alembic upgrade head
+```
+
+後續調整 SQLAlchemy models 時，應新增 Alembic revision，不再只依賴 `create_all()`。
+
+## 查詢與補資料分工
+
+GET 查詢端點預設只讀資料，不會自動補歷史資料。需要寫入資料庫的補資料流程改由 POST backfill 端點觸發，例如：
+
+```text
+POST /api/market/backfill/daily-metrics/{stock_id}/history
+POST /api/market/backfill/shareholding/{stock_id}/history
+POST /api/market/backfill/revenue/{stock_id}/history
+POST /api/market/backfill/financials/{stock_id}/history
+POST /api/watchlists/groups/{group_id}/backfill
+```
+
+TWSE / TPEx 日線回補預設會依資料源名稱解析來源，不再依賴資料庫流水號；`source_id` 仍可作為特殊情境的覆寫參數。
+
+## Job 狀態與錯誤格式
+
+POST backfill 端點會先建立 `job_run`，回傳 HTTP `202` 與 job 狀態；實際工作由 FastAPI background task 執行。前端會輪詢 job API，直到 `success` 或 `error`：
+
+```text
+GET /api/jobs/{job_id}
+GET /api/jobs?status=running
+```
+
+`job_run` 目前提供單機開發可用的排程與進度追蹤；正式部署若需要跨程序、重試、排隊與並發控制，可保留同一個 API/資料表，再把執行層替換成 Celery、RQ 或其他 worker。
+
+API 錯誤統一回傳以下格式，並在 response header 帶 `x-request-id`：
+
+```json
+{
+  "error": {
+    "code": "validation_error",
+    "message": "Request validation failed.",
+    "request_id": "..."
+  }
+}
+```
+
+## Raw Result 保留政策
+
+`raw_fetch_result` 會保留 metadata 與 id，避免破壞其他資料表的 `raw_result_id` 追溯關係。清理策略預設只壓縮舊資料的 `raw_text` 欄位，不刪 row：
+
+```text
+POST /api/raw-results/retention/compact?dry_run=true&keep_latest_per_source=200&max_age_days=180
+```
+
+`dry_run=true` 只回報候選筆數與預估釋放字元數；確認後可改 `dry_run=false` 執行。`keep_latest_per_source` 會保留每個 source 最新 N 筆 raw text，`max_age_days` 可限制只處理指定天數以前的資料。
+
 目前預設資料源包含：
 
 - TWSE daily trading。
@@ -396,7 +468,7 @@ Open Market Intelligence/
 
 中期：
 
-- 導入正式 migration 工具。
+- 將補資料流程升級為可查詢進度的背景任務。
 - 將新聞、事件、話題資料接入主儀表板。
 - 建立非台股市場資料源與 API adapter。
 - 增加資料排程與背景任務。

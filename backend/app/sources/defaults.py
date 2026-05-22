@@ -1,0 +1,2 @@
+TWSE_DAILY_TRADING_SOURCE_NAME = "TWSE OpenAPI Daily Trading"
+TPEX_DAILY_QUOTES_SOURCE_NAME = "TPEx Mainboard Daily Quotes"

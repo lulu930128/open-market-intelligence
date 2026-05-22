@@ -1,25 +1,29 @@
 from datetime import date, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
-from app.market.backfill import backfill_tpex_trading_stock, backfill_twse_stock_day
 from app.market.daily_metrics_backfill import (
-    ensure_daily_metrics,
     ensure_latest_daily_metrics,
     ensure_stock_daily_metrics,
 )
 from app.market.fundamental_metrics_backfill import (
-    ensure_fundamental_metrics,
     ensure_stock_fundamental_metrics,
 )
 from app.market.financial_metrics_history_backfill import ensure_stock_financial_metrics_history
 from app.market.monthly_revenue_history_backfill import ensure_stock_monthly_revenue_history
 from app.market.shareholding_history_backfill import ensure_stock_shareholding_history
 from app.db.session import get_db
+from app.jobs import backfill_tasks, service as job_service
+from app.jobs.schemas import JobRunRead
+from app.market.institutional_holding_ratios import (
+    InstitutionalHoldingRatioFetchError,
+    fetch_institutional_holding_ratios,
+)
 from app.market.intraday import get_intraday_trend
 from app.market.schemas import (
     FinancialMetricQuarterlyRead,
     IntradayTrendRead,
+    InstitutionalHoldingRatioRead,
     InstitutionalTradeDailyRead,
     MarginTradingDailyRead,
     MarketDailyChartRead,
@@ -27,7 +31,6 @@ from app.market.schemas import (
     MarketDailyPriceRead,
     MonthlyRevenueRead,
     ShareholdingDistributionWeeklyRead,
-    TwseBackfillResultRead,
 )
 from app.market.service import (
     get_latest_stock_financial_metric,
@@ -77,62 +80,115 @@ def _daily_metric_history_range(
     return start_date, end_date
 
 
-@router.post("/backfill/twse/{stock_id}", response_model=TwseBackfillResultRead)
+def _queue_backfill_job(
+    *,
+    db: Session,
+    background_tasks: BackgroundTasks,
+    job_type: str,
+    target: str | None,
+    request: dict,
+    task,
+    task_args: tuple,
+):
+    job = job_service.create_job(
+        db=db,
+        job_type=job_type,
+        target=target,
+        request=request,
+        progress_total=1,
+        message="Queued.",
+    )
+    background_tasks.add_task(task, job.id, *task_args)
+    return job_service.serialize_job(job)
+
+
+@router.post(
+    "/backfill/twse/{stock_id}",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def backfill_twse_stock_daily_prices(
     stock_id: str,
     start_date: date,
     end_date: date,
-    source_id: int = 1,
+    background_tasks: BackgroundTasks,
+    source_id: int | None = None,
     sleep_seconds: float = 0.8,
     skip_existing_months: bool = False,
     db: Session = Depends(get_db),
 ):
-    try:
-        return backfill_twse_stock_day(
-            db=db,
-            stock_id=stock_id,
-            start_date=start_date,
-            end_date=end_date,
-            source_id=source_id,
-            sleep_seconds=sleep_seconds,
-            skip_existing_months=skip_existing_months,
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
+    return _queue_backfill_job(
+        db=db,
+        background_tasks=background_tasks,
+        job_type="market.twse_daily_price_backfill",
+        target=stock_id,
+        request={
+            "stock_id": stock_id,
+            "start_date": start_date,
+            "end_date": end_date,
+            "source_id": source_id,
+            "sleep_seconds": sleep_seconds,
+            "skip_existing_months": skip_existing_months,
+        },
+        task=backfill_tasks.run_twse_daily_price_job,
+        task_args=(
+            stock_id,
+            start_date,
+            end_date,
+            source_id,
+            sleep_seconds,
+            skip_existing_months,
+        ),
+    )
 
 
-@router.post("/backfill/tpex/{stock_id}", response_model=TwseBackfillResultRead)
+@router.post(
+    "/backfill/tpex/{stock_id}",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def backfill_tpex_stock_daily_prices(
     stock_id: str,
     start_date: date,
     end_date: date,
-    source_id: int = 6,
+    background_tasks: BackgroundTasks,
+    source_id: int | None = None,
     sleep_seconds: float = 0.8,
     skip_existing_months: bool = False,
     db: Session = Depends(get_db),
 ):
-    try:
-        return backfill_tpex_trading_stock(
-            db=db,
-            stock_id=stock_id,
-            start_date=start_date,
-            end_date=end_date,
-            source_id=source_id,
-            sleep_seconds=sleep_seconds,
-            skip_existing_months=skip_existing_months,
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
+    return _queue_backfill_job(
+        db=db,
+        background_tasks=background_tasks,
+        job_type="market.tpex_daily_price_backfill",
+        target=stock_id,
+        request={
+            "stock_id": stock_id,
+            "start_date": start_date,
+            "end_date": end_date,
+            "source_id": source_id,
+            "sleep_seconds": sleep_seconds,
+            "skip_existing_months": skip_existing_months,
+        },
+        task=backfill_tasks.run_tpex_daily_price_job,
+        task_args=(
+            stock_id,
+            start_date,
+            end_date,
+            source_id,
+            sleep_seconds,
+            skip_existing_months,
+        ),
+    )
 
 
-@router.post("/backfill/daily-metrics")
+@router.post(
+    "/backfill/daily-metrics",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def backfill_market_daily_metrics(
+    background_tasks: BackgroundTasks,
     start_date: date | None = None,
     end_date: date | None = None,
     categories: str = Query(default="institutional_trade,margin_trading"),
@@ -142,37 +198,90 @@ def backfill_market_daily_metrics(
     skip_existing: bool = True,
     db: Session = Depends(get_db),
 ):
-    try:
-        category_list = _split_categories(categories)
+    category_list = _split_categories(categories)
+    return _queue_backfill_job(
+        db=db,
+        background_tasks=background_tasks,
+        job_type="market.daily_metrics_backfill",
+        target=None,
+        request={
+            "start_date": start_date,
+            "end_date": end_date,
+            "categories": category_list,
+            "lookback_days": lookback_days,
+            "include_today": include_today,
+            "sleep_seconds": sleep_seconds,
+            "skip_existing": skip_existing,
+        },
+        task=backfill_tasks.run_market_daily_metrics_job,
+        task_args=(
+            start_date,
+            end_date,
+            category_list,
+            lookback_days,
+            include_today,
+            sleep_seconds,
+            skip_existing,
+        ),
+    )
 
-        if start_date is not None:
-            return ensure_daily_metrics(
-                db=db,
-                start_date=start_date,
-                end_date=end_date or start_date,
-                categories=category_list,
-                sleep_seconds=sleep_seconds,
-                skip_existing=skip_existing,
-            )
 
-        return ensure_latest_daily_metrics(
-            db=db,
-            categories=category_list,
-            to_date=end_date,
-            lookback_days=lookback_days,
-            include_today=include_today,
-            sleep_seconds=sleep_seconds,
-            skip_existing=skip_existing,
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
+@router.post(
+    "/backfill/daily-metrics/{stock_id}/history",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def backfill_stock_daily_metrics_history(
+    stock_id: str,
+    background_tasks: BackgroundTasks,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    categories: str = Query(default="institutional_trade,margin_trading"),
+    lookback_days: int = Query(default=365, ge=1, le=5000),
+    include_today: bool = False,
+    sleep_seconds: float = Query(default=0.2, ge=0, le=3),
+    skip_existing: bool = True,
+    db: Session = Depends(get_db),
+):
+    start_date, end_date = _daily_metric_history_range(
+        from_date=from_date,
+        to_date=to_date,
+        lookback_days=lookback_days,
+        include_today=include_today,
+    )
+    category_list = _split_categories(categories)
+    return _queue_backfill_job(
+        db=db,
+        background_tasks=background_tasks,
+        job_type="market.stock_daily_metrics_history_backfill",
+        target=stock_id,
+        request={
+            "stock_id": stock_id,
+            "start_date": start_date,
+            "end_date": end_date,
+            "categories": category_list,
+            "sleep_seconds": sleep_seconds,
+            "skip_existing": skip_existing,
+        },
+        task=backfill_tasks.run_stock_daily_metrics_history_job,
+        task_args=(
+            stock_id,
+            start_date,
+            end_date,
+            category_list,
+            sleep_seconds,
+            skip_existing,
+        ),
+    )
 
 
-@router.post("/backfill/fundamentals")
+@router.post(
+    "/backfill/fundamentals",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def backfill_market_fundamental_metrics(
+    background_tasks: BackgroundTasks,
     categories: str = Query(
         default="shareholding_distribution,monthly_revenue,financial_metrics"
     ),
@@ -180,23 +289,30 @@ def backfill_market_fundamental_metrics(
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     db: Session = Depends(get_db),
 ):
-    try:
-        return ensure_fundamental_metrics(
-            db=db,
-            categories=_split_categories(categories),
-            force=force,
-            sleep_seconds=sleep_seconds,
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
+    category_list = _split_categories(categories)
+    return _queue_backfill_job(
+        db=db,
+        background_tasks=background_tasks,
+        job_type="market.fundamental_metrics_backfill",
+        target=None,
+        request={
+            "categories": category_list,
+            "force": force,
+            "sleep_seconds": sleep_seconds,
+        },
+        task=backfill_tasks.run_market_fundamental_metrics_job,
+        task_args=(category_list, force, sleep_seconds),
+    )
 
 
-@router.post("/backfill/fundamentals/{stock_id}")
+@router.post(
+    "/backfill/fundamentals/{stock_id}",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def backfill_stock_fundamental_metrics(
     stock_id: str,
+    background_tasks: BackgroundTasks,
     categories: str = Query(
         default="shareholding_distribution,monthly_revenue,financial_metrics"
     ),
@@ -204,24 +320,31 @@ def backfill_stock_fundamental_metrics(
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     db: Session = Depends(get_db),
 ):
-    try:
-        return ensure_stock_fundamental_metrics(
-            db=db,
-            stock_id=stock_id,
-            categories=_split_categories(categories),
-            force=force,
-            sleep_seconds=sleep_seconds,
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
+    category_list = _split_categories(categories)
+    return _queue_backfill_job(
+        db=db,
+        background_tasks=background_tasks,
+        job_type="market.stock_fundamental_metrics_backfill",
+        target=stock_id,
+        request={
+            "stock_id": stock_id,
+            "categories": category_list,
+            "force": force,
+            "sleep_seconds": sleep_seconds,
+        },
+        task=backfill_tasks.run_stock_fundamental_metrics_job,
+        task_args=(stock_id, category_list, force, sleep_seconds),
+    )
 
 
-@router.post("/backfill/shareholding/{stock_id}/history")
+@router.post(
+    "/backfill/shareholding/{stock_id}/history",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def backfill_stock_shareholding_history(
     stock_id: str,
+    background_tasks: BackgroundTasks,
     from_date: date | None = None,
     to_date: date | None = None,
     lookback_weeks: int = Query(default=52, ge=1, le=60),
@@ -229,26 +352,39 @@ def backfill_stock_shareholding_history(
     skip_existing: bool = True,
     db: Session = Depends(get_db),
 ):
-    try:
-        return ensure_stock_shareholding_history(
-            db=db,
-            stock_id=stock_id,
-            from_date=from_date,
-            to_date=to_date,
-            lookback_weeks=lookback_weeks,
-            sleep_seconds=sleep_seconds,
-            skip_existing=skip_existing,
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
+    return _queue_backfill_job(
+        db=db,
+        background_tasks=background_tasks,
+        job_type="market.stock_shareholding_history_backfill",
+        target=stock_id,
+        request={
+            "stock_id": stock_id,
+            "from_date": from_date,
+            "to_date": to_date,
+            "lookback_weeks": lookback_weeks,
+            "sleep_seconds": sleep_seconds,
+            "skip_existing": skip_existing,
+        },
+        task=backfill_tasks.run_stock_shareholding_history_job,
+        task_args=(
+            stock_id,
+            from_date,
+            to_date,
+            lookback_weeks,
+            sleep_seconds,
+            skip_existing,
+        ),
+    )
 
 
-@router.post("/backfill/revenue/{stock_id}/history")
+@router.post(
+    "/backfill/revenue/{stock_id}/history",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def backfill_stock_monthly_revenue_history(
     stock_id: str,
+    background_tasks: BackgroundTasks,
     from_period: date | None = None,
     to_period: date | None = None,
     lookback_months: int = Query(default=120, ge=1, le=120),
@@ -256,26 +392,39 @@ def backfill_stock_monthly_revenue_history(
     skip_existing: bool = True,
     db: Session = Depends(get_db),
 ):
-    try:
-        return ensure_stock_monthly_revenue_history(
-            db=db,
-            stock_id=stock_id,
-            from_period=from_period,
-            to_period=to_period,
-            lookback_months=lookback_months,
-            sleep_seconds=sleep_seconds,
-            skip_existing=skip_existing,
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
+    return _queue_backfill_job(
+        db=db,
+        background_tasks=background_tasks,
+        job_type="market.stock_monthly_revenue_history_backfill",
+        target=stock_id,
+        request={
+            "stock_id": stock_id,
+            "from_period": from_period,
+            "to_period": to_period,
+            "lookback_months": lookback_months,
+            "sleep_seconds": sleep_seconds,
+            "skip_existing": skip_existing,
+        },
+        task=backfill_tasks.run_stock_monthly_revenue_history_job,
+        task_args=(
+            stock_id,
+            from_period,
+            to_period,
+            lookback_months,
+            sleep_seconds,
+            skip_existing,
+        ),
+    )
 
 
-@router.post("/backfill/financials/{stock_id}/history")
+@router.post(
+    "/backfill/financials/{stock_id}/history",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def backfill_stock_financial_metrics_history(
     stock_id: str,
+    background_tasks: BackgroundTasks,
     from_fiscal_year: int | None = Query(default=None, ge=1900, le=2100),
     from_quarter: int | None = Query(default=None, ge=1, le=4),
     to_fiscal_year: int | None = Query(default=None, ge=1900, le=2100),
@@ -285,23 +434,33 @@ def backfill_stock_financial_metrics_history(
     skip_existing: bool = True,
     db: Session = Depends(get_db),
 ):
-    try:
-        return ensure_stock_financial_metrics_history(
-            db=db,
-            stock_id=stock_id,
-            from_fiscal_year=from_fiscal_year,
-            from_quarter=from_quarter,
-            to_fiscal_year=to_fiscal_year,
-            to_quarter=to_quarter,
-            lookback_quarters=lookback_quarters,
-            sleep_seconds=sleep_seconds,
-            skip_existing=skip_existing,
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
+    return _queue_backfill_job(
+        db=db,
+        background_tasks=background_tasks,
+        job_type="market.stock_financial_metrics_history_backfill",
+        target=stock_id,
+        request={
+            "stock_id": stock_id,
+            "from_fiscal_year": from_fiscal_year,
+            "from_quarter": from_quarter,
+            "to_fiscal_year": to_fiscal_year,
+            "to_quarter": to_quarter,
+            "lookback_quarters": lookback_quarters,
+            "sleep_seconds": sleep_seconds,
+            "skip_existing": skip_existing,
+        },
+        task=backfill_tasks.run_stock_financial_metrics_history_job,
+        task_args=(
+            stock_id,
+            from_fiscal_year,
+            from_quarter,
+            to_fiscal_year,
+            to_quarter,
+            lookback_quarters,
+            sleep_seconds,
+            skip_existing,
+        ),
+    )
 
 
 @router.get("/ohlc/{stock_id}", response_model=MarketOhlcChartRead)
@@ -309,7 +468,7 @@ def get_stock_ohlc_chart_data(
     stock_id: str,
     timeframe: str = Query(default="daily", pattern="^(daily|weekly|monthly)$"),
     bars: int = Query(default=90, ge=1, le=240),
-    ensure_history: bool = True,
+    ensure_history: bool = False,
     to_date: date | None = None,
     sleep_seconds: float = Query(default=0.08, ge=0, le=2),
     db: Session = Depends(get_db),
@@ -347,7 +506,7 @@ def get_latest_institutional_trades(limit: int = Query(default=100, ge=1, le=100
 @router.get("/institutional/{stock_id}/latest", response_model=InstitutionalTradeDailyRead)
 def get_latest_stock_institutional_trade_api(
     stock_id: str,
-    ensure_daily: bool = True,
+    ensure_daily: bool = False,
     include_today: bool = False,
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     db: Session = Depends(get_db),
@@ -372,7 +531,7 @@ def get_stock_institutional_trade_history(
     from_date: date | None = None,
     to_date: date | None = None,
     limit: int = Query(default=250, ge=1, le=5000),
-    ensure_history: bool = True,
+    ensure_history: bool = False,
     lookback_days: int = Query(default=365, ge=1, le=5000),
     include_today: bool = False,
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
@@ -397,6 +556,20 @@ def get_stock_institutional_trade_history(
     return list_stock_institutional_trade_history(db=db, stock_id=stock_id, from_date=from_date, to_date=to_date, limit=limit, ascending=True)
 
 
+@router.get(
+    "/institutional/{stock_id}/holding-ratios",
+    response_model=InstitutionalHoldingRatioRead,
+)
+def get_stock_institutional_holding_ratios(stock_id: str):
+    try:
+        return fetch_institutional_holding_ratios(stock_id=stock_id)
+    except InstitutionalHoldingRatioFetchError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+
+
 @router.get("/institutional", response_model=list[InstitutionalTradeDailyRead])
 def get_institutional_trades(trade_date: date | None = None, stock_id: str | None = None, limit: int = Query(default=100, ge=1, le=1000), offset: int = Query(default=0, ge=0), db: Session = Depends(get_db)):
     return list_institutional_trades(db=db, trade_date=trade_date, stock_id=stock_id, limit=limit, offset=offset)
@@ -414,7 +587,7 @@ def get_latest_margin_trades(
 @router.get("/margin/{stock_id}/latest", response_model=MarginTradingDailyRead)
 def get_latest_stock_margin_trade_api(
     stock_id: str,
-    ensure_daily: bool = True,
+    ensure_daily: bool = False,
     include_today: bool = False,
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     db: Session = Depends(get_db),
@@ -444,7 +617,7 @@ def get_stock_margin_trade_history(
     from_date: date | None = None,
     to_date: date | None = None,
     limit: int = Query(default=250, ge=1, le=5000),
-    ensure_history: bool = True,
+    ensure_history: bool = False,
     lookback_days: int = Query(default=365, ge=1, le=5000),
     include_today: bool = False,
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
@@ -499,7 +672,7 @@ def get_margin_trades(
 )
 def get_latest_stock_shareholding_distribution_api(
     stock_id: str,
-    ensure_latest: bool = True,
+    ensure_latest: bool = False,
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     db: Session = Depends(get_db),
 ):
@@ -523,7 +696,7 @@ def get_stock_shareholding_history_api(
     from_date: date | None = None,
     to_date: date | None = None,
     limit: int = Query(default=5000, ge=1, le=20000),
-    ensure_history: bool = True,
+    ensure_history: bool = False,
     lookback_weeks: int = Query(default=52, ge=1, le=60),
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     db: Session = Depends(get_db),
@@ -567,7 +740,7 @@ def get_shareholding_distributions(
 @router.get("/revenue/{stock_id}/latest", response_model=MonthlyRevenueRead)
 def get_latest_stock_monthly_revenue_api(
     stock_id: str,
-    ensure_latest: bool = True,
+    ensure_latest: bool = False,
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     db: Session = Depends(get_db),
 ):
@@ -596,7 +769,7 @@ def get_stock_monthly_revenue_history_api(
     from_date: date | None = None,
     to_date: date | None = None,
     limit: int = Query(default=120, ge=1, le=5000),
-    ensure_history: bool = True,
+    ensure_history: bool = False,
     backfill_months: int | None = Query(default=None, ge=1, le=120),
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     db: Session = Depends(get_db),
@@ -642,7 +815,7 @@ def get_monthly_revenues(
 @router.get("/financials/{stock_id}/latest", response_model=FinancialMetricQuarterlyRead)
 def get_latest_stock_financial_metric_api(
     stock_id: str,
-    ensure_latest: bool = True,
+    ensure_latest: bool = False,
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     db: Session = Depends(get_db),
 ):
@@ -669,7 +842,7 @@ def get_latest_stock_financial_metric_api(
 def get_stock_financial_metric_history_api(
     stock_id: str,
     limit: int = Query(default=40, ge=1, le=400),
-    ensure_history: bool = True,
+    ensure_history: bool = False,
     backfill_quarters: int | None = Query(default=None, ge=1, le=80),
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     db: Session = Depends(get_db),

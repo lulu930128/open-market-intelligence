@@ -57,6 +57,23 @@ export type WatchlistGroupBackfillResult = {
   results: WatchlistBackfillStockResult[];
 };
 
+export type JobRunRead = {
+  id: number;
+  job_type: string;
+  status: "queued" | "running" | "success" | "error" | string;
+  target: string | null;
+  progress_current: number;
+  progress_total: number;
+  message: string | null;
+  error_message: string | null;
+  request: unknown;
+  result: unknown;
+  created_at: string;
+  started_at: string | null;
+  ended_at: string | null;
+  updated_at: string;
+};
+
 export type RankingItem = {
   rank: number;
   stock_id: string;
@@ -65,7 +82,7 @@ export type RankingItem = {
   close: number | null;
   volume: number | null;
   change_pct: number | null;
-  score: number;
+  score: number | null;
   status: string;
   signal_count: number;
   signal_keys: string[];
@@ -215,6 +232,22 @@ export type StockMasterRead = {
   last_seen_at: string;
   created_at: string;
   updated_at: string;
+};
+
+export type InstitutionalHoldingRatioPointRead = {
+  trade_date: string | null;
+  foreign_investor_ratio: number | null;
+  investment_trust_ratio: number | null;
+  dealer_ratio: number | null;
+};
+
+export type InstitutionalHoldingRatioRead = InstitutionalHoldingRatioPointRead & {
+  stock_id: string;
+  stock_name: string | null;
+  source_name: string;
+  source_url: string;
+  fetched_at: string;
+  history: InstitutionalHoldingRatioPointRead[];
 };
 
 export type InstitutionalTradeDailyRead = {
