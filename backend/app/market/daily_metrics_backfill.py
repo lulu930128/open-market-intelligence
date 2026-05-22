@@ -10,6 +10,7 @@ from app.db.models import (
     MarginTradingDaily,
     MarketDailyPrice,
     SourceRegistry,
+    StockMaster,
 )
 from app.pipelines.fetch_pipeline import refresh_source
 
@@ -24,6 +25,16 @@ SUPPORTED_PARSER_MODELS = {
 }
 
 DEFAULT_CATEGORIES = ("institutional_trade", "margin_trading")
+MARKET_CATEGORY_PARSER_TYPES = {
+    "TWSE": {
+        "institutional_trade": ("twse_institutional_trade",),
+        "margin_trading": ("twse_margin_trading",),
+    },
+    "TPEX": {
+        "institutional_trade": ("tpex_institutional_trade",),
+        "margin_trading": ("tpex_margin_trading",),
+    },
+}
 
 
 def _taiwan_today() -> date:
@@ -46,15 +57,19 @@ def _normalize_categories(categories: list[str] | tuple[str, ...] | None) -> tup
 def _list_metric_sources(
     db: Session,
     categories: tuple[str, ...],
+    parser_types: tuple[str, ...] | None = None,
 ) -> list[SourceRegistry]:
-    return (
+    query = (
         db.query(SourceRegistry)
         .filter(SourceRegistry.enabled.is_(True))
         .filter(SourceRegistry.category.in_(categories))
         .filter(SourceRegistry.parser_type.in_(SUPPORTED_PARSER_MODELS.keys()))
-        .order_by(SourceRegistry.priority.asc(), SourceRegistry.id.asc())
-        .all()
     )
+
+    if parser_types is not None:
+        query = query.filter(SourceRegistry.parser_type.in_(parser_types))
+
+    return query.order_by(SourceRegistry.priority.asc(), SourceRegistry.id.asc()).all()
 
 
 def _metric_model_for_source(source: SourceRegistry):
@@ -164,12 +179,22 @@ def ensure_daily_metrics(
     categories: list[str] | tuple[str, ...] | None = None,
     sleep_seconds: float = 0.2,
     skip_existing: bool = True,
+    parser_types: list[str] | tuple[str, ...] | None = None,
 ) -> dict:
     if end_date < start_date:
         raise ValueError("end_date must be greater than or equal to start_date.")
 
     normalized_categories = _normalize_categories(categories)
-    sources = _list_metric_sources(db=db, categories=normalized_categories)
+    normalized_parser_types = (
+        tuple(dict.fromkeys(item.strip() for item in parser_types if item.strip()))
+        if parser_types
+        else None
+    )
+    sources = _list_metric_sources(
+        db=db,
+        categories=normalized_categories,
+        parser_types=normalized_parser_types,
+    )
     trade_dates = _market_trade_dates(db=db, start_date=start_date, end_date=end_date)
 
     if not sources:
@@ -177,6 +202,7 @@ def ensure_daily_metrics(
             "status": "skipped",
             "message": "No enabled daily metric sources found.",
             "categories": list(normalized_categories),
+            "parser_types": list(normalized_parser_types or []),
             "start_date": start_date,
             "end_date": end_date,
             "trade_dates": [],
@@ -282,6 +308,7 @@ def ensure_daily_metrics(
         "status": status,
         "message": "Daily metric ensure completed.",
         "categories": list(normalized_categories),
+        "parser_types": list(normalized_parser_types or []),
         "start_date": start_date,
         "end_date": end_date,
         "trade_dates": trade_dates,
@@ -347,7 +374,58 @@ def ensure_latest_daily_metrics(
     )
 
 
+def ensure_stock_daily_metrics(
+    db: Session,
+    stock_id: str,
+    start_date: date,
+    end_date: date,
+    categories: list[str] | tuple[str, ...] | None = None,
+    sleep_seconds: float = 0.2,
+    skip_existing: bool = True,
+) -> dict:
+    normalized_categories = _normalize_categories(categories)
+    stock = db.query(StockMaster).filter(StockMaster.stock_id == stock_id).first()
+    market = stock.market.upper() if stock and stock.market else None
+    market_parser_types = MARKET_CATEGORY_PARSER_TYPES.get(market or "")
+
+    if market_parser_types is None:
+        return {
+            "status": "skipped",
+            "message": f"Daily metric ensure is not configured for stock_id='{stock_id}' market='{market}'.",
+            "stock_id": stock_id,
+            "market": market,
+            "categories": list(normalized_categories),
+            "parser_types": [],
+            "start_date": start_date,
+            "end_date": end_date,
+            "trade_dates": [],
+            "requested_count": 0,
+            "fetched_count": 0,
+            "skipped_existing_count": 0,
+            "error_count": 0,
+            "inserted_count": 0,
+            "results": [],
+        }
+
+    parser_types = tuple(
+        parser_type
+        for category in normalized_categories
+        for parser_type in market_parser_types.get(category, ())
+    )
+
+    return ensure_daily_metrics(
+        db=db,
+        start_date=start_date,
+        end_date=end_date,
+        categories=normalized_categories,
+        sleep_seconds=sleep_seconds,
+        skip_existing=skip_existing,
+        parser_types=parser_types,
+    )
+
+
 __all__ = [
     "ensure_daily_metrics",
     "ensure_latest_daily_metrics",
+    "ensure_stock_daily_metrics",
 ]

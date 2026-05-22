@@ -3,33 +3,56 @@ from datetime import date, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from app.market.backfill import backfill_tpex_trading_stock, backfill_twse_stock_day
-from app.market.daily_metrics_backfill import ensure_daily_metrics, ensure_latest_daily_metrics
+from app.market.daily_metrics_backfill import (
+    ensure_daily_metrics,
+    ensure_latest_daily_metrics,
+    ensure_stock_daily_metrics,
+)
+from app.market.fundamental_metrics_backfill import (
+    ensure_fundamental_metrics,
+    ensure_stock_fundamental_metrics,
+)
+from app.market.financial_metrics_history_backfill import ensure_stock_financial_metrics_history
+from app.market.monthly_revenue_history_backfill import ensure_stock_monthly_revenue_history
+from app.market.shareholding_history_backfill import ensure_stock_shareholding_history
 from app.db.session import get_db
 from app.market.intraday import get_intraday_trend
 from app.market.schemas import (
+    FinancialMetricQuarterlyRead,
     IntradayTrendRead,
     InstitutionalTradeDailyRead,
     MarginTradingDailyRead,
     MarketDailyChartRead,
     MarketOhlcChartRead,
     MarketDailyPriceRead,
+    MonthlyRevenueRead,
+    ShareholdingDistributionWeeklyRead,
     TwseBackfillResultRead,
 )
 from app.market.service import (
+    get_latest_stock_financial_metric,
     get_latest_stock_daily_price,
     get_latest_stock_institutional_trade,
     get_latest_stock_margin_trade,
+    get_latest_stock_monthly_revenue,
+    list_financial_metrics,
     list_institutional_trades,
     list_latest_institutional_trades,
     list_latest_margin_trades,
     list_latest_market_daily_prices,
+    list_latest_stock_shareholding_distribution,
     list_margin_trades,
     list_market_daily_prices,
+    list_monthly_revenues,
+    list_shareholding_distributions,
     list_stock_chart_data,
     list_stock_daily_history,
+    list_stock_financial_metric_history,
     list_stock_ohlc_chart_data,
     list_stock_institutional_trade_history,
     list_stock_margin_trade_history,
+    list_stock_monthly_revenue_history,
+    list_stock_shareholding_history,
 )
 
 router = APIRouter()
@@ -37,6 +60,21 @@ router = APIRouter()
 
 def _split_categories(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _daily_metric_history_range(
+    from_date: date | None,
+    to_date: date | None,
+    lookback_days: int,
+    include_today: bool,
+) -> tuple[date, date]:
+    end_date = to_date or date.today()
+
+    if to_date is None and not include_today:
+        end_date -= timedelta(days=1)
+
+    start_date = from_date or end_date - timedelta(days=lookback_days)
+    return start_date, end_date
 
 
 @router.post("/backfill/twse/{stock_id}", response_model=TwseBackfillResultRead)
@@ -133,6 +171,139 @@ def backfill_market_daily_metrics(
         ) from exc
 
 
+@router.post("/backfill/fundamentals")
+def backfill_market_fundamental_metrics(
+    categories: str = Query(
+        default="shareholding_distribution,monthly_revenue,financial_metrics"
+    ),
+    force: bool = False,
+    sleep_seconds: float = Query(default=0.2, ge=0, le=3),
+    db: Session = Depends(get_db),
+):
+    try:
+        return ensure_fundamental_metrics(
+            db=db,
+            categories=_split_categories(categories),
+            force=force,
+            sleep_seconds=sleep_seconds,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post("/backfill/fundamentals/{stock_id}")
+def backfill_stock_fundamental_metrics(
+    stock_id: str,
+    categories: str = Query(
+        default="shareholding_distribution,monthly_revenue,financial_metrics"
+    ),
+    force: bool = False,
+    sleep_seconds: float = Query(default=0.2, ge=0, le=3),
+    db: Session = Depends(get_db),
+):
+    try:
+        return ensure_stock_fundamental_metrics(
+            db=db,
+            stock_id=stock_id,
+            categories=_split_categories(categories),
+            force=force,
+            sleep_seconds=sleep_seconds,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post("/backfill/shareholding/{stock_id}/history")
+def backfill_stock_shareholding_history(
+    stock_id: str,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    lookback_weeks: int = Query(default=52, ge=1, le=60),
+    sleep_seconds: float = Query(default=0.1, ge=0, le=3),
+    skip_existing: bool = True,
+    db: Session = Depends(get_db),
+):
+    try:
+        return ensure_stock_shareholding_history(
+            db=db,
+            stock_id=stock_id,
+            from_date=from_date,
+            to_date=to_date,
+            lookback_weeks=lookback_weeks,
+            sleep_seconds=sleep_seconds,
+            skip_existing=skip_existing,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post("/backfill/revenue/{stock_id}/history")
+def backfill_stock_monthly_revenue_history(
+    stock_id: str,
+    from_period: date | None = None,
+    to_period: date | None = None,
+    lookback_months: int = Query(default=120, ge=1, le=120),
+    sleep_seconds: float = Query(default=0.05, ge=0, le=3),
+    skip_existing: bool = True,
+    db: Session = Depends(get_db),
+):
+    try:
+        return ensure_stock_monthly_revenue_history(
+            db=db,
+            stock_id=stock_id,
+            from_period=from_period,
+            to_period=to_period,
+            lookback_months=lookback_months,
+            sleep_seconds=sleep_seconds,
+            skip_existing=skip_existing,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post("/backfill/financials/{stock_id}/history")
+def backfill_stock_financial_metrics_history(
+    stock_id: str,
+    from_fiscal_year: int | None = Query(default=None, ge=1900, le=2100),
+    from_quarter: int | None = Query(default=None, ge=1, le=4),
+    to_fiscal_year: int | None = Query(default=None, ge=1900, le=2100),
+    to_quarter: int | None = Query(default=None, ge=1, le=4),
+    lookback_quarters: int = Query(default=40, ge=1, le=80),
+    sleep_seconds: float = Query(default=0.05, ge=0, le=3),
+    skip_existing: bool = True,
+    db: Session = Depends(get_db),
+):
+    try:
+        return ensure_stock_financial_metrics_history(
+            db=db,
+            stock_id=stock_id,
+            from_fiscal_year=from_fiscal_year,
+            from_quarter=from_quarter,
+            to_fiscal_year=to_fiscal_year,
+            to_quarter=to_quarter,
+            lookback_quarters=lookback_quarters,
+            sleep_seconds=sleep_seconds,
+            skip_existing=skip_existing,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
 @router.get("/ohlc/{stock_id}", response_model=MarketOhlcChartRead)
 def get_stock_ohlc_chart_data(
     stock_id: str,
@@ -208,22 +379,20 @@ def get_stock_institutional_trade_history(
     db: Session = Depends(get_db),
 ):
     if ensure_history:
-        if to_date is None:
-            ensure_latest_daily_metrics(
-                db=db,
-                categories=["institutional_trade"],
-                lookback_days=lookback_days,
-                include_today=include_today,
-                sleep_seconds=sleep_seconds,
-            )
-        else:
-            ensure_daily_metrics(
-                db=db,
-                start_date=from_date or to_date - timedelta(days=lookback_days),
-                end_date=to_date,
-                categories=["institutional_trade"],
-                sleep_seconds=sleep_seconds,
-            )
+        start_date, end_date = _daily_metric_history_range(
+            from_date=from_date,
+            to_date=to_date,
+            lookback_days=lookback_days,
+            include_today=include_today,
+        )
+        ensure_stock_daily_metrics(
+            db=db,
+            stock_id=stock_id,
+            start_date=start_date,
+            end_date=end_date,
+            categories=["institutional_trade"],
+            sleep_seconds=sleep_seconds,
+        )
 
     return list_stock_institutional_trade_history(db=db, stock_id=stock_id, from_date=from_date, to_date=to_date, limit=limit, ascending=True)
 
@@ -282,22 +451,20 @@ def get_stock_margin_trade_history(
     db: Session = Depends(get_db),
 ):
     if ensure_history:
-        if to_date is None:
-            ensure_latest_daily_metrics(
-                db=db,
-                categories=["margin_trading"],
-                lookback_days=lookback_days,
-                include_today=include_today,
-                sleep_seconds=sleep_seconds,
-            )
-        else:
-            ensure_daily_metrics(
-                db=db,
-                start_date=from_date or to_date - timedelta(days=lookback_days),
-                end_date=to_date,
-                categories=["margin_trading"],
-                sleep_seconds=sleep_seconds,
-            )
+        start_date, end_date = _daily_metric_history_range(
+            from_date=from_date,
+            to_date=to_date,
+            lookback_days=lookback_days,
+            include_today=include_today,
+        )
+        ensure_stock_daily_metrics(
+            db=db,
+            stock_id=stock_id,
+            start_date=start_date,
+            end_date=end_date,
+            categories=["margin_trading"],
+            sleep_seconds=sleep_seconds,
+        )
 
     return list_stock_margin_trade_history(
         db=db,
@@ -321,6 +488,223 @@ def get_margin_trades(
         db=db,
         trade_date=trade_date,
         stock_id=stock_id,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get(
+    "/shareholding/{stock_id}/latest",
+    response_model=list[ShareholdingDistributionWeeklyRead],
+)
+def get_latest_stock_shareholding_distribution_api(
+    stock_id: str,
+    ensure_latest: bool = True,
+    sleep_seconds: float = Query(default=0.2, ge=0, le=3),
+    db: Session = Depends(get_db),
+):
+    if ensure_latest:
+        ensure_stock_fundamental_metrics(
+            db=db,
+            stock_id=stock_id,
+            categories=["shareholding_distribution"],
+            sleep_seconds=sleep_seconds,
+        )
+
+    return list_latest_stock_shareholding_distribution(db=db, stock_id=stock_id)
+
+
+@router.get(
+    "/shareholding/{stock_id}/history",
+    response_model=list[ShareholdingDistributionWeeklyRead],
+)
+def get_stock_shareholding_history_api(
+    stock_id: str,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    limit: int = Query(default=5000, ge=1, le=20000),
+    ensure_history: bool = True,
+    lookback_weeks: int = Query(default=52, ge=1, le=60),
+    sleep_seconds: float = Query(default=0.2, ge=0, le=3),
+    db: Session = Depends(get_db),
+):
+    if ensure_history:
+        ensure_stock_shareholding_history(
+            db=db,
+            stock_id=stock_id,
+            from_date=from_date,
+            to_date=to_date,
+            lookback_weeks=lookback_weeks,
+            sleep_seconds=sleep_seconds,
+        )
+
+    return list_stock_shareholding_history(
+        db=db,
+        stock_id=stock_id,
+        from_date=from_date,
+        to_date=to_date,
+        limit=limit,
+    )
+
+
+@router.get("/shareholding", response_model=list[ShareholdingDistributionWeeklyRead])
+def get_shareholding_distributions(
+    data_date: date | None = None,
+    stock_id: str | None = None,
+    limit: int = Query(default=100, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    return list_shareholding_distributions(
+        db=db,
+        data_date=data_date,
+        stock_id=stock_id,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/revenue/{stock_id}/latest", response_model=MonthlyRevenueRead)
+def get_latest_stock_monthly_revenue_api(
+    stock_id: str,
+    ensure_latest: bool = True,
+    sleep_seconds: float = Query(default=0.2, ge=0, le=3),
+    db: Session = Depends(get_db),
+):
+    if ensure_latest:
+        ensure_stock_fundamental_metrics(
+            db=db,
+            stock_id=stock_id,
+            categories=["monthly_revenue"],
+            sleep_seconds=sleep_seconds,
+        )
+
+    result = get_latest_stock_monthly_revenue(db=db, stock_id=stock_id)
+
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Latest monthly revenue for stock_id='{stock_id}' not found.",
+        )
+
+    return result
+
+
+@router.get("/revenue/{stock_id}/history", response_model=list[MonthlyRevenueRead])
+def get_stock_monthly_revenue_history_api(
+    stock_id: str,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    limit: int = Query(default=120, ge=1, le=5000),
+    ensure_history: bool = True,
+    backfill_months: int | None = Query(default=None, ge=1, le=120),
+    sleep_seconds: float = Query(default=0.2, ge=0, le=3),
+    db: Session = Depends(get_db),
+):
+    if ensure_history:
+        ensure_stock_monthly_revenue_history(
+            db=db,
+            stock_id=stock_id,
+            from_period=from_date,
+            to_period=to_date,
+            lookback_months=backfill_months or min(limit, 120),
+            sleep_seconds=sleep_seconds,
+            skip_existing=True,
+        )
+
+    return list_stock_monthly_revenue_history(
+        db=db,
+        stock_id=stock_id,
+        from_date=from_date,
+        to_date=to_date,
+        limit=limit,
+        ascending=True,
+    )
+
+
+@router.get("/revenue", response_model=list[MonthlyRevenueRead])
+def get_monthly_revenues(
+    period: date | None = None,
+    stock_id: str | None = None,
+    limit: int = Query(default=100, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    return list_monthly_revenues(
+        db=db,
+        period=period,
+        stock_id=stock_id,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/financials/{stock_id}/latest", response_model=FinancialMetricQuarterlyRead)
+def get_latest_stock_financial_metric_api(
+    stock_id: str,
+    ensure_latest: bool = True,
+    sleep_seconds: float = Query(default=0.2, ge=0, le=3),
+    db: Session = Depends(get_db),
+):
+    if ensure_latest:
+        ensure_stock_fundamental_metrics(
+            db=db,
+            stock_id=stock_id,
+            categories=["financial_metrics"],
+            sleep_seconds=sleep_seconds,
+        )
+
+    result = get_latest_stock_financial_metric(db=db, stock_id=stock_id)
+
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Latest financial metric for stock_id='{stock_id}' not found.",
+        )
+
+    return result
+
+
+@router.get("/financials/{stock_id}/history", response_model=list[FinancialMetricQuarterlyRead])
+def get_stock_financial_metric_history_api(
+    stock_id: str,
+    limit: int = Query(default=40, ge=1, le=400),
+    ensure_history: bool = True,
+    backfill_quarters: int | None = Query(default=None, ge=1, le=80),
+    sleep_seconds: float = Query(default=0.2, ge=0, le=3),
+    db: Session = Depends(get_db),
+):
+    if ensure_history:
+        ensure_stock_financial_metrics_history(
+            db=db,
+            stock_id=stock_id,
+            lookback_quarters=backfill_quarters or min(limit, 80),
+            sleep_seconds=sleep_seconds,
+            skip_existing=True,
+        )
+
+    return list_stock_financial_metric_history(
+        db=db,
+        stock_id=stock_id,
+        limit=limit,
+        ascending=True,
+    )
+
+
+@router.get("/financials", response_model=list[FinancialMetricQuarterlyRead])
+def get_financial_metrics(
+    stock_id: str | None = None,
+    fiscal_year: int | None = None,
+    quarter: int | None = None,
+    limit: int = Query(default=100, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    return list_financial_metrics(
+        db=db,
+        stock_id=stock_id,
+        fiscal_year=fiscal_year,
+        quarter=quarter,
         limit=limit,
         offset=offset,
     )

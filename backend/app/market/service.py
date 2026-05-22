@@ -5,9 +5,12 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import (
+    FinancialMetricQuarterly,
     InstitutionalTradeDaily,
     MarginTradingDaily,
     MarketDailyPrice,
+    MonthlyRevenue,
+    ShareholdingDistributionWeekly,
     StockMaster,
 )
 from app.market.backfill import backfill_tpex_trading_stock, backfill_twse_stock_day
@@ -441,6 +444,219 @@ def list_stock_margin_trade_history(
 
     rows = (
         query.order_by(MarginTradingDaily.trade_date.desc())
+        .limit(limit)
+        .all()
+    )
+
+    if ascending:
+        rows.reverse()
+
+    return rows
+
+
+def get_latest_shareholding_date(db: Session) -> date | None:
+    return db.query(func.max(ShareholdingDistributionWeekly.data_date)).scalar()
+
+
+def list_shareholding_distributions(
+    db: Session,
+    data_date: date | None = None,
+    stock_id: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[ShareholdingDistributionWeekly]:
+    query = db.query(ShareholdingDistributionWeekly)
+
+    if data_date is not None:
+        query = query.filter(ShareholdingDistributionWeekly.data_date == data_date)
+
+    if stock_id is not None:
+        query = query.filter(ShareholdingDistributionWeekly.stock_id == stock_id)
+
+    return (
+        query.order_by(
+            ShareholdingDistributionWeekly.data_date.desc(),
+            ShareholdingDistributionWeekly.stock_id.asc(),
+            ShareholdingDistributionWeekly.holding_level_order.asc(),
+            ShareholdingDistributionWeekly.holding_level.asc(),
+        )
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+
+def list_latest_stock_shareholding_distribution(
+    db: Session,
+    stock_id: str,
+) -> list[ShareholdingDistributionWeekly]:
+    latest_date = (
+        db.query(func.max(ShareholdingDistributionWeekly.data_date))
+        .filter(ShareholdingDistributionWeekly.stock_id == stock_id)
+        .scalar()
+    )
+
+    if latest_date is None:
+        return []
+
+    return list_shareholding_distributions(
+        db=db,
+        data_date=latest_date,
+        stock_id=stock_id,
+        limit=100,
+    )
+
+
+def list_stock_shareholding_history(
+    db: Session,
+    stock_id: str,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    limit: int = 5000,
+) -> list[ShareholdingDistributionWeekly]:
+    query = db.query(ShareholdingDistributionWeekly).filter(
+        ShareholdingDistributionWeekly.stock_id == stock_id
+    )
+
+    if from_date is not None:
+        query = query.filter(ShareholdingDistributionWeekly.data_date >= from_date)
+
+    if to_date is not None:
+        query = query.filter(ShareholdingDistributionWeekly.data_date <= to_date)
+
+    return (
+        query.order_by(
+            ShareholdingDistributionWeekly.data_date.asc(),
+            ShareholdingDistributionWeekly.holding_level_order.asc(),
+            ShareholdingDistributionWeekly.holding_level.asc(),
+        )
+        .limit(limit)
+        .all()
+    )
+
+
+def get_latest_monthly_revenue_period(db: Session) -> date | None:
+    return db.query(func.max(MonthlyRevenue.period)).scalar()
+
+
+def list_monthly_revenues(
+    db: Session,
+    period: date | None = None,
+    stock_id: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[MonthlyRevenue]:
+    query = db.query(MonthlyRevenue)
+
+    if period is not None:
+        query = query.filter(MonthlyRevenue.period == period)
+
+    if stock_id is not None:
+        query = query.filter(MonthlyRevenue.stock_id == stock_id)
+
+    return (
+        query.order_by(MonthlyRevenue.period.desc(), MonthlyRevenue.stock_id.asc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+
+def get_latest_stock_monthly_revenue(
+    db: Session,
+    stock_id: str,
+) -> MonthlyRevenue | None:
+    return (
+        db.query(MonthlyRevenue)
+        .filter(MonthlyRevenue.stock_id == stock_id)
+        .order_by(MonthlyRevenue.period.desc())
+        .first()
+    )
+
+
+def list_stock_monthly_revenue_history(
+    db: Session,
+    stock_id: str,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    limit: int = 120,
+    ascending: bool = True,
+) -> list[MonthlyRevenue]:
+    query = db.query(MonthlyRevenue).filter(MonthlyRevenue.stock_id == stock_id)
+
+    if from_date is not None:
+        query = query.filter(MonthlyRevenue.period >= from_date)
+
+    if to_date is not None:
+        query = query.filter(MonthlyRevenue.period <= to_date)
+
+    rows = query.order_by(MonthlyRevenue.period.desc()).limit(limit).all()
+
+    if ascending:
+        rows.reverse()
+
+    return rows
+
+
+def list_financial_metrics(
+    db: Session,
+    stock_id: str | None = None,
+    fiscal_year: int | None = None,
+    quarter: int | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[FinancialMetricQuarterly]:
+    query = db.query(FinancialMetricQuarterly)
+
+    if stock_id is not None:
+        query = query.filter(FinancialMetricQuarterly.stock_id == stock_id)
+
+    if fiscal_year is not None:
+        query = query.filter(FinancialMetricQuarterly.fiscal_year == fiscal_year)
+
+    if quarter is not None:
+        query = query.filter(FinancialMetricQuarterly.quarter == quarter)
+
+    return (
+        query.order_by(
+            FinancialMetricQuarterly.fiscal_year.desc(),
+            FinancialMetricQuarterly.quarter.desc(),
+            FinancialMetricQuarterly.stock_id.asc(),
+        )
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+
+def get_latest_stock_financial_metric(
+    db: Session,
+    stock_id: str,
+) -> FinancialMetricQuarterly | None:
+    return (
+        db.query(FinancialMetricQuarterly)
+        .filter(FinancialMetricQuarterly.stock_id == stock_id)
+        .order_by(
+            FinancialMetricQuarterly.fiscal_year.desc(),
+            FinancialMetricQuarterly.quarter.desc(),
+        )
+        .first()
+    )
+
+
+def list_stock_financial_metric_history(
+    db: Session,
+    stock_id: str,
+    limit: int = 40,
+    ascending: bool = True,
+) -> list[FinancialMetricQuarterly]:
+    rows = (
+        db.query(FinancialMetricQuarterly)
+        .filter(FinancialMetricQuarterly.stock_id == stock_id)
+        .order_by(
+            FinancialMetricQuarterly.fiscal_year.desc(),
+            FinancialMetricQuarterly.quarter.desc(),
+        )
         .limit(limit)
         .all()
     )

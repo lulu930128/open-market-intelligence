@@ -271,3 +271,69 @@ export type MarginTradingDailyRead = {
   created_at: string;
   updated_at: string;
 };
+
+export type ShareholdingDistributionWeeklyRead = {
+  id: number;
+  source_id: number;
+  raw_result_id: number;
+  data_date: string;
+  stock_id: string;
+  stock_name: string | null;
+  holding_level: string;
+  holding_level_order: number | null;
+  holder_count: number | null;
+  share_count: number | null;
+  share_ratio: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type MonthlyRevenueRead = {
+  id: number;
+  source_id: number;
+  raw_result_id: number;
+  report_date: string | null;
+  period: string;
+  stock_id: string;
+  stock_name: string | null;
+  market: string | null;
+  industry: string | null;
+  monthly_revenue: number | null;
+  previous_month_revenue: number | null;
+  previous_year_month_revenue: number | null;
+  month_over_month_pct: number | null;
+  year_over_year_pct: number | null;
+  cumulative_revenue: number | null;
+  previous_year_cumulative_revenue: number | null;
+  cumulative_year_over_year_pct: number | null;
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type FinancialMetricQuarterlyRead = {
+  id: number;
+  source_id: number;
+  raw_result_id: number;
+  report_date: string | null;
+  fiscal_year: number;
+  quarter: number;
+  period: string;
+  stock_id: string;
+  stock_name: string | null;
+  market: string | null;
+  revenue: number | null;
+  gross_profit: number | null;
+  operating_income: number | null;
+  net_income: number | null;
+  net_income_attributable_parent: number | null;
+  eps: number | null;
+  total_assets: number | null;
+  total_equity: number | null;
+  parent_equity: number | null;
+  book_value_per_share: number | null;
+  roe: number | null;
+  roa: number | null;
+  created_at: string;
+  updated_at: string;
+};

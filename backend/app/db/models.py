@@ -305,6 +305,154 @@ class MarginTradingDaily(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class ShareholdingDistributionWeekly(Base):
+    __tablename__ = "shareholding_distribution_weekly"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source_id",
+            "stock_id",
+            "data_date",
+            "holding_level",
+            name="uq_shareholding_source_stock_date_level",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("source_registry.id"),
+        nullable=False,
+        index=True,
+    )
+
+    raw_result_id: Mapped[int] = mapped_column(
+        ForeignKey("raw_fetch_result.id"),
+        nullable=False,
+        index=True,
+    )
+
+    data_date: Mapped[date] = mapped_column(Date, index=True)
+
+    stock_id: Mapped[str] = mapped_column(String(20), index=True)
+    stock_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+    holding_level: Mapped[str] = mapped_column(String(20), index=True)
+    holding_level_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    holder_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    share_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    share_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class MonthlyRevenue(Base):
+    __tablename__ = "monthly_revenue"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source_id",
+            "stock_id",
+            "period",
+            name="uq_monthly_revenue_source_stock_period",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("source_registry.id"),
+        nullable=False,
+        index=True,
+    )
+
+    raw_result_id: Mapped[int] = mapped_column(
+        ForeignKey("raw_fetch_result.id"),
+        nullable=False,
+        index=True,
+    )
+
+    report_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    period: Mapped[date] = mapped_column(Date, index=True)
+
+    stock_id: Mapped[str] = mapped_column(String(20), index=True)
+    stock_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    market: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    industry: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+
+    monthly_revenue: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    previous_month_revenue: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    previous_year_month_revenue: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    month_over_month_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    year_over_year_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    cumulative_revenue: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    previous_year_cumulative_revenue: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    cumulative_year_over_year_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class FinancialMetricQuarterly(Base):
+    __tablename__ = "financial_metric_quarterly"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source_id",
+            "stock_id",
+            "fiscal_year",
+            "quarter",
+            name="uq_financial_metric_source_stock_year_quarter",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("source_registry.id"),
+        nullable=False,
+        index=True,
+    )
+
+    raw_result_id: Mapped[int] = mapped_column(
+        ForeignKey("raw_fetch_result.id"),
+        nullable=False,
+        index=True,
+    )
+
+    report_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    fiscal_year: Mapped[int] = mapped_column(Integer, index=True)
+    quarter: Mapped[int] = mapped_column(Integer, index=True)
+    period: Mapped[str] = mapped_column(String(12), index=True)
+
+    stock_id: Mapped[str] = mapped_column(String(20), index=True)
+    stock_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    market: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+
+    revenue: Mapped[float | None] = mapped_column(Float, nullable=True)
+    gross_profit: Mapped[float | None] = mapped_column(Float, nullable=True)
+    operating_income: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_income: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_income_attributable_parent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    eps: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    total_assets: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_equity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    parent_equity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    book_value_per_share: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    roe: Mapped[float | None] = mapped_column(Float, nullable=True)
+    roa: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 
 
 class StockMaster(Base):

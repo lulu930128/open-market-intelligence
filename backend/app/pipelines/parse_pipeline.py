@@ -3,13 +3,19 @@ from collections.abc import Callable
 from sqlalchemy.orm import Session
 
 from app.db.models import (
+    FinancialMetricQuarterly,
     InstitutionalTradeDaily,
     MarginTradingDaily,
     MarketDailyPrice,
+    MonthlyRevenue,
+    ShareholdingDistributionWeekly,
     StockMaster,
     StockProfile,
     utc_now,
 )
+from app.parsers.financial_metrics import parse_financial_metrics_raw
+from app.parsers.monthly_revenue import parse_monthly_revenue_raw
+from app.parsers.shareholding_distribution import parse_shareholding_distribution_raw
 from app.parsers.twse_company_profile import parse_twse_company_profile_raw
 from app.parsers.twse_daily import parse_twse_daily_raw
 from app.parsers.twse_institutional_trade import parse_twse_institutional_trade_raw
@@ -22,6 +28,31 @@ from app.sources.service import get_raw_result
 
 
 ParserFunction = Callable[[Session, int], dict]
+
+
+def _market_from_source_name(source_name: str | None) -> str | None:
+    if source_name is None:
+        return None
+
+    normalized = source_name.upper()
+
+    if "TPEX" in normalized:
+        return "TPEX"
+
+    if "TWSE" in normalized:
+        return "TWSE"
+
+    return None
+
+
+def _stock_names_by_id(db: Session, stock_ids: list[str]) -> dict[str, str | None]:
+    if not stock_ids:
+        return {}
+
+    return {
+        row.stock_id: row.stock_name
+        for row in db.query(StockMaster).filter(StockMaster.stock_id.in_(stock_ids)).all()
+    }
 
 
 def parse_twse_daily_raw_result(db: Session, raw_result_id: int) -> dict:
@@ -416,6 +447,137 @@ def parse_tpex_margin_trading_raw_result(db: Session, raw_result_id: int) -> dic
     }
 
 
+def parse_shareholding_distribution_raw_result(db: Session, raw_result_id: int) -> dict:
+    raw_result = get_raw_result(db, raw_result_id)
+    parsed_rows, skipped_count = parse_shareholding_distribution_raw(raw_result)
+
+    if not parsed_rows:
+        raise ValueError("No valid rows parsed from raw result.")
+
+    data_dates = sorted({row["data_date"] for row in parsed_rows})
+    stock_ids = sorted({row["stock_id"] for row in parsed_rows})
+    stock_names = _stock_names_by_id(db=db, stock_ids=stock_ids)
+
+    for row in parsed_rows:
+        row["stock_name"] = stock_names.get(row["stock_id"])
+
+    (
+        db.query(ShareholdingDistributionWeekly)
+        .filter(ShareholdingDistributionWeekly.raw_result_id == raw_result.id)
+        .delete(synchronize_session=False)
+    )
+
+    for data_date in data_dates:
+        (
+            db.query(ShareholdingDistributionWeekly)
+            .filter(ShareholdingDistributionWeekly.source_id == raw_result.source_id)
+            .filter(ShareholdingDistributionWeekly.data_date == data_date)
+            .delete(synchronize_session=False)
+        )
+
+    db.add_all([ShareholdingDistributionWeekly(**row) for row in parsed_rows])
+    db.commit()
+
+    return {
+        "raw_result_id": raw_result.id,
+        "source_id": raw_result.source_id,
+        "parser_type": "tdcc_shareholding_distribution",
+        "status": "success",
+        "parsed_count": len(parsed_rows),
+        "skipped_count": skipped_count,
+        "inserted_count": len(parsed_rows),
+        "replaced_data_dates": data_dates,
+        "message": "TDCC shareholding distribution raw result parsed successfully.",
+    }
+
+
+def parse_monthly_revenue_raw_result(db: Session, raw_result_id: int) -> dict:
+    raw_result = get_raw_result(db, raw_result_id)
+    parsed_rows, skipped_count = parse_monthly_revenue_raw(raw_result)
+
+    if not parsed_rows:
+        raise ValueError("No valid rows parsed from raw result.")
+
+    periods = sorted({row["period"] for row in parsed_rows})
+    source_market = _market_from_source_name(raw_result.source.source_name)
+
+    for row in parsed_rows:
+        row["market"] = source_market
+
+    (
+        db.query(MonthlyRevenue)
+        .filter(MonthlyRevenue.raw_result_id == raw_result.id)
+        .delete(synchronize_session=False)
+    )
+
+    for period in periods:
+        (
+            db.query(MonthlyRevenue)
+            .filter(MonthlyRevenue.source_id == raw_result.source_id)
+            .filter(MonthlyRevenue.period == period)
+            .delete(synchronize_session=False)
+        )
+
+    db.add_all([MonthlyRevenue(**row) for row in parsed_rows])
+    db.commit()
+
+    return {
+        "raw_result_id": raw_result.id,
+        "source_id": raw_result.source_id,
+        "parser_type": "monthly_revenue",
+        "status": "success",
+        "parsed_count": len(parsed_rows),
+        "skipped_count": skipped_count,
+        "inserted_count": len(parsed_rows),
+        "replaced_periods": periods,
+        "message": "Monthly revenue raw result parsed successfully.",
+    }
+
+
+def parse_financial_metrics_raw_result(db: Session, raw_result_id: int) -> dict:
+    raw_result = get_raw_result(db, raw_result_id)
+    parsed_rows, skipped_count = parse_financial_metrics_raw(raw_result)
+
+    if not parsed_rows:
+        raise ValueError("No valid rows parsed from raw result.")
+
+    source_market = _market_from_source_name(raw_result.source.source_name)
+    period_keys = sorted({(row["fiscal_year"], row["quarter"]) for row in parsed_rows})
+
+    for row in parsed_rows:
+        row["market"] = source_market
+
+    (
+        db.query(FinancialMetricQuarterly)
+        .filter(FinancialMetricQuarterly.raw_result_id == raw_result.id)
+        .delete(synchronize_session=False)
+    )
+
+    for fiscal_year, quarter in period_keys:
+        (
+            db.query(FinancialMetricQuarterly)
+            .filter(FinancialMetricQuarterly.source_id == raw_result.source_id)
+            .filter(FinancialMetricQuarterly.fiscal_year == fiscal_year)
+            .filter(FinancialMetricQuarterly.quarter == quarter)
+            .delete(synchronize_session=False)
+        )
+
+    db.add_all([FinancialMetricQuarterly(**row) for row in parsed_rows])
+    db.commit()
+
+    return {
+        "raw_result_id": raw_result.id,
+        "source_id": raw_result.source_id,
+        "parser_type": "financial_metrics",
+        "status": "success",
+        "parsed_count": len(parsed_rows),
+        "skipped_count": skipped_count,
+        "inserted_count": len(parsed_rows),
+        "replaced_periods": [f"{year}Q{quarter}" for year, quarter in period_keys],
+        "message": "Financial metrics raw result parsed successfully.",
+    }
+
+
 
 PARSER_REGISTRY: dict[str, ParserFunction] = {
     "twse_daily_trading": parse_twse_daily_raw_result,
@@ -426,6 +588,9 @@ PARSER_REGISTRY: dict[str, ParserFunction] = {
     "tpex_company_profile": parse_tpex_company_profile_raw_result,
     "tpex_institutional_trade": parse_tpex_institutional_trade_raw_result,
     "tpex_margin_trading": parse_tpex_margin_trading_raw_result,
+    "tdcc_shareholding_distribution": parse_shareholding_distribution_raw_result,
+    "monthly_revenue": parse_monthly_revenue_raw_result,
+    "financial_metrics": parse_financial_metrics_raw_result,
 }
 
 

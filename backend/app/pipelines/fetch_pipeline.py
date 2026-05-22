@@ -12,7 +12,7 @@ from app.sources.service import SourceNotFoundError, get_source
 from app.utils.hash import sha256_text
 
 
-MAX_RAW_TEXT_CHARS = 2_000_000
+MAX_RAW_TEXT_CHARS = 25_000_000
 
 
 LATEST_MARKET_TRADE_DATE_PLACEHOLDERS = (

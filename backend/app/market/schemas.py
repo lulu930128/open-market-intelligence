@@ -197,3 +197,72 @@ class MarginTradingDailyRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     model_config = ConfigDict(from_attributes=True)
+
+
+class ShareholdingDistributionWeeklyRead(BaseModel):
+    id: int
+    source_id: int
+    raw_result_id: int
+    data_date: date
+    stock_id: str
+    stock_name: str | None = None
+    holding_level: str
+    holding_level_order: int | None = None
+    holder_count: int | None = None
+    share_count: int | None = None
+    share_ratio: float | None = None
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class MonthlyRevenueRead(BaseModel):
+    id: int
+    source_id: int
+    raw_result_id: int
+    report_date: date | None = None
+    period: date
+    stock_id: str
+    stock_name: str | None = None
+    market: str | None = None
+    industry: str | None = None
+    monthly_revenue: int | None = None
+    previous_month_revenue: int | None = None
+    previous_year_month_revenue: int | None = None
+    month_over_month_pct: float | None = None
+    year_over_year_pct: float | None = None
+    cumulative_revenue: int | None = None
+    previous_year_cumulative_revenue: int | None = None
+    cumulative_year_over_year_pct: float | None = None
+    note: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class FinancialMetricQuarterlyRead(BaseModel):
+    id: int
+    source_id: int
+    raw_result_id: int
+    report_date: date | None = None
+    fiscal_year: int
+    quarter: int
+    period: str
+    stock_id: str
+    stock_name: str | None = None
+    market: str | None = None
+    revenue: float | None = None
+    gross_profit: float | None = None
+    operating_income: float | None = None
+    net_income: float | None = None
+    net_income_attributable_parent: float | None = None
+    eps: float | None = None
+    total_assets: float | None = None
+    total_equity: float | None = None
+    parent_equity: float | None = None
+    book_value_per_share: float | None = None
+    roe: float | None = None
+    roa: float | None = None
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
