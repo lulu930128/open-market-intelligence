@@ -2,7 +2,6 @@ import MarketDashboardClient from "@/components/MarketDashboardClient";
 import type {
   ChartPoint,
   RankingResponse,
-  SignalsResponse,
   StockIndicatorPoint,
   WatchlistGroupNode,
   WatchlistItemRead,
@@ -53,19 +52,12 @@ export default async function Page({
   const initialChartData: ChartPoint[] = [];
   const initialIndicatorData: StockIndicatorPoint[] = [];
   let initialRankingData: RankingResponse | null = null;
-  let initialSignalsData: SignalsResponse | null = null;
 
   if (initialSelectedGroupId !== null) {
-    [initialRankingData, initialSignalsData] = await Promise.all([
-      fetchBackendJson<RankingResponse | null>(
-        `/api/watchlists/groups/${initialSelectedGroupId}/rankings/latest?include_children=true&enabled_only=true&rank_by=change_pct&sort_order=desc&limit=100&volume_ratio_threshold=1.5&ma_windows=5,20,60&volume_ma_windows=5,20`,
-        null
-      ),
-      fetchBackendJson<SignalsResponse | null>(
-        `/api/watchlists/groups/${initialSelectedGroupId}/signals/latest?include_children=true&enabled_only=true&limit=100&volume_ratio_threshold=1.5&ma_windows=5,20,60&volume_ma_windows=5,20`,
-        null
-      ),
-    ]);
+    initialRankingData = await fetchBackendJson<RankingResponse | null>(
+      `/api/watchlists/groups/${initialSelectedGroupId}/rankings/latest?include_children=true&enabled_only=true&rank_by=change_pct&sort_order=desc&limit=100&volume_ratio_threshold=1.5&ma_windows=5,20,60&volume_ma_windows=5,20&use_intraday=true`,
+      null
+    );
   }
 
   return (
@@ -76,7 +68,6 @@ export default async function Page({
       initialChartData={initialChartData}
       initialIndicatorData={initialIndicatorData}
       initialRankingData={initialRankingData}
-      initialSignalsData={initialSignalsData}
     />
   );
 }

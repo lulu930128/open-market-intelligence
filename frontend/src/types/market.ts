@@ -71,6 +71,11 @@ export type RankingItem = {
   signal_keys: string[];
   primary_signal_key: string | null;
   primary_signal_label: string | null;
+  intraday_previous_close: number | null;
+  intraday_points: Array<{
+    time: string;
+    price: number;
+  }>;
   error_message: string | null;
 };
 

@@ -1,8 +1,9 @@
-from datetime import date
+from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from app.market.backfill import backfill_tpex_trading_stock, backfill_twse_stock_day
+from app.market.daily_metrics_backfill import ensure_daily_metrics, ensure_latest_daily_metrics
 from app.db.session import get_db
 from app.market.intraday import get_intraday_trend
 from app.market.schemas import (
@@ -32,6 +33,10 @@ from app.market.service import (
 )
 
 router = APIRouter()
+
+
+def _split_categories(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 @router.post("/backfill/twse/{stock_id}", response_model=TwseBackfillResultRead)
@@ -88,6 +93,46 @@ def backfill_tpex_stock_daily_prices(
         ) from exc
 
 
+@router.post("/backfill/daily-metrics")
+def backfill_market_daily_metrics(
+    start_date: date | None = None,
+    end_date: date | None = None,
+    categories: str = Query(default="institutional_trade,margin_trading"),
+    lookback_days: int = Query(default=30, ge=1, le=1000),
+    include_today: bool = False,
+    sleep_seconds: float = Query(default=0.2, ge=0, le=3),
+    skip_existing: bool = True,
+    db: Session = Depends(get_db),
+):
+    try:
+        category_list = _split_categories(categories)
+
+        if start_date is not None:
+            return ensure_daily_metrics(
+                db=db,
+                start_date=start_date,
+                end_date=end_date or start_date,
+                categories=category_list,
+                sleep_seconds=sleep_seconds,
+                skip_existing=skip_existing,
+            )
+
+        return ensure_latest_daily_metrics(
+            db=db,
+            categories=category_list,
+            to_date=end_date,
+            lookback_days=lookback_days,
+            include_today=include_today,
+            sleep_seconds=sleep_seconds,
+            skip_existing=skip_existing,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
 @router.get("/ohlc/{stock_id}", response_model=MarketOhlcChartRead)
 def get_stock_ohlc_chart_data(
     stock_id: str,
@@ -129,7 +174,21 @@ def get_latest_institutional_trades(limit: int = Query(default=100, ge=1, le=100
 
 
 @router.get("/institutional/{stock_id}/latest", response_model=InstitutionalTradeDailyRead)
-def get_latest_stock_institutional_trade_api(stock_id: str, db: Session = Depends(get_db)):
+def get_latest_stock_institutional_trade_api(
+    stock_id: str,
+    ensure_daily: bool = True,
+    include_today: bool = False,
+    sleep_seconds: float = Query(default=0.2, ge=0, le=3),
+    db: Session = Depends(get_db),
+):
+    if ensure_daily:
+        ensure_latest_daily_metrics(
+            db=db,
+            categories=["institutional_trade"],
+            include_today=include_today,
+            sleep_seconds=sleep_seconds,
+        )
+
     result = get_latest_stock_institutional_trade(db=db, stock_id=stock_id)
     if result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Latest institutional trade for stock_id='{stock_id}' not found.")
@@ -137,7 +196,35 @@ def get_latest_stock_institutional_trade_api(stock_id: str, db: Session = Depend
 
 
 @router.get("/institutional/{stock_id}/history", response_model=list[InstitutionalTradeDailyRead])
-def get_stock_institutional_trade_history(stock_id: str, from_date: date | None = None, to_date: date | None = None, limit: int = Query(default=250, ge=1, le=5000), db: Session = Depends(get_db)):
+def get_stock_institutional_trade_history(
+    stock_id: str,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    limit: int = Query(default=250, ge=1, le=5000),
+    ensure_history: bool = True,
+    lookback_days: int = Query(default=365, ge=1, le=5000),
+    include_today: bool = False,
+    sleep_seconds: float = Query(default=0.2, ge=0, le=3),
+    db: Session = Depends(get_db),
+):
+    if ensure_history:
+        if to_date is None:
+            ensure_latest_daily_metrics(
+                db=db,
+                categories=["institutional_trade"],
+                lookback_days=lookback_days,
+                include_today=include_today,
+                sleep_seconds=sleep_seconds,
+            )
+        else:
+            ensure_daily_metrics(
+                db=db,
+                start_date=from_date or to_date - timedelta(days=lookback_days),
+                end_date=to_date,
+                categories=["institutional_trade"],
+                sleep_seconds=sleep_seconds,
+            )
+
     return list_stock_institutional_trade_history(db=db, stock_id=stock_id, from_date=from_date, to_date=to_date, limit=limit, ascending=True)
 
 
@@ -158,8 +245,19 @@ def get_latest_margin_trades(
 @router.get("/margin/{stock_id}/latest", response_model=MarginTradingDailyRead)
 def get_latest_stock_margin_trade_api(
     stock_id: str,
+    ensure_daily: bool = True,
+    include_today: bool = False,
+    sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     db: Session = Depends(get_db),
 ):
+    if ensure_daily:
+        ensure_latest_daily_metrics(
+            db=db,
+            categories=["margin_trading"],
+            include_today=include_today,
+            sleep_seconds=sleep_seconds,
+        )
+
     result = get_latest_stock_margin_trade(db=db, stock_id=stock_id)
 
     if result is None:
@@ -177,8 +275,30 @@ def get_stock_margin_trade_history(
     from_date: date | None = None,
     to_date: date | None = None,
     limit: int = Query(default=250, ge=1, le=5000),
+    ensure_history: bool = True,
+    lookback_days: int = Query(default=365, ge=1, le=5000),
+    include_today: bool = False,
+    sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     db: Session = Depends(get_db),
 ):
+    if ensure_history:
+        if to_date is None:
+            ensure_latest_daily_metrics(
+                db=db,
+                categories=["margin_trading"],
+                lookback_days=lookback_days,
+                include_today=include_today,
+                sleep_seconds=sleep_seconds,
+            )
+        else:
+            ensure_daily_metrics(
+                db=db,
+                start_date=from_date or to_date - timedelta(days=lookback_days),
+                end_date=to_date,
+                categories=["margin_trading"],
+                sleep_seconds=sleep_seconds,
+            )
+
     return list_stock_margin_trade_history(
         db=db,
         stock_id=stock_id,

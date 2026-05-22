@@ -1,4 +1,5 @@
 from time import perf_counter
+from datetime import date
 from types import SimpleNamespace
 
 from sqlalchemy import func
@@ -24,7 +25,7 @@ LATEST_MARKET_TRADE_DATE_ROC_PLACEHOLDERS = (
 )
 
 
-def _get_latest_market_trade_date_yyyymmdd(db: Session) -> str:
+def _get_latest_market_trade_date(db: Session) -> date:
     latest_trade_date = db.query(func.max(MarketDailyPrice.trade_date)).scalar()
 
     if latest_trade_date is None:
@@ -33,23 +34,25 @@ def _get_latest_market_trade_date_yyyymmdd(db: Session) -> str:
             "Refresh a daily market price source before date-based sources."
         )
 
-    return latest_trade_date.strftime("%Y%m%d")
+    return latest_trade_date
 
 
-def _get_latest_market_trade_date_roc_yyy_mm_dd(db: Session) -> str:
-    latest_trade_date = db.query(func.max(MarketDailyPrice.trade_date)).scalar()
-
-    if latest_trade_date is None:
-        raise ValueError(
-            "Cannot render source endpoint URL: no market_daily_price trade_date found. "
-            "Refresh a daily market price source before date-based sources."
-        )
-
-    roc_year = latest_trade_date.year - 1911
-    return f"{roc_year:03d}/{latest_trade_date.month:02d}/{latest_trade_date.day:02d}"
+def _get_market_trade_date_yyyymmdd(db: Session, trade_date: date | None = None) -> str:
+    effective_trade_date = trade_date or _get_latest_market_trade_date(db)
+    return effective_trade_date.strftime("%Y%m%d")
 
 
-def _render_endpoint_url_with_db_context(db: Session, endpoint_url: str | None) -> str | None:
+def _get_market_trade_date_roc_yyy_mm_dd(db: Session, trade_date: date | None = None) -> str:
+    effective_trade_date = trade_date or _get_latest_market_trade_date(db)
+    roc_year = effective_trade_date.year - 1911
+    return f"{roc_year:03d}/{effective_trade_date.month:02d}/{effective_trade_date.day:02d}"
+
+
+def _render_endpoint_url_with_db_context(
+    db: Session,
+    endpoint_url: str | None,
+    trade_date: date | None = None,
+) -> str | None:
     if endpoint_url is None:
         return None
 
@@ -67,19 +70,33 @@ def _render_endpoint_url_with_db_context(db: Session, endpoint_url: str | None) 
 
     for placeholder in LATEST_MARKET_TRADE_DATE_PLACEHOLDERS:
         if placeholder in endpoint_url:
-            latest_trade_date = latest_trade_date or _get_latest_market_trade_date_yyyymmdd(db)
+            latest_trade_date = latest_trade_date or _get_market_trade_date_yyyymmdd(
+                db,
+                trade_date=trade_date,
+            )
             endpoint_url = endpoint_url.replace(placeholder, latest_trade_date)
 
     for placeholder in LATEST_MARKET_TRADE_DATE_ROC_PLACEHOLDERS:
         if placeholder in endpoint_url:
-            latest_trade_date_roc = latest_trade_date_roc or _get_latest_market_trade_date_roc_yyy_mm_dd(db)
+            latest_trade_date_roc = latest_trade_date_roc or _get_market_trade_date_roc_yyy_mm_dd(
+                db,
+                trade_date=trade_date,
+            )
             endpoint_url = endpoint_url.replace(placeholder, latest_trade_date_roc)
 
     return endpoint_url
 
 
-def _build_source_for_fetch(db: Session, source: SourceRegistry) -> SourceRegistry | SimpleNamespace:
-    rendered_endpoint_url = _render_endpoint_url_with_db_context(db, source.endpoint_url)
+def _build_source_for_fetch(
+    db: Session,
+    source: SourceRegistry,
+    trade_date: date | None = None,
+) -> SourceRegistry | SimpleNamespace:
+    rendered_endpoint_url = _render_endpoint_url_with_db_context(
+        db,
+        source.endpoint_url,
+        trade_date=trade_date,
+    )
 
     if rendered_endpoint_url == source.endpoint_url:
         return source
@@ -101,7 +118,7 @@ def _build_source_for_fetch(db: Session, source: SourceRegistry) -> SourceRegist
     )
 
 
-def run_source_fetch(db: Session, source_id: int) -> dict:
+def run_source_fetch(db: Session, source_id: int, trade_date: date | None = None) -> dict:
     source: SourceRegistry = get_source(db, source_id)
 
     if not source.enabled:
@@ -127,7 +144,11 @@ def run_source_fetch(db: Session, source_id: int) -> dict:
 
     fetch_log = FetchLog(
         source_id=source.id,
-        job_name=f"manual_run:{source.source_name}",
+        job_name=(
+            f"manual_run:{source.source_name}"
+            if trade_date is None
+            else f"manual_run:{source.source_name}:{trade_date.isoformat()}"
+        ),
         status="running",
         started_at=utc_now(),
         message="Manual source fetch started.",
@@ -141,7 +162,11 @@ def run_source_fetch(db: Session, source_id: int) -> dict:
 
     try:
         connector = get_connector(source)
-        fetch_source = _build_source_for_fetch(db=db, source=source)
+        fetch_source = _build_source_for_fetch(
+            db=db,
+            source=source,
+            trade_date=trade_date,
+        )
         result = connector.fetch(fetch_source)
 
         raw_text = result.raw_text
@@ -293,7 +318,7 @@ def run_source_fetch(db: Session, source_id: int) -> dict:
         raise
 
 
-def refresh_source(db: Session, source_id: int) -> dict:
+def refresh_source(db: Session, source_id: int, trade_date: date | None = None) -> dict:
     source = get_source(db, source_id)
 
     if not source.enabled:
@@ -317,7 +342,7 @@ def refresh_source(db: Session, source_id: int) -> dict:
             "fetched_at": utc_now(),
         }
 
-    fetch_result = run_source_fetch(db, source_id)
+    fetch_result = run_source_fetch(db, source_id, trade_date=trade_date)
 
     if fetch_result["status"] != "success":
         return {

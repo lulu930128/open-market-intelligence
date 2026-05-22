@@ -4,8 +4,10 @@ from sqlalchemy.orm import Session
 from app.db.models import StockMaster, WatchlistGroup, WatchlistItem
 from app.watchlists.schemas import (
     WatchlistGroupCreate,
+    WatchlistGroupMove,
     WatchlistGroupUpdate,
     WatchlistItemCreate,
+    WatchlistItemMove,
     WatchlistItemUpdate,
 )
 
@@ -102,6 +104,77 @@ def update_group(
 
     for key, value in update_data.items():
         setattr(group, key, value)
+
+    db.commit()
+    db.refresh(group)
+
+    return group
+
+
+def _list_group_siblings(
+    db: Session,
+    parent_id: int | None,
+    exclude_group_id: int | None = None,
+) -> list[WatchlistGroup]:
+    query = db.query(WatchlistGroup)
+
+    if parent_id is None:
+        query = query.filter(WatchlistGroup.parent_id.is_(None))
+    else:
+        query = query.filter(WatchlistGroup.parent_id == parent_id)
+
+    if exclude_group_id is not None:
+        query = query.filter(WatchlistGroup.id != exclude_group_id)
+
+    return query.order_by(WatchlistGroup.sort_order.asc(), WatchlistGroup.id.asc()).all()
+
+
+def _normalize_group_sort_order(groups: list[WatchlistGroup]) -> None:
+    for index, group in enumerate(groups, start=1):
+        group.sort_order = index * 100
+
+
+def move_group(
+    db: Session,
+    group_id: int,
+    payload: WatchlistGroupMove,
+) -> WatchlistGroup:
+    group = get_group(db, group_id)
+    parent_id = payload.parent_id
+
+    _validate_parent(db=db, group_id=group_id, parent_id=parent_id)
+
+    if payload.before_group_id is not None:
+        before_group = get_group(db, payload.before_group_id)
+        if before_group.id == group_id:
+            return group
+        if before_group.parent_id != parent_id:
+            raise WatchlistInvalidTreeError(
+                "before_group_id must belong to the target parent group."
+            )
+
+    siblings = _list_group_siblings(
+        db=db,
+        parent_id=parent_id,
+        exclude_group_id=group_id,
+    )
+
+    group.parent_id = parent_id
+
+    if payload.before_group_id is None:
+        ordered_groups = [*siblings, group]
+    else:
+        ordered_groups = []
+        inserted = False
+        for sibling in siblings:
+            if sibling.id == payload.before_group_id:
+                ordered_groups.append(group)
+                inserted = True
+            ordered_groups.append(sibling)
+        if not inserted:
+            ordered_groups.append(group)
+
+    _normalize_group_sort_order(ordered_groups)
 
     db.commit()
     db.refresh(group)
@@ -304,6 +377,90 @@ def update_item(
 
     for key, value in update_data.items():
         setattr(item, key, value)
+
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise WatchlistDuplicateItemError(
+            "Duplicate stock in the same watchlist group."
+        ) from exc
+
+    db.refresh(item)
+
+    return _item_to_dict(db, item)
+
+
+def _list_item_siblings(
+    db: Session,
+    group_id: int,
+    exclude_item_id: int | None = None,
+) -> list[WatchlistItem]:
+    query = db.query(WatchlistItem).filter(WatchlistItem.group_id == group_id)
+
+    if exclude_item_id is not None:
+        query = query.filter(WatchlistItem.id != exclude_item_id)
+
+    return query.order_by(WatchlistItem.priority.asc(), WatchlistItem.id.asc()).all()
+
+
+def _normalize_item_priority(items: list[WatchlistItem]) -> None:
+    for index, item in enumerate(items, start=1):
+        item.priority = index * 100
+
+
+def move_item(
+    db: Session,
+    item_id: int,
+    payload: WatchlistItemMove,
+) -> dict:
+    item = get_item(db, item_id)
+    get_group(db, payload.group_id)
+
+    duplicate = (
+        db.query(WatchlistItem)
+        .filter(WatchlistItem.group_id == payload.group_id)
+        .filter(WatchlistItem.stock_id == item.stock_id)
+        .filter(WatchlistItem.id != item.id)
+        .first()
+    )
+
+    if duplicate is not None:
+        raise WatchlistDuplicateItemError(
+            f"Stock id='{item.stock_id}' already exists in group id={payload.group_id}."
+        )
+
+    if payload.before_item_id is not None:
+        before_item = get_item(db, payload.before_item_id)
+        if before_item.id == item_id:
+            return _item_to_dict(db, item)
+        if before_item.group_id != payload.group_id:
+            raise WatchlistItemNotFoundError(
+                "before_item_id must belong to the target watchlist group."
+            )
+
+    siblings = _list_item_siblings(
+        db=db,
+        group_id=payload.group_id,
+        exclude_item_id=item_id,
+    )
+
+    item.group_id = payload.group_id
+
+    if payload.before_item_id is None:
+        ordered_items = [*siblings, item]
+    else:
+        ordered_items = []
+        inserted = False
+        for sibling in siblings:
+            if sibling.id == payload.before_item_id:
+                ordered_items.append(item)
+                inserted = True
+            ordered_items.append(sibling)
+        if not inserted:
+            ordered_items.append(item)
+
+    _normalize_item_priority(ordered_items)
 
     try:
         db.commit()

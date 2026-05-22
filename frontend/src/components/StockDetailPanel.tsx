@@ -8,6 +8,10 @@ import StockKLineChart, {
   type IndicatorSettings,
 } from "@/components/StockKLineChart";
 import { fetchJson } from "@/lib/api";
+import {
+  TAIWAN_INTRADAY_REFRESH_MS,
+  getTaiwanMarketRefreshState,
+} from "@/lib/taiwanMarketTime";
 import type {
   ChartPoint,
   IntradayTrendPoint,
@@ -18,7 +22,7 @@ import type {
   StockIndicatorPoint,
   StockMasterRead,
 } from "@/types/market";
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 type Props = {
   stockId: string | null;
@@ -30,8 +34,6 @@ type Props = {
 
 type Timeframe = "today" | "daily" | "weekly" | "monthly";
 type LoadState = "idle" | "loading" | "success" | "error";
-
-const INTRADAY_REFRESH_MS = 5_000;
 
 const timeframeLabels: Record<Timeframe, string> = {
   today: "今日",
@@ -66,6 +68,24 @@ function formatPct(value: number | null | undefined) {
   return `${sign}${value.toFixed(2)}%`;
 }
 
+function formatDateTime(value: string | null | undefined) {
+  if (!value) return "-";
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime()) || !value.includes("T")) return value;
+
+  return new Intl.DateTimeFormat("zh-TW", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "Asia/Taipei",
+  }).format(date);
+}
+
 function valueTone(value: number | null | undefined) {
   if (value === null || value === undefined) return "text-slate-500";
   if (value > 0) return "text-red-600";
@@ -95,23 +115,6 @@ async function fetchOptional<T>(path: string): Promise<T | null> {
   }
 }
 
-function DataCell({
-  label,
-  value,
-  tone = "text-slate-900",
-}: {
-  label: string;
-  value: string;
-  tone?: string;
-}) {
-  return (
-    <div className="border-t border-slate-200 px-4 py-3">
-      <div className="text-xs text-slate-500">{label}</div>
-      <div className={`mt-1 text-sm font-semibold ${tone}`}>{value}</div>
-    </div>
-  );
-}
-
 function TechnicalBar({ label, value }: { label: string; value: number | null }) {
   const displayValue = value === null ? 0 : Math.max(-12, Math.min(12, value));
   const width = `${Math.abs(displayValue / 12) * 50}%`;
@@ -133,6 +136,38 @@ function TechnicalBar({ label, value }: { label: string; value: number | null })
           style={{ width }}
         />
       </div>
+    </div>
+  );
+}
+
+function MetricRow({
+  label,
+  value,
+  tone = "text-slate-900",
+}: {
+  label: string;
+  value: string;
+  tone?: string;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4 border-t border-slate-100 py-2 text-xs">
+      <span className="text-slate-500">{label}</span>
+      <span className={`font-semibold ${tone}`}>{value}</span>
+    </div>
+  );
+}
+
+function ChipMetricBlock({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="border border-slate-200 bg-white px-3 py-2">
+      <div className="text-xs font-bold text-slate-900">{title}</div>
+      <div className="mt-1">{children}</div>
     </div>
   );
 }
@@ -160,6 +195,7 @@ export default function StockDetailPanel({
   const [stockInfo, setStockInfo] = useState<StockMasterRead | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const finalIntradayRefreshDate = useRef<string | null>(null);
 
   function toggleChartIndicator(key: IndicatorKey) {
     setChartIndicators((current) => ({
@@ -227,6 +263,13 @@ export default function StockDetailPanel({
     let intradayTimer: number | undefined;
     let intradayRequestInFlight = false;
 
+    function clearIntradayTimer() {
+      if (intradayTimer !== undefined) {
+        window.clearTimeout(intradayTimer);
+        intradayTimer = undefined;
+      }
+    }
+
     async function loadTodayTrend(showLoading: boolean) {
       if (intradayRequestInFlight) return;
       intradayRequestInFlight = true;
@@ -247,7 +290,8 @@ export default function StockDetailPanel({
         setTodayTrend(today.points);
         setTodayPreviousClose(today.previous_close);
         setTodaySource(today.source);
-        setTodayUpdatedAt(new Date().toLocaleTimeString("zh-TW", { hour12: false }));
+        const latestPoint = today.points[today.points.length - 1] ?? null;
+        setTodayUpdatedAt(latestPoint ? formatDateTime(latestPoint.time) : null);
         setLoadState("success");
         setErrorMessage(null);
       } catch (error) {
@@ -259,14 +303,47 @@ export default function StockDetailPanel({
       }
     }
 
+    function scheduleTodayRefresh() {
+      if (cancelled) return;
+
+      const marketState = getTaiwanMarketRefreshState();
+
+      if (marketState.isPollingWindow) {
+        intradayTimer = window.setTimeout(() => {
+          void loadTodayTrend(false).finally(scheduleTodayRefresh);
+        }, TAIWAN_INTRADAY_REFRESH_MS);
+        return;
+      }
+
+      if (
+        marketState.isAfterClose &&
+        finalIntradayRefreshDate.current !== marketState.dateKey
+      ) {
+        finalIntradayRefreshDate.current = marketState.dateKey;
+        intradayTimer = window.setTimeout(() => {
+          void loadTodayTrend(false).finally(scheduleTodayRefresh);
+        }, 0);
+        return;
+      }
+
+      intradayTimer = window.setTimeout(
+        scheduleTodayRefresh,
+        Math.min(marketState.msUntilNextPollingStart, 60_000)
+      );
+    }
+
     async function loadChart() {
       if (timeframe === "today") {
         await loadTodayTrend(true);
 
         if (!cancelled) {
-          intradayTimer = window.setInterval(() => {
-            void loadTodayTrend(false);
-          }, INTRADAY_REFRESH_MS);
+          const marketState = getTaiwanMarketRefreshState();
+
+          if (marketState.isAfterClose) {
+            finalIntradayRefreshDate.current = marketState.dateKey;
+          }
+
+          scheduleTodayRefresh();
         }
 
         return;
@@ -306,9 +383,7 @@ export default function StockDetailPanel({
 
     return () => {
       cancelled = true;
-      if (intradayTimer !== undefined) {
-        window.clearInterval(intradayTimer);
-      }
+      clearIntradayTimer();
     };
   }, [stockId, timeframe]);
 
@@ -338,10 +413,11 @@ export default function StockDetailPanel({
       : null;
   const volumeRatio = safeRatio(latestIndicator?.volume, volumeMa20);
   const volumeRatioPct = volumeRatio === null ? null : (volumeRatio - 1) * 100;
-  const foreignNet = institutional?.foreign_investor_net ?? null;
-  const investmentTrustNet = institutional?.investment_trust_net ?? null;
-  const dealerNet = institutional?.dealer_net ?? null;
   const totalInstitutionalNet = institutional?.total_institutional_net ?? null;
+  const displayTime =
+    timeframe === "today" && latestToday
+      ? formatDateTime(latestToday.time)
+      : latestIndicator?.time ?? latestChart?.time ?? "-";
 
   const technicalStatus = useMemo(() => {
     if (latestClose === null) return "資料不足";
@@ -393,13 +469,46 @@ export default function StockDetailPanel({
     return result;
   }, [latestClose, ma5, ma20, totalInstitutionalNet, volumeRatio]);
 
+  const chipDateGroups = useMemo(() => {
+    const groups = new Map<
+      string,
+      {
+        tradeDate: string;
+        institutional: InstitutionalTradeDailyRead | null;
+        margin: MarginTradingDailyRead | null;
+      }
+    >();
+
+    if (institutional?.trade_date) {
+      groups.set(institutional.trade_date, {
+        tradeDate: institutional.trade_date,
+        institutional,
+        margin: null,
+      });
+    }
+
+    if (margin?.trade_date) {
+      const current = groups.get(margin.trade_date);
+
+      groups.set(margin.trade_date, {
+        tradeDate: margin.trade_date,
+        institutional: current?.institutional ?? null,
+        margin,
+      });
+    }
+
+    return Array.from(groups.values()).sort((a, b) =>
+      b.tradeDate.localeCompare(a.tradeDate)
+    );
+  }, [institutional, margin]);
+
   if (!stockId) {
     return watchlistRankingPanel ? (
       <section className="min-w-0">{watchlistRankingPanel}</section>
     ) : null;
   }
 
-  const technicalSpanClass = watchlistRankingPanel ? "xl:row-span-3" : "xl:row-span-2";
+  const technicalSpanClass = watchlistRankingPanel ? "xl:row-span-2" : "";
 
   return (
     <section className="grid w-full grid-cols-1 justify-start gap-4 xl:grid-cols-[minmax(0,7fr)_minmax(360px,5fr)]">
@@ -414,7 +523,7 @@ export default function StockDetailPanel({
               </h2>
               <div className="mt-1 text-sm text-slate-500">
                 {stockInfo?.market ?? "-"} · {stockInfo?.industry ?? "未分類"} ·{" "}
-                {latestIndicator?.time ?? latestChart?.time ?? "-"}
+                {displayTime}
               </div>
             </div>
 
@@ -499,7 +608,7 @@ export default function StockDetailPanel({
               previousClose={todayPreviousClose}
               label={timeframeLabels[timeframe]}
               source={todaySource}
-              refreshIntervalMs={INTRADAY_REFRESH_MS}
+              refreshIntervalMs={TAIWAN_INTRADAY_REFRESH_MS}
               updatedAt={todayUpdatedAt}
             />
           ) : (
@@ -568,35 +677,87 @@ export default function StockDetailPanel({
               ))}
             </div>
           </div>
+
+          <div className="border-t border-slate-200 px-5 py-4">
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+              Data
+            </div>
+            <div className="mt-1 flex items-end justify-between gap-4">
+              <div>
+                <div className="text-lg font-bold text-slate-950">籌碼資料</div>
+                <div className="mt-1 text-xs text-slate-500">依資料日期分類</div>
+              </div>
+            </div>
+
+            <div className="mt-4 space-y-4">
+              {chipDateGroups.length ? (
+                chipDateGroups.map((group) => (
+                  <div key={group.tradeDate} className="space-y-3">
+                    <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+                      <span className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
+                        Date
+                      </span>
+                      <span className="text-sm font-bold text-slate-900">
+                        {group.tradeDate}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-3 2xl:grid-cols-2">
+                      <ChipMetricBlock title="三大法人">
+                        <MetricRow
+                          label="外資買賣超"
+                          value={formatSignedNumber(group.institutional?.foreign_investor_net)}
+                          tone={valueTone(group.institutional?.foreign_investor_net)}
+                        />
+                        <MetricRow
+                          label="投信買賣超"
+                          value={formatSignedNumber(group.institutional?.investment_trust_net)}
+                          tone={valueTone(group.institutional?.investment_trust_net)}
+                        />
+                        <MetricRow
+                          label="自營商買賣超"
+                          value={formatSignedNumber(group.institutional?.dealer_net)}
+                          tone={valueTone(group.institutional?.dealer_net)}
+                        />
+                        <MetricRow
+                          label="三大法人合計"
+                          value={formatSignedNumber(group.institutional?.total_institutional_net)}
+                          tone={valueTone(group.institutional?.total_institutional_net)}
+                        />
+                      </ChipMetricBlock>
+
+                      <ChipMetricBlock title="融資融券">
+                        <MetricRow
+                          label="融資餘額"
+                          value={formatNumber(group.margin?.margin_today_balance)}
+                        />
+                        <MetricRow
+                          label="融券餘額"
+                          value={formatNumber(group.margin?.short_today_balance)}
+                        />
+                        <MetricRow
+                          label="資券相抵"
+                          value={formatNumber(group.margin?.offset)}
+                        />
+                        <MetricRow
+                          label="融資買 / 賣"
+                          value={`${formatNumber(group.margin?.margin_buy)} / ${formatNumber(
+                            group.margin?.margin_sell
+                          )}`}
+                        />
+                      </ChipMetricBlock>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="border border-dashed border-slate-200 px-4 py-6 text-center text-sm text-slate-500">
+                  尚無三大法人或融資融券資料
+                </div>
+              )}
+            </div>
+          </div>
       </aside>
 
-      <div className="min-w-0 border border-slate-200 bg-white">
-        <div className="border-b border-slate-200 px-5 py-3">
-          <h3 className="text-sm font-bold text-slate-950">資料摘要</h3>
-        </div>
-        <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6">
-          <DataCell label="成交量" value={formatNumber(latestIndicator?.volume ?? latestChart?.volume)} />
-          <DataCell label="成交金額" value={formatNumber(latestChart?.trade_value)} />
-          <DataCell label="外資買賣超" value={formatSignedNumber(foreignNet)} tone={valueTone(foreignNet)} />
-          <DataCell
-            label="投信買賣超"
-            value={formatSignedNumber(investmentTrustNet)}
-            tone={valueTone(investmentTrustNet)}
-          />
-          <DataCell label="自營商買賣超" value={formatSignedNumber(dealerNet)} tone={valueTone(dealerNet)} />
-          <DataCell
-            label="三大法人合計"
-            value={formatSignedNumber(totalInstitutionalNet)}
-            tone={valueTone(totalInstitutionalNet)}
-          />
-          <DataCell label="融資餘額" value={formatNumber(margin?.margin_today_balance)} />
-          <DataCell label="融券餘額" value={formatNumber(margin?.short_today_balance)} />
-          <DataCell label="資券相抵" value={formatNumber(margin?.offset)} />
-          <DataCell label="市場" value={stockInfo?.market ?? "-"} />
-          <DataCell label="產業" value={stockInfo?.industry ?? "-"} />
-          <DataCell label="資料日期" value={latestIndicator?.time ?? latestChart?.time ?? "-"} />
-        </div>
-      </div>
       {watchlistRankingPanel ? <div className="min-w-0">{watchlistRankingPanel}</div> : null}
     </section>
   );

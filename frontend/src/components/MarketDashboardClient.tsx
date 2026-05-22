@@ -3,16 +3,21 @@
 import SidebarWatchlistExplorer from "@/components/SidebarWatchlistExplorer";
 import StockDetailPanel from "@/components/StockDetailPanel";
 import { fetchJson } from "@/lib/api";
+import {
+  TAIWAN_INTRADAY_REFRESH_MS,
+  getTaiwanIntradayXRatio,
+  getTaiwanMarketRefreshState,
+  isTaiwanRegularSessionPoint,
+} from "@/lib/taiwanMarketTime";
 import type {
   ChartPoint,
   RankingItem,
   RankingResponse,
-  SignalsResponse,
   StockIndicatorPoint,
   WatchlistGroupNode,
   WatchlistItemRead,
 } from "@/types/market";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
 type Props = {
@@ -22,7 +27,6 @@ type Props = {
   initialChartData: ChartPoint[];
   initialIndicatorData: StockIndicatorPoint[];
   initialRankingData: RankingResponse | null;
-  initialSignalsData: SignalsResponse | null;
 };
 
 function formatNumber(value: number | null | undefined) {
@@ -83,6 +87,156 @@ function trendClass(value: number | null | undefined) {
   return "bg-slate-100 text-slate-600";
 }
 
+function sparklineTone(
+  latestPrice: number | null,
+  previousClose: number | null,
+  selected: boolean
+) {
+  if (latestPrice === null || previousClose === null || previousClose === 0) {
+    return selected ? "stroke-slate-300" : "stroke-slate-400";
+  }
+
+  if (latestPrice > previousClose) return "stroke-red-500";
+  if (latestPrice < previousClose) return "stroke-emerald-500";
+  return selected ? "stroke-slate-300" : "stroke-slate-400";
+}
+
+function formatRowTime(value: string | null | undefined) {
+  if (!value) return null;
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime()) || !value.includes("T")) return value;
+
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Taipei",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    })
+      .formatToParts(date)
+      .map((part) => [part.type, part.value])
+  );
+
+  return `${parts.month}/${parts.day} ${parts.hour}:${parts.minute}`;
+}
+
+function formatDashboardTime(value: Date) {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Taipei",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    })
+      .formatToParts(value)
+      .map((part) => [part.type, part.value])
+  );
+
+  return `${parts.year}/${parts.month}/${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+}
+
+function buildSparklinePath(
+  points: Array<{ time: string; price: number }>,
+  previousClose: number | null
+) {
+  const width = 92;
+  const height = 28;
+  const paddingX = 2;
+  const paddingY = 4;
+  const usableWidth = width - paddingX * 2;
+  const usableHeight = height - paddingY * 2;
+  const prices = [
+    ...points.map((point) => point.price),
+    ...(previousClose !== null ? [previousClose] : []),
+  ];
+  const minPrice = Math.min(...prices);
+  const maxPrice = Math.max(...prices);
+  const range = maxPrice - minPrice || Math.max(maxPrice * 0.01, 1);
+  const yMin = minPrice - range * 0.08;
+  const yMax = maxPrice + range * 0.08;
+  const yRange = yMax - yMin || 1;
+  const path = points
+    .map((point, index) => {
+      const x = paddingX + getTaiwanIntradayXRatio(point.time) * usableWidth;
+      const y = paddingY + ((yMax - point.price) / yRange) * usableHeight;
+
+      return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+    })
+    .join(" ");
+  const previousCloseY =
+    previousClose === null
+      ? null
+      : paddingY + ((yMax - previousClose) / yRange) * usableHeight;
+
+  return { path, previousCloseY, width, height };
+}
+
+function RankingSparkline({
+  row,
+  selected,
+}: {
+  row: RankingItem;
+  selected: boolean;
+}) {
+  const points = (row.intraday_points ?? []).filter((point) => {
+    return (
+      point.time &&
+      point.price !== null &&
+      point.price !== undefined &&
+      !Number.isNaN(point.price) &&
+      isTaiwanRegularSessionPoint(point.time)
+    );
+  });
+
+  if (points.length < 2) {
+    return (
+      <span className={selected ? "text-center text-xs text-slate-400" : "text-center text-xs text-slate-400"}>
+        -
+      </span>
+    );
+  }
+
+  const previousClose = row.intraday_previous_close ?? null;
+  const latestPrice = points[points.length - 1]?.price ?? null;
+  const chart = buildSparklinePath(points, previousClose);
+
+  return (
+    <svg
+      viewBox={`0 0 ${chart.width} ${chart.height}`}
+      className="h-8 w-[92px]"
+      aria-label="當日走勢"
+    >
+      <rect width={chart.width} height={chart.height} fill="transparent" />
+      {chart.previousCloseY !== null ? (
+        <line
+          x1="2"
+          x2={chart.width - 2}
+          y1={chart.previousCloseY}
+          y2={chart.previousCloseY}
+          className={selected ? "stroke-slate-600" : "stroke-slate-200"}
+          strokeDasharray="3 3"
+        />
+      ) : null}
+      <path
+        d={chart.path}
+        fill="none"
+        strokeWidth="1.8"
+        className={sparklineTone(latestPrice, previousClose, selected)}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 function flattenGroups(nodes: WatchlistGroupNode[]): WatchlistGroupNode[] {
   return nodes.flatMap((node) => [node, ...flattenGroups(node.children)]);
 }
@@ -94,7 +248,6 @@ export default function MarketDashboardClient({
   initialChartData,
   initialIndicatorData,
   initialRankingData,
-  initialSignalsData,
 }: Props) {
   const initialSelectedGroup = useMemo(() => {
     return flattenGroups(initialTree).find((group) => group.id === initialSelectedGroupId) ?? null;
@@ -109,17 +262,41 @@ export default function MarketDashboardClient({
   const [selectedStockName, setSelectedStockName] = useState<string | null>(null);
   const [rankBy, setRankBy] = useState("change_pct");
   const [ranking, setRanking] = useState<RankingResponse | null>(initialRankingData);
-  const [signals, setSignals] = useState<SignalsResponse | null>(initialSignalsData);
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
+  const dashboardRequestInFlight = useRef(false);
+  const finalDashboardRefreshDate = useRef<string | null>(null);
 
   const rows = useMemo(() => ranking?.results ?? [], [ranking]);
   const activeGroupId = selectedGroupId ?? selectedGroup?.id ?? null;
+  const summary = useMemo(() => {
+    const upCount = rows.filter((row) => {
+      return row.change_pct !== null && row.change_pct !== undefined && row.change_pct > 0;
+    }).length;
+    const downCount = rows.filter((row) => {
+      return row.change_pct !== null && row.change_pct !== undefined && row.change_pct < 0;
+    }).length;
 
-  async function loadDashboard(groupId: number, currentRankBy = rankBy) {
-    setLoadState("loading");
-    setErrorMessage(null);
+    return {
+      stockCount: ranking?.requested_stock_count ?? rows.length,
+      upCount,
+      downCount,
+    };
+  }, [ranking?.requested_stock_count, rows]);
+
+  async function loadDashboard(
+    groupId: number,
+    currentRankBy = rankBy,
+    options?: { silent?: boolean }
+  ) {
+    if (dashboardRequestInFlight.current) return;
+    dashboardRequestInFlight.current = true;
+
+    if (!options?.silent) {
+      setLoadState("loading");
+      setErrorMessage(null);
+    }
 
     try {
       const commonParams = {
@@ -129,41 +306,91 @@ export default function MarketDashboardClient({
         volume_ma_windows: "5,20",
       };
 
-      const [rankingData, signalsData] = await Promise.all([
-        fetchJson<RankingResponse>(`/api/watchlists/groups/${groupId}/rankings/latest`, {
+      const rankingData = await fetchJson<RankingResponse>(
+        `/api/watchlists/groups/${groupId}/rankings/latest`,
+        {
           ...commonParams,
           rank_by: currentRankBy,
           sort_order: "desc",
           limit: 100,
           volume_ratio_threshold: 1.5,
-        }),
-        fetchJson<SignalsResponse>(`/api/watchlists/groups/${groupId}/signals/latest`, {
-          ...commonParams,
-          limit: 100,
-          volume_ratio_threshold: 1.5,
-        }),
-      ]);
+          use_intraday: true,
+        }
+      );
 
       setRanking(rankingData);
-      setSignals(signalsData);
-      setLastUpdatedAt(new Date().toLocaleString("zh-TW", { hour12: false }));
+      setLastUpdatedAt(formatDashboardTime(new Date()));
       setLoadState("success");
     } catch (error) {
       setLoadState("error");
       setErrorMessage(error instanceof Error ? error.message : "資料讀取失敗");
+    } finally {
+      dashboardRequestInFlight.current = false;
     }
   }
 
   useEffect(() => {
     if (activeGroupId === null) return;
 
-    const timer = window.setTimeout(() => {
-      void loadDashboard(activeGroupId);
+    const groupId = activeGroupId;
+    let disposed = false;
+    let refreshTimer: number | undefined;
+
+    function clearRefreshTimer() {
+      if (refreshTimer !== undefined) {
+        window.clearTimeout(refreshTimer);
+        refreshTimer = undefined;
+      }
+    }
+
+    function scheduleRefresh() {
+      if (disposed) return;
+
+      const marketState = getTaiwanMarketRefreshState();
+
+      if (marketState.isPollingWindow) {
+        refreshTimer = window.setTimeout(() => {
+          void loadDashboard(groupId, rankBy, { silent: true }).finally(scheduleRefresh);
+        }, TAIWAN_INTRADAY_REFRESH_MS);
+        return;
+      }
+
+      if (
+        marketState.isAfterClose &&
+        finalDashboardRefreshDate.current !== marketState.dateKey
+      ) {
+        finalDashboardRefreshDate.current = marketState.dateKey;
+        refreshTimer = window.setTimeout(() => {
+          void loadDashboard(groupId, rankBy, { silent: true }).finally(scheduleRefresh);
+        }, 0);
+        return;
+      }
+
+      refreshTimer = window.setTimeout(
+        scheduleRefresh,
+        Math.min(marketState.msUntilNextPollingStart, 60_000)
+      );
+    }
+
+    const initialTimer = window.setTimeout(() => {
+      void loadDashboard(groupId, rankBy).finally(() => {
+        const marketState = getTaiwanMarketRefreshState();
+
+        if (marketState.isAfterClose) {
+          finalDashboardRefreshDate.current = marketState.dateKey;
+        }
+
+        scheduleRefresh();
+      });
     }, 0);
 
-    return () => window.clearTimeout(timer);
+    return () => {
+      disposed = true;
+      window.clearTimeout(initialTimer);
+      clearRefreshTimer();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeGroupId]);
+  }, [activeGroupId, rankBy]);
 
   function handleSelectGroup(group: WatchlistGroupNode | null) {
     setSelectedGroup(group);
@@ -174,7 +401,6 @@ export default function MarketDashboardClient({
       setSelectedStockName(null);
     } else {
       setRanking(null);
-      setSignals(null);
     }
   }
 
@@ -185,9 +411,6 @@ export default function MarketDashboardClient({
 
   function handleRankByChange(value: string) {
     setRankBy(value);
-    if (activeGroupId !== null) {
-      void loadDashboard(activeGroupId, value);
-    }
   }
 
   function renderRankingRow(row: RankingItem) {
@@ -199,7 +422,7 @@ export default function MarketDashboardClient({
         type="button"
         onClick={() => handleSelectStock(row.stock_id, row.stock_name)}
         className={[
-          "grid w-full grid-cols-[46px_minmax(120px,1fr)_80px_82px_72px_90px] items-center border-t border-slate-200 px-4 py-2 text-left text-sm",
+          "grid w-full grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-slate-200 px-4 py-2 text-left text-sm",
           selected ? "bg-slate-900 text-white" : "bg-white text-slate-800 hover:bg-slate-50",
         ].join(" ")}
       >
@@ -209,8 +432,11 @@ export default function MarketDashboardClient({
             {row.stock_id} {row.stock_name ?? ""}
           </span>
           <span className={selected ? "block truncate text-xs text-slate-300" : "block truncate text-xs text-slate-500"}>
-            {row.time ?? row.primary_signal_label ?? statusLabel(row.status)}
+            {formatRowTime(row.time) ?? row.primary_signal_label ?? statusLabel(row.status)}
           </span>
+        </span>
+        <span className="flex justify-center">
+          <RankingSparkline row={row} selected={selected} />
         </span>
         <span className="text-right font-semibold">{formatPrice(row.close)}</span>
         <span className={`text-right font-semibold ${selected ? "" : valueTone(row.change_pct)}`}>
@@ -242,9 +468,10 @@ export default function MarketDashboardClient({
         </span>
       </div>
 
-      <div className="grid grid-cols-[46px_minmax(120px,1fr)_80px_82px_72px_90px] bg-slate-50 px-4 py-2 text-xs font-bold uppercase tracking-wide text-slate-500">
+      <div className="grid grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] bg-slate-50 px-4 py-2 text-xs font-bold uppercase tracking-wide text-slate-500">
         <span>名次</span>
         <span>股票</span>
+        <span className="text-center">走勢</span>
         <span className="text-right">收盤</span>
         <span className="text-right">漲幅</span>
         <span className="text-right">漲跌</span>
@@ -277,7 +504,6 @@ export default function MarketDashboardClient({
                 await loadDashboard(groupId);
               } else {
                 setRanking(null);
-                setSignals(null);
               }
             }}
           />
@@ -330,15 +556,15 @@ export default function MarketDashboardClient({
               <div className="grid grid-cols-2 border-t border-slate-200 md:grid-cols-4">
                 <div className="px-5 py-3">
                   <div className="text-xs text-slate-500">股票數</div>
-                  <div className="mt-1 text-xl font-bold">{ranking?.requested_stock_count ?? "-"}</div>
+                  <div className="mt-1 text-xl font-bold">{summary.stockCount}</div>
                 </div>
                 <div className="border-l border-slate-200 px-5 py-3">
-                  <div className="text-xs text-slate-500">偏多</div>
-                  <div className="mt-1 text-xl font-bold text-red-600">{signals?.bullish_count ?? "-"}</div>
+                  <div className="text-xs text-slate-500">上漲</div>
+                  <div className="mt-1 text-xl font-bold text-red-600">{summary.upCount}</div>
                 </div>
                 <div className="border-l border-slate-200 px-5 py-3">
-                  <div className="text-xs text-slate-500">偏空</div>
-                  <div className="mt-1 text-xl font-bold text-emerald-600">{signals?.bearish_count ?? "-"}</div>
+                  <div className="text-xs text-slate-500">下跌</div>
+                  <div className="mt-1 text-xl font-bold text-emerald-600">{summary.downCount}</div>
                 </div>
                 <div className="border-l border-slate-200 px-5 py-3">
                   <div className="text-xs text-slate-500">排序</div>

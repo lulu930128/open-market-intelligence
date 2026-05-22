@@ -19,6 +19,11 @@ class WatchlistGroupUpdate(BaseModel):
     is_active: bool | None = None
 
 
+class WatchlistGroupMove(BaseModel):
+    parent_id: int | None = None
+    before_group_id: int | None = None
+
+
 class WatchlistGroupRead(BaseModel):
     id: int
     parent_id: int | None = None
@@ -66,6 +71,11 @@ class WatchlistItemUpdate(BaseModel):
     priority: int | None = None
     tags: str | None = None
     enabled: bool | None = None
+
+
+class WatchlistItemMove(BaseModel):
+    group_id: int
+    before_item_id: int | None = None
 
 
 class WatchlistItemRead(BaseModel):
@@ -158,7 +168,7 @@ class WatchlistStockLatestSignalsRead(BaseModel):
     stock_id: str
     stock_name: str | None = None
 
-    time: date | None = None
+    time: str | date | None = None
     close: float | None = None
     volume: int | None = None
     change_pct: float | None = None
@@ -190,7 +200,7 @@ class WatchlistRankingItemRead(BaseModel):
     stock_id: str
     stock_name: str | None = None
 
-    time: date | None = None
+    time: str | date | None = None
     close: float | None = None
     volume: int | None = None
     change_pct: float | None = None
@@ -203,6 +213,9 @@ class WatchlistRankingItemRead(BaseModel):
 
     primary_signal_key: str | None = None
     primary_signal_label: str | None = None
+
+    intraday_previous_close: float | None = None
+    intraday_points: list[dict] = Field(default_factory=list)
 
     error_message: str | None = None
 

@@ -1,7 +1,13 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import type { IntradayTrendPoint } from "@/types/market";
+import {
+  TAIWAN_SESSION_END_MINUTES,
+  TAIWAN_SESSION_START_MINUTES,
+  getTaiwanIntradayXRatio,
+  isTaiwanRegularSessionPoint,
+} from "@/lib/taiwanMarketTime";
 
 type Props = {
   points: IntradayTrendPoint[];
@@ -21,33 +27,6 @@ function formatPrice(value: number | null | undefined) {
   });
 }
 
-function formatNumber(value: number | null | undefined) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "-";
-
-  if (Math.abs(value) >= 100_000_000) {
-    return `${(value / 100_000_000).toFixed(1)}億`;
-  }
-
-  if (Math.abs(value) >= 10_000) {
-    return `${(value / 10_000).toFixed(1)}萬`;
-  }
-
-  return new Intl.NumberFormat("zh-TW").format(value);
-}
-
-function formatTime(value: string) {
-  const date = new Date(value);
-
-  if (Number.isNaN(date.getTime())) return value;
-
-  return new Intl.DateTimeFormat("zh-TW", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    timeZone: "Asia/Taipei",
-  }).format(date);
-}
-
 function formatSource(value: string) {
   if (value === "yahoo_finance_chart") return "1 分鐘走勢";
   if (value === "twse_mis_snapshot") return "即時快照";
@@ -60,6 +39,206 @@ function clamp(value: number, min: number, max: number) {
 
 function validNumber(value: number | null | undefined): value is number {
   return value !== null && value !== undefined && !Number.isNaN(value);
+}
+
+function formatLots(value: number | null | undefined) {
+  if (!validNumber(value) || value <= 0) return "-";
+
+  return new Intl.NumberFormat("zh-TW", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 1,
+  }).format(value / 1000);
+}
+
+function getTaiwanPriceStep(price: number) {
+  if (price >= 500) return 1;
+  if (price >= 100) return 0.5;
+  if (price >= 50) return 0.1;
+  if (price >= 10) return 0.05;
+  return 0.01;
+}
+
+function roundToStep(value: number, step: number, mode: "floor" | "ceil" | "round") {
+  const scaled = value / step;
+
+  if (mode === "floor") return Math.floor(scaled) * step;
+  if (mode === "ceil") return Math.ceil(scaled) * step;
+
+  return Math.round(scaled) * step;
+}
+
+function floorToTaiwanPriceStep(value: number) {
+  return roundToStep(value, getTaiwanPriceStep(value), "floor");
+}
+
+function ceilToTaiwanPriceStep(value: number) {
+  return roundToStep(value, getTaiwanPriceStep(value), "ceil");
+}
+
+function getNiceAxisInterval(range: number, referencePrice: number) {
+  const baseStep = getTaiwanPriceStep(referencePrice);
+  const rawStep = Math.max(range / 5, baseStep);
+  const multipliers = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000];
+  const multiplier = multipliers.find((item) => item * baseStep >= rawStep) ?? 1000;
+
+  return multiplier * baseStep;
+}
+
+function nearlyEqual(a: number, b: number, tolerance: number) {
+  return Math.abs(a - b) <= tolerance;
+}
+
+function uniqueTicks(values: number[]) {
+  return values.reduce<number[]>((result, value) => {
+    const rounded = Number(value.toFixed(4));
+    const exists = result.some((item) => nearlyEqual(item, rounded, 0.0001));
+
+    if (!exists) result.push(rounded);
+
+    return result;
+  }, []);
+}
+
+function buildPriceTicks(
+  min: number,
+  max: number,
+  interval: number,
+  hasFixedMax: boolean,
+  hasFixedMin: boolean
+) {
+  const ticks = [max];
+  let next = hasFixedMax ? roundToStep(max - interval, interval, "ceil") : max - interval;
+
+  while (next > min + interval * 0.2) {
+    ticks.push(next);
+    next -= interval;
+  }
+
+  if (hasFixedMin) {
+    ticks.push(min);
+  } else if (ticks[ticks.length - 1] > min + interval * 0.2) {
+    ticks.push(min);
+  }
+
+  return uniqueTicks(ticks).sort((a, b) => b - a);
+}
+
+function getPriceScale(
+  prices: number[],
+  previousClose: number | null,
+  showLimitRange: boolean
+) {
+  const referencePrice = previousClose ?? prices[prices.length - 1] ?? 1;
+  const hardMax = previousClose === null ? null : previousClose * 1.1;
+  const hardMin = previousClose === null ? null : previousClose * 0.9;
+  const limitUp = hardMax === null ? null : floorToTaiwanPriceStep(hardMax);
+  const limitDown = hardMin === null ? null : ceilToTaiwanPriceStep(hardMin);
+  const limitTolerance = getTaiwanPriceStep(referencePrice) * 0.51;
+  const scaleValues = [...prices];
+
+  if (previousClose !== null) scaleValues.push(previousClose);
+  if (showLimitRange && limitUp !== null && limitDown !== null) {
+    scaleValues.push(limitUp, limitDown);
+  }
+
+  const rawMin = Math.min(...scaleValues);
+  const rawMax = Math.max(...scaleValues);
+  const hitsLimitUp = limitUp !== null && rawMax >= limitUp - limitTolerance;
+  const hitsLimitDown = limitDown !== null && rawMin <= limitDown + limitTolerance;
+  const rawRange = rawMax - rawMin || Math.max(referencePrice * 0.02, 1);
+  let paddedMin = rawMin - rawRange * 0.08;
+  let paddedMax = rawMax + rawRange * 0.08;
+
+  if (limitDown !== null && (showLimitRange || hitsLimitDown)) {
+    paddedMin = limitDown;
+  } else if (limitDown !== null) {
+    paddedMin = Math.max(paddedMin, limitDown);
+  }
+
+  if (limitUp !== null && (showLimitRange || hitsLimitUp)) {
+    paddedMax = limitUp;
+  } else if (limitUp !== null) {
+    paddedMax = Math.min(paddedMax, limitUp);
+  }
+
+  const interval = getNiceAxisInterval(paddedMax - paddedMin || rawRange, referencePrice);
+  let min =
+    limitDown !== null && (showLimitRange || hitsLimitDown)
+      ? limitDown
+      : roundToStep(paddedMin, interval, "floor");
+  let max =
+    limitUp !== null && (showLimitRange || hitsLimitUp)
+      ? limitUp
+      : roundToStep(paddedMax, interval, "ceil");
+
+  if (limitUp !== null && max > limitUp) {
+    max = limitUp;
+  }
+
+  if (limitDown !== null && min < limitDown) {
+    min = limitDown;
+  }
+
+  if (min === max) {
+    const nextMin = limitDown !== null ? Math.max(limitDown, min - interval) : min - interval;
+    const nextMax = limitUp !== null ? Math.min(limitUp, max + interval) : max + interval;
+
+    min = nextMin;
+    max = nextMax;
+  }
+
+  const ticks = buildPriceTicks(
+    min,
+    max,
+    interval,
+    limitUp !== null && nearlyEqual(max, limitUp, limitTolerance),
+    limitDown !== null && nearlyEqual(min, limitDown, limitTolerance)
+  );
+
+  return {
+    min,
+    max,
+    ticks,
+    interval,
+    limitUp,
+    limitDown,
+    hardMax,
+    hardMin,
+    hitsLimitUp,
+    hitsLimitDown,
+  };
+}
+
+function priceToneClass(
+  price: number,
+  previousClose: number | null,
+  limitUp: number | null,
+  limitDown: number | null
+) {
+  const step = getTaiwanPriceStep(price) * 0.51;
+
+  if (limitUp !== null && nearlyEqual(price, limitUp, step)) {
+    return "fill-red-600 font-bold";
+  }
+
+  if (limitDown !== null && nearlyEqual(price, limitDown, step)) {
+    return "fill-emerald-600 font-bold";
+  }
+
+  if (previousClose === null || price === previousClose) return "fill-slate-600";
+  if (price > previousClose) return "fill-red-600";
+  return "fill-emerald-600";
+}
+
+function pricePctToneClass(value: number) {
+  if (value > 0) return "fill-red-600";
+  if (value < 0) return "fill-emerald-600";
+  return "fill-slate-700";
+}
+
+function formatPct(value: number) {
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toFixed(1)}%`;
 }
 
 function labelPosition(
@@ -79,16 +258,27 @@ function labelPosition(
 
 function buildLinePath(
   data: IntradayTrendPoint[],
-  getX: (index: number) => number,
+  getX: (point: IntradayTrendPoint, index: number) => number,
   getY: (value: number) => number
 ) {
   return data
     .map((point, index) => {
-      const x = getX(index).toFixed(2);
+      const x = getX(point, index).toFixed(2);
       const y = getY(point.price).toFixed(2);
       return `${index === 0 ? "M" : "L"} ${x} ${y}`;
     })
     .join(" ");
+}
+
+function buildBaselineAreaPath(
+  linePath: string,
+  firstPointX: number,
+  lastPointX: number,
+  baselineY: number
+) {
+  return `${linePath} L ${lastPointX.toFixed(2)} ${baselineY.toFixed(
+    2
+  )} L ${firstPointX.toFixed(2)} ${baselineY.toFixed(2)} Z`;
 }
 
 export default function IntradayTrendChart({
@@ -99,16 +289,23 @@ export default function IntradayTrendChart({
   refreshIntervalMs,
   updatedAt,
 }: Props) {
+  const chartId = useId();
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const [showLimitRange, setShowLimitRange] = useState(false);
 
   const data = useMemo(() => {
     return points.filter((point) => {
-      return point.price !== null && point.price !== undefined && !Number.isNaN(point.price);
+      return (
+        point.price !== null &&
+        point.price !== undefined &&
+        !Number.isNaN(point.price) &&
+        isTaiwanRegularSessionPoint(point.time)
+      );
     });
   }, [points]);
 
-  const hoveredPoint =
-    hoverIndex !== null ? data[hoverIndex] : data[data.length - 1] ?? null;
+  const safeHoverIndex =
+    hoverIndex !== null && hoverIndex >= 0 && hoverIndex < data.length ? hoverIndex : null;
 
   if (data.length < 2) {
     return (
@@ -121,7 +318,7 @@ export default function IntradayTrendChart({
   const width = 1000;
   const height = 420;
   const paddingLeft = 58;
-  const paddingRight = 28;
+  const paddingRight = 72;
   const priceTop = 30;
   const priceHeight = 260;
   const volumeTop = 322;
@@ -131,33 +328,29 @@ export default function IntradayTrendChart({
   const latestPrice = data[data.length - 1]?.price ?? null;
   const change =
     latestPrice !== null && previousClose !== null ? latestPrice - previousClose : null;
-  const trendClass =
-    change === null || change === 0
-      ? "stroke-slate-700"
-      : change > 0
-        ? "stroke-red-600"
-        : "stroke-emerald-600";
-  const areaClass =
-    change === null || change === 0
-      ? "fill-slate-50"
-      : change > 0
-        ? "fill-red-50"
-        : "fill-emerald-50";
 
   const priceValues = [
     ...data.map((point) => point.price),
     ...(previousClose !== null ? [previousClose] : []),
   ];
-  const minPrice = Math.min(...priceValues);
-  const maxPrice = Math.max(...priceValues);
-  const pricePadding = (maxPrice - minPrice || 1) * 0.08;
-  const yMin = minPrice - pricePadding;
-  const yMax = maxPrice + pricePadding;
+  const priceScale = getPriceScale(priceValues, previousClose, showLimitRange);
+  const yMin = priceScale.min;
+  const yMax = priceScale.max;
   const yRange = yMax - yMin || 1;
+  const limitTolerance = previousClose === null ? 0 : getTaiwanPriceStep(previousClose) * 0.51;
   const volumes = data
     .map((point) => point.volume)
     .filter(validNumber);
   const maxVolume = Math.max(...volumes, 1);
+  const cumulativeVolumes = data.reduce<number[]>((result, point, index) => {
+    const previous = index > 0 ? result[index - 1] : 0;
+    const volume = validNumber(point.volume) && point.volume > 0 ? point.volume : 0;
+
+    result.push(previous + volume);
+
+    return result;
+  }, []);
+  const totalVolume = cumulativeVolumes[cumulativeVolumes.length - 1] ?? null;
   const rangeHigh = data.reduce<{ index: number; value: number } | null>(
     (best, point, index) => {
       const value = point.high ?? point.price;
@@ -180,10 +373,17 @@ export default function IntradayTrendChart({
     },
     null
   );
+  const rangeHighIsLimit =
+    rangeHigh !== null &&
+    priceScale.limitUp !== null &&
+    nearlyEqual(rangeHigh.value, priceScale.limitUp, limitTolerance);
+  const rangeLowIsLimit =
+    rangeLow !== null &&
+    priceScale.limitDown !== null &&
+    nearlyEqual(rangeLow.value, priceScale.limitDown, limitTolerance);
 
-  function getX(index: number) {
-    if (data.length <= 1) return paddingLeft;
-    return paddingLeft + (index / (data.length - 1)) * usableWidth;
+  function getPointX(point: IntradayTrendPoint) {
+    return paddingLeft + getTaiwanIntradayXRatio(point.time) * usableWidth;
   }
 
   function getPriceY(value: number) {
@@ -196,18 +396,41 @@ export default function IntradayTrendChart({
 
   function handleMouseMove(event: React.MouseEvent<SVGRectElement>) {
     const rect = event.currentTarget.getBoundingClientRect();
-    const localX = ((event.clientX - rect.left) / rect.width) * width;
-    const ratio = (localX - paddingLeft) / usableWidth;
-    const index = Math.round(ratio * (data.length - 1));
-    setHoverIndex(clamp(index, 0, data.length - 1));
+    const ratio = clamp((event.clientX - rect.left) / rect.width, 0, 1);
+    const localX = paddingLeft + ratio * usableWidth;
+    const closest = data.reduce<{ index: number; distance: number } | null>(
+      (best, point, index) => {
+        const distance = Math.abs(getPointX(point) - localX);
+
+        if (best === null || distance < best.distance) return { index, distance };
+
+        return best;
+      },
+      null
+    );
+
+    setHoverIndex(closest?.index ?? null);
   }
 
-  const linePath = buildLinePath(data, getX, getPriceY);
-  const areaPath = `${linePath} L ${getX(data.length - 1).toFixed(2)} ${volumeTop.toFixed(
-    2
-  )} L ${paddingLeft.toFixed(2)} ${volumeTop.toFixed(2)} Z`;
-  const hoverX = hoverIndex !== null ? getX(hoverIndex) : null;
+  const linePath = buildLinePath(data, getPointX, getPriceY);
+  const firstPointX = getPointX(data[0]);
+  const lastPointX = getPointX(data[data.length - 1]);
+  const hoverX = safeHoverIndex !== null ? getPointX(data[safeHoverIndex]) : null;
   const previousCloseY = previousClose !== null ? getPriceY(previousClose) : null;
+  const baselineY = previousCloseY ?? volumeTop;
+  const areaPath = buildBaselineAreaPath(linePath, firstPointX, lastPointX, baselineY);
+  const sessionMinutes = TAIWAN_SESSION_END_MINUTES - TAIWAN_SESSION_START_MINUTES;
+  const chartAreaRight = width - paddingRight;
+  const clipAboveId = `${chartId}-above`.replace(/:/g, "");
+  const clipBelowId = `${chartId}-below`.replace(/:/g, "");
+  const timeTicks = [
+    { label: "09:00", minutes: 9 * 60 },
+    { label: "10:00", minutes: 10 * 60 },
+    { label: "11:00", minutes: 11 * 60 },
+    { label: "12:00", minutes: 12 * 60 },
+    { label: "13:00", minutes: 13 * 60 },
+    { label: "13:30", minutes: 13 * 60 + 30 },
+  ];
 
   return (
     <div className="border border-slate-200 bg-white">
@@ -225,40 +448,67 @@ export default function IntradayTrendChart({
           ) : null}
         </div>
 
-        {hoveredPoint ? (
-          <div className="grid grid-cols-3 gap-x-4 gap-y-1 text-right text-xs">
-            <div>
-              <span className="text-slate-400">時間</span>
-              <div className="font-semibold text-slate-800">{formatTime(hoveredPoint.time)}</div>
-            </div>
-            <div>
-              <span className="text-slate-400">價格</span>
-              <div className="font-semibold text-slate-800">
-                {formatPrice(hoveredPoint.price)}
-              </div>
-            </div>
-            <div>
-              <span className="text-slate-400">量</span>
-              <div className="font-semibold text-slate-800">
-                {formatNumber(hoveredPoint.volume)}
-              </div>
+        <div className="grid shrink-0 grid-cols-2 gap-x-8 gap-y-2 text-right sm:grid-cols-4">
+          <div>
+            <span className="text-xs text-slate-400">昨收</span>
+            <div className="mt-1 text-base font-bold text-slate-800">
+              {formatPrice(previousClose)}
             </div>
           </div>
-        ) : null}
+          <div>
+            <span className="text-xs text-slate-400">最低</span>
+            <div className="mt-1 text-base font-bold text-emerald-600">
+              {formatPrice(rangeLow?.value)}
+            </div>
+          </div>
+          <div>
+            <span className="text-xs text-slate-400">最高</span>
+            <div className="mt-1 text-base font-bold text-red-600">
+              {formatPrice(rangeHigh?.value)}
+            </div>
+          </div>
+          <div>
+            <span className="text-xs text-slate-400">成交量(張)</span>
+            <div className="mt-1 text-base font-bold text-slate-800">
+              {formatLots(totalVolume)}
+            </div>
+          </div>
+        </div>
       </div>
 
       <svg viewBox={`0 0 ${width} ${height}`} className="h-[420px] w-full">
         <rect x="0" y="0" width={width} height={height} className="fill-white" />
+        <defs>
+          <clipPath id={clipAboveId}>
+            <rect
+              x={paddingLeft}
+              y={priceTop}
+              width={usableWidth}
+              height={Math.max(0, baselineY - priceTop)}
+            />
+          </clipPath>
+          <clipPath id={clipBelowId}>
+            <rect
+              x={paddingLeft}
+              y={baselineY}
+              width={usableWidth}
+              height={Math.max(0, volumeTop - baselineY)}
+            />
+          </clipPath>
+        </defs>
 
-        {[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
-          const y = priceTop + ratio * priceHeight;
-          const price = yMax - ratio * yRange;
+        {priceScale.ticks.map((price) => {
+          const y = getPriceY(price);
+          const pct =
+            previousClose !== null && previousClose !== 0
+              ? ((price - previousClose) / previousClose) * 100
+              : null;
 
           return (
-            <g key={ratio}>
+            <g key={price}>
               <line
                 x1={paddingLeft}
-                x2={width - paddingRight}
+                x2={chartAreaRight}
                 y1={y}
                 y2={y}
                 className="stroke-slate-100"
@@ -267,9 +517,51 @@ export default function IntradayTrendChart({
                 x={paddingLeft - 10}
                 y={y + 4}
                 textAnchor="end"
-                className="fill-slate-500 text-[11px]"
+                className={`${priceToneClass(
+                  price,
+                  previousClose,
+                  priceScale.limitUp,
+                  priceScale.limitDown
+                )} text-[11px]`}
               >
                 {formatPrice(price)}
+              </text>
+              {pct !== null ? (
+                <text
+                  x={chartAreaRight + 8}
+                  y={y + 4}
+                  textAnchor="start"
+                  className={`${pricePctToneClass(pct)} text-[11px]`}
+                >
+                  {formatPct(pct)}
+                </text>
+              ) : null}
+            </g>
+          );
+        })}
+
+        {timeTicks.map((tick) => {
+          const ratio =
+            (tick.minutes - TAIWAN_SESSION_START_MINUTES) /
+            (TAIWAN_SESSION_END_MINUTES - TAIWAN_SESSION_START_MINUTES);
+          const x = paddingLeft + ratio * usableWidth;
+
+          return (
+            <g key={tick.label}>
+              <line
+                x1={x}
+                x2={x}
+                y1={priceTop}
+                y2={volumeTop + volumeHeight}
+                className="stroke-slate-100"
+              />
+              <text
+                x={x}
+                y={labelY}
+                textAnchor={tick.label === "09:00" ? "start" : tick.label === "13:30" ? "end" : "middle"}
+                className="fill-slate-500 text-[11px]"
+              >
+                {tick.label}
               </text>
             </g>
           );
@@ -279,37 +571,91 @@ export default function IntradayTrendChart({
           <g>
             <line
               x1={paddingLeft}
-              x2={width - paddingRight}
+              x2={chartAreaRight}
               y1={previousCloseY}
               y2={previousCloseY}
-              className="stroke-slate-300"
-              strokeDasharray="5 5"
+              className="stroke-blue-500"
+              strokeDasharray="4 4"
             />
             <text
-              x={width - paddingRight}
+              x={chartAreaRight + 8}
               y={previousCloseY - 6}
-              textAnchor="end"
-              className="fill-slate-400 text-[11px]"
+              textAnchor="start"
+              className="fill-blue-600 text-[11px]"
             >
               昨收 {formatPrice(previousClose)}
             </text>
           </g>
         ) : null}
 
-        <path d={areaPath} className={`${areaClass} opacity-80`} />
-        <path
-          d={linePath}
-          fill="none"
-          strokeWidth="2.4"
-          className={trendClass}
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
+        {showLimitRange && priceScale.limitUp !== null ? (
+          <g>
+            <line
+              x1={paddingLeft}
+              x2={chartAreaRight}
+              y1={getPriceY(priceScale.limitUp)}
+              y2={getPriceY(priceScale.limitUp)}
+              className="stroke-red-200"
+              strokeDasharray="4 4"
+            />
+          </g>
+        ) : null}
 
-        {rangeHigh ? (
+        {showLimitRange && priceScale.limitDown !== null ? (
+          <g>
+            <line
+              x1={paddingLeft}
+              x2={chartAreaRight}
+              y1={getPriceY(priceScale.limitDown)}
+              y2={getPriceY(priceScale.limitDown)}
+              className="stroke-emerald-200"
+              strokeDasharray="4 4"
+            />
+          </g>
+        ) : null}
+
+        {previousCloseY !== null ? (
+          <>
+            <path d={areaPath} className="fill-red-100 opacity-80" clipPath={`url(#${clipAboveId})`} />
+            <path
+              d={areaPath}
+              className="fill-emerald-100 opacity-80"
+              clipPath={`url(#${clipBelowId})`}
+            />
+            <path
+              d={linePath}
+              fill="none"
+              strokeWidth="2.4"
+              className="stroke-red-600"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              clipPath={`url(#${clipAboveId})`}
+            />
+            <path
+              d={linePath}
+              fill="none"
+              strokeWidth="2.4"
+              className="stroke-emerald-600"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              clipPath={`url(#${clipBelowId})`}
+            />
+          </>
+        ) : (
+          <path
+            d={linePath}
+            fill="none"
+            strokeWidth="2.4"
+            className={change !== null && change < 0 ? "stroke-emerald-600" : "stroke-red-600"}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        )}
+
+        {rangeHigh && !rangeHighIsLimit ? (
           <g>
             {(() => {
-              const x = getX(rangeHigh.index);
+              const x = getPointX(data[rangeHigh.index]);
               const y = getPriceY(rangeHigh.value);
               const label = labelPosition(x, paddingLeft, paddingRight, width);
               const markerLabelY = clamp(y - 12, priceTop + 12, volumeTop - 8);
@@ -339,10 +685,10 @@ export default function IntradayTrendChart({
           </g>
         ) : null}
 
-        {rangeLow ? (
+        {rangeLow && !rangeLowIsLimit ? (
           <g>
             {(() => {
-              const x = getX(rangeLow.index);
+              const x = getPointX(data[rangeLow.index]);
               const y = getPriceY(rangeLow.value);
               const label = labelPosition(x, paddingLeft, paddingRight, width);
               const markerLabelY = clamp(y + 18, priceTop + 12, volumeTop - 8);
@@ -376,23 +722,23 @@ export default function IntradayTrendChart({
           const volume = point.volume ?? 0;
           const volumeY = getVolumeY(volume);
           const volumeBarHeight = volumeTop + volumeHeight - volumeY;
-          const barWidth = clamp((usableWidth / data.length) * 0.55, 1, 5);
+          const barWidth = clamp((usableWidth / sessionMinutes) * 0.7, 1, 5);
 
           return (
             <rect
               key={`${point.time}-${index}`}
-              x={getX(index) - barWidth / 2}
+              x={getPointX(point) - barWidth / 2}
               y={volumeY}
               width={barWidth}
               height={Math.max(volumeBarHeight, 1)}
-              className="fill-slate-200"
+              className="fill-amber-300 opacity-70"
             />
           );
         })}
 
         <line
           x1={paddingLeft}
-          x2={width - paddingRight}
+          x2={chartAreaRight}
           y1={volumeTop}
           y2={volumeTop}
           className="stroke-slate-100"
@@ -409,18 +755,6 @@ export default function IntradayTrendChart({
           />
         ) : null}
 
-        <text x={paddingLeft} y={labelY} textAnchor="start" className="fill-slate-500 text-[11px]">
-          {formatTime(data[0]?.time ?? "")}
-        </text>
-        <text
-          x={width - paddingRight}
-          y={labelY}
-          textAnchor="end"
-          className="fill-slate-500 text-[11px]"
-        >
-          {formatTime(data[data.length - 1]?.time ?? "")}
-        </text>
-
         <rect
           x={paddingLeft}
           y={priceTop}
@@ -431,6 +765,21 @@ export default function IntradayTrendChart({
           onMouseLeave={() => setHoverIndex(null)}
         />
       </svg>
+
+      <div className="flex items-center justify-end border-t border-slate-200 px-4 py-2">
+        <button
+          type="button"
+          onClick={() => setShowLimitRange((value) => !value)}
+          className={[
+            "h-8 border px-3 text-xs font-semibold transition",
+            showLimitRange
+              ? "border-red-700 bg-red-700 text-white"
+              : "border-slate-300 bg-white text-slate-700 hover:border-red-700 hover:text-red-700",
+          ].join(" ")}
+        >
+          顯示漲跌停
+        </button>
+      </div>
     </div>
   );
 }

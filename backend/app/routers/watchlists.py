@@ -10,11 +10,13 @@ from app.watchlists.schemas import (
     WatchlistGroupDeleteResultRead,
     WatchlistGroupLatestIndicatorsRead,
     WatchlistGroupLatestSignalsRead,
+    WatchlistGroupMove,
     WatchlistGroupRankingRead,
     WatchlistGroupRead,
     WatchlistGroupTreeRead,
     WatchlistGroupUpdate,
     WatchlistItemCreate,
+    WatchlistItemMove,
     WatchlistItemRead,
     WatchlistItemUpdate,
 )
@@ -67,6 +69,18 @@ def update_watchlist_group(
 ):
     try:
         return service.update_group(db=db, group_id=group_id, payload=payload)
+    except Exception as exc:
+        raise _handle_group_error(exc) from exc
+
+
+@router.post("/groups/{group_id}/move", response_model=WatchlistGroupRead)
+def move_watchlist_group(
+    group_id: int,
+    payload: WatchlistGroupMove,
+    db: Session = Depends(get_db),
+):
+    try:
+        return service.move_group(db=db, group_id=group_id, payload=payload)
     except Exception as exc:
         raise _handle_group_error(exc) from exc
 
@@ -240,6 +254,22 @@ def update_watchlist_item(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
+@router.post("/items/{item_id}/move", response_model=WatchlistItemRead)
+def move_watchlist_item(
+    item_id: int,
+    payload: WatchlistItemMove,
+    db: Session = Depends(get_db),
+):
+    try:
+        return service.move_item(db=db, item_id=item_id, payload=payload)
+    except service.WatchlistItemNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except service.WatchlistGroupNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except service.WatchlistDuplicateItemError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
 @router.delete("/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_watchlist_item(
     item_id: int,
@@ -321,6 +351,7 @@ def get_watchlist_group_latest_ranking(
     volume_ma_windows: str = "5,20",
     limit: int = Query(default=100, ge=20, le=500),
     volume_ratio_threshold: float = Query(default=1.5, ge=1.0, le=5.0),
+    use_intraday: bool = False,
     db: Session = Depends(get_db),
 ):
     try:
@@ -335,6 +366,7 @@ def get_watchlist_group_latest_ranking(
             volume_ma_windows=volume_ma_windows,
             limit=limit,
             volume_ratio_threshold=volume_ratio_threshold,
+            use_intraday=use_intraday,
         )
     except service.WatchlistGroupNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc

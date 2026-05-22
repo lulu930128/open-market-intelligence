@@ -381,8 +381,10 @@ export default function StockKLineChart({
     });
   }, [chartData, indicatorData]);
 
+  const safeHoverIndex =
+    hoverIndex !== null && hoverIndex >= 0 && hoverIndex < data.length ? hoverIndex : null;
   const hoveredPoint =
-    hoverIndex !== null ? data[hoverIndex] : data[data.length - 1] ?? null;
+    safeHoverIndex !== null ? data[safeHoverIndex] : data[data.length - 1] ?? null;
 
   if (data.length < 1) {
     return (
@@ -497,9 +499,10 @@ export default function StockKLineChart({
 
   function handleMouseMove(event: MouseEvent<SVGRectElement>) {
     const rect = event.currentTarget.getBoundingClientRect();
-    const localX = ((event.clientX - rect.left) / rect.width) * width;
-    const ratio = (localX - paddingLeft) / usableWidth;
-    const index = Math.round(ratio * (data.length - 1));
+    const ratio = clamp((event.clientX - rect.left) / rect.width, 0, 1);
+    const localX = paddingLeft + ratio * usableWidth;
+    const dataRatio = (localX - paddingLeft) / usableWidth;
+    const index = Math.round(dataRatio * (data.length - 1));
     setHoverIndex(clamp(index, 0, data.length - 1));
   }
 
@@ -510,7 +513,7 @@ export default function StockKLineChart({
   const bbMiddlePath = buildLinePath(data, (point) => point.bbMiddle, getX, getPriceY);
   const bbLowerPath = buildLinePath(data, (point) => point.bbLower, getX, getPriceY);
   const bbAreaPath = buildBandAreaPath(data, (point) => point.bbUpper, (point) => point.bbLower, getX, getPriceY);
-  const hoverX = hoverIndex !== null ? getX(hoverIndex) : null;
+  const hoverX = safeHoverIndex !== null ? getX(safeHoverIndex) : null;
 
   return (
     <div className="border border-slate-200 bg-white">

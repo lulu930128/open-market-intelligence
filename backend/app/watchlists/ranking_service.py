@@ -1,5 +1,6 @@
 from sqlalchemy.orm import Session
 
+from app.market.intraday import get_intraday_trend
 from app.market.signal_service import calculate_latest_stock_signals
 from app.watchlists import service as watchlist_service
 
@@ -28,6 +29,80 @@ def _get_rank_value(row: dict, rank_by: str):
     return value
 
 
+def _valid_number(value) -> bool:
+    return isinstance(value, (int, float)) and value == value
+
+
+def _sum_intraday_volume(points: list[dict]) -> int | None:
+    volumes = [
+        int(point["volume"])
+        for point in points
+        if _valid_number(point.get("volume")) and int(point["volume"]) > 0
+    ]
+
+    if not volumes:
+        return None
+
+    return sum(volumes)
+
+
+def _compact_intraday_points(points: list[dict], max_points: int = 72) -> list[dict]:
+    valid_points = [
+        {
+            "time": point.get("time"),
+            "price": float(point["price"]),
+        }
+        for point in points
+        if point.get("time") and _valid_number(point.get("price"))
+    ]
+
+    if len(valid_points) <= max_points:
+        return valid_points
+
+    last_index = len(valid_points) - 1
+    indexes = {
+        round(index * last_index / (max_points - 1))
+        for index in range(max_points)
+    }
+
+    return [valid_points[index] for index in sorted(indexes)]
+
+
+def _get_intraday_overlay(db: Session, stock_id: str) -> dict | None:
+    intraday = get_intraday_trend(db=db, stock_id=stock_id)
+    points = intraday.get("points") or []
+
+    if not points:
+        return None
+
+    latest = points[-1]
+    latest_price = latest.get("price")
+    previous_close = intraday.get("previous_close")
+
+    if not _valid_number(latest_price):
+        return None
+
+    change_pct = None
+
+    if _valid_number(previous_close) and previous_close != 0:
+        change_pct = ((float(latest_price) - float(previous_close)) / float(previous_close)) * 100
+
+    volume = _sum_intraday_volume(points)
+
+    if volume is None and _valid_number(latest.get("volume")):
+        volume = int(latest["volume"])
+
+    return {
+        "time": latest.get("time"),
+        "close": float(latest_price),
+        "volume": volume,
+        "change_pct": change_pct,
+        "previous_close": float(previous_close) if _valid_number(previous_close) else None,
+        "points": _compact_intraday_points(points),
+        "source": intraday.get("source"),
+    }
+
+
 def get_watchlist_group_latest_ranking(
     db: Session,
     group_id: int,
@@ -39,6 +114,7 @@ def get_watchlist_group_latest_ranking(
     volume_ma_windows: str = "5,20",
     limit: int = 100,
     volume_ratio_threshold: float = 1.5,
+    use_intraday: bool = False,
 ) -> dict:
     rank_by = rank_by.lower()
     sort_order = sort_order.lower()
@@ -80,9 +156,6 @@ def get_watchlist_group_latest_ranking(
 
     rows: list[dict] = []
 
-    no_data_count = 0
-    error_count = 0
-
     for item in unique_items:
         stock_id = item["stock_id"]
         stock_name = item.get("stock_name")
@@ -101,32 +174,44 @@ def get_watchlist_group_latest_ranking(
             primary_signal = _pick_primary_signal(signals)
 
             status = signal_result.get("status", "unknown")
+            row = {
+                "rank": 0,
+                "stock_id": stock_id,
+                "stock_name": stock_name,
+                "time": signal_result.get("time"),
+                "close": signal_result.get("close"),
+                "volume": signal_result.get("volume"),
+                "change_pct": signal_result.get("change_pct"),
+                "score": int(signal_result.get("score", 0) or 0),
+                "status": status,
+                "signal_count": len(signals),
+                "signal_keys": [signal.get("key") for signal in signals if signal.get("key")],
+                "primary_signal_key": primary_signal.get("key") if primary_signal else None,
+                "primary_signal_label": primary_signal.get("label") if primary_signal else None,
+                "intraday_previous_close": None,
+                "intraday_points": [],
+                "error_message": None,
+            }
 
-            if status == "no_data":
-                no_data_count += 1
+            if use_intraday:
+                overlay = _get_intraday_overlay(db=db, stock_id=stock_id)
 
-            rows.append(
-                {
-                    "rank": 0,
-                    "stock_id": stock_id,
-                    "stock_name": stock_name,
-                    "time": signal_result.get("time"),
-                    "close": signal_result.get("close"),
-                    "volume": signal_result.get("volume"),
-                    "change_pct": signal_result.get("change_pct"),
-                    "score": int(signal_result.get("score", 0) or 0),
-                    "status": status,
-                    "signal_count": len(signals),
-                    "signal_keys": [signal.get("key") for signal in signals if signal.get("key")],
-                    "primary_signal_key": primary_signal.get("key") if primary_signal else None,
-                    "primary_signal_label": primary_signal.get("label") if primary_signal else None,
-                    "error_message": None,
-                }
-            )
+                if overlay is not None:
+                    row["time"] = overlay["time"]
+                    row["close"] = overlay["close"]
+                    row["change_pct"] = overlay["change_pct"]
+                    row["intraday_previous_close"] = overlay["previous_close"]
+                    row["intraday_points"] = overlay["points"]
+
+                    if overlay["volume"] is not None:
+                        row["volume"] = overlay["volume"]
+
+                    if row["status"] == "no_data":
+                        row["status"] = "intraday"
+
+            rows.append(row)
 
         except Exception as exc:
-            error_count += 1
-
             rows.append(
                 {
                     "rank": 0,
@@ -142,9 +227,14 @@ def get_watchlist_group_latest_ranking(
                     "signal_keys": [],
                     "primary_signal_key": None,
                     "primary_signal_label": None,
+                    "intraday_previous_close": None,
+                    "intraday_points": [],
                     "error_message": str(exc),
                 }
             )
+
+    no_data_count = sum(1 for row in rows if row["status"] == "no_data")
+    error_count = sum(1 for row in rows if row["status"] == "error")
 
     sortable_rows: list[dict] = []
     unsortable_rows: list[dict] = []

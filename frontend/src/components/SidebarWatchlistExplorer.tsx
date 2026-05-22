@@ -8,7 +8,14 @@ import type {
   WatchlistGroupRead,
   WatchlistItemRead,
 } from "@/types/market";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import {
+  FormEvent,
+  type PointerEvent as ReactPointerEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 type Props = {
   initialTree: WatchlistGroupNode[];
@@ -22,6 +29,23 @@ type Props = {
 
 type Message = { type: "success" | "error"; text: string } | null;
 type MarketRegion = "tw" | "us" | "jp" | "kr" | "hk";
+type DragPayload =
+  | { type: "group"; groupId: number }
+  | { type: "stock"; itemId: number; groupId: number; stockId: string };
+type GroupDropPosition = "before" | "inside" | "after";
+type DropTarget =
+  | { type: "group"; groupId: number; position: GroupDropPosition }
+  | { type: "stock"; itemId: number }
+  | { type: "root" };
+type PointerDragState = {
+  payload: DragPayload;
+  startX: number;
+  startY: number;
+  currentX: number;
+  currentY: number;
+  active: boolean;
+  target: DropTarget | null;
+};
 
 const marketOptions: Array<{ label: string; value: MarketRegion }> = [
   { label: "台股", value: "tw" },
@@ -33,6 +57,33 @@ const marketOptions: Array<{ label: string; value: MarketRegion }> = [
 
 function flattenGroups(nodes: WatchlistGroupNode[]): WatchlistGroupNode[] {
   return nodes.flatMap((node) => [node, ...flattenGroups(node.children)]);
+}
+
+function findGroupById(
+  nodes: WatchlistGroupNode[],
+  groupId: number | null
+): WatchlistGroupNode | null {
+  if (groupId === null) return null;
+
+  for (const node of nodes) {
+    if (node.id === groupId) return node;
+
+    const child = findGroupById(node.children, groupId);
+    if (child) return child;
+  }
+
+  return null;
+}
+
+function isDescendantGroup(
+  nodes: WatchlistGroupNode[],
+  ancestorId: number,
+  possibleDescendantId: number
+) {
+  const ancestor = findGroupById(nodes, ancestorId);
+  if (!ancestor) return false;
+
+  return flattenGroups(ancestor.children).some((group) => group.id === possibleDescendantId);
 }
 
 function inputClass() {
@@ -97,11 +148,16 @@ export default function SidebarWatchlistExplorer({
   const [stockTags, setStockTags] = useState("");
   const [stockSuggestions, setStockSuggestions] = useState<StockMasterRead[]>([]);
   const [selectedMarket, setSelectedMarket] = useState<MarketRegion>("tw");
+  const [dragPayload, setDragPayload] = useState<DragPayload | null>(null);
+  const [dragOverKey, setDragOverKey] = useState<string | null>(null);
+  const [pointerDrag, setPointerDrag] = useState<PointerDragState | null>(null);
+  const pointerDragRef = useRef<PointerDragState | null>(null);
 
   const allGroups = useMemo(() => flattenGroups(tree), [tree]);
   const selectedGroup = useMemo(() => {
     return allGroups.find((group) => group.id === selectedGroupId) ?? null;
   }, [allGroups, selectedGroupId]);
+  const hasPointerDrag = pointerDrag !== null;
 
   const itemsByGroupId = useMemo(() => {
     const map = new Map<number, WatchlistItemRead[]>();
@@ -114,6 +170,27 @@ export default function SidebarWatchlistExplorer({
 
     return map;
   }, [items]);
+
+  function countGroupItems(node: WatchlistGroupNode): number {
+    const directCount = itemsByGroupId.get(node.id)?.length ?? 0;
+    return (
+      directCount +
+      node.children.reduce((total, child) => total + countGroupItems(child), 0)
+    );
+  }
+
+  function getSiblingGroups(parentId: number | null) {
+    if (parentId === null) return tree;
+
+    return findGroupById(tree, parentId)?.children ?? [];
+  }
+
+  function getNextSiblingGroupId(targetGroup: WatchlistGroupNode) {
+    const siblings = getSiblingGroups(targetGroup.parent_id);
+    const targetIndex = siblings.findIndex((group) => group.id === targetGroup.id);
+
+    return targetIndex >= 0 ? siblings[targetIndex + 1]?.id ?? null : null;
+  }
 
   async function reloadExplorerData(options?: { keepSelection?: boolean }) {
     const [treeData, itemData] = await Promise.all([
@@ -185,8 +262,8 @@ export default function SidebarWatchlistExplorer({
         type: result.error_count > 0 ? "error" : "success",
         text:
           problemCount > 0
-            ? `已更新 ${result.requested_stock_count} 檔，成功 ${result.success_count}，需確認 ${problemCount}`
-            : `已更新 ${result.requested_stock_count} 檔自選股`,
+            ? `已更新整包 ${result.requested_stock_count} 檔，成功 ${result.success_count}，需確認 ${problemCount}`
+            : `已更新整包 ${result.requested_stock_count} 檔自選股`,
       });
     } catch (error) {
       setMessage({
@@ -283,6 +360,298 @@ export default function SidebarWatchlistExplorer({
       return next;
     });
   }
+
+  function getGroupDropPosition(
+    targetElement: HTMLElement,
+    clientY: number
+  ): GroupDropPosition {
+    const rect = targetElement.getBoundingClientRect();
+    const y = clientY - rect.top;
+
+    if (y < rect.height * 0.3) return "before";
+    if (y > rect.height * 0.7) return "after";
+    return "inside";
+  }
+
+  function setCurrentPointerDrag(next: PointerDragState | null) {
+    pointerDragRef.current = next;
+    setPointerDrag(next);
+  }
+
+  function getDragLabel(payload: DragPayload) {
+    if (payload.type === "group") {
+      return allGroups.find((group) => group.id === payload.groupId)?.group_name ?? "分組";
+    }
+
+    const item = items.find((entry) => entry.id === payload.itemId);
+    return item ? `${item.stock_id} ${item.stock_name ?? ""}`.trim() : payload.stockId;
+  }
+
+  function dropTargetKey(target: DropTarget | null, payload: DragPayload) {
+    if (!target) return null;
+    if (target.type === "root") return "root";
+    if (target.type === "stock") return `stock:${target.itemId}:before`;
+
+    const position = payload.type === "stock" ? "inside" : target.position;
+    return `group:${target.groupId}:${position}`;
+  }
+
+  function clearPointerDrag() {
+    setCurrentPointerDrag(null);
+    setDragPayload(null);
+    setDragOverKey(null);
+  }
+
+  function canDropGroupOnTarget(
+    draggedGroupId: number,
+    targetGroup: WatchlistGroupNode,
+    position: GroupDropPosition
+  ) {
+    if (draggedGroupId === targetGroup.id) return false;
+
+    const nextParentId = position === "inside" ? targetGroup.id : targetGroup.parent_id;
+
+    if (nextParentId === draggedGroupId) return false;
+    if (isDescendantGroup(tree, draggedGroupId, targetGroup.id)) return false;
+
+    return true;
+  }
+
+  function resolvePointerDropTarget(
+    clientX: number,
+    clientY: number,
+    payload: DragPayload
+  ): DropTarget | null {
+    const element = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+    if (!element) return null;
+
+    const stockElement = element.closest<HTMLElement>("[data-watchlist-stock-id]");
+    if (stockElement && payload.type === "stock") {
+      const itemId = Number(stockElement.dataset.watchlistStockId);
+      if (Number.isFinite(itemId) && itemId !== payload.itemId) {
+        return { type: "stock", itemId };
+      }
+    }
+
+    const groupElement = element.closest<HTMLElement>("[data-watchlist-group-id]");
+    if (groupElement) {
+      const groupId = Number(groupElement.dataset.watchlistGroupId);
+      const targetGroup = findGroupById(tree, Number.isFinite(groupId) ? groupId : null);
+      if (!targetGroup) return null;
+
+      const position =
+        payload.type === "stock"
+          ? "inside"
+          : getGroupDropPosition(groupElement, clientY);
+
+      if (
+        payload.type === "group" &&
+        !canDropGroupOnTarget(payload.groupId, targetGroup, position)
+      ) {
+        return null;
+      }
+
+      return { type: "group", groupId: targetGroup.id, position };
+    }
+
+    const rootElement = element.closest<HTMLElement>("[data-watchlist-root-drop='true']");
+    if (rootElement && payload.type === "group") {
+      return { type: "root" };
+    }
+
+    return null;
+  }
+
+  function beginPointerDrag(
+    event: ReactPointerEvent<HTMLElement>,
+    payload: DragPayload
+  ) {
+    if (event.button !== 0) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    window.getSelection()?.removeAllRanges();
+
+    const next = {
+      payload,
+      startX: event.clientX,
+      startY: event.clientY,
+      currentX: event.clientX,
+      currentY: event.clientY,
+      active: false,
+      target: null,
+    };
+
+    setCurrentPointerDrag(next);
+  }
+
+  async function movePayloadToGroup(
+    node: WatchlistGroupNode,
+    position: GroupDropPosition,
+    currentDrag: DragPayload | null
+  ) {
+    if (!currentDrag) return;
+
+    if (currentDrag.type === "group") {
+      const nextParentId = position === "inside" ? node.id : node.parent_id;
+      const beforeGroupId =
+        position === "before"
+          ? node.id
+          : position === "after"
+            ? getNextSiblingGroupId(node)
+            : null;
+
+      await runAction(
+        async () => {
+          await requestJson<WatchlistGroupRead>(
+            `/api/watchlists/groups/${currentDrag.groupId}/move`,
+            {
+              method: "POST",
+              body: JSON.stringify({
+                parent_id: nextParentId,
+                before_group_id: beforeGroupId,
+              }),
+            }
+          );
+        },
+        "已移動分組",
+        { keepSelection: true }
+      );
+      return;
+    }
+
+    await runAction(
+      async () => {
+        await requestJson<WatchlistItemRead>(
+          `/api/watchlists/items/${currentDrag.itemId}/move`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              group_id: node.id,
+              before_item_id: null,
+            }),
+          }
+        );
+      },
+      "已移動股票",
+      { keepSelection: true }
+    );
+  }
+
+  async function movePayloadBeforeStock(
+    item: WatchlistItemRead,
+    currentDrag: DragPayload | null
+  ) {
+    if (!currentDrag || currentDrag.type !== "stock" || currentDrag.itemId === item.id) return;
+
+    await runAction(
+      async () => {
+        await requestJson<WatchlistItemRead>(
+          `/api/watchlists/items/${currentDrag.itemId}/move`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              group_id: item.group_id,
+              before_item_id: item.id,
+            }),
+          }
+        );
+      },
+      "已調整股票順序",
+      { keepSelection: true }
+    );
+  }
+
+  async function movePayloadToRoot(currentDrag: DragPayload | null) {
+    if (!currentDrag || currentDrag.type !== "group") return;
+
+    await runAction(
+      async () => {
+        await requestJson<WatchlistGroupRead>(
+          `/api/watchlists/groups/${currentDrag.groupId}/move`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              parent_id: null,
+              before_group_id: null,
+            }),
+          }
+        );
+      },
+      "已移到根層",
+      { keepSelection: true }
+    );
+  }
+
+  async function applyDropTarget(payload: DragPayload, target: DropTarget) {
+    if (target.type === "root") {
+      await movePayloadToRoot(payload);
+      return;
+    }
+
+    if (target.type === "group") {
+      const targetGroup = findGroupById(tree, target.groupId);
+      if (!targetGroup) return;
+
+      await movePayloadToGroup(targetGroup, target.position, payload);
+      return;
+    }
+
+    if (payload.type !== "stock") return;
+
+    const targetItem = items.find((item) => item.id === target.itemId);
+    if (!targetItem) return;
+
+    await movePayloadBeforeStock(targetItem, payload);
+  }
+
+  useEffect(() => {
+    if (!hasPointerDrag) return;
+
+    function handlePointerMove(event: PointerEvent) {
+      const current = pointerDragRef.current;
+      if (!current) return;
+
+      const moved =
+        current.active ||
+        Math.abs(event.clientX - current.startX) > 4 ||
+        Math.abs(event.clientY - current.startY) > 4;
+      const target = moved
+        ? resolvePointerDropTarget(event.clientX, event.clientY, current.payload)
+        : null;
+      const next = {
+        ...current,
+        currentX: event.clientX,
+        currentY: event.clientY,
+        active: moved,
+        target,
+      };
+
+      setCurrentPointerDrag(next);
+      setDragPayload(moved ? current.payload : null);
+      setDragOverKey(dropTargetKey(target, current.payload));
+    }
+
+    function handlePointerUp() {
+      const current = pointerDragRef.current;
+      clearPointerDrag();
+
+      if (current?.active && current.target) {
+        void applyDropTarget(current.payload, current.target);
+      }
+    }
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerUp);
+
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointercancel", handlePointerUp);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasPointerDrag]);
 
   async function createRootFolder() {
     const name = folderName.trim();
@@ -471,18 +840,47 @@ export default function SidebarWatchlistExplorer({
     const expanded = expandedIds.has(node.id);
     const children = node.children;
     const groupItems = itemsByGroupId.get(node.id) ?? [];
+    const totalItemCount = countGroupItems(node);
     const hasContent = children.length > 0 || groupItems.length > 0;
+    const groupDropBefore = dragOverKey === `group:${node.id}:before`;
+    const groupDropInside = dragOverKey === `group:${node.id}:inside`;
+    const groupDropAfter = dragOverKey === `group:${node.id}:after`;
 
     return (
       <div key={node.id}>
         <div
           className={[
-            "flex cursor-pointer items-center gap-1 py-1 pr-1 text-sm",
+            "relative flex cursor-pointer items-center gap-0.5 py-1 pr-1 text-sm",
+            dragPayload?.type === "group" && dragPayload.groupId === node.id
+              ? "opacity-50"
+              : "",
+            groupDropInside ? "ring-1 ring-inset ring-red-600" : "",
             selected ? "bg-red-700 text-white" : "text-slate-700 hover:bg-slate-100",
           ].join(" ")}
-          style={{ paddingLeft: `${8 + depth * 14}px` }}
+          style={{ paddingLeft: `${6 + depth * 10}px` }}
+          data-watchlist-group-id={node.id}
           onClick={() => selectGroup(node)}
         >
+          {groupDropBefore ? (
+            <div className="absolute left-0 right-0 top-0 h-0.5 bg-red-700" />
+          ) : null}
+          {groupDropAfter ? (
+            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-700" />
+          ) : null}
+          <button
+            type="button"
+            aria-label="移動分組"
+            onPointerDown={(event) =>
+              beginPointerDrag(event, { type: "group", groupId: node.id })
+            }
+            onClick={(event) => event.stopPropagation()}
+            className={[
+              "h-6 w-3 select-none text-[9px] font-bold leading-none",
+              selected ? "text-red-100" : "text-slate-400 hover:text-red-700",
+            ].join(" ")}
+          >
+            ::
+          </button>
           <button
             type="button"
             onClick={(event) => {
@@ -490,7 +888,7 @@ export default function SidebarWatchlistExplorer({
               toggleExpanded(node.id);
             }}
             className={[
-              "h-6 w-6 text-xs",
+              "h-6 w-4 text-xs",
               selected ? "text-white" : "text-slate-500",
               !hasContent ? "opacity-40" : "",
             ].join(" ")}
@@ -498,15 +896,12 @@ export default function SidebarWatchlistExplorer({
             {hasContent ? (expanded ? "v" : ">") : "-"}
           </button>
 
-          <button
-            type="button"
-            className="min-w-0 flex-1 text-left"
-          >
+          <div className="min-w-0 flex-1 text-left">
             <div className="truncate font-semibold">{node.group_name}</div>
-          </button>
+          </div>
 
           <span className={selected ? "pr-2 text-xs text-red-100" : "pr-2 text-xs text-slate-400"}>
-            {groupItems.length}
+            {totalItemCount}
           </span>
         </div>
 
@@ -514,21 +909,48 @@ export default function SidebarWatchlistExplorer({
           <div>
             {groupItems.map((item) => {
               const itemSelected = item.stock_id === selectedStockId;
+              const stockDropBefore = dragOverKey === `stock:${item.id}:before`;
 
               return (
                 <div
                   key={item.id}
                   className={[
-                    "group flex cursor-pointer items-center gap-2 py-1.5 pr-2 text-xs",
+                    "group relative flex cursor-pointer items-center gap-1 py-1.5 pr-2 text-xs",
+                    dragPayload?.type === "stock" && dragPayload.itemId === item.id
+                      ? "opacity-50"
+                      : "",
                     itemSelected
                       ? "bg-slate-900 text-white"
                       : item.enabled
                         ? "text-slate-700 hover:bg-slate-100"
                         : "text-slate-400",
                   ].join(" ")}
-                  style={{ paddingLeft: `${38 + depth * 14}px` }}
+                  style={{ paddingLeft: `${28 + depth * 10}px` }}
+                  data-watchlist-stock-id={item.id}
                   onClick={() => onSelectStock(item.stock_id, item.stock_name)}
                 >
+                  {stockDropBefore ? (
+                    <div className="absolute left-0 right-0 top-0 h-0.5 bg-red-700" />
+                  ) : null}
+                  <button
+                    type="button"
+                    aria-label="移動股票"
+                    onPointerDown={(event) =>
+                      beginPointerDrag(event, {
+                        type: "stock",
+                        itemId: item.id,
+                        groupId: item.group_id,
+                        stockId: item.stock_id,
+                      })
+                    }
+                    onClick={(event) => event.stopPropagation()}
+                    className={[
+                      "h-5 w-3 select-none text-[9px] font-bold leading-none",
+                      itemSelected ? "text-slate-300" : "text-slate-300 hover:text-red-700",
+                    ].join(" ")}
+                  >
+                    ::
+                  </button>
                   <div className="min-w-0 flex-1">
                     <div className="truncate font-semibold">
                       {item.stock_id} {item.stock_name ?? ""}
@@ -554,6 +976,7 @@ export default function SidebarWatchlistExplorer({
                     <input type="hidden" name="enabled" value={String(!item.enabled)} />
                     <button
                       type="submit"
+                      draggable={false}
                       onClick={(event) => event.stopPropagation()}
                       className={[
                         "hidden px-1.5 py-0.5 text-[10px] font-semibold group-hover:block",
@@ -577,6 +1000,7 @@ export default function SidebarWatchlistExplorer({
                     <input type="hidden" name="group_id" value={item.group_id} />
                     <button
                       type="submit"
+                      draggable={false}
                       onClick={(event) => event.stopPropagation()}
                       className="hidden bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold text-red-700 group-hover:block"
                     >
@@ -638,12 +1062,37 @@ export default function SidebarWatchlistExplorer({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto py-2">
+        {dragPayload?.type === "group" ? (
+          <div
+            className={[
+              "mx-2 mb-2 border border-dashed px-3 py-2 text-center text-xs font-semibold",
+              dragOverKey === "root"
+                ? "border-red-700 bg-red-50 text-red-700"
+                : "border-slate-300 text-slate-500",
+            ].join(" ")}
+            data-watchlist-root-drop="true"
+          >
+            移到最外層
+          </div>
+        ) : null}
         {tree.length > 0 ? (
           tree.map((node) => renderGroupNode(node))
         ) : (
           <div className="px-4 py-6 text-sm text-slate-500">尚未建立分組</div>
         )}
       </div>
+
+      {pointerDrag?.active ? (
+        <div
+          className="pointer-events-none fixed z-50 max-w-48 border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-800 shadow-sm"
+          style={{
+            left: pointerDrag.currentX + 10,
+            top: pointerDrag.currentY + 10,
+          }}
+        >
+          {getDragLabel(pointerDrag.payload)}
+        </div>
+      ) : null}
 
       {message ? (
         <div
