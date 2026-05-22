@@ -7,6 +7,7 @@ from app.db.models import StockMaster
 
 
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+NSTOCK_MINUTE_URL = "https://shop.nstock.tw/api/v2/minute-stock-data/data"
 TWSE_MIS_STOCK_INFO_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 TAIPEI_TZ = timezone(timedelta(hours=8))
 
@@ -150,7 +151,91 @@ def _build_snapshot_time(date_text: str | None, time_text: str) -> str:
     return day.isoformat()
 
 
-def _fetch_mis_snapshot(stock_id: str, market: str | None) -> dict:
+def _parse_nstock_time(date_text: str | None, time_text: str | None) -> datetime | None:
+    if (
+        not date_text
+        or not time_text
+        or len(date_text) != 8
+        or len(time_text) != 6
+        or not date_text.isdigit()
+        or not time_text.isdigit()
+    ):
+        return None
+
+    try:
+        return datetime(
+            int(date_text[:4]),
+            int(date_text[4:6]),
+            int(date_text[6:8]),
+            int(time_text[:2]),
+            int(time_text[2:4]),
+            int(time_text[4:6]),
+            tzinfo=TAIPEI_TZ,
+        )
+    except ValueError:
+        return None
+
+
+def _fetch_nstock_intraday(stock_id: str) -> dict:
+    response = requests.get(
+        NSTOCK_MINUTE_URL,
+        params={"stock_id": stock_id},
+        headers={
+            "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
+            "Accept": "application/json,text/plain,*/*",
+        },
+        timeout=20,
+    )
+    response.raise_for_status()
+
+    payload = response.json()
+    data = (payload.get("data") or [None])[0]
+
+    if not data:
+        return {
+            "stock_id": stock_id,
+            "symbol": stock_id,
+            "source": "nstock_minute_stock_data",
+            "previous_close": None,
+            "point_count": 0,
+            "points": [],
+        }
+
+    points: list[dict] = []
+    for row in data.get("分K") or []:
+        point_time = _parse_nstock_time(row.get("交易日"), row.get("交易時間"))
+        close_price = _as_float(row.get("收盤價"))
+
+        if point_time is None or close_price is None:
+            continue
+
+        points.append(
+            {
+                "time": point_time.isoformat(),
+                "price": close_price,
+                "volume": _volume_lots_to_shares(row.get("成交量")),
+                "open": _as_float(row.get("開盤價")),
+                "high": _as_float(row.get("最高價")),
+                "low": _as_float(row.get("最低價")),
+            }
+        )
+
+    points.sort(key=lambda item: item["time"])
+    total_volume = _volume_lots_to_shares(data.get("總成交量"))
+    if total_volume is not None and total_volume > 0:
+        _fill_volume_gap(points, total_volume)
+
+    return {
+        "stock_id": stock_id,
+        "symbol": stock_id,
+        "source": "nstock_minute_stock_data",
+        "previous_close": _as_float(data.get("參考價")),
+        "point_count": len(points),
+        "points": points,
+    }
+
+
+def _fetch_mis_message(stock_id: str, market: str | None) -> dict | None:
     exchange = _mis_exchange(market)
     response = requests.get(
         TWSE_MIS_STOCK_INFO_URL,
@@ -168,7 +253,196 @@ def _fetch_mis_snapshot(stock_id: str, market: str | None) -> dict:
     response.raise_for_status()
 
     payload = response.json()
-    message = (payload.get("msgArray") or [None])[0]
+    return (payload.get("msgArray") or [None])[0]
+
+
+def _parse_snapshot_datetime(message: dict) -> datetime | None:
+    trade_date = message.get("d")
+    latest_time = message.get("t") or message.get("%")
+
+    if not trade_date or not latest_time:
+        return None
+
+    try:
+        return datetime.fromisoformat(_build_snapshot_time(trade_date, latest_time))
+    except ValueError:
+        return None
+
+
+def _point_datetime(point: dict) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(point["time"]))
+    except (KeyError, ValueError):
+        return None
+
+
+def _point_time_key(point: dict) -> tuple[str, str] | None:
+    point_time = _point_datetime(point)
+    if point_time is None:
+        return None
+
+    return point_time.strftime("%Y%m%d"), point_time.strftime("%H:%M:%S")
+
+
+def _volume_lots_to_shares(value) -> int | None:
+    lots = _as_int(value)
+    if lots is None:
+        return None
+
+    return lots * 1000
+
+
+def _upsert_intraday_point(
+    points: list[dict],
+    *,
+    point_time: datetime,
+    price: float | None,
+    volume: int | None,
+    volume_mode: str = "max",
+    open_price: float | None,
+    high_price: float | None,
+    low_price: float | None,
+) -> dict:
+    date_key = point_time.strftime("%Y%m%d")
+    time_key = point_time.strftime("%H:%M:%S")
+
+    for point in points:
+        key = _point_time_key(point)
+        if key == (date_key, time_key):
+            if price is not None:
+                point["price"] = price
+            if volume is not None:
+                current_volume = _as_int(point.get("volume")) or 0
+                if volume_mode == "add":
+                    point["volume"] = current_volume + volume
+                elif volume_mode == "set":
+                    point["volume"] = volume
+                else:
+                    point["volume"] = max(current_volume, volume)
+            point["open"] = _as_float(point.get("open")) or open_price or price
+            point["high"] = max(
+                [value for value in [_as_float(point.get("high")), high_price, price] if value is not None],
+                default=None,
+            )
+            point["low"] = min(
+                [value for value in [_as_float(point.get("low")), low_price, price] if value is not None],
+                default=None,
+            )
+            return point
+
+    point = {
+        "time": point_time.isoformat(),
+        "price": price,
+        "volume": volume,
+        "open": open_price or price,
+        "high": high_price or price,
+        "low": low_price or price,
+    }
+    points.append(point)
+    points.sort(key=lambda item: item["time"])
+    return point
+
+
+def _fill_volume_gap(points: list[dict], total_volume: int) -> bool:
+    current_total = sum(
+        volume
+        for volume in (_as_int(point.get("volume")) for point in points)
+        if volume is not None and volume > 0
+    )
+    missing_volume = total_volume - current_total
+
+    if missing_volume <= 0:
+        return False
+
+    candidates = [
+        point
+        for point in points
+        if (point_time := _point_datetime(point)) is not None
+        and (point_time.hour, point_time.minute) != (13, 30)
+    ]
+    target = candidates[-1] if candidates else (points[-1] if points else None)
+
+    if target is None:
+        return False
+
+    target["volume"] = (_as_int(target.get("volume")) or 0) + missing_volume
+    return True
+
+
+def _apply_mis_volume_adjustment(result: dict, message: dict | None) -> dict:
+    if not message or not result.get("points"):
+        return result
+
+    snapshot_time = _parse_snapshot_datetime(message)
+    trade_date = message.get("d")
+
+    if snapshot_time is None or not trade_date:
+        return result
+
+    points = result["points"]
+    if not any((key := _point_time_key(point)) is not None and key[0] == trade_date for point in points):
+        return result
+
+    price = _as_float(message.get("z"))
+    close_volume = _volume_lots_to_shares(message.get("tv") or message.get("s"))
+    total_volume = _volume_lots_to_shares(message.get("v"))
+    adjusted = False
+
+    if close_volume is not None and close_volume > 0:
+        _upsert_intraday_point(
+            points,
+            point_time=snapshot_time,
+            price=price,
+            volume=close_volume,
+            open_price=price,
+            high_price=price,
+            low_price=price,
+        )
+        adjusted = True
+
+    if (
+        total_volume is not None
+        and total_volume > 0
+        and snapshot_time.hour == 13
+        and snapshot_time.minute >= 30
+    ):
+        current_total = sum(
+            volume
+            for volume in (_as_int(point.get("volume")) for point in points)
+            if volume is not None and volume > 0
+        )
+        missing_volume = total_volume - current_total
+
+        if missing_volume > 0:
+            open_time = datetime.combine(
+                snapshot_time.date(),
+                time(9, 0, 0),
+                tzinfo=snapshot_time.tzinfo or TAIPEI_TZ,
+            )
+            _upsert_intraday_point(
+                points,
+                point_time=open_time,
+                price=_as_float(message.get("o")),
+                volume=missing_volume,
+                volume_mode="add",
+                open_price=_as_float(message.get("o")),
+                high_price=_as_float(message.get("o")),
+                low_price=_as_float(message.get("o")),
+            )
+            adjusted = True
+
+    result["point_count"] = len(points)
+    if adjusted:
+        if result.get("source") == "nstock_minute_stock_data":
+            result["source"] = "nstock_minute_stock_data_twse_mis_volume"
+        else:
+            result["source"] = "yahoo_finance_chart_twse_mis_volume"
+    return result
+
+
+def _fetch_mis_snapshot(stock_id: str, market: str | None) -> dict:
+    exchange = _mis_exchange(market)
+    message = _fetch_mis_message(stock_id=stock_id, market=market)
 
     if not message:
         return {
@@ -217,10 +491,26 @@ def get_intraday_trend(db: Session, stock_id: str) -> dict:
     market = stock.market.upper() if stock else None
 
     try:
+        nstock_result = _fetch_nstock_intraday(stock_id=stock_id)
+
+        if nstock_result["points"]:
+            try:
+                message = _fetch_mis_message(stock_id=stock_id, market=market)
+            except Exception:
+                message = None
+            return _apply_mis_volume_adjustment(nstock_result, message)
+    except Exception:
+        pass
+
+    try:
         yahoo_result = _fetch_yahoo_intraday(stock_id=stock_id, market=market)
 
         if yahoo_result["points"]:
-            return yahoo_result
+            try:
+                message = _fetch_mis_message(stock_id=stock_id, market=market)
+            except Exception:
+                message = None
+            return _apply_mis_volume_adjustment(yahoo_result, message)
     except Exception:
         pass
 

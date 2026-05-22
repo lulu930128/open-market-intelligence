@@ -72,7 +72,12 @@ function formatPrice(value: number | null | undefined) {
   });
 }
 
-function formatNumber(value: number | null | undefined) {
+function formatLots(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "-";
+  return new Intl.NumberFormat("zh-TW").format(Math.round(value / 1000));
+}
+
+function formatTradeValue(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
 
   if (Math.abs(value) >= 100_000_000) {
@@ -419,7 +424,7 @@ export default function StockKLineChart({
     nextPanelTop += panelHeight + panelGap;
   }
 
-  addPanel(indicators.volume, "volume", "成交量");
+  addPanel(indicators.volume, "volume", "成交量(張)");
   addPanel(indicators.rsi, "rsi", "RSI 14");
   addPanel(indicators.macd, "macd", "MACD");
   addPanel(indicators.kd, "kd", "KD");
@@ -527,7 +532,7 @@ export default function StockKLineChart({
 
         <div className="flex items-start gap-4">
           {hoveredPoint ? (
-            <div className="grid grid-cols-4 gap-x-4 gap-y-1 text-right text-xs">
+            <div className="grid grid-cols-5 gap-x-4 gap-y-1 text-right text-xs">
               <div>
                 <span className="text-slate-400">日期</span>
                 <div className="font-semibold text-slate-800">{hoveredPoint.time}</div>
@@ -545,9 +550,15 @@ export default function StockKLineChart({
                 </div>
               </div>
               <div>
-                <span className="text-slate-400">成交量</span>
+                <span className="text-slate-400">成交量(張)</span>
                 <div className="font-semibold text-slate-800">
-                  {formatNumber(hoveredPoint.volume)}
+                  {formatLots(hoveredPoint.volume)}
+                </div>
+              </div>
+              <div>
+                <span className="text-slate-400">成交金額</span>
+                <div className="font-semibold text-slate-800">
+                  {formatTradeValue(hoveredPoint.trade_value)}
                 </div>
               </div>
               <div>

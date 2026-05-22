@@ -28,6 +28,9 @@ function formatPrice(value: number | null | undefined) {
 }
 
 function formatSource(value: string) {
+  if (value === "nstock_minute_stock_data_twse_mis_volume") return "分K走勢 + 交易所量";
+  if (value === "nstock_minute_stock_data") return "分K走勢";
+  if (value === "yahoo_finance_chart_twse_mis_volume") return "1 分鐘走勢 + 交易所量";
   if (value === "yahoo_finance_chart") return "1 分鐘走勢";
   if (value === "twse_mis_snapshot") return "即時快照";
   return "走勢資料";

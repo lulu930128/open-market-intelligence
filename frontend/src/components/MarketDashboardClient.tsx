@@ -30,9 +30,9 @@ type Props = {
   initialRankingData: RankingResponse | null;
 };
 
-function formatNumber(value: number | null | undefined) {
+function formatLots(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
-  return new Intl.NumberFormat("zh-TW").format(value);
+  return new Intl.NumberFormat("zh-TW").format(Math.round(value / 1000));
 }
 
 function formatPrice(value: number | null | undefined) {
@@ -541,7 +541,7 @@ export default function MarketDashboardClient({
             {trendLabel(row.change_pct)}
           </span>
         </span>
-        <span className="text-right">{formatNumber(row.volume)}</span>
+        <span className="text-right">{formatLots(row.volume)}</span>
       </button>
     );
   }
@@ -566,7 +566,7 @@ export default function MarketDashboardClient({
         <span className="text-right">收盤</span>
         <span className="text-right">漲幅</span>
         <span className="text-right">漲跌</span>
-        <span className="text-right">成交量</span>
+        <span className="text-right">成交量(張)</span>
       </div>
       {rows.length > 0 ? (
         rows.map(renderRankingRow)
