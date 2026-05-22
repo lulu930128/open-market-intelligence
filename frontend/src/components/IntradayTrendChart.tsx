@@ -8,6 +8,8 @@ type Props = {
   previousClose: number | null;
   label: string;
   source: string;
+  refreshIntervalMs?: number;
+  updatedAt?: string | null;
 };
 
 function formatPrice(value: number | null | undefined) {
@@ -94,6 +96,8 @@ export default function IntradayTrendChart({
   previousClose,
   label,
   source,
+  refreshIntervalMs,
+  updatedAt,
 }: Props) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
 
@@ -213,6 +217,12 @@ export default function IntradayTrendChart({
           <div className="mt-1 text-xs text-slate-500">
             {label} · {formatSource(source)} · {data.length} 點
           </div>
+          {refreshIntervalMs ? (
+            <div className="mt-1 text-xs text-slate-500">
+              盤中每 {Math.round(refreshIntervalMs / 1000)} 秒更新
+              {updatedAt ? `，最後更新 ${updatedAt}` : ""}
+            </div>
+          ) : null}
         </div>
 
         {hoveredPoint ? (

@@ -32,7 +32,7 @@ Open Market Intelligence 是一套以公開市場資料為基礎的本機化投�
 flowchart LR
     user["使用者"] --> browser["Next.js Dashboard<br/>127.0.0.1:3000"]
     browser --> proxy["Next.js Rewrite<br/>/omi-data"]
-    proxy --> api["FastAPI Backend<br/>127.0.0.1:8000/api"]
+    proxy --> api["FastAPI Backend<br/>127.0.0.1:8300/api"]
 
     api --> routers["Routers"]
     routers --> services["Services"]
@@ -249,7 +249,7 @@ POST /api/watchlists/groups/{group_id}/backfill
 
 ```ts
 // frontend/next.config.ts
-const apiProxyTarget = process.env.API_PROXY_TARGET ?? "http://127.0.0.1:8000";
+const apiProxyTarget = process.env.API_PROXY_TARGET ?? "http://127.0.0.1:8300";
 const apiProxyPath = process.env.API_PROXY_PATH ?? "/omi-data";
 ```
 
@@ -257,14 +257,14 @@ const apiProxyPath = process.env.API_PROXY_PATH ?? "/omi-data";
 
 | 前端呼叫 | Next.js 代理到 |
 | --- | --- |
-| `/omi-data/wl/tree` | `http://127.0.0.1:8000/api/watchlists/tree` |
-| `/omi-data/market/ohlc/2330` | `http://127.0.0.1:8000/api/market/ohlc/2330` |
-| `/api/...` | `http://127.0.0.1:8000/api/...` |
+| `/omi-data/wl/tree` | `http://127.0.0.1:8300/api/watchlists/tree` |
+| `/omi-data/market/ohlc/2330` | `http://127.0.0.1:8300/api/market/ohlc/2330` |
+| `/api/...` | `http://127.0.0.1:8300/api/...` |
 
 建議前端 `.env.local`：
 
 ```env
-API_PROXY_TARGET=http://127.0.0.1:8000
+API_PROXY_TARGET=http://127.0.0.1:8300
 API_PROXY_PATH=/omi-data
 NEXT_PUBLIC_API_PROXY_PATH=/omi-data
 NEXT_PUBLIC_API_BASE_URL=
@@ -278,15 +278,15 @@ NEXT_PUBLIC_API_BASE_URL=
 cd "C:\Open Market Intelligence"
 .\.venv\Scripts\Activate.ps1
 cd backend
-python -m uvicorn app.main:app --reload --port 8000
+python -m uvicorn app.main:app --reload --port 8300
 ```
 
 後端網址：
 
 ```text
-http://127.0.0.1:8000
-http://127.0.0.1:8000/docs
-http://127.0.0.1:8000/api/system/health
+http://127.0.0.1:8300
+http://127.0.0.1:8300/docs
+http://127.0.0.1:8300/api/system/health
 ```
 
 ### 2. 啟動前端
@@ -295,6 +295,8 @@ http://127.0.0.1:8000/api/system/health
 cd "C:\Open Market Intelligence\frontend"
 npm run dev
 ```
+
+如果有修改 `frontend/.env.local` 或 `API_PROXY_TARGET`，需要停止並重新啟動前端 dev server；Next.js 會在啟動時讀取 proxy 設定，已啟動的程序不會自動吃到新的 port。
 
 前端網址：
 

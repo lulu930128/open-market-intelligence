@@ -31,6 +31,8 @@ type Props = {
 type Timeframe = "today" | "daily" | "weekly" | "monthly";
 type LoadState = "idle" | "loading" | "success" | "error";
 
+const INTRADAY_REFRESH_MS = 5_000;
+
 const timeframeLabels: Record<Timeframe, string> = {
   today: "今日",
   daily: "日K",
@@ -150,6 +152,7 @@ export default function StockDetailPanel({
   const [todayTrend, setTodayTrend] = useState<IntradayTrendPoint[]>([]);
   const [todayPreviousClose, setTodayPreviousClose] = useState<number | null>(null);
   const [todaySource, setTodaySource] = useState("unavailable");
+  const [todayUpdatedAt, setTodayUpdatedAt] = useState<string | null>(null);
   const [indicatorData, setIndicatorData] =
     useState<StockIndicatorPoint[]>(initialIndicatorData);
   const [institutional, setInstitutional] = useState<InstitutionalTradeDailyRead | null>(null);
@@ -172,6 +175,7 @@ export default function StockDetailPanel({
         setTodayTrend([]);
         setTodayPreviousClose(null);
         setTodaySource("unavailable");
+        setTodayUpdatedAt(null);
         setIndicatorData([]);
         setInstitutional(null);
         setMargin(null);
@@ -220,26 +224,58 @@ export default function StockDetailPanel({
     if (!stockId) return;
 
     let cancelled = false;
+    let intradayTimer: number | undefined;
+    let intradayRequestInFlight = false;
+
+    async function loadTodayTrend(showLoading: boolean) {
+      if (intradayRequestInFlight) return;
+      intradayRequestInFlight = true;
+
+      if (showLoading) {
+        setLoadState("loading");
+        setErrorMessage(null);
+        setTodayUpdatedAt(null);
+      }
+
+      try {
+        const today = await fetchJson<IntradayTrendResponse>(
+          `/api/market/intraday/${stockId}`
+        );
+
+        if (cancelled) return;
+
+        setTodayTrend(today.points);
+        setTodayPreviousClose(today.previous_close);
+        setTodaySource(today.source);
+        setTodayUpdatedAt(new Date().toLocaleTimeString("zh-TW", { hour12: false }));
+        setLoadState("success");
+        setErrorMessage(null);
+      } catch (error) {
+        if (cancelled) return;
+        setLoadState("error");
+        setErrorMessage(error instanceof Error ? error.message : "資料讀取失敗");
+      } finally {
+        intradayRequestInFlight = false;
+      }
+    }
 
     async function loadChart() {
+      if (timeframe === "today") {
+        await loadTodayTrend(true);
+
+        if (!cancelled) {
+          intradayTimer = window.setInterval(() => {
+            void loadTodayTrend(false);
+          }, INTRADAY_REFRESH_MS);
+        }
+
+        return;
+      }
+
       setLoadState("loading");
       setErrorMessage(null);
 
       try {
-        if (timeframe === "today") {
-          const today = await fetchJson<IntradayTrendResponse>(
-            `/api/market/intraday/${stockId}`
-          );
-
-          if (cancelled) return;
-
-          setTodayTrend(today.points);
-          setTodayPreviousClose(today.previous_close);
-          setTodaySource(today.source);
-          setLoadState("success");
-          return;
-        }
-
         const ohlc = await fetchJson<OhlcChartResponse>(`/api/market/ohlc/${stockId}`, {
           timeframe,
           bars: 90,
@@ -270,6 +306,9 @@ export default function StockDetailPanel({
 
     return () => {
       cancelled = true;
+      if (intradayTimer !== undefined) {
+        window.clearInterval(intradayTimer);
+      }
     };
   }, [stockId, timeframe]);
 
@@ -460,6 +499,8 @@ export default function StockDetailPanel({
               previousClose={todayPreviousClose}
               label={timeframeLabels[timeframe]}
               source={todaySource}
+              refreshIntervalMs={INTRADAY_REFRESH_MS}
+              updatedAt={todayUpdatedAt}
             />
           ) : (
             <StockKLineChart

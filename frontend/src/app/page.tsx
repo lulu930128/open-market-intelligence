@@ -8,7 +8,7 @@ import type {
   WatchlistItemRead,
 } from "@/types/market";
 
-const apiProxyTarget = process.env.API_PROXY_TARGET ?? "http://127.0.0.1:8000";
+const apiProxyTarget = process.env.API_PROXY_TARGET ?? "http://127.0.0.1:8300";
 
 async function fetchBackendJson<T>(path: string, fallback: T): Promise<T> {
   try {

@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     app_name: str = "Open Market Intelligence"
     app_env: str = "development"
     app_host: str = "127.0.0.1"
-    app_port: int = 8000
+    app_port: int = 8300
 
     database_url: str = f"sqlite:///{DEFAULT_DB_PATH.as_posix()}"
 
