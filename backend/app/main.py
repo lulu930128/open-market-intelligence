@@ -10,12 +10,13 @@ from fastapi.responses import FileResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import PROJECT_ROOT
-from app.db.session import init_db
+from app.db.session import SessionLocal, init_db
 from app.errors import (
     http_exception_handler,
     unhandled_exception_handler,
     validation_exception_handler,
 )
+from app.jobs import scheduler as job_scheduler, service as job_service
 from app.routers import indicators, jobs, market, raw_results, reports, sources, stocks, system, watchlists
 
 
@@ -26,7 +27,26 @@ request_logger = logging.getLogger("app.requests")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    yield
+    db = SessionLocal()
+
+    try:
+        interrupted_count = job_service.mark_interrupted_jobs(db)
+
+        if interrupted_count:
+            logging.getLogger(__name__).warning(
+                "Marked %s interrupted queued/running jobs as error.",
+                interrupted_count,
+            )
+    finally:
+        db.close()
+
+    scheduler = job_scheduler.start_scheduler()
+
+    try:
+        yield
+    finally:
+        job_scheduler.stop_scheduler(scheduler)
+        job_service.shutdown_job_executor(wait=False)
 
 
 app = FastAPI(

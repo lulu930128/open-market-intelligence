@@ -95,15 +95,18 @@ def _queue_backfill_job(
     task,
     task_args: tuple,
 ):
-    job = job_service.create_job(
+    del background_tasks
+
+    job, _created = job_service.enqueue_job(
         db=db,
         job_type=job_type,
         target=target,
         request=request,
         progress_total=1,
         message="Queued.",
+        task=task,
+        task_args=task_args,
     )
-    background_tasks.add_task(task, job.id, *task_args)
     return job_service.serialize_job(job)
 
 

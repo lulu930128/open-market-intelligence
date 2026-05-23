@@ -49,36 +49,38 @@ def _queue_group_backfill_job(
     sleep_seconds: float,
     skip_existing_months: bool,
 ):
-    job = job_service.create_job(
+    del background_tasks
+
+    request = {
+        "group_id": group_id,
+        "start_date": start_date,
+        "end_date": end_date,
+        "source_id": source_id,
+        "tpex_source_id": tpex_source_id,
+        "include_children": include_children,
+        "enabled_only": enabled_only,
+        "sleep_seconds": sleep_seconds,
+        "skip_existing_months": skip_existing_months,
+    }
+    job, _created = job_service.enqueue_job(
         db=db,
         job_type="watchlist.group_daily_price_backfill",
         target=str(group_id),
-        request={
-            "group_id": group_id,
-            "start_date": start_date,
-            "end_date": end_date,
-            "source_id": source_id,
-            "tpex_source_id": tpex_source_id,
-            "include_children": include_children,
-            "enabled_only": enabled_only,
-            "sleep_seconds": sleep_seconds,
-            "skip_existing_months": skip_existing_months,
-        },
+        request=request,
         progress_total=1,
         message="Queued.",
-    )
-    background_tasks.add_task(
-        backfill_tasks.run_watchlist_group_backfill_job,
-        job.id,
-        group_id,
-        start_date,
-        end_date,
-        source_id,
-        tpex_source_id,
-        include_children,
-        enabled_only,
-        sleep_seconds,
-        skip_existing_months,
+        task=backfill_tasks.run_watchlist_group_backfill_job,
+        task_args=(
+            group_id,
+            start_date,
+            end_date,
+            source_id,
+            tpex_source_id,
+            include_children,
+            enabled_only,
+            sleep_seconds,
+            skip_existing_months,
+        ),
     )
     return job_service.serialize_job(job)
 

@@ -354,6 +354,8 @@ export default function IntradayTrendChart({
     return result;
   }, []);
   const totalVolume = cumulativeVolumes[cumulativeVolumes.length - 1] ?? null;
+  const displayedVolume =
+    safeHoverIndex !== null ? cumulativeVolumes[safeHoverIndex] ?? null : totalVolume;
   const rangeHigh = data.reduce<{ index: number; value: number } | null>(
     (best, point, index) => {
       const value = point.high ?? point.price;
@@ -473,7 +475,7 @@ export default function IntradayTrendChart({
           <div>
             <span className="text-xs text-slate-400">成交量(張)</span>
             <div className="mt-1 text-base font-bold text-slate-800">
-              {formatLots(totalVolume)}
+              {formatLots(displayedVolume)}
             </div>
           </div>
         </div>

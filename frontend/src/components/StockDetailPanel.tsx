@@ -108,6 +108,10 @@ const dataPanelTabs: Array<{ key: DataPanelTab; label: string }> = [
   { key: "earnings", label: "盈餘" },
 ];
 
+function dataPanelCacheKey(stockId: string, tab: DataPanelTab) {
+  return `${stockId}:${tab}`;
+}
+
 const branchDayOptions = ["1", "3", "5", "10", "20", "60", "120", "更多"];
 const largeHolderLotOptions = [100, 200, 400, 600, 800, 1000];
 const smallHolderLotOptions = [10, 20, 30, 40, 50, 100];
@@ -551,6 +555,8 @@ function buildLinePath(
   width: number,
   height: number
 ) {
+  let hasStarted = false;
+
   return points
     .map((point, index) => {
       const value = point[valueKey];
@@ -558,7 +564,9 @@ function buildLinePath(
 
       const x = chartX(index, points.length, left, width);
       const y = chartY(value, scale.min, scale.max, top, height);
-      return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+      const command = hasStarted ? "L" : "M";
+      hasStarted = true;
+      return `${command} ${x.toFixed(2)} ${y.toFixed(2)}`;
     })
     .filter(Boolean)
     .join(" ");
@@ -573,6 +581,8 @@ function buildNumericLinePath<T>(
   width: number,
   height: number
 ) {
+  let hasStarted = false;
+
   return points
     .map((point, index) => {
       const value = getValue(point);
@@ -580,7 +590,9 @@ function buildNumericLinePath<T>(
 
       const x = chartX(index, points.length, left, width);
       const y = chartY(value, scale.min, scale.max, top, height);
-      return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+      const command = hasStarted ? "L" : "M";
+      hasStarted = true;
+      return `${command} ${x.toFixed(2)} ${y.toFixed(2)}`;
     })
     .filter(Boolean)
     .join(" ");
@@ -1784,6 +1796,7 @@ export default function StockDetailPanel({
   const [largeHolderLots, setLargeHolderLots] = useState(1000);
   const [smallHolderLots, setSmallHolderLots] = useState(100);
   const [revenueView, setRevenueView] = useState<RevenueView>("monthly");
+  const [revenueYear, setRevenueYear] = useState<number | null>(null);
   const [earningsView, setEarningsView] = useState<EarningsView>("quarterly");
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -1791,6 +1804,7 @@ export default function StockDetailPanel({
   const activeStockIdRef = useRef<string | null>(stockId);
   const activeDataTabRef = useRef<DataPanelTab>(activeDataTab);
   const dataPanelRequestKeyRef = useRef<string | null>(null);
+  const dataPanelResolvedKeysRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     activeStockIdRef.current = stockId;
@@ -1808,6 +1822,8 @@ export default function StockDetailPanel({
   }
 
   useEffect(() => {
+    dataPanelResolvedKeysRef.current.clear();
+
     if (!stockId) {
       const timer = window.setTimeout(() => {
         setChartData([]);
@@ -1831,6 +1847,7 @@ export default function StockDetailPanel({
         setDataPanelLoading(null);
         setDataPanelMessage(null);
         setInstitutionalHoverDate(null);
+        setRevenueYear(null);
         setLoadState("idle");
         setErrorMessage(null);
       }, 0);
@@ -1839,6 +1856,25 @@ export default function StockDetailPanel({
     }
 
     let cancelled = false;
+    const resetTimer = window.setTimeout(() => {
+      if (cancelled) return;
+
+      setInstitutional(null);
+      setInstitutionalHistory([]);
+      setMargin(null);
+      setBrokerBranchSummary(null);
+      setShareholding([]);
+      setMonthlyRevenue(null);
+      setMonthlyRevenueHistory([]);
+      setFinancialMetric(null);
+      setFinancialMetricHistory([]);
+      setStockInfo(null);
+      setInstitutionalHoldingRatio(null);
+      setDataPanelLoading(activeDataTabRef.current);
+      setDataPanelMessage(null);
+      setInstitutionalHoverDate(null);
+      setRevenueYear(null);
+    }, 0);
 
     async function loadStaticDetail() {
       try {
@@ -1978,6 +2014,7 @@ export default function StockDetailPanel({
 
     return () => {
       cancelled = true;
+      window.clearTimeout(resetTimer);
     };
   }, [stockId]);
 
@@ -2352,11 +2389,54 @@ export default function StockDetailPanel({
     [financialMetricHistory, earningsView]
   );
 
+  function dataTabHasCurrentData(tab: DataPanelTab, targetStockId = stockId) {
+    if (!targetStockId) return false;
+
+    if (tab === "chips") {
+      return (
+        (margin !== null && margin.stock_id === targetStockId) ||
+        shareholding.some((row) => row.stock_id === targetStockId)
+      );
+    }
+
+    if (tab === "institutional") {
+      return (
+        (institutional !== null && institutional.stock_id === targetStockId) ||
+        institutionalHistory.some((row) => row.stock_id === targetStockId) ||
+        (institutionalHoldingRatio !== null &&
+          institutionalHoldingRatio.stock_id === targetStockId)
+      );
+    }
+
+    if (tab === "branch") {
+      return (
+        brokerBranchSummary !== null &&
+        brokerBranchSummary.stock_id === targetStockId
+      );
+    }
+
+    if (tab === "revenue") {
+      return (
+        (monthlyRevenue !== null && monthlyRevenue.stock_id === targetStockId) ||
+        monthlyRevenueHistory.some((row) => row.stock_id === targetStockId)
+      );
+    }
+
+    if (tab === "earnings") {
+      return (
+        (financialMetric !== null && financialMetric.stock_id === targetStockId) ||
+        financialMetricHistory.some((row) => row.stock_id === targetStockId)
+      );
+    }
+
+    return false;
+  }
+
   async function refreshDataTab(tab: DataPanelTab) {
     if (!stockId) return;
 
     const targetStockId = stockId;
-    const requestKey = `${targetStockId}:${tab}`;
+    const requestKey = dataPanelCacheKey(targetStockId, tab);
 
     if (dataPanelRequestKeyRef.current === requestKey) return;
 
@@ -2392,6 +2472,7 @@ export default function StockDetailPanel({
 
         if (activeStockIdRef.current !== targetStockId) return;
 
+        dataPanelResolvedKeysRef.current.add(requestKey);
         setBrokerBranchSummary(branchSummary);
         setDataPanelMessage(
           branchSummary.trade_date
@@ -2434,6 +2515,7 @@ export default function StockDetailPanel({
 
         if (activeStockIdRef.current !== targetStockId) return;
 
+        dataPanelResolvedKeysRef.current.add(requestKey);
         setShareholding(shareholdingRows);
         setMargin(marginRows[marginRows.length - 1] ?? null);
         setDataPanelMessage("籌碼與融資融券資料已補齊");
@@ -2462,6 +2544,7 @@ export default function StockDetailPanel({
 
         if (activeStockIdRef.current !== targetStockId) return;
 
+        dataPanelResolvedKeysRef.current.add(requestKey);
         setInstitutional(institutionalRows[institutionalRows.length - 1] ?? null);
         setInstitutionalHistory(institutionalRows);
         setDataPanelMessage("法人資料已補齊");
@@ -2488,6 +2571,7 @@ export default function StockDetailPanel({
 
         if (activeStockIdRef.current !== targetStockId) return;
 
+        dataPanelResolvedKeysRef.current.add(requestKey);
         setMonthlyRevenue(revenueRows[revenueRows.length - 1] ?? null);
         setMonthlyRevenueHistory(revenueRows);
         setDataPanelMessage("營收資料已補齊");
@@ -2514,6 +2598,7 @@ export default function StockDetailPanel({
 
         if (activeStockIdRef.current !== targetStockId) return;
 
+        dataPanelResolvedKeysRef.current.add(requestKey);
         setFinancialMetric(financialRows[financialRows.length - 1] ?? null);
         setFinancialMetricHistory(financialRows);
         setDataPanelMessage("盈餘資料已補齊");
@@ -2538,6 +2623,21 @@ export default function StockDetailPanel({
   useEffect(() => {
     if (!stockId) return;
 
+    const requestKey = dataPanelCacheKey(stockId, activeDataTab);
+    const hasCachedResult = dataPanelResolvedKeysRef.current.has(requestKey);
+    const hasCurrentData = dataTabHasCurrentData(activeDataTab);
+
+    if (hasCachedResult || hasCurrentData) {
+      const timer = window.setTimeout(() => {
+        if (dataPanelRequestKeyRef.current === requestKey) return;
+
+        setDataPanelLoading((current) => (current === activeDataTab ? null : current));
+        setDataPanelMessage(hasCachedResult ? "使用暫存資料" : null);
+      }, 0);
+
+      return () => window.clearTimeout(timer);
+    }
+
     const timer = window.setTimeout(() => {
       void refreshDataTab(activeDataTab);
     }, 0);
@@ -2551,6 +2651,53 @@ export default function StockDetailPanel({
     return watchlistRankingPanel ? (
       <section className="min-w-0">{watchlistRankingPanel}</section>
     ) : null;
+  }
+
+  const selectedStockId = stockId;
+
+  function hasRowsFromOtherStock<T extends { stock_id: string }>(rows: T[]) {
+    return rows.some((row) => row.stock_id !== selectedStockId);
+  }
+
+  function activeDataTabHasStaleData() {
+    if (activeDataTab === "chips") {
+      return (
+        (margin !== null && margin.stock_id !== selectedStockId) ||
+        hasRowsFromOtherStock(shareholding)
+      );
+    }
+
+    if (activeDataTab === "institutional") {
+      return (
+        (institutional !== null && institutional.stock_id !== selectedStockId) ||
+        hasRowsFromOtherStock(institutionalHistory) ||
+        (institutionalHoldingRatio !== null &&
+          institutionalHoldingRatio.stock_id !== selectedStockId)
+      );
+    }
+
+    if (activeDataTab === "branch") {
+      return (
+        brokerBranchSummary !== null &&
+        brokerBranchSummary.stock_id !== selectedStockId
+      );
+    }
+
+    if (activeDataTab === "revenue") {
+      return (
+        (monthlyRevenue !== null && monthlyRevenue.stock_id !== selectedStockId) ||
+        hasRowsFromOtherStock(monthlyRevenueHistory)
+      );
+    }
+
+    if (activeDataTab === "earnings") {
+      return (
+        (financialMetric !== null && financialMetric.stock_id !== selectedStockId) ||
+        hasRowsFromOtherStock(financialMetricHistory)
+      );
+    }
+
+    return false;
   }
 
   function renderChipTab() {
@@ -3038,9 +3185,25 @@ export default function StockDetailPanel({
     }
 
     const latestYear = Number(latestRevenue.period.slice(0, 4));
+    const revenueYearOptions = Array.from(
+      new Set(
+        monthlyRevenueHistory
+          .map((row) => Number(row.period.slice(0, 4)))
+          .filter((year) => Number.isFinite(year))
+      )
+    ).sort((left, right) => right - left);
+
+    if (!revenueYearOptions.includes(latestYear)) {
+      revenueYearOptions.unshift(latestYear);
+    }
+
+    const selectedRevenueYear =
+      revenueYear !== null && revenueYearOptions.includes(revenueYear)
+        ? revenueYear
+        : latestYear;
     const monthlyRowsByMonth = new Map(
       monthlyRevenueHistory
-        .filter((row) => Number(row.period.slice(0, 4)) === latestYear)
+        .filter((row) => Number(row.period.slice(0, 4)) === selectedRevenueYear)
         .map((row) => [Number(row.period.slice(5, 7)), row])
     );
     const latestRows = activeRows.slice().reverse().slice(0, 12);
@@ -3079,7 +3242,20 @@ export default function StockDetailPanel({
         {revenueView === "monthly" ? (
           <div className="overflow-hidden border border-slate-200">
             <div className="grid grid-cols-[0.7fr_1fr_1fr_1fr_1fr_1fr] border-b border-slate-200 bg-slate-50 text-center text-xs font-semibold text-slate-600">
-              <div className="px-2 py-2 text-lg font-normal text-slate-700">{latestYear}</div>
+              <div className="px-2 py-1">
+                <select
+                  value={selectedRevenueYear}
+                  onChange={(event) => setRevenueYear(Number(event.target.value))}
+                  className="h-8 w-full bg-white px-2 text-center text-sm font-semibold text-slate-800 outline outline-1 outline-slate-200"
+                  aria-label="選擇營收年度"
+                >
+                  {revenueYearOptions.map((year) => (
+                    <option key={year} value={year}>
+                      {year}
+                    </option>
+                  ))}
+                </select>
+              </div>
               <div className="border-l border-slate-200 px-2 py-2">營收(億)</div>
               <div className="border-l border-slate-200 px-2 py-2">年增</div>
               <div className="border-l border-slate-200 px-2 py-2">年累(億)</div>
@@ -3232,6 +3408,10 @@ export default function StockDetailPanel({
   }
 
   function renderActiveDataTab() {
+    if (dataPanelLoading === activeDataTab || activeDataTabHasStaleData()) {
+      return <EmptyDataState message="補齊資料中..." />;
+    }
+
     if (activeDataTab === "institutional") return renderInstitutionalTab();
     if (activeDataTab === "branch") return renderBranchTab();
     if (activeDataTab === "revenue") return renderRevenueTab();

@@ -1,20 +1,28 @@
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 import json
 import logging
+from threading import Lock
 from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.db.models import JobRun, utc_now
 from app.db.session import SessionLocal
 
 
 logger = logging.getLogger(__name__)
 
+ACTIVE_STATUSES = {"queued", "running"}
 TERMINAL_STATUSES = {"success", "error"}
 ProgressCallback = Callable[[int | None, int | None, str | None], None]
 JobWorker = Callable[[Session, ProgressCallback], Any]
+JobTask = Callable[..., None]
+
+_executor: ThreadPoolExecutor | None = None
+_executor_lock = Lock()
 
 
 class JobRunNotFoundError(Exception):
@@ -32,7 +40,7 @@ def _to_json(value: Any) -> str | None:
     if value is None:
         return None
 
-    return json.dumps(value, ensure_ascii=False, default=_json_default)
+    return json.dumps(value, ensure_ascii=False, default=_json_default, sort_keys=True)
 
 
 def _from_json(value: str | None) -> Any:
@@ -94,6 +102,27 @@ def list_jobs(
     )
 
 
+def find_active_job(
+    db: Session,
+    job_type: str,
+    target: str | None = None,
+    request: Any = None,
+) -> JobRun | None:
+    request_json = _to_json(request)
+    query = db.query(JobRun).filter(
+        JobRun.job_type == job_type,
+        JobRun.status.in_(ACTIVE_STATUSES),
+        JobRun.target == target,
+    )
+
+    if request_json is None:
+        query = query.filter(JobRun.request_json.is_(None))
+    else:
+        query = query.filter(JobRun.request_json == request_json)
+
+    return query.order_by(JobRun.created_at.desc(), JobRun.id.desc()).first()
+
+
 def create_job(
     db: Session,
     job_type: str,
@@ -116,6 +145,118 @@ def create_job(
     db.commit()
     db.refresh(job)
     return job
+
+
+def _get_executor() -> ThreadPoolExecutor:
+    global _executor
+
+    with _executor_lock:
+        if _executor is None:
+            _executor = ThreadPoolExecutor(
+                max_workers=max(settings.job_worker_max_concurrency, 1),
+                thread_name_prefix="omi-job",
+            )
+
+        return _executor
+
+
+def _log_unhandled_task_exception(future) -> None:
+    if future.cancelled():
+        return
+
+    try:
+        exc = future.exception()
+    except Exception as callback_exc:
+        logger.exception("Failed to inspect background job future: %s", callback_exc)
+        return
+
+    if exc is not None:
+        logger.error(
+            "Background job task crashed outside job tracking.",
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+
+
+def submit_job_task(task: JobTask, job_id: int, *task_args: Any) -> None:
+    future = _get_executor().submit(task, job_id, *task_args)
+    future.add_done_callback(_log_unhandled_task_exception)
+
+
+def enqueue_job(
+    db: Session,
+    *,
+    job_type: str,
+    target: str | None = None,
+    request: Any = None,
+    progress_total: int = 1,
+    message: str | None = "Queued.",
+    task: JobTask,
+    task_args: tuple[Any, ...] = (),
+    dedupe_active: bool | None = None,
+) -> tuple[JobRun, bool]:
+    should_dedupe = settings.job_dedupe_active if dedupe_active is None else dedupe_active
+
+    if should_dedupe:
+        existing = find_active_job(
+            db=db,
+            job_type=job_type,
+            target=target,
+            request=request,
+        )
+
+        if existing is not None:
+            return existing, False
+
+    job = create_job(
+        db=db,
+        job_type=job_type,
+        target=target,
+        request=request,
+        progress_total=progress_total,
+        message=message,
+    )
+
+    try:
+        submit_job_task(task, job.id, *task_args)
+    except Exception as exc:
+        fail_job(db, job.id, error_message=f"Failed to submit job: {exc}")
+        db.refresh(job)
+
+    return job, True
+
+
+def shutdown_job_executor(wait: bool = False) -> None:
+    global _executor
+
+    with _executor_lock:
+        executor = _executor
+        _executor = None
+
+    if executor is not None:
+        executor.shutdown(wait=wait, cancel_futures=not wait)
+
+
+def mark_interrupted_jobs(db: Session) -> int:
+    jobs = (
+        db.query(JobRun)
+        .filter(JobRun.status.in_(ACTIVE_STATUSES))
+        .all()
+    )
+
+    if not jobs:
+        return 0
+
+    now = utc_now()
+
+    for job in jobs:
+        job.status = "error"
+        job.error_message = "Job interrupted by application restart."
+        job.message = "Job stopped before completion."
+        job.ended_at = now
+        job.updated_at = now
+
+    db.commit()
+    return len(jobs)
 
 
 def start_job(db: Session, job_id: int, message: str | None = None) -> JobRun:

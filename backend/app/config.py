@@ -17,6 +17,11 @@ class Settings(BaseSettings):
 
     enable_scheduler: bool = False
     timezone: str = "Asia/Taipei"
+    job_worker_max_concurrency: int = 1
+    job_dedupe_active: bool = True
+    scheduler_market_refresh_time: str = "15:15"
+    scheduler_market_refresh_lookback_days: int = 7
+    scheduler_market_refresh_sleep_seconds: float = 0.2
 
     finmind_token: str | None = None
     openai_api_key: str | None = None
