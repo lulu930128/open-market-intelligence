@@ -17,10 +17,11 @@ from app.market.backfill import backfill_tpex_trading_stock, backfill_twse_stock
 
 
 CHART_LOOKBACK_MULTIPLIER = {
-    "daily": 1,
+    "daily": 2,
     "weekly": 7,
     "monthly": 31,
 }
+MAX_CHART_BARS = 5000
 
 
 def list_market_daily_prices(
@@ -287,8 +288,8 @@ def list_stock_ohlc_chart_data(
     if bars <= 0:
         raise ValueError("bars must be greater than 0.")
 
-    if bars > 240:
-        raise ValueError("bars must be less than or equal to 240.")
+    if bars > MAX_CHART_BARS:
+        raise ValueError(f"bars must be less than or equal to {MAX_CHART_BARS}.")
 
     end_date = to_date or date.today()
     lookback_days = bars * CHART_LOOKBACK_MULTIPLIER[timeframe]

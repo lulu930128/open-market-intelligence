@@ -475,7 +475,7 @@ def backfill_stock_financial_metrics_history(
 def get_stock_ohlc_chart_data(
     stock_id: str,
     timeframe: str = Query(default="daily", pattern="^(daily|weekly|monthly)$"),
-    bars: int = Query(default=90, ge=1, le=240),
+    bars: int = Query(default=90, ge=1, le=5000),
     ensure_history: bool = False,
     to_date: date | None = None,
     sleep_seconds: float = Query(default=0.08, ge=0, le=2),

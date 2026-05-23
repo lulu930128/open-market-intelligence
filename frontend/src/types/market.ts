@@ -216,6 +216,14 @@ export type StockIndicatorPoint = {
   change_pct: number | null;
   ma: Record<string, number | null>;
   volume_ma: Record<string, number | null>;
+  ema?: Record<string, number | null>;
+  macd?: Record<string, number | null>;
+  rsi?: Record<string, number | null>;
+  atr?: Record<string, number | null>;
+  adx?: Record<string, number | null>;
+  roc?: Record<string, number | null>;
+  mfi?: Record<string, number | null>;
+  donchian?: Record<string, number | null>;
 };
 
 export type StockMasterRead = {

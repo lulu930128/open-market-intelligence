@@ -140,6 +140,14 @@ class DailyIndicatorPointRead(BaseModel):
 
     ma: dict[str, float | None]
     volume_ma: dict[str, float | None]
+    ema: dict[str, float | None] = Field(default_factory=dict)
+    macd: dict[str, float | None] = Field(default_factory=dict)
+    rsi: dict[str, float | None] = Field(default_factory=dict)
+    atr: dict[str, float | None] = Field(default_factory=dict)
+    adx: dict[str, float | None] = Field(default_factory=dict)
+    roc: dict[str, float | None] = Field(default_factory=dict)
+    mfi: dict[str, float | None] = Field(default_factory=dict)
+    donchian: dict[str, float | None] = Field(default_factory=dict)
 
 
 class InstitutionalTradeDailyRead(BaseModel):

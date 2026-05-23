@@ -1,6 +1,6 @@
 "use client";
 
-import { type MouseEvent, useMemo, useState } from "react";
+import { type MouseEvent, type WheelEvent, useMemo, useState } from "react";
 import type { ChartPoint, StockIndicatorPoint } from "@/types/market";
 
 type Props = {
@@ -8,23 +8,70 @@ type Props = {
   indicatorData?: StockIndicatorPoint[];
   label: string;
   indicators: IndicatorSettings;
+  indicatorParameters?: IndicatorParameters;
 };
 
 export type IndicatorSettings = {
+  signals: boolean;
   ma: boolean;
+  ema: boolean;
   bollinger: boolean;
+  vwap: boolean;
+  psar: boolean;
+  donchian: boolean;
   volume: boolean;
   rsi: boolean;
   macd: boolean;
   kd: boolean;
+  atr: boolean;
+  adx: boolean;
+  obv: boolean;
+  mfi: boolean;
+  cci: boolean;
+  williamsR: boolean;
+  roc: boolean;
+  stochRsi: boolean;
 };
 
 export type IndicatorKey = keyof IndicatorSettings;
+
+export type IndicatorParameters = {
+  maShort: number;
+  maMiddle: number;
+  maLong: number;
+  emaFast: number;
+  emaSlow: number;
+  bollingerPeriod: number;
+  bollingerStdDev: number;
+  volumeMa: number;
+  rsiPeriod: number;
+  macdFast: number;
+  macdSlow: number;
+  macdSignal: number;
+  kdPeriod: number;
+  atrPeriod: number;
+  adxPeriod: number;
+  donchianPeriod: number;
+  obvMa: number;
+  mfiPeriod: number;
+  cciPeriod: number;
+  williamsRPeriod: number;
+  rocPeriod: number;
+  stochRsiPeriod: number;
+  stochRsiSmoothK: number;
+  stochRsiSmoothD: number;
+};
 
 type MergedPoint = ChartPoint & {
   ma5: number | null;
   ma20: number | null;
   ma60: number | null;
+  ema12: number | null;
+  ema26: number | null;
+  vwap: number | null;
+  psar: number | null;
+  donchianUpper: number | null;
+  donchianLower: number | null;
   volumeMa20: number | null;
   changePct: number | null;
   bbMiddle: number | null;
@@ -36,32 +83,119 @@ type MergedPoint = ChartPoint & {
   macdHistogram: number | null;
   k: number | null;
   d: number | null;
+  atr14: number | null;
+  plusDi14: number | null;
+  minusDi14: number | null;
+  adx14: number | null;
+  obv: number | null;
+  obvMa10: number | null;
+  mfi14: number | null;
+  cci20: number | null;
+  williamsR14: number | null;
+  roc12: number | null;
+  stochRsiK: number | null;
+  stochRsiD: number | null;
 };
 
 type Panel = {
-  key: "volume" | "rsi" | "macd" | "kd";
+  key:
+    | "volume"
+    | "rsi"
+    | "macd"
+    | "kd"
+    | "atr"
+    | "adx"
+    | "obv"
+    | "mfi"
+    | "cci"
+    | "williamsR"
+    | "roc"
+    | "stochRsi";
   label: string;
   top: number;
   height: number;
 };
 
+type VisibleRangeState = {
+  start: number;
+  count: number;
+  pinnedToLatest: boolean;
+  dataKey: string | null;
+};
+
 export const indicatorOptions: Array<{ key: IndicatorKey; label: string; description: string }> = [
+  { key: "signals", label: "SIGNAL", description: "交叉 / 突破標記" },
   { key: "ma", label: "MA", description: "MA5 / MA20 / MA60" },
+  { key: "ema", label: "EMA", description: "EMA12 / EMA26" },
   { key: "bollinger", label: "BOLL", description: "20MA +/- 2SD" },
+  { key: "vwap", label: "VWAP", description: "量價均價" },
+  { key: "psar", label: "SAR", description: "Parabolic SAR" },
+  { key: "donchian", label: "DONCH", description: "20 日通道" },
   { key: "volume", label: "VOL", description: "成交量" },
   { key: "rsi", label: "RSI", description: "RSI 14" },
   { key: "macd", label: "MACD", description: "12 / 26 / 9" },
   { key: "kd", label: "KD", description: "KD 9 / 3" },
+  { key: "atr", label: "ATR", description: "ATR 14" },
+  { key: "adx", label: "ADX", description: "ADX / +DI / -DI" },
+  { key: "obv", label: "OBV", description: "能量潮" },
+  { key: "mfi", label: "MFI", description: "Money Flow 14" },
+  { key: "cci", label: "CCI", description: "CCI 20" },
+  { key: "williamsR", label: "W%R", description: "Williams %R 14" },
+  { key: "roc", label: "ROC", description: "ROC 12" },
+  { key: "stochRsi", label: "StochRSI", description: "RSI 隨機指標" },
 ];
 
 export const defaultIndicators: IndicatorSettings = {
+  signals: true,
   ma: true,
+  ema: false,
   bollinger: false,
+  vwap: false,
+  psar: false,
+  donchian: false,
   volume: true,
   rsi: false,
   macd: false,
   kd: false,
+  atr: false,
+  adx: false,
+  obv: false,
+  mfi: false,
+  cci: false,
+  williamsR: false,
+  roc: false,
+  stochRsi: false,
 };
+
+export const defaultIndicatorParameters: IndicatorParameters = {
+  maShort: 5,
+  maMiddle: 20,
+  maLong: 60,
+  emaFast: 12,
+  emaSlow: 26,
+  bollingerPeriod: 20,
+  bollingerStdDev: 2,
+  volumeMa: 20,
+  rsiPeriod: 14,
+  macdFast: 12,
+  macdSlow: 26,
+  macdSignal: 9,
+  kdPeriod: 9,
+  atrPeriod: 14,
+  adxPeriod: 14,
+  donchianPeriod: 20,
+  obvMa: 10,
+  mfiPeriod: 14,
+  cciPeriod: 20,
+  williamsRPeriod: 14,
+  rocPeriod: 12,
+  stochRsiPeriod: 14,
+  stochRsiSmoothK: 3,
+  stochRsiSmoothD: 3,
+};
+
+const DEFAULT_VISIBLE_BARS = 80;
+const MIN_VISIBLE_BARS = 20;
 
 function formatPrice(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
@@ -203,14 +337,19 @@ function calculateEma(values: Array<number | null | undefined>, period: number) 
   });
 }
 
-function calculateMacd(closes: Array<number | null | undefined>) {
-  const ema12 = calculateEma(closes, 12);
-  const ema26 = calculateEma(closes, 26);
+function calculateMacd(
+  closes: Array<number | null | undefined>,
+  fastPeriod = 12,
+  slowPeriod = 26,
+  signalPeriod = 9
+) {
+  const ema12 = calculateEma(closes, fastPeriod);
+  const ema26 = calculateEma(closes, slowPeriod);
   const macd = closes.map((_, index) => {
     if (!validNumber(ema12[index]) || !validNumber(ema26[index])) return null;
     return ema12[index] - ema26[index];
   });
-  const signal = calculateEma(macd, 9);
+  const signal = calculateEma(macd, signalPeriod);
   const histogram = macd.map((value, index) => {
     if (!validNumber(value) || !validNumber(signal[index])) return null;
     return value - signal[index];
@@ -247,6 +386,449 @@ function calculateKd(points: ChartPoint[], period = 9) {
 
     return { k, d };
   });
+}
+
+function typicalPrice(point: ChartPoint) {
+  if (!validNumber(point.high) || !validNumber(point.low) || !validNumber(point.close)) {
+    return null;
+  }
+
+  return (point.high + point.low + point.close) / 3;
+}
+
+function calculateVwap(points: ChartPoint[]) {
+  let cumulativePriceVolume = 0;
+  let cumulativeVolume = 0;
+
+  return points.map((point) => {
+    const price = typicalPrice(point);
+    const volume = point.volume;
+
+    if (!validNumber(price) || !validNumber(volume) || volume <= 0) {
+      return null;
+    }
+
+    cumulativePriceVolume += price * volume;
+    cumulativeVolume += volume;
+
+    return cumulativeVolume > 0 ? cumulativePriceVolume / cumulativeVolume : null;
+  });
+}
+
+function calculateParabolicSar(points: ChartPoint[], step = 0.02, maxStep = 0.2) {
+  const values: Array<number | null> = points.map(() => null);
+
+  if (points.length < 2) return values;
+
+  const first = points[0];
+  const second = points[1];
+
+  if (
+    !validNumber(first.high) ||
+    !validNumber(first.low) ||
+    !validNumber(first.close) ||
+    !validNumber(second.high) ||
+    !validNumber(second.low) ||
+    !validNumber(second.close)
+  ) {
+    return values;
+  }
+
+  let isUpTrend = second.close >= first.close;
+  let sar = isUpTrend ? Math.min(first.low, second.low) : Math.max(first.high, second.high);
+  let extremePoint = isUpTrend ? Math.max(first.high, second.high) : Math.min(first.low, second.low);
+  let acceleration = step;
+  values[1] = sar;
+
+  for (let index = 2; index < points.length; index += 1) {
+    const point = points[index];
+    const previous = points[index - 1];
+    const previous2 = points[index - 2];
+
+    if (
+      !validNumber(point.high) ||
+      !validNumber(point.low) ||
+      !validNumber(previous.high) ||
+      !validNumber(previous.low) ||
+      !validNumber(previous2.high) ||
+      !validNumber(previous2.low)
+    ) {
+      values[index] = null;
+      continue;
+    }
+
+    let nextSar = sar + acceleration * (extremePoint - sar);
+
+    if (isUpTrend) {
+      nextSar = Math.min(nextSar, previous.low, previous2.low);
+
+      if (point.low < nextSar) {
+        isUpTrend = false;
+        sar = extremePoint;
+        extremePoint = point.low;
+        acceleration = step;
+      } else {
+        sar = nextSar;
+
+        if (point.high > extremePoint) {
+          extremePoint = point.high;
+          acceleration = Math.min(acceleration + step, maxStep);
+        }
+      }
+    } else {
+      nextSar = Math.max(nextSar, previous.high, previous2.high);
+
+      if (point.high > nextSar) {
+        isUpTrend = true;
+        sar = extremePoint;
+        extremePoint = point.high;
+        acceleration = step;
+      } else {
+        sar = nextSar;
+
+        if (point.low < extremePoint) {
+          extremePoint = point.low;
+          acceleration = Math.min(acceleration + step, maxStep);
+        }
+      }
+    }
+
+    values[index] = sar;
+  }
+
+  return values;
+}
+
+function calculateDonchian(points: ChartPoint[], period = 20) {
+  return points.map((_, index) => {
+    if (index + 1 < period) {
+      return { upper: null, lower: null };
+    }
+
+    const slice = points.slice(index + 1 - period, index + 1);
+    const highs = slice.map((point) => point.high).filter(validNumber);
+    const lows = slice.map((point) => point.low).filter(validNumber);
+
+    if (highs.length < period || lows.length < period) {
+      return { upper: null, lower: null };
+    }
+
+    return {
+      upper: Math.max(...highs),
+      lower: Math.min(...lows),
+    };
+  });
+}
+
+function calculateTrueRanges(points: ChartPoint[]) {
+  return points.map((point, index) => {
+    if (!validNumber(point.high) || !validNumber(point.low)) return null;
+
+    const previousClose = points[index - 1]?.close;
+    const highLow = point.high - point.low;
+
+    if (!validNumber(previousClose)) return highLow;
+
+    return Math.max(
+      highLow,
+      Math.abs(point.high - previousClose),
+      Math.abs(point.low - previousClose)
+    );
+  });
+}
+
+function calculateAtr(points: ChartPoint[], period = 14) {
+  const trueRanges = calculateTrueRanges(points);
+  let previousAtr: number | null = null;
+
+  return trueRanges.map((trueRange, index) => {
+    if (!validNumber(trueRange)) return null;
+
+    if (index + 1 < period) return null;
+
+    if (previousAtr === null) {
+      const slice = trueRanges.slice(index + 1 - period, index + 1);
+
+      if (slice.some((value) => !validNumber(value))) return null;
+
+      previousAtr = average(slice);
+      return previousAtr;
+    }
+
+    previousAtr = (previousAtr * (period - 1) + trueRange) / period;
+    return previousAtr;
+  });
+}
+
+function calculateDmi(points: ChartPoint[], period = 14) {
+  const trueRanges = calculateTrueRanges(points);
+  const plusDm: Array<number | null> = points.map(() => null);
+  const minusDm: Array<number | null> = points.map(() => null);
+
+  for (let index = 1; index < points.length; index += 1) {
+    const current = points[index];
+    const previous = points[index - 1];
+
+    if (
+      !validNumber(current.high) ||
+      !validNumber(current.low) ||
+      !validNumber(previous.high) ||
+      !validNumber(previous.low)
+    ) {
+      continue;
+    }
+
+    const upMove = current.high - previous.high;
+    const downMove = previous.low - current.low;
+    plusDm[index] = upMove > downMove && upMove > 0 ? upMove : 0;
+    minusDm[index] = downMove > upMove && downMove > 0 ? downMove : 0;
+  }
+
+  let smoothedTr: number | null = null;
+  let smoothedPlusDm: number | null = null;
+  let smoothedMinusDm: number | null = null;
+  let previousAdx: number | null = null;
+  const dxValues: Array<number | null> = points.map(() => null);
+
+  return points.map((_, index) => {
+    if (index < period) {
+      return { plusDi: null, minusDi: null, adx: null };
+    }
+
+    const trueRange = trueRanges[index];
+    const plus = plusDm[index];
+    const minus = minusDm[index];
+
+    if (!validNumber(trueRange) || !validNumber(plus) || !validNumber(minus)) {
+      return { plusDi: null, minusDi: null, adx: null };
+    }
+
+    if (smoothedTr === null || smoothedPlusDm === null || smoothedMinusDm === null) {
+      const trSlice = trueRanges.slice(index + 1 - period, index + 1);
+      const plusSlice = plusDm.slice(index + 1 - period, index + 1);
+      const minusSlice = minusDm.slice(index + 1 - period, index + 1);
+
+      const trValues = trSlice.filter(validNumber);
+      const plusValues = plusSlice.filter(validNumber);
+      const minusValues = minusSlice.filter(validNumber);
+
+      if (
+        trValues.length < period ||
+        plusValues.length < period ||
+        minusValues.length < period
+      ) {
+        return { plusDi: null, minusDi: null, adx: null };
+      }
+
+      smoothedTr = trValues.reduce((sum, value) => sum + value, 0);
+      smoothedPlusDm = plusValues.reduce((sum, value) => sum + value, 0);
+      smoothedMinusDm = minusValues.reduce((sum, value) => sum + value, 0);
+    } else {
+      smoothedTr = smoothedTr - smoothedTr / period + trueRange;
+      smoothedPlusDm = smoothedPlusDm - smoothedPlusDm / period + plus;
+      smoothedMinusDm = smoothedMinusDm - smoothedMinusDm / period + minus;
+    }
+
+    if (smoothedTr === null || smoothedPlusDm === null || smoothedMinusDm === null || smoothedTr === 0) {
+      return { plusDi: null, minusDi: null, adx: null };
+    }
+
+    const plusDi = (smoothedPlusDm / smoothedTr) * 100;
+    const minusDi = (smoothedMinusDm / smoothedTr) * 100;
+    const diTotal = plusDi + minusDi;
+    const dx = diTotal === 0 ? 0 : (Math.abs(plusDi - minusDi) / diTotal) * 100;
+    dxValues[index] = dx;
+
+    if (index >= period * 2 - 1) {
+      if (previousAdx === null) {
+        const dxSlice = dxValues.slice(index + 1 - period, index + 1);
+
+        if (!dxSlice.some((value) => !validNumber(value))) {
+          previousAdx = average(dxSlice);
+        }
+      } else {
+        previousAdx = (previousAdx * (period - 1) + dx) / period;
+      }
+    }
+
+    return { plusDi, minusDi, adx: previousAdx };
+  });
+}
+
+function calculateObv(points: ChartPoint[]) {
+  let currentObv = 0;
+
+  return points.map((point, index) => {
+    const previousClose = points[index - 1]?.close;
+
+    if (!validNumber(point.close) || !validNumber(point.volume)) {
+      return index === 0 ? 0 : currentObv;
+    }
+
+    if (!validNumber(previousClose)) {
+      return currentObv;
+    }
+
+    if (point.close > previousClose) currentObv += point.volume;
+    else if (point.close < previousClose) currentObv -= point.volume;
+
+    return currentObv;
+  });
+}
+
+function calculateMfi(points: ChartPoint[], period = 14) {
+  const typicalPrices = points.map(typicalPrice);
+  const positiveFlow: Array<number | null> = points.map(() => null);
+  const negativeFlow: Array<number | null> = points.map(() => null);
+
+  for (let index = 1; index < points.length; index += 1) {
+    const price = typicalPrices[index];
+    const previousPrice = typicalPrices[index - 1];
+    const volume = points[index].volume;
+
+    if (!validNumber(price) || !validNumber(previousPrice) || !validNumber(volume)) {
+      continue;
+    }
+
+    const moneyFlow = price * volume;
+    positiveFlow[index] = price > previousPrice ? moneyFlow : 0;
+    negativeFlow[index] = price < previousPrice ? moneyFlow : 0;
+  }
+
+  return points.map((_, index) => {
+    if (index + 1 < period) return null;
+
+    const positiveSlice = positiveFlow.slice(index + 1 - period, index + 1);
+    const negativeSlice = negativeFlow.slice(index + 1 - period, index + 1);
+
+    const positiveValues = positiveSlice.filter(validNumber);
+    const negativeValues = negativeSlice.filter(validNumber);
+
+    if (positiveValues.length < period || negativeValues.length < period) {
+      return null;
+    }
+
+    const positive = positiveValues.reduce((sum, value) => sum + value, 0);
+    const negative = negativeValues.reduce((sum, value) => sum + value, 0);
+
+    if (negative === 0) return 100;
+    if (positive === 0) return 0;
+
+    const moneyRatio = positive / negative;
+    return 100 - 100 / (1 + moneyRatio);
+  });
+}
+
+function calculateCci(points: ChartPoint[], period = 20) {
+  const typicalPrices = points.map(typicalPrice);
+
+  return typicalPrices.map((price, index) => {
+    if (!validNumber(price) || index + 1 < period) return null;
+
+    const slice = typicalPrices.slice(index + 1 - period, index + 1);
+    const values = slice.filter(validNumber);
+
+    if (values.length < period) return null;
+
+    const mean = average(values);
+
+    if (mean === null) return null;
+
+    const meanDeviation =
+      values.reduce((sum, value) => sum + Math.abs(value - mean), 0) / period;
+
+    if (meanDeviation === 0) return 0;
+
+    return (price - mean) / (0.015 * meanDeviation);
+  });
+}
+
+function calculateWilliamsR(points: ChartPoint[], period = 14) {
+  return points.map((point, index) => {
+    if (!validNumber(point.close) || index + 1 < period) return null;
+
+    const slice = points.slice(index + 1 - period, index + 1);
+    const highs = slice.map((item) => item.high).filter(validNumber);
+    const lows = slice.map((item) => item.low).filter(validNumber);
+
+    if (highs.length < period || lows.length < period) return null;
+
+    const highest = Math.max(...highs);
+    const lowest = Math.min(...lows);
+
+    if (highest === lowest) return -50;
+
+    return ((highest - point.close) / (highest - lowest)) * -100;
+  });
+}
+
+function calculateRoc(closes: Array<number | null | undefined>, period = 12) {
+  return closes.map((close, index) => {
+    const previous = closes[index - period];
+
+    if (!validNumber(close) || !validNumber(previous) || previous === 0) {
+      return null;
+    }
+
+    return ((close - previous) / previous) * 100;
+  });
+}
+
+function calculateStochRsi(
+  rsiValues: Array<number | null>,
+  period = 14,
+  smoothK = 3,
+  smoothD = 3
+) {
+  const rawValues = rsiValues.map((rsi, index) => {
+    if (!validNumber(rsi) || index + 1 < period) return null;
+
+    const slice = rsiValues.slice(index + 1 - period, index + 1);
+
+    if (slice.some((value) => !validNumber(value))) return null;
+
+    const minRsi = Math.min(...slice.filter(validNumber));
+    const maxRsi = Math.max(...slice.filter(validNumber));
+
+    if (maxRsi === minRsi) return 50;
+
+    return ((rsi - minRsi) / (maxRsi - minRsi)) * 100;
+  });
+  const k = rawValues.map((_, index) => movingAverage(rawValues, index, smoothK));
+  const d = k.map((_, index) => movingAverage(k, index, smoothD));
+
+  return { k, d };
+}
+
+function numericRange(
+  values: Array<number | null | undefined>,
+  options?: { includeZero?: boolean; min?: number; max?: number }
+) {
+  const valid = values.filter(validNumber);
+
+  if (options?.min !== undefined && options?.max !== undefined) {
+    return { min: options.min, max: options.max };
+  }
+
+  if (valid.length === 0) {
+    return { min: options?.min ?? 0, max: options?.max ?? 1 };
+  }
+
+  let min = options?.min ?? Math.min(...valid);
+  let max = options?.max ?? Math.max(...valid);
+
+  if (options?.includeZero) {
+    min = Math.min(min, 0);
+    max = Math.max(max, 0);
+  }
+
+  const range = max - min || Math.max(Math.abs(max), 1);
+  const padding = range * 0.08;
+
+  return {
+    min: options?.min ?? min - padding,
+    max: options?.max ?? max + padding,
+  };
 }
 
 function buildLinePath(
@@ -339,13 +921,184 @@ function labelPosition(
   } as const;
 }
 
+type ChartSignal = {
+  key: string;
+  index: number;
+  label: string;
+  direction: "bullish" | "bearish" | "neutral";
+  price: number;
+};
+
+function buildChartSignals(data: MergedPoint[]) {
+  const signals: ChartSignal[] = [];
+
+  for (let index = 1; index < data.length; index += 1) {
+    const point = data[index];
+    const previous = data[index - 1];
+    const bullishPrice = point.low ?? point.close;
+    const bearishPrice = point.high ?? point.close;
+
+    if (
+      validNumber(previous.ema12) &&
+      validNumber(previous.ema26) &&
+      validNumber(point.ema12) &&
+      validNumber(point.ema26) &&
+      validNumber(bullishPrice) &&
+      previous.ema12 <= previous.ema26 &&
+      point.ema12 > point.ema26
+    ) {
+      signals.push({
+        key: `${point.time}-ema-up`,
+        index,
+        label: "EMA金叉",
+        direction: "bullish",
+        price: bullishPrice,
+      });
+    }
+
+    if (
+      validNumber(previous.ema12) &&
+      validNumber(previous.ema26) &&
+      validNumber(point.ema12) &&
+      validNumber(point.ema26) &&
+      validNumber(bearishPrice) &&
+      previous.ema12 >= previous.ema26 &&
+      point.ema12 < point.ema26
+    ) {
+      signals.push({
+        key: `${point.time}-ema-down`,
+        index,
+        label: "EMA死叉",
+        direction: "bearish",
+        price: bearishPrice,
+      });
+    }
+
+    if (
+      validNumber(previous.macd) &&
+      validNumber(previous.macdSignal) &&
+      validNumber(point.macd) &&
+      validNumber(point.macdSignal) &&
+      validNumber(bullishPrice) &&
+      previous.macd <= previous.macdSignal &&
+      point.macd > point.macdSignal
+    ) {
+      signals.push({
+        key: `${point.time}-macd-up`,
+        index,
+        label: "MACD翻紅",
+        direction: "bullish",
+        price: bullishPrice,
+      });
+    }
+
+    if (
+      validNumber(previous.macd) &&
+      validNumber(previous.macdSignal) &&
+      validNumber(point.macd) &&
+      validNumber(point.macdSignal) &&
+      validNumber(bearishPrice) &&
+      previous.macd >= previous.macdSignal &&
+      point.macd < point.macdSignal
+    ) {
+      signals.push({
+        key: `${point.time}-macd-down`,
+        index,
+        label: "MACD翻黑",
+        direction: "bearish",
+        price: bearishPrice,
+      });
+    }
+
+    if (
+      validNumber(point.close) &&
+      validNumber(previous.donchianUpper) &&
+      validNumber(bullishPrice) &&
+      point.close > previous.donchianUpper
+    ) {
+      signals.push({
+        key: `${point.time}-donch-up`,
+        index,
+        label: "通道突破",
+        direction: "bullish",
+        price: bullishPrice,
+      });
+    }
+
+    if (
+      validNumber(point.close) &&
+      validNumber(previous.donchianLower) &&
+      validNumber(bearishPrice) &&
+      point.close < previous.donchianLower
+    ) {
+      signals.push({
+        key: `${point.time}-donch-down`,
+        index,
+        label: "通道跌破",
+        direction: "bearish",
+        price: bearishPrice,
+      });
+    }
+
+    if (
+      validNumber(point.volume) &&
+      validNumber(point.volumeMa20) &&
+      validNumber(point.changePct) &&
+      validNumber(bullishPrice) &&
+      point.volumeMa20 > 0 &&
+      point.volume / point.volumeMa20 >= 1.8 &&
+      point.changePct > 0
+    ) {
+      signals.push({
+        key: `${point.time}-volume-up`,
+        index,
+        label: "放量上攻",
+        direction: "bullish",
+        price: bullishPrice,
+      });
+    }
+
+    if (
+      validNumber(previous.adx14) &&
+      validNumber(point.adx14) &&
+      validNumber(point.close) &&
+      previous.adx14 <= 25 &&
+      point.adx14 > 25
+    ) {
+      signals.push({
+        key: `${point.time}-adx-trend`,
+        index,
+        label: "趨勢成形",
+        direction: "neutral",
+        price: point.close,
+      });
+    }
+  }
+
+  return signals;
+}
+
 export default function StockKLineChart({
   chartData,
   indicatorData = [],
   label,
   indicators,
+  indicatorParameters,
 }: Props) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const [visibleRange, setVisibleRange] = useState<VisibleRangeState>({
+    start: 0,
+    count: DEFAULT_VISIBLE_BARS,
+    pinnedToLatest: true,
+    dataKey: null,
+  });
+  const params = useMemo(
+    () => ({
+      ...defaultIndicatorParameters,
+      ...(indicatorParameters ?? {}),
+    }),
+    [indicatorParameters]
+  );
 
   const data = useMemo<MergedPoint[]>(() => {
     const indicatorByTime = new Map<string, StockIndicatorPoint>();
@@ -356,40 +1109,174 @@ export default function StockKLineChart({
 
     const closes = chartData.map((point) => point.close);
     const volumes = chartData.map((point) => point.volume);
-    const rsi = calculateRsi(closes);
-    const macd = calculateMacd(closes);
-    const kd = calculateKd(chartData);
+    const rsi = calculateRsi(closes, params.rsiPeriod);
+    const ema12 = calculateEma(closes, params.emaFast);
+    const ema26 = calculateEma(closes, params.emaSlow);
+    const macd = calculateMacd(
+      closes,
+      params.macdFast,
+      params.macdSlow,
+      params.macdSignal
+    );
+    const kd = calculateKd(chartData, params.kdPeriod);
+    const vwap = calculateVwap(chartData);
+    const psar = calculateParabolicSar(chartData);
+    const donchian = calculateDonchian(chartData, params.donchianPeriod);
+    const atr = calculateAtr(chartData, params.atrPeriod);
+    const dmi = calculateDmi(chartData, params.adxPeriod);
+    const obv = calculateObv(chartData);
+    const obvMa10 = obv.map((_, index) => movingAverage(obv, index, params.obvMa));
+    const mfi = calculateMfi(chartData, params.mfiPeriod);
+    const cci = calculateCci(chartData, params.cciPeriod);
+    const williamsR = calculateWilliamsR(chartData, params.williamsRPeriod);
+    const roc = calculateRoc(closes, params.rocPeriod);
+    const stochRsi = calculateStochRsi(
+      rsi,
+      params.stochRsiPeriod,
+      params.stochRsiSmoothK,
+      params.stochRsiSmoothD
+    );
 
     return chartData.map((point, index) => {
       const indicator = indicatorByTime.get(point.time);
       const previousClose = chartData[index - 1]?.close;
-      const ma20 = indicator?.ma?.ma20 ?? movingAverage(closes, index, 20);
-      const standardDev20 = standardDeviation(closes, index, 20);
+      const maShort =
+        indicator?.ma?.[`ma${params.maShort}`] ?? movingAverage(closes, index, params.maShort);
+      const maMiddle =
+        indicator?.ma?.[`ma${params.maMiddle}`] ?? movingAverage(closes, index, params.maMiddle);
+      const maLong =
+        indicator?.ma?.[`ma${params.maLong}`] ?? movingAverage(closes, index, params.maLong);
+      const bbMiddle = movingAverage(closes, index, params.bollingerPeriod);
+      const standardDev20 = standardDeviation(closes, index, params.bollingerPeriod);
 
       return {
         ...point,
-        ma5: indicator?.ma?.ma5 ?? movingAverage(closes, index, 5),
-        ma20,
-        ma60: indicator?.ma?.ma60 ?? movingAverage(closes, index, 60),
-        volumeMa20: indicator?.volume_ma?.volume_ma20 ?? movingAverage(volumes, index, 20),
+        ma5: maShort,
+        ma20: maMiddle,
+        ma60: maLong,
+        ema12: ema12[index],
+        ema26: ema26[index],
+        vwap: vwap[index],
+        psar: psar[index],
+        donchianUpper: donchian[index].upper,
+        donchianLower: donchian[index].lower,
+        volumeMa20:
+          indicator?.volume_ma?.[`volume_ma${params.volumeMa}`] ??
+          movingAverage(volumes, index, params.volumeMa),
         changePct: indicator?.change_pct ?? calculateChangePct(point.close, previousClose),
-        bbMiddle: ma20,
-        bbUpper: ma20 !== null && standardDev20 !== null ? ma20 + standardDev20 * 2 : null,
-        bbLower: ma20 !== null && standardDev20 !== null ? ma20 - standardDev20 * 2 : null,
+        bbMiddle,
+        bbUpper:
+          bbMiddle !== null && standardDev20 !== null
+            ? bbMiddle + standardDev20 * params.bollingerStdDev
+            : null,
+        bbLower:
+          bbMiddle !== null && standardDev20 !== null
+            ? bbMiddle - standardDev20 * params.bollingerStdDev
+            : null,
         rsi14: rsi[index],
         macd: macd.macd[index],
         macdSignal: macd.signal[index],
         macdHistogram: macd.histogram[index],
         k: kd[index].k,
         d: kd[index].d,
+        atr14: atr[index],
+        plusDi14: dmi[index].plusDi,
+        minusDi14: dmi[index].minusDi,
+        adx14: dmi[index].adx,
+        obv: obv[index],
+        obvMa10: obvMa10[index],
+        mfi14: mfi[index],
+        cci20: cci[index],
+        williamsR14: williamsR[index],
+        roc12: roc[index],
+        stochRsiK: stochRsi.k[index],
+        stochRsiD: stochRsi.d[index],
       };
     });
-  }, [chartData, indicatorData]);
+  }, [chartData, indicatorData, params]);
+
+  const dataKey = `${label}:${data.length}:${data[0]?.time ?? ""}:${data[data.length - 1]?.time ?? ""}`;
+  const activeVisibleRange =
+    visibleRange.dataKey === dataKey
+      ? visibleRange
+      : {
+          ...visibleRange,
+          start: 0,
+          count: DEFAULT_VISIBLE_BARS,
+          pinnedToLatest: true,
+          dataKey,
+        };
+  const minVisibleBars = Math.min(MIN_VISIBLE_BARS, Math.max(data.length, 1));
+  const maxVisibleBars = Math.max(minVisibleBars, data.length || minVisibleBars);
+  const visibleBarCount = Math.round(
+    clamp(activeVisibleRange.count, minVisibleBars, maxVisibleBars)
+  );
+  const maxVisibleStart = Math.max(0, data.length - visibleBarCount);
+  const visibleStart = Math.round(
+    clamp(
+      activeVisibleRange.pinnedToLatest ? maxVisibleStart : activeVisibleRange.start,
+      0,
+      maxVisibleStart
+    )
+  );
+  const visibleEnd = Math.min(data.length, visibleStart + visibleBarCount);
+  const visibleData = data.slice(visibleStart, visibleEnd);
+  const canMoveRange = data.length > visibleData.length;
+  const visibleStep = Math.max(1, Math.round(visibleBarCount * 0.25));
+
+  function updateVisibleCount(nextCount: number) {
+    const count = Math.round(clamp(nextCount, minVisibleBars, maxVisibleBars));
+    const currentEnd = visibleStart + visibleBarCount;
+    const nextMaxStart = Math.max(0, data.length - count);
+    const nextStart = Math.round(clamp(currentEnd - count, 0, nextMaxStart));
+
+    setHoverIndex(null);
+    setVisibleRange({
+      start: nextStart,
+      count,
+      pinnedToLatest: nextStart === nextMaxStart,
+      dataKey,
+    });
+  }
+
+  function panVisibleBars(delta: number) {
+    const nextStart = Math.round(clamp(visibleStart + delta, 0, maxVisibleStart));
+
+    setHoverIndex(null);
+    setVisibleRange({
+      start: nextStart,
+      count: visibleBarCount,
+      pinnedToLatest: nextStart === maxVisibleStart,
+      dataKey,
+    });
+  }
+
+  function jumpToLatest() {
+    setHoverIndex(null);
+    setVisibleRange({
+      start: maxVisibleStart,
+      count: visibleBarCount,
+      pinnedToLatest: true,
+      dataKey,
+    });
+  }
+
+  function showAllBars() {
+    setHoverIndex(null);
+    setVisibleRange({
+      start: 0,
+      count: maxVisibleBars,
+      pinnedToLatest: true,
+      dataKey,
+    });
+  }
 
   const safeHoverIndex =
-    hoverIndex !== null && hoverIndex >= 0 && hoverIndex < data.length ? hoverIndex : null;
+    hoverIndex !== null && hoverIndex >= 0 && hoverIndex < visibleData.length ? hoverIndex : null;
   const hoveredPoint =
-    safeHoverIndex !== null ? data[safeHoverIndex] : data[data.length - 1] ?? null;
+    safeHoverIndex !== null
+      ? visibleData[safeHoverIndex]
+      : visibleData[visibleData.length - 1] ?? null;
 
   if (data.length < 1) {
     return (
@@ -425,16 +1312,24 @@ export default function StockKLineChart({
   }
 
   addPanel(indicators.volume, "volume", "成交量(張)");
-  addPanel(indicators.rsi, "rsi", "RSI 14");
-  addPanel(indicators.macd, "macd", "MACD");
-  addPanel(indicators.kd, "kd", "KD");
+  addPanel(indicators.rsi, "rsi", `RSI ${params.rsiPeriod}`);
+  addPanel(indicators.macd, "macd", `MACD ${params.macdFast}/${params.macdSlow}/${params.macdSignal}`);
+  addPanel(indicators.kd, "kd", `KD ${params.kdPeriod}`);
+  addPanel(indicators.atr, "atr", `ATR ${params.atrPeriod}`);
+  addPanel(indicators.adx, "adx", "ADX / DMI");
+  addPanel(indicators.obv, "obv", "OBV");
+  addPanel(indicators.mfi, "mfi", `MFI ${params.mfiPeriod}`);
+  addPanel(indicators.cci, "cci", `CCI ${params.cciPeriod}`);
+  addPanel(indicators.williamsR, "williamsR", "Williams %R");
+  addPanel(indicators.roc, "roc", `ROC ${params.rocPeriod}`);
+  addPanel(indicators.stochRsi, "stochRsi", "StochRSI");
 
   const height = Math.max(360, nextPanelTop - panelGap + bottomPadding);
   const labelY = height - 10;
   const priceBottom = chartTop + priceHeight;
   const plotBottom = panels.length > 0 ? panels[panels.length - 1].top + panelHeight : priceBottom;
 
-  const priceValues = data
+  const priceValues = visibleData
     .flatMap((point) => [
       point.open,
       point.high,
@@ -443,6 +1338,12 @@ export default function StockKLineChart({
       indicators.ma ? point.ma5 : null,
       indicators.ma ? point.ma20 : null,
       indicators.ma ? point.ma60 : null,
+      indicators.ema ? point.ema12 : null,
+      indicators.ema ? point.ema26 : null,
+      indicators.vwap ? point.vwap : null,
+      indicators.psar ? point.psar : null,
+      indicators.donchian ? point.donchianUpper : null,
+      indicators.donchian ? point.donchianLower : null,
       indicators.bollinger ? point.bbUpper : null,
       indicators.bollinger ? point.bbLower : null,
     ])
@@ -454,14 +1355,24 @@ export default function StockKLineChart({
   const yMin = minPrice - pricePadding;
   const yMax = maxPrice + pricePadding;
   const yRange = yMax - yMin || 1;
-  const volumes = data.map((point) => point.volume).filter(validNumber);
+  const volumes = visibleData.map((point) => point.volume).filter(validNumber);
   const maxVolume = Math.max(...volumes, 1);
-  const macdValues = data
+  const macdValues = visibleData
     .flatMap((point) => [point.macd, point.macdSignal, point.macdHistogram])
     .filter(validNumber);
   const macdAbsMax = Math.max(...macdValues.map((value) => Math.abs(value)), 1);
-  const candleWidth = clamp((usableWidth / data.length) * 0.58, 3, 12);
-  const rangeHigh = data.reduce<{ index: number; value: number } | null>(
+  const atrRange = numericRange(visibleData.map((point) => point.atr14), { min: 0 });
+  const obvRange = numericRange(
+    visibleData.flatMap((point) => [point.obv, point.obvMa10]),
+    { includeZero: true }
+  );
+  const cciRange = numericRange(
+    [...visibleData.map((point) => point.cci20), -100, 0, 100],
+    { includeZero: true }
+  );
+  const rocRange = numericRange(visibleData.map((point) => point.roc12), { includeZero: true });
+  const candleWidth = clamp((usableWidth / visibleData.length) * 0.58, 3, 12);
+  const rangeHigh = visibleData.reduce<{ index: number; value: number } | null>(
     (best, point, index) => {
       const value = point.high ?? point.close;
 
@@ -472,7 +1383,7 @@ export default function StockKLineChart({
     },
     null
   );
-  const rangeLow = data.reduce<{ index: number; value: number } | null>(
+  const rangeLow = visibleData.reduce<{ index: number; value: number } | null>(
     (best, point, index) => {
       const value = point.low ?? point.close;
 
@@ -483,10 +1394,19 @@ export default function StockKLineChart({
     },
     null
   );
+  const visibleChartSignals = indicators.signals
+    ? buildChartSignals(data)
+        .filter((signal) => signal.index >= visibleStart && signal.index < visibleEnd)
+        .map((signal) => ({
+          ...signal,
+          index: signal.index - visibleStart,
+        }))
+        .slice(-18)
+    : [];
 
   function getX(index: number) {
-    if (data.length <= 1) return paddingLeft;
-    return paddingLeft + (index / (data.length - 1)) * usableWidth;
+    if (visibleData.length <= 1) return paddingLeft;
+    return paddingLeft + (index / (visibleData.length - 1)) * usableWidth;
   }
 
   function getPriceY(value: number) {
@@ -507,17 +1427,48 @@ export default function StockKLineChart({
     const ratio = clamp((event.clientX - rect.left) / rect.width, 0, 1);
     const localX = paddingLeft + ratio * usableWidth;
     const dataRatio = (localX - paddingLeft) / usableWidth;
-    const index = Math.round(dataRatio * (data.length - 1));
-    setHoverIndex(clamp(index, 0, data.length - 1));
+    const index = Math.round(dataRatio * (visibleData.length - 1));
+    setHoverIndex(clamp(index, 0, visibleData.length - 1));
   }
 
-  const ma5Path = buildLinePath(data, (point) => point.ma5, getX, getPriceY);
-  const ma20Path = buildLinePath(data, (point) => point.ma20, getX, getPriceY);
-  const ma60Path = buildLinePath(data, (point) => point.ma60, getX, getPriceY);
-  const bbUpperPath = buildLinePath(data, (point) => point.bbUpper, getX, getPriceY);
-  const bbMiddlePath = buildLinePath(data, (point) => point.bbMiddle, getX, getPriceY);
-  const bbLowerPath = buildLinePath(data, (point) => point.bbLower, getX, getPriceY);
-  const bbAreaPath = buildBandAreaPath(data, (point) => point.bbUpper, (point) => point.bbLower, getX, getPriceY);
+  function handleWheel(event: WheelEvent<SVGRectElement>) {
+    if (!canMoveRange && visibleBarCount <= minVisibleBars) return;
+
+    if (event.ctrlKey || event.metaKey) {
+      event.preventDefault();
+      updateVisibleCount(visibleBarCount * (event.deltaY > 0 ? 1.18 : 0.82));
+      return;
+    }
+
+    const hasHorizontalIntent =
+      event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY);
+
+    if (!hasHorizontalIntent || !canMoveRange) return;
+
+    event.preventDefault();
+    const delta = event.deltaX !== 0 ? event.deltaX : event.deltaY;
+    panVisibleBars(Math.sign(delta) * Math.max(1, Math.round(visibleBarCount * 0.08)));
+  }
+
+  const ma5Path = buildLinePath(visibleData, (point) => point.ma5, getX, getPriceY);
+  const ma20Path = buildLinePath(visibleData, (point) => point.ma20, getX, getPriceY);
+  const ma60Path = buildLinePath(visibleData, (point) => point.ma60, getX, getPriceY);
+  const ema12Path = buildLinePath(visibleData, (point) => point.ema12, getX, getPriceY);
+  const ema26Path = buildLinePath(visibleData, (point) => point.ema26, getX, getPriceY);
+  const vwapPath = buildLinePath(visibleData, (point) => point.vwap, getX, getPriceY);
+  const bbUpperPath = buildLinePath(visibleData, (point) => point.bbUpper, getX, getPriceY);
+  const bbMiddlePath = buildLinePath(visibleData, (point) => point.bbMiddle, getX, getPriceY);
+  const bbLowerPath = buildLinePath(visibleData, (point) => point.bbLower, getX, getPriceY);
+  const bbAreaPath = buildBandAreaPath(visibleData, (point) => point.bbUpper, (point) => point.bbLower, getX, getPriceY);
+  const donchianUpperPath = buildLinePath(visibleData, (point) => point.donchianUpper, getX, getPriceY);
+  const donchianLowerPath = buildLinePath(visibleData, (point) => point.donchianLower, getX, getPriceY);
+  const donchianAreaPath = buildBandAreaPath(
+    visibleData,
+    (point) => point.donchianUpper,
+    (point) => point.donchianLower,
+    getX,
+    getPriceY
+  );
   const hoverX = safeHoverIndex !== null ? getX(safeHoverIndex) : null;
 
   return (
@@ -530,7 +1481,7 @@ export default function StockKLineChart({
           </div>
         </div>
 
-        <div className="flex items-start gap-4">
+        <div className="flex max-w-[760px] flex-col items-end gap-2">
           {hoveredPoint ? (
             <div className="grid grid-cols-5 gap-x-4 gap-y-1 text-right text-xs">
               <div>
@@ -562,12 +1513,40 @@ export default function StockKLineChart({
                 </div>
               </div>
               <div>
-                <span className="text-slate-400">MA5/20/60</span>
+                <span className="text-slate-400">
+                  MA{params.maShort}/{params.maMiddle}/{params.maLong}
+                </span>
                 <div className="font-semibold text-slate-800">
                   {formatPrice(hoveredPoint.ma5)} / {formatPrice(hoveredPoint.ma20)} /{" "}
                   {formatPrice(hoveredPoint.ma60)}
                 </div>
               </div>
+              {indicators.ema ? (
+                <div>
+                  <span className="text-slate-400">
+                    EMA{params.emaFast}/{params.emaSlow}
+                  </span>
+                  <div className="font-semibold text-slate-800">
+                    {formatPrice(hoveredPoint.ema12)} / {formatPrice(hoveredPoint.ema26)}
+                  </div>
+                </div>
+              ) : null}
+              {indicators.vwap ? (
+                <div>
+                  <span className="text-slate-400">VWAP</span>
+                  <div className="font-semibold text-slate-800">
+                    {formatPrice(hoveredPoint.vwap)}
+                  </div>
+                </div>
+              ) : null}
+              {indicators.psar ? (
+                <div>
+                  <span className="text-slate-400">SAR</span>
+                  <div className="font-semibold text-slate-800">
+                    {formatPrice(hoveredPoint.psar)}
+                  </div>
+                </div>
+              ) : null}
               <div>
                 <span className="text-slate-400">RSI</span>
                 <div className="font-semibold text-slate-800">
@@ -586,8 +1565,155 @@ export default function StockKLineChart({
                   {formatIndicator(hoveredPoint.k)} / {formatIndicator(hoveredPoint.d)}
                 </div>
               </div>
+              {indicators.atr ? (
+                <div>
+                  <span className="text-slate-400">ATR</span>
+                  <div className="font-semibold text-slate-800">
+                    {formatIndicator(hoveredPoint.atr14)}
+                  </div>
+                </div>
+              ) : null}
+              {indicators.adx ? (
+                <div>
+                  <span className="text-slate-400">ADX/+DI/-DI</span>
+                  <div className="font-semibold text-slate-800">
+                    {formatIndicator(hoveredPoint.adx14)} / {formatIndicator(hoveredPoint.plusDi14)} /{" "}
+                    {formatIndicator(hoveredPoint.minusDi14)}
+                  </div>
+                </div>
+              ) : null}
+              {indicators.obv ? (
+                <div>
+                  <span className="text-slate-400">OBV(張)</span>
+                  <div className={`font-semibold ${valueTone(hoveredPoint.obv)}`}>
+                    {formatLots(hoveredPoint.obv)}
+                  </div>
+                </div>
+              ) : null}
+              {indicators.mfi ? (
+                <div>
+                  <span className="text-slate-400">MFI</span>
+                  <div className="font-semibold text-slate-800">
+                    {formatIndicator(hoveredPoint.mfi14)}
+                  </div>
+                </div>
+              ) : null}
+              {indicators.cci ? (
+                <div>
+                  <span className="text-slate-400">CCI</span>
+                  <div className={`font-semibold ${valueTone(hoveredPoint.cci20)}`}>
+                    {formatIndicator(hoveredPoint.cci20)}
+                  </div>
+                </div>
+              ) : null}
+              {indicators.williamsR ? (
+                <div>
+                  <span className="text-slate-400">Williams %R</span>
+                  <div className="font-semibold text-slate-800">
+                    {formatIndicator(hoveredPoint.williamsR14)}
+                  </div>
+                </div>
+              ) : null}
+              {indicators.roc ? (
+                <div>
+                  <span className="text-slate-400">ROC</span>
+                  <div className={`font-semibold ${valueTone(hoveredPoint.roc12)}`}>
+                    {formatPct(hoveredPoint.roc12)}
+                  </div>
+                </div>
+              ) : null}
+              {indicators.stochRsi ? (
+                <div>
+                  <span className="text-slate-400">StochRSI K/D</span>
+                  <div className="font-semibold text-slate-800">
+                    {formatIndicator(hoveredPoint.stochRsiK)} / {formatIndicator(hoveredPoint.stochRsiD)}
+                  </div>
+                </div>
+              ) : null}
             </div>
           ) : null}
+          <div className="flex w-full flex-wrap items-center justify-end gap-2 text-xs">
+            <span className="whitespace-nowrap text-slate-500">
+              {visibleStart + 1}-{visibleEnd} / {data.length}
+            </span>
+            <button
+              type="button"
+              aria-label="往左回看"
+              title="往左回看"
+              onClick={() => panVisibleBars(-visibleStep)}
+              disabled={!canMoveRange || visibleStart <= 0}
+              className="h-7 w-7 border border-slate-300 bg-white font-semibold text-slate-700 hover:border-slate-500 disabled:cursor-not-allowed disabled:text-slate-300"
+            >
+              &lt;
+            </button>
+            <button
+              type="button"
+              aria-label="往右移動"
+              title="往右移動"
+              onClick={() => panVisibleBars(visibleStep)}
+              disabled={!canMoveRange || visibleStart >= maxVisibleStart}
+              className="h-7 w-7 border border-slate-300 bg-white font-semibold text-slate-700 hover:border-slate-500 disabled:cursor-not-allowed disabled:text-slate-300"
+            >
+              &gt;
+            </button>
+            <button
+              type="button"
+              aria-label="放大 K 線"
+              title="放大 K 線"
+              onClick={() => updateVisibleCount(visibleBarCount * 0.72)}
+              disabled={visibleBarCount <= minVisibleBars}
+              className="h-7 w-7 border border-slate-300 bg-white font-semibold text-slate-700 hover:border-slate-500 disabled:cursor-not-allowed disabled:text-slate-300"
+            >
+              +
+            </button>
+            <button
+              type="button"
+              aria-label="縮小 K 線"
+              title="縮小 K 線"
+              onClick={() => updateVisibleCount(visibleBarCount * 1.38)}
+              disabled={visibleBarCount >= maxVisibleBars}
+              className="h-7 w-7 border border-slate-300 bg-white font-semibold text-slate-700 hover:border-slate-500 disabled:cursor-not-allowed disabled:text-slate-300"
+            >
+              -
+            </button>
+            <button
+              type="button"
+              onClick={jumpToLatest}
+              disabled={!canMoveRange || visibleStart >= maxVisibleStart}
+              className="h-7 border border-slate-300 bg-white px-2 font-semibold text-slate-700 hover:border-slate-500 disabled:cursor-not-allowed disabled:text-slate-300"
+            >
+              最新
+            </button>
+            <button
+              type="button"
+              onClick={showAllBars}
+              disabled={visibleBarCount >= maxVisibleBars}
+              className="h-7 border border-slate-300 bg-white px-2 font-semibold text-slate-700 hover:border-slate-500 disabled:cursor-not-allowed disabled:text-slate-300"
+            >
+              全部
+            </button>
+            <input
+              type="range"
+              min={0}
+              max={maxVisibleStart}
+              step={1}
+              value={visibleStart}
+              aria-label="K 線顯示區間"
+              disabled={!canMoveRange}
+              onChange={(event) => {
+                const nextStart = Number(event.target.value);
+
+                setHoverIndex(null);
+                setVisibleRange({
+                  start: nextStart,
+                  count: visibleBarCount,
+                  pinnedToLatest: nextStart >= maxVisibleStart,
+                  dataKey,
+                });
+              }}
+              className="h-7 w-40 accent-slate-900 disabled:opacity-40"
+            />
+          </div>
         </div>
       </div>
 
@@ -623,7 +1749,11 @@ export default function StockKLineChart({
           <path d={bbAreaPath} className="fill-sky-100/70" />
         ) : null}
 
-        {data.map((point, index) => {
+        {indicators.donchian && donchianAreaPath ? (
+          <path d={donchianAreaPath} className="fill-lime-100/50" />
+        ) : null}
+
+        {visibleData.map((point, index) => {
           const open = point.open ?? point.close;
           const close = point.close ?? point.open;
           const high = point.high ?? Math.max(open ?? 0, close ?? 0);
@@ -680,6 +1810,17 @@ export default function StockKLineChart({
           </>
         ) : null}
 
+        {indicators.donchian ? (
+          <>
+            {donchianUpperPath ? (
+              <path d={donchianUpperPath} fill="none" strokeWidth="1.3" className="stroke-lime-600" />
+            ) : null}
+            {donchianLowerPath ? (
+              <path d={donchianLowerPath} fill="none" strokeWidth="1.3" className="stroke-lime-600" />
+            ) : null}
+          </>
+        ) : null}
+
         {indicators.ma && ma5Path ? (
           <path
             d={ma5Path}
@@ -710,6 +1851,52 @@ export default function StockKLineChart({
             strokeLinejoin="round"
           />
         ) : null}
+        {indicators.ema && ema12Path ? (
+          <path
+            d={ema12Path}
+            fill="none"
+            strokeWidth="1.8"
+            className="stroke-cyan-600"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        ) : null}
+        {indicators.ema && ema26Path ? (
+          <path
+            d={ema26Path}
+            fill="none"
+            strokeWidth="1.8"
+            className="stroke-rose-500"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        ) : null}
+        {indicators.vwap && vwapPath ? (
+          <path
+            d={vwapPath}
+            fill="none"
+            strokeWidth="2"
+            className="stroke-slate-700"
+            strokeDasharray="6 4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        ) : null}
+        {indicators.psar
+          ? visibleData.map((point, index) => {
+              if (!validNumber(point.psar)) return null;
+
+              return (
+                <circle
+                  key={`${point.time}-psar`}
+                  cx={getX(index)}
+                  cy={getPriceY(point.psar)}
+                  r="2.5"
+                  className="fill-violet-600"
+                />
+              );
+            })
+          : null}
 
         {rangeHigh ? (
           <g>
@@ -777,6 +1964,58 @@ export default function StockKLineChart({
           </g>
         ) : null}
 
+        {visibleChartSignals.map((signal) => {
+          const x = getX(signal.index);
+          const y = clamp(
+            getPriceY(signal.price) + (signal.direction === "bearish" ? 18 : -18),
+            chartTop + 16,
+            priceBottom - 8
+          );
+          const labelWidth = Math.max(signal.label.length * 12 + 12, 54);
+          const label = labelPosition(x, paddingLeft, paddingRight, width);
+          const labelX = label.anchor === "end" ? x - 10 : x + 10;
+          const rectX = label.anchor === "end" ? labelX - labelWidth : labelX;
+          const tone =
+            signal.direction === "bullish"
+              ? "fill-red-600"
+              : signal.direction === "bearish"
+                ? "fill-emerald-600"
+                : "fill-violet-600";
+
+          return (
+            <g key={signal.key}>
+              <line
+                x1={x}
+                x2={labelX}
+                y1={getPriceY(signal.price)}
+                y2={y}
+                className="stroke-slate-300"
+                strokeDasharray="3 3"
+              />
+              <circle cx={x} cy={getPriceY(signal.price)} r="3" className={tone} />
+              <rect
+                x={rectX}
+                y={y - 10}
+                width={labelWidth}
+                height="18"
+                rx="2"
+                className={tone}
+              />
+              <text
+                x={label.anchor === "end" ? labelX - 6 : labelX + 6}
+                y={y + 3}
+                textAnchor={label.anchor}
+                className="fill-white text-[10px] font-semibold"
+              >
+                {signal.label}
+              </text>
+              <title>
+                {visibleData[signal.index]?.time} {signal.label}
+              </title>
+            </g>
+          );
+        })}
+
         {panels.map((panel) => {
           const panelBottom = panel.top + panel.height;
 
@@ -800,7 +2039,7 @@ export default function StockKLineChart({
 
               {panel.key === "volume" ? (
                 <>
-                  {data.map((point, index) => {
+                  {visibleData.map((point, index) => {
                     const open = point.open ?? point.close;
                     const close = point.close ?? point.open;
                     const volume = point.volume ?? 0;
@@ -845,7 +2084,7 @@ export default function StockKLineChart({
                     />
                   ))}
                   <path
-                    d={buildLinePath(data, (point) => point.rsi14, getX, (value) => getPanelY(panel, value, 0, 100))}
+                    d={buildLinePath(visibleData, (point) => point.rsi14, getX, (value) => getPanelY(panel, value, 0, 100))}
                     fill="none"
                     strokeWidth="1.8"
                     className="stroke-fuchsia-600"
@@ -864,7 +2103,7 @@ export default function StockKLineChart({
                     y2={getPanelY(panel, 0, -macdAbsMax, macdAbsMax)}
                     className="stroke-slate-200"
                   />
-                  {data.map((point, index) => {
+                  {visibleData.map((point, index) => {
                     if (!validNumber(point.macdHistogram)) return null;
 
                     const x = getX(index);
@@ -883,7 +2122,7 @@ export default function StockKLineChart({
                     );
                   })}
                   <path
-                    d={buildLinePath(data, (point) => point.macd, getX, (value) =>
+                    d={buildLinePath(visibleData, (point) => point.macd, getX, (value) =>
                       getPanelY(panel, value, -macdAbsMax, macdAbsMax)
                     )}
                     fill="none"
@@ -891,7 +2130,7 @@ export default function StockKLineChart({
                     className="stroke-blue-600"
                   />
                   <path
-                    d={buildLinePath(data, (point) => point.macdSignal, getX, (value) =>
+                    d={buildLinePath(visibleData, (point) => point.macdSignal, getX, (value) =>
                       getPanelY(panel, value, -macdAbsMax, macdAbsMax)
                     )}
                     fill="none"
@@ -915,16 +2154,255 @@ export default function StockKLineChart({
                     />
                   ))}
                   <path
-                    d={buildLinePath(data, (point) => point.k, getX, (value) => getPanelY(panel, value, 0, 100))}
+                    d={buildLinePath(visibleData, (point) => point.k, getX, (value) => getPanelY(panel, value, 0, 100))}
                     fill="none"
                     strokeWidth="1.7"
                     className="stroke-blue-600"
                   />
                   <path
-                    d={buildLinePath(data, (point) => point.d, getX, (value) => getPanelY(panel, value, 0, 100))}
+                    d={buildLinePath(visibleData, (point) => point.d, getX, (value) => getPanelY(panel, value, 0, 100))}
                     fill="none"
                     strokeWidth="1.7"
                     className="stroke-amber-500"
+                  />
+                </>
+              ) : null}
+
+              {panel.key === "atr" ? (
+                <>
+                  <text
+                    x={paddingLeft - 10}
+                    y={panel.top + panel.height}
+                    textAnchor="end"
+                    className="fill-slate-400 text-[10px]"
+                  >
+                    0
+                  </text>
+                  <path
+                    d={buildLinePath(visibleData, (point) => point.atr14, getX, (value) =>
+                      getPanelY(panel, value, atrRange.min, atrRange.max)
+                    )}
+                    fill="none"
+                    strokeWidth="1.8"
+                    className="stroke-orange-500"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </>
+              ) : null}
+
+              {panel.key === "adx" ? (
+                <>
+                  {[20, 25, 50].map((value) => (
+                    <line
+                      key={value}
+                      x1={paddingLeft}
+                      x2={width - paddingRight}
+                      y1={getPanelY(panel, value, 0, 100)}
+                      y2={getPanelY(panel, value, 0, 100)}
+                      className={value === 25 ? "stroke-slate-300" : "stroke-slate-100"}
+                      strokeDasharray={value === 25 ? "4 4" : undefined}
+                    />
+                  ))}
+                  <path
+                    d={buildLinePath(visibleData, (point) => point.adx14, getX, (value) =>
+                      getPanelY(panel, value, 0, 100)
+                    )}
+                    fill="none"
+                    strokeWidth="1.8"
+                    className="stroke-violet-600"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <path
+                    d={buildLinePath(visibleData, (point) => point.plusDi14, getX, (value) =>
+                      getPanelY(panel, value, 0, 100)
+                    )}
+                    fill="none"
+                    strokeWidth="1.5"
+                    className="stroke-red-500"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <path
+                    d={buildLinePath(visibleData, (point) => point.minusDi14, getX, (value) =>
+                      getPanelY(panel, value, 0, 100)
+                    )}
+                    fill="none"
+                    strokeWidth="1.5"
+                    className="stroke-emerald-500"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </>
+              ) : null}
+
+              {panel.key === "obv" ? (
+                <>
+                  {obvRange.min < 0 && obvRange.max > 0 ? (
+                    <line
+                      x1={paddingLeft}
+                      x2={width - paddingRight}
+                      y1={getPanelY(panel, 0, obvRange.min, obvRange.max)}
+                      y2={getPanelY(panel, 0, obvRange.min, obvRange.max)}
+                      className="stroke-slate-200"
+                    />
+                  ) : null}
+                  <path
+                    d={buildLinePath(visibleData, (point) => point.obv, getX, (value) =>
+                      getPanelY(panel, value, obvRange.min, obvRange.max)
+                    )}
+                    fill="none"
+                    strokeWidth="1.8"
+                    className="stroke-slate-700"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <path
+                    d={buildLinePath(visibleData, (point) => point.obvMa10, getX, (value) =>
+                      getPanelY(panel, value, obvRange.min, obvRange.max)
+                    )}
+                    fill="none"
+                    strokeWidth="1.5"
+                    className="stroke-amber-500"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </>
+              ) : null}
+
+              {panel.key === "mfi" ? (
+                <>
+                  {[20, 50, 80].map((value) => (
+                    <line
+                      key={value}
+                      x1={paddingLeft}
+                      x2={width - paddingRight}
+                      y1={getPanelY(panel, value, 0, 100)}
+                      y2={getPanelY(panel, value, 0, 100)}
+                      className={value === 50 ? "stroke-slate-100" : "stroke-slate-200"}
+                      strokeDasharray={value === 50 ? undefined : "4 4"}
+                    />
+                  ))}
+                  <path
+                    d={buildLinePath(visibleData, (point) => point.mfi14, getX, (value) =>
+                      getPanelY(panel, value, 0, 100)
+                    )}
+                    fill="none"
+                    strokeWidth="1.8"
+                    className="stroke-teal-600"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </>
+              ) : null}
+
+              {panel.key === "cci" ? (
+                <>
+                  {[-100, 0, 100].map((value) => (
+                    <line
+                      key={value}
+                      x1={paddingLeft}
+                      x2={width - paddingRight}
+                      y1={getPanelY(panel, value, cciRange.min, cciRange.max)}
+                      y2={getPanelY(panel, value, cciRange.min, cciRange.max)}
+                      className={value === 0 ? "stroke-slate-200" : "stroke-slate-300"}
+                      strokeDasharray={value === 0 ? undefined : "4 4"}
+                    />
+                  ))}
+                  <path
+                    d={buildLinePath(visibleData, (point) => point.cci20, getX, (value) =>
+                      getPanelY(panel, value, cciRange.min, cciRange.max)
+                    )}
+                    fill="none"
+                    strokeWidth="1.8"
+                    className="stroke-indigo-600"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </>
+              ) : null}
+
+              {panel.key === "williamsR" ? (
+                <>
+                  {[-80, -50, -20].map((value) => (
+                    <line
+                      key={value}
+                      x1={paddingLeft}
+                      x2={width - paddingRight}
+                      y1={getPanelY(panel, value, -100, 0)}
+                      y2={getPanelY(panel, value, -100, 0)}
+                      className={value === -50 ? "stroke-slate-100" : "stroke-slate-200"}
+                      strokeDasharray={value === -50 ? undefined : "4 4"}
+                    />
+                  ))}
+                  <path
+                    d={buildLinePath(visibleData, (point) => point.williamsR14, getX, (value) =>
+                      getPanelY(panel, value, -100, 0)
+                    )}
+                    fill="none"
+                    strokeWidth="1.8"
+                    className="stroke-pink-600"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </>
+              ) : null}
+
+              {panel.key === "roc" ? (
+                <>
+                  <line
+                    x1={paddingLeft}
+                    x2={width - paddingRight}
+                    y1={getPanelY(panel, 0, rocRange.min, rocRange.max)}
+                    y2={getPanelY(panel, 0, rocRange.min, rocRange.max)}
+                    className="stroke-slate-200"
+                  />
+                  <path
+                    d={buildLinePath(visibleData, (point) => point.roc12, getX, (value) =>
+                      getPanelY(panel, value, rocRange.min, rocRange.max)
+                    )}
+                    fill="none"
+                    strokeWidth="1.8"
+                    className="stroke-cyan-700"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </>
+              ) : null}
+
+              {panel.key === "stochRsi" ? (
+                <>
+                  {[20, 50, 80].map((value) => (
+                    <line
+                      key={value}
+                      x1={paddingLeft}
+                      x2={width - paddingRight}
+                      y1={getPanelY(panel, value, 0, 100)}
+                      y2={getPanelY(panel, value, 0, 100)}
+                      className={value === 50 ? "stroke-slate-100" : "stroke-slate-200"}
+                      strokeDasharray={value === 50 ? undefined : "4 4"}
+                    />
+                  ))}
+                  <path
+                    d={buildLinePath(visibleData, (point) => point.stochRsiK, getX, (value) =>
+                      getPanelY(panel, value, 0, 100)
+                    )}
+                    fill="none"
+                    strokeWidth="1.7"
+                    className="stroke-blue-600"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <path
+                    d={buildLinePath(visibleData, (point) => point.stochRsiD, getX, (value) =>
+                      getPanelY(panel, value, 0, 100)
+                    )}
+                    fill="none"
+                    strokeWidth="1.7"
+                    className="stroke-amber-500"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
                   />
                 </>
               ) : null}
@@ -944,7 +2422,7 @@ export default function StockKLineChart({
         ) : null}
 
         <text x={paddingLeft} y={labelY} textAnchor="start" className="fill-slate-500 text-[11px]">
-          {data[0]?.time ?? "-"}
+          {visibleData[0]?.time ?? "-"}
         </text>
         <text
           x={width - paddingRight}
@@ -952,7 +2430,7 @@ export default function StockKLineChart({
           textAnchor="end"
           className="fill-slate-500 text-[11px]"
         >
-          {data[data.length - 1]?.time ?? "-"}
+          {visibleData[visibleData.length - 1]?.time ?? "-"}
         </text>
 
         <g transform={`translate(${paddingLeft}, 18)`}>
@@ -960,15 +2438,15 @@ export default function StockKLineChart({
             <>
               <circle cx="0" cy="0" r="4" className="fill-blue-600" />
               <text x="10" y="4" className="fill-slate-600 text-[11px]">
-                MA5
+                MA{params.maShort}
               </text>
               <circle cx="58" cy="0" r="4" className="fill-amber-500" />
               <text x="68" y="4" className="fill-slate-600 text-[11px]">
-                MA20
+                MA{params.maMiddle}
               </text>
               <circle cx="126" cy="0" r="4" className="fill-purple-500" />
               <text x="136" y="4" className="fill-slate-600 text-[11px]">
-                MA60
+                MA{params.maLong}
               </text>
             </>
           ) : null}
@@ -977,6 +2455,42 @@ export default function StockKLineChart({
               <rect x={190} y={-4} width={8} height={8} className="fill-sky-400" />
               <text x="204" y="4" className="fill-slate-600 text-[11px]">
                 BOLL
+              </text>
+            </>
+          ) : null}
+          {indicators.ema ? (
+            <>
+              <circle cx="248" cy="0" r="4" className="fill-cyan-600" />
+              <text x="258" y="4" className="fill-slate-600 text-[11px]">
+                EMA{params.emaFast}
+              </text>
+              <circle cx="318" cy="0" r="4" className="fill-rose-500" />
+              <text x="328" y="4" className="fill-slate-600 text-[11px]">
+                EMA{params.emaSlow}
+              </text>
+            </>
+          ) : null}
+          {indicators.vwap ? (
+            <>
+              <circle cx="388" cy="0" r="4" className="fill-slate-700" />
+              <text x="398" y="4" className="fill-slate-600 text-[11px]">
+                VWAP
+              </text>
+            </>
+          ) : null}
+          {indicators.psar ? (
+            <>
+              <circle cx="452" cy="0" r="4" className="fill-violet-600" />
+              <text x="462" y="4" className="fill-slate-600 text-[11px]">
+                SAR
+              </text>
+            </>
+          ) : null}
+          {indicators.donchian ? (
+            <>
+              <rect x={506} y={-4} width={8} height={8} className="fill-lime-500" />
+              <text x="520" y="4" className="fill-slate-600 text-[11px]">
+                DONCH
               </text>
             </>
           ) : null}
@@ -990,6 +2504,7 @@ export default function StockKLineChart({
           fill="transparent"
           onMouseMove={handleMouseMove}
           onMouseLeave={() => setHoverIndex(null)}
+          onWheel={handleWheel}
         />
       </svg>
     </div>

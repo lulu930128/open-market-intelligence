@@ -2,8 +2,10 @@
 
 import IntradayTrendChart from "@/components/IntradayTrendChart";
 import StockKLineChart, {
+  defaultIndicatorParameters,
   defaultIndicators,
   indicatorOptions,
+  type IndicatorParameters,
   type IndicatorKey,
   type IndicatorSettings,
 } from "@/components/StockKLineChart";
@@ -144,6 +146,103 @@ const timeframeLabels: Record<Timeframe, string> = {
   weekly: "週K",
   monthly: "月K",
 };
+const chartBarsByTimeframe: Record<Exclude<Timeframe, "today">, number> = {
+  daily: 2600,
+  weekly: 520,
+  monthly: 132,
+};
+
+type IndicatorTemplateKey = "basic" | "short" | "trend" | "swing" | "flow";
+
+const indicatorTemplates: Array<{
+  key: IndicatorTemplateKey;
+  label: string;
+  indicators: IndicatorSettings;
+  parameters?: Partial<IndicatorParameters>;
+}> = [
+  {
+    key: "basic",
+    label: "基本",
+    indicators: defaultIndicators,
+  },
+  {
+    key: "short",
+    label: "短線",
+    indicators: {
+      ...defaultIndicators,
+      ma: false,
+      ema: true,
+      vwap: true,
+      kd: true,
+      mfi: true,
+      signals: true,
+    },
+    parameters: {
+      emaFast: 5,
+      emaSlow: 20,
+      kdPeriod: 9,
+      mfiPeriod: 14,
+    },
+  },
+  {
+    key: "trend",
+    label: "趨勢",
+    indicators: {
+      ...defaultIndicators,
+      ema: true,
+      psar: true,
+      donchian: true,
+      atr: true,
+      adx: true,
+      signals: true,
+    },
+    parameters: {
+      emaFast: 12,
+      emaSlow: 26,
+      donchianPeriod: 20,
+      atrPeriod: 14,
+      adxPeriod: 14,
+    },
+  },
+  {
+    key: "swing",
+    label: "波段",
+    indicators: {
+      ...defaultIndicators,
+      bollinger: true,
+      rsi: true,
+      macd: true,
+      roc: true,
+      cci: true,
+      signals: true,
+    },
+    parameters: {
+      bollingerPeriod: 20,
+      bollingerStdDev: 2,
+      rsiPeriod: 14,
+      rocPeriod: 12,
+      cciPeriod: 20,
+    },
+  },
+  {
+    key: "flow",
+    label: "量價",
+    indicators: {
+      ...defaultIndicators,
+      ma: false,
+      vwap: true,
+      obv: true,
+      mfi: true,
+      volume: true,
+      signals: true,
+    },
+    parameters: {
+      volumeMa: 20,
+      obvMa: 10,
+      mfiPeriod: 14,
+    },
+  },
+];
 
 function formatPrice(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
@@ -1767,6 +1866,10 @@ export default function StockDetailPanel({
   const [indicatorMenuOpen, setIndicatorMenuOpen] = useState(false);
   const [chartIndicators, setChartIndicators] =
     useState<IndicatorSettings>(defaultIndicators);
+  const [activeIndicatorTemplate, setActiveIndicatorTemplate] =
+    useState<IndicatorTemplateKey | null>("basic");
+  const [indicatorParameters, setIndicatorParameters] =
+    useState<IndicatorParameters>(defaultIndicatorParameters);
   const [chartData, setChartData] = useState<ChartPoint[]>(initialChartData);
   const [todayTrend, setTodayTrend] = useState<IntradayTrendPoint[]>([]);
   const [todayPreviousClose, setTodayPreviousClose] = useState<number | null>(null);
@@ -1815,9 +1918,40 @@ export default function StockDetailPanel({
   }, [activeDataTab]);
 
   function toggleChartIndicator(key: IndicatorKey) {
+    setActiveIndicatorTemplate(null);
     setChartIndicators((current) => ({
       ...current,
       [key]: !current[key],
+    }));
+  }
+
+  function applyIndicatorTemplate(templateKey: IndicatorTemplateKey) {
+    const template = indicatorTemplates.find((item) => item.key === templateKey);
+
+    if (!template) return;
+
+    setActiveIndicatorTemplate(template.key);
+    setChartIndicators(template.indicators);
+    setIndicatorParameters({
+      ...defaultIndicatorParameters,
+      ...(template.parameters ?? {}),
+    });
+  }
+
+  function updateIndicatorParameter(
+    key: keyof IndicatorParameters,
+    value: string,
+    min: number,
+    max: number
+  ) {
+    const parsed = Number(value);
+
+    if (!Number.isFinite(parsed)) return;
+
+    setActiveIndicatorTemplate(null);
+    setIndicatorParameters((current) => ({
+      ...current,
+      [key]: Math.max(min, Math.min(max, parsed)),
     }));
   }
 
@@ -2115,15 +2249,16 @@ export default function StockDetailPanel({
       setErrorMessage(null);
 
       try {
+        const chartBars = chartBarsByTimeframe[timeframe];
         const ohlc = await fetchJson<OhlcChartResponse>(`/api/market/ohlc/${stockId}`, {
           timeframe,
-          bars: 90,
+          bars: chartBars,
           ensure_history: false,
         });
         const indicators = await fetchJson<StockIndicatorPoint[]>(
           `/api/market/indicators/${stockId}/daily`,
           {
-            limit: 520,
+            limit: 3000,
             ma_windows: "5,20,60",
             volume_ma_windows: "5,20",
           }
@@ -3476,7 +3611,30 @@ export default function StockDetailPanel({
                       指標
                     </button>
                     {indicatorMenuOpen ? (
-                      <div className="absolute right-0 z-20 mt-2 w-48 border border-slate-200 bg-white p-2 text-left shadow-lg">
+                      <div className="absolute right-0 z-20 mt-2 max-h-[74vh] w-80 overflow-y-auto border border-slate-200 bg-white p-3 text-left shadow-lg">
+                        <div className="border-b border-slate-200 pb-3">
+                          <div className="mb-2 text-xs font-bold text-slate-500">指標模板</div>
+                          <div className="grid grid-cols-5 gap-1">
+                            {indicatorTemplates.map((template) => (
+                              <button
+                                key={template.key}
+                                type="button"
+                                onClick={() => applyIndicatorTemplate(template.key)}
+                                className={[
+                                  "h-8 border text-xs font-semibold",
+                                  activeIndicatorTemplate === template.key
+                                    ? "border-red-700 bg-red-700 text-white"
+                                    : "border-slate-300 bg-white text-slate-700 hover:border-slate-900",
+                                ].join(" ")}
+                              >
+                                {template.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="border-b border-slate-200 py-3">
+                          <div className="mb-2 text-xs font-bold text-slate-500">顯示項目</div>
                         {indicatorOptions.map((option) => (
                           <label
                             key={option.key}
@@ -3498,6 +3656,142 @@ export default function StockDetailPanel({
                             </span>
                           </label>
                         ))}
+                        </div>
+
+                        <div className="pt-3">
+                          <div className="mb-2 text-xs font-bold text-slate-500">參數</div>
+                          <div className="grid grid-cols-2 gap-2">
+                            {[
+                              ["MA短", "maShort", 1, 300],
+                              ["MA中", "maMiddle", 1, 400],
+                              ["MA長", "maLong", 1, 600],
+                              ["EMA快", "emaFast", 1, 200],
+                              ["EMA慢", "emaSlow", 1, 400],
+                              ["量均", "volumeMa", 1, 300],
+                              ["RSI", "rsiPeriod", 2, 100],
+                              ["KD", "kdPeriod", 2, 100],
+                              ["ATR", "atrPeriod", 2, 100],
+                              ["ADX", "adxPeriod", 2, 100],
+                              ["Donch", "donchianPeriod", 2, 300],
+                              ["OBV MA", "obvMa", 1, 200],
+                              ["MFI", "mfiPeriod", 2, 100],
+                              ["CCI", "cciPeriod", 2, 200],
+                              ["W%R", "williamsRPeriod", 2, 100],
+                              ["ROC", "rocPeriod", 1, 200],
+                              ["StochRSI", "stochRsiPeriod", 2, 100],
+                              ["Stoch K", "stochRsiSmoothK", 1, 20],
+                              ["Stoch D", "stochRsiSmoothD", 1, 20],
+                            ].map(([labelText, key, min, max]) => (
+                              <label key={String(key)} className="text-xs">
+                                <span className="mb-1 block font-semibold text-slate-500">
+                                  {labelText}
+                                </span>
+                                <input
+                                  type="number"
+                                  min={Number(min)}
+                                  max={Number(max)}
+                                  value={indicatorParameters[key as keyof IndicatorParameters]}
+                                  onChange={(event) =>
+                                    updateIndicatorParameter(
+                                      key as keyof IndicatorParameters,
+                                      event.target.value,
+                                      Number(min),
+                                      Number(max)
+                                    )
+                                  }
+                                  className="h-8 w-full border border-slate-300 px-2 text-sm font-semibold text-slate-900 outline-none focus:border-red-700"
+                                />
+                              </label>
+                            ))}
+
+                            <label className="text-xs">
+                              <span className="mb-1 block font-semibold text-slate-500">
+                                BOLL週期
+                              </span>
+                              <input
+                                type="number"
+                                min={2}
+                                max={300}
+                                value={indicatorParameters.bollingerPeriod}
+                                onChange={(event) =>
+                                  updateIndicatorParameter(
+                                    "bollingerPeriod",
+                                    event.target.value,
+                                    2,
+                                    300
+                                  )
+                                }
+                                className="h-8 w-full border border-slate-300 px-2 text-sm font-semibold text-slate-900 outline-none focus:border-red-700"
+                              />
+                            </label>
+                            <label className="text-xs">
+                              <span className="mb-1 block font-semibold text-slate-500">
+                                BOLL倍數
+                              </span>
+                              <input
+                                type="number"
+                                min={0.5}
+                                max={5}
+                                step={0.1}
+                                value={indicatorParameters.bollingerStdDev}
+                                onChange={(event) =>
+                                  updateIndicatorParameter(
+                                    "bollingerStdDev",
+                                    event.target.value,
+                                    0.5,
+                                    5
+                                  )
+                                }
+                                className="h-8 w-full border border-slate-300 px-2 text-sm font-semibold text-slate-900 outline-none focus:border-red-700"
+                              />
+                            </label>
+                            <label className="text-xs">
+                              <span className="mb-1 block font-semibold text-slate-500">
+                                MACD快
+                              </span>
+                              <input
+                                type="number"
+                                min={1}
+                                max={100}
+                                value={indicatorParameters.macdFast}
+                                onChange={(event) =>
+                                  updateIndicatorParameter("macdFast", event.target.value, 1, 100)
+                                }
+                                className="h-8 w-full border border-slate-300 px-2 text-sm font-semibold text-slate-900 outline-none focus:border-red-700"
+                              />
+                            </label>
+                            <label className="text-xs">
+                              <span className="mb-1 block font-semibold text-slate-500">
+                                MACD慢
+                              </span>
+                              <input
+                                type="number"
+                                min={1}
+                                max={200}
+                                value={indicatorParameters.macdSlow}
+                                onChange={(event) =>
+                                  updateIndicatorParameter("macdSlow", event.target.value, 1, 200)
+                                }
+                                className="h-8 w-full border border-slate-300 px-2 text-sm font-semibold text-slate-900 outline-none focus:border-red-700"
+                              />
+                            </label>
+                            <label className="text-xs">
+                              <span className="mb-1 block font-semibold text-slate-500">
+                                MACD訊號
+                              </span>
+                              <input
+                                type="number"
+                                min={1}
+                                max={100}
+                                value={indicatorParameters.macdSignal}
+                                onChange={(event) =>
+                                  updateIndicatorParameter("macdSignal", event.target.value, 1, 100)
+                                }
+                                className="h-8 w-full border border-slate-300 px-2 text-sm font-semibold text-slate-900 outline-none focus:border-red-700"
+                              />
+                            </label>
+                          </div>
+                        </div>
                       </div>
                     ) : null}
                   </div>
@@ -3527,6 +3821,7 @@ export default function StockDetailPanel({
               indicatorData={indicatorForTimeframe}
               label={timeframeLabels[timeframe]}
               indicators={chartIndicators}
+              indicatorParameters={indicatorParameters}
             />
           )}
         </div>
