@@ -1,167 +1,288 @@
 # Open Market Intelligence
 
-Open Market Intelligence 是一套本機市場情報與自選股分析系統，目標是把台股日線、盤中走勢、自選股分組、技術指標、三大法人、融資融券、營收、財務與籌碼資料整合在同一個工作台。系統採用前後端分離架構，後端負責資料擷取、解析、校驗與 API 服務，前端負責市場儀表板、圖表與操作流程。
+Open Market Intelligence 是一套本機優先的市場情報與自選股研究工作台。它把台股自選股、日線、週線、月線、盤中分時、技術指標、三大法人、融資融券、集保分布、分點、營收與財務資料整合在同一個介面，方便用一致的資料流做看盤、回補、檢查與後續分析。
 
-本專案目前以本機開發與研究流程為主，預設服務如下：
+目前主力流程聚焦在台股 TWSE / TPEx。介面上保留美股、日股、韓股、港股入口，但本 README 以目前實作完整度最高的台股流程為準。
 
-| 服務 | 技術 | 預設位置 |
+## Current Stack
+
+| Layer | Technology | Default |
 | --- | --- | --- |
-| Backend | FastAPI, SQLAlchemy, Alembic, SQLite | `http://127.0.0.1:8300` |
-| Frontend | Next.js, React, TypeScript, Tailwind CSS | `http://127.0.0.1:3000` |
+| Backend | FastAPI, SQLAlchemy, Alembic, APScheduler, SQLite | `http://127.0.0.1:8300` |
+| Frontend | Next.js 16, React 19, TypeScript, Tailwind CSS | `http://127.0.0.1:3000` |
+| API Proxy | Next.js rewrites | `/omi-data -> /api` |
+| Database | SQLite | `data/open_market_intelligence.db` |
+| Timezone | Asia/Taipei | configured by `.env` |
 
-## 系統架構
+## What It Does
+
+- 自選股管理：支援市場分頁、樹狀群組、子群組、拖曳排序、股票加入、備註與標籤。
+- 台股 Dashboard：支援股票數、漲跌家數、排序、排行與個股快速切換。
+- 個股看盤：支援 `今日`、`日K`、`週K`、`月K`。
+- 今日分時：支援 1m / 5m / 15m 聚合、盤中成交量、最高最低標記、昨收線、漲跌停參考、VWAP、TWAP、EMA5/20、RSI14、MACD 12/26/9。
+- K 線圖：支援放大、縮小、回滾歷史資料、固定視窗檢視與滑桿調整顯示區間。
+- K 線技術指標：支援 SIGNAL、MA、EMA、BOLL、VWAP、SAR、Donchian、VOL、RSI、MACD、KD、ATR、ADX / DMI、OBV、MFI、CCI、Williams %R、ROC、StochRSI。
+- 指標控制：今日分時與日週月 K 線都在右上角使用同一個 `指標` 按鈕開關顯示項目；日週月 K 線另支援指標模板與參數調整。
+- 籌碼與基本面：支援三大法人、法人持股比例、融資融券、集保分布、分點 Top15、多日分點加總、月營收、季度財務與盈餘。
+- 資料回補：支援 TWSE / TPEx 日線、法人、融資融券、集保、營收、財務與自選股群組回補。
+- 資料治理：保存 raw result、fetch log、quality check、parser result 與 background job 狀態。
+
+## System Flow
 
 ```mermaid
 flowchart LR
-    user["使用者"] --> ui["Next.js Dashboard<br/>127.0.0.1:3000"]
-    ui --> proxy["Next.js Rewrite<br/>/omi-data"]
-    proxy --> api["FastAPI Backend<br/>127.0.0.1:8300/api"]
+    user["使用者"] --> browser["Browser<br/>localhost:3000"]
+    browser --> next["Next.js App Router<br/>Dashboard UI"]
+    next --> proxy["Next.js Rewrite<br/>/omi-data"]
+    proxy --> api["FastAPI<br/>localhost:8300/api"]
 
-    api --> routers["API Routers"]
+    api --> routers["Routers<br/>market / watchlists / stocks / jobs"]
     routers --> services["Domain Services"]
-    services --> db[("SQLite Database")]
-    services --> pipelines["Fetch / Parse / Backfill Pipelines"]
+    services --> db[("SQLite<br/>open_market_intelligence.db")]
+    services --> jobs["Job Service<br/>backfill / refresh"]
+    jobs --> pipelines["Fetch + Parse Pipelines"]
 
-    pipelines --> registry["source_registry"]
-    registry --> twse["TWSE"]
-    registry --> tpex["TPEx"]
-    registry --> mops["MOPS"]
-    registry --> external["RSS / GDELT / HTTP Sources"]
+    pipelines --> sources["source_registry"]
+    sources --> twse["TWSE"]
+    sources --> tpex["TPEx"]
+    sources --> mops["MOPS / MOPSOV"]
+    sources --> nstock["nStock"]
+    sources --> tdcc["TDCC"]
 
     twse --> raw["raw_fetch_result"]
     tpex --> raw
     mops --> raw
-    external --> raw
+    nstock --> raw
+    tdcc --> raw
+
     raw --> quality["data_quality_check"]
     quality --> parsers["Parsers"]
-    parsers --> db
+    parsers --> tables["Market Tables"]
+    tables --> db
     db --> services
 ```
 
-## 主要功能
-
-- 自選股群組管理，支援多層分組、股票加入、重新命名與刪除。
-- 台股市場儀表板，支援正常排序、漲幅、Score 與成交量排序。
-- 個股今日走勢、日 K、週 K、月 K 切換。
-- K 線圖支援 MA、BOLL、RSI、MACD、KD 與成交量指標。
-- 今日走勢支援分K價格、成交量、昨收基準、最高最低標記與漲跌停參考。
-- 三大法人、持股比例、集保、營收、盈餘、財務、股利等個股資料區塊。
-- TWSE / TPEx 日線資料補齊與自選股分組回補。
-- Raw result 保存、品質檢查、解析紀錄與 job 進度追蹤。
-
-## 資料流程
+## Frontend User Flow
 
 ```mermaid
 flowchart TD
-    seed["初始化資料源<br/>app.scripts.seed_sources"] --> source["source_registry"]
-    source --> fetch["Fetch Pipeline / Backfill Service"]
-    fetch --> connector["Connector<br/>HTTP / TWSE / TPEx / RSS / GDELT"]
-    connector --> raw["raw_fetch_result<br/>原始回應保存"]
-    connector --> log["fetch_log<br/>擷取紀錄"]
-    raw --> quality["data_quality_check<br/>品質檢查"]
-    quality --> parser{"Parser Type"}
+    open["Open Dashboard"] --> market["選擇市場分頁<br/>目前主力：台股"]
+    market --> group["選擇自選股群組"]
+    group --> ranking["讀取群組排名<br/>正常 / 漲幅 / Score / 成交量"]
+    ranking --> stock["選擇個股"]
+    stock --> timeframe{"時間框架"}
 
-    parser --> daily["market_daily_price<br/>日線 OHLC"]
-    parser --> institutional["institutional_trade_daily<br/>三大法人"]
-    parser --> margin["margin_trading_daily<br/>融資融券"]
-    parser --> profile["stock_master / stock_profile<br/>股票主檔"]
-    parser --> metrics["營收 / 財務 / 集保資料"]
+    timeframe --> today["今日"]
+    timeframe --> daily["日K"]
+    timeframe --> weekly["週K"]
+    timeframe --> monthly["月K"]
 
-    daily --> indicator["技術指標服務"]
-    institutional --> ranking["自選股排名服務"]
-    margin --> ranking
-    profile --> dashboard["Market Dashboard"]
-    metrics --> dashboard
-    indicator --> dashboard
-    ranking --> dashboard
+    today --> intraday["IntradayTrendChart<br/>1m / 5m / 15m"]
+    intraday --> intradayIndicators["指標開關<br/>VOL / VWAP / TWAP / EMA / RSI / MACD"]
+
+    daily --> kline["StockKLineChart"]
+    weekly --> kline
+    monthly --> kline
+    kline --> zoom["放大 / 縮小 / 回滾 / 滑桿"]
+    kline --> kIndicators["指標模板與參數<br/>MA / EMA / BOLL / RSI / MACD / ..."]
+
+    stock --> panels{"資料分頁"}
+    panels --> chips["籌碼<br/>集保 / 融資融券"]
+    panels --> inst["法人<br/>三大法人 / 持股比例"]
+    panels --> branch["分點<br/>1 / 3 / 5 / 10 / 20 / 60 / 120 日"]
+    panels --> revenue["營收"]
+    panels --> earnings["盈餘 / 財務"]
 ```
 
-## 盤中走勢資料流程
-
-今日走勢採取分層資料來源。優先使用分K來源取得每分鐘 OHLCV，再以交易所即時快照校正尾盤與總量；若分K來源失敗，才退回 Yahoo Finance 與 TWSE MIS 快照。
+## Backend Data Flow
 
 ```mermaid
 flowchart TD
-    request["GET /api/market/intraday/{stock_id}"] --> stock["解析股票代號與市場"]
-    stock --> minute["讀取分K資料"]
+    seed["python -m app.scripts.seed_sources"] --> registry["source_registry"]
+    registry --> request["API / Job / Backfill request"]
+    request --> fetch["Fetch Service"]
+    fetch --> connector["HTTP connector / source-specific client"]
+    connector --> raw["raw_fetch_result"]
+    connector --> fetchLog["fetch_log"]
+    raw --> quality["data_quality_check"]
+    quality --> parser{"parser_type"}
+
+    parser --> daily["market_daily_price<br/>OHLCV"]
+    parser --> inst["institutional_trade_daily"]
+    parser --> margin["margin_trading_daily"]
+    parser --> share["shareholding_distribution_weekly"]
+    parser --> revenue["monthly_revenue"]
+    parser --> financials["financial_metric_quarterly"]
+    parser --> branch["broker_branch_trade_daily"]
+    parser --> stocks["stock_master / stock_profile"]
+
+    daily --> indicators["indicator service"]
+    branch --> branchSummary["branch summary / multi-day aggregate"]
+    indicators --> api["API response"]
+    branchSummary --> api
+    inst --> api
+    margin --> api
+    share --> api
+    revenue --> api
+    financials --> api
+```
+
+## Intraday Flow
+
+今日走勢不是只畫價格線。後端先取分K資料，再用交易所快照校正最新價與成交量；前端再依使用者選擇聚合成 1m / 5m / 15m，並即時計算盤中指標。
+
+```mermaid
+flowchart TD
+    api["GET /api/market/intraday/{stock_id}"] --> market["判斷 TWSE / TPEx"]
+    market --> minute["nStock minute data"]
     minute --> hasMinute{"有分K資料?"}
-    hasMinute --> yes["建立每分鐘 OHLCV"]
-    yes --> mis["讀取 TWSE MIS 快照"]
-    mis --> adjust["校正尾盤量與總成交量"]
-    adjust --> response["回傳今日走勢"]
-
-    hasMinute --> no["讀取 Yahoo Finance 1m chart"]
+    hasMinute --> yes["建立分K OHLCV"]
+    hasMinute --> no["Yahoo Finance 1m fallback"]
     no --> yahooOk{"有 Yahoo 資料?"}
-    yahooOk --> yahooYes["建立 Yahoo 走勢點"]
-    yahooYes --> mis
-    yahooOk --> yahooNo["使用 TWSE MIS 快照 fallback"]
-    yahooNo --> response
+    yahooOk --> yes2["建立 1m points"]
+    yahooOk --> no2["TWSE MIS snapshot fallback"]
+    yes --> mis["TWSE MIS snapshot"]
+    yes2 --> mis
+    no2 --> response["IntradayTrendRead"]
+    mis --> volume["校正總量 / 最新價"]
+    volume --> response
+
+    response --> frontend["IntradayTrendChart"]
+    frontend --> interval["1m / 5m / 15m aggregation"]
+    interval --> calc["Frontend indicators<br/>VWAP / TWAP / EMA / RSI / MACD"]
+    calc --> chart["Chart + indicator menu"]
 ```
 
-## 後端目錄
+## K-Line And Indicator Flow
 
-```text
-backend/
-  app/
-    connectors/      資料來源連線器。
-    db/              SQLAlchemy models 與 session。
-    jobs/            背景任務狀態與 schema。
-    market/          市場資料、日線、盤中、指標、訊號與回補服務。
-    parsers/         TWSE、TPEx、MOPS 與其他來源解析器。
-    pipelines/       Fetch 與 parse 流程。
-    quality/         資料品質檢查。
-    routers/         FastAPI routes。
-    scripts/         初始化與維運腳本。
-    sources/         資料來源註冊表。
-    stocks/          股票主檔同步。
-    watchlists/      自選股群組、排名、指標與回補。
+```mermaid
+flowchart TD
+    stock["選擇個股"] --> timeframe{"日K / 週K / 月K"}
+    timeframe --> ohlc["GET /api/market/ohlc/{stock_id}"]
+    timeframe --> indicatorApi["GET /api/market/indicators/{stock_id}/daily"]
+    ohlc --> chartData["OHLC chart data"]
+    indicatorApi --> indicatorData["Daily indicator data"]
+    chartData --> chart["StockKLineChart"]
+    indicatorData --> chart
+    chart --> controls["縮放 / 回滾 / range slider"]
+    chart --> menu["指標選單"]
+    menu --> template["模板<br/>基本 / 短線 / 趨勢 / 波段 / 量價"]
+    menu --> params["參數<br/>MA / EMA / BOLL / RSI / MACD / ..."]
+    template --> render["Render overlays and panels"]
+    params --> render
+    controls --> render
 ```
 
-主要 API 區塊：
+## Broker Branch Flow
 
-| 區塊 | Prefix | 用途 |
-| --- | --- | --- |
-| System | `/api/system` | 健康檢查與系統狀態 |
-| Sources | `/api/sources` | 資料來源註冊與管理 |
-| Raw Results | `/api/raw-results` | 原始資料保存、解析與清理 |
-| Market | `/api/market` | 日線、盤中、回補與市場資料 |
-| Indicators | `/api/market/indicators` | 個股日線技術指標 |
-| Stocks | `/api/stocks` | 股票主檔 |
-| Watchlists | `/api/watchlists` | 自選股群組、清單、排名與回補 |
-| Jobs | `/api/jobs` | 背景任務狀態 |
-| Reports | `/api/reports` | 報表類資料 |
+分點資料來源目前是 nStock Top15。單日模式保留買超與賣超排名；多日模式會用已存每日 Top15 快照做分點加總，依淨買賣超重新排序。
 
-## 前端目錄
+```mermaid
+flowchart TD
+    ui["分點 tab"] --> days["選擇天數<br/>1 / 3 / 5 / 10 / 20 / 60 / 120"]
+    days --> api["GET /api/market/broker-branches/{stock_id}/daily?days=N"]
+    api --> ensure{"ensure_daily?"}
+    ensure --> yes["確認預期交易日資料<br/>15:15 後才抓當日"]
+    ensure --> no["使用已存資料"]
+    yes --> fetch["fetch nStock Top15"]
+    fetch --> save["寫入 broker_branch_trade_daily"]
+    save --> recent["取最近 N 個交易日"]
+    no --> recent
+    recent --> single{"N = 1?"}
+    single --> rank["保留來源 Top15 rank"]
+    single --> aggregate["依分點加總 buy / sell / net / avg price"]
+    aggregate --> rerank["重新產生買超 / 賣超 Top15"]
+    rank --> response["BrokerBranchTradeDailySummaryRead"]
+    rerank --> response
+    response --> frontend["分點表格與天數狀態"]
+```
+
+## Directory Layout
 
 ```text
-frontend/
-  src/
+.
+  backend/
     app/
-      page.tsx       Dashboard 入口。
-      layout.tsx     全域 layout。
-      globals.css    全域樣式。
-    components/
-      MarketDashboardClient.tsx
-      SidebarWatchlistExplorer.tsx
-      StockDetailPanel.tsx
-      IntradayTrendChart.tsx
-      StockKLineChart.tsx
-      WatchlistManager.tsx
-    lib/
-      api.ts
-      taiwanMarketTime.ts
-    types/
-      market.ts
+      connectors/      通用 HTTP 與資料來源連線器。
+      db/              SQLAlchemy models、session 與資料庫初始化。
+      jobs/            Background job、scheduler 與狀態查詢。
+      market/          台股市場資料、日線、盤中、回補、指標與分點服務。
+      parsers/         TWSE、TPEx、MOPS、TDCC 等 parser。
+      pipelines/       Raw result parse pipeline。
+      quality/         Raw payload 品質檢查。
+      routers/         FastAPI API routes。
+      scripts/         seed sources 與維運腳本。
+      sources/         預設資料來源定義。
+      stocks/          股票主檔查詢與同步。
+      watchlists/      自選股群組、排行與回補服務。
+  frontend/
+    src/
+      app/             Next.js App Router entry。
+      components/      Dashboard、側欄、個股面板、圖表元件。
+      lib/             API client、台股交易時間工具。
+      types/           前端 API 型別。
+  data/                本機 SQLite database，Git ignore。
+  alembic/             Database migrations。
 ```
 
-## 首次安裝
+## Important Backend Modules
 
-需求版本：
+| Module | Responsibility |
+| --- | --- |
+| `backend/app/main.py` | FastAPI app、middleware、router registration、startup / shutdown lifecycle |
+| `backend/app/config.py` | `.env` 設定、database URL、timezone、scheduler options |
+| `backend/app/market/intraday.py` | 今日分時資料來源、fallback 與交易所快照校正 |
+| `backend/app/market/backfill.py` | TWSE / TPEx 日線回補 |
+| `backend/app/market/daily_metrics_backfill.py` | 法人與融資融券回補 |
+| `backend/app/market/broker_branch.py` | 分點 Top15 擷取、單日查詢、多日加總 |
+| `backend/app/market/monthly_revenue_history_backfill.py` | 月營收歷史回補 |
+| `backend/app/market/financial_metrics_history_backfill.py` | 財務季度資料歷史回補 |
+| `backend/app/market/indicators.py` | 日線技術指標計算 |
+| `backend/app/watchlists/service.py` | 自選股 CRUD 與排行 |
+| `backend/app/watchlists/backfill_service.py` | 群組股票批次回補 |
 
-- Python 3.10 以上。
-- Node.js 20.9 以上與 npm 10 以上。
+## Important Frontend Components
 
-後端安裝與資料庫初始化：
+| Component | Responsibility |
+| --- | --- |
+| `MarketDashboardClient.tsx` | Dashboard 主狀態、群組選取、排序、股票選取 |
+| `SidebarWatchlistExplorer.tsx` | 左側市場分頁、自選股樹、群組與股票操作 |
+| `StockDetailPanel.tsx` | 個股頁籤、API 載入、指標選單、籌碼/法人/分點/營收/財務面板 |
+| `IntradayTrendChart.tsx` | 今日分時圖、1m/5m/15m、盤中指標與指標開關 |
+| `StockKLineChart.tsx` | K 線、縮放/回滾、技術指標模板、指標參數、副圖 |
+| `WatchlistManager.tsx` | 自選股管理輔助操作 |
+
+## API Map
+
+| Prefix | Examples | Purpose |
+| --- | --- | --- |
+| `/api/system` | `/health` | 健康檢查 |
+| `/api/sources` | `/`, `/{id}/run`, `/{id}/logs` | 資料來源、擷取與 raw result |
+| `/api/raw-results` | `/{id}`, `/{id}/quality` | Raw payload、品質檢查與 parse |
+| `/api/jobs` | `/`, `/{job_id}` | Background job 狀態 |
+| `/api/stocks` | `/search`, `/{stock_id}`, `/{stock_id}/profile` | 股票主檔與公司資料 |
+| `/api/watchlists` | `/tree`, `/groups`, `/items`, `/groups/{id}/ranking` | 自選股群組、項目、排行與群組回補 |
+| `/api/market/ohlc` | `/api/market/ohlc/2330?timeframe=daily` | 日週月 K 線 |
+| `/api/market/intraday` | `/api/market/intraday/2330` | 今日分時 |
+| `/api/market/indicators` | `/api/market/indicators/2330/daily` | 日線技術指標 |
+| `/api/market/broker-branches` | `/api/market/broker-branches/2330/daily?days=20` | 分點 Top15 與多日加總 |
+| `/api/market/institutional` | `/latest`, `/{stock_id}/history`, `/{stock_id}/holding-ratios` | 三大法人與持股比例 |
+| `/api/market/margin` | `/{stock_id}/latest`, `/{stock_id}/history` | 融資融券 |
+| `/api/market/shareholding` | `/{stock_id}/history` | 集保分布 |
+| `/api/market/revenue` | `/{stock_id}/latest`, `/{stock_id}/history` | 月營收 |
+| `/api/market/financials` | `/{stock_id}/latest`, `/{stock_id}/history` | 季度財務 |
+| `/api/market/backfill` | `/twse/{stock_id}`, `/revenue/{stock_id}/history`, `/financials/{stock_id}/history` | 資料回補 job |
+
+## Setup
+
+### Requirements
+
+- Windows PowerShell is the primary local workflow.
+- Python 3.10+ is required. Current local workflow has been used with Python 3.12.
+- Node.js `>=20.9.0`.
+- npm `>=10`.
+
+### Backend First-Time Setup
 
 ```powershell
 cd "C:\Open Market Intelligence"
@@ -177,7 +298,7 @@ $env:PYTHONPATH = "backend"
 python -m app.scripts.seed_sources
 ```
 
-前端安裝：
+### Frontend First-Time Setup
 
 ```powershell
 cd "C:\Open Market Intelligence\frontend"
@@ -185,11 +306,9 @@ if (-not (Test-Path .env.local)) { Copy-Item .env.example .env.local }
 npm ci
 ```
 
-本機資料庫預設建立在 `data/open_market_intelligence.db`。`data/`、`.venv/`、`frontend/node_modules/`、`frontend/.next/` 與本機環境檔會被 Git 忽略，不應推上 repository。
+## Running Locally
 
-## 本機啟動
-
-### 1. 啟動後端
+### Backend
 
 ```powershell
 cd "C:\Open Market Intelligence"
@@ -198,7 +317,7 @@ cd backend
 python -m uvicorn app.main:app --reload --port 8300
 ```
 
-常用後端網址：
+Useful URLs:
 
 ```text
 http://127.0.0.1:8300
@@ -206,35 +325,35 @@ http://127.0.0.1:8300/docs
 http://127.0.0.1:8300/api/system/health
 ```
 
-### 2. 啟動前端
+### Frontend
 
 ```powershell
 cd "C:\Open Market Intelligence\frontend"
 npm run dev
 ```
 
-前端網址：
+Open:
 
 ```text
 http://127.0.0.1:3000
 ```
 
-## 環境設定
+## Environment Files
 
-根目錄 `.env.example`：
+Root `.env.example`:
 
 ```env
 APP_NAME=Open Market Intelligence
 APP_ENV=development
 APP_HOST=127.0.0.1
 APP_PORT=8300
-# DATABASE_URL 未設定時，預設使用專案根目錄下的 data/open_market_intelligence.db
+# DATABASE_URL 未設定時，預設使用 data/open_market_intelligence.db
 # DATABASE_URL=sqlite:///C:/Open Market Intelligence/data/open_market_intelligence.db
 ENABLE_SCHEDULER=false
 TIMEZONE=Asia/Taipei
 ```
 
-前端 `.env.example`：
+Frontend `.env.example`:
 
 ```env
 API_PROXY_TARGET=http://127.0.0.1:8300
@@ -243,24 +362,17 @@ NEXT_PUBLIC_API_PROXY_PATH=/omi-data
 NEXT_PUBLIC_API_BASE_URL=
 ```
 
-前端預設透過 Next.js rewrite 轉送後端 API：
+Next.js rewrite:
 
 ```text
-/omi-data/... -> http://127.0.0.1:8300/api/...
+/omi-data/wl/... -> http://127.0.0.1:8300/api/watchlists/...
+/omi-data/...    -> http://127.0.0.1:8300/api/...
+/api/...         -> http://127.0.0.1:8300/api/...
 ```
 
-## 初始化資料來源
+## Database And Migrations
 
-```powershell
-cd "C:\Open Market Intelligence"
-.\.venv\Scripts\Activate.ps1
-$env:PYTHONPATH = "backend"
-python -m app.scripts.seed_sources
-```
-
-## 資料庫 Migration
-
-本專案使用 Alembic。新環境或既有本機資料庫都可以從專案根目錄套用 migration：
+新環境套用 migration：
 
 ```powershell
 cd "C:\Open Market Intelligence"
@@ -268,81 +380,141 @@ cd "C:\Open Market Intelligence"
 python -m alembic upgrade head
 ```
 
-只有在你已經手動確認資料庫 schema 與目前程式碼完全一致、且只想補上 Alembic 版本標記時，才使用：
+只有在你已經確認資料庫 schema 與目前程式碼一致、只想同步 Alembic 版本標記時，才使用：
 
 ```powershell
-cd "C:\Open Market Intelligence"
-.\.venv\Scripts\Activate.ps1
 python -m alembic stamp head
 ```
 
-## 自選股回補流程
+Local-only paths:
+
+```text
+data/open_market_intelligence.db
+.venv/
+frontend/node_modules/
+frontend/.next/
+.env
+frontend/.env.local
+```
+
+These should not be committed.
+
+## Common Workflows
+
+### 1. Add Stocks To Watchlist
 
 ```mermaid
 flowchart TD
-    start["POST /api/watchlists/groups/{group_id}/backfill"] --> collect["收集群組股票"]
-    collect --> children{"包含子群組?"}
-    children --> stocks["整理 stock_id"]
-    stocks --> market{"市場別"}
-    market --> twse["TWSE 日線回補"]
-    market --> tpex["TPEx 日線回補"]
-    market --> skip["不支援市場略過"]
-    twse --> exists{"月份資料已存在?"}
-    tpex --> exists
-    exists --> useExisting["依設定略過"]
-    exists --> fetch["擷取來源資料"]
-    fetch --> raw["保存 raw_fetch_result"]
-    raw --> parse["解析與品質檢查"]
-    parse --> save["寫入 market_daily_price"]
-    useExisting --> result["更新 job 進度"]
-    save --> result
+    sidebar["Sidebar"] --> market["選擇台股"]
+    market --> group["選擇或新增群組"]
+    group --> input["輸入股票代號 / 名稱"]
+    input --> add["Add Stock"]
+    add --> ranking["群組排行刷新"]
+    ranking --> detail["點選個股載入 StockDetailPanel"]
 ```
 
-常用參數：
+### 2. Backfill A Watchlist Group
 
-| 參數 | 預設 | 說明 |
-| --- | --- | --- |
-| `start_date` | 呼叫端指定 | 回補起始日 |
-| `end_date` | 呼叫端指定 | 回補結束日 |
-| `include_children` | `true` | 是否包含子群組 |
-| `enabled_only` | `true` | 是否只處理啟用項目 |
-| `skip_existing_months` | `true` | 是否跳過已有資料月份 |
-| `sleep_seconds` | `0.8` | 遠端請求間隔 |
+```mermaid
+flowchart TD
+    group["Watchlist Group"] --> action["POST /api/watchlists/groups/{id}/backfill/twse"]
+    action --> collect["收集群組與子群組股票"]
+    collect --> market{"TWSE / TPEx"}
+    market --> twse["TWSE STOCK_DAY"]
+    market --> tpex["TPEx tradingStock"]
+    twse --> raw["保存 raw result"]
+    tpex --> raw
+    raw --> parse["parse + quality check"]
+    parse --> save["market_daily_price upsert"]
+    save --> job["job progress"]
+    job --> ui["前端顯示補資料狀態"]
+```
 
-## 驗證指令
+### 3. Study A Stock
 
-後端語法檢查：
+```mermaid
+flowchart TD
+    pick["選擇個股"] --> today["今日分時<br/>看盤中價格與量"]
+    pick --> kline["日K / 週K / 月K<br/>看趨勢與區間"]
+    pick --> chips["籌碼<br/>法人 / 融資 / 集保"]
+    pick --> branch["分點<br/>單日或多日 Top15"]
+    pick --> fundamentals["營收 / 盈餘 / 財務"]
+
+    today --> decision["短線觀察"]
+    kline --> decision
+    chips --> decision
+    branch --> decision
+    fundamentals --> decision
+```
+
+## Validation
+
+Backend syntax check:
 
 ```powershell
-cd "C:\Open Market Intelligence"
-python -m compileall -q backend\app
+cd "C:\Open Market Intelligence\backend"
+python -m compileall app
 ```
 
-前端 lint：
-
-```powershell
-cd "C:\Open Market Intelligence\frontend"
-npm run lint
-```
-
-前端 type check：
+Frontend type check:
 
 ```powershell
 cd "C:\Open Market Intelligence\frontend"
 npx tsc --noEmit
 ```
 
-前端 production build：
+Frontend lint:
+
+```powershell
+cd "C:\Open Market Intelligence\frontend"
+npm run lint
+```
+
+Frontend production build:
 
 ```powershell
 cd "C:\Open Market Intelligence\frontend"
 npm run build
 ```
 
-## 維運原則
+Useful API spot-checks:
 
-- GET API 保持讀取語義；資料補齊與遠端擷取應使用 POST backfill 或 job 流程。
-- 新資料源應先註冊到 `source_registry`，再建立 parser 與品質檢查。
-- 解析器應優先使用結構化資料，不以畫面文字或 fragile string parsing 作為主要邏輯。
-- 長時間任務應寫入 `job_run`，方便前端追蹤進度與錯誤。
-- Raw payload 應保留足夠時間，便於追查 parser 與來源格式變更。
+```powershell
+Invoke-RestMethod "http://127.0.0.1:8300/api/system/health"
+Invoke-RestMethod "http://127.0.0.1:8300/api/market/intraday/2330"
+Invoke-RestMethod "http://127.0.0.1:8300/api/market/ohlc/2330?timeframe=daily&limit=120"
+Invoke-RestMethod "http://127.0.0.1:8300/api/market/indicators/2330/daily?limit=120"
+Invoke-RestMethod "http://127.0.0.1:8300/api/market/broker-branches/2330/daily?days=3&ensure_daily=false"
+```
+
+Git whitespace check:
+
+```powershell
+git diff --check
+```
+
+## Operating Notes
+
+- GET routes should stay read-oriented. Expensive or mutating data fetches should go through POST backfill or job routes where possible.
+- New data sources should be registered in `source_registry` first, then wired through parser and quality checks.
+- Raw payloads should be saved before parsing so source format changes can be debugged later.
+- Frontend API access should go through `frontend/src/lib/api.ts` and the `/omi-data` proxy unless there is a deliberate reason not to.
+- 台股盤中時間、regular session 判斷與 X 軸比例集中在 `frontend/src/lib/taiwanMarketTime.ts`。
+- Chart controls should keep dimensions stable. Hover, indicator toggles, labels and refreshes should not cause incoherent layout shifts.
+- Multi-day branch data is an aggregate of stored daily Top15 snapshots, not a full broker ledger.
+- Intraday indicators are calculated client-side from the current intraday payload. Early-session RSI/MACD can show `-` until enough points exist.
+
+## Current Limitations
+
+- 美股、日股、韓股、港股目前偏向入口與未來擴充，不是完整資料流。
+- 分點多日統計受限於已存的每日 Top15 快照；若資料庫只有 1 天資料，`days=3` 會回傳 partial 狀態。
+- 盤中資料依外部來源可用性 fallback；來源故障時可能只剩交易所快照。
+- SQLite 適合本機研究與開發；多使用者或長期服務應評估 PostgreSQL 等資料庫。
+
+## Production Hygiene
+
+- Do not commit `.env`, `.env.local`, `.venv`, `node_modules`, `.next`, local SQLite databases, logs or downloaded raw private data.
+- Do not hard-code API keys or credentials. Use `.env`.
+- Keep migrations explicit when schema changes.
+- Before push, run backend compile plus frontend type/lint/build at minimum.
+- When changing source parsing, add an API spot-check with a real stock id and inspect returned dates/counts.
