@@ -2,6 +2,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.models import StockMaster, WatchlistGroup, WatchlistItem
+from app.stocks.service import ensure_stock_from_market_daily
 from app.watchlists.schemas import (
     WatchlistGroupCreate,
     WatchlistGroupMove,
@@ -261,6 +262,9 @@ def _get_descendant_group_ids(db: Session, group_id: int) -> list[int]:
 
 def _ensure_stock_exists(db: Session, stock_id: str) -> StockMaster:
     stock = db.query(StockMaster).filter(StockMaster.stock_id == stock_id).first()
+
+    if stock is None:
+        stock = ensure_stock_from_market_daily(db=db, stock_id=stock_id)
 
     if stock is None:
         raise WatchlistStockNotFoundError(

@@ -37,11 +37,22 @@ def _moving_average(
     values: list[float | None],
     index: int,
     window: int,
+    dates: list[date] | None = None,
+    max_gap_days: int = 10,
 ) -> float | None:
     start = index - window + 1
 
     if start < 0:
         return None
+
+    if dates is not None:
+        window_dates = dates[start : index + 1]
+
+        if any(
+            (right - left).days > max_gap_days
+            for left, right in zip(window_dates, window_dates[1:])
+        ):
+            return None
 
     window_values = values[start : index + 1]
 
@@ -69,6 +80,22 @@ def _calculate_change(
     return round(change, 4), round(change_pct, 4)
 
 
+def _calculate_change_from_price_change(
+    current: float | None,
+    price_change: float | None,
+) -> tuple[float | None, float | None]:
+    if current is None or price_change is None:
+        return None, None
+
+    previous = current - price_change
+
+    if previous == 0:
+        return round(price_change, 4), None
+
+    change_pct = price_change / previous * 100
+    return round(price_change, 4), round(change_pct, 4)
+
+
 def calculate_daily_indicators(
     db: Session,
     stock_id: str,
@@ -91,6 +118,7 @@ def calculate_daily_indicators(
     )
 
     closes: list[float | None] = [row.close_price for row in rows]
+    row_dates: list[date] = [row.trade_date for row in rows]
     volumes: list[float | None] = [
         float(row.trade_volume) if row.trade_volume is not None else None
         for row in rows
@@ -100,15 +128,21 @@ def calculate_daily_indicators(
 
     for index, row in enumerate(rows):
         previous_close = closes[index - 1] if index > 0 else None
-        change, change_pct = _calculate_change(row.close_price, previous_close)
+        change, change_pct = _calculate_change_from_price_change(
+            row.close_price,
+            row.price_change,
+        )
+
+        if change is None and change_pct is None:
+            change, change_pct = _calculate_change(row.close_price, previous_close)
 
         ma_values = {
-            f"ma{window}": _moving_average(closes, index, window)
+            f"ma{window}": _moving_average(closes, index, window, row_dates)
             for window in ma_window_list
         }
 
         volume_ma_values = {
-            f"volume_ma{window}": _moving_average(volumes, index, window)
+            f"volume_ma{window}": _moving_average(volumes, index, window, row_dates)
             for window in volume_ma_window_list
         }
 

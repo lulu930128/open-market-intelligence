@@ -20,7 +20,12 @@ from app.market.institutional_holding_ratios import (
     fetch_institutional_holding_ratios,
 )
 from app.market.intraday import get_intraday_trend
+from app.market.broker_branch import (
+    BrokerBranchFetchError,
+    get_broker_branch_trade_summary,
+)
 from app.market.schemas import (
+    BrokerBranchTradeDailySummaryRead,
     FinancialMetricQuarterlyRead,
     IntradayTrendRead,
     InstitutionalHoldingRatioRead,
@@ -573,6 +578,32 @@ def get_stock_institutional_holding_ratios(stock_id: str):
 @router.get("/institutional", response_model=list[InstitutionalTradeDailyRead])
 def get_institutional_trades(trade_date: date | None = None, stock_id: str | None = None, limit: int = Query(default=100, ge=1, le=1000), offset: int = Query(default=0, ge=0), db: Session = Depends(get_db)):
     return list_institutional_trades(db=db, trade_date=trade_date, stock_id=stock_id, limit=limit, offset=offset)
+
+
+@router.get(
+    "/broker-branches/{stock_id}/daily",
+    response_model=BrokerBranchTradeDailySummaryRead,
+)
+def get_stock_broker_branch_daily(
+    stock_id: str,
+    trade_date: date | None = None,
+    ensure_daily: bool = False,
+    force: bool = False,
+    db: Session = Depends(get_db),
+):
+    try:
+        return get_broker_branch_trade_summary(
+            db=db,
+            stock_id=stock_id,
+            trade_date=trade_date,
+            ensure_daily=ensure_daily,
+            force=force,
+        )
+    except BrokerBranchFetchError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
 
 
 @router.get("/margin/latest", response_model=list[MarginTradingDailyRead])

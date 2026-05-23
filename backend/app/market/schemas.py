@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class MarketDailyPriceRead(BaseModel):
@@ -217,6 +217,41 @@ class MarginTradingDailyRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     model_config = ConfigDict(from_attributes=True)
+
+
+class BrokerBranchTradeDailyRead(BaseModel):
+    id: int
+    source_id: int
+    raw_result_id: int
+    trade_date: date
+    stock_id: str
+    stock_name: str | None = None
+    branch_code: str
+    branch_name: str
+    buy_lots: int | None = None
+    sell_lots: int | None = None
+    net_lots: int | None = None
+    buy_avg_price: float | None = None
+    sell_avg_price: float | None = None
+    buy_rank: int | None = None
+    sell_rank: int | None = None
+    source_label: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class BrokerBranchTradeDailySummaryRead(BaseModel):
+    stock_id: str
+    stock_name: str | None = None
+    trade_date: date | None = None
+    source_name: str | None = None
+    source_url: str
+    source_label: str | None = None
+    is_latest: bool = False
+    row_count: int = 0
+    buy_top: list[BrokerBranchTradeDailyRead] = Field(default_factory=list)
+    sell_top: list[BrokerBranchTradeDailyRead] = Field(default_factory=list)
 
 
 class ShareholdingDistributionWeeklyRead(BaseModel):

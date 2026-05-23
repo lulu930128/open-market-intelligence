@@ -329,6 +329,57 @@ class MarginTradingDaily(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class BrokerBranchTradeDaily(Base):
+    __tablename__ = "broker_branch_trade_daily"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source_id",
+            "stock_id",
+            "trade_date",
+            "branch_code",
+            name="uq_broker_branch_source_stock_date_branch",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("source_registry.id"),
+        nullable=False,
+        index=True,
+    )
+
+    raw_result_id: Mapped[int] = mapped_column(
+        ForeignKey("raw_fetch_result.id"),
+        nullable=False,
+        index=True,
+    )
+
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+
+    stock_id: Mapped[str] = mapped_column(String(20), index=True)
+    stock_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+    branch_code: Mapped[str] = mapped_column(String(20), index=True)
+    branch_name: Mapped[str] = mapped_column(String(160), index=True)
+
+    buy_lots: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    sell_lots: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    net_lots: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    buy_avg_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sell_avg_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    buy_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sell_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    source_label: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class ShareholdingDistributionWeekly(Base):
     __tablename__ = "shareholding_distribution_weekly"
 

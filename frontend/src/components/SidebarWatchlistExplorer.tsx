@@ -141,9 +141,7 @@ export default function SidebarWatchlistExplorer({
 }: Props) {
   const [tree, setTree] = useState<WatchlistGroupNode[]>(initialTree);
   const [items, setItems] = useState<WatchlistItemRead[]>(initialItems);
-  const [expandedIds, setExpandedIds] = useState<Set<number>>(
-    new Set(initialTree.map((group) => group.id))
-  );
+  const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
   const [loading, setLoading] = useState(false);
   const [refreshingMarketData, setRefreshingMarketData] = useState(false);
   const [message, setMessage] = useState<Message>(null);
@@ -212,14 +210,6 @@ export default function SidebarWatchlistExplorer({
     onExplorerDataChanged?.(treeData, itemData);
 
     const flattened = flattenGroups(treeData);
-
-    setExpandedIds((previous) => {
-      const next = new Set(previous);
-      treeData.forEach((root) => next.add(root.id));
-      if (selectedGroupId !== null) next.add(selectedGroupId);
-      return next;
-    });
-
     const selectedStillExists =
       selectedGroupId !== null &&
       flattened.some((group) => group.id === selectedGroupId);
@@ -229,13 +219,20 @@ export default function SidebarWatchlistExplorer({
         flattened.find((group) => group.id === selectedGroupId) ?? null;
       onSelectGroup(currentGroup);
       setRenameValue(currentGroup?.group_name ?? "");
+      setExpandedIds((previous) => {
+        if (selectedGroupId === null) return previous;
+
+        const next = new Set(previous);
+        next.add(selectedGroupId);
+        return next;
+      });
       return currentGroup;
     }
 
-    const nextGroup = flattened[0] ?? null;
-    onSelectGroup(nextGroup);
-    setRenameValue(nextGroup?.group_name ?? "");
-    return nextGroup;
+    onSelectGroup(null);
+    setRenameValue("");
+    setExpandedIds(new Set());
+    return null;
   }
 
   async function refreshSelectedGroupMarketData() {
@@ -325,6 +322,7 @@ export default function SidebarWatchlistExplorer({
     const timer = window.setTimeout(() => {
       setTree(initialTree);
       setItems(initialItems);
+      setExpandedIds(new Set());
     }, 0);
 
     return () => window.clearTimeout(timer);
@@ -332,7 +330,7 @@ export default function SidebarWatchlistExplorer({
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      reloadExplorerData({ keepSelection: true }).catch((error) => {
+      reloadExplorerData({ keepSelection: selectedGroupId !== null }).catch((error) => {
         setMessage({
           type: "error",
           text: error instanceof Error ? error.message : "自選股讀取失敗",

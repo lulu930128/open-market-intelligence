@@ -305,6 +305,40 @@ export type MarginTradingDailyRead = {
   updated_at: string;
 };
 
+export type BrokerBranchTradeDailyRead = {
+  id: number;
+  source_id: number;
+  raw_result_id: number;
+  trade_date: string;
+  stock_id: string;
+  stock_name: string | null;
+  branch_code: string;
+  branch_name: string;
+  buy_lots: number | null;
+  sell_lots: number | null;
+  net_lots: number | null;
+  buy_avg_price: number | null;
+  sell_avg_price: number | null;
+  buy_rank: number | null;
+  sell_rank: number | null;
+  source_label: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type BrokerBranchTradeDailySummaryRead = {
+  stock_id: string;
+  stock_name: string | null;
+  trade_date: string | null;
+  source_name: string | null;
+  source_url: string;
+  source_label: string | null;
+  is_latest: boolean;
+  row_count: number;
+  buy_top: BrokerBranchTradeDailyRead[];
+  sell_top: BrokerBranchTradeDailyRead[];
+};
+
 export type ShareholdingDistributionWeeklyRead = {
   id: number;
   source_id: number;

@@ -25,10 +25,6 @@ async function fetchBackendJson<T>(path: string, fallback: T): Promise<T> {
   }
 }
 
-function flattenGroups(nodes: WatchlistGroupNode[]): WatchlistGroupNode[] {
-  return nodes.flatMap((node) => [node, ...flattenGroups(node.children)]);
-}
-
 export default async function Page({
   searchParams,
 }: {
@@ -44,10 +40,9 @@ export default async function Page({
   const requestedGroupId = Array.isArray(groupIdParam)
     ? Number(groupIdParam[0])
     : Number(groupIdParam);
-  const flattened = flattenGroups(initialTree);
   const initialSelectedGroupId = Number.isFinite(requestedGroupId)
     ? requestedGroupId
-    : flattened[0]?.id ?? null;
+    : null;
   const initialChartData: ChartPoint[] = [];
   const initialIndicatorData: StockIndicatorPoint[] = [];
 

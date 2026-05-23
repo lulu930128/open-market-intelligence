@@ -14,6 +14,8 @@ import {
   getTaiwanMarketRefreshState,
 } from "@/lib/taiwanMarketTime";
 import type {
+  BrokerBranchTradeDailyRead,
+  BrokerBranchTradeDailySummaryRead,
   ChartPoint,
   FinancialMetricQuarterlyRead,
   IntradayTrendPoint,
@@ -47,6 +49,7 @@ type Props = {
 type Timeframe = "today" | "daily" | "weekly" | "monthly";
 type LoadState = "idle" | "loading" | "success" | "error";
 type DataPanelTab = "chips" | "institutional" | "branch" | "revenue" | "earnings";
+type BranchTableSide = "buy" | "sell";
 type RevenueView = "monthly" | "quarterly" | "yearly";
 type EarningsView = "quarterly" | "yearly";
 type ShareholdingSeriesPoint = {
@@ -105,6 +108,7 @@ const dataPanelTabs: Array<{ key: DataPanelTab; label: string }> = [
   { key: "earnings", label: "盈餘" },
 ];
 
+const branchDayOptions = ["1", "3", "5", "10", "20", "60", "120", "更多"];
 const largeHolderLotOptions = [100, 200, 400, 600, 800, 1000];
 const smallHolderLotOptions = [10, 20, 30, 40, 50, 100];
 const institutionalLookbackDays = 100;
@@ -166,6 +170,11 @@ function formatSignedLots(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
   const sign = value > 0 ? "+" : "";
   return `${sign}${formatLots(value)}`;
+}
+
+function formatLotUnits(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "-";
+  return new Intl.NumberFormat("zh-TW").format(Math.round(value));
 }
 
 function formatPct(value: number | null | undefined) {
@@ -315,6 +324,10 @@ async function fetchOptional<T>(
   } catch {
     return null;
   }
+}
+
+function looksLikeEtfStockId(stockId: string | null | undefined) {
+  return Boolean(stockId?.startsWith("00"));
 }
 
 function TechnicalBar({ label, value }: { label: string; value: number | null }) {
@@ -1752,6 +1765,8 @@ export default function StockDetailPanel({
   const [institutional, setInstitutional] = useState<InstitutionalTradeDailyRead | null>(null);
   const [institutionalHistory, setInstitutionalHistory] = useState<InstitutionalTradeDailyRead[]>([]);
   const [margin, setMargin] = useState<MarginTradingDailyRead | null>(null);
+  const [brokerBranchSummary, setBrokerBranchSummary] =
+    useState<BrokerBranchTradeDailySummaryRead | null>(null);
   const [shareholding, setShareholding] = useState<ShareholdingDistributionWeeklyRead[]>([]);
   const [monthlyRevenue, setMonthlyRevenue] = useState<MonthlyRevenueRead | null>(null);
   const [monthlyRevenueHistory, setMonthlyRevenueHistory] = useState<MonthlyRevenueRead[]>([]);
@@ -1765,6 +1780,7 @@ export default function StockDetailPanel({
   const [dataPanelLoading, setDataPanelLoading] = useState<DataPanelTab | null>(null);
   const [dataPanelMessage, setDataPanelMessage] = useState<string | null>(null);
   const [institutionalHoverDate, setInstitutionalHoverDate] = useState<string | null>(null);
+  const [branchTableSide, setBranchTableSide] = useState<BranchTableSide>("buy");
   const [largeHolderLots, setLargeHolderLots] = useState(1000);
   const [smallHolderLots, setSmallHolderLots] = useState(100);
   const [revenueView, setRevenueView] = useState<RevenueView>("monthly");
@@ -1803,6 +1819,7 @@ export default function StockDetailPanel({
         setInstitutional(null);
         setInstitutionalHistory([]);
         setMargin(null);
+        setBrokerBranchSummary(null);
         setShareholding([]);
         setMonthlyRevenue(null);
         setMonthlyRevenueHistory([]);
@@ -1825,10 +1842,12 @@ export default function StockDetailPanel({
 
     async function loadStaticDetail() {
       try {
+        const skipStockOnlyData = looksLikeEtfStockId(stockId);
         const [
           institutionalData,
           institutionalHistoryData,
           marginData,
+          brokerBranchData,
           shareholdingData,
           revenueData,
           revenueHistoryData,
@@ -1845,32 +1864,50 @@ export default function StockDetailPanel({
             `/api/market/institutional/${stockId}/history`,
             { limit: institutionalHistoryLimit, ensure_history: false }
           ),
-          fetchOptional<MarginTradingDailyRead>(`/api/market/margin/${stockId}/latest`, {
-            ensure_daily: false,
-          }),
-          fetchOptional<ShareholdingDistributionWeeklyRead[]>(
-            `/api/market/shareholding/${stockId}/history`,
-            { limit: 12000, ensure_history: false }
+          skipStockOnlyData
+            ? Promise.resolve(null)
+            : fetchOptional<MarginTradingDailyRead>(`/api/market/margin/${stockId}/latest`, {
+                ensure_daily: false,
+              }),
+          fetchOptional<BrokerBranchTradeDailySummaryRead>(
+            `/api/market/broker-branches/${stockId}/daily`,
+            { ensure_daily: false }
           ),
-          fetchOptional<MonthlyRevenueRead>(`/api/market/revenue/${stockId}/latest`, {
-            ensure_latest: false,
-          }),
-          fetchOptional<MonthlyRevenueRead[]>(`/api/market/revenue/${stockId}/history`, {
-            limit: revenueHistoryLimit,
-            ensure_history: false,
-          }),
-          fetchOptional<FinancialMetricQuarterlyRead>(
-            `/api/market/financials/${stockId}/latest`,
-            { ensure_latest: false }
-          ),
-          fetchOptional<FinancialMetricQuarterlyRead[]>(
-            `/api/market/financials/${stockId}/history`,
-            { limit: financialHistoryLimit, ensure_history: false }
-          ),
+          skipStockOnlyData
+            ? Promise.resolve([])
+            : fetchOptional<ShareholdingDistributionWeeklyRead[]>(
+                `/api/market/shareholding/${stockId}/history`,
+                { limit: 12000, ensure_history: false }
+              ),
+          skipStockOnlyData
+            ? Promise.resolve(null)
+            : fetchOptional<MonthlyRevenueRead>(`/api/market/revenue/${stockId}/latest`, {
+                ensure_latest: false,
+              }),
+          skipStockOnlyData
+            ? Promise.resolve([])
+            : fetchOptional<MonthlyRevenueRead[]>(`/api/market/revenue/${stockId}/history`, {
+                limit: revenueHistoryLimit,
+                ensure_history: false,
+              }),
+          skipStockOnlyData
+            ? Promise.resolve(null)
+            : fetchOptional<FinancialMetricQuarterlyRead>(
+                `/api/market/financials/${stockId}/latest`,
+                { ensure_latest: false }
+              ),
+          skipStockOnlyData
+            ? Promise.resolve([])
+            : fetchOptional<FinancialMetricQuarterlyRead[]>(
+                `/api/market/financials/${stockId}/history`,
+                { limit: financialHistoryLimit, ensure_history: false }
+              ),
           fetchOptional<StockMasterRead>(`/api/stocks/${stockId}`),
-          fetchOptional<InstitutionalHoldingRatioRead>(
-            `/api/market/institutional/${stockId}/holding-ratios`
-          ),
+          skipStockOnlyData
+            ? Promise.resolve(null)
+            : fetchOptional<InstitutionalHoldingRatioRead>(
+                `/api/market/institutional/${stockId}/holding-ratios`
+              ),
         ]);
 
         if (cancelled) return;
@@ -1885,6 +1922,10 @@ export default function StockDetailPanel({
         if (currentActiveTab !== "chips") {
           setMargin(marginData);
           setShareholding(shareholdingData ?? []);
+        }
+
+        if (currentActiveTab !== "branch") {
+          setBrokerBranchSummary(brokerBranchData);
         }
 
         if (currentActiveTab !== "revenue") {
@@ -1911,6 +1952,10 @@ export default function StockDetailPanel({
           if (currentActiveTab !== "chips") {
             setMargin(null);
             setShareholding([]);
+          }
+
+          if (currentActiveTab !== "branch") {
+            setBrokerBranchSummary(null);
           }
 
           if (currentActiveTab !== "revenue") {
@@ -2079,9 +2124,17 @@ export default function StockDetailPanel({
     timeframe === "today"
       ? latestToday?.price ?? latestIndicator?.close ?? latestChart?.close ?? null
       : latestIndicator?.close ?? latestChart?.close ?? null;
+  const dailyPreviousClose =
+    latestIndicator?.close !== null &&
+    latestIndicator?.close !== undefined &&
+    latestIndicator?.change !== null &&
+    latestIndicator?.change !== undefined
+      ? latestIndicator.close - latestIndicator.change
+      : null;
+  const todayReferenceClose = todayPreviousClose ?? dailyPreviousClose;
   const latestChangePct =
-    timeframe === "today" && latestToday && todayPreviousClose
-      ? ((latestToday.price - todayPreviousClose) / todayPreviousClose) * 100
+    timeframe === "today" && latestToday && todayReferenceClose
+      ? ((latestToday.price - todayReferenceClose) / todayReferenceClose) * 100
       : latestIndicator?.change_pct ?? null;
   const ma5 = latestIndicator?.ma?.ma5 ?? null;
   const ma20 = latestIndicator?.ma?.ma20 ?? null;
@@ -2302,11 +2355,6 @@ export default function StockDetailPanel({
   async function refreshDataTab(tab: DataPanelTab) {
     if (!stockId) return;
 
-    if (tab === "branch") {
-      setDataPanelMessage("分點資料後端尚未接入，版面先保留");
-      return;
-    }
-
     const targetStockId = stockId;
     const requestKey = `${targetStockId}:${tab}`;
 
@@ -2334,6 +2382,25 @@ export default function StockDetailPanel({
       );
 
     try {
+      if (tab === "branch") {
+        const shouldEnsure =
+          brokerBranchSummary?.stock_id !== targetStockId || !brokerBranchSummary.trade_date;
+        const branchSummary = await fetchJson<BrokerBranchTradeDailySummaryRead>(
+          `/api/market/broker-branches/${targetStockId}/daily`,
+          { ensure_daily: shouldEnsure }
+        );
+
+        if (activeStockIdRef.current !== targetStockId) return;
+
+        setBrokerBranchSummary(branchSummary);
+        setDataPanelMessage(
+          branchSummary.trade_date
+            ? `分點 Top15 已更新至 ${formatDate(branchSummary.trade_date)}`
+            : "尚無分點 Top15 資料"
+        );
+        return;
+      }
+
       if (tab === "chips") {
         await runBackfill(
           `/api/market/backfill/shareholding/${targetStockId}/history`,
@@ -2725,7 +2792,237 @@ export default function StockDetailPanel({
   }
 
   function renderBranchTab() {
-    return <EmptyDataState message="分點資料後端尚未接入，版位已先保留" />;
+    if (!brokerBranchSummary || brokerBranchSummary.row_count === 0) {
+      return <EmptyDataState message="尚無一日分點 Top15 資料" />;
+    }
+
+    const buyTotal = brokerBranchSummary.buy_top.reduce(
+      (sum, row) => sum + (row.net_lots ?? 0),
+      0
+    );
+    const sellTotal = brokerBranchSummary.sell_top.reduce(
+      (sum, row) => sum + Math.abs(row.net_lots ?? 0),
+      0
+    );
+    const compareRows = Array.from(
+      {
+        length: Math.max(
+          brokerBranchSummary.buy_top.length,
+          brokerBranchSummary.sell_top.length
+        ),
+      },
+      (_, index) => ({
+        buy: brokerBranchSummary.buy_top[index] ?? null,
+        sell: brokerBranchSummary.sell_top[index] ?? null,
+      })
+    );
+    const maxCompareValue = Math.max(
+      1,
+      ...compareRows.flatMap((row) => [
+        Math.abs(row.buy?.net_lots ?? 0),
+        Math.abs(row.sell?.net_lots ?? 0),
+      ])
+    );
+    const detailRows =
+      branchTableSide === "buy"
+        ? brokerBranchSummary.buy_top
+        : brokerBranchSummary.sell_top;
+    const detailTotal =
+      branchTableSide === "buy" ? buyTotal : sellTotal;
+    const detailNetLabel = branchTableSide === "buy" ? "買超(張)" : "賣超(張)";
+    const detailNameLabel = branchTableSide === "buy" ? "買超Top15" : "賣超Top15";
+    const detailTotalLabel =
+      branchTableSide === "buy" ? "Top15總買超" : "Top15總賣超";
+    const detailTone =
+      branchTableSide === "buy" ? "text-red-500" : "text-emerald-600";
+
+    const branchDisplayName = (row: BrokerBranchTradeDailyRead | null) =>
+      row?.branch_name || "-";
+    const branchNetAbs = (row: BrokerBranchTradeDailyRead | null) =>
+      Math.abs(row?.net_lots ?? 0);
+    const branchBarWidth = (row: BrokerBranchTradeDailyRead | null) =>
+      `${(branchNetAbs(row) / maxCompareValue) * 100}%`;
+
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center justify-between gap-4">
+          <div className="text-lg font-bold text-slate-950">分點</div>
+          <div className="text-right text-[11px] text-slate-500">
+            <div>更新日期：{formatDate(brokerBranchSummary.trade_date)}</div>
+            <a
+              href={brokerBranchSummary.source_url}
+              target="_blank"
+              rel="noreferrer"
+              className="font-semibold text-slate-700 underline-offset-2 hover:underline"
+            >
+              {brokerBranchSummary.source_name ?? "nStock"}
+            </a>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-center gap-3 text-xs">
+          <span className="font-semibold text-slate-600">天數</span>
+          <div className="grid grid-cols-8 overflow-hidden border border-slate-800">
+            {branchDayOptions.map((day, index) => (
+              <button
+                key={day}
+                type="button"
+                className={[
+                  "h-7 w-12 border-r border-slate-800 text-xs font-semibold last:border-r-0",
+                  index === 0
+                    ? "bg-slate-700 text-white"
+                    : "bg-white text-slate-800",
+                ].join(" ")}
+                aria-disabled="true"
+              >
+                {day}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <div className="grid grid-cols-[1.2fr_1fr_1fr_1.2fr] text-xs font-semibold text-slate-500">
+            <div>買超Top15</div>
+            <div className="text-right">買超(張)</div>
+            <div className="text-left">賣超(張)</div>
+            <div className="text-right">賣超Top15</div>
+          </div>
+
+          <div className="space-y-1">
+            {compareRows.map((row, index) => (
+              <div
+                key={`branch-compare-${index}`}
+                className="grid grid-cols-[1.2fr_1fr_1fr_1.2fr] items-center gap-2 text-xs"
+              >
+                <div className="min-w-0 truncate font-semibold text-slate-900">
+                  {branchDisplayName(row.buy)}
+                </div>
+                <div className="relative h-6 overflow-hidden bg-red-50 text-right">
+                  <div
+                    className="absolute bottom-0 right-0 top-0 bg-red-100"
+                    style={{ width: branchBarWidth(row.buy) }}
+                  />
+                  <span className="relative z-10 pr-1 font-semibold text-red-500">
+                    {formatLotUnits(branchNetAbs(row.buy))}
+                  </span>
+                </div>
+                <div className="relative h-6 overflow-hidden bg-emerald-50 text-left">
+                  <div
+                    className="absolute bottom-0 left-0 top-0 bg-emerald-100"
+                    style={{ width: branchBarWidth(row.sell) }}
+                  />
+                  <span className="relative z-10 pl-1 font-semibold text-emerald-600">
+                    {formatLotUnits(branchNetAbs(row.sell))}
+                  </span>
+                </div>
+                <div className="min-w-0 truncate text-right font-semibold text-slate-900">
+                  {branchDisplayName(row.sell)}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="border-t border-slate-200 pt-2">
+            <div className="mb-1 flex items-center justify-between text-xs font-semibold text-slate-900">
+              <span>Top15總買超</span>
+              <span>Top15總賣超</span>
+            </div>
+            <div className="grid grid-cols-2 overflow-hidden text-xs">
+              <div className="bg-red-50 px-1 py-1 text-left font-semibold text-red-500">
+                {formatLotUnits(buyTotal)}
+              </div>
+              <div className="bg-emerald-50 px-1 py-1 text-right font-semibold text-emerald-600">
+                {formatLotUnits(sellTotal)}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="space-y-3 border-t border-slate-200 pt-5">
+          <div className="text-center text-sm font-bold text-slate-950">
+            Top15券商分點買賣超
+          </div>
+
+          <div className="flex items-center justify-center text-sm font-semibold">
+            <div className="flex overflow-hidden border border-slate-800">
+              {[
+                { key: "buy", label: "買方" },
+                { key: "sell", label: "賣方" },
+              ].map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  onClick={() => setBranchTableSide(item.key as BranchTableSide)}
+                  className={[
+                    "h-8 w-12 border-r border-slate-800 text-sm last:border-r-0",
+                    branchTableSide === item.key
+                      ? "bg-slate-700 text-white"
+                      : "bg-white text-slate-800 hover:bg-slate-50",
+                  ].join(" ")}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="overflow-hidden border-t border-slate-200">
+            <div
+              className="grid grid-cols-[1.5fr_0.9fr_0.8fr_0.8fr_0.9fr_0.9fr] border-b border-slate-200 text-xs font-semibold text-slate-500"
+            >
+              <div className="px-1 py-2">{detailNameLabel}</div>
+              <div className="px-1 py-2 text-right">{detailNetLabel}</div>
+              <div className="px-1 py-2 text-right">買張</div>
+              <div className="px-1 py-2 text-right">賣張</div>
+              <div className="px-1 py-2 text-right">買均價</div>
+              <div className="px-1 py-2 text-right">賣均價</div>
+            </div>
+            {detailRows.map((row) => (
+              <div
+                key={`${branchTableSide}-${row.branch_code}-${row.branch_name}`}
+                className="grid grid-cols-[1.5fr_0.9fr_0.8fr_0.8fr_0.9fr_0.9fr] border-b border-slate-200 text-sm last:border-b-0"
+              >
+                <div className="min-w-0 truncate px-1 py-2 font-semibold text-slate-950">
+                  {row.branch_name || "-"}
+                </div>
+                <div className={`px-1 py-2 text-right ${detailTone}`}>
+                  {formatLotUnits(Math.abs(row.net_lots ?? 0))}
+                </div>
+                <div className="px-1 py-2 text-right text-slate-950">
+                  {formatLotUnits(row.buy_lots)}
+                </div>
+                <div className="px-1 py-2 text-right text-slate-950">
+                  {formatLotUnits(row.sell_lots)}
+                </div>
+                <div className="px-1 py-2 text-right text-slate-950">
+                  {formatPrice(row.buy_avg_price)}
+                </div>
+                <div className="px-1 py-2 text-right text-slate-950">
+                  {formatPrice(row.sell_avg_price)}
+                </div>
+              </div>
+            ))}
+            <div
+              className="grid grid-cols-[1.5fr_0.9fr_0.8fr_0.8fr_0.9fr_0.9fr] border-t border-slate-200 text-sm font-semibold"
+            >
+              <div className="px-1 py-2 text-slate-950">{detailTotalLabel}</div>
+              <div className={`px-1 py-2 text-right ${detailTone}`}>
+                {formatLotUnits(detailTotal)}
+              </div>
+              <div />
+              <div />
+              <div />
+              <div />
+            </div>
+          </div>
+
+          <div className="text-right text-[11px] text-slate-500">
+            目前接入一日 Top15 分點；天數切換先保留版面，尚未接多日資料。
+          </div>
+        </div>
+      </div>
+    );
   }
 
   function renderRevenueTab() {

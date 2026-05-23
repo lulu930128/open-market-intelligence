@@ -1,7 +1,8 @@
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.db.models import MarketDailyPrice, SourceRegistry, StockMaster, StockProfile, utc_now
+from app.parsers.twse_common import normalize_text
 from app.stocks.schemas import StockMasterUpdate
 
 
@@ -41,6 +42,79 @@ def _infer_instrument_type(stock_id: str, stock_name: str | None) -> str:
         return "warrant"
 
     return "unknown"
+
+
+def _upsert_stock_master_from_market_daily_row(
+    db: Session,
+    *,
+    stock_id: str,
+    stock_name: str | None,
+    source_id: int | None,
+    sources: dict[int, SourceRegistry] | None = None,
+) -> StockMaster:
+    stock_name = normalize_text(stock_name)
+    source = sources.get(source_id) if sources and source_id is not None else None
+
+    if source is None and source_id is not None:
+        source = db.query(SourceRegistry).filter(SourceRegistry.id == source_id).first()
+
+    stock = db.query(StockMaster).filter(StockMaster.stock_id == stock_id).first()
+    inferred_market = _infer_market(source)
+    inferred_type = _infer_instrument_type(stock_id, stock_name)
+
+    if stock is None:
+        stock = StockMaster(
+            stock_id=stock_id,
+            stock_name=stock_name,
+            market=inferred_market,
+            instrument_type=inferred_type,
+            last_seen_at=utc_now(),
+        )
+        db.add(stock)
+        db.flush()
+        return stock
+
+    stock.stock_name = stock_name or stock.stock_name
+    stock.market = stock.market if stock.market != "unknown" else inferred_market
+    stock.instrument_type = (
+        stock.instrument_type
+        if stock.instrument_type != "unknown"
+        else inferred_type
+    )
+    stock.last_seen_at = utc_now()
+    stock.is_active = True
+    db.flush()
+    return stock
+
+
+def ensure_stock_from_market_daily(db: Session, stock_id: str) -> StockMaster | None:
+    row = (
+        db.query(MarketDailyPrice)
+        .filter(MarketDailyPrice.stock_id == stock_id)
+        .order_by(MarketDailyPrice.trade_date.desc(), MarketDailyPrice.id.desc())
+        .first()
+    )
+
+    if row is None:
+        return None
+
+    return _upsert_stock_master_from_market_daily_row(
+        db=db,
+        stock_id=row.stock_id,
+        stock_name=row.stock_name,
+        source_id=row.source_id,
+    )
+
+
+def _repair_stock_master_name(stock: StockMaster) -> bool:
+    repaired_name = normalize_text(stock.stock_name)
+
+    if repaired_name and repaired_name != stock.stock_name:
+        stock.stock_name = repaired_name
+        stock.updated_at = utc_now()
+        return True
+
+    return False
 
 
 def sync_stocks_from_market_daily(db: Session) -> dict:
@@ -140,26 +214,104 @@ def search_stocks(
     keyword: str,
     limit: int = 50,
 ) -> list[StockMaster]:
+    keyword = keyword.strip()
     pattern = f"%{keyword}%"
+    is_etf_keyword = keyword.lower() in {"etf", "etfs"}
 
-    return (
+    filters = [
+        StockMaster.stock_id.ilike(pattern),
+        StockMaster.stock_name.ilike(pattern),
+        StockMaster.industry.ilike(pattern),
+        StockMaster.category.ilike(pattern),
+        StockMaster.instrument_type.ilike(pattern),
+    ]
+
+    if is_etf_keyword:
+        filters.append(StockMaster.instrument_type == "ETF")
+
+    results = (
         db.query(StockMaster)
-        .filter(
-            or_(
-                StockMaster.stock_id.ilike(pattern),
-                StockMaster.stock_name.ilike(pattern),
-                StockMaster.industry.ilike(pattern),
-                StockMaster.category.ilike(pattern),
-            )
-        )
+        .filter(or_(*filters))
         .order_by(StockMaster.stock_id.asc())
         .limit(limit)
         .all()
     )
+    repaired_existing = False
+
+    for stock in results:
+        repaired_existing = _repair_stock_master_name(stock) or repaired_existing
+
+    if len(results) >= limit:
+        if repaired_existing:
+            db.commit()
+
+        return results
+
+    seen_stock_ids = {stock.stock_id for stock in results}
+    market_filters = [
+        MarketDailyPrice.stock_id.ilike(pattern),
+        MarketDailyPrice.stock_name.ilike(pattern),
+    ]
+
+    if is_etf_keyword:
+        market_filters.append(MarketDailyPrice.stock_id.like("00%"))
+
+    market_rows = (
+        db.query(
+            MarketDailyPrice.stock_id,
+            func.max(MarketDailyPrice.stock_name).label("stock_name"),
+            func.max(MarketDailyPrice.source_id).label("source_id"),
+        )
+        .filter(or_(*market_filters))
+        .group_by(MarketDailyPrice.stock_id)
+        .order_by(MarketDailyPrice.stock_id.asc())
+        .limit(limit)
+        .all()
+    )
+
+    source_ids = {row.source_id for row in market_rows if row.source_id is not None}
+    sources = {
+        source.id: source
+        for source in db.query(SourceRegistry).filter(SourceRegistry.id.in_(source_ids)).all()
+    }
+    created_from_daily = False
+
+    for row in market_rows:
+        if row.stock_id in seen_stock_ids:
+            continue
+
+        stock = _upsert_stock_master_from_market_daily_row(
+            db=db,
+            stock_id=row.stock_id,
+            stock_name=row.stock_name,
+            source_id=row.source_id,
+            sources=sources,
+        )
+        results.append(stock)
+        seen_stock_ids.add(stock.stock_id)
+        created_from_daily = True
+
+        if len(results) >= limit:
+            break
+
+    if repaired_existing or created_from_daily:
+        db.commit()
+
+    return sorted(results, key=lambda stock: stock.stock_id)[:limit]
 
 
 def get_stock(db: Session, stock_id: str) -> StockMaster:
     stock = db.query(StockMaster).filter(StockMaster.stock_id == stock_id).first()
+
+    if stock is None:
+        stock = ensure_stock_from_market_daily(db=db, stock_id=stock_id)
+
+        if stock is not None:
+            db.commit()
+            db.refresh(stock)
+    elif _repair_stock_master_name(stock):
+        db.commit()
+        db.refresh(stock)
 
     if stock is None:
         raise StockNotFoundError(f"Stock id='{stock_id}' not found.")
