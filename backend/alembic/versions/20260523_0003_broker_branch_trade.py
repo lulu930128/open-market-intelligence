@@ -17,7 +17,21 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+def _has_table(table_name: str) -> bool:
+    return sa.inspect(op.get_bind()).has_table(table_name)
+
+
+def _has_index(table_name: str, index_name: str) -> bool:
+    return any(
+        index["name"] == index_name
+        for index in sa.inspect(op.get_bind()).get_indexes(table_name)
+    )
+
+
 def upgrade() -> None:
+    if _has_table("broker_branch_trade_daily"):
+        return
+
     op.create_table(
         "broker_branch_trade_daily",
         sa.Column("id", sa.Integer(), nullable=False),
@@ -94,32 +108,19 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index(
-        op.f("ix_broker_branch_trade_daily_trade_date"),
-        table_name="broker_branch_trade_daily",
-    )
-    op.drop_index(
-        op.f("ix_broker_branch_trade_daily_stock_id"),
-        table_name="broker_branch_trade_daily",
-    )
-    op.drop_index(
-        op.f("ix_broker_branch_trade_daily_source_id"),
-        table_name="broker_branch_trade_daily",
-    )
-    op.drop_index(
-        op.f("ix_broker_branch_trade_daily_raw_result_id"),
-        table_name="broker_branch_trade_daily",
-    )
-    op.drop_index(
-        op.f("ix_broker_branch_trade_daily_id"),
-        table_name="broker_branch_trade_daily",
-    )
-    op.drop_index(
-        op.f("ix_broker_branch_trade_daily_branch_name"),
-        table_name="broker_branch_trade_daily",
-    )
-    op.drop_index(
-        op.f("ix_broker_branch_trade_daily_branch_code"),
-        table_name="broker_branch_trade_daily",
-    )
+    if not _has_table("broker_branch_trade_daily"):
+        return
+
+    for index_name in (
+        "ix_broker_branch_trade_daily_trade_date",
+        "ix_broker_branch_trade_daily_stock_id",
+        "ix_broker_branch_trade_daily_source_id",
+        "ix_broker_branch_trade_daily_raw_result_id",
+        "ix_broker_branch_trade_daily_id",
+        "ix_broker_branch_trade_daily_branch_name",
+        "ix_broker_branch_trade_daily_branch_code",
+    ):
+        if _has_index("broker_branch_trade_daily", index_name):
+            op.drop_index(op.f(index_name), table_name="broker_branch_trade_daily")
+
     op.drop_table("broker_branch_trade_daily")

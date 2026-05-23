@@ -154,6 +154,39 @@ frontend/
       market.ts
 ```
 
+## 首次安裝
+
+需求版本：
+
+- Python 3.10 以上。
+- Node.js 20.9 以上與 npm 10 以上。
+
+後端安裝與資料庫初始化：
+
+```powershell
+cd "C:\Open Market Intelligence"
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r backend\requirements.txt
+
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+python -m alembic upgrade head
+
+$env:PYTHONPATH = "backend"
+python -m app.scripts.seed_sources
+```
+
+前端安裝：
+
+```powershell
+cd "C:\Open Market Intelligence\frontend"
+if (-not (Test-Path .env.local)) { Copy-Item .env.example .env.local }
+npm ci
+```
+
+本機資料庫預設建立在 `data/open_market_intelligence.db`。`data/`、`.venv/`、`frontend/node_modules/`、`frontend/.next/` 與本機環境檔會被 Git 忽略，不應推上 repository。
+
 ## 本機啟動
 
 ### 1. 啟動後端
@@ -195,7 +228,8 @@ APP_NAME=Open Market Intelligence
 APP_ENV=development
 APP_HOST=127.0.0.1
 APP_PORT=8300
-DATABASE_URL=sqlite:///./data/open_market_intelligence.db
+# DATABASE_URL 未設定時，預設使用專案根目錄下的 data/open_market_intelligence.db
+# DATABASE_URL=sqlite:///C:/Open Market Intelligence/data/open_market_intelligence.db
 ENABLE_SCHEDULER=false
 TIMEZONE=Asia/Taipei
 ```
@@ -220,26 +254,26 @@ NEXT_PUBLIC_API_BASE_URL=
 ```powershell
 cd "C:\Open Market Intelligence"
 .\.venv\Scripts\Activate.ps1
-cd backend
+$env:PYTHONPATH = "backend"
 python -m app.scripts.seed_sources
 ```
 
 ## 資料庫 Migration
 
-本專案使用 Alembic。若本機資料庫已存在，先將目前 schema 標記為最新版本：
-
-```powershell
-cd "C:\Open Market Intelligence"
-.\.venv\Scripts\Activate.ps1
-python -m alembic stamp head
-```
-
-套用 migration：
+本專案使用 Alembic。新環境或既有本機資料庫都可以從專案根目錄套用 migration：
 
 ```powershell
 cd "C:\Open Market Intelligence"
 .\.venv\Scripts\Activate.ps1
 python -m alembic upgrade head
+```
+
+只有在你已經手動確認資料庫 schema 與目前程式碼完全一致、且只想補上 Alembic 版本標記時，才使用：
+
+```powershell
+cd "C:\Open Market Intelligence"
+.\.venv\Scripts\Activate.ps1
+python -m alembic stamp head
 ```
 
 ## 自選股回補流程

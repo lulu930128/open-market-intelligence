@@ -81,6 +81,18 @@ frontend/
   package.json
 ```
 
+## 首次安裝
+
+前端需要 Node.js 20.9 以上與 npm 10 以上。
+
+```powershell
+cd "C:\Open Market Intelligence\frontend"
+if (-not (Test-Path .env.local)) { Copy-Item .env.example .env.local }
+npm ci
+```
+
+後端第一次安裝、資料庫 migration 與資料來源初始化請先依照根目錄 `README.md` 執行。
+
 ## 本機啟動
 
 先啟動後端：
