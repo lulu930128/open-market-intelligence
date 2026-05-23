@@ -1,6 +1,11 @@
 "use client";
 
-import IntradayTrendChart from "@/components/IntradayTrendChart";
+import IntradayTrendChart, {
+  defaultIntradayIndicators,
+  intradayIndicatorOptions,
+  type IntradayIndicatorKey,
+  type IntradayIndicatorSettings,
+} from "@/components/IntradayTrendChart";
 import StockKLineChart, {
   defaultIndicatorParameters,
   defaultIndicators,
@@ -110,11 +115,20 @@ const dataPanelTabs: Array<{ key: DataPanelTab; label: string }> = [
   { key: "earnings", label: "盈餘" },
 ];
 
-function dataPanelCacheKey(stockId: string, tab: DataPanelTab) {
-  return `${stockId}:${tab}`;
+function dataPanelCacheKey(stockId: string, tab: DataPanelTab, branchDays = 1) {
+  return tab === "branch" ? `${stockId}:${tab}:${branchDays}` : `${stockId}:${tab}`;
 }
 
-const branchDayOptions = ["1", "3", "5", "10", "20", "60", "120", "更多"];
+const branchDayOptions = [
+  { label: "1", days: 1 },
+  { label: "3", days: 3 },
+  { label: "5", days: 5 },
+  { label: "10", days: 10 },
+  { label: "20", days: 20 },
+  { label: "60", days: 60 },
+  { label: "120", days: 120 },
+  { label: "更多", days: null },
+];
 const largeHolderLotOptions = [100, 200, 400, 600, 800, 1000];
 const smallHolderLotOptions = [10, 20, 30, 40, 50, 100];
 const institutionalLookbackDays = 100;
@@ -1866,6 +1880,8 @@ export default function StockDetailPanel({
   const [indicatorMenuOpen, setIndicatorMenuOpen] = useState(false);
   const [chartIndicators, setChartIndicators] =
     useState<IndicatorSettings>(defaultIndicators);
+  const [intradayIndicators, setIntradayIndicators] =
+    useState<IntradayIndicatorSettings>(defaultIntradayIndicators);
   const [activeIndicatorTemplate, setActiveIndicatorTemplate] =
     useState<IndicatorTemplateKey | null>("basic");
   const [indicatorParameters, setIndicatorParameters] =
@@ -1896,6 +1912,7 @@ export default function StockDetailPanel({
   const [dataPanelMessage, setDataPanelMessage] = useState<string | null>(null);
   const [institutionalHoverDate, setInstitutionalHoverDate] = useState<string | null>(null);
   const [branchTableSide, setBranchTableSide] = useState<BranchTableSide>("buy");
+  const [branchDays, setBranchDays] = useState(1);
   const [largeHolderLots, setLargeHolderLots] = useState(1000);
   const [smallHolderLots, setSmallHolderLots] = useState(100);
   const [revenueView, setRevenueView] = useState<RevenueView>("monthly");
@@ -1906,8 +1923,10 @@ export default function StockDetailPanel({
   const finalIntradayRefreshDate = useRef<string | null>(null);
   const activeStockIdRef = useRef<string | null>(stockId);
   const activeDataTabRef = useRef<DataPanelTab>(activeDataTab);
+  const branchDaysRef = useRef(branchDays);
   const dataPanelRequestKeyRef = useRef<string | null>(null);
   const dataPanelResolvedKeysRef = useRef<Set<string>>(new Set());
+  const branchSummaryCacheRef = useRef<Map<string, BrokerBranchTradeDailySummaryRead>>(new Map());
 
   useEffect(() => {
     activeStockIdRef.current = stockId;
@@ -1917,9 +1936,20 @@ export default function StockDetailPanel({
     activeDataTabRef.current = activeDataTab;
   }, [activeDataTab]);
 
+  useEffect(() => {
+    branchDaysRef.current = branchDays;
+  }, [branchDays]);
+
   function toggleChartIndicator(key: IndicatorKey) {
     setActiveIndicatorTemplate(null);
     setChartIndicators((current) => ({
+      ...current,
+      [key]: !current[key],
+    }));
+  }
+
+  function toggleIntradayIndicator(key: IntradayIndicatorKey) {
+    setIntradayIndicators((current) => ({
       ...current,
       [key]: !current[key],
     }));
@@ -1957,6 +1987,7 @@ export default function StockDetailPanel({
 
   useEffect(() => {
     dataPanelResolvedKeysRef.current.clear();
+    branchSummaryCacheRef.current.clear();
 
     if (!stockId) {
       const timer = window.setTimeout(() => {
@@ -1981,6 +2012,7 @@ export default function StockDetailPanel({
         setDataPanelLoading(null);
         setDataPanelMessage(null);
         setInstitutionalHoverDate(null);
+        setBranchDays(1);
         setRevenueYear(null);
         setLoadState("idle");
         setErrorMessage(null);
@@ -2007,6 +2039,7 @@ export default function StockDetailPanel({
       setDataPanelLoading(activeDataTabRef.current);
       setDataPanelMessage(null);
       setInstitutionalHoverDate(null);
+      setBranchDays(1);
       setRevenueYear(null);
     }, 0);
 
@@ -2546,7 +2579,11 @@ export default function StockDetailPanel({
     if (tab === "branch") {
       return (
         brokerBranchSummary !== null &&
-        brokerBranchSummary.stock_id === targetStockId
+        brokerBranchSummary.stock_id === targetStockId &&
+        brokerBranchSummary.requested_days === branchDays &&
+        dataPanelResolvedKeysRef.current.has(
+          dataPanelCacheKey(targetStockId, "branch", branchDays)
+        )
       );
     }
 
@@ -2571,7 +2608,8 @@ export default function StockDetailPanel({
     if (!stockId) return;
 
     const targetStockId = stockId;
-    const requestKey = dataPanelCacheKey(targetStockId, tab);
+    const targetBranchDays = tab === "branch" ? branchDays : 1;
+    const requestKey = dataPanelCacheKey(targetStockId, tab, targetBranchDays);
 
     if (dataPanelRequestKeyRef.current === requestKey) return;
 
@@ -2598,16 +2636,23 @@ export default function StockDetailPanel({
 
     try {
       if (tab === "branch") {
-        const shouldEnsure =
-          brokerBranchSummary?.stock_id !== targetStockId || !brokerBranchSummary.trade_date;
         const branchSummary = await fetchJson<BrokerBranchTradeDailySummaryRead>(
           `/api/market/broker-branches/${targetStockId}/daily`,
-          { ensure_daily: shouldEnsure }
+          { ensure_daily: true, days: targetBranchDays }
         );
 
         if (activeStockIdRef.current !== targetStockId) return;
 
         dataPanelResolvedKeysRef.current.add(requestKey);
+        branchSummaryCacheRef.current.set(requestKey, branchSummary);
+
+        if (
+          activeDataTabRef.current === "branch" &&
+          dataPanelCacheKey(targetStockId, "branch", branchDaysRef.current) !== requestKey
+        ) {
+          return;
+        }
+
         setBrokerBranchSummary(branchSummary);
         setDataPanelMessage(
           branchSummary.trade_date
@@ -2758,9 +2803,23 @@ export default function StockDetailPanel({
   useEffect(() => {
     if (!stockId) return;
 
-    const requestKey = dataPanelCacheKey(stockId, activeDataTab);
+    const requestKey = dataPanelCacheKey(stockId, activeDataTab, branchDays);
+    const cachedBranchSummary =
+      activeDataTab === "branch" ? branchSummaryCacheRef.current.get(requestKey) : null;
     const hasCachedResult = dataPanelResolvedKeysRef.current.has(requestKey);
     const hasCurrentData = dataTabHasCurrentData(activeDataTab);
+
+    if (cachedBranchSummary) {
+      const timer = window.setTimeout(() => {
+        if (dataPanelRequestKeyRef.current === requestKey) return;
+
+        setBrokerBranchSummary(cachedBranchSummary);
+        setDataPanelLoading((current) => (current === activeDataTab ? null : current));
+        setDataPanelMessage("使用暫存資料");
+      }, 0);
+
+      return () => window.clearTimeout(timer);
+    }
 
     if (hasCachedResult || hasCurrentData) {
       const timer = window.setTimeout(() => {
@@ -2780,7 +2839,7 @@ export default function StockDetailPanel({
     return () => window.clearTimeout(timer);
     // Populate the visible right-panel tab whenever the selected stock or tab changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stockId, activeDataTab]);
+  }, [stockId, activeDataTab, branchDays]);
 
   if (!stockId) {
     return watchlistRankingPanel ? (
@@ -2814,7 +2873,8 @@ export default function StockDetailPanel({
     if (activeDataTab === "branch") {
       return (
         brokerBranchSummary !== null &&
-        brokerBranchSummary.stock_id !== selectedStockId
+        (brokerBranchSummary.stock_id !== selectedStockId ||
+          brokerBranchSummary.requested_days !== branchDays)
       );
     }
 
@@ -3075,7 +3135,7 @@ export default function StockDetailPanel({
 
   function renderBranchTab() {
     if (!brokerBranchSummary || brokerBranchSummary.row_count === 0) {
-      return <EmptyDataState message="尚無一日分點 Top15 資料" />;
+      return <EmptyDataState message="尚無分點 Top15 資料" />;
     }
 
     const buyTotal = brokerBranchSummary.buy_top.reduce(
@@ -3124,13 +3184,26 @@ export default function StockDetailPanel({
       Math.abs(row?.net_lots ?? 0);
     const branchBarWidth = (row: BrokerBranchTradeDailyRead | null) =>
       `${(branchNetAbs(row) / maxCompareValue) * 100}%`;
+    const branchTradeDates = brokerBranchSummary.trade_dates ?? [];
+    const branchDateRange =
+      branchTradeDates.length > 1
+        ? `${formatDate(branchTradeDates[branchTradeDates.length - 1])} - ${formatDate(
+            branchTradeDates[0]
+          )}`
+        : formatDate(brokerBranchSummary.trade_date);
+    const branchCoverageText =
+      brokerBranchSummary.requested_days > 1
+        ? brokerBranchSummary.is_partial
+          ? `目前僅有 ${brokerBranchSummary.available_days} / ${brokerBranchSummary.requested_days} 日已存分點資料`
+          : `目前顯示最近 ${brokerBranchSummary.available_days} 日分點資料`
+        : "目前顯示一日分點資料";
 
     return (
       <div className="space-y-6">
         <div className="flex items-center justify-between gap-4">
           <div className="text-lg font-bold text-slate-950">分點</div>
           <div className="text-right text-[11px] text-slate-500">
-            <div>更新日期：{formatDate(brokerBranchSummary.trade_date)}</div>
+            <div>資料日期：{branchDateRange}</div>
             <a
               href={brokerBranchSummary.source_url}
               target="_blank"
@@ -3145,21 +3218,31 @@ export default function StockDetailPanel({
         <div className="flex items-center justify-center gap-3 text-xs">
           <span className="font-semibold text-slate-600">天數</span>
           <div className="grid grid-cols-8 overflow-hidden border border-slate-800">
-            {branchDayOptions.map((day, index) => (
-              <button
-                key={day}
-                type="button"
-                className={[
-                  "h-7 w-12 border-r border-slate-800 text-xs font-semibold last:border-r-0",
-                  index === 0
-                    ? "bg-slate-700 text-white"
-                    : "bg-white text-slate-800",
-                ].join(" ")}
-                aria-disabled="true"
-              >
-                {day}
-              </button>
-            ))}
+            {branchDayOptions.map((option) => {
+              const disabled = option.days === null;
+              const selected = option.days === branchDays;
+
+              return (
+                <button
+                  key={option.label}
+                  type="button"
+                  onClick={() => {
+                    if (option.days !== null) setBranchDays(option.days);
+                  }}
+                  disabled={disabled}
+                  className={[
+                    "h-7 w-12 border-r border-slate-800 text-xs font-semibold last:border-r-0",
+                    selected
+                      ? "bg-slate-700 text-white"
+                      : disabled
+                        ? "bg-slate-100 text-slate-400"
+                        : "bg-white text-slate-800 hover:bg-slate-50",
+                  ].join(" ")}
+                >
+                  {option.label}
+                </button>
+              );
+            })}
           </div>
         </div>
 
@@ -3300,7 +3383,7 @@ export default function StockDetailPanel({
           </div>
 
           <div className="text-right text-[11px] text-slate-500">
-            目前接入一日 Top15 分點；天數切換先保留版面，尚未接多日資料。
+            {branchCoverageText}；多日為已存每日 Top15 快照加總。
           </div>
         </div>
       </div>
@@ -3601,7 +3684,43 @@ export default function StockDetailPanel({
                   ))}
                 </div>
 
-                {timeframe !== "today" ? (
+                {timeframe === "today" ? (
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setIndicatorMenuOpen((value) => !value)}
+                      className="h-8 border border-slate-900 bg-white px-3 text-sm font-semibold text-slate-900 hover:border-red-700 hover:text-red-700"
+                    >
+                      指標
+                    </button>
+                    {indicatorMenuOpen ? (
+                      <div className="absolute right-0 z-20 mt-2 w-56 border border-slate-200 bg-white p-3 text-left shadow-lg">
+                        <div className="mb-2 text-xs font-bold text-slate-500">顯示項目</div>
+                        {intradayIndicatorOptions.map((option) => (
+                          <label
+                            key={option.key}
+                            className="flex cursor-pointer items-start gap-2 px-2 py-2 text-xs hover:bg-slate-50"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={intradayIndicators[option.key]}
+                              onChange={() => toggleIntradayIndicator(option.key)}
+                              className="mt-0.5"
+                            />
+                            <span>
+                              <span className="block font-semibold text-slate-800">
+                                {option.label}
+                              </span>
+                              <span className="block text-slate-500">
+                                {option.description}
+                              </span>
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
                   <div className="relative">
                     <button
                       type="button"
@@ -3795,7 +3914,7 @@ export default function StockDetailPanel({
                       </div>
                     ) : null}
                   </div>
-                ) : null}
+                )}
               </div>
             </div>
           </div>
@@ -3812,6 +3931,7 @@ export default function StockDetailPanel({
               previousClose={todayPreviousClose}
               label={timeframeLabels[timeframe]}
               source={todaySource}
+              indicators={intradayIndicators}
               refreshIntervalMs={TAIWAN_INTRADAY_REFRESH_MS}
               updatedAt={todayUpdatedAt}
             />

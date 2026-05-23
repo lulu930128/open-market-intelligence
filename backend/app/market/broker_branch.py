@@ -1,9 +1,11 @@
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 import requests
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.db.models import BrokerBranchTradeDaily, RawFetchResult, SourceRegistry
 from app.parsers.twse_common import parse_date, parse_float, parse_int
 from app.utils.hash import sha256_text
@@ -11,6 +13,7 @@ from app.utils.hash import sha256_text
 
 NSTOCK_BRANCH_TOP15_URL = "https://shop.nstock.tw/api/v2/branch-data/branch-top15_ad"
 NSTOCK_BRANCH_SOURCE_NAME = "nStock Broker Branch Top 15"
+BRANCH_DAILY_READY_TIME = time(hour=15, minute=15)
 
 
 class BrokerBranchFetchError(RuntimeError):
@@ -252,6 +255,70 @@ def fetch_and_store_broker_branch_daily(
     )
 
 
+def _previous_weekday(value: date) -> date:
+    current = value
+
+    while current.weekday() >= 5:
+        current -= timedelta(days=1)
+
+    return current
+
+
+def expected_broker_branch_trade_date(now: datetime | None = None) -> date:
+    timezone = ZoneInfo(settings.timezone)
+    local_now = now.astimezone(timezone) if now is not None else datetime.now(timezone)
+    target_date = local_now.date()
+
+    if target_date.weekday() < 5 and local_now.time() < BRANCH_DAILY_READY_TIME:
+        target_date -= timedelta(days=1)
+
+    return _previous_weekday(target_date)
+
+
+def has_broker_branch_trades(
+    db: Session,
+    *,
+    stock_id: str,
+    trade_date: date,
+) -> bool:
+    return (
+        db.query(BrokerBranchTradeDaily.id)
+        .filter(BrokerBranchTradeDaily.stock_id == stock_id)
+        .filter(BrokerBranchTradeDaily.trade_date == trade_date)
+        .limit(1)
+        .scalar()
+        is not None
+    )
+
+
+def ensure_broker_branch_daily(
+    db: Session,
+    *,
+    stock_id: str,
+    trade_date: date | None = None,
+    force: bool = False,
+) -> list[BrokerBranchTradeDaily]:
+    target_trade_date = trade_date or expected_broker_branch_trade_date()
+
+    if not force and has_broker_branch_trades(
+        db=db,
+        stock_id=stock_id,
+        trade_date=target_trade_date,
+    ):
+        return list_broker_branch_trades(
+            db=db,
+            stock_id=stock_id,
+            trade_date=target_trade_date,
+        )
+
+    return fetch_and_store_broker_branch_daily(
+        db=db,
+        stock_id=stock_id,
+        requested_trade_date=target_trade_date,
+        force=force,
+    )
+
+
 def latest_broker_branch_trade_date(db: Session, stock_id: str) -> date | None:
     return (
         db.query(BrokerBranchTradeDaily.trade_date)
@@ -260,6 +327,32 @@ def latest_broker_branch_trade_date(db: Session, stock_id: str) -> date | None:
         .limit(1)
         .scalar()
     )
+
+
+def list_recent_broker_branch_trade_dates(
+    db: Session,
+    *,
+    stock_id: str,
+    days: int,
+    trade_date: date | None = None,
+) -> list[date]:
+    query = (
+        db.query(BrokerBranchTradeDaily.trade_date)
+        .filter(BrokerBranchTradeDaily.stock_id == stock_id)
+    )
+
+    if trade_date is not None:
+        query = query.filter(BrokerBranchTradeDaily.trade_date <= trade_date)
+
+    return [
+        row[0]
+        for row in (
+            query.distinct()
+            .order_by(BrokerBranchTradeDaily.trade_date.desc())
+            .limit(max(days, 1))
+            .all()
+        )
+    ]
 
 
 def list_broker_branch_trades(
@@ -280,23 +373,127 @@ def list_broker_branch_trades(
     )
 
 
+def list_broker_branch_trades_for_dates(
+    db: Session,
+    *,
+    stock_id: str,
+    trade_dates: list[date],
+) -> list[BrokerBranchTradeDaily]:
+    if not trade_dates:
+        return []
+
+    return (
+        db.query(BrokerBranchTradeDaily)
+        .filter(BrokerBranchTradeDaily.stock_id == stock_id)
+        .filter(BrokerBranchTradeDaily.trade_date.in_(trade_dates))
+        .order_by(
+            BrokerBranchTradeDaily.trade_date.desc(),
+            BrokerBranchTradeDaily.branch_code.asc(),
+        )
+        .all()
+    )
+
+
+def _weighted_average(total_value: float, total_lots: int) -> float | None:
+    if total_lots <= 0:
+        return None
+
+    return total_value / total_lots
+
+
+def aggregate_broker_branch_trades(
+    rows: list[BrokerBranchTradeDaily],
+    *,
+    trade_date: date,
+    source_label: str,
+) -> list[dict]:
+    aggregated: dict[str, dict] = {}
+
+    for row in rows:
+        branch_key = row.branch_code or row.branch_name
+        current = aggregated.get(branch_key)
+
+        if current is None:
+            current = {
+                "id": row.id,
+                "source_id": row.source_id,
+                "raw_result_id": row.raw_result_id,
+                "trade_date": trade_date,
+                "stock_id": row.stock_id,
+                "stock_name": row.stock_name,
+                "branch_code": row.branch_code,
+                "branch_name": row.branch_name,
+                "buy_lots": 0,
+                "sell_lots": 0,
+                "net_lots": 0,
+                "buy_avg_price": None,
+                "sell_avg_price": None,
+                "buy_rank": None,
+                "sell_rank": None,
+                "source_label": source_label,
+                "created_at": row.created_at,
+                "updated_at": row.updated_at,
+                "_buy_value": 0.0,
+                "_sell_value": 0.0,
+            }
+            aggregated[branch_key] = current
+
+        buy_lots = row.buy_lots or 0
+        sell_lots = row.sell_lots or 0
+        current["buy_lots"] += buy_lots
+        current["sell_lots"] += sell_lots
+        current["net_lots"] += row.net_lots or 0
+
+        if row.buy_avg_price is not None and buy_lots > 0:
+            current["_buy_value"] += row.buy_avg_price * buy_lots
+
+        if row.sell_avg_price is not None and sell_lots > 0:
+            current["_sell_value"] += row.sell_avg_price * sell_lots
+
+        if row.updated_at > current["updated_at"]:
+            current["updated_at"] = row.updated_at
+
+    result = []
+
+    for current in aggregated.values():
+        current["buy_avg_price"] = _weighted_average(
+            current.pop("_buy_value"),
+            current["buy_lots"],
+        )
+        current["sell_avg_price"] = _weighted_average(
+            current.pop("_sell_value"),
+            current["sell_lots"],
+        )
+        result.append(current)
+
+    return result
+
+
 def get_broker_branch_trade_summary(
     db: Session,
     *,
     stock_id: str,
     trade_date: date | None = None,
+    days: int = 1,
     ensure_daily: bool = False,
     force: bool = False,
 ) -> dict:
     if ensure_daily:
-        fetch_and_store_broker_branch_daily(
+        ensure_broker_branch_daily(
             db=db,
             stock_id=stock_id,
-            requested_trade_date=trade_date,
+            trade_date=trade_date,
             force=force,
         )
 
-    target_date = trade_date or latest_broker_branch_trade_date(db=db, stock_id=stock_id)
+    requested_days = max(days, 1)
+    trade_dates = list_recent_broker_branch_trade_dates(
+        db=db,
+        stock_id=stock_id,
+        days=requested_days,
+        trade_date=trade_date,
+    )
+    target_date = trade_dates[0] if trade_dates else None
 
     if target_date is None:
         return {
@@ -307,20 +504,57 @@ def get_broker_branch_trade_summary(
             "source_url": _source_url(stock_id),
             "source_label": None,
             "is_latest": False,
+            "requested_days": requested_days,
+            "available_days": 0,
+            "trade_dates": [],
+            "is_partial": True,
             "row_count": 0,
             "buy_top": [],
             "sell_top": [],
         }
 
-    rows = list_broker_branch_trades(db=db, stock_id=stock_id, trade_date=target_date)
-    buy_top = sorted(
-        [row for row in rows if row.buy_rank is not None],
-        key=lambda row: row.buy_rank or 999,
+    rows = list_broker_branch_trades_for_dates(
+        db=db,
+        stock_id=stock_id,
+        trade_dates=trade_dates,
     )
-    sell_top = sorted(
-        [row for row in rows if row.sell_rank is not None],
-        key=lambda row: row.sell_rank or 999,
-    )
+
+    if requested_days <= 1:
+        buy_top = sorted(
+            [row for row in rows if row.buy_rank is not None],
+            key=lambda row: row.buy_rank or 999,
+        )
+        sell_top = sorted(
+            [row for row in rows if row.sell_rank is not None],
+            key=lambda row: row.sell_rank or 999,
+        )
+        source_label = rows[0].source_label if rows else None
+        row_count = len(rows)
+    else:
+        source_label = f"nStock branch top15 aggregate ({len(trade_dates)} days)"
+        aggregated_rows = aggregate_broker_branch_trades(
+            rows,
+            trade_date=target_date,
+            source_label=source_label,
+        )
+        buy_top = sorted(
+            [row for row in aggregated_rows if (row["net_lots"] or 0) > 0],
+            key=lambda row: row["net_lots"] or 0,
+            reverse=True,
+        )[:15]
+        sell_top = sorted(
+            [row for row in aggregated_rows if (row["net_lots"] or 0) < 0],
+            key=lambda row: row["net_lots"] or 0,
+        )[:15]
+
+        for index, row in enumerate(buy_top, start=1):
+            row["buy_rank"] = index
+
+        for index, row in enumerate(sell_top, start=1):
+            row["sell_rank"] = index
+
+        row_count = len(aggregated_rows)
+
     first_row = rows[0] if rows else None
 
     return {
@@ -329,9 +563,13 @@ def get_broker_branch_trade_summary(
         "trade_date": target_date,
         "source_name": NSTOCK_BRANCH_SOURCE_NAME,
         "source_url": _source_url(stock_id),
-        "source_label": first_row.source_label if first_row else None,
+        "source_label": source_label,
         "is_latest": True,
-        "row_count": len(rows),
+        "requested_days": requested_days,
+        "available_days": len(trade_dates),
+        "trade_dates": trade_dates,
+        "is_partial": len(trade_dates) < requested_days,
+        "row_count": row_count,
         "buy_top": buy_top,
         "sell_top": sell_top,
     }

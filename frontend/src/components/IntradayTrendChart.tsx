@@ -5,6 +5,7 @@ import type { IntradayTrendPoint } from "@/types/market";
 import {
   TAIWAN_SESSION_END_MINUTES,
   TAIWAN_SESSION_START_MINUTES,
+  getTaipeiMinutesOfDay,
   getTaiwanIntradayXRatio,
   isTaiwanRegularSessionPoint,
 } from "@/lib/taiwanMarketTime";
@@ -14,9 +15,53 @@ type Props = {
   previousClose: number | null;
   label: string;
   source: string;
+  indicators?: IntradayIndicatorSettings;
   refreshIntervalMs?: number;
   updatedAt?: string | null;
 };
+
+type IntradayInterval = 1 | 5 | 15;
+export type IntradayIndicatorKey = "volume" | "vwap" | "twap" | "ema" | "rsi" | "macd";
+export type IntradayIndicatorSettings = Record<IntradayIndicatorKey, boolean>;
+
+type IntradayChartPoint = IntradayTrendPoint & {
+  vwap: number | null;
+  twap: number | null;
+  emaFast: number | null;
+  emaSlow: number | null;
+  rsi: number | null;
+  macd: number | null;
+  macdSignal: number | null;
+  macdHistogram: number | null;
+};
+
+const intervalOptions: Array<{ label: string; value: IntradayInterval }> = [
+  { label: "1m", value: 1 },
+  { label: "5m", value: 5 },
+  { label: "15m", value: 15 },
+];
+
+export const defaultIntradayIndicators: IntradayIndicatorSettings = {
+  volume: true,
+  vwap: true,
+  twap: true,
+  ema: true,
+  rsi: true,
+  macd: true,
+};
+
+export const intradayIndicatorOptions: Array<{
+  key: IntradayIndicatorKey;
+  label: string;
+  description: string;
+}> = [
+  { key: "volume", label: "VOL", description: "盤中成交量" },
+  { key: "vwap", label: "VWAP", description: "量價均價" },
+  { key: "twap", label: "TWAP", description: "時間均價" },
+  { key: "ema", label: "EMA", description: "EMA5 / EMA20" },
+  { key: "rsi", label: "RSI", description: "RSI 14" },
+  { key: "macd", label: "MACD", description: "12 / 26 / 9" },
+];
 
 function formatPrice(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
@@ -42,6 +87,14 @@ function clamp(value: number, min: number, max: number) {
 
 function validNumber(value: number | null | undefined): value is number {
   return value !== null && value !== undefined && !Number.isNaN(value);
+}
+
+function average(values: Array<number | null | undefined>) {
+  const valid = values.filter(validNumber);
+
+  if (valid.length === 0) return null;
+
+  return valid.reduce((sum, value) => sum + value, 0) / valid.length;
 }
 
 function formatLots(value: number | null | undefined) {
@@ -244,6 +297,11 @@ function formatPct(value: number) {
   return `${sign}${value.toFixed(1)}%`;
 }
 
+function formatIndicator(value: number | null | undefined, digits = 2) {
+  if (!validNumber(value)) return "-";
+  return value.toFixed(digits);
+}
+
 function labelPosition(
   x: number,
   paddingLeft: number,
@@ -259,9 +317,188 @@ function labelPosition(
   } as const;
 }
 
+function aggregateIntradayPoints(
+  points: IntradayTrendPoint[],
+  interval: IntradayInterval
+) {
+  const regularPoints = points.filter((point) => {
+    return (
+      validNumber(point.price) &&
+      isTaiwanRegularSessionPoint(point.time)
+    );
+  });
+
+  if (interval === 1) {
+    return regularPoints.map((point) => ({
+      ...point,
+      open: point.open ?? point.price,
+      high: point.high ?? point.price,
+      low: point.low ?? point.price,
+    }));
+  }
+
+  const buckets = new Map<number, IntradayTrendPoint[]>();
+
+  regularPoints.forEach((point) => {
+    const minutes = getTaipeiMinutesOfDay(point.time);
+
+    if (minutes === null) return;
+
+    const bucket =
+      TAIWAN_SESSION_START_MINUTES +
+      Math.floor((minutes - TAIWAN_SESSION_START_MINUTES) / interval) * interval;
+    const current = buckets.get(bucket) ?? [];
+
+    current.push(point);
+    buckets.set(bucket, current);
+  });
+
+  return Array.from(buckets.entries())
+    .sort(([a], [b]) => a - b)
+    .map(([, bucketPoints]) => {
+      const first = bucketPoints[0];
+      const last = bucketPoints[bucketPoints.length - 1];
+      const highs = bucketPoints
+        .map((point) => point.high ?? point.price)
+        .filter(validNumber);
+      const lows = bucketPoints
+        .map((point) => point.low ?? point.price)
+        .filter(validNumber);
+      const volume = bucketPoints.reduce((sum, point) => {
+        return sum + (validNumber(point.volume) && point.volume > 0 ? point.volume : 0);
+      }, 0);
+
+      return {
+        time: first.time,
+        price: last.price,
+        volume: volume > 0 ? volume : null,
+        open: first.open ?? first.price,
+        high: highs.length > 0 ? Math.max(...highs) : last.price,
+        low: lows.length > 0 ? Math.min(...lows) : last.price,
+      };
+    });
+}
+
+function calculateEma(values: number[], period: number) {
+  let previousEma: number | null = null;
+  const multiplier = 2 / (period + 1);
+
+  return values.map((value, index) => {
+    if (index + 1 < period) return null;
+
+    if (previousEma === null) {
+      previousEma = average(values.slice(index + 1 - period, index + 1));
+      return previousEma;
+    }
+
+    previousEma = value * multiplier + previousEma * (1 - multiplier);
+    return previousEma;
+  });
+}
+
+function calculateNullableEma(values: Array<number | null>, period: number) {
+  let previousEma: number | null = null;
+  const multiplier = 2 / (period + 1);
+
+  return values.map((value, index) => {
+    if (!validNumber(value)) return null;
+
+    if (previousEma === null) {
+      const slice = values.slice(0, index + 1).filter(validNumber).slice(-period);
+
+      if (slice.length < period) return null;
+
+      previousEma = average(slice);
+      return previousEma;
+    }
+
+    previousEma = value * multiplier + previousEma * (1 - multiplier);
+    return previousEma;
+  });
+}
+
+function calculateRsi(values: number[], period: number) {
+  let averageGain: number | null = null;
+  let averageLoss: number | null = null;
+
+  return values.map((value, index) => {
+    if (index === 0 || index < period) return null;
+
+    const change = value - values[index - 1];
+    const gain = Math.max(change, 0);
+    const loss = Math.max(-change, 0);
+
+    if (averageGain === null || averageLoss === null) {
+      const changes = values.slice(index + 1 - period, index + 1).map((current, cursor) => {
+        return current - values[index - period + cursor];
+      });
+
+      averageGain = changes.reduce((sum, item) => sum + Math.max(item, 0), 0) / period;
+      averageLoss = changes.reduce((sum, item) => sum + Math.max(-item, 0), 0) / period;
+    } else {
+      averageGain = (averageGain * (period - 1) + gain) / period;
+      averageLoss = (averageLoss * (period - 1) + loss) / period;
+    }
+
+    if (averageLoss === 0) return 100;
+
+    const relativeStrength = averageGain / averageLoss;
+    return 100 - 100 / (1 + relativeStrength);
+  });
+}
+
+function enrichIntradayPoints(points: IntradayTrendPoint[]): IntradayChartPoint[] {
+  const closes = points.map((point) => point.price);
+  const emaFast = calculateEma(closes, 5);
+  const emaSlow = calculateEma(closes, 20);
+  const rsi = calculateRsi(closes, 14);
+  const macdFast = calculateEma(closes, 12);
+  const macdSlow = calculateEma(closes, 26);
+  const macd = macdFast.map((fast, index) => {
+    const slow = macdSlow[index];
+
+    if (!validNumber(fast) || !validNumber(slow)) return null;
+    return fast - slow;
+  });
+  const macdSignal = calculateNullableEma(macd, 9);
+  let cumulativePrice = 0;
+  let cumulativePriceVolume = 0;
+  let cumulativeVolume = 0;
+  let latestVwap: number | null = null;
+
+  return points.map((point, index) => {
+    cumulativePrice += point.price;
+
+    const volume = validNumber(point.volume) && point.volume > 0 ? point.volume : 0;
+
+    if (volume > 0) {
+      cumulativePriceVolume += point.price * volume;
+      cumulativeVolume += volume;
+      latestVwap = cumulativePriceVolume / cumulativeVolume;
+    }
+
+    const histogram =
+      validNumber(macd[index]) && validNumber(macdSignal[index])
+        ? macd[index] - macdSignal[index]
+        : null;
+
+    return {
+      ...point,
+      vwap: latestVwap,
+      twap: cumulativePrice / (index + 1),
+      emaFast: emaFast[index],
+      emaSlow: emaSlow[index],
+      rsi: rsi[index],
+      macd: macd[index],
+      macdSignal: macdSignal[index],
+      macdHistogram: histogram,
+    };
+  });
+}
+
 function buildLinePath(
-  data: IntradayTrendPoint[],
-  getX: (point: IntradayTrendPoint, index: number) => number,
+  data: IntradayChartPoint[],
+  getX: (point: IntradayChartPoint, index: number) => number,
   getY: (value: number) => number
 ) {
   return data
@@ -270,6 +507,34 @@ function buildLinePath(
       const y = getY(point.price).toFixed(2);
       return `${index === 0 ? "M" : "L"} ${x} ${y}`;
     })
+    .join(" ");
+}
+
+function buildNullableLinePath(
+  data: IntradayChartPoint[],
+  getValue: (point: IntradayChartPoint) => number | null | undefined,
+  getX: (point: IntradayChartPoint, index: number) => number,
+  getY: (value: number) => number
+) {
+  let started = false;
+
+  return data
+    .map((point, index) => {
+      const value = getValue(point);
+
+      if (!validNumber(value)) {
+        started = false;
+        return "";
+      }
+
+      const x = getX(point, index).toFixed(2);
+      const y = getY(value).toFixed(2);
+      const command = started ? "L" : "M";
+
+      started = true;
+      return `${command} ${x} ${y}`;
+    })
+    .filter(Boolean)
     .join(" ");
 }
 
@@ -289,23 +554,18 @@ export default function IntradayTrendChart({
   previousClose,
   label,
   source,
+  indicators = defaultIntradayIndicators,
   refreshIntervalMs,
   updatedAt,
 }: Props) {
   const chartId = useId();
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const [showLimitRange, setShowLimitRange] = useState(false);
+  const [interval, setInterval] = useState<IntradayInterval>(1);
 
   const data = useMemo(() => {
-    return points.filter((point) => {
-      return (
-        point.price !== null &&
-        point.price !== undefined &&
-        !Number.isNaN(point.price) &&
-        isTaiwanRegularSessionPoint(point.time)
-      );
-    });
-  }, [points]);
+    return enrichIntradayPoints(aggregateIntradayPoints(points, interval));
+  }, [points, interval]);
 
   const safeHoverIndex =
     hoverIndex !== null && hoverIndex >= 0 && hoverIndex < data.length ? hoverIndex : null;
@@ -319,7 +579,8 @@ export default function IntradayTrendChart({
   }
 
   const width = 1000;
-  const height = 420;
+  const indicatorHeight = 48;
+  const indicatorGap = 14;
   const paddingLeft = 58;
   const paddingRight = 72;
   const priceTop = 30;
@@ -327,15 +588,42 @@ export default function IntradayTrendChart({
   const volumeTop = 322;
   const volumeHeight = 62;
   const labelY = 406;
+  const lowerPanelStartTop = 428;
+  const lowerPanelKeys: Array<"rsi" | "macd"> = [];
+
+  if (indicators.rsi) lowerPanelKeys.push("rsi");
+  if (indicators.macd) lowerPanelKeys.push("macd");
+
+  const rsiPanelIndex = lowerPanelKeys.indexOf("rsi");
+  const macdPanelIndex = lowerPanelKeys.indexOf("macd");
+  const rsiTop =
+    rsiPanelIndex >= 0
+      ? lowerPanelStartTop + rsiPanelIndex * (indicatorHeight + indicatorGap)
+      : null;
+  const macdTop =
+    macdPanelIndex >= 0
+      ? lowerPanelStartTop + macdPanelIndex * (indicatorHeight + indicatorGap)
+      : null;
+  const indicatorBottom =
+    lowerPanelKeys.length > 0
+      ? lowerPanelStartTop +
+        (lowerPanelKeys.length - 1) * (indicatorHeight + indicatorGap) +
+        indicatorHeight
+      : volumeTop + volumeHeight;
+  const height = lowerPanelKeys.length > 0 ? indicatorBottom + 28 : 420;
   const usableWidth = width - paddingLeft - paddingRight;
   const latestPrice = data[data.length - 1]?.price ?? null;
+  const latestPoint = safeHoverIndex !== null ? data[safeHoverIndex] : data[data.length - 1];
   const change =
     latestPrice !== null && previousClose !== null ? latestPrice - previousClose : null;
 
   const priceValues = [
     ...data.map((point) => point.price),
+    ...(indicators.vwap ? data.map((point) => point.vwap) : []),
+    ...(indicators.twap ? data.map((point) => point.twap) : []),
+    ...(indicators.ema ? data.flatMap((point) => [point.emaFast, point.emaSlow]) : []),
     ...(previousClose !== null ? [previousClose] : []),
-  ];
+  ].filter(validNumber);
   const priceScale = getPriceScale(priceValues, previousClose, showLimitRange);
   const yMin = priceScale.min;
   const yMax = priceScale.max;
@@ -386,8 +674,12 @@ export default function IntradayTrendChart({
     rangeLow !== null &&
     priceScale.limitDown !== null &&
     nearlyEqual(rangeLow.value, priceScale.limitDown, limitTolerance);
+  const macdValues = data
+    .flatMap((point) => [point.macd, point.macdSignal, point.macdHistogram])
+    .filter(validNumber);
+  const macdAbsMax = Math.max(...macdValues.map((value) => Math.abs(value)), 1);
 
-  function getPointX(point: IntradayTrendPoint) {
+  function getPointX(point: IntradayChartPoint) {
     return paddingLeft + getTaiwanIntradayXRatio(point.time) * usableWidth;
   }
 
@@ -397,6 +689,11 @@ export default function IntradayTrendChart({
 
   function getVolumeY(value: number) {
     return volumeTop + volumeHeight - (value / maxVolume) * volumeHeight;
+  }
+
+  function getPanelY(top: number, value: number, min: number, max: number) {
+    const range = max - min || 1;
+    return top + ((max - value) / range) * indicatorHeight;
   }
 
   function handleMouseMove(event: React.MouseEvent<SVGRectElement>) {
@@ -418,6 +715,28 @@ export default function IntradayTrendChart({
   }
 
   const linePath = buildLinePath(data, getPointX, getPriceY);
+  const vwapPath = buildNullableLinePath(data, (point) => point.vwap, getPointX, getPriceY);
+  const twapPath = buildNullableLinePath(data, (point) => point.twap, getPointX, getPriceY);
+  const emaFastPath = buildNullableLinePath(data, (point) => point.emaFast, getPointX, getPriceY);
+  const emaSlowPath = buildNullableLinePath(data, (point) => point.emaSlow, getPointX, getPriceY);
+  const rsiPath =
+    rsiTop !== null
+      ? buildNullableLinePath(data, (point) => point.rsi, getPointX, (value) =>
+          getPanelY(rsiTop, value, 0, 100)
+        )
+      : "";
+  const macdPath =
+    macdTop !== null
+      ? buildNullableLinePath(data, (point) => point.macd, getPointX, (value) =>
+          getPanelY(macdTop, value, -macdAbsMax, macdAbsMax)
+        )
+      : "";
+  const macdSignalPath =
+    macdTop !== null
+      ? buildNullableLinePath(data, (point) => point.macdSignal, getPointX, (value) =>
+          getPanelY(macdTop, value, -macdAbsMax, macdAbsMax)
+        )
+      : "";
   const firstPointX = getPointX(data[0]);
   const lastPointX = getPointX(data[data.length - 1]);
   const hoverX = safeHoverIndex !== null ? getPointX(data[safeHoverIndex]) : null;
@@ -428,6 +747,7 @@ export default function IntradayTrendChart({
   const chartAreaRight = width - paddingRight;
   const clipAboveId = `${chartId}-above`.replace(/:/g, "");
   const clipBelowId = `${chartId}-below`.replace(/:/g, "");
+  const barWidth = clamp((usableWidth / sessionMinutes) * interval * 0.7, 1, 10);
   const timeTicks = [
     { label: "09:00", minutes: 9 * 60 },
     { label: "10:00", minutes: 10 * 60 },
@@ -451,6 +771,28 @@ export default function IntradayTrendChart({
               {updatedAt ? `，最後更新 ${updatedAt}` : ""}
             </div>
           ) : null}
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <div className="inline-flex border border-slate-300 bg-white">
+              {intervalOptions.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => {
+                    setHoverIndex(null);
+                    setInterval(option.value);
+                  }}
+                  className={[
+                    "h-7 px-2.5 text-xs font-semibold transition",
+                    interval === option.value
+                      ? "bg-slate-900 text-white"
+                      : "text-slate-600 hover:bg-slate-100",
+                  ].join(" ")}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
         <div className="grid shrink-0 grid-cols-2 gap-x-8 gap-y-2 text-right sm:grid-cols-4">
@@ -478,10 +820,50 @@ export default function IntradayTrendChart({
               {formatLots(displayedVolume)}
             </div>
           </div>
+          {indicators.vwap ? (
+            <div>
+              <span className="text-xs text-slate-400">VWAP</span>
+              <div className="mt-1 text-base font-bold text-blue-700">
+                {formatPrice(latestPoint?.vwap)}
+              </div>
+            </div>
+          ) : null}
+          {indicators.twap ? (
+            <div>
+              <span className="text-xs text-slate-400">TWAP</span>
+              <div className="mt-1 text-base font-bold text-slate-800">
+                {formatPrice(latestPoint?.twap)}
+              </div>
+            </div>
+          ) : null}
+          {indicators.ema ? (
+            <div>
+              <span className="text-xs text-slate-400">EMA5/20</span>
+              <div className="mt-1 text-base font-bold text-slate-800">
+                {formatPrice(latestPoint?.emaFast)} / {formatPrice(latestPoint?.emaSlow)}
+              </div>
+            </div>
+          ) : null}
+          {indicators.rsi ? (
+            <div>
+              <span className="text-xs text-slate-400">RSI</span>
+              <div className="mt-1 text-base font-bold text-fuchsia-700">
+                {formatIndicator(latestPoint?.rsi)}
+              </div>
+            </div>
+          ) : null}
+          {indicators.macd ? (
+            <div>
+              <span className="text-xs text-slate-400">MACD H</span>
+              <div className="mt-1 text-base font-bold text-slate-800">
+                {formatIndicator(latestPoint?.macdHistogram)}
+              </div>
+            </div>
+          ) : null}
         </div>
       </div>
 
-      <svg viewBox={`0 0 ${width} ${height}`} className="h-[420px] w-full">
+      <svg viewBox={`0 0 ${width} ${height}`} className="w-full" style={{ height }}>
         <rect x="0" y="0" width={width} height={height} className="fill-white" />
         <defs>
           <clipPath id={clipAboveId}>
@@ -657,6 +1039,48 @@ export default function IntradayTrendChart({
           />
         )}
 
+        {indicators.vwap && vwapPath ? (
+          <path
+            d={vwapPath}
+            fill="none"
+            strokeWidth="1.8"
+            className="stroke-blue-600"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        ) : null}
+        {indicators.twap && twapPath ? (
+          <path
+            d={twapPath}
+            fill="none"
+            strokeWidth="1.4"
+            className="stroke-slate-500"
+            strokeDasharray="5 4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        ) : null}
+        {indicators.ema && emaFastPath ? (
+          <path
+            d={emaFastPath}
+            fill="none"
+            strokeWidth="1.4"
+            className="stroke-cyan-600"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        ) : null}
+        {indicators.ema && emaSlowPath ? (
+          <path
+            d={emaSlowPath}
+            fill="none"
+            strokeWidth="1.4"
+            className="stroke-amber-500"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        ) : null}
+
         {rangeHigh && !rangeHighIsLimit ? (
           <g>
             {(() => {
@@ -723,38 +1147,152 @@ export default function IntradayTrendChart({
           </g>
         ) : null}
 
-        {data.map((point, index) => {
-          const volume = point.volume ?? 0;
-          const volumeY = getVolumeY(volume);
-          const volumeBarHeight = volumeTop + volumeHeight - volumeY;
-          const barWidth = clamp((usableWidth / sessionMinutes) * 0.7, 1, 5);
+        {indicators.volume
+          ? data.map((point, index) => {
+              const volume = point.volume ?? 0;
+              const volumeY = getVolumeY(volume);
+              const volumeBarHeight = volumeTop + volumeHeight - volumeY;
 
-          return (
-            <rect
-              key={`${point.time}-${index}`}
-              x={getPointX(point) - barWidth / 2}
-              y={volumeY}
-              width={barWidth}
-              height={Math.max(volumeBarHeight, 1)}
-              className="fill-amber-300 opacity-70"
+              return (
+                <rect
+                  key={`${point.time}-${index}`}
+                  x={getPointX(point) - barWidth / 2}
+                  y={volumeY}
+                  width={barWidth}
+                  height={Math.max(volumeBarHeight, 1)}
+                  className="fill-amber-300 opacity-70"
+                />
+              );
+            })
+          : null}
+
+        {indicators.volume ? (
+          <line
+            x1={paddingLeft}
+            x2={chartAreaRight}
+            y1={volumeTop}
+            y2={volumeTop}
+            className="stroke-slate-100"
+          />
+        ) : null}
+
+        {rsiTop !== null ? (
+          <g>
+            <line
+              x1={paddingLeft}
+              x2={chartAreaRight}
+              y1={rsiTop}
+              y2={rsiTop}
+              className="stroke-slate-200"
             />
-          );
-        })}
+            <text
+              x={paddingLeft - 10}
+              y={rsiTop + 12}
+              textAnchor="end"
+              className="fill-slate-500 text-[11px]"
+            >
+              RSI
+            </text>
+            {[30, 50, 70].map((value) => {
+              const y = getPanelY(rsiTop, value, 0, 100);
 
-        <line
-          x1={paddingLeft}
-          x2={chartAreaRight}
-          y1={volumeTop}
-          y2={volumeTop}
-          className="stroke-slate-100"
-        />
+              return (
+                <line
+                  key={value}
+                  x1={paddingLeft}
+                  x2={chartAreaRight}
+                  y1={y}
+                  y2={y}
+                  className={value === 50 ? "stroke-slate-200" : "stroke-slate-100"}
+                  strokeDasharray={value === 50 ? undefined : "4 4"}
+                />
+              );
+            })}
+            {rsiPath ? (
+              <path
+                d={rsiPath}
+                fill="none"
+                strokeWidth="1.6"
+                className="stroke-fuchsia-600"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            ) : null}
+          </g>
+        ) : null}
+
+        {macdTop !== null ? (
+          <g>
+            <line
+              x1={paddingLeft}
+              x2={chartAreaRight}
+              y1={macdTop}
+              y2={macdTop}
+              className="stroke-slate-200"
+            />
+            <text
+              x={paddingLeft - 10}
+              y={macdTop + 12}
+              textAnchor="end"
+              className="fill-slate-500 text-[11px]"
+            >
+              MACD
+            </text>
+            <line
+              x1={paddingLeft}
+              x2={chartAreaRight}
+              y1={getPanelY(macdTop, 0, -macdAbsMax, macdAbsMax)}
+              y2={getPanelY(macdTop, 0, -macdAbsMax, macdAbsMax)}
+              className="stroke-slate-200"
+            />
+            {data.map((point, index) => {
+              if (!validNumber(point.macdHistogram)) return null;
+
+              const zeroY = getPanelY(macdTop, 0, -macdAbsMax, macdAbsMax);
+              const valueY = getPanelY(macdTop, point.macdHistogram, -macdAbsMax, macdAbsMax);
+              const y = Math.min(zeroY, valueY);
+              const height = Math.max(Math.abs(zeroY - valueY), 1);
+
+              return (
+                <rect
+                  key={`${point.time}-macd-${index}`}
+                  x={getPointX(point) - barWidth / 2}
+                  y={y}
+                  width={barWidth}
+                  height={height}
+                  className={point.macdHistogram >= 0 ? "fill-red-200" : "fill-emerald-200"}
+                />
+              );
+            })}
+            {macdPath ? (
+              <path
+                d={macdPath}
+                fill="none"
+                strokeWidth="1.5"
+                className="stroke-blue-600"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            ) : null}
+            {macdSignalPath ? (
+              <path
+                d={macdSignalPath}
+                fill="none"
+                strokeWidth="1.5"
+                className="stroke-amber-500"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            ) : null}
+          </g>
+        ) : null}
 
         {hoverX !== null ? (
           <line
             x1={hoverX}
             x2={hoverX}
             y1={priceTop}
-            y2={volumeTop + volumeHeight}
+            y2={indicatorBottom}
             className="stroke-slate-400"
             strokeDasharray="4 4"
           />
@@ -764,7 +1302,7 @@ export default function IntradayTrendChart({
           x={paddingLeft}
           y={priceTop}
           width={usableWidth}
-          height={volumeTop + volumeHeight - priceTop}
+          height={indicatorBottom - priceTop}
           fill="transparent"
           onMouseMove={handleMouseMove}
           onMouseLeave={() => setHoverIndex(null)}

@@ -590,6 +590,7 @@ def get_institutional_trades(trade_date: date | None = None, stock_id: str | Non
 def get_stock_broker_branch_daily(
     stock_id: str,
     trade_date: date | None = None,
+    days: int = Query(default=1, ge=1, le=120),
     ensure_daily: bool = False,
     force: bool = False,
     db: Session = Depends(get_db),
@@ -599,6 +600,7 @@ def get_stock_broker_branch_daily(
             db=db,
             stock_id=stock_id,
             trade_date=trade_date,
+            days=days,
             ensure_daily=ensure_daily,
             force=force,
         )

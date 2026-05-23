@@ -257,6 +257,10 @@ class BrokerBranchTradeDailySummaryRead(BaseModel):
     source_url: str
     source_label: str | None = None
     is_latest: bool = False
+    requested_days: int = 1
+    available_days: int = 0
+    trade_dates: list[date] = Field(default_factory=list)
+    is_partial: bool = False
     row_count: int = 0
     buy_top: list[BrokerBranchTradeDailyRead] = Field(default_factory=list)
     sell_top: list[BrokerBranchTradeDailyRead] = Field(default_factory=list)

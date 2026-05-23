@@ -342,6 +342,10 @@ export type BrokerBranchTradeDailySummaryRead = {
   source_url: string;
   source_label: string | null;
   is_latest: boolean;
+  requested_days: number;
+  available_days: number;
+  trade_dates: string[];
+  is_partial: boolean;
   row_count: number;
   buy_top: BrokerBranchTradeDailyRead[];
   sell_top: BrokerBranchTradeDailyRead[];
