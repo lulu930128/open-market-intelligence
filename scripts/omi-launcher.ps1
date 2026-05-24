@@ -10,14 +10,27 @@ $script:BackendDir = Join-Path $script:RepoRoot "backend"
 $script:FrontendDir = Join-Path $script:RepoRoot "frontend"
 $script:TrayIconPath = Join-Path $script:RepoRoot "ATRI-MyDearMoments.ico"
 $script:TrayIcon = $null
-$script:LogRoot = Join-Path $script:RepoRoot "logs"
+$script:IsPackagedRelease = Test-Path -LiteralPath (Join-Path $script:RepoRoot "release-manifest.json")
+$script:AppDataRoot = if ($script:IsPackagedRelease) {
+    Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "Open Market Intelligence"
+}
+else {
+    $script:RepoRoot
+}
+$script:LogRoot = Join-Path $script:AppDataRoot "logs"
+$script:DataRoot = Join-Path $script:AppDataRoot "data"
+$script:DatabasePath = Join-Path $script:DataRoot "open_market_intelligence.db"
 $script:ServiceRunner = Join-Path $PSScriptRoot "run-service-logged.ps1"
+$script:PackagedPython = Join-Path $script:RepoRoot "runtime\python\python.exe"
+$script:PackagedNode = Join-Path $script:RepoRoot "runtime\node\node.exe"
 $script:BackendProcess = $null
 $script:FrontendProcess = $null
 $script:LastStatusText = $null
 $script:IsShuttingDown = $false
+$script:DashboardAutoOpened = $false
 
 New-Item -ItemType Directory -Force -Path $script:LogRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $script:DataRoot | Out-Null
 
 function Get-DailyLogPath {
     param(
@@ -63,6 +76,41 @@ if (-not $script:Mutex.WaitOne(0, $false)) {
 
 Write-LauncherLog "Launcher started. repo_root=$($script:RepoRoot)"
 Write-LauncherLog "Logs root: $($script:LogRoot). Daily folders: backend, frontend, launcher."
+Write-LauncherLog "Packaged release mode: $($script:IsPackagedRelease). app_data_root=$($script:AppDataRoot)"
+
+function ConvertTo-SqliteUrl {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $absolutePath = [System.IO.Path]::GetFullPath($Path)
+    return "sqlite:///$($absolutePath.Replace('\', '/'))"
+}
+
+function Initialize-ReleaseEnvironment {
+    if (-not $script:IsPackagedRelease) {
+        return
+    }
+
+    $seedDatabasePath = Join-Path $script:RepoRoot "data\open_market_intelligence.db"
+
+    if ((-not (Test-Path -LiteralPath $script:DatabasePath)) -and
+        (Test-Path -LiteralPath $seedDatabasePath)) {
+        Write-LauncherLog "Copying seed database to app data. source=$seedDatabasePath target=$($script:DatabasePath)"
+        Copy-Item -LiteralPath $seedDatabasePath -Destination $script:DatabasePath -Force
+    }
+
+    $env:APP_ENV = "production"
+    $env:DATABASE_URL = ConvertTo-SqliteUrl $script:DatabasePath
+    $env:API_PROXY_TARGET = "http://127.0.0.1:8300"
+    $env:API_PROXY_PATH = "/omi-data"
+    $env:NEXT_PUBLIC_API_PROXY_PATH = "/omi-data"
+    $env:NEXT_PUBLIC_API_BASE_URL = ""
+    $env:HOSTNAME = "127.0.0.1"
+    $env:PORT = "3000"
+
+    Write-LauncherLog "Release environment initialized. database=$($script:DatabasePath)"
+}
+
+Initialize-ReleaseEnvironment
 
 function Test-HttpOk {
     param([Parameter(Mandatory = $true)][string]$Url)
@@ -186,9 +234,15 @@ function Start-Backend {
         return
     }
 
-    $python = Join-Path $script:RepoRoot ".venv\Scripts\python.exe"
+    $python = if ($script:IsPackagedRelease -and (Test-Path -LiteralPath $script:PackagedPython)) {
+        $script:PackagedPython
+    }
+    else {
+        Join-Path $script:RepoRoot ".venv\Scripts\python.exe"
+    }
+
     if (-not (Test-Path -LiteralPath $python)) {
-        throw "Missing Python virtual environment executable: $python"
+        throw "Missing Python executable: $python"
     }
 
     if (-not (Test-Path -LiteralPath $script:BackendDir)) {
@@ -196,10 +250,17 @@ function Start-Backend {
     }
 
     Write-LauncherLog "Starting backend with $python."
+    $backendArguments = if ($script:IsPackagedRelease) {
+        @("-m", "uvicorn", "app.main:app", "--port", "8300")
+    }
+    else {
+        @("-m", "uvicorn", "app.main:app", "--reload", "--port", "8300")
+    }
+
     $script:BackendProcess = Start-LoggedService `
         -ServiceName "backend" `
         -FilePath $python `
-        -Arguments @("-m", "uvicorn", "app.main:app", "--reload", "--port", "8300") `
+        -Arguments $backendArguments `
         -WorkingDirectory $script:BackendDir
     Write-LauncherLog "Backend started pid=$($script:BackendProcess.Id)."
 }
@@ -217,6 +278,27 @@ function Start-Frontend {
 
     if (-not (Test-Path -LiteralPath $script:FrontendDir)) {
         throw "Missing frontend directory: $($script:FrontendDir)"
+    }
+
+    if ($script:IsPackagedRelease) {
+        $serverScript = Join-Path $script:FrontendDir "server.js"
+
+        if (-not (Test-Path -LiteralPath $script:PackagedNode)) {
+            throw "Missing packaged Node executable: $($script:PackagedNode)"
+        }
+
+        if (-not (Test-Path -LiteralPath $serverScript)) {
+            throw "Missing packaged frontend server: $serverScript"
+        }
+
+        Write-LauncherLog "Starting packaged frontend with $($script:PackagedNode)."
+        $script:FrontendProcess = Start-LoggedService `
+            -ServiceName "frontend" `
+            -FilePath $script:PackagedNode `
+            -Arguments @($serverScript) `
+            -WorkingDirectory $script:FrontendDir
+        Write-LauncherLog "Frontend started pid=$($script:FrontendProcess.Id)."
+        return
     }
 
     $npm = Get-Command "npm.cmd" -ErrorAction SilentlyContinue
@@ -364,6 +446,14 @@ $script:Timer.add_Tick({
     if ($script:LastStatusText -ne $statusText) {
         Write-LauncherLog "Status changed: $statusText"
         $script:LastStatusText = $statusText
+    }
+
+    if ($script:IsPackagedRelease -and
+        (-not $script:DashboardAutoOpened) -and
+        $backendHttp -and
+        $frontendHttp) {
+        $script:DashboardAutoOpened = $true
+        Open-Url "http://127.0.0.1:3000"
     }
 })
 

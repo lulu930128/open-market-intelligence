@@ -47,6 +47,12 @@ build/
 .pytest_cache/
 coverage/
 
+# Installer build artifacts
+Installer/cache/
+Installer/output/
+Installer/runtimes/
+Installer/staging/
+
 
 # Local notes
 上傳說明.txt

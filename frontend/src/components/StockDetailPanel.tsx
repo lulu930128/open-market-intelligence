@@ -143,6 +143,8 @@ const institutionalHistoryLimit = 120;
 const institutionalDisplayMonths = 3;
 const revenueHistoryLimit = 120;
 const financialHistoryLimit = 40;
+const minimumUsableRevenueRows = 2;
+const minimumUsableFinancialRows = 2;
 const shareholdingLevelRanges: Record<number, { minLots: number; maxLots: number | null }> = {
   1: { minLots: 0, maxLots: 1 },
   2: { minLots: 1, maxLots: 5 },
@@ -3122,17 +3124,19 @@ export default function StockDetailPanel({
     }
 
     if (tab === "revenue") {
-      return (
-        (monthlyRevenue !== null && monthlyRevenue.stock_id === targetStockId) ||
-        monthlyRevenueHistory.some((row) => row.stock_id === targetStockId)
+      const currentRows = monthlyRevenueHistory.filter(
+        (row) => row.stock_id === targetStockId
       );
+
+      return currentRows.length >= minimumUsableRevenueRows;
     }
 
     if (tab === "earnings") {
-      return (
-        (financialMetric !== null && financialMetric.stock_id === targetStockId) ||
-        financialMetricHistory.some((row) => row.stock_id === targetStockId)
+      const currentRows = financialMetricHistory.filter(
+        (row) => row.stock_id === targetStockId
       );
+
+      return currentRows.length >= minimumUsableFinancialRows;
     }
 
     return false;
