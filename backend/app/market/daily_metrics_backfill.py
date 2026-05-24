@@ -12,6 +12,7 @@ from app.db.models import (
     SourceRegistry,
     StockMaster,
 )
+from app.market.backfill import backfill_tpex_trading_stock, backfill_twse_stock_day
 from app.pipelines.fetch_pipeline import refresh_source
 
 
@@ -110,6 +111,104 @@ def _market_trade_dates(
     )
 
     return [row.trade_date for row in rows]
+
+
+def _stock_market_trade_dates(
+    db: Session,
+    stock_id: str,
+    start_date: date,
+    end_date: date,
+) -> list[date]:
+    rows = (
+        db.query(MarketDailyPrice.trade_date)
+        .filter(MarketDailyPrice.stock_id == stock_id)
+        .filter(MarketDailyPrice.trade_date >= start_date)
+        .filter(MarketDailyPrice.trade_date <= end_date)
+        .distinct()
+        .order_by(MarketDailyPrice.trade_date.asc())
+        .all()
+    )
+
+    return [row.trade_date for row in rows]
+
+
+def _ensure_stock_market_trade_dates(
+    db: Session,
+    stock: StockMaster,
+    start_date: date,
+    end_date: date,
+    sleep_seconds: float,
+) -> dict:
+    existing_dates = _stock_market_trade_dates(
+        db=db,
+        stock_id=stock.stock_id,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+    if existing_dates:
+        return {
+            "status": "skipped_existing",
+            "message": "Stock market daily prices already provide trade dates.",
+            "stock_id": stock.stock_id,
+            "market": stock.market,
+            "start_date": start_date,
+            "end_date": end_date,
+            "trade_dates": existing_dates,
+            "trade_date_count": len(existing_dates),
+        }
+
+    market = stock.market.upper() if stock.market else None
+    backfill_sleep_seconds = max(sleep_seconds, 0.2)
+
+    if market == "TWSE":
+        result = backfill_twse_stock_day(
+            db=db,
+            stock_id=stock.stock_id,
+            start_date=start_date,
+            end_date=end_date,
+            sleep_seconds=backfill_sleep_seconds,
+            skip_existing_months=True,
+        )
+    elif market == "TPEX":
+        result = backfill_tpex_trading_stock(
+            db=db,
+            stock_id=stock.stock_id,
+            start_date=start_date,
+            end_date=end_date,
+            sleep_seconds=backfill_sleep_seconds,
+            skip_existing_months=True,
+        )
+    else:
+        return {
+            "status": "skipped",
+            "message": f"Market daily price backfill is not configured for market='{market}'.",
+            "stock_id": stock.stock_id,
+            "market": market,
+            "start_date": start_date,
+            "end_date": end_date,
+            "trade_dates": [],
+            "trade_date_count": 0,
+        }
+
+    trade_dates = _stock_market_trade_dates(
+        db=db,
+        stock_id=stock.stock_id,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+    return {
+        "status": result.get("status"),
+        "message": result.get("message"),
+        "stock_id": stock.stock_id,
+        "market": stock.market,
+        "start_date": start_date,
+        "end_date": end_date,
+        "trade_dates": trade_dates,
+        "trade_date_count": len(trade_dates),
+        "result": result,
+    }
 
 
 def _source_has_date_rows(
@@ -412,8 +511,14 @@ def ensure_stock_daily_metrics(
         for category in normalized_categories
         for parser_type in market_parser_types.get(category, ())
     )
-
-    return ensure_daily_metrics(
+    market_daily_price_result = _ensure_stock_market_trade_dates(
+        db=db,
+        stock=stock,
+        start_date=start_date,
+        end_date=end_date,
+        sleep_seconds=sleep_seconds,
+    )
+    result = ensure_daily_metrics(
         db=db,
         start_date=start_date,
         end_date=end_date,
@@ -422,6 +527,11 @@ def ensure_stock_daily_metrics(
         skip_existing=skip_existing,
         parser_types=parser_types,
     )
+    result["stock_id"] = stock_id
+    result["market"] = market
+    result["market_daily_price"] = market_daily_price_result
+
+    return result
 
 
 __all__ = [

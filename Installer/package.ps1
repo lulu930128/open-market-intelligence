@@ -223,7 +223,7 @@ Open Market Intelligence - Taiwan Market Watchstation
 Version: $Version
 
 How to start:
-1. Extract this folder to a writable location.
+1. Extract the whole zip folder to a writable location. Do not run the launcher from inside the zip preview.
 2. Run Start-OMI-Launcher.cmd.
 3. Wait for the tray icon. The dashboard opens automatically after backend and frontend are ready.
 

@@ -22,6 +22,10 @@ After extraction they run:
 Start-OMI-Launcher.cmd
 ```
 
+Users must extract the whole zip folder first. Running `Start-OMI-Launcher.cmd`
+from the Windows zip preview opens only a temporary copy of the `.cmd` file, so
+the adjacent `scripts/` runtime files will be missing.
+
 The launcher starts the backend and frontend in the system tray, then opens:
 
 ```text
