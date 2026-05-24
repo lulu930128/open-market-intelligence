@@ -31,6 +31,49 @@ function Write-ServiceLog {
     Add-Content -LiteralPath (Get-ServiceLogPath) -Value $line -Encoding UTF8
 }
 
+function ConvertTo-ProcessArgument {
+    param([AllowEmptyString()][string]$Argument)
+
+    if ($null -eq $Argument) {
+        return '""'
+    }
+
+    if ($Argument -notmatch '[\s"]') {
+        return $Argument
+    }
+
+    $result = '"'
+    $backslashes = 0
+
+    foreach ($character in $Argument.ToCharArray()) {
+        if ($character -eq '\') {
+            $backslashes += 1
+            continue
+        }
+
+        if ($character -eq '"') {
+            $result += ('\' * (($backslashes * 2) + 1))
+            $result += '"'
+            $backslashes = 0
+            continue
+        }
+
+        if ($backslashes -gt 0) {
+            $result += ('\' * $backslashes)
+            $backslashes = 0
+        }
+
+        $result += $character
+    }
+
+    if ($backslashes -gt 0) {
+        $result += ('\' * ($backslashes * 2))
+    }
+
+    $result += '"'
+    return $result
+}
+
 try {
     $argumentsJson = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($ArgumentsJsonBase64))
     $parsedArguments = ConvertFrom-Json -InputObject $argumentsJson
@@ -55,34 +98,32 @@ try {
         throw "Executable does not exist: $FilePath"
     }
 
+    $serviceLogPath = Get-ServiceLogPath
+    $processFilePath = Join-Path $env:SystemRoot "System32\cmd.exe"
+    $innerCommand = ((@($FilePath) + $arguments) | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join " "
+    $innerCommand = "$innerCommand >> $(ConvertTo-ProcessArgument $serviceLogPath) 2>&1"
+    $processArguments = "/d /s /c `"$innerCommand`""
+
     Write-ServiceLog "Starting service. file=$FilePath args=$($arguments -join ' ') cwd=$WorkingDirectory" "SYSTEM"
+    Write-ServiceLog "Process runner. file=$processFilePath args=$processArguments" "SYSTEM"
 
-    Push-Location -LiteralPath $WorkingDirectory
-    try {
-        $previousErrorActionPreference = $ErrorActionPreference
-        $ErrorActionPreference = "Continue"
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $processFilePath
+    $startInfo.Arguments = $processArguments
+    $startInfo.WorkingDirectory = $WorkingDirectory
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
 
-        try {
-            & $FilePath @arguments 2>&1 | ForEach-Object {
-                if ($_ -is [System.Management.Automation.ErrorRecord]) {
-                    Write-ServiceLog $_.ToString() "ERROR"
-                }
-                else {
-                    Write-ServiceLog $_.ToString()
-                }
-            }
-        }
-        finally {
-            $ErrorActionPreference = $previousErrorActionPreference
-        }
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
 
-        $exitCode = if ($null -ne $global:LASTEXITCODE) { $global:LASTEXITCODE } else { 0 }
-        Write-ServiceLog "Service exited. exit_code=$exitCode" "SYSTEM"
-        exit $exitCode
-    }
-    finally {
-        Pop-Location
-    }
+    [void]$process.Start()
+    $process.WaitForExit()
+
+    $exitCode = $process.ExitCode
+    Write-ServiceLog "Service exited. exit_code=$exitCode" "SYSTEM"
+    exit $exitCode
 }
 catch {
     Write-ServiceLog "Service runner failed. error=$($_.Exception.Message)" "ERROR"

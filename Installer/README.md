@@ -36,7 +36,18 @@ From the repo root:
 .\Installer\package.ps1 -Version 1.0.0
 ```
 
-To include the current local SQLite database as a seed database:
+By default the package creates a lightweight seed database from the local
+`data/open_market_intelligence.db`. The seed only includes `source_registry` and
+`stock_master`, so first-run stock search and watchlist add flows can resolve
+symbols such as `2330` without bundling the full local history database.
+
+To build a package with no stock master seed:
+
+```powershell
+.\Installer\package.ps1 -Version 1.0.0 -SkipStockMasterSeed
+```
+
+To include the current local SQLite database as a full seed database:
 
 ```powershell
 .\Installer\package.ps1 -Version 1.0.0 -IncludeSeedData

@@ -28,6 +28,7 @@ $script:FrontendProcess = $null
 $script:LastStatusText = $null
 $script:IsShuttingDown = $false
 $script:DashboardAutoOpened = $false
+$script:DashboardUrl = "http://localhost:3000"
 
 New-Item -ItemType Directory -Force -Path $script:LogRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $script:DataRoot | Out-Null
@@ -85,6 +86,56 @@ function ConvertTo-SqliteUrl {
     return "sqlite:///$($absolutePath.Replace('\', '/'))"
 }
 
+function Invoke-StockMasterSeed {
+    param([Parameter(Mandatory = $true)][string]$SeedDatabasePath)
+
+    $seedScriptPath = Join-Path $script:RepoRoot "scripts\stock-master-seed.py"
+
+    if (-not (Test-Path -LiteralPath $SeedDatabasePath)) {
+        Write-LauncherLog "No packaged stock master seed database found at $SeedDatabasePath"
+        return
+    }
+
+    if (-not (Test-Path -LiteralPath $seedScriptPath)) {
+        Write-LauncherLog "Stock master seed script was not found: $seedScriptPath" "WARN"
+        return
+    }
+
+    if (-not (Test-Path -LiteralPath $script:PackagedPython)) {
+        Write-LauncherLog "Packaged Python runtime was not found: $($script:PackagedPython)" "WARN"
+        return
+    }
+
+    Write-LauncherLog "Applying stock master seed if needed. seed=$SeedDatabasePath target=$($script:DatabasePath)"
+
+    $arguments = @(
+        $seedScriptPath,
+        "apply",
+        "--seed-db",
+        $SeedDatabasePath,
+        "--target-db",
+        $script:DatabasePath,
+        "--require-stock",
+        "2330"
+    )
+
+    try {
+        $output = & $script:PackagedPython @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+
+        foreach ($line in $output) {
+            Write-LauncherLog "stock-master-seed: $line"
+        }
+
+        if ($exitCode -ne 0) {
+            Write-LauncherLog "Stock master seed exited with code $exitCode." "WARN"
+        }
+    }
+    catch {
+        Write-LauncherLog "Stock master seed failed: $($_.Exception.Message)" "WARN"
+    }
+}
+
 function Initialize-ReleaseEnvironment {
     if (-not $script:IsPackagedRelease) {
         return
@@ -97,6 +148,8 @@ function Initialize-ReleaseEnvironment {
         Write-LauncherLog "Copying seed database to app data. source=$seedDatabasePath target=$($script:DatabasePath)"
         Copy-Item -LiteralPath $seedDatabasePath -Destination $script:DatabasePath -Force
     }
+
+    Invoke-StockMasterSeed -SeedDatabasePath $seedDatabasePath
 
     $env:APP_ENV = "production"
     $env:DATABASE_URL = ConvertTo-SqliteUrl $script:DatabasePath
@@ -266,7 +319,7 @@ function Start-Backend {
 }
 
 function Start-Frontend {
-    if (Test-HttpOk "http://127.0.0.1:3000") {
+    if (Test-HttpOk $script:DashboardUrl) {
         Write-LauncherLog "Frontend already responds; skipping frontend start."
         return
     }
@@ -393,7 +446,7 @@ $stopItem.add_Click({ Stop-Services })
 
 $openDashboardItem = New-Object System.Windows.Forms.ToolStripMenuItem
 $openDashboardItem.Text = "Open Dashboard"
-$openDashboardItem.add_Click({ Open-Url "http://127.0.0.1:3000" })
+$openDashboardItem.add_Click({ Open-Url $script:DashboardUrl })
 
 $openApiItem = New-Object System.Windows.Forms.ToolStripMenuItem
 $openApiItem.Text = "Open API Health"
@@ -426,13 +479,13 @@ $exitItem.add_Click({
 [void]$script:Menu.Items.Add($exitItem)
 
 $script:NotifyIcon.ContextMenuStrip = $script:Menu
-$script:NotifyIcon.add_DoubleClick({ Open-Url "http://127.0.0.1:3000" })
+$script:NotifyIcon.add_DoubleClick({ Open-Url $script:DashboardUrl })
 
 $script:Timer = New-Object System.Windows.Forms.Timer
 $script:Timer.Interval = 5000
 $script:Timer.add_Tick({
     $backendHttp = Test-HttpOk "http://127.0.0.1:8300/api/system/health"
-    $frontendHttp = Test-HttpOk "http://127.0.0.1:3000"
+    $frontendHttp = Test-HttpOk $script:DashboardUrl
     $backendProc = Test-ProcessRunning $script:BackendProcess
     $frontendProc = Test-ProcessRunning $script:FrontendProcess
 
@@ -453,7 +506,7 @@ $script:Timer.add_Tick({
         $backendHttp -and
         $frontendHttp) {
         $script:DashboardAutoOpened = $true
-        Open-Url "http://127.0.0.1:3000"
+        Open-Url $script:DashboardUrl
     }
 })
 

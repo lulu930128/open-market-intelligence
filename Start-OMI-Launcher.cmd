@@ -2,7 +2,7 @@
 setlocal
 
 set "ROOT=%~dp0"
-set "SCRIPT=%ROOT%scripts\omi-launcher.ps1"
+set "SCRIPT=%ROOT%scripts\start-omi-launcher-hidden.vbs"
 
 if not exist "%SCRIPT%" (
   echo Missing launcher script: %SCRIPT%
@@ -10,6 +10,7 @@ if not exist "%SCRIPT%" (
   exit /b 1
 )
 
-start "Open Market Intelligence Launcher" powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "%SCRIPT%"
+"%SystemRoot%\System32\wscript.exe" "%SCRIPT%"
 
 endlocal
+exit /b 0

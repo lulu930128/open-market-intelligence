@@ -2,6 +2,7 @@ param(
     [string]$Version = "1.0.0",
     [string]$PythonVersion = "3.12.3",
     [switch]$IncludeSeedData,
+    [switch]$SkipStockMasterSeed,
     [switch]$SkipFrontendBuild
 )
 
@@ -207,6 +208,16 @@ function Copy-AppFiles {
             -Destination (Join-Path $dataTarget "open_market_intelligence.db")
     }
 
+    $seedDescription = if ($IncludeSeedData) {
+        "- The package includes the current local SQLite database as seed data."
+    }
+    elseif (-not $SkipStockMasterSeed) {
+        "- The package includes a lightweight stock master seed so stock search works on first launch."
+    }
+    else {
+        "- No seed database is included. Users must import or sync market data before searching stocks."
+    }
+
     @"
 Open Market Intelligence - Taiwan Market Watchstation
 Version: $Version
@@ -228,10 +239,51 @@ Runtime and data:
 - Logs and the writable SQLite database are stored under:
   %LOCALAPPDATA%\Open Market Intelligence
 - The package folder itself is treated as read-only application files.
+$seedDescription
 
 If Windows blocks the script, right click Start-OMI-Launcher.cmd and choose Run anyway,
 or run it from PowerShell after unblocking the downloaded zip.
 "@ | Set-Content -LiteralPath (Join-Path $packageRoot "README-FIRST.txt") -Encoding UTF8
+}
+
+function New-StockMasterSeedData {
+    param([Parameter(Mandatory = $true)][string]$PythonExe)
+
+    if ($IncludeSeedData) {
+        Write-Host "Full seed database requested; skipping lightweight stock master seed."
+        return
+    }
+
+    if ($SkipStockMasterSeed) {
+        Write-Host "Lightweight stock master seed disabled."
+        return
+    }
+
+    $sourceDb = Join-Path $repoRoot "data\open_market_intelligence.db"
+    $targetDb = Join-Path $packageRoot "data\open_market_intelligence.db"
+    $seedScript = Join-Path $repoRoot "scripts\stock-master-seed.py"
+
+    if (-not (Test-Path -LiteralPath $sourceDb)) {
+        throw "Missing source database for stock master seed: $sourceDb"
+    }
+
+    if (-not (Test-Path -LiteralPath $seedScript)) {
+        throw "Missing stock master seed script: $seedScript"
+    }
+
+    Invoke-Logged `
+        -FilePath $PythonExe `
+        -Arguments @(
+            $seedScript,
+            "create",
+            "--source-db",
+            $sourceDb,
+            "--target-db",
+            $targetDb,
+            "--require-stock",
+            "2330"
+        ) `
+        -WorkingDirectory $repoRoot
 }
 
 function Write-ReleaseManifest {
@@ -243,6 +295,7 @@ function Write-ReleaseManifest {
         commit = Get-GitCommit
         python_version = $PythonVersion
         include_seed_data = [bool]$IncludeSeedData
+        stock_master_seed = [bool]((-not $IncludeSeedData) -and (-not $SkipStockMasterSeed))
         frontend_mode = "next-standalone"
         backend_mode = "python-embeddable"
     }
@@ -275,6 +328,7 @@ Build-FrontendStandalone
 Copy-AppFiles
 $pythonExe = Ensure-PythonRuntime
 $nodeExe = Copy-NodeRuntime
+New-StockMasterSeedData -PythonExe $pythonExe
 Write-ReleaseManifest
 Test-PackagedRuntime -PythonExe $pythonExe -NodeExe $nodeExe
 
