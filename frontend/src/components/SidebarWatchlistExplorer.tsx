@@ -116,6 +116,11 @@ function formatDateParam(value: Date) {
 }
 
 const WATCHLIST_REFRESH_LOOKBACK_YEARS = 8;
+const PINNED_INDEX_GROUP_NAME = "加權指數";
+const PINNED_INDEX_ITEMS = [
+  { stockId: "TAIEX", stockName: "加權指數", note: "TWSE" },
+  { stockId: "TPEX", stockName: "櫃買指數", note: "TPEx" },
+];
 
 function yearsAgo(years: number) {
   const value = new Date();
@@ -142,6 +147,7 @@ export default function SidebarWatchlistExplorer({
   const [tree, setTree] = useState<WatchlistGroupNode[]>(initialTree);
   const [items, setItems] = useState<WatchlistItemRead[]>(initialItems);
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
+  const [indexGroupExpanded, setIndexGroupExpanded] = useState(true);
   const [loading, setLoading] = useState(false);
   const [refreshingMarketData, setRefreshingMarketData] = useState(false);
   const [message, setMessage] = useState<Message>(null);
@@ -854,6 +860,78 @@ export default function SidebarWatchlistExplorer({
     void createStockItem();
   }
 
+  function renderPinnedIndexGroup() {
+    const selected = PINNED_INDEX_ITEMS.some((item) => item.stockId === selectedStockId);
+
+    return (
+      <div>
+        <div
+          className={[
+            "relative flex cursor-pointer items-center gap-1 py-1 pr-1 text-sm",
+            selected ? "bg-red-700 text-white" : "text-slate-700 hover:bg-slate-100",
+          ].join(" ")}
+          style={{ paddingLeft: "4px" }}
+          onClick={() => setIndexGroupExpanded((previous) => !previous)}
+        >
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              setIndexGroupExpanded((previous) => !previous);
+            }}
+            className={[
+              "h-6 w-4 text-xs",
+              selected ? "text-white" : "text-slate-500",
+            ].join(" ")}
+            aria-label="切換加權指數資料夾"
+          >
+            {indexGroupExpanded ? "v" : ">"}
+          </button>
+
+          <div className="min-w-0 flex-1 text-left">
+            <div className="truncate font-semibold">{PINNED_INDEX_GROUP_NAME}</div>
+          </div>
+
+          <span className={selected ? "pr-2 text-xs text-red-100" : "pr-2 text-xs text-slate-400"}>
+            {PINNED_INDEX_ITEMS.length}
+          </span>
+        </div>
+
+        {indexGroupExpanded ? (
+          <div>
+            {PINNED_INDEX_ITEMS.map((item) => {
+              const itemSelected = item.stockId === selectedStockId;
+
+              return (
+                <button
+                  key={item.stockId}
+                  type="button"
+                  className={[
+                    "group relative flex w-full cursor-pointer items-center gap-1 py-1.5 pr-2 text-left text-xs",
+                    itemSelected
+                      ? "bg-slate-900 text-white"
+                      : "text-slate-700 hover:bg-slate-100",
+                  ].join(" ")}
+                  style={{ paddingLeft: "24px" }}
+                  onClick={() => onSelectStock(item.stockId, item.stockName)}
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate font-semibold">
+                      {item.stockId} {item.stockName}
+                    </div>
+                    <div className={itemSelected ? "truncate text-slate-300" : "truncate text-slate-400"}>
+                      {item.note}
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
   function renderGroupNode(node: WatchlistGroupNode, depth = 0) {
     const selected = node.id === selectedGroupId;
     const expanded = expandedIds.has(node.id);
@@ -1094,6 +1172,7 @@ export default function SidebarWatchlistExplorer({
             移到最外層
           </div>
         ) : null}
+        {renderPinnedIndexGroup()}
         {tree.length > 0 ? (
           tree.map((node) => renderGroupNode(node))
         ) : (

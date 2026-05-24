@@ -30,6 +30,12 @@ import type {
   InstitutionalHoldingRatioRead,
   InstitutionalTradeDailyRead,
   MarginTradingDailyRead,
+  MarketIndexContributionItem,
+  MarketIndexContributionResponse,
+  MarketIndexListItem,
+  MarketIndexListResponse,
+  MarketIndexSnapshot,
+  MarketIndexSummary,
   MonthlyRevenueRead,
   OhlcChartResponse,
   ShareholdingDistributionWeeklyRead,
@@ -51,6 +57,7 @@ type Props = {
   initialChartData?: ChartPoint[];
   initialIndicatorData?: StockIndicatorPoint[];
   watchlistRankingPanel?: ReactNode;
+  marketIndexSummary?: MarketIndexSummary | null;
 };
 
 type Timeframe = "today" | "daily" | "weekly" | "monthly";
@@ -165,6 +172,30 @@ const chartBarsByTimeframe: Record<Exclude<Timeframe, "today">, number> = {
   weekly: 520,
   monthly: 132,
 };
+const allTimeframes = Object.keys(timeframeLabels) as Timeframe[];
+const indexTimeframes: Timeframe[] = ["today", "daily", "weekly", "monthly"];
+const indexProducts = new Map([
+  [
+    "TAIEX",
+    {
+      indexId: "TAIEX",
+      stockId: "TAIEX",
+      stockName: "加權指數",
+      market: "TWSE",
+      symbol: "^TWII",
+    },
+  ],
+  [
+    "TPEX",
+    {
+      indexId: "TPEX",
+      stockId: "TPEX",
+      stockName: "櫃買指數",
+      market: "TPEX",
+      symbol: "^TWOII",
+    },
+  ],
+]);
 
 type IndicatorTemplateKey = "basic" | "short" | "trend" | "swing" | "flow";
 
@@ -267,9 +298,30 @@ function formatPrice(value: number | null | undefined) {
   });
 }
 
+function formatSignedPrice(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "-";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${formatPrice(value)}`;
+}
+
 function formatNumber(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
   return new Intl.NumberFormat("zh-TW").format(Math.round(value));
+}
+
+function formatTradeValueYi(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "-";
+
+  return (value / 100_000_000).toLocaleString("zh-TW", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  });
+}
+
+function formatContributionPoint(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "-";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toFixed(4)}`;
 }
 
 function formatSignedNumber(value: number | null | undefined) {
@@ -447,6 +499,48 @@ function looksLikeEtfStockId(stockId: string | null | undefined) {
   return Boolean(stockId?.startsWith("00"));
 }
 
+function averageRecentChartValue(
+  points: ChartPoint[],
+  key: "close" | "volume",
+  windowSize: number
+) {
+  const values = points
+    .slice(-windowSize)
+    .map((point) => point[key])
+    .filter((value): value is number => value !== null && value !== undefined);
+
+  if (values.length < windowSize) return null;
+
+  return values.reduce((total, value) => total + value, 0) / values.length;
+}
+
+function summarizeIntradayPoints(points: IntradayTrendPoint[]) {
+  const validPoints = points.filter((point) => point.price !== null && point.price !== undefined);
+
+  if (validPoints.length === 0) {
+    return {
+      open: null,
+      high: null,
+      low: null,
+      volume: null,
+    };
+  }
+
+  const firstPoint = validPoints[0];
+  const highs = validPoints.map((point) => point.high ?? point.price);
+  const lows = validPoints.map((point) => point.low ?? point.price);
+  const volumes = validPoints
+    .map((point) => point.volume)
+    .filter((value): value is number => value !== null && value !== undefined);
+
+  return {
+    open: firstPoint.open ?? firstPoint.price,
+    high: Math.max(...highs),
+    low: Math.min(...lows),
+    volume: volumes.length > 0 ? volumes.reduce((total, value) => total + value, 0) : null,
+  };
+}
+
 function TechnicalBar({ label, value }: { label: string; value: number | null }) {
   const displayValue = value === null ? 0 : Math.max(-12, Math.min(12, value));
   const width = `${Math.abs(displayValue / 12) * 50}%`;
@@ -466,6 +560,290 @@ function TechnicalBar({ label, value }: { label: string; value: number | null })
             isPositive ? "left-1/2 bg-red-500" : "right-1/2 bg-emerald-500",
           ].join(" ")}
           style={{ width }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function marketRegimeLabel(index: MarketIndexSnapshot | null | undefined) {
+  if (!index || index.close === null || index.close === undefined) return "資料不足";
+
+  if (index.price_vs_ma20 !== null && index.price_vs_ma20 !== undefined) {
+    if (index.price_vs_ma20 > 1) return "站上 MA20";
+    if (index.price_vs_ma20 < -1) return "跌破 MA20";
+  }
+
+  if (index.change_pct !== null && index.change_pct !== undefined) {
+    if (index.change_pct > 0) return "短線偏多";
+    if (index.change_pct < 0) return "短線偏弱";
+  }
+
+  return "中性震盪";
+}
+
+function MarketIndexRow({ index }: { index: MarketIndexSnapshot | null | undefined }) {
+  return (
+    <div className="flex items-center justify-between gap-3 border-t border-slate-100 py-2 text-xs">
+      <div>
+        <div className="font-semibold text-slate-800">{index?.short_label ?? "-"}</div>
+        <div className="mt-0.5 text-slate-500">{marketRegimeLabel(index)}</div>
+      </div>
+      <div className="text-right">
+        <div className="font-semibold text-slate-950">{formatPrice(index?.close)}</div>
+        <div className={valueTone(index?.change_pct)}>{formatPct(index?.change_pct)}</div>
+      </div>
+    </div>
+  );
+}
+
+function IndexListPanel({
+  items,
+  loadState,
+  marketLabel,
+}: {
+  items: MarketIndexListItem[];
+  loadState: LoadState;
+  marketLabel: string;
+}) {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="border-b border-slate-200 px-5 py-4">
+        <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+          Market
+        </div>
+        <div className="mt-2 flex items-end justify-between gap-4">
+          <div>
+            <div className="text-xl font-bold text-slate-950">{marketLabel}指數列表</div>
+            <div className="mt-1 text-xs text-slate-500">
+              {loadState === "loading" ? "讀取中" : `${items.length} 檔指數`}
+            </div>
+          </div>
+          <div className="text-right text-xs font-semibold text-slate-500">
+            {marketLabel}
+          </div>
+        </div>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-3">
+        {items.length > 0 ? (
+          items.map((item) => (
+            <div
+              key={`${item.market}-${item.rank}-${item.name}`}
+              className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 border-t border-slate-100 py-2 text-sm first:border-t-0"
+            >
+              <div className="min-w-0">
+                <div className="truncate font-semibold text-slate-900">
+                  {item.rank}. {item.name}
+                </div>
+                <div className="mt-0.5 text-xs text-slate-500">
+                  {item.trade_date ?? "-"}
+                </div>
+              </div>
+              <div className="text-right font-semibold text-slate-950">
+                {formatPrice(item.close)}
+              </div>
+              <div className={`min-w-20 text-right font-semibold ${valueTone(item.change_pct)}`}>
+                <div>{formatPct(item.change_pct)}</div>
+                <div className="text-xs font-medium">{formatSignedPrice(item.change)}</div>
+              </div>
+            </div>
+          ))
+        ) : (
+          <div className="py-10 text-center text-sm text-slate-500">
+            {loadState === "loading" ? "讀取中" : "尚無指數列表資料"}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function IndexDetailDataPanel({
+  index,
+  timeframe,
+  latestChart,
+  todayStats,
+  todayPreviousClose,
+  contributions,
+  contributionLoadState,
+}: {
+  index: MarketIndexSnapshot | null;
+  timeframe: Timeframe;
+  latestChart: ChartPoint | null;
+  todayStats: ReturnType<typeof summarizeIntradayPoints>;
+  todayPreviousClose: number | null;
+  contributions: MarketIndexContributionResponse | null;
+  contributionLoadState: LoadState;
+}) {
+  const isToday = timeframe === "today";
+  const breadth = index?.breadth ?? null;
+  const open = isToday
+    ? todayStats.open ?? index?.open ?? latestChart?.open ?? null
+    : latestChart?.open ?? index?.open ?? null;
+  const high = isToday
+    ? todayStats.high ?? index?.high ?? latestChart?.high ?? null
+    : latestChart?.high ?? index?.high ?? null;
+  const low = isToday
+    ? todayStats.low ?? index?.low ?? latestChart?.low ?? null
+    : latestChart?.low ?? index?.low ?? null;
+  const reference = todayPreviousClose ?? index?.previous_close ?? null;
+  const tradeValue = index?.trade_value ?? breadth?.trade_value ?? latestChart?.trade_value ?? null;
+  const estimatedTradeValue = index?.estimated_trade_value ?? tradeValue;
+
+  return (
+    <section className="border border-slate-200 bg-white">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+            Index Data
+          </div>
+          <div className="mt-1 text-lg font-bold text-slate-950">指數詳細數據</div>
+        </div>
+        <div className="text-right text-xs text-slate-500">
+          更新 {formatDateTime(index?.as_of)}
+        </div>
+      </div>
+
+      <div className="grid gap-2 border-b border-slate-200 p-5 sm:grid-cols-2 xl:grid-cols-4">
+        <IndexMetricCard
+          label="開盤"
+          value={formatPrice(open)}
+          tone={valueTone(open !== null && reference !== null ? open - reference : null)}
+        />
+        <IndexMetricCard
+          label="最高"
+          value={formatPrice(high)}
+          tone={valueTone(high !== null && reference !== null ? high - reference : null)}
+        />
+        <IndexMetricCard
+          label="最低"
+          value={formatPrice(low)}
+          tone={valueTone(low !== null && reference !== null ? low - reference : null)}
+        />
+        <IndexMetricCard label="參考" value={formatPrice(reference)} />
+        <IndexMetricCard label="成交金額(億)" value={formatTradeValueYi(tradeValue)} />
+        <IndexMetricCard label="估計金額(億)" value={formatTradeValueYi(estimatedTradeValue)} />
+        <IndexMetricCard label="上漲家" value={formatNumber(breadth?.advance_count)} tone="text-red-600" />
+        <IndexMetricCard label="下跌家" value={formatNumber(breadth?.decline_count)} tone="text-emerald-600" />
+        <IndexMetricCard label="漲停家" value={formatNumber(breadth?.limit_up_count)} tone="text-red-600" />
+        <IndexMetricCard label="跌停家" value={formatNumber(breadth?.limit_down_count)} tone="text-emerald-600" />
+        <IndexMetricCard label="平盤家" value={formatNumber(breadth?.unchanged_count)} />
+        <IndexMetricCard label="總家數" value={formatNumber(breadth?.total_count)} />
+      </div>
+
+      <IndexContributionRanking
+        contributions={contributions}
+        loadState={contributionLoadState}
+      />
+
+      <div className="px-5 py-3 text-xs text-slate-500">
+        {breadth?.source
+          ? `市場廣度來源 ${breadth.source}；貢獻排行為估算值`
+          : "市場廣度待資料更新"}
+      </div>
+    </section>
+  );
+}
+
+function IndexMetricCard({
+  label,
+  value,
+  tone = "text-slate-900",
+}: {
+  label: string;
+  value: string;
+  tone?: string;
+}) {
+  return (
+    <div className="border border-slate-200 bg-slate-50 px-3 py-2">
+      <div className="text-xs font-semibold text-slate-500">{label}</div>
+      <div className={`mt-1 text-base font-bold ${tone}`}>{value}</div>
+    </div>
+  );
+}
+
+function ContributionColumn({
+  title,
+  items,
+  tone,
+}: {
+  title: string;
+  items: MarketIndexContributionItem[];
+  tone: string;
+}) {
+  return (
+    <div className="min-w-0">
+      <div className="mb-2 text-xs font-bold uppercase tracking-[0.14em] text-slate-500">
+        {title}
+      </div>
+      <div className="overflow-hidden border border-slate-200">
+        {items.length > 0 ? (
+          items.map((item) => (
+            <div
+              key={`${title}-${item.stock_id}`}
+              className="grid grid-cols-[34px_minmax(0,1fr)_82px_88px] items-center border-b border-slate-100 px-3 py-2 text-xs last:border-b-0"
+            >
+              <div className="text-slate-500">#{item.rank}</div>
+              <div className="min-w-0">
+                <div className="truncate font-semibold text-slate-950">
+                  {item.stock_id} {item.stock_name ?? ""}
+                </div>
+                <div className="mt-0.5 text-slate-500">
+                  {formatPrice(item.close)} / {formatPct(item.change_pct)}
+                </div>
+              </div>
+              <div className={`text-right font-bold ${tone}`}>
+                {formatContributionPoint(item.contribution_points)}
+              </div>
+              <div className="text-right text-slate-600">
+                {formatTradeValueYi(item.trade_value)}
+              </div>
+            </div>
+          ))
+        ) : (
+          <div className="px-3 py-8 text-center text-sm text-slate-500">尚無資料</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function IndexContributionRanking({
+  contributions,
+  loadState,
+}: {
+  contributions: MarketIndexContributionResponse | null;
+  loadState: LoadState;
+}) {
+  return (
+    <div className="border-b border-slate-200 px-5 py-4">
+      <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+            Contribution
+          </div>
+          <div className="mt-1 text-base font-bold text-slate-950">個股貢獻排行</div>
+        </div>
+        <div className="text-right text-xs text-slate-500">
+          {loadState === "loading"
+            ? "讀取中"
+            : contributions?.trade_date
+              ? `${contributions.trade_date} · 點數估算`
+              : "點數估算"}
+        </div>
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-2">
+        <ContributionColumn
+          title="正貢獻"
+          items={contributions?.positive ?? []}
+          tone="text-red-600"
+        />
+        <ContributionColumn
+          title="負貢獻"
+          items={contributions?.negative ?? []}
+          tone="text-emerald-600"
         />
       </div>
     </div>
@@ -1875,6 +2253,7 @@ export default function StockDetailPanel({
   initialChartData = [],
   initialIndicatorData = [],
   watchlistRankingPanel,
+  marketIndexSummary,
 }: Props) {
   const [timeframe, setTimeframe] = useState<Timeframe>("daily");
   const [indicatorMenuOpen, setIndicatorMenuOpen] = useState(false);
@@ -1920,6 +2299,12 @@ export default function StockDetailPanel({
   const [earningsView, setEarningsView] = useState<EarningsView>("quarterly");
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [indexList, setIndexList] = useState<MarketIndexListItem[]>([]);
+  const [indexListLoadState, setIndexListLoadState] = useState<LoadState>("idle");
+  const [indexContributions, setIndexContributions] =
+    useState<MarketIndexContributionResponse | null>(null);
+  const [indexContributionLoadState, setIndexContributionLoadState] =
+    useState<LoadState>("idle");
   const finalIntradayRefreshDate = useRef<string | null>(null);
   const activeStockIdRef = useRef<string | null>(stockId);
   const activeDataTabRef = useRef<DataPanelTab>(activeDataTab);
@@ -1927,6 +2312,12 @@ export default function StockDetailPanel({
   const dataPanelRequestKeyRef = useRef<string | null>(null);
   const dataPanelResolvedKeysRef = useRef<Set<string>>(new Set());
   const branchSummaryCacheRef = useRef<Map<string, BrokerBranchTradeDailySummaryRead>>(new Map());
+  const indexProduct = stockId ? indexProducts.get(stockId) ?? null : null;
+  const isIndexProduct = indexProduct !== null;
+  const effectiveTimeframe = timeframe;
+  const availableTimeframes = isIndexProduct ? indexTimeframes : allTimeframes;
+  const indexMarket = indexProduct?.market ?? null;
+  const indexId = indexProduct?.indexId ?? null;
 
   useEffect(() => {
     activeStockIdRef.current = stockId;
@@ -1939,6 +2330,83 @@ export default function StockDetailPanel({
   useEffect(() => {
     branchDaysRef.current = branchDays;
   }, [branchDays]);
+
+  useEffect(() => {
+    if (!isIndexProduct || !indexMarket) {
+      return;
+    }
+
+    let cancelled = false;
+    const market = indexMarket;
+
+    async function loadIndexList() {
+      setIndexList([]);
+      setIndexListLoadState("loading");
+
+      try {
+        const response = await fetchJson<MarketIndexListResponse>(
+          "/api/market/indices/list",
+          {
+            market,
+            limit: 80,
+          }
+        );
+
+        if (cancelled) return;
+
+        setIndexList(response.items);
+        setIndexListLoadState("success");
+      } catch {
+        if (cancelled) return;
+
+        setIndexList([]);
+        setIndexListLoadState("error");
+      }
+    }
+
+    void loadIndexList();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [indexMarket, isIndexProduct]);
+
+  useEffect(() => {
+    if (!isIndexProduct || !indexId) {
+      return;
+    }
+
+    let cancelled = false;
+    const currentIndexId = indexId;
+
+    async function loadIndexContributions() {
+      setIndexContributions(null);
+      setIndexContributionLoadState("loading");
+
+      try {
+        const response = await fetchJson<MarketIndexContributionResponse>(
+          `/api/market/indices/${currentIndexId}/contributions`,
+          { limit: 20 }
+        );
+
+        if (cancelled) return;
+
+        setIndexContributions(response);
+        setIndexContributionLoadState("success");
+      } catch {
+        if (cancelled) return;
+
+        setIndexContributions(null);
+        setIndexContributionLoadState("error");
+      }
+    }
+
+    void loadIndexContributions();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [indexId, isIndexProduct]);
 
   function toggleChartIndicator(key: IndicatorKey) {
     setActiveIndicatorTemplate(null);
@@ -2016,6 +2484,30 @@ export default function StockDetailPanel({
         setRevenueYear(null);
         setLoadState("idle");
         setErrorMessage(null);
+      }, 0);
+
+      return () => window.clearTimeout(timer);
+    }
+
+    if (isIndexProduct) {
+      const timer = window.setTimeout(() => {
+        setInstitutional(null);
+        setInstitutionalHistory([]);
+        setMargin(null);
+        setBrokerBranchSummary(null);
+        setShareholding([]);
+        setMonthlyRevenue(null);
+        setMonthlyRevenueHistory([]);
+        setFinancialMetric(null);
+        setFinancialMetricHistory([]);
+        setStockInfo(null);
+        setInstitutionalHoldingRatio(null);
+        setActiveDataTab("chips");
+        setDataPanelLoading(null);
+        setDataPanelMessage(null);
+        setInstitutionalHoverDate(null);
+        setBranchDays(1);
+        setRevenueYear(null);
       }, 0);
 
       return () => window.clearTimeout(timer);
@@ -2183,7 +2675,7 @@ export default function StockDetailPanel({
       cancelled = true;
       window.clearTimeout(resetTimer);
     };
-  }, [stockId]);
+  }, [isIndexProduct, stockId]);
 
   useEffect(() => {
     if (!stockId) return;
@@ -2211,7 +2703,9 @@ export default function StockDetailPanel({
 
       try {
         const today = await fetchJson<IntradayTrendResponse>(
-          `/api/market/intraday/${stockId}`
+          isIndexProduct
+            ? `/api/market/indices/${stockId}/intraday`
+            : `/api/market/intraday/${stockId}`
         );
 
         if (cancelled) return;
@@ -2262,7 +2756,7 @@ export default function StockDetailPanel({
     }
 
     async function loadChart() {
-      if (timeframe === "today") {
+      if (effectiveTimeframe === "today") {
         await loadTodayTrend(true);
 
         if (!cancelled) {
@@ -2282,20 +2776,28 @@ export default function StockDetailPanel({
       setErrorMessage(null);
 
       try {
-        const chartBars = chartBarsByTimeframe[timeframe];
-        const ohlc = await fetchJson<OhlcChartResponse>(`/api/market/ohlc/${stockId}`, {
-          timeframe,
-          bars: chartBars,
-          ensure_history: false,
-        });
-        const indicators = await fetchJson<StockIndicatorPoint[]>(
-          `/api/market/indicators/${stockId}/daily`,
+        const chartBars = chartBarsByTimeframe[effectiveTimeframe];
+        const ohlc = await fetchJson<OhlcChartResponse>(
+          isIndexProduct
+            ? `/api/market/indices/${stockId}/ohlc`
+            : `/api/market/ohlc/${stockId}`,
           {
-            limit: 3000,
-            ma_windows: "5,20,60",
-            volume_ma_windows: "5,20",
+            timeframe: effectiveTimeframe,
+            bars: chartBars,
+            ensure_history: false,
           }
         );
+        const indicators =
+          isIndexProduct
+            ? []
+            : await fetchJson<StockIndicatorPoint[]>(
+                `/api/market/indicators/${stockId}/daily`,
+                {
+                  limit: 3000,
+                  ma_windows: "5,20,60",
+                  volume_ma_windows: "5,20",
+                }
+              );
 
         if (cancelled) return;
 
@@ -2315,18 +2817,20 @@ export default function StockDetailPanel({
       cancelled = true;
       clearIntradayTimer();
     };
-  }, [stockId, timeframe]);
+  }, [effectiveTimeframe, isIndexProduct, stockId]);
 
   const indicatorForTimeframe = useMemo(() => {
-    if (timeframe === "daily") return indicatorData.slice(-180);
+    if (effectiveTimeframe === "daily") return indicatorData.slice(-180);
     return [];
-  }, [indicatorData, timeframe]);
+  }, [effectiveTimeframe, indicatorData]);
 
   const latestIndicator = indicatorData[indicatorData.length - 1] ?? null;
   const latestChart = chartData[chartData.length - 1] ?? null;
+  const previousChart = chartData[chartData.length - 2] ?? null;
   const latestToday = todayTrend[todayTrend.length - 1] ?? null;
+  const todayStats = useMemo(() => summarizeIntradayPoints(todayTrend), [todayTrend]);
   const latestClose =
-    timeframe === "today"
+    effectiveTimeframe === "today"
       ? latestToday?.price ?? latestIndicator?.close ?? latestChart?.close ?? null
       : latestIndicator?.close ?? latestChart?.close ?? null;
   const dailyPreviousClose =
@@ -2337,25 +2841,55 @@ export default function StockDetailPanel({
       ? latestIndicator.close - latestIndicator.change
       : null;
   const todayReferenceClose = todayPreviousClose ?? dailyPreviousClose;
+  const chartChangePct =
+    latestChart?.close !== null &&
+    latestChart?.close !== undefined &&
+    previousChart?.close !== null &&
+    previousChart?.close !== undefined &&
+    previousChart.close !== 0
+      ? ((latestChart.close - previousChart.close) / previousChart.close) * 100
+      : null;
   const latestChangePct =
-    timeframe === "today" && latestToday && todayReferenceClose
+    effectiveTimeframe === "today" && latestToday && todayReferenceClose
       ? ((latestToday.price - todayReferenceClose) / todayReferenceClose) * 100
-      : latestIndicator?.change_pct ?? null;
-  const ma5 = latestIndicator?.ma?.ma5 ?? null;
-  const ma20 = latestIndicator?.ma?.ma20 ?? null;
-  const ma60 = latestIndicator?.ma?.ma60 ?? null;
-  const volumeMa20 = latestIndicator?.volume_ma?.volume_ma20 ?? null;
+      : latestIndicator?.change_pct ?? chartChangePct;
+  const ma5 = latestIndicator?.ma?.ma5 ?? averageRecentChartValue(chartData, "close", 5);
+  const ma20 = latestIndicator?.ma?.ma20 ?? averageRecentChartValue(chartData, "close", 20);
+  const ma60 = latestIndicator?.ma?.ma60 ?? averageRecentChartValue(chartData, "close", 60);
+  const volumeMa20 =
+    latestIndicator?.volume_ma?.volume_ma20 ?? averageRecentChartValue(chartData, "volume", 20);
   const priceVsMa20 =
     latestClose !== null && ma20 !== null && ma20 !== 0
       ? ((latestClose - ma20) / ma20) * 100
       : null;
-  const volumeRatio = safeRatio(latestIndicator?.volume, volumeMa20);
+  const latestVolume = latestIndicator?.volume ?? latestChart?.volume ?? null;
+  const volumeRatio = safeRatio(latestVolume, volumeMa20);
   const volumeRatioPct = volumeRatio === null ? null : (volumeRatio - 1) * 100;
   const totalInstitutionalNet = institutional?.total_institutional_net ?? null;
   const displayTime =
-    timeframe === "today" && latestToday
+    effectiveTimeframe === "today" && latestToday
       ? formatDateTime(latestToday.time)
       : latestIndicator?.time ?? latestChart?.time ?? "-";
+  const marketIndicesById = useMemo(() => {
+    return new Map(
+      (marketIndexSummary?.indices ?? []).map((index) => [index.index_id, index])
+    );
+  }, [marketIndexSummary]);
+  const taiexIndex = marketIndicesById.get("TAIEX") ?? null;
+  const tpexIndex = marketIndicesById.get("TPEX") ?? null;
+  const selectedIndexSnapshot =
+    indexProduct?.indexId === "TPEX" ? tpexIndex : taiexIndex;
+  const primaryMarketIndex =
+    indexProduct?.indexId === "TPEX" || stockInfo?.market === "TPEX"
+      ? tpexIndex
+      : taiexIndex;
+  const relativeToPrimaryIndex =
+    latestChangePct !== null &&
+    latestChangePct !== undefined &&
+    primaryMarketIndex?.change_pct !== null &&
+    primaryMarketIndex?.change_pct !== undefined
+      ? latestChangePct - primaryMarketIndex.change_pct
+      : null;
 
   const technicalStatus = useMemo(() => {
     if (latestClose === null) return "資料不足";
@@ -2797,11 +3331,12 @@ export default function StockDetailPanel({
   }
 
   function handleDataTabClick(tab: DataPanelTab) {
+    if (isIndexProduct) return;
     setActiveDataTab(tab);
   }
 
   useEffect(() => {
-    if (!stockId) return;
+    if (!stockId || isIndexProduct) return;
 
     const requestKey = dataPanelCacheKey(stockId, activeDataTab, branchDays);
     const cachedBranchSummary =
@@ -2839,7 +3374,7 @@ export default function StockDetailPanel({
     return () => window.clearTimeout(timer);
     // Populate the visible right-panel tab whenever the selected stock or tab changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stockId, activeDataTab, branchDays]);
+  }, [activeDataTab, branchDays, isIndexProduct, stockId]);
 
   if (!stockId) {
     return watchlistRankingPanel ? (
@@ -3644,13 +4179,16 @@ export default function StockDetailPanel({
           <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 px-5 py-4">
             <div>
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
-                Stock
+                {isIndexProduct ? "Index" : "Stock"}
               </div>
               <h2 className="mt-1 text-2xl font-bold text-slate-950">
-                {stockId} {stockName ?? stockInfo?.stock_name ?? ""}
+                {stockId} {indexProduct?.stockName ?? stockName ?? stockInfo?.stock_name ?? ""}
               </h2>
               <div className="mt-1 text-sm text-slate-500">
-                {stockInfo?.market ?? "-"} · {stockInfo?.industry ?? "未分類"} ·{" "}
+                {indexProduct
+                  ? `${indexProduct.market} · 指數 · ${indexProduct.symbol}`
+                  : `${stockInfo?.market ?? "-"} · ${stockInfo?.industry ?? "未分類"}`}{" "}
+                ·{" "}
                 {displayTime}
               </div>
             </div>
@@ -3667,14 +4205,14 @@ export default function StockDetailPanel({
 
               <div className="flex flex-col items-end gap-2">
                 <div className="flex border border-slate-200 bg-slate-50 p-1">
-                  {(Object.keys(timeframeLabels) as Timeframe[]).map((item) => (
+                  {availableTimeframes.map((item) => (
                     <button
                       key={item}
                       type="button"
                       onClick={() => setTimeframe(item)}
                       className={[
                         "h-8 min-w-12 px-3 text-sm font-semibold transition",
-                        timeframe === item
+                        effectiveTimeframe === item
                           ? "bg-red-700 text-white"
                           : "text-slate-600 hover:bg-white",
                       ].join(" ")}
@@ -3684,7 +4222,7 @@ export default function StockDetailPanel({
                   ))}
                 </div>
 
-                {timeframe === "today" ? (
+                {effectiveTimeframe === "today" ? (
                   <div className="relative">
                     <button
                       type="button"
@@ -3925,11 +4463,11 @@ export default function StockDetailPanel({
             </div>
           ) : null}
 
-          {timeframe === "today" ? (
+          {effectiveTimeframe === "today" ? (
             <IntradayTrendChart
               points={todayTrend}
               previousClose={todayPreviousClose}
-              label={timeframeLabels[timeframe]}
+              label={timeframeLabels[effectiveTimeframe]}
               source={todaySource}
               indicators={intradayIndicators}
               refreshIntervalMs={TAIWAN_INTRADAY_REFRESH_MS}
@@ -3939,19 +4477,43 @@ export default function StockDetailPanel({
             <StockKLineChart
               chartData={chartData}
               indicatorData={indicatorForTimeframe}
-              label={timeframeLabels[timeframe]}
+              label={timeframeLabels[effectiveTimeframe]}
               indicators={chartIndicators}
               indicatorParameters={indicatorParameters}
+              volumePanelLabel={isIndexProduct ? "成交金額(億)" : undefined}
+              volumeTooltipLabel={isIndexProduct ? "成交金額(億)" : undefined}
+              volumeValueKey={isIndexProduct ? "trade_value" : "volume"}
+              volumeValueFormatter={isIndexProduct ? formatTradeValueYi : undefined}
             />
           )}
         </div>
 
-        {watchlistRankingPanel ? <div className="min-w-0">{watchlistRankingPanel}</div> : null}
+        {isIndexProduct ? (
+          <IndexDetailDataPanel
+            index={selectedIndexSnapshot}
+            timeframe={effectiveTimeframe}
+            latestChart={latestChart}
+            todayStats={todayStats}
+            todayPreviousClose={todayPreviousClose}
+            contributions={indexContributions}
+            contributionLoadState={indexContributionLoadState}
+          />
+        ) : watchlistRankingPanel ? (
+          <div className="min-w-0">{watchlistRankingPanel}</div>
+        ) : null}
       </div>
 
       <aside
         className="flex min-w-0 flex-col border border-slate-200 bg-white"
       >
+        {isIndexProduct ? (
+          <IndexListPanel
+            items={indexList}
+            loadState={indexListLoadState}
+            marketLabel={indexProduct?.market === "TPEX" ? "上櫃" : "上市"}
+          />
+        ) : (
+          <>
           <div className="border-b border-slate-200 px-5 py-4">
             <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
               Technical
@@ -3982,6 +4544,34 @@ export default function StockDetailPanel({
               }
             />
 
+            <div className="border border-slate-200 bg-slate-50 px-3 py-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-xs font-bold uppercase tracking-[0.14em] text-slate-500">
+                    Market Context
+                  </div>
+                  <div className="mt-1 text-sm font-bold text-slate-950">市場環境</div>
+                </div>
+                <div className={`text-right text-sm font-bold ${valueTone(relativeToPrimaryIndex)}`}>
+                  {formatPct(relativeToPrimaryIndex)}
+                  <div className="text-[11px] font-medium text-slate-500">
+                    vs {primaryMarketIndex?.short_label ?? "大盤"}
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-2">
+                <MarketIndexRow index={primaryMarketIndex} />
+              </div>
+
+              <div className="mt-3 space-y-3">
+                <TechnicalBar
+                  label={`個股相對${primaryMarketIndex?.short_label ?? "大盤"}`}
+                  value={relativeToPrimaryIndex}
+                />
+              </div>
+            </div>
+
             <div className="grid grid-cols-3 border border-slate-200 text-center text-xs">
               <div className="px-2 py-3">
                 <div className="text-slate-500">MA5</div>
@@ -4005,7 +4595,10 @@ export default function StockDetailPanel({
               ))}
             </div>
           </div>
+          </>
+        )}
 
+          {!isIndexProduct ? (
           <div className="border-t border-slate-200">
             <div className="flex border-b border-slate-200">
               {dataPanelTabs.map((tab) => (
@@ -4039,6 +4632,7 @@ export default function StockDetailPanel({
               <div className="mt-4">{renderActiveDataTab()}</div>
             </div>
           </div>
+          ) : null}
 
           <div className="hidden">
             <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">

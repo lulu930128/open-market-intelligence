@@ -11,6 +11,8 @@ import {
 } from "@/lib/taiwanMarketTime";
 import type {
   ChartPoint,
+  MarketIndexSnapshot,
+  MarketIndexSummary,
   RankingItem,
   RankingResponse,
   StockIndicatorPoint,
@@ -28,6 +30,7 @@ type Props = {
   initialChartData: ChartPoint[];
   initialIndicatorData: StockIndicatorPoint[];
   initialRankingData: RankingResponse | null;
+  initialMarketIndexSummary: MarketIndexSummary | null;
 };
 
 function formatLots(value: number | null | undefined) {
@@ -44,10 +47,28 @@ function formatPrice(value: number | null | undefined) {
   });
 }
 
+function formatSignedNumber(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "-";
+  const sign = value > 0 ? "+" : "";
+
+  return `${sign}${value.toLocaleString("zh-TW", {
+    maximumFractionDigits: 2,
+  })}`;
+}
+
 function formatPct(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
   const sign = value > 0 ? "+" : "";
   return `${sign}${value.toFixed(2)}%`;
+}
+
+function formatTradeValueYi(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "-";
+
+  return (value / 100_000_000).toLocaleString("zh-TW", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 1,
+  });
 }
 
 function valueTone(value: number | null | undefined) {
@@ -239,6 +260,105 @@ function RankingSparkline({
   );
 }
 
+function marketRegimeLabel(index: MarketIndexSnapshot) {
+  if (index.close === null || index.close === undefined) return "資料不足";
+  if (index.price_vs_ma20 !== null && index.price_vs_ma20 !== undefined) {
+    if (index.price_vs_ma20 > 1) return "站上 MA20";
+    if (index.price_vs_ma20 < -1) return "跌破 MA20";
+  }
+
+  if (index.change_pct !== null && index.change_pct !== undefined) {
+    if (index.change_pct > 0) return "短線偏多";
+    if (index.change_pct < 0) return "短線偏弱";
+  }
+
+  return "中性震盪";
+}
+
+function MarketTape({
+  summary,
+  loadState,
+}: {
+  summary: MarketIndexSummary | null;
+  loadState: LoadState;
+}) {
+  const indices = summary?.indices ?? [];
+  const asOf = summary?.as_of ? formatDashboardTime(new Date(summary.as_of)) : null;
+
+  return (
+    <section className="mb-3 border border-slate-200 bg-white">
+      <div className="grid gap-px bg-slate-200 lg:grid-cols-2">
+        {indices.length > 0 ? (
+          indices.map((index) => {
+            const breadth = index.breadth;
+            const advanceRatio =
+              breadth && breadth.total_count > 0
+                ? (breadth.advance_count / breadth.total_count) * 100
+                : null;
+
+            return (
+              <div key={index.index_id} className="bg-white px-4 py-3">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
+                      Market
+                    </div>
+                    <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                      <span className="text-lg font-bold text-slate-950">{index.label}</span>
+                      <span className="text-2xl font-black text-slate-950">
+                        {formatPrice(index.close)}
+                      </span>
+                      <span className={`text-sm font-bold ${valueTone(index.change_pct)}`}>
+                        {formatSignedNumber(index.change)} / {formatPct(index.change_pct)}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="text-right text-xs">
+                    <div className="font-semibold text-slate-900">{marketRegimeLabel(index)}</div>
+                    <div className={valueTone(index.price_vs_ma20)}>
+                      {formatPct(index.price_vs_ma20)} vs MA20
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+                  <div className="border border-slate-100 bg-slate-50 px-2 py-2">
+                    <div className="text-slate-500">成交金額(億)</div>
+                    <div className="mt-1 font-semibold text-slate-900">
+                      {formatTradeValueYi(index.trade_value)}
+                    </div>
+                  </div>
+                  <div className="border border-slate-100 bg-slate-50 px-2 py-2">
+                    <div className="text-slate-500">上漲 / 下跌</div>
+                    <div className="mt-1 font-semibold">
+                      <span className="text-red-600">{breadth?.advance_count ?? "-"}</span>
+                      <span className="px-1 text-slate-400">/</span>
+                      <span className="text-emerald-600">{breadth?.decline_count ?? "-"}</span>
+                    </div>
+                  </div>
+                  <div className="border border-slate-100 bg-slate-50 px-2 py-2">
+                    <div className="text-slate-500">廣度</div>
+                    <div className={`mt-1 font-semibold ${valueTone((advanceRatio ?? 50) - 50)}`}>
+                      {advanceRatio === null ? "-" : `${advanceRatio.toFixed(0)}% 上漲`}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })
+        ) : (
+          <div className="bg-white px-4 py-3 text-sm text-slate-500">
+            {loadState === "loading" ? "市場指數載入中..." : "市場指數暫無資料"}
+          </div>
+        )}
+      </div>
+      <div className="border-t border-slate-200 px-4 py-2 text-xs text-slate-500">
+        {asOf ? `市場環境更新 ${asOf}` : "市場環境等待更新"}
+      </div>
+    </section>
+  );
+}
+
 function flattenGroups(nodes: WatchlistGroupNode[]): WatchlistGroupNode[] {
   return nodes.flatMap((node) => [node, ...flattenGroups(node.children)]);
 }
@@ -317,6 +437,7 @@ export default function MarketDashboardClient({
   initialChartData,
   initialIndicatorData,
   initialRankingData,
+  initialMarketIndexSummary,
 }: Props) {
   const initialSelectedGroup = useMemo(() => {
     return flattenGroups(initialTree).find((group) => group.id === initialSelectedGroupId) ?? null;
@@ -333,10 +454,15 @@ export default function MarketDashboardClient({
   const [watchlistItems, setWatchlistItems] = useState<WatchlistItemRead[]>(initialItems);
   const [rankBy, setRankBy] = useState<RankBy>("none");
   const [ranking, setRanking] = useState<RankingResponse | null>(initialRankingData);
+  const [marketIndexSummary, setMarketIndexSummary] =
+    useState<MarketIndexSummary | null>(initialMarketIndexSummary);
+  const [marketIndexLoadState, setMarketIndexLoadState] =
+    useState<LoadState>(initialMarketIndexSummary ? "success" : "idle");
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
   const dashboardRequestSeq = useRef(0);
+  const marketIndexRequestSeq = useRef(0);
   const finalDashboardRefreshDate = useRef<string | null>(null);
 
   const activeGroupId = selectedGroupId ?? selectedGroup?.id ?? null;
@@ -411,6 +537,58 @@ export default function MarketDashboardClient({
       setErrorMessage(error instanceof Error ? error.message : "資料讀取失敗");
     }
   }
+
+  async function loadMarketIndices(options?: { silent?: boolean }) {
+    const requestSeq = marketIndexRequestSeq.current + 1;
+    marketIndexRequestSeq.current = requestSeq;
+
+    if (!options?.silent) {
+      setMarketIndexLoadState("loading");
+    }
+
+    try {
+      const summaryData = await fetchJson<MarketIndexSummary>("/api/market/indices/summary");
+
+      if (marketIndexRequestSeq.current !== requestSeq) return;
+
+      setMarketIndexSummary(summaryData);
+      setMarketIndexLoadState("success");
+    } catch {
+      if (marketIndexRequestSeq.current !== requestSeq) return;
+
+      setMarketIndexLoadState("error");
+    }
+  }
+
+  useEffect(() => {
+    let disposed = false;
+    let refreshTimer: number | undefined;
+
+    function scheduleRefresh() {
+      if (disposed) return;
+
+      const marketState = getTaiwanMarketRefreshState();
+      const delay = marketState.isPollingWindow
+        ? TAIWAN_INTRADAY_REFRESH_MS
+        : Math.min(marketState.msUntilNextPollingStart, 300_000);
+
+      refreshTimer = window.setTimeout(() => {
+        void loadMarketIndices({ silent: true }).finally(scheduleRefresh);
+      }, delay);
+    }
+
+    const initialTimer = window.setTimeout(() => {
+      void loadMarketIndices().finally(scheduleRefresh);
+    }, 0);
+
+    return () => {
+      disposed = true;
+      window.clearTimeout(initialTimer);
+      if (refreshTimer !== undefined) {
+        window.clearTimeout(refreshTimer);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (activeGroupId === null) return;
@@ -546,36 +724,108 @@ export default function MarketDashboardClient({
     );
   }
 
-  const rankingPanel = (
+  const groupSummaryPanel = (
     <section className="border border-slate-200 bg-white">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-3">
-        <h3 className="text-sm font-bold text-slate-950">自選股列表</h3>
-        <span className="text-xs text-slate-500">
-          {loadState === "loading"
-            ? "載入中"
-            : rankBy === "none"
-              ? `${rows.length} 檔 · 正常排序`
-              : `${rows.length} 檔 · 依 ${rankLabel(ranking?.rank_by ?? rankBy)} 排序`}
-        </span>
+      <div className="flex flex-wrap items-start justify-between gap-4 px-5 py-4">
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+            Selected Group
+          </div>
+          <h2 className="mt-1 text-2xl font-bold text-slate-950">
+            {selectedGroup?.group_name ?? "尚未選擇分組"}
+          </h2>
+          <div className="mt-1 text-sm text-slate-500">
+            {lastUpdatedAt ? `更新時間 ${lastUpdatedAt}` : "選擇左側分組後載入資料"}
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <select
+            value={rankBy}
+            onChange={(event) => handleRankByChange(event.target.value as RankBy)}
+            className="h-9 border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-700 outline-none focus:border-red-700"
+          >
+            <option value="none">正常排序</option>
+            <option value="change_pct">漲幅</option>
+            <option value="score">Score</option>
+            <option value="volume">成交量</option>
+          </select>
+          <button
+            type="button"
+            onClick={() => {
+              void loadMarketIndices({ silent: true });
+              if (activeGroupId !== null) void loadDashboard(activeGroupId);
+            }}
+            className="h-9 bg-slate-900 px-4 text-sm font-semibold text-white hover:bg-slate-700 disabled:bg-slate-300"
+            disabled={activeGroupId === null || loadState === "loading"}
+          >
+            Reload
+          </button>
+        </div>
       </div>
 
-      <div className="grid grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] bg-slate-50 px-4 py-2 text-xs font-bold uppercase tracking-wide text-slate-500">
-        <span>名次</span>
-        <span>股票</span>
-        <span className="text-center">走勢</span>
-        <span className="text-right">收盤</span>
-        <span className="text-right">漲幅</span>
-        <span className="text-right">漲跌</span>
-        <span className="text-right">成交量(張)</span>
-      </div>
-      {rows.length > 0 ? (
-        rows.map(renderRankingRow)
-      ) : (
-        <div className="border-t border-slate-200 px-5 py-10 text-center text-sm text-slate-500">
-          尚無排行資料
+      {errorMessage ? (
+        <div className="border-t border-red-200 bg-red-50 px-5 py-3 text-sm text-red-700">
+          {errorMessage}
         </div>
-      )}
+      ) : null}
+
+      <div className="grid grid-cols-2 border-t border-slate-200 md:grid-cols-4">
+        <div className="px-5 py-3">
+          <div className="text-xs text-slate-500">股票數</div>
+          <div className="mt-1 text-xl font-bold">{summary.stockCount}</div>
+        </div>
+        <div className="border-l border-slate-200 px-5 py-3">
+          <div className="text-xs text-slate-500">上漲</div>
+          <div className="mt-1 text-xl font-bold text-red-600">{summary.upCount}</div>
+        </div>
+        <div className="border-l border-slate-200 px-5 py-3">
+          <div className="text-xs text-slate-500">下跌</div>
+          <div className="mt-1 text-xl font-bold text-emerald-600">{summary.downCount}</div>
+        </div>
+        <div className="border-l border-slate-200 px-5 py-3">
+          <div className="text-xs text-slate-500">排序</div>
+          <div className="mt-1 text-xl font-bold">
+            {rankLabel(ranking?.rank_by ?? rankBy)}
+          </div>
+        </div>
+      </div>
     </section>
+  );
+
+  const rankingPanel = (
+    <div className="space-y-4">
+      {groupSummaryPanel}
+      <section className="border border-slate-200 bg-white">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-3">
+          <h3 className="text-sm font-bold text-slate-950">自選股列表</h3>
+          <span className="text-xs text-slate-500">
+            {loadState === "loading"
+              ? "載入中"
+              : rankBy === "none"
+                ? `${rows.length} 檔 · 正常排序`
+                : `${rows.length} 檔 · 依 ${rankLabel(ranking?.rank_by ?? rankBy)} 排序`}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] bg-slate-50 px-4 py-2 text-xs font-bold uppercase tracking-wide text-slate-500">
+          <span>名次</span>
+          <span>股票</span>
+          <span className="text-center">走勢</span>
+          <span className="text-right">收盤</span>
+          <span className="text-right">漲幅</span>
+          <span className="text-right">漲跌</span>
+          <span className="text-right">成交量(張)</span>
+        </div>
+        {rows.length > 0 ? (
+          rows.map(renderRankingRow)
+        ) : (
+          <div className="border-t border-slate-200 px-5 py-10 text-center text-sm text-slate-500">
+            尚無排行資料
+          </div>
+        )}
+      </section>
+    </div>
   );
 
   return (
@@ -611,71 +861,7 @@ export default function MarketDashboardClient({
           />
 
           <section className="min-w-0 flex-1 overflow-y-auto p-4">
-            <div className="mb-4 border border-slate-200 bg-white">
-              <div className="flex flex-wrap items-start justify-between gap-4 px-5 py-4">
-                <div>
-                  <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
-                    Selected Group
-                  </div>
-                  <h2 className="mt-1 text-2xl font-bold text-slate-950">
-                    {selectedGroup?.group_name ?? "尚未選擇分組"}
-                  </h2>
-                  <div className="mt-1 text-sm text-slate-500">
-                    {lastUpdatedAt ? `更新時間 ${lastUpdatedAt}` : "選擇左側分組後載入資料"}
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <select
-                    value={rankBy}
-                    onChange={(event) => handleRankByChange(event.target.value as RankBy)}
-                    className="h-9 border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-700 outline-none focus:border-red-700"
-                  >
-                    <option value="none">正常排序</option>
-                    <option value="change_pct">漲幅</option>
-                    <option value="score">Score</option>
-                    <option value="volume">成交量</option>
-                  </select>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (activeGroupId !== null) void loadDashboard(activeGroupId);
-                    }}
-                    className="h-9 bg-slate-900 px-4 text-sm font-semibold text-white hover:bg-slate-700 disabled:bg-slate-300"
-                    disabled={activeGroupId === null || loadState === "loading"}
-                  >
-                    Reload
-                  </button>
-                </div>
-              </div>
-
-              {errorMessage ? (
-                <div className="border-t border-red-200 bg-red-50 px-5 py-3 text-sm text-red-700">
-                  {errorMessage}
-                </div>
-              ) : null}
-
-              <div className="grid grid-cols-2 border-t border-slate-200 md:grid-cols-4">
-                <div className="px-5 py-3">
-                  <div className="text-xs text-slate-500">股票數</div>
-                  <div className="mt-1 text-xl font-bold">{summary.stockCount}</div>
-                </div>
-                <div className="border-l border-slate-200 px-5 py-3">
-                  <div className="text-xs text-slate-500">上漲</div>
-                  <div className="mt-1 text-xl font-bold text-red-600">{summary.upCount}</div>
-                </div>
-                <div className="border-l border-slate-200 px-5 py-3">
-                  <div className="text-xs text-slate-500">下跌</div>
-                  <div className="mt-1 text-xl font-bold text-emerald-600">{summary.downCount}</div>
-                </div>
-                <div className="border-l border-slate-200 px-5 py-3">
-                  <div className="text-xs text-slate-500">排序</div>
-                  <div className="mt-1 text-xl font-bold">
-                    {rankLabel(ranking?.rank_by ?? rankBy)}
-                  </div>
-                </div>
-              </div>
-            </div>
+            <MarketTape summary={marketIndexSummary} loadState={marketIndexLoadState} />
 
             <StockDetailPanel
               stockId={selectedStockId}
@@ -683,6 +869,7 @@ export default function MarketDashboardClient({
               initialChartData={initialChartData}
               initialIndicatorData={initialIndicatorData}
               watchlistRankingPanel={rankingPanel}
+              marketIndexSummary={marketIndexSummary}
             />
           </section>
         </div>

@@ -1,6 +1,7 @@
 import MarketDashboardClient from "@/components/MarketDashboardClient";
 import type {
   ChartPoint,
+  MarketIndexSummary,
   StockIndicatorPoint,
   WatchlistGroupNode,
   WatchlistItemRead,
@@ -31,9 +32,10 @@ export default async function Page({
   searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const resolvedSearchParams = await searchParams;
-  const [initialTree, initialItems] = await Promise.all([
+  const [initialTree, initialItems, initialMarketIndexSummary] = await Promise.all([
     fetchBackendJson<WatchlistGroupNode[]>("/api/watchlists/tree", []),
     fetchBackendJson<WatchlistItemRead[]>("/api/watchlists/items?limit=5000&offset=0", []),
+    fetchBackendJson<MarketIndexSummary | null>("/api/market/indices/summary", null),
   ]);
 
   const groupIdParam = resolvedSearchParams?.group_id;
@@ -54,6 +56,7 @@ export default async function Page({
       initialChartData={initialChartData}
       initialIndicatorData={initialIndicatorData}
       initialRankingData={null}
+      initialMarketIndexSummary={initialMarketIndexSummary}
     />
   );
 }

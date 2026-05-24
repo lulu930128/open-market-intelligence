@@ -190,6 +190,97 @@ export type OhlcChartResponse = {
   backfill: Record<string, unknown> | null;
 };
 
+export type MarketBreadth = {
+  market: string;
+  trade_date: string | null;
+  advance_count: number;
+  decline_count: number;
+  unchanged_count: number;
+  total_count: number;
+  limit_up_count: number | null;
+  limit_down_count: number | null;
+  trade_value: number | null;
+  source: string | null;
+};
+
+export type MarketIndexSnapshot = {
+  index_id: string;
+  label: string;
+  short_label: string;
+  market: string;
+  symbol: string;
+  source: string;
+  as_of: string | null;
+  time: string | null;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  close: number | null;
+  previous_close: number | null;
+  change: number | null;
+  change_pct: number | null;
+  volume: number | null;
+  estimated_volume: number | null;
+  trade_value: number | null;
+  estimated_trade_value: number | null;
+  ma20: number | null;
+  price_vs_ma20: number | null;
+  point_count: number;
+  points: ChartPoint[];
+  breadth: MarketBreadth | null;
+  error_message: string | null;
+};
+
+export type MarketIndexSummary = {
+  as_of: string;
+  source: string;
+  indices: MarketIndexSnapshot[];
+};
+
+export type MarketIndexListItem = {
+  rank: number;
+  market: string;
+  name: string;
+  close: number | null;
+  change: number | null;
+  change_pct: number | null;
+  trade_date: string | null;
+};
+
+export type MarketIndexListResponse = {
+  market: string;
+  source: string;
+  as_of: string;
+  count: number;
+  items: MarketIndexListItem[];
+};
+
+export type MarketIndexContributionItem = {
+  rank: number;
+  stock_id: string;
+  stock_name: string | null;
+  close: number | null;
+  change: number | null;
+  change_pct: number | null;
+  contribution_points: number | null;
+  market_value_change: number | null;
+  trade_value: number | null;
+};
+
+export type MarketIndexContributionResponse = {
+  index_id: string;
+  market: string;
+  source: string;
+  method: string;
+  as_of: string;
+  trade_date: string | null;
+  index_close: number | null;
+  index_change: number | null;
+  total_market_value: number | null;
+  positive: MarketIndexContributionItem[];
+  negative: MarketIndexContributionItem[];
+};
+
 export type IntradayTrendPoint = {
   time: string;
   price: number;

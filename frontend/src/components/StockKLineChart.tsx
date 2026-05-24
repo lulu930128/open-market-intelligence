@@ -9,6 +9,10 @@ type Props = {
   label: string;
   indicators: IndicatorSettings;
   indicatorParameters?: IndicatorParameters;
+  volumePanelLabel?: string;
+  volumeTooltipLabel?: string;
+  volumeValueKey?: "volume" | "trade_value";
+  volumeValueFormatter?: (value: number | null | undefined) => string;
 };
 
 export type IndicatorSettings = {
@@ -1084,6 +1088,10 @@ export default function StockKLineChart({
   label,
   indicators,
   indicatorParameters,
+  volumePanelLabel = "成交量(張)",
+  volumeTooltipLabel = "成交量(張)",
+  volumeValueKey = "volume",
+  volumeValueFormatter = formatLots,
 }: Props) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const [visibleRange, setVisibleRange] = useState<VisibleRangeState>({
@@ -1099,6 +1107,8 @@ export default function StockKLineChart({
     }),
     [indicatorParameters]
   );
+  const getVolumeMetric = (point: ChartPoint | MergedPoint) =>
+    volumeValueKey === "trade_value" ? point.trade_value : point.volume;
 
   const data = useMemo<MergedPoint[]>(() => {
     const indicatorByTime = new Map<string, StockIndicatorPoint>();
@@ -1311,7 +1321,7 @@ export default function StockKLineChart({
     nextPanelTop += panelHeight + panelGap;
   }
 
-  addPanel(indicators.volume, "volume", "成交量(張)");
+  addPanel(indicators.volume, "volume", volumePanelLabel);
   addPanel(indicators.rsi, "rsi", `RSI ${params.rsiPeriod}`);
   addPanel(indicators.macd, "macd", `MACD ${params.macdFast}/${params.macdSlow}/${params.macdSignal}`);
   addPanel(indicators.kd, "kd", `KD ${params.kdPeriod}`);
@@ -1355,7 +1365,7 @@ export default function StockKLineChart({
   const yMin = minPrice - pricePadding;
   const yMax = maxPrice + pricePadding;
   const yRange = yMax - yMin || 1;
-  const volumes = visibleData.map((point) => point.volume).filter(validNumber);
+  const volumes = visibleData.map((point) => getVolumeMetric(point)).filter(validNumber);
   const maxVolume = Math.max(...volumes, 1);
   const macdValues = visibleData
     .flatMap((point) => [point.macd, point.macdSignal, point.macdHistogram])
@@ -1501,17 +1511,19 @@ export default function StockKLineChart({
                 </div>
               </div>
               <div>
-                <span className="text-slate-400">成交量(張)</span>
+                <span className="text-slate-400">{volumeTooltipLabel}</span>
                 <div className="font-semibold text-slate-800">
-                  {formatLots(hoveredPoint.volume)}
+                  {volumeValueFormatter(getVolumeMetric(hoveredPoint))}
                 </div>
               </div>
-              <div>
-                <span className="text-slate-400">成交金額</span>
-                <div className="font-semibold text-slate-800">
-                  {formatTradeValue(hoveredPoint.trade_value)}
+              {volumeValueKey !== "trade_value" ? (
+                <div>
+                  <span className="text-slate-400">成交金額</span>
+                  <div className="font-semibold text-slate-800">
+                    {formatTradeValue(hoveredPoint.trade_value)}
+                  </div>
                 </div>
-              </div>
+              ) : null}
               <div>
                 <span className="text-slate-400">
                   MA{params.maShort}/{params.maMiddle}/{params.maLong}
@@ -2042,7 +2054,7 @@ export default function StockKLineChart({
                   {visibleData.map((point, index) => {
                     const open = point.open ?? point.close;
                     const close = point.close ?? point.open;
-                    const volume = point.volume ?? 0;
+                    const volume = getVolumeMetric(point) ?? 0;
                     const x = getX(index);
                     const isUp = validNumber(close) && validNumber(open) ? close >= open : true;
                     const y = getVolumeY(panel, volume);

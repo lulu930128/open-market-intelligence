@@ -111,6 +111,99 @@ class MarketOhlcChartRead(BaseModel):
     backfill: dict | None = None
 
 
+class MarketBreadthRead(BaseModel):
+    market: str
+    trade_date: date | None = None
+    advance_count: int
+    decline_count: int
+    unchanged_count: int
+    total_count: int
+    limit_up_count: int | None = None
+    limit_down_count: int | None = None
+    trade_value: int | None = None
+    source: str | None = None
+
+
+class MarketIndexSnapshotRead(BaseModel):
+    index_id: str
+    label: str
+    short_label: str
+    market: str
+    symbol: str
+    source: str
+    as_of: datetime | None = None
+    time: date | None = None
+
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    close: float | None = None
+    previous_close: float | None = None
+    change: float | None = None
+    change_pct: float | None = None
+    volume: int | None = None
+    estimated_volume: int | None = None
+    trade_value: int | None = None
+    estimated_trade_value: int | None = None
+
+    ma20: float | None = None
+    price_vs_ma20: float | None = None
+    point_count: int = 0
+    points: list[MarketDailyChartRead] = Field(default_factory=list)
+    breadth: MarketBreadthRead | None = None
+    error_message: str | None = None
+
+
+class MarketIndexSummaryRead(BaseModel):
+    as_of: datetime
+    source: str
+    indices: list[MarketIndexSnapshotRead]
+
+
+class MarketIndexListItemRead(BaseModel):
+    rank: int
+    market: str
+    name: str
+    close: float | None = None
+    change: float | None = None
+    change_pct: float | None = None
+    trade_date: date | None = None
+
+
+class MarketIndexListRead(BaseModel):
+    market: str
+    source: str
+    as_of: datetime
+    count: int
+    items: list[MarketIndexListItemRead]
+
+
+class MarketIndexContributionItemRead(BaseModel):
+    rank: int
+    stock_id: str
+    stock_name: str | None = None
+    close: float | None = None
+    change: float | None = None
+    change_pct: float | None = None
+    contribution_points: float | None = None
+    market_value_change: float | None = None
+    trade_value: int | None = None
+
+
+class MarketIndexContributionRead(BaseModel):
+    index_id: str
+    market: str
+    source: str
+    method: str
+    as_of: datetime
+    trade_date: date | None = None
+    index_close: float | None = None
+    index_change: float | None = None
+    total_market_value: float | None = None
+    positive: list[MarketIndexContributionItemRead]
+    negative: list[MarketIndexContributionItemRead]
+
+
 class IntradayTrendPointRead(BaseModel):
     time: str
     price: float
