@@ -534,6 +534,48 @@ def list_stock_shareholding_history(
     )
 
 
+def get_stock_chip_coverage(db: Session, stock_id: str) -> dict:
+    shareholding_latest_date = (
+        db.query(func.max(ShareholdingDistributionWeekly.data_date))
+        .filter(ShareholdingDistributionWeekly.stock_id == stock_id)
+        .scalar()
+    )
+    shareholding_week_count = (
+        db.query(func.count(func.distinct(ShareholdingDistributionWeekly.data_date)))
+        .filter(ShareholdingDistributionWeekly.stock_id == stock_id)
+        .scalar()
+        or 0
+    )
+    shareholding_row_count = (
+        db.query(func.count(ShareholdingDistributionWeekly.id))
+        .filter(ShareholdingDistributionWeekly.stock_id == stock_id)
+        .scalar()
+        or 0
+    )
+    margin_latest_trade_date = (
+        db.query(func.max(MarginTradingDaily.trade_date))
+        .filter(MarginTradingDaily.stock_id == stock_id)
+        .scalar()
+    )
+    margin_row_count = (
+        db.query(func.count(MarginTradingDaily.id))
+        .filter(MarginTradingDaily.stock_id == stock_id)
+        .scalar()
+        or 0
+    )
+
+    return {
+        "stock_id": stock_id,
+        "shareholding_latest_date": shareholding_latest_date,
+        "shareholding_week_count": shareholding_week_count,
+        "shareholding_row_count": shareholding_row_count,
+        "margin_latest_trade_date": margin_latest_trade_date,
+        "margin_row_count": margin_row_count,
+        "has_shareholding": shareholding_week_count > 0,
+        "has_margin": margin_row_count > 0,
+    }
+
+
 def get_latest_monthly_revenue_period(db: Session) -> date | None:
     return db.query(func.max(MonthlyRevenue.period)).scalar()
 

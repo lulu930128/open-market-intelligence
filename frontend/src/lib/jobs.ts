@@ -11,17 +11,54 @@ export function isJobTerminal(job: JobRunRead) {
   return TERMINAL_STATUSES.has(job.status);
 }
 
+function getJobResultObject(job: JobRunRead) {
+  const result = job.result;
+
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    return null;
+  }
+
+  return result as Record<string, unknown>;
+}
+
+export function getJobResultStatus(job: JobRunRead) {
+  const status = getJobResultObject(job)?.status;
+
+  return typeof status === "string" ? status : null;
+}
+
+function getJobResultMessage(job: JobRunRead) {
+  const result = getJobResultObject(job);
+  const message = result?.message;
+
+  if (typeof message === "string" && message) {
+    return message;
+  }
+
+  const errorCount = result?.error_count;
+
+  if (typeof errorCount === "number" && errorCount > 0) {
+    return `${errorCount} 筆來源失敗`;
+  }
+
+  return null;
+}
+
 export function formatJobStatus(job: JobRunRead) {
   const labels: Record<string, string> = {
     queued: "已排程",
     running: "補資料中",
     success: "補資料完成",
+    partial_success: "部分完成",
+    skipped: "無需補齊",
     error: "補資料失敗",
   };
   const total = Math.max(job.progress_total || 1, 1);
   const current = Math.min(Math.max(job.progress_current || 0, 0), total);
-  const label = labels[job.status] ?? job.status;
-  const message = job.error_message || job.message;
+  const resultStatus = getJobResultStatus(job);
+  const effectiveStatus = job.status === "success" && resultStatus ? resultStatus : job.status;
+  const label = labels[effectiveStatus] ?? effectiveStatus;
+  const message = job.error_message || getJobResultMessage(job) || job.message;
 
   return `${label} (${current}/${total})${message ? `：${message}` : ""}`;
 }

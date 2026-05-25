@@ -16,7 +16,11 @@ from app.market.fundamental_metrics_backfill import (
 )
 from app.market.monthly_revenue_history_backfill import ensure_stock_monthly_revenue_history
 from app.market.shareholding_history_backfill import ensure_stock_shareholding_history
-from app.watchlists.backfill_service import backfill_watchlist_group_twse
+from app.market.stock_selection_refresh import refresh_selected_stock_data
+from app.watchlists.backfill_service import (
+    backfill_watchlist_group_twse,
+    refresh_watchlist_group_daily_prices,
+)
 
 
 def run_twse_daily_price_job(
@@ -241,6 +245,25 @@ def run_stock_financial_metrics_history_job(
     run_tracked_job(job_id, worker)
 
 
+def run_stock_selection_refresh_job(
+    job_id: int,
+    stock_id: str,
+    include_today: bool | None,
+    sleep_seconds: float,
+) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        progress(0, 6, "Refreshing selected stock data.")
+        return refresh_selected_stock_data(
+            db=db,
+            stock_id=stock_id,
+            include_today=include_today,
+            sleep_seconds=sleep_seconds,
+            progress=progress,
+        )
+
+    run_tracked_job(job_id, worker)
+
+
 def run_watchlist_group_backfill_job(
     job_id: int,
     group_id: int,
@@ -260,6 +283,39 @@ def run_watchlist_group_backfill_job(
             group_id=group_id,
             start_date=start_date,
             end_date=end_date,
+            source_id=source_id,
+            tpex_source_id=tpex_source_id,
+            include_children=include_children,
+            enabled_only=enabled_only,
+            sleep_seconds=sleep_seconds,
+            skip_existing_months=skip_existing_months,
+            progress_callback=progress,
+        )
+
+    run_tracked_job(job_id, worker)
+
+
+def run_watchlist_group_refresh_latest_job(
+    job_id: int,
+    group_id: int,
+    to_date: date | None,
+    lookback_days: int,
+    include_today: bool,
+    source_id: int | None,
+    tpex_source_id: int | None,
+    include_children: bool,
+    enabled_only: bool,
+    sleep_seconds: float,
+    skip_existing_months: bool,
+) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        progress(0, 1, "Refreshing watchlist group daily prices.")
+        return refresh_watchlist_group_daily_prices(
+            db=db,
+            group_id=group_id,
+            to_date=to_date,
+            lookback_days=lookback_days,
+            include_today=include_today,
             source_id=source_id,
             tpex_source_id=tpex_source_id,
             include_children=include_children,

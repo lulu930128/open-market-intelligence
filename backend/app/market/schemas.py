@@ -320,6 +320,17 @@ class MarginTradingDailyRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class StockChipCoverageRead(BaseModel):
+    stock_id: str
+    shareholding_latest_date: date | None = None
+    shareholding_week_count: int = 0
+    shareholding_row_count: int = 0
+    margin_latest_trade_date: date | None = None
+    margin_row_count: int = 0
+    has_shareholding: bool = False
+    has_margin: bool = False
+
+
 class BrokerBranchTradeDailyRead(BaseModel):
     id: int
     source_id: int

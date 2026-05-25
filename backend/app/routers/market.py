@@ -1,4 +1,5 @@
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -46,6 +47,7 @@ from app.market.schemas import (
     MarketDailyPriceRead,
     MonthlyRevenueRead,
     ShareholdingDistributionWeeklyRead,
+    StockChipCoverageRead,
 )
 from app.market.service import (
     get_latest_stock_financial_metric,
@@ -53,6 +55,7 @@ from app.market.service import (
     get_latest_stock_institutional_trade,
     get_latest_stock_margin_trade,
     get_latest_stock_monthly_revenue,
+    get_stock_chip_coverage,
     list_financial_metrics,
     list_institutional_trades,
     list_latest_institutional_trades,
@@ -75,9 +78,37 @@ from app.market.service import (
 
 router = APIRouter()
 
+TAIWAN_TZ = ZoneInfo("Asia/Taipei")
+DAILY_METRIC_RELEASE_TIMES = {
+    "institutional_trade": time(18, 10),
+    "margin_trading": time(21, 10),
+}
+
 
 def _split_categories(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _resolve_daily_metric_include_today(
+    categories: list[str],
+    include_today: bool | None,
+) -> bool:
+    if include_today is not None:
+        return include_today
+
+    now = datetime.now(TAIWAN_TZ)
+
+    if now.weekday() >= 5:
+        return False
+
+    release_time = max(
+        (
+            DAILY_METRIC_RELEASE_TIMES.get(category, time(21, 10))
+            for category in categories
+        ),
+        default=time(21, 10),
+    )
+    return now.time() >= release_time
 
 
 def _daily_metric_history_range(
@@ -86,7 +117,7 @@ def _daily_metric_history_range(
     lookback_days: int,
     include_today: bool,
 ) -> tuple[date, date]:
-    end_date = to_date or date.today()
+    end_date = to_date or datetime.now(TAIWAN_TZ).date()
 
     if to_date is None and not include_today:
         end_date -= timedelta(days=1)
@@ -102,6 +133,7 @@ def _queue_backfill_job(
     job_type: str,
     target: str | None,
     request: dict,
+    progress_total: int = 1,
     task,
     task_args: tuple,
 ):
@@ -112,12 +144,40 @@ def _queue_backfill_job(
         job_type=job_type,
         target=target,
         request=request,
-        progress_total=1,
+        progress_total=progress_total,
         message="Queued.",
         task=task,
         task_args=task_args,
     )
     return job_service.serialize_job(job)
+
+
+@router.post(
+    "/selection-refresh/{stock_id}",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def refresh_selected_stock_data_api(
+    stock_id: str,
+    background_tasks: BackgroundTasks,
+    include_today: bool | None = None,
+    sleep_seconds: float = Query(default=0.05, ge=0, le=3),
+    db: Session = Depends(get_db),
+):
+    return _queue_backfill_job(
+        db=db,
+        background_tasks=background_tasks,
+        job_type="market.stock_selection_refresh",
+        target=stock_id,
+        request={
+            "stock_id": stock_id,
+            "include_today": include_today,
+            "sleep_seconds": sleep_seconds,
+        },
+        progress_total=6,
+        task=backfill_tasks.run_stock_selection_refresh_job,
+        task_args=(stock_id, include_today, sleep_seconds),
+    )
 
 
 @router.post(
@@ -211,12 +271,16 @@ def backfill_market_daily_metrics(
     end_date: date | None = None,
     categories: str = Query(default="institutional_trade,margin_trading"),
     lookback_days: int = Query(default=30, ge=1, le=1000),
-    include_today: bool = False,
+    include_today: bool | None = None,
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     skip_existing: bool = True,
     db: Session = Depends(get_db),
 ):
     category_list = _split_categories(categories)
+    resolved_include_today = _resolve_daily_metric_include_today(
+        categories=category_list,
+        include_today=include_today,
+    )
     return _queue_backfill_job(
         db=db,
         background_tasks=background_tasks,
@@ -227,7 +291,7 @@ def backfill_market_daily_metrics(
             "end_date": end_date,
             "categories": category_list,
             "lookback_days": lookback_days,
-            "include_today": include_today,
+            "include_today": resolved_include_today,
             "sleep_seconds": sleep_seconds,
             "skip_existing": skip_existing,
         },
@@ -237,7 +301,7 @@ def backfill_market_daily_metrics(
             end_date,
             category_list,
             lookback_days,
-            include_today,
+            resolved_include_today,
             sleep_seconds,
             skip_existing,
         ),
@@ -256,18 +320,22 @@ def backfill_stock_daily_metrics_history(
     to_date: date | None = None,
     categories: str = Query(default="institutional_trade,margin_trading"),
     lookback_days: int = Query(default=365, ge=1, le=5000),
-    include_today: bool = False,
+    include_today: bool | None = None,
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     skip_existing: bool = True,
     db: Session = Depends(get_db),
 ):
+    category_list = _split_categories(categories)
+    resolved_include_today = _resolve_daily_metric_include_today(
+        categories=category_list,
+        include_today=include_today,
+    )
     start_date, end_date = _daily_metric_history_range(
         from_date=from_date,
         to_date=to_date,
         lookback_days=lookback_days,
-        include_today=include_today,
+        include_today=resolved_include_today,
     )
-    category_list = _split_categories(categories)
     return _queue_backfill_job(
         db=db,
         background_tasks=background_tasks,
@@ -278,6 +346,7 @@ def backfill_stock_daily_metrics_history(
             "start_date": start_date,
             "end_date": end_date,
             "categories": category_list,
+            "include_today": resolved_include_today,
             "sleep_seconds": sleep_seconds,
             "skip_existing": skip_existing,
         },
@@ -611,15 +680,19 @@ def get_latest_institutional_trades(limit: int = Query(default=100, ge=1, le=100
 def get_latest_stock_institutional_trade_api(
     stock_id: str,
     ensure_daily: bool = False,
-    include_today: bool = False,
+    include_today: bool | None = None,
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     db: Session = Depends(get_db),
 ):
     if ensure_daily:
+        resolved_include_today = _resolve_daily_metric_include_today(
+            categories=["institutional_trade"],
+            include_today=include_today,
+        )
         ensure_latest_daily_metrics(
             db=db,
             categories=["institutional_trade"],
-            include_today=include_today,
+            include_today=resolved_include_today,
             sleep_seconds=sleep_seconds,
         )
 
@@ -637,16 +710,20 @@ def get_stock_institutional_trade_history(
     limit: int = Query(default=250, ge=1, le=5000),
     ensure_history: bool = False,
     lookback_days: int = Query(default=365, ge=1, le=5000),
-    include_today: bool = False,
+    include_today: bool | None = None,
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     db: Session = Depends(get_db),
 ):
     if ensure_history:
+        resolved_include_today = _resolve_daily_metric_include_today(
+            categories=["institutional_trade"],
+            include_today=include_today,
+        )
         start_date, end_date = _daily_metric_history_range(
             from_date=from_date,
             to_date=to_date,
             lookback_days=lookback_days,
-            include_today=include_today,
+            include_today=resolved_include_today,
         )
         ensure_stock_daily_metrics(
             db=db,
@@ -720,15 +797,19 @@ def get_latest_margin_trades(
 def get_latest_stock_margin_trade_api(
     stock_id: str,
     ensure_daily: bool = False,
-    include_today: bool = False,
+    include_today: bool | None = None,
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     db: Session = Depends(get_db),
 ):
     if ensure_daily:
+        resolved_include_today = _resolve_daily_metric_include_today(
+            categories=["margin_trading"],
+            include_today=include_today,
+        )
         ensure_latest_daily_metrics(
             db=db,
             categories=["margin_trading"],
-            include_today=include_today,
+            include_today=resolved_include_today,
             sleep_seconds=sleep_seconds,
         )
 
@@ -751,16 +832,20 @@ def get_stock_margin_trade_history(
     limit: int = Query(default=250, ge=1, le=5000),
     ensure_history: bool = False,
     lookback_days: int = Query(default=365, ge=1, le=5000),
-    include_today: bool = False,
+    include_today: bool | None = None,
     sleep_seconds: float = Query(default=0.2, ge=0, le=3),
     db: Session = Depends(get_db),
 ):
     if ensure_history:
+        resolved_include_today = _resolve_daily_metric_include_today(
+            categories=["margin_trading"],
+            include_today=include_today,
+        )
         start_date, end_date = _daily_metric_history_range(
             from_date=from_date,
             to_date=to_date,
             lookback_days=lookback_days,
-            include_today=include_today,
+            include_today=resolved_include_today,
         )
         ensure_stock_daily_metrics(
             db=db,
@@ -796,6 +881,14 @@ def get_margin_trades(
         limit=limit,
         offset=offset,
     )
+
+
+@router.get(
+    "/chips/{stock_id}/coverage",
+    response_model=StockChipCoverageRead,
+)
+def get_stock_chip_coverage_api(stock_id: str, db: Session = Depends(get_db)):
+    return get_stock_chip_coverage(db=db, stock_id=stock_id)
 
 
 @router.get(

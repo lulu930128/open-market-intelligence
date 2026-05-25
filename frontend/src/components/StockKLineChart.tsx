@@ -1,6 +1,13 @@
 "use client";
 
-import { type MouseEvent, type WheelEvent, useMemo, useState } from "react";
+import {
+  type PointerEvent,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { ChartPoint, StockIndicatorPoint } from "@/types/market";
 
 type Props = {
@@ -9,6 +16,7 @@ type Props = {
   label: string;
   indicators: IndicatorSettings;
   indicatorParameters?: IndicatorParameters;
+  revealKey?: string;
   volumePanelLabel?: string;
   volumeTooltipLabel?: string;
   volumeValueKey?: "volume" | "trade_value";
@@ -127,6 +135,12 @@ type VisibleRangeState = {
   dataKey: string | null;
 };
 
+type ChartDragState = {
+  pointerId: number;
+  startClientX: number;
+  startVisibleStart: number;
+};
+
 export const indicatorOptions: Array<{ key: IndicatorKey; label: string; description: string }> = [
   { key: "signals", label: "SIGNAL", description: "交叉 / 突破標記" },
   { key: "ma", label: "MA", description: "MA5 / MA20 / MA60" },
@@ -170,6 +184,8 @@ export const defaultIndicators: IndicatorSettings = {
   roc: false,
   stochRsi: false,
 };
+
+const playedKLineRevealKeys = new Set<string>();
 
 export const defaultIndicatorParameters: IndicatorParameters = {
   maShort: 5,
@@ -1088,6 +1104,7 @@ export default function StockKLineChart({
   label,
   indicators,
   indicatorParameters,
+  revealKey,
   volumePanelLabel = "成交量(張)",
   volumeTooltipLabel = "成交量(張)",
   volumeValueKey = "volume",
@@ -1100,6 +1117,10 @@ export default function StockKLineChart({
     pinnedToLatest: true,
     dataKey: null,
   });
+  const [activeRevealKey, setActiveRevealKey] = useState<string | null>(null);
+  const chartDragRef = useRef<ChartDragState | null>(null);
+  const chartWheelAreaRef = useRef<SVGRectElement | null>(null);
+  const revealId = useId().replace(/[^a-zA-Z0-9_-]/g, "");
   const params = useMemo(
     () => ({
       ...defaultIndicatorParameters,
@@ -1234,11 +1255,14 @@ export default function StockKLineChart({
   const canMoveRange = data.length > visibleData.length;
   const visibleStep = Math.max(1, Math.round(visibleBarCount * 0.25));
 
-  function updateVisibleCount(nextCount: number) {
+  function updateVisibleCount(nextCount: number, anchorRatio = 1) {
     const count = Math.round(clamp(nextCount, minVisibleBars, maxVisibleBars));
-    const currentEnd = visibleStart + visibleBarCount;
+    const safeAnchorRatio = clamp(anchorRatio, 0, 1);
+    const focusedIndex = visibleStart + (visibleBarCount - 1) * safeAnchorRatio;
     const nextMaxStart = Math.max(0, data.length - count);
-    const nextStart = Math.round(clamp(currentEnd - count, 0, nextMaxStart));
+    const nextStart = Math.round(
+      clamp(focusedIndex - (count - 1) * safeAnchorRatio, 0, nextMaxStart)
+    );
 
     setHoverIndex(null);
     setVisibleRange({
@@ -1287,6 +1311,64 @@ export default function StockKLineChart({
     safeHoverIndex !== null
       ? visibleData[safeHoverIndex]
       : visibleData[visibleData.length - 1] ?? null;
+  const stableRevealKey = revealKey ?? label;
+  const dataReadyForReveal = data.length > 0;
+
+  useEffect(() => {
+    if (!dataReadyForReveal) return;
+
+    const timeoutId = window.setTimeout(() => {
+      setActiveRevealKey((current) => {
+        if (playedKLineRevealKeys.has(stableRevealKey)) {
+          return current === stableRevealKey ? current : null;
+        }
+
+        return stableRevealKey;
+      });
+    }, 0);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [dataReadyForReveal, stableRevealKey]);
+
+  useEffect(() => {
+    const target = chartWheelAreaRef.current;
+
+    if (target === null || data.length < 1) return;
+
+    const handleNativeWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      if (!canMoveRange && visibleBarCount <= minVisibleBars) return;
+
+      if (event.shiftKey && canMoveRange) {
+        const delta = event.deltaX !== 0 ? event.deltaX : event.deltaY;
+        panVisibleBars(Math.sign(delta) * Math.max(1, Math.round(visibleBarCount * 0.08)));
+        return;
+      }
+
+      if (Math.abs(event.deltaY) >= Math.abs(event.deltaX)) {
+        const rect = target.getBoundingClientRect();
+        const anchorRatio = clamp((event.clientX - rect.left) / rect.width, 0, 1);
+
+        updateVisibleCount(visibleBarCount * (event.deltaY > 0 ? 1.18 : 0.82), anchorRatio);
+        return;
+      }
+
+      const hasHorizontalIntent = Math.abs(event.deltaX) > Math.abs(event.deltaY);
+
+      if (!hasHorizontalIntent || !canMoveRange) return;
+
+      const delta = event.deltaX !== 0 ? event.deltaX : event.deltaY;
+      panVisibleBars(Math.sign(delta) * Math.max(1, Math.round(visibleBarCount * 0.08)));
+    };
+
+    target.addEventListener("wheel", handleNativeWheel, { passive: false });
+
+    return () => {
+      target.removeEventListener("wheel", handleNativeWheel);
+    };
+  });
 
   if (data.length < 1) {
     return (
@@ -1432,32 +1514,69 @@ export default function StockKLineChart({
     return panel.top + panel.height - (value / maxVolume) * panel.height;
   }
 
-  function handleMouseMove(event: MouseEvent<SVGRectElement>) {
-    const rect = event.currentTarget.getBoundingClientRect();
-    const ratio = clamp((event.clientX - rect.left) / rect.width, 0, 1);
+  function getPlotClientXRatio(target: SVGRectElement, clientX: number) {
+    const rect = target.getBoundingClientRect();
+    return clamp((clientX - rect.left) / rect.width, 0, 1);
+  }
+
+  function updateHoverIndexFromClientX(target: SVGRectElement, clientX: number) {
+    const ratio = getPlotClientXRatio(target, clientX);
     const localX = paddingLeft + ratio * usableWidth;
     const dataRatio = (localX - paddingLeft) / usableWidth;
     const index = Math.round(dataRatio * (visibleData.length - 1));
     setHoverIndex(clamp(index, 0, visibleData.length - 1));
   }
 
-  function handleWheel(event: WheelEvent<SVGRectElement>) {
-    if (!canMoveRange && visibleBarCount <= minVisibleBars) return;
+  function handlePointerDown(event: PointerEvent<SVGRectElement>) {
+    if (!canMoveRange || event.button !== 0) return;
 
-    if (event.ctrlKey || event.metaKey) {
-      event.preventDefault();
-      updateVisibleCount(visibleBarCount * (event.deltaY > 0 ? 1.18 : 0.82));
+    chartDragRef.current = {
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startVisibleStart: visibleStart,
+    };
+
+    setHoverIndex(null);
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function handlePointerMove(event: PointerEvent<SVGRectElement>) {
+    const current = chartDragRef.current;
+
+    if (current === null || current.pointerId !== event.pointerId) {
+      updateHoverIndexFromClientX(event.currentTarget, event.clientX);
       return;
     }
 
-    const hasHorizontalIntent =
-      event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY);
-
-    if (!hasHorizontalIntent || !canMoveRange) return;
+    const deltaX = event.clientX - current.startClientX;
 
     event.preventDefault();
-    const delta = event.deltaX !== 0 ? event.deltaX : event.deltaY;
-    panVisibleBars(Math.sign(delta) * Math.max(1, Math.round(visibleBarCount * 0.08)));
+
+    const barSpacing = usableWidth / Math.max(visibleData.length - 1, 1);
+    const nextStart = Math.round(
+      clamp(current.startVisibleStart - deltaX / barSpacing, 0, maxVisibleStart)
+    );
+
+    setHoverIndex(null);
+    setVisibleRange({
+      start: nextStart,
+      count: visibleBarCount,
+      pinnedToLatest: nextStart >= maxVisibleStart,
+      dataKey,
+    });
+  }
+
+  function handlePointerEnd(event: PointerEvent<SVGRectElement>) {
+    const current = chartDragRef.current;
+
+    if (current === null || current.pointerId !== event.pointerId) return;
+
+    chartDragRef.current = null;
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
   }
 
   const ma5Path = buildLinePath(visibleData, (point) => point.ma5, getX, getPriceY);
@@ -1480,6 +1599,9 @@ export default function StockKLineChart({
     getPriceY
   );
   const hoverX = safeHoverIndex !== null ? getX(safeHoverIndex) : null;
+  const revealCoverClass = `k-line-reveal-cover-${revealId}`;
+  const revealAnimationName = `k-line-reveal-${revealId}`;
+  const shouldShowRevealCover = activeRevealKey === stableRevealKey;
 
   return (
     <div className="border border-slate-200 bg-white">
@@ -1491,9 +1613,9 @@ export default function StockKLineChart({
           </div>
         </div>
 
-        <div className="flex max-w-[760px] flex-col items-end gap-2">
+        <div className="flex max-w-[760px] min-w-0 flex-col items-end gap-2">
           {hoveredPoint ? (
-            <div className="grid grid-cols-5 gap-x-4 gap-y-1 text-right text-xs">
+            <div className="grid min-h-[4.75rem] max-w-full grid-cols-[repeat(4,minmax(10.5rem,max-content))] gap-x-5 gap-y-1 overflow-x-auto pb-1 text-right text-xs [&>div>div]:whitespace-nowrap [&>div>div]:tabular-nums [&>div>span]:whitespace-nowrap [&>div]:min-w-[10.5rem] [&>div]:whitespace-nowrap">
               <div>
                 <span className="text-slate-400">日期</span>
                 <div className="font-semibold text-slate-800">{hoveredPoint.time}</div>
@@ -1643,7 +1765,9 @@ export default function StockKLineChart({
                 </div>
               ) : null}
             </div>
-          ) : null}
+          ) : (
+            <div className="min-h-[4.75rem]" aria-hidden="true" />
+          )}
           <div className="flex w-full flex-wrap items-center justify-end gap-2 text-xs">
             <span className="whitespace-nowrap text-slate-500">
               {visibleStart + 1}-{visibleEnd} / {data.length}
@@ -1690,6 +1814,8 @@ export default function StockKLineChart({
             </button>
             <button
               type="button"
+              aria-label="跳到最新 K 線"
+              title="跳到最新 K 線"
               onClick={jumpToLatest}
               disabled={!canMoveRange || visibleStart >= maxVisibleStart}
               className="h-7 border border-slate-300 bg-white px-2 font-semibold text-slate-700 hover:border-slate-500 disabled:cursor-not-allowed disabled:text-slate-300"
@@ -1730,6 +1856,37 @@ export default function StockKLineChart({
       </div>
 
       <svg viewBox={`0 0 ${width} ${height}`} className="w-full" style={{ height }}>
+        <defs>
+          <style>
+            {`
+              @keyframes ${revealAnimationName} {
+                0% {
+                  opacity: 1;
+                  transform: translateX(0);
+                }
+                92% {
+                  opacity: 1;
+                }
+                100% {
+                  opacity: 0;
+                  transform: translateX(${width}px);
+                }
+              }
+
+              .${revealCoverClass} {
+                animation: ${revealAnimationName} 1300ms cubic-bezier(0.22, 1, 0.36, 1) both;
+                pointer-events: none;
+                transform-box: fill-box;
+              }
+
+              @media (prefers-reduced-motion: reduce) {
+                .${revealCoverClass} {
+                  animation-duration: 1ms;
+                }
+              }
+            `}
+          </style>
+        </defs>
         <rect x="0" y="0" width={width} height={height} className="fill-white" />
 
         {[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
@@ -2508,15 +2665,49 @@ export default function StockKLineChart({
           ) : null}
         </g>
 
+        {shouldShowRevealCover ? (
+          <g
+            key={activeRevealKey}
+            className={revealCoverClass}
+            aria-hidden="true"
+            onAnimationStart={() => {
+              playedKLineRevealKeys.add(stableRevealKey);
+            }}
+            onAnimationEnd={() => {
+              setActiveRevealKey((current) => (current === stableRevealKey ? null : current));
+            }}
+          >
+            <rect x="0" y="0" width={width} height={height} className="fill-white" />
+          </g>
+        ) : null}
+
         <rect
+          ref={chartWheelAreaRef}
           x={paddingLeft}
           y={chartTop}
           width={usableWidth}
           height={plotBottom - chartTop}
           fill="transparent"
-          onMouseMove={handleMouseMove}
-          onMouseLeave={() => setHoverIndex(null)}
-          onWheel={handleWheel}
+          pointerEvents="all"
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerEnd}
+          onPointerCancel={handlePointerEnd}
+          onPointerLeave={(event) => {
+            const current = chartDragRef.current;
+
+            if (current === null || current.pointerId !== event.pointerId) {
+              setHoverIndex(null);
+            }
+          }}
+          onContextMenu={(event) => {
+            if (chartDragRef.current !== null) {
+              event.preventDefault();
+            }
+          }}
+          style={{
+            touchAction: "pan-y",
+          }}
         />
       </svg>
     </div>

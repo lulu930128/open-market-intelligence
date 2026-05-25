@@ -404,6 +404,17 @@ export type MarginTradingDailyRead = {
   updated_at: string;
 };
 
+export type StockChipCoverageRead = {
+  stock_id: string;
+  shareholding_latest_date: string | null;
+  shareholding_week_count: number;
+  shareholding_row_count: number;
+  margin_latest_trade_date: string | null;
+  margin_row_count: number;
+  has_shareholding: boolean;
+  has_margin: boolean;
+};
+
 export type BrokerBranchTradeDailyRead = {
   id: number;
   source_id: number;

@@ -85,6 +85,59 @@ def _queue_group_backfill_job(
     return job_service.serialize_job(job)
 
 
+def _queue_group_refresh_latest_job(
+    *,
+    db: Session,
+    background_tasks: BackgroundTasks,
+    group_id: int,
+    to_date: date | None,
+    lookback_days: int,
+    include_today: bool,
+    source_id: int | None,
+    tpex_source_id: int | None,
+    include_children: bool,
+    enabled_only: bool,
+    sleep_seconds: float,
+    skip_existing_months: bool,
+):
+    del background_tasks
+
+    request = {
+        "group_id": group_id,
+        "to_date": to_date,
+        "lookback_days": lookback_days,
+        "include_today": include_today,
+        "source_id": source_id,
+        "tpex_source_id": tpex_source_id,
+        "include_children": include_children,
+        "enabled_only": enabled_only,
+        "sleep_seconds": sleep_seconds,
+        "skip_existing_months": skip_existing_months,
+    }
+    job, _created = job_service.enqueue_job(
+        db=db,
+        job_type="watchlist.group_daily_price_refresh_latest",
+        target=str(group_id),
+        request=request,
+        progress_total=1,
+        message="Queued.",
+        task=backfill_tasks.run_watchlist_group_refresh_latest_job,
+        task_args=(
+            group_id,
+            to_date,
+            lookback_days,
+            include_today,
+            source_id,
+            tpex_source_id,
+            include_children,
+            enabled_only,
+            sleep_seconds,
+            skip_existing_months,
+        ),
+    )
+    return job_service.serialize_job(job)
+
+
 @router.post("/groups", response_model=WatchlistGroupRead, status_code=status.HTTP_201_CREATED)
 def create_watchlist_group(
     payload: WatchlistGroupCreate,
@@ -278,6 +331,41 @@ def backfill_watchlist_group_twse(
         group_id=group_id,
         start_date=start_date,
         end_date=end_date,
+        source_id=source_id,
+        tpex_source_id=tpex_source_id,
+        include_children=include_children,
+        enabled_only=enabled_only,
+        sleep_seconds=sleep_seconds,
+        skip_existing_months=skip_existing_months,
+    )
+
+
+@router.post(
+    "/groups/{group_id}/refresh-latest",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def refresh_watchlist_group_latest_prices(
+    group_id: int,
+    background_tasks: BackgroundTasks,
+    to_date: date | None = None,
+    lookback_days: int = Query(default=14, ge=1, le=365),
+    include_today: bool = False,
+    source_id: int | None = None,
+    tpex_source_id: int | None = None,
+    include_children: bool = True,
+    enabled_only: bool = True,
+    sleep_seconds: float = Query(default=0.8, ge=0.2, le=10.0),
+    skip_existing_months: bool = True,
+    db: Session = Depends(get_db),
+):
+    return _queue_group_refresh_latest_job(
+        db=db,
+        background_tasks=background_tasks,
+        group_id=group_id,
+        to_date=to_date,
+        lookback_days=lookback_days,
+        include_today=include_today,
         source_id=source_id,
         tpex_source_id=tpex_source_id,
         include_children=include_children,

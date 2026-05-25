@@ -15,7 +15,7 @@ import StockKLineChart, {
   type IndicatorSettings,
 } from "@/components/StockKLineChart";
 import { fetchJson } from "@/lib/api";
-import { formatJobStatus, requestBackfillJob } from "@/lib/jobs";
+import { formatJobStatus, getJobResultStatus, requestBackfillJob } from "@/lib/jobs";
 import {
   TAIWAN_INTRADAY_REFRESH_MS,
   getTaiwanMarketRefreshState,
@@ -29,6 +29,7 @@ import type {
   IntradayTrendResponse,
   InstitutionalHoldingRatioRead,
   InstitutionalTradeDailyRead,
+  JobRunRead,
   MarginTradingDailyRead,
   MarketIndexContributionItem,
   MarketIndexContributionResponse,
@@ -39,6 +40,7 @@ import type {
   MonthlyRevenueRead,
   OhlcChartResponse,
   ShareholdingDistributionWeeklyRead,
+  StockChipCoverageRead,
   StockIndicatorPoint,
   StockMasterRead,
 } from "@/types/market";
@@ -61,6 +63,7 @@ type Props = {
 };
 
 type Timeframe = "today" | "daily" | "weekly" | "monthly";
+type ChartTimeframe = Exclude<Timeframe, "today">;
 type LoadState = "idle" | "loading" | "success" | "error";
 type DataPanelTab = "chips" | "institutional" | "branch" | "revenue" | "earnings";
 type BranchTableSide = "buy" | "sell";
@@ -380,6 +383,39 @@ function formatDateTime(value: string | null | undefined) {
 function formatDate(value: string | null | undefined) {
   if (!value) return "-";
   return value.slice(0, 10);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readBackfillCount(result: unknown, key: string) {
+  if (!isRecord(result)) return null;
+
+  const value = result[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function formatBackfillOutcome(job: JobRunRead, label: string) {
+  const status = getJobResultStatus(job);
+  const insertedCount = readBackfillCount(job.result, "inserted_count");
+  const skippedCount = readBackfillCount(job.result, "skipped_existing_count");
+  const errorCount = readBackfillCount(job.result, "error_count");
+  const details = [
+    insertedCount !== null && insertedCount > 0 ? `新增 ${insertedCount}` : null,
+    skippedCount !== null && skippedCount > 0 ? `已存在 ${skippedCount}` : null,
+    errorCount !== null && errorCount > 0 ? `失敗 ${errorCount}` : null,
+  ].filter(Boolean);
+  const suffix =
+    status === "partial_success"
+      ? "部分完成"
+      : status === "skipped"
+        ? "無需補齊"
+        : status === "error"
+          ? "失敗"
+          : "補齊完成";
+
+  return `${label}${suffix}${details.length ? `（${details.join("、")}）` : ""}`;
 }
 
 function formatMonth(value: string | null | undefined) {
@@ -2268,6 +2304,8 @@ export default function StockDetailPanel({
   const [indicatorParameters, setIndicatorParameters] =
     useState<IndicatorParameters>(defaultIndicatorParameters);
   const [chartData, setChartData] = useState<ChartPoint[]>(initialChartData);
+  const [chartStockId, setChartStockId] = useState<string | null>(stockId);
+  const [chartTimeframe, setChartTimeframe] = useState<ChartTimeframe>("daily");
   const [todayTrend, setTodayTrend] = useState<IntradayTrendPoint[]>([]);
   const [todayPreviousClose, setTodayPreviousClose] = useState<number | null>(null);
   const [todaySource, setTodaySource] = useState("unavailable");
@@ -2280,6 +2318,7 @@ export default function StockDetailPanel({
   const [brokerBranchSummary, setBrokerBranchSummary] =
     useState<BrokerBranchTradeDailySummaryRead | null>(null);
   const [shareholding, setShareholding] = useState<ShareholdingDistributionWeeklyRead[]>([]);
+  const [chipCoverage, setChipCoverage] = useState<StockChipCoverageRead | null>(null);
   const [monthlyRevenue, setMonthlyRevenue] = useState<MonthlyRevenueRead | null>(null);
   const [monthlyRevenueHistory, setMonthlyRevenueHistory] = useState<MonthlyRevenueRead[]>([]);
   const [financialMetric, setFinancialMetric] =
@@ -2462,6 +2501,8 @@ export default function StockDetailPanel({
     if (!stockId) {
       const timer = window.setTimeout(() => {
         setChartData([]);
+        setChartStockId(null);
+        setChartTimeframe("daily");
         setTodayTrend([]);
         setTodayPreviousClose(null);
         setTodaySource("unavailable");
@@ -2472,6 +2513,7 @@ export default function StockDetailPanel({
         setMargin(null);
         setBrokerBranchSummary(null);
         setShareholding([]);
+        setChipCoverage(null);
         setMonthlyRevenue(null);
         setMonthlyRevenueHistory([]);
         setFinancialMetric(null);
@@ -2524,6 +2566,7 @@ export default function StockDetailPanel({
       setMargin(null);
       setBrokerBranchSummary(null);
       setShareholding([]);
+      setChipCoverage(null);
       setMonthlyRevenue(null);
       setMonthlyRevenueHistory([]);
       setFinancialMetric(null);
@@ -2546,6 +2589,7 @@ export default function StockDetailPanel({
           marginData,
           brokerBranchData,
           shareholdingData,
+          chipCoverageData,
           revenueData,
           revenueHistoryData,
           financialData,
@@ -2576,6 +2620,9 @@ export default function StockDetailPanel({
                 `/api/market/shareholding/${stockId}/history`,
                 { limit: 12000, ensure_history: false }
               ),
+          skipStockOnlyData
+            ? Promise.resolve(null)
+            : fetchOptional<StockChipCoverageRead>(`/api/market/chips/${stockId}/coverage`),
           skipStockOnlyData
             ? Promise.resolve(null)
             : fetchOptional<MonthlyRevenueRead>(`/api/market/revenue/${stockId}/latest`, {
@@ -2619,6 +2666,7 @@ export default function StockDetailPanel({
         if (currentActiveTab !== "chips") {
           setMargin(marginData);
           setShareholding(shareholdingData ?? []);
+          setChipCoverage(chipCoverageData);
         }
 
         if (currentActiveTab !== "branch") {
@@ -2649,6 +2697,7 @@ export default function StockDetailPanel({
           if (currentActiveTab !== "chips") {
             setMargin(null);
             setShareholding([]);
+            setChipCoverage(null);
           }
 
           if (currentActiveTab !== "branch") {
@@ -2778,13 +2827,15 @@ export default function StockDetailPanel({
       setErrorMessage(null);
 
       try {
-        const chartBars = chartBarsByTimeframe[effectiveTimeframe];
+        const requestedStockId = stockId;
+        const requestedTimeframe = effectiveTimeframe;
+        const chartBars = chartBarsByTimeframe[requestedTimeframe];
         const ohlc = await fetchJson<OhlcChartResponse>(
           isIndexProduct
-            ? `/api/market/indices/${stockId}/ohlc`
-            : `/api/market/ohlc/${stockId}`,
+            ? `/api/market/indices/${requestedStockId}/ohlc`
+            : `/api/market/ohlc/${requestedStockId}`,
           {
-            timeframe: effectiveTimeframe,
+            timeframe: requestedTimeframe,
             bars: chartBars,
             ensure_history: false,
           }
@@ -2793,7 +2844,7 @@ export default function StockDetailPanel({
           isIndexProduct
             ? []
             : await fetchJson<StockIndicatorPoint[]>(
-                `/api/market/indicators/${stockId}/daily`,
+                `/api/market/indicators/${requestedStockId}/daily`,
                 {
                   limit: 3000,
                   ma_windows: "5,20,60",
@@ -2805,6 +2856,8 @@ export default function StockDetailPanel({
 
         setChartData(ohlc.points);
         setIndicatorData(indicators);
+        setChartStockId(requestedStockId);
+        setChartTimeframe(requestedTimeframe);
         setLoadState("success");
       } catch (error) {
         if (cancelled) return;
@@ -2829,6 +2882,10 @@ export default function StockDetailPanel({
   const latestIndicator = indicatorData[indicatorData.length - 1] ?? null;
   const latestChart = chartData[chartData.length - 1] ?? null;
   const previousChart = chartData[chartData.length - 2] ?? null;
+  const currentChartReady =
+    effectiveTimeframe !== "today" &&
+    chartStockId === stockId &&
+    chartTimeframe === effectiveTimeframe;
   const latestToday = todayTrend[todayTrend.length - 1] ?? null;
   const todayStats = useMemo(() => summarizeIntradayPoints(todayTrend), [todayTrend]);
   const latestClose =
@@ -3155,22 +3212,101 @@ export default function StockDetailPanel({
     setDataPanelLoading(tab);
     setDataPanelMessage(null);
 
-    const runBackfill = (
+    const runBackfill = async (
       path: string,
-      params?: Record<string, string | number | boolean>
-    ) =>
-      requestBackfillJob(
+      params?: Record<string, string | number | boolean>,
+      label = "資料補齊"
+    ) => {
+      const job = await requestBackfillJob(
         path,
         { method: "POST" },
         params,
         {
           onUpdate: (job) => {
             if (activeStockIdRef.current === targetStockId) {
-              setDataPanelMessage(formatJobStatus(job));
+              setDataPanelMessage(`${label}：${formatJobStatus(job)}`);
             }
           },
         }
       );
+
+      if (getJobResultStatus(job) === "error") {
+        throw new Error(formatBackfillOutcome(job, label));
+      }
+
+      return job;
+    };
+
+    const loadCachedChips = async (messagePrefix: string) => {
+      const [coverageResult, shareholdingResult, marginResult] = await Promise.allSettled([
+        fetchJson<StockChipCoverageRead>(`/api/market/chips/${targetStockId}/coverage`),
+        fetchJson<ShareholdingDistributionWeeklyRead[]>(
+          `/api/market/shareholding/${targetStockId}/history`,
+          { limit: 12000, ensure_history: false }
+        ),
+        fetchJson<MarginTradingDailyRead[]>(`/api/market/margin/${targetStockId}/history`, {
+          lookback_days: 365,
+          limit: 365,
+          ensure_history: false,
+        }),
+      ]);
+
+      if (activeStockIdRef.current !== targetStockId) {
+        return { hasShareholding: false, hasMargin: false };
+      }
+
+      const fallbackCoverage = chipCoverage?.stock_id === targetStockId ? chipCoverage : null;
+      const fallbackShareholding = shareholding.filter((row) => row.stock_id === targetStockId);
+      const fallbackMargin = margin?.stock_id === targetStockId ? margin : null;
+      const nextCoverage =
+        coverageResult.status === "fulfilled" ? coverageResult.value : fallbackCoverage;
+      const nextShareholding =
+        shareholdingResult.status === "fulfilled"
+          ? shareholdingResult.value
+          : fallbackShareholding;
+      const nextMarginRows = marginResult.status === "fulfilled" ? marginResult.value : [];
+      const nextMargin =
+        marginResult.status === "fulfilled"
+          ? nextMarginRows[nextMarginRows.length - 1] ?? null
+          : fallbackMargin;
+      const hasShareholding = nextShareholding.length > 0;
+      const hasMargin = nextMargin !== null;
+      const fallbackShareholdingWeekCount = new Set(
+        nextShareholding.map((row) => row.data_date)
+      ).size;
+
+      setChipCoverage(nextCoverage);
+      setShareholding(nextShareholding);
+      setMargin(nextMargin);
+
+      const coverageText = nextCoverage
+        ? `集保 ${nextCoverage.shareholding_week_count} 週${
+            nextCoverage.shareholding_latest_date
+              ? `，最新 ${formatDate(nextCoverage.shareholding_latest_date)}`
+              : ""
+          }；融資融券 ${nextCoverage.margin_row_count} 筆${
+            nextCoverage.margin_latest_trade_date
+              ? `，最新 ${formatDate(nextCoverage.margin_latest_trade_date)}`
+              : ""
+          }`
+        : `集保 ${fallbackShareholdingWeekCount} 週；融資融券 ${
+            nextMarginRows.length || (nextMargin ? 1 : 0)
+          } 筆`;
+
+      const failures = [
+        coverageResult.status === "rejected" ? "快取狀態" : null,
+        shareholdingResult.status === "rejected" ? "集保股權分散" : null,
+        marginResult.status === "rejected" ? "融資融券" : null,
+      ].filter(Boolean);
+
+      setDataPanelMessage(
+        `${messagePrefix}${coverageText}${
+          failures.length ? `；讀取失敗：${failures.join("、")}` : ""
+        }`
+      );
+
+      return { hasShareholding, hasMargin };
+    };
 
     try {
       if (tab === "branch") {
@@ -3201,42 +3337,55 @@ export default function StockDetailPanel({
       }
 
       if (tab === "chips") {
-        await runBackfill(
-          `/api/market/backfill/shareholding/${targetStockId}/history`,
-          {
-            lookback_weeks: 52,
-            sleep_seconds: 0.05,
-            skip_existing: true,
-          }
-        );
-        await runBackfill(
-          `/api/market/backfill/daily-metrics/${targetStockId}/history`,
-          {
-            categories: "margin_trading",
-            lookback_days: 365,
-            sleep_seconds: 0.05,
-            skip_existing: true,
-          }
-        );
+        const initialCache = await loadCachedChips("已先顯示本機快取。");
+        const stageMessages: string[] = [];
 
-        const [shareholdingRows, marginRows] = await Promise.all([
-          fetchJson<ShareholdingDistributionWeeklyRead[]>(
-            `/api/market/shareholding/${targetStockId}/history`,
-            { limit: 12000, ensure_history: false }
-          ),
-          fetchJson<MarginTradingDailyRead[]>(`/api/market/margin/${targetStockId}/history`, {
-            lookback_days: 365,
-            limit: 365,
-            ensure_history: false,
-          }),
-        ]);
+        if (initialCache.hasShareholding || initialCache.hasMargin) {
+          dataPanelResolvedKeysRef.current.add(requestKey);
+        }
+
+        try {
+          const shareholdingJob = await runBackfill(
+            `/api/market/backfill/shareholding/${targetStockId}/history`,
+            {
+              lookback_weeks: 52,
+              sleep_seconds: 0.05,
+              skip_existing: true,
+            },
+            "集保股權分散"
+          );
+          stageMessages.push(formatBackfillOutcome(shareholdingJob, "集保股權分散"));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          stageMessages.push(`集保股權分散補齊失敗：${message}`);
+        }
+
+        try {
+          const marginJob = await runBackfill(
+            `/api/market/backfill/daily-metrics/${targetStockId}/history`,
+            {
+              categories: "margin_trading",
+              lookback_days: 365,
+              sleep_seconds: 0.05,
+              skip_existing: true,
+            },
+            "融資融券"
+          );
+          stageMessages.push(formatBackfillOutcome(marginJob, "融資融券"));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          stageMessages.push(`融資融券補齊失敗：${message}`);
+        }
+
+        const finalCache = await loadCachedChips(
+          stageMessages.length ? `${stageMessages.join("；")}。` : "籌碼資料已重新讀取。"
+        );
 
         if (activeStockIdRef.current !== targetStockId) return;
 
-        dataPanelResolvedKeysRef.current.add(requestKey);
-        setShareholding(shareholdingRows);
-        setMargin(marginRows[marginRows.length - 1] ?? null);
-        setDataPanelMessage("籌碼與融資融券資料已補齊");
+        if (finalCache.hasShareholding || finalCache.hasMargin) {
+          dataPanelResolvedKeysRef.current.add(requestKey);
+        }
         return;
       }
 
@@ -3333,6 +3482,55 @@ export default function StockDetailPanel({
       }
     }
   }
+
+  useEffect(() => {
+    if (!stockId || isIndexProduct) return;
+
+    let cancelled = false;
+    const targetStockId = stockId;
+    const timer = window.setTimeout(() => {
+      void requestBackfillJob(
+        `/api/market/selection-refresh/${targetStockId}`,
+        { method: "POST" },
+        { sleep_seconds: 0.05 },
+        {
+          intervalMs: 1500,
+          timeoutMs: 600000,
+          onUpdate: (job) => {
+            if (!cancelled && activeStockIdRef.current === targetStockId) {
+              setDataPanelMessage(`自選股資料自動更新：${formatJobStatus(job)}`);
+            }
+          },
+        }
+      )
+        .then((job) => {
+          if (cancelled || activeStockIdRef.current !== targetStockId) return;
+
+          const resultStatus = getJobResultStatus(job);
+          setDataPanelMessage(
+            resultStatus === "partial_success"
+              ? "自選股資料自動更新部分完成，部分來源暫時不可用"
+              : resultStatus === "error"
+                ? "自選股資料自動更新失敗"
+                : "自選股資料自動更新完成"
+          );
+          void refreshDataTab(activeDataTabRef.current);
+        })
+        .catch((error) => {
+          if (cancelled || activeStockIdRef.current !== targetStockId) return;
+
+          const message = error instanceof Error ? error.message : "Unknown error";
+          setDataPanelMessage(`自選股資料自動更新失敗：${message}`);
+        });
+    }, 0);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+    // Queue once per selected stock; refreshDataTab is invoked after the job finishes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isIndexProduct, stockId]);
 
   function handleDataTabClick(tab: DataPanelTab) {
     if (isIndexProduct) return;
@@ -3434,9 +3632,54 @@ export default function StockDetailPanel({
     return false;
   }
 
+  function activeDataTabHasRenderableData() {
+    if (activeDataTab === "chips") {
+      return (
+        (margin !== null && margin.stock_id === selectedStockId) ||
+        shareholding.some((row) => row.stock_id === selectedStockId)
+      );
+    }
+
+    if (activeDataTab === "institutional") {
+      return (
+        (institutional !== null && institutional.stock_id === selectedStockId) ||
+        institutionalHistory.some((row) => row.stock_id === selectedStockId) ||
+        (institutionalHoldingRatio !== null &&
+          institutionalHoldingRatio.stock_id === selectedStockId)
+      );
+    }
+
+    if (activeDataTab === "branch") {
+      return (
+        brokerBranchSummary !== null &&
+        brokerBranchSummary.stock_id === selectedStockId &&
+        brokerBranchSummary.requested_days === branchDays
+      );
+    }
+
+    if (activeDataTab === "revenue") {
+      const currentRows = monthlyRevenueHistory.filter(
+        (row) => row.stock_id === selectedStockId
+      );
+
+      return currentRows.length >= minimumUsableRevenueRows;
+    }
+
+    if (activeDataTab === "earnings") {
+      const currentRows = financialMetricHistory.filter(
+        (row) => row.stock_id === selectedStockId
+      );
+
+      return currentRows.length >= minimumUsableFinancialRows;
+    }
+
+    return false;
+  }
+
   function renderChipTab() {
     const hasShareholding = shareholdingSeries.length > 0;
     const hasMargin = margin !== null;
+    const currentChipCoverage = chipCoverage?.stock_id === stockId ? chipCoverage : null;
 
     if (!hasShareholding && !hasMargin) {
       return <EmptyDataState message="尚無籌碼或融資融券資料" />;
@@ -3444,6 +3687,21 @@ export default function StockDetailPanel({
 
     return (
       <div className="space-y-5">
+        {dataPanelLoading === "chips" && dataPanelMessage ? (
+          <div className="border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
+            {dataPanelMessage}
+          </div>
+        ) : null}
+
+        {currentChipCoverage ? (
+          <div className="text-xs leading-5 text-slate-500">
+            集保最新 {formatDate(currentChipCoverage.shareholding_latest_date)}，
+            共 {currentChipCoverage.shareholding_week_count} 週；融資融券最新{" "}
+            {formatDate(currentChipCoverage.margin_latest_trade_date)}，
+            共 {currentChipCoverage.margin_row_count} 筆
+          </div>
+        ) : null}
+
         <div className="space-y-2">
           <SegmentedNumberButtons
             label="大股東張數 >"
@@ -4165,8 +4423,12 @@ export default function StockDetailPanel({
   }
 
   function renderActiveDataTab() {
-    if (dataPanelLoading === activeDataTab || activeDataTabHasStaleData()) {
+    if (activeDataTabHasStaleData()) {
       return <EmptyDataState message="補齊資料中..." />;
+    }
+
+    if (dataPanelLoading === activeDataTab && !activeDataTabHasRenderableData()) {
+      return <EmptyDataState message={dataPanelMessage ?? "補齊資料中..."} />;
     }
 
     if (activeDataTab === "institutional") return renderInstitutionalTab();
@@ -4474,21 +4736,25 @@ export default function StockDetailPanel({
               label={timeframeLabels[effectiveTimeframe]}
               source={todaySource}
               indicators={intradayIndicators}
+              revealKey={`${stockId}:${effectiveTimeframe}`}
               refreshIntervalMs={TAIWAN_INTRADAY_REFRESH_MS}
               updatedAt={todayUpdatedAt}
             />
-          ) : (
+          ) : currentChartReady ? (
             <StockKLineChart
               chartData={chartData}
               indicatorData={indicatorForTimeframe}
               label={timeframeLabels[effectiveTimeframe]}
               indicators={chartIndicators}
               indicatorParameters={indicatorParameters}
+              revealKey={`${stockId}:${effectiveTimeframe}`}
               volumePanelLabel={isIndexProduct ? "成交金額(億)" : undefined}
               volumeTooltipLabel={isIndexProduct ? "成交金額(億)" : undefined}
               volumeValueKey={isIndexProduct ? "trade_value" : "volume"}
               volumeValueFormatter={isIndexProduct ? formatTradeValueYi : undefined}
             />
+          ) : (
+            <EmptyDataState message={`讀取${timeframeLabels[effectiveTimeframe]}資料中...`} />
           )}
         </div>
 
@@ -4627,7 +4893,7 @@ export default function StockDetailPanel({
                   </div>
                   <div className="mt-1 text-xs text-slate-500">
                     {dataPanelLoading === activeDataTab
-                      ? "補齊資料中..."
+                      ? dataPanelMessage ?? "補齊資料中..."
                       : dataPanelMessage ?? "依目前選取股票載入對應公開資料"}
                   </div>
                 </div>

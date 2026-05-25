@@ -3,6 +3,7 @@
 import SidebarWatchlistExplorer from "@/components/SidebarWatchlistExplorer";
 import StockDetailPanel from "@/components/StockDetailPanel";
 import { fetchJson } from "@/lib/api";
+import { requestBackfillJob } from "@/lib/jobs";
 import {
   TAIWAN_INTRADAY_REFRESH_MS,
   getTaiwanIntradayXRatio,
@@ -466,6 +467,8 @@ export default function MarketDashboardClient({
   const finalDashboardRefreshDate = useRef<string | null>(null);
 
   const activeGroupId = selectedGroupId ?? selectedGroup?.id ?? null;
+  const activeGroupIdRef = useRef<number | null>(activeGroupId);
+  const watchlistFreshnessRequestKeys = useRef<Set<string>>(new Set());
   const baseRows = useMemo(
     () => buildWatchlistRows(selectedGroup, watchlistItems),
     [selectedGroup, watchlistItems]
@@ -560,6 +563,44 @@ export default function MarketDashboardClient({
     }
   }
 
+  async function refreshWatchlistDailyPricesOnOpen(groupId: number, currentRankBy: RankBy) {
+    const marketState = getTaiwanMarketRefreshState();
+    const requestKey = `${groupId}:${marketState.dateKey}`;
+
+    if (watchlistFreshnessRequestKeys.current.has(requestKey)) return;
+
+    watchlistFreshnessRequestKeys.current.add(requestKey);
+
+    try {
+      await requestBackfillJob(
+        `/api/watchlists/groups/${groupId}/refresh-latest`,
+        { method: "POST" },
+        {
+          lookback_days: 14,
+          include_today: false,
+          include_children: true,
+          enabled_only: true,
+          sleep_seconds: 0.3,
+          skip_existing_months: true,
+        },
+        {
+          intervalMs: 1500,
+          timeoutMs: 600000,
+        }
+      );
+
+      if (activeGroupIdRef.current === groupId) {
+        await loadDashboard(groupId, currentRankBy, { silent: true });
+      }
+    } catch (error) {
+      console.warn("Watchlist daily price refresh failed.", error);
+    }
+  }
+
+  useEffect(() => {
+    activeGroupIdRef.current = activeGroupId;
+  }, [activeGroupId]);
+
   useEffect(() => {
     let disposed = false;
     let refreshTimer: number | undefined;
@@ -642,6 +683,7 @@ export default function MarketDashboardClient({
         }
 
         scheduleRefresh();
+        void refreshWatchlistDailyPricesOnOpen(groupId, rankBy);
       });
     }, 120);
 

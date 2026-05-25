@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import type { IntradayTrendPoint } from "@/types/market";
 import {
   TAIWAN_SESSION_END_MINUTES,
@@ -16,6 +16,7 @@ type Props = {
   label: string;
   source: string;
   indicators?: IntradayIndicatorSettings;
+  revealKey?: string;
   refreshIntervalMs?: number;
   updatedAt?: string | null;
 };
@@ -62,6 +63,8 @@ export const intradayIndicatorOptions: Array<{
   { key: "rsi", label: "RSI", description: "RSI 14" },
   { key: "macd", label: "MACD", description: "12 / 26 / 9" },
 ];
+
+const playedIntradayRevealKeys = new Set<string>();
 
 function formatPrice(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
@@ -555,13 +558,16 @@ export default function IntradayTrendChart({
   label,
   source,
   indicators = defaultIntradayIndicators,
+  revealKey,
   refreshIntervalMs,
   updatedAt,
 }: Props) {
   const chartId = useId();
+  const safeChartId = chartId.replace(/[^a-zA-Z0-9_-]/g, "");
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const [showLimitRange, setShowLimitRange] = useState(false);
   const [interval, setInterval] = useState<IntradayInterval>(1);
+  const [activeRevealKey, setActiveRevealKey] = useState<string | null>(null);
 
   const data = useMemo(() => {
     return enrichIntradayPoints(aggregateIntradayPoints(points, interval));
@@ -569,6 +575,24 @@ export default function IntradayTrendChart({
 
   const safeHoverIndex =
     hoverIndex !== null && hoverIndex >= 0 && hoverIndex < data.length ? hoverIndex : null;
+  const stableRevealKey = revealKey ?? label;
+  const dataReadyForReveal = data.length >= 2;
+
+  useEffect(() => {
+    if (!dataReadyForReveal) return;
+
+    const timeoutId = window.setTimeout(() => {
+      setActiveRevealKey((current) => {
+        if (playedIntradayRevealKeys.has(stableRevealKey)) {
+          return current === stableRevealKey ? current : null;
+        }
+
+        return stableRevealKey;
+      });
+    }, 0);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [dataReadyForReveal, stableRevealKey]);
 
   if (data.length < 2) {
     return (
@@ -582,7 +606,7 @@ export default function IntradayTrendChart({
   const indicatorHeight = 48;
   const indicatorGap = 14;
   const paddingLeft = 58;
-  const paddingRight = 72;
+  const paddingRight = 90;
   const priceTop = 30;
   const priceHeight = 260;
   const volumeTop = 322;
@@ -745,8 +769,12 @@ export default function IntradayTrendChart({
   const areaPath = buildBaselineAreaPath(linePath, firstPointX, lastPointX, baselineY);
   const sessionMinutes = TAIWAN_SESSION_END_MINUTES - TAIWAN_SESSION_START_MINUTES;
   const chartAreaRight = width - paddingRight;
-  const clipAboveId = `${chartId}-above`.replace(/:/g, "");
-  const clipBelowId = `${chartId}-below`.replace(/:/g, "");
+  const clipAboveId = `${safeChartId}-above`;
+  const clipBelowId = `${safeChartId}-below`;
+  const revealClipId = `${safeChartId}-reveal`;
+  const revealCoverClass = `intraday-reveal-cover-${safeChartId}`;
+  const revealAnimationName = `intraday-reveal-${safeChartId}`;
+  const shouldShowRevealCover = activeRevealKey === stableRevealKey;
   const barWidth = clamp((usableWidth / sessionMinutes) * interval * 0.7, 1, 10);
   const timeTicks = [
     { label: "09:00", minutes: 9 * 60 },
@@ -866,6 +894,35 @@ export default function IntradayTrendChart({
       <svg viewBox={`0 0 ${width} ${height}`} className="w-full" style={{ height }}>
         <rect x="0" y="0" width={width} height={height} className="fill-white" />
         <defs>
+          <style>
+            {`
+              @keyframes ${revealAnimationName} {
+                0% {
+                  opacity: 1;
+                  transform: translateX(0);
+                }
+                92% {
+                  opacity: 1;
+                }
+                100% {
+                  opacity: 0;
+                  transform: translateX(${usableWidth}px);
+                }
+              }
+
+              .${revealCoverClass} {
+                animation: ${revealAnimationName} 1300ms cubic-bezier(0.22, 1, 0.36, 1) both;
+                pointer-events: none;
+                transform-box: fill-box;
+              }
+
+              @media (prefers-reduced-motion: reduce) {
+                .${revealCoverClass} {
+                  animation-duration: 1ms;
+                }
+              }
+            `}
+          </style>
           <clipPath id={clipAboveId}>
             <rect
               x={paddingLeft}
@@ -880,6 +937,14 @@ export default function IntradayTrendChart({
               y={baselineY}
               width={usableWidth}
               height={Math.max(0, volumeTop - baselineY)}
+            />
+          </clipPath>
+          <clipPath id={revealClipId}>
+            <rect
+              x={paddingLeft}
+              y={priceTop}
+              width={usableWidth}
+              height={indicatorBottom - priceTop}
             />
           </clipPath>
         </defs>
@@ -1284,6 +1349,29 @@ export default function IntradayTrendChart({
                 strokeLinejoin="round"
               />
             ) : null}
+          </g>
+        ) : null}
+
+        {shouldShowRevealCover ? (
+          <g
+            key={activeRevealKey}
+            className={revealCoverClass}
+            clipPath={`url(#${revealClipId})`}
+            aria-hidden="true"
+            onAnimationStart={() => {
+              playedIntradayRevealKeys.add(stableRevealKey);
+            }}
+            onAnimationEnd={() => {
+              setActiveRevealKey((current) => (current === stableRevealKey ? null : current));
+            }}
+          >
+            <rect
+              x={paddingLeft}
+              y={priceTop}
+              width={usableWidth}
+              height={indicatorBottom - priceTop}
+              className="fill-white"
+            />
           </g>
         ) : null}
 
