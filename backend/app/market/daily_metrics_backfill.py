@@ -1,6 +1,5 @@
 import time
-from datetime import date, datetime, timedelta
-from zoneinfo import ZoneInfo
+from datetime import date, timedelta
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -13,10 +12,9 @@ from app.db.models import (
     StockMaster,
 )
 from app.market.backfill import backfill_tpex_trading_stock, backfill_twse_stock_day
+from app.market.trading_calendar import taiwan_today
 from app.pipelines.fetch_pipeline import refresh_source
 
-
-TAIWAN_TZ = ZoneInfo("Asia/Taipei")
 
 SUPPORTED_PARSER_MODELS = {
     "twse_institutional_trade": InstitutionalTradeDaily,
@@ -39,7 +37,7 @@ MARKET_CATEGORY_PARSER_TYPES = {
 
 
 def _taiwan_today() -> date:
-    return datetime.now(TAIWAN_TZ).date()
+    return taiwan_today()
 
 
 def _normalize_categories(categories: list[str] | tuple[str, ...] | None) -> tuple[str, ...]:

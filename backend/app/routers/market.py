@@ -1,5 +1,4 @@
 from datetime import date, datetime, time, timedelta
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -31,6 +30,11 @@ from app.market.intraday import get_intraday_trend
 from app.market.broker_branch import (
     BrokerBranchFetchError,
     get_broker_branch_trade_summary,
+)
+from app.market.trading_calendar import (
+    TAIWAN_TZ,
+    is_taiwan_trading_day,
+    previous_taiwan_trading_day,
 )
 from app.market.schemas import (
     BrokerBranchTradeDailySummaryRead,
@@ -78,7 +82,6 @@ from app.market.service import (
 
 router = APIRouter()
 
-TAIWAN_TZ = ZoneInfo("Asia/Taipei")
 DAILY_METRIC_RELEASE_TIMES = {
     "institutional_trade": time(18, 10),
     "margin_trading": time(21, 10),
@@ -98,7 +101,7 @@ def _resolve_daily_metric_include_today(
 
     now = datetime.now(TAIWAN_TZ)
 
-    if now.weekday() >= 5:
+    if not is_taiwan_trading_day(now.date()):
         return False
 
     release_time = max(
@@ -119,8 +122,13 @@ def _daily_metric_history_range(
 ) -> tuple[date, date]:
     end_date = to_date or datetime.now(TAIWAN_TZ).date()
 
-    if to_date is None and not include_today:
-        end_date -= timedelta(days=1)
+    if to_date is None:
+        end_date = previous_taiwan_trading_day(
+            end_date,
+            include_value=include_today,
+        )
+    else:
+        end_date = previous_taiwan_trading_day(end_date, include_value=True)
 
     start_date = from_date or end_date - timedelta(days=lookback_days)
     return start_date, end_date

@@ -1,12 +1,11 @@
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
-from zoneinfo import ZoneInfo
+from datetime import date, datetime, time
 
 import requests
 from sqlalchemy.orm import Session
 
-from app.config import settings
 from app.db.models import BrokerBranchTradeDaily, RawFetchResult, SourceRegistry
+from app.market.trading_calendar import latest_released_trading_day
 from app.parsers.twse_common import parse_date, parse_float, parse_int
 from app.utils.hash import sha256_text
 
@@ -255,24 +254,12 @@ def fetch_and_store_broker_branch_daily(
     )
 
 
-def _previous_weekday(value: date) -> date:
-    current = value
-
-    while current.weekday() >= 5:
-        current -= timedelta(days=1)
-
-    return current
-
-
 def expected_broker_branch_trade_date(now: datetime | None = None) -> date:
-    timezone = ZoneInfo(settings.timezone)
-    local_now = now.astimezone(timezone) if now is not None else datetime.now(timezone)
-    target_date = local_now.date()
-
-    if target_date.weekday() < 5 and local_now.time() < BRANCH_DAILY_READY_TIME:
-        target_date -= timedelta(days=1)
-
-    return _previous_weekday(target_date)
+    return latest_released_trading_day(
+        release_time=BRANCH_DAILY_READY_TIME,
+        include_today=None,
+        now=now,
+    )
 
 
 def has_broker_branch_trades(

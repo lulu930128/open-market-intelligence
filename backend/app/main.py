@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import PROJECT_ROOT
+from app.db.migrations import run_database_migrations
 from app.db.session import SessionLocal, init_db
 from app.errors import (
     http_exception_handler,
@@ -26,6 +27,7 @@ request_logger = logging.getLogger("app.requests")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    run_database_migrations()
     init_db()
     db = SessionLocal()
 

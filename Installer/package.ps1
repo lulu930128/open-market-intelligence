@@ -193,7 +193,9 @@ function Build-FrontendStandalone {
 
 function Copy-AppFiles {
     Copy-Directory -Source (Join-Path $repoRoot "backend\app") -Destination (Join-Path $packageRoot "backend\app")
+    Copy-Directory -Source (Join-Path $repoRoot "backend\alembic") -Destination (Join-Path $packageRoot "backend\alembic")
     Copy-RequiredFile -Source (Join-Path $repoRoot "backend\requirements.txt") -Destination (Join-Path $packageRoot "backend\requirements.txt")
+    Copy-RequiredFile -Source (Join-Path $repoRoot "alembic.ini") -Destination (Join-Path $packageRoot "alembic.ini")
     Copy-RequiredFile -Source (Join-Path $repoRoot "Start-OMI-Launcher.cmd") -Destination (Join-Path $packageRoot "Start-OMI-Launcher.cmd")
     Copy-RequiredFile -Source (Join-Path $repoRoot "ATRI-MyDearMoments.ico") -Destination (Join-Path $packageRoot "ATRI-MyDearMoments.ico")
 
@@ -314,7 +316,7 @@ function Test-PackagedRuntime {
     $backendTarget = Join-Path $packageRoot "backend"
     Invoke-Logged `
         -FilePath $PythonExe `
-        -Arguments @("-c", "import fastapi, uvicorn, pandas, sqlalchemy; import app.main; print('python-runtime-ok')") `
+        -Arguments @("-c", "import alembic, fastapi, uvicorn, pandas, sqlalchemy; import app.main; from app.db.migrations import get_head_revision; print('python-runtime-ok', get_head_revision())") `
         -WorkingDirectory $backendTarget
 }
 

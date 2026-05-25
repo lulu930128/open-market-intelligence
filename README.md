@@ -372,6 +372,11 @@ Next.js rewrite:
 
 ## Database And Migrations
 
+The backend runs `alembic upgrade head` automatically during startup before
+opening application sessions. This keeps packaged releases and local runs on the
+current schema, including older SQLite databases that were created before
+Alembic version tracking existed.
+
 新環境套用 migration：
 
 ```powershell
@@ -398,6 +403,24 @@ frontend/.env.local
 ```
 
 These should not be committed.
+
+## Validation
+
+Backend:
+
+```powershell
+$env:PYTHONPATH = "backend"
+python -m compileall backend\app
+python -m unittest discover -s backend\tests -p "test_*.py"
+```
+
+Frontend:
+
+```powershell
+cd frontend
+npm run lint
+npm run build
+```
 
 ## Common Workflows
 

@@ -3,6 +3,40 @@ export const TAIWAN_PREOPEN_MINUTES = 8 * 60 + 30;
 export const TAIWAN_SESSION_START_MINUTES = 9 * 60;
 export const TAIWAN_SESSION_END_MINUTES = 13 * 60 + 30;
 
+const TAIWAN_MARKET_HOLIDAYS = new Set([
+  "2025-01-01",
+  "2025-01-27",
+  "2025-01-28",
+  "2025-01-29",
+  "2025-01-30",
+  "2025-01-31",
+  "2025-02-28",
+  "2025-04-03",
+  "2025-04-04",
+  "2025-05-01",
+  "2025-05-30",
+  "2025-10-06",
+  "2025-10-10",
+  "2026-01-01",
+  "2026-02-12",
+  "2026-02-13",
+  "2026-02-16",
+  "2026-02-17",
+  "2026-02-18",
+  "2026-02-19",
+  "2026-02-20",
+  "2026-02-27",
+  "2026-04-03",
+  "2026-04-06",
+  "2026-05-01",
+  "2026-06-19",
+  "2026-09-25",
+  "2026-09-28",
+  "2026-10-09",
+  "2026-10-26",
+  "2026-12-25",
+]);
+
 type TaipeiParts = {
   year: number;
   month: number;
@@ -57,6 +91,14 @@ function isTaiwanWeekday(year: number, month: number, day: number) {
   return weekday >= 1 && weekday <= 5;
 }
 
+function taipeiDateKey(year: number, month: number, day: number) {
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function isTaiwanTradingDay(year: number, month: number, day: number) {
+  return isTaiwanWeekday(year, month, day) && !TAIWAN_MARKET_HOLIDAYS.has(taipeiDateKey(year, month, day));
+}
+
 function addTaipeiDays(parts: TaipeiParts, days: number) {
   const value = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + days, 4));
   return {
@@ -70,7 +112,7 @@ function nextTaiwanWeekday(parts: TaipeiParts) {
   for (let offset = 1; offset <= 7; offset += 1) {
     const candidate = addTaipeiDays(parts, offset);
 
-    if (isTaiwanWeekday(candidate.year, candidate.month, candidate.day)) {
+    if (isTaiwanTradingDay(candidate.year, candidate.month, candidate.day)) {
       return candidate;
     }
   }
@@ -80,10 +122,7 @@ function nextTaiwanWeekday(parts: TaipeiParts) {
 
 export function getTaipeiDateKey(value = new Date()) {
   const parts = getTaipeiParts(value);
-  const month = String(parts.month).padStart(2, "0");
-  const day = String(parts.day).padStart(2, "0");
-
-  return `${parts.year}-${month}-${day}`;
+  return taipeiDateKey(parts.year, parts.month, parts.day);
 }
 
 export function getTaipeiMinutesOfDay(value: string | Date) {
@@ -98,7 +137,7 @@ export function getTaipeiMinutesOfDay(value: string | Date) {
 export function getTaiwanMarketRefreshState(now = new Date()) {
   const parts = getTaipeiParts(now);
   const dateKey = getTaipeiDateKey(now);
-  const isWeekday = isTaiwanWeekday(parts.year, parts.month, parts.day);
+  const isTradingDay = isTaiwanTradingDay(parts.year, parts.month, parts.day);
   const nowMs = now.getTime();
   const preopenMs = taipeiBoundaryToUtcMs(parts.year, parts.month, parts.day, 8, 30);
   const closeMs = taipeiBoundaryToUtcMs(parts.year, parts.month, parts.day, 13, 30);
@@ -110,10 +149,10 @@ export function getTaiwanMarketRefreshState(now = new Date()) {
     8,
     30
   );
-  const isPollingWindow = isWeekday && nowMs >= preopenMs && nowMs < closeMs;
-  const isAfterClose = isWeekday && nowMs >= closeMs;
+  const isPollingWindow = isTradingDay && nowMs >= preopenMs && nowMs < closeMs;
+  const isAfterClose = isTradingDay && nowMs >= closeMs;
   const nextPollingStartMs =
-    isWeekday && nowMs < preopenMs ? preopenMs : nextPreopenMs;
+    isTradingDay && nowMs < preopenMs ? preopenMs : nextPreopenMs;
 
   return {
     dateKey,

@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from app.config import settings
 from app.db.session import SessionLocal
 from app.jobs import backfill_tasks, service as job_service
+from app.market.trading_calendar import is_taiwan_trading_day
 
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,11 @@ def _timezone() -> ZoneInfo:
 def enqueue_market_daily_refresh() -> None:
     categories = ["institutional_trade", "margin_trading"]
     now = datetime.now(_timezone())
+
+    if not is_taiwan_trading_day(now.date()):
+        logger.info("Skipped scheduled market daily refresh because %s is not a trading day.", now.date())
+        return
+
     request = {
         "schedule": "market_daily_refresh",
         "run_date": now.date().isoformat(),

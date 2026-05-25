@@ -1,13 +1,12 @@
 from collections.abc import Callable
-from datetime import date, datetime, time, timedelta
-from zoneinfo import ZoneInfo
+from datetime import date, time, timedelta
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.config import settings
 from app.db.models import MarketDailyPrice, StockMaster
 from app.market.backfill import backfill_tpex_trading_stock, backfill_twse_stock_day
+from app.market.trading_calendar import latest_released_trading_day, previous_taiwan_trading_day
 from app.watchlists import service as watchlist_service
 
 
@@ -45,29 +44,14 @@ def _get_latest_trade_date(db: Session, stock_id: str) -> date | None:
     )
 
 
-def _previous_weekday(value: date) -> date:
-    current = value
-
-    while current.weekday() >= 5:
-        current -= timedelta(days=1)
-
-    return current
-
-
 def _expected_latest_trade_date(to_date: date | None, include_today: bool) -> date:
     if to_date is not None:
-        return to_date
+        return previous_taiwan_trading_day(to_date, include_value=True)
 
-    local_now = datetime.now(ZoneInfo(settings.timezone))
-    today = local_now.date()
-
-    if today.weekday() >= 5:
-        return _previous_weekday(today)
-
-    if not include_today and local_now.time() < time(hour=15, minute=15):
-        return _previous_weekday(today - timedelta(days=1))
-
-    return today
+    return latest_released_trading_day(
+        release_time=time(hour=15, minute=15),
+        include_today=True if include_today else None,
+    )
 
 
 def _list_unique_watchlist_items(

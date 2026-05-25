@@ -1,15 +1,14 @@
 from collections.abc import Callable
-from datetime import date, datetime, time, timedelta
-from zoneinfo import ZoneInfo
+from datetime import time
 
 from sqlalchemy.orm import Session
 
-from app.config import settings
 from app.market.broker_branch import ensure_broker_branch_daily
 from app.market.daily_metrics_backfill import ensure_stock_daily_metrics
 from app.market.financial_metrics_history_backfill import ensure_stock_financial_metrics_history
 from app.market.monthly_revenue_history_backfill import ensure_stock_monthly_revenue_history
 from app.market.shareholding_history_backfill import ensure_stock_shareholding_history
+from app.market.trading_calendar import latest_released_trading_day
 
 
 ProgressCallback = Callable[[int | None, int | None, str | None], None]
@@ -18,37 +17,6 @@ DAILY_METRIC_RELEASE_TIMES = {
     "institutional_trade": time(18, 10),
     "margin_trading": time(21, 10),
 }
-
-
-def _previous_weekday(value: date) -> date:
-    current = value
-
-    while current.weekday() >= 5:
-        current -= timedelta(days=1)
-
-    return current
-
-
-def _released_trade_date(
-    *,
-    release_time: time,
-    include_today: bool | None,
-    now: datetime | None = None,
-) -> date:
-    timezone = ZoneInfo(settings.timezone)
-    local_now = now.astimezone(timezone) if now is not None else datetime.now(timezone)
-    target_date = local_now.date()
-
-    if target_date.weekday() >= 5:
-        return _previous_weekday(target_date)
-
-    if include_today is False:
-        return _previous_weekday(target_date - timedelta(days=1))
-
-    if include_today is None and local_now.time() < release_time:
-        return _previous_weekday(target_date - timedelta(days=1))
-
-    return target_date
 
 
 def _step_status(result: dict) -> str:
@@ -100,11 +68,11 @@ def refresh_selected_stock_data(
 ) -> dict:
     step_total = 6
     results: dict[str, dict] = {}
-    institutional_trade_date = _released_trade_date(
+    institutional_trade_date = latest_released_trading_day(
         release_time=DAILY_METRIC_RELEASE_TIMES["institutional_trade"],
         include_today=include_today,
     )
-    margin_trade_date = _released_trade_date(
+    margin_trade_date = latest_released_trading_day(
         release_time=DAILY_METRIC_RELEASE_TIMES["margin_trading"],
         include_today=include_today,
     )
