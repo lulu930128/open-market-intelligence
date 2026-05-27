@@ -231,6 +231,11 @@ flowchart TD
 | --- | --- |
 | `backend/app/main.py` | FastAPI app、middleware、router registration、startup / shutdown lifecycle |
 | `backend/app/config.py` | `.env` 設定、database URL、timezone、scheduler options |
+| `backend/app/ai/tools.py` | AI 可用的本機資料工具與 evidence pack 組裝 |
+| `backend/app/ai/prompts.py` | AI 策略 profile、system prompt 與研究偏好 |
+| `backend/app/ai/llm.py` | OpenAI Responses API 呼叫、JSON schema 驗證與錯誤處理 |
+| `backend/app/ai/orchestrator.py` | 個股與自選群組 AI 報告產生流程 |
+| `backend/app/ai/memory.py` | AI 記憶建立、查詢、封存與相關記憶選取 |
 | `backend/app/market/intraday.py` | 今日分時資料來源、fallback 與交易所快照校正 |
 | `backend/app/market/backfill.py` | TWSE / TPEx 日線回補 |
 | `backend/app/market/daily_metrics_backfill.py` | 法人與融資融券回補 |
@@ -260,6 +265,7 @@ flowchart TD
 | `/api/sources` | `/`, `/{id}/run`, `/{id}/logs` | 資料來源、擷取與 raw result |
 | `/api/raw-results` | `/{id}`, `/{id}/quality` | Raw payload、品質檢查與 parse |
 | `/api/jobs` | `/`, `/{job_id}` | Background job 狀態 |
+| `/api/ai` | `/tools`, `/strategy-profiles`, `/stocks/{id}/brief/generate`, `/watchlists/{id}/brief/generate` | AI 工具清單、記憶、個股報告與自選群組報告 |
 | `/api/stocks` | `/search`, `/{stock_id}`, `/{stock_id}/profile` | 股票主檔與公司資料 |
 | `/api/watchlists` | `/tree`, `/groups`, `/items`, `/groups/{id}/ranking` | 自選股群組、項目、排行與群組回補 |
 | `/api/market/ohlc` | `/api/market/ohlc/2330?timeframe=daily` | 日週月 K 線 |
@@ -351,7 +357,22 @@ APP_PORT=8300
 # DATABASE_URL=sqlite:///C:/Open Market Intelligence/data/open_market_intelligence.db
 ENABLE_SCHEDULER=false
 TIMEZONE=Asia/Taipei
+OPENAI_API_KEY=
+OPENAI_LLM_API_KEY=
+OMI_OPENAI_ENV_FILE=
+OPENAI_MODEL=gpt-5.4-mini
+OPENAI_RESPONSES_URL=https://api.openai.com/v1/responses
+OPENAI_TIMEOUT_SECONDS=120
+OPENAI_MAX_OUTPUT_TOKENS=1800
 ```
+
+OpenAI key resolution order:
+
+1. `OPENAI_API_KEY`
+2. `OPENAI_LLM_API_KEY`
+3. `OMI_OPENAI_ENV_FILE`, pointing at a local env file that contains either key
+
+Do not commit real keys. `.env` is local-only and ignored by git.
 
 Frontend `.env.example`:
 
@@ -369,6 +390,52 @@ Next.js rewrite:
 /omi-data/...    -> http://127.0.0.1:8300/api/...
 /api/...         -> http://127.0.0.1:8300/api/...
 ```
+
+## AI Research Flow
+
+AI 研究功能採用本機資料優先流程：後端先用明確工具讀取 SQLite 與既有 service，整理成 evidence pack，再交給 OpenAI 做摘要與判讀。LLM 不直接碰資料庫，也不自行假設缺漏資料。
+
+```mermaid
+flowchart TD
+    ask["AI question"] --> scope{"Scope"}
+    scope --> stock["Stock brief<br/>/api/ai/stocks/{id}/brief/generate"]
+    scope --> group["Watchlist brief<br/>/api/ai/watchlists/{id}/brief/generate"]
+    scope --> freshness["Data freshness / market overview<br/>read-only tools"]
+
+    stock --> stockData["OHLC, indicators, chips, branch, revenue, financials"]
+    group --> groupData["Watchlist ranking, score, change, volume, signal keys"]
+    freshness --> freshnessData["Latest local dates, missing tables, source refs"]
+
+    stockData --> pack["Evidence pack"]
+    groupData --> pack
+    freshnessData --> pack
+    pack --> profile["Strategy profile<br/>balanced / technical_swing / chip_flow / fundamentals_growth / dividend_value"]
+    profile --> memory["Relevant AI memories"]
+    memory --> llm["OpenAI Responses API"]
+    llm --> schema["Strict JSON schema validation"]
+    schema --> report["ai_report + ai_tool_call"]
+```
+
+### AI Question Modes
+
+| Mode | API | Reads | Use case |
+| --- | --- | --- | --- |
+| Data freshness | `GET /api/ai/data-freshness` | Latest available dates and missing coverage | Check whether the local dataset is usable before analysis |
+| Market overview | `GET /api/ai/market-overview` | Latest market breadth and movers | Quick market context without an LLM call |
+| Stock context | `GET /api/ai/stocks/{stock_id}/context` | Full single-stock evidence pack | Inspect what would be sent to AI |
+| Stock LLM brief | `POST /api/ai/stocks/{stock_id}/brief/generate` | Single-stock evidence plus strategy profile and memory | Deep stock report |
+| Watchlist context | `GET /api/ai/watchlists/{group_id}/context` | Group ranking, score, change, volume, status and signal keys | Inspect group scan payload |
+| Watchlist LLM brief | `POST /api/ai/watchlists/{group_id}/brief/generate` | Compact group ranking plus strategy profile and memory | Sector/watchlist scan |
+
+For short-term trading research, use `strategy_profile=technical_swing` first. The intended flow is group scan first, then deep stock briefs only for selected candidates. This keeps the prompt small and avoids sending full single-stock data for every item in a large watchlist.
+
+### AI Cost And Token Controls
+
+- Watchlist AI reports send ranking rows and signal summaries, not every stock's full branch, institutional, revenue and financial history.
+- Stock AI reports are heavier because they include one stock's chart, chips, branch, revenue and financial context.
+- Large groups should be treated as scan mode. If a group has many stocks, call the watchlist brief first, pick top candidates, then call stock briefs for those candidates.
+- The OpenAI output budget is controlled by `OPENAI_MAX_OUTPUT_TOKENS`; request timeout is controlled by `OPENAI_TIMEOUT_SECONDS`.
+- Generated reports are persisted in `ai_report` with `ai_tool_call` records so later agents can inspect what tools were used.
 
 ## Database And Migrations
 

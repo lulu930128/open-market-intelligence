@@ -182,7 +182,7 @@ def refresh_selected_stock_data_api(
             "include_today": include_today,
             "sleep_seconds": sleep_seconds,
         },
-        progress_total=6,
+        progress_total=7,
         task=backfill_tasks.run_stock_selection_refresh_job,
         task_args=(stock_id, include_today, sleep_seconds),
     )

@@ -18,7 +18,7 @@ from app.errors import (
     validation_exception_handler,
 )
 from app.jobs import scheduler as job_scheduler, service as job_service
-from app.routers import indicators, jobs, market, raw_results, reports, sources, stocks, system, watchlists
+from app.routers import ai, indicators, jobs, market, raw_results, reports, sources, stocks, system, watchlists
 
 
 FAVICON_PATH = PROJECT_ROOT / "frontend" / "src" / "app" / "favicon.ico"
@@ -110,6 +110,7 @@ app.include_router(system.router, prefix="/api/system", tags=["system"])
 app.include_router(sources.router, prefix="/api/sources", tags=["sources"])
 app.include_router(raw_results.router, prefix="/api/raw-results", tags=["raw-results"])
 app.include_router(jobs.router, prefix="/api/jobs", tags=["jobs"])
+app.include_router(ai.router, prefix="/api/ai", tags=["ai"])
 app.include_router(market.router, prefix="/api/market", tags=["market"])
 app.include_router(indicators.router, prefix="/api/market/indicators", tags=["market-indicators"])
 app.include_router(stocks.router, prefix="/api/stocks", tags=["stocks"])

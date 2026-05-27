@@ -20,6 +20,11 @@ from app.parsers.twse_stock_day import (
     validate_twse_stock_day_payload,
 )
 from app.parsers.twse_common import parse_float, parse_int
+from app.market.trading_calendar import (
+    is_taiwan_trading_day,
+    previous_taiwan_trading_day,
+    taiwan_today,
+)
 from app.sources.defaults import (
     TPEX_DAILY_QUOTES_SOURCE_NAME,
     TWSE_DAILY_TRADING_SOURCE_NAME,
@@ -134,24 +139,67 @@ def _existing_market_row_stats(
     return len(dates), max(dates) if dates else None
 
 
+def _trading_day_count(start_date: date, end_date: date) -> int:
+    if end_date < start_date:
+        return 0
+
+    count = 0
+    current = start_date
+
+    while current <= end_date:
+        if is_taiwan_trading_day(current):
+            count += 1
+
+        current += timedelta(days=1)
+
+    return count
+
+
+def _minimum_existing_rows_for_skip(
+    expected_trading_day_count: int,
+    *,
+    is_closed_historical_month: bool,
+) -> int:
+    if expected_trading_day_count <= 0:
+        return 0
+
+    if not is_closed_historical_month:
+        return expected_trading_day_count
+
+    if expected_trading_day_count <= 10:
+        return expected_trading_day_count
+
+    return max(1, expected_trading_day_count - 5)
+
+
 def _should_skip_existing_month(
     existing_count: int,
     latest_existing_date: date | None,
-    month_end: date,
+    effective_start: date,
     effective_end: date,
+    month_end: date,
+    today: date | None = None,
 ) -> bool:
     if existing_count <= 0 or latest_existing_date is None:
         return False
 
-    if latest_existing_date >= effective_end:
-        return True
+    local_today = today or taiwan_today()
+    expected_latest_date = previous_taiwan_trading_day(
+        effective_end,
+        include_value=True,
+    )
 
-    is_closed_historical_month = month_end < date.today()
-
-    if not is_closed_historical_month:
+    if latest_existing_date < expected_latest_date:
         return False
 
-    if latest_existing_date >= effective_end - timedelta(days=4):
+    expected_trading_day_count = _trading_day_count(effective_start, effective_end)
+    is_closed_historical_month = month_end < local_today
+    minimum_existing_count = _minimum_existing_rows_for_skip(
+        expected_trading_day_count,
+        is_closed_historical_month=is_closed_historical_month,
+    )
+
+    if existing_count >= minimum_existing_count:
         return True
 
     return False
@@ -343,8 +391,9 @@ def backfill_twse_stock_day(
             if _should_skip_existing_month(
                 existing_count=existing_count,
                 latest_existing_date=latest_existing_date,
-                month_end=month_end,
+                effective_start=effective_start,
                 effective_end=effective_end,
+                month_end=month_end,
             ):
                 skipped_existing_month_count += 1
                 month_results.append(
@@ -612,8 +661,9 @@ def backfill_tpex_trading_stock(
             if _should_skip_existing_month(
                 existing_count=existing_count,
                 latest_existing_date=latest_existing_date,
-                month_end=month_end,
+                effective_start=effective_start,
                 effective_end=effective_end,
+                month_end=month_end,
             ):
                 skipped_existing_month_count += 1
                 month_results.append(

@@ -1,5 +1,6 @@
 "use client";
 
+import JobStatusCenter from "@/components/JobStatusCenter";
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
 import { formatJobStatus, getJobResult, requestBackfillJob } from "@/lib/jobs";
 import type {
@@ -1205,7 +1206,11 @@ export default function SidebarWatchlistExplorer({
         </div>
       ) : null}
 
-      <div className="space-y-4 border-t border-slate-200 p-4">
+      <div className="border-b border-slate-200 px-4 py-4">
+        <JobStatusCenter placement="inline" />
+      </div>
+
+      <div className="space-y-4 p-4">
         <form
           action="/omi-form/watchlists/groups"
           method="post"

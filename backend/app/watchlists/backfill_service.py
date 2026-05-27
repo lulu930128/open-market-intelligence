@@ -6,7 +6,11 @@ from sqlalchemy.orm import Session
 
 from app.db.models import MarketDailyPrice, StockMaster
 from app.market.backfill import backfill_tpex_trading_stock, backfill_twse_stock_day
-from app.market.trading_calendar import latest_released_trading_day, previous_taiwan_trading_day
+from app.market.trading_calendar import (
+    is_taiwan_trading_day,
+    latest_released_trading_day,
+    previous_taiwan_trading_day,
+)
 from app.watchlists import service as watchlist_service
 
 
@@ -42,6 +46,57 @@ def _get_latest_trade_date(db: Session, stock_id: str) -> date | None:
         .filter(MarketDailyPrice.stock_id == stock_id)
         .scalar()
     )
+
+
+def _trading_day_count(start_date: date, end_date: date) -> int:
+    if end_date < start_date:
+        return 0
+
+    count = 0
+    current = start_date
+
+    while current <= end_date:
+        if is_taiwan_trading_day(current):
+            count += 1
+
+        current += timedelta(days=1)
+
+    return count
+
+
+def _existing_daily_price_count(
+    db: Session,
+    stock_id: str,
+    start_date: date,
+    end_date: date,
+) -> int:
+    return (
+        db.query(func.count(MarketDailyPrice.id))
+        .filter(MarketDailyPrice.stock_id == stock_id)
+        .filter(MarketDailyPrice.trade_date >= start_date)
+        .filter(MarketDailyPrice.trade_date <= end_date)
+        .scalar()
+        or 0
+    )
+
+
+def _has_complete_daily_price_range(
+    db: Session,
+    stock_id: str,
+    start_date: date,
+    end_date: date,
+) -> bool:
+    expected_count = _trading_day_count(start_date, end_date)
+
+    if expected_count <= 0:
+        return True
+
+    return _existing_daily_price_count(
+        db=db,
+        stock_id=stock_id,
+        start_date=start_date,
+        end_date=end_date,
+    ) >= expected_count
 
 
 def _expected_latest_trade_date(to_date: date | None, include_today: bool) -> date:
@@ -304,8 +359,18 @@ def refresh_watchlist_group_daily_prices(
         stock_name = item.get("stock_name")
         market = _get_stock_market(db=db, stock_id=stock_id)
         latest_trade_date = _get_latest_trade_date(db=db, stock_id=stock_id)
+        current_month_start = date(target_date.year, target_date.month, 1)
 
-        if latest_trade_date is not None and latest_trade_date >= target_date:
+        if (
+            latest_trade_date is not None
+            and latest_trade_date >= target_date
+            and _has_complete_daily_price_range(
+                db=db,
+                stock_id=stock_id,
+                start_date=current_month_start,
+                end_date=target_date,
+            )
+        ):
             current_count += 1
             results.append(
                 {
@@ -329,11 +394,12 @@ def refresh_watchlist_group_daily_prices(
 
             continue
 
-        start_date = (
-            latest_trade_date + timedelta(days=1)
-            if latest_trade_date is not None
-            else target_date - timedelta(days=lookback_days)
-        )
+        if latest_trade_date is not None and latest_trade_date < target_date:
+            start_date = latest_trade_date + timedelta(days=1)
+        elif latest_trade_date is not None:
+            start_date = current_month_start
+        else:
+            start_date = target_date - timedelta(days=lookback_days)
 
         if start_date > target_date:
             current_count += 1

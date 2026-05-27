@@ -1,9 +1,11 @@
 from collections.abc import Callable
-from datetime import time
+from datetime import date, time
 
 from sqlalchemy.orm import Session
 
+from app.db.models import StockMaster
 from app.market.broker_branch import ensure_broker_branch_daily
+from app.market.backfill import backfill_tpex_trading_stock, backfill_twse_stock_day
 from app.market.daily_metrics_backfill import ensure_stock_daily_metrics
 from app.market.financial_metrics_history_backfill import ensure_stock_financial_metrics_history
 from app.market.monthly_revenue_history_backfill import ensure_stock_monthly_revenue_history
@@ -14,6 +16,7 @@ from app.market.trading_calendar import latest_released_trading_day
 ProgressCallback = Callable[[int | None, int | None, str | None], None]
 
 DAILY_METRIC_RELEASE_TIMES = {
+    "daily_price": time(15, 15),
     "institutional_trade": time(18, 10),
     "margin_trading": time(21, 10),
 }
@@ -58,6 +61,54 @@ def _run_refresh_step(
         progress(step_index, step_total, f"{label}更新完成。")
 
 
+def _get_stock_market(db: Session, stock_id: str) -> str | None:
+    stock = db.query(StockMaster).filter(StockMaster.stock_id == stock_id).first()
+
+    if stock is None:
+        return None
+
+    return stock.market.upper()
+
+
+def _ensure_current_month_daily_prices(
+    *,
+    db: Session,
+    stock_id: str,
+    target_date: date,
+    sleep_seconds: float,
+) -> dict:
+    start_date = date(target_date.year, target_date.month, 1)
+    market = _get_stock_market(db=db, stock_id=stock_id)
+
+    if market == "TWSE":
+        return backfill_twse_stock_day(
+            db=db,
+            stock_id=stock_id,
+            start_date=start_date,
+            end_date=target_date,
+            sleep_seconds=sleep_seconds,
+            skip_existing_months=True,
+        )
+
+    if market == "TPEX":
+        return backfill_tpex_trading_stock(
+            db=db,
+            stock_id=stock_id,
+            start_date=start_date,
+            end_date=target_date,
+            sleep_seconds=sleep_seconds,
+            skip_existing_months=True,
+        )
+
+    return {
+        "status": "skipped",
+        "stock_id": stock_id,
+        "start_date": start_date,
+        "end_date": target_date,
+        "message": f"Daily price refresh is not configured for market='{market}'.",
+    }
+
+
 def refresh_selected_stock_data(
     *,
     db: Session,
@@ -66,8 +117,12 @@ def refresh_selected_stock_data(
     sleep_seconds: float = 0.05,
     progress: ProgressCallback | None = None,
 ) -> dict:
-    step_total = 6
+    step_total = 7
     results: dict[str, dict] = {}
+    daily_price_date = latest_released_trading_day(
+        release_time=DAILY_METRIC_RELEASE_TIMES["daily_price"],
+        include_today=include_today,
+    )
     institutional_trade_date = latest_released_trading_day(
         release_time=DAILY_METRIC_RELEASE_TIMES["institutional_trade"],
         include_today=include_today,
@@ -78,9 +133,23 @@ def refresh_selected_stock_data(
     )
 
     _run_refresh_step(
+        key="daily_price",
+        label="日K",
+        step_index=1,
+        step_total=step_total,
+        progress=progress,
+        results=results,
+        action=lambda: _ensure_current_month_daily_prices(
+            db=db,
+            stock_id=stock_id,
+            target_date=daily_price_date,
+            sleep_seconds=sleep_seconds,
+        ),
+    )
+    _run_refresh_step(
         key="institutional_trade",
         label="法人",
-        step_index=1,
+        step_index=2,
         step_total=step_total,
         progress=progress,
         results=results,
@@ -97,7 +166,7 @@ def refresh_selected_stock_data(
     _run_refresh_step(
         key="margin_trading",
         label="融資融券",
-        step_index=2,
+        step_index=3,
         step_total=step_total,
         progress=progress,
         results=results,
@@ -114,7 +183,7 @@ def refresh_selected_stock_data(
     _run_refresh_step(
         key="broker_branch",
         label="分點",
-        step_index=3,
+        step_index=4,
         step_total=step_total,
         progress=progress,
         results=results,
@@ -126,7 +195,7 @@ def refresh_selected_stock_data(
     _run_refresh_step(
         key="shareholding_distribution",
         label="股權分散",
-        step_index=4,
+        step_index=5,
         step_total=step_total,
         progress=progress,
         results=results,
@@ -141,7 +210,7 @@ def refresh_selected_stock_data(
     _run_refresh_step(
         key="monthly_revenue",
         label="營收",
-        step_index=5,
+        step_index=6,
         step_total=step_total,
         progress=progress,
         results=results,
@@ -156,7 +225,7 @@ def refresh_selected_stock_data(
     _run_refresh_step(
         key="financial_metrics",
         label="盈餘",
-        step_index=6,
+        step_index=7,
         step_total=step_total,
         progress=progress,
         results=results,
@@ -187,6 +256,7 @@ def refresh_selected_stock_data(
         "message": "Selected stock data refresh completed.",
         "stock_id": stock_id,
         "include_today": include_today,
+        "daily_price_date": daily_price_date,
         "institutional_trade_date": institutional_trade_date,
         "margin_trade_date": margin_trade_date,
         "requested_count": step_total,

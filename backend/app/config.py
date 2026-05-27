@@ -7,6 +7,42 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "open_market_intelligence.db"
 
 
+def _clean_secret(value: str | None) -> str | None:
+    if value is None:
+        return None
+
+    cleaned = value.strip().strip('"').strip("'")
+    return cleaned or None
+
+
+def _read_env_file_secret(path_value: str | None, names: tuple[str, ...]) -> str | None:
+    cleaned_path = _clean_secret(path_value)
+    if not cleaned_path:
+        return None
+
+    path = Path(cleaned_path).expanduser()
+    if not path.is_file():
+        return None
+
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+
+        key, value = stripped.split("=", 1)
+        if key.strip() in names:
+            secret = _clean_secret(value)
+            if secret:
+                return secret
+
+    return None
+
+
 class Settings(BaseSettings):
     app_name: str = "Open Market Intelligence"
     app_env: str = "development"
@@ -25,12 +61,33 @@ class Settings(BaseSettings):
 
     finmind_token: str | None = None
     openai_api_key: str | None = None
+    openai_llm_api_key: str | None = None
+    omi_openai_env_file: str | None = None
+    openai_model: str = "gpt-5.4-mini"
+    openai_responses_url: str = "https://api.openai.com/v1/responses"
+    openai_timeout_seconds: int = 120
+    openai_max_output_tokens: int = 1800
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @property
+    def effective_openai_api_key(self) -> str | None:
+        direct_key = _clean_secret(self.openai_api_key)
+        if direct_key:
+            return direct_key
+
+        alias_key = _clean_secret(self.openai_llm_api_key)
+        if alias_key:
+            return alias_key
+
+        return _read_env_file_secret(
+            self.omi_openai_env_file,
+            ("OPENAI_API_KEY", "OPENAI_LLM_API_KEY"),
+        )
 
 
 settings = Settings()

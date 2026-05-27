@@ -34,6 +34,7 @@ reports/*
 Thumbs.db
 .vscode/
 .idea/
+.codex/
 
 # Node / Next.js future frontend
 node_modules/

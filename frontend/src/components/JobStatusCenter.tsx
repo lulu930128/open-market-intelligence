@@ -3,7 +3,7 @@
 import { fetchJson, requestJson } from "@/lib/api";
 import { formatJobStatus } from "@/lib/jobs";
 import type { JobRunRead } from "@/types/market";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const ACTIVE_STATUSES = new Set(["queued", "running"]);
 
@@ -138,11 +138,17 @@ function JobRow({
   );
 }
 
-export default function JobStatusCenter() {
+type JobStatusCenterProps = {
+  placement?: "fixed" | "inline";
+};
+
+export default function JobStatusCenter({ placement = "fixed" }: JobStatusCenterProps) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const [open, setOpen] = useState(false);
   const [jobs, setJobs] = useState<JobRunRead[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [retryingJobId, setRetryingJobId] = useState<number | null>(null);
+  const inline = placement === "inline";
 
   const loadJobs = useCallback(async () => {
     try {
@@ -169,6 +175,24 @@ export default function JobStatusCenter() {
     };
   }, [loadJobs]);
 
+  useEffect(() => {
+    if (!open) return;
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (target instanceof Node && rootRef.current?.contains(target)) {
+        return;
+      }
+
+      setOpen(false);
+    }
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+    };
+  }, [open]);
+
   const activeCount = useMemo(() => jobs.filter(isActiveJob).length, [jobs]);
   const failedCount = useMemo(
     () =>
@@ -193,11 +217,14 @@ export default function JobStatusCenter() {
   }
 
   return (
-    <div className="fixed right-6 top-4 z-50">
+    <div ref={rootRef} className={inline ? "relative" : "fixed right-6 top-4 z-50"}>
       <button
         type="button"
         aria-expanded={open}
-        className="flex min-w-[104px] items-center justify-between gap-2 border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-800 shadow-sm hover:border-slate-500"
+        className={[
+          "flex min-w-[104px] items-center justify-between gap-2 border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-800 shadow-sm hover:border-slate-500",
+          inline ? "w-full" : "",
+        ].join(" ")}
         onClick={() => setOpen((value) => !value)}
       >
         <span>更新狀態</span>
@@ -215,7 +242,12 @@ export default function JobStatusCenter() {
       </button>
 
       {open ? (
-        <section className="mt-2 w-[420px] border border-slate-300 bg-white shadow-xl">
+        <section
+          className={[
+            "mt-2 border border-slate-300 bg-white shadow-xl",
+            inline ? "w-full" : "w-[420px]",
+          ].join(" ")}
+        >
           <div className="flex items-center justify-between border-b border-slate-200 px-3 py-2">
             <div>
               <h2 className="text-sm font-black text-slate-950">背景工作</h2>
@@ -236,7 +268,7 @@ export default function JobStatusCenter() {
             </div>
           ) : null}
 
-          <div className="max-h-[520px] overflow-y-auto">
+          <div className={inline ? "max-h-72 overflow-y-auto" : "max-h-[520px] overflow-y-auto"}>
             {jobs.length ? (
               jobs.map((job) => (
                 <JobRow key={job.id} job={job} retryingJobId={retryingJobId} onRetry={handleRetry} />

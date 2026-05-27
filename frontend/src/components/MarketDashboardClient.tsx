@@ -1,7 +1,6 @@
 "use client";
 
 import SidebarWatchlistExplorer from "@/components/SidebarWatchlistExplorer";
-import JobStatusCenter from "@/components/JobStatusCenter";
 import StockDetailPanel from "@/components/StockDetailPanel";
 import { fetchJson } from "@/lib/api";
 import { requestBackfillJob } from "@/lib/jobs";
@@ -873,7 +872,6 @@ export default function MarketDashboardClient({
 
   return (
     <main className="h-screen overflow-hidden bg-slate-100 text-slate-950">
-      <JobStatusCenter />
       <div className="flex h-full min-w-[1180px] flex-col">
         <div className="flex min-h-0 flex-1">
           <SidebarWatchlistExplorer

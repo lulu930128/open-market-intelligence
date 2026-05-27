@@ -135,6 +135,97 @@ class JobRun(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class AiMemory(Base):
+    __tablename__ = "ai_memory"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    memory_type: Mapped[str] = mapped_column(String(50), index=True)
+    scope_type: Mapped[str] = mapped_column(String(50), default="global", index=True)
+    scope_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+
+    title: Mapped[str] = mapped_column(String(200), index=True)
+    content: Mapped[str] = mapped_column(Text)
+
+    tags_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    importance: Mapped[int] = mapped_column(Integer, default=50, index=True)
+    status: Mapped[str] = mapped_column(String(30), default="active", index=True)
+    source: Mapped[str] = mapped_column(String(80), default="user")
+    created_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class AiReport(Base):
+    __tablename__ = "ai_report"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    report_type: Mapped[str] = mapped_column(String(80), index=True)
+    scope_type: Mapped[str] = mapped_column(String(50), index=True)
+    scope_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+
+    strategy_profile: Mapped[str] = mapped_column(String(80), default="balanced", index=True)
+    title: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    as_of: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+
+    status: Mapped[str] = mapped_column(String(30), default="success", index=True)
+    model_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    job_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("job_run.id"),
+        nullable=True,
+        index=True,
+    )
+
+    summary_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prompt_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    missing_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    warnings_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_refs_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    memory_refs_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+    tool_calls: Mapped[list["AiToolCall"]] = relationship(
+        back_populates="report",
+        cascade="all, delete-orphan",
+    )
+
+
+class AiToolCall(Base):
+    __tablename__ = "ai_tool_call"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    report_id: Mapped[int | None] = mapped_column(
+        ForeignKey("ai_report.id"),
+        nullable=True,
+        index=True,
+    )
+
+    tool_name: Mapped[str] = mapped_column(String(140), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="success", index=True)
+    source: Mapped[str] = mapped_column(String(80), default="backend")
+
+    arguments_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_summary_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    report: Mapped[AiReport | None] = relationship(back_populates="tool_calls")
+
+
 class DataQualityCheck(Base):
     __tablename__ = "data_quality_check"
 
