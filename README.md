@@ -265,7 +265,7 @@ flowchart TD
 | `/api/sources` | `/`, `/{id}/run`, `/{id}/logs` | 資料來源、擷取與 raw result |
 | `/api/raw-results` | `/{id}`, `/{id}/quality` | Raw payload、品質檢查與 parse |
 | `/api/jobs` | `/`, `/{job_id}` | Background job 狀態 |
-| `/api/ai` | `/tools`, `/strategy-profiles`, `/stocks/{id}/brief/generate`, `/watchlists/{id}/brief/generate` | AI 工具清單、記憶、個股報告與自選群組報告 |
+| `/api/ai` | `/ask`, `/tools`, `/strategy-profiles`, `/stocks/{id}/brief/generate`, `/watchlists/{id}/brief/generate` | AI/agent 入口、工具清單、記憶、個股報告與自選群組報告 |
 | `/api/stocks` | `/search`, `/{stock_id}`, `/{stock_id}/profile` | 股票主檔與公司資料 |
 | `/api/watchlists` | `/tree`, `/groups`, `/items`, `/groups/{id}/ranking` | 自選股群組、項目、排行與群組回補 |
 | `/api/market/ohlc` | `/api/market/ohlc/2330?timeframe=daily` | 日週月 K 線 |
@@ -364,6 +364,9 @@ OPENAI_MODEL=gpt-5.4-mini
 OPENAI_RESPONSES_URL=https://api.openai.com/v1/responses
 OPENAI_TIMEOUT_SECONDS=120
 OPENAI_MAX_OUTPUT_TOKENS=1800
+OMI_AI_ALLOW_LOCAL_TRUST=true
+OMI_AI_TRUSTED_CLIENT_HOSTS=127.0.0.1,::1
+OMI_AI_TRUST_TOKEN=
 ```
 
 OpenAI key resolution order:
@@ -373,6 +376,12 @@ OpenAI key resolution order:
 3. `OMI_OPENAI_ENV_FILE`, pointing at a local env file that contains either key
 
 Do not commit real keys. `.env` is local-only and ignored by git.
+
+AI report generation and internal AI tool listing use server-side trust checks.
+Local development can trust loopback clients through `OMI_AI_ALLOW_LOCAL_TRUST`
+and `OMI_AI_TRUSTED_CLIENT_HOSTS`. Non-loopback clients should use
+`X-OMI-AI-Trust-Token` with `OMI_AI_TRUST_TOKEN`; `caller_profile` is only a
+label and is not a security boundary.
 
 Frontend `.env.example`:
 
@@ -409,7 +418,7 @@ flowchart TD
     stockData --> pack["Evidence pack"]
     groupData --> pack
     freshnessData --> pack
-    pack --> profile["Strategy profile<br/>balanced / technical_swing / chip_flow / fundamentals_growth / dividend_value"]
+    pack --> profile["Strategy profile<br/>balanced / technical_swing / short_term_momentum / chip_flow / fundamentals_growth / dividend_value"]
     profile --> memory["Relevant AI memories"]
     memory --> llm["OpenAI Responses API"]
     llm --> schema["Strict JSON schema validation"]
@@ -418,8 +427,65 @@ flowchart TD
 
 ### AI Question Modes
 
+For external agents, prefer `POST /api/ai/ask` or MCP `omi.ask`. This is the
+single public entry point: callers send a question and optional scope, while OMI
+decides whether to return raw data, a prompt-ready brief, or a persisted LLM
+report. It defaults to `strategy_profile=short_term_momentum` and does not call
+OpenAI unless report mode is explicitly allowed by server-side policy. `GET
+/api/ai/tools` also returns only `omi.ask` by default; add `debug=true` or
+`include_internal=true` only from a trusted local/token-authenticated request to
+list internal tools.
+
+The direct write/cost routes are internal integration paths. Creating/updating
+AI memory, saving briefs, and generating LLM reports require the same
+server-side trusted request policy used by `ask`. Read-only context and brief
+routes stay available for local dashboard inspection.
+
+### External Agent Contract
+
+External desktop assistants should treat OMI as the stock/market authority and
+should not call the internal AI routes directly. The supported contract is:
+
+1. Call `POST /api/ai/ask` or MCP `omi.ask`.
+2. Use `mode=data_only` when the caller only needs structured local evidence.
+3. Use `mode=brief` when the caller needs a compact prompt-ready summary.
+4. Use `mode=report` only when the request is server-side trusted and explicitly
+   sets both `allow_llm=true` and `allow_write=true`.
+5. Preserve `warnings`, `missing`, `source_refs`, `mode_effective`, and
+   `as_of` in downstream UIs so partial or stale local data is visible.
+
+The response envelope is intentionally stable for agents:
+
+```json
+{
+  "kind": "ai_ask",
+  "scope_type": "stock",
+  "scope_id": "2330",
+  "mode_requested": "brief",
+  "mode_effective": "brief",
+  "action": "omi.generate_stock_brief",
+  "policy": {
+    "allow_llm": false,
+    "allow_write": false,
+    "can_generate_report": false
+  },
+  "result": {
+    "kind": "stock_brief",
+    "as_of": "2026-05-26"
+  },
+  "warnings": [],
+  "source_refs": []
+}
+```
+
+For Kuro, the intended route is OMI-first: stock, watchlist, and local market
+questions should call `omi.ask` before any web search. Web search should be used
+only as enrichment for explicit realtime quote, fresh news, or missing-context
+questions.
+
 | Mode | API | Reads | Use case |
 | --- | --- | --- | --- |
+| OMI ask | `POST /api/ai/ask` / MCP `omi.ask` | Auto-dispatched data, stock, watchlist, or report path | External agent integration through one stable entry point |
 | Data freshness | `GET /api/ai/data-freshness` | Latest available dates and missing coverage | Check whether the local dataset is usable before analysis |
 | Market overview | `GET /api/ai/market-overview` | Latest market breadth and movers | Quick market context without an LLM call |
 | Stock context | `GET /api/ai/stocks/{stock_id}/context` | Full single-stock evidence pack | Inspect what would be sent to AI |
@@ -427,15 +493,19 @@ flowchart TD
 | Watchlist context | `GET /api/ai/watchlists/{group_id}/context` | Group ranking, score, change, volume, status and signal keys | Inspect group scan payload |
 | Watchlist LLM brief | `POST /api/ai/watchlists/{group_id}/brief/generate` | Compact group ranking plus strategy profile and memory | Sector/watchlist scan |
 
-For short-term trading research, use `strategy_profile=technical_swing` first. The intended flow is group scan first, then deep stock briefs only for selected candidates. This keeps the prompt small and avoids sending full single-stock data for every item in a large watchlist.
+For short-term trading research, use `strategy_profile=short_term_momentum` first. The intended flow is group scan first, then deep stock briefs only for selected candidates. This keeps the prompt small and avoids sending full single-stock data for every item in a large watchlist.
 
 ### AI Cost And Token Controls
 
-- Watchlist AI reports send ranking rows and signal summaries, not every stock's full branch, institutional, revenue and financial history.
+- Watchlist AI reports send a scan pack: top 20 candidates, bottom 5 watchlist rows, and up to 20 attention rows. They do not send every stock's full branch, institutional, revenue and financial history.
 - Stock AI reports are heavier because they include one stock's chart, chips, branch, revenue and financial context.
 - Large groups should be treated as scan mode. If a group has many stocks, call the watchlist brief first, pick top candidates, then call stock briefs for those candidates.
 - The OpenAI output budget is controlled by `OPENAI_MAX_OUTPUT_TOKENS`; request timeout is controlled by `OPENAI_TIMEOUT_SECONDS`.
 - Generated reports are persisted in `ai_report` with `ai_tool_call` records so later agents can inspect what tools were used.
+- `caller_profile` is only a caller label. Trust is decided by backend policy:
+  loopback hosts listed in `OMI_AI_TRUSTED_CLIENT_HOSTS` when
+  `OMI_AI_ALLOW_LOCAL_TRUST=true`, or a matching `X-OMI-AI-Trust-Token` header
+  when `OMI_AI_TRUST_TOKEN` is configured.
 
 ## Database And Migrations
 

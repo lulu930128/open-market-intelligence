@@ -96,6 +96,139 @@ def _compact_watchlist_summary(context: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+WATCHLIST_SCAN_TOP_LIMIT = 20
+WATCHLIST_SCAN_BOTTOM_LIMIT = 5
+WATCHLIST_SCAN_ATTENTION_LIMIT = 20
+
+_ATTENTION_SIGNAL_KEYS = {
+    "donchian_breakout",
+    "volume_price_up",
+    "volume_above_ma5",
+    "rsi_overheated",
+    "macd_negative",
+    "roc_negative",
+    "mfi_inflow",
+}
+
+
+def _watchlist_row_key(row: dict[str, Any]) -> tuple[Any, Any]:
+    return (row.get("stock_id"), row.get("time"))
+
+
+def _compact_watchlist_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "rank": row.get("rank"),
+        "stock_id": row.get("stock_id"),
+        "stock_name": row.get("stock_name"),
+        "time": row.get("time"),
+        "close": row.get("close"),
+        "volume": row.get("volume"),
+        "change_pct": row.get("change_pct"),
+        "score": row.get("score"),
+        "status": row.get("status"),
+        "signal_count": row.get("signal_count"),
+        "signal_keys": row.get("signal_keys") or [],
+        "primary_signal_key": row.get("primary_signal_key"),
+        "primary_signal_label": row.get("primary_signal_label"),
+        "error_message": row.get("error_message"),
+    }
+
+
+def _is_watchlist_attention_row(row: dict[str, Any]) -> bool:
+    signal_keys = set(row.get("signal_keys") or [])
+    status = row.get("status")
+    change_pct = row.get("change_pct")
+
+    if signal_keys & _ATTENTION_SIGNAL_KEYS:
+        return True
+
+    if status in {"strong_bearish", "bearish", "error", "no_data"}:
+        return True
+
+    if isinstance(change_pct, (int, float)) and abs(change_pct) >= 5:
+        return True
+
+    return False
+
+
+def _append_unique_watchlist_rows(
+    target: list[dict[str, Any]],
+    seen: set[tuple[Any, Any]],
+    rows: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> None:
+    for row in rows:
+        key = _watchlist_row_key(row)
+        if key in seen:
+            continue
+
+        seen.add(key)
+        target.append(_compact_watchlist_row(row))
+
+        if len(target) >= limit:
+            return
+
+
+def _build_watchlist_scan_data(context: dict[str, Any]) -> dict[str, Any]:
+    ranking = (context.get("data") or {}).get("ranking") or {}
+    results = ranking.get("results") or []
+    seen: set[tuple[Any, Any]] = set()
+
+    top_candidates: list[dict[str, Any]] = []
+    bottom_watchlist: list[dict[str, Any]] = []
+    attention_rows: list[dict[str, Any]] = []
+
+    _append_unique_watchlist_rows(
+        top_candidates,
+        seen,
+        results[:WATCHLIST_SCAN_TOP_LIMIT],
+        limit=WATCHLIST_SCAN_TOP_LIMIT,
+    )
+
+    if len(results) > WATCHLIST_SCAN_TOP_LIMIT:
+        _append_unique_watchlist_rows(
+            bottom_watchlist,
+            seen,
+            results[-WATCHLIST_SCAN_BOTTOM_LIMIT:],
+            limit=WATCHLIST_SCAN_BOTTOM_LIMIT,
+        )
+
+    attention_source = [
+        row
+        for row in results
+        if _watchlist_row_key(row) not in seen and _is_watchlist_attention_row(row)
+    ]
+    _append_unique_watchlist_rows(
+        attention_rows,
+        seen,
+        attention_source,
+        limit=WATCHLIST_SCAN_ATTENTION_LIMIT,
+    )
+
+    return {
+        "ranking": {
+            "rank_by": ranking.get("rank_by"),
+            "sort_order": ranking.get("sort_order"),
+            "requested_stock_count": ranking.get("requested_stock_count"),
+            "ranked_count": ranking.get("ranked_count"),
+            "no_data_count": ranking.get("no_data_count"),
+            "error_count": ranking.get("error_count"),
+            "results_count": len(results),
+            "included_count": len(seen),
+            "omitted_count": max(len(results) - len(seen), 0),
+            "scan_top_limit": WATCHLIST_SCAN_TOP_LIMIT,
+            "scan_bottom_limit": WATCHLIST_SCAN_BOTTOM_LIMIT,
+            "scan_attention_limit": WATCHLIST_SCAN_ATTENTION_LIMIT,
+        },
+        "scan": {
+            "top_candidates": top_candidates,
+            "bottom_watchlist": bottom_watchlist,
+            "attention_rows": attention_rows,
+        },
+    }
+
+
 def build_stock_brief(
     db: Session,
     stock_id: str,
@@ -149,6 +282,13 @@ def build_watchlist_brief(
         rank_by=rank_by,
         sort_order=sort_order,
     )
+    scan_data = _build_watchlist_scan_data(context)
+    warnings = list(context.get("warnings") or [])
+    if scan_data["ranking"]["omitted_count"]:
+        warnings.append(
+            "Watchlist brief uses compressed scan mode for LLM cost control; "
+            "read the watchlist context endpoint for the full ranking rows."
+        )
     profile = prompts.get_strategy_profile(strategy_profile)
     memories = _memory_context(
         db=db,
@@ -160,6 +300,8 @@ def build_watchlist_brief(
     return {
         **context,
         "kind": "watchlist_brief",
+        "data": scan_data,
+        "warnings": warnings,
         "strategy_profile": profile.key,
         "prompt": {
             "system": prompts.build_system_prompt(profile.key),

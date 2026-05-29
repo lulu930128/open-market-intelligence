@@ -40,6 +40,46 @@ class AiReportEnvelope(AiDataEnvelope):
     summary: dict[str, Any] = Field(default_factory=dict)
 
 
+class AiAskRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=4000)
+    scope_type: str = Field(default="auto", min_length=1, max_length=50)
+    scope_id: str | None = Field(default=None, max_length=120)
+    mode: str = Field(default="auto", min_length=1, max_length=50)
+    caller_profile: str = Field(
+        default="kuro_readonly",
+        min_length=1,
+        max_length=80,
+        description="Caller label only. Server-side policy decides trust.",
+    )
+    allow_llm: bool = False
+    allow_write: bool = False
+    strategy_profile: str = Field(default="short_term_momentum", min_length=1, max_length=80)
+    branch_days: int = Field(default=5, ge=1, le=120)
+    rank_by: str = Field(default="score", min_length=1, max_length=50)
+    sort_order: str = Field(default="desc", min_length=1, max_length=10)
+    market_limit: int = Field(default=10, ge=1, le=50)
+    context_limit: int = Field(default=100, ge=20, le=500)
+    include_children: bool = True
+    enabled_only: bool = True
+
+
+class AiAskResponse(BaseModel):
+    kind: str = "ai_ask"
+    question: str
+    scope_type: str
+    scope_id: str | None = None
+    mode_requested: str
+    mode_effective: str
+    action: str
+    strategy_profile: str
+    caller_profile: str
+    policy: dict[str, Any] = Field(default_factory=dict)
+    result: dict[str, Any] = Field(default_factory=dict)
+    missing: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    source_refs: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class AiMemoryCreate(BaseModel):
     memory_type: str = Field(..., min_length=1, max_length=50)
     scope_type: str = Field(default="global", min_length=1, max_length=50)

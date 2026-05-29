@@ -2,7 +2,8 @@
 
 Minimal stdio MCP adapter for Open Market Intelligence.
 
-It exposes read-only OMI tools and forwards calls to the local FastAPI backend:
+By default it exposes one public OMI tool and forwards calls to the local
+FastAPI backend:
 
 ```text
 MCP client -> agents/omi_mcp_server/server.py -> http://127.0.0.1:8300/api/ai/...
@@ -19,14 +20,35 @@ Optional environment variable:
 ```powershell
 $env:OMI_API_BASE_URL = "http://127.0.0.1:8300"
 $env:OMI_API_TIMEOUT_SECONDS = "180"
+$env:OMI_MCP_EXPOSE_INTERNAL_TOOLS = "false"
+$env:OMI_MCP_AI_TRUST_TOKEN = ""
 ```
 
-OpenAI-backed tools require the OMI backend process to have `OPENAI_API_KEY`,
-`OPENAI_LLM_API_KEY`, or `OMI_OPENAI_ENV_FILE` configured. `OMI_OPENAI_ENV_FILE`
-may point at another local env file that contains `OPENAI_API_KEY` or
-`OPENAI_LLM_API_KEY`. The MCP server does not read, store, or forward API keys.
+Public tool:
 
-Initial tools:
+- `omi.ask`
+
+`omi.ask` is read-only by default. It accepts a question plus optional scope
+fields, then the OMI backend chooses `data_only`, `brief`, or `report` mode.
+Report mode calls OpenAI and persists an AI report, so it requires a backend
+server-side trusted request and both `allow_llm=true` and `allow_write=true`.
+`caller_profile` is only a label and is not trusted for permissions.
+
+OpenAI-backed report mode requires the OMI backend process to have
+`OPENAI_API_KEY`, `OPENAI_LLM_API_KEY`, or `OMI_OPENAI_ENV_FILE` configured.
+`OMI_OPENAI_ENV_FILE` may point at another local env file that contains
+`OPENAI_API_KEY` or `OPENAI_LLM_API_KEY`. The MCP server does not read, store,
+or forward API keys.
+
+Set `OMI_MCP_EXPOSE_INTERNAL_TOOLS=true` only for debugging or a trusted local
+agent that needs direct tool selection. If the backend disables local trust or
+runs across a non-loopback boundary, configure `OMI_AI_TRUST_TOKEN` on the
+backend and pass the same value to the MCP process as `OMI_MCP_AI_TRUST_TOKEN`.
+Direct memory writes, brief saves, and LLM report generation are also protected
+by that backend trust policy; regular external callers should go through
+`omi.ask`.
+
+Internal tools:
 
 - `omi.read_market_overview`
 - `omi.read_stock_context`

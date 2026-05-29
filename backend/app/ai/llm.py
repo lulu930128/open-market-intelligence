@@ -96,6 +96,8 @@ def _build_user_prompt(envelope: dict[str, Any]) -> str:
         "- Use only values present in the evidence pack.\n"
         "- Do not infer live prices, future events, or missing datasets.\n"
         "- If evidence is stale, partial, or insufficient, lower confidence and say so.\n"
+        "- Write all human-readable output strings in Traditional Chinese.\n"
+        "- Keep the report concise and focused on actionable next checks.\n"
         "- The output must be JSON that matches the provided schema.\n\n"
         f"Evidence JSON:\n{evidence_json}"
     )

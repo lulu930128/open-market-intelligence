@@ -1,11 +1,16 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from secrets import compare_digest
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
 
+from app.ai import ask as ai_ask
 from app.ai import llm as ai_llm
 from app.ai import memory as ai_memory
 from app.ai import orchestrator, prompts, reports, tools
 from app.ai import report_store
 from app.ai.schemas import (
+    AiAskRequest,
+    AiAskResponse,
     AiDataEnvelope,
     AiMemoryCreate,
     AiMemoryRead,
@@ -15,11 +20,58 @@ from app.ai.schemas import (
     AiToolListRead,
     StrategyProfileRead,
 )
+from app.config import settings
 from app.db.session import get_db
 from app.watchlists import service as watchlist_service
 
 
 router = APIRouter()
+AI_TRUST_TOKEN_HEADER = "x-omi-ai-trust-token"
+
+
+def _csv_values(value: str | None) -> set[str]:
+    if not value:
+        return set()
+
+    return {item.strip() for item in value.split(",") if item.strip()}
+
+
+def _clean_token(value: str | None) -> str:
+    return (value or "").strip().strip('"').strip("'")
+
+
+def _trusted_ai_source(request: Request) -> str:
+    configured_token = _clean_token(settings.omi_ai_trust_token)
+    request_token = _clean_token(request.headers.get(AI_TRUST_TOKEN_HEADER))
+    if configured_token and request_token and compare_digest(configured_token, request_token):
+        return "token"
+
+    client_host = request.client.host if request.client else ""
+    trusted_hosts = _csv_values(settings.omi_ai_trusted_client_hosts)
+    if settings.omi_ai_allow_local_trust and client_host in trusted_hosts:
+        return "local_allowlist"
+
+    return "untrusted"
+
+
+def _ai_server_policy(request: Request) -> ai_ask.AiAskServerPolicy:
+    trust_source = _trusted_ai_source(request)
+    trusted = trust_source != "untrusted"
+    return ai_ask.AiAskServerPolicy(
+        can_call_llm=trusted,
+        can_write=trusted,
+        trust_source=trust_source,
+    )
+
+
+def _require_trusted_ai_request(request: Request, action: str) -> None:
+    if _trusted_ai_source(request) != "untrusted":
+        return
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=f"{action} requires a server-side trusted AI request.",
+    )
 
 
 def _raise_llm_http_error(exc: ai_llm.OpenAILLMError) -> None:
@@ -76,8 +128,19 @@ def _save_brief_report(
 
 
 @router.get("/tools", response_model=AiToolListRead)
-def list_ai_tools():
-    return tools.list_ai_tools()
+def list_ai_tools(
+    request: Request,
+    include_internal: bool = Query(default=False),
+    debug: bool = Query(default=False),
+):
+    wants_internal = include_internal or debug
+    if wants_internal and _trusted_ai_source(request) == "untrusted":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Internal AI tools require a server-side trusted request.",
+        )
+
+    return tools.list_ai_tools(include_internal=wants_internal)
 
 
 @router.get("/strategy-profiles", response_model=list[StrategyProfileRead])
@@ -101,15 +164,33 @@ def read_market_overview(
     return tools.read_market_overview(db=db, limit=limit)
 
 
+@router.post("/ask", response_model=AiAskResponse)
+def ask_omi(
+    request: Request,
+    payload: AiAskRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        return ai_ask.ask(db=db, payload=payload, server_policy=_ai_server_policy(request))
+    except watchlist_service.WatchlistGroupNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except ai_llm.OpenAILLMError as exc:
+        _raise_llm_http_error(exc)
+
+
 @router.post(
     "/memories",
     response_model=AiMemoryRead,
     status_code=status.HTTP_201_CREATED,
 )
 def create_memory(
+    request: Request,
     payload: AiMemoryCreate,
     db: Session = Depends(get_db),
 ):
+    _require_trusted_ai_request(request, "Creating AI memory")
     return ai_memory.serialize_memory(ai_memory.create_memory(db=db, payload=payload))
 
 
@@ -140,9 +221,11 @@ def list_memories(
 @router.patch("/memories/{memory_id}", response_model=AiMemoryRead)
 def update_memory(
     memory_id: int,
+    request: Request,
     payload: AiMemoryUpdate,
     db: Session = Depends(get_db),
 ):
+    _require_trusted_ai_request(request, "Updating AI memory")
     try:
         return ai_memory.serialize_memory(
             ai_memory.update_memory(db=db, memory_id=memory_id, payload=payload)
@@ -154,8 +237,10 @@ def update_memory(
 @router.post("/memories/{memory_id}/archive", response_model=AiMemoryRead)
 def archive_memory(
     memory_id: int,
+    request: Request,
     db: Session = Depends(get_db),
 ):
+    _require_trusted_ai_request(request, "Archiving AI memory")
     try:
         return ai_memory.serialize_memory(
             ai_memory.archive_memory(db=db, memory_id=memory_id)
@@ -262,10 +347,12 @@ def build_stock_brief(
 @router.post("/stocks/{stock_id}/brief/save", response_model=AiStoredReportRead)
 def save_stock_brief(
     stock_id: str,
+    request: Request,
     strategy_profile: str = "balanced",
     branch_days: int = Query(default=5, ge=1, le=120),
     db: Session = Depends(get_db),
 ):
+    _require_trusted_ai_request(request, "Saving stock brief")
     envelope = reports.build_stock_brief(
         db=db,
         stock_id=stock_id,
@@ -292,10 +379,12 @@ def save_stock_brief(
 @router.post("/stocks/{stock_id}/brief/generate", response_model=AiStoredReportRead)
 def generate_stock_llm_report(
     stock_id: str,
+    request: Request,
     strategy_profile: str = "balanced",
     branch_days: int = Query(default=5, ge=1, le=120),
     db: Session = Depends(get_db),
 ):
+    _require_trusted_ai_request(request, "Generating stock LLM report")
     try:
         return orchestrator.generate_stock_llm_report(
             db=db,
@@ -332,11 +421,13 @@ def build_watchlist_brief(
 @router.post("/watchlists/{group_id}/brief/generate", response_model=AiStoredReportRead)
 def generate_watchlist_llm_report(
     group_id: int,
+    request: Request,
     strategy_profile: str = "balanced",
     rank_by: str = Query(default="score", pattern="^(watchlist|score|change_pct|volume)$"),
     sort_order: str = Query(default="desc", pattern="^(asc|desc)$"),
     db: Session = Depends(get_db),
 ):
+    _require_trusted_ai_request(request, "Generating watchlist LLM report")
     try:
         return orchestrator.generate_watchlist_llm_report(
             db=db,
@@ -356,11 +447,13 @@ def generate_watchlist_llm_report(
 @router.post("/watchlists/{group_id}/brief/save", response_model=AiStoredReportRead)
 def save_watchlist_brief(
     group_id: int,
+    request: Request,
     strategy_profile: str = "balanced",
     rank_by: str = Query(default="score", pattern="^(watchlist|score|change_pct|volume)$"),
     sort_order: str = Query(default="desc", pattern="^(asc|desc)$"),
     db: Session = Depends(get_db),
 ):
+    _require_trusted_ai_request(request, "Saving watchlist brief")
     try:
         envelope = reports.build_watchlist_brief(
             db=db,

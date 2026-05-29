@@ -67,6 +67,9 @@ class Settings(BaseSettings):
     openai_responses_url: str = "https://api.openai.com/v1/responses"
     openai_timeout_seconds: int = 120
     openai_max_output_tokens: int = 1800
+    omi_ai_allow_local_trust: bool = True
+    omi_ai_trusted_client_hosts: str = "127.0.0.1,::1"
+    omi_ai_trust_token: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",

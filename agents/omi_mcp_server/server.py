@@ -24,9 +24,92 @@ def _env_int(name: str, default: int) -> int:
 
 
 API_TIMEOUT_SECONDS = _env_int("OMI_API_TIMEOUT_SECONDS", 180)
+AI_TRUST_TOKEN = (
+    os.environ.get("OMI_MCP_AI_TRUST_TOKEN")
+    or os.environ.get("OMI_AI_TRUST_TOKEN")
+    or ""
+).strip()
 
 
-TOOLS: list[dict[str, Any]] = [
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+EXPOSE_INTERNAL_TOOLS = _env_bool("OMI_MCP_EXPOSE_INTERNAL_TOOLS", False)
+
+ASK_TOOL: dict[str, Any] = {
+    "name": "omi.ask",
+    "title": "Ask OMI",
+    "description": (
+        "Single entry point for Open Market Intelligence. The backend decides whether "
+        "to read data, build a brief, or generate a trusted LLM report."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "question": {"type": "string"},
+            "scope_type": {
+                "type": "string",
+                "enum": ["auto", "market", "data_freshness", "stock", "watchlist"],
+                "default": "auto",
+            },
+            "scope_id": {
+                "type": "string",
+                "description": "Stock id for stock scope, or numeric watchlist group id for watchlist scope.",
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["auto", "data_only", "brief", "report"],
+                "default": "auto",
+            },
+            "strategy_profile": {
+                "type": "string",
+                "enum": [
+                    "balanced",
+                    "technical_swing",
+                    "short_term_momentum",
+                    "chip_flow",
+                    "fundamentals_growth",
+                    "dividend_value",
+                ],
+                "default": "short_term_momentum",
+            },
+            "caller_profile": {
+                "type": "string",
+                "default": "kuro_readonly",
+                "description": "Caller label for logs and responses only. The backend does not trust this field.",
+            },
+            "allow_llm": {
+                "type": "boolean",
+                "default": False,
+                "description": "Must be true for report mode, and only works with a server-side trusted request.",
+            },
+            "allow_write": {
+                "type": "boolean",
+                "default": False,
+                "description": "Must be true for report mode because reports are persisted.",
+            },
+            "branch_days": {"type": "integer", "minimum": 1, "maximum": 120, "default": 5},
+            "rank_by": {
+                "type": "string",
+                "enum": ["watchlist", "score", "change_pct", "volume"],
+                "default": "score",
+            },
+            "sort_order": {"type": "string", "enum": ["asc", "desc"], "default": "desc"},
+            "market_limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+            "context_limit": {"type": "integer", "minimum": 20, "maximum": 500, "default": 100},
+            "include_children": {"type": "boolean", "default": True},
+            "enabled_only": {"type": "boolean", "default": True},
+        },
+        "required": ["question"],
+    },
+}
+
+INTERNAL_TOOLS: list[dict[str, Any]] = [
     {
         "name": "omi.read_market_overview",
         "title": "Read OMI Market Overview",
@@ -99,6 +182,7 @@ TOOLS: list[dict[str, Any]] = [
                     "enum": [
                         "balanced",
                         "technical_swing",
+                        "short_term_momentum",
                         "chip_flow",
                         "fundamentals_growth",
                         "dividend_value",
@@ -123,6 +207,7 @@ TOOLS: list[dict[str, Any]] = [
                     "enum": [
                         "balanced",
                         "technical_swing",
+                        "short_term_momentum",
                         "chip_flow",
                         "fundamentals_growth",
                         "dividend_value",
@@ -152,6 +237,7 @@ TOOLS: list[dict[str, Any]] = [
                     "enum": [
                         "balanced",
                         "technical_swing",
+                        "short_term_momentum",
                         "chip_flow",
                         "fundamentals_growth",
                         "dividend_value",
@@ -176,6 +262,7 @@ TOOLS: list[dict[str, Any]] = [
                     "enum": [
                         "balanced",
                         "technical_swing",
+                        "short_term_momentum",
                         "chip_flow",
                         "fundamentals_growth",
                         "dividend_value",
@@ -299,6 +386,7 @@ TOOLS: list[dict[str, Any]] = [
                     "enum": [
                         "balanced",
                         "technical_swing",
+                        "short_term_momentum",
                         "chip_flow",
                         "fundamentals_growth",
                         "dividend_value",
@@ -323,6 +411,7 @@ TOOLS: list[dict[str, Any]] = [
                     "enum": [
                         "balanced",
                         "technical_swing",
+                        "short_term_momentum",
                         "chip_flow",
                         "fundamentals_growth",
                         "dividend_value",
@@ -340,6 +429,9 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
 ]
+
+
+TOOLS = [ASK_TOOL, *INTERNAL_TOOLS] if EXPOSE_INTERNAL_TOOLS else [ASK_TOOL]
 
 
 def _json_default(value: Any) -> str:
@@ -393,6 +485,8 @@ def _api_request(
 
     data = None
     headers = {"Accept": "application/json", "User-Agent": f"{SERVER_NAME}/{SERVER_VERSION}"}
+    if AI_TRUST_TOKEN:
+        headers["X-OMI-AI-Trust-Token"] = AI_TRUST_TOKEN
     if payload is not None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -438,7 +532,40 @@ def _require(arguments: dict[str, Any], key: str) -> Any:
     return value
 
 
+def _bool_arg(arguments: dict[str, Any], key: str, default: bool) -> bool:
+    value = arguments.get(key, default)
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+    return bool(value)
+
+
 def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
+    if name == "omi.ask":
+        return _api_post(
+            "/api/ai/ask",
+            payload={
+                "question": _require(arguments, "question"),
+                "scope_type": arguments.get("scope_type", "auto"),
+                "scope_id": arguments.get("scope_id"),
+                "mode": arguments.get("mode", "auto"),
+                "caller_profile": arguments.get("caller_profile", "kuro_readonly"),
+                "allow_llm": _bool_arg(arguments, "allow_llm", False),
+                "allow_write": _bool_arg(arguments, "allow_write", False),
+                "strategy_profile": arguments.get("strategy_profile", "short_term_momentum"),
+                "branch_days": arguments.get("branch_days", 5),
+                "rank_by": arguments.get("rank_by", "score"),
+                "sort_order": arguments.get("sort_order", "desc"),
+                "market_limit": arguments.get("market_limit", 10),
+                "context_limit": arguments.get("context_limit", 100),
+                "include_children": _bool_arg(arguments, "include_children", True),
+                "enabled_only": _bool_arg(arguments, "enabled_only", True),
+            },
+        )
+
     if name == "omi.read_market_overview":
         return _api_get("/api/ai/market-overview", {"limit": arguments.get("limit", 10)})
 
@@ -615,7 +742,10 @@ def _handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
                     "title": "Open Market Intelligence MCP Server",
                     "version": SERVER_VERSION,
                 },
-                "instructions": "Use these read-only tools to retrieve OMI evidence packs. Do not treat missing data as a conclusion.",
+                "instructions": (
+                    "Use omi.ask as the public entry point. It is read-only by default; "
+                    "report generation requires a server-side trusted request. Do not treat missing data as a conclusion."
+                ),
             },
         )
 

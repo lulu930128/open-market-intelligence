@@ -40,6 +40,26 @@ STRATEGY_PROFILES: dict[str, StrategyProfile] = {
             "Intraday data should be treated separately from daily data.",
         ),
     ),
+    "short_term_momentum": StrategyProfile(
+        key="short_term_momentum",
+        label="Short-term momentum",
+        description=(
+            "Prioritize short-term group strength, breakout quality, volume expansion, "
+            "and next-session confirmation."
+        ),
+        focus_points=(
+            "Start from watchlist ranking, score, change_pct, volume, and primary signals.",
+            "Identify the strongest candidates, early turnarounds, and names that look extended.",
+            "For single stocks, focus on the next 1 to 5 sessions instead of long-term valuation.",
+            "State observable trigger conditions and failure conditions from the provided data.",
+            "Use chips and fundamentals only as confirmation, contradiction, or risk context.",
+        ),
+        risk_notes=(
+            "Do not call a trade if the latest price, volume, or signal data is stale.",
+            "Do not infer intraday follow-through from daily-only evidence.",
+            "Mention overextension and pullback risk when signals are strong but price is stretched.",
+        ),
+    ),
     "chip_flow": StrategyProfile(
         key="chip_flow",
         label="Chip flow",
@@ -115,6 +135,10 @@ def build_system_prompt(profile_key: str | None) -> str:
         "Use only the provided OMI evidence pack. Do not invent missing market data.\n"
         "Always separate facts, interpretation, missing data, and next checks.\n"
         "Always mention the relevant as_of dates when making a claim.\n\n"
+        "Output language and style:\n"
+        "- Write every report string value in Traditional Chinese.\n"
+        "- Keep stock ids, field names, source names, and indicator keys unchanged when needed.\n"
+        "- Be concise and decision-oriented; avoid generic market commentary.\n\n"
         f"Strategy profile: {profile.label}\n"
         f"Profile description: {profile.description}\n\n"
         "Focus:\n"

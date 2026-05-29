@@ -102,9 +102,57 @@ def _add_missing(missing: list[str], key: str, value: Any) -> None:
         missing.append(key)
 
 
-def list_ai_tools() -> dict[str, Any]:
-    return {
-        "tools": [
+def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
+    tool_list = [
+            {
+                "name": "omi.ask",
+                "title": "Ask OMI",
+                "description": (
+                    "Single OMI entry point. It chooses data_only, brief, or report mode "
+                    "from a question and policy flags."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string"},
+                        "scope_type": {
+                            "type": "string",
+                            "enum": ["auto", "market", "data_freshness", "stock", "watchlist"],
+                            "default": "auto",
+                        },
+                        "scope_id": {"type": "string"},
+                        "mode": {
+                            "type": "string",
+                            "enum": ["auto", "data_only", "brief", "report"],
+                            "default": "auto",
+                        },
+                        "strategy_profile": {
+                            "type": "string",
+                            "enum": [
+                                "balanced",
+                                "technical_swing",
+                                "short_term_momentum",
+                                "chip_flow",
+                                "fundamentals_growth",
+                                "dividend_value",
+                            ],
+                            "default": "short_term_momentum",
+                        },
+                        "caller_profile": {
+                            "type": "string",
+                            "default": "kuro_readonly",
+                            "description": "Caller label only. Server-side policy decides trust.",
+                        },
+                        "allow_llm": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "Must be true for report mode and requires server-side trust.",
+                        },
+                        "allow_write": {"type": "boolean", "default": False},
+                    },
+                    "required": ["question"],
+                },
+            },
             {
                 "name": "omi.read_market_overview",
                 "title": "Read Market Overview",
@@ -164,6 +212,7 @@ def list_ai_tools() -> dict[str, Any]:
                             "enum": [
                                 "balanced",
                                 "technical_swing",
+                                "short_term_momentum",
                                 "chip_flow",
                                 "fundamentals_growth",
                                 "dividend_value",
@@ -187,6 +236,7 @@ def list_ai_tools() -> dict[str, Any]:
                             "enum": [
                                 "balanced",
                                 "technical_swing",
+                                "short_term_momentum",
                                 "chip_flow",
                                 "fundamentals_growth",
                                 "dividend_value",
@@ -214,6 +264,7 @@ def list_ai_tools() -> dict[str, Any]:
                             "enum": [
                                 "balanced",
                                 "technical_swing",
+                                "short_term_momentum",
                                 "chip_flow",
                                 "fundamentals_growth",
                                 "dividend_value",
@@ -237,6 +288,7 @@ def list_ai_tools() -> dict[str, Any]:
                             "enum": [
                                 "balanced",
                                 "technical_swing",
+                                "short_term_momentum",
                                 "chip_flow",
                                 "fundamentals_growth",
                                 "dividend_value",
@@ -352,6 +404,7 @@ def list_ai_tools() -> dict[str, Any]:
                             "enum": [
                                 "balanced",
                                 "technical_swing",
+                                "short_term_momentum",
                                 "chip_flow",
                                 "fundamentals_growth",
                                 "dividend_value",
@@ -375,6 +428,7 @@ def list_ai_tools() -> dict[str, Any]:
                             "enum": [
                                 "balanced",
                                 "technical_swing",
+                                "short_term_momentum",
                                 "chip_flow",
                                 "fundamentals_growth",
                                 "dividend_value",
@@ -389,8 +443,12 @@ def list_ai_tools() -> dict[str, Any]:
                     "required": ["group_id"],
                 },
             },
-        ]
-    }
+    ]
+
+    if not include_internal:
+        tool_list = tool_list[:1]
+
+    return {"tools": tool_list}
 
 
 def read_data_freshness(db: Session, stock_id: str | None = None) -> dict[str, Any]:
