@@ -4,6 +4,10 @@ Open Market Intelligence 是一套本機優先的市場情報與自選股研究�
 
 目前主力流程聚焦在台股 TWSE / TPEx。介面上保留美股、日股、韓股、港股入口，但本 README 以目前實作完整度最高的台股流程為準。
 
+<p align="center">
+  <img src="docs/assets/readme/omi-stock-workbench.png" alt="Open Market Intelligence stock workbench with watchlist, K-line chart, technical indicators and chip-flow panels" width="960">
+</p>
+
 ## Current Stack
 
 | Layer | Technology | Default |
@@ -26,6 +30,21 @@ Open Market Intelligence 是一套本機優先的市場情報與自選股研究�
 - 籌碼與基本面：支援三大法人、法人持股比例、融資融券、集保分布、分點 Top15、多日分點加總、月營收、季度財務與盈餘。
 - 資料回補：支援 TWSE / TPEx 日線、法人、融資融券、集保、營收、財務與自選股群組回補。
 - 資料治理：保存 raw result、fetch log、quality check、parser result 與 background job 狀態。
+- 外部 Agent 介面：提供 `POST /api/ai/ask` 與 MCP `omi.ask`，讓 Kuro 或其他桌面助理以單一入口讀取本機 evidence pack、brief、freshness 與 warning。
+
+## Visual Tour
+
+| Market dashboard | Intraday trend |
+| --- | --- |
+| <img src="docs/assets/readme/omi-market-dashboard.png" alt="Market dashboard with market index cards, watchlist groups and ranked stock rows" width="480"> | <img src="docs/assets/readme/omi-intraday-trend.png" alt="Intraday chart with 1m, 5m and 15m aggregation, VWAP, TWAP, EMA, RSI and MACD" width="480"> |
+
+| Institutional flow | Broker branch |
+| --- | --- |
+| <img src="docs/assets/readme/omi-institutional-flow.png" alt="Institutional net buy/sell chart and holding ratio panel" width="420"> | <img src="docs/assets/readme/omi-broker-branch.png" alt="Broker branch Top 15 buy and sell ranking with single and multi-day modes" width="420"> |
+
+| Earnings and fundamentals | Long-term K-line |
+| --- | --- |
+| <img src="docs/assets/readme/omi-earnings.png" alt="Quarterly earnings chart and financial metric table" width="420"> | <img src="docs/assets/readme/omi-monthly-trend.png" alt="Monthly K-line chart with long-term technical indicators and chip-flow panel" width="480"> |
 
 ## System Flow
 
@@ -402,7 +421,7 @@ Next.js rewrite:
 
 ## AI Research Flow
 
-AI 研究功能採用本機資料優先流程：後端先用明確工具讀取 SQLite 與既有 service，整理成 evidence pack，再交給 OpenAI 做摘要與判讀。LLM 不直接碰資料庫，也不自行假設缺漏資料。
+AI 研究功能在 OMI 裡不是主要視覺介面，而是外部 Agent 的本機資料插座。Kuro 或其他桌面助理可以透過 `omi.ask` 接入；OMI 負責讀取 SQLite 與既有 service、整理 evidence pack、回傳 brief / report / freshness warnings，並在允許時才把資料交給 OpenAI 做摘要與判讀。LLM 不直接碰資料庫，也不自行假設缺漏資料。
 
 ```mermaid
 flowchart TD
