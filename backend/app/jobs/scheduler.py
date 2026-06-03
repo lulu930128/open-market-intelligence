@@ -78,6 +78,47 @@ def enqueue_market_daily_refresh() -> None:
         db.close()
 
 
+def enqueue_us_market_daily_refresh() -> None:
+    now = datetime.now(_timezone())
+    request = {
+        "schedule": "us_market_daily_refresh",
+        "run_date": now.date().isoformat(),
+        "group_id": None,
+        "include_children": True,
+        "enabled_only": True,
+        "outputsize": settings.scheduler_us_market_refresh_outputsize,
+        "adjusted": settings.scheduler_us_market_refresh_adjusted,
+        "sleep_seconds": settings.scheduler_us_market_refresh_sleep_seconds,
+    }
+    db = SessionLocal()
+
+    try:
+        job, created = job_service.enqueue_job(
+            db=db,
+            job_type="scheduler.us_market_daily_refresh",
+            target="all",
+            request=request,
+            progress_total=1,
+            message="Queued by scheduler.",
+            task=backfill_tasks.run_us_watchlist_daily_refresh_job,
+            task_args=(
+                None,
+                True,
+                True,
+                settings.scheduler_us_market_refresh_outputsize,
+                settings.scheduler_us_market_refresh_adjusted,
+                settings.scheduler_us_market_refresh_sleep_seconds,
+            ),
+        )
+        logger.info(
+            "Scheduled US market daily refresh %s job_id=%s",
+            "queued" if created else "deduped",
+            job.id,
+        )
+    finally:
+        db.close()
+
+
 def start_scheduler() -> Any | None:
     if not settings.enable_scheduler:
         logger.info("Job scheduler disabled.")
@@ -102,11 +143,28 @@ def start_scheduler() -> Any | None:
         coalesce=True,
         max_instances=1,
     )
+    if settings.enable_us_market_scheduler:
+        us_hour, us_minute = _parse_hour_minute(settings.scheduler_us_market_refresh_time)
+        scheduler.add_job(
+            enqueue_us_market_daily_refresh,
+            trigger="cron",
+            day_of_week=settings.scheduler_us_market_refresh_day_of_week,
+            hour=us_hour,
+            minute=us_minute,
+            id="us_market_daily_refresh",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
     scheduler.start()
     logger.info(
-        "Job scheduler started. market_daily_refresh=%s %s weekdays.",
+        "Job scheduler started. market_daily_refresh=%s %s weekdays; us_market_daily_refresh=%s %s %s enabled=%s.",
         settings.scheduler_market_refresh_time,
         settings.timezone,
+        settings.scheduler_us_market_refresh_time,
+        settings.scheduler_us_market_refresh_day_of_week,
+        settings.timezone,
+        settings.enable_us_market_scheduler,
     )
     return scheduler
 

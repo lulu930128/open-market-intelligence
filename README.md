@@ -32,6 +32,35 @@ Open Market Intelligence 是一套本機優先的市場情報與自選股研究�
 - 資料治理：保存 raw result、fetch log、quality check、parser result 與 background job 狀態。
 - 外部 Agent 介面：提供 `POST /api/ai/ask` 與 MCP `omi.ask`，讓 Kuro 或其他桌面助理以單一入口讀取本機 evidence pack、brief、freshness 與 warning。
 
+## US Market Coverage
+
+美股模組的定位不是複製台股研究流程，而是提供台股研究的外部領先訊號層。它目前聚焦在科技股、半導體、雲端平台、資料中心、資安、企業軟體、金融科技與科技 ETF，方便把美股同業與產業 ETF 變化對照回台股供應鏈。
+
+目前已支援：
+
+- 美股主檔：NASDAQ Trader symbol directories，並可合併 SEC company ticker / CIK 資料。
+- 美股自選樹：`科技股` root 下可建立多層分類與個股 / ETF 葉節點。
+- 價量資料：Yahoo chart 與 Alpha Vantage daily price refresh，支援 daily / weekly / monthly OHLC 聚合。
+- 盤中資料：Yahoo chart 1m intraday trend，前端依 America/New_York regular session 判斷輪詢。
+- SEC facts：SEC EDGAR companyfacts，整理成 fundamentals summary，例如 revenue、gross profit、net income、EPS、assets、liabilities、cash、debt、cash flow 與 shares outstanding。
+- Company profile / corporate actions：Alpha Vantage overview、dividend、split endpoint 的資料表與 refresh API。
+- Short volume：FINRA daily short sale volume。這是 daily short sale volume，不是 short interest 部位資料。
+- Macro：FRED series observations 的資料表與 refresh API。
+- Background jobs：可針對美股自選群組批次刷新 daily price，並支援排程設定。
+
+目前限制：
+
+- 美股資料覆蓋以自選 universe 為主，不應先把 12,000+ 檔主檔全量回補。
+- Alpha Vantage / FRED 需要 API key；SEC EDGAR 需要描述清楚的 `US_SEC_USER_AGENT`，並需遵守 fair access / rate limit。
+- AI evidence pack 目前仍以台股流程為主，美股資料應先作為台股研究的領先訊號與同業對照，再逐步接進 `omi.ask`。
+
+建議的美股工作流：
+
+1. 先維護 `科技股` root 下的核心分類與個股 / ETF。
+2. 對自選 universe 跑 daily price / SEC facts / profile / corporate actions 回補。
+3. 用 `QQQ`、`SMH`、`SOXX`、AI megacap、半導體設備、記憶體與資料中心股當作台股族群領先訊號。
+4. 再把 US-TW 對應關係接進 AI brief，讓報告能回答「美股某族群變化會影響哪些台股」。
+
 ## Visual Tour
 
 | Market dashboard | Intraday trend |
@@ -265,6 +294,14 @@ flowchart TD
 | `backend/app/watchlists/service.py` | 自選股 CRUD 與排行 |
 | `backend/app/watchlists/backfill_service.py` | 群組股票批次回補 |
 
+### US Market Backend Modules
+
+| Module | Responsibility |
+| --- | --- |
+| `backend/app/us_market/sources.py` | 美股外部資料來源 parser / fetcher：NASDAQ Trader、Yahoo chart、Alpha Vantage、SEC EDGAR、FINRA、FRED |
+| `backend/app/us_market/service.py` | 美股主檔、自選樹、OHLC、SEC facts、profile、corporate actions、short volume、macro 服務層 |
+| `backend/app/routers/us_market.py` | `/api/us-market` router，提供美股自選、資料刷新與查詢 API |
+
 ## Important Frontend Components
 
 | Component | Responsibility |
@@ -275,6 +312,15 @@ flowchart TD
 | `IntradayTrendChart.tsx` | 今日分時圖、1m/5m/15m、盤中指標與指標開關 |
 | `StockKLineChart.tsx` | K 線、縮放/回滾、技術指標模板、指標參數、副圖 |
 | `WatchlistManager.tsx` | 自選股管理輔助操作 |
+
+### US Market Frontend Components
+
+| Component | Responsibility |
+| --- | --- |
+| `USWatchlistSidebar.tsx` | 美股市場切換、自選分類樹、個股搜尋 / 加入 / 停用 / 刪除 |
+| `USStockDetailPanel.tsx` | 美股個股 detail：OHLC、盤中、SEC fundamentals、profile、actions、short volume |
+| `USWatchlistRankingPanel.tsx` | 美股自選排行，依 change / volume / close 或原始 watchlist 順序展示 |
+| `usMarketTime.ts` | America/New_York regular session、盤中輪詢與 X 軸比例判斷 |
 
 ## API Map
 
@@ -297,6 +343,12 @@ flowchart TD
 | `/api/market/revenue` | `/{stock_id}/latest`, `/{stock_id}/history` | 月營收 |
 | `/api/market/financials` | `/{stock_id}/latest`, `/{stock_id}/history` | 季度財務 |
 | `/api/market/backfill` | `/twse/{stock_id}`, `/revenue/{stock_id}/history`, `/financials/{stock_id}/history` | 資料回補 job |
+
+### US Market API
+
+| Prefix | Examples | Purpose |
+| --- | --- | --- |
+| `/api/us-market` | `/watchlists/tree`, `/stocks/search`, `/ohlc/{symbol}`, `/sec/{symbol}/fundamentals`, `/profiles/{symbol}`, `/corporate-actions/{symbol}`, `/short-volume/{symbol}/history`, `/macro/{series_id}/observations` | 美股主檔、自選樹、OHLC、SEC facts、profile、corporate actions、short volume、macro |
 
 ## Setup
 
@@ -387,6 +439,13 @@ OMI_AI_ALLOW_LOCAL_TRUST=true
 OMI_AI_TRUSTED_CLIENT_HOSTS=127.0.0.1,::1
 OMI_AI_TRUST_TOKEN=
 ```
+
+US market data settings:
+
+- `ALPHAVANTAGE_API_KEY` is required for Alpha Vantage daily/profile/actions refreshes.
+- `FRED_API_KEY` is required for FRED macro series refreshes.
+- `US_SEC_USER_AGENT` should be set to a descriptive SEC EDGAR User-Agent before calling SEC APIs.
+- `ENABLE_US_MARKET_SCHEDULER=true` enables the scheduled US watchlist daily refresh.
 
 OpenAI key resolution order:
 

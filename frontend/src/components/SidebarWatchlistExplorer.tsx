@@ -24,8 +24,10 @@ type Props = {
   initialItems: WatchlistItemRead[];
   selectedGroupId: number | null;
   selectedStockId: string | null;
+  selectedMarket: MarketRegion;
   onSelectGroup: (group: WatchlistGroupNode | null) => void;
   onSelectStock: (stockId: string, stockName: string | null) => void;
+  onMarketChange: (market: MarketRegion) => void;
   onExplorerDataChanged?: (
     tree: WatchlistGroupNode[],
     items: WatchlistItemRead[]
@@ -34,7 +36,7 @@ type Props = {
 };
 
 type Message = { type: "success" | "error"; text: string } | null;
-type MarketRegion = "tw" | "us" | "jp" | "kr" | "hk";
+export type MarketRegion = "tw" | "us" | "jp" | "kr" | "hk";
 type DragPayload =
   | { type: "group"; groupId: number }
   | { type: "stock"; itemId: number; groupId: number; stockId: string };
@@ -53,12 +55,19 @@ type PointerDragState = {
   target: DropTarget | null;
 };
 
-const marketOptions: Array<{ label: string; value: MarketRegion }> = [
-  { label: "台股", value: "tw" },
-  { label: "美股", value: "us" },
-  { label: "日股", value: "jp" },
-  { label: "韓股", value: "kr" },
-  { label: "港股", value: "hk" },
+type SidebarMarketOption = {
+  label: string;
+  value: MarketRegion;
+  enabled: boolean;
+  summary: string;
+};
+
+const sidebarMarketOptions: SidebarMarketOption[] = [
+  { label: "台股", value: "tw", enabled: true, summary: "自選股 / 技術面 / 籌碼" },
+  { label: "美股", value: "us", enabled: true, summary: "主檔 / 日線 / SEC" },
+  { label: "日股", value: "jp", enabled: false, summary: "尚未啟用" },
+  { label: "韓股", value: "kr", enabled: false, summary: "尚未啟用" },
+  { label: "港股", value: "hk", enabled: false, summary: "尚未啟用" },
 ];
 
 function flattenGroups(nodes: WatchlistGroupNode[]): WatchlistGroupNode[] {
@@ -135,13 +144,43 @@ function submitterValue(event: FormEvent<HTMLFormElement>) {
   return submitter?.value ?? "";
 }
 
+function getSidebarMarketOption(value: MarketRegion) {
+  return (
+    sidebarMarketOptions.find((option) => option.value === value) ??
+    sidebarMarketOptions[0]
+  );
+}
+
+function SidebarMarketSummary({ selectedMarket }: { selectedMarket: MarketRegion }) {
+  const option = getSidebarMarketOption(selectedMarket);
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col border-b border-slate-200 px-4 py-4">
+      <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+        Market
+      </div>
+      <div className="mt-1 text-lg font-bold text-slate-950">{option.label}</div>
+      <div className="mt-2 border border-slate-200 bg-slate-50 px-3 py-3 text-sm font-semibold text-slate-700">
+        {option.summary}
+      </div>
+      {!option.enabled ? (
+        <div className="mt-3 border border-slate-200 bg-white px-3 py-3 text-xs text-slate-500">
+          目前先保留市場入口。
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export default function SidebarWatchlistExplorer({
   initialTree,
   initialItems,
   selectedGroupId,
   selectedStockId,
+  selectedMarket,
   onSelectGroup,
   onSelectStock,
+  onMarketChange,
   onExplorerDataChanged,
   onChanged,
 }: Props) {
@@ -158,7 +197,6 @@ export default function SidebarWatchlistExplorer({
   const [stockNote, setStockNote] = useState("");
   const [stockTags, setStockTags] = useState("");
   const [stockSuggestions, setStockSuggestions] = useState<StockMasterRead[]>([]);
-  const [selectedMarket, setSelectedMarket] = useState<MarketRegion>("tw");
   const [dragPayload, setDragPayload] = useState<DragPayload | null>(null);
   const [dragOverKey, setDragOverKey] = useState<string | null>(null);
   const [pointerDrag, setPointerDrag] = useState<PointerDragState | null>(null);
@@ -1124,16 +1162,21 @@ export default function SidebarWatchlistExplorer({
         </div>
         <h1 className="mt-2 text-xl font-bold text-slate-950">Market Dashboard</h1>
         <div className="mt-3 grid grid-cols-5 border border-slate-200 bg-slate-50 p-1">
-          {marketOptions.map((option) => (
+          {sidebarMarketOptions.map((option) => (
             <button
               key={option.value}
               type="button"
-              onClick={() => setSelectedMarket(option.value)}
+              onClick={() => {
+                if (option.enabled) onMarketChange(option.value);
+              }}
+              disabled={!option.enabled}
               className={[
                 "h-8 text-xs font-semibold transition",
                 selectedMarket === option.value
                   ? "bg-red-700 text-white"
-                  : "text-slate-600 hover:bg-white",
+                  : option.enabled
+                    ? "text-slate-600 hover:bg-white"
+                    : "cursor-not-allowed text-slate-300",
               ].join(" ")}
             >
               {option.label}
@@ -1142,6 +1185,8 @@ export default function SidebarWatchlistExplorer({
         </div>
       </div>
 
+      {selectedMarket === "tw" ? (
+        <>
       <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
         <div>
           <div className="text-xs font-semibold text-slate-500">自選股</div>
@@ -1339,6 +1384,10 @@ export default function SidebarWatchlistExplorer({
           </button>
         </form>
       </div>
+        </>
+      ) : (
+        <SidebarMarketSummary selectedMarket={selectedMarket} />
+      )}
     </aside>
   );
 }

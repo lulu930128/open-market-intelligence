@@ -199,6 +199,52 @@ function Test-ProcessRunning {
     }
 }
 
+function Invoke-BackendPythonRuntimeCheck {
+    param([Parameter(Mandatory = $true)][string]$PythonPath)
+
+    if (-not (Test-Path -LiteralPath $PythonPath)) {
+        throw "Missing Python executable: $PythonPath"
+    }
+
+    $probeScript = @'
+import importlib.util
+import sys
+
+print("executable=" + sys.executable)
+print("version=" + sys.version.replace("\n", " "))
+
+missing_modules = [
+    module_name
+    for module_name in ("fastapi", "uvicorn", "pydantic_core")
+    if importlib.util.find_spec(module_name) is None
+]
+if missing_modules:
+    raise SystemExit("missing modules: " + ", ".join(missing_modules))
+'@
+
+    Write-LauncherLog "Checking backend Python runtime. python=$PythonPath"
+
+    try {
+        $env:OMI_BACKEND_PYTHON_PROBE = $probeScript
+        $output = & $PythonPath -c "import os; exec(os.environ['OMI_BACKEND_PYTHON_PROBE'])" 2>&1
+        $exitCode = $LASTEXITCODE
+
+        foreach ($line in $output) {
+            Write-LauncherLog "backend-python-check: $line"
+        }
+
+        if ($exitCode -ne 0) {
+            throw "runtime check exited with code $exitCode"
+        }
+    }
+    catch {
+        throw "Backend Python runtime is invalid. python=$PythonPath error=$($_.Exception.Message). Rebuild .venv from the repo root and install backend requirements."
+    }
+    finally {
+        Remove-Item Env:\OMI_BACKEND_PYTHON_PROBE -ErrorAction SilentlyContinue
+    }
+}
+
 function Get-TrayIcon {
     if ($null -ne $script:TrayIcon) {
         return $script:TrayIcon
@@ -278,7 +324,7 @@ function Start-LoggedService {
 
 function Start-Backend {
     if (Test-HttpOk "http://127.0.0.1:8300/api/system/health") {
-        Write-LauncherLog "Backend health endpoint already responds; skipping backend start."
+        Write-LauncherLog "Backend health endpoint already responds; skipping backend start. Local Python runtime was not needed for this launch."
         return
     }
 
@@ -301,6 +347,8 @@ function Start-Backend {
     if (-not (Test-Path -LiteralPath $script:BackendDir)) {
         throw "Missing backend directory: $($script:BackendDir)"
     }
+
+    Invoke-BackendPythonRuntimeCheck -PythonPath $python
 
     Write-LauncherLog "Starting backend with $python."
     $backendArguments = if ($script:IsPackagedRelease) {

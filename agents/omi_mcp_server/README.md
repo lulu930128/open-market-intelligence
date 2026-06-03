@@ -29,12 +29,14 @@ Public tool:
 - `omi.ask`
 
 `omi.ask` is read-only by default. It accepts a question plus optional scope
-fields, then the OMI backend chooses `data_only`, `brief`, or `report` mode.
-Report mode calls OpenAI and persists an AI report, so it requires a backend
-server-side trusted request and both `allow_llm=true` and `allow_write=true`.
+fields, then the OMI backend chooses `data_only`, `brief`, `analysis`, or
+`report` mode. Analysis mode calls OpenAI for a non-persistent OMI LLM answer,
+so it requires a backend server-side trusted request and `allow_llm=true`.
+Report mode calls OpenAI and persists an AI report, so it additionally requires
+`allow_write=true`.
 `caller_profile` is only a label and is not trusted for permissions.
 
-OpenAI-backed report mode requires the OMI backend process to have
+OpenAI-backed analysis/report mode requires the OMI backend process to have
 `OPENAI_API_KEY`, `OPENAI_LLM_API_KEY`, or `OMI_OPENAI_ENV_FILE` configured.
 `OMI_OPENAI_ENV_FILE` may point at another local env file that contains
 `OPENAI_API_KEY` or `OPENAI_LLM_API_KEY`. The MCP server does not read, store,
@@ -44,8 +46,8 @@ Set `OMI_MCP_EXPOSE_INTERNAL_TOOLS=true` only for debugging or a trusted local
 agent that needs direct tool selection. If the backend disables local trust or
 runs across a non-loopback boundary, configure `OMI_AI_TRUST_TOKEN` on the
 backend and pass the same value to the MCP process as `OMI_MCP_AI_TRUST_TOKEN`.
-Direct memory writes, brief saves, and LLM report generation are also protected
-by that backend trust policy; regular external callers should go through
+Direct memory writes, brief saves, and LLM analysis/report generation are also
+protected by that backend trust policy; regular external callers should go through
 `omi.ask`.
 
 Internal tools:

@@ -3,6 +3,8 @@ import type {
   ChartPoint,
   MarketIndexSummary,
   StockIndicatorPoint,
+  USWatchlistGroupNode,
+  USWatchlistItemRead,
   WatchlistGroupNode,
   WatchlistItemRead,
 } from "@/types/market";
@@ -32,10 +34,21 @@ export default async function Page({
   searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const resolvedSearchParams = await searchParams;
-  const [initialTree, initialItems, initialMarketIndexSummary] = await Promise.all([
+  const [
+    initialTree,
+    initialItems,
+    initialMarketIndexSummary,
+    initialUsWatchlistTree,
+    initialUsWatchlistItems,
+  ] = await Promise.all([
     fetchBackendJson<WatchlistGroupNode[]>("/api/watchlists/tree", []),
     fetchBackendJson<WatchlistItemRead[]>("/api/watchlists/items?limit=5000&offset=0", []),
     fetchBackendJson<MarketIndexSummary | null>("/api/market/indices/summary", null),
+    fetchBackendJson<USWatchlistGroupNode[]>("/api/us-market/watchlists/tree", []),
+    fetchBackendJson<USWatchlistItemRead[]>(
+      "/api/us-market/watchlists/items?limit=5000&offset=0",
+      []
+    ),
   ]);
 
   const groupIdParam = resolvedSearchParams?.group_id;
@@ -57,6 +70,8 @@ export default async function Page({
       initialIndicatorData={initialIndicatorData}
       initialRankingData={null}
       initialMarketIndexSummary={initialMarketIndexSummary}
+      initialUsWatchlistTree={initialUsWatchlistTree}
+      initialUsWatchlistItems={initialUsWatchlistItems}
     />
   );
 }

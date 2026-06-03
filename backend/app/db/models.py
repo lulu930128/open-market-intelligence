@@ -706,6 +706,321 @@ class StockProfile(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class USStockMaster(Base):
+    __tablename__ = "us_stock_master"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "symbol",
+            name="uq_us_stock_master_symbol",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    symbol: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    security_name: Mapped[str | None] = mapped_column(String(240), nullable=True)
+
+    exchange: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    asset_type: Mapped[str] = mapped_column(String(40), default="unknown", index=True)
+    listing_source: Mapped[str] = mapped_column(String(40), default="nasdaq_trader", index=True)
+
+    market_category: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    financial_status: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    cqs_symbol: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    nasdaq_symbol: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+
+    cik: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    sec_company_name: Mapped[str | None] = mapped_column(String(240), nullable=True)
+
+    is_etf: Mapped[bool | None] = mapped_column(Boolean, nullable=True, index=True)
+    is_test_issue: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    round_lot_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class USDailyPrice(Base):
+    __tablename__ = "us_daily_price"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "symbol",
+            "trade_date",
+            name="uq_us_daily_price_provider_symbol_date",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+    currency: Mapped[str] = mapped_column(String(10), default="USD", index=True)
+
+    open_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    close_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    adjusted_close: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    trade_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    dividend_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    split_coefficient: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_hash: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class USSecCompanyFact(Base):
+    __tablename__ = "us_sec_company_fact"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "fact_key",
+            name="uq_us_sec_company_fact_key",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    fact_key: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    cik: Mapped[str] = mapped_column(String(20), index=True)
+    symbol: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    entity_name: Mapped[str | None] = mapped_column(String(240), nullable=True)
+
+    taxonomy: Mapped[str] = mapped_column(String(40), index=True)
+    tag: Mapped[str] = mapped_column(String(160), index=True)
+    label: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    unit: Mapped[str] = mapped_column(String(80), index=True)
+
+    fiscal_year: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    fiscal_period: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    form: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    filed_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    period_start_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    period_end_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    accession_number: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    frame: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+
+    value_numeric: Mapped[float | None] = mapped_column(Float, nullable=True)
+    value_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class USCompanyProfile(Base):
+    __tablename__ = "us_company_profile"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "symbol",
+            name="uq_us_company_profile_provider_symbol",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    company_name: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    exchange: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    sector: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    industry: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
+    country: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    currency: Mapped[str | None] = mapped_column(String(10), nullable=True, index=True)
+
+    market_cap: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    ebitda: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    pe_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    peg_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    beta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    dividend_yield: Mapped[float | None] = mapped_column(Float, nullable=True)
+    eps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    revenue_ttm: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    profit_margin: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    fiscal_year_end: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    latest_quarter: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_hash: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class USCorporateAction(Base):
+    __tablename__ = "us_corporate_action"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "symbol",
+            "action_type",
+            "event_date",
+            name="uq_us_corporate_action_provider_symbol_type_date",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    action_type: Mapped[str] = mapped_column(String(40), index=True)
+    event_date: Mapped[date] = mapped_column(Date, index=True)
+
+    declaration_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    record_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    payment_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+
+    amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    split_from: Mapped[float | None] = mapped_column(Float, nullable=True)
+    split_to: Mapped[float | None] = mapped_column(Float, nullable=True)
+    split_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_hash: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class USShortVolumeDaily(Base):
+    __tablename__ = "us_short_volume_daily"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "symbol",
+            "trade_date",
+            "market_center",
+            name="uq_us_short_volume_provider_symbol_date_market",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+    market_center: Mapped[str] = mapped_column(String(40), default="", index=True)
+
+    short_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    short_exempt_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    total_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    short_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_hash: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class MacroSeriesObservation(Base):
+    __tablename__ = "macro_series_observation"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "series_id",
+            "observation_date",
+            name="uq_macro_series_observation_provider_series_date",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    series_id: Mapped[str] = mapped_column(String(80), index=True)
+    series_name: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    observation_date: Mapped[date] = mapped_column(Date, index=True)
+    value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    unit: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    frequency: Mapped[str | None] = mapped_column(String(80), nullable=True)
+
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_hash: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class USWatchlistGroup(Base):
+    __tablename__ = "us_watchlist_group"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    parent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("us_watchlist_group.id"),
+        nullable=True,
+        index=True,
+    )
+
+    group_name: Mapped[str] = mapped_column(String(120), index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    sort_order: Mapped[int] = mapped_column(Integer, default=100, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class USWatchlistItem(Base):
+    __tablename__ = "us_watchlist_item"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "group_id",
+            "symbol",
+            name="uq_us_watchlist_item_group_symbol",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    group_id: Mapped[int] = mapped_column(
+        ForeignKey("us_watchlist_group.id"),
+        nullable=False,
+        index=True,
+    )
+
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    priority: Mapped[int] = mapped_column(Integer, default=100, index=True)
+
+    tags: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class WatchlistGroup(Base):
     __tablename__ = "watchlist_group"
 

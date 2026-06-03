@@ -66,9 +66,54 @@ def _attach_llm_result(envelope: dict[str, Any], llm_result: dict[str, Any]) -> 
     return enriched
 
 
+def _build_non_persistent_analysis(envelope: dict[str, Any], *, kind: str) -> dict[str, Any]:
+    llm_result = llm.generate_structured_report(envelope)
+    enriched = _attach_llm_result(envelope, llm_result)
+    enriched["kind"] = kind
+    enriched["llm"]["usage"] = llm_result.get("usage") or {}
+    warnings = list(enriched.get("warnings") or [])
+    warnings.append("LLM analysis was generated on demand and was not persisted.")
+    enriched["warnings"] = list(dict.fromkeys(warnings))
+    return enriched
+
+
 def _report_title(value: Any, fallback: str) -> str:
     title = str(value or fallback).strip() or fallback
     return title[:240]
+
+
+def generate_stock_llm_analysis(
+    db: Session,
+    stock_id: str,
+    *,
+    strategy_profile: str = "balanced",
+    branch_days: int = 5,
+) -> dict[str, Any]:
+    envelope = reports.build_stock_brief(
+        db=db,
+        stock_id=stock_id,
+        strategy_profile=strategy_profile,
+        branch_days=branch_days,
+    )
+    return _build_non_persistent_analysis(envelope, kind="stock_llm_analysis")
+
+
+def generate_watchlist_llm_analysis(
+    db: Session,
+    group_id: int,
+    *,
+    strategy_profile: str = "balanced",
+    rank_by: str = "score",
+    sort_order: str = "desc",
+) -> dict[str, Any]:
+    envelope = reports.build_watchlist_brief(
+        db=db,
+        group_id=group_id,
+        strategy_profile=strategy_profile,
+        rank_by=rank_by,
+        sort_order=sort_order,
+    )
+    return _build_non_persistent_analysis(envelope, kind="watchlist_llm_analysis")
 
 
 def generate_stock_llm_report(

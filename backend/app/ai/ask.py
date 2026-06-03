@@ -6,12 +6,12 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.ai import orchestrator, reports, tools
+from app.ai import freshness, orchestrator, reports, tools
 from app.ai.schemas import AiAskRequest
 
 
 VALID_SCOPE_TYPES = {"auto", "market", "data_freshness", "stock", "watchlist"}
-VALID_MODES = {"auto", "data_only", "brief", "report"}
+VALID_MODES = {"auto", "data_only", "brief", "analysis", "report"}
 VALID_RANK_BY = {"watchlist", "score", "change_pct", "volume"}
 VALID_SORT_ORDER = {"asc", "desc"}
 
@@ -33,6 +33,19 @@ REPORT_HINTS = (
     "生成報告",
     "研究報告",
     "AI報告",
+)
+ANALYSIS_HINTS = (
+    "analysis",
+    "analyze",
+    "interpret",
+    "llm brief",
+    "分析",
+    "短評",
+    "怎麼看",
+    "看法",
+    "解讀",
+    "重點",
+    "風險",
 )
 FRESHNESS_HINTS = (
     "freshness",
@@ -134,6 +147,7 @@ def _policy(payload: AiAskRequest, server_policy: AiAskServerPolicy) -> dict[str
         "server_can_write": server_policy.can_write,
         "can_call_llm": can_call_llm,
         "can_write": can_write,
+        "can_generate_analysis": can_call_llm,
         "can_generate_report": bool(can_call_llm and can_write),
     }
 
@@ -148,6 +162,9 @@ def _infer_mode(payload: AiAskRequest, scope_type: str, policy: dict[str, Any]) 
     if policy["can_generate_report"] and _contains_hint(payload.question, REPORT_HINTS):
         return "report"
 
+    if policy["can_generate_analysis"] and _contains_hint(payload.question, ANALYSIS_HINTS):
+        return "analysis"
+
     return "brief"
 
 
@@ -158,13 +175,25 @@ def _effective_mode(
     warnings: list[str],
 ) -> str:
     if requested_mode == "report" and not policy["can_generate_report"]:
+        if policy["can_generate_analysis"] and scope_type in {"stock", "watchlist"}:
+            warnings.append(
+                "Report mode requires allow_write=true and a server-side trusted request; returned non-persistent analysis instead."
+            )
+            return "analysis"
+
         warnings.append(
             "Report mode requires allow_llm=true, allow_write=true, and a server-side trusted request; returned a brief instead."
         )
         return "brief" if scope_type in {"stock", "watchlist"} else "data_only"
 
-    if requested_mode in {"brief", "report"} and scope_type in {"market", "data_freshness"}:
-        warnings.append(f"{scope_type} does not have a brief/report path yet; returned data_only.")
+    if requested_mode == "analysis" and not policy["can_generate_analysis"]:
+        warnings.append(
+            "Analysis mode requires allow_llm=true and a server-side trusted request; returned a brief instead."
+        )
+        return "brief" if scope_type in {"stock", "watchlist"} else "data_only"
+
+    if requested_mode in {"brief", "analysis", "report"} and scope_type in {"market", "data_freshness"}:
+        warnings.append(f"{scope_type} does not have a brief/analysis/report path yet; returned data_only.")
         return "data_only"
 
     return requested_mode
@@ -263,9 +292,50 @@ def _generate_report(db: Session, payload: AiAskRequest, scope_type: str) -> tup
     return _read_data_only(db, payload, scope_type)
 
 
+def _generate_analysis(db: Session, payload: AiAskRequest, scope_type: str) -> tuple[str, dict[str, Any]]:
+    if scope_type == "stock":
+        stock_id = _require_scope_id(payload, "stock")
+        return "omi.generate_stock_llm_analysis", orchestrator.generate_stock_llm_analysis(
+            db=db,
+            stock_id=stock_id,
+            strategy_profile=payload.strategy_profile,
+            branch_days=payload.branch_days,
+        )
+
+    if scope_type == "watchlist":
+        group_id = _require_group_id(payload)
+        return "omi.generate_watchlist_llm_analysis", orchestrator.generate_watchlist_llm_analysis(
+            db=db,
+            group_id=group_id,
+            strategy_profile=payload.strategy_profile,
+            rank_by=payload.rank_by,
+            sort_order=payload.sort_order,
+        )
+
+    return _read_data_only(db, payload, scope_type)
+
+
 def _extract_list(result: dict[str, Any], key: str) -> list[Any]:
     value = result.get(key)
     return value if isinstance(value, list) else []
+
+
+def _check_freshness(db: Session, payload: AiAskRequest, scope_type: str) -> dict[str, Any]:
+    if scope_type == "stock":
+        return freshness.check_stock_data_freshness(
+            db=db,
+            stock_id=_require_scope_id(payload, "stock"),
+        )
+
+    if scope_type == "watchlist":
+        return freshness.check_watchlist_data_freshness(
+            db=db,
+            group_id=_require_group_id(payload),
+            include_children=payload.include_children,
+            enabled_only=payload.enabled_only,
+        )
+
+    return {}
 
 
 def ask(
@@ -281,11 +351,28 @@ def ask(
     policy = _policy(payload, server_policy or AiAskServerPolicy())
     requested_mode = _infer_mode(payload, scope_type, policy)
     effective_mode = _effective_mode(requested_mode, scope_type, policy, warnings)
+    freshness_result = _check_freshness(db, payload, scope_type)
+
+    if freshness_result:
+        policy["freshness_guard"] = {
+            "is_current": freshness_result.get("is_current"),
+            "stale_stock_count": freshness_result.get("stale_stock_count"),
+            "missing": freshness_result.get("missing", []),
+            "expected_dates": freshness_result.get("expected_dates", {}),
+        }
+
+    if freshness_result and not freshness_result.get("is_current", True) and effective_mode == "report":
+        warnings.append(
+            "Report mode skipped because local OMI data is incomplete; returned a brief instead."
+        )
+        effective_mode = "brief" if scope_type in {"stock", "watchlist"} else "data_only"
 
     if effective_mode == "data_only":
         action, result = _read_data_only(db, payload, scope_type)
     elif effective_mode == "brief":
         action, result = _build_brief(db, payload, scope_type)
+    elif effective_mode == "analysis":
+        action, result = _generate_analysis(db, payload, scope_type)
     elif effective_mode == "report":
         action, result = _generate_report(db, payload, scope_type)
     else:
@@ -294,6 +381,8 @@ def ask(
     result_warnings = _extract_list(result, "warnings")
     result_missing = _extract_list(result, "missing")
     result_source_refs = _extract_list(result, "source_refs")
+    freshness_warnings = _extract_list(freshness_result, "warnings")
+    freshness_missing = _extract_list(freshness_result, "missing")
 
     return {
         "kind": "ai_ask",
@@ -307,7 +396,8 @@ def ask(
         "caller_profile": payload.caller_profile,
         "policy": policy,
         "result": result,
-        "missing": result_missing,
-        "warnings": warnings + result_warnings,
+        "freshness": freshness_result,
+        "missing": list(dict.fromkeys(result_missing + freshness_missing)),
+        "warnings": list(dict.fromkeys(warnings + freshness_warnings + result_warnings)),
         "source_refs": result_source_refs,
     }

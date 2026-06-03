@@ -333,6 +333,295 @@ export type StockMasterRead = {
   updated_at: string;
 };
 
+export type USStockMasterRead = {
+  id: number;
+  symbol: string;
+  security_name: string | null;
+  exchange: string | null;
+  asset_type: string;
+  listing_source: string;
+  market_category: string | null;
+  financial_status: string | null;
+  cqs_symbol: string | null;
+  nasdaq_symbol: string | null;
+  cik: string | null;
+  sec_company_name: string | null;
+  is_etf: boolean | null;
+  is_test_issue: boolean;
+  round_lot_size: number | null;
+  is_active: boolean;
+  first_seen_at: string;
+  last_seen_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type USSymbolSyncResultRead = {
+  status: string;
+  scanned_count: number;
+  created_count: number;
+  updated_count: number;
+  deactivated_count: number;
+  message: string;
+};
+
+export type USDailyPriceRead = {
+  id: number;
+  provider: string;
+  symbol: string;
+  trade_date: string;
+  currency: string;
+  open_price: number | null;
+  high_price: number | null;
+  low_price: number | null;
+  close_price: number | null;
+  adjusted_close: number | null;
+  trade_volume: number | null;
+  dividend_amount: number | null;
+  split_coefficient: number | null;
+  source_url: string | null;
+  raw_payload_hash: string | null;
+  fetched_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type USDailyPriceRefreshResultRead = {
+  status: string;
+  provider: string;
+  symbol: string;
+  fetched_count: number;
+  inserted_count: number;
+  updated_count: number;
+  message: string;
+};
+
+export type USOhlcPointRead = {
+  time: string;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  close: number | null;
+  volume: number | null;
+};
+
+export type USOhlcChartRead = {
+  symbol: string;
+  timeframe: string;
+  bars: number;
+  lookback_days: number;
+  from_date: string;
+  to_date: string;
+  point_count: number;
+  points: USOhlcPointRead[];
+  backfill: Record<string, unknown> | null;
+};
+
+export type USSecCompanyFactRead = {
+  id: number;
+  fact_key: string;
+  cik: string;
+  symbol: string | null;
+  entity_name: string | null;
+  taxonomy: string;
+  tag: string;
+  label: string | null;
+  description: string | null;
+  unit: string;
+  fiscal_year: number | null;
+  fiscal_period: string | null;
+  form: string | null;
+  filed_date: string | null;
+  period_start_date: string | null;
+  period_end_date: string | null;
+  accession_number: string | null;
+  frame: string | null;
+  value_numeric: number | null;
+  value_text: string | null;
+  source_url: string | null;
+  fetched_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type USSecFactRefreshResultRead = {
+  status: string;
+  symbol: string;
+  cik: string;
+  fetched_count: number;
+  inserted_count: number;
+  updated_count: number;
+  message: string;
+};
+
+export type USSecFundamentalMetricRead = {
+  metric: string;
+  tag: string;
+  label: string | null;
+  unit: string;
+  value_numeric: number | null;
+  value_text: string | null;
+  fiscal_year: number | null;
+  fiscal_period: string | null;
+  form: string | null;
+  filed_date: string | null;
+  period_start_date: string | null;
+  period_end_date: string | null;
+  accession_number: string | null;
+  source_url: string | null;
+};
+
+export type USSecFundamentalSummaryRead = {
+  symbol: string;
+  cik: string | null;
+  entity_name: string | null;
+  metric_count: number;
+  metrics: USSecFundamentalMetricRead[];
+};
+
+export type USCompanyProfileRead = {
+  id: number;
+  provider: string;
+  symbol: string;
+  company_name: string | null;
+  description: string | null;
+  exchange: string | null;
+  sector: string | null;
+  industry: string | null;
+  country: string | null;
+  currency: string | null;
+  market_cap: number | null;
+  ebitda: number | null;
+  pe_ratio: number | null;
+  peg_ratio: number | null;
+  beta: number | null;
+  dividend_yield: number | null;
+  eps: number | null;
+  revenue_ttm: number | null;
+  profit_margin: number | null;
+  fiscal_year_end: string | null;
+  latest_quarter: string | null;
+  source_url: string | null;
+  raw_payload_hash: string | null;
+  fetched_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type USCorporateActionRead = {
+  id: number;
+  provider: string;
+  symbol: string;
+  action_type: string;
+  event_date: string;
+  declaration_date: string | null;
+  record_date: string | null;
+  payment_date: string | null;
+  amount: number | null;
+  split_from: number | null;
+  split_to: number | null;
+  split_ratio: number | null;
+  source_url: string | null;
+  raw_payload_hash: string | null;
+  fetched_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type USShortVolumeDailyRead = {
+  id: number;
+  provider: string;
+  symbol: string;
+  trade_date: string;
+  market_center: string;
+  short_volume: number | null;
+  short_exempt_volume: number | null;
+  total_volume: number | null;
+  short_ratio: number | null;
+  source_url: string | null;
+  raw_payload_hash: string | null;
+  fetched_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type USResourceRefreshResultRead = {
+  status: string;
+  provider: string;
+  symbol: string | null;
+  trade_date: string | null;
+  series_id: string | null;
+  fetched_count: number;
+  inserted_count: number;
+  updated_count: number;
+  message: string;
+};
+
+export type USWatchlistGroupNode = {
+  id: number;
+  parent_id: number | null;
+  group_name: string;
+  description: string | null;
+  sort_order: number;
+  is_active: boolean;
+  children: USWatchlistGroupNode[];
+};
+
+export type USWatchlistGroupRead = {
+  id: number;
+  parent_id: number | null;
+  group_name: string;
+  description: string | null;
+  sort_order: number;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type USWatchlistItemRead = {
+  id: number;
+  group_id: number;
+  symbol: string;
+  security_name: string | null;
+  exchange: string | null;
+  asset_type: string | null;
+  note: string | null;
+  priority: number;
+  tags: string | null;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type USWatchlistRankingItemRead = {
+  rank: number;
+  symbol: string;
+  security_name: string | null;
+  exchange: string | null;
+  asset_type: string | null;
+  group_id: number;
+  trade_date: string | null;
+  close: number | null;
+  previous_close: number | null;
+  change: number | null;
+  change_pct: number | null;
+  volume: number | null;
+  status: string;
+  error_message: string | null;
+};
+
+export type USWatchlistRankingRead = {
+  group_id: number | null;
+  include_children: boolean;
+  rank_by: string;
+  sort_order: string;
+  requested_symbol_count: number;
+  ranked_count: number;
+  no_data_count: number;
+  error_count: number;
+  results: USWatchlistRankingItemRead[];
+};
+
 export type InstitutionalHoldingRatioPointRead = {
   trade_date: string | null;
   foreign_investor_ratio: number | null;

@@ -17,6 +17,7 @@ from app.market.fundamental_metrics_backfill import (
 from app.market.monthly_revenue_history_backfill import ensure_stock_monthly_revenue_history
 from app.market.shareholding_history_backfill import ensure_stock_shareholding_history
 from app.market.stock_selection_refresh import refresh_selected_stock_data
+from app.us_market import service as us_market_service
 from app.watchlists.backfill_service import (
     backfill_watchlist_group_twse,
     refresh_watchlist_group_daily_prices,
@@ -322,6 +323,31 @@ def run_watchlist_group_refresh_latest_job(
             enabled_only=enabled_only,
             sleep_seconds=sleep_seconds,
             skip_existing_months=skip_existing_months,
+            progress_callback=progress,
+        )
+
+    run_tracked_job(job_id, worker)
+
+
+def run_us_watchlist_daily_refresh_job(
+    job_id: int,
+    group_id: int | None,
+    include_children: bool,
+    enabled_only: bool,
+    outputsize: str,
+    adjusted: bool,
+    sleep_seconds: float,
+) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        progress(0, 1, "Refreshing US watchlist daily prices.")
+        return us_market_service.refresh_us_watchlist_daily_prices(
+            db=db,
+            group_id=group_id,
+            include_children=include_children,
+            enabled_only=enabled_only,
+            outputsize=outputsize,
+            adjusted=adjusted,
+            sleep_seconds=sleep_seconds,
             progress_callback=progress,
         )
 

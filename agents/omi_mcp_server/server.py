@@ -46,7 +46,8 @@ ASK_TOOL: dict[str, Any] = {
     "title": "Ask OMI",
     "description": (
         "Single entry point for Open Market Intelligence. The backend decides whether "
-        "to read data, build a brief, or generate a trusted LLM report."
+        "to read data, build a brief, generate non-persistent trusted LLM analysis, "
+        "or generate a trusted persisted LLM report."
     ),
     "inputSchema": {
         "type": "object",
@@ -63,7 +64,7 @@ ASK_TOOL: dict[str, Any] = {
             },
             "mode": {
                 "type": "string",
-                "enum": ["auto", "data_only", "brief", "report"],
+                "enum": ["auto", "data_only", "brief", "analysis", "report"],
                 "default": "auto",
             },
             "strategy_profile": {
@@ -86,12 +87,12 @@ ASK_TOOL: dict[str, Any] = {
             "allow_llm": {
                 "type": "boolean",
                 "default": False,
-                "description": "Must be true for report mode, and only works with a server-side trusted request.",
+                "description": "Must be true for analysis/report mode, and only works with a server-side trusted request.",
             },
             "allow_write": {
                 "type": "boolean",
                 "default": False,
-                "description": "Must be true for report mode because reports are persisted.",
+                "description": "Must be true only for report mode because reports are persisted.",
             },
             "branch_days": {"type": "integer", "minimum": 1, "maximum": 120, "default": 5},
             "rank_by": {
@@ -438,8 +439,26 @@ def _json_default(value: Any) -> str:
     return str(value)
 
 
+def _replace_surrogates(value: str) -> str:
+    return value.encode("utf-8", errors="replace").decode("utf-8")
+
+
+def _sanitize_json_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _replace_surrogates(value)
+    if isinstance(value, list):
+        return [_sanitize_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            _sanitize_json_value(str(key)): _sanitize_json_value(item)
+            for key, item in value.items()
+        }
+    return value
+
+
 def _write(message: dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(message, ensure_ascii=False, default=_json_default) + "\n")
+    safe_message = _sanitize_json_value(message)
+    sys.stdout.write(json.dumps(safe_message, ensure_ascii=False, default=_json_default) + "\n")
     sys.stdout.flush()
 
 
@@ -459,10 +478,11 @@ def _error(request_id: Any, code: int, message: str, data: Any = None) -> dict[s
 
 
 def _tool_result(data: Any, *, is_error: bool = False) -> dict[str, Any]:
-    text = json.dumps(data, ensure_ascii=False, default=_json_default)
+    safe_data = _sanitize_json_value(data)
+    text = json.dumps(safe_data, ensure_ascii=False, default=_json_default)
     return {
         "content": [{"type": "text", "text": text}],
-        "structuredContent": data if isinstance(data, dict) else {"result": data},
+        "structuredContent": safe_data if isinstance(safe_data, dict) else {"result": safe_data},
         "isError": is_error,
     }
 
@@ -488,7 +508,8 @@ def _api_request(
     if AI_TRUST_TOKEN:
         headers["X-OMI-AI-Trust-Token"] = AI_TRUST_TOKEN
     if payload is not None:
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        safe_payload = _sanitize_json_value(payload)
+        data = json.dumps(safe_payload, ensure_ascii=False).encode("utf-8")
         headers["Content-Type"] = "application/json"
 
     request = Request(

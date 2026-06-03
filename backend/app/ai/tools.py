@@ -108,7 +108,7 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                 "name": "omi.ask",
                 "title": "Ask OMI",
                 "description": (
-                    "Single OMI entry point. It chooses data_only, brief, or report mode "
+                    "Single OMI entry point. It chooses data_only, brief, analysis, or report mode "
                     "from a question and policy flags."
                 ),
                 "input_schema": {
@@ -123,7 +123,7 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                         "scope_id": {"type": "string"},
                         "mode": {
                             "type": "string",
-                            "enum": ["auto", "data_only", "brief", "report"],
+                            "enum": ["auto", "data_only", "brief", "analysis", "report"],
                             "default": "auto",
                         },
                         "strategy_profile": {
@@ -146,9 +146,13 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                         "allow_llm": {
                             "type": "boolean",
                             "default": False,
-                            "description": "Must be true for report mode and requires server-side trust.",
+                            "description": "Must be true for analysis/report mode and requires server-side trust.",
                         },
-                        "allow_write": {"type": "boolean", "default": False},
+                        "allow_write": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "Required only for persisted report mode.",
+                        },
                     },
                     "required": ["question"],
                 },

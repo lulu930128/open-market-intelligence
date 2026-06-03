@@ -2,6 +2,7 @@ export const TAIWAN_INTRADAY_REFRESH_MS = 5_000;
 export const TAIWAN_PREOPEN_MINUTES = 8 * 60 + 30;
 export const TAIWAN_SESSION_START_MINUTES = 9 * 60;
 export const TAIWAN_SESSION_END_MINUTES = 13 * 60 + 30;
+export const TAIWAN_DAILY_PRICE_RELEASE_MINUTES = 15 * 60 + 15;
 
 const TAIWAN_MARKET_HOLIDAYS = new Set([
   "2025-01-01",
@@ -151,6 +152,9 @@ export function getTaiwanMarketRefreshState(now = new Date()) {
   );
   const isPollingWindow = isTradingDay && nowMs >= preopenMs && nowMs < closeMs;
   const isAfterClose = isTradingDay && nowMs >= closeMs;
+  const isDailyPriceReleased =
+    isTradingDay &&
+    parts.hour * 60 + parts.minute + parts.second / 60 >= TAIWAN_DAILY_PRICE_RELEASE_MINUTES;
   const nextPollingStartMs =
     isTradingDay && nowMs < preopenMs ? preopenMs : nextPreopenMs;
 
@@ -158,6 +162,7 @@ export function getTaiwanMarketRefreshState(now = new Date()) {
     dateKey,
     isPollingWindow,
     isAfterClose,
+    isDailyPriceReleased,
     msUntilNextPollingStart: Math.max(1_000, nextPollingStartMs - nowMs),
   };
 }

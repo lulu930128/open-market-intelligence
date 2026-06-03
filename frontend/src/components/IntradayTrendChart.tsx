@@ -16,6 +16,7 @@ type Props = {
   label: string;
   source: string;
   indicators?: IntradayIndicatorSettings;
+  session?: IntradaySessionConfig;
   revealKey?: string;
   refreshIntervalMs?: number;
   updatedAt?: string | null;
@@ -24,6 +25,15 @@ type Props = {
 type IntradayInterval = 1 | 5 | 15;
 export type IntradayIndicatorKey = "volume" | "vwap" | "twap" | "ema" | "rsi" | "macd";
 export type IntradayIndicatorSettings = Record<IntradayIndicatorKey, boolean>;
+export type IntradaySessionConfig = {
+  startMinutes: number;
+  endMinutes: number;
+  timeTicks: Array<{ label: string; minutes: number }>;
+  getMinutesOfDay: (value: string | Date) => number | null;
+  getXRatio: (value: string | Date) => number;
+  isRegularSessionPoint: (value: string | Date) => boolean;
+  volumeFormatter?: (value: number | null | undefined) => string;
+};
 
 type IntradayChartPoint = IntradayTrendPoint & {
   vwap: number | null;
@@ -49,6 +59,23 @@ export const defaultIntradayIndicators: IntradayIndicatorSettings = {
   ema: true,
   rsi: true,
   macd: true,
+};
+
+export const taiwanIntradaySession: IntradaySessionConfig = {
+  startMinutes: TAIWAN_SESSION_START_MINUTES,
+  endMinutes: TAIWAN_SESSION_END_MINUTES,
+  timeTicks: [
+    { label: "09:00", minutes: 9 * 60 },
+    { label: "10:00", minutes: 10 * 60 },
+    { label: "11:00", minutes: 11 * 60 },
+    { label: "12:00", minutes: 12 * 60 },
+    { label: "13:00", minutes: 13 * 60 },
+    { label: "13:30", minutes: 13 * 60 + 30 },
+  ],
+  getMinutesOfDay: getTaipeiMinutesOfDay,
+  getXRatio: getTaiwanIntradayXRatio,
+  isRegularSessionPoint: isTaiwanRegularSessionPoint,
+  volumeFormatter: formatLots,
 };
 
 export const intradayIndicatorOptions: Array<{
@@ -322,12 +349,13 @@ function labelPosition(
 
 function aggregateIntradayPoints(
   points: IntradayTrendPoint[],
-  interval: IntradayInterval
+  interval: IntradayInterval,
+  session: IntradaySessionConfig
 ) {
   const regularPoints = points.filter((point) => {
     return (
       validNumber(point.price) &&
-      isTaiwanRegularSessionPoint(point.time)
+      session.isRegularSessionPoint(point.time)
     );
   });
 
@@ -343,13 +371,13 @@ function aggregateIntradayPoints(
   const buckets = new Map<number, IntradayTrendPoint[]>();
 
   regularPoints.forEach((point) => {
-    const minutes = getTaipeiMinutesOfDay(point.time);
+    const minutes = session.getMinutesOfDay(point.time);
 
     if (minutes === null) return;
 
     const bucket =
-      TAIWAN_SESSION_START_MINUTES +
-      Math.floor((minutes - TAIWAN_SESSION_START_MINUTES) / interval) * interval;
+      session.startMinutes +
+      Math.floor((minutes - session.startMinutes) / interval) * interval;
     const current = buckets.get(bucket) ?? [];
 
     current.push(point);
@@ -558,6 +586,7 @@ export default function IntradayTrendChart({
   label,
   source,
   indicators = defaultIntradayIndicators,
+  session = taiwanIntradaySession,
   revealKey,
   refreshIntervalMs,
   updatedAt,
@@ -570,8 +599,8 @@ export default function IntradayTrendChart({
   const [activeRevealKey, setActiveRevealKey] = useState<string | null>(null);
 
   const data = useMemo(() => {
-    return enrichIntradayPoints(aggregateIntradayPoints(points, interval));
-  }, [points, interval]);
+    return enrichIntradayPoints(aggregateIntradayPoints(points, interval, session));
+  }, [points, interval, session]);
 
   const safeHoverIndex =
     hoverIndex !== null && hoverIndex >= 0 && hoverIndex < data.length ? hoverIndex : null;
@@ -704,7 +733,7 @@ export default function IntradayTrendChart({
   const macdAbsMax = Math.max(...macdValues.map((value) => Math.abs(value)), 1);
 
   function getPointX(point: IntradayChartPoint) {
-    return paddingLeft + getTaiwanIntradayXRatio(point.time) * usableWidth;
+    return paddingLeft + session.getXRatio(point.time) * usableWidth;
   }
 
   function getPriceY(value: number) {
@@ -767,7 +796,7 @@ export default function IntradayTrendChart({
   const previousCloseY = previousClose !== null ? getPriceY(previousClose) : null;
   const baselineY = previousCloseY ?? volumeTop;
   const areaPath = buildBaselineAreaPath(linePath, firstPointX, lastPointX, baselineY);
-  const sessionMinutes = TAIWAN_SESSION_END_MINUTES - TAIWAN_SESSION_START_MINUTES;
+  const sessionMinutes = session.endMinutes - session.startMinutes;
   const chartAreaRight = width - paddingRight;
   const clipAboveId = `${safeChartId}-above`;
   const clipBelowId = `${safeChartId}-below`;
@@ -776,14 +805,8 @@ export default function IntradayTrendChart({
   const revealAnimationName = `intraday-reveal-${safeChartId}`;
   const shouldShowRevealCover = activeRevealKey === stableRevealKey;
   const barWidth = clamp((usableWidth / sessionMinutes) * interval * 0.7, 1, 10);
-  const timeTicks = [
-    { label: "09:00", minutes: 9 * 60 },
-    { label: "10:00", minutes: 10 * 60 },
-    { label: "11:00", minutes: 11 * 60 },
-    { label: "12:00", minutes: 12 * 60 },
-    { label: "13:00", minutes: 13 * 60 },
-    { label: "13:30", minutes: 13 * 60 + 30 },
-  ];
+  const timeTicks = session.timeTicks;
+  const formatVolumeValue = session.volumeFormatter ?? formatLots;
 
   return (
     <div className="border border-slate-200 bg-white">
@@ -845,7 +868,7 @@ export default function IntradayTrendChart({
           <div>
             <span className="text-xs text-slate-400">成交量(張)</span>
             <div className="mt-1 text-base font-bold text-slate-800">
-              {formatLots(displayedVolume)}
+              {formatVolumeValue(displayedVolume)}
             </div>
           </div>
           {indicators.vwap ? (
@@ -994,8 +1017,8 @@ export default function IntradayTrendChart({
 
         {timeTicks.map((tick) => {
           const ratio =
-            (tick.minutes - TAIWAN_SESSION_START_MINUTES) /
-            (TAIWAN_SESSION_END_MINUTES - TAIWAN_SESSION_START_MINUTES);
+            (tick.minutes - session.startMinutes) /
+            (session.endMinutes - session.startMinutes);
           const x = paddingLeft + ratio * usableWidth;
 
           return (

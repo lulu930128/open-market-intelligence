@@ -1,7 +1,10 @@
 "use client";
 
 import SidebarWatchlistExplorer from "@/components/SidebarWatchlistExplorer";
+import type { MarketRegion } from "@/components/SidebarWatchlistExplorer";
 import StockDetailPanel from "@/components/StockDetailPanel";
+import USStockDetailPanel from "@/components/USStockDetailPanel";
+import USWatchlistSidebar from "@/components/USWatchlistSidebar";
 import { fetchJson } from "@/lib/api";
 import { requestBackfillJob } from "@/lib/jobs";
 import {
@@ -17,13 +20,37 @@ import type {
   RankingItem,
   RankingResponse,
   StockIndicatorPoint,
+  USWatchlistGroupNode,
+  USWatchlistItemRead,
+  USWatchlistRankingItemRead,
+  USWatchlistRankingRead,
   WatchlistGroupNode,
   WatchlistItemRead,
 } from "@/types/market";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
 type RankBy = "none" | "change_pct" | "score" | "volume";
+type USRankBy = "none" | "change_pct" | "volume" | "close";
+type RankingDisplayRow = {
+  key: string;
+  rank: number;
+  symbol: string;
+  name: string | null;
+  meta: string | null;
+  visual: ReactNode;
+  close: string;
+  change: string;
+  changePct: number | null | undefined;
+  trend: string;
+  volume: string;
+  selected: boolean;
+  onSelect: () => void;
+};
+type RankingPanelOption = {
+  value: string;
+  label: string;
+};
 type Props = {
   initialTree: WatchlistGroupNode[];
   initialItems: WatchlistItemRead[];
@@ -32,11 +59,18 @@ type Props = {
   initialIndicatorData: StockIndicatorPoint[];
   initialRankingData: RankingResponse | null;
   initialMarketIndexSummary: MarketIndexSummary | null;
+  initialUsWatchlistTree: USWatchlistGroupNode[];
+  initialUsWatchlistItems: USWatchlistItemRead[];
 };
 
 function formatLots(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
   return new Intl.NumberFormat("zh-TW").format(Math.round(value / 1000));
+}
+
+function formatWholeNumber(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "-";
+  return new Intl.NumberFormat("en-US").format(Math.round(value));
 }
 
 function formatPrice(value: number | null | undefined) {
@@ -92,6 +126,7 @@ function rankLabel(rankBy: string) {
   if (rankBy === "none" || rankBy === "watchlist") return "正常排序";
   if (rankBy === "change_pct") return "漲幅";
   if (rankBy === "volume") return "成交量";
+  if (rankBy === "close") return "收盤價";
   return "Score";
 }
 
@@ -364,6 +399,10 @@ function flattenGroups(nodes: WatchlistGroupNode[]): WatchlistGroupNode[] {
   return nodes.flatMap((node) => [node, ...flattenGroups(node.children)]);
 }
 
+function flattenUsGroups(nodes: USWatchlistGroupNode[]): USWatchlistGroupNode[] {
+  return nodes.flatMap((node) => [node, ...flattenUsGroups(node.children)]);
+}
+
 function buildWatchlistRows(
   group: WatchlistGroupNode | null,
   items: WatchlistItemRead[]
@@ -431,6 +470,243 @@ function mergeWatchlistRows(
   }));
 }
 
+function buildUsWatchlistRows(
+  group: USWatchlistGroupNode | null,
+  items: USWatchlistItemRead[]
+): USWatchlistRankingItemRead[] {
+  if (!group) return [];
+
+  const itemsByGroupId = new Map<number, USWatchlistItemRead[]>();
+  const seenSymbols = new Set<string>();
+  const rows: USWatchlistRankingItemRead[] = [];
+
+  items.forEach((item) => {
+    if (!item.enabled) return;
+
+    const groupItems = itemsByGroupId.get(item.group_id) ?? [];
+    groupItems.push(item);
+    itemsByGroupId.set(item.group_id, groupItems);
+  });
+
+  function appendGroupRows(currentGroup: USWatchlistGroupNode) {
+    (itemsByGroupId.get(currentGroup.id) ?? []).forEach((item) => {
+      const symbol = item.symbol.toUpperCase();
+      if (seenSymbols.has(symbol)) return;
+
+      seenSymbols.add(symbol);
+      rows.push({
+        rank: rows.length + 1,
+        symbol,
+        security_name: item.security_name,
+        exchange: item.exchange,
+        asset_type: item.asset_type,
+        group_id: item.group_id,
+        trade_date: null,
+        close: null,
+        previous_close: null,
+        change: null,
+        change_pct: null,
+        volume: null,
+        status: "pending",
+        error_message: null,
+      });
+    });
+
+    currentGroup.children.forEach(appendGroupRows);
+  }
+
+  appendGroupRows(group);
+  return rows;
+}
+
+function mergeUsWatchlistRows(
+  baseRows: USWatchlistRankingItemRead[],
+  ranking: USWatchlistRankingRead | null
+) {
+  if (!ranking) return baseRows;
+
+  const rankingBySymbol = new Map(
+    ranking.results.map((row) => [row.symbol, row])
+  );
+
+  return baseRows.map((row, index) => ({
+    ...row,
+    ...(rankingBySymbol.get(row.symbol) ?? {}),
+    rank: index + 1,
+  }));
+}
+
+function WatchlistRankingPanel({
+  groupName,
+  lastUpdatedAt,
+  rankBy,
+  rankOptions,
+  onRankByChange,
+  onReload,
+  reloadDisabled,
+  loadState,
+  errorMessage,
+  rows,
+  summary,
+  volumeHeader,
+  emptyMessage,
+}: {
+  groupName: string | null;
+  lastUpdatedAt: string | null;
+  rankBy: string;
+  rankOptions: RankingPanelOption[];
+  onRankByChange: (value: string) => void;
+  onReload: () => void;
+  reloadDisabled: boolean;
+  loadState: LoadState;
+  errorMessage: string | null;
+  rows: RankingDisplayRow[];
+  summary: {
+    stockCount: number;
+    upCount: number;
+    downCount: number;
+  };
+  volumeHeader: string;
+  emptyMessage: string;
+}) {
+  return (
+    <div className="space-y-4">
+      <section className="border border-slate-200 bg-white">
+        <div className="flex flex-wrap items-start justify-between gap-4 px-5 py-4">
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+              Selected Group
+            </div>
+            <h2 className="mt-1 text-2xl font-bold text-slate-950">
+              {groupName ?? "尚未選擇分組"}
+            </h2>
+            <div className="mt-1 text-sm text-slate-500">
+              {lastUpdatedAt ? `更新時間 ${lastUpdatedAt}` : "尚未載入分組資料"}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <select
+              value={rankBy}
+              onChange={(event) => onRankByChange(event.target.value)}
+              className="h-9 border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-700 outline-none focus:border-red-700"
+            >
+              {rankOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={onReload}
+              className="h-9 bg-slate-900 px-4 text-sm font-semibold text-white hover:bg-slate-700 disabled:bg-slate-300"
+              disabled={reloadDisabled}
+            >
+              Reload
+            </button>
+          </div>
+        </div>
+
+        {errorMessage ? (
+          <div className="border-t border-red-200 bg-red-50 px-5 py-3 text-sm text-red-700">
+            {errorMessage}
+          </div>
+        ) : null}
+
+        <div className="grid grid-cols-2 border-t border-slate-200 md:grid-cols-4">
+          <div className="px-5 py-3">
+            <div className="text-xs text-slate-500">股票數</div>
+            <div className="mt-1 text-xl font-bold">{summary.stockCount}</div>
+          </div>
+          <div className="border-l border-slate-200 px-5 py-3">
+            <div className="text-xs text-slate-500">上漲</div>
+            <div className="mt-1 text-xl font-bold text-red-600">{summary.upCount}</div>
+          </div>
+          <div className="border-l border-slate-200 px-5 py-3">
+            <div className="text-xs text-slate-500">下跌</div>
+            <div className="mt-1 text-xl font-bold text-emerald-600">{summary.downCount}</div>
+          </div>
+          <div className="border-l border-slate-200 px-5 py-3">
+            <div className="text-xs text-slate-500">排序</div>
+            <div className="mt-1 text-xl font-bold">{rankLabel(rankBy)}</div>
+          </div>
+        </div>
+      </section>
+
+      <section className="border border-slate-200 bg-white">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-3">
+          <h3 className="text-sm font-bold text-slate-950">自選股列表</h3>
+          <span className="text-xs text-slate-500">
+            {loadState === "loading"
+              ? "載入中"
+              : rankBy === "none"
+                ? `${rows.length} 檔 · 正常排序`
+                : `${rows.length} 檔 · 依 ${rankLabel(rankBy)} 排序`}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] bg-slate-50 px-4 py-2 text-xs font-bold uppercase tracking-wide text-slate-500">
+          <span>名次</span>
+          <span>股票</span>
+          <span className="text-center">走勢</span>
+          <span className="text-right">收盤</span>
+          <span className="text-right">漲幅</span>
+          <span className="text-right">漲跌</span>
+          <span className="text-right">{volumeHeader}</span>
+        </div>
+        {rows.length > 0 ? (
+          rows.map((row) => (
+            <button
+              key={row.key}
+              type="button"
+              onClick={row.onSelect}
+              className={[
+                "grid w-full grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-slate-200 px-4 py-2 text-left text-sm",
+                row.selected
+                  ? "bg-slate-900 text-white"
+                  : "bg-white text-slate-800 hover:bg-slate-50",
+              ].join(" ")}
+            >
+              <span className={row.selected ? "text-slate-300" : "text-slate-500"}>
+                #{row.rank}
+              </span>
+              <span className="min-w-0">
+                <span className="block truncate font-semibold">
+                  {row.symbol} {row.name ?? ""}
+                </span>
+                <span className={row.selected ? "block truncate text-xs text-slate-300" : "block truncate text-xs text-slate-500"}>
+                  {row.meta ?? "-"}
+                </span>
+              </span>
+              <span className="flex justify-center">{row.visual}</span>
+              <span className="text-right font-semibold">{row.close}</span>
+              <span className={`text-right font-semibold ${row.selected ? "" : valueTone(row.changePct)}`}>
+                {row.change}
+              </span>
+              <span className="text-right">
+                <span
+                  className={[
+                    "px-2 py-1 text-xs font-semibold",
+                    row.selected ? "bg-white text-slate-900" : trendClass(row.changePct),
+                  ].join(" ")}
+                >
+                  {row.trend}
+                </span>
+              </span>
+              <span className="text-right">{row.volume}</span>
+            </button>
+          ))
+        ) : (
+          <div className="border-t border-slate-200 px-5 py-10 text-center text-sm text-slate-500">
+            {loadState === "loading" ? "載入中" : emptyMessage}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
 export default function MarketDashboardClient({
   initialTree,
   initialItems,
@@ -439,10 +715,20 @@ export default function MarketDashboardClient({
   initialIndicatorData,
   initialRankingData,
   initialMarketIndexSummary,
+  initialUsWatchlistTree,
+  initialUsWatchlistItems,
 }: Props) {
   const initialSelectedGroup = useMemo(() => {
-    return flattenGroups(initialTree).find((group) => group.id === initialSelectedGroupId) ?? null;
+    const groups = flattenGroups(initialTree);
+    return (
+      groups.find((group) => group.id === initialSelectedGroupId) ??
+      groups[0] ??
+      null
+    );
   }, [initialTree, initialSelectedGroupId]);
+  const initialSelectedUsGroup = useMemo(() => {
+    return flattenUsGroups(initialUsWatchlistTree)[0] ?? null;
+  }, [initialUsWatchlistTree]);
   const [selectedGroupId, setSelectedGroupId] = useState<number | null>(
     initialSelectedGroup?.id ?? null
   );
@@ -453,16 +739,39 @@ export default function MarketDashboardClient({
   const [selectedStockName, setSelectedStockName] = useState<string | null>(null);
   const [watchlistTree, setWatchlistTree] = useState<WatchlistGroupNode[]>(initialTree);
   const [watchlistItems, setWatchlistItems] = useState<WatchlistItemRead[]>(initialItems);
+  const [activeMarket, setActiveMarket] = useState<MarketRegion>("tw");
+  const [selectedUsSymbol, setSelectedUsSymbol] = useState<string | null>(null);
+  const [selectedUsSecurityName, setSelectedUsSecurityName] = useState<string | null>(null);
+  const [selectedUsGroupId, setSelectedUsGroupId] = useState<number | null>(
+    initialSelectedUsGroup?.id ?? null
+  );
+  const [selectedUsGroup, setSelectedUsGroup] = useState<USWatchlistGroupNode | null>(
+    initialSelectedUsGroup
+  );
+  const [selectedUsGroupName, setSelectedUsGroupName] = useState<string | null>(
+    initialSelectedUsGroup?.group_name ?? null
+  );
+  const [usWatchlistTree, setUsWatchlistTree] =
+    useState<USWatchlistGroupNode[]>(initialUsWatchlistTree);
+  const [usWatchlistItems, setUsWatchlistItems] =
+    useState<USWatchlistItemRead[]>(initialUsWatchlistItems);
+  const [usWatchlistVersion, setUsWatchlistVersion] = useState(0);
   const [rankBy, setRankBy] = useState<RankBy>("none");
   const [ranking, setRanking] = useState<RankingResponse | null>(initialRankingData);
+  const [usRankBy, setUsRankBy] = useState<USRankBy>("none");
+  const [usRanking, setUsRanking] = useState<USWatchlistRankingRead | null>(null);
   const [marketIndexSummary, setMarketIndexSummary] =
     useState<MarketIndexSummary | null>(initialMarketIndexSummary);
   const [marketIndexLoadState, setMarketIndexLoadState] =
     useState<LoadState>(initialMarketIndexSummary ? "success" : "idle");
   const [loadState, setLoadState] = useState<LoadState>("idle");
+  const [usLoadState, setUsLoadState] = useState<LoadState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [usErrorMessage, setUsErrorMessage] = useState<string | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
+  const [usLastUpdatedAt, setUsLastUpdatedAt] = useState<string | null>(null);
   const dashboardRequestSeq = useRef(0);
+  const usDashboardRequestSeq = useRef(0);
   const marketIndexRequestSeq = useRef(0);
   const finalDashboardRefreshDate = useRef<string | null>(null);
 
@@ -494,6 +803,31 @@ export default function MarketDashboardClient({
       downCount,
     };
   }, [baseRows.length, rows]);
+  const usBaseRows = useMemo(
+    () => buildUsWatchlistRows(selectedUsGroup, usWatchlistItems),
+    [selectedUsGroup, usWatchlistItems]
+  );
+  const usRows = useMemo(() => {
+    if (usRankBy === "none") {
+      return mergeUsWatchlistRows(usBaseRows, usRanking);
+    }
+
+    return usRanking?.results ?? usBaseRows;
+  }, [usBaseRows, usRankBy, usRanking]);
+  const usSummary = useMemo(() => {
+    const upCount = usRows.filter((row) => {
+      return row.change_pct !== null && row.change_pct !== undefined && row.change_pct > 0;
+    }).length;
+    const downCount = usRows.filter((row) => {
+      return row.change_pct !== null && row.change_pct !== undefined && row.change_pct < 0;
+    }).length;
+
+    return {
+      stockCount: usBaseRows.length,
+      upCount,
+      downCount,
+    };
+  }, [usBaseRows.length, usRows]);
 
   async function loadDashboard(
     groupId: number,
@@ -541,6 +875,44 @@ export default function MarketDashboardClient({
     }
   }
 
+  async function loadUsDashboard(
+    groupId: number,
+    currentRankBy = usRankBy,
+    options?: { silent?: boolean }
+  ) {
+    const requestSeq = usDashboardRequestSeq.current + 1;
+    usDashboardRequestSeq.current = requestSeq;
+
+    if (!options?.silent) {
+      setUsLoadState("loading");
+      setUsErrorMessage(null);
+    }
+
+    try {
+      const rankingData = await fetchJson<USWatchlistRankingRead>(
+        "/api/us-market/watchlists/ranking",
+        {
+          group_id: groupId,
+          include_children: true,
+          enabled_only: true,
+          rank_by: currentRankBy,
+          sort_order: currentRankBy === "none" ? "asc" : "desc",
+        }
+      );
+
+      if (usDashboardRequestSeq.current !== requestSeq) return;
+
+      setUsRanking(rankingData);
+      setUsLastUpdatedAt(formatDashboardTime(new Date()));
+      setUsLoadState("success");
+    } catch (error) {
+      if (usDashboardRequestSeq.current !== requestSeq) return;
+
+      setUsLoadState("error");
+      setUsErrorMessage(error instanceof Error ? error.message : "US ranking load failed");
+    }
+  }
+
   async function loadMarketIndices(options?: { silent?: boolean }) {
     const requestSeq = marketIndexRequestSeq.current + 1;
     marketIndexRequestSeq.current = requestSeq;
@@ -565,7 +937,8 @@ export default function MarketDashboardClient({
 
   async function refreshWatchlistDailyPricesOnOpen(groupId: number, currentRankBy: RankBy) {
     const marketState = getTaiwanMarketRefreshState();
-    const requestKey = `${groupId}:${marketState.dateKey}`;
+    const includeToday = marketState.isDailyPriceReleased;
+    const requestKey = `${groupId}:${marketState.dateKey}:${includeToday ? "today" : "latest"}`;
 
     if (watchlistFreshnessRequestKeys.current.has(requestKey)) return;
 
@@ -577,7 +950,7 @@ export default function MarketDashboardClient({
         { method: "POST" },
         {
           lookback_days: 14,
-          include_today: false,
+          include_today: includeToday,
           include_children: true,
           enabled_only: true,
           sleep_seconds: 0.3,
@@ -602,6 +975,8 @@ export default function MarketDashboardClient({
   }, [activeGroupId]);
 
   useEffect(() => {
+    if (activeMarket !== "tw") return;
+
     let disposed = false;
     let refreshTimer: number | undefined;
 
@@ -629,9 +1004,10 @@ export default function MarketDashboardClient({
         window.clearTimeout(refreshTimer);
       }
     };
-  }, []);
+  }, [activeMarket]);
 
   useEffect(() => {
+    if (activeMarket !== "tw") return;
     if (activeGroupId === null) return;
 
     const groupId = activeGroupId;
@@ -693,7 +1069,19 @@ export default function MarketDashboardClient({
       clearRefreshTimer();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeGroupId, rankBy]);
+  }, [activeGroupId, activeMarket, rankBy]);
+
+  useEffect(() => {
+    if (activeMarket !== "us") return;
+    if (selectedUsGroupId === null) return;
+
+    const timer = window.setTimeout(() => {
+      void loadUsDashboard(selectedUsGroupId, usRankBy);
+    }, 120);
+
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeMarket, selectedUsGroupId, usRankBy, usWatchlistVersion]);
 
   function handleSelectGroup(group: WatchlistGroupNode | null) {
     setSelectedGroup(group);
@@ -715,11 +1103,29 @@ export default function MarketDashboardClient({
     setSelectedStockName(stockName);
   }
 
+  function handleSelectUsGroup(group: USWatchlistGroupNode | null) {
+    setSelectedUsGroupId(group?.id ?? null);
+    setSelectedUsGroup(group);
+    setSelectedUsGroupName(group?.group_name ?? null);
+    setSelectedUsSymbol(null);
+    setSelectedUsSecurityName(null);
+    setUsRanking(null);
+    setUsLoadState("idle");
+    setUsErrorMessage(null);
+  }
+
   function handleRankByChange(value: RankBy) {
     setRankBy(value);
     setRanking(null);
     setLoadState("idle");
     setErrorMessage(null);
+  }
+
+  function handleUsRankByChange(value: string) {
+    setUsRankBy(value as USRankBy);
+    setUsRanking(null);
+    setUsLoadState("idle");
+    setUsErrorMessage(null);
   }
 
   function renderRankingRow(row: RankingItem) {
@@ -870,49 +1276,153 @@ export default function MarketDashboardClient({
     </div>
   );
 
+  const usDisplayRows: RankingDisplayRow[] = usRows.map((row) => {
+    const selected = row.symbol === selectedUsSymbol;
+
+    return {
+      key: `${row.group_id}-${row.symbol}`,
+      rank: row.rank,
+      symbol: row.symbol,
+      name: row.security_name,
+      meta: [row.trade_date?.slice(0, 10), row.exchange, row.asset_type]
+        .filter(Boolean)
+        .join(" · ") || statusLabel(row.status),
+      visual: (
+        <span className={selected ? "text-center text-xs text-slate-300" : "text-center text-xs text-slate-400"}>
+          {row.trade_date?.slice(5, 10) ?? "-"}
+        </span>
+      ),
+      close: formatPrice(row.close),
+      change: formatPct(row.change_pct),
+      changePct: row.change_pct,
+      trend: trendLabel(row.change_pct),
+      volume: formatWholeNumber(row.volume),
+      selected,
+      onSelect: () => {
+        setSelectedUsSymbol(row.symbol);
+        setSelectedUsSecurityName(row.security_name);
+      },
+    };
+  });
+  const usRankingPanel = (
+    <WatchlistRankingPanel
+      groupName={selectedUsGroupName}
+      lastUpdatedAt={usLastUpdatedAt}
+      rankBy={usRanking?.rank_by ?? usRankBy}
+      rankOptions={[
+        { value: "none", label: "正常排序" },
+        { value: "change_pct", label: "漲幅" },
+        { value: "volume", label: "成交量" },
+        { value: "close", label: "收盤價" },
+      ]}
+      onRankByChange={handleUsRankByChange}
+      onReload={() => {
+        if (selectedUsGroupId !== null) void loadUsDashboard(selectedUsGroupId);
+      }}
+      reloadDisabled={selectedUsGroupId === null || usLoadState === "loading"}
+      loadState={usLoadState}
+      errorMessage={usErrorMessage}
+      rows={usDisplayRows}
+      summary={usSummary}
+      volumeHeader="成交量"
+      emptyMessage="尚無美股自選資料"
+    />
+  );
+
   return (
     <main className="h-screen overflow-hidden bg-slate-100 text-slate-950">
       <div className="flex h-full min-w-[1180px] flex-col">
         <div className="flex min-h-0 flex-1">
-          <SidebarWatchlistExplorer
-            initialTree={watchlistTree}
-            initialItems={watchlistItems}
-            selectedGroupId={activeGroupId}
-            selectedStockId={selectedStockId}
-            onSelectGroup={handleSelectGroup}
-            onSelectStock={handleSelectStock}
-            onExplorerDataChanged={(nextTree, nextItems) => {
-              setWatchlistTree(nextTree);
-              setWatchlistItems(nextItems);
+          {activeMarket === "us" ? (
+            <USWatchlistSidebar
+              initialTree={usWatchlistTree}
+              initialItems={usWatchlistItems}
+              selectedMarket={activeMarket}
+              selectedSymbol={selectedUsSymbol}
+              onMarketChange={(market) => {
+                setActiveMarket(market);
+                setErrorMessage(null);
+                setUsErrorMessage(null);
+              }}
+              onSelectGroup={handleSelectUsGroup}
+              onSelectSymbol={(symbol, securityName) => {
+                setSelectedUsSymbol(symbol);
+                setSelectedUsSecurityName(securityName);
+              }}
+              onExplorerDataChanged={(nextTree, nextItems) => {
+                setUsWatchlistTree(nextTree);
+                setUsWatchlistItems(nextItems);
 
-              const nextSelectedGroup =
-                flattenGroups(nextTree).find((group) => group.id === activeGroupId) ?? null;
+                const nextSelectedGroup =
+                  flattenUsGroups(nextTree).find((group) => group.id === selectedUsGroupId) ?? null;
 
-              if (nextSelectedGroup) {
-                setSelectedGroup(nextSelectedGroup);
-              }
-            }}
-            onChanged={(nextGroupId) => {
-              const groupId = nextGroupId === undefined ? activeGroupId : nextGroupId;
-              if (groupId !== null) {
-                void loadDashboard(groupId);
-              } else {
-                setRanking(null);
-              }
-            }}
-          />
+                if (nextSelectedGroup) {
+                  setSelectedUsGroup(nextSelectedGroup);
+                  setSelectedUsGroupName(nextSelectedGroup.group_name);
+                }
+              }}
+              onChanged={() => setUsWatchlistVersion((version) => version + 1)}
+            />
+          ) : (
+            <SidebarWatchlistExplorer
+              initialTree={watchlistTree}
+              initialItems={watchlistItems}
+              selectedGroupId={activeGroupId}
+              selectedStockId={selectedStockId}
+              selectedMarket={activeMarket}
+              onSelectGroup={handleSelectGroup}
+              onSelectStock={handleSelectStock}
+              onMarketChange={(market) => {
+                setActiveMarket(market);
+                setErrorMessage(null);
+              }}
+              onExplorerDataChanged={(nextTree, nextItems) => {
+                setWatchlistTree(nextTree);
+                setWatchlistItems(nextItems);
+
+                const nextSelectedGroup =
+                  flattenGroups(nextTree).find((group) => group.id === activeGroupId) ?? null;
+
+                if (nextSelectedGroup) {
+                  setSelectedGroup(nextSelectedGroup);
+                }
+              }}
+              onChanged={(nextGroupId) => {
+                const groupId = nextGroupId === undefined ? activeGroupId : nextGroupId;
+                if (groupId !== null) {
+                  void loadDashboard(groupId);
+                } else {
+                  setRanking(null);
+                }
+              }}
+            />
+          )}
 
           <section className="min-w-0 flex-1 overflow-y-auto p-4">
-            <MarketTape summary={marketIndexSummary} loadState={marketIndexLoadState} />
+            {activeMarket === "tw" ? (
+              <>
+                <MarketTape summary={marketIndexSummary} loadState={marketIndexLoadState} />
 
-            <StockDetailPanel
-              stockId={selectedStockId}
-              stockName={selectedStockName}
-              initialChartData={initialChartData}
-              initialIndicatorData={initialIndicatorData}
-              watchlistRankingPanel={rankingPanel}
-              marketIndexSummary={marketIndexSummary}
-            />
+                <StockDetailPanel
+                  stockId={selectedStockId}
+                  stockName={selectedStockName}
+                  initialChartData={initialChartData}
+                  initialIndicatorData={initialIndicatorData}
+                  watchlistRankingPanel={rankingPanel}
+                  marketIndexSummary={marketIndexSummary}
+                />
+              </>
+            ) : activeMarket === "us" ? (
+              <USStockDetailPanel
+                selectedSymbol={selectedUsSymbol}
+                selectedSecurityName={selectedUsSecurityName}
+                watchlistRankingPanel={usRankingPanel}
+              />
+            ) : (
+              <section className="border border-slate-200 bg-white px-5 py-10 text-sm text-slate-500">
+                尚未啟用
+              </section>
+            )}
           </section>
         </div>
       </div>

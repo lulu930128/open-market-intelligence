@@ -58,8 +58,18 @@ class Settings(BaseSettings):
     scheduler_market_refresh_time: str = "15:15"
     scheduler_market_refresh_lookback_days: int = 7
     scheduler_market_refresh_sleep_seconds: float = 0.2
+    enable_us_market_scheduler: bool = False
+    scheduler_us_market_refresh_time: str = "06:30"
+    scheduler_us_market_refresh_day_of_week: str = "tue-sat"
+    scheduler_us_market_refresh_outputsize: str = "compact"
+    scheduler_us_market_refresh_adjusted: bool = False
+    scheduler_us_market_refresh_sleep_seconds: float = 12.0
 
     finmind_token: str | None = None
+    alphavantage_api_key: str | None = None
+    fred_api_key: str | None = None
+    us_sec_user_agent: str = "Open Market Intelligence local research; set US_SEC_USER_AGENT"
+    us_market_http_timeout_seconds: int = 30
     openai_api_key: str | None = None
     openai_llm_api_key: str | None = None
     omi_openai_env_file: str | None = None

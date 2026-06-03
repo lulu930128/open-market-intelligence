@@ -75,6 +75,7 @@ class AiAskResponse(BaseModel):
     caller_profile: str
     policy: dict[str, Any] = Field(default_factory=dict)
     result: dict[str, Any] = Field(default_factory=dict)
+    freshness: dict[str, Any] = Field(default_factory=dict)
     missing: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     source_refs: list[dict[str, Any]] = Field(default_factory=list)
