@@ -15,7 +15,7 @@ import StockKLineChart, {
   type IndicatorSettings,
 } from "@/components/StockKLineChart";
 import { fetchJson } from "@/lib/api";
-import { formatJobStatus, getJobResultStatus, requestBackfillJob } from "@/lib/jobs";
+import { getJobResultStatus, requestBackfillJob } from "@/lib/jobs";
 import {
   TAIWAN_INTRADAY_REFRESH_MS,
   getTaiwanMarketRefreshState,
@@ -394,6 +394,26 @@ function readBackfillCount(result: unknown, key: string) {
 
   const value = result[key];
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function formatPanelJobProgress(label: string, job: JobRunRead) {
+  const total = Math.max(job.progress_total || 1, 1);
+  const current = Math.min(Math.max(job.progress_current || 0, 0), total);
+  const status = getJobResultStatus(job) ?? job.status;
+
+  if (status === "error") {
+    return `${label}：補齊失敗，詳見左側更新狀態`;
+  }
+
+  if (status === "partial_success") {
+    return `${label}：部分完成，詳見左側更新狀態`;
+  }
+
+  if (status === "success") {
+    return `${label}：補齊完成，詳見左側更新狀態`;
+  }
+
+  return `${label}：補齊中，進度 ${current}/${total}，詳見左側更新狀態`;
 }
 
 function formatBackfillOutcome(job: JobRunRead, label: string) {
@@ -3224,7 +3244,7 @@ export default function StockDetailPanel({
         {
           onUpdate: (job) => {
             if (activeStockIdRef.current === targetStockId) {
-              setDataPanelMessage(`${label}：${formatJobStatus(job)}`);
+              setDataPanelMessage(formatPanelJobProgress(label, job));
             }
           },
         }
@@ -3237,7 +3257,7 @@ export default function StockDetailPanel({
       return job;
     };
 
-    const loadCachedChips = async (messagePrefix: string) => {
+    const loadCachedChips = async (statusNote?: string) => {
       const [coverageResult, shareholdingResult, marginResult] = await Promise.allSettled([
         fetchJson<StockChipCoverageRead>(`/api/market/chips/${targetStockId}/coverage`),
         fetchJson<ShareholdingDistributionWeeklyRead[]>(
@@ -3299,11 +3319,13 @@ export default function StockDetailPanel({
         marginResult.status === "rejected" ? "融資融券" : null,
       ].filter(Boolean);
 
-      setDataPanelMessage(
-        `${messagePrefix}${coverageText}${
-          failures.length ? `；讀取失敗：${failures.join("、")}` : ""
-        }`
-      );
+      const panelNotes = [
+        statusNote,
+        coverageText,
+        failures.length ? `部分快取讀取失敗：${failures.join("、")}` : null,
+      ].filter(Boolean);
+
+      setDataPanelMessage(panelNotes.join("；"));
 
       return { hasShareholding, hasMargin };
     };
@@ -3337,8 +3359,8 @@ export default function StockDetailPanel({
       }
 
       if (tab === "chips") {
-        const initialCache = await loadCachedChips("已先顯示本機快取。");
-        const stageMessages: string[] = [];
+        const initialCache = await loadCachedChips("已先顯示本機快取");
+        let hasBackfillIssue = false;
 
         if (initialCache.hasShareholding || initialCache.hasMargin) {
           dataPanelResolvedKeysRef.current.add(requestKey);
@@ -3354,10 +3376,11 @@ export default function StockDetailPanel({
             },
             "集保股權分散"
           );
-          stageMessages.push(formatBackfillOutcome(shareholdingJob, "集保股權分散"));
-        } catch (error) {
-          const message = error instanceof Error ? error.message : "Unknown error";
-          stageMessages.push(`集保股權分散補齊失敗：${message}`);
+          if (getJobResultStatus(shareholdingJob) === "partial_success") {
+            hasBackfillIssue = true;
+          }
+        } catch {
+          hasBackfillIssue = true;
         }
 
         try {
@@ -3371,14 +3394,15 @@ export default function StockDetailPanel({
             },
             "融資融券"
           );
-          stageMessages.push(formatBackfillOutcome(marginJob, "融資融券"));
-        } catch (error) {
-          const message = error instanceof Error ? error.message : "Unknown error";
-          stageMessages.push(`融資融券補齊失敗：${message}`);
+          if (getJobResultStatus(marginJob) === "partial_success") {
+            hasBackfillIssue = true;
+          }
+        } catch {
+          hasBackfillIssue = true;
         }
 
         const finalCache = await loadCachedChips(
-          stageMessages.length ? `${stageMessages.join("；")}。` : "籌碼資料已重新讀取。"
+          hasBackfillIssue ? "部分補齊未完成，詳見左側更新狀態" : "籌碼資料已重新讀取"
         );
 
         if (activeStockIdRef.current !== targetStockId) return;
@@ -3470,11 +3494,10 @@ export default function StockDetailPanel({
         setFinancialMetricHistory(financialRows);
         setDataPanelMessage("盈餘資料已補齊");
       }
-    } catch (error) {
+    } catch {
       if (activeStockIdRef.current !== targetStockId) return;
 
-      const message = error instanceof Error ? error.message : "Unknown error";
-      setDataPanelMessage(`補資料失敗：${message}`);
+      setDataPanelMessage("補資料失敗，詳見左側更新狀態或稍後重試");
     } finally {
       if (dataPanelRequestKeyRef.current === requestKey) {
         dataPanelRequestKeyRef.current = null;
@@ -3498,7 +3521,7 @@ export default function StockDetailPanel({
           timeoutMs: 600000,
           onUpdate: (job) => {
             if (!cancelled && activeStockIdRef.current === targetStockId) {
-              setDataPanelMessage(`自選股資料自動更新：${formatJobStatus(job)}`);
+              setDataPanelMessage(formatPanelJobProgress("自選股資料自動更新", job));
             }
           },
         }
@@ -3516,11 +3539,10 @@ export default function StockDetailPanel({
           );
           void refreshDataTab(activeDataTabRef.current);
         })
-        .catch((error) => {
+        .catch(() => {
           if (cancelled || activeStockIdRef.current !== targetStockId) return;
 
-          const message = error instanceof Error ? error.message : "Unknown error";
-          setDataPanelMessage(`自選股資料自動更新失敗：${message}`);
+          setDataPanelMessage("自選股資料自動更新失敗，詳見左側更新狀態");
         });
     }, 0);
 
@@ -3687,12 +3709,6 @@ export default function StockDetailPanel({
 
     return (
       <div className="space-y-5">
-        {dataPanelLoading === "chips" && dataPanelMessage ? (
-          <div className="border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
-            {dataPanelMessage}
-          </div>
-        ) : null}
-
         {currentChipCoverage ? (
           <div className="text-xs leading-5 text-slate-500">
             集保最新 {formatDate(currentChipCoverage.shareholding_latest_date)}，
@@ -4890,11 +4906,6 @@ export default function StockDetailPanel({
                   <div className="text-lg font-bold text-slate-950">
                     {dataPanelTabs.find((tab) => tab.key === activeDataTab)?.label ?? "資料"}
                     資料
-                  </div>
-                  <div className="mt-1 text-xs text-slate-500">
-                    {dataPanelLoading === activeDataTab
-                      ? dataPanelMessage ?? "補齊資料中..."
-                      : dataPanelMessage ?? "依目前選取股票載入對應公開資料"}
                   </div>
                 </div>
               </div>

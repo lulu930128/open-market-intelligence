@@ -41,9 +41,11 @@ class AiReportEnvelope(AiDataEnvelope):
 
 
 class AiAskRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     question: str = Field(..., min_length=1, max_length=4000)
-    scope_type: str = Field(default="auto", min_length=1, max_length=50)
-    scope_id: str | None = Field(default=None, max_length=120)
+    contract_version: str = Field(default="omi.ai.ask.v2", min_length=1, max_length=80)
+    target: dict[str, Any] = Field(default_factory=lambda: {"type": "auto"})
     mode: str = Field(default="auto", min_length=1, max_length=50)
     caller_profile: str = Field(
         default="kuro_readonly",
@@ -53,6 +55,15 @@ class AiAskRequest(BaseModel):
     )
     allow_llm: bool = False
     allow_write: bool = False
+    allow_external_fetch: bool = False
+    tool_budget: dict[str, Any] = Field(default_factory=dict)
+    refresh_policy: dict[str, Any] = Field(
+        default_factory=lambda: {
+            "mode": "stale_first",
+            "before_answer": True,
+            "fallback_to_cached": True,
+        }
+    )
     strategy_profile: str = Field(default="short_term_momentum", min_length=1, max_length=80)
     branch_days: int = Field(default=5, ge=1, le=120)
     rank_by: str = Field(default="score", min_length=1, max_length=50)
@@ -61,19 +72,26 @@ class AiAskRequest(BaseModel):
     context_limit: int = Field(default=100, ge=20, le=500)
     include_children: bool = True
     enabled_only: bool = True
+    conversation_context: dict[str, Any] = Field(default_factory=dict)
 
 
 class AiAskResponse(BaseModel):
     kind: str = "ai_ask"
+    contract_version: str = "omi.ai.ask.v2"
     question: str
-    scope_type: str
-    scope_id: str | None = None
-    mode_requested: str
-    mode_effective: str
+    target: dict[str, Any] = Field(default_factory=dict)
+    mode: dict[str, Any] = Field(default_factory=dict)
     action: str
     strategy_profile: str
     caller_profile: str
+    resolution: dict[str, Any] = Field(default_factory=dict)
+    clarification: dict[str, Any] = Field(default_factory=dict)
+    next_actions: list[dict[str, Any]] = Field(default_factory=list)
+    answer_ready: bool = True
+    report_level: str = "data_only"
     policy: dict[str, Any] = Field(default_factory=dict)
+    tool_plan: dict[str, Any] = Field(default_factory=dict)
+    tool_runs: list[dict[str, Any]] = Field(default_factory=list)
     result: dict[str, Any] = Field(default_factory=dict)
     freshness: dict[str, Any] = Field(default_factory=dict)
     missing: list[str] = Field(default_factory=list)

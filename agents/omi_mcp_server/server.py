@@ -10,6 +10,25 @@ from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 
+def _configure_stdio() -> None:
+    """Keep MCP stdio traffic UTF-8 on Windows and other non-UTF-8 shells."""
+    for stream_name, errors in (
+        ("stdin", "replace"),
+        ("stdout", "strict"),
+        ("stderr", "backslashreplace"),
+    ):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors=errors)
+            except Exception:
+                pass
+
+
+_configure_stdio()
+
+
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_NAME = "omi-mcp-server"
 SERVER_VERSION = "0.1.0"
@@ -45,22 +64,36 @@ ASK_TOOL: dict[str, Any] = {
     "name": "omi.ask",
     "title": "Ask OMI",
     "description": (
-        "Single entry point for Open Market Intelligence. The backend decides whether "
-        "to read data, build a brief, generate non-persistent trusted LLM analysis, "
-        "or generate a trusted persisted LLM report."
+        "Open Market Intelligence v2 entry point. Send a natural-language question "
+        "and optional target; OMI resolves the target, returns clarification when "
+        "needed, and provides read-only evidence, brief, or trusted analysis."
     ),
     "inputSchema": {
         "type": "object",
         "properties": {
-            "question": {"type": "string"},
-            "scope_type": {
+            "contract_version": {
                 "type": "string",
-                "enum": ["auto", "market", "data_freshness", "stock", "watchlist"],
-                "default": "auto",
+                "default": "omi.ai.ask.v2",
+                "description": "OMI ask contract version. Use omi.ai.ask.v2.",
             },
-            "scope_id": {
-                "type": "string",
-                "description": "Stock id for stock scope, or numeric watchlist group id for watchlist scope.",
+            "question": {"type": "string"},
+            "target": {
+                "type": "object",
+                "description": "Optional resolved or requested target. Use type=auto when Kuro wants OMI to resolve it.",
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "enum": ["auto", "market", "data_freshness", "tw_stock", "tw_watchlist", "us_stock"],
+                        "default": "auto",
+                    },
+                    "id": {
+                        "type": "string",
+                        "description": "Target id, for example Taiwan stock id 2330 or watchlist group id 1.",
+                    },
+                    "label": {"type": "string"},
+                    "market": {"type": "string"},
+                },
+                "default": {"type": "auto"},
             },
             "mode": {
                 "type": "string",
@@ -94,6 +127,28 @@ ASK_TOOL: dict[str, Any] = {
                 "default": False,
                 "description": "Must be true only for report mode because reports are persisted.",
             },
+            "allow_external_fetch": {
+                "type": "boolean",
+                "default": False,
+                "description": "Allow trusted OMI backend to call configured external market APIs and update local evidence cache.",
+            },
+            "tool_budget": {
+                "type": "object",
+                "properties": {
+                    "max_calls": {"type": "integer", "minimum": 0, "maximum": 12, "default": 5},
+                    "max_external_fetches": {"type": "integer", "minimum": 0, "maximum": 8, "default": 3},
+                    "max_total_seconds": {"type": "integer", "minimum": 1, "maximum": 90, "default": 25},
+                },
+            },
+            "refresh_policy": {
+                "type": "object",
+                "properties": {
+                    "mode": {"type": "string", "enum": ["stale_first", "off"], "default": "stale_first"},
+                    "before_answer": {"type": "boolean", "default": True},
+                    "fallback_to_cached": {"type": "boolean", "default": True},
+                },
+                "description": "Controls whether OMI should refresh stale local evidence before answering.",
+            },
             "branch_days": {"type": "integer", "minimum": 1, "maximum": 120, "default": 5},
             "rank_by": {
                 "type": "string",
@@ -105,6 +160,10 @@ ASK_TOOL: dict[str, Any] = {
             "context_limit": {"type": "integer", "minimum": 20, "maximum": 500, "default": 100},
             "include_children": {"type": "boolean", "default": True},
             "enabled_only": {"type": "boolean", "default": True},
+            "conversation_context": {
+                "type": "object",
+                "description": "Optional Kuro conversation context, including last OMI resolution for follow-up turns.",
+            },
         },
         "required": ["question"],
     },
@@ -458,7 +517,14 @@ def _sanitize_json_value(value: Any) -> Any:
 
 def _write(message: dict[str, Any]) -> None:
     safe_message = _sanitize_json_value(message)
-    sys.stdout.write(json.dumps(safe_message, ensure_ascii=False, default=_json_default) + "\n")
+    text = json.dumps(safe_message, ensure_ascii=False, default=_json_default) + "\n"
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is not None:
+        buffer.write(text.encode("utf-8"))
+        buffer.flush()
+        return
+
+    sys.stdout.write(text)
     sys.stdout.flush()
 
 
@@ -569,13 +635,20 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
         return _api_post(
             "/api/ai/ask",
             payload={
+                "contract_version": arguments.get("contract_version", "omi.ai.ask.v2"),
                 "question": _require(arguments, "question"),
-                "scope_type": arguments.get("scope_type", "auto"),
-                "scope_id": arguments.get("scope_id"),
+                "target": arguments.get("target") or {"type": "auto"},
                 "mode": arguments.get("mode", "auto"),
                 "caller_profile": arguments.get("caller_profile", "kuro_readonly"),
                 "allow_llm": _bool_arg(arguments, "allow_llm", False),
                 "allow_write": _bool_arg(arguments, "allow_write", False),
+                "allow_external_fetch": _bool_arg(arguments, "allow_external_fetch", False),
+                "tool_budget": arguments.get("tool_budget") or {},
+                "refresh_policy": arguments.get("refresh_policy") or {
+                    "mode": "stale_first",
+                    "before_answer": True,
+                    "fallback_to_cached": True,
+                },
                 "strategy_profile": arguments.get("strategy_profile", "short_term_momentum"),
                 "branch_days": arguments.get("branch_days", 5),
                 "rank_by": arguments.get("rank_by", "score"),
@@ -584,6 +657,7 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
                 "context_limit": arguments.get("context_limit", 100),
                 "include_children": _bool_arg(arguments, "include_children", True),
                 "enabled_only": _bool_arg(arguments, "enabled_only", True),
+                "conversation_context": arguments.get("conversation_context") or {},
             },
         )
 

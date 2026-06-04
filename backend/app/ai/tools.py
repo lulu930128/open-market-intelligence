@@ -114,13 +114,25 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "question": {"type": "string"},
-                        "scope_type": {
+                        "contract_version": {
                             "type": "string",
-                            "enum": ["auto", "market", "data_freshness", "stock", "watchlist"],
-                            "default": "auto",
+                            "default": "omi.ai.ask.v2",
                         },
-                        "scope_id": {"type": "string"},
+                        "question": {"type": "string"},
+                        "target": {
+                            "type": "object",
+                            "properties": {
+                                "type": {
+                                    "type": "string",
+                                    "enum": ["auto", "market", "data_freshness", "tw_stock", "tw_watchlist", "us_stock"],
+                                    "default": "auto",
+                                },
+                                "id": {"type": "string"},
+                                "label": {"type": "string"},
+                                "market": {"type": "string"},
+                            },
+                            "default": {"type": "auto"},
+                        },
                         "mode": {
                             "type": "string",
                             "enum": ["auto", "data_only", "brief", "analysis", "report"],
@@ -152,6 +164,32 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                             "type": "boolean",
                             "default": False,
                             "description": "Required only for persisted report mode.",
+                        },
+                        "allow_external_fetch": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "Allow trusted OMI backend to call configured external market APIs and update local evidence cache.",
+                        },
+                        "tool_budget": {
+                            "type": "object",
+                            "properties": {
+                                "max_calls": {"type": "integer", "minimum": 0, "maximum": 12, "default": 5},
+                                "max_external_fetches": {"type": "integer", "minimum": 0, "maximum": 8, "default": 3},
+                                "max_total_seconds": {"type": "integer", "minimum": 1, "maximum": 90, "default": 25},
+                            },
+                        },
+                        "refresh_policy": {
+                            "type": "object",
+                            "properties": {
+                                "mode": {"type": "string", "enum": ["stale_first", "off"], "default": "stale_first"},
+                                "before_answer": {"type": "boolean", "default": True},
+                                "fallback_to_cached": {"type": "boolean", "default": True},
+                            },
+                            "description": "Controls whether OMI should refresh stale local evidence before answering.",
+                        },
+                        "conversation_context": {
+                            "type": "object",
+                            "description": "Optional caller context such as prior OMI resolution.",
                         },
                     },
                     "required": ["question"],

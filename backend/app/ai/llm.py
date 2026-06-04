@@ -69,6 +69,57 @@ LLM_REPORT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+LLM_TOOL_PLAN_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "reason": {"type": "string"},
+        "tool_plan": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "tool": {
+                        "type": "string",
+                        "enum": [
+                            "tw.refresh_stock_evidence",
+                            "us.read_intraday_trend",
+                            "us.refresh_daily_price",
+                            "us.refresh_company_profile",
+                            "us.refresh_sec_facts",
+                            "us.read_sec_fundamentals",
+                            "us.refresh_corporate_actions",
+                        ],
+                    },
+                    "stock_id": {"type": ["string", "null"]},
+                    "symbol": {"type": ["string", "null"]},
+                    "provider": {"type": ["string", "null"]},
+                    "outputsize": {"type": ["string", "null"]},
+                    "adjusted": {"type": ["boolean", "null"]},
+                    "series_id": {"type": ["string", "null"]},
+                    "include_today": {"type": ["boolean", "null"]},
+                    "sleep_seconds": {"type": ["number", "null"]},
+                    "reason": {"type": "string"},
+                },
+                "required": [
+                    "tool",
+                    "stock_id",
+                    "symbol",
+                    "provider",
+                    "outputsize",
+                    "adjusted",
+                    "series_id",
+                    "include_today",
+                    "sleep_seconds",
+                    "reason",
+                ],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["reason", "tool_plan"],
+    "additionalProperties": False,
+}
+
 
 def _json_default(value: Any) -> str:
     return str(value)
@@ -130,6 +181,47 @@ def build_responses_payload(envelope: dict[str, Any]) -> dict[str, Any]:
             }
         },
         "max_output_tokens": settings.openai_max_output_tokens,
+    }
+
+
+def build_tool_plan_payload(planner_input: dict[str, Any]) -> dict[str, Any]:
+    planner_json = json.dumps(planner_input, ensure_ascii=False, default=_json_default)
+    system_prompt = (
+        "You are the OMI tool planner. Choose a minimal, bounded tool plan. "
+        "Only select tools listed in allowed_tools. Do not invent tools or broad refreshes."
+    )
+    user_prompt = (
+        "Create an OMI tool plan from the following JSON.\n"
+        "Rules:\n"
+        "- Use at most the requested budget.\n"
+        "- Prefer local cached evidence when gaps are not material.\n"
+        "- Use external fetch tools only when they directly reduce missing evidence.\n"
+        "- If no tool is needed, return an empty tool_plan.\n"
+        "- For single-stock US/ADR questions, keep all symbol fields to the target symbol.\n\n"
+        f"Planner input JSON:\n{planner_json}"
+    )
+
+    return {
+        "model": settings.openai_model,
+        "input": [
+            {
+                "role": "system",
+                "content": [{"type": "input_text", "text": system_prompt}],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": user_prompt}],
+            },
+        ],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "omi_tool_plan",
+                "strict": True,
+                "schema": LLM_TOOL_PLAN_SCHEMA,
+            }
+        },
+        "max_output_tokens": min(settings.openai_max_output_tokens, 900),
     }
 
 
@@ -261,3 +353,49 @@ def generate_structured_report(envelope: dict[str, Any]) -> dict[str, Any]:
         "model": response_payload.get("model") or settings.openai_model,
         "usage": response_payload.get("usage") or {},
     }
+
+
+def generate_tool_plan(planner_input: dict[str, Any]) -> dict[str, Any]:
+    openai_api_key = settings.effective_openai_api_key
+    if not openai_api_key:
+        raise OpenAIConfigurationError(
+            "OPENAI_API_KEY is not configured for OMI tool planning. Set OPENAI_API_KEY, "
+            "OPENAI_LLM_API_KEY, or OMI_OPENAI_ENV_FILE in the OMI environment."
+        )
+
+    payload = build_tool_plan_payload(planner_input)
+    headers = {
+        "Authorization": f"Bearer {openai_api_key}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        response = requests.post(
+            settings.openai_responses_url,
+            headers=headers,
+            json=payload,
+            timeout=min(settings.openai_timeout_seconds, 45),
+        )
+    except requests.RequestException as exc:
+        raise OpenAILLMError(f"OpenAI Responses API tool-plan request failed: {exc}") from exc
+
+    _raise_for_openai_error(response)
+
+    try:
+        response_payload = response.json()
+    except ValueError as exc:
+        raise OpenAILLMError("OpenAI Responses API returned non-JSON response for tool planning.") from exc
+
+    if response_payload.get("status") == "incomplete":
+        details = response_payload.get("incomplete_details") or {}
+        raise OpenAILLMError(f"OpenAI tool-plan response was incomplete: {details}")
+
+    plan = _parse_json_text(_extract_text(response_payload))
+    if not isinstance(plan.get("tool_plan"), list):
+        raise OpenAILLMError("OpenAI tool-plan JSON missed tool_plan list.")
+
+    plan["provider"] = "openai"
+    plan["response_id"] = response_payload.get("id")
+    plan["model"] = response_payload.get("model") or settings.openai_model
+    plan["usage"] = response_payload.get("usage") or {}
+    return plan

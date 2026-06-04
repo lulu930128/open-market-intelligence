@@ -60,6 +60,7 @@ def _ai_server_policy(request: Request) -> ai_ask.AiAskServerPolicy:
     return ai_ask.AiAskServerPolicy(
         can_call_llm=trusted,
         can_write=trusted,
+        can_external_fetch=trusted,
         trust_source=trust_source,
     )
 

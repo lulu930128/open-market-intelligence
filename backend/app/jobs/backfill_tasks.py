@@ -352,3 +352,36 @@ def run_us_watchlist_daily_refresh_job(
         )
 
     run_tracked_job(job_id, worker)
+
+
+def run_us_watchlist_resource_refresh_job(
+    job_id: int,
+    group_id: int | None,
+    include_children: bool,
+    enabled_only: bool,
+    include_daily: bool,
+    include_sec_facts: bool,
+    include_profile: bool,
+    include_actions: bool,
+    outputsize: str,
+    adjusted: bool,
+    sleep_seconds: float,
+) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        progress(0, 1, "Refreshing US watchlist resources.")
+        return us_market_service.refresh_us_watchlist_resources(
+            db=db,
+            group_id=group_id,
+            include_children=include_children,
+            enabled_only=enabled_only,
+            include_daily=include_daily,
+            include_sec_facts=include_sec_facts,
+            include_profile=include_profile,
+            include_actions=include_actions,
+            outputsize=outputsize,
+            adjusted=adjusted,
+            sleep_seconds=sleep_seconds,
+            progress_callback=progress,
+        )
+
+    run_tracked_job(job_id, worker)

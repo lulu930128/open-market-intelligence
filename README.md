@@ -30,6 +30,7 @@ Open Market Intelligence 是一套本機優先的市場情報與自選股研究�
 - 籌碼與基本面：支援三大法人、法人持股比例、融資融券、集保分布、分點 Top15、多日分點加總、月營收、季度財務與盈餘。
 - 資料回補：支援 TWSE / TPEx 日線、法人、融資融券、集保、營收、財務與自選股群組回補。
 - 資料治理：保存 raw result、fetch log、quality check、parser result 與 background job 狀態。
+- 更新狀態中心：左側統一呈現 background job 進度、partial success、失敗項目與 retry，個股資料面板不重複顯示原始補資料訊息。
 - 外部 Agent 介面：提供 `POST /api/ai/ask` 與 MCP `omi.ask`，讓 Kuro 或其他桌面助理以單一入口讀取本機 evidence pack、brief、freshness 與 warning。
 
 ## US Market Coverage
@@ -46,18 +47,18 @@ Open Market Intelligence 是一套本機優先的市場情報與自選股研究�
 - Company profile / corporate actions：Alpha Vantage overview、dividend、split endpoint 的資料表與 refresh API。
 - Short volume：FINRA daily short sale volume。這是 daily short sale volume，不是 short interest 部位資料。
 - Macro：FRED series observations 的資料表與 refresh API。
-- Background jobs：可針對美股自選群組批次刷新 daily price，並支援排程設定。
+- Background jobs：可針對美股自選群組批次刷新 daily price、SEC facts、profile 與 corporate actions，並支援排程與 retry。
 
 目前限制：
 
 - 美股資料覆蓋以自選 universe 為主，不應先把 12,000+ 檔主檔全量回補。
 - Alpha Vantage / FRED 需要 API key；SEC EDGAR 需要描述清楚的 `US_SEC_USER_AGENT`，並需遵守 fair access / rate limit。
-- AI evidence pack 目前仍以台股流程為主，美股資料應先作為台股研究的領先訊號與同業對照，再逐步接進 `omi.ask`。
+- AI evidence pack 仍以台股研究為核心，但 `omi.ask` 已支援 `target.type=us_stock` 單股 / ADR 查詢；美股資料可先作為領先訊號與同業對照，US-TW 對應關係再逐步深化。
 
 建議的美股工作流：
 
 1. 先維護 `科技股` root 下的核心分類與個股 / ETF。
-2. 對自選 universe 跑 daily price / SEC facts / profile / corporate actions 回補。
+2. 對自選 universe 跑 daily price / SEC facts / profile / corporate actions 回補；前端美股排行區的 `Backfill Data` 會排入 watchlist resource refresh job。
 3. 用 `QQQ`、`SMH`、`SOXX`、AI megacap、半導體設備、記憶體與資料中心股當作台股族群領先訊號。
 4. 再把 US-TW 對應關係接進 AI brief，讓報告能回答「美股某族群變化會影響哪些台股」。
 
@@ -280,6 +281,7 @@ flowchart TD
 | `backend/app/main.py` | FastAPI app、middleware、router registration、startup / shutdown lifecycle |
 | `backend/app/config.py` | `.env` 設定、database URL、timezone、scheduler options |
 | `backend/app/ai/tools.py` | AI 可用的本機資料工具與 evidence pack 組裝 |
+| `backend/app/ai/agentic_tools.py` | `omi.ask` v2 的 allowlisted refresh/read tool planner、budget enforcement 與 tool run 結果整理 |
 | `backend/app/ai/prompts.py` | AI 策略 profile、system prompt 與研究偏好 |
 | `backend/app/ai/llm.py` | OpenAI Responses API 呼叫、JSON schema 驗證與錯誤處理 |
 | `backend/app/ai/orchestrator.py` | 個股與自選群組 AI 報告產生流程 |
@@ -299,16 +301,17 @@ flowchart TD
 | Module | Responsibility |
 | --- | --- |
 | `backend/app/us_market/sources.py` | 美股外部資料來源 parser / fetcher：NASDAQ Trader、Yahoo chart、Alpha Vantage、SEC EDGAR、FINRA、FRED |
-| `backend/app/us_market/service.py` | 美股主檔、自選樹、OHLC、SEC facts、profile、corporate actions、short volume、macro 服務層 |
-| `backend/app/routers/us_market.py` | `/api/us-market` router，提供美股自選、資料刷新與查詢 API |
+| `backend/app/us_market/service.py` | 美股主檔、自選樹、OHLC、SEC facts、profile、corporate actions、short volume、macro 與 watchlist resource refresh 服務層 |
+| `backend/app/routers/us_market.py` | `/api/us-market` router，提供美股自選、資料刷新、resource refresh job 與查詢 API |
 
 ## Important Frontend Components
 
 | Component | Responsibility |
 | --- | --- |
-| `MarketDashboardClient.tsx` | Dashboard 主狀態、群組選取、排序、股票選取 |
+| `MarketDashboardClient.tsx` | Dashboard 主狀態、群組選取、排序、股票選取、美股預設葉節點與 resource refresh 操作 |
 | `SidebarWatchlistExplorer.tsx` | 左側市場分頁、自選股樹、群組與股票操作 |
 | `StockDetailPanel.tsx` | 個股頁籤、API 載入、指標選單、籌碼/法人/分點/營收/財務面板 |
+| `JobStatusCenter.tsx` | 左側更新狀態中心，統一顯示 background job 進度、partial success、失敗項目與 retry |
 | `IntradayTrendChart.tsx` | 今日分時圖、1m/5m/15m、盤中指標與指標開關 |
 | `StockKLineChart.tsx` | K 線、縮放/回滾、技術指標模板、指標參數、副圖 |
 | `WatchlistManager.tsx` | 自選股管理輔助操作 |
@@ -318,7 +321,7 @@ flowchart TD
 | Component | Responsibility |
 | --- | --- |
 | `USWatchlistSidebar.tsx` | 美股市場切換、自選分類樹、個股搜尋 / 加入 / 停用 / 刪除 |
-| `USStockDetailPanel.tsx` | 美股個股 detail：OHLC、盤中、SEC fundamentals、profile、actions、short volume |
+| `USStockDetailPanel.tsx` | 美股個股 detail：OHLC、盤中、SEC fundamentals、profile、actions、short volume 與 right-side data readiness |
 | `USWatchlistRankingPanel.tsx` | 美股自選排行，依 change / volume / close 或原始 watchlist 順序展示 |
 | `usMarketTime.ts` | America/New_York regular session、盤中輪詢與 X 軸比例判斷 |
 
@@ -348,7 +351,7 @@ flowchart TD
 
 | Prefix | Examples | Purpose |
 | --- | --- | --- |
-| `/api/us-market` | `/watchlists/tree`, `/stocks/search`, `/ohlc/{symbol}`, `/sec/{symbol}/fundamentals`, `/profiles/{symbol}`, `/corporate-actions/{symbol}`, `/short-volume/{symbol}/history`, `/macro/{series_id}/observations` | 美股主檔、自選樹、OHLC、SEC facts、profile、corporate actions、short volume、macro |
+| `/api/us-market` | `/watchlists/tree`, `/watchlists/groups/{id}/refresh-resources`, `/stocks/search`, `/ohlc/{symbol}`, `/sec/{symbol}/fundamentals`, `/profiles/{symbol}`, `/corporate-actions/{symbol}`, `/short-volume/{symbol}/history`, `/macro/{series_id}/observations` | 美股主檔、自選樹、watchlist resource refresh、OHLC、SEC facts、profile、corporate actions、short volume、macro |
 
 ## Setup
 
@@ -506,10 +509,11 @@ flowchart TD
 ### AI Question Modes
 
 For external agents, prefer `POST /api/ai/ask` or MCP `omi.ask`. This is the
-single public entry point: callers send a question and optional scope, while OMI
+single public entry point: callers send a question and optional v2 `target`
+object, while OMI resolves ambiguous natural-language scope and
 decides whether to return raw data, a prompt-ready brief, or a persisted LLM
 report. It defaults to `strategy_profile=short_term_momentum` and does not call
-OpenAI unless report mode is explicitly allowed by server-side policy. `GET
+OpenAI unless analysis/report mode is explicitly allowed by server-side policy. `GET
 /api/ai/tools` also returns only `omi.ask` by default; add `debug=true` or
 `include_internal=true` only from a trusted local/token-authenticated request to
 list internal tools.
@@ -529,7 +533,7 @@ should not call the internal AI routes directly. The supported contract is:
 3. Use `mode=brief` when the caller needs a compact prompt-ready summary.
 4. Use `mode=report` only when the request is server-side trusted and explicitly
    sets both `allow_llm=true` and `allow_write=true`.
-5. Preserve `warnings`, `missing`, `source_refs`, `mode_effective`, and
+5. Preserve `warnings`, `missing`, `source_refs`, `mode.effective`, and
    `as_of` in downstream UIs so partial or stale local data is visible.
 
 The response envelope is intentionally stable for agents:
@@ -537,11 +541,15 @@ The response envelope is intentionally stable for agents:
 ```json
 {
   "kind": "ai_ask",
-  "scope_type": "stock",
-  "scope_id": "2330",
-  "mode_requested": "brief",
-  "mode_effective": "brief",
+  "contract_version": "omi.ai.ask.v2",
+  "target": {"type": "tw_stock", "id": "2330", "label": "台積電"},
+  "mode": {"requested": "brief", "effective": "brief"},
   "action": "omi.generate_stock_brief",
+  "resolution": {
+    "target": {"type": "tw_stock", "id": "2330", "label": "台積電"},
+    "confidence": "high",
+    "assumption": "Resolved 2330 as Taiwan stock 2330."
+  },
   "policy": {
     "allow_llm": false,
     "allow_write": false,
@@ -555,6 +563,21 @@ The response envelope is intentionally stable for agents:
   "source_refs": []
 }
 ```
+
+For `target.type=us_stock`, trusted callers can set `allow_external_fetch=true`
+with a bounded `tool_budget`. OMI then lets its own LLM planner choose from
+backend allowlisted tools such as `us.read_intraday_trend`,
+`us.refresh_daily_price`, `us.refresh_company_profile`, and
+`us.refresh_sec_facts`; the backend validates budget/trust, executes the tools,
+records `tool_plan` and `tool_runs`, and folds the refreshed evidence into the
+answer. External API credentials stay in OMI and are never exposed to Kuro.
+
+For `target.type=tw_stock`, OMI defaults to `refresh_policy.mode=stale_first`.
+When freshness says the local Taiwan evidence pack is stale and the caller is
+trusted with `allow_external_fetch=true`, OMI runs the backend
+`tw.refresh_stock_evidence` tool before answering. If the exchange/source has
+not published the expected trading-day data yet, OMI falls back to cached data
+and surfaces the gap in `warnings`, `missing`, `freshness`, and `tool_runs`.
 
 For Kuro, the intended route is OMI-first: stock, watchlist, and local market
 questions should call `omi.ask` before any web search. Web search should be used
@@ -615,6 +638,7 @@ frontend/node_modules/
 frontend/.next/
 .env
 frontend/.env.local
+暫存區/
 ```
 
 These should not be committed.

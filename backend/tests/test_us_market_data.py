@@ -34,6 +34,7 @@ from app.us_market.service import (
     list_us_watchlist_items,
     list_us_watchlist_symbols,
     refresh_us_sec_companyfacts,
+    refresh_us_watchlist_resources,
     search_us_stocks,
     upsert_macro_series_observation_records,
     upsert_us_company_profile_records,
@@ -743,6 +744,94 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self.assertEqual(ranking["results"][0]["change_pct"], 10.0)
         self.assertEqual(ranking["results"][1]["symbol"], "IBM")
         self.assertEqual(self.db.query(MarketDailyPrice).count(), 0)
+
+    def test_us_watchlist_resource_refresh_continues_after_resource_error(self) -> None:
+        symbol_records = parse_symbol_directories(
+            nasdaq_listed_text=NASDAQ_LISTED_SAMPLE,
+            other_listed_text=OTHER_LISTED_SAMPLE,
+            sec_company_payload=SEC_TICKERS_SAMPLE,
+        )
+        upsert_us_symbol_records(self.db, symbol_records)
+        group = create_us_watchlist_group(
+            self.db,
+            USWatchlistGroupCreate(group_name="Mega Cap"),
+        )
+        create_us_watchlist_item(
+            self.db,
+            USWatchlistItemCreate(group_id=group.id, symbol="AAPL"),
+        )
+        create_us_watchlist_item(
+            self.db,
+            USWatchlistItemCreate(group_id=group.id, symbol="IBM"),
+        )
+        progress_updates: list[tuple[int | None, int | None, str | None]] = []
+
+        def daily_result(*, db: Session, symbol: str, outputsize: str, adjusted: bool):
+            return {
+                "status": "success",
+                "provider": "yahoo_chart",
+                "symbol": symbol,
+                "fetched_count": 2,
+                "inserted_count": 1,
+                "updated_count": 1,
+                "message": "daily ok",
+            }
+
+        def profile_result(*, db: Session, symbol: str):
+            if symbol == "IBM":
+                raise RuntimeError("profile unavailable")
+
+            return {
+                "status": "success",
+                "provider": "alphavantage",
+                "symbol": symbol,
+                "fetched_count": 1,
+                "inserted_count": 1,
+                "updated_count": 0,
+                "message": "profile ok",
+            }
+
+        def facts_result(*, db: Session, symbol: str):
+            return {
+                "status": "success",
+                "symbol": symbol,
+                "cik": "0000320193",
+                "fetched_count": 3,
+                "inserted_count": 3,
+                "updated_count": 0,
+                "message": "facts ok",
+            }
+
+        with (
+            patch("app.us_market.service.refresh_us_daily_prices", side_effect=daily_result) as daily_mock,
+            patch(
+                "app.us_market.service.refresh_us_company_profile_from_alphavantage",
+                side_effect=profile_result,
+            ) as profile_mock,
+            patch("app.us_market.service.refresh_us_sec_companyfacts", side_effect=facts_result) as facts_mock,
+        ):
+            result = refresh_us_watchlist_resources(
+                self.db,
+                group_id=group.id,
+                include_actions=False,
+                sleep_seconds=0,
+                progress_callback=lambda current, total, message: progress_updates.append(
+                    (current, total, message)
+                ),
+            )
+
+        self.assertEqual(result["status"], "partial_success")
+        self.assertEqual(result["symbol_count"], 2)
+        self.assertEqual(result["success_count"], 1)
+        self.assertEqual(result["partial_success_count"], 1)
+        self.assertEqual(result["error_count"], 1)
+        self.assertEqual(result["errors"][0]["symbol"], "IBM")
+        self.assertEqual(result["errors"][0]["resource"], "profile")
+        self.assertEqual(daily_mock.call_count, 2)
+        self.assertEqual(profile_mock.call_count, 2)
+        self.assertEqual(facts_mock.call_count, 2)
+        self.assertEqual(progress_updates[0][0], 0)
+        self.assertEqual(progress_updates[-1][0], 2)
 
     def test_us_stock_search_prioritizes_exact_symbol(self) -> None:
         self.db.add_all(

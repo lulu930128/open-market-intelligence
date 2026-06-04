@@ -6,7 +6,7 @@ import StockDetailPanel from "@/components/StockDetailPanel";
 import USStockDetailPanel from "@/components/USStockDetailPanel";
 import USWatchlistSidebar from "@/components/USWatchlistSidebar";
 import { fetchJson } from "@/lib/api";
-import { requestBackfillJob } from "@/lib/jobs";
+import { formatJobStatus, requestBackfillJob } from "@/lib/jobs";
 import {
   TAIWAN_INTRADAY_REFRESH_MS,
   getTaiwanIntradayXRatio,
@@ -519,6 +519,13 @@ function buildUsWatchlistRows(
   return rows;
 }
 
+function firstUsWatchlistRow(
+  group: USWatchlistGroupNode | null,
+  items: USWatchlistItemRead[]
+) {
+  return buildUsWatchlistRows(group, items)[0] ?? null;
+}
+
 function mergeUsWatchlistRows(
   baseRows: USWatchlistRankingItemRead[],
   ranking: USWatchlistRankingRead | null
@@ -544,6 +551,7 @@ function WatchlistRankingPanel({
   onRankByChange,
   onReload,
   reloadDisabled,
+  secondaryAction,
   loadState,
   errorMessage,
   rows,
@@ -558,6 +566,7 @@ function WatchlistRankingPanel({
   onRankByChange: (value: string) => void;
   onReload: () => void;
   reloadDisabled: boolean;
+  secondaryAction?: ReactNode;
   loadState: LoadState;
   errorMessage: string | null;
   rows: RankingDisplayRow[];
@@ -586,6 +595,7 @@ function WatchlistRankingPanel({
           </div>
 
           <div className="flex items-center gap-2">
+            {secondaryAction}
             <select
               value={rankBy}
               onChange={(event) => onRankByChange(event.target.value)}
@@ -729,6 +739,9 @@ export default function MarketDashboardClient({
   const initialSelectedUsGroup = useMemo(() => {
     return flattenUsGroups(initialUsWatchlistTree)[0] ?? null;
   }, [initialUsWatchlistTree]);
+  const initialSelectedUsRow = useMemo(() => {
+    return firstUsWatchlistRow(initialSelectedUsGroup, initialUsWatchlistItems);
+  }, [initialSelectedUsGroup, initialUsWatchlistItems]);
   const [selectedGroupId, setSelectedGroupId] = useState<number | null>(
     initialSelectedGroup?.id ?? null
   );
@@ -740,8 +753,12 @@ export default function MarketDashboardClient({
   const [watchlistTree, setWatchlistTree] = useState<WatchlistGroupNode[]>(initialTree);
   const [watchlistItems, setWatchlistItems] = useState<WatchlistItemRead[]>(initialItems);
   const [activeMarket, setActiveMarket] = useState<MarketRegion>("tw");
-  const [selectedUsSymbol, setSelectedUsSymbol] = useState<string | null>(null);
-  const [selectedUsSecurityName, setSelectedUsSecurityName] = useState<string | null>(null);
+  const [selectedUsSymbol, setSelectedUsSymbol] = useState<string | null>(
+    initialSelectedUsRow?.symbol ?? null
+  );
+  const [selectedUsSecurityName, setSelectedUsSecurityName] = useState<string | null>(
+    initialSelectedUsRow?.security_name ?? null
+  );
   const [selectedUsGroupId, setSelectedUsGroupId] = useState<number | null>(
     initialSelectedUsGroup?.id ?? null
   );
@@ -766,8 +783,12 @@ export default function MarketDashboardClient({
     useState<LoadState>(initialMarketIndexSummary ? "success" : "idle");
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [usLoadState, setUsLoadState] = useState<LoadState>("idle");
+  const [usUniverseRefreshState, setUsUniverseRefreshState] =
+    useState<LoadState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [usErrorMessage, setUsErrorMessage] = useState<string | null>(null);
+  const [usUniverseRefreshMessage, setUsUniverseRefreshMessage] =
+    useState<string | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
   const [usLastUpdatedAt, setUsLastUpdatedAt] = useState<string | null>(null);
   const dashboardRequestSeq = useRef(0);
@@ -1104,14 +1125,85 @@ export default function MarketDashboardClient({
   }
 
   function handleSelectUsGroup(group: USWatchlistGroupNode | null) {
+    const firstRow = firstUsWatchlistRow(group, usWatchlistItems);
+
     setSelectedUsGroupId(group?.id ?? null);
     setSelectedUsGroup(group);
     setSelectedUsGroupName(group?.group_name ?? null);
-    setSelectedUsSymbol(null);
-    setSelectedUsSecurityName(null);
+    setSelectedUsSymbol(firstRow?.symbol ?? null);
+    setSelectedUsSecurityName(firstRow?.security_name ?? null);
     setUsRanking(null);
     setUsLoadState("idle");
     setUsErrorMessage(null);
+  }
+
+  function ensureSelectedUsLeaf() {
+    const fallbackGroup = selectedUsGroup ?? flattenUsGroups(usWatchlistTree)[0] ?? null;
+    const firstRow = firstUsWatchlistRow(fallbackGroup, usWatchlistItems);
+
+    if (fallbackGroup !== selectedUsGroup) {
+      setSelectedUsGroup(fallbackGroup);
+      setSelectedUsGroupId(fallbackGroup?.id ?? null);
+      setSelectedUsGroupName(fallbackGroup?.group_name ?? null);
+    }
+
+    if (selectedUsSymbol === null) {
+      setSelectedUsSymbol(firstRow?.symbol ?? null);
+      setSelectedUsSecurityName(firstRow?.security_name ?? null);
+    }
+  }
+
+  async function refreshSelectedUsUniverse() {
+    if (selectedUsGroupId === null) return;
+
+    setUsUniverseRefreshState("loading");
+    setUsUniverseRefreshMessage("Queueing US data refresh.");
+
+    try {
+      const job = await requestBackfillJob(
+        `/api/us-market/watchlists/groups/${selectedUsGroupId}/refresh-resources`,
+        { method: "POST" },
+        {
+          include_children: true,
+          enabled_only: true,
+          include_daily: true,
+          include_sec_facts: true,
+          include_profile: true,
+          include_actions: false,
+          outputsize: "compact",
+          adjusted: false,
+          sleep_seconds: 12,
+        },
+        {
+          intervalMs: 1500,
+          timeoutMs: 1_800_000,
+          onUpdate: (nextJob) => {
+            setUsUniverseRefreshMessage(formatJobStatus(nextJob));
+          },
+        }
+      );
+      const result =
+        job.result && typeof job.result === "object" && !Array.isArray(job.result)
+          ? (job.result as Record<string, unknown>)
+          : null;
+      const symbolCount =
+        typeof result?.symbol_count === "number" ? result.symbol_count : null;
+      const errorCount =
+        typeof result?.error_count === "number" ? result.error_count : null;
+
+      setUsUniverseRefreshState("success");
+      setUsUniverseRefreshMessage(
+        `Completed${symbolCount !== null ? ` ${symbolCount} symbols` : ""}${
+          errorCount ? `, ${errorCount} resource errors` : ""
+        }.`
+      );
+      await loadUsDashboard(selectedUsGroupId, usRankBy, { silent: true });
+    } catch (error) {
+      setUsUniverseRefreshState("error");
+      setUsUniverseRefreshMessage(
+        error instanceof Error ? error.message : "US data refresh failed."
+      );
+    }
   }
 
   function handleRankByChange(value: RankBy) {
@@ -1320,6 +1412,32 @@ export default function MarketDashboardClient({
         if (selectedUsGroupId !== null) void loadUsDashboard(selectedUsGroupId);
       }}
       reloadDisabled={selectedUsGroupId === null || usLoadState === "loading"}
+      secondaryAction={
+        <div className="flex max-w-[220px] flex-col items-end gap-1">
+          <button
+            type="button"
+            onClick={() => void refreshSelectedUsUniverse()}
+            className="h-9 whitespace-nowrap border border-slate-900 bg-white px-3 text-xs font-semibold text-slate-900 hover:border-red-700 hover:text-red-700 disabled:border-slate-200 disabled:text-slate-400"
+            disabled={
+              selectedUsGroupId === null || usUniverseRefreshState === "loading"
+            }
+          >
+            {usUniverseRefreshState === "loading" ? "Backfilling" : "Backfill Data"}
+          </button>
+          {usUniverseRefreshMessage ? (
+            <span
+              className={[
+                "line-clamp-2 text-right text-[11px]",
+                usUniverseRefreshState === "error"
+                  ? "text-red-600"
+                  : "text-slate-500",
+              ].join(" ")}
+            >
+              {usUniverseRefreshMessage}
+            </span>
+          ) : null}
+        </div>
+      }
       loadState={usLoadState}
       errorMessage={usErrorMessage}
       rows={usDisplayRows}
@@ -1343,6 +1461,9 @@ export default function MarketDashboardClient({
                 setActiveMarket(market);
                 setErrorMessage(null);
                 setUsErrorMessage(null);
+                if (market === "us") {
+                  ensureSelectedUsLeaf();
+                }
               }}
               onSelectGroup={handleSelectUsGroup}
               onSelectSymbol={(symbol, securityName) => {
@@ -1354,11 +1475,28 @@ export default function MarketDashboardClient({
                 setUsWatchlistItems(nextItems);
 
                 const nextSelectedGroup =
-                  flattenUsGroups(nextTree).find((group) => group.id === selectedUsGroupId) ?? null;
+                  flattenUsGroups(nextTree).find((group) => group.id === selectedUsGroupId) ??
+                  flattenUsGroups(nextTree)[0] ??
+                  null;
+                const rowsForNextGroup = buildUsWatchlistRows(nextSelectedGroup, nextItems);
+                const selectedSymbolKey = selectedUsSymbol?.toUpperCase() ?? null;
+                const nextSelectedRow =
+                  rowsForNextGroup.find((row) => row.symbol === selectedSymbolKey) ??
+                  rowsForNextGroup[0] ??
+                  null;
 
-                if (nextSelectedGroup) {
-                  setSelectedUsGroup(nextSelectedGroup);
-                  setSelectedUsGroupName(nextSelectedGroup.group_name);
+                setSelectedUsGroup(nextSelectedGroup);
+                setSelectedUsGroupId(nextSelectedGroup?.id ?? null);
+                setSelectedUsGroupName(nextSelectedGroup?.group_name ?? null);
+
+                if (
+                  nextSelectedRow === null ||
+                  selectedUsSymbol === null ||
+                  nextSelectedRow.symbol !== selectedUsSymbol.toUpperCase() ||
+                  nextSelectedRow.security_name !== selectedUsSecurityName
+                ) {
+                  setSelectedUsSymbol(nextSelectedRow?.symbol ?? null);
+                  setSelectedUsSecurityName(nextSelectedRow?.security_name ?? null);
                 }
               }}
               onChanged={() => setUsWatchlistVersion((version) => version + 1)}
@@ -1375,6 +1513,9 @@ export default function MarketDashboardClient({
               onMarketChange={(market) => {
                 setActiveMarket(market);
                 setErrorMessage(null);
+                if (market === "us") {
+                  ensureSelectedUsLeaf();
+                }
               }}
               onExplorerDataChanged={(nextTree, nextItems) => {
                 setWatchlistTree(nextTree);

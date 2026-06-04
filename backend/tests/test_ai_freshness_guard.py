@@ -23,6 +23,7 @@ from app.db.models import (
     ShareholdingDistributionWeekly,
     SourceRegistry,
     StockMaster,
+    USStockMaster,
 )
 
 
@@ -42,6 +43,23 @@ def add_stock(db: Session, stock_id: str = "2330") -> None:
             stock_name="TSMC",
             market="TWSE",
             instrument_type="stock",
+        )
+    )
+    db.commit()
+
+
+def add_us_stock(db: Session, symbol: str = "TSM") -> None:
+    db.add(
+        USStockMaster(
+            symbol=symbol,
+            security_name="Taiwan Semiconductor Manufacturing ADR",
+            exchange="NYSE",
+            asset_type="stock",
+            listing_source="test",
+            cik="0001046179",
+            sec_company_name="TAIWAN SEMICONDUCTOR MANUFACTURING CO LTD",
+            is_test_issue=False,
+            is_active=True,
         )
     )
     db.commit()
@@ -246,8 +264,7 @@ class AiFreshnessGuardTests(unittest.TestCase):
             add_stock(db)
             payload = AiAskRequest(
                 question="generate report for 2330",
-                scope_type="stock",
-                scope_id="2330",
+                target={"type": "tw_stock", "id": "2330"},
                 mode="report",
                 allow_llm=True,
                 allow_write=True,
@@ -268,8 +285,13 @@ class AiFreshnessGuardTests(unittest.TestCase):
                 response = ai_ask.ask(db=db, payload=payload, server_policy=server_policy)
 
             generate_report.assert_not_called()
-            self.assertEqual(response["mode_requested"], "report")
-            self.assertEqual(response["mode_effective"], "brief")
+            self.assertEqual(response["contract_version"], "omi.ai.ask.v2")
+            self.assertEqual(response["target"]["type"], "tw_stock")
+            self.assertEqual(response["target"]["id"], "2330")
+            self.assertEqual(response["mode"]["requested"], "report")
+            self.assertEqual(response["mode"]["effective"], "brief")
+            self.assertNotIn("scope_type", response)
+            self.assertNotIn("scope_id", response)
             self.assertFalse(response["freshness"]["is_current"])
             self.assertIn("market_daily_price", response["missing"])
             self.assertIn("monthly_revenue", response["missing"])
@@ -279,14 +301,90 @@ class AiFreshnessGuardTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_tw_stock_refreshes_stale_evidence_before_answer_when_allowed(self) -> None:
+        db = make_session()
+        try:
+            add_stock(db)
+            payload = AiAskRequest(
+                question="2330 今天最新怎麼看",
+                target={"type": "tw_stock", "id": "2330"},
+                mode="brief",
+                allow_external_fetch=True,
+                tool_budget={"max_calls": 1, "max_external_fetches": 1, "max_total_seconds": 25},
+            )
+            server_policy = ai_ask.AiAskServerPolicy(
+                can_call_llm=False,
+                can_write=False,
+                can_external_fetch=True,
+                trust_source="local_allowlist",
+            )
+
+            with patch.object(
+                ai_ask.agentic_tools.stock_selection_refresh,
+                "refresh_selected_stock_data",
+                return_value={
+                    "status": "success",
+                    "message": "Selected stock data refresh completed.",
+                    "stock_id": "2330",
+                    "daily_price_date": date(2026, 6, 4),
+                    "institutional_trade_date": date(2026, 6, 4),
+                    "margin_trade_date": date(2026, 6, 4),
+                    "requested_count": 7,
+                    "refreshed_count": 7,
+                    "skipped_count": 0,
+                    "error_count": 0,
+                },
+            ) as refresh_selected:
+                response = ai_ask.ask(db=db, payload=payload, server_policy=server_policy)
+
+            refresh_selected.assert_called_once()
+            self.assertEqual(refresh_selected.call_args.kwargs["stock_id"], "2330")
+            self.assertEqual(response["tool_plan"]["provider"], "fallback")
+            self.assertEqual(response["tool_runs"][0]["tool"], "tw.refresh_stock_evidence")
+            self.assertEqual(response["tool_runs"][0]["status"], "success")
+            self.assertTrue(response["policy"]["refresh_policy"]["before_answer"])
+        finally:
+            db.close()
+
+    def test_tw_stock_refresh_is_blocked_without_external_fetch_trust(self) -> None:
+        db = make_session()
+        try:
+            add_stock(db)
+            payload = AiAskRequest(
+                question="2330 今天最新怎麼看",
+                target={"type": "tw_stock", "id": "2330"},
+                mode="brief",
+                allow_external_fetch=True,
+                tool_budget={"max_calls": 1, "max_external_fetches": 1, "max_total_seconds": 25},
+            )
+            server_policy = ai_ask.AiAskServerPolicy(
+                can_call_llm=False,
+                can_write=False,
+                can_external_fetch=False,
+                trust_source="untrusted",
+            )
+
+            with patch.object(
+                ai_ask.agentic_tools.stock_selection_refresh,
+                "refresh_selected_stock_data",
+            ) as refresh_selected:
+                response = ai_ask.ask(db=db, payload=payload, server_policy=server_policy)
+
+            refresh_selected.assert_not_called()
+            self.assertEqual(response["tool_runs"][0]["tool"], "tw.refresh_stock_evidence")
+            self.assertEqual(response["tool_runs"][0]["status"], "blocked")
+            self.assertIn("External fetch is not allowed", response["tool_runs"][0]["error"])
+            self.assertFalse(response["policy"]["can_external_fetch"])
+        finally:
+            db.close()
+
     def test_ask_allows_non_persistent_analysis_without_write(self) -> None:
         db = make_session()
         try:
             add_stock(db)
             payload = AiAskRequest(
                 question="請分析 2330 的短評與風險",
-                scope_type="stock",
-                scope_id="2330",
+                target={"type": "tw_stock", "id": "2330"},
                 mode="analysis",
                 allow_llm=True,
                 allow_write=False,
@@ -305,8 +403,8 @@ class AiFreshnessGuardTests(unittest.TestCase):
                 response = ai_ask.ask(db=db, payload=payload, server_policy=server_policy)
 
             generate_analysis.assert_called_once()
-            self.assertEqual(response["mode_requested"], "analysis")
-            self.assertEqual(response["mode_effective"], "analysis")
+            self.assertEqual(response["mode"]["requested"], "analysis")
+            self.assertEqual(response["mode"]["effective"], "analysis")
             self.assertEqual(response["action"], "omi.generate_stock_llm_analysis")
             self.assertTrue(response["policy"]["can_call_llm"])
             self.assertFalse(response["policy"]["can_write"])
@@ -320,8 +418,7 @@ class AiFreshnessGuardTests(unittest.TestCase):
             add_stock(db)
             payload = AiAskRequest(
                 question="請分析 2330 的短評與風險",
-                scope_type="stock",
-                scope_id="2330",
+                target={"type": "tw_stock", "id": "2330"},
                 mode="analysis",
                 allow_llm=True,
                 allow_write=False,
@@ -331,12 +428,279 @@ class AiFreshnessGuardTests(unittest.TestCase):
                 response = ai_ask.ask(db=db, payload=payload)
 
             generate_analysis.assert_not_called()
-            self.assertEqual(response["mode_requested"], "analysis")
-            self.assertEqual(response["mode_effective"], "brief")
+            self.assertEqual(response["mode"]["requested"], "analysis")
+            self.assertEqual(response["mode"]["effective"], "brief")
             self.assertFalse(response["policy"]["can_call_llm"])
             self.assertTrue(
                 any("Analysis mode requires" in warning for warning in response["warnings"])
             )
+        finally:
+            db.close()
+
+    def test_ask_resolves_stock_id_from_question_text(self) -> None:
+        db = make_session()
+        try:
+            add_stock(db)
+            payload = AiAskRequest(
+                question="analyze 2330 risk",
+                mode="auto",
+                allow_llm=False,
+                allow_write=False,
+            )
+
+            response = ai_ask.ask(db=db, payload=payload)
+
+            self.assertEqual(response["contract_version"], "omi.ai.ask.v2")
+            self.assertEqual(response["target"]["type"], "tw_stock")
+            self.assertEqual(response["target"]["id"], "2330")
+            self.assertEqual(response["action"], "omi.generate_stock_brief")
+            self.assertEqual(response["resolution"]["target"]["id"], "2330")
+            self.assertFalse(response["clarification"]["required"])
+            self.assertTrue(response["answer_ready"])
+            self.assertIn(response["report_level"], {"brief", "brief_with_gaps"})
+        finally:
+            db.close()
+
+    def test_ask_resolves_tsmc_alias_to_tw_stock_with_adr_candidate(self) -> None:
+        db = make_session()
+        try:
+            add_stock(db)
+            payload = AiAskRequest(
+                question="TSMC risk",
+                mode="auto",
+                allow_llm=False,
+                allow_write=False,
+            )
+
+            response = ai_ask.ask(db=db, payload=payload)
+
+            self.assertEqual(response["target"]["type"], "tw_stock")
+            self.assertEqual(response["target"]["id"], "2330")
+            self.assertEqual(response["resolution"]["target"]["id"], "2330")
+            self.assertEqual(response["resolution"]["confidence"], "high")
+            self.assertTrue(
+                any(
+                    candidate["target"]["type"] == "us_stock" and candidate["target"]["id"] == "TSM"
+                    for candidate in response["resolution"]["candidates"]
+                )
+            )
+            self.assertTrue(
+                any(action["type"] == "connect_us_stock_context" for action in response["next_actions"])
+            )
+        finally:
+            db.close()
+
+    def test_ask_resolves_adr_followup_to_us_stock_from_last_resolution(self) -> None:
+        db = make_session()
+        try:
+            add_stock(db)
+            add_us_stock(db)
+            payload = AiAskRequest(
+                question="那 ADR 呢？",
+                mode="auto",
+                allow_llm=False,
+                allow_write=False,
+                conversation_context={
+                    "last_resolution": {
+                        "target": {"type": "tw_stock", "id": "2330", "label": "台積電"},
+                        "candidates": [
+                            {"target": {"type": "tw_stock", "id": "2330", "label": "台積電"}},
+                            {"target": {"type": "us_stock", "id": "TSM", "label": "TSM ADR"}},
+                        ],
+                    }
+                },
+            )
+
+            response = ai_ask.ask(db=db, payload=payload)
+
+            self.assertEqual(response["target"]["type"], "us_stock")
+            self.assertEqual(response["target"]["id"], "TSM")
+            self.assertEqual(response["action"], "omi.generate_us_stock_brief")
+            self.assertEqual(response["resolution"]["source"], "conversation_resolution")
+            self.assertFalse(
+                any(action["type"] == "connect_us_stock_context" for action in response["next_actions"])
+            )
+        finally:
+            db.close()
+
+    def test_us_stock_llm_tool_plan_executes_allowed_tools(self) -> None:
+        db = make_session()
+        try:
+            add_us_stock(db)
+            payload = AiAskRequest(
+                question="TSM ADR 最新走勢和資料缺口",
+                target={"type": "us_stock", "id": "TSM"},
+                mode="brief",
+                allow_llm=True,
+                allow_external_fetch=True,
+                tool_budget={"max_calls": 2, "max_external_fetches": 2, "max_total_seconds": 25},
+            )
+            server_policy = ai_ask.AiAskServerPolicy(
+                can_call_llm=True,
+                can_write=False,
+                can_external_fetch=True,
+                trust_source="token",
+            )
+            planner_result = {
+                "provider": "openai",
+                "reason": "ADR question needs US intraday and daily evidence.",
+                "tool_plan": [
+                    {"tool": "us.read_intraday_trend", "args": {"symbol": "TSM"}, "reason": "latest ADR trading"},
+                    {
+                        "tool": "us.refresh_daily_price",
+                        "args": {"symbol": "TSM", "provider": "auto", "outputsize": "compact", "adjusted": False},
+                        "reason": "daily cache gap",
+                    },
+                ],
+            }
+
+            with (
+                patch.object(ai_ask.agentic_tools.llm, "generate_tool_plan", return_value=planner_result) as planner,
+                patch.object(
+                    ai_ask.agentic_tools.us_market_service,
+                    "get_us_intraday_trend",
+                    return_value={
+                        "symbol": "TSM",
+                        "source": "yahoo_chart",
+                        "previous_close": 180.0,
+                        "point_count": 3,
+                        "points": [],
+                    },
+                ) as intraday,
+                patch.object(
+                    ai_ask.agentic_tools.us_market_service,
+                    "refresh_us_daily_prices",
+                    return_value={
+                        "status": "success",
+                        "provider": "yahoo_chart",
+                        "symbol": "TSM",
+                        "fetched_count": 5,
+                        "inserted_count": 5,
+                        "updated_count": 0,
+                    },
+                ) as refresh_daily,
+            ):
+                response = ai_ask.ask(db=db, payload=payload, server_policy=server_policy)
+
+            planner.assert_called_once()
+            intraday.assert_called_once_with(symbol="TSM")
+            refresh_daily.assert_called_once()
+            self.assertEqual(response["target"]["type"], "us_stock")
+            self.assertEqual(response["tool_plan"]["provider"], "openai")
+            self.assertEqual([run["status"] for run in response["tool_runs"]], ["success", "success"])
+            self.assertEqual(response["tool_runs"][0]["tool"], "us.read_intraday_trend")
+            self.assertEqual(response["result"]["summary"]["intraday"]["point_count"], 3)
+        finally:
+            db.close()
+
+    def test_us_stock_external_tool_is_blocked_without_fetch_trust(self) -> None:
+        db = make_session()
+        try:
+            add_us_stock(db)
+            payload = AiAskRequest(
+                question="TSM ADR 最新走勢",
+                target={"type": "us_stock", "id": "TSM"},
+                mode="brief",
+                allow_llm=True,
+                allow_external_fetch=True,
+                tool_budget={"max_calls": 1, "max_external_fetches": 1, "max_total_seconds": 25},
+            )
+            server_policy = ai_ask.AiAskServerPolicy(
+                can_call_llm=True,
+                can_write=False,
+                can_external_fetch=False,
+                trust_source="token_without_fetch",
+            )
+            planner_result = {
+                "provider": "openai",
+                "reason": "latest ADR context",
+                "tool_plan": [
+                    {"tool": "us.read_intraday_trend", "args": {"symbol": "TSM"}, "reason": "latest ADR trading"},
+                ],
+            }
+
+            with (
+                patch.object(ai_ask.agentic_tools.llm, "generate_tool_plan", return_value=planner_result),
+                patch.object(ai_ask.agentic_tools.us_market_service, "get_us_intraday_trend") as intraday,
+            ):
+                response = ai_ask.ask(db=db, payload=payload, server_policy=server_policy)
+
+            intraday.assert_not_called()
+            self.assertEqual(response["tool_runs"][0]["status"], "blocked")
+            self.assertIn("External fetch is not allowed", response["tool_runs"][0]["error"])
+            self.assertFalse(response["policy"]["can_external_fetch"])
+        finally:
+            db.close()
+
+    def test_ask_resolves_watchlist_group_id_from_question_text(self) -> None:
+        db = make_session()
+        try:
+            payload = AiAskRequest(
+                question="watchlist group 1 ranking",
+                mode="auto",
+                allow_llm=False,
+                allow_write=False,
+            )
+
+            with (
+                patch.object(ai_ask.freshness, "check_watchlist_data_freshness", return_value={}),
+                patch.object(
+                    ai_ask.reports,
+                    "build_watchlist_brief",
+                    return_value={"kind": "watchlist_brief", "warnings": [], "strategy_profile": "short_term_momentum"},
+                ) as build_watchlist_brief,
+            ):
+                response = ai_ask.ask(db=db, payload=payload)
+
+            build_watchlist_brief.assert_called_once()
+            self.assertEqual(build_watchlist_brief.call_args.kwargs["group_id"], 1)
+            self.assertEqual(response["target"]["type"], "tw_watchlist")
+            self.assertEqual(response["target"]["id"], "1")
+            self.assertEqual(response["action"], "omi.generate_watchlist_brief")
+            self.assertFalse(response["clarification"]["required"])
+        finally:
+            db.close()
+
+    def test_ask_resolves_stock_specific_freshness_from_question_text(self) -> None:
+        db = make_session()
+        try:
+            add_stock(db)
+            payload = AiAskRequest(
+                question="freshness coverage for 2330",
+                mode="auto",
+                allow_llm=False,
+                allow_write=False,
+            )
+
+            response = ai_ask.ask(db=db, payload=payload)
+
+            self.assertEqual(response["target"]["type"], "data_freshness")
+            self.assertEqual(response["target"]["id"], "2330")
+            self.assertEqual(response["action"], "omi.read_data_freshness")
+            self.assertEqual(response["result"]["scope"]["stock_id"], "2330")
+            self.assertFalse(response["clarification"]["required"])
+        finally:
+            db.close()
+
+    def test_ask_returns_clarification_for_watchlist_without_group_id(self) -> None:
+        db = make_session()
+        try:
+            payload = AiAskRequest(
+                question="watchlist ranking",
+                mode="auto",
+                allow_llm=False,
+                allow_write=False,
+            )
+
+            response = ai_ask.ask(db=db, payload=payload)
+
+            self.assertEqual(response["target"]["type"], "tw_watchlist")
+            self.assertIsNone(response["target"]["id"])
+            self.assertEqual(response["mode"]["effective"], "clarification")
+            self.assertEqual(response["action"], "omi.ask.clarify")
+            self.assertTrue(response["clarification"]["required"])
+            self.assertFalse(response["answer_ready"])
+            self.assertTrue(any(action["type"] == "ask_clarification" for action in response["next_actions"]))
         finally:
             db.close()
 

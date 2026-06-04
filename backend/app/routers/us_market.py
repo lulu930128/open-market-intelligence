@@ -148,6 +148,57 @@ def _enqueue_us_watchlist_daily_refresh(
     return job_service.serialize_job(job)
 
 
+def _enqueue_us_watchlist_resource_refresh(
+    *,
+    db: Session,
+    group_id: int | None,
+    include_children: bool,
+    enabled_only: bool,
+    include_daily: bool,
+    include_sec_facts: bool,
+    include_profile: bool,
+    include_actions: bool,
+    outputsize: str,
+    adjusted: bool,
+    sleep_seconds: float,
+) -> dict:
+    target = f"group:{group_id}" if group_id is not None else "all"
+    request = {
+        "group_id": group_id,
+        "include_children": include_children,
+        "enabled_only": enabled_only,
+        "include_daily": include_daily,
+        "include_sec_facts": include_sec_facts,
+        "include_profile": include_profile,
+        "include_actions": include_actions,
+        "outputsize": outputsize,
+        "adjusted": adjusted,
+        "sleep_seconds": sleep_seconds,
+    }
+    job, _created = job_service.enqueue_job(
+        db=db,
+        job_type="us_market.watchlist_resource_refresh",
+        target=target,
+        request=request,
+        progress_total=1,
+        message="Queued US watchlist resource refresh.",
+        task=backfill_tasks.run_us_watchlist_resource_refresh_job,
+        task_args=(
+            group_id,
+            include_children,
+            enabled_only,
+            include_daily,
+            include_sec_facts,
+            include_profile,
+            include_actions,
+            outputsize,
+            adjusted,
+            sleep_seconds,
+        ),
+    )
+    return job_service.serialize_job(job)
+
+
 @router.post(
     "/watchlists/groups",
     response_model=USWatchlistGroupRead,
@@ -341,6 +392,75 @@ def refresh_us_watchlist_group_daily_prices_api(
             group_id=group_id,
             include_children=include_children,
             enabled_only=enabled_only,
+            outputsize=outputsize,
+            adjusted=adjusted,
+            sleep_seconds=sleep_seconds,
+        )
+    except Exception as exc:
+        raise _group_error(exc) from exc
+
+
+@router.post(
+    "/watchlists/resources/refresh",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def refresh_all_us_watchlist_resources_api(
+    include_children: bool = True,
+    enabled_only: bool = True,
+    include_daily: bool = True,
+    include_sec_facts: bool = True,
+    include_profile: bool = True,
+    include_actions: bool = False,
+    outputsize: str = Query(default="compact", pattern="^(compact|full)$"),
+    adjusted: bool = False,
+    sleep_seconds: float = Query(default=12.0, ge=0, le=120),
+    db: Session = Depends(get_db),
+):
+    return _enqueue_us_watchlist_resource_refresh(
+        db=db,
+        group_id=None,
+        include_children=include_children,
+        enabled_only=enabled_only,
+        include_daily=include_daily,
+        include_sec_facts=include_sec_facts,
+        include_profile=include_profile,
+        include_actions=include_actions,
+        outputsize=outputsize,
+        adjusted=adjusted,
+        sleep_seconds=sleep_seconds,
+    )
+
+
+@router.post(
+    "/watchlists/groups/{group_id}/refresh-resources",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def refresh_us_watchlist_group_resources_api(
+    group_id: int,
+    include_children: bool = True,
+    enabled_only: bool = True,
+    include_daily: bool = True,
+    include_sec_facts: bool = True,
+    include_profile: bool = True,
+    include_actions: bool = False,
+    outputsize: str = Query(default="compact", pattern="^(compact|full)$"),
+    adjusted: bool = False,
+    sleep_seconds: float = Query(default=12.0, ge=0, le=120),
+    db: Session = Depends(get_db),
+):
+    try:
+        get_us_watchlist_group(db=db, group_id=group_id)
+        return _enqueue_us_watchlist_resource_refresh(
+            db=db,
+            group_id=group_id,
+            include_children=include_children,
+            enabled_only=enabled_only,
+            include_daily=include_daily,
+            include_sec_facts=include_sec_facts,
+            include_profile=include_profile,
+            include_actions=include_actions,
             outputsize=outputsize,
             adjusted=adjusted,
             sleep_seconds=sleep_seconds,

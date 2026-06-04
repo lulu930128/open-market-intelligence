@@ -44,9 +44,58 @@ function getResultNumber(job: JobRunRead, key: string) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+function getFirstResultNumber(job: JobRunRead, keys: string[]) {
+  for (const key of keys) {
+    const value = getResultNumber(job, key);
+
+    if (value !== null) return value;
+  }
+
+  return null;
+}
+
+function getResultString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function getResultItems(job: JobRunRead) {
+  const result = getResultObject(job);
+  const rows = result?.results;
+
+  if (!Array.isArray(rows)) return [];
+
+  return rows.filter(
+    (row): row is Record<string, unknown> =>
+      typeof row === "object" && row !== null && !Array.isArray(row)
+  );
+}
+
+function getFailedResultItems(job: JobRunRead) {
+  return getResultItems(job).filter((row) => {
+    const status = getResultString(row.status);
+    const errorMessage = getResultString(row.error_message);
+
+    return status === "error" || status === "partial_success" || errorMessage !== null;
+  });
+}
+
+function hasResultErrors(job: JobRunRead) {
+  const errorCount = getFirstResultNumber(job, ["error_count", "failed_count"]);
+  return (errorCount !== null && errorCount > 0) || getFailedResultItems(job).length > 0;
+}
+
 function getEffectiveStatus(job: JobRunRead) {
   const resultStatus = getResultObject(job)?.status;
-  return job.status === "success" && typeof resultStatus === "string" ? resultStatus : job.status;
+
+  if (job.status === "success" && typeof resultStatus === "string") {
+    return resultStatus;
+  }
+
+  if (job.status === "success" && hasResultErrors(job)) {
+    return "partial_success";
+  }
+
+  return job.status;
 }
 
 function formatDateTime(value: string | null) {
@@ -82,6 +131,67 @@ function canRetry(job: JobRunRead) {
   return effectiveStatus === "error" || effectiveStatus === "partial_success";
 }
 
+function formatShortText(value: string | null, maxLength = 220) {
+  if (!value) return null;
+
+  return value.length > maxLength ? `${value.slice(0, maxLength).trimEnd()}...` : value;
+}
+
+function formatResultSummary(job: JobRunRead) {
+  const requestedCount = getFirstResultNumber(job, [
+    "requested_count",
+    "requested_stock_count",
+    "total_count",
+  ]);
+  const successCount = getFirstResultNumber(job, ["success_count", "current_count"]);
+  const warningCount = getFirstResultNumber(job, ["warning_count"]);
+  const errorCount = getFirstResultNumber(job, ["error_count", "failed_count"]);
+  const insertedCount = getFirstResultNumber(job, ["inserted_count"]);
+  const skippedExistingCount = getFirstResultNumber(job, [
+    "skipped_existing_count",
+    "skipped_count",
+  ]);
+  const parts: string[] = [];
+
+  if (requestedCount !== null && errorCount !== null) {
+    parts.push(`完成 ${Math.max(requestedCount - errorCount, 0)}/${requestedCount}`);
+  } else if (requestedCount !== null && successCount !== null) {
+    parts.push(`完成 ${successCount}/${requestedCount}`);
+  }
+
+  if (insertedCount !== null && insertedCount > 0) parts.push(`新增 ${insertedCount}`);
+  if (skippedExistingCount !== null && skippedExistingCount > 0) {
+    parts.push(`已存在 ${skippedExistingCount}`);
+  }
+  if (warningCount !== null && warningCount > 0) parts.push(`警告 ${warningCount}`);
+  if (errorCount !== null && errorCount > 0) parts.push(`失敗 ${errorCount}`);
+
+  return parts;
+}
+
+function formatResultItemTitle(row: Record<string, unknown>) {
+  const stockId = getResultString(row.stock_id);
+  const stockName = getResultString(row.stock_name);
+  const sourceName = getResultString(row.source_name);
+  const category = getResultString(row.category);
+  const tradeDate = getResultString(row.trade_date);
+  const title =
+    stockId !== null
+      ? `${stockId}${stockName ? ` ${stockName}` : ""}`
+      : sourceName ?? category ?? "項目";
+
+  return tradeDate ? `${title} · ${tradeDate}` : title;
+}
+
+function formatResultItemMessage(row: Record<string, unknown>) {
+  return (
+    getResultString(row.error_message) ??
+    getResultString(row.message) ??
+    getResultString(row.status) ??
+    "補資料未完成"
+  );
+}
+
 function JobRow({
   job,
   retryingJobId,
@@ -91,12 +201,10 @@ function JobRow({
   retryingJobId: number | null;
   onRetry: (job: JobRunRead) => void;
 }) {
-  const errorCount = getResultNumber(job, "error_count");
-  const requestedCount = getResultNumber(job, "requested_count");
-  const summary =
-    errorCount !== null && requestedCount !== null
-      ? `來源 ${requestedCount - errorCount}/${requestedCount}`
-      : null;
+  const summaryParts = formatResultSummary(job);
+  const failedItems = getFailedResultItems(job);
+  const visibleFailedItems = failedItems.slice(0, 4);
+  const errorMessage = formatShortText(job.error_message);
 
   return (
     <div className="border-t border-slate-200 px-3 py-2">
@@ -115,12 +223,39 @@ function JobRow({
 
       <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-slate-500">
         <span>更新 {formatDateTime(job.updated_at)}</span>
-        {summary ? <span>{summary}</span> : null}
       </div>
 
-      {job.error_message ? (
+      {summaryParts.length ? (
+        <div className="mt-2 flex flex-wrap gap-1">
+          {summaryParts.map((part) => (
+            <span key={part} className="border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] text-slate-600">
+              {part}
+            </span>
+          ))}
+        </div>
+      ) : null}
+
+      {visibleFailedItems.length ? (
+        <div className="mt-2 space-y-1">
+          {visibleFailedItems.map((row, index) => (
+            <div key={`${formatResultItemTitle(row)}-${index}`} className="border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700">
+              <div className="font-bold">{formatResultItemTitle(row)}</div>
+              <div className="mt-0.5 break-words text-[11px]">
+                {formatShortText(formatResultItemMessage(row))}
+              </div>
+            </div>
+          ))}
+          {failedItems.length > visibleFailedItems.length ? (
+            <div className="text-[11px] text-slate-500">
+              還有 {failedItems.length - visibleFailedItems.length} 筆失敗項目
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {errorMessage ? (
         <div className="mt-2 break-words border border-red-200 bg-red-50 px-2 py-1 text-xs text-red-700">
-          {job.error_message}
+          {errorMessage}
         </div>
       ) : null}
 

@@ -214,6 +214,25 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
             request,
         )
 
+    if job_type == "us_market.watchlist_resource_refresh":
+        group_id = request.get("group_id")
+        return (
+            backfill_tasks.run_us_watchlist_resource_refresh_job,
+            (
+                int(group_id) if group_id is not None else None,
+                bool(request.get("include_children", True)),
+                bool(request.get("enabled_only", True)),
+                bool(request.get("include_daily", True)),
+                bool(request.get("include_sec_facts", True)),
+                bool(request.get("include_profile", True)),
+                bool(request.get("include_actions", False)),
+                str(request.get("outputsize") or "compact"),
+                bool(request.get("adjusted", False)),
+                float(request.get("sleep_seconds", 12.0)),
+            ),
+            request,
+        )
+
     raise ValueError(f"Job type '{job_type}' does not support retry.")
 
 

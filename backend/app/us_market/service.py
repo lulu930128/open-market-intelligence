@@ -2214,6 +2214,220 @@ def refresh_us_watchlist_daily_prices(
     }
 
 
+def _compact_us_resource_result(result: dict) -> dict:
+    return {
+        "status": result.get("status", "success"),
+        "fetched_count": int(result.get("fetched_count") or 0),
+        "inserted_count": int(result.get("inserted_count") or 0),
+        "updated_count": int(result.get("updated_count") or 0),
+        "message": result.get("message"),
+    }
+
+
+def _refresh_us_symbol_resources(
+    db: Session,
+    *,
+    symbol: str,
+    include_daily: bool,
+    include_sec_facts: bool,
+    include_profile: bool,
+    include_actions: bool,
+    outputsize: str,
+    adjusted: bool,
+) -> dict:
+    normalized_symbol = normalize_us_symbol(symbol)
+    stock = _ensure_us_stock_exists(db, normalized_symbol)
+    resources: dict[str, dict] = {}
+    errors: list[dict[str, str]] = []
+
+    def run_resource(resource: str, callback: Callable[[], dict]) -> None:
+        try:
+            resources[resource] = _compact_us_resource_result(callback())
+        except Exception as exc:
+            db.rollback()
+            message = str(exc)
+            resources[resource] = {
+                "status": "error",
+                "fetched_count": 0,
+                "inserted_count": 0,
+                "updated_count": 0,
+                "message": message,
+            }
+            errors.append(
+                {
+                    "symbol": normalized_symbol,
+                    "resource": resource,
+                    "message": message,
+                }
+            )
+
+    if include_daily:
+        run_resource(
+            "daily",
+            lambda: refresh_us_daily_prices(
+                db=db,
+                symbol=normalized_symbol,
+                outputsize=outputsize,
+                adjusted=adjusted,
+            ),
+        )
+
+    if include_sec_facts:
+        is_sec_company = not stock.is_etf and (stock.asset_type or "").upper() != "ETF"
+        if is_sec_company:
+            run_resource(
+                "sec_facts",
+                lambda: refresh_us_sec_companyfacts(db=db, symbol=normalized_symbol),
+            )
+        else:
+            resources["sec_facts"] = {
+                "status": "skipped",
+                "fetched_count": 0,
+                "inserted_count": 0,
+                "updated_count": 0,
+                "message": "SEC company facts skipped for ETF/non-company asset.",
+            }
+
+    if include_profile:
+        run_resource(
+            "profile",
+            lambda: refresh_us_company_profile_from_alphavantage(
+                db=db,
+                symbol=normalized_symbol,
+            ),
+        )
+
+    if include_actions:
+        run_resource(
+            "actions",
+            lambda: refresh_us_corporate_actions_from_alphavantage(
+                db=db,
+                symbol=normalized_symbol,
+            ),
+        )
+
+    success_count = sum(1 for item in resources.values() if item["status"] == "success")
+    skipped_count = sum(1 for item in resources.values() if item["status"] == "skipped")
+
+    if errors:
+        symbol_status = "error" if success_count == 0 else "partial_success"
+    elif resources and skipped_count == len(resources):
+        symbol_status = "skipped"
+    else:
+        symbol_status = "success"
+
+    return {
+        "symbol": normalized_symbol,
+        "asset_type": stock.asset_type,
+        "exchange": stock.exchange,
+        "status": symbol_status,
+        "resource_count": len(resources),
+        "success_count": success_count,
+        "skipped_count": skipped_count,
+        "error_count": len(errors),
+        "fetched_count": sum(item["fetched_count"] for item in resources.values()),
+        "inserted_count": sum(item["inserted_count"] for item in resources.values()),
+        "updated_count": sum(item["updated_count"] for item in resources.values()),
+        "resources": resources,
+        "errors": errors,
+    }
+
+
+def refresh_us_watchlist_resources(
+    db: Session,
+    *,
+    group_id: int | None = None,
+    include_children: bool = True,
+    enabled_only: bool = True,
+    include_daily: bool = True,
+    include_sec_facts: bool = True,
+    include_profile: bool = True,
+    include_actions: bool = False,
+    outputsize: str = "compact",
+    adjusted: bool = False,
+    sleep_seconds: float = 12.0,
+    progress_callback: ProgressCallback | None = None,
+) -> dict:
+    symbols = list_us_watchlist_symbols(
+        db=db,
+        group_id=group_id,
+        include_children=include_children,
+        enabled_only=enabled_only,
+    )
+    total = len(symbols)
+
+    if progress_callback is not None:
+        progress_callback(0, max(total, 1), "Refreshing US watchlist resources.")
+
+    if not symbols:
+        return {
+            "status": "empty",
+            "group_id": group_id,
+            "symbol_count": 0,
+            "success_count": 0,
+            "partial_success_count": 0,
+            "skipped_count": 0,
+            "error_count": 0,
+            "symbol_error_count": 0,
+            "fetched_count": 0,
+            "inserted_count": 0,
+            "updated_count": 0,
+            "results": [],
+            "errors": [],
+        }
+
+    results: list[dict] = []
+    errors: list[dict[str, str]] = []
+
+    for index, symbol in enumerate(symbols, start=1):
+        result = _refresh_us_symbol_resources(
+            db=db,
+            symbol=symbol,
+            include_daily=include_daily,
+            include_sec_facts=include_sec_facts,
+            include_profile=include_profile,
+            include_actions=include_actions,
+            outputsize=outputsize,
+            adjusted=adjusted,
+        )
+        results.append(result)
+        errors.extend(result["errors"])
+
+        if progress_callback is not None:
+            progress_callback(index, total, f"Refreshed {index}/{total} US symbols.")
+
+        if index < total and sleep_seconds > 0:
+            time.sleep(sleep_seconds)
+
+    success_count = sum(1 for result in results if result["status"] == "success")
+    partial_success_count = sum(1 for result in results if result["status"] == "partial_success")
+    skipped_count = sum(1 for result in results if result["status"] == "skipped")
+    symbol_error_count = sum(1 for result in results if result["status"] == "error")
+
+    if symbol_error_count and success_count == 0 and partial_success_count == 0:
+        status_value = "error"
+    elif errors:
+        status_value = "partial_success"
+    else:
+        status_value = "success"
+
+    return {
+        "status": status_value,
+        "group_id": group_id,
+        "symbol_count": total,
+        "success_count": success_count,
+        "partial_success_count": partial_success_count,
+        "skipped_count": skipped_count,
+        "error_count": len(errors),
+        "symbol_error_count": symbol_error_count,
+        "fetched_count": sum(result["fetched_count"] for result in results),
+        "inserted_count": sum(result["inserted_count"] for result in results),
+        "updated_count": sum(result["updated_count"] for result in results),
+        "results": results,
+        "errors": errors,
+    }
+
+
 def update_us_watchlist_item(
     db: Session,
     item_id: int,
@@ -2291,6 +2505,7 @@ __all__ = [
     "refresh_us_sec_companyfacts",
     "refresh_us_short_volume_from_finra",
     "refresh_us_watchlist_daily_prices",
+    "refresh_us_watchlist_resources",
     "search_us_stocks",
     "sync_us_sec_company_data",
     "sync_us_symbol_master",

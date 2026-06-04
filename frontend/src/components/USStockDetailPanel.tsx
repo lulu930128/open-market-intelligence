@@ -51,6 +51,7 @@ type Message = { type: "success" | "error"; text: string } | null;
 type USChartTimeframe = "today" | "daily" | "weekly" | "monthly";
 type USHistoricalTimeframe = Exclude<USChartTimeframe, "today">;
 type USDataPanelTab = "ownership" | "insider" | "short" | "filings";
+type CoverageStatus = "ready" | "missing" | "loading" | "stale";
 
 type Props = {
   selectedSymbol: string | null;
@@ -359,6 +360,86 @@ function messageClass(message: Message) {
     : "border-red-200 bg-red-50 text-red-700";
 }
 
+function daysSince(value: string | null | undefined) {
+  if (!value || value === "-") return null;
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+
+  const today = new Date();
+  const todayDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const parsedDate = new Date(
+    parsed.getFullYear(),
+    parsed.getMonth(),
+    parsed.getDate()
+  );
+
+  return Math.floor((todayDate.getTime() - parsedDate.getTime()) / 86_400_000);
+}
+
+function coverageStatus(
+  hasData: boolean,
+  loadState: LoadState,
+  latestDateValue?: string | null,
+  staleAfterDays?: number
+): CoverageStatus {
+  if (loadState === "loading") return "loading";
+  if (!hasData) return "missing";
+
+  const age = daysSince(latestDateValue);
+  if (
+    staleAfterDays !== undefined &&
+    age !== null &&
+    age > staleAfterDays
+  ) {
+    return "stale";
+  }
+
+  return "ready";
+}
+
+function coverageClass(status: CoverageStatus) {
+  const classes: Record<CoverageStatus, string> = {
+    ready: "border-emerald-200 bg-emerald-50 text-emerald-700",
+    missing: "border-slate-200 bg-slate-50 text-slate-500",
+    loading: "border-sky-200 bg-sky-50 text-sky-700",
+    stale: "border-amber-200 bg-amber-50 text-amber-700",
+  };
+
+  return classes[status];
+}
+
+function coverageLabel(status: CoverageStatus) {
+  const labels: Record<CoverageStatus, string> = {
+    ready: "Ready",
+    missing: "Missing",
+    loading: "Loading",
+    stale: "Stale",
+  };
+
+  return labels[status];
+}
+
+function DataCoverageChip({
+  label,
+  status,
+  detail,
+}: {
+  label: string;
+  status: CoverageStatus;
+  detail: string;
+}) {
+  return (
+    <div className={`border px-3 py-2 ${coverageClass(status)}`}>
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-bold uppercase tracking-wide">{label}</span>
+        <span className="text-[11px] font-black">{coverageLabel(status)}</span>
+      </div>
+      <div className="mt-1 truncate text-[11px] font-medium opacity-80">{detail}</div>
+    </div>
+  );
+}
+
 function metricBarWidth(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "0%";
   return `${Math.max(0, Math.min(100, Math.abs(value)))}%`;
@@ -630,6 +711,62 @@ export default function USStockDetailPanel({
             value: loadState === "loading" ? "Loading" : String(displayedPointCount),
           },
         ];
+
+  const dataCoverageItems = [
+    {
+      label: "Price",
+      status: coverageStatus(chartData.length > 0, loadState, latestPoint?.time, 10),
+      detail:
+        chartData.length > 0
+          ? `${chartData.length} bars / ${formatDate(latestPoint?.time)}`
+          : "No OHLC rows",
+    },
+    {
+      label: "Profile",
+      status: coverageStatus(Boolean(companyProfile), loadState, companyProfile?.fetched_at, 45),
+      detail: companyProfile
+        ? `${companyProfile.provider} / ${formatDate(companyProfile.fetched_at)}`
+        : "Alpha Vantage overview",
+    },
+    {
+      label: "SEC",
+      status: coverageStatus(
+        factRows.length > 0 || fundamentalMetrics.length > 0,
+        factLoadState,
+        latestFundamentalFiledDate !== "-" ? latestFundamentalFiledDate : latestFactFiledDate,
+        210
+      ),
+      detail:
+        factRows.length > 0 || fundamentalMetrics.length > 0
+          ? `${fundamentalMetrics.length} metrics / ${
+              latestFundamentalFiledDate !== "-" ? latestFundamentalFiledDate : latestFactFiledDate
+            }`
+          : "No SEC facts",
+    },
+    {
+      label: "Actions",
+      status: coverageStatus(corporateActions.length > 0, loadState),
+      detail:
+        corporateActions.length > 0
+          ? `${corporateActions.length} events / ${latestActionDate}`
+          : "No dividend/split rows",
+    },
+    {
+      label: "Short",
+      status: coverageStatus(
+        shortVolumeRows.length > 0,
+        loadState,
+        latestShortVolume?.trade_date,
+        10
+      ),
+      detail: latestShortVolume
+        ? `${formatRatioAsPct(latestShortVolume.short_ratio)} / ${formatDate(latestShortVolume.trade_date)}`
+        : "No FINRA rows",
+    },
+  ];
+  const readyCoverageCount = dataCoverageItems.filter(
+    (item) => item.status === "ready"
+  ).length;
 
   const loadSymbolData = useCallback(
     async (symbol: string, nextTimeframe: USChartTimeframe) => {
@@ -1652,6 +1789,32 @@ export default function USStockDetailPanel({
               <div className="text-xs text-slate-500">MA60</div>
               <div className="mt-1 font-bold">{formatNumber(ma60)}</div>
             </div>
+          </div>
+        </section>
+
+        <section className="border-t border-slate-200 px-5 py-4">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+                Coverage
+              </div>
+              <div className="mt-1 text-sm font-bold text-slate-950">
+                Right-side data readiness
+              </div>
+            </div>
+            <div className="text-right text-[11px] font-semibold text-slate-500">
+              {readyCoverageCount}/{dataCoverageItems.length} ready
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            {dataCoverageItems.map((item) => (
+              <DataCoverageChip
+                key={item.label}
+                label={item.label}
+                status={item.status}
+                detail={item.detail}
+              />
+            ))}
           </div>
         </section>
 
