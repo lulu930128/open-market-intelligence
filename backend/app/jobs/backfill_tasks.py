@@ -251,14 +251,16 @@ def run_stock_selection_refresh_job(
     stock_id: str,
     include_today: bool | None,
     sleep_seconds: float,
+    profile: str = "full",
 ) -> None:
     def worker(db: Session, progress: ProgressCallback):
-        progress(0, 6, "Refreshing selected stock data.")
+        progress(0, None, "Refreshing selected stock data.")
         return refresh_selected_stock_data(
             db=db,
             stock_id=stock_id,
             include_today=include_today,
             sleep_seconds=sleep_seconds,
+            profile=profile,
             progress=progress,
         )
 

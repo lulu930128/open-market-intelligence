@@ -160,6 +160,7 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
                 str(request.get("stock_id") or job.target),
                 request.get("include_today"),
                 float(request.get("sleep_seconds", 0.05)),
+                str(request.get("profile") or "full"),
             ),
             request,
         )
@@ -241,6 +242,10 @@ def list_jobs(
     status_filter: str | None = Query(default=None, alias="status"),
     job_type: str | None = None,
     limit: int = Query(default=50, ge=1, le=200),
+    include_payload: bool = Query(
+        default=True,
+        description="When false, omit request payload and return a compact result summary for polling UIs.",
+    ),
     db: Session = Depends(get_db),
 ):
     jobs = service.list_jobs(
@@ -248,8 +253,9 @@ def list_jobs(
         status=status_filter,
         job_type=job_type,
         limit=limit,
+        include_payload=include_payload,
     )
-    return [service.serialize_job(job) for job in jobs]
+    return [service.serialize_job(job, include_payload=include_payload) for job in jobs]
 
 
 @router.get("/{job_id}", response_model=JobRunRead)

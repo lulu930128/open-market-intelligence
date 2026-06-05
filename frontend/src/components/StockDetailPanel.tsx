@@ -177,6 +177,7 @@ const chartBarsByTimeframe: Record<Exclude<Timeframe, "today">, number> = {
   weekly: 520,
   monthly: 132,
 };
+const dailyIndicatorLimit = 220;
 const allTimeframes = Object.keys(timeframeLabels) as Timeframe[];
 const indexTimeframes: Timeframe[] = ["today", "daily", "weekly", "monthly"];
 const indexProducts = new Map([
@@ -551,10 +552,6 @@ async function fetchOptional<T>(
   } catch {
     return null;
   }
-}
-
-function looksLikeEtfStockId(stockId: string | null | undefined) {
-  return Boolean(stockId?.startsWith("00"));
 }
 
 function averageRecentChartValue(
@@ -2593,154 +2590,36 @@ export default function StockDetailPanel({
       setFinancialMetricHistory([]);
       setStockInfo(null);
       setInstitutionalHoldingRatio(null);
-      setDataPanelLoading(activeDataTabRef.current);
+      setDataPanelLoading(null);
       setDataPanelMessage(null);
       setInstitutionalHoverDate(null);
       setBranchDays(1);
       setRevenueYear(null);
     }, 0);
 
-    async function loadStaticDetail() {
+    async function loadBasicDetail() {
       try {
-        const skipStockOnlyData = looksLikeEtfStockId(stockId);
-        const [
-          institutionalData,
-          institutionalHistoryData,
-          marginData,
-          brokerBranchData,
-          shareholdingData,
-          chipCoverageData,
-          revenueData,
-          revenueHistoryData,
-          financialData,
-          financialHistoryData,
-          stockData,
-          institutionalHoldingRatioData,
-        ] = await Promise.all([
+        const [institutionalData, stockData] = await Promise.all([
           fetchOptional<InstitutionalTradeDailyRead>(
             `/api/market/institutional/${stockId}/latest`,
             { ensure_daily: false }
           ),
-          fetchOptional<InstitutionalTradeDailyRead[]>(
-            `/api/market/institutional/${stockId}/history`,
-            { limit: institutionalHistoryLimit, ensure_history: false }
-          ),
-          skipStockOnlyData
-            ? Promise.resolve(null)
-            : fetchOptional<MarginTradingDailyRead>(`/api/market/margin/${stockId}/latest`, {
-                ensure_daily: false,
-              }),
-          fetchOptional<BrokerBranchTradeDailySummaryRead>(
-            `/api/market/broker-branches/${stockId}/daily`,
-            { ensure_daily: false }
-          ),
-          skipStockOnlyData
-            ? Promise.resolve([])
-            : fetchOptional<ShareholdingDistributionWeeklyRead[]>(
-                `/api/market/shareholding/${stockId}/history`,
-                { limit: 12000, ensure_history: false }
-              ),
-          skipStockOnlyData
-            ? Promise.resolve(null)
-            : fetchOptional<StockChipCoverageRead>(`/api/market/chips/${stockId}/coverage`),
-          skipStockOnlyData
-            ? Promise.resolve(null)
-            : fetchOptional<MonthlyRevenueRead>(`/api/market/revenue/${stockId}/latest`, {
-                ensure_latest: false,
-              }),
-          skipStockOnlyData
-            ? Promise.resolve([])
-            : fetchOptional<MonthlyRevenueRead[]>(`/api/market/revenue/${stockId}/history`, {
-                limit: revenueHistoryLimit,
-                ensure_history: false,
-              }),
-          skipStockOnlyData
-            ? Promise.resolve(null)
-            : fetchOptional<FinancialMetricQuarterlyRead>(
-                `/api/market/financials/${stockId}/latest`,
-                { ensure_latest: false }
-              ),
-          skipStockOnlyData
-            ? Promise.resolve([])
-            : fetchOptional<FinancialMetricQuarterlyRead[]>(
-                `/api/market/financials/${stockId}/history`,
-                { limit: financialHistoryLimit, ensure_history: false }
-              ),
           fetchOptional<StockMasterRead>(`/api/stocks/${stockId}`),
-          skipStockOnlyData
-            ? Promise.resolve(null)
-            : fetchOptional<InstitutionalHoldingRatioRead>(
-                `/api/market/institutional/${stockId}/holding-ratios`
-              ),
         ]);
 
         if (cancelled) return;
 
-        const currentActiveTab = activeDataTabRef.current;
-
-        if (currentActiveTab !== "institutional") {
-          setInstitutional(institutionalData);
-          setInstitutionalHistory(institutionalHistoryData ?? []);
-        }
-
-        if (currentActiveTab !== "chips") {
-          setMargin(marginData);
-          setShareholding(shareholdingData ?? []);
-          setChipCoverage(chipCoverageData);
-        }
-
-        if (currentActiveTab !== "branch") {
-          setBrokerBranchSummary(brokerBranchData);
-        }
-
-        if (currentActiveTab !== "revenue") {
-          setMonthlyRevenue(revenueData);
-          setMonthlyRevenueHistory(revenueHistoryData ?? []);
-        }
-
-        if (currentActiveTab !== "earnings") {
-          setFinancialMetric(financialData);
-          setFinancialMetricHistory(financialHistoryData ?? []);
-        }
-
+        setInstitutional(institutionalData);
         setStockInfo(stockData);
-        setInstitutionalHoldingRatio(institutionalHoldingRatioData);
       } catch {
         if (!cancelled) {
-          const currentActiveTab = activeDataTabRef.current;
-
-          if (currentActiveTab !== "institutional") {
-            setInstitutional(null);
-            setInstitutionalHistory([]);
-          }
-
-          if (currentActiveTab !== "chips") {
-            setMargin(null);
-            setShareholding([]);
-            setChipCoverage(null);
-          }
-
-          if (currentActiveTab !== "branch") {
-            setBrokerBranchSummary(null);
-          }
-
-          if (currentActiveTab !== "revenue") {
-            setMonthlyRevenue(null);
-            setMonthlyRevenueHistory([]);
-          }
-
-          if (currentActiveTab !== "earnings") {
-            setFinancialMetric(null);
-            setFinancialMetricHistory([]);
-          }
-
+          setInstitutional(null);
           setStockInfo(null);
-          setInstitutionalHoldingRatio(null);
         }
       }
     }
 
-    void loadStaticDetail();
+    void loadBasicDetail();
 
     return () => {
       cancelled = true;
@@ -2866,7 +2745,7 @@ export default function StockDetailPanel({
             : await fetchJson<StockIndicatorPoint[]>(
                 `/api/market/indicators/${requestedStockId}/daily`,
                 {
-                  limit: 3000,
+                  limit: dailyIndicatorLimit,
                   ma_windows: "5,20,60",
                   volume_ma_windows: "5,20",
                 }
@@ -3515,13 +3394,13 @@ export default function StockDetailPanel({
       void requestBackfillJob(
         `/api/market/selection-refresh/${targetStockId}`,
         { method: "POST" },
-        { sleep_seconds: 0.05 },
+        { profile: "basic", sleep_seconds: 0.05 },
         {
           intervalMs: 1500,
           timeoutMs: 600000,
           onUpdate: (job) => {
             if (!cancelled && activeStockIdRef.current === targetStockId) {
-              setDataPanelMessage(formatPanelJobProgress("自選股資料自動更新", job));
+              setDataPanelMessage(formatPanelJobProgress("自選股基礎資料自動更新", job));
             }
           },
         }
@@ -3532,17 +3411,16 @@ export default function StockDetailPanel({
           const resultStatus = getJobResultStatus(job);
           setDataPanelMessage(
             resultStatus === "partial_success"
-              ? "自選股資料自動更新部分完成，部分來源暫時不可用"
+              ? "自選股基礎資料自動更新部分完成，部分來源暫時不可用"
               : resultStatus === "error"
-                ? "自選股資料自動更新失敗"
-                : "自選股資料自動更新完成"
+                ? "自選股基礎資料自動更新失敗"
+                : "自選股基礎資料自動更新完成"
           );
-          void refreshDataTab(activeDataTabRef.current);
         })
         .catch(() => {
           if (cancelled || activeStockIdRef.current !== targetStockId) return;
 
-          setDataPanelMessage("自選股資料自動更新失敗，詳見左側更新狀態");
+          setDataPanelMessage("自選股基礎資料自動更新失敗，詳見左側更新狀態");
         });
     }, 0);
 
@@ -3550,8 +3428,7 @@ export default function StockDetailPanel({
       cancelled = true;
       window.clearTimeout(timer);
     };
-    // Queue once per selected stock; refreshDataTab is invoked after the job finishes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Queue once per selected stock; tab-level datasets are loaded by the visible tab effect.
   }, [isIndexProduct, stockId]);
 
   function handleDataTabClick(tab: DataPanelTab) {

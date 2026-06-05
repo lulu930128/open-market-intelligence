@@ -14,11 +14,24 @@ from app.market.trading_calendar import latest_released_trading_day
 
 
 ProgressCallback = Callable[[int | None, int | None, str | None], None]
+RefreshProfile = str
 
 DAILY_METRIC_RELEASE_TIMES = {
     "daily_price": time(15, 15),
     "institutional_trade": time(18, 10),
     "margin_trading": time(21, 10),
+}
+REFRESH_PROFILE_STEPS: dict[RefreshProfile, tuple[str, ...]] = {
+    "basic": ("daily_price", "institutional_trade"),
+    "full": (
+        "daily_price",
+        "institutional_trade",
+        "margin_trading",
+        "broker_branch",
+        "shareholding_distribution",
+        "monthly_revenue",
+        "financial_metrics",
+    ),
 }
 
 
@@ -70,6 +83,15 @@ def _get_stock_market(db: Session, stock_id: str) -> str | None:
     return stock.market.upper()
 
 
+def normalize_refresh_profile(profile: str | None) -> RefreshProfile:
+    normalized = (profile or "full").strip().lower()
+
+    if normalized not in REFRESH_PROFILE_STEPS:
+        raise ValueError("profile must be one of: basic, full.")
+
+    return normalized
+
+
 def _ensure_current_month_daily_prices(
     *,
     db: Session,
@@ -115,9 +137,12 @@ def refresh_selected_stock_data(
     stock_id: str,
     include_today: bool | None = None,
     sleep_seconds: float = 0.05,
+    profile: str | None = "full",
     progress: ProgressCallback | None = None,
 ) -> dict:
-    step_total = 7
+    refresh_profile = normalize_refresh_profile(profile)
+    requested_steps = REFRESH_PROFILE_STEPS[refresh_profile]
+    step_total = len(requested_steps)
     results: dict[str, dict] = {}
     daily_price_date = latest_released_trading_day(
         release_time=DAILY_METRIC_RELEASE_TIMES["daily_price"],
@@ -132,111 +157,90 @@ def refresh_selected_stock_data(
         include_today=include_today,
     )
 
-    _run_refresh_step(
-        key="daily_price",
-        label="日K",
-        step_index=1,
-        step_total=step_total,
-        progress=progress,
-        results=results,
-        action=lambda: _ensure_current_month_daily_prices(
-            db=db,
-            stock_id=stock_id,
-            target_date=daily_price_date,
-            sleep_seconds=sleep_seconds,
+    refresh_steps: dict[str, tuple[str, Callable[[], dict]]] = {
+        "daily_price": (
+            "日K",
+            lambda: _ensure_current_month_daily_prices(
+                db=db,
+                stock_id=stock_id,
+                target_date=daily_price_date,
+                sleep_seconds=sleep_seconds,
+            ),
         ),
-    )
-    _run_refresh_step(
-        key="institutional_trade",
-        label="法人",
-        step_index=2,
-        step_total=step_total,
-        progress=progress,
-        results=results,
-        action=lambda: ensure_stock_daily_metrics(
-            db=db,
-            stock_id=stock_id,
-            start_date=institutional_trade_date,
-            end_date=institutional_trade_date,
-            categories=["institutional_trade"],
-            sleep_seconds=sleep_seconds,
-            skip_existing=True,
+        "institutional_trade": (
+            "法人",
+            lambda: ensure_stock_daily_metrics(
+                db=db,
+                stock_id=stock_id,
+                start_date=institutional_trade_date,
+                end_date=institutional_trade_date,
+                categories=["institutional_trade"],
+                sleep_seconds=sleep_seconds,
+                skip_existing=True,
+            ),
         ),
-    )
-    _run_refresh_step(
-        key="margin_trading",
-        label="融資融券",
-        step_index=3,
-        step_total=step_total,
-        progress=progress,
-        results=results,
-        action=lambda: ensure_stock_daily_metrics(
-            db=db,
-            stock_id=stock_id,
-            start_date=margin_trade_date,
-            end_date=margin_trade_date,
-            categories=["margin_trading"],
-            sleep_seconds=sleep_seconds,
-            skip_existing=True,
+        "margin_trading": (
+            "融資融券",
+            lambda: ensure_stock_daily_metrics(
+                db=db,
+                stock_id=stock_id,
+                start_date=margin_trade_date,
+                end_date=margin_trade_date,
+                categories=["margin_trading"],
+                sleep_seconds=sleep_seconds,
+                skip_existing=True,
+            ),
         ),
-    )
-    _run_refresh_step(
-        key="broker_branch",
-        label="分點",
-        step_index=4,
-        step_total=step_total,
-        progress=progress,
-        results=results,
-        action=lambda: {
-            "status": "success",
-            "rows": len(ensure_broker_branch_daily(db=db, stock_id=stock_id)),
-        },
-    )
-    _run_refresh_step(
-        key="shareholding_distribution",
-        label="股權分散",
-        step_index=5,
-        step_total=step_total,
-        progress=progress,
-        results=results,
-        action=lambda: ensure_stock_shareholding_history(
-            db=db,
-            stock_id=stock_id,
-            lookback_weeks=52,
-            sleep_seconds=sleep_seconds,
-            skip_existing=True,
+        "broker_branch": (
+            "分點",
+            lambda: {
+                "status": "success",
+                "rows": len(ensure_broker_branch_daily(db=db, stock_id=stock_id)),
+            },
         ),
-    )
-    _run_refresh_step(
-        key="monthly_revenue",
-        label="營收",
-        step_index=6,
-        step_total=step_total,
-        progress=progress,
-        results=results,
-        action=lambda: ensure_stock_monthly_revenue_history(
-            db=db,
-            stock_id=stock_id,
-            lookback_months=120,
-            sleep_seconds=sleep_seconds,
-            skip_existing=True,
+        "shareholding_distribution": (
+            "股權分散",
+            lambda: ensure_stock_shareholding_history(
+                db=db,
+                stock_id=stock_id,
+                lookback_weeks=52,
+                sleep_seconds=sleep_seconds,
+                skip_existing=True,
+            ),
         ),
-    )
-    _run_refresh_step(
-        key="financial_metrics",
-        label="盈餘",
-        step_index=7,
-        step_total=step_total,
-        progress=progress,
-        results=results,
-        action=lambda: ensure_stock_financial_metrics_history(
-            db=db,
-            stock_id=stock_id,
-            lookback_quarters=40,
-            sleep_seconds=sleep_seconds,
-            skip_existing=True,
+        "monthly_revenue": (
+            "營收",
+            lambda: ensure_stock_monthly_revenue_history(
+                db=db,
+                stock_id=stock_id,
+                lookback_months=120,
+                sleep_seconds=sleep_seconds,
+                skip_existing=True,
+            ),
         ),
-    )
+        "financial_metrics": (
+            "盈餘",
+            lambda: ensure_stock_financial_metrics_history(
+                db=db,
+                stock_id=stock_id,
+                lookback_quarters=40,
+                sleep_seconds=sleep_seconds,
+                skip_existing=True,
+            ),
+        ),
+    }
+
+    for step_index, step_key in enumerate(requested_steps, start=1):
+        label, action = refresh_steps[step_key]
+        _run_refresh_step(
+            key=step_key,
+            label=label,
+            step_index=step_index,
+            step_total=step_total,
+            progress=progress,
+            results=results,
+            action=action,
+        )
 
     error_count = sum(1 for result in results.values() if result["status"] == "error")
     skipped_count = sum(1 for result in results.values() if result["status"] == "skipped")
@@ -256,6 +260,7 @@ def refresh_selected_stock_data(
         "message": "Selected stock data refresh completed.",
         "stock_id": stock_id,
         "include_today": include_today,
+        "profile": refresh_profile,
         "daily_price_date": daily_price_date,
         "institutional_trade_date": institutional_trade_date,
         "margin_trade_date": margin_trade_date,

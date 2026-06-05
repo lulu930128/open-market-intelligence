@@ -12,6 +12,7 @@ from app.market.fundamental_metrics_backfill import (
 from app.market.financial_metrics_history_backfill import ensure_stock_financial_metrics_history
 from app.market.monthly_revenue_history_backfill import ensure_stock_monthly_revenue_history
 from app.market.shareholding_history_backfill import ensure_stock_shareholding_history
+from app.market.stock_selection_refresh import normalize_refresh_profile
 from app.db.session import get_db
 from app.jobs import backfill_tasks, service as job_service
 from app.jobs.schemas import JobRunRead
@@ -169,9 +170,13 @@ def refresh_selected_stock_data_api(
     stock_id: str,
     background_tasks: BackgroundTasks,
     include_today: bool | None = None,
+    profile: str = Query(default="full", pattern="^(basic|full)$"),
     sleep_seconds: float = Query(default=0.05, ge=0, le=3),
     db: Session = Depends(get_db),
 ):
+    refresh_profile = normalize_refresh_profile(profile)
+    progress_total = 2 if refresh_profile == "basic" else 7
+
     return _queue_backfill_job(
         db=db,
         background_tasks=background_tasks,
@@ -180,11 +185,12 @@ def refresh_selected_stock_data_api(
         request={
             "stock_id": stock_id,
             "include_today": include_today,
+            "profile": refresh_profile,
             "sleep_seconds": sleep_seconds,
         },
-        progress_total=7,
+        progress_total=progress_total,
         task=backfill_tasks.run_stock_selection_refresh_job,
-        task_args=(stock_id, include_today, sleep_seconds),
+        task_args=(stock_id, include_today, sleep_seconds, refresh_profile),
     )
 
 

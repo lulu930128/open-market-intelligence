@@ -287,7 +287,10 @@ export default function JobStatusCenter({ placement = "fixed" }: JobStatusCenter
 
   const loadJobs = useCallback(async () => {
     try {
-      const rows = await fetchJson<JobRunRead[]>("/api/jobs", { limit: 20 });
+      const rows = await fetchJson<JobRunRead[]>("/api/jobs", {
+        limit: 20,
+        include_payload: false,
+      });
       setJobs(rows);
       setErrorMessage(null);
     } catch (error) {
@@ -302,13 +305,13 @@ export default function JobStatusCenter({ placement = "fixed" }: JobStatusCenter
 
     const interval = window.setInterval(() => {
       void loadJobs();
-    }, 3000);
+    }, open ? 3000 : 10000);
 
     return () => {
       window.clearTimeout(initialTimer);
       window.clearInterval(interval);
     };
-  }, [loadJobs]);
+  }, [loadJobs, open]);
 
   useEffect(() => {
     if (!open) return;
