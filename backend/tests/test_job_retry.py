@@ -85,7 +85,22 @@ class JobRetryTests(unittest.TestCase):
         with (
             patch.object(
                 stock_selection_refresh,
-                "latest_released_trading_day",
+                "expected_daily_price_date",
+                return_value=released_date,
+            ),
+            patch.object(
+                stock_selection_refresh,
+                "expected_institutional_trade_date",
+                return_value=released_date,
+            ),
+            patch.object(
+                stock_selection_refresh,
+                "expected_margin_trade_date",
+                return_value=released_date,
+            ),
+            patch.object(
+                stock_selection_refresh,
+                "expected_broker_branch_date",
                 return_value=released_date,
             ),
             patch.object(

@@ -1,30 +1,32 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.db.models import (
-    BrokerBranchTradeDaily,
-    FinancialMetricQuarterly,
-    InstitutionalTradeDaily,
-    MarginTradingDaily,
-    MarketDailyPrice,
-    MonthlyRevenue,
-    ShareholdingDistributionWeekly,
-    StockMaster,
+from app.db.models import StockMaster
+from app.market.taiwan_rules import (
+    TAIWAN_DATASET_BROKER_BRANCH,
+    TAIWAN_DATASET_DAILY_PRICE,
+    TAIWAN_DATASET_FREQUENCIES,
+    TAIWAN_DATASET_INSTITUTIONAL_TRADE,
+    TAIWAN_DATASET_LABELS,
+    TAIWAN_DATASET_MARGIN_TRADING,
+    TAIWAN_DATASET_SPECS,
+    TAIWAN_STOCK_MASTER_DATASET,
+    TaiwanDatasetSpec,
+    expected_broker_branch_date,
+    expected_daily_price_date,
+    expected_institutional_trade_date,
+    expected_margin_trade_date,
+    is_equity_only_dataset_required as _is_equity_only_dataset_required,
 )
-from app.market.broker_branch import expected_broker_branch_trade_date
-from app.market.trading_calendar import latest_released_trading_day
 from app.watchlists import service as watchlist_service
 
 
-DAILY_PRICE_RELEASE_TIME = time(hour=15, minute=15)
-INSTITUTIONAL_TRADE_RELEASE_TIME = time(hour=18, minute=10)
-MARGIN_TRADE_RELEASE_TIME = time(hour=21, minute=10)
 MAX_STALE_STOCK_DETAILS = 20
 MAX_STALE_STOCK_IDS = 500
 
@@ -34,128 +36,24 @@ class StockCandidate:
     stock_id: str
     stock_name: str | None = None
 
-
-@dataclass(frozen=True)
-class DatasetSpec:
-    key: str
-    label: str
-    frequency: str
-    model: Any
-    latest_column: Any
-    has_expected_date: bool = False
-    equity_only: bool = False
-
-
-def expected_daily_price_date() -> date:
-    return latest_released_trading_day(
-        release_time=DAILY_PRICE_RELEASE_TIME,
-        include_today=None,
-    )
-
-
-def expected_institutional_trade_date() -> date:
-    return latest_released_trading_day(
-        release_time=INSTITUTIONAL_TRADE_RELEASE_TIME,
-        include_today=None,
-    )
-
-
-def expected_margin_trade_date() -> date:
-    return latest_released_trading_day(
-        release_time=MARGIN_TRADE_RELEASE_TIME,
-        include_today=None,
-    )
-
-
-def expected_broker_branch_date() -> date:
-    return expected_broker_branch_trade_date()
-
-
-DATASET_SPECS: tuple[DatasetSpec, ...] = (
-    DatasetSpec(
-        key="market_daily_price",
-        label="Daily price",
-        frequency="daily",
-        model=MarketDailyPrice,
-        latest_column=MarketDailyPrice.trade_date,
-        has_expected_date=True,
-    ),
-    DatasetSpec(
-        key="institutional_trade_daily",
-        label="Institutional trade",
-        frequency="daily",
-        model=InstitutionalTradeDaily,
-        latest_column=InstitutionalTradeDaily.trade_date,
-        has_expected_date=True,
-    ),
-    DatasetSpec(
-        key="margin_trading_daily",
-        label="Margin trading",
-        frequency="daily",
-        model=MarginTradingDaily,
-        latest_column=MarginTradingDaily.trade_date,
-        has_expected_date=True,
-    ),
-    DatasetSpec(
-        key="broker_branch_trade_daily",
-        label="Broker branch trade",
-        frequency="daily",
-        model=BrokerBranchTradeDaily,
-        latest_column=BrokerBranchTradeDaily.trade_date,
-        has_expected_date=True,
-    ),
-    DatasetSpec(
-        key="shareholding_distribution_weekly",
-        label="Shareholding distribution",
-        frequency="weekly",
-        model=ShareholdingDistributionWeekly,
-        latest_column=ShareholdingDistributionWeekly.data_date,
-        equity_only=True,
-    ),
-    DatasetSpec(
-        key="monthly_revenue",
-        label="Monthly revenue",
-        frequency="monthly",
-        model=MonthlyRevenue,
-        latest_column=MonthlyRevenue.period,
-        equity_only=True,
-    ),
-    DatasetSpec(
-        key="financial_metric_quarterly",
-        label="Quarterly financial metrics",
-        frequency="quarterly",
-        model=FinancialMetricQuarterly,
-        latest_column=FinancialMetricQuarterly.period,
-        equity_only=True,
-    ),
-)
-
-STOCK_MASTER_DATASET = {
-    "key": "stock_master",
-    "label": "Stock master",
-    "frequency": "master",
-}
-DATASET_LABELS = {
-    STOCK_MASTER_DATASET["key"]: STOCK_MASTER_DATASET["label"],
-    **{spec.key: spec.label for spec in DATASET_SPECS},
-}
-DATASET_FREQUENCIES = {
-    STOCK_MASTER_DATASET["key"]: STOCK_MASTER_DATASET["frequency"],
-    **{spec.key: spec.frequency for spec in DATASET_SPECS},
-}
+DatasetSpec = TaiwanDatasetSpec
+DATASET_SPECS = TAIWAN_DATASET_SPECS
+STOCK_MASTER_DATASET = TAIWAN_STOCK_MASTER_DATASET
+DATASET_LABELS = TAIWAN_DATASET_LABELS
+DATASET_FREQUENCIES = TAIWAN_DATASET_FREQUENCIES
 
 
 def _expected_date_for_dataset(key: str) -> date | None:
-    if key == "market_daily_price":
+    if key == TAIWAN_DATASET_DAILY_PRICE:
         return expected_daily_price_date()
 
-    if key == "institutional_trade_daily":
+    if key == TAIWAN_DATASET_INSTITUTIONAL_TRADE:
         return expected_institutional_trade_date()
 
-    if key == "margin_trading_daily":
+    if key == TAIWAN_DATASET_MARGIN_TRADING:
         return expected_margin_trade_date()
 
-    if key == "broker_branch_trade_daily":
+    if key == TAIWAN_DATASET_BROKER_BRANCH:
         return expected_broker_branch_date()
 
     return None
@@ -193,17 +91,6 @@ def _stock_master_by_id(db: Session, stock_ids: list[str]) -> dict[str, StockMas
 
     rows = db.query(StockMaster).filter(StockMaster.stock_id.in_(stock_ids)).all()
     return {stock.stock_id: stock for stock in rows}
-
-
-def _is_equity_only_dataset_required(spec: DatasetSpec, stock: StockMaster | None) -> bool:
-    if not spec.equity_only:
-        return True
-
-    if stock is None:
-        return True
-
-    instrument_type = (stock.instrument_type or "").strip().lower()
-    return instrument_type not in {"etf", "warrant"}
 
 
 def _stock_master_check(
@@ -469,7 +356,11 @@ def check_stock_data_freshness(db: Session, stock_id: str) -> dict[str, Any]:
         scope_id=normalized_stock_id,
         rows=rows,
         refresh_endpoint=f"/api/market/selection-refresh/{normalized_stock_id}",
-        refresh_params={"include_today": None, "sleep_seconds": 0.05},
+        refresh_params={
+            "include_today": None,
+            "profile": "full",
+            "sleep_seconds": 0.05,
+        },
     )
 
 
@@ -517,6 +408,11 @@ def check_watchlist_data_freshness(
             "sleep_seconds": 0.3,
             "skip_existing_months": True,
             "full_refresh_endpoint_template": "/api/market/selection-refresh/{stock_id}",
+            "full_refresh_params": {
+                "include_today": None,
+                "profile": "full",
+                "sleep_seconds": 0.05,
+            },
             "note": (
                 "This group endpoint refreshes daily prices. "
                 "Use /api/market/selection-refresh/{stock_id} per affected stock "

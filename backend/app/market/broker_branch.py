@@ -1,10 +1,11 @@
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime
 
 import requests
 from sqlalchemy.orm import Session
 
 from app.db.models import BrokerBranchTradeDaily, RawFetchResult, SourceRegistry
+from app.market.taiwan_rules import TAIWAN_BROKER_BRANCH_RELEASE_TIME
 from app.market.trading_calendar import latest_released_trading_day
 from app.parsers.twse_common import parse_date, parse_float, parse_int
 from app.utils.hash import sha256_text
@@ -12,7 +13,7 @@ from app.utils.hash import sha256_text
 
 NSTOCK_BRANCH_TOP15_URL = "https://shop.nstock.tw/api/v2/branch-data/branch-top15_ad"
 NSTOCK_BRANCH_SOURCE_NAME = "nStock Broker Branch Top 15"
-BRANCH_DAILY_READY_TIME = time(hour=15, minute=15)
+BRANCH_DAILY_READY_TIME = TAIWAN_BROKER_BRANCH_RELEASE_TIME
 
 
 class BrokerBranchFetchError(RuntimeError):

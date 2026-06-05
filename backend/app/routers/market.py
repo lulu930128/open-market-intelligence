@@ -1,4 +1,4 @@
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -12,7 +12,12 @@ from app.market.fundamental_metrics_backfill import (
 from app.market.financial_metrics_history_backfill import ensure_stock_financial_metrics_history
 from app.market.monthly_revenue_history_backfill import ensure_stock_monthly_revenue_history
 from app.market.shareholding_history_backfill import ensure_stock_shareholding_history
-from app.market.stock_selection_refresh import normalize_refresh_profile
+from app.market.taiwan_rules import (
+    TAIWAN_REFRESH_PROFILE_PATTERN,
+    daily_metric_release_time,
+    normalize_refresh_profile,
+    refresh_profile_step_count,
+)
 from app.db.session import get_db
 from app.jobs import backfill_tasks, service as job_service
 from app.jobs.schemas import JobRunRead
@@ -83,11 +88,6 @@ from app.market.service import (
 
 router = APIRouter()
 
-DAILY_METRIC_RELEASE_TIMES = {
-    "institutional_trade": time(18, 10),
-    "margin_trading": time(21, 10),
-}
-
 
 def _split_categories(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
@@ -106,11 +106,8 @@ def _resolve_daily_metric_include_today(
         return False
 
     release_time = max(
-        (
-            DAILY_METRIC_RELEASE_TIMES.get(category, time(21, 10))
-            for category in categories
-        ),
-        default=time(21, 10),
+        (daily_metric_release_time(category) for category in categories),
+        default=daily_metric_release_time(""),
     )
     return now.time() >= release_time
 
@@ -170,12 +167,12 @@ def refresh_selected_stock_data_api(
     stock_id: str,
     background_tasks: BackgroundTasks,
     include_today: bool | None = None,
-    profile: str = Query(default="full", pattern="^(basic|full)$"),
+    profile: str = Query(default="full", pattern=TAIWAN_REFRESH_PROFILE_PATTERN),
     sleep_seconds: float = Query(default=0.05, ge=0, le=3),
     db: Session = Depends(get_db),
 ):
     refresh_profile = normalize_refresh_profile(profile)
-    progress_total = 2 if refresh_profile == "basic" else 7
+    progress_total = refresh_profile_step_count(refresh_profile)
 
     return _queue_backfill_job(
         db=db,

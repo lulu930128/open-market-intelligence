@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from datetime import date, time
+from datetime import date
 
 from sqlalchemy.orm import Session
 
@@ -10,29 +10,18 @@ from app.market.daily_metrics_backfill import ensure_stock_daily_metrics
 from app.market.financial_metrics_history_backfill import ensure_stock_financial_metrics_history
 from app.market.monthly_revenue_history_backfill import ensure_stock_monthly_revenue_history
 from app.market.shareholding_history_backfill import ensure_stock_shareholding_history
-from app.market.trading_calendar import latest_released_trading_day
+from app.market.taiwan_rules import (
+    TAIWAN_REFRESH_STEP_LABELS,
+    expected_broker_branch_date,
+    expected_daily_price_date,
+    expected_institutional_trade_date,
+    expected_margin_trade_date,
+    normalize_refresh_profile,
+    refresh_profile_steps,
+)
 
 
 ProgressCallback = Callable[[int | None, int | None, str | None], None]
-RefreshProfile = str
-
-DAILY_METRIC_RELEASE_TIMES = {
-    "daily_price": time(15, 15),
-    "institutional_trade": time(18, 10),
-    "margin_trading": time(21, 10),
-}
-REFRESH_PROFILE_STEPS: dict[RefreshProfile, tuple[str, ...]] = {
-    "basic": ("daily_price", "institutional_trade"),
-    "full": (
-        "daily_price",
-        "institutional_trade",
-        "margin_trading",
-        "broker_branch",
-        "shareholding_distribution",
-        "monthly_revenue",
-        "financial_metrics",
-    ),
-}
 
 
 def _step_status(result: dict) -> str:
@@ -81,15 +70,6 @@ def _get_stock_market(db: Session, stock_id: str) -> str | None:
         return None
 
     return stock.market.upper()
-
-
-def normalize_refresh_profile(profile: str | None) -> RefreshProfile:
-    normalized = (profile or "full").strip().lower()
-
-    if normalized not in REFRESH_PROFILE_STEPS:
-        raise ValueError("profile must be one of: basic, full.")
-
-    return normalized
 
 
 def _ensure_current_month_daily_prices(
@@ -141,34 +121,32 @@ def refresh_selected_stock_data(
     progress: ProgressCallback | None = None,
 ) -> dict:
     refresh_profile = normalize_refresh_profile(profile)
-    requested_steps = REFRESH_PROFILE_STEPS[refresh_profile]
+    requested_steps = refresh_profile_steps(refresh_profile)
     step_total = len(requested_steps)
     results: dict[str, dict] = {}
-    daily_price_date = latest_released_trading_day(
-        release_time=DAILY_METRIC_RELEASE_TIMES["daily_price"],
+    daily_price_date = expected_daily_price_date(
         include_today=include_today,
     )
-    institutional_trade_date = latest_released_trading_day(
-        release_time=DAILY_METRIC_RELEASE_TIMES["institutional_trade"],
+    institutional_trade_date = expected_institutional_trade_date(
         include_today=include_today,
     )
-    margin_trade_date = latest_released_trading_day(
-        release_time=DAILY_METRIC_RELEASE_TIMES["margin_trading"],
+    margin_trade_date = expected_margin_trade_date(
+        include_today=include_today,
+    )
+    branch_trade_date = expected_broker_branch_date(
         include_today=include_today,
     )
 
-    refresh_steps: dict[str, tuple[str, Callable[[], dict]]] = {
+    refresh_steps: dict[str, Callable[[], dict]] = {
         "daily_price": (
-            "日K",
             lambda: _ensure_current_month_daily_prices(
                 db=db,
                 stock_id=stock_id,
                 target_date=daily_price_date,
                 sleep_seconds=sleep_seconds,
-            ),
+            )
         ),
         "institutional_trade": (
-            "法人",
             lambda: ensure_stock_daily_metrics(
                 db=db,
                 stock_id=stock_id,
@@ -177,10 +155,9 @@ def refresh_selected_stock_data(
                 categories=["institutional_trade"],
                 sleep_seconds=sleep_seconds,
                 skip_existing=True,
-            ),
+            )
         ),
         "margin_trading": (
-            "融資融券",
             lambda: ensure_stock_daily_metrics(
                 db=db,
                 stock_id=stock_id,
@@ -189,49 +166,52 @@ def refresh_selected_stock_data(
                 categories=["margin_trading"],
                 sleep_seconds=sleep_seconds,
                 skip_existing=True,
-            ),
+            )
         ),
         "broker_branch": (
-            "分點",
             lambda: {
                 "status": "success",
-                "rows": len(ensure_broker_branch_daily(db=db, stock_id=stock_id)),
-            },
+                "rows": len(
+                    ensure_broker_branch_daily(
+                        db=db,
+                        stock_id=stock_id,
+                        trade_date=branch_trade_date,
+                    )
+                ),
+            }
         ),
         "shareholding_distribution": (
-            "股權分散",
             lambda: ensure_stock_shareholding_history(
                 db=db,
                 stock_id=stock_id,
                 lookback_weeks=52,
                 sleep_seconds=sleep_seconds,
                 skip_existing=True,
-            ),
+            )
         ),
         "monthly_revenue": (
-            "營收",
             lambda: ensure_stock_monthly_revenue_history(
                 db=db,
                 stock_id=stock_id,
                 lookback_months=120,
                 sleep_seconds=sleep_seconds,
                 skip_existing=True,
-            ),
+            )
         ),
         "financial_metrics": (
-            "盈餘",
             lambda: ensure_stock_financial_metrics_history(
                 db=db,
                 stock_id=stock_id,
                 lookback_quarters=40,
                 sleep_seconds=sleep_seconds,
                 skip_existing=True,
-            ),
+            )
         ),
     }
 
     for step_index, step_key in enumerate(requested_steps, start=1):
-        label, action = refresh_steps[step_key]
+        label = TAIWAN_REFRESH_STEP_LABELS[step_key]
+        action = refresh_steps[step_key]
         _run_refresh_step(
             key=step_key,
             label=label,
@@ -264,6 +244,7 @@ def refresh_selected_stock_data(
         "daily_price_date": daily_price_date,
         "institutional_trade_date": institutional_trade_date,
         "margin_trade_date": margin_trade_date,
+        "broker_branch_date": branch_trade_date,
         "requested_count": step_total,
         "refreshed_count": refreshed_count,
         "skipped_count": skipped_count,
