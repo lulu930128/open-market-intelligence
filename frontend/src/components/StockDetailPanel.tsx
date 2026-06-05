@@ -20,6 +20,16 @@ import {
   TAIWAN_INTRADAY_REFRESH_MS,
   getTaiwanMarketRefreshState,
 } from "@/lib/taiwanMarketTime";
+import {
+  getTaiwanChartHistoryRequirement,
+  getTaiwanDataPanelRefreshLabel,
+  getTaiwanDataPanelRefreshProfile,
+  taiwanDailyPriceBackfillPath,
+  taiwanSelectionRefreshPath,
+  type TaiwanChartTimeframe,
+  type TaiwanRefreshProfile,
+  type TaiwanDataPanelTab,
+} from "@/lib/taiwanMarketRules";
 import type {
   BrokerBranchTradeDailyRead,
   BrokerBranchTradeDailySummaryRead,
@@ -65,7 +75,7 @@ type Props = {
 type Timeframe = "today" | "daily" | "weekly" | "monthly";
 type ChartTimeframe = Exclude<Timeframe, "today">;
 type LoadState = "idle" | "loading" | "success" | "error";
-type DataPanelTab = "chips" | "institutional" | "branch" | "revenue" | "earnings";
+type DataPanelTab = TaiwanDataPanelTab;
 type BranchTableSide = "buy" | "sell";
 type RevenueView = "monthly" | "quarterly" | "yearly";
 type EarningsView = "quarterly" | "yearly";
@@ -386,6 +396,16 @@ function formatDate(value: string | null | undefined) {
   return value.slice(0, 10);
 }
 
+function shiftIsoDate(value: string, days: number) {
+  const [year, month, day] = value.slice(0, 10).split("-").map(Number);
+
+  if (!year || !month || !day) return value.slice(0, 10);
+
+  const date = new Date(Date.UTC(year, month - 1, day));
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -419,11 +439,15 @@ function formatPanelJobProgress(label: string, job: JobRunRead) {
 
 function formatBackfillOutcome(job: JobRunRead, label: string) {
   const status = getJobResultStatus(job);
-  const insertedCount = readBackfillCount(job.result, "inserted_count");
-  const skippedCount = readBackfillCount(job.result, "skipped_existing_count");
+  const insertedCount =
+    readBackfillCount(job.result, "inserted_count") ??
+    readBackfillCount(job.result, "refreshed_count");
+  const skippedCount =
+    readBackfillCount(job.result, "skipped_existing_count") ??
+    readBackfillCount(job.result, "skipped_count");
   const errorCount = readBackfillCount(job.result, "error_count");
   const details = [
-    insertedCount !== null && insertedCount > 0 ? `新增 ${insertedCount}` : null,
+    insertedCount !== null && insertedCount > 0 ? `更新 ${insertedCount}` : null,
     skippedCount !== null && skippedCount > 0 ? `已存在 ${skippedCount}` : null,
     errorCount !== null && errorCount > 0 ? `失敗 ${errorCount}` : null,
   ].filter(Boolean);
@@ -2357,6 +2381,7 @@ export default function StockDetailPanel({
   const [earningsView, setEarningsView] = useState<EarningsView>("quarterly");
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [chartHistoryMessage, setChartHistoryMessage] = useState<string | null>(null);
   const [indexList, setIndexList] = useState<MarketIndexListItem[]>([]);
   const [indexListLoadState, setIndexListLoadState] = useState<LoadState>("idle");
   const [indexContributions, setIndexContributions] =
@@ -2370,6 +2395,7 @@ export default function StockDetailPanel({
   const dataPanelRequestKeyRef = useRef<string | null>(null);
   const dataPanelResolvedKeysRef = useRef<Set<string>>(new Set());
   const branchSummaryCacheRef = useRef<Map<string, BrokerBranchTradeDailySummaryRead>>(new Map());
+  const chartHistoryBackfillKeysRef = useRef<Set<string>>(new Set());
   const indexProduct = stockId ? indexProducts.get(stockId) ?? null : null;
   const isIndexProduct = indexProduct !== null;
   const effectiveTimeframe = timeframe;
@@ -2466,6 +2492,9 @@ export default function StockDetailPanel({
     };
   }, [indexId, isIndexProduct]);
 
+  const currentStockInfoId = stockInfo?.stock_id ?? null;
+  const currentStockInfoMarket = stockInfo?.market ?? null;
+
   function toggleChartIndicator(key: IndicatorKey) {
     setActiveIndicatorTemplate(null);
     setChartIndicators((current) => ({
@@ -2514,6 +2543,7 @@ export default function StockDetailPanel({
   useEffect(() => {
     dataPanelResolvedKeysRef.current.clear();
     branchSummaryCacheRef.current.clear();
+    chartHistoryBackfillKeysRef.current.clear();
 
     if (!stockId) {
       const timer = window.setTimeout(() => {
@@ -2545,6 +2575,7 @@ export default function StockDetailPanel({
         setRevenueYear(null);
         setLoadState("idle");
         setErrorMessage(null);
+        setChartHistoryMessage(null);
       }, 0);
 
       return () => window.clearTimeout(timer);
@@ -2569,6 +2600,7 @@ export default function StockDetailPanel({
         setInstitutionalHoverDate(null);
         setBranchDays(1);
         setRevenueYear(null);
+        setChartHistoryMessage(null);
       }, 0);
 
       return () => window.clearTimeout(timer);
@@ -2595,6 +2627,7 @@ export default function StockDetailPanel({
       setInstitutionalHoverDate(null);
       setBranchDays(1);
       setRevenueYear(null);
+      setChartHistoryMessage(null);
     }, 0);
 
     async function loadBasicDetail() {
@@ -2630,6 +2663,7 @@ export default function StockDetailPanel({
   useEffect(() => {
     if (!stockId) return;
 
+    const effectStockId = stockId;
     let cancelled = false;
     let intradayTimer: number | undefined;
     let intradayRequestInFlight = false;
@@ -2705,6 +2739,114 @@ export default function StockDetailPanel({
       );
     }
 
+    async function resolveStockMarketForBackfill(targetStockId: string) {
+      if (currentStockInfoId === targetStockId) {
+        return currentStockInfoMarket;
+      }
+
+      const stockData = await fetchOptional<StockMasterRead>(`/api/stocks/${targetStockId}`);
+
+      if (stockData && !cancelled && activeStockIdRef.current === targetStockId) {
+        setStockInfo(stockData);
+      }
+
+      return stockData?.market ?? null;
+    }
+
+    async function maybeQueueChartHistoryBackfill(
+      targetStockId: string,
+      requestedTimeframe: TaiwanChartTimeframe,
+      ohlc: OhlcChartResponse
+    ) {
+      const requirement = getTaiwanChartHistoryRequirement(requestedTimeframe);
+
+      if (ohlc.point_count >= requirement.minPoints) {
+        setChartHistoryMessage(null);
+        return;
+      }
+
+      const market = await resolveStockMarketForBackfill(targetStockId);
+      const backfillPath = taiwanDailyPriceBackfillPath(targetStockId, market);
+
+      if (!backfillPath) {
+        if (!cancelled && activeStockIdRef.current === targetStockId) {
+          setChartHistoryMessage(
+            `${requirement.label}資料深度不足，目前市場 ${market ?? "-"} 尚未支援自動補齊`
+          );
+        }
+        return;
+      }
+
+      const endDate = ohlc.to_date.slice(0, 10);
+      const startDate = shiftIsoDate(endDate, -requirement.lookbackDays);
+      const backfillKey = `${targetStockId}:${requestedTimeframe}:${startDate}:${endDate}`;
+
+      if (chartHistoryBackfillKeysRef.current.has(backfillKey)) return;
+
+      chartHistoryBackfillKeysRef.current.add(backfillKey);
+
+      if (!cancelled && activeStockIdRef.current === targetStockId) {
+        setChartHistoryMessage(
+          `${requirement.label}目前只有 ${ohlc.point_count} 根，背景補歷史資料中`
+        );
+      }
+
+      try {
+        await requestBackfillJob(
+          backfillPath,
+          { method: "POST" },
+          {
+            start_date: startDate,
+            end_date: endDate,
+            sleep_seconds: 0.05,
+            skip_existing_months: true,
+          },
+          {
+            intervalMs: 2000,
+            timeoutMs: 900000,
+            onUpdate: (job) => {
+              if (!cancelled && activeStockIdRef.current === targetStockId) {
+                setChartHistoryMessage(formatPanelJobProgress(requirement.label, job));
+              }
+            },
+          }
+        );
+
+        const refreshedOhlc = await fetchJson<OhlcChartResponse>(
+          `/api/market/ohlc/${targetStockId}`,
+          {
+            timeframe: requestedTimeframe,
+            bars: chartBarsByTimeframe[requestedTimeframe],
+            ensure_history: false,
+          }
+        );
+        const refreshedIndicators = await fetchJson<StockIndicatorPoint[]>(
+          `/api/market/indicators/${targetStockId}/daily`,
+          {
+            limit: dailyIndicatorLimit,
+            ma_windows: "5,20,60",
+            volume_ma_windows: "5,20",
+          }
+        );
+
+        if (cancelled || activeStockIdRef.current !== targetStockId) return;
+
+        setChartData(refreshedOhlc.points);
+        setIndicatorData(refreshedIndicators);
+        setChartStockId(targetStockId);
+        setChartTimeframe(requestedTimeframe);
+        setChartHistoryMessage(
+          refreshedOhlc.point_count >= requirement.minPoints
+            ? `${requirement.label}歷史資料已補齊`
+            : `${requirement.label}歷史資料已補齊，目前可用 ${refreshedOhlc.point_count} 根`
+        );
+      } catch {
+        if (cancelled || activeStockIdRef.current !== targetStockId) return;
+
+        setChartHistoryMessage(`${requirement.label}歷史資料背景補齊失敗，詳見左側更新狀態`);
+      }
+    }
+
     async function loadChart() {
       if (effectiveTimeframe === "today") {
         await loadTodayTrend(true);
@@ -2726,8 +2868,8 @@ export default function StockDetailPanel({
       setErrorMessage(null);
 
       try {
-        const requestedStockId = stockId;
-        const requestedTimeframe = effectiveTimeframe;
+        const requestedStockId = effectStockId;
+        const requestedTimeframe = effectiveTimeframe as TaiwanChartTimeframe;
         const chartBars = chartBarsByTimeframe[requestedTimeframe];
         const ohlc = await fetchJson<OhlcChartResponse>(
           isIndexProduct
@@ -2758,6 +2900,10 @@ export default function StockDetailPanel({
         setChartStockId(requestedStockId);
         setChartTimeframe(requestedTimeframe);
         setLoadState("success");
+
+        if (!isIndexProduct) {
+          void maybeQueueChartHistoryBackfill(requestedStockId, requestedTimeframe, ohlc);
+        }
       } catch (error) {
         if (cancelled) return;
         setLoadState("error");
@@ -2771,7 +2917,7 @@ export default function StockDetailPanel({
       cancelled = true;
       clearIntradayTimer();
     };
-  }, [effectiveTimeframe, isIndexProduct, stockId]);
+  }, [currentStockInfoId, currentStockInfoMarket, effectiveTimeframe, isIndexProduct, stockId]);
 
   const indicatorForTimeframe = useMemo(() => {
     if (effectiveTimeframe === "daily") return indicatorData.slice(-180);
@@ -3111,16 +3257,20 @@ export default function StockDetailPanel({
     setDataPanelLoading(tab);
     setDataPanelMessage(null);
 
-    const runBackfill = async (
-      path: string,
-      params?: Record<string, string | number | boolean>,
-      label = "資料補齊"
+    const panelRefreshProfile = getTaiwanDataPanelRefreshProfile(tab);
+    const panelRefreshLabel = getTaiwanDataPanelRefreshLabel(tab);
+
+    const runPanelRefresh = async (
+      profile: TaiwanRefreshProfile,
+      label: string
     ) => {
       const job = await requestBackfillJob(
-        path,
+        taiwanSelectionRefreshPath(targetStockId),
         { method: "POST" },
-        params,
+        { profile, sleep_seconds: 0.05 },
         {
+          intervalMs: 1500,
+          timeoutMs: 600000,
           onUpdate: (job) => {
             if (activeStockIdRef.current === targetStockId) {
               setDataPanelMessage(formatPanelJobProgress(label, job));
@@ -3211,9 +3361,10 @@ export default function StockDetailPanel({
 
     try {
       if (tab === "branch") {
+        const refreshJob = await runPanelRefresh(panelRefreshProfile, panelRefreshLabel);
         const branchSummary = await fetchJson<BrokerBranchTradeDailySummaryRead>(
           `/api/market/broker-branches/${targetStockId}/daily`,
-          { ensure_daily: true, days: targetBranchDays }
+          { ensure_daily: false, days: targetBranchDays }
         );
 
         if (activeStockIdRef.current !== targetStockId) return;
@@ -3231,7 +3382,7 @@ export default function StockDetailPanel({
         setBrokerBranchSummary(branchSummary);
         setDataPanelMessage(
           branchSummary.trade_date
-            ? `分點 Top15 已更新至 ${formatDate(branchSummary.trade_date)}`
+            ? `${formatBackfillOutcome(refreshJob, panelRefreshLabel)}；分點 Top15 已讀取至 ${formatDate(branchSummary.trade_date)}`
             : "尚無分點 Top15 資料"
         );
         return;
@@ -3246,34 +3397,8 @@ export default function StockDetailPanel({
         }
 
         try {
-          const shareholdingJob = await runBackfill(
-            `/api/market/backfill/shareholding/${targetStockId}/history`,
-            {
-              lookback_weeks: 52,
-              sleep_seconds: 0.05,
-              skip_existing: true,
-            },
-            "集保股權分散"
-          );
-          if (getJobResultStatus(shareholdingJob) === "partial_success") {
-            hasBackfillIssue = true;
-          }
-        } catch {
-          hasBackfillIssue = true;
-        }
-
-        try {
-          const marginJob = await runBackfill(
-            `/api/market/backfill/daily-metrics/${targetStockId}/history`,
-            {
-              categories: "margin_trading",
-              lookback_days: 365,
-              sleep_seconds: 0.05,
-              skip_existing: true,
-            },
-            "融資融券"
-          );
-          if (getJobResultStatus(marginJob) === "partial_success") {
+          const refreshJob = await runPanelRefresh(panelRefreshProfile, panelRefreshLabel);
+          if (getJobResultStatus(refreshJob) === "partial_success") {
             hasBackfillIssue = true;
           }
         } catch {
@@ -3293,15 +3418,7 @@ export default function StockDetailPanel({
       }
 
       if (tab === "institutional") {
-        await runBackfill(
-          `/api/market/backfill/daily-metrics/${targetStockId}/history`,
-          {
-            categories: "institutional_trade",
-            lookback_days: institutionalLookbackDays,
-            sleep_seconds: 0.05,
-            skip_existing: true,
-          }
-        );
+        const refreshJob = await runPanelRefresh(panelRefreshProfile, panelRefreshLabel);
 
         const institutionalRows = await fetchJson<InstitutionalTradeDailyRead[]>(
           `/api/market/institutional/${targetStockId}/history`,
@@ -3317,19 +3434,12 @@ export default function StockDetailPanel({
         dataPanelResolvedKeysRef.current.add(requestKey);
         setInstitutional(institutionalRows[institutionalRows.length - 1] ?? null);
         setInstitutionalHistory(institutionalRows);
-        setDataPanelMessage("法人資料已補齊");
+        setDataPanelMessage(formatBackfillOutcome(refreshJob, panelRefreshLabel));
         return;
       }
 
       if (tab === "revenue") {
-        await runBackfill(
-          `/api/market/backfill/revenue/${targetStockId}/history`,
-          {
-            lookback_months: revenueHistoryLimit,
-            sleep_seconds: 0.05,
-            skip_existing: true,
-          }
-        );
+        const refreshJob = await runPanelRefresh(panelRefreshProfile, panelRefreshLabel);
 
         const revenueRows = await fetchJson<MonthlyRevenueRead[]>(
           `/api/market/revenue/${targetStockId}/history`,
@@ -3344,19 +3454,12 @@ export default function StockDetailPanel({
         dataPanelResolvedKeysRef.current.add(requestKey);
         setMonthlyRevenue(revenueRows[revenueRows.length - 1] ?? null);
         setMonthlyRevenueHistory(revenueRows);
-        setDataPanelMessage("營收資料已補齊");
+        setDataPanelMessage(formatBackfillOutcome(refreshJob, panelRefreshLabel));
         return;
       }
 
       if (tab === "earnings") {
-        await runBackfill(
-          `/api/market/backfill/financials/${targetStockId}/history`,
-          {
-            lookback_quarters: financialHistoryLimit,
-            sleep_seconds: 0.05,
-            skip_existing: true,
-          }
-        );
+        const refreshJob = await runPanelRefresh(panelRefreshProfile, panelRefreshLabel);
 
         const financialRows = await fetchJson<FinancialMetricQuarterlyRead[]>(
           `/api/market/financials/${targetStockId}/history`,
@@ -3371,7 +3474,7 @@ export default function StockDetailPanel({
         dataPanelResolvedKeysRef.current.add(requestKey);
         setFinancialMetric(financialRows[financialRows.length - 1] ?? null);
         setFinancialMetricHistory(financialRows);
-        setDataPanelMessage("盈餘資料已補齊");
+        setDataPanelMessage(formatBackfillOutcome(refreshJob, panelRefreshLabel));
       }
     } catch {
       if (activeStockIdRef.current !== targetStockId) return;
@@ -3392,7 +3495,7 @@ export default function StockDetailPanel({
     const targetStockId = stockId;
     const timer = window.setTimeout(() => {
       void requestBackfillJob(
-        `/api/market/selection-refresh/${targetStockId}`,
+        taiwanSelectionRefreshPath(targetStockId),
         { method: "POST" },
         { profile: "basic", sleep_seconds: 0.05 },
         {
@@ -4619,6 +4722,11 @@ export default function StockDetailPanel({
           {errorMessage ? (
             <div className="border-b border-red-200 bg-red-50 px-5 py-3 text-sm text-red-700">
               {errorMessage}
+            </div>
+          ) : null}
+          {chartHistoryMessage && !errorMessage ? (
+            <div className="border-b border-amber-200 bg-amber-50 px-5 py-2 text-xs text-amber-800">
+              {chartHistoryMessage}
             </div>
           ) : null}
 
