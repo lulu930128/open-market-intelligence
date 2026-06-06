@@ -1,6 +1,11 @@
 "use client";
 
+import PriceUpdatePulse from "@/components/PriceUpdatePulse";
 import { fetchJson } from "@/lib/api";
+import {
+  US_INTRADAY_REFRESH_MS,
+  getUsMarketRefreshState,
+} from "@/lib/usMarketTime";
 import type {
   USWatchlistRankingItemRead,
   USWatchlistRankingRead,
@@ -9,6 +14,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
 type USRankBy = "none" | "change_pct" | "volume" | "close";
+const WATCHLIST_INTRADAY_LIMIT = 30;
 
 type Props = {
   selectedGroupId: number | null;
@@ -69,6 +75,7 @@ function trendClass(value: number | null | undefined) {
 }
 
 function statusLabel(status: string) {
+  if (status === "intraday") return "盤中";
   if (status === "ready") return "Ready";
   if (status === "no_data") return "尚無資料";
   if (status === "error") return "錯誤";
@@ -114,15 +121,20 @@ export default function USWatchlistRankingPanel({
     };
   }, [ranking?.no_data_count, ranking?.requested_symbol_count, rows]);
 
-  const loadRanking = useCallback(async () => {
-    setLoadState("loading");
-    setErrorMessage(null);
+  const loadRanking = useCallback(async (options?: { silent?: boolean }) => {
+    if (!options?.silent) {
+      setLoadState("loading");
+      setErrorMessage(null);
+    }
+    const marketState = getUsMarketRefreshState();
 
     const params: Record<string, string | number | boolean> = {
       include_children: true,
       enabled_only: true,
       rank_by: rankBy,
       sort_order: sortOrder,
+      use_intraday: marketState.isPollingWindow,
+      intraday_limit: WATCHLIST_INTRADAY_LIMIT,
     };
 
     if (selectedGroupId !== null) {
@@ -152,6 +164,38 @@ export default function USWatchlistRankingPanel({
     return () => window.clearTimeout(timer);
   }, [loadRanking, reloadKey]);
 
+  useEffect(() => {
+    let disposed = false;
+    let refreshTimer: number | undefined;
+
+    function scheduleRefresh() {
+      if (disposed) return;
+
+      const marketState = getUsMarketRefreshState();
+
+      if (marketState.isPollingWindow) {
+        refreshTimer = window.setTimeout(() => {
+          void loadRanking({ silent: true }).finally(scheduleRefresh);
+        }, US_INTRADAY_REFRESH_MS);
+        return;
+      }
+
+      refreshTimer = window.setTimeout(
+        scheduleRefresh,
+        Math.min(marketState.msUntilNextPollingStart, 60_000)
+      );
+    }
+
+    scheduleRefresh();
+
+    return () => {
+      disposed = true;
+      if (refreshTimer !== undefined) {
+        window.clearTimeout(refreshTimer);
+      }
+    };
+  }, [loadRanking]);
+
   function renderRow(row: USWatchlistRankingItemRead) {
     const selected = row.symbol === selectedSymbol;
 
@@ -171,17 +215,44 @@ export default function USWatchlistRankingPanel({
             {row.symbol} {row.security_name ?? ""}
           </span>
           <span className={selected ? "block truncate text-xs text-slate-300" : "block truncate text-xs text-slate-500"}>
-            {[row.exchange, row.asset_type].filter(Boolean).join(" · ") || statusLabel(row.status)}
+            {[row.time ? formatDate(row.time) : null, row.exchange, row.asset_type]
+              .filter(Boolean)
+              .join(" · ") || statusLabel(row.status)}
           </span>
         </span>
         <span className={selected ? "text-slate-300" : "text-slate-500"}>
-          {formatDate(row.trade_date)}
+          {row.time ? "盤中" : formatDate(row.trade_date)}
         </span>
-        <span className="text-right font-semibold">{formatNumber(row.close)}</span>
+        <span className="text-right font-semibold">
+          <PriceUpdatePulse
+            value={row.close}
+            direction={row.change_pct}
+            resetKey={`${selectedGroupId ?? "all"}:${row.symbol}`}
+            className="justify-end tabular-nums"
+          >
+            {formatNumber(row.close)}
+          </PriceUpdatePulse>
+        </span>
         <span className={`text-right font-semibold ${selected ? "" : valueTone(row.change_pct)}`}>
-          {formatPct(row.change_pct)}
+          <PriceUpdatePulse
+            value={row.change_pct}
+            direction={row.change_pct}
+            resetKey={`${selectedGroupId ?? "all"}:${row.symbol}`}
+            className="justify-end tabular-nums"
+          >
+            {formatPct(row.change_pct)}
+          </PriceUpdatePulse>
         </span>
-        <span className="text-right">{formatVolume(row.volume)}</span>
+        <span className="text-right">
+          <PriceUpdatePulse
+            value={row.volume}
+            direction={null}
+            resetKey={`${selectedGroupId ?? "all"}:${row.symbol}`}
+            className="justify-end tabular-nums"
+          >
+            {formatVolume(row.volume)}
+          </PriceUpdatePulse>
+        </span>
         <span className="text-right">
           <span
             className={[

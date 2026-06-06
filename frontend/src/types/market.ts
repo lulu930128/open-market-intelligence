@@ -81,7 +81,10 @@ export type RankingItem = {
   time: string | null;
   close: number | null;
   volume: number | null;
+  change: number | null;
+  previous_close: number | null;
   change_pct: number | null;
+  limit_status: "limit_up" | "limit_down" | null;
   score: number | null;
   status: string;
   signal_count: number;
@@ -601,12 +604,19 @@ export type USWatchlistRankingItemRead = {
   asset_type: string | null;
   group_id: number;
   trade_date: string | null;
+  time: string | null;
   close: number | null;
   previous_close: number | null;
   change: number | null;
   change_pct: number | null;
   volume: number | null;
   status: string;
+  source: string | null;
+  intraday_previous_close: number | null;
+  intraday_points: Array<{
+    time: string;
+    price: number;
+  }>;
   error_message: string | null;
 };
 

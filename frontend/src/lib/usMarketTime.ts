@@ -1,4 +1,4 @@
-export const US_INTRADAY_REFRESH_MS = 10_000;
+export const US_INTRADAY_REFRESH_MS = 5_000;
 export const US_SESSION_START_MINUTES = 9 * 60 + 30;
 export const US_SESSION_END_MINUTES = 16 * 60;
 

@@ -7,6 +7,7 @@ from app.watchlists import service as watchlist_service
 
 _ALLOWED_RANK_FIELDS = {"watchlist", "score", "change_pct", "volume"}
 _ALLOWED_SORT_ORDERS = {"asc", "desc"}
+ESTIMATED_LIMIT_PCT_THRESHOLD = 9.5
 
 
 def _pick_primary_signal(signals: list[dict]) -> dict | None:
@@ -31,6 +32,36 @@ def _get_rank_value(row: dict, rank_by: str):
 
 def _valid_number(value) -> bool:
     return isinstance(value, (int, float)) and value == value
+
+
+def _limit_status_from_change_pct(change_pct) -> str | None:
+    if not _valid_number(change_pct):
+        return None
+
+    if float(change_pct) >= ESTIMATED_LIMIT_PCT_THRESHOLD:
+        return "limit_up"
+
+    if float(change_pct) <= -ESTIMATED_LIMIT_PCT_THRESHOLD:
+        return "limit_down"
+
+    return None
+
+
+def _previous_close_from_change(
+    close,
+    change,
+    change_pct,
+) -> float | None:
+    if _valid_number(close) and _valid_number(change):
+        previous_close = float(close) - float(change)
+        return previous_close if previous_close > 0 else None
+
+    if _valid_number(close) and _valid_number(change_pct):
+        denominator = 1 + (float(change_pct) / 100)
+        if denominator > 0:
+            return float(close) / denominator
+
+    return None
 
 
 def _sum_intraday_volume(points: list[dict]) -> int | None:
@@ -83,8 +114,10 @@ def _get_intraday_overlay(db: Session, stock_id: str) -> dict | None:
         return None
 
     change_pct = None
+    change = None
 
     if _valid_number(previous_close) and previous_close != 0:
+        change = float(latest_price) - float(previous_close)
         change_pct = ((float(latest_price) - float(previous_close)) / float(previous_close)) * 100
 
     volume = _sum_intraday_volume(points)
@@ -96,8 +129,10 @@ def _get_intraday_overlay(db: Session, stock_id: str) -> dict | None:
         "time": latest.get("time"),
         "close": float(latest_price),
         "volume": volume,
+        "change": change,
         "change_pct": change_pct,
         "previous_close": float(previous_close) if _valid_number(previous_close) else None,
+        "limit_status": _limit_status_from_change_pct(change_pct),
         "points": _compact_intraday_points(points),
         "source": intraday.get("source"),
     }
@@ -115,6 +150,7 @@ def get_watchlist_group_latest_ranking(
     limit: int = 100,
     volume_ratio_threshold: float = 1.5,
     use_intraday: bool = False,
+    intraday_limit: int = 30,
 ) -> dict:
     rank_by = rank_by.lower()
     sort_order = sort_order.lower()
@@ -156,6 +192,8 @@ def get_watchlist_group_latest_ranking(
 
     rows: list[dict] = []
 
+    intraday_overlay_attempts = 0
+
     for item in unique_items:
         stock_id = item["stock_id"]
         stock_name = item.get("stock_name")
@@ -174,14 +212,25 @@ def get_watchlist_group_latest_ranking(
             primary_signal = _pick_primary_signal(signals)
 
             status = signal_result.get("status", "unknown")
+            change = signal_result.get("change")
+            close = signal_result.get("close")
+            change_pct = signal_result.get("change_pct")
+            previous_close = _previous_close_from_change(
+                close=close,
+                change=change,
+                change_pct=change_pct,
+            )
             row = {
                 "rank": 0,
                 "stock_id": stock_id,
                 "stock_name": stock_name,
                 "time": signal_result.get("time"),
-                "close": signal_result.get("close"),
+                "close": close,
                 "volume": signal_result.get("volume"),
-                "change_pct": signal_result.get("change_pct"),
+                "change": change,
+                "previous_close": previous_close,
+                "change_pct": change_pct,
+                "limit_status": _limit_status_from_change_pct(change_pct),
                 "score": int(signal_result.get("score", 0) or 0),
                 "status": status,
                 "signal_count": len(signals),
@@ -193,13 +242,17 @@ def get_watchlist_group_latest_ranking(
                 "error_message": None,
             }
 
-            if use_intraday:
+            if use_intraday and intraday_overlay_attempts < intraday_limit:
+                intraday_overlay_attempts += 1
                 overlay = _get_intraday_overlay(db=db, stock_id=stock_id)
 
                 if overlay is not None:
                     row["time"] = overlay["time"]
                     row["close"] = overlay["close"]
+                    row["change"] = overlay["change"]
                     row["change_pct"] = overlay["change_pct"]
+                    row["previous_close"] = overlay["previous_close"]
+                    row["limit_status"] = overlay["limit_status"]
                     row["intraday_previous_close"] = overlay["previous_close"]
                     row["intraday_points"] = overlay["points"]
 
@@ -220,7 +273,10 @@ def get_watchlist_group_latest_ranking(
                     "time": None,
                     "close": None,
                     "volume": None,
+                    "change": None,
+                    "previous_close": None,
                     "change_pct": None,
+                    "limit_status": None,
                     "score": 0,
                     "status": "error",
                     "signal_count": 0,

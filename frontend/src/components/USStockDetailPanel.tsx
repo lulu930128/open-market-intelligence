@@ -7,6 +7,7 @@ import IntradayTrendChart, {
   type IntradayIndicatorSettings,
   type IntradaySessionConfig,
 } from "@/components/IntradayTrendChart";
+import PriceUpdatePulse from "@/components/PriceUpdatePulse";
 import StockKLineChart, {
   defaultIndicatorParameters,
   defaultIndicators,
@@ -443,6 +444,13 @@ function DataCoverageChip({
 function metricBarWidth(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "0%";
   return `${Math.max(0, Math.min(100, Math.abs(value)))}%`;
+}
+
+function metricBarClass(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "bg-slate-300";
+  if (value > 0) return "bg-red-500";
+  if (value < 0) return "bg-emerald-500";
+  return "bg-slate-300";
 }
 
 function safeDivide(
@@ -1565,9 +1573,14 @@ export default function USStockDetailPanel({
             </div>
 
             <div className="text-right">
-              <div className="text-3xl font-black text-slate-950">
+              <PriceUpdatePulse
+                value={latestClose}
+                direction={change}
+                resetKey={`${selectedSymbol ?? "empty"}:${timeframe}`}
+                className="text-3xl font-black text-slate-950"
+              >
                 {formatNumber(latestClose)}
-              </div>
+              </PriceUpdatePulse>
               <div className={`text-sm font-bold ${valueTone(changePct)}`}>
                 {formatNumber(change)} / {formatPct(changePct)}
               </div>
@@ -1741,7 +1754,14 @@ export default function USStockDetailPanel({
               <div className="mt-1 text-sm text-slate-500">均線、量能、價格相對位置</div>
             </div>
             <div className={`text-right text-lg font-black ${valueTone(priceVsMa20)}`}>
-              {formatPct(priceVsMa20)}
+              <PriceUpdatePulse
+                value={priceVsMa20}
+                direction={priceVsMa20}
+                resetKey={`${selectedSymbol ?? "empty"}:technical-ma20`}
+                className="justify-end tabular-nums"
+              >
+                {formatPct(priceVsMa20)}
+              </PriceUpdatePulse>
               <div className="text-xs font-semibold text-slate-500">vs MA20</div>
             </div>
           </div>
@@ -1750,28 +1770,64 @@ export default function USStockDetailPanel({
             <div>
               <div className="mb-1 flex justify-between text-xs text-slate-500">
                 <span>價格相對 MA20</span>
-                <span className={valueTone(priceVsMa20)}>{formatPct(priceVsMa20)}</span>
+                <span className={valueTone(priceVsMa20)}>
+                  <PriceUpdatePulse
+                    value={priceVsMa20}
+                    direction={priceVsMa20}
+                    resetKey={`${selectedSymbol ?? "empty"}:technical-price`}
+                    className="justify-end tabular-nums"
+                  >
+                    {formatPct(priceVsMa20)}
+                  </PriceUpdatePulse>
+                </span>
               </div>
               <div className="h-2 bg-slate-100">
-                <div className="h-2 bg-red-500" style={{ width: metricBarWidth(priceVsMa20) }} />
+                <div
+                  className={`omi-technical-bar h-2 ${metricBarClass(priceVsMa20)}`}
+                  style={{ width: metricBarWidth(priceVsMa20) }}
+                />
               </div>
             </div>
             <div>
               <div className="mb-1 flex justify-between text-xs text-slate-500">
                 <span>量能相對 20 日均量</span>
-                <span className={valueTone(volumeVsMa20)}>{formatPct(volumeVsMa20)}</span>
+                <span className={valueTone(volumeVsMa20)}>
+                  <PriceUpdatePulse
+                    value={volumeVsMa20}
+                    direction={volumeVsMa20}
+                    resetKey={`${selectedSymbol ?? "empty"}:technical-volume`}
+                    className="justify-end tabular-nums"
+                  >
+                    {formatPct(volumeVsMa20)}
+                  </PriceUpdatePulse>
+                </span>
               </div>
               <div className="h-2 bg-slate-100">
-                <div className="h-2 bg-red-500" style={{ width: metricBarWidth(volumeVsMa20) }} />
+                <div
+                  className={`omi-technical-bar h-2 ${metricBarClass(volumeVsMa20)}`}
+                  style={{ width: metricBarWidth(volumeVsMa20) }}
+                />
               </div>
             </div>
             <div>
               <div className="mb-1 flex justify-between text-xs text-slate-500">
                 <span>日漲跌幅</span>
-                <span className={valueTone(changePct)}>{formatPct(changePct)}</span>
+                <span className={valueTone(changePct)}>
+                  <PriceUpdatePulse
+                    value={changePct}
+                    direction={changePct}
+                    resetKey={`${selectedSymbol ?? "empty"}:technical-change`}
+                    className="justify-end tabular-nums"
+                  >
+                    {formatPct(changePct)}
+                  </PriceUpdatePulse>
+                </span>
               </div>
               <div className="h-2 bg-slate-100">
-                <div className="h-2 bg-red-500" style={{ width: metricBarWidth(changePct) }} />
+                <div
+                  className={`omi-technical-bar h-2 ${metricBarClass(changePct)}`}
+                  style={{ width: metricBarWidth(changePct) }}
+                />
               </div>
             </div>
           </div>

@@ -1,4 +1,6 @@
+from copy import deepcopy
 from datetime import datetime, time, timedelta, timezone
+import time as monotonic_time
 
 import requests
 from sqlalchemy.orm import Session
@@ -10,6 +12,26 @@ YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 NSTOCK_MINUTE_URL = "https://shop.nstock.tw/api/v2/minute-stock-data/data"
 TWSE_MIS_STOCK_INFO_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 TAIPEI_TZ = timezone(timedelta(hours=8))
+INTRADAY_CACHE_TTL_SECONDS = 4.75
+_INTRADAY_CACHE: dict[str, tuple[float, dict]] = {}
+
+
+def _cache_get(cache_key: str) -> dict | None:
+    cached = _INTRADAY_CACHE.get(cache_key)
+    if cached is None:
+        return None
+
+    cached_at, payload = cached
+    if monotonic_time.monotonic() - cached_at > INTRADAY_CACHE_TTL_SECONDS:
+        _INTRADAY_CACHE.pop(cache_key, None)
+        return None
+
+    return deepcopy(payload)
+
+
+def _cache_set(cache_key: str, payload: dict) -> dict:
+    _INTRADAY_CACHE[cache_key] = (monotonic_time.monotonic(), deepcopy(payload))
+    return payload
 
 
 def _as_float(value) -> float | None:
@@ -489,6 +511,11 @@ def _fetch_mis_snapshot(stock_id: str, market: str | None) -> dict:
 def get_intraday_trend(db: Session, stock_id: str) -> dict:
     stock = _get_stock(db=db, stock_id=stock_id)
     market = stock.market.upper() if stock else None
+    cache_key = f"{market or 'UNKNOWN'}:{stock_id}"
+    cached = _cache_get(cache_key)
+
+    if cached is not None:
+        return cached
 
     try:
         nstock_result = _fetch_nstock_intraday(stock_id=stock_id)
@@ -498,7 +525,7 @@ def get_intraday_trend(db: Session, stock_id: str) -> dict:
                 message = _fetch_mis_message(stock_id=stock_id, market=market)
             except Exception:
                 message = None
-            return _apply_mis_volume_adjustment(nstock_result, message)
+            return _cache_set(cache_key, _apply_mis_volume_adjustment(nstock_result, message))
     except Exception:
         pass
 
@@ -510,18 +537,18 @@ def get_intraday_trend(db: Session, stock_id: str) -> dict:
                 message = _fetch_mis_message(stock_id=stock_id, market=market)
             except Exception:
                 message = None
-            return _apply_mis_volume_adjustment(yahoo_result, message)
+            return _cache_set(cache_key, _apply_mis_volume_adjustment(yahoo_result, message))
     except Exception:
         pass
 
     try:
-        return _fetch_mis_snapshot(stock_id=stock_id, market=market)
+        return _cache_set(cache_key, _fetch_mis_snapshot(stock_id=stock_id, market=market))
     except Exception:
-        return {
+        return _cache_set(cache_key, {
             "stock_id": stock_id,
             "symbol": _yahoo_symbol(stock_id=stock_id, market=market),
             "source": "unavailable",
             "previous_close": None,
             "point_count": 0,
             "points": [],
-        }
+        })

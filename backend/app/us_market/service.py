@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Callable
+from copy import deepcopy
 from datetime import date, timedelta
 import time
 
@@ -90,6 +91,8 @@ class USWatchlistDuplicateItemError(Exception):
 
 
 ProgressCallback = Callable[[int | None, int | None, str | None], None]
+US_INTRADAY_CACHE_TTL_SECONDS = 4.75
+_US_INTRADAY_CACHE: dict[str, tuple[float, dict]] = {}
 US_CHART_LOOKBACK_MULTIPLIER = {
     "daily": 2,
     "weekly": 8,
@@ -138,6 +141,28 @@ SEC_FUNDAMENTAL_METRIC_TAGS = OrderedDict(
         ("shares_outstanding", ("EntityCommonStockSharesOutstanding",)),
     ]
 )
+
+
+def _valid_number(value) -> bool:
+    return isinstance(value, (int, float)) and value == value
+
+
+def _get_us_intraday_cache(cache_key: str) -> dict | None:
+    cached = _US_INTRADAY_CACHE.get(cache_key)
+    if cached is None:
+        return None
+
+    cached_at, payload = cached
+    if time.monotonic() - cached_at > US_INTRADAY_CACHE_TTL_SECONDS:
+        _US_INTRADAY_CACHE.pop(cache_key, None)
+        return None
+
+    return deepcopy(payload)
+
+
+def _set_us_intraday_cache(cache_key: str, payload: dict) -> dict:
+    _US_INTRADAY_CACHE[cache_key] = (time.monotonic(), deepcopy(payload))
+    return payload
 
 
 def _clean_setting(value: str | None) -> str:
@@ -805,6 +830,11 @@ def list_us_ohlc_chart_data(
 
 def get_us_intraday_trend(*, symbol: str) -> dict:
     normalized_symbol = normalize_us_symbol(symbol)
+    cache_key = f"US:{normalized_symbol}"
+    cached = _get_us_intraday_cache(cache_key)
+
+    if cached is not None:
+        return cached
 
     try:
         payload, source_url = fetch_yahoo_chart_payload(
@@ -813,20 +843,26 @@ def get_us_intraday_trend(*, symbol: str) -> dict:
             interval="1m",
             timeout_seconds=settings.us_market_http_timeout_seconds,
         )
-        return parse_yahoo_intraday_prices(
-            payload,
-            symbol=normalized_symbol,
-            source_url=source_url,
+        return _set_us_intraday_cache(
+            cache_key,
+            parse_yahoo_intraday_prices(
+                payload,
+                symbol=normalized_symbol,
+                source_url=source_url,
+            ),
         )
     except Exception:
-        return {
-            "stock_id": normalized_symbol,
-            "symbol": normalized_symbol,
-            "source": "unavailable",
-            "previous_close": None,
-            "point_count": 0,
-            "points": [],
-        }
+        return _set_us_intraday_cache(
+            cache_key,
+            {
+                "stock_id": normalized_symbol,
+                "symbol": normalized_symbol,
+                "source": "unavailable",
+                "previous_close": None,
+                "point_count": 0,
+                "points": [],
+            },
+        )
 
 
 def _resolve_cik_for_symbol(db: Session, symbol: str) -> str:
@@ -2005,6 +2041,79 @@ def _latest_distinct_us_daily_rows(
     return selected_rows
 
 
+def _sum_us_intraday_volume(points: list[dict]) -> int | None:
+    volumes = [
+        int(point["volume"])
+        for point in points
+        if _valid_number(point.get("volume")) and int(point["volume"]) > 0
+    ]
+
+    if not volumes:
+        return None
+
+    return sum(volumes)
+
+
+def _compact_us_intraday_points(points: list[dict], max_points: int = 72) -> list[dict]:
+    valid_points = [
+        {
+            "time": point.get("time"),
+            "price": float(point["price"]),
+        }
+        for point in points
+        if point.get("time") and _valid_number(point.get("price"))
+    ]
+
+    if len(valid_points) <= max_points:
+        return valid_points
+
+    last_index = len(valid_points) - 1
+    indexes = {
+        round(index * last_index / (max_points - 1))
+        for index in range(max_points)
+    }
+
+    return [valid_points[index] for index in sorted(indexes)]
+
+
+def _get_us_intraday_overlay(symbol: str) -> dict | None:
+    intraday = get_us_intraday_trend(symbol=symbol)
+    points = intraday.get("points") or []
+
+    if not points:
+        return None
+
+    latest = points[-1]
+    latest_price = latest.get("price")
+    previous_close = intraday.get("previous_close")
+
+    if not _valid_number(latest_price):
+        return None
+
+    change = None
+    change_pct = None
+
+    if _valid_number(previous_close) and previous_close != 0:
+        change = float(latest_price) - float(previous_close)
+        change_pct = (change / float(previous_close)) * 100
+
+    volume = _sum_us_intraday_volume(points)
+
+    if volume is None and _valid_number(latest.get("volume")):
+        volume = int(latest["volume"])
+
+    return {
+        "time": latest.get("time"),
+        "close": float(latest_price),
+        "previous_close": float(previous_close) if _valid_number(previous_close) else None,
+        "change": change,
+        "change_pct": change_pct,
+        "volume": volume,
+        "source": intraday.get("source"),
+        "points": _compact_us_intraday_points(points),
+    }
+
+
 def get_us_watchlist_ranking(
     db: Session,
     *,
@@ -2013,6 +2122,8 @@ def get_us_watchlist_ranking(
     enabled_only: bool = True,
     rank_by: str = "none",
     sort_order: str = "asc",
+    use_intraday: bool = False,
+    intraday_limit: int = 30,
 ) -> dict:
     if rank_by not in {"none", "change_pct", "volume", "close"}:
         raise ValueError("rank_by must be one of: none, change_pct, volume, close.")
@@ -2060,6 +2171,7 @@ def get_us_watchlist_ranking(
         .all()
     } if symbols else {}
     rows: list[dict] = []
+    intraday_overlay_attempts = 0
 
     for item in unique_items:
         symbol = normalize_us_symbol(item.symbol)
@@ -2080,28 +2192,51 @@ def get_us_watchlist_ranking(
             else None
         )
 
-        rows.append(
-            {
-                "rank": 0,
-                "symbol": symbol,
-                "security_name": (
-                    stock.security_name
-                    if stock is not None
-                    else None
-                ),
-                "exchange": stock.exchange if stock is not None else None,
-                "asset_type": stock.asset_type if stock is not None else None,
-                "group_id": item.group_id,
-                "trade_date": latest.trade_date if latest is not None else None,
-                "close": close,
-                "previous_close": previous_close,
-                "change": change,
-                "change_pct": change_pct,
-                "volume": latest.trade_volume if latest is not None else None,
-                "status": "ready" if close is not None else "no_data",
-                "error_message": None,
-            }
-        )
+        row = {
+            "rank": 0,
+            "symbol": symbol,
+            "security_name": (
+                stock.security_name
+                if stock is not None
+                else None
+            ),
+            "exchange": stock.exchange if stock is not None else None,
+            "asset_type": stock.asset_type if stock is not None else None,
+            "group_id": item.group_id,
+            "trade_date": latest.trade_date if latest is not None else None,
+            "time": None,
+            "close": close,
+            "previous_close": previous_close,
+            "change": change,
+            "change_pct": change_pct,
+            "volume": latest.trade_volume if latest is not None else None,
+            "status": "ready" if close is not None else "no_data",
+            "source": None,
+            "intraday_previous_close": None,
+            "intraday_points": [],
+            "error_message": None,
+        }
+
+        if use_intraday and intraday_overlay_attempts < intraday_limit:
+            intraday_overlay_attempts += 1
+            overlay = _get_us_intraday_overlay(symbol=symbol)
+
+            if overlay is not None:
+                row["time"] = overlay["time"]
+                row["close"] = overlay["close"]
+                row["previous_close"] = overlay["previous_close"]
+                row["change"] = overlay["change"]
+                row["change_pct"] = overlay["change_pct"]
+                row["source"] = overlay["source"]
+                row["intraday_previous_close"] = overlay["previous_close"]
+                row["intraday_points"] = overlay["points"]
+
+                if overlay["volume"] is not None:
+                    row["volume"] = overlay["volume"]
+
+                row["status"] = "intraday"
+
+        rows.append(row)
 
     if rank_by != "none":
         ranked_rows = [

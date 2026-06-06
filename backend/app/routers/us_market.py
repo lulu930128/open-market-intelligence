@@ -303,6 +303,8 @@ def get_us_watchlist_ranking_api(
     enabled_only: bool = True,
     rank_by: str = Query(default="none", pattern="^(none|change_pct|volume|close)$"),
     sort_order: str = Query(default="asc", pattern="^(asc|desc)$"),
+    use_intraday: bool = False,
+    intraday_limit: int = Query(default=30, ge=1, le=100),
     db: Session = Depends(get_db),
 ):
     try:
@@ -313,6 +315,8 @@ def get_us_watchlist_ranking_api(
             enabled_only=enabled_only,
             rank_by=rank_by,
             sort_order=sort_order,
+            use_intraday=use_intraday,
+            intraday_limit=intraday_limit,
         )
     except ValueError as exc:
         raise HTTPException(

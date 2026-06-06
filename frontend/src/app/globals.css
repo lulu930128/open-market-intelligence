@@ -30,6 +30,220 @@ select {
   box-sizing: border-box;
 }
 
+.omi-price-pulse {
+  position: relative;
+  transform-origin: center;
+  will-change: transform;
+}
+
+.omi-price-pulse::after {
+  content: "";
+  position: absolute;
+  inset: -5px;
+  border-radius: inherit;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.omi-price-pulse-up {
+  animation: omi-price-nudge-up 760ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.omi-price-pulse-down {
+  animation: omi-price-nudge-down 760ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.omi-price-pulse-neutral {
+  animation: omi-price-nudge-neutral 680ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.omi-price-pulse-up::after {
+  animation: omi-price-flash-up 760ms ease-out;
+}
+
+.omi-price-pulse-down::after {
+  animation: omi-price-flash-down 760ms ease-out;
+}
+
+.omi-price-pulse-neutral::after {
+  animation: omi-price-flash-neutral 680ms ease-out;
+}
+
+.omi-live-point-ring {
+  fill: none;
+  stroke-width: 2;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: omi-live-point-ring 980ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.omi-live-point-core {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: omi-live-point-core 980ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.omi-live-sparkline-point .omi-live-point-ring {
+  stroke-width: 1.4;
+}
+
+.omi-live-sparkline-point .omi-live-point-core {
+  animation-duration: 860ms;
+}
+
+.omi-technical-bar {
+  transform-origin: left center;
+  transition:
+    width 560ms cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 220ms ease;
+  will-change: width;
+}
+
+@keyframes omi-price-nudge-up {
+  0% {
+    transform: translateY(0) scale(1);
+  }
+  22% {
+    transform: translateY(-3px) scale(1.04);
+  }
+  55% {
+    transform: translateY(1px) scale(0.995);
+  }
+  100% {
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes omi-price-nudge-down {
+  0% {
+    transform: translateY(0) scale(1);
+  }
+  22% {
+    transform: translateY(3px) scale(1.035);
+  }
+  55% {
+    transform: translateY(-1px) scale(0.995);
+  }
+  100% {
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes omi-price-nudge-neutral {
+  0% {
+    transform: scale(1);
+  }
+  24% {
+    transform: scale(1.025);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes omi-price-flash-up {
+  0% {
+    opacity: 0;
+    box-shadow: 0 0 0 0 rgb(239 68 68 / 0);
+  }
+  18% {
+    opacity: 1;
+    background: rgb(239 68 68 / 0.16);
+    box-shadow:
+      0 0 0 3px rgb(239 68 68 / 0.22),
+      0 10px 22px rgb(239 68 68 / 0.16);
+  }
+  100% {
+    opacity: 0;
+    box-shadow: 0 0 0 10px rgb(239 68 68 / 0);
+  }
+}
+
+@keyframes omi-price-flash-down {
+  0% {
+    opacity: 0;
+    box-shadow: 0 0 0 0 rgb(16 185 129 / 0);
+  }
+  18% {
+    opacity: 1;
+    background: rgb(16 185 129 / 0.16);
+    box-shadow:
+      0 0 0 3px rgb(16 185 129 / 0.22),
+      0 10px 22px rgb(16 185 129 / 0.14);
+  }
+  100% {
+    opacity: 0;
+    box-shadow: 0 0 0 10px rgb(16 185 129 / 0);
+  }
+}
+
+@keyframes omi-price-flash-neutral {
+  0% {
+    opacity: 0;
+    box-shadow: 0 0 0 0 rgb(100 116 139 / 0);
+  }
+  22% {
+    opacity: 1;
+    background: rgb(100 116 139 / 0.12);
+    box-shadow: 0 0 0 3px rgb(100 116 139 / 0.18);
+  }
+  100% {
+    opacity: 0;
+    box-shadow: 0 0 0 8px rgb(100 116 139 / 0);
+  }
+}
+
+@keyframes omi-live-point-ring {
+  0% {
+    opacity: 0.78;
+    transform: scale(0.55);
+  }
+  58% {
+    opacity: 0.18;
+    transform: scale(1.9);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(2.2);
+  }
+}
+
+@keyframes omi-live-point-core {
+  0% {
+    transform: scale(0.82);
+  }
+  28% {
+    transform: scale(1.22);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .omi-price-pulse-up,
+  .omi-price-pulse-down,
+  .omi-price-pulse-neutral {
+    animation: none;
+  }
+
+  .omi-live-point-ring,
+  .omi-live-point-core {
+    animation: none;
+  }
+
+  .omi-technical-bar {
+    transition: none;
+  }
+
+  .omi-price-pulse-up::after,
+  .omi-price-pulse-down::after,
+  .omi-price-pulse-neutral::after {
+    animation-duration: 180ms;
+  }
+}
+
 ::-webkit-scrollbar {
   height: 10px;
   width: 10px;

@@ -3,7 +3,6 @@
 import {
   type PointerEvent,
   useEffect,
-  useId,
   useMemo,
   useRef,
   useState,
@@ -141,6 +140,11 @@ type ChartDragState = {
   startVisibleStart: number;
 };
 
+type HoverPriceGuideState = {
+  y: number;
+  snap: "high" | "low" | null;
+};
+
 export const indicatorOptions: Array<{ key: IndicatorKey; label: string; description: string }> = [
   { key: "signals", label: "SIGNAL", description: "交叉 / 突破標記" },
   { key: "ma", label: "MA", description: "MA5 / MA20 / MA60" },
@@ -216,6 +220,7 @@ export const defaultIndicatorParameters: IndicatorParameters = {
 
 const DEFAULT_VISIBLE_BARS = 80;
 const MIN_VISIBLE_BARS = 20;
+const PRICE_GUIDE_SNAP_DISTANCE = 10;
 
 function formatPrice(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
@@ -1111,6 +1116,7 @@ export default function StockKLineChart({
   volumeValueFormatter = formatLots,
 }: Props) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const [hoverPriceGuide, setHoverPriceGuide] = useState<HoverPriceGuideState | null>(null);
   const [visibleRange, setVisibleRange] = useState<VisibleRangeState>({
     start: 0,
     count: DEFAULT_VISIBLE_BARS,
@@ -1120,7 +1126,7 @@ export default function StockKLineChart({
   const [activeRevealKey, setActiveRevealKey] = useState<string | null>(null);
   const chartDragRef = useRef<ChartDragState | null>(null);
   const chartWheelAreaRef = useRef<SVGRectElement | null>(null);
-  const revealId = useId().replace(/[^a-zA-Z0-9_-]/g, "");
+  const revealCoverRef = useRef<HTMLDivElement | null>(null);
   const params = useMemo(
     () => ({
       ...defaultIndicatorParameters,
@@ -1265,6 +1271,7 @@ export default function StockKLineChart({
     );
 
     setHoverIndex(null);
+    setHoverPriceGuide(null);
     setVisibleRange({
       start: nextStart,
       count,
@@ -1277,6 +1284,7 @@ export default function StockKLineChart({
     const nextStart = Math.round(clamp(visibleStart + delta, 0, maxVisibleStart));
 
     setHoverIndex(null);
+    setHoverPriceGuide(null);
     setVisibleRange({
       start: nextStart,
       count: visibleBarCount,
@@ -1287,6 +1295,7 @@ export default function StockKLineChart({
 
   function jumpToLatest() {
     setHoverIndex(null);
+    setHoverPriceGuide(null);
     setVisibleRange({
       start: maxVisibleStart,
       count: visibleBarCount,
@@ -1297,6 +1306,7 @@ export default function StockKLineChart({
 
   function showAllBars() {
     setHoverIndex(null);
+    setHoverPriceGuide(null);
     setVisibleRange({
       start: 0,
       count: maxVisibleBars,
@@ -1323,12 +1333,45 @@ export default function StockKLineChart({
           return current === stableRevealKey ? current : null;
         }
 
+        playedKLineRevealKeys.add(stableRevealKey);
         return stableRevealKey;
       });
     }, 0);
 
     return () => window.clearTimeout(timeoutId);
   }, [dataReadyForReveal, stableRevealKey]);
+
+  useEffect(() => {
+    if (activeRevealKey === null) return;
+
+    const revealCover = revealCoverRef.current;
+    if (revealCover === null) return;
+
+    const durationMs = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 1 : 1440;
+    const clearRevealCover = () => {
+      setActiveRevealKey((current) => (current === activeRevealKey ? null : current));
+    };
+    const animation = revealCover.animate(
+      [
+        { opacity: 1, transform: "translateX(0)" },
+        { opacity: 0, transform: "translateX(100%)" },
+      ],
+      {
+        duration: durationMs,
+        easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+        fill: "forwards",
+      }
+    );
+    const timeoutId = window.setTimeout(clearRevealCover, durationMs + 250);
+
+    animation.addEventListener("finish", clearRevealCover, { once: true });
+
+    return () => {
+      animation.removeEventListener("finish", clearRevealCover);
+      animation.cancel();
+      window.clearTimeout(timeoutId);
+    };
+  }, [activeRevealKey]);
 
   useEffect(() => {
     const target = chartWheelAreaRef.current;
@@ -1379,7 +1422,7 @@ export default function StockKLineChart({
   }
 
   const width = 1000;
-  const paddingLeft = 58;
+  const paddingLeft = 84;
   const paddingRight = 28;
   const chartTop = 28;
   const priceHeight = 260;
@@ -1519,12 +1562,58 @@ export default function StockKLineChart({
     return clamp((clientX - rect.left) / rect.width, 0, 1);
   }
 
-  function updateHoverIndexFromClientX(target: SVGRectElement, clientX: number) {
+  function getPlotClientY(target: SVGRectElement, clientY: number) {
+    const rect = target.getBoundingClientRect();
+    const ratio = clamp((clientY - rect.top) / rect.height, 0, 1);
+
+    return chartTop + ratio * (plotBottom - chartTop);
+  }
+
+  function updateHoverFromClientPoint(target: SVGRectElement, clientX: number, clientY: number) {
     const ratio = getPlotClientXRatio(target, clientX);
     const localX = paddingLeft + ratio * usableWidth;
     const dataRatio = (localX - paddingLeft) / usableWidth;
     const index = Math.round(dataRatio * (visibleData.length - 1));
-    setHoverIndex(clamp(index, 0, visibleData.length - 1));
+    const safeIndex = clamp(index, 0, visibleData.length - 1);
+    const pointerY = getPlotClientY(target, clientY);
+
+    setHoverIndex(safeIndex);
+
+    if (pointerY < chartTop || pointerY > priceBottom) {
+      setHoverPriceGuide(null);
+      return;
+    }
+
+    const point = visibleData[safeIndex];
+    const open = point?.open ?? point?.close;
+    const close = point?.close ?? point?.open;
+    const high =
+      point?.high ??
+      (validNumber(open) && validNumber(close) ? Math.max(open, close) : null);
+    const low =
+      point?.low ??
+      (validNumber(open) && validNumber(close) ? Math.min(open, close) : null);
+    const candidates = [
+      validNumber(high)
+        ? { snap: "high" as const, y: getPriceY(high), distance: Math.abs(pointerY - getPriceY(high)) }
+        : null,
+      validNumber(low)
+        ? { snap: "low" as const, y: getPriceY(low), distance: Math.abs(pointerY - getPriceY(low)) }
+        : null,
+    ].filter((candidate): candidate is { snap: "high" | "low"; y: number; distance: number } =>
+      candidate !== null
+    );
+    const nearest = candidates.reduce<(typeof candidates)[number] | null>(
+      (best, candidate) =>
+        best === null || candidate.distance < best.distance ? candidate : best,
+      null
+    );
+
+    setHoverPriceGuide(
+      nearest !== null && nearest.distance <= PRICE_GUIDE_SNAP_DISTANCE
+        ? { y: nearest.y, snap: nearest.snap }
+        : { y: clamp(pointerY, chartTop, priceBottom), snap: null }
+    );
   }
 
   function handlePointerDown(event: PointerEvent<SVGRectElement>) {
@@ -1537,6 +1626,7 @@ export default function StockKLineChart({
     };
 
     setHoverIndex(null);
+    setHoverPriceGuide(null);
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
   }
@@ -1545,7 +1635,7 @@ export default function StockKLineChart({
     const current = chartDragRef.current;
 
     if (current === null || current.pointerId !== event.pointerId) {
-      updateHoverIndexFromClientX(event.currentTarget, event.clientX);
+      updateHoverFromClientPoint(event.currentTarget, event.clientX, event.clientY);
       return;
     }
 
@@ -1559,6 +1649,7 @@ export default function StockKLineChart({
     );
 
     setHoverIndex(null);
+    setHoverPriceGuide(null);
     setVisibleRange({
       start: nextStart,
       count: visibleBarCount,
@@ -1599,8 +1690,36 @@ export default function StockKLineChart({
     getPriceY
   );
   const hoverX = safeHoverIndex !== null ? getX(safeHoverIndex) : null;
-  const revealCoverClass = `k-line-reveal-cover-${revealId}`;
-  const revealAnimationName = `k-line-reveal-${revealId}`;
+  const hoverPriceGuideY =
+    safeHoverIndex !== null && hoverPriceGuide !== null
+      ? clamp(hoverPriceGuide.y, chartTop, priceBottom)
+      : null;
+  const hoverPriceGuideSnap =
+    safeHoverIndex !== null && hoverPriceGuide !== null ? hoverPriceGuide.snap : null;
+  const hoverPriceGuideValue =
+    hoverPriceGuideY !== null
+      ? yMax - ((hoverPriceGuideY - chartTop) / priceHeight) * yRange
+      : null;
+  const hoverPriceGuideLabel =
+    hoverPriceGuideValue !== null
+      ? hoverPriceGuideSnap === "high"
+        ? `高 ${formatPrice(hoverPriceGuideValue)}`
+        : hoverPriceGuideSnap === "low"
+          ? `低 ${formatPrice(hoverPriceGuideValue)}`
+          : formatPrice(hoverPriceGuideValue)
+      : null;
+  const hoverPriceGuideStrokeClass =
+    hoverPriceGuideSnap === "high"
+      ? "stroke-red-500"
+      : hoverPriceGuideSnap === "low"
+        ? "stroke-emerald-500"
+        : "stroke-slate-500";
+  const hoverPriceGuideFillClass =
+    hoverPriceGuideSnap === "high"
+      ? "fill-red-700"
+      : hoverPriceGuideSnap === "low"
+        ? "fill-emerald-700"
+        : "fill-slate-800";
   const shouldShowRevealCover = activeRevealKey === stableRevealKey;
 
   return (
@@ -1842,6 +1961,7 @@ export default function StockKLineChart({
                 const nextStart = Number(event.target.value);
 
                 setHoverIndex(null);
+                setHoverPriceGuide(null);
                 setVisibleRange({
                   start: nextStart,
                   count: visibleBarCount,
@@ -1855,38 +1975,8 @@ export default function StockKLineChart({
         </div>
       </div>
 
-      <svg viewBox={`0 0 ${width} ${height}`} className="w-full" style={{ height }}>
-        <defs>
-          <style>
-            {`
-              @keyframes ${revealAnimationName} {
-                0% {
-                  opacity: 1;
-                  transform: translateX(0);
-                }
-                92% {
-                  opacity: 1;
-                }
-                100% {
-                  opacity: 0;
-                  transform: translateX(${width}px);
-                }
-              }
-
-              .${revealCoverClass} {
-                animation: ${revealAnimationName} 1300ms cubic-bezier(0.22, 1, 0.36, 1) both;
-                pointer-events: none;
-                transform-box: fill-box;
-              }
-
-              @media (prefers-reduced-motion: reduce) {
-                .${revealCoverClass} {
-                  animation-duration: 1ms;
-                }
-              }
-            `}
-          </style>
-        </defs>
+      <div className="relative overflow-hidden">
+        <svg viewBox={`0 0 ${width} ${height}`} className="w-full" style={{ height }}>
         <rect x="0" y="0" width={width} height={height} className="fill-white" />
 
         {[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
@@ -1906,7 +1996,7 @@ export default function StockKLineChart({
                 x={paddingLeft - 10}
                 y={y + 4}
                 textAnchor="end"
-                className="fill-slate-500 text-[11px]"
+                className="fill-slate-600 text-[12px] font-medium"
               >
                 {formatPrice(price)}
               </text>
@@ -2580,14 +2670,44 @@ export default function StockKLineChart({
         })}
 
         {hoverX !== null ? (
-          <line
-            x1={hoverX}
-            x2={hoverX}
-            y1={chartTop}
-            y2={plotBottom}
-            className="stroke-slate-400"
-            strokeDasharray="4 4"
-          />
+          <g pointerEvents="none">
+            <line
+              x1={hoverX}
+              x2={hoverX}
+              y1={chartTop}
+              y2={plotBottom}
+              className="stroke-slate-400"
+              strokeDasharray="4 4"
+            />
+            {hoverPriceGuideY !== null && hoverPriceGuideLabel !== null ? (
+              <>
+                <line
+                  x1={paddingLeft}
+                  x2={width - paddingRight}
+                  y1={hoverPriceGuideY}
+                  y2={hoverPriceGuideY}
+                  className={hoverPriceGuideStrokeClass}
+                  strokeDasharray="4 4"
+                />
+                <rect
+                  x={4}
+                  y={clamp(hoverPriceGuideY - 12, chartTop + 2, priceBottom - 24)}
+                  width={paddingLeft - 10}
+                  height={24}
+                  rx={3}
+                  className={hoverPriceGuideFillClass}
+                />
+                <text
+                  x={paddingLeft - 14}
+                  y={clamp(hoverPriceGuideY + 4, chartTop + 18, priceBottom - 8)}
+                  textAnchor="end"
+                  className="fill-white text-[12px] font-semibold tabular-nums"
+                >
+                  {hoverPriceGuideLabel}
+                </text>
+              </>
+            ) : null}
+          </g>
         ) : null}
 
         <text x={paddingLeft} y={labelY} textAnchor="start" className="fill-slate-500 text-[11px]">
@@ -2665,22 +2785,6 @@ export default function StockKLineChart({
           ) : null}
         </g>
 
-        {shouldShowRevealCover ? (
-          <g
-            key={activeRevealKey}
-            className={revealCoverClass}
-            aria-hidden="true"
-            onAnimationStart={() => {
-              playedKLineRevealKeys.add(stableRevealKey);
-            }}
-            onAnimationEnd={() => {
-              setActiveRevealKey((current) => (current === stableRevealKey ? null : current));
-            }}
-          >
-            <rect x="0" y="0" width={width} height={height} className="fill-white" />
-          </g>
-        ) : null}
-
         <rect
           ref={chartWheelAreaRef}
           x={paddingLeft}
@@ -2698,6 +2802,7 @@ export default function StockKLineChart({
 
             if (current === null || current.pointerId !== event.pointerId) {
               setHoverIndex(null);
+              setHoverPriceGuide(null);
             }
           }}
           onContextMenu={(event) => {
@@ -2709,7 +2814,19 @@ export default function StockKLineChart({
             touchAction: "pan-y",
           }}
         />
-      </svg>
+        </svg>
+        {shouldShowRevealCover ? (
+          <div
+            ref={revealCoverRef}
+            key={activeRevealKey}
+            className="pointer-events-none absolute inset-0 z-10 bg-white"
+            aria-hidden="true"
+            style={{
+              willChange: "opacity, transform",
+            }}
+          />
+        ) : null}
+      </div>
     </div>
   );
 }

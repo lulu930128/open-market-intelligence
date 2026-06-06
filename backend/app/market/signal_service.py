@@ -116,6 +116,7 @@ def calculate_latest_stock_signals(
             "time": None,
             "close": None,
             "volume": None,
+            "change": None,
             "change_pct": None,
             "score": 0,
             "status": "no_data",
@@ -127,6 +128,7 @@ def calculate_latest_stock_signals(
 
     close = _num(latest.get("close"))
     volume = _num(latest.get("volume"))
+    change = _num(latest.get("change"))
     change_pct = _num(latest.get("change_pct"))
 
     ma = latest.get("ma") or {}
@@ -165,6 +167,7 @@ def calculate_latest_stock_signals(
             "time": latest.get("time"),
             "close": None,
             "volume": int(volume) if volume is not None else None,
+            "change": change,
             "change_pct": change_pct,
             "score": 0,
             "status": "no_data",
@@ -609,6 +612,7 @@ def calculate_latest_stock_signals(
         "time": latest.get("time"),
         "close": close,
         "volume": int(volume) if volume is not None else None,
+        "change": change,
         "change_pct": change_pct,
         "score": score,
         "status": _score_to_status(score),

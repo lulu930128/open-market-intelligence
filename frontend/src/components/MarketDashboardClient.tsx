@@ -2,6 +2,7 @@
 
 import SidebarWatchlistExplorer from "@/components/SidebarWatchlistExplorer";
 import type { MarketRegion } from "@/components/SidebarWatchlistExplorer";
+import PriceUpdatePulse from "@/components/PriceUpdatePulse";
 import StockDetailPanel from "@/components/StockDetailPanel";
 import USStockDetailPanel from "@/components/USStockDetailPanel";
 import USWatchlistSidebar from "@/components/USWatchlistSidebar";
@@ -13,6 +14,12 @@ import {
   getTaiwanMarketRefreshState,
   isTaiwanRegularSessionPoint,
 } from "@/lib/taiwanMarketTime";
+import {
+  US_INTRADAY_REFRESH_MS,
+  getUsIntradayXRatio,
+  getUsMarketRefreshState,
+  isUsRegularSessionPoint,
+} from "@/lib/usMarketTime";
 import type {
   ChartPoint,
   MarketIndexSnapshot,
@@ -32,6 +39,7 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 type LoadState = "idle" | "loading" | "success" | "error";
 type RankBy = "none" | "change_pct" | "score" | "volume";
 type USRankBy = "none" | "change_pct" | "volume" | "close";
+const WATCHLIST_INTRADAY_LIMIT = 30;
 type RankingDisplayRow = {
   key: string;
   rank: number;
@@ -40,10 +48,12 @@ type RankingDisplayRow = {
   meta: string | null;
   visual: ReactNode;
   close: string;
+  closeValue: number | null | undefined;
   change: string;
   changePct: number | null | undefined;
   trend: string;
   volume: string;
+  volumeValue: number | null | undefined;
   selected: boolean;
   onSelect: () => void;
 };
@@ -115,6 +125,7 @@ function valueTone(value: number | null | undefined) {
 
 function statusLabel(status: string) {
   if (status === "pending") return "-";
+  if (status === "intraday") return "盤中";
   if (status.includes("bullish")) return "偏多";
   if (status.includes("bearish")) return "偏空";
   if (status === "no_data") return "無資料";
@@ -130,20 +141,36 @@ function rankLabel(rankBy: string) {
   return "Score";
 }
 
-function trendLabel(value: number | null | undefined) {
+function trendLabel(
+  value: number | null | undefined,
+  limitStatus?: RankingItem["limit_status"]
+) {
+  if (limitStatus === "limit_up") return "漲停";
+  if (limitStatus === "limit_down") return "跌停";
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
   if (value > 0) return "上漲";
   if (value < 0) return "下跌";
   return "持平";
 }
 
-function trendClass(value: number | null | undefined) {
+function trendClass(
+  value: number | null | undefined,
+  limitStatus?: RankingItem["limit_status"]
+) {
+  if (limitStatus === "limit_up") return "bg-red-600 text-white shadow-sm";
+  if (limitStatus === "limit_down") return "bg-emerald-600 text-white shadow-sm";
   if (value === null || value === undefined || Number.isNaN(value)) {
     return "bg-slate-100 text-slate-600";
   }
   if (value > 0) return "bg-red-50 text-red-700";
   if (value < 0) return "bg-emerald-50 text-emerald-700";
   return "bg-slate-100 text-slate-600";
+}
+
+function selectedTrendClass(limitStatus?: RankingItem["limit_status"]) {
+  if (limitStatus === "limit_up") return "bg-red-500 text-white";
+  if (limitStatus === "limit_down") return "bg-emerald-500 text-white";
+  return "bg-white text-slate-900";
 }
 
 function sparklineTone(
@@ -204,7 +231,8 @@ function formatDashboardTime(value: Date) {
 
 function buildSparklinePath(
   points: Array<{ time: string; price: number }>,
-  previousClose: number | null
+  previousClose: number | null,
+  getXRatio: (value: string | Date) => number = getTaiwanIntradayXRatio
 ) {
   const width = 92;
   const height = 28;
@@ -224,7 +252,7 @@ function buildSparklinePath(
   const yRange = yMax - yMin || 1;
   const path = points
     .map((point, index) => {
-      const x = paddingX + getTaiwanIntradayXRatio(point.time) * usableWidth;
+      const x = paddingX + getXRatio(point.time) * usableWidth;
       const y = paddingY + ((yMax - point.price) / yRange) * usableHeight;
 
       return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
@@ -234,8 +262,38 @@ function buildSparklinePath(
     previousClose === null
       ? null
       : paddingY + ((yMax - previousClose) / yRange) * usableHeight;
+  const latestPoint = points[points.length - 1];
+  const latestPointX = paddingX + getXRatio(latestPoint.time) * usableWidth;
+  const latestPointY = paddingY + ((yMax - latestPoint.price) / yRange) * usableHeight;
 
-  return { path, previousCloseY, width, height };
+  return { path, previousCloseY, latestPointX, latestPointY, width, height };
+}
+
+function sparklinePointTone(
+  latestPrice: number | null,
+  previousClose: number | null,
+  selected: boolean
+) {
+  if (latestPrice !== null && previousClose !== null && previousClose !== 0) {
+    if (latestPrice > previousClose) {
+      return {
+        core: selected ? "fill-red-300" : "fill-red-500",
+        ring: selected ? "stroke-red-200" : "stroke-red-400",
+      };
+    }
+
+    if (latestPrice < previousClose) {
+      return {
+        core: selected ? "fill-emerald-300" : "fill-emerald-500",
+        ring: selected ? "stroke-emerald-200" : "stroke-emerald-400",
+      };
+    }
+  }
+
+  return {
+    core: selected ? "fill-slate-200" : "fill-slate-400",
+    ring: selected ? "stroke-slate-300" : "stroke-slate-300",
+  };
 }
 
 function RankingSparkline({
@@ -266,6 +324,8 @@ function RankingSparkline({
   const previousClose = row.intraday_previous_close ?? null;
   const latestPrice = points[points.length - 1]?.price ?? null;
   const chart = buildSparklinePath(points, previousClose);
+  const latestPoint = points[points.length - 1];
+  const pointTone = sparklinePointTone(latestPrice, previousClose, selected);
 
   return (
     <svg
@@ -292,6 +352,102 @@ function RankingSparkline({
         strokeLinecap="round"
         strokeLinejoin="round"
       />
+      <g
+        key={`${latestPoint.time}-${latestPoint.price}`}
+        className="omi-live-sparkline-point"
+        pointerEvents="none"
+      >
+        <circle
+          cx={chart.latestPointX}
+          cy={chart.latestPointY}
+          r="5.5"
+          className={`omi-live-point-ring ${pointTone.ring}`}
+        />
+        <circle
+          cx={chart.latestPointX}
+          cy={chart.latestPointY}
+          r="2.2"
+          className={`omi-live-point-core ${pointTone.core}`}
+        />
+      </g>
+    </svg>
+  );
+}
+
+function USRankingSparkline({
+  row,
+  selected,
+}: {
+  row: USWatchlistRankingItemRead;
+  selected: boolean;
+}) {
+  const points = (row.intraday_points ?? []).filter((point) => {
+    return (
+      point.time &&
+      point.price !== null &&
+      point.price !== undefined &&
+      !Number.isNaN(point.price) &&
+      isUsRegularSessionPoint(point.time)
+    );
+  });
+
+  if (points.length < 2) {
+    return (
+      <span className={selected ? "text-center text-xs text-slate-400" : "text-center text-xs text-slate-400"}>
+        {row.time ? "盤中" : "-"}
+      </span>
+    );
+  }
+
+  const previousClose = row.intraday_previous_close ?? null;
+  const latestPrice = points[points.length - 1]?.price ?? null;
+  const chart = buildSparklinePath(points, previousClose, getUsIntradayXRatio);
+  const latestPoint = points[points.length - 1];
+  const pointTone = sparklinePointTone(latestPrice, previousClose, selected);
+
+  return (
+    <svg
+      viewBox={`0 0 ${chart.width} ${chart.height}`}
+      className="h-8 w-[92px]"
+      aria-label="US intraday trend"
+    >
+      <rect width={chart.width} height={chart.height} fill="transparent" />
+      {chart.previousCloseY !== null ? (
+        <line
+          x1="2"
+          x2={chart.width - 2}
+          y1={chart.previousCloseY}
+          y2={chart.previousCloseY}
+          className={selected ? "stroke-slate-600" : "stroke-slate-200"}
+          strokeDasharray="3 3"
+        />
+      ) : null}
+      <path
+        d={chart.path}
+        fill="none"
+        strokeWidth="1.8"
+        className={sparklineTone(latestPrice, previousClose, selected)}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <g
+        key={`${latestPoint.time}-${latestPoint.price}`}
+        className="omi-live-sparkline-point"
+        pointerEvents="none"
+      >
+        <circle
+          cx={chart.latestPointX}
+          cy={chart.latestPointY}
+          r="5.5"
+          className={`omi-live-point-ring ${pointTone.ring}`}
+        />
+        <circle
+          cx={chart.latestPointX}
+          cy={chart.latestPointY}
+          r="2.2"
+          className={`omi-live-point-core ${pointTone.core}`}
+        />
+      </g>
     </svg>
   );
 }
@@ -433,7 +589,10 @@ function buildWatchlistRows(
         time: null,
         close: null,
         volume: null,
+        change: null,
+        previous_close: null,
         change_pct: null,
+        limit_status: null,
         score: null,
         status: "pending",
         signal_count: 0,
@@ -502,12 +661,16 @@ function buildUsWatchlistRows(
         asset_type: item.asset_type,
         group_id: item.group_id,
         trade_date: null,
+        time: null,
         close: null,
         previous_close: null,
         change: null,
         change_pct: null,
         volume: null,
         status: "pending",
+        source: null,
+        intraday_previous_close: null,
+        intraday_points: [],
         error_message: null,
       });
     });
@@ -672,7 +835,7 @@ function WatchlistRankingPanel({
               type="button"
               onClick={row.onSelect}
               className={[
-                "grid w-full grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-slate-200 px-4 py-2 text-left text-sm",
+                "grid w-full grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-slate-200 px-4 py-2 text-left text-sm transition-colors",
                 row.selected
                   ? "bg-slate-900 text-white"
                   : "bg-white text-slate-800 hover:bg-slate-50",
@@ -690,9 +853,25 @@ function WatchlistRankingPanel({
                 </span>
               </span>
               <span className="flex justify-center">{row.visual}</span>
-              <span className="text-right font-semibold">{row.close}</span>
+              <span className="text-right font-semibold">
+                <PriceUpdatePulse
+                  value={row.closeValue}
+                  direction={row.changePct}
+                  resetKey={row.key}
+                  className="justify-end tabular-nums"
+                >
+                  {row.close}
+                </PriceUpdatePulse>
+              </span>
               <span className={`text-right font-semibold ${row.selected ? "" : valueTone(row.changePct)}`}>
-                {row.change}
+                <PriceUpdatePulse
+                  value={row.change}
+                  direction={row.changePct}
+                  resetKey={row.key}
+                  className="justify-end tabular-nums"
+                >
+                  {row.change}
+                </PriceUpdatePulse>
               </span>
               <span className="text-right">
                 <span
@@ -704,7 +883,16 @@ function WatchlistRankingPanel({
                   {row.trend}
                 </span>
               </span>
-              <span className="text-right">{row.volume}</span>
+              <span className="text-right">
+                <PriceUpdatePulse
+                  value={row.volumeValue ?? row.volume}
+                  direction={null}
+                  resetKey={row.key}
+                  className="justify-end tabular-nums"
+                >
+                  {row.volume}
+                </PriceUpdatePulse>
+              </span>
             </button>
           ))
         ) : (
@@ -795,6 +983,7 @@ export default function MarketDashboardClient({
   const usDashboardRequestSeq = useRef(0);
   const marketIndexRequestSeq = useRef(0);
   const finalDashboardRefreshDate = useRef<string | null>(null);
+  const finalUsDashboardRefreshDate = useRef<string | null>(null);
 
   const activeGroupId = selectedGroupId ?? selectedGroup?.id ?? null;
   const activeGroupIdRef = useRef<number | null>(activeGroupId);
@@ -864,6 +1053,7 @@ export default function MarketDashboardClient({
     }
 
     try {
+      const marketState = getTaiwanMarketRefreshState();
       const commonParams = {
         include_children: true,
         enabled_only: true,
@@ -879,7 +1069,8 @@ export default function MarketDashboardClient({
           sort_order: currentRankBy === "none" ? "asc" : "desc",
           limit: 100,
           volume_ratio_threshold: 1.5,
-          use_intraday: false,
+          use_intraday: marketState.isPollingWindow,
+          intraday_limit: WATCHLIST_INTRADAY_LIMIT,
         }
       );
 
@@ -910,6 +1101,7 @@ export default function MarketDashboardClient({
     }
 
     try {
+      const marketState = getUsMarketRefreshState();
       const rankingData = await fetchJson<USWatchlistRankingRead>(
         "/api/us-market/watchlists/ranking",
         {
@@ -918,6 +1110,8 @@ export default function MarketDashboardClient({
           enabled_only: true,
           rank_by: currentRankBy,
           sort_order: currentRankBy === "none" ? "asc" : "desc",
+          use_intraday: marketState.isPollingWindow,
+          intraday_limit: WATCHLIST_INTRADAY_LIMIT,
         }
       );
 
@@ -1096,11 +1290,63 @@ export default function MarketDashboardClient({
     if (activeMarket !== "us") return;
     if (selectedUsGroupId === null) return;
 
-    const timer = window.setTimeout(() => {
-      void loadUsDashboard(selectedUsGroupId, usRankBy);
+    const groupId = selectedUsGroupId;
+    let disposed = false;
+    let refreshTimer: number | undefined;
+
+    function clearRefreshTimer() {
+      if (refreshTimer !== undefined) {
+        window.clearTimeout(refreshTimer);
+        refreshTimer = undefined;
+      }
+    }
+
+    function scheduleRefresh() {
+      if (disposed) return;
+
+      const marketState = getUsMarketRefreshState();
+
+      if (marketState.isPollingWindow) {
+        refreshTimer = window.setTimeout(() => {
+          void loadUsDashboard(groupId, usRankBy, { silent: true }).finally(scheduleRefresh);
+        }, US_INTRADAY_REFRESH_MS);
+        return;
+      }
+
+      if (
+        marketState.isAfterClose &&
+        finalUsDashboardRefreshDate.current !== marketState.dateKey
+      ) {
+        finalUsDashboardRefreshDate.current = marketState.dateKey;
+        refreshTimer = window.setTimeout(() => {
+          void loadUsDashboard(groupId, usRankBy, { silent: true }).finally(scheduleRefresh);
+        }, 0);
+        return;
+      }
+
+      refreshTimer = window.setTimeout(
+        scheduleRefresh,
+        Math.min(marketState.msUntilNextPollingStart, 60_000)
+      );
+    }
+
+    const initialTimer = window.setTimeout(() => {
+      void loadUsDashboard(groupId, usRankBy).finally(() => {
+        const marketState = getUsMarketRefreshState();
+
+        if (marketState.isAfterClose) {
+          finalUsDashboardRefreshDate.current = marketState.dateKey;
+        }
+
+        scheduleRefresh();
+      });
     }, 120);
 
-    return () => window.clearTimeout(timer);
+    return () => {
+      disposed = true;
+      window.clearTimeout(initialTimer);
+      clearRefreshTimer();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeMarket, selectedUsGroupId, usRankBy, usWatchlistVersion]);
 
@@ -1245,21 +1491,48 @@ export default function MarketDashboardClient({
         <span className="flex justify-center">
           <RankingSparkline row={row} selected={selected} />
         </span>
-        <span className="text-right font-semibold">{formatPrice(row.close)}</span>
+        <span className="text-right font-semibold">
+          <PriceUpdatePulse
+            value={row.close}
+            direction={row.change_pct}
+            resetKey={`${activeGroupId ?? "all"}:${row.stock_id}`}
+            className="justify-end tabular-nums"
+          >
+            {formatPrice(row.close)}
+          </PriceUpdatePulse>
+        </span>
         <span className={`text-right font-semibold ${selected ? "" : valueTone(row.change_pct)}`}>
-          {formatPct(row.change_pct)}
+          <PriceUpdatePulse
+            value={row.change_pct}
+            direction={row.change_pct}
+            resetKey={`${activeGroupId ?? "all"}:${row.stock_id}`}
+            className="justify-end tabular-nums"
+          >
+            {formatPct(row.change_pct)}
+          </PriceUpdatePulse>
         </span>
         <span className="text-right">
           <span
             className={[
               "px-2 py-1 text-xs font-semibold",
-              selected ? "bg-white text-slate-900" : trendClass(row.change_pct),
+              selected
+                ? selectedTrendClass(row.limit_status)
+                : trendClass(row.change_pct, row.limit_status),
             ].join(" ")}
           >
-            {trendLabel(row.change_pct)}
+            {trendLabel(row.change_pct, row.limit_status)}
           </span>
         </span>
-        <span className="text-right">{formatLots(row.volume)}</span>
+        <span className="text-right">
+          <PriceUpdatePulse
+            value={row.volume}
+            direction={null}
+            resetKey={`${activeGroupId ?? "all"}:${row.stock_id}`}
+            className="justify-end tabular-nums"
+          >
+            {formatLots(row.volume)}
+          </PriceUpdatePulse>
+        </span>
       </button>
     );
   }
@@ -1376,19 +1649,23 @@ export default function MarketDashboardClient({
       rank: row.rank,
       symbol: row.symbol,
       name: row.security_name,
-      meta: [row.trade_date?.slice(0, 10), row.exchange, row.asset_type]
+      meta: [
+        row.time ? formatRowTime(row.time) : row.trade_date?.slice(0, 10),
+        row.exchange,
+        row.asset_type,
+      ]
         .filter(Boolean)
         .join(" · ") || statusLabel(row.status),
       visual: (
-        <span className={selected ? "text-center text-xs text-slate-300" : "text-center text-xs text-slate-400"}>
-          {row.trade_date?.slice(5, 10) ?? "-"}
-        </span>
+        <USRankingSparkline row={row} selected={selected} />
       ),
       close: formatPrice(row.close),
+      closeValue: row.close,
       change: formatPct(row.change_pct),
       changePct: row.change_pct,
       trend: trendLabel(row.change_pct),
       volume: formatWholeNumber(row.volume),
+      volumeValue: row.volume,
       selected,
       onSelect: () => {
         setSelectedUsSymbol(row.symbol);

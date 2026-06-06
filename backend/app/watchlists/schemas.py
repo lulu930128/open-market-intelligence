@@ -203,7 +203,10 @@ class WatchlistRankingItemRead(BaseModel):
     time: str | date | None = None
     close: float | None = None
     volume: int | None = None
+    change: float | None = None
+    previous_close: float | None = None
     change_pct: float | None = None
+    limit_status: str | None = None
 
     score: int
     status: str

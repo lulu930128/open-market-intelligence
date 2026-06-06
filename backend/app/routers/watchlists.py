@@ -491,6 +491,7 @@ def get_watchlist_group_latest_ranking(
     limit: int = Query(default=100, ge=20, le=500),
     volume_ratio_threshold: float = Query(default=1.5, ge=1.0, le=5.0),
     use_intraday: bool = False,
+    intraday_limit: int = Query(default=30, ge=1, le=100),
     db: Session = Depends(get_db),
 ):
     try:
@@ -506,6 +507,7 @@ def get_watchlist_group_latest_ranking(
             limit=limit,
             volume_ratio_threshold=volume_ratio_threshold,
             use_intraday=use_intraday,
+            intraday_limit=intraday_limit,
         )
     except service.WatchlistGroupNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc

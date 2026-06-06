@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { IntradayTrendPoint } from "@/types/market";
 import {
   TAIWAN_SESSION_END_MINUTES,
@@ -44,6 +44,11 @@ type IntradayChartPoint = IntradayTrendPoint & {
   macd: number | null;
   macdSignal: number | null;
   macdHistogram: number | null;
+};
+
+type HoverPriceGuideState = {
+  y: number;
+  snap: "high" | "low" | null;
 };
 
 const intervalOptions: Array<{ label: string; value: IntradayInterval }> = [
@@ -92,6 +97,7 @@ export const intradayIndicatorOptions: Array<{
 ];
 
 const playedIntradayRevealKeys = new Set<string>();
+const PRICE_GUIDE_SNAP_DISTANCE = 10;
 
 function formatPrice(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
@@ -327,9 +333,32 @@ function formatPct(value: number) {
   return `${sign}${value.toFixed(1)}%`;
 }
 
-function formatIndicator(value: number | null | undefined, digits = 2) {
-  if (!validNumber(value)) return "-";
-  return value.toFixed(digits);
+function priceGuideSnap(value: number | null, reference: number | null): HoverPriceGuideState["snap"] {
+  if (!validNumber(value) || !validNumber(reference) || value === reference) return null;
+  return value > reference ? "high" : "low";
+}
+
+function livePointTone(price: number | null, reference: number | null) {
+  if (validNumber(price) && validNumber(reference) && reference !== 0) {
+    if (price > reference) {
+      return {
+        core: "fill-red-600",
+        ring: "stroke-red-400",
+      };
+    }
+
+    if (price < reference) {
+      return {
+        core: "fill-emerald-600",
+        ring: "stroke-emerald-400",
+      };
+    }
+  }
+
+  return {
+    core: "fill-slate-500",
+    ring: "stroke-slate-300",
+  };
 }
 
 function labelPosition(
@@ -594,9 +623,11 @@ export default function IntradayTrendChart({
   const chartId = useId();
   const safeChartId = chartId.replace(/[^a-zA-Z0-9_-]/g, "");
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const [hoverPriceGuide, setHoverPriceGuide] = useState<HoverPriceGuideState | null>(null);
   const [showLimitRange, setShowLimitRange] = useState(false);
   const [interval, setInterval] = useState<IntradayInterval>(1);
   const [activeRevealKey, setActiveRevealKey] = useState<string | null>(null);
+  const revealCoverRef = useRef<HTMLDivElement | null>(null);
 
   const data = useMemo(() => {
     return enrichIntradayPoints(aggregateIntradayPoints(points, interval, session));
@@ -616,12 +647,45 @@ export default function IntradayTrendChart({
           return current === stableRevealKey ? current : null;
         }
 
+        playedIntradayRevealKeys.add(stableRevealKey);
         return stableRevealKey;
       });
     }, 0);
 
     return () => window.clearTimeout(timeoutId);
   }, [dataReadyForReveal, stableRevealKey]);
+
+  useEffect(() => {
+    if (activeRevealKey === null) return;
+
+    const revealCover = revealCoverRef.current;
+    if (revealCover === null) return;
+
+    const durationMs = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 1 : 1440;
+    const clearRevealCover = () => {
+      setActiveRevealKey((current) => (current === activeRevealKey ? null : current));
+    };
+    const animation = revealCover.animate(
+      [
+        { opacity: 1, transform: "translateX(0)" },
+        { opacity: 0, transform: "translateX(100%)" },
+      ],
+      {
+        duration: durationMs,
+        easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+        fill: "forwards",
+      }
+    );
+    const timeoutId = window.setTimeout(clearRevealCover, durationMs + 250);
+
+    animation.addEventListener("finish", clearRevealCover, { once: true });
+
+    return () => {
+      animation.removeEventListener("finish", clearRevealCover);
+      animation.cancel();
+      window.clearTimeout(timeoutId);
+    };
+  }, [activeRevealKey]);
 
   if (data.length < 2) {
     return (
@@ -634,10 +698,11 @@ export default function IntradayTrendChart({
   const width = 1000;
   const indicatorHeight = 48;
   const indicatorGap = 14;
-  const paddingLeft = 58;
+  const paddingLeft = 84;
   const paddingRight = 90;
   const priceTop = 30;
   const priceHeight = 260;
+  const priceBottom = priceTop + priceHeight;
   const volumeTop = 322;
   const volumeHeight = 62;
   const labelY = 406;
@@ -666,7 +731,6 @@ export default function IntradayTrendChart({
   const height = lowerPanelKeys.length > 0 ? indicatorBottom + 28 : 420;
   const usableWidth = width - paddingLeft - paddingRight;
   const latestPrice = data[data.length - 1]?.price ?? null;
-  const latestPoint = safeHoverIndex !== null ? data[safeHoverIndex] : data[data.length - 1];
   const change =
     latestPrice !== null && previousClose !== null ? latestPrice - previousClose : null;
 
@@ -753,6 +817,8 @@ export default function IntradayTrendChart({
     const rect = event.currentTarget.getBoundingClientRect();
     const ratio = clamp((event.clientX - rect.left) / rect.width, 0, 1);
     const localX = paddingLeft + ratio * usableWidth;
+    const pointerY =
+      priceTop + clamp((event.clientY - rect.top) / rect.height, 0, 1) * (indicatorBottom - priceTop);
     const closest = data.reduce<{ index: number; distance: number } | null>(
       (best, point, index) => {
         const distance = Math.abs(getPointX(point) - localX);
@@ -763,8 +829,44 @@ export default function IntradayTrendChart({
       },
       null
     );
+    const safeIndex = closest?.index ?? null;
 
-    setHoverIndex(closest?.index ?? null);
+    setHoverIndex(safeIndex);
+
+    if (safeIndex === null || pointerY < priceTop || pointerY > priceBottom) {
+      setHoverPriceGuide(null);
+      return;
+    }
+
+    const point = data[safeIndex];
+    const high = point.high ?? point.price;
+    const low = point.low ?? point.price;
+    const candidates = [
+      validNumber(high)
+        ? { value: high, y: getPriceY(high), distance: Math.abs(pointerY - getPriceY(high)) }
+        : null,
+      validNumber(low)
+        ? { value: low, y: getPriceY(low), distance: Math.abs(pointerY - getPriceY(low)) }
+        : null,
+    ].filter((candidate): candidate is { value: number; y: number; distance: number } =>
+      candidate !== null
+    );
+    const nearest = candidates.reduce<(typeof candidates)[number] | null>(
+      (best, candidate) =>
+        best === null || candidate.distance < best.distance ? candidate : best,
+      null
+    );
+
+    const pointerPrice = yMax - ((clamp(pointerY, priceTop, priceBottom) - priceTop) / priceHeight) * yRange;
+
+    setHoverPriceGuide(
+      nearest !== null && nearest.distance <= PRICE_GUIDE_SNAP_DISTANCE
+        ? { y: nearest.y, snap: priceGuideSnap(nearest.value, previousClose) }
+        : {
+            y: clamp(pointerY, priceTop, priceBottom),
+            snap: priceGuideSnap(pointerPrice, previousClose),
+          }
+    );
   }
 
   const linePath = buildLinePath(data, getPointX, getPriceY);
@@ -792,7 +894,34 @@ export default function IntradayTrendChart({
       : "";
   const firstPointX = getPointX(data[0]);
   const lastPointX = getPointX(data[data.length - 1]);
+  const latestPoint = data[data.length - 1];
+  const latestPointY = getPriceY(latestPoint.price);
+  const latestPointTone = livePointTone(latestPoint.price, previousClose);
   const hoverX = safeHoverIndex !== null ? getPointX(data[safeHoverIndex]) : null;
+  const hoverPriceGuideY =
+    safeHoverIndex !== null && hoverPriceGuide !== null
+      ? clamp(hoverPriceGuide.y, priceTop, priceBottom)
+      : null;
+  const hoverPriceGuideSnap =
+    safeHoverIndex !== null && hoverPriceGuide !== null ? hoverPriceGuide.snap : null;
+  const hoverPriceGuideValue =
+    hoverPriceGuideY !== null
+      ? yMax - ((hoverPriceGuideY - priceTop) / priceHeight) * yRange
+      : null;
+  const hoverPriceGuideLabel =
+    hoverPriceGuideValue !== null ? formatPrice(hoverPriceGuideValue) : null;
+  const hoverPriceGuideStrokeClass =
+    hoverPriceGuideSnap === "high"
+      ? "stroke-red-500"
+      : hoverPriceGuideSnap === "low"
+        ? "stroke-emerald-500"
+        : "stroke-slate-500";
+  const hoverPriceGuideTextClass =
+    hoverPriceGuideSnap === "high"
+      ? "fill-red-700"
+      : hoverPriceGuideSnap === "low"
+        ? "fill-emerald-700"
+        : "fill-slate-800";
   const previousCloseY = previousClose !== null ? getPriceY(previousClose) : null;
   const baselineY = previousCloseY ?? volumeTop;
   const areaPath = buildBaselineAreaPath(linePath, firstPointX, lastPointX, baselineY);
@@ -800,9 +929,6 @@ export default function IntradayTrendChart({
   const chartAreaRight = width - paddingRight;
   const clipAboveId = `${safeChartId}-above`;
   const clipBelowId = `${safeChartId}-below`;
-  const revealClipId = `${safeChartId}-reveal`;
-  const revealCoverClass = `intraday-reveal-cover-${safeChartId}`;
-  const revealAnimationName = `intraday-reveal-${safeChartId}`;
   const shouldShowRevealCover = activeRevealKey === stableRevealKey;
   const barWidth = clamp((usableWidth / sessionMinutes) * interval * 0.7, 1, 10);
   const timeTicks = session.timeTicks;
@@ -830,6 +956,7 @@ export default function IntradayTrendChart({
                   type="button"
                   onClick={() => {
                     setHoverIndex(null);
+                    setHoverPriceGuide(null);
                     setInterval(option.value);
                   }}
                   className={[
@@ -871,81 +998,13 @@ export default function IntradayTrendChart({
               {formatVolumeValue(displayedVolume)}
             </div>
           </div>
-          {indicators.vwap ? (
-            <div>
-              <span className="text-xs text-slate-400">VWAP</span>
-              <div className="mt-1 text-base font-bold text-blue-700">
-                {formatPrice(latestPoint?.vwap)}
-              </div>
-            </div>
-          ) : null}
-          {indicators.twap ? (
-            <div>
-              <span className="text-xs text-slate-400">TWAP</span>
-              <div className="mt-1 text-base font-bold text-slate-800">
-                {formatPrice(latestPoint?.twap)}
-              </div>
-            </div>
-          ) : null}
-          {indicators.ema ? (
-            <div>
-              <span className="text-xs text-slate-400">EMA5/20</span>
-              <div className="mt-1 text-base font-bold text-slate-800">
-                {formatPrice(latestPoint?.emaFast)} / {formatPrice(latestPoint?.emaSlow)}
-              </div>
-            </div>
-          ) : null}
-          {indicators.rsi ? (
-            <div>
-              <span className="text-xs text-slate-400">RSI</span>
-              <div className="mt-1 text-base font-bold text-fuchsia-700">
-                {formatIndicator(latestPoint?.rsi)}
-              </div>
-            </div>
-          ) : null}
-          {indicators.macd ? (
-            <div>
-              <span className="text-xs text-slate-400">MACD H</span>
-              <div className="mt-1 text-base font-bold text-slate-800">
-                {formatIndicator(latestPoint?.macdHistogram)}
-              </div>
-            </div>
-          ) : null}
         </div>
       </div>
 
-      <svg viewBox={`0 0 ${width} ${height}`} className="w-full" style={{ height }}>
+      <div className="relative overflow-hidden">
+        <svg viewBox={`0 0 ${width} ${height}`} className="w-full" style={{ height }}>
         <rect x="0" y="0" width={width} height={height} className="fill-white" />
         <defs>
-          <style>
-            {`
-              @keyframes ${revealAnimationName} {
-                0% {
-                  opacity: 1;
-                  transform: translateX(0);
-                }
-                92% {
-                  opacity: 1;
-                }
-                100% {
-                  opacity: 0;
-                  transform: translateX(${usableWidth}px);
-                }
-              }
-
-              .${revealCoverClass} {
-                animation: ${revealAnimationName} 1300ms cubic-bezier(0.22, 1, 0.36, 1) both;
-                pointer-events: none;
-                transform-box: fill-box;
-              }
-
-              @media (prefers-reduced-motion: reduce) {
-                .${revealCoverClass} {
-                  animation-duration: 1ms;
-                }
-              }
-            `}
-          </style>
           <clipPath id={clipAboveId}>
             <rect
               x={paddingLeft}
@@ -960,14 +1019,6 @@ export default function IntradayTrendChart({
               y={baselineY}
               width={usableWidth}
               height={Math.max(0, volumeTop - baselineY)}
-            />
-          </clipPath>
-          <clipPath id={revealClipId}>
-            <rect
-              x={paddingLeft}
-              y={priceTop}
-              width={usableWidth}
-              height={indicatorBottom - priceTop}
             />
           </clipPath>
         </defs>
@@ -997,7 +1048,7 @@ export default function IntradayTrendChart({
                   previousClose,
                   priceScale.limitUp,
                   priceScale.limitDown
-                )} text-[11px]`}
+                )} text-[12px] font-medium`}
               >
                 {formatPrice(price)}
               </text>
@@ -1235,6 +1286,21 @@ export default function IntradayTrendChart({
           </g>
         ) : null}
 
+        <g key={`${latestPoint.time}-${latestPoint.price}`} pointerEvents="none">
+          <circle
+            cx={lastPointX}
+            cy={latestPointY}
+            r="8"
+            className={`omi-live-point-ring ${latestPointTone.ring}`}
+          />
+          <circle
+            cx={lastPointX}
+            cy={latestPointY}
+            r="3.2"
+            className={`omi-live-point-core ${latestPointTone.core}`}
+          />
+        </g>
+
         {indicators.volume
           ? data.map((point, index) => {
               const volume = point.volume ?? 0;
@@ -1375,38 +1441,46 @@ export default function IntradayTrendChart({
           </g>
         ) : null}
 
-        {shouldShowRevealCover ? (
-          <g
-            key={activeRevealKey}
-            className={revealCoverClass}
-            clipPath={`url(#${revealClipId})`}
-            aria-hidden="true"
-            onAnimationStart={() => {
-              playedIntradayRevealKeys.add(stableRevealKey);
-            }}
-            onAnimationEnd={() => {
-              setActiveRevealKey((current) => (current === stableRevealKey ? null : current));
-            }}
-          >
-            <rect
-              x={paddingLeft}
-              y={priceTop}
-              width={usableWidth}
-              height={indicatorBottom - priceTop}
-              className="fill-white"
-            />
-          </g>
-        ) : null}
-
         {hoverX !== null ? (
-          <line
-            x1={hoverX}
-            x2={hoverX}
-            y1={priceTop}
-            y2={indicatorBottom}
-            className="stroke-slate-400"
-            strokeDasharray="4 4"
-          />
+          <g pointerEvents="none">
+            <line
+              x1={hoverX}
+              x2={hoverX}
+              y1={priceTop}
+              y2={indicatorBottom}
+              className="stroke-slate-400"
+              strokeDasharray="4 4"
+            />
+            {hoverPriceGuideY !== null && hoverPriceGuideLabel !== null ? (
+              <>
+                <line
+                  x1={paddingLeft}
+                  x2={chartAreaRight}
+                  y1={hoverPriceGuideY}
+                  y2={hoverPriceGuideY}
+                  className={hoverPriceGuideStrokeClass}
+                  strokeDasharray="4 4"
+                />
+                <rect
+                  x={4}
+                  y={clamp(hoverPriceGuideY - 12, priceTop + 2, priceBottom - 24)}
+                  width={paddingLeft - 10}
+                  height={24}
+                  rx={3}
+                  className={`fill-white ${hoverPriceGuideStrokeClass}`}
+                  strokeWidth="1.5"
+                />
+                <text
+                  x={paddingLeft - 14}
+                  y={clamp(hoverPriceGuideY + 4, priceTop + 18, priceBottom - 8)}
+                  textAnchor="end"
+                  className={`${hoverPriceGuideTextClass} text-[12px] font-semibold tabular-nums`}
+                >
+                  {formatPrice(hoverPriceGuideValue)}
+                </text>
+              </>
+            ) : null}
+          </g>
         ) : null}
 
         <rect
@@ -1416,9 +1490,24 @@ export default function IntradayTrendChart({
           height={indicatorBottom - priceTop}
           fill="transparent"
           onMouseMove={handleMouseMove}
-          onMouseLeave={() => setHoverIndex(null)}
+          onMouseLeave={() => {
+            setHoverIndex(null);
+            setHoverPriceGuide(null);
+          }}
         />
-      </svg>
+        </svg>
+        {shouldShowRevealCover ? (
+          <div
+            ref={revealCoverRef}
+            key={activeRevealKey}
+            className="pointer-events-none absolute inset-0 z-10 bg-white"
+            aria-hidden="true"
+            style={{
+              willChange: "opacity, transform",
+            }}
+          />
+        ) : null}
+      </div>
 
       <div className="flex items-center justify-end border-t border-slate-200 px-4 py-2">
         <button

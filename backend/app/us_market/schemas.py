@@ -401,12 +401,16 @@ class USWatchlistRankingItemRead(BaseModel):
     asset_type: str | None = None
     group_id: int
     trade_date: date | None = None
+    time: str | None = None
     close: float | None = None
     previous_close: float | None = None
     change: float | None = None
     change_pct: float | None = None
     volume: int | None = None
     status: str
+    source: str | None = None
+    intraday_previous_close: float | None = None
+    intraday_points: list[dict] = Field(default_factory=list)
     error_message: str | None = None
 
 

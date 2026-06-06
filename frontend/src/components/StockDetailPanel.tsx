@@ -6,6 +6,7 @@ import IntradayTrendChart, {
   type IntradayIndicatorKey,
   type IntradayIndicatorSettings,
 } from "@/components/IntradayTrendChart";
+import PriceUpdatePulse from "@/components/PriceUpdatePulse";
 import StockKLineChart, {
   defaultIndicatorParameters,
   defaultIndicators,
@@ -320,6 +321,16 @@ function formatSignedPrice(value: number | null | undefined) {
   return `${sign}${formatPrice(value)}`;
 }
 
+function formatSignedPointChange(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "-";
+  const sign = value > 0 ? "+" : "";
+
+  return `${sign}${value.toLocaleString("zh-TW", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
 function formatNumber(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
   return new Intl.NumberFormat("zh-TW").format(Math.round(value));
@@ -553,6 +564,33 @@ function valueTone(value: number | null | undefined) {
   return "text-slate-700";
 }
 
+type PriceLimitStatus = "limit_up" | "limit_down" | null;
+
+function estimatedPriceLimitStatus(value: number | null | undefined): PriceLimitStatus {
+  if (value === null || value === undefined || Number.isNaN(value)) return null;
+  if (value >= 9.5) return "limit_up";
+  if (value <= -9.5) return "limit_down";
+  return null;
+}
+
+function priceLimitTone(status: PriceLimitStatus, fallback: number | null | undefined) {
+  if (status === "limit_up") return "text-red-600";
+  if (status === "limit_down") return "text-emerald-600";
+  return valueTone(fallback);
+}
+
+function priceLimitBoxClass(status: PriceLimitStatus) {
+  if (status === "limit_up") {
+    return "rounded-[4px] bg-red-500 px-3 py-2 text-white shadow-sm";
+  }
+
+  if (status === "limit_down") {
+    return "rounded-[4px] bg-emerald-500 px-3 py-2 text-white shadow-sm";
+  }
+
+  return "";
+}
+
 function safeRatio(numerator: number | null | undefined, denominator: number | null | undefined) {
   if (
     numerator === null ||
@@ -620,26 +658,45 @@ function summarizeIntradayPoints(points: IntradayTrendPoint[]) {
   };
 }
 
-function TechnicalBar({ label, value }: { label: string; value: number | null }) {
-  const displayValue = value === null ? 0 : Math.max(-12, Math.min(12, value));
-  const width = `${Math.abs(displayValue / 12) * 50}%`;
-  const isPositive = displayValue >= 0;
+type TechnicalTone = "positive" | "negative" | "neutral" | "warning";
 
+function technicalToneClass(tone: TechnicalTone) {
+  if (tone === "positive") return "text-red-600";
+  if (tone === "negative") return "text-emerald-600";
+  if (tone === "warning") return "text-amber-600";
+  return "text-slate-700";
+}
+
+function TechnicalSignalRow({
+  title,
+  description,
+  value,
+  pulseValue,
+  direction,
+  tone = "neutral",
+}: {
+  title: string;
+  description: string;
+  value: string;
+  pulseValue?: number | string | null;
+  direction?: number | null;
+  tone?: TechnicalTone;
+}) {
   return (
-    <div>
-      <div className="mb-1 flex items-center justify-between text-xs">
-        <span className="text-slate-500">{label}</span>
-        <span className={valueTone(value)}>{value === null ? "-" : formatPct(value)}</span>
+    <div className="flex items-start justify-between gap-4 border-t border-slate-100 py-2 first:border-t-0 first:pt-0">
+      <div className="min-w-0">
+        <div className="text-sm font-bold text-slate-950">{title}</div>
+        <div className="mt-0.5 text-xs leading-4 text-slate-500">{description}</div>
       </div>
-      <div className="relative h-2 bg-slate-100">
-        <div className="absolute left-1/2 top-0 h-2 w-px bg-slate-300" />
-        <div
-          className={[
-            "absolute top-0 h-2",
-            isPositive ? "left-1/2 bg-red-500" : "right-1/2 bg-emerald-500",
-          ].join(" ")}
-          style={{ width }}
-        />
+      <div className={`shrink-0 text-right text-sm font-bold ${technicalToneClass(tone)}`}>
+        <PriceUpdatePulse
+          value={pulseValue ?? value}
+          direction={direction}
+          resetKey={title}
+          className="justify-end tabular-nums"
+        >
+          {value}
+        </PriceUpdatePulse>
       </div>
     </div>
   );
@@ -659,21 +716,6 @@ function marketRegimeLabel(index: MarketIndexSnapshot | null | undefined) {
   }
 
   return "中性震盪";
-}
-
-function MarketIndexRow({ index }: { index: MarketIndexSnapshot | null | undefined }) {
-  return (
-    <div className="flex items-center justify-between gap-3 border-t border-slate-100 py-2 text-xs">
-      <div>
-        <div className="font-semibold text-slate-800">{index?.short_label ?? "-"}</div>
-        <div className="mt-0.5 text-slate-500">{marketRegimeLabel(index)}</div>
-      </div>
-      <div className="text-right">
-        <div className="font-semibold text-slate-950">{formatPrice(index?.close)}</div>
-        <div className={valueTone(index?.change_pct)}>{formatPct(index?.change_pct)}</div>
-      </div>
-    </div>
-  );
 }
 
 function IndexListPanel({
@@ -2953,10 +2995,22 @@ export default function StockDetailPanel({
     previousChart.close !== 0
       ? ((latestChart.close - previousChart.close) / previousChart.close) * 100
       : null;
+  const chartChange =
+    latestChart?.close !== null &&
+    latestChart?.close !== undefined &&
+    previousChart?.close !== null &&
+    previousChart?.close !== undefined
+      ? latestChart.close - previousChart.close
+      : null;
+  const latestChange =
+    effectiveTimeframe === "today" && latestToday && todayReferenceClose
+      ? latestToday.price - todayReferenceClose
+      : latestIndicator?.change ?? chartChange;
   const latestChangePct =
     effectiveTimeframe === "today" && latestToday && todayReferenceClose
       ? ((latestToday.price - todayReferenceClose) / todayReferenceClose) * 100
       : latestIndicator?.change_pct ?? chartChangePct;
+  const headerLimitStatus = isIndexProduct ? null : estimatedPriceLimitStatus(latestChangePct);
   const ma5 = latestIndicator?.ma?.ma5 ?? averageRecentChartValue(chartData, "close", 5);
   const ma20 = latestIndicator?.ma?.ma20 ?? averageRecentChartValue(chartData, "close", 20);
   const ma60 = latestIndicator?.ma?.ma60 ?? averageRecentChartValue(chartData, "close", 60);
@@ -3044,6 +3098,66 @@ export default function StockDetailPanel({
 
     return result;
   }, [latestClose, ma5, ma20, totalInstitutionalNet, volumeRatio]);
+  const priceTrendLabel =
+    priceVsMa20 === null ? "資料不足" : priceVsMa20 >= 0 ? "站上 MA20" : "跌破 MA20";
+  const priceTrendTone: TechnicalTone =
+    priceVsMa20 === null ? "neutral" : priceVsMa20 >= 0 ? "positive" : "negative";
+  const volumeStatusLabel =
+    volumeRatio === null
+      ? "資料不足"
+      : volumeRatio >= 1.5
+        ? "明顯放量"
+        : volumeRatio >= 1
+          ? "高於均量"
+          : volumeRatio >= 0.65
+            ? "量能正常"
+            : "量能偏低";
+  const volumeStatusTone: TechnicalTone =
+    volumeRatio === null ? "neutral" : volumeRatio >= 1.5 ? "warning" : "neutral";
+  const institutionalStatusLabel =
+    totalInstitutionalNet === null
+      ? "資料不足"
+      : totalInstitutionalNet > 0
+        ? "法人買超"
+        : totalInstitutionalNet < 0
+          ? "法人賣超"
+          : "法人持平";
+  const institutionalStatusTone: TechnicalTone =
+    totalInstitutionalNet === null
+      ? "neutral"
+      : totalInstitutionalNet > 0
+        ? "positive"
+        : totalInstitutionalNet < 0
+          ? "negative"
+          : "neutral";
+  const marketRelativeLabel =
+    relativeToPrimaryIndex === null
+      ? "資料不足"
+      : relativeToPrimaryIndex > 0
+        ? "強於大盤"
+        : relativeToPrimaryIndex < 0
+          ? "弱於大盤"
+          : "同步大盤";
+  const marketRelativeTone: TechnicalTone =
+    relativeToPrimaryIndex === null
+      ? "neutral"
+      : relativeToPrimaryIndex > 0
+        ? "positive"
+        : relativeToPrimaryIndex < 0
+          ? "negative"
+          : "neutral";
+  const technicalSummaryParts = [
+    priceTrendLabel,
+    volumeStatusLabel,
+    institutionalStatusLabel,
+  ].filter((part) => part !== "資料不足");
+  const technicalSummaryText =
+    loadState === "loading"
+      ? "資料讀取中"
+      : technicalSummaryParts.length
+        ? technicalSummaryParts.join("，")
+        : "訊號資料不足";
+  const visibleSignals = signals.slice(0, 3);
 
   const shareholdingSeries = useMemo<ShareholdingSeriesPoint[]>(() => {
     const closeByDate = new Map(
@@ -4456,13 +4570,31 @@ export default function StockDetailPanel({
             </div>
 
             <div className="flex items-start gap-5">
-              <div className="text-right">
-                <div className="text-3xl font-bold text-slate-950">
+              <div
+                className={`flex flex-wrap items-center justify-end gap-x-2 gap-y-1 text-right ${priceLimitTone(
+                  headerLimitStatus,
+                  latestChange
+                )}`}
+              >
+                <PriceUpdatePulse
+                  value={latestClose}
+                  direction={latestChange}
+                  resetKey={`${stockId ?? "empty"}:${effectiveTimeframe}`}
+                  className={[
+                    "text-4xl font-bold leading-none tracking-normal tabular-nums",
+                    priceLimitBoxClass(headerLimitStatus),
+                  ].join(" ")}
+                >
                   {formatPrice(latestClose)}
-                </div>
-                <div className={`mt-1 text-sm font-semibold ${valueTone(latestChangePct)}`}>
-                  {formatPct(latestChangePct)}
-                </div>
+                </PriceUpdatePulse>
+                <span className="text-base font-semibold tabular-nums">
+                  {formatSignedPointChange(latestChange)}
+                </span>
+                {latestChangePct !== null && latestChangePct !== undefined ? (
+                  <span className="text-base font-semibold tabular-nums">
+                    ({formatPct(latestChangePct)})
+                  </span>
+                ) : null}
               </div>
 
               <div className="flex flex-col items-end gap-2">
@@ -4785,87 +4917,102 @@ export default function StockDetailPanel({
           />
         ) : (
           <>
-          <div className="border-b border-slate-200 px-5 py-4">
-            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
-              Technical
+            <div className="border-b border-slate-200 px-5 py-3">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+                Technical
+              </div>
+              <div className="mt-1.5 flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="text-xl font-bold text-slate-950">{technicalStatus}</div>
+                  <div className="mt-0.5 text-xs leading-4 text-slate-500">{technicalSummaryText}</div>
+                </div>
+                <div className={`shrink-0 text-right text-lg font-bold ${valueTone(priceVsMa20)}`}>
+                  <PriceUpdatePulse
+                    value={priceVsMa20}
+                    direction={priceVsMa20}
+                    resetKey={`${stockId ?? "empty"}:technical-ma20`}
+                    className="justify-end tabular-nums"
+                  >
+                    {formatPct(priceVsMa20)}
+                  </PriceUpdatePulse>
+                  <div className="text-xs font-medium text-slate-500">vs MA20</div>
+                </div>
+              </div>
             </div>
-            <div className="mt-2 flex items-end justify-between gap-4">
+
+            <div className="px-5 py-3">
               <div>
-                <div className="text-xl font-bold text-slate-950">{technicalStatus}</div>
-                <div className="mt-1 text-xs text-slate-500">
-                  {loadState === "loading" ? "讀取中" : "均線、量能、法人綜合判讀"}
-                </div>
-              </div>
-              <div className={`text-right text-lg font-bold ${valueTone(priceVsMa20)}`}>
-                {formatPct(priceVsMa20)}
-                <div className="text-xs font-medium text-slate-500">vs MA20</div>
-              </div>
-            </div>
-          </div>
-
-          <div className="space-y-4 px-5 py-4">
-            <TechnicalBar label="價格相對 MA20" value={priceVsMa20} />
-            <TechnicalBar label="量能相對 20 日均量" value={volumeRatioPct} />
-            <TechnicalBar
-              label="三大法人淨買賣"
-              value={
-                totalInstitutionalNet === null
-                  ? null
-                  : Math.max(-12, Math.min(12, totalInstitutionalNet / 1_000_000))
-              }
-            />
-
-            <div className="border border-slate-200 bg-slate-50 px-3 py-3">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <div className="text-xs font-bold uppercase tracking-[0.14em] text-slate-500">
-                    Market Context
-                  </div>
-                  <div className="mt-1 text-sm font-bold text-slate-950">市場環境</div>
-                </div>
-                <div className={`text-right text-sm font-bold ${valueTone(relativeToPrimaryIndex)}`}>
-                  {formatPct(relativeToPrimaryIndex)}
-                  <div className="text-[11px] font-medium text-slate-500">
-                    vs {primaryMarketIndex?.short_label ?? "大盤"}
-                  </div>
-                </div>
-              </div>
-
-              <div className="mt-2">
-                <MarketIndexRow index={primaryMarketIndex} />
-              </div>
-
-              <div className="mt-3 space-y-3">
-                <TechnicalBar
-                  label={`個股相對${primaryMarketIndex?.short_label ?? "大盤"}`}
-                  value={relativeToPrimaryIndex}
+                <TechnicalSignalRow
+                  title="價格趨勢"
+                  description={priceTrendLabel}
+                  value={formatPct(priceVsMa20)}
+                  pulseValue={priceVsMa20}
+                  direction={priceVsMa20}
+                  tone={priceTrendTone}
+                />
+                <TechnicalSignalRow
+                  title="量能狀態"
+                  description={`${volumeStatusLabel}，相對 20 日均量`}
+                  value={formatPct(volumeRatioPct)}
+                  pulseValue={volumeRatioPct}
+                  direction={volumeRatioPct}
+                  tone={volumeStatusTone}
+                />
+                <TechnicalSignalRow
+                  title="法人籌碼"
+                  description={`${institutionalStatusLabel}，三大法人合計`}
+                  value={
+                    totalInstitutionalNet === null
+                      ? "-"
+                      : `${formatSignedLots(totalInstitutionalNet)}張`
+                  }
+                  pulseValue={totalInstitutionalNet}
+                  direction={totalInstitutionalNet}
+                  tone={institutionalStatusTone}
+                />
+                <TechnicalSignalRow
+                  title="相對市場"
+                  description={`相對${primaryMarketIndex?.short_label ?? "大盤"}，${marketRelativeLabel}`}
+                  value={formatPct(relativeToPrimaryIndex)}
+                  pulseValue={relativeToPrimaryIndex}
+                  direction={relativeToPrimaryIndex}
+                  tone={marketRelativeTone}
                 />
               </div>
-            </div>
 
-            <div className="grid grid-cols-3 border border-slate-200 text-center text-xs">
-              <div className="px-2 py-3">
-                <div className="text-slate-500">MA5</div>
-                <div className="mt-1 font-semibold text-slate-900">{formatPrice(ma5)}</div>
+              <div className="mt-3 border-t border-slate-200 pt-3">
+                <div className="flex items-start justify-between gap-4 text-xs">
+                  <div>
+                    <div className="font-bold uppercase tracking-[0.14em] text-slate-500">
+                      Market
+                    </div>
+                    <div className="mt-0.5 text-sm font-bold text-slate-950">
+                      {primaryMarketIndex?.short_label ?? "大盤"}
+                    </div>
+                    <div className="mt-0.5 text-slate-500">{marketRegimeLabel(primaryMarketIndex)}</div>
+                  </div>
+                  <div className="text-right">
+                    <div className="font-bold text-slate-950">{formatPrice(primaryMarketIndex?.close)}</div>
+                    <div className={valueTone(primaryMarketIndex?.change_pct)}>
+                      {formatPct(primaryMarketIndex?.change_pct)}
+                    </div>
+                  </div>
+                </div>
               </div>
-              <div className="border-x border-slate-200 px-2 py-3">
-                <div className="text-slate-500">MA20</div>
-                <div className="mt-1 font-semibold text-slate-900">{formatPrice(ma20)}</div>
-              </div>
-              <div className="px-2 py-3">
-                <div className="text-slate-500">MA60</div>
-                <div className="mt-1 font-semibold text-slate-900">{formatPrice(ma60)}</div>
-              </div>
-            </div>
 
-            <div className="flex flex-wrap gap-2">
-              {signals.map((signal) => (
-                <span key={signal.label} className={`px-2.5 py-1 text-xs font-semibold ${signal.tone}`}>
-                  {signal.label}
-                </span>
-              ))}
+              {visibleSignals.length ? (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {visibleSignals.map((signal) => (
+                    <span
+                      key={signal.label}
+                      className={`px-2.5 py-1 text-xs font-semibold ${signal.tone}`}
+                    >
+                      {signal.label}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
             </div>
-          </div>
           </>
         )}
 

@@ -745,6 +745,74 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self.assertEqual(ranking["results"][1]["symbol"], "IBM")
         self.assertEqual(self.db.query(MarketDailyPrice).count(), 0)
 
+    def test_us_watchlist_ranking_limits_intraday_overlay_attempts(self) -> None:
+        symbol_records = parse_symbol_directories(
+            nasdaq_listed_text=NASDAQ_LISTED_SAMPLE,
+            other_listed_text=OTHER_LISTED_SAMPLE,
+            sec_company_payload=SEC_TICKERS_SAMPLE,
+        )
+        upsert_us_symbol_records(self.db, symbol_records)
+        group = create_us_watchlist_group(
+            self.db,
+            USWatchlistGroupCreate(group_name="Mega Cap"),
+        )
+        create_us_watchlist_item(
+            self.db,
+            USWatchlistItemCreate(group_id=group.id, symbol="AAPL"),
+        )
+        create_us_watchlist_item(
+            self.db,
+            USWatchlistItemCreate(group_id=group.id, symbol="IBM"),
+        )
+        self.db.add_all(
+            [
+                USDailyPrice(
+                    provider="yahoo_chart",
+                    symbol="AAPL",
+                    trade_date=date(2026, 5, 29),
+                    close_price=100.0,
+                    trade_volume=1000,
+                    raw_payload_hash="aapl-1",
+                ),
+                USDailyPrice(
+                    provider="yahoo_chart",
+                    symbol="IBM",
+                    trade_date=date(2026, 5, 29),
+                    close_price=190.0,
+                    trade_volume=4000,
+                    raw_payload_hash="ibm-1",
+                ),
+            ],
+        )
+        self.db.commit()
+
+        with patch("app.us_market.service._get_us_intraday_overlay") as mock_overlay:
+            mock_overlay.return_value = {
+                "time": "2026-06-05T13:45:00-04:00",
+                "close": 111.0,
+                "previous_close": 100.0,
+                "change": 11.0,
+                "change_pct": 11.0,
+                "volume": 2000,
+                "source": "test_intraday",
+                "points": [{"time": "2026-06-05T13:45:00-04:00", "price": 111.0}],
+            }
+
+            ranking = get_us_watchlist_ranking(
+                self.db,
+                group_id=group.id,
+                use_intraday=True,
+                intraday_limit=1,
+            )
+
+        mock_overlay.assert_called_once_with(symbol="AAPL")
+        self.assertEqual(ranking["results"][0]["symbol"], "AAPL")
+        self.assertEqual(ranking["results"][0]["status"], "intraday")
+        self.assertEqual(ranking["results"][0]["close"], 111.0)
+        self.assertEqual(ranking["results"][1]["symbol"], "IBM")
+        self.assertEqual(ranking["results"][1]["status"], "ready")
+        self.assertEqual(ranking["results"][1]["close"], 190.0)
+
     def test_us_watchlist_resource_refresh_continues_after_resource_error(self) -> None:
         symbol_records = parse_symbol_directories(
             nasdaq_listed_text=NASDAQ_LISTED_SAMPLE,
