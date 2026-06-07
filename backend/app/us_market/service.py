@@ -6,6 +6,7 @@ from copy import deepcopy
 from datetime import date, timedelta
 import time
 
+import requests
 from sqlalchemy import case, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -99,6 +100,10 @@ US_CHART_LOOKBACK_MULTIPLIER = {
     "monthly": 31,
 }
 MAX_US_CHART_BARS = 5000
+YAHOO_CHART_COMPACT_RANGE = "1y"
+# Yahoo can downsample range=max daily charts to monthly bars for some US symbols.
+YAHOO_CHART_FULL_RANGE = "10y"
+YAHOO_CHART_INDEX_FULL_RANGE = "10y"
 SEC_FUNDAMENTAL_FORMS = ("10-K", "10-Q", "20-F", "40-F")
 SEC_FUNDAMENTAL_METRIC_TAGS = OrderedDict(
     [
@@ -500,6 +505,9 @@ def upsert_us_daily_price_records(
             inserted_count += 1
             continue
 
+        if _should_skip_us_daily_price_update(existing=existing, record=record):
+            continue
+
         existing.open_price = record.open_price
         existing.high_price = record.high_price
         existing.low_price = record.low_price
@@ -519,6 +527,171 @@ def upsert_us_daily_price_records(
     return {
         "inserted_count": inserted_count,
         "updated_count": updated_count,
+    }
+
+
+def _is_yahoo_range_max_url(source_url: str | None) -> bool:
+    return bool(source_url and "range=max" in source_url.lower())
+
+
+def _is_yahoo_range_max_record(row: USDailyPrice) -> bool:
+    return row.provider == "yahoo_chart" and _is_yahoo_range_max_url(row.source_url)
+
+
+def _is_yahoo_range_max_price_record(record: USDailyPriceRecord) -> bool:
+    return record.provider == "yahoo_chart" and _is_yahoo_range_max_url(record.source_url)
+
+
+def _should_skip_us_daily_price_update(
+    *,
+    existing: USDailyPrice,
+    record: USDailyPriceRecord,
+) -> bool:
+    if not _is_yahoo_range_max_price_record(record):
+        return False
+
+    return not _is_yahoo_range_max_record(existing)
+
+
+def _us_daily_price_sample(row: USDailyPrice) -> dict:
+    return {
+        "id": row.id,
+        "provider": row.provider,
+        "symbol": row.symbol,
+        "trade_date": row.trade_date,
+        "open_price": row.open_price,
+        "high_price": row.high_price,
+        "low_price": row.low_price,
+        "close_price": row.close_price,
+        "trade_volume": row.trade_volume,
+        "source_url": row.source_url,
+    }
+
+
+def repair_us_daily_price_quality(
+    db: Session,
+    *,
+    symbol: str | None = None,
+    dry_run: bool = True,
+    limit: int = 1000,
+    refresh: bool = False,
+    outputsize: str = "compact",
+    adjusted: bool = False,
+    sleep_seconds: float = 0.0,
+    progress_callback: ProgressCallback | None = None,
+) -> dict:
+    if limit <= 0:
+        raise ValueError("limit must be greater than 0.")
+
+    if outputsize not in {"compact", "full"}:
+        raise ValueError("outputsize must be one of: compact, full.")
+
+    normalized_symbol = normalize_us_symbol(symbol) if symbol else None
+    query = (
+        db.query(USDailyPrice)
+        .filter(USDailyPrice.provider == "yahoo_chart")
+        .filter(USDailyPrice.source_url.ilike("%range=max%"))
+    )
+
+    if normalized_symbol is not None:
+        query = query.filter(USDailyPrice.symbol == normalized_symbol)
+
+    total_dirty_count = query.count()
+    candidates = (
+        query.order_by(
+            USDailyPrice.symbol.asc(),
+            USDailyPrice.trade_date.asc(),
+            USDailyPrice.id.asc(),
+        )
+        .limit(limit)
+        .all()
+    )
+    affected_symbols = sorted({row.symbol for row in candidates})
+    sample_rows = [_us_daily_price_sample(row) for row in candidates[:25]]
+    deleted_count = 0
+    refresh_results: list[dict] = []
+    errors: list[dict] = []
+
+    if candidates and not dry_run:
+        for row in candidates:
+            db.delete(row)
+
+        db.commit()
+        deleted_count = len(candidates)
+
+    if refresh and not dry_run and affected_symbols:
+        total = len(affected_symbols)
+
+        if progress_callback is not None:
+            progress_callback(0, total, "Repairing US daily price quality.")
+
+        for index, affected_symbol in enumerate(affected_symbols, start=1):
+            try:
+                result = refresh_us_daily_prices(
+                    db=db,
+                    symbol=affected_symbol,
+                    outputsize=outputsize,
+                    adjusted=adjusted,
+                    provider="yahoo_chart",
+                )
+                refresh_results.append(result)
+            except Exception as exc:
+                db.rollback()
+                errors.append(
+                    {
+                        "symbol": affected_symbol,
+                        "message": str(exc),
+                    }
+                )
+
+            if progress_callback is not None:
+                progress_callback(index, total, f"Repaired {index}/{total} US symbols.")
+
+            if index < total and sleep_seconds > 0:
+                time.sleep(sleep_seconds)
+
+    if total_dirty_count == 0:
+        status_value = "empty"
+    elif dry_run:
+        status_value = "dry_run"
+    elif errors and deleted_count == 0:
+        status_value = "error"
+    elif errors:
+        status_value = "partial_success"
+    else:
+        status_value = "success"
+
+    if dry_run:
+        message = "US daily price quality repair dry-run completed."
+    elif deleted_count:
+        message = "US daily price quality repair completed."
+    else:
+        message = "No matching US daily price rows required repair."
+
+    remaining_dirty_count = (
+        total_dirty_count
+        if dry_run
+        else max(total_dirty_count - deleted_count, 0)
+    )
+
+    return {
+        "status": status_value,
+        "dry_run": dry_run,
+        "symbol": normalized_symbol,
+        "provider": "yahoo_chart",
+        "limit": limit,
+        "total_dirty_count": total_dirty_count,
+        "candidate_count": len(candidates),
+        "remaining_dirty_count": remaining_dirty_count,
+        "affected_symbol_count": len(affected_symbols),
+        "deleted_count": deleted_count,
+        "refreshed_symbol_count": len(refresh_results),
+        "refresh_error_count": len(errors),
+        "affected_symbols": affected_symbols,
+        "sample_rows": sample_rows,
+        "refresh_results": refresh_results,
+        "errors": errors,
+        "message": message,
     }
 
 
@@ -556,6 +729,18 @@ def refresh_us_daily_prices_from_alphavantage(
     }
 
 
+def _yahoo_daily_range_for_symbol(*, symbol: str, outputsize: str) -> str:
+    if outputsize == "compact":
+        return YAHOO_CHART_COMPACT_RANGE
+
+    normalized_symbol = normalize_us_symbol(symbol)
+    if normalized_symbol.startswith("^"):
+        # Yahoo may downsample range=max index charts to quarterly bars.
+        return YAHOO_CHART_INDEX_FULL_RANGE
+
+    return YAHOO_CHART_FULL_RANGE
+
+
 def refresh_us_daily_prices_from_yahoo_chart(
     db: Session,
     *,
@@ -563,7 +748,10 @@ def refresh_us_daily_prices_from_yahoo_chart(
     outputsize: str = "compact",
 ) -> dict:
     normalized_symbol = normalize_us_symbol(symbol)
-    range_value = "1y" if outputsize == "compact" else "max"
+    range_value = _yahoo_daily_range_for_symbol(
+        symbol=normalized_symbol,
+        outputsize=outputsize,
+    )
     payload, source_url = fetch_yahoo_chart_payload(
         symbol=normalized_symbol,
         range_value=range_value,
@@ -715,6 +903,54 @@ def _aggregate_us_daily_rows(rows: list[USDailyPrice], timeframe: str) -> list[d
     return results
 
 
+def _is_sparse_daily_ohlc_shape(points: list[dict]) -> bool:
+    if len(points) < 12:
+        return False
+
+    dates = sorted(
+        point["time"]
+        for point in points
+        if isinstance(point.get("time"), date)
+    )
+    if len(dates) < 12:
+        return False
+
+    month_count = len({(item.year, item.month) for item in dates})
+    if month_count < 3:
+        return False
+
+    average_points_per_month = len(dates) / month_count
+    distinct_month_days = len({item.day for item in dates})
+    first_day_ratio = sum(1 for item in dates if item.day == 1) / len(dates)
+
+    return (
+        average_points_per_month < 6
+        or first_day_ratio >= 0.55
+        or distinct_month_days <= 4
+    )
+
+
+def _filter_us_ohlc_source_rows(rows: list[USDailyPrice]) -> list[USDailyPrice]:
+    return [row for row in rows if not _is_yahoo_range_max_record(row)]
+
+
+def _has_newer_untrusted_yahoo_rows(
+    *,
+    rows: list[USDailyPrice],
+    trusted_rows: list[USDailyPrice],
+) -> bool:
+    trusted_latest_date = max((row.trade_date for row in trusted_rows), default=None)
+
+    for row in rows:
+        if not _is_yahoo_range_max_record(row):
+            continue
+
+        if trusted_latest_date is None or row.trade_date > trusted_latest_date:
+            return True
+
+    return False
+
+
 def _list_us_ohlc_source_rows(
     db: Session,
     *,
@@ -743,23 +979,49 @@ def _refresh_us_ohlc_history_if_needed(
     ensure_history: bool,
     outputsize: str,
     adjusted: bool,
+    provider: str,
+    has_newer_untrusted_yahoo_rows: bool,
 ) -> dict | None:
     if not ensure_history:
         return None
 
     refresh_outputsize = outputsize
-    if timeframe == "monthly" and len(points) < bars:
-        refresh_outputsize = "full"
-
-    if timeframe == "monthly" and len(points) >= bars:
+    has_sparse_daily_shape = (
+        timeframe == "daily" and _is_sparse_daily_ohlc_shape(points)
+    )
+    if (
+        len(points) >= bars
+        and not has_sparse_daily_shape
+        and not has_newer_untrusted_yahoo_rows
+    ):
         return None
 
-    return refresh_us_daily_prices(
-        db=db,
-        symbol=symbol,
-        outputsize=refresh_outputsize,
-        adjusted=adjusted,
-    )
+    if timeframe in {"weekly", "monthly"}:
+        refresh_outputsize = "full"
+    elif has_sparse_daily_shape or has_newer_untrusted_yahoo_rows:
+        refresh_outputsize = "compact"
+
+    try:
+        return refresh_us_daily_prices(
+            db=db,
+            symbol=symbol,
+            outputsize=refresh_outputsize,
+            adjusted=adjusted,
+            provider=provider,
+        )
+    except (USMarketConfigurationError, USMarketDataFetchError, requests.RequestException) as exc:
+        if len(points) < bars:
+            raise
+
+        return {
+            "status": "error",
+            "provider": provider,
+            "symbol": symbol,
+            "fetched_count": 0,
+            "inserted_count": 0,
+            "updated_count": 0,
+            "message": f"US daily quality refresh failed; using cached clean rows: {exc}",
+        }
 
 
 def list_us_ohlc_chart_data(
@@ -771,6 +1033,7 @@ def list_us_ohlc_chart_data(
     ensure_history: bool = False,
     outputsize: str = "compact",
     adjusted: bool = False,
+    provider: str = "auto",
     to_date: date | None = None,
 ) -> dict:
     if timeframe not in US_CHART_LOOKBACK_MULTIPLIER:
@@ -788,12 +1051,13 @@ def list_us_ohlc_chart_data(
     start_date = end_date - timedelta(days=lookback_days)
     backfill_result = None
 
-    rows = _list_us_ohlc_source_rows(
+    source_rows = _list_us_ohlc_source_rows(
         db=db,
         symbol=normalized_symbol,
         from_date=start_date,
         to_date=end_date,
     )
+    rows = _filter_us_ohlc_source_rows(source_rows)
     points = _aggregate_us_daily_rows(rows=rows, timeframe=timeframe)[-bars:]
     backfill_result = _refresh_us_ohlc_history_if_needed(
         db=db,
@@ -804,15 +1068,21 @@ def list_us_ohlc_chart_data(
         ensure_history=ensure_history,
         outputsize=outputsize,
         adjusted=adjusted,
+        provider=provider,
+        has_newer_untrusted_yahoo_rows=_has_newer_untrusted_yahoo_rows(
+            rows=source_rows,
+            trusted_rows=rows,
+        ),
     )
 
     if backfill_result is not None:
-        rows = _list_us_ohlc_source_rows(
+        source_rows = _list_us_ohlc_source_rows(
             db=db,
             symbol=normalized_symbol,
             from_date=start_date,
             to_date=end_date,
         )
+        rows = _filter_us_ohlc_source_rows(source_rows)
         points = _aggregate_us_daily_rows(rows=rows, timeframe=timeframe)[-bars:]
 
     return {
@@ -2632,6 +2902,7 @@ __all__ = [
     "list_us_watchlist_items",
     "list_us_watchlist_symbols",
     "refresh_fred_macro_series",
+    "repair_us_daily_price_quality",
     "refresh_us_company_profile_from_alphavantage",
     "refresh_us_corporate_actions_from_alphavantage",
     "refresh_us_daily_prices",

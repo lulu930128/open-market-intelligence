@@ -2,6 +2,10 @@
 
 import type { MarketRegion } from "@/components/SidebarWatchlistExplorer";
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
+import {
+  US_MARKET_INDEX_GROUP_NAME,
+  US_MARKET_INDEX_ITEMS,
+} from "@/lib/usMarketIndices";
 import type {
   USStockMasterRead,
   USWatchlistGroupNode,
@@ -106,6 +110,7 @@ export default function USWatchlistSidebar({
   const [stockNote, setStockNote] = useState("");
   const [stockTags, setStockTags] = useState("");
   const [stockSuggestions, setStockSuggestions] = useState<USStockMasterRead[]>([]);
+  const [indexGroupExpanded, setIndexGroupExpanded] = useState(true);
 
   const allGroups = useMemo(() => flattenGroups(tree), [tree]);
   const selectedGroup = useMemo(() => {
@@ -404,6 +409,78 @@ export default function USWatchlistSidebar({
     void createStockItem();
   }
 
+  function renderPinnedIndexGroup() {
+    const selected = US_MARKET_INDEX_ITEMS.some((item) => item.symbol === selectedSymbol);
+
+    return (
+      <div>
+        <div
+          className={[
+            "relative flex cursor-pointer items-center gap-1 py-1 pr-1 text-sm",
+            selected ? "bg-red-700 text-white" : "text-slate-700 hover:bg-slate-100",
+          ].join(" ")}
+          style={{ paddingLeft: "4px" }}
+          onClick={() => setIndexGroupExpanded((previous) => !previous)}
+        >
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              setIndexGroupExpanded((previous) => !previous);
+            }}
+            className={[
+              "h-6 w-4 text-xs",
+              selected ? "text-white" : "text-slate-500",
+            ].join(" ")}
+            aria-label="切換美股指數資料夾"
+          >
+            {indexGroupExpanded ? "v" : ">"}
+          </button>
+
+          <div className="min-w-0 flex-1 text-left">
+            <div className="truncate font-semibold">{US_MARKET_INDEX_GROUP_NAME}</div>
+          </div>
+
+          <span className={selected ? "pr-2 text-xs text-red-100" : "pr-2 text-xs text-slate-400"}>
+            {US_MARKET_INDEX_ITEMS.length}
+          </span>
+        </div>
+
+        {indexGroupExpanded ? (
+          <div>
+            {US_MARKET_INDEX_ITEMS.map((item) => {
+              const itemSelected = item.symbol === selectedSymbol;
+
+              return (
+                <button
+                  key={item.symbol}
+                  type="button"
+                  className={[
+                    "group relative flex w-full cursor-pointer items-center gap-1 py-1.5 pr-2 text-left text-xs",
+                    itemSelected
+                      ? "bg-slate-900 text-white"
+                      : "text-slate-700 hover:bg-slate-100",
+                  ].join(" ")}
+                  style={{ paddingLeft: "24px" }}
+                  onClick={() => onSelectSymbol(item.symbol, item.name)}
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate font-semibold">
+                      {item.displaySymbol} {item.name}
+                    </div>
+                    <div className={itemSelected ? "truncate text-slate-300" : "truncate text-slate-400"}>
+                      {item.exchange} · index · {item.note}
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
   function renderGroupNode(node: USWatchlistGroupNode, depth = 0) {
     const selected = node.id === selectedGroupId;
     const expanded = expandedIds.has(node.id);
@@ -546,6 +623,7 @@ export default function USWatchlistSidebar({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto py-2">
+        {renderPinnedIndexGroup()}
         {tree.length > 0 ? (
           tree.map((node) => renderGroupNode(node))
         ) : (

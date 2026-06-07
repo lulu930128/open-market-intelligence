@@ -234,6 +234,21 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
             request,
         )
 
+    if job_type == "us_market.daily_price_quality_repair":
+        return (
+            backfill_tasks.run_us_daily_price_quality_repair_job,
+            (
+                request.get("symbol"),
+                bool(request.get("dry_run", True)),
+                int(request.get("limit", 1000)),
+                bool(request.get("refresh", False)),
+                str(request.get("outputsize") or "compact"),
+                bool(request.get("adjusted", False)),
+                float(request.get("sleep_seconds", 0.0)),
+            ),
+            request,
+        )
+
     raise ValueError(f"Job type '{job_type}' does not support retry.")
 
 

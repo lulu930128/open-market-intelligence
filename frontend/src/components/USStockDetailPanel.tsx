@@ -22,6 +22,7 @@ import {
   getUsMarketRefreshState,
   isUsRegularSessionPoint,
 } from "@/lib/usMarketTime";
+import { getUsMarketIndexConfig } from "@/lib/usMarketIndices";
 import type {
   ChartPoint,
   IntradayTrendPoint,
@@ -58,6 +59,7 @@ type Props = {
   selectedSymbol: string | null;
   selectedSecurityName: string | null;
   watchlistRankingPanel?: ReactNode;
+  onCompanyProfileChange?: (profile: USCompanyProfileRead | null) => void;
 };
 
 const timeframeOptions: Array<{ value: USChartTimeframe; label: string }> = [
@@ -589,6 +591,7 @@ export default function USStockDetailPanel({
   selectedSymbol,
   selectedSecurityName,
   watchlistRankingPanel,
+  onCompanyProfileChange,
 }: Props) {
   const [timeframe, setTimeframe] = useState<USChartTimeframe>("daily");
   const [indicatorMenuOpen, setIndicatorMenuOpen] = useState(false);
@@ -693,6 +696,17 @@ export default function USStockDetailPanel({
   );
   const activeDataTabMeta =
     usDataPanelTabs.find((tab) => tab.key === activeDataTab) ?? usDataPanelTabs[0];
+  const selectedIndexConfig = getUsMarketIndexConfig(selectedSymbol);
+  const selectedDisplaySymbol = selectedIndexConfig?.displaySymbol ?? selectedSymbol ?? "-";
+  const selectedDisplayName =
+    selectedIndexConfig?.name ?? stockName(selectedStock, selectedSecurityName);
+  const selectedSubtitle = selectedIndexConfig
+    ? `${selectedIndexConfig.exchange} · Index · ${formatDate(displayDate)}`
+    : selectedStock
+      ? `${selectedStock.exchange ?? "-"} · ${assetTypeLabel(selectedStock)} · ${formatDate(displayDate)}`
+      : selectedSymbol
+        ? "讀取美股主檔中"
+        : "請從左側自選或上方搜尋選擇股票";
   const headerMetrics =
     timeframe === "today"
       ? [
@@ -720,58 +734,89 @@ export default function USStockDetailPanel({
           },
         ];
 
-  const dataCoverageItems = [
-    {
-      label: "Price",
-      status: coverageStatus(chartData.length > 0, loadState, latestPoint?.time, 10),
-      detail:
-        chartData.length > 0
-          ? `${chartData.length} bars / ${formatDate(latestPoint?.time)}`
-          : "No OHLC rows",
-    },
-    {
-      label: "Profile",
-      status: coverageStatus(Boolean(companyProfile), loadState, companyProfile?.fetched_at, 45),
-      detail: companyProfile
-        ? `${companyProfile.provider} / ${formatDate(companyProfile.fetched_at)}`
-        : "Alpha Vantage overview",
-    },
-    {
-      label: "SEC",
-      status: coverageStatus(
-        factRows.length > 0 || fundamentalMetrics.length > 0,
-        factLoadState,
-        latestFundamentalFiledDate !== "-" ? latestFundamentalFiledDate : latestFactFiledDate,
-        210
-      ),
-      detail:
-        factRows.length > 0 || fundamentalMetrics.length > 0
-          ? `${fundamentalMetrics.length} metrics / ${
-              latestFundamentalFiledDate !== "-" ? latestFundamentalFiledDate : latestFactFiledDate
-            }`
-          : "No SEC facts",
-    },
-    {
-      label: "Actions",
-      status: coverageStatus(corporateActions.length > 0, loadState),
-      detail:
-        corporateActions.length > 0
-          ? `${corporateActions.length} events / ${latestActionDate}`
-          : "No dividend/split rows",
-    },
-    {
-      label: "Short",
-      status: coverageStatus(
-        shortVolumeRows.length > 0,
-        loadState,
-        latestShortVolume?.trade_date,
-        10
-      ),
-      detail: latestShortVolume
-        ? `${formatRatioAsPct(latestShortVolume.short_ratio)} / ${formatDate(latestShortVolume.trade_date)}`
-        : "No FINRA rows",
-    },
-  ];
+  const dataCoverageItems: Array<{
+    label: string;
+    status: CoverageStatus;
+    detail: string;
+  }> = selectedIndexConfig
+    ? [
+        {
+          label: "OHLC",
+          status: coverageStatus(chartData.length > 0, loadState, latestPoint?.time, 10),
+          detail:
+            chartData.length > 0
+              ? `${chartData.length} bars / ${formatDate(latestPoint?.time)}`
+              : "No index bars",
+        },
+        {
+          label: "Intraday",
+          status:
+            timeframe === "today"
+              ? coverageStatus(todayTrend.length > 0, loadState, latestToday?.time, 2)
+              : "ready",
+          detail:
+            timeframe === "today"
+              ? `${todayTrend.length} points / ${todayUpdatedAt ?? "-"}`
+              : "Available on Today tab",
+        },
+        {
+          label: "Source",
+          status: "ready",
+          detail: "Yahoo chart index",
+        },
+      ]
+    : [
+        {
+          label: "Price",
+          status: coverageStatus(chartData.length > 0, loadState, latestPoint?.time, 10),
+          detail:
+            chartData.length > 0
+              ? `${chartData.length} bars / ${formatDate(latestPoint?.time)}`
+              : "No OHLC rows",
+        },
+        {
+          label: "Profile",
+          status: coverageStatus(Boolean(companyProfile), loadState, companyProfile?.fetched_at, 45),
+          detail: companyProfile
+            ? `${companyProfile.provider} / ${formatDate(companyProfile.fetched_at)}`
+            : "Alpha Vantage overview",
+        },
+        {
+          label: "SEC",
+          status: coverageStatus(
+            factRows.length > 0 || fundamentalMetrics.length > 0,
+            factLoadState,
+            latestFundamentalFiledDate !== "-" ? latestFundamentalFiledDate : latestFactFiledDate,
+            210
+          ),
+          detail:
+            factRows.length > 0 || fundamentalMetrics.length > 0
+              ? `${fundamentalMetrics.length} metrics / ${
+                  latestFundamentalFiledDate !== "-" ? latestFundamentalFiledDate : latestFactFiledDate
+                }`
+              : "No SEC facts",
+        },
+        {
+          label: "Actions",
+          status: coverageStatus(corporateActions.length > 0, loadState),
+          detail:
+            corporateActions.length > 0
+              ? `${corporateActions.length} events / ${latestActionDate}`
+              : "No dividend/split rows",
+        },
+        {
+          label: "Short",
+          status: coverageStatus(
+            shortVolumeRows.length > 0,
+            loadState,
+            latestShortVolume?.trade_date,
+            10
+          ),
+          detail: latestShortVolume
+            ? `${formatRatioAsPct(latestShortVolume.short_ratio)} / ${formatDate(latestShortVolume.trade_date)}`
+            : "No FINRA rows",
+        },
+      ];
   const readyCoverageCount = dataCoverageItems.filter(
     (item) => item.status === "ready"
   ).length;
@@ -785,6 +830,84 @@ export default function USStockDetailPanel({
       setMessage(null);
 
       try {
+        const indexConfig = getUsMarketIndexConfig(symbol);
+
+        if (indexConfig) {
+          if (nextTimeframe === "today") {
+            const [todayData, dailyChartData] = await Promise.all([
+              fetchJson<IntradayTrendResponse>(
+                `/api/us-market/intraday/${encodeURIComponent(symbol)}`
+              ),
+              fetchJson<USOhlcChartRead>(
+                `/api/us-market/ohlc/${encodeURIComponent(symbol)}`,
+                {
+                  timeframe: "daily",
+                  bars: 90,
+                  ensure_history: true,
+                  outputsize: "compact",
+                  provider: "yahoo_chart",
+                }
+              ),
+            ]);
+
+            if (requestSeq.current !== requestId) return;
+
+            const latestIntradayPoint = todayData.points[todayData.points.length - 1] ?? null;
+            const marketState = getUsMarketRefreshState();
+
+            if (marketState.isAfterClose) {
+              finalIntradayRefreshDate.current = marketState.dateKey;
+            }
+
+            setSelectedStock(null);
+            setChart(dailyChartData);
+            setTodayTrend(todayData.points);
+            setTodayPreviousClose(todayData.previous_close);
+            setTodaySource(todayData.source);
+            setTodayUpdatedAt(
+              latestIntradayPoint ? formatDateTime(latestIntradayPoint.time) : null
+            );
+            setFactRows([]);
+            setFundamentalSummary(null);
+            setCompanyProfile(null);
+            onCompanyProfileChange?.(null);
+            setCorporateActions([]);
+            setShortVolumeRows([]);
+            setLoadState("success");
+            setFactLoadState("success");
+            return;
+          }
+
+          const chartDataResponse = await fetchJson<USOhlcChartRead>(
+            `/api/us-market/ohlc/${encodeURIComponent(symbol)}`,
+            {
+              timeframe: nextTimeframe,
+              bars: barsByTimeframe[nextTimeframe],
+              ensure_history: true,
+              outputsize: "full",
+              provider: "yahoo_chart",
+            }
+          );
+
+          if (requestSeq.current !== requestId) return;
+
+          setSelectedStock(null);
+          setChart(chartDataResponse);
+          setTodayTrend([]);
+          setTodayPreviousClose(null);
+          setTodaySource("unavailable");
+          setTodayUpdatedAt(null);
+          setFactRows([]);
+          setFundamentalSummary(null);
+          setCompanyProfile(null);
+          onCompanyProfileChange?.(null);
+          setCorporateActions([]);
+          setShortVolumeRows([]);
+          setLoadState("success");
+          setFactLoadState("success");
+          return;
+        }
+
         if (nextTimeframe === "today") {
           const [
             stockData,
@@ -807,7 +930,7 @@ export default function USStockDetailPanel({
               {
                 timeframe: "daily",
                 bars: barsByTimeframe.daily,
-                ensure_history: false,
+                ensure_history: true,
                 outputsize: "compact",
               }
             ),
@@ -860,6 +983,7 @@ export default function USStockDetailPanel({
           setFactRows(factData);
           setFundamentalSummary(fundamentalData);
           setCompanyProfile(profileData);
+          onCompanyProfileChange?.(profileData);
           setCorporateActions(actionData);
           setShortVolumeRows(shortVolumeData);
           setLoadState("success");
@@ -884,7 +1008,7 @@ export default function USStockDetailPanel({
             {
               timeframe: nextTimeframe,
               bars: barsByTimeframe[nextTimeframe],
-              ensure_history: nextTimeframe === "monthly",
+              ensure_history: true,
               outputsize: nextTimeframe === "monthly" ? "full" : "compact",
             }
           ),
@@ -928,6 +1052,7 @@ export default function USStockDetailPanel({
         setFactRows(factData);
         setFundamentalSummary(fundamentalData);
         setCompanyProfile(profileData);
+        onCompanyProfileChange?.(profileData);
         setCorporateActions(actionData);
         setShortVolumeRows(shortVolumeData);
         setLoadState("success");
@@ -944,6 +1069,7 @@ export default function USStockDetailPanel({
         setFactRows([]);
         setFundamentalSummary(null);
         setCompanyProfile(null);
+        onCompanyProfileChange?.(null);
         setCorporateActions([]);
         setShortVolumeRows([]);
         setLoadState("error");
@@ -954,7 +1080,7 @@ export default function USStockDetailPanel({
         });
       }
     },
-    []
+    [onCompanyProfileChange]
   );
 
   useEffect(() => {
@@ -963,6 +1089,7 @@ export default function USStockDetailPanel({
         setSelectedStock(null);
         setChart(null);
         setCompanyProfile(null);
+        onCompanyProfileChange?.(null);
         setCorporateActions([]);
         setShortVolumeRows([]);
         setTodayTrend([]);
@@ -980,7 +1107,7 @@ export default function USStockDetailPanel({
     }, 0);
 
     return () => window.clearTimeout(timer);
-  }, [loadSymbolData, selectedSymbol, timeframe]);
+  }, [loadSymbolData, onCompanyProfileChange, selectedSymbol, timeframe]);
 
   useEffect(() => {
     if (!selectedSymbol || timeframe !== "today") return;
@@ -1077,6 +1204,9 @@ export default function USStockDetailPanel({
   async function refreshDailyRows() {
     if (!selectedSymbol) return;
 
+    const indexConfig = getUsMarketIndexConfig(selectedSymbol);
+    const outputsize = indexConfig ? "full" : "compact";
+
     setRefreshingDaily(true);
     setMessage(null);
 
@@ -1085,9 +1215,9 @@ export default function USStockDetailPanel({
         `/api/us-market/daily/${encodeURIComponent(selectedSymbol)}/refresh`,
         { method: "POST" },
         {
-          outputsize: "compact",
+          outputsize,
           adjusted: false,
-          provider: "auto",
+          provider: indexConfig ? "yahoo_chart" : "auto",
         }
       );
 
@@ -1558,17 +1688,13 @@ export default function USStockDetailPanel({
           <div className="flex flex-wrap items-start justify-between gap-4 px-5 py-4">
             <div>
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
-                Stock
+                {selectedIndexConfig ? "Index" : "Stock"}
               </div>
               <h2 className="mt-1 text-2xl font-bold text-slate-950">
-                {selectedSymbol ?? "-"} {stockName(selectedStock, selectedSecurityName)}
+                {selectedDisplaySymbol} {selectedDisplayName}
               </h2>
               <div className="mt-1 text-sm text-slate-500">
-                {selectedStock
-                  ? `${selectedStock.exchange ?? "-"} · ${assetTypeLabel(selectedStock)} · ${formatDate(displayDate)}`
-                  : selectedSymbol
-                    ? "讀取美股主檔中"
-                    : "請從左側自選或上方搜尋選擇股票"}
+                {selectedSubtitle}
               </div>
             </div>
 
@@ -1708,7 +1834,11 @@ export default function USStockDetailPanel({
             <IntradayTrendChart
               points={todayTrend}
               previousClose={todayPreviousClose}
-              label={timeframeOptions.find((option) => option.value === timeframe)?.label ?? "今日"}
+              label={
+                selectedIndexConfig
+                  ? `${selectedDisplaySymbol} 今日`
+                  : timeframeOptions.find((option) => option.value === timeframe)?.label ?? "今日"
+              }
               source={todaySource}
               indicators={intradayIndicators}
               session={usIntradaySession}
@@ -1719,7 +1849,7 @@ export default function USStockDetailPanel({
           ) : chartData.length > 0 ? (
             <StockKLineChart
               chartData={chartData}
-              label={selectedSymbol ?? "US"}
+              label={selectedDisplaySymbol}
               indicators={usChartIndicators}
               indicatorParameters={defaultIndicatorParameters}
               revealKey={`${selectedSymbol ?? "empty"}-${timeframe}-${chartData.length}`}
@@ -1732,7 +1862,9 @@ export default function USStockDetailPanel({
               {loadState === "loading"
                 ? "讀取 K 線中"
                 : selectedSymbol
-                  ? "尚無 K 線資料，請先更新日線。"
+                  ? selectedIndexConfig
+                    ? "尚無指數 K 線資料，請先按 Reload 或更新。"
+                    : "尚無 K 線資料，請先更新日線。"
                   : "尚未選擇股票"}
             </div>
           )}
@@ -1874,37 +2006,57 @@ export default function USStockDetailPanel({
           </div>
         </section>
 
-        <section className="border-t border-slate-200">
-          <div className="grid grid-cols-4 border-b border-slate-200">
-            {usDataPanelTabs.map((tab) => (
-              <USDataTabButton
-                key={tab.key}
-                tab={tab}
-                active={activeDataTab === tab.key}
-                onClick={() => setActiveDataTab(tab.key)}
-              />
-            ))}
-          </div>
-
-          <div className="px-5 py-4">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
-                  Data
-                </div>
-                <h3 className="mt-1 text-lg font-bold text-slate-950">
-                  {activeDataTabMeta.title}
-                </h3>
-                <div className="mt-1 text-xs text-slate-500">
-                  {activeDataTabMeta.description}
-                </div>
-              </div>
-              {renderDataPanelAction()}
+        {selectedIndexConfig ? (
+          <section className="border-t border-slate-200 px-5 py-4">
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+              Data
+            </div>
+            <h3 className="mt-1 text-lg font-bold text-slate-950">
+              {selectedDisplayName}
+            </h3>
+            <div className="mt-1 text-sm leading-6 text-slate-500">
+              目前接入 Yahoo chart 的日K、週K、月K與盤中 1 分 K。成分股廣度、權重貢獻與產業分解待下一版補上。
+            </div>
+            <div className="mt-4 grid grid-cols-2 gap-px bg-slate-200 text-sm">
+              <MetricCell label="Symbol" value={selectedIndexConfig.symbol} />
+              <MetricCell label="Display" value={selectedIndexConfig.displaySymbol} />
+              <MetricCell label="Exchange" value={selectedIndexConfig.exchange} />
+              <MetricCell label="Source" value="Yahoo chart" />
+            </div>
+          </section>
+        ) : (
+          <section className="border-t border-slate-200">
+            <div className="grid grid-cols-4 border-b border-slate-200">
+              {usDataPanelTabs.map((tab) => (
+                <USDataTabButton
+                  key={tab.key}
+                  tab={tab}
+                  active={activeDataTab === tab.key}
+                  onClick={() => setActiveDataTab(tab.key)}
+                />
+              ))}
             </div>
 
-            <div className="mt-4">{renderActiveDataTab()}</div>
-          </div>
-        </section>
+            <div className="px-5 py-4">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+                    Data
+                  </div>
+                  <h3 className="mt-1 text-lg font-bold text-slate-950">
+                    {activeDataTabMeta.title}
+                  </h3>
+                  <div className="mt-1 text-xs text-slate-500">
+                    {activeDataTabMeta.description}
+                  </div>
+                </div>
+                {renderDataPanelAction()}
+              </div>
+
+              <div className="mt-4">{renderActiveDataTab()}</div>
+            </div>
+          </section>
+        )}
       </aside>
     </section>
   );

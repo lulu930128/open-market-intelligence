@@ -33,8 +33,10 @@ from app.us_market.service import (
     list_us_ohlc_chart_data,
     list_us_watchlist_items,
     list_us_watchlist_symbols,
+    refresh_us_daily_prices_from_yahoo_chart,
     refresh_us_sec_companyfacts,
     refresh_us_watchlist_resources,
+    repair_us_daily_price_quality,
     search_us_stocks,
     upsert_macro_series_observation_records,
     upsert_us_company_profile_records,
@@ -46,6 +48,7 @@ from app.us_market.service import (
 )
 from app.us_market.sources import (
     USDailyPriceRecord,
+    USMarketDataFetchError,
     USShortVolumeRecord,
     normalize_us_symbol,
     parse_alphavantage_company_profile,
@@ -1045,6 +1048,639 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self.assertEqual(chart["points"][0]["close"], 382.09)
         self.assertEqual(chart["points"][1]["close"], 355.46)
 
+    def test_us_daily_ohlc_skips_refresh_when_local_points_are_enough(self) -> None:
+        records = [
+            USDailyPriceRecord(
+                provider="yahoo_chart",
+                symbol="MU",
+                trade_date=date(2026, 3, 25),
+                open_price=381.0,
+                high_price=386.0,
+                low_price=378.0,
+                close_price=382.09,
+                adjusted_close=None,
+                trade_volume=55328700,
+                dividend_amount=None,
+                split_coefficient=None,
+                source_url=None,
+                raw_payload_hash="raw-skip-refresh-1",
+            ),
+            USDailyPriceRecord(
+                provider="yahoo_chart",
+                symbol="MU",
+                trade_date=date(2026, 3, 26),
+                open_price=370.02,
+                high_price=374.25,
+                low_price=350.0,
+                close_price=355.46,
+                adjusted_close=None,
+                trade_volume=54515900,
+                dividend_amount=None,
+                split_coefficient=None,
+                source_url=None,
+                raw_payload_hash="raw-skip-refresh-2",
+            ),
+        ]
+        upsert_us_daily_price_records(self.db, records)
+
+        with patch("app.us_market.service.refresh_us_daily_prices") as refresh_mock:
+            chart = list_us_ohlc_chart_data(
+                self.db,
+                symbol="MU",
+                timeframe="daily",
+                bars=2,
+                ensure_history=True,
+                to_date=date(2026, 3, 26),
+            )
+
+        refresh_mock.assert_not_called()
+        self.assertEqual(chart["point_count"], 2)
+        self.assertIsNone(chart["backfill"])
+
+    def test_us_daily_ohlc_refreshes_when_local_points_are_monthly_sparse(self) -> None:
+        records = [
+            USDailyPriceRecord(
+                provider="yahoo_chart",
+                symbol="AMZN",
+                trade_date=date(year, month, 1),
+                open_price=100.0,
+                high_price=110.0,
+                low_price=90.0,
+                close_price=105.0,
+                adjusted_close=None,
+                trade_volume=1000,
+                dividend_amount=None,
+                split_coefficient=None,
+                source_url=None,
+                raw_payload_hash=f"monthly-sparse-{year}-{month}",
+            )
+            for year, month in [
+                (2025, 7),
+                (2025, 8),
+                (2025, 9),
+                (2025, 10),
+                (2025, 11),
+                (2025, 12),
+                (2026, 1),
+                (2026, 2),
+                (2026, 3),
+                (2026, 4),
+                (2026, 5),
+                (2026, 6),
+            ]
+        ]
+        upsert_us_daily_price_records(self.db, records)
+
+        with patch("app.us_market.service.refresh_us_daily_prices") as refresh_mock:
+            refresh_mock.return_value = {
+                "status": "success",
+                "provider": "yahoo_chart",
+                "symbol": "AMZN",
+                "fetched_count": 0,
+                "inserted_count": 0,
+                "updated_count": 0,
+                "message": "mocked",
+            }
+            chart = list_us_ohlc_chart_data(
+                self.db,
+                symbol="AMZN",
+                timeframe="daily",
+                bars=180,
+                ensure_history=True,
+                outputsize="compact",
+                provider="yahoo_chart",
+                to_date=date(2026, 6, 30),
+            )
+
+        refresh_mock.assert_called_once_with(
+            db=self.db,
+            symbol="AMZN",
+            outputsize="compact",
+            adjusted=False,
+            provider="yahoo_chart",
+        )
+        self.assertEqual(chart["backfill"]["message"], "mocked")
+
+    def test_us_daily_ohlc_ignores_yahoo_range_max_rows(self) -> None:
+        records = [
+            USDailyPriceRecord(
+                provider="yahoo_chart",
+                symbol="MU",
+                trade_date=trade_date,
+                open_price=100.0 + index,
+                high_price=105.0 + index,
+                low_price=95.0 + index,
+                close_price=102.0 + index,
+                adjusted_close=None,
+                trade_volume=1000 + index,
+                dividend_amount=None,
+                split_coefficient=None,
+                source_url="https://query1.finance.yahoo.com/v8/finance/chart/MU?range=1y&interval=1d",
+                raw_payload_hash=f"clean-{index}",
+            )
+            for index, trade_date in enumerate(
+                [
+                    date(2026, 2, 27),
+                    date(2026, 3, 2),
+                    date(2026, 3, 3),
+                    date(2026, 3, 4),
+                    date(2026, 3, 5),
+                    date(2026, 3, 6),
+                ],
+                start=1,
+            )
+        ]
+        records.append(
+            USDailyPriceRecord(
+                provider="yahoo_chart",
+                symbol="MU",
+                trade_date=date(2026, 3, 1),
+                open_price=401.47,
+                high_price=981.0,
+                low_price=311.49,
+                close_price=971.0,
+                adjusted_close=None,
+                trade_volume=3_012_061_200,
+                dividend_amount=None,
+                split_coefficient=None,
+                source_url="https://query1.finance.yahoo.com/v8/finance/chart/MU?range=max&interval=1d",
+                raw_payload_hash="range-max-month-row",
+            )
+        )
+        upsert_us_daily_price_records(self.db, records)
+
+        chart = list_us_ohlc_chart_data(
+            self.db,
+            symbol="MU",
+            timeframe="daily",
+            bars=10,
+            to_date=date(2026, 3, 7),
+        )
+
+        self.assertEqual(chart["point_count"], 6)
+        self.assertNotIn(date(2026, 3, 1), [point["time"] for point in chart["points"]])
+        self.assertNotIn(981.0, [point["high"] for point in chart["points"]])
+
+    def test_us_daily_ohlc_refreshes_when_newer_yahoo_range_max_row_exists(self) -> None:
+        records = [
+            USDailyPriceRecord(
+                provider="yahoo_chart",
+                symbol="MU",
+                trade_date=trade_date,
+                open_price=100.0 + index,
+                high_price=105.0 + index,
+                low_price=95.0 + index,
+                close_price=102.0 + index,
+                adjusted_close=None,
+                trade_volume=1000 + index,
+                dividend_amount=None,
+                split_coefficient=None,
+                source_url="https://query1.finance.yahoo.com/v8/finance/chart/MU?range=1y&interval=1d",
+                raw_payload_hash=f"clean-latest-{index}",
+            )
+            for index, trade_date in enumerate(
+                [
+                    date(2026, 5, 26),
+                    date(2026, 5, 27),
+                    date(2026, 5, 28),
+                    date(2026, 5, 29),
+                ],
+                start=1,
+            )
+        ]
+        records.append(
+            USDailyPriceRecord(
+                provider="yahoo_chart",
+                symbol="MU",
+                trade_date=date(2026, 6, 1),
+                open_price=1009.72,
+                high_price=1046.97,
+                low_price=1009.5,
+                close_price=1035.5,
+                adjusted_close=None,
+                trade_volume=46_305_400,
+                dividend_amount=None,
+                split_coefficient=None,
+                source_url="https://query1.finance.yahoo.com/v8/finance/chart/MU?range=max&interval=1d",
+                raw_payload_hash="range-max-latest-row",
+            )
+        )
+        upsert_us_daily_price_records(self.db, records)
+
+        with patch("app.us_market.service.refresh_us_daily_prices") as refresh_mock:
+            refresh_mock.return_value = {
+                "status": "success",
+                "provider": "yahoo_chart",
+                "symbol": "MU",
+                "fetched_count": 0,
+                "inserted_count": 0,
+                "updated_count": 0,
+                "message": "mocked",
+            }
+            chart = list_us_ohlc_chart_data(
+                self.db,
+                symbol="MU",
+                timeframe="daily",
+                bars=3,
+                ensure_history=True,
+                outputsize="compact",
+                provider="yahoo_chart",
+                to_date=date(2026, 6, 1),
+            )
+
+        refresh_mock.assert_called_once_with(
+            db=self.db,
+            symbol="MU",
+            outputsize="compact",
+            adjusted=False,
+            provider="yahoo_chart",
+        )
+        self.assertEqual(chart["backfill"]["message"], "mocked")
+
+    def test_us_daily_ohlc_uses_clean_cache_when_quality_refresh_fails(self) -> None:
+        records = [
+            USDailyPriceRecord(
+                provider="yahoo_chart",
+                symbol="MU",
+                trade_date=trade_date,
+                open_price=100.0 + index,
+                high_price=105.0 + index,
+                low_price=95.0 + index,
+                close_price=102.0 + index,
+                adjusted_close=None,
+                trade_volume=1000 + index,
+                dividend_amount=None,
+                split_coefficient=None,
+                source_url="https://query1.finance.yahoo.com/v8/finance/chart/MU?range=1y&interval=1d",
+                raw_payload_hash=f"clean-fallback-{index}",
+            )
+            for index, trade_date in enumerate(
+                [
+                    date(2026, 5, 26),
+                    date(2026, 5, 27),
+                    date(2026, 5, 28),
+                    date(2026, 5, 29),
+                ],
+                start=1,
+            )
+        ]
+        records.append(
+            USDailyPriceRecord(
+                provider="yahoo_chart",
+                symbol="MU",
+                trade_date=date(2026, 6, 1),
+                open_price=1009.72,
+                high_price=1046.97,
+                low_price=1009.5,
+                close_price=1035.5,
+                adjusted_close=None,
+                trade_volume=46_305_400,
+                dividend_amount=None,
+                split_coefficient=None,
+                source_url="https://query1.finance.yahoo.com/v8/finance/chart/MU?range=max&interval=1d",
+                raw_payload_hash="range-max-fallback-row",
+            )
+        )
+        upsert_us_daily_price_records(self.db, records)
+
+        with patch("app.us_market.service.refresh_us_daily_prices") as refresh_mock:
+            refresh_mock.side_effect = USMarketDataFetchError("proxy down")
+            chart = list_us_ohlc_chart_data(
+                self.db,
+                symbol="MU",
+                timeframe="daily",
+                bars=3,
+                ensure_history=True,
+                outputsize="compact",
+                provider="yahoo_chart",
+                to_date=date(2026, 6, 1),
+            )
+
+        self.assertEqual(chart["point_count"], 3)
+        self.assertEqual(chart["backfill"]["status"], "error")
+        self.assertIn("using cached clean rows", chart["backfill"]["message"])
+        self.assertNotIn(date(2026, 6, 1), [point["time"] for point in chart["points"]])
+
+    def test_us_daily_upsert_does_not_replace_clean_yahoo_row_with_range_max(self) -> None:
+        upsert_us_daily_price_records(
+            self.db,
+            [
+                USDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="MU",
+                    trade_date=date(2026, 3, 2),
+                    open_price=100.0,
+                    high_price=110.0,
+                    low_price=90.0,
+                    close_price=105.0,
+                    adjusted_close=None,
+                    trade_volume=1000,
+                    dividend_amount=None,
+                    split_coefficient=None,
+                    source_url="https://query1.finance.yahoo.com/v8/finance/chart/MU?range=1y&interval=1d",
+                    raw_payload_hash="clean-row",
+                )
+            ],
+        )
+
+        result = upsert_us_daily_price_records(
+            self.db,
+            [
+                USDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="MU",
+                    trade_date=date(2026, 3, 2),
+                    open_price=400.0,
+                    high_price=981.0,
+                    low_price=300.0,
+                    close_price=971.0,
+                    adjusted_close=None,
+                    trade_volume=3_012_061_200,
+                    dividend_amount=None,
+                    split_coefficient=None,
+                    source_url="https://query1.finance.yahoo.com/v8/finance/chart/MU?range=max&interval=1d",
+                    raw_payload_hash="range-max-row",
+                )
+            ],
+        )
+
+        row = self.db.query(USDailyPrice).filter(USDailyPrice.symbol == "MU").one()
+        self.assertEqual(result["updated_count"], 0)
+        self.assertEqual(row.close_price, 105.0)
+        self.assertEqual(row.raw_payload_hash, "clean-row")
+
+    def test_us_daily_upsert_replaces_range_max_row_with_clean_yahoo_row(self) -> None:
+        upsert_us_daily_price_records(
+            self.db,
+            [
+                USDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="MU",
+                    trade_date=date(2026, 3, 2),
+                    open_price=400.0,
+                    high_price=981.0,
+                    low_price=300.0,
+                    close_price=971.0,
+                    adjusted_close=None,
+                    trade_volume=3_012_061_200,
+                    dividend_amount=None,
+                    split_coefficient=None,
+                    source_url="https://query1.finance.yahoo.com/v8/finance/chart/MU?range=max&interval=1d",
+                    raw_payload_hash="range-max-row",
+                )
+            ],
+        )
+
+        result = upsert_us_daily_price_records(
+            self.db,
+            [
+                USDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="MU",
+                    trade_date=date(2026, 3, 2),
+                    open_price=100.0,
+                    high_price=110.0,
+                    low_price=90.0,
+                    close_price=105.0,
+                    adjusted_close=None,
+                    trade_volume=1000,
+                    dividend_amount=None,
+                    split_coefficient=None,
+                    source_url="https://query1.finance.yahoo.com/v8/finance/chart/MU?range=1y&interval=1d",
+                    raw_payload_hash="clean-row",
+                )
+            ],
+        )
+
+        row = self.db.query(USDailyPrice).filter(USDailyPrice.symbol == "MU").one()
+        self.assertEqual(result["updated_count"], 1)
+        self.assertEqual(row.close_price, 105.0)
+        self.assertEqual(row.raw_payload_hash, "clean-row")
+
+    def test_us_daily_quality_repair_dry_run_reports_range_max_rows(self) -> None:
+        upsert_us_daily_price_records(
+            self.db,
+            [
+                USDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="MU",
+                    trade_date=date(2026, 3, 1),
+                    open_price=401.47,
+                    high_price=981.0,
+                    low_price=311.49,
+                    close_price=971.0,
+                    adjusted_close=None,
+                    trade_volume=3_012_061_200,
+                    dividend_amount=None,
+                    split_coefficient=None,
+                    source_url="https://query1.finance.yahoo.com/v8/finance/chart/MU?range=max&interval=1d",
+                    raw_payload_hash="range-max-mu",
+                ),
+                USDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="AAPL",
+                    trade_date=date(2026, 3, 1),
+                    open_price=200.0,
+                    high_price=250.0,
+                    low_price=180.0,
+                    close_price=240.0,
+                    adjusted_close=None,
+                    trade_volume=1000,
+                    dividend_amount=None,
+                    split_coefficient=None,
+                    source_url="https://query1.finance.yahoo.com/v8/finance/chart/AAPL?range=max&interval=1d",
+                    raw_payload_hash="range-max-aapl",
+                ),
+                USDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="MU",
+                    trade_date=date(2026, 3, 2),
+                    open_price=100.0,
+                    high_price=110.0,
+                    low_price=90.0,
+                    close_price=105.0,
+                    adjusted_close=None,
+                    trade_volume=1000,
+                    dividend_amount=None,
+                    split_coefficient=None,
+                    source_url="https://query1.finance.yahoo.com/v8/finance/chart/MU?range=1y&interval=1d",
+                    raw_payload_hash="clean-mu",
+                ),
+            ],
+        )
+
+        result = repair_us_daily_price_quality(self.db, dry_run=True)
+
+        self.assertEqual(result["status"], "dry_run")
+        self.assertEqual(result["total_dirty_count"], 2)
+        self.assertEqual(result["candidate_count"], 2)
+        self.assertEqual(result["remaining_dirty_count"], 2)
+        self.assertEqual(result["deleted_count"], 0)
+        self.assertEqual(result["affected_symbols"], ["AAPL", "MU"])
+        self.assertEqual(self.db.query(USDailyPrice).count(), 3)
+
+    def test_us_daily_quality_repair_deletes_only_matching_symbol_range_max_rows(self) -> None:
+        upsert_us_daily_price_records(
+            self.db,
+            [
+                USDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="MU",
+                    trade_date=date(2026, 3, 1),
+                    open_price=401.47,
+                    high_price=981.0,
+                    low_price=311.49,
+                    close_price=971.0,
+                    adjusted_close=None,
+                    trade_volume=3_012_061_200,
+                    dividend_amount=None,
+                    split_coefficient=None,
+                    source_url="https://query1.finance.yahoo.com/v8/finance/chart/MU?range=max&interval=1d",
+                    raw_payload_hash="range-max-mu",
+                ),
+                USDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="AAPL",
+                    trade_date=date(2026, 3, 1),
+                    open_price=200.0,
+                    high_price=250.0,
+                    low_price=180.0,
+                    close_price=240.0,
+                    adjusted_close=None,
+                    trade_volume=1000,
+                    dividend_amount=None,
+                    split_coefficient=None,
+                    source_url="https://query1.finance.yahoo.com/v8/finance/chart/AAPL?range=max&interval=1d",
+                    raw_payload_hash="range-max-aapl",
+                ),
+                USDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="MU",
+                    trade_date=date(2026, 3, 2),
+                    open_price=100.0,
+                    high_price=110.0,
+                    low_price=90.0,
+                    close_price=105.0,
+                    adjusted_close=None,
+                    trade_volume=1000,
+                    dividend_amount=None,
+                    split_coefficient=None,
+                    source_url="https://query1.finance.yahoo.com/v8/finance/chart/MU?range=1y&interval=1d",
+                    raw_payload_hash="clean-mu",
+                ),
+            ],
+        )
+
+        result = repair_us_daily_price_quality(self.db, symbol="MU", dry_run=False)
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["deleted_count"], 1)
+        self.assertEqual(result["remaining_dirty_count"], 0)
+        self.assertEqual(result["affected_symbols"], ["MU"])
+        rows = self.db.query(USDailyPrice).order_by(USDailyPrice.symbol.asc()).all()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(
+            self.db.query(USDailyPrice)
+            .filter(USDailyPrice.symbol == "MU")
+            .filter(USDailyPrice.source_url.ilike("%range=max%"))
+            .count(),
+            0,
+        )
+        self.assertEqual(
+            self.db.query(USDailyPrice)
+            .filter(USDailyPrice.symbol == "AAPL")
+            .filter(USDailyPrice.source_url.ilike("%range=max%"))
+            .count(),
+            1,
+        )
+
+    def test_us_daily_quality_repair_refreshes_affected_symbols_after_delete(self) -> None:
+        upsert_us_daily_price_records(
+            self.db,
+            [
+                USDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol=symbol,
+                    trade_date=date(2026, 3, 1),
+                    open_price=401.47,
+                    high_price=981.0,
+                    low_price=311.49,
+                    close_price=971.0,
+                    adjusted_close=None,
+                    trade_volume=3_012_061_200,
+                    dividend_amount=None,
+                    split_coefficient=None,
+                    source_url=f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=max&interval=1d",
+                    raw_payload_hash=f"range-max-{symbol}",
+                )
+                for symbol in ["MU", "AAPL"]
+            ],
+        )
+
+        with patch("app.us_market.service.refresh_us_daily_prices") as refresh_mock:
+            refresh_mock.side_effect = lambda **kwargs: {
+                "status": "success",
+                "provider": kwargs["provider"],
+                "symbol": kwargs["symbol"],
+                "fetched_count": 1,
+                "inserted_count": 1,
+                "updated_count": 0,
+                "message": "mocked",
+            }
+            result = repair_us_daily_price_quality(
+                self.db,
+                dry_run=False,
+                refresh=True,
+                outputsize="compact",
+            )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["deleted_count"], 2)
+        self.assertEqual(result["remaining_dirty_count"], 0)
+        self.assertEqual(result["refreshed_symbol_count"], 2)
+        self.assertEqual(self.db.query(USDailyPrice).count(), 0)
+        self.assertEqual(
+            [call.kwargs["symbol"] for call in refresh_mock.call_args_list],
+            ["AAPL", "MU"],
+        )
+        for call in refresh_mock.call_args_list:
+            self.assertEqual(call.kwargs["provider"], "yahoo_chart")
+            self.assertEqual(call.kwargs["outputsize"], "compact")
+
+    @patch("app.us_market.service.fetch_yahoo_chart_payload")
+    def test_us_yahoo_full_refresh_uses_ten_year_range_for_stocks(self, mock_fetch) -> None:
+        mock_fetch.return_value = (
+            {"chart": {"result": [{"timestamp": [], "indicators": {"quote": [{}]}}]}},
+            "https://example.test/chart/MU",
+        )
+
+        result = refresh_us_daily_prices_from_yahoo_chart(
+            self.db,
+            symbol="MU",
+            outputsize="full",
+        )
+
+        self.assertEqual(result["symbol"], "MU")
+        self.assertEqual(result["fetched_count"], 0)
+        self.assertEqual(mock_fetch.call_args.kwargs["range_value"], "10y")
+
+    @patch("app.us_market.service.fetch_yahoo_chart_payload")
+    def test_us_yahoo_full_refresh_uses_ten_year_range_for_indices(self, mock_fetch) -> None:
+        mock_fetch.return_value = (
+            {"chart": {"result": [{"timestamp": [], "indicators": {"quote": [{}]}}]}},
+            "https://example.test/chart/%5EIXIC",
+        )
+
+        result = refresh_us_daily_prices_from_yahoo_chart(
+            self.db,
+            symbol="^IXIC",
+            outputsize="full",
+        )
+
+        self.assertEqual(result["symbol"], "^IXIC")
+        self.assertEqual(result["fetched_count"], 0)
+        self.assertEqual(mock_fetch.call_args.kwargs["range_value"], "10y")
+
     def test_us_monthly_ohlc_refreshes_full_history_when_local_points_are_short(self) -> None:
         records = [
             USDailyPriceRecord(
@@ -1105,9 +1741,42 @@ class USMarketStorageIsolationTests(unittest.TestCase):
             symbol="MU",
             outputsize="full",
             adjusted=False,
+            provider="auto",
         )
         self.assertEqual(chart["point_count"], 13)
         self.assertEqual(chart["backfill"]["message"], "mocked")
+
+    def test_us_ohlc_refresh_uses_requested_provider(self) -> None:
+        with patch("app.us_market.service.refresh_us_daily_prices") as refresh_mock:
+            refresh_mock.return_value = {
+                "status": "success",
+                "provider": "yahoo_chart",
+                "symbol": "^GSPC",
+                "fetched_count": 0,
+                "inserted_count": 0,
+                "updated_count": 0,
+                "message": "mocked",
+            }
+            chart = list_us_ohlc_chart_data(
+                self.db,
+                symbol="^GSPC",
+                timeframe="daily",
+                bars=5,
+                ensure_history=True,
+                outputsize="compact",
+                provider="yahoo_chart",
+                to_date=date(2026, 5, 31),
+            )
+
+        refresh_mock.assert_called_once_with(
+            db=self.db,
+            symbol="^GSPC",
+            outputsize="compact",
+            adjusted=False,
+            provider="yahoo_chart",
+        )
+        self.assertEqual(chart["symbol"], "^GSPC")
+        self.assertEqual(chart["backfill"]["provider"], "yahoo_chart")
 
     def test_us_monthly_ohlc_skips_refresh_when_local_points_are_enough(self) -> None:
         records = [

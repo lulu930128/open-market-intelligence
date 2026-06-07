@@ -20,13 +20,23 @@ import {
   getUsMarketRefreshState,
   isUsRegularSessionPoint,
 } from "@/lib/usMarketTime";
+import {
+  US_MARKET_INDEX_ITEMS,
+  getUsPrimaryMarketIndexConfig,
+  resolveUsContextIndexConfig,
+  getUsMarketIndexConfig,
+  type USMarketIndexConfig,
+} from "@/lib/usMarketIndices";
 import type {
   ChartPoint,
+  IntradayTrendResponse,
   MarketIndexSnapshot,
   MarketIndexSummary,
   RankingItem,
   RankingResponse,
   StockIndicatorPoint,
+  USCompanyProfileRead,
+  USOhlcChartRead,
   USWatchlistGroupNode,
   USWatchlistItemRead,
   USWatchlistRankingItemRead,
@@ -551,6 +561,318 @@ function MarketTape({
   );
 }
 
+type USMarketTapeSnapshot = {
+  symbol: string;
+  displaySymbol: string;
+  name: string;
+  exchange: string;
+  note: string;
+  close: number | null;
+  change: number | null;
+  changePct: number | null;
+  priceVsMa20: number | null;
+  volume: number | null;
+  pointCount: number;
+  asOf: string | null;
+  source: "intraday" | "daily";
+};
+
+function averageLastNumbers(values: Array<number | null | undefined>, windowSize: number) {
+  const validValues = values
+    .filter((value): value is number => {
+      return value !== null && value !== undefined && !Number.isNaN(value);
+    })
+    .slice(-windowSize);
+
+  if (!validValues.length) return null;
+
+  return validValues.reduce((total, value) => total + value, 0) / validValues.length;
+}
+
+function sumUsIntradayVolume(points: IntradayTrendResponse["points"]) {
+  const regularVolumes = points
+    .filter((point) => isUsRegularSessionPoint(point.time))
+    .map((point) => point.volume)
+    .filter((value): value is number => {
+      return value !== null && value !== undefined && !Number.isNaN(value) && value > 0;
+    });
+
+  if (!regularVolumes.length) return null;
+
+  return regularVolumes.reduce((total, value) => total + value, 0);
+}
+
+function usMarketRegimeLabel(snapshot: USMarketTapeSnapshot | null | undefined) {
+  if (!snapshot || snapshot.close === null) return "資料不足";
+  if (snapshot.priceVsMa20 !== null) {
+    if (snapshot.priceVsMa20 > 1) return "站上 MA20";
+    if (snapshot.priceVsMa20 < -1) return "跌破 MA20";
+  }
+
+  if (snapshot.changePct !== null) {
+    if (snapshot.changePct > 0) return "短線偏多";
+    if (snapshot.changePct < 0) return "短線偏弱";
+  }
+
+  return "中性震盪";
+}
+
+async function fetchUsMarketTapeSnapshot(config: USMarketIndexConfig) {
+  const [chart, intraday] = await Promise.all([
+    fetchJson<USOhlcChartRead>(
+      `/api/us-market/ohlc/${encodeURIComponent(config.symbol)}`,
+      {
+        timeframe: "daily",
+        bars: 60,
+        ensure_history: true,
+        outputsize: "compact",
+        provider: "yahoo_chart",
+      }
+    ),
+    fetchJson<IntradayTrendResponse>(
+      `/api/us-market/intraday/${encodeURIComponent(config.symbol)}`
+    ).catch(() => null),
+  ]);
+  const chartPoints = chart.points ?? [];
+  const latestDaily = chartPoints[chartPoints.length - 1] ?? null;
+  const previousDaily = chartPoints[chartPoints.length - 2] ?? null;
+  const latestIntraday = intraday?.points[intraday.points.length - 1] ?? null;
+  const close = latestIntraday?.price ?? latestDaily?.close ?? null;
+  const previousClose =
+    latestIntraday && intraday?.previous_close !== null && intraday?.previous_close !== undefined
+      ? intraday.previous_close
+      : previousDaily?.close ?? null;
+  const change =
+    close !== null && previousClose !== null ? close - previousClose : null;
+  const changePct =
+    change !== null && previousClose !== null && previousClose !== 0
+      ? (change / previousClose) * 100
+      : null;
+  const ma20 = averageLastNumbers(
+    chartPoints.map((point) => point.close),
+    20
+  );
+  const priceVsMa20 =
+    close !== null && ma20 !== null && ma20 !== 0
+      ? ((close - ma20) / ma20) * 100
+      : null;
+
+  return {
+    symbol: config.symbol,
+    displaySymbol: config.displaySymbol,
+    name: config.name,
+    exchange: config.exchange,
+    note: config.note,
+    close,
+    change,
+    changePct,
+    priceVsMa20,
+    volume: latestIntraday
+      ? sumUsIntradayVolume(intraday?.points ?? []) ?? latestDaily?.volume ?? null
+      : latestDaily?.volume ?? null,
+    pointCount: chart.point_count,
+    asOf: latestIntraday?.time ?? latestDaily?.time ?? null,
+    source: latestIntraday ? "intraday" : "daily",
+  } satisfies USMarketTapeSnapshot;
+}
+
+function USMarketTapeCard({
+  title,
+  snapshot,
+  loadState,
+}: {
+  title: string;
+  snapshot: USMarketTapeSnapshot | null;
+  loadState: LoadState;
+}) {
+  return (
+    <div className="bg-white px-4 py-3">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
+            {title}
+          </div>
+          <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <span className="text-lg font-bold text-slate-950">
+              {snapshot ? snapshot.name : loadState === "loading" ? "Loading" : "-"}
+            </span>
+            <span className="text-2xl font-black text-slate-950">
+              {formatPrice(snapshot?.close)}
+            </span>
+            <span className={`text-sm font-bold ${valueTone(snapshot?.changePct)}`}>
+              {formatSignedNumber(snapshot?.change)} / {formatPct(snapshot?.changePct)}
+            </span>
+          </div>
+          <div className="mt-1 text-xs text-slate-500">
+            {snapshot
+              ? `${snapshot.displaySymbol} · ${snapshot.exchange} · ${
+                  snapshot.source === "intraday" ? "盤中" : "日線"
+                }`
+              : "等待市場指數資料"}
+          </div>
+        </div>
+        <div className="text-right text-xs">
+          <div className="font-semibold text-slate-900">
+            {usMarketRegimeLabel(snapshot)}
+          </div>
+          <div className={valueTone(snapshot?.priceVsMa20)}>
+            {formatPct(snapshot?.priceVsMa20)} vs MA20
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+        <div className="border border-slate-100 bg-slate-50 px-2 py-2">
+          <div className="text-slate-500">成交量</div>
+          <div className="mt-1 font-semibold text-slate-900">
+            {formatWholeNumber(snapshot?.volume)}
+          </div>
+        </div>
+        <div className="border border-slate-100 bg-slate-50 px-2 py-2">
+          <div className="text-slate-500">K 線筆數</div>
+          <div className="mt-1 font-semibold text-slate-900">
+            {snapshot?.pointCount ?? "-"}
+          </div>
+        </div>
+        <div className="border border-slate-100 bg-slate-50 px-2 py-2">
+          <div className="text-slate-500">更新</div>
+          <div className="mt-1 truncate font-semibold text-slate-900">
+            {snapshot?.asOf ? formatRowTime(snapshot.asOf) ?? snapshot.asOf.slice(0, 10) : "-"}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function USMarketTape({
+  selectedSymbol,
+  selectedSecurityName,
+  selectedGroupName,
+  companyProfile,
+}: {
+  selectedSymbol: string | null;
+  selectedSecurityName: string | null;
+  selectedGroupName: string | null;
+  companyProfile: USCompanyProfileRead | null;
+}) {
+  const primaryIndex = getUsPrimaryMarketIndexConfig();
+  const contextIndex = resolveUsContextIndexConfig({
+    symbol: selectedSymbol,
+    securityName: selectedSecurityName,
+    groupName: selectedGroupName,
+    profile: companyProfile,
+  });
+  const [snapshots, setSnapshots] = useState<Record<string, USMarketTapeSnapshot>>({});
+  const [loadState, setLoadState] = useState<LoadState>("idle");
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const primarySnapshot = snapshots[primaryIndex.symbol] ?? null;
+  const contextSnapshot = snapshots[contextIndex.symbol] ?? null;
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | undefined;
+    let requestInFlight = false;
+    const configs = [primaryIndex, contextIndex].filter(
+      (config, index, items) => {
+        return items.findIndex((item) => item.symbol === config.symbol) === index;
+      }
+    );
+
+    function clearTimer() {
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+        timer = undefined;
+      }
+    }
+
+    async function loadSnapshots(silent = false) {
+      if (requestInFlight) return;
+      requestInFlight = true;
+
+      if (!silent) {
+        setLoadState("loading");
+      }
+      setErrorMessage(null);
+
+      try {
+        const nextSnapshots = await Promise.all(
+          configs.map((config) => fetchUsMarketTapeSnapshot(config))
+        );
+
+        if (cancelled) return;
+
+        setSnapshots((current) => {
+          const updated = { ...current };
+          nextSnapshots.forEach((snapshot) => {
+            updated[snapshot.symbol] = snapshot;
+          });
+          return updated;
+        });
+        setLoadState("success");
+      } catch (error) {
+        if (cancelled) return;
+
+        setLoadState("error");
+        setErrorMessage(
+          error instanceof Error ? error.message : "美股市場指數載入失敗"
+        );
+      } finally {
+        requestInFlight = false;
+      }
+    }
+
+    function scheduleRefresh() {
+      if (cancelled) return;
+
+      const marketState = getUsMarketRefreshState();
+      const delay = marketState.isPollingWindow
+        ? US_INTRADAY_REFRESH_MS
+        : Math.min(marketState.msUntilNextPollingStart, 60_000);
+
+      timer = window.setTimeout(() => {
+        void loadSnapshots(true).finally(scheduleRefresh);
+      }, delay);
+    }
+
+    void loadSnapshots().finally(scheduleRefresh);
+
+    return () => {
+      cancelled = true;
+      clearTimer();
+    };
+  }, [contextIndex, primaryIndex]);
+
+  const asOf = [primarySnapshot?.asOf, contextSnapshot?.asOf]
+    .filter((value): value is string => Boolean(value))
+    .sort((left, right) => left.localeCompare(right))
+    .at(-1);
+
+  return (
+    <section className="mb-3 border border-slate-200 bg-white">
+      <div className="grid gap-px bg-slate-200 lg:grid-cols-2">
+        <USMarketTapeCard
+          title="Market"
+          snapshot={primarySnapshot}
+          loadState={loadState}
+        />
+        <USMarketTapeCard
+          title="Context"
+          snapshot={contextSnapshot}
+          loadState={loadState}
+        />
+      </div>
+      <div className="border-t border-slate-200 px-4 py-2 text-xs text-slate-500">
+        {errorMessage
+          ? errorMessage
+          : asOf
+            ? `美股市場環境更新 ${formatRowTime(asOf) ?? asOf.slice(0, 10)}`
+            : "美股市場環境等待更新"}
+      </div>
+    </section>
+  );
+}
+
 function flattenGroups(nodes: WatchlistGroupNode[]): WatchlistGroupNode[] {
   return nodes.flatMap((node) => [node, ...flattenGroups(node.children)]);
 }
@@ -947,6 +1269,8 @@ export default function MarketDashboardClient({
   const [selectedUsSecurityName, setSelectedUsSecurityName] = useState<string | null>(
     initialSelectedUsRow?.security_name ?? null
   );
+  const [selectedUsCompanyProfile, setSelectedUsCompanyProfile] =
+    useState<USCompanyProfileRead | null>(null);
   const [selectedUsGroupId, setSelectedUsGroupId] = useState<number | null>(
     initialSelectedUsGroup?.id ?? null
   );
@@ -1038,6 +1362,10 @@ export default function MarketDashboardClient({
       downCount,
     };
   }, [usBaseRows.length, usRows]);
+  const selectedUsContextProfile =
+    selectedUsCompanyProfile?.symbol.toUpperCase() === selectedUsSymbol?.toUpperCase()
+      ? selectedUsCompanyProfile
+      : null;
 
   async function loadDashboard(
     groupId: number,
@@ -1386,6 +1714,7 @@ export default function MarketDashboardClient({
   function ensureSelectedUsLeaf() {
     const fallbackGroup = selectedUsGroup ?? flattenUsGroups(usWatchlistTree)[0] ?? null;
     const firstRow = firstUsWatchlistRow(fallbackGroup, usWatchlistItems);
+    const fallbackIndex = US_MARKET_INDEX_ITEMS[0] ?? null;
 
     if (fallbackGroup !== selectedUsGroup) {
       setSelectedUsGroup(fallbackGroup);
@@ -1394,8 +1723,8 @@ export default function MarketDashboardClient({
     }
 
     if (selectedUsSymbol === null) {
-      setSelectedUsSymbol(firstRow?.symbol ?? null);
-      setSelectedUsSecurityName(firstRow?.security_name ?? null);
+      setSelectedUsSymbol(firstRow?.symbol ?? fallbackIndex?.symbol ?? null);
+      setSelectedUsSecurityName(firstRow?.security_name ?? fallbackIndex?.name ?? null);
     }
   }
 
@@ -1761,12 +2090,16 @@ export default function MarketDashboardClient({
                   rowsForNextGroup.find((row) => row.symbol === selectedSymbolKey) ??
                   rowsForNextGroup[0] ??
                   null;
+                const selectedIndexConfig = getUsMarketIndexConfig(selectedUsSymbol);
 
                 setSelectedUsGroup(nextSelectedGroup);
                 setSelectedUsGroupId(nextSelectedGroup?.id ?? null);
                 setSelectedUsGroupName(nextSelectedGroup?.group_name ?? null);
 
-                if (
+                if (selectedIndexConfig) {
+                  setSelectedUsSymbol(selectedIndexConfig.symbol);
+                  setSelectedUsSecurityName(selectedIndexConfig.name);
+                } else if (
                   nextSelectedRow === null ||
                   selectedUsSymbol === null ||
                   nextSelectedRow.symbol !== selectedUsSymbol.toUpperCase() ||
@@ -1831,11 +2164,21 @@ export default function MarketDashboardClient({
                 />
               </>
             ) : activeMarket === "us" ? (
-              <USStockDetailPanel
-                selectedSymbol={selectedUsSymbol}
-                selectedSecurityName={selectedUsSecurityName}
-                watchlistRankingPanel={usRankingPanel}
-              />
+              <>
+                <USMarketTape
+                  selectedSymbol={selectedUsSymbol}
+                  selectedSecurityName={selectedUsSecurityName}
+                  selectedGroupName={selectedUsGroupName}
+                  companyProfile={selectedUsContextProfile}
+                />
+
+                <USStockDetailPanel
+                  selectedSymbol={selectedUsSymbol}
+                  selectedSecurityName={selectedUsSecurityName}
+                  watchlistRankingPanel={usRankingPanel}
+                  onCompanyProfileChange={setSelectedUsCompanyProfile}
+                />
+              </>
             ) : (
               <section className="border border-slate-200 bg-white px-5 py-10 text-sm text-slate-500">
                 尚未啟用

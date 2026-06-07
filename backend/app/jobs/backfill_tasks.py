@@ -356,6 +356,33 @@ def run_us_watchlist_daily_refresh_job(
     run_tracked_job(job_id, worker)
 
 
+def run_us_daily_price_quality_repair_job(
+    job_id: int,
+    symbol: str | None,
+    dry_run: bool,
+    limit: int,
+    refresh: bool,
+    outputsize: str,
+    adjusted: bool,
+    sleep_seconds: float,
+) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        progress(0, 1, "Repairing US daily price quality.")
+        return us_market_service.repair_us_daily_price_quality(
+            db=db,
+            symbol=symbol,
+            dry_run=dry_run,
+            limit=limit,
+            refresh=refresh,
+            outputsize=outputsize,
+            adjusted=adjusted,
+            sleep_seconds=sleep_seconds,
+            progress_callback=progress,
+        )
+
+    run_tracked_job(job_id, worker)
+
+
 def run_us_watchlist_resource_refresh_job(
     job_id: int,
     group_id: int | None,

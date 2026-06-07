@@ -84,6 +84,26 @@ class USDailyPriceRefreshResultRead(BaseModel):
     message: str
 
 
+class USDailyPriceQualityRepairResultRead(BaseModel):
+    status: str
+    dry_run: bool
+    symbol: str | None = None
+    provider: str
+    limit: int
+    total_dirty_count: int
+    candidate_count: int
+    remaining_dirty_count: int
+    affected_symbol_count: int
+    deleted_count: int
+    refreshed_symbol_count: int = 0
+    refresh_error_count: int = 0
+    affected_symbols: list[str] = Field(default_factory=list)
+    sample_rows: list[dict] = Field(default_factory=list)
+    refresh_results: list[dict] = Field(default_factory=list)
+    errors: list[dict] = Field(default_factory=list)
+    message: str
+
+
 class USOhlcPointRead(BaseModel):
     time: date
     open: float | None = None

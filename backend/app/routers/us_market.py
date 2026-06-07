@@ -12,6 +12,7 @@ from app.jobs.schemas import JobRunRead
 from app.us_market.schemas import (
     MacroSeriesObservationRead,
     USDailyPriceRead,
+    USDailyPriceQualityRepairResultRead,
     USDailyPriceRefreshResultRead,
     USCompanyProfileRead,
     USCorporateActionRead,
@@ -70,6 +71,7 @@ from app.us_market.service import (
     refresh_us_daily_prices as refresh_us_daily_prices_service,
     refresh_us_sec_companyfacts,
     refresh_us_short_volume_from_finra,
+    repair_us_daily_price_quality,
     search_us_stocks,
     sync_us_sec_company_data,
     sync_us_symbol_master,
@@ -191,6 +193,49 @@ def _enqueue_us_watchlist_resource_refresh(
             include_sec_facts,
             include_profile,
             include_actions,
+            outputsize,
+            adjusted,
+            sleep_seconds,
+        ),
+    )
+    return job_service.serialize_job(job)
+
+
+def _enqueue_us_daily_price_quality_repair(
+    *,
+    db: Session,
+    symbol: str | None,
+    dry_run: bool,
+    limit: int,
+    refresh: bool,
+    outputsize: str,
+    adjusted: bool,
+    sleep_seconds: float,
+) -> dict:
+    normalized_symbol = symbol.upper().strip() if symbol else None
+    target = normalized_symbol or "all"
+    request = {
+        "symbol": normalized_symbol,
+        "dry_run": dry_run,
+        "limit": limit,
+        "refresh": refresh,
+        "outputsize": outputsize,
+        "adjusted": adjusted,
+        "sleep_seconds": sleep_seconds,
+    }
+    job, _created = job_service.enqueue_job(
+        db=db,
+        job_type="us_market.daily_price_quality_repair",
+        target=target,
+        request=request,
+        progress_total=1,
+        message="Queued US daily price quality repair.",
+        task=backfill_tasks.run_us_daily_price_quality_repair_job,
+        task_args=(
+            normalized_symbol,
+            dry_run,
+            limit,
+            refresh,
             outputsize,
             adjusted,
             sleep_seconds,
@@ -554,6 +599,65 @@ def get_us_stock_master(symbol: str, db: Session = Depends(get_db)):
         ) from exc
 
 
+@router.post(
+    "/daily/quality/repair",
+    response_model=USDailyPriceQualityRepairResultRead,
+)
+def repair_us_daily_price_quality_api(
+    symbol: str | None = None,
+    dry_run: bool = True,
+    limit: int = Query(default=1000, ge=1, le=10000),
+    refresh: bool = False,
+    outputsize: str = Query(default="compact", pattern="^(compact|full)$"),
+    adjusted: bool = False,
+    sleep_seconds: float = Query(default=0.0, ge=0, le=120),
+    db: Session = Depends(get_db),
+):
+    try:
+        return repair_us_daily_price_quality(
+            db=db,
+            symbol=symbol,
+            dry_run=dry_run,
+            limit=limit,
+            refresh=refresh,
+            outputsize=outputsize,
+            adjusted=adjusted,
+            sleep_seconds=sleep_seconds,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/daily/quality/repair-job",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def repair_us_daily_price_quality_job_api(
+    symbol: str | None = None,
+    dry_run: bool = True,
+    limit: int = Query(default=1000, ge=1, le=10000),
+    refresh: bool = False,
+    outputsize: str = Query(default="compact", pattern="^(compact|full)$"),
+    adjusted: bool = False,
+    sleep_seconds: float = Query(default=0.0, ge=0, le=120),
+    db: Session = Depends(get_db),
+):
+    return _enqueue_us_daily_price_quality_repair(
+        db=db,
+        symbol=symbol,
+        dry_run=dry_run,
+        limit=limit,
+        refresh=refresh,
+        outputsize=outputsize,
+        adjusted=adjusted,
+        sleep_seconds=sleep_seconds,
+    )
+
+
 @router.post("/daily/{symbol}/refresh", response_model=USDailyPriceRefreshResultRead)
 def refresh_us_daily_prices(
     symbol: str,
@@ -615,6 +719,7 @@ def get_us_ohlc_chart_data(
     ensure_history: bool = False,
     outputsize: str = Query(default="compact", pattern="^(compact|full)$"),
     adjusted: bool = False,
+    provider: str = Query(default="auto", pattern="^(auto|alphavantage|yahoo_chart)$"),
     to_date: date | None = None,
     db: Session = Depends(get_db),
 ):
@@ -627,6 +732,7 @@ def get_us_ohlc_chart_data(
             ensure_history=ensure_history,
             outputsize=outputsize,
             adjusted=adjusted,
+            provider=provider,
             to_date=to_date,
         )
     except ValueError as exc:
