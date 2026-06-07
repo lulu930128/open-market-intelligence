@@ -2,6 +2,7 @@
 
 import SidebarWatchlistExplorer from "@/components/SidebarWatchlistExplorer";
 import type { MarketRegion } from "@/components/SidebarWatchlistExplorer";
+import { LoadingDots } from "@/components/LoadingPlaceholders";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
 import StockDetailPanel from "@/components/StockDetailPanel";
 import USStockDetailPanel from "@/components/USStockDetailPanel";
@@ -82,6 +83,32 @@ type Props = {
   initialUsWatchlistTree: USWatchlistGroupNode[];
   initialUsWatchlistItems: USWatchlistItemRead[];
 };
+
+function RankingLoadingRows({ rows = 5 }: { rows?: number }) {
+  return (
+    <div className="border-t border-slate-200" aria-hidden="true">
+      {Array.from({ length: rows }).map((_, index) => (
+        <div
+          key={index}
+          className="omi-ranking-loading-row grid w-full grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-slate-100 px-4 py-2 text-sm first:border-t-0"
+        >
+          <div className="omi-skeleton h-3 w-7" />
+          <div className="min-w-0 space-y-2">
+            <div className="omi-skeleton h-3 w-28" />
+            <div className="omi-skeleton h-2.5 w-16" />
+          </div>
+          <div className="mx-auto h-6 w-16">
+            <div className="omi-skeleton h-full w-full" />
+          </div>
+          <div className="ml-auto omi-skeleton h-3 w-14" />
+          <div className="ml-auto omi-skeleton h-3 w-12" />
+          <div className="ml-auto omi-skeleton h-6 w-12" />
+          <div className="ml-auto omi-skeleton h-3 w-16" />
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function formatLots(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
@@ -1132,13 +1159,18 @@ function WatchlistRankingPanel({
       <section className="border border-slate-200 bg-white">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-3">
           <h3 className="text-sm font-bold text-slate-950">自選股列表</h3>
-          <span className="text-xs text-slate-500">
-            {loadState === "loading"
-              ? "載入中"
-              : rankBy === "none"
+          {loadState === "loading" ? (
+            <span className="inline-flex items-center gap-2 text-xs text-slate-500">
+              載入中
+              <LoadingDots label="排行資料讀取中" />
+            </span>
+          ) : (
+            <span className="text-xs text-slate-500">
+              {rankBy === "none"
                 ? `${rows.length} 檔 · 正常排序`
                 : `${rows.length} 檔 · 依 ${rankLabel(rankBy)} 排序`}
-          </span>
+            </span>
+          )}
         </div>
 
         <div className="grid grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] bg-slate-50 px-4 py-2 text-xs font-bold uppercase tracking-wide text-slate-500">
@@ -1157,9 +1189,9 @@ function WatchlistRankingPanel({
               type="button"
               onClick={row.onSelect}
               className={[
-                "grid w-full grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-slate-200 px-4 py-2 text-left text-sm transition-colors",
+                "omi-ranking-row grid w-full grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-slate-200 px-4 py-2 text-left text-sm",
                 row.selected
-                  ? "bg-slate-900 text-white"
+                  ? "omi-ranking-row-selected bg-slate-900 text-white"
                   : "bg-white text-slate-800 hover:bg-slate-50",
               ].join(" ")}
             >
@@ -1198,8 +1230,10 @@ function WatchlistRankingPanel({
               <span className="text-right">
                 <span
                   className={[
-                    "px-2 py-1 text-xs font-semibold",
-                    row.selected ? "bg-white text-slate-900" : trendClass(row.changePct),
+                    "omi-ranking-trend-chip px-2 py-1 text-xs font-semibold",
+                    row.selected
+                      ? "omi-ranking-trend-chip-selected bg-white text-slate-900"
+                      : trendClass(row.changePct),
                   ].join(" ")}
                 >
                   {row.trend}
@@ -1217,9 +1251,11 @@ function WatchlistRankingPanel({
               </span>
             </button>
           ))
+        ) : loadState === "loading" ? (
+          <RankingLoadingRows />
         ) : (
           <div className="border-t border-slate-200 px-5 py-10 text-center text-sm text-slate-500">
-            {loadState === "loading" ? "載入中" : emptyMessage}
+            {emptyMessage}
           </div>
         )}
       </section>
@@ -1804,8 +1840,10 @@ export default function MarketDashboardClient({
         type="button"
         onClick={() => handleSelectStock(row.stock_id, row.stock_name)}
         className={[
-          "grid w-full grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-slate-200 px-4 py-2 text-left text-sm",
-          selected ? "bg-slate-900 text-white" : "bg-white text-slate-800 hover:bg-slate-50",
+          "omi-ranking-row grid w-full grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-slate-200 px-4 py-2 text-left text-sm",
+          selected
+            ? "omi-ranking-row-selected bg-slate-900 text-white"
+            : "bg-white text-slate-800 hover:bg-slate-50",
         ].join(" ")}
       >
         <span className={selected ? "text-slate-300" : "text-slate-500"}>#{row.rank}</span>
@@ -1843,9 +1881,9 @@ export default function MarketDashboardClient({
         <span className="text-right">
           <span
             className={[
-              "px-2 py-1 text-xs font-semibold",
+              "omi-ranking-trend-chip px-2 py-1 text-xs font-semibold",
               selected
-                ? selectedTrendClass(row.limit_status)
+                ? `omi-ranking-trend-chip-selected ${selectedTrendClass(row.limit_status)}`
                 : trendClass(row.change_pct, row.limit_status),
             ].join(" ")}
           >
@@ -1941,13 +1979,18 @@ export default function MarketDashboardClient({
       <section className="border border-slate-200 bg-white">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-3">
           <h3 className="text-sm font-bold text-slate-950">自選股列表</h3>
-          <span className="text-xs text-slate-500">
-            {loadState === "loading"
-              ? "載入中"
-              : rankBy === "none"
+          {loadState === "loading" ? (
+            <span className="inline-flex items-center gap-2 text-xs text-slate-500">
+              載入中
+              <LoadingDots label="自選股排行資料讀取中" />
+            </span>
+          ) : (
+            <span className="text-xs text-slate-500">
+              {rankBy === "none"
                 ? `${rows.length} 檔 · 正常排序`
                 : `${rows.length} 檔 · 依 ${rankLabel(ranking?.rank_by ?? rankBy)} 排序`}
-          </span>
+            </span>
+          )}
         </div>
 
         <div className="grid grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] bg-slate-50 px-4 py-2 text-xs font-bold uppercase tracking-wide text-slate-500">
@@ -1961,6 +2004,8 @@ export default function MarketDashboardClient({
         </div>
         {rows.length > 0 ? (
           rows.map(renderRankingRow)
+        ) : loadState === "loading" ? (
+          <RankingLoadingRows />
         ) : (
           <div className="border-t border-slate-200 px-5 py-10 text-center text-sm text-slate-500">
             尚無排行資料

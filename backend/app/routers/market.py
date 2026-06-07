@@ -33,6 +33,7 @@ from app.market.indices import (
     get_market_index_summary,
 )
 from app.market.intraday import get_intraday_trend
+from app.market.technical_report import build_stock_technical_report
 from app.market.broker_branch import (
     BrokerBranchFetchError,
     get_broker_branch_trade_summary,
@@ -58,6 +59,7 @@ from app.market.schemas import (
     MonthlyRevenueRead,
     ShareholdingDistributionWeeklyRead,
     StockChipCoverageRead,
+    TechnicalReportRead,
 )
 from app.market.service import (
     get_latest_stock_financial_metric,
@@ -594,6 +596,27 @@ def get_stock_intraday_trend(
     db: Session = Depends(get_db),
 ):
     return get_intraday_trend(db=db, stock_id=stock_id)
+
+
+@router.get("/technical/{stock_id}", response_model=TechnicalReportRead)
+def get_stock_technical_report(
+    stock_id: str,
+    timeframe: str = Query(default="daily", pattern="^(today|daily)$"),
+    include_intraday: bool = True,
+    db: Session = Depends(get_db),
+):
+    try:
+        return build_stock_technical_report(
+            db=db,
+            stock_id=stock_id,
+            timeframe=timeframe,
+            include_intraday=include_intraday,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
 
 
 @router.get("/indices/summary", response_model=MarketIndexSummaryRead)

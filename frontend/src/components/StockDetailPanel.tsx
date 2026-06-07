@@ -6,6 +6,7 @@ import IntradayTrendChart, {
   type IntradayIndicatorKey,
   type IntradayIndicatorSettings,
 } from "@/components/IntradayTrendChart";
+import { LoadingDots } from "@/components/LoadingPlaceholders";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
 import StockKLineChart, {
   defaultIndicatorParameters,
@@ -19,6 +20,8 @@ import { fetchJson } from "@/lib/api";
 import { getJobResultStatus, requestBackfillJob } from "@/lib/jobs";
 import {
   TAIWAN_INTRADAY_REFRESH_MS,
+  TAIWAN_SESSION_START_MINUTES,
+  getTaipeiMinutesOfDay,
   getTaiwanMarketRefreshState,
 } from "@/lib/taiwanMarketTime";
 import {
@@ -54,6 +57,7 @@ import type {
   StockChipCoverageRead,
   StockIndicatorPoint,
   StockMasterRead,
+  StockTechnicalReportRead,
 } from "@/types/market";
 import {
   type MouseEvent as ReactMouseEvent,
@@ -189,6 +193,8 @@ const chartBarsByTimeframe: Record<Exclude<Timeframe, "today">, number> = {
   monthly: 132,
 };
 const dailyIndicatorLimit = 220;
+const openingObservationMinutes = 5;
+const openingObservationMinPoints = 5;
 const allTimeframes = Object.keys(timeframeLabels) as Timeframe[];
 const indexTimeframes: Timeframe[] = ["today", "daily", "weekly", "monthly"];
 const indexProducts = new Map([
@@ -377,6 +383,14 @@ function formatPct(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
   const sign = value > 0 ? "+" : "";
   return `${sign}${value.toFixed(2)}%`;
+}
+
+function formatIndicatorValue(value: number | null | undefined, digits = 2) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "-";
+  return value.toLocaleString("zh-TW", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  });
 }
 
 function formatRatioPct(value: number | null | undefined) {
@@ -605,6 +619,10 @@ function safeRatio(numerator: number | null | undefined, denominator: number | n
   return numerator / denominator;
 }
 
+function finiteNumber(value: number | null | undefined): value is number {
+  return value !== null && value !== undefined && Number.isFinite(value);
+}
+
 async function fetchOptional<T>(
   path: string,
   params?: Record<string, string | number | boolean>
@@ -629,6 +647,96 @@ function averageRecentChartValue(
   if (values.length < windowSize) return null;
 
   return values.reduce((total, value) => total + value, 0) / values.length;
+}
+
+function chartWindowStats(points: ChartPoint[], windowSize: number) {
+  const rows = points.slice(-windowSize);
+  const firstClose = rows.find((point) => finiteNumber(point.close))?.close ?? null;
+  const latest = [...rows].reverse().find((point) => finiteNumber(point.close)) ?? null;
+  const latestClose = latest?.close ?? null;
+  const highs = rows.map((point) => point.high).filter(finiteNumber);
+  const lows = rows.map((point) => point.low).filter(finiteNumber);
+  const volumes = rows.map((point) => point.volume).filter(finiteNumber);
+  const high = highs.length ? Math.max(...highs) : null;
+  const low = lows.length ? Math.min(...lows) : null;
+  const changePct =
+    finiteNumber(latestClose) && finiteNumber(firstClose) && firstClose !== 0
+      ? ((latestClose - firstClose) / firstClose) * 100
+      : null;
+  const rangePositionPct =
+    finiteNumber(latestClose) && finiteNumber(high) && finiteNumber(low) && high !== low
+      ? ((latestClose - low) / (high - low)) * 100
+      : null;
+
+  return {
+    pointCount: rows.length,
+    latestClose,
+    changePct,
+    high,
+    low,
+    rangePositionPct,
+    volumeAverage:
+      volumes.length > 0
+        ? volumes.reduce((total, value) => total + value, 0) / volumes.length
+        : null,
+  };
+}
+
+function averageRecentChartClose(points: ChartPoint[], windowSize: number) {
+  return averageRecentChartValue(points, "close", windowSize);
+}
+
+function latestLargeHolderSummary(
+  rows: ShareholdingDistributionWeeklyRead[],
+  largeHolderLots: number
+) {
+  const groups = new Map<string, ShareholdingDistributionWeeklyRead[]>();
+
+  rows.forEach((row) => {
+    groups.set(row.data_date, [...(groups.get(row.data_date) ?? []), row]);
+  });
+
+  const points = Array.from(groups.entries())
+    .sort(([leftDate], [rightDate]) => leftDate.localeCompare(rightDate))
+    .map(([dataDate, groupRows]) => {
+      const largeRows = groupRows.filter((row) => {
+        const range = shareholdingLevelRanges[row.holding_level_order ?? -1];
+        return range ? range.minLots >= largeHolderLots : false;
+      });
+      const ratio = largeRows.reduce((total, row) => total + (row.share_ratio ?? 0), 0);
+
+      return {
+        dataDate,
+        ratio: largeRows.length ? ratio : null,
+      };
+    })
+    .filter((point) => point.ratio !== null);
+  const latest = points[points.length - 1] ?? null;
+  const previous = points[points.length - 2] ?? null;
+  const change =
+    latest?.ratio !== null &&
+    latest?.ratio !== undefined &&
+    previous?.ratio !== null &&
+    previous?.ratio !== undefined
+      ? latest.ratio - previous.ratio
+      : null;
+
+  return {
+    ratio: latest?.ratio ?? null,
+    change,
+    dataDate: latest?.dataDate ?? null,
+  };
+}
+
+function sumRecentInstitutionalNet(rows: InstitutionalTradeDailyRead[], rowCount: number) {
+  const values = rows
+    .slice(-rowCount)
+    .map((row) => row.total_institutional_net)
+    .filter(finiteNumber);
+
+  if (!values.length) return null;
+
+  return values.reduce((total, value) => total + value, 0);
 }
 
 function summarizeIntradayPoints(points: IntradayTrendPoint[]) {
@@ -660,11 +768,73 @@ function summarizeIntradayPoints(points: IntradayTrendPoint[]) {
 
 type TechnicalTone = "positive" | "negative" | "neutral" | "warning";
 
+type TechnicalReportRow = {
+  title: string;
+  description: string;
+  value: string;
+  pulseValue?: number | string | null;
+  direction?: number | null;
+  tone?: TechnicalTone;
+};
+
+type TechnicalReportBadge = {
+  label: string;
+  tone: string;
+};
+
+type TechnicalReport = {
+  title: string;
+  summary: string;
+  value: number | null;
+  valueLabel: string;
+  score: number;
+  rows: TechnicalReportRow[];
+  badges: TechnicalReportBadge[];
+};
+
 function technicalToneClass(tone: TechnicalTone) {
   if (tone === "positive") return "text-red-600";
   if (tone === "negative") return "text-emerald-600";
   if (tone === "warning") return "text-amber-600";
   return "text-slate-700";
+}
+
+function semanticTechnicalTone(tone: string | null | undefined): TechnicalTone {
+  if (tone === "positive" || tone === "negative" || tone === "warning") return tone;
+  return "neutral";
+}
+
+function semanticBadgeToneClass(tone: string | null | undefined) {
+  if (tone === "positive") return "text-red-700 bg-red-50";
+  if (tone === "negative") return "text-emerald-700 bg-emerald-50";
+  if (tone === "warning") return "text-amber-700 bg-amber-50";
+  return "text-slate-600 bg-slate-100";
+}
+
+function numberValue(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function mapBackendTechnicalReport(report: StockTechnicalReportRead): TechnicalReport {
+  return {
+    title: report.title,
+    summary: report.summary,
+    value: report.value,
+    valueLabel: report.value_label,
+    score: report.score,
+    rows: report.rows.map((row) => ({
+      title: row.label,
+      description: row.description,
+      value: row.display_value,
+      pulseValue: numberValue(row.value),
+      direction: row.direction,
+      tone: semanticTechnicalTone(row.tone),
+    })),
+    badges: report.badges.map((badge) => ({
+      label: badge.label,
+      tone: semanticBadgeToneClass(badge.tone),
+    })),
+  };
 }
 
 function TechnicalSignalRow({
@@ -683,12 +853,12 @@ function TechnicalSignalRow({
   tone?: TechnicalTone;
 }) {
   return (
-    <div className="flex items-start justify-between gap-4 border-t border-slate-100 py-2 first:border-t-0 first:pt-0">
+    <div className={`omi-technical-row omi-technical-row-${tone} flex items-start justify-between gap-4 border-t border-slate-100 py-2 first:border-t-0 first:pt-0`}>
       <div className="min-w-0">
         <div className="text-sm font-bold text-slate-950">{title}</div>
         <div className="mt-0.5 text-xs leading-4 text-slate-500">{description}</div>
       </div>
-      <div className={`shrink-0 text-right text-sm font-bold ${technicalToneClass(tone)}`}>
+      <div className={`omi-technical-score shrink-0 text-right text-sm font-bold ${technicalToneClass(tone)}`}>
         <PriceUpdatePulse
           value={pulseValue ?? value}
           direction={direction}
@@ -699,6 +869,72 @@ function TechnicalSignalRow({
         </PriceUpdatePulse>
       </div>
     </div>
+  );
+}
+
+function TechnicalLoadingPanel() {
+  return (
+    <>
+      <div className="omi-technical-summary border-b border-slate-200 px-5 py-3">
+        <div className="flex items-center justify-between gap-4">
+          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+            Technical
+          </div>
+          <LoadingDots label="Technical 分析讀取中" />
+        </div>
+        <div className="mt-3 flex items-start justify-between gap-4">
+          <div className="min-w-0 flex-1 space-y-2">
+            <div className="omi-skeleton h-5 w-32" />
+            <div className="omi-skeleton h-3 w-56 max-w-full" />
+          </div>
+          <div className="w-20 space-y-2">
+            <div className="ml-auto omi-skeleton h-5 w-16" />
+            <div className="ml-auto omi-skeleton h-2.5 w-12" />
+          </div>
+        </div>
+      </div>
+
+      <div className="px-5 py-3">
+        <div className="space-y-0">
+          {Array.from({ length: 5 }).map((_, index) => (
+            <div
+              key={index}
+              className="omi-technical-loading-row flex items-start justify-between gap-4 border-t border-slate-100 py-2 first:border-t-0 first:pt-0"
+              aria-hidden="true"
+            >
+              <div className="min-w-0 flex-1 space-y-2">
+                <div className="omi-skeleton h-3.5 w-24" />
+                <div className="omi-skeleton h-2.5 w-48 max-w-full" />
+              </div>
+              <div className="w-20 space-y-2">
+                <div className="ml-auto omi-skeleton h-3.5 w-14" />
+                <div className="ml-auto omi-skeleton h-2.5 w-10" />
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-3 border-t border-slate-200 pt-3">
+          <div className="omi-technical-loading-row flex items-start justify-between gap-4 text-xs">
+            <div className="space-y-2">
+              <div className="omi-skeleton h-3 w-16" />
+              <div className="omi-skeleton h-4 w-20" />
+              <div className="omi-skeleton h-2.5 w-24" />
+            </div>
+            <div className="w-20 space-y-2">
+              <div className="ml-auto omi-skeleton h-3.5 w-16" />
+              <div className="ml-auto omi-skeleton h-2.5 w-12" />
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-3 flex flex-wrap gap-2" aria-hidden="true">
+          <div className="omi-skeleton h-7 w-20" />
+          <div className="omi-skeleton h-7 w-24" />
+          <div className="omi-skeleton h-7 w-16" />
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -736,9 +972,14 @@ function IndexListPanel({
         <div className="mt-2 flex items-end justify-between gap-4">
           <div>
             <div className="text-xl font-bold text-slate-950">{marketLabel}指數列表</div>
-            <div className="mt-1 text-xs text-slate-500">
-              {loadState === "loading" ? "讀取中" : `${items.length} 檔指數`}
-            </div>
+            {loadState === "loading" ? (
+              <div className="mt-1 inline-flex items-center gap-2 text-xs text-slate-500">
+                讀取中
+                <LoadingDots label={`${marketLabel}指數列表讀取中`} />
+              </div>
+            ) : (
+              <div className="mt-1 text-xs text-slate-500">{`${items.length} 檔指數`}</div>
+            )}
           </div>
           <div className="text-right text-xs font-semibold text-slate-500">
             {marketLabel}
@@ -770,9 +1011,25 @@ function IndexListPanel({
               </div>
             </div>
           ))
+        ) : loadState === "loading" ? (
+          <div className="space-y-0" aria-hidden="true">
+            {Array.from({ length: 6 }).map((_, index) => (
+              <div
+                key={index}
+                className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 border-t border-slate-100 py-2 first:border-t-0"
+              >
+                <div className="min-w-0 space-y-2">
+                  <div className="omi-skeleton h-3.5 w-32" />
+                  <div className="omi-skeleton h-2.5 w-20" />
+                </div>
+                <div className="omi-skeleton h-3.5 w-16" />
+                <div className="omi-skeleton h-7 w-20" />
+              </div>
+            ))}
+          </div>
         ) : (
           <div className="py-10 text-center text-sm text-slate-500">
-            {loadState === "loading" ? "讀取中" : "尚無指數列表資料"}
+            尚無指數列表資料
           </div>
         )}
       </div>
@@ -1072,9 +1329,9 @@ function DataTabButton({
       type="button"
       onClick={onClick}
       className={[
-        "flex h-11 min-w-0 flex-1 items-center justify-center gap-2 border-r border-slate-200 text-sm font-semibold transition last:border-r-0",
+        "omi-data-tab flex h-11 min-w-0 flex-1 items-center justify-center gap-2 border-r border-slate-200 text-sm font-semibold transition last:border-r-0",
         active
-          ? "bg-white text-slate-950 shadow-[inset_0_-2px_0_#b91c1c]"
+          ? "omi-data-tab-active bg-white text-slate-950"
           : "bg-slate-50 text-slate-500 hover:bg-white hover:text-slate-900",
       ].join(" ")}
     >
@@ -1088,6 +1345,46 @@ function EmptyDataState({ message }: { message: string }) {
   return (
     <div className="border border-dashed border-slate-200 px-4 py-8 text-center text-sm text-slate-500">
       {message}
+    </div>
+  );
+}
+
+function DataPanelLoadingState({ message }: { message: string }) {
+  return (
+    <div className="omi-tab-panel border border-slate-200 bg-white px-4 py-5">
+      <div className="mb-4 flex items-center justify-between gap-4">
+        <div className="inline-flex min-w-0 items-center gap-2 text-sm font-semibold text-slate-700">
+          <span className="truncate">{message}</span>
+          <LoadingDots label={message} />
+        </div>
+        <div className="h-1.5 w-20 overflow-hidden bg-slate-100">
+          <div className="omi-loading-bar h-full w-1/2 bg-slate-900" />
+        </div>
+      </div>
+      <div className="space-y-3">
+        <div className="omi-skeleton h-3 w-2/3" />
+        <div className="grid grid-cols-3 gap-3">
+          <div className="omi-skeleton h-16" />
+          <div className="omi-skeleton h-16" />
+          <div className="omi-skeleton h-16" />
+        </div>
+        <div className="omi-skeleton h-44" />
+      </div>
+    </div>
+  );
+}
+
+function DataPanelRefreshRail({ message }: { message: string | null }) {
+  return (
+    <div className="pointer-events-none absolute inset-x-0 top-0 z-10">
+      <div className="h-0.5 overflow-hidden bg-slate-100">
+        <div className="omi-loading-bar h-full w-1/3 bg-red-700" />
+      </div>
+      {message ? (
+        <div className="absolute right-0 top-2 max-w-[70%] truncate bg-white/90 px-2 py-1 text-[11px] font-medium text-slate-500 shadow-sm ring-1 ring-slate-200">
+          {message}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -2424,6 +2721,8 @@ export default function StockDetailPanel({
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [chartHistoryMessage, setChartHistoryMessage] = useState<string | null>(null);
+  const [backendTechnicalReport, setBackendTechnicalReport] =
+    useState<StockTechnicalReportRead | null>(null);
   const [indexList, setIndexList] = useState<MarketIndexListItem[]>([]);
   const [indexListLoadState, setIndexListLoadState] = useState<LoadState>("idle");
   const [indexContributions, setIndexContributions] =
@@ -2961,6 +3260,42 @@ export default function StockDetailPanel({
     };
   }, [currentStockInfoId, currentStockInfoMarket, effectiveTimeframe, isIndexProduct, stockId]);
 
+  useEffect(() => {
+    if (!stockId || isIndexProduct || !["today", "daily"].includes(effectiveTimeframe)) {
+      return;
+    }
+
+    let cancelled = false;
+    const requestedStockId = stockId;
+    const requestedTimeframe = effectiveTimeframe as "today" | "daily";
+
+    async function loadBackendTechnicalReport() {
+      try {
+        const report = await fetchJson<StockTechnicalReportRead>(
+          `/api/market/technical/${requestedStockId}`,
+          {
+            timeframe: requestedTimeframe,
+            include_intraday: requestedTimeframe === "today",
+          }
+        );
+
+        if (cancelled || activeStockIdRef.current !== requestedStockId) return;
+
+        setBackendTechnicalReport(report);
+      } catch {
+        if (cancelled || activeStockIdRef.current !== requestedStockId) return;
+
+        setBackendTechnicalReport(null);
+      }
+    }
+
+    void loadBackendTechnicalReport();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [effectiveTimeframe, isIndexProduct, stockId, todayUpdatedAt]);
+
   const indicatorForTimeframe = useMemo(() => {
     if (effectiveTimeframe === "daily") return indicatorData.slice(-180);
     return [];
@@ -2977,7 +3312,7 @@ export default function StockDetailPanel({
   const todayStats = useMemo(() => summarizeIntradayPoints(todayTrend), [todayTrend]);
   const latestClose =
     effectiveTimeframe === "today"
-      ? latestToday?.price ?? latestIndicator?.close ?? latestChart?.close ?? null
+      ? latestToday?.price ?? null
       : latestIndicator?.close ?? latestChart?.close ?? null;
   const dailyPreviousClose =
     latestIndicator?.close !== null &&
@@ -3020,14 +3355,19 @@ export default function StockDetailPanel({
     latestClose !== null && ma20 !== null && ma20 !== 0
       ? ((latestClose - ma20) / ma20) * 100
       : null;
-  const latestVolume = latestIndicator?.volume ?? latestChart?.volume ?? null;
+  const latestVolume =
+    effectiveTimeframe === "today"
+      ? todayStats.volume ?? latestToday?.volume ?? null
+      : latestIndicator?.volume ?? latestChart?.volume ?? null;
   const volumeRatio = safeRatio(latestVolume, volumeMa20);
   const volumeRatioPct = volumeRatio === null ? null : (volumeRatio - 1) * 100;
   const totalInstitutionalNet = institutional?.total_institutional_net ?? null;
   const displayTime =
     effectiveTimeframe === "today" && latestToday
       ? formatDateTime(latestToday.time)
-      : latestIndicator?.time ?? latestChart?.time ?? "-";
+      : effectiveTimeframe === "today"
+        ? "-"
+        : latestIndicator?.time ?? latestChart?.time ?? "-";
   const marketIndicesById = useMemo(() => {
     return new Map(
       (marketIndexSummary?.indices ?? []).map((index) => [index.index_id, index])
@@ -3049,115 +3389,600 @@ export default function StockDetailPanel({
       ? latestChangePct - primaryMarketIndex.change_pct
       : null;
 
-  const technicalStatus = useMemo(() => {
-    if (latestClose === null) return "資料不足";
-    if (ma20 !== null && ma60 !== null && latestClose > ma20 && ma20 > ma60) {
-      return "多方排列";
-    }
-    if (ma20 !== null && ma60 !== null && latestClose < ma20 && ma20 < ma60) {
-      return "空方排列";
-    }
-    if (ma20 !== null && latestClose > ma20) return "偏多整理";
-    if (ma20 !== null && latestClose < ma20) return "偏弱整理";
-    return "中性";
-  }, [latestClose, ma20, ma60]);
+  const fallbackTechnicalReport = useMemo<TechnicalReport>(() => {
+    const rows: TechnicalReportRow[] = [];
+    const badges: TechnicalReportBadge[] = [];
+    let score = 0;
+    const hasCurrentChart =
+      effectiveTimeframe === "today" || currentChartReady || isIndexProduct;
 
-  const signals = useMemo(() => {
-    const result: { label: string; tone: string }[] = [];
-
-    if (latestClose !== null && ma20 !== null) {
-      result.push({
-        label: latestClose >= ma20 ? "收盤站上 MA20" : "收盤跌破 MA20",
-        tone: latestClose >= ma20 ? "text-red-700 bg-red-50" : "text-emerald-700 bg-emerald-50",
-      });
+    function addScore(value: number) {
+      score += value;
     }
 
-    if (ma5 !== null && ma20 !== null) {
-      result.push({
-        label: ma5 >= ma20 ? "短均線偏多" : "短均線偏弱",
-        tone: ma5 >= ma20 ? "text-red-700 bg-red-50" : "text-emerald-700 bg-emerald-50",
-      });
+    function addBadge(label: string, tone: string) {
+      if (badges.some((badge) => badge.label === label)) return;
+      badges.push({ label, tone });
     }
 
-    if (volumeRatio !== null) {
-      result.push({
-        label: volumeRatio >= 1.5 ? "量能放大" : "量能一般",
-        tone: volumeRatio >= 1.5 ? "text-amber-700 bg-amber-50" : "text-slate-600 bg-slate-100",
-      });
+    function rowTone(value: number | null | undefined): TechnicalTone {
+      if (!finiteNumber(value)) return "neutral";
+      if (value > 0) return "positive";
+      if (value < 0) return "negative";
+      return "neutral";
     }
 
-    if (totalInstitutionalNet !== null) {
-      result.push({
-        label: totalInstitutionalNet >= 0 ? "法人買超" : "法人賣超",
+    function titleFor(shortLabel: string, neutralLabel: string, weakLabel: string) {
+      if (score >= 3) return shortLabel;
+      if (score <= -3) return weakLabel;
+      return neutralLabel;
+    }
+
+    function summaryFrom(parts: string[]) {
+      if (loadState === "loading") return "資料讀取中";
+      const validParts = parts.filter((part) => part && part !== "資料不足");
+      return validParts.length ? validParts.join("，") : "訊號資料不足";
+    }
+
+    if (effectiveTimeframe === "today" && !latestToday) {
+      addBadge("等待盤中", "text-slate-600 bg-slate-100");
+
+      return {
+        title: loadState === "loading" ? "資料讀取中" : "等待盤中資料",
+        summary:
+          loadState === "loading"
+            ? "正在取得今日盤中資料"
+            : "尚未取得今日第一筆成交，日線資料暫不作盤中判斷",
+        value: null,
+        valueLabel: "vs 昨收",
+        score: 0,
+        rows: [
+          {
+            title: "資料狀態",
+            description: "尚未取得今日第一筆成交或即時快照",
+            value: "0筆",
+            tone: "neutral",
+          },
+          {
+            title: "參考基準",
+            description: "今日漲跌幅將以上一交易日收盤價計算",
+            value: formatPrice(todayReferenceClose),
+            pulseValue: todayReferenceClose,
+            tone: "neutral",
+          },
+        ],
+        badges,
+      };
+    }
+
+    if (!finiteNumber(latestClose) || !hasCurrentChart) {
+      return {
+        title: loadState === "loading" ? "資料讀取中" : "資料不足",
+        summary: loadState === "loading" ? "正在整理技術訊號" : "尚無足夠資料產生報告",
+        value: null,
+        valueLabel: timeframeLabels[effectiveTimeframe],
+        score: 0,
+        rows: [
+          {
+            title: "資料狀態",
+            description: hasCurrentChart ? "價格資料不足" : "等待目前週期 K 線資料",
+            value: "-",
+            tone: "neutral",
+          },
+        ],
+        badges,
+      };
+    }
+
+    const rsi14 = latestIndicator?.rsi?.rsi14 ?? null;
+    const macdHistogram = latestIndicator?.macd?.histogram ?? null;
+    const roc12 = latestIndicator?.roc?.roc12 ?? null;
+    const mfi14 = latestIndicator?.mfi?.mfi14 ?? null;
+    const atr14 = latestIndicator?.atr?.atr14 ?? null;
+    const adx14 = latestIndicator?.adx?.adx14 ?? null;
+    const plusDi14 = latestIndicator?.adx?.plus_di14 ?? null;
+    const minusDi14 = latestIndicator?.adx?.minus_di14 ?? null;
+    const donchianUpper20 = latestIndicator?.donchian?.upper20 ?? null;
+    const donchianLower20 = latestIndicator?.donchian?.lower20 ?? null;
+    const atrPct =
+      finiteNumber(atr14) && latestClose !== 0 ? (atr14 / latestClose) * 100 : null;
+    const donchianPositionPct =
+      finiteNumber(donchianUpper20) &&
+      finiteNumber(donchianLower20) &&
+      donchianUpper20 !== donchianLower20
+        ? ((latestClose - donchianLower20) / (donchianUpper20 - donchianLower20)) * 100
+        : null;
+    const latestInstitutionalNet =
+      institutional?.total_institutional_net ?? totalInstitutionalNet;
+    const largeHolder = latestLargeHolderSummary(shareholding, largeHolderLots);
+    const marginBalanceChange =
+      finiteNumber(margin?.margin_today_balance) && finiteNumber(margin?.margin_previous_balance)
+        ? margin.margin_today_balance - margin.margin_previous_balance
+        : null;
+    const marketRelativeLabel =
+      relativeToPrimaryIndex === null
+        ? "資料不足"
+        : relativeToPrimaryIndex > 0
+          ? "強於大盤"
+          : relativeToPrimaryIndex < 0
+            ? "弱於大盤"
+            : "同步大盤";
+
+    if (effectiveTimeframe === "today") {
+      const pointCount = todayTrend.length;
+      const latestIntradayMinutes = latestToday ? getTaipeiMinutesOfDay(latestToday.time) : null;
+      const minutesFromOpen = finiteNumber(latestIntradayMinutes)
+        ? latestIntradayMinutes - TAIWAN_SESSION_START_MINUTES
+        : null;
+      const isOpeningPhase =
+        !finiteNumber(minutesFromOpen) ||
+        minutesFromOpen < openingObservationMinutes ||
+        pointCount < openingObservationMinPoints;
+      const todayOpen = todayStats.open ?? latestToday?.open ?? null;
+      const priceVsOpenPct =
+        finiteNumber(latestClose) && finiteNumber(todayOpen) && todayOpen !== 0
+          ? ((latestClose - todayOpen) / todayOpen) * 100
+          : null;
+      const openingGapPct =
+        finiteNumber(todayOpen) && finiteNumber(todayReferenceClose) && todayReferenceClose !== 0
+          ? ((todayOpen - todayReferenceClose) / todayReferenceClose) * 100
+          : null;
+      const intradayRangePct =
+        finiteNumber(todayStats.high) &&
+        finiteNumber(todayStats.low) &&
+        finiteNumber(todayReferenceClose) &&
+        todayReferenceClose !== 0
+          ? ((todayStats.high - todayStats.low) / todayReferenceClose) * 100
+          : null;
+      const currentVolume = todayStats.volume ?? latestToday?.volume ?? null;
+      const currentVolumeVsDailyAverage = safeRatio(currentVolume, volumeMa20);
+      const currentVolumeVsDailyAveragePct =
+        currentVolumeVsDailyAverage === null ? null : currentVolumeVsDailyAverage * 100;
+
+      if (finiteNumber(latestChangePct)) {
+        if (latestChangePct > 0) addScore(1);
+        if (latestChangePct < 0) addScore(-1);
+      }
+      if (finiteNumber(openingGapPct)) {
+        if (openingGapPct > 0) addScore(1);
+        if (openingGapPct < 0) addScore(-1);
+      }
+      if (!isOpeningPhase && finiteNumber(priceVsOpenPct)) {
+        if (priceVsOpenPct > 0) addScore(1);
+        if (priceVsOpenPct < 0) addScore(-1);
+      }
+      if (!isOpeningPhase && finiteNumber(relativeToPrimaryIndex)) {
+        if (relativeToPrimaryIndex > 0) addScore(1);
+        if (relativeToPrimaryIndex < 0) addScore(-1);
+      }
+
+      const intradayHighLow = `${formatPrice(todayStats.high)} / ${formatPrice(todayStats.low)}`;
+      rows.push(
+        {
+          title: "即時價格",
+          description: `相對昨收 ${formatPct(latestChangePct)}，${pointCount} 筆盤中資料`,
+          value: formatPrice(latestClose),
+          pulseValue: latestClose,
+          direction: latestChangePct,
+          tone: rowTone(latestChangePct),
+        },
+        {
+          title: "開盤結構",
+          description: `開盤 ${formatPrice(todayOpen)}，高低 ${intradayHighLow}，振幅 ${formatPct(intradayRangePct)}`,
+          value: formatPct(priceVsOpenPct),
+          pulseValue: priceVsOpenPct,
+          direction: priceVsOpenPct,
+          tone: rowTone(priceVsOpenPct),
+        },
+        {
+          title: "量能速度",
+          description: `目前累計量，20日均量占比 ${formatPct(currentVolumeVsDailyAveragePct)}`,
+          value: currentVolume === null ? "觀察中" : `${formatLots(currentVolume)}張`,
+          pulseValue: currentVolume,
+          direction: null,
+          tone: "neutral",
+        },
+        {
+          title: "日線背景",
+          description: `RSI ${formatIndicatorValue(rsi14)}，MACD H ${formatIndicatorValue(macdHistogram)}，MA20 ${formatPrice(ma20)}`,
+          value: formatPct(priceVsMa20),
+          pulseValue: priceVsMa20,
+          direction: priceVsMa20,
+          tone:
+            finiteNumber(rsi14) && rsi14 >= 80
+              ? "warning"
+              : finiteNumber(priceVsMa20)
+                ? rowTone(priceVsMa20)
+                : "neutral",
+        },
+        {
+          title: "法人籌碼",
+          description: `最新已公布三大法人，融資餘額 ${formatSignedNumber(marginBalanceChange)}`,
+          value:
+            latestInstitutionalNet === null
+              ? "-"
+              : `${formatSignedLots(latestInstitutionalNet)}張`,
+          pulseValue: latestInstitutionalNet,
+          direction: latestInstitutionalNet,
+          tone: rowTone(latestInstitutionalNet),
+        },
+        {
+          title: "相對市場",
+          description: `相對${primaryMarketIndex?.short_label ?? "大盤"}，${
+            isOpeningPhase ? "開盤初期僅作方向參考" : marketRelativeLabel
+          }`,
+          value: formatPct(relativeToPrimaryIndex),
+          pulseValue: relativeToPrimaryIndex,
+          direction: relativeToPrimaryIndex,
+          tone: rowTone(relativeToPrimaryIndex),
+        }
+      );
+
+      if (isOpeningPhase) addBadge("開盤資料少", "text-amber-700 bg-amber-50");
+      if (finiteNumber(openingGapPct)) {
+        addBadge(
+          openingGapPct >= 0 ? "開高" : "開低",
+          openingGapPct >= 0 ? "text-red-700 bg-red-50" : "text-emerald-700 bg-emerald-50"
+        );
+      }
+      if (finiteNumber(priceVsMa20)) {
+        addBadge(
+          priceVsMa20 >= 0 ? "日線站上 MA20" : "日線跌破 MA20",
+          priceVsMa20 >= 0 ? "text-red-700 bg-red-50" : "text-emerald-700 bg-emerald-50"
+        );
+      }
+      if (finiteNumber(rsi14) && rsi14 >= 80) addBadge("日線 RSI 過熱", "text-amber-700 bg-amber-50");
+
+      return {
+        title: isOpeningPhase
+          ? titleFor("開盤偏強", "開盤觀察", "開盤偏弱")
+          : titleFor("盤中偏多", "盤中觀察", "盤中偏弱"),
+        summary: summaryFrom([
+          `${pointCount} 筆盤中資料`,
+          finiteNumber(latestChangePct)
+            ? latestChangePct >= 0
+              ? "現價高於昨收"
+              : "現價低於昨收"
+            : "資料不足",
+          finiteNumber(openingGapPct)
+            ? openingGapPct >= 0
+              ? "開高"
+              : "開低"
+            : "資料不足",
+          isOpeningPhase ? "日線指標僅作背景" : marketRelativeLabel,
+        ]),
+        value: latestChangePct ?? null,
+        valueLabel: "vs 昨收",
+        score,
+        rows,
+        badges,
+      };
+    }
+
+    if (effectiveTimeframe === "daily") {
+      if (finiteNumber(priceVsMa20)) addScore(priceVsMa20 >= 0 ? 1 : -1);
+      if (finiteNumber(ma5) && finiteNumber(ma20)) addScore(ma5 >= ma20 ? 1 : -1);
+      if (finiteNumber(ma20) && finiteNumber(ma60)) addScore(ma20 >= ma60 ? 1 : -1);
+      if (finiteNumber(macdHistogram)) addScore(macdHistogram >= 0 ? 1 : -1);
+      if (finiteNumber(rsi14)) {
+        if (rsi14 >= 50 && rsi14 < 80) addScore(1);
+        if (rsi14 < 40) addScore(-1);
+      }
+      if (finiteNumber(mfi14) && mfi14 >= 50 && mfi14 < 85) addScore(1);
+      if (finiteNumber(adx14) && adx14 >= 25 && finiteNumber(plusDi14) && finiteNumber(minusDi14)) {
+        addScore(plusDi14 >= minusDi14 ? 1 : -1);
+      }
+      if (finiteNumber(latestInstitutionalNet)) addScore(latestInstitutionalNet > 0 ? 1 : -1);
+
+      rows.push(
+        {
+          title: "趨勢結構",
+          description: `MA5/20/60 ${formatPrice(ma5)} / ${formatPrice(ma20)} / ${formatPrice(ma60)}，ADX ${formatIndicatorValue(adx14)}`,
+          value: formatPct(priceVsMa20),
+          pulseValue: priceVsMa20,
+          direction: priceVsMa20,
+          tone: rowTone(priceVsMa20),
+        },
+        {
+          title: "動能指標",
+          description: `RSI ${formatIndicatorValue(rsi14)}，MACD H ${formatIndicatorValue(macdHistogram)}，ROC12 ${formatPct(roc12)}`,
+          value: formatIndicatorValue(rsi14),
+          pulseValue: rsi14,
+          direction: macdHistogram,
+          tone:
+            finiteNumber(rsi14) && rsi14 >= 80
+              ? "warning"
+              : finiteNumber(macdHistogram)
+                ? rowTone(macdHistogram)
+                : "neutral",
+        },
+        {
+          title: "量價資金",
+          description: `量能 ${formatPct(volumeRatioPct)} vs 20 日均量，MFI ${formatIndicatorValue(mfi14)}`,
+          value: formatPct(volumeRatioPct),
+          pulseValue: volumeRatioPct,
+          direction: volumeRatioPct,
+          tone: finiteNumber(volumeRatio) && volumeRatio >= 1.5 ? "warning" : "neutral",
+        },
+        {
+          title: "波動風險",
+          description: `ATR ${formatPct(atrPct)}，Donchian 位置 ${formatPct(donchianPositionPct)}`,
+          value: formatPct(atrPct),
+          pulseValue: atrPct,
+          direction: finiteNumber(atrPct) && atrPct > 5 ? 1 : 0,
+          tone: finiteNumber(atrPct) && atrPct > 5 ? "warning" : "neutral",
+        },
+        {
+          title: "法人籌碼",
+          description: `最新三大法人合計，融資餘額 ${formatSignedNumber(marginBalanceChange)}`,
+          value:
+            latestInstitutionalNet === null
+              ? "-"
+              : `${formatSignedLots(latestInstitutionalNet)}張`,
+          pulseValue: latestInstitutionalNet,
+          direction: latestInstitutionalNet,
+          tone: rowTone(latestInstitutionalNet),
+        },
+        {
+          title: "相對市場",
+          description: `相對${primaryMarketIndex?.short_label ?? "大盤"}，${marketRelativeLabel}`,
+          value: formatPct(relativeToPrimaryIndex),
+          pulseValue: relativeToPrimaryIndex,
+          direction: relativeToPrimaryIndex,
+          tone: rowTone(relativeToPrimaryIndex),
+        }
+      );
+
+      if (finiteNumber(priceVsMa20)) addBadge(priceVsMa20 >= 0 ? "站上 MA20" : "跌破 MA20", priceVsMa20 >= 0 ? "text-red-700 bg-red-50" : "text-emerald-700 bg-emerald-50");
+      if (finiteNumber(macdHistogram)) addBadge(macdHistogram >= 0 ? "MACD 偏多" : "MACD 偏弱", macdHistogram >= 0 ? "text-red-700 bg-red-50" : "text-emerald-700 bg-emerald-50");
+      if (finiteNumber(rsi14) && rsi14 >= 80) addBadge("RSI 過熱", "text-amber-700 bg-amber-50");
+      if (finiteNumber(volumeRatio) && volumeRatio >= 1.5) addBadge("放量", "text-amber-700 bg-amber-50");
+
+      return {
+        title: titleFor("短線偏多", "短線整理", "短線偏弱"),
+        summary: summaryFrom([
+          finiteNumber(priceVsMa20) ? (priceVsMa20 >= 0 ? "站上 MA20" : "跌破 MA20") : "資料不足",
+          finiteNumber(macdHistogram) ? (macdHistogram >= 0 ? "MACD 偏多" : "MACD 偏弱") : "資料不足",
+          finiteNumber(volumeRatio) ? (volumeRatio >= 1.5 ? "放量" : "量能一般") : "資料不足",
+        ]),
+        value: priceVsMa20,
+        valueLabel: "vs MA20",
+        score,
+        rows,
+        badges,
+      };
+    }
+
+    if (effectiveTimeframe === "weekly") {
+      const weekStats13 = chartWindowStats(chartData, 13);
+      const weekStats26 = chartWindowStats(chartData, 26);
+      const weeklyMa4 = averageRecentChartClose(chartData, 4);
+      const weeklyMa13 = averageRecentChartClose(chartData, 13);
+      const weeklyVolumeRatio = safeRatio(latestChart?.volume, weekStats13.volumeAverage);
+      const weeklyVolumeRatioPct =
+        weeklyVolumeRatio === null ? null : (weeklyVolumeRatio - 1) * 100;
+      const institutional20 = sumRecentInstitutionalNet(institutionalHistory, 20) ?? latestInstitutionalNet;
+
+      if (finiteNumber(weekStats13.changePct)) addScore(weekStats13.changePct >= 0 ? 1 : -1);
+      if (finiteNumber(weeklyMa4) && finiteNumber(weeklyMa13)) addScore(weeklyMa4 >= weeklyMa13 ? 1 : -1);
+      if (finiteNumber(weekStats26.rangePositionPct)) {
+        if (weekStats26.rangePositionPct >= 65) addScore(1);
+        if (weekStats26.rangePositionPct <= 35) addScore(-1);
+      }
+      if (finiteNumber(institutional20)) addScore(institutional20 > 0 ? 1 : -1);
+
+      rows.push(
+        {
+          title: "中線趨勢",
+          description: `4週/13週均價 ${formatPrice(weeklyMa4)} / ${formatPrice(weeklyMa13)}`,
+          value: formatPct(weekStats13.changePct),
+          pulseValue: weekStats13.changePct,
+          direction: weekStats13.changePct,
+          tone: rowTone(weekStats13.changePct),
+        },
+        {
+          title: "區間位置",
+          description: `26週高低 ${formatPrice(weekStats26.high)} / ${formatPrice(weekStats26.low)}`,
+          value: formatPct(weekStats26.rangePositionPct),
+          pulseValue: weekStats26.rangePositionPct,
+          direction:
+            finiteNumber(weekStats26.rangePositionPct) ? weekStats26.rangePositionPct - 50 : null,
+          tone:
+            finiteNumber(weekStats26.rangePositionPct) && weekStats26.rangePositionPct >= 70
+              ? "positive"
+              : finiteNumber(weekStats26.rangePositionPct) && weekStats26.rangePositionPct <= 30
+                ? "negative"
+                : "neutral",
+        },
+        {
+          title: "週量節奏",
+          description: "最新週量相對 13 週均量",
+          value: formatPct(weeklyVolumeRatioPct),
+          pulseValue: weeklyVolumeRatioPct,
+          direction: weeklyVolumeRatioPct,
+          tone: finiteNumber(weeklyVolumeRatio) && weeklyVolumeRatio >= 1.5 ? "warning" : "neutral",
+        },
+        {
+          title: "法人累積",
+          description: "近 20 個交易日三大法人合計",
+          value: institutional20 === null ? "-" : `${formatSignedLots(institutional20)}張`,
+          pulseValue: institutional20,
+          direction: institutional20,
+          tone: rowTone(institutional20),
+        },
+        {
+          title: "市場背景",
+          description: `${primaryMarketIndex?.short_label ?? "大盤"} ${marketRegimeLabel(primaryMarketIndex)}`,
+          value: formatPct(primaryMarketIndex?.change_pct),
+          pulseValue: primaryMarketIndex?.change_pct,
+          direction: primaryMarketIndex?.change_pct,
+          tone: rowTone(primaryMarketIndex?.change_pct),
+        }
+      );
+
+      if (finiteNumber(weeklyMa4) && finiteNumber(weeklyMa13)) addBadge(weeklyMa4 >= weeklyMa13 ? "週線偏多" : "週線偏弱", weeklyMa4 >= weeklyMa13 ? "text-red-700 bg-red-50" : "text-emerald-700 bg-emerald-50");
+      if (finiteNumber(weekStats26.rangePositionPct) && weekStats26.rangePositionPct >= 80) addBadge("接近26週高位", "text-amber-700 bg-amber-50");
+      if (finiteNumber(weeklyVolumeRatio) && weeklyVolumeRatio >= 1.5) addBadge("週量放大", "text-amber-700 bg-amber-50");
+
+      return {
+        title: titleFor("中線轉強", "中線整理", "中線偏弱"),
+        summary: summaryFrom([
+          finiteNumber(weekStats13.changePct) ? `13週${weekStats13.changePct >= 0 ? "走升" : "走弱"}` : "資料不足",
+          finiteNumber(weekStats26.rangePositionPct)
+            ? weekStats26.rangePositionPct >= 65
+              ? "位於區間上緣"
+              : weekStats26.rangePositionPct <= 35
+                ? "位於區間下緣"
+                : "區間中段"
+            : "資料不足",
+          institutional20 !== null ? (institutional20 >= 0 ? "法人累積買超" : "法人累積賣超") : "資料不足",
+        ]),
+        value: weekStats13.changePct,
+        valueLabel: "近13週",
+        score,
+        rows,
+        badges,
+      };
+    }
+
+    const monthStats6 = chartWindowStats(chartData, 6);
+    const monthStats12 = chartWindowStats(chartData, 12);
+    const monthlyMa6 = averageRecentChartClose(chartData, 6);
+    const monthlyMa12 = averageRecentChartClose(chartData, 12);
+    const revenueGrowth = monthlyRevenue?.year_over_year_pct ?? null;
+    const cumulativeRevenueGrowth = monthlyRevenue?.cumulative_year_over_year_pct ?? null;
+    const eps = financialMetric?.eps ?? null;
+    const roe = financialMetric?.roe ?? null;
+
+    if (finiteNumber(monthStats12.changePct)) addScore(monthStats12.changePct >= 0 ? 1 : -1);
+    if (finiteNumber(monthlyMa6) && finiteNumber(monthlyMa12)) addScore(monthlyMa6 >= monthlyMa12 ? 1 : -1);
+    if (finiteNumber(revenueGrowth)) addScore(revenueGrowth >= 0 ? 1 : -1);
+    if (finiteNumber(eps)) addScore(eps > 0 ? 1 : -1);
+    if (finiteNumber(largeHolder.change)) addScore(largeHolder.change >= 0 ? 1 : -1);
+
+    rows.push(
+      {
+        title: "長線趨勢",
+        description: `6月/12月均價 ${formatPrice(monthlyMa6)} / ${formatPrice(monthlyMa12)}`,
+        value: formatPct(monthStats12.changePct),
+        pulseValue: monthStats12.changePct,
+        direction: monthStats12.changePct,
+        tone: rowTone(monthStats12.changePct),
+      },
+      {
+        title: "長期區間",
+        description: `12月高低 ${formatPrice(monthStats12.high)} / ${formatPrice(monthStats12.low)}`,
+        value: formatPct(monthStats12.rangePositionPct),
+        pulseValue: monthStats12.rangePositionPct,
+        direction:
+          finiteNumber(monthStats12.rangePositionPct) ? monthStats12.rangePositionPct - 50 : null,
         tone:
-          totalInstitutionalNet >= 0
-            ? "text-red-700 bg-red-50"
-            : "text-emerald-700 bg-emerald-50",
-      });
+          finiteNumber(monthStats12.rangePositionPct) && monthStats12.rangePositionPct >= 70
+            ? "positive"
+            : finiteNumber(monthStats12.rangePositionPct) && monthStats12.rangePositionPct <= 30
+              ? "negative"
+              : "neutral",
+      },
+      {
+        title: "營收動能",
+        description: `月營收 YoY ${formatPct(revenueGrowth)}，累計 YoY ${formatPct(cumulativeRevenueGrowth)}`,
+        value: formatPct(revenueGrowth),
+        pulseValue: revenueGrowth,
+        direction: revenueGrowth,
+        tone: rowTone(revenueGrowth),
+      },
+      {
+        title: "獲利品質",
+        description: `EPS ${formatIndicatorValue(eps)}，ROE ${formatRatioPct(roe)}`,
+        value: formatIndicatorValue(eps),
+        pulseValue: eps,
+        direction: eps,
+        tone: rowTone(eps),
+      },
+      {
+        title: "長期籌碼",
+        description: `${largeHolderLots}張以上持股比 ${formatRatioPct(largeHolder.ratio)}，最新 ${formatDate(largeHolder.dataDate)}`,
+        value: formatPct(largeHolder.change),
+        pulseValue: largeHolder.change,
+        direction: largeHolder.change,
+        tone: rowTone(largeHolder.change),
+      }
+    );
+
+    if (finiteNumber(monthlyMa6) && finiteNumber(monthlyMa12)) addBadge(monthlyMa6 >= monthlyMa12 ? "月線偏多" : "月線偏弱", monthlyMa6 >= monthlyMa12 ? "text-red-700 bg-red-50" : "text-emerald-700 bg-emerald-50");
+    if (finiteNumber(revenueGrowth)) addBadge(revenueGrowth >= 0 ? "營收成長" : "營收衰退", revenueGrowth >= 0 ? "text-red-700 bg-red-50" : "text-emerald-700 bg-emerald-50");
+    if (finiteNumber(monthStats12.rangePositionPct) && monthStats12.rangePositionPct >= 80) addBadge("接近12月高位", "text-amber-700 bg-amber-50");
+
+    return {
+      title: titleFor("長線偏多", "長線觀察", "長線偏弱"),
+      summary: summaryFrom([
+        finiteNumber(monthStats12.changePct) ? `12月${monthStats12.changePct >= 0 ? "走升" : "走弱"}` : "資料不足",
+        finiteNumber(revenueGrowth) ? (revenueGrowth >= 0 ? "營收成長" : "營收衰退") : "營收待讀取",
+        finiteNumber(largeHolder.change) ? (largeHolder.change >= 0 ? "大戶增加" : "大戶減少") : "籌碼待讀取",
+      ]),
+      value: monthStats6.changePct ?? monthStats12.changePct,
+      valueLabel: monthStats6.changePct !== null ? "近6月" : "近12月",
+      score,
+      rows,
+      badges,
+    };
+  }, [
+    chartData,
+    currentChartReady,
+    effectiveTimeframe,
+    financialMetric,
+    institutional,
+    institutionalHistory,
+    isIndexProduct,
+    largeHolderLots,
+    latestChangePct,
+    latestChart?.volume,
+    latestClose,
+    latestIndicator,
+    latestToday,
+    loadState,
+    ma5,
+    ma20,
+    ma60,
+    margin,
+    monthlyRevenue,
+    primaryMarketIndex,
+    priceVsMa20,
+    relativeToPrimaryIndex,
+    shareholding,
+    todayStats.high,
+    todayStats.low,
+    todayStats.open,
+    todayStats.volume,
+    todayReferenceClose,
+    todayTrend.length,
+    totalInstitutionalNet,
+    volumeMa20,
+    volumeRatio,
+    volumeRatioPct,
+  ]);
+  const backendTechnicalReportView = useMemo(() => {
+    if (
+      !backendTechnicalReport ||
+      backendTechnicalReport.stock_id !== stockId ||
+      backendTechnicalReport.timeframe !== effectiveTimeframe
+    ) {
+      return null;
     }
 
-    return result;
-  }, [latestClose, ma5, ma20, totalInstitutionalNet, volumeRatio]);
-  const priceTrendLabel =
-    priceVsMa20 === null ? "資料不足" : priceVsMa20 >= 0 ? "站上 MA20" : "跌破 MA20";
-  const priceTrendTone: TechnicalTone =
-    priceVsMa20 === null ? "neutral" : priceVsMa20 >= 0 ? "positive" : "negative";
-  const volumeStatusLabel =
-    volumeRatio === null
-      ? "資料不足"
-      : volumeRatio >= 1.5
-        ? "明顯放量"
-        : volumeRatio >= 1
-          ? "高於均量"
-          : volumeRatio >= 0.65
-            ? "量能正常"
-            : "量能偏低";
-  const volumeStatusTone: TechnicalTone =
-    volumeRatio === null ? "neutral" : volumeRatio >= 1.5 ? "warning" : "neutral";
-  const institutionalStatusLabel =
-    totalInstitutionalNet === null
-      ? "資料不足"
-      : totalInstitutionalNet > 0
-        ? "法人買超"
-        : totalInstitutionalNet < 0
-          ? "法人賣超"
-          : "法人持平";
-  const institutionalStatusTone: TechnicalTone =
-    totalInstitutionalNet === null
-      ? "neutral"
-      : totalInstitutionalNet > 0
-        ? "positive"
-        : totalInstitutionalNet < 0
-          ? "negative"
-          : "neutral";
-  const marketRelativeLabel =
-    relativeToPrimaryIndex === null
-      ? "資料不足"
-      : relativeToPrimaryIndex > 0
-        ? "強於大盤"
-        : relativeToPrimaryIndex < 0
-          ? "弱於大盤"
-          : "同步大盤";
-  const marketRelativeTone: TechnicalTone =
-    relativeToPrimaryIndex === null
-      ? "neutral"
-      : relativeToPrimaryIndex > 0
-        ? "positive"
-        : relativeToPrimaryIndex < 0
-          ? "negative"
-          : "neutral";
-  const technicalSummaryParts = [
-    priceTrendLabel,
-    volumeStatusLabel,
-    institutionalStatusLabel,
-  ].filter((part) => part !== "資料不足");
-  const technicalSummaryText =
-    loadState === "loading"
-      ? "資料讀取中"
-      : technicalSummaryParts.length
-        ? technicalSummaryParts.join("，")
-        : "訊號資料不足";
-  const visibleSignals = signals.slice(0, 3);
+    return mapBackendTechnicalReport(backendTechnicalReport);
+  }, [backendTechnicalReport, effectiveTimeframe, stockId]);
+  const technicalReport = backendTechnicalReportView ?? fallbackTechnicalReport;
+  const technicalStatus = technicalReport.title;
+  const technicalSummaryText = technicalReport.summary;
+  const visibleSignals = technicalReport.badges.slice(0, 4);
+  const technicalSourceReady =
+    effectiveTimeframe === "today" ? todayTrend.length > 0 : currentChartReady;
+  const showTechnicalLoading =
+    !isIndexProduct &&
+    loadState === "loading" &&
+    !technicalSourceReady &&
+    backendTechnicalReportView === null;
 
   const shareholdingSeries = useMemo<ShareholdingSeriesPoint[]>(() => {
     const closeByDate = new Map(
@@ -3320,12 +4145,7 @@ export default function StockDetailPanel({
     }
 
     if (tab === "institutional") {
-      return (
-        (institutional !== null && institutional.stock_id === targetStockId) ||
-        institutionalHistory.some((row) => row.stock_id === targetStockId) ||
-        (institutionalHoldingRatio !== null &&
-          institutionalHoldingRatio.stock_id === targetStockId)
-      );
+      return institutionalHistory.some((row) => row.stock_id === targetStockId);
     }
 
     if (tab === "branch") {
@@ -3715,12 +4535,7 @@ export default function StockDetailPanel({
     }
 
     if (activeDataTab === "institutional") {
-      return (
-        (institutional !== null && institutional.stock_id !== selectedStockId) ||
-        hasRowsFromOtherStock(institutionalHistory) ||
-        (institutionalHoldingRatio !== null &&
-          institutionalHoldingRatio.stock_id !== selectedStockId)
-      );
+      return hasRowsFromOtherStock(institutionalHistory);
     }
 
     if (activeDataTab === "branch") {
@@ -3757,12 +4572,7 @@ export default function StockDetailPanel({
     }
 
     if (activeDataTab === "institutional") {
-      return (
-        (institutional !== null && institutional.stock_id === selectedStockId) ||
-        institutionalHistory.some((row) => row.stock_id === selectedStockId) ||
-        (institutionalHoldingRatio !== null &&
-          institutionalHoldingRatio.stock_id === selectedStockId)
-      );
+      return institutionalHistory.some((row) => row.stock_id === selectedStockId);
     }
 
     if (activeDataTab === "branch") {
@@ -3896,10 +4706,12 @@ export default function StockDetailPanel({
     const displayLatestPoint = recentPoints[recentPoints.length - 1] ?? latestPoint;
     const activeDailyPoint =
       recentPoints.find((point) => point.date === institutionalHoverDate) ?? displayLatestPoint;
-    const ratioHistory = institutionalHoldingRatio?.history ?? [];
+    const currentHoldingRatio =
+      institutionalHoldingRatio?.stock_id === selectedStockId ? institutionalHoldingRatio : null;
+    const ratioHistory = currentHoldingRatio?.history ?? [];
     const activeHoldingRatio = institutionalHoverDate
       ? ratioHistory.find((point) => point.trade_date === institutionalHoverDate) ?? null
-      : institutionalHoldingRatio;
+      : currentHoldingRatio;
     const ratioDate =
       institutionalHoverDate ?? activeHoldingRatio?.trade_date ?? activeDailyPoint.date;
     const tableRows = recentPoints.slice().reverse();
@@ -4533,19 +5345,44 @@ export default function StockDetailPanel({
   }
 
   function renderActiveDataTab() {
+    const loadingActiveTab = dataPanelLoading === activeDataTab;
+    const hasRenderableData = activeDataTabHasRenderableData();
+
     if (activeDataTabHasStaleData()) {
-      return <EmptyDataState message="補齊資料中..." />;
+      return <DataPanelLoadingState message="補齊資料中..." />;
     }
 
-    if (dataPanelLoading === activeDataTab && !activeDataTabHasRenderableData()) {
-      return <EmptyDataState message={dataPanelMessage ?? "補齊資料中..."} />;
+    if (loadingActiveTab && !hasRenderableData) {
+      return <DataPanelLoadingState message={dataPanelMessage ?? "補齊資料中..."} />;
     }
 
-    if (activeDataTab === "institutional") return renderInstitutionalTab();
-    if (activeDataTab === "branch") return renderBranchTab();
-    if (activeDataTab === "revenue") return renderRevenueTab();
-    if (activeDataTab === "earnings") return renderEarningsTab();
-    return renderChipTab();
+    const content =
+      activeDataTab === "institutional"
+        ? renderInstitutionalTab()
+        : activeDataTab === "branch"
+          ? renderBranchTab()
+          : activeDataTab === "revenue"
+            ? renderRevenueTab()
+            : activeDataTab === "earnings"
+              ? renderEarningsTab()
+              : renderChipTab();
+
+    return (
+      <div
+        key={`${selectedStockId}:${activeDataTab}:${branchDays}`}
+        className={[
+          "omi-tab-panel relative",
+          loadingActiveTab ? "omi-soft-refresh pt-3" : "",
+        ]
+          .filter(Boolean)
+          .join(" ")}
+      >
+        {loadingActiveTab ? <DataPanelRefreshRail message={dataPanelMessage} /> : null}
+        <div className={loadingActiveTab ? "opacity-85 transition-opacity duration-150" : ""}>
+          {content}
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -4915,9 +5752,11 @@ export default function StockDetailPanel({
             loadState={indexListLoadState}
             marketLabel={indexProduct?.market === "TPEX" ? "上櫃" : "上市"}
           />
+        ) : showTechnicalLoading ? (
+          <TechnicalLoadingPanel />
         ) : (
           <>
-            <div className="border-b border-slate-200 px-5 py-3">
+            <div className="omi-technical-summary border-b border-slate-200 px-5 py-3">
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
                 Technical
               </div>
@@ -4926,62 +5765,37 @@ export default function StockDetailPanel({
                   <div className="text-xl font-bold text-slate-950">{technicalStatus}</div>
                   <div className="mt-0.5 text-xs leading-4 text-slate-500">{technicalSummaryText}</div>
                 </div>
-                <div className={`shrink-0 text-right text-lg font-bold ${valueTone(priceVsMa20)}`}>
+                <div className={`omi-technical-score shrink-0 text-right text-lg font-bold ${valueTone(technicalReport.value)}`}>
                   <PriceUpdatePulse
-                    value={priceVsMa20}
-                    direction={priceVsMa20}
-                    resetKey={`${stockId ?? "empty"}:technical-ma20`}
+                    value={technicalReport.value}
+                    direction={technicalReport.value}
+                    resetKey={`${stockId ?? "empty"}:technical:${effectiveTimeframe}`}
                     className="justify-end tabular-nums"
                   >
-                    {formatPct(priceVsMa20)}
+                    {formatPct(technicalReport.value)}
                   </PriceUpdatePulse>
-                  <div className="text-xs font-medium text-slate-500">vs MA20</div>
+                  <div className="text-xs font-medium text-slate-500">{technicalReport.valueLabel}</div>
                 </div>
               </div>
             </div>
 
             <div className="px-5 py-3">
               <div>
-                <TechnicalSignalRow
-                  title="價格趨勢"
-                  description={priceTrendLabel}
-                  value={formatPct(priceVsMa20)}
-                  pulseValue={priceVsMa20}
-                  direction={priceVsMa20}
-                  tone={priceTrendTone}
-                />
-                <TechnicalSignalRow
-                  title="量能狀態"
-                  description={`${volumeStatusLabel}，相對 20 日均量`}
-                  value={formatPct(volumeRatioPct)}
-                  pulseValue={volumeRatioPct}
-                  direction={volumeRatioPct}
-                  tone={volumeStatusTone}
-                />
-                <TechnicalSignalRow
-                  title="法人籌碼"
-                  description={`${institutionalStatusLabel}，三大法人合計`}
-                  value={
-                    totalInstitutionalNet === null
-                      ? "-"
-                      : `${formatSignedLots(totalInstitutionalNet)}張`
-                  }
-                  pulseValue={totalInstitutionalNet}
-                  direction={totalInstitutionalNet}
-                  tone={institutionalStatusTone}
-                />
-                <TechnicalSignalRow
-                  title="相對市場"
-                  description={`相對${primaryMarketIndex?.short_label ?? "大盤"}，${marketRelativeLabel}`}
-                  value={formatPct(relativeToPrimaryIndex)}
-                  pulseValue={relativeToPrimaryIndex}
-                  direction={relativeToPrimaryIndex}
-                  tone={marketRelativeTone}
-                />
+                {technicalReport.rows.map((row) => (
+                  <TechnicalSignalRow
+                    key={row.title}
+                    title={row.title}
+                    description={row.description}
+                    value={row.value}
+                    pulseValue={row.pulseValue}
+                    direction={row.direction}
+                    tone={row.tone}
+                  />
+                ))}
               </div>
 
               <div className="mt-3 border-t border-slate-200 pt-3">
-                <div className="flex items-start justify-between gap-4 text-xs">
+                <div className="omi-technical-market flex items-start justify-between gap-4 text-xs">
                   <div>
                     <div className="font-bold uppercase tracking-[0.14em] text-slate-500">
                       Market
@@ -5005,7 +5819,7 @@ export default function StockDetailPanel({
                   {visibleSignals.map((signal) => (
                     <span
                       key={signal.label}
-                      className={`px-2.5 py-1 text-xs font-semibold ${signal.tone}`}
+                      className={`omi-technical-badge px-2.5 py-1 text-xs font-semibold ${signal.tone}`}
                     >
                       {signal.label}
                     </span>
@@ -5016,8 +5830,13 @@ export default function StockDetailPanel({
           </>
         )}
 
-          {!isIndexProduct ? (
-          <div className="border-t border-slate-200">
+        {!isIndexProduct ? (
+          <div className="border-t border-slate-200 bg-white">
+            <div
+              aria-hidden="true"
+              className="h-2 border-b border-slate-200 bg-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.75)]"
+            />
+
             <div className="flex border-b border-slate-200">
               {dataPanelTabs.map((tab) => (
                 <DataTabButton
@@ -5045,7 +5864,7 @@ export default function StockDetailPanel({
               <div className="mt-4">{renderActiveDataTab()}</div>
             </div>
           </div>
-          ) : null}
+        ) : null}
 
           <div className="hidden">
             <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">

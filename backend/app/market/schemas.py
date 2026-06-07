@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -220,6 +221,43 @@ class IntradayTrendRead(BaseModel):
     previous_close: float | None = None
     point_count: int
     points: list[IntradayTrendPointRead]
+
+
+class TechnicalReportRowRead(BaseModel):
+    key: str
+    label: str
+    description: str
+    value: Any = None
+    display_value: str
+    direction: float | None = None
+    tone: str = "neutral"
+    basis: str
+    source: str
+
+
+class TechnicalReportBadgeRead(BaseModel):
+    label: str
+    tone: str
+
+
+class TechnicalReportRead(BaseModel):
+    kind: str
+    stock_id: str
+    timeframe: str
+    phase: str
+    confidence: str
+    generated_at: datetime
+    title: str
+    summary: str
+    score: int
+    value: float | None = None
+    value_label: str
+    rows: list[TechnicalReportRowRead]
+    badges: list[TechnicalReportBadgeRead] = Field(default_factory=list)
+    data: dict[str, Any] = Field(default_factory=dict)
+    missing: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    source_refs: list[dict[str, str]] = Field(default_factory=list)
 
 
 class DailyIndicatorPointRead(BaseModel):

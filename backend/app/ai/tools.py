@@ -15,6 +15,7 @@ from app.db.models import (
     StockMaster,
 )
 from app.market import service as market_service
+from app.market.technical_report import build_stock_technical_report
 from app.market.broker_branch import get_broker_branch_trade_summary
 from app.stocks import service as stock_service
 from app.watchlists import ranking_service
@@ -210,6 +211,11 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                     "properties": {
                         "stock_id": {"type": "string"},
                         "branch_days": {"type": "integer", "minimum": 1, "maximum": 120},
+                        "include_intraday": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "Include live Taiwan intraday technical report when trusted external fetch is allowed.",
+                        },
                     },
                     "required": ["stock_id"],
                 },
@@ -249,6 +255,11 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                     "type": "object",
                     "properties": {
                         "stock_id": {"type": "string"},
+                        "include_intraday": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "Include live Taiwan intraday technical report when trusted external fetch is allowed.",
+                        },
                         "strategy_profile": {
                             "type": "string",
                             "enum": [
@@ -301,6 +312,11 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                     "type": "object",
                     "properties": {
                         "stock_id": {"type": "string"},
+                        "include_intraday": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "Include live Taiwan intraday technical report when trusted external fetch is allowed.",
+                        },
                         "strategy_profile": {
                             "type": "string",
                             "enum": [
@@ -441,6 +457,11 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                     "type": "object",
                     "properties": {
                         "stock_id": {"type": "string"},
+                        "include_intraday": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "Include live Taiwan intraday technical report when trusted external fetch is allowed.",
+                        },
                         "strategy_profile": {
                             "type": "string",
                             "enum": [
@@ -661,6 +682,7 @@ def read_stock_context(
     bars: int = 120,
     revenue_months: int = 12,
     financial_quarters: int = 8,
+    include_intraday: bool = False,
 ) -> dict[str, Any]:
     normalized_stock_id = stock_id.strip()
     missing: list[str] = []
@@ -701,6 +723,30 @@ def read_stock_context(
         days=max(branch_days, 1),
         ensure_daily=False,
     )
+    technical_reports: dict[str, Any] = {}
+
+    try:
+        technical_reports["daily"] = build_stock_technical_report(
+            db=db,
+            stock_id=normalized_stock_id,
+            timeframe="daily",
+            include_intraday=False,
+        )
+    except Exception as exc:
+        warnings.append(f"Daily technical report unavailable: {exc}")
+        missing.append("technical_report.daily")
+
+    if include_intraday:
+        try:
+            technical_reports["today"] = build_stock_technical_report(
+                db=db,
+                stock_id=normalized_stock_id,
+                timeframe="today",
+                include_intraday=True,
+            )
+        except Exception as exc:
+            warnings.append(f"Today technical report unavailable: {exc}")
+            missing.append("technical_report.today")
 
     if branch_summary.get("is_partial"):
         warnings.append(
@@ -759,6 +805,7 @@ def read_stock_context(
                     for point in chart.get("points", [])
                 ],
             },
+            "technical_reports": technical_reports,
             "latest_institutional": _row_dict(
                 latest_institutional,
                 (
@@ -871,6 +918,7 @@ def read_stock_context(
             {"type": "table", "name": "broker_branch_trade_daily"},
             {"type": "table", "name": "monthly_revenue"},
             {"type": "table", "name": "financial_metric_quarterly"},
+            {"type": "derived", "name": "app.market.technical_report"},
         ],
     }
 

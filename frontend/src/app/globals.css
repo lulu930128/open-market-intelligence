@@ -100,6 +100,441 @@ select {
   will-change: width;
 }
 
+.omi-ranking-row {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  transform: translateZ(0);
+  transition:
+    background-color 160ms ease,
+    color 160ms ease,
+    box-shadow 180ms ease,
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: omi-row-in 190ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.omi-ranking-row > * {
+  position: relative;
+  z-index: 1;
+}
+
+.omi-ranking-row::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    rgb(255 255 255 / 0) 0%,
+    rgb(148 163 184 / 0.14) 48%,
+    rgb(255 255 255 / 0) 100%
+  );
+  opacity: 0;
+  transform: translateX(-42%);
+}
+
+.omi-ranking-row:hover {
+  transform: translateX(1px);
+  box-shadow: inset 3px 0 0 rgb(203 213 225 / 0.9);
+}
+
+.omi-ranking-row:hover::after {
+  animation: omi-row-sweep 720ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.omi-ranking-row-selected {
+  box-shadow: inset 3px 0 0 #dc2626;
+}
+
+.omi-ranking-row-selected::after {
+  background: linear-gradient(
+    90deg,
+    rgb(255 255 255 / 0) 0%,
+    rgb(255 255 255 / 0.18) 46%,
+    rgb(255 255 255 / 0) 100%
+  );
+  animation: omi-row-sweep 860ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.omi-ranking-trend-chip {
+  display: inline-flex;
+  min-width: 2.75rem;
+  justify-content: center;
+  transform-origin: center;
+  transition:
+    box-shadow 180ms ease,
+    filter 180ms ease,
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.omi-ranking-row:hover .omi-ranking-trend-chip {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 16px rgb(15 23 42 / 0.08);
+}
+
+.omi-ranking-trend-chip-selected {
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.42);
+}
+
+.omi-ranking-loading-row {
+  position: relative;
+  overflow: hidden;
+  background: #fff;
+  animation: omi-loading-surface-in 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.omi-technical-summary {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+.omi-technical-summary > * {
+  position: relative;
+  z-index: 1;
+}
+
+.omi-technical-summary::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    rgb(255 255 255 / 0) 0%,
+    rgb(248 250 252 / 0.78) 48%,
+    rgb(255 255 255 / 0) 100%
+  );
+  opacity: 0;
+  transform: translateX(-44%);
+  animation: omi-technical-summary-sweep 820ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.omi-technical-row {
+  position: relative;
+  overflow: hidden;
+  transform: translateZ(0);
+  transition:
+    background-color 160ms ease,
+    box-shadow 160ms ease,
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: omi-technical-row-in 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.omi-technical-row::before {
+  content: "";
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: 0;
+  width: 2px;
+  opacity: 0;
+  transform: scaleY(0.42);
+  transform-origin: center;
+  transition:
+    opacity 160ms ease,
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.omi-technical-row:hover {
+  background: #f8fafc;
+  box-shadow: inset 0 0 0 1px rgb(226 232 240 / 0.72);
+  transform: translateX(1px);
+}
+
+.omi-technical-row:hover::before {
+  opacity: 1;
+  transform: scaleY(1);
+}
+
+.omi-technical-row-positive::before {
+  background: #dc2626;
+}
+
+.omi-technical-row-negative::before {
+  background: #059669;
+}
+
+.omi-technical-row-warning::before {
+  background: #d97706;
+}
+
+.omi-technical-row-neutral::before {
+  background: #64748b;
+}
+
+.omi-technical-score {
+  transform-origin: right center;
+  transition:
+    text-shadow 180ms ease,
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.omi-technical-row:hover .omi-technical-score {
+  transform: translateY(-1px);
+  text-shadow: 0 8px 16px rgb(15 23 42 / 0.08);
+}
+
+.omi-technical-market {
+  transition:
+    background-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.omi-technical-market:hover {
+  background: #f8fafc;
+  box-shadow: inset 0 0 0 1px rgb(226 232 240 / 0.72);
+}
+
+.omi-technical-badge {
+  display: inline-flex;
+  transform-origin: center;
+  transition:
+    box-shadow 180ms ease,
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: omi-badge-in 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.omi-technical-badge:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 16px rgb(15 23 42 / 0.08);
+}
+
+.omi-technical-loading-row {
+  animation: omi-loading-surface-in 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.omi-tab-panel {
+  animation: omi-tab-panel-in 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.omi-data-tab {
+  position: relative;
+  overflow: hidden;
+}
+
+.omi-data-tab::after {
+  content: "";
+  position: absolute;
+  right: 18%;
+  bottom: 0;
+  left: 18%;
+  height: 2px;
+  background: #b91c1c;
+  transform: scaleX(0);
+  transform-origin: center;
+  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.omi-data-tab-active::after {
+  transform: scaleX(1);
+}
+
+.omi-soft-refresh {
+  overflow: hidden;
+}
+
+.omi-soft-refresh::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    rgb(255 255 255 / 0) 0%,
+    rgb(248 250 252 / 0.72) 46%,
+    rgb(255 255 255 / 0) 100%
+  );
+  opacity: 0;
+  transform: translateX(-42%);
+  animation: omi-soft-refresh-sweep 1200ms cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+
+.omi-loading-bar {
+  animation: omi-loading-bar 1040ms cubic-bezier(0.22, 1, 0.36, 1) infinite;
+  transform-origin: left center;
+}
+
+.omi-loading-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 18px;
+  vertical-align: middle;
+}
+
+.omi-loading-dots span {
+  display: block;
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.42;
+  transform: translateY(0);
+  animation: omi-loading-dot 980ms ease-in-out infinite;
+}
+
+.omi-loading-dots span:nth-child(2) {
+  animation-delay: 120ms;
+}
+
+.omi-loading-dots span:nth-child(3) {
+  animation-delay: 240ms;
+}
+
+.omi-skeleton {
+  position: relative;
+  overflow: hidden;
+  background: #eef2f7;
+}
+
+.omi-skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    rgb(255 255 255 / 0) 0%,
+    rgb(255 255 255 / 0.72) 48%,
+    rgb(255 255 255 / 0) 100%
+  );
+  transform: translateX(-100%);
+  animation: omi-skeleton-shimmer 1280ms ease-in-out infinite;
+}
+
+@keyframes omi-tab-panel-in {
+  0% {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes omi-soft-refresh-sweep {
+  0% {
+    opacity: 0;
+    transform: translateX(-55%);
+  }
+  24% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(55%);
+  }
+}
+
+@keyframes omi-loading-bar {
+  0% {
+    transform: translateX(-120%) scaleX(0.72);
+  }
+  48% {
+    transform: translateX(85%) scaleX(1);
+  }
+  100% {
+    transform: translateX(240%) scaleX(0.72);
+  }
+}
+
+@keyframes omi-loading-dot {
+  0%,
+  80%,
+  100% {
+    opacity: 0.34;
+    transform: translateY(0);
+  }
+  36% {
+    opacity: 0.9;
+    transform: translateY(-3px);
+  }
+}
+
+@keyframes omi-loading-surface-in {
+  0% {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes omi-skeleton-shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes omi-row-in {
+  0% {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes omi-row-sweep {
+  0% {
+    opacity: 0;
+    transform: translateX(-48%);
+  }
+  24% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(48%);
+  }
+}
+
+@keyframes omi-technical-summary-sweep {
+  0% {
+    opacity: 0;
+    transform: translateX(-52%);
+  }
+  28% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(52%);
+  }
+}
+
+@keyframes omi-technical-row-in {
+  0% {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes omi-badge-in {
+  0% {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
 @keyframes omi-price-nudge-up {
   0% {
     transform: translateY(0) scale(1);
@@ -234,6 +669,53 @@ select {
   }
 
   .omi-technical-bar {
+    transition: none;
+  }
+
+  .omi-ranking-row,
+  .omi-ranking-loading-row,
+  .omi-technical-row,
+  .omi-technical-loading-row,
+  .omi-technical-badge,
+  .omi-loading-dots span,
+  .omi-technical-summary::after {
+    animation: none;
+  }
+
+  .omi-ranking-row,
+  .omi-ranking-trend-chip,
+  .omi-technical-row,
+  .omi-technical-score,
+  .omi-technical-market,
+  .omi-technical-badge {
+    transition: none;
+  }
+
+  .omi-ranking-row:hover,
+  .omi-ranking-row:hover .omi-ranking-trend-chip,
+  .omi-technical-row:hover,
+  .omi-technical-row:hover .omi-technical-score,
+  .omi-technical-badge:hover {
+    transform: none;
+  }
+
+  .omi-ranking-row::after,
+  .omi-ranking-row:hover::after {
+    animation: none;
+  }
+
+  .omi-technical-row::before {
+    transition: none;
+  }
+
+  .omi-tab-panel,
+  .omi-soft-refresh::after,
+  .omi-loading-bar,
+  .omi-skeleton::after {
+    animation: none;
+  }
+
+  .omi-data-tab::after {
     transition: none;
   }
 

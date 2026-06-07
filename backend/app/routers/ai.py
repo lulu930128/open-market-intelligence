@@ -292,6 +292,7 @@ def read_stock_context(
     bars: int = Query(default=120, ge=20, le=1000),
     revenue_months: int = Query(default=12, ge=1, le=120),
     financial_quarters: int = Query(default=8, ge=1, le=40),
+    include_intraday: bool = Query(default=False),
     db: Session = Depends(get_db),
 ):
     return tools.read_stock_context(
@@ -301,6 +302,7 @@ def read_stock_context(
         bars=bars,
         revenue_months=revenue_months,
         financial_quarters=financial_quarters,
+        include_intraday=include_intraday,
     )
 
 
@@ -335,6 +337,7 @@ def build_stock_brief(
     stock_id: str,
     strategy_profile: str = "balanced",
     branch_days: int = Query(default=5, ge=1, le=120),
+    include_intraday: bool = Query(default=False),
     db: Session = Depends(get_db),
 ):
     return reports.build_stock_brief(
@@ -342,6 +345,7 @@ def build_stock_brief(
         stock_id=stock_id,
         strategy_profile=strategy_profile,
         branch_days=branch_days,
+        include_intraday=include_intraday,
     )
 
 
@@ -351,6 +355,7 @@ def save_stock_brief(
     request: Request,
     strategy_profile: str = "balanced",
     branch_days: int = Query(default=5, ge=1, le=120),
+    include_intraday: bool = Query(default=False),
     db: Session = Depends(get_db),
 ):
     _require_trusted_ai_request(request, "Saving stock brief")
@@ -359,6 +364,7 @@ def save_stock_brief(
         stock_id=stock_id,
         strategy_profile=strategy_profile,
         branch_days=branch_days,
+        include_intraday=include_intraday,
     )
     return _save_brief_report(
         db=db,
@@ -373,6 +379,7 @@ def save_stock_brief(
             "stock_id": stock_id,
             "strategy_profile": strategy_profile,
             "branch_days": branch_days,
+            "include_intraday": include_intraday,
         },
     )
 
@@ -383,6 +390,7 @@ def generate_stock_llm_report(
     request: Request,
     strategy_profile: str = "balanced",
     branch_days: int = Query(default=5, ge=1, le=120),
+    include_intraday: bool = Query(default=False),
     db: Session = Depends(get_db),
 ):
     _require_trusted_ai_request(request, "Generating stock LLM report")
@@ -392,6 +400,7 @@ def generate_stock_llm_report(
             stock_id=stock_id,
             strategy_profile=strategy_profile,
             branch_days=branch_days,
+            include_intraday=include_intraday,
         )
     except ai_llm.OpenAILLMError as exc:
         _raise_llm_http_error(exc)

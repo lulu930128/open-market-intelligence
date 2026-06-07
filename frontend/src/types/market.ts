@@ -302,6 +302,43 @@ export type IntradayTrendResponse = {
   points: IntradayTrendPoint[];
 };
 
+export type StockTechnicalReportRow = {
+  key: string;
+  label: string;
+  description: string;
+  value: unknown;
+  display_value: string;
+  direction: number | null;
+  tone: "positive" | "negative" | "neutral" | "warning" | string;
+  basis: string;
+  source: string;
+};
+
+export type StockTechnicalReportBadge = {
+  label: string;
+  tone: "positive" | "negative" | "neutral" | "warning" | string;
+};
+
+export type StockTechnicalReportRead = {
+  kind: string;
+  stock_id: string;
+  timeframe: "today" | "daily";
+  phase: string;
+  confidence: "low" | "medium" | "high" | string;
+  generated_at: string;
+  title: string;
+  summary: string;
+  score: number;
+  value: number | null;
+  value_label: string;
+  rows: StockTechnicalReportRow[];
+  badges: StockTechnicalReportBadge[];
+  data: Record<string, unknown>;
+  missing: string[];
+  warnings: string[];
+  source_refs: Array<Record<string, string>>;
+};
+
 export type StockIndicatorPoint = {
   time: string;
   close: number | null;

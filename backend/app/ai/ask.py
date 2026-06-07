@@ -89,6 +89,22 @@ FRESHNESS_HINTS = (
     "更新到",
     "缺資料",
 )
+INTRADAY_HINTS = (
+    "intraday",
+    "live",
+    "realtime",
+    "real-time",
+    "today",
+    "now",
+    "opening",
+    "盤中",
+    "即時",
+    "今日",
+    "今天",
+    "現在",
+    "開盤",
+    "最新",
+)
 WATCHLIST_HINTS = (
     "watchlist",
     "group",
@@ -134,6 +150,10 @@ TAIWAN_TSMC_ALIASES = (
 def _contains_hint(question: str, hints: tuple[str, ...]) -> bool:
     lowered = question.lower()
     return any(hint.lower() in lowered for hint in hints)
+
+
+def _include_tw_intraday(payload: AiAskRequest) -> bool:
+    return bool(payload.allow_external_fetch and _contains_hint(payload.question, INTRADAY_HINTS))
 
 
 def _normalize_text(value: str | None) -> str | None:
@@ -845,6 +865,7 @@ def _read_data_only(db: Session, payload: AiAskRequest, scope_type: str) -> tupl
             db=db,
             stock_id=stock_id,
             branch_days=payload.branch_days,
+            include_intraday=_include_tw_intraday(payload),
         )
 
     if scope_type == "us_stock":
@@ -874,6 +895,7 @@ def _build_brief(db: Session, payload: AiAskRequest, scope_type: str) -> tuple[s
             stock_id=stock_id,
             strategy_profile=payload.strategy_profile,
             branch_days=payload.branch_days,
+            include_intraday=_include_tw_intraday(payload),
         )
 
     if scope_type == "watchlist":
@@ -904,6 +926,7 @@ def _generate_report(db: Session, payload: AiAskRequest, scope_type: str) -> tup
             stock_id=stock_id,
             strategy_profile=payload.strategy_profile,
             branch_days=payload.branch_days,
+            include_intraday=_include_tw_intraday(payload),
         )
 
     if scope_type == "watchlist":
@@ -927,6 +950,7 @@ def _generate_analysis(db: Session, payload: AiAskRequest, scope_type: str) -> t
             stock_id=stock_id,
             strategy_profile=payload.strategy_profile,
             branch_days=payload.branch_days,
+            include_intraday=_include_tw_intraday(payload),
         )
 
     if scope_type == "watchlist":

@@ -88,12 +88,14 @@ def generate_stock_llm_analysis(
     *,
     strategy_profile: str = "balanced",
     branch_days: int = 5,
+    include_intraday: bool = False,
 ) -> dict[str, Any]:
     envelope = reports.build_stock_brief(
         db=db,
         stock_id=stock_id,
         strategy_profile=strategy_profile,
         branch_days=branch_days,
+        include_intraday=include_intraday,
     )
     return _build_non_persistent_analysis(envelope, kind="stock_llm_analysis")
 
@@ -122,12 +124,14 @@ def generate_stock_llm_report(
     *,
     strategy_profile: str = "balanced",
     branch_days: int = 5,
+    include_intraday: bool = False,
 ) -> dict[str, Any]:
     envelope = reports.build_stock_brief(
         db=db,
         stock_id=stock_id,
         strategy_profile=strategy_profile,
         branch_days=branch_days,
+        include_intraday=include_intraday,
     )
 
     started_at = _now()
@@ -154,6 +158,7 @@ def generate_stock_llm_report(
                     "stock_id": stock_id,
                     "strategy_profile": strategy_profile,
                     "branch_days": branch_days,
+                    "include_intraday": include_intraday,
                 },
                 "result_summary": report_store.report_tool_summary(envelope),
             },

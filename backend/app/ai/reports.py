@@ -28,6 +28,9 @@ def _compact_stock_summary(context: dict[str, Any]) -> dict[str, Any]:
     latest_revenue = data.get("latest_revenue") or {}
     latest_financial = data.get("latest_financial") or {}
     broker_branch = data.get("broker_branch") or {}
+    technical_reports = data.get("technical_reports") or {}
+    daily_technical = technical_reports.get("daily") or {}
+    today_technical = technical_reports.get("today") or {}
 
     highlights: list[str] = []
     checks: list[str] = []
@@ -66,6 +69,19 @@ def _compact_stock_summary(context: dict[str, Any]) -> dict[str, Any]:
         )
     else:
         checks.append("Broker branch data is missing.")
+
+    if daily_technical:
+        highlights.append(
+            "Daily technical report "
+            f"{daily_technical.get('title')} ({daily_technical.get('summary')})."
+        )
+
+    if today_technical:
+        highlights.append(
+            "Today technical report "
+            f"{today_technical.get('title')} phase={today_technical.get('phase')} "
+            f"confidence={today_technical.get('confidence')}."
+        )
 
     checks.extend(context.get("missing", []))
 
@@ -235,11 +251,13 @@ def build_stock_brief(
     *,
     strategy_profile: str = "balanced",
     branch_days: int = 5,
+    include_intraday: bool = False,
 ) -> dict[str, Any]:
     context = tools.read_stock_context(
         db=db,
         stock_id=stock_id,
         branch_days=branch_days,
+        include_intraday=include_intraday,
     )
     profile = prompts.get_strategy_profile(strategy_profile)
     memories = _memory_context(
