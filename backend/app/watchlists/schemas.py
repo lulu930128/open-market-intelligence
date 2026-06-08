@@ -235,6 +235,12 @@ class WatchlistGroupRankingRead(BaseModel):
     no_data_count: int
     error_count: int
 
+    trade_date: date | None = None
+    target_trade_date: date | None = None
+    is_current: bool = True
+    current_stock_count: int = 0
+    stale_stock_count: int = 0
+
     results: list[WatchlistRankingItemRead]
 
 

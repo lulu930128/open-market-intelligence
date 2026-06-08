@@ -2301,7 +2301,9 @@ export default function StockKLineChart({
                   {visibleData.map((point, index) => {
                     const open = point.open ?? point.close;
                     const close = point.close ?? point.open;
-                    const volume = getVolumeMetric(point) ?? 0;
+                    const volume = getVolumeMetric(point);
+                    if (!validNumber(volume)) return null;
+
                     const x = getX(index);
                     const isUp = validNumber(close) && validNumber(open) ? close >= open : true;
                     const y = getVolumeY(panel, volume);

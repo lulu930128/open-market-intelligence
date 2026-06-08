@@ -1,5 +1,6 @@
 "use client";
 
+import JobStatusCenter from "@/components/JobStatusCenter";
 import type { MarketRegion } from "@/components/SidebarWatchlistExplorer";
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
 import {
@@ -643,6 +644,10 @@ export default function USWatchlistSidebar({
           {message.text}
         </div>
       ) : null}
+
+      <div className="border-b border-slate-200 px-4 py-4">
+        <JobStatusCenter placement="inline" market="us" />
+      </div>
 
       <div className="space-y-4 p-4">
         <form

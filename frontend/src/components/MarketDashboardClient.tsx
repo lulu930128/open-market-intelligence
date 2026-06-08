@@ -8,7 +8,7 @@ import StockDetailPanel from "@/components/StockDetailPanel";
 import USStockDetailPanel from "@/components/USStockDetailPanel";
 import USWatchlistSidebar from "@/components/USWatchlistSidebar";
 import { fetchJson } from "@/lib/api";
-import { formatJobStatus, requestBackfillJob } from "@/lib/jobs";
+import { requestBackfillJob } from "@/lib/jobs";
 import {
   TAIWAN_INTRADAY_REFRESH_MS,
   getTaiwanIntradayXRatio,
@@ -22,7 +22,6 @@ import {
   isUsRegularSessionPoint,
 } from "@/lib/usMarketTime";
 import {
-  US_MARKET_INDEX_ITEMS,
   getUsPrimaryMarketIndexConfig,
   resolveUsContextIndexConfig,
   getUsMarketIndexConfig,
@@ -51,6 +50,7 @@ type LoadState = "idle" | "loading" | "success" | "error";
 type RankBy = "none" | "change_pct" | "score" | "volume";
 type USRankBy = "none" | "change_pct" | "volume" | "close";
 const WATCHLIST_INTRADAY_LIMIT = 30;
+const WATCHLIST_BACKFILL_LOOKBACK_YEARS = 8;
 type RankingDisplayRow = {
   key: string;
   rank: number;
@@ -66,6 +66,7 @@ type RankingDisplayRow = {
   volume: string;
   volumeValue: number | null | undefined;
   selected: boolean;
+  loading?: boolean;
   onSelect: () => void;
 };
 type RankingPanelOption = {
@@ -108,6 +109,27 @@ function RankingLoadingRows({ rows = 5 }: { rows?: number }) {
       ))}
     </div>
   );
+}
+
+function RankingCellSkeleton({
+  className = "h-3 w-14",
+}: {
+  className?: string;
+}) {
+  return (
+    <span
+      aria-hidden="true"
+      className={`inline-block align-middle omi-skeleton ${className}`}
+    />
+  );
+}
+
+function isRankingItemPending(row: RankingItem) {
+  return row.status === "pending";
+}
+
+function isUsRankingItemPending(row: USWatchlistRankingItemRead) {
+  return row.status === "pending";
 }
 
 function formatLots(value: number | null | undefined) {
@@ -264,6 +286,20 @@ function formatDashboardTime(value: Date) {
   );
 
   return `${parts.year}/${parts.month}/${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+}
+
+function formatDateParam(value: Date) {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
+
+function yearsAgo(years: number) {
+  const value = new Date();
+  value.setFullYear(value.getFullYear() - years);
+  return value;
 }
 
 function buildSparklinePath(
@@ -1031,13 +1067,6 @@ function buildUsWatchlistRows(
   return rows;
 }
 
-function firstUsWatchlistRow(
-  group: USWatchlistGroupNode | null,
-  items: USWatchlistItemRead[]
-) {
-  return buildUsWatchlistRows(group, items)[0] ?? null;
-}
-
 function mergeUsWatchlistRows(
   baseRows: USWatchlistRankingItemRead[],
   ranking: USWatchlistRankingRead | null
@@ -1058,6 +1087,7 @@ function mergeUsWatchlistRows(
 function WatchlistRankingPanel({
   groupName,
   lastUpdatedAt,
+  statusLabel,
   rankBy,
   rankOptions,
   onRankByChange,
@@ -1065,6 +1095,7 @@ function WatchlistRankingPanel({
   reloadDisabled,
   secondaryAction,
   loadState,
+  loadingLabel,
   errorMessage,
   rows,
   summary,
@@ -1073,6 +1104,7 @@ function WatchlistRankingPanel({
 }: {
   groupName: string | null;
   lastUpdatedAt: string | null;
+  statusLabel?: string;
   rankBy: string;
   rankOptions: RankingPanelOption[];
   onRankByChange: (value: string) => void;
@@ -1080,6 +1112,7 @@ function WatchlistRankingPanel({
   reloadDisabled: boolean;
   secondaryAction?: ReactNode;
   loadState: LoadState;
+  loadingLabel?: string;
   errorMessage: string | null;
   rows: RankingDisplayRow[];
   summary: {
@@ -1090,6 +1123,8 @@ function WatchlistRankingPanel({
   volumeHeader: string;
   emptyMessage: string;
 }) {
+  const isLoadingRows = loadState === "loading" || rows.some((row) => row.loading);
+
   return (
     <div className="space-y-4">
       <section className="border border-slate-200 bg-white">
@@ -1102,12 +1137,12 @@ function WatchlistRankingPanel({
               {groupName ?? "尚未選擇分組"}
             </h2>
             <div className="mt-1 text-sm text-slate-500">
-              {lastUpdatedAt ? `更新時間 ${lastUpdatedAt}` : "尚未載入分組資料"}
+              {statusLabel ??
+                (lastUpdatedAt ? `更新時間 ${lastUpdatedAt}` : "尚未載入分組資料")}
             </div>
           </div>
 
           <div className="flex items-center gap-2">
-            {secondaryAction}
             <select
               value={rankBy}
               onChange={(event) => onRankByChange(event.target.value)}
@@ -1119,6 +1154,7 @@ function WatchlistRankingPanel({
                 </option>
               ))}
             </select>
+            {secondaryAction}
             <button
               type="button"
               onClick={onReload}
@@ -1143,11 +1179,23 @@ function WatchlistRankingPanel({
           </div>
           <div className="border-l border-slate-200 px-5 py-3">
             <div className="text-xs text-slate-500">上漲</div>
-            <div className="mt-1 text-xl font-bold text-red-600">{summary.upCount}</div>
+            <div className="mt-1 text-xl font-bold text-red-600">
+              {isLoadingRows ? (
+                <span className="block h-6 w-8 animate-pulse bg-slate-200" />
+              ) : (
+                summary.upCount
+              )}
+            </div>
           </div>
           <div className="border-l border-slate-200 px-5 py-3">
             <div className="text-xs text-slate-500">下跌</div>
-            <div className="mt-1 text-xl font-bold text-emerald-600">{summary.downCount}</div>
+            <div className="mt-1 text-xl font-bold text-emerald-600">
+              {isLoadingRows ? (
+                <span className="block h-6 w-8 animate-pulse bg-slate-200" />
+              ) : (
+                summary.downCount
+              )}
+            </div>
           </div>
           <div className="border-l border-slate-200 px-5 py-3">
             <div className="text-xs text-slate-500">排序</div>
@@ -1159,9 +1207,9 @@ function WatchlistRankingPanel({
       <section className="border border-slate-200 bg-white">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-3">
           <h3 className="text-sm font-bold text-slate-950">自選股列表</h3>
-          {loadState === "loading" ? (
+          {isLoadingRows ? (
             <span className="inline-flex items-center gap-2 text-xs text-slate-500">
-              載入中
+              {loadingLabel ?? "載入中"}
               <LoadingDots label="排行資料讀取中" />
             </span>
           ) : (
@@ -1203,55 +1251,73 @@ function WatchlistRankingPanel({
                   {row.symbol} {row.name ?? ""}
                 </span>
                 <span className={row.selected ? "block truncate text-xs text-slate-300" : "block truncate text-xs text-slate-500"}>
-                  {row.meta ?? "-"}
+                  {row.loading ? <RankingCellSkeleton className="h-2.5 w-16" /> : row.meta ?? "-"}
                 </span>
               </span>
-              <span className="flex justify-center">{row.visual}</span>
+              <span className="flex justify-center">
+                {row.loading ? <RankingCellSkeleton className="h-5 w-16" /> : row.visual}
+              </span>
               <span className="text-right font-semibold">
-                <PriceUpdatePulse
-                  value={row.closeValue}
-                  direction={row.changePct}
-                  resetKey={row.key}
-                  className="justify-end tabular-nums"
-                >
-                  {row.close}
-                </PriceUpdatePulse>
+                {row.loading ? (
+                  <RankingCellSkeleton />
+                ) : (
+                  <PriceUpdatePulse
+                    value={row.closeValue}
+                    direction={row.changePct}
+                    resetKey={row.key}
+                    className="justify-end tabular-nums"
+                  >
+                    {row.close}
+                  </PriceUpdatePulse>
+                )}
               </span>
               <span className={`text-right font-semibold ${row.selected ? "" : valueTone(row.changePct)}`}>
-                <PriceUpdatePulse
-                  value={row.change}
-                  direction={row.changePct}
-                  resetKey={row.key}
-                  className="justify-end tabular-nums"
-                >
-                  {row.change}
-                </PriceUpdatePulse>
+                {row.loading ? (
+                  <RankingCellSkeleton className="h-3 w-12" />
+                ) : (
+                  <PriceUpdatePulse
+                    value={row.change}
+                    direction={row.changePct}
+                    resetKey={row.key}
+                    className="justify-end tabular-nums"
+                  >
+                    {row.change}
+                  </PriceUpdatePulse>
+                )}
               </span>
               <span className="text-right">
-                <span
-                  className={[
-                    "omi-ranking-trend-chip px-2 py-1 text-xs font-semibold",
-                    row.selected
-                      ? "omi-ranking-trend-chip-selected bg-white text-slate-900"
-                      : trendClass(row.changePct),
-                  ].join(" ")}
-                >
-                  {row.trend}
-                </span>
+                {row.loading ? (
+                  <RankingCellSkeleton className="h-6 w-12" />
+                ) : (
+                  <span
+                    className={[
+                      "omi-ranking-trend-chip px-2 py-1 text-xs font-semibold",
+                      row.selected
+                        ? "omi-ranking-trend-chip-selected bg-white text-slate-900"
+                        : trendClass(row.changePct),
+                    ].join(" ")}
+                  >
+                    {row.trend}
+                  </span>
+                )}
               </span>
               <span className="text-right">
-                <PriceUpdatePulse
-                  value={row.volumeValue ?? row.volume}
-                  direction={null}
-                  resetKey={row.key}
-                  className="justify-end tabular-nums"
-                >
-                  {row.volume}
-                </PriceUpdatePulse>
+                {row.loading ? (
+                  <RankingCellSkeleton className="h-3 w-16" />
+                ) : (
+                  <PriceUpdatePulse
+                    value={row.volumeValue ?? row.volume}
+                    direction={null}
+                    resetKey={row.key}
+                    className="justify-end tabular-nums"
+                  >
+                    {row.volume}
+                  </PriceUpdatePulse>
+                )}
               </span>
             </button>
           ))
-        ) : loadState === "loading" ? (
+        ) : isLoadingRows ? (
           <RankingLoadingRows />
         ) : (
           <div className="border-t border-slate-200 px-5 py-10 text-center text-sm text-slate-500">
@@ -1285,9 +1351,6 @@ export default function MarketDashboardClient({
   const initialSelectedUsGroup = useMemo(() => {
     return flattenUsGroups(initialUsWatchlistTree)[0] ?? null;
   }, [initialUsWatchlistTree]);
-  const initialSelectedUsRow = useMemo(() => {
-    return firstUsWatchlistRow(initialSelectedUsGroup, initialUsWatchlistItems);
-  }, [initialSelectedUsGroup, initialUsWatchlistItems]);
   const [selectedGroupId, setSelectedGroupId] = useState<number | null>(
     initialSelectedGroup?.id ?? null
   );
@@ -1299,12 +1362,8 @@ export default function MarketDashboardClient({
   const [watchlistTree, setWatchlistTree] = useState<WatchlistGroupNode[]>(initialTree);
   const [watchlistItems, setWatchlistItems] = useState<WatchlistItemRead[]>(initialItems);
   const [activeMarket, setActiveMarket] = useState<MarketRegion>("tw");
-  const [selectedUsSymbol, setSelectedUsSymbol] = useState<string | null>(
-    initialSelectedUsRow?.symbol ?? null
-  );
-  const [selectedUsSecurityName, setSelectedUsSecurityName] = useState<string | null>(
-    initialSelectedUsRow?.security_name ?? null
-  );
+  const [selectedUsSymbol, setSelectedUsSymbol] = useState<string | null>(null);
+  const [selectedUsSecurityName, setSelectedUsSecurityName] = useState<string | null>(null);
   const [selectedUsCompanyProfile, setSelectedUsCompanyProfile] =
     useState<USCompanyProfileRead | null>(null);
   const [selectedUsGroupId, setSelectedUsGroupId] = useState<number | null>(
@@ -1330,13 +1389,13 @@ export default function MarketDashboardClient({
   const [marketIndexLoadState, setMarketIndexLoadState] =
     useState<LoadState>(initialMarketIndexSummary ? "success" : "idle");
   const [loadState, setLoadState] = useState<LoadState>("idle");
+  const [twWatchlistBackfillState, setTwWatchlistBackfillState] =
+    useState<LoadState>("idle");
   const [usLoadState, setUsLoadState] = useState<LoadState>("idle");
   const [usUniverseRefreshState, setUsUniverseRefreshState] =
     useState<LoadState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [usErrorMessage, setUsErrorMessage] = useState<string | null>(null);
-  const [usUniverseRefreshMessage, setUsUniverseRefreshMessage] =
-    useState<string | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
   const [usLastUpdatedAt, setUsLastUpdatedAt] = useState<string | null>(null);
   const dashboardRequestSeq = useRef(0);
@@ -1347,7 +1406,9 @@ export default function MarketDashboardClient({
 
   const activeGroupId = selectedGroupId ?? selectedGroup?.id ?? null;
   const activeGroupIdRef = useRef<number | null>(activeGroupId);
+  const selectedUsGroupIdRef = useRef<number | null>(selectedUsGroupId);
   const watchlistFreshnessRequestKeys = useRef<Set<string>>(new Set());
+  const usWatchlistFreshnessRequestKeys = useRef<Set<string>>(new Set());
   const baseRows = useMemo(
     () => buildWatchlistRows(selectedGroup, watchlistItems),
     [selectedGroup, watchlistItems]
@@ -1359,11 +1420,23 @@ export default function MarketDashboardClient({
 
     return ranking?.results ?? baseRows;
   }, [baseRows, rankBy, ranking]);
+  const displayRows = useMemo(() => {
+    return ranking?.is_current === false ? [] : rows;
+  }, [ranking?.is_current, rows]);
+  const rankingLoadState: LoadState =
+    ranking?.is_current === false && loadState !== "error" ? "loading" : loadState;
+  const hasPendingDisplayRows = displayRows.some(isRankingItemPending);
+  const rankingListLoading =
+    rankingLoadState === "loading" || hasPendingDisplayRows;
+  const rankingPendingLabel =
+    ranking?.is_current === false && ranking.target_trade_date
+      ? `等待 ${ranking.target_trade_date} 自選股資料`
+      : "載入中";
   const summary = useMemo(() => {
-    const upCount = rows.filter((row) => {
+    const upCount = displayRows.filter((row) => {
       return row.change_pct !== null && row.change_pct !== undefined && row.change_pct > 0;
     }).length;
-    const downCount = rows.filter((row) => {
+    const downCount = displayRows.filter((row) => {
       return row.change_pct !== null && row.change_pct !== undefined && row.change_pct < 0;
     }).length;
 
@@ -1372,7 +1445,7 @@ export default function MarketDashboardClient({
       upCount,
       downCount,
     };
-  }, [baseRows.length, rows]);
+  }, [baseRows.length, displayRows]);
   const usBaseRows = useMemo(
     () => buildUsWatchlistRows(selectedUsGroup, usWatchlistItems),
     [selectedUsGroup, usWatchlistItems]
@@ -1384,11 +1457,20 @@ export default function MarketDashboardClient({
 
     return usRanking?.results ?? usBaseRows;
   }, [usBaseRows, usRankBy, usRanking]);
+  const usVisibleRows = useMemo(() => {
+    return usRanking?.is_current === false ? [] : usRows;
+  }, [usRanking?.is_current, usRows]);
+  const usRankingLoadState: LoadState =
+    usRanking?.is_current === false && usLoadState !== "error" ? "loading" : usLoadState;
+  const usRankingPendingLabel =
+    usRanking?.is_current === false && usRanking.target_trade_date
+      ? `等待 ${usRanking.target_trade_date} 美股自選資料`
+      : "載入中";
   const usSummary = useMemo(() => {
-    const upCount = usRows.filter((row) => {
+    const upCount = usVisibleRows.filter((row) => {
       return row.change_pct !== null && row.change_pct !== undefined && row.change_pct > 0;
     }).length;
-    const downCount = usRows.filter((row) => {
+    const downCount = usVisibleRows.filter((row) => {
       return row.change_pct !== null && row.change_pct !== undefined && row.change_pct < 0;
     }).length;
 
@@ -1397,7 +1479,7 @@ export default function MarketDashboardClient({
       upCount,
       downCount,
     };
-  }, [usBaseRows.length, usRows]);
+  }, [usBaseRows.length, usVisibleRows]);
   const selectedUsContextProfile =
     selectedUsCompanyProfile?.symbol.toUpperCase() === selectedUsSymbol?.toUpperCase()
       ? selectedUsCompanyProfile
@@ -1549,9 +1631,96 @@ export default function MarketDashboardClient({
     }
   }
 
+  async function backfillSelectedTwWatchlistGroup() {
+    if (activeGroupId === null) return;
+
+    const groupId = activeGroupId;
+    setTwWatchlistBackfillState("loading");
+    setErrorMessage(null);
+
+    try {
+      await requestBackfillJob(
+        `/api/watchlists/groups/${groupId}/backfill`,
+        { method: "POST" },
+        {
+          start_date: formatDateParam(yearsAgo(WATCHLIST_BACKFILL_LOOKBACK_YEARS)),
+          end_date: formatDateParam(new Date()),
+          include_children: true,
+          enabled_only: true,
+          sleep_seconds: 0.2,
+          skip_existing_months: true,
+        },
+        {
+          intervalMs: 1500,
+          timeoutMs: 600000,
+        }
+      );
+
+      setTwWatchlistBackfillState("success");
+
+      if (activeGroupIdRef.current === groupId) {
+        await Promise.all([
+          loadMarketIndices({ silent: true }),
+          loadDashboard(groupId, rankBy, { silent: true }),
+        ]);
+      }
+    } catch (error) {
+      setTwWatchlistBackfillState("error");
+      setErrorMessage(error instanceof Error ? error.message : "台股補資料失敗");
+    }
+  }
+
+  async function refreshUsWatchlistDailyPricesForFreshness(
+    groupId: number,
+    currentRankBy: USRankBy,
+    targetTradeDate: string | null
+  ) {
+    const requestKey = `${groupId}:${targetTradeDate ?? "unknown"}:daily`;
+
+    if (usWatchlistFreshnessRequestKeys.current.has(requestKey)) return;
+
+    usWatchlistFreshnessRequestKeys.current.add(requestKey);
+    setUsUniverseRefreshState("loading");
+
+    try {
+      const job = await requestBackfillJob(
+        `/api/us-market/watchlists/groups/${groupId}/refresh-daily`,
+        { method: "POST" },
+        {
+          include_children: true,
+          enabled_only: true,
+          outputsize: "compact",
+          adjusted: false,
+          sleep_seconds: 12,
+        },
+        {
+          intervalMs: 1500,
+          timeoutMs: 1_800_000,
+        }
+      );
+      const result =
+        job.result && typeof job.result === "object" && !Array.isArray(job.result)
+          ? (job.result as Record<string, unknown>)
+          : null;
+      const errors = Array.isArray(result?.errors) ? result.errors : [];
+
+      setUsUniverseRefreshState(errors.length > 0 ? "error" : "success");
+
+      if (selectedUsGroupIdRef.current === groupId) {
+        await loadUsDashboard(groupId, currentRankBy, { silent: true });
+      }
+    } catch {
+      setUsUniverseRefreshState("error");
+    }
+  }
+
   useEffect(() => {
     activeGroupIdRef.current = activeGroupId;
   }, [activeGroupId]);
+
+  useEffect(() => {
+    selectedUsGroupIdRef.current = selectedUsGroupId;
+  }, [selectedUsGroupId]);
 
   useEffect(() => {
     if (activeMarket !== "tw") return;
@@ -1714,6 +1883,31 @@ export default function MarketDashboardClient({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeMarket, selectedUsGroupId, usRankBy, usWatchlistVersion]);
 
+  useEffect(() => {
+    if (activeMarket !== "us") return;
+    if (selectedUsGroupId === null) return;
+    if (usRanking?.is_current !== false) return;
+
+    const refreshTimer = window.setTimeout(() => {
+      void refreshUsWatchlistDailyPricesForFreshness(
+        selectedUsGroupId,
+        usRankBy,
+        usRanking.target_trade_date
+      );
+    }, 0);
+
+    return () => {
+      window.clearTimeout(refreshTimer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    activeMarket,
+    selectedUsGroupId,
+    usRankBy,
+    usRanking?.is_current,
+    usRanking?.target_trade_date,
+  ]);
+
   function handleSelectGroup(group: WatchlistGroupNode | null) {
     setSelectedGroup(group);
     setSelectedGroupId(group?.id ?? null);
@@ -1735,32 +1929,23 @@ export default function MarketDashboardClient({
   }
 
   function handleSelectUsGroup(group: USWatchlistGroupNode | null) {
-    const firstRow = firstUsWatchlistRow(group, usWatchlistItems);
-
     setSelectedUsGroupId(group?.id ?? null);
     setSelectedUsGroup(group);
     setSelectedUsGroupName(group?.group_name ?? null);
-    setSelectedUsSymbol(firstRow?.symbol ?? null);
-    setSelectedUsSecurityName(firstRow?.security_name ?? null);
+    setSelectedUsSymbol(null);
+    setSelectedUsSecurityName(null);
     setUsRanking(null);
     setUsLoadState("idle");
     setUsErrorMessage(null);
   }
 
-  function ensureSelectedUsLeaf() {
+  function ensureSelectedUsGroup() {
     const fallbackGroup = selectedUsGroup ?? flattenUsGroups(usWatchlistTree)[0] ?? null;
-    const firstRow = firstUsWatchlistRow(fallbackGroup, usWatchlistItems);
-    const fallbackIndex = US_MARKET_INDEX_ITEMS[0] ?? null;
 
     if (fallbackGroup !== selectedUsGroup) {
       setSelectedUsGroup(fallbackGroup);
       setSelectedUsGroupId(fallbackGroup?.id ?? null);
       setSelectedUsGroupName(fallbackGroup?.group_name ?? null);
-    }
-
-    if (selectedUsSymbol === null) {
-      setSelectedUsSymbol(firstRow?.symbol ?? fallbackIndex?.symbol ?? null);
-      setSelectedUsSecurityName(firstRow?.security_name ?? fallbackIndex?.name ?? null);
     }
   }
 
@@ -1768,10 +1953,9 @@ export default function MarketDashboardClient({
     if (selectedUsGroupId === null) return;
 
     setUsUniverseRefreshState("loading");
-    setUsUniverseRefreshMessage("Queueing US data refresh.");
 
     try {
-      const job = await requestBackfillJob(
+      await requestBackfillJob(
         `/api/us-market/watchlists/groups/${selectedUsGroupId}/refresh-resources`,
         { method: "POST" },
         {
@@ -1788,32 +1972,13 @@ export default function MarketDashboardClient({
         {
           intervalMs: 1500,
           timeoutMs: 1_800_000,
-          onUpdate: (nextJob) => {
-            setUsUniverseRefreshMessage(formatJobStatus(nextJob));
-          },
         }
       );
-      const result =
-        job.result && typeof job.result === "object" && !Array.isArray(job.result)
-          ? (job.result as Record<string, unknown>)
-          : null;
-      const symbolCount =
-        typeof result?.symbol_count === "number" ? result.symbol_count : null;
-      const errorCount =
-        typeof result?.error_count === "number" ? result.error_count : null;
 
       setUsUniverseRefreshState("success");
-      setUsUniverseRefreshMessage(
-        `Completed${symbolCount !== null ? ` ${symbolCount} symbols` : ""}${
-          errorCount ? `, ${errorCount} resource errors` : ""
-        }.`
-      );
       await loadUsDashboard(selectedUsGroupId, usRankBy, { silent: true });
-    } catch (error) {
+    } catch {
       setUsUniverseRefreshState("error");
-      setUsUniverseRefreshMessage(
-        error instanceof Error ? error.message : "US data refresh failed."
-      );
     }
   }
 
@@ -1833,6 +1998,7 @@ export default function MarketDashboardClient({
 
   function renderRankingRow(row: RankingItem) {
     const selected = row.stock_id === selectedStockId;
+    const loading = isRankingItemPending(row);
 
     return (
       <button
@@ -1852,53 +2018,77 @@ export default function MarketDashboardClient({
             {row.stock_id} {row.stock_name ?? ""}
           </span>
           <span className={selected ? "block truncate text-xs text-slate-300" : "block truncate text-xs text-slate-500"}>
-            {formatRowTime(row.time) ?? row.primary_signal_label ?? statusLabel(row.status)}
+            {loading ? (
+              <RankingCellSkeleton className="h-2.5 w-16" />
+            ) : (
+              formatRowTime(row.time) ?? row.primary_signal_label ?? statusLabel(row.status)
+            )}
           </span>
         </span>
         <span className="flex justify-center">
-          <RankingSparkline row={row} selected={selected} />
+          {loading ? (
+            <RankingCellSkeleton className="h-5 w-16" />
+          ) : (
+            <RankingSparkline row={row} selected={selected} />
+          )}
         </span>
         <span className="text-right font-semibold">
-          <PriceUpdatePulse
-            value={row.close}
-            direction={row.change_pct}
-            resetKey={`${activeGroupId ?? "all"}:${row.stock_id}`}
-            className="justify-end tabular-nums"
-          >
-            {formatPrice(row.close)}
-          </PriceUpdatePulse>
+          {loading ? (
+            <RankingCellSkeleton />
+          ) : (
+            <PriceUpdatePulse
+              value={row.close}
+              direction={row.change_pct}
+              resetKey={`${activeGroupId ?? "all"}:${row.stock_id}`}
+              className="justify-end tabular-nums"
+            >
+              {formatPrice(row.close)}
+            </PriceUpdatePulse>
+          )}
         </span>
         <span className={`text-right font-semibold ${selected ? "" : valueTone(row.change_pct)}`}>
-          <PriceUpdatePulse
-            value={row.change_pct}
-            direction={row.change_pct}
-            resetKey={`${activeGroupId ?? "all"}:${row.stock_id}`}
-            className="justify-end tabular-nums"
-          >
-            {formatPct(row.change_pct)}
-          </PriceUpdatePulse>
+          {loading ? (
+            <RankingCellSkeleton className="h-3 w-12" />
+          ) : (
+            <PriceUpdatePulse
+              value={row.change_pct}
+              direction={row.change_pct}
+              resetKey={`${activeGroupId ?? "all"}:${row.stock_id}`}
+              className="justify-end tabular-nums"
+            >
+              {formatPct(row.change_pct)}
+            </PriceUpdatePulse>
+          )}
         </span>
         <span className="text-right">
-          <span
-            className={[
-              "omi-ranking-trend-chip px-2 py-1 text-xs font-semibold",
-              selected
-                ? `omi-ranking-trend-chip-selected ${selectedTrendClass(row.limit_status)}`
-                : trendClass(row.change_pct, row.limit_status),
-            ].join(" ")}
-          >
-            {trendLabel(row.change_pct, row.limit_status)}
-          </span>
+          {loading ? (
+            <RankingCellSkeleton className="h-6 w-12" />
+          ) : (
+            <span
+              className={[
+                "omi-ranking-trend-chip px-2 py-1 text-xs font-semibold",
+                selected
+                  ? `omi-ranking-trend-chip-selected ${selectedTrendClass(row.limit_status)}`
+                  : trendClass(row.change_pct, row.limit_status),
+              ].join(" ")}
+            >
+              {trendLabel(row.change_pct, row.limit_status)}
+            </span>
+          )}
         </span>
         <span className="text-right">
-          <PriceUpdatePulse
-            value={row.volume}
-            direction={null}
-            resetKey={`${activeGroupId ?? "all"}:${row.stock_id}`}
-            className="justify-end tabular-nums"
-          >
-            {formatLots(row.volume)}
-          </PriceUpdatePulse>
+          {loading ? (
+            <RankingCellSkeleton className="h-3 w-16" />
+          ) : (
+            <PriceUpdatePulse
+              value={row.volume}
+              direction={null}
+              resetKey={`${activeGroupId ?? "all"}:${row.stock_id}`}
+              className="justify-end tabular-nums"
+            >
+              {formatLots(row.volume)}
+            </PriceUpdatePulse>
+          )}
         </span>
       </button>
     );
@@ -1915,7 +2105,11 @@ export default function MarketDashboardClient({
             {selectedGroup?.group_name ?? "尚未選擇分組"}
           </h2>
           <div className="mt-1 text-sm text-slate-500">
-            {lastUpdatedAt ? `更新時間 ${lastUpdatedAt}` : "選擇左側分組後載入資料"}
+            {ranking?.is_current === false
+              ? rankingPendingLabel
+              : lastUpdatedAt
+                ? `更新時間 ${lastUpdatedAt}`
+                : "選擇左側分組後載入資料"}
           </div>
         </div>
 
@@ -1930,6 +2124,16 @@ export default function MarketDashboardClient({
             <option value="score">Score</option>
             <option value="volume">成交量</option>
           </select>
+          <button
+            type="button"
+            onClick={() => void backfillSelectedTwWatchlistGroup()}
+            className="h-9 whitespace-nowrap border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-700 hover:border-red-700 hover:text-red-700 disabled:border-slate-200 disabled:text-slate-400"
+            disabled={
+              activeGroupId === null || twWatchlistBackfillState === "loading"
+            }
+          >
+            {twWatchlistBackfillState === "loading" ? "Backfilling" : "Backfill"}
+          </button>
           <button
             type="button"
             onClick={() => {
@@ -1957,11 +2161,23 @@ export default function MarketDashboardClient({
         </div>
         <div className="border-l border-slate-200 px-5 py-3">
           <div className="text-xs text-slate-500">上漲</div>
-          <div className="mt-1 text-xl font-bold text-red-600">{summary.upCount}</div>
+          <div className="mt-1 text-xl font-bold text-red-600">
+            {rankingListLoading ? (
+              <span className="block h-6 w-8 animate-pulse bg-slate-200" />
+            ) : (
+              summary.upCount
+            )}
+          </div>
         </div>
         <div className="border-l border-slate-200 px-5 py-3">
           <div className="text-xs text-slate-500">下跌</div>
-          <div className="mt-1 text-xl font-bold text-emerald-600">{summary.downCount}</div>
+          <div className="mt-1 text-xl font-bold text-emerald-600">
+            {rankingListLoading ? (
+              <span className="block h-6 w-8 animate-pulse bg-slate-200" />
+            ) : (
+              summary.downCount
+            )}
+          </div>
         </div>
         <div className="border-l border-slate-200 px-5 py-3">
           <div className="text-xs text-slate-500">排序</div>
@@ -1979,16 +2195,16 @@ export default function MarketDashboardClient({
       <section className="border border-slate-200 bg-white">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-3">
           <h3 className="text-sm font-bold text-slate-950">自選股列表</h3>
-          {loadState === "loading" ? (
+          {rankingListLoading ? (
             <span className="inline-flex items-center gap-2 text-xs text-slate-500">
-              載入中
+              {rankingPendingLabel}
               <LoadingDots label="自選股排行資料讀取中" />
             </span>
           ) : (
             <span className="text-xs text-slate-500">
               {rankBy === "none"
-                ? `${rows.length} 檔 · 正常排序`
-                : `${rows.length} 檔 · 依 ${rankLabel(ranking?.rank_by ?? rankBy)} 排序`}
+                ? `${displayRows.length} 檔 · 正常排序`
+                : `${displayRows.length} 檔 · 依 ${rankLabel(ranking?.rank_by ?? rankBy)} 排序`}
             </span>
           )}
         </div>
@@ -2002,9 +2218,9 @@ export default function MarketDashboardClient({
           <span className="text-right">漲跌</span>
           <span className="text-right">成交量(張)</span>
         </div>
-        {rows.length > 0 ? (
-          rows.map(renderRankingRow)
-        ) : loadState === "loading" ? (
+        {displayRows.length > 0 ? (
+          displayRows.map(renderRankingRow)
+        ) : rankingListLoading ? (
           <RankingLoadingRows />
         ) : (
           <div className="border-t border-slate-200 px-5 py-10 text-center text-sm text-slate-500">
@@ -2015,8 +2231,9 @@ export default function MarketDashboardClient({
     </div>
   );
 
-  const usDisplayRows: RankingDisplayRow[] = usRows.map((row) => {
+  const usDisplayRows: RankingDisplayRow[] = usVisibleRows.map((row) => {
     const selected = row.symbol === selectedUsSymbol;
+    const loading = isUsRankingItemPending(row);
 
     return {
       key: `${row.group_id}-${row.symbol}`,
@@ -2041,6 +2258,7 @@ export default function MarketDashboardClient({
       volume: formatWholeNumber(row.volume),
       volumeValue: row.volume,
       selected,
+      loading,
       onSelect: () => {
         setSelectedUsSymbol(row.symbol);
         setSelectedUsSecurityName(row.security_name);
@@ -2051,6 +2269,9 @@ export default function MarketDashboardClient({
     <WatchlistRankingPanel
       groupName={selectedUsGroupName}
       lastUpdatedAt={usLastUpdatedAt}
+      statusLabel={
+        usRanking?.is_current === false ? usRankingPendingLabel : undefined
+      }
       rankBy={usRanking?.rank_by ?? usRankBy}
       rankOptions={[
         { value: "none", label: "正常排序" },
@@ -2064,32 +2285,19 @@ export default function MarketDashboardClient({
       }}
       reloadDisabled={selectedUsGroupId === null || usLoadState === "loading"}
       secondaryAction={
-        <div className="flex max-w-[220px] flex-col items-end gap-1">
-          <button
-            type="button"
-            onClick={() => void refreshSelectedUsUniverse()}
-            className="h-9 whitespace-nowrap border border-slate-900 bg-white px-3 text-xs font-semibold text-slate-900 hover:border-red-700 hover:text-red-700 disabled:border-slate-200 disabled:text-slate-400"
-            disabled={
-              selectedUsGroupId === null || usUniverseRefreshState === "loading"
-            }
-          >
-            {usUniverseRefreshState === "loading" ? "Backfilling" : "Backfill Data"}
-          </button>
-          {usUniverseRefreshMessage ? (
-            <span
-              className={[
-                "line-clamp-2 text-right text-[11px]",
-                usUniverseRefreshState === "error"
-                  ? "text-red-600"
-                  : "text-slate-500",
-              ].join(" ")}
-            >
-              {usUniverseRefreshMessage}
-            </span>
-          ) : null}
-        </div>
+        <button
+          type="button"
+          onClick={() => void refreshSelectedUsUniverse()}
+          className="h-9 whitespace-nowrap border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-700 hover:border-red-700 hover:text-red-700 disabled:border-slate-200 disabled:text-slate-400"
+          disabled={
+            selectedUsGroupId === null || usUniverseRefreshState === "loading"
+          }
+        >
+          {usUniverseRefreshState === "loading" ? "Backfilling" : "Backfill"}
+        </button>
       }
-      loadState={usLoadState}
+      loadState={usRankingLoadState}
+      loadingLabel={usRankingPendingLabel}
       errorMessage={usErrorMessage}
       rows={usDisplayRows}
       summary={usSummary}
@@ -2113,7 +2321,7 @@ export default function MarketDashboardClient({
                 setErrorMessage(null);
                 setUsErrorMessage(null);
                 if (market === "us") {
-                  ensureSelectedUsLeaf();
+                  ensureSelectedUsGroup();
                 }
               }}
               onSelectGroup={handleSelectUsGroup}
@@ -2132,9 +2340,9 @@ export default function MarketDashboardClient({
                 const rowsForNextGroup = buildUsWatchlistRows(nextSelectedGroup, nextItems);
                 const selectedSymbolKey = selectedUsSymbol?.toUpperCase() ?? null;
                 const nextSelectedRow =
-                  rowsForNextGroup.find((row) => row.symbol === selectedSymbolKey) ??
-                  rowsForNextGroup[0] ??
-                  null;
+                  selectedSymbolKey === null
+                    ? null
+                    : rowsForNextGroup.find((row) => row.symbol === selectedSymbolKey) ?? null;
                 const selectedIndexConfig = getUsMarketIndexConfig(selectedUsSymbol);
 
                 setSelectedUsGroup(nextSelectedGroup);
@@ -2144,14 +2352,14 @@ export default function MarketDashboardClient({
                 if (selectedIndexConfig) {
                   setSelectedUsSymbol(selectedIndexConfig.symbol);
                   setSelectedUsSecurityName(selectedIndexConfig.name);
+                } else if (selectedSymbolKey !== null && nextSelectedRow === null) {
+                  setSelectedUsSymbol(null);
+                  setSelectedUsSecurityName(null);
                 } else if (
-                  nextSelectedRow === null ||
-                  selectedUsSymbol === null ||
-                  nextSelectedRow.symbol !== selectedUsSymbol.toUpperCase() ||
+                  nextSelectedRow !== null &&
                   nextSelectedRow.security_name !== selectedUsSecurityName
                 ) {
-                  setSelectedUsSymbol(nextSelectedRow?.symbol ?? null);
-                  setSelectedUsSecurityName(nextSelectedRow?.security_name ?? null);
+                  setSelectedUsSecurityName(nextSelectedRow.security_name);
                 }
               }}
               onChanged={() => setUsWatchlistVersion((version) => version + 1)}
@@ -2169,7 +2377,7 @@ export default function MarketDashboardClient({
                 setActiveMarket(market);
                 setErrorMessage(null);
                 if (market === "us") {
-                  ensureSelectedUsLeaf();
+                  ensureSelectedUsGroup();
                 }
               }}
               onExplorerDataChanged={(nextTree, nextItems) => {

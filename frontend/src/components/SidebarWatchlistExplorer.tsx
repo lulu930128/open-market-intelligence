@@ -2,10 +2,8 @@
 
 import JobStatusCenter from "@/components/JobStatusCenter";
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
-import { formatJobStatus, getJobResult, requestBackfillJob } from "@/lib/jobs";
 import type {
   StockMasterRead,
-  WatchlistGroupBackfillResult,
   WatchlistGroupNode,
   WatchlistGroupRead,
   WatchlistItemRead,
@@ -117,26 +115,11 @@ function buttonClass(kind: "primary" | "ghost" | "danger" = "ghost") {
   return "h-8 bg-slate-100 px-3 text-xs font-semibold text-slate-700 hover:bg-slate-200 disabled:cursor-not-allowed disabled:text-slate-300";
 }
 
-function formatDateParam(value: Date) {
-  const year = value.getFullYear();
-  const month = String(value.getMonth() + 1).padStart(2, "0");
-  const day = String(value.getDate()).padStart(2, "0");
-
-  return `${year}-${month}-${day}`;
-}
-
-const WATCHLIST_REFRESH_LOOKBACK_YEARS = 8;
 const PINNED_INDEX_GROUP_NAME = "加權指數";
 const PINNED_INDEX_ITEMS = [
   { stockId: "TAIEX", stockName: "加權指數", note: "TWSE" },
   { stockId: "TPEX", stockName: "櫃買指數", note: "TPEx" },
 ];
-
-function yearsAgo(years: number) {
-  const value = new Date();
-  value.setFullYear(value.getFullYear() - years);
-  return value;
-}
 
 function submitterValue(event: FormEvent<HTMLFormElement>) {
   const nativeEvent = event.nativeEvent as SubmitEvent;
@@ -189,7 +172,7 @@ export default function SidebarWatchlistExplorer({
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
   const [indexGroupExpanded, setIndexGroupExpanded] = useState(true);
   const [loading, setLoading] = useState(false);
-  const [refreshingMarketData, setRefreshingMarketData] = useState(false);
+  const [reloadingExplorerData, setReloadingExplorerData] = useState(false);
   const [message, setMessage] = useState<Message>(null);
   const [folderName, setFolderName] = useState("");
   const [renameValue, setRenameValue] = useState("");
@@ -280,61 +263,21 @@ export default function SidebarWatchlistExplorer({
     return null;
   }
 
-  async function refreshSelectedGroupMarketData() {
-    if (selectedGroupId === null) {
-      await reloadExplorerData({ keepSelection: true });
-      return;
-    }
-
-    setRefreshingMarketData(true);
+  async function reloadSelectedGroupList() {
+    setReloadingExplorerData(true);
     setMessage(null);
 
     try {
-      const job = await requestBackfillJob(
-        `/api/watchlists/groups/${selectedGroupId}/backfill`,
-        { method: "POST" },
-        {
-          start_date: formatDateParam(yearsAgo(WATCHLIST_REFRESH_LOOKBACK_YEARS)),
-          end_date: formatDateParam(new Date()),
-          include_children: true,
-          enabled_only: true,
-          sleep_seconds: 0.2,
-          skip_existing_months: true,
-        },
-        {
-          timeoutMs: 600000,
-          onUpdate: (updatedJob) => {
-            setMessage({
-              type: updatedJob.status === "error" ? "error" : "success",
-              text: formatJobStatus(updatedJob),
-            });
-          },
-        }
-      );
-      const result = getJobResult<WatchlistGroupBackfillResult>(job);
-
-      if (!result) {
-        throw new Error("Backfill job finished without a result.");
-      }
-
       const nextGroup = await reloadExplorerData({ keepSelection: true });
       await onChanged(nextGroup?.id ?? selectedGroupId);
-
-      const problemCount = result.warning_count + result.error_count;
-      setMessage({
-        type: result.error_count > 0 ? "error" : "success",
-        text:
-          problemCount > 0
-            ? `已更新整包 ${result.requested_stock_count} 檔，成功 ${result.success_count}，需確認 ${problemCount}`
-            : `已更新整包 ${result.requested_stock_count} 檔自選股`,
-      });
+      setMessage({ type: "success", text: "已重讀自選股清單" });
     } catch (error) {
       setMessage({
         type: "error",
-        text: error instanceof Error ? error.message : "自選股更新失敗",
+        text: error instanceof Error ? error.message : "自選股清單重讀失敗",
       });
     } finally {
-      setRefreshingMarketData(false);
+      setReloadingExplorerData(false);
     }
   }
 
@@ -1197,10 +1140,10 @@ export default function SidebarWatchlistExplorer({
         <button
           type="button"
           className={buttonClass("ghost")}
-          onClick={() => void refreshSelectedGroupMarketData()}
-          disabled={loading || refreshingMarketData}
+          onClick={() => void reloadSelectedGroupList()}
+          disabled={loading || reloadingExplorerData}
         >
-          {refreshingMarketData ? "更新中" : "重新整理"}
+          {reloadingExplorerData ? "重讀中" : "重讀清單"}
         </button>
       </div>
 
@@ -1252,7 +1195,7 @@ export default function SidebarWatchlistExplorer({
       ) : null}
 
       <div className="border-b border-slate-200 px-4 py-4">
-        <JobStatusCenter placement="inline" />
+        <JobStatusCenter placement="inline" market="tw" />
       </div>
 
       <div className="space-y-4 p-4">

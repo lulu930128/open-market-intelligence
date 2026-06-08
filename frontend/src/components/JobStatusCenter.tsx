@@ -21,7 +21,47 @@ const JOB_TYPE_LABELS: Record<string, string> = {
   "market.fundamental_metrics_backfill": "市場基本資料",
   "market.twse_daily_price_backfill": "上市日線補齊",
   "market.tpex_daily_price_backfill": "上櫃日線補齊",
+  "us_market.watchlist_daily_refresh": "美股自選日線補齊",
+  "scheduler.us_market_daily_refresh": "排程美股日線補齊",
+  "us_market.watchlist_resource_refresh": "美股自選資料補齊",
+  "us_market.daily_price_quality_repair": "美股日線品質修復",
 };
+
+type JobMarketFilter = "all" | "tw" | "us";
+
+const JOB_PANEL_TEXT: Record<
+  JobMarketFilter,
+  { subtitle: string; empty: string }
+> = {
+  all: {
+    subtitle: "顯示最近 20 筆補資料與排程工作",
+    empty: "尚無背景工作",
+  },
+  tw: {
+    subtitle: "顯示最近 20 筆台股補資料與排程工作",
+    empty: "尚無台股背景工作",
+  },
+  us: {
+    subtitle: "顯示最近 20 筆美股補資料與排程工作",
+    empty: "尚無美股背景工作",
+  },
+};
+
+function getJobMarket(jobType: string): "tw" | "us" | "other" {
+  if (jobType.startsWith("us_market.") || jobType === "scheduler.us_market_daily_refresh") {
+    return "us";
+  }
+
+  if (
+    jobType.startsWith("market.") ||
+    jobType.startsWith("watchlist.") ||
+    jobType === "scheduler.market_daily_refresh"
+  ) {
+    return "tw";
+  }
+
+  return "other";
+}
 
 function getJobTypeLabel(jobType: string) {
   return JOB_TYPE_LABELS[jobType] ?? jobType;
@@ -70,18 +110,35 @@ function getResultItems(job: JobRunRead) {
   );
 }
 
+function getResultErrors(job: JobRunRead) {
+  const result = getResultObject(job);
+  const rows = result?.errors;
+
+  if (!Array.isArray(rows)) return [];
+
+  return rows.filter(
+    (row): row is Record<string, unknown> =>
+      typeof row === "object" && row !== null && !Array.isArray(row)
+  );
+}
+
 function getFailedResultItems(job: JobRunRead) {
-  return getResultItems(job).filter((row) => {
+  const failedRows = getResultItems(job).filter((row) => {
     const status = getResultString(row.status);
     const errorMessage = getResultString(row.error_message);
 
     return status === "error" || status === "partial_success" || errorMessage !== null;
   });
+
+  return [...failedRows, ...getResultErrors(job)];
 }
 
 function hasResultErrors(job: JobRunRead) {
   const errorCount = getFirstResultNumber(job, ["error_count", "failed_count"]);
-  return (errorCount !== null && errorCount > 0) || getFailedResultItems(job).length > 0;
+  return (
+    (errorCount !== null && errorCount > 0) ||
+    getFailedResultItems(job).length > 0
+  );
 }
 
 function getEffectiveStatus(job: JobRunRead) {
@@ -141,12 +198,18 @@ function formatResultSummary(job: JobRunRead) {
   const requestedCount = getFirstResultNumber(job, [
     "requested_count",
     "requested_stock_count",
+    "requested_symbol_count",
+    "symbol_count",
     "total_count",
   ]);
   const successCount = getFirstResultNumber(job, ["success_count", "current_count"]);
   const warningCount = getFirstResultNumber(job, ["warning_count"]);
-  const errorCount = getFirstResultNumber(job, ["error_count", "failed_count"]);
+  const errorCount =
+    getFirstResultNumber(job, ["error_count", "failed_count"]) ??
+    getResultErrors(job).length;
   const insertedCount = getFirstResultNumber(job, ["inserted_count"]);
+  const updatedCount = getFirstResultNumber(job, ["updated_count"]);
+  const fetchedCount = getFirstResultNumber(job, ["fetched_count"]);
   const skippedExistingCount = getFirstResultNumber(job, [
     "skipped_existing_count",
     "skipped_count",
@@ -160,6 +223,8 @@ function formatResultSummary(job: JobRunRead) {
   }
 
   if (insertedCount !== null && insertedCount > 0) parts.push(`新增 ${insertedCount}`);
+  if (updatedCount !== null && updatedCount > 0) parts.push(`更新 ${updatedCount}`);
+  if (fetchedCount !== null && fetchedCount > 0) parts.push(`取得 ${fetchedCount}`);
   if (skippedExistingCount !== null && skippedExistingCount > 0) {
     parts.push(`已存在 ${skippedExistingCount}`);
   }
@@ -172,12 +237,16 @@ function formatResultSummary(job: JobRunRead) {
 function formatResultItemTitle(row: Record<string, unknown>) {
   const stockId = getResultString(row.stock_id);
   const stockName = getResultString(row.stock_name);
+  const symbol = getResultString(row.symbol);
+  const resource = getResultString(row.resource);
   const sourceName = getResultString(row.source_name);
   const category = getResultString(row.category);
   const tradeDate = getResultString(row.trade_date);
   const title =
     stockId !== null
       ? `${stockId}${stockName ? ` ${stockName}` : ""}`
+      : symbol !== null
+        ? `${symbol}${resource ? ` · ${resource}` : ""}`
       : sourceName ?? category ?? "項目";
 
   return tradeDate ? `${title} · ${tradeDate}` : title;
@@ -275,9 +344,13 @@ function JobRow({
 
 type JobStatusCenterProps = {
   placement?: "fixed" | "inline";
+  market?: JobMarketFilter;
 };
 
-export default function JobStatusCenter({ placement = "fixed" }: JobStatusCenterProps) {
+export default function JobStatusCenter({
+  placement = "fixed",
+  market = "all",
+}: JobStatusCenterProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [open, setOpen] = useState(false);
   const [jobs, setJobs] = useState<JobRunRead[]>([]);
@@ -288,15 +361,20 @@ export default function JobStatusCenter({ placement = "fixed" }: JobStatusCenter
   const loadJobs = useCallback(async () => {
     try {
       const rows = await fetchJson<JobRunRead[]>("/api/jobs", {
-        limit: 20,
+        limit: market === "all" ? 20 : 80,
         include_payload: false,
       });
-      setJobs(rows);
+      const marketRows =
+        market === "all"
+          ? rows
+          : rows.filter((job) => getJobMarket(job.job_type) === market);
+
+      setJobs(marketRows.slice(0, 20));
       setErrorMessage(null);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "工作狀態讀取失敗");
     }
-  }, []);
+  }, [market]);
 
   useEffect(() => {
     const initialTimer = window.setTimeout(() => {
@@ -332,6 +410,7 @@ export default function JobStatusCenter({ placement = "fixed" }: JobStatusCenter
   }, [open]);
 
   const activeCount = useMemo(() => jobs.filter(isActiveJob).length, [jobs]);
+  const panelText = JOB_PANEL_TEXT[market];
   const failedCount = useMemo(
     () =>
       jobs.filter((job) => {
@@ -386,14 +465,14 @@ export default function JobStatusCenter({ placement = "fixed" }: JobStatusCenter
             inline ? "w-full" : "w-[420px]",
           ].join(" ")}
         >
-          <div className="flex items-center justify-between border-b border-slate-200 px-3 py-2">
-            <div>
+          <div className="flex items-start justify-between gap-2 border-b border-slate-200 px-3 py-2">
+            <div className="min-w-0">
               <h2 className="text-sm font-black text-slate-950">背景工作</h2>
-              <p className="text-xs text-slate-500">顯示最近 20 筆補資料與排程工作</p>
+              <p className="text-xs text-slate-500">{panelText.subtitle}</p>
             </div>
             <button
               type="button"
-              className="border border-slate-300 px-2 py-1 text-xs font-bold text-slate-700 hover:border-slate-500"
+              className="h-7 shrink-0 whitespace-nowrap border border-slate-300 px-2 text-[11px] font-bold text-slate-700 hover:border-slate-500"
               onClick={() => void loadJobs()}
             >
               重整
@@ -412,7 +491,9 @@ export default function JobStatusCenter({ placement = "fixed" }: JobStatusCenter
                 <JobRow key={job.id} job={job} retryingJobId={retryingJobId} onRetry={handleRetry} />
               ))
             ) : (
-              <div className="px-3 py-8 text-center text-sm text-slate-500">尚無背景工作</div>
+              <div className="px-3 py-8 text-center text-sm text-slate-500">
+                {panelText.empty}
+              </div>
             )}
           </div>
         </section>

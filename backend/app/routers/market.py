@@ -686,12 +686,14 @@ def get_index_ohlc_chart_data(
     index_id: str,
     timeframe: str = Query(default="daily", pattern="^(daily|weekly|monthly)$"),
     bars: int = Query(default=90, ge=1, le=5000),
+    db: Session = Depends(get_db),
 ):
     try:
         return get_market_index_ohlc_chart_data(
             index_id=index_id,
             timeframe=timeframe,
             bars=bars,
+            db=db,
         )
     except ValueError as exc:
         raise HTTPException(

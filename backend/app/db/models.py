@@ -308,6 +308,37 @@ class MarketDailyPrice(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class MarketIndexDailyStat(Base):
+    __tablename__ = "market_index_daily_stat"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "index_id",
+            "trade_date",
+            name="uq_market_index_daily_stat_index_date",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    index_id: Mapped[str] = mapped_column(String(20), index=True)
+    market: Mapped[str] = mapped_column(String(20), index=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+
+    trade_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    trade_value: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    transaction_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    close_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_change: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    source: Mapped[str] = mapped_column(String(120), index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class InstitutionalTradeDaily(Base):
     __tablename__ = "institutional_trade_daily"
 

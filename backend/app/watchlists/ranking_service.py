@@ -1,7 +1,10 @@
+from datetime import date, datetime
+
 from sqlalchemy.orm import Session
 
 from app.market.intraday import get_intraday_trend
 from app.market.signal_service import calculate_latest_stock_signals
+from app.market.taiwan_rules import expected_daily_price_date
 from app.watchlists import service as watchlist_service
 
 
@@ -97,6 +100,57 @@ def _compact_intraday_points(points: list[dict], max_points: int = 72) -> list[d
     }
 
     return [valid_points[index] for index in sorted(indexes)]
+
+
+def _parse_row_trade_date(value) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+
+    if isinstance(value, date):
+        return value
+
+    text = str(value or "").strip()
+
+    if not text:
+        return None
+
+    normalized = text.replace("/", "-")
+
+    if normalized.endswith("Z"):
+        normalized = f"{normalized[:-1]}+00:00"
+
+    try:
+        return datetime.fromisoformat(normalized).date()
+    except ValueError:
+        pass
+
+    try:
+        return date.fromisoformat(normalized[:10])
+    except ValueError:
+        return None
+
+
+def _ranking_freshness(rows: list[dict], requested_stock_count: int) -> dict:
+    target_trade_date = expected_daily_price_date()
+    row_dates = [_parse_row_trade_date(row.get("time")) for row in rows]
+    latest_trade_date = max(
+        (row_date for row_date in row_dates if row_date is not None),
+        default=None,
+    )
+    current_stock_count = sum(
+        1
+        for row_date in row_dates
+        if row_date is not None and row_date >= target_trade_date
+    )
+    stale_stock_count = max(requested_stock_count - current_stock_count, 0)
+
+    return {
+        "trade_date": latest_trade_date,
+        "target_trade_date": target_trade_date,
+        "is_current": requested_stock_count == 0 or stale_stock_count == 0,
+        "current_stock_count": current_stock_count,
+        "stale_stock_count": stale_stock_count,
+    }
 
 
 def _get_intraday_overlay(db: Session, stock_id: str) -> dict | None:
@@ -317,6 +371,11 @@ def get_watchlist_group_latest_ranking(
     for index, row in enumerate(ranked_results, start=1):
         row["rank"] = index
 
+    freshness = _ranking_freshness(
+        rows=ranked_results,
+        requested_stock_count=len(unique_items),
+    )
+
     return {
         "group_id": group_id,
         "include_children": include_children,
@@ -326,5 +385,6 @@ def get_watchlist_group_latest_ranking(
         "ranked_count": len(sortable_rows),
         "no_data_count": no_data_count,
         "error_count": error_count,
+        **freshness,
         "results": ranked_results,
     }

@@ -443,4 +443,9 @@ class USWatchlistRankingRead(BaseModel):
     ranked_count: int
     no_data_count: int
     error_count: int
+    trade_date: date | None = None
+    target_trade_date: date | None = None
+    is_current: bool = True
+    current_symbol_count: int = 0
+    stale_symbol_count: int = 0
     results: list[USWatchlistRankingItemRead]

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
-import tempfile
+import shutil
 import unittest
+import uuid
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import Session
@@ -15,10 +17,22 @@ def sqlite_url(path: Path) -> str:
     return f"sqlite:///{path.as_posix()}"
 
 
+@contextmanager
+def migration_test_directory():
+    root = Path(__file__).resolve().parents[2] / ".tmp" / "test_database_migrations"
+    root.mkdir(parents=True, exist_ok=True)
+    directory = root / uuid.uuid4().hex
+    directory.mkdir()
+    try:
+        yield directory
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
 class DatabaseMigrationTests(unittest.TestCase):
     def test_upgrade_empty_sqlite_database_to_head(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            database_url = sqlite_url(Path(directory) / "empty.db")
+        with migration_test_directory() as directory:
+            database_url = sqlite_url(directory / "empty.db")
 
             run_database_migrations(database_url)
 
@@ -41,11 +55,12 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("us_watchlist_item", table_names)
             self.assertIn("job_run", table_names)
             self.assertIn("broker_branch_trade_daily", table_names)
+            self.assertIn("market_index_daily_stat", table_names)
             self.assertEqual(get_database_revision(database_url), get_head_revision())
 
     def test_upgrade_legacy_create_all_database_preserves_rows(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            database_url = sqlite_url(Path(directory) / "legacy.db")
+        with migration_test_directory() as directory:
+            database_url = sqlite_url(directory / "legacy.db")
             engine = create_engine(database_url)
 
             try:

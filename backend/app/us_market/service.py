@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from collections.abc import Callable
 from copy import deepcopy
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 import time
 
 import requests
@@ -61,6 +61,7 @@ from app.us_market.sources import (
     parse_yahoo_daily_prices,
     parse_yahoo_intraday_prices,
 )
+from app.us_market.trading_calendar import expected_us_daily_price_date
 
 
 class USStockNotFoundError(Exception):
@@ -2346,6 +2347,63 @@ def _compact_us_intraday_points(points: list[dict], max_points: int = 72) -> lis
     return [valid_points[index] for index in sorted(indexes)]
 
 
+def _parse_us_row_trade_date(value) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+
+    if isinstance(value, date):
+        return value
+
+    text = str(value or "").strip()
+
+    if not text:
+        return None
+
+    normalized = text.replace("/", "-")
+
+    if normalized.endswith("Z"):
+        normalized = f"{normalized[:-1]}+00:00"
+
+    try:
+        return datetime.fromisoformat(normalized).date()
+    except ValueError:
+        pass
+
+    try:
+        return date.fromisoformat(normalized[:10])
+    except ValueError:
+        return None
+
+
+def _us_row_trade_date(row: dict) -> date | None:
+    return _parse_us_row_trade_date(row.get("time")) or _parse_us_row_trade_date(
+        row.get("trade_date")
+    )
+
+
+def _us_ranking_freshness(rows: list[dict], requested_symbol_count: int) -> dict:
+    target_trade_date = expected_us_daily_price_date()
+    row_dates = [_us_row_trade_date(row) for row in rows]
+    latest_trade_date = max(
+        (row_date for row_date in row_dates if row_date is not None),
+        default=None,
+    )
+    current_symbol_count = sum(
+        1
+        for row_date in row_dates
+        if row_date is not None and row_date >= target_trade_date
+    )
+    stale_symbol_count = max(requested_symbol_count - current_symbol_count, 0)
+
+    return {
+        "trade_date": latest_trade_date,
+        "target_trade_date": target_trade_date,
+        "is_current": requested_symbol_count == 0 or stale_symbol_count == 0,
+        "current_symbol_count": current_symbol_count,
+        "stale_symbol_count": stale_symbol_count,
+    }
+
+
 def _get_us_intraday_overlay(symbol: str) -> dict | None:
     intraday = get_us_intraday_trend(symbol=symbol)
     points = intraday.get("points") or []
@@ -2529,6 +2587,10 @@ def get_us_watchlist_ranking(
         row["rank"] = index
 
     no_data_count = sum(1 for row in rows if row["status"] == "no_data")
+    freshness = _us_ranking_freshness(
+        rows=rows,
+        requested_symbol_count=len(unique_items),
+    )
 
     return {
         "group_id": group_id,
@@ -2539,6 +2601,7 @@ def get_us_watchlist_ranking(
         "ranked_count": len(rows) - no_data_count,
         "no_data_count": no_data_count,
         "error_count": 0,
+        **freshness,
         "results": rows,
     }
 

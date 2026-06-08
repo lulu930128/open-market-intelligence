@@ -108,6 +108,11 @@ export type RankingResponse = {
   ranked_count: number;
   no_data_count: number;
   error_count: number;
+  trade_date: string | null;
+  target_trade_date: string | null;
+  is_current: boolean;
+  current_stock_count: number;
+  stale_stock_count: number;
   results: RankingItem[];
 };
 
@@ -666,6 +671,11 @@ export type USWatchlistRankingRead = {
   ranked_count: number;
   no_data_count: number;
   error_count: number;
+  trade_date: string | null;
+  target_trade_date: string | null;
+  is_current: boolean;
+  current_symbol_count: number;
+  stale_symbol_count: number;
   results: USWatchlistRankingItemRead[];
 };
 

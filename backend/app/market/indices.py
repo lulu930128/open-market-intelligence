@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections import defaultdict
+from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, time, timedelta, timezone
 from time import monotonic
 from urllib.parse import quote
@@ -8,7 +11,7 @@ import requests
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.db.models import MarketDailyPrice, SourceRegistry
+from app.db.models import MarketDailyPrice, MarketIndexDailyStat, SourceRegistry
 from app.sources.defaults import (
     TPEX_DAILY_QUOTES_SOURCE_NAME,
     TWSE_DAILY_TRADING_SOURCE_NAME,
@@ -19,12 +22,14 @@ YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 TWSE_INDEX_LIST_URL = "https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX"
 TWSE_DAILY_QUOTES_URL = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
 TWSE_MARKET_DAILY_URL = "https://openapi.twse.com.tw/v1/exchangeReport/FMTQIK"
+TWSE_MARKET_DAILY_HISTORY_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK"
 TWSE_COMPANY_BASIC_URL = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
 TPEX_DAILY_INDEX_URL = "https://www.tpex.org.tw/openapi/v1/tpex_daily_trading_index"
 TPEX_DAILY_QUOTES_URL = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes"
 TAIPEI_TZ = timezone(timedelta(hours=8))
 CACHE_TTL_SECONDS = 45
 INDEX_LIST_CACHE_TTL_SECONDS = 300
+MAX_INDEX_STAT_FETCH_WORKERS = 4
 
 INDEX_CONFIGS = (
     {
@@ -362,28 +367,436 @@ def _resolve_market_breadth(db: Session, market: str) -> dict | None:
 
 
 def _fetch_recent_index_trade_values(market: str) -> dict[date, int]:
+    index_id = "TPEX" if market == "TPEX" else "TAIEX"
+    return {
+        item["trade_date"]: item["trade_value"]
+        for item in _fetch_recent_market_index_daily_stats(index_id=index_id, market=market)
+        if item.get("trade_value") is not None
+    }
+
+
+def _twse_market_daily_history_url(month_start: date) -> str:
+    return f"{TWSE_MARKET_DAILY_HISTORY_URL}?date={month_start:%Y%m%d}&response=json"
+
+
+def _row_value(row, keys: Iterable[str], positions: Iterable[int]):
+    if isinstance(row, dict):
+        for key in keys:
+            value = row.get(key)
+            if value not in (None, ""):
+                return value
+        return None
+
+    if isinstance(row, (list, tuple)):
+        for position in positions:
+            if position < len(row):
+                value = row[position]
+                if value not in (None, ""):
+                    return value
+
+    return None
+
+
+def _market_index_stat_item(
+    *,
+    trade_date: date | None,
+    trade_volume: int | None,
+    trade_value: int | None,
+    transaction_count: int | None,
+    close_value: float | None,
+    price_change: float | None,
+) -> dict | None:
+    if trade_date is None:
+        return None
+
+    if trade_volume is None and trade_value is None and close_value is None:
+        return None
+
+    return {
+        "trade_date": trade_date,
+        "trade_volume": trade_volume,
+        "trade_value": trade_value,
+        "transaction_count": transaction_count,
+        "close_value": close_value,
+        "price_change": price_change,
+    }
+
+
+def _parse_twse_market_daily_history_rows(payload) -> list[dict]:
+    rows = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(rows, list):
+        return []
+
+    results: list[dict] = []
+
+    for row in rows:
+        item = _market_index_stat_item(
+            trade_date=_parse_trade_date(
+                _row_value(row, keys=("Date", "date", "日期"), positions=(0,))
+            ),
+            trade_volume=_as_int(
+                _row_value(row, keys=("TradeVolume", "trade_volume", "成交股數"), positions=(1,))
+            ),
+            trade_value=_as_int(
+                _row_value(row, keys=("TradeValue", "trade_value", "成交金額"), positions=(2,))
+            ),
+            transaction_count=_as_int(
+                _row_value(row, keys=("Transaction", "transaction_count", "成交筆數"), positions=(3,))
+            ),
+            close_value=_as_float(
+                _row_value(row, keys=("TAIEX", "close_value", "發行量加權股價指數"), positions=(4,))
+            ),
+            price_change=_as_float(
+                _row_value(row, keys=("Change", "price_change", "漲跌點數"), positions=(5,))
+            ),
+        )
+        if item is not None:
+            results.append(item)
+
+    return results
+
+
+def _parse_tpex_market_daily_rows(payload) -> list[dict]:
+    rows = payload if isinstance(payload, list) else []
+    results: list[dict] = []
+
+    for row in rows:
+        item = _market_index_stat_item(
+            trade_date=_parse_trade_date(_row_value(row, keys=("Date", "date"), positions=(0,))),
+            trade_volume=_as_int(
+                _row_value(
+                    row,
+                    keys=("TradeVolume", "Volume", "TransactionVolume"),
+                    positions=(1,),
+                )
+            ),
+            trade_value=_as_int(
+                _row_value(row, keys=("TradeAmount", "TradeValue", "TransactionAmount"), positions=(2,))
+            ),
+            transaction_count=_as_int(
+                _row_value(row, keys=("Transaction", "TransactionCount"), positions=(3,))
+            ),
+            close_value=_as_float(_row_value(row, keys=("Index", "Close", "TPEX"), positions=(4,))),
+            price_change=_as_float(_row_value(row, keys=("Change",), positions=(5,))),
+        )
+        if item is not None:
+            results.append(item)
+
+    return results
+
+
+def _fetch_twse_market_daily_stats_for_month(month_start: date) -> tuple[list[dict], str]:
+    url = _twse_market_daily_history_url(month_start)
+    payload = _fetch_json(url)
+    return _parse_twse_market_daily_history_rows(payload), url
+
+
+def _fetch_recent_market_index_daily_stats(index_id: str, market: str) -> list[dict]:
     if market == "TPEX":
         payload = _fetch_json(TPEX_DAILY_INDEX_URL)
-        rows = payload if isinstance(payload, list) else []
-        return {
-            trade_date: trade_value
-            for row in rows
-            if isinstance(row, dict)
-            for trade_date in [_parse_trade_date(row.get("Date"))]
-            for trade_value in [_as_int(row.get("TradeAmount"))]
-            if trade_date is not None and trade_value is not None
-        }
+        return _parse_tpex_market_daily_rows(payload)
 
     payload = _fetch_json(TWSE_MARKET_DAILY_URL)
-    rows = payload if isinstance(payload, list) else []
+    return _parse_twse_market_daily_history_rows(payload)
+
+
+def _month_start(value: date) -> date:
+    return date(value.year, value.month, 1)
+
+
+def _month_starts_between(from_date: date, to_date: date) -> list[date]:
+    current = _month_start(from_date)
+    end_month = _month_start(to_date)
+    months: list[date] = []
+
+    while current <= end_month:
+        months.append(current)
+        if current.month == 12:
+            current = date(current.year + 1, 1, 1)
+        else:
+            current = date(current.year, current.month + 1, 1)
+
+    return months
+
+
+def _persist_market_index_daily_stats(
+    db: Session,
+    *,
+    index_id: str,
+    market: str,
+    rows: list[dict],
+    source: str,
+    source_url: str | None,
+) -> dict:
+    inserted_count = 0
+    updated_count = 0
+
+    for row in rows:
+        trade_date = row.get("trade_date")
+        if not isinstance(trade_date, date):
+            continue
+
+        values = {
+            "market": market,
+            "trade_volume": row.get("trade_volume"),
+            "trade_value": row.get("trade_value"),
+            "transaction_count": row.get("transaction_count"),
+            "close_value": row.get("close_value"),
+            "price_change": row.get("price_change"),
+            "source": source,
+            "source_url": source_url,
+        }
+        existing = (
+            db.query(MarketIndexDailyStat)
+            .filter(MarketIndexDailyStat.index_id == index_id)
+            .filter(MarketIndexDailyStat.trade_date == trade_date)
+            .first()
+        )
+
+        if existing is None:
+            db.add(
+                MarketIndexDailyStat(
+                    index_id=index_id,
+                    trade_date=trade_date,
+                    **values,
+                )
+            )
+            inserted_count += 1
+            continue
+
+        changed = False
+        for key, value in values.items():
+            if getattr(existing, key) != value:
+                setattr(existing, key, value)
+                changed = True
+
+        if changed:
+            updated_count += 1
+
+    db.commit()
+
     return {
-        trade_date: trade_value
-        for row in rows
-        if isinstance(row, dict)
-        for trade_date in [_parse_trade_date(row.get("Date"))]
-        for trade_value in [_as_int(row.get("TradeValue"))]
-        if trade_date is not None and trade_value is not None
+        "inserted_count": inserted_count,
+        "updated_count": updated_count,
     }
+
+
+def _existing_index_stat_months(
+    db: Session,
+    *,
+    index_id: str,
+    from_date: date,
+    to_date: date,
+) -> set[date]:
+    rows = (
+        db.query(MarketIndexDailyStat.trade_date)
+        .filter(MarketIndexDailyStat.index_id == index_id)
+        .filter(MarketIndexDailyStat.trade_date >= from_date)
+        .filter(MarketIndexDailyStat.trade_date <= to_date)
+        .all()
+    )
+    return {_month_start(row.trade_date) for row in rows}
+
+
+def _ensure_market_index_daily_stat_coverage(
+    db: Session,
+    *,
+    index_id: str,
+    market: str,
+    from_date: date,
+    to_date: date,
+) -> dict | None:
+    months = _month_starts_between(from_date=from_date, to_date=to_date)
+    existing_months = _existing_index_stat_months(
+        db=db,
+        index_id=index_id,
+        from_date=from_date,
+        to_date=to_date,
+    )
+    missing_months = [month for month in months if month not in existing_months]
+    result = {
+        "status": "success",
+        "index_id": index_id,
+        "market": market,
+        "source": None,
+        "requested_month_count": len(months),
+        "fetched_month_count": 0,
+        "skipped_existing_month_count": len(months) - len(missing_months),
+        "inserted_count": 0,
+        "updated_count": 0,
+        "errors": [],
+    }
+
+    if index_id == "TAIEX" and missing_months:
+        result["source"] = "twse_rwd_fmtqik"
+        with ThreadPoolExecutor(max_workers=MAX_INDEX_STAT_FETCH_WORKERS) as executor:
+            futures = {
+                executor.submit(_fetch_twse_market_daily_stats_for_month, month): month
+                for month in missing_months
+            }
+
+            for future in as_completed(futures):
+                month = futures[future]
+                try:
+                    rows, source_url = future.result()
+                    counts = _persist_market_index_daily_stats(
+                        db=db,
+                        index_id=index_id,
+                        market=market,
+                        rows=rows,
+                        source="twse_rwd_fmtqik",
+                        source_url=source_url,
+                    )
+                    result["fetched_month_count"] += 1
+                    result["inserted_count"] += counts["inserted_count"]
+                    result["updated_count"] += counts["updated_count"]
+                except Exception as exc:
+                    db.rollback()
+                    result["errors"].append(
+                        {
+                            "month": month.strftime("%Y-%m"),
+                            "error_message": str(exc),
+                        }
+                    )
+
+    try:
+        recent_rows = _fetch_recent_market_index_daily_stats(index_id=index_id, market=market)
+        if recent_rows:
+            recent_source = (
+                "tpex_openapi_daily_trading_index"
+                if market == "TPEX"
+                else "twse_openapi_fmtqik"
+            )
+            counts = _persist_market_index_daily_stats(
+                db=db,
+                index_id=index_id,
+                market=market,
+                rows=recent_rows,
+                source=recent_source,
+                source_url=TPEX_DAILY_INDEX_URL if market == "TPEX" else TWSE_MARKET_DAILY_URL,
+            )
+            result["source"] = result["source"] or recent_source
+            result["inserted_count"] += counts["inserted_count"]
+            result["updated_count"] += counts["updated_count"]
+    except Exception as exc:
+        db.rollback()
+        result["errors"].append(
+            {
+                "source": "recent_market_index_daily_stats",
+                "error_message": str(exc),
+            }
+        )
+
+    if result["errors"]:
+        result["status"] = "partial_success" if result["fetched_month_count"] else "error"
+
+    if (
+        result["fetched_month_count"] == 0
+        and result["inserted_count"] == 0
+        and result["updated_count"] == 0
+        and not result["errors"]
+    ):
+        return None
+
+    result["message"] = (
+        f"Index daily stats refreshed: fetched {result['fetched_month_count']} month(s), "
+        f"inserted {result['inserted_count']}, updated {result['updated_count']}."
+    )
+    return result
+
+
+def _index_stat_period_key(value: date, timeframe: str) -> date:
+    if timeframe == "weekly":
+        return value - timedelta(days=value.weekday())
+
+    if timeframe == "monthly":
+        return _month_start(value)
+
+    return value
+
+
+def _index_stat_query_range(timeframe: str, from_date: date, to_date: date) -> tuple[date, date]:
+    if timeframe == "weekly":
+        return (
+            _index_stat_period_key(from_date, timeframe),
+            _index_stat_period_key(to_date, timeframe) + timedelta(days=6),
+        )
+
+    if timeframe == "monthly":
+        start = _month_start(from_date)
+        end_month = _month_start(to_date)
+        if end_month.month == 12:
+            next_month = date(end_month.year + 1, 1, 1)
+        else:
+            next_month = date(end_month.year, end_month.month + 1, 1)
+        return start, next_month - timedelta(days=1)
+
+    return from_date, to_date
+
+
+def _add_nullable_sum(current: int | None, value: int | None) -> int | None:
+    if value is None:
+        return current
+
+    return value if current is None else current + value
+
+
+def _load_market_index_stat_values(
+    db: Session,
+    *,
+    index_id: str,
+    timeframe: str,
+    from_date: date,
+    to_date: date,
+) -> dict[date, dict]:
+    rows = (
+        db.query(MarketIndexDailyStat)
+        .filter(MarketIndexDailyStat.index_id == index_id)
+        .filter(MarketIndexDailyStat.trade_date >= from_date)
+        .filter(MarketIndexDailyStat.trade_date <= to_date)
+        .order_by(MarketIndexDailyStat.trade_date.asc())
+        .all()
+    )
+    values_by_period: defaultdict[date, dict] = defaultdict(
+        lambda: {
+            "trade_volume": None,
+            "trade_value": None,
+            "transaction_count": None,
+        }
+    )
+
+    for row in rows:
+        key = _index_stat_period_key(row.trade_date, timeframe)
+        values = values_by_period[key]
+        values["trade_volume"] = _add_nullable_sum(values["trade_volume"], row.trade_volume)
+        values["trade_value"] = _add_nullable_sum(values["trade_value"], row.trade_value)
+        values["transaction_count"] = _add_nullable_sum(
+            values["transaction_count"],
+            row.transaction_count,
+        )
+
+    return dict(values_by_period)
+
+
+def _apply_market_index_stat_values(
+    points: list[dict],
+    *,
+    timeframe: str,
+    values_by_period: dict[date, dict],
+) -> None:
+    for point in points:
+        point_time = point.get("time")
+        if not isinstance(point_time, date):
+            continue
+
+        values = values_by_period.get(_index_stat_period_key(point_time, timeframe))
+        if values is None:
+            continue
+
+        if values.get("trade_volume") is not None:
+            point["volume"] = values["trade_volume"]
+        point["trade_value"] = values.get("trade_value")
+        point["transaction_count"] = values.get("transaction_count")
 
 
 def _index_range_for(timeframe: str, bars: int) -> str:
@@ -1166,6 +1579,7 @@ def get_market_index_ohlc_chart_data(
     index_id: str,
     timeframe: str = "daily",
     bars: int = 90,
+    db: Session | None = None,
 ) -> dict:
     normalized_index_id = index_id.upper()
     config = INDEX_CONFIG_BY_ID.get(normalized_index_id)
@@ -1193,17 +1607,54 @@ def get_market_index_ohlc_chart_data(
         )
 
     selected_points = [dict(point) for point in points[-bars:]]
-    try:
-        trade_values_by_date = _fetch_recent_index_trade_values(str(config["market"]))
-
-        for point in selected_points:
-            point["trade_value"] = trade_values_by_date.get(point["time"])
-    except Exception:
-        pass
-
     fallback_date = date.today()
     from_date = selected_points[0]["time"] if selected_points else fallback_date
     to_date = selected_points[-1]["time"] if selected_points else fallback_date
+    stat_from_date, stat_to_date = _index_stat_query_range(
+        timeframe=timeframe,
+        from_date=from_date,
+        to_date=to_date,
+    )
+    backfill_result = None
+
+    if db is not None and selected_points:
+        try:
+            backfill_result = _ensure_market_index_daily_stat_coverage(
+                db=db,
+                index_id=normalized_index_id,
+                market=str(config["market"]),
+                from_date=stat_from_date,
+                to_date=stat_to_date,
+            )
+        except Exception as exc:
+            db.rollback()
+            backfill_result = {
+                "status": "error",
+                "index_id": normalized_index_id,
+                "market": str(config["market"]),
+                "message": f"Index daily stat refresh failed: {exc}",
+            }
+
+        values_by_period = _load_market_index_stat_values(
+            db=db,
+            index_id=normalized_index_id,
+            timeframe=timeframe,
+            from_date=stat_from_date,
+            to_date=stat_to_date,
+        )
+        _apply_market_index_stat_values(
+            selected_points,
+            timeframe=timeframe,
+            values_by_period=values_by_period,
+        )
+    else:
+        try:
+            trade_values_by_date = _fetch_recent_index_trade_values(str(config["market"]))
+
+            for point in selected_points:
+                point["trade_value"] = trade_values_by_date.get(point["time"])
+        except Exception:
+            pass
 
     return {
         "stock_id": normalized_index_id,
@@ -1214,7 +1665,7 @@ def get_market_index_ohlc_chart_data(
         "to_date": to_date,
         "point_count": len(selected_points),
         "points": selected_points,
-        "backfill": None,
+        "backfill": backfill_result,
     }
 
 

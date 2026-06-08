@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 import unittest
 from unittest.mock import patch
 
@@ -62,6 +62,7 @@ from app.us_market.sources import (
     parse_yahoo_daily_prices,
     parse_yahoo_intraday_prices,
 )
+from app.us_market.trading_calendar import expected_us_daily_price_date
 
 
 NASDAQ_LISTED_SAMPLE = """Symbol|Security Name|Market Category|Test Issue|Financial Status|Round Lot Size|ETF|NextShares
@@ -748,6 +749,89 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self.assertEqual(ranking["results"][1]["symbol"], "IBM")
         self.assertEqual(self.db.query(MarketDailyPrice).count(), 0)
 
+    def test_us_watchlist_ranking_marks_old_rows_stale_after_daily_release(self) -> None:
+        symbol_records = parse_symbol_directories(
+            nasdaq_listed_text=NASDAQ_LISTED_SAMPLE,
+            other_listed_text=OTHER_LISTED_SAMPLE,
+            sec_company_payload=SEC_TICKERS_SAMPLE,
+        )
+        upsert_us_symbol_records(self.db, symbol_records)
+        group = create_us_watchlist_group(
+            self.db,
+            USWatchlistGroupCreate(group_name="Mega Cap"),
+        )
+        create_us_watchlist_item(
+            self.db,
+            USWatchlistItemCreate(group_id=group.id, symbol="AAPL"),
+        )
+        self.db.add(
+            USDailyPrice(
+                provider="yahoo_chart",
+                symbol="AAPL",
+                trade_date=date(2026, 6, 5),
+                close_price=100.0,
+                trade_volume=1000,
+                raw_payload_hash="aapl-1",
+            )
+        )
+        self.db.commit()
+
+        with patch(
+            "app.us_market.service.expected_us_daily_price_date",
+            return_value=date(2026, 6, 8),
+        ):
+            ranking = get_us_watchlist_ranking(
+                self.db,
+                group_id=group.id,
+            )
+
+        self.assertFalse(ranking["is_current"])
+        self.assertEqual(ranking["target_trade_date"], date(2026, 6, 8))
+        self.assertEqual(ranking["trade_date"], date(2026, 6, 5))
+        self.assertEqual(ranking["current_symbol_count"], 0)
+        self.assertEqual(ranking["stale_symbol_count"], 1)
+
+    def test_us_watchlist_ranking_accepts_previous_session_before_daily_release(self) -> None:
+        symbol_records = parse_symbol_directories(
+            nasdaq_listed_text=NASDAQ_LISTED_SAMPLE,
+            other_listed_text=OTHER_LISTED_SAMPLE,
+            sec_company_payload=SEC_TICKERS_SAMPLE,
+        )
+        upsert_us_symbol_records(self.db, symbol_records)
+        group = create_us_watchlist_group(
+            self.db,
+            USWatchlistGroupCreate(group_name="Mega Cap"),
+        )
+        create_us_watchlist_item(
+            self.db,
+            USWatchlistItemCreate(group_id=group.id, symbol="AAPL"),
+        )
+        self.db.add(
+            USDailyPrice(
+                provider="yahoo_chart",
+                symbol="AAPL",
+                trade_date=date(2026, 6, 5),
+                close_price=100.0,
+                trade_volume=1000,
+                raw_payload_hash="aapl-1",
+            )
+        )
+        self.db.commit()
+
+        with patch(
+            "app.us_market.service.expected_us_daily_price_date",
+            return_value=date(2026, 6, 5),
+        ):
+            ranking = get_us_watchlist_ranking(
+                self.db,
+                group_id=group.id,
+            )
+
+        self.assertTrue(ranking["is_current"])
+        self.assertEqual(ranking["target_trade_date"], date(2026, 6, 5))
+        self.assertEqual(ranking["current_symbol_count"], 1)
+        self.assertEqual(ranking["stale_symbol_count"], 0)
+
     def test_us_watchlist_ranking_limits_intraday_overlay_attempts(self) -> None:
         symbol_records = parse_symbol_directories(
             nasdaq_listed_text=NASDAQ_LISTED_SAMPLE,
@@ -815,6 +899,26 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self.assertEqual(ranking["results"][1]["symbol"], "IBM")
         self.assertEqual(ranking["results"][1]["status"], "ready")
         self.assertEqual(ranking["results"][1]["close"], 190.0)
+
+    def test_expected_us_daily_price_date_uses_new_york_release_time(self) -> None:
+        self.assertEqual(
+            expected_us_daily_price_date(
+                now=datetime(2026, 6, 8, 19, 59, tzinfo=timezone.utc),
+            ),
+            date(2026, 6, 5),
+        )
+        self.assertEqual(
+            expected_us_daily_price_date(
+                now=datetime(2026, 6, 8, 20, 1, tzinfo=timezone.utc),
+            ),
+            date(2026, 6, 8),
+        )
+        self.assertEqual(
+            expected_us_daily_price_date(
+                now=datetime(2026, 6, 19, 20, 1, tzinfo=timezone.utc),
+            ),
+            date(2026, 6, 18),
+        )
 
     def test_us_watchlist_resource_refresh_continues_after_resource_error(self) -> None:
         symbol_records = parse_symbol_directories(
