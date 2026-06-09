@@ -188,9 +188,21 @@ def save_report(
 
 
 def report_tool_summary(envelope: dict[str, Any]) -> dict[str, Any]:
+    data = envelope.get("data") if isinstance(envelope.get("data"), dict) else {}
+    analysis = data.get("analysis") if isinstance(data, dict) else None
+    analysis_summary = {}
+    if isinstance(analysis, dict) and analysis:
+        analysis_summary = {
+            "selected_horizon": analysis.get("selected_horizon"),
+            "selected_timeframe": analysis.get("selected_timeframe"),
+            "selected_score": analysis.get("selected_score"),
+            "selected_confidence": analysis.get("selected_confidence"),
+        }
+
     return {
         "kind": envelope.get("kind"),
         "as_of": envelope.get("as_of"),
+        "analysis": analysis_summary,
         "missing_count": len(envelope.get("missing") or []),
         "warning_count": len(envelope.get("warnings") or []),
         "source_ref_count": len(envelope.get("source_refs") or []),

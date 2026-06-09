@@ -1,12 +1,24 @@
 # Open Market Intelligence
 
-Open Market Intelligence 是一套本機優先的市場情報與自選股研究工作台。它把台股自選股、日線、週線、月線、盤中分時、技術指標、三大法人、融資融券、集保分布、分點、營收與財務資料整合在同一個介面，方便用一致的資料流做看盤、回補、檢查與後續分析。
+Open Market Intelligence 是一套本機優先的市場情報與自選股研究工作台。它把台股看盤、資料回補、技術分析、籌碼資料、基本面資料、美股領先訊號與 AI/Agent 查詢介面整合在同一個專案中，目標是讓使用者能用一致的資料流觀察市場、檢查缺漏、產生研究摘要，並讓外部桌面助理透過穩定合約讀取 OMI 的本機 evidence。
 
-目前主力流程聚焦在台股 TWSE / TPEx。介面上保留美股、日股、韓股、港股入口，但本 README 以目前實作完整度最高的台股流程為準。
+目前完整度最高的主流程是台股 TWSE / TPEx；美股模組定位為台股研究的外部領先訊號層，已支援核心自選股、指數、日週月 K、盤中資料、SEC facts、profile、corporate actions、short volume 與批次刷新。日股、韓股、港股入口保留為後續擴充。
 
 <p align="center">
   <img src="docs/assets/readme/omi-stock-workbench.png" alt="Open Market Intelligence stock workbench with watchlist, K-line chart, technical indicators and chip-flow panels" width="960">
 </p>
+
+## Highlights
+
+- 台股 Dashboard：市場指數、自選股群組、排行、個股快速切換、背景更新狀態中心。
+- 個股看盤：`今日`、`日K`、`週K`、`月K` 共用版型，支援即時價格、漲跌、成交量與資料新鮮度提示。
+- 今日分時：1m / 5m / 15m 聚合、昨收線、VWAP、TWAP、EMA、RSI、MACD、成交量與 hover 對齊線。
+- K 線圖：日週月 K、MA/EMA/BOLL/VWAP/SAR/Donchian/VOL/RSI/MACD/KD/ATR/ADX/DMI/OBV/MFI/CCI/Williams %R/ROC/StochRSI。
+- 技術總結：依 `today`、`daily`、`weekly`、`monthly` 產生不同時間框架的 technical report，支援短線、中短線、波段與長線觀察。
+- 籌碼與基本面：三大法人、法人持股比例、融資融券、集保分布、分點 Top15、多日分點加總、月營收、季度財務與盈餘。
+- 資料治理：raw fetch result、fetch log、quality check、parser result、background job、partial success 與 retry 狀態。
+- 美股觀測：S&P 500、NASDAQ、Dow、費城半導體等指數脈絡，以及科技股 / ETF 自選 universe 的價量與基本資料。
+- AI/Agent 入口：`POST /api/ai/ask` 與 MCP `omi.ask`，讓 Kuro 或其他桌面助理用單一合約讀取本機 evidence、刷新缺漏資料、取得 brief 或 trusted analysis。
 
 ## Current Stack
 
@@ -16,51 +28,8 @@ Open Market Intelligence 是一套本機優先的市場情報與自選股研究�
 | Frontend | Next.js 16, React 19, TypeScript, Tailwind CSS | `http://127.0.0.1:3000` |
 | API Proxy | Next.js rewrites | `/omi-data -> /api` |
 | Database | SQLite | `data/open_market_intelligence.db` |
-| Timezone | Asia/Taipei | configured by `.env` |
-
-## What It Does
-
-- 自選股管理：支援市場分頁、樹狀群組、子群組、拖曳排序、股票加入、備註與標籤。
-- 台股 Dashboard：支援股票數、漲跌家數、排序、排行與個股快速切換。
-- 個股看盤：支援 `今日`、`日K`、`週K`、`月K`。
-- 今日分時：支援 1m / 5m / 15m 聚合、盤中成交量、最高最低標記、昨收線、漲跌停參考、VWAP、TWAP、EMA5/20、RSI14、MACD 12/26/9。
-- K 線圖：支援放大、縮小、回滾歷史資料、固定視窗檢視與滑桿調整顯示區間。
-- K 線技術指標：支援 SIGNAL、MA、EMA、BOLL、VWAP、SAR、Donchian、VOL、RSI、MACD、KD、ATR、ADX / DMI、OBV、MFI、CCI、Williams %R、ROC、StochRSI。
-- 指標控制：今日分時與日週月 K 線都在右上角使用同一個 `指標` 按鈕開關顯示項目；日週月 K 線另支援指標模板與參數調整。
-- 籌碼與基本面：支援三大法人、法人持股比例、融資融券、集保分布、分點 Top15、多日分點加總、月營收、季度財務與盈餘。
-- 資料回補：支援 TWSE / TPEx 日線、法人、融資融券、集保、營收、財務與自選股群組回補。
-- 資料治理：保存 raw result、fetch log、quality check、parser result 與 background job 狀態。
-- 更新狀態中心：左側統一呈現 background job 進度、partial success、失敗項目與 retry，個股資料面板不重複顯示原始補資料訊息。
-- 外部 Agent 介面：提供 `POST /api/ai/ask` 與 MCP `omi.ask`，讓 Kuro 或其他桌面助理以單一入口讀取本機 evidence pack、brief、freshness 與 warning。
-
-## US Market Coverage
-
-美股模組的定位不是複製台股研究流程，而是提供台股研究的外部領先訊號層。它目前聚焦在科技股、半導體、雲端平台、資料中心、資安、企業軟體、金融科技與科技 ETF，方便把美股同業與產業 ETF 變化對照回台股供應鏈。
-
-目前已支援：
-
-- 美股主檔：NASDAQ Trader symbol directories，並可合併 SEC company ticker / CIK 資料。
-- 美股自選樹：`科技股` root 下可建立多層分類與個股 / ETF 葉節點。
-- 價量資料：Yahoo chart 與 Alpha Vantage daily price refresh，支援 daily / weekly / monthly OHLC 聚合。
-- 盤中資料：Yahoo chart 1m intraday trend，前端依 America/New_York regular session 判斷輪詢。
-- SEC facts：SEC EDGAR companyfacts，整理成 fundamentals summary，例如 revenue、gross profit、net income、EPS、assets、liabilities、cash、debt、cash flow 與 shares outstanding。
-- Company profile / corporate actions：Alpha Vantage overview、dividend、split endpoint 的資料表與 refresh API。
-- Short volume：FINRA daily short sale volume。這是 daily short sale volume，不是 short interest 部位資料。
-- Macro：FRED series observations 的資料表與 refresh API。
-- Background jobs：可針對美股自選群組批次刷新 daily price、SEC facts、profile 與 corporate actions，並支援排程與 retry。
-
-目前限制：
-
-- 美股資料覆蓋以自選 universe 為主，不應先把 12,000+ 檔主檔全量回補。
-- Alpha Vantage / FRED 需要 API key；SEC EDGAR 需要描述清楚的 `US_SEC_USER_AGENT`，並需遵守 fair access / rate limit。
-- AI evidence pack 仍以台股研究為核心，但 `omi.ask` 已支援 `target.type=us_stock` 單股 / ADR 查詢；美股資料可先作為領先訊號與同業對照，US-TW 對應關係再逐步深化。
-
-建議的美股工作流：
-
-1. 先維護 `科技股` root 下的核心分類與個股 / ETF。
-2. 對自選 universe 跑 daily price / SEC facts / profile / corporate actions 回補；前端美股排行區的 `Backfill Data` 會排入 watchlist resource refresh job。
-3. 用 `QQQ`、`SMH`、`SOXX`、AI megacap、半導體設備、記憶體與資料中心股當作台股族群領先訊號。
-4. 再把 US-TW 對應關係接進 AI brief，讓報告能回答「美股某族群變化會影響哪些台股」。
+| Timezone | Asia/Taipei | `.env` |
+| Agent Adapter | stdio MCP server | `agents/omi_mcp_server/server.py` |
 
 ## Visual Tour
 
@@ -76,296 +45,275 @@ Open Market Intelligence 是一套本機優先的市場情報與自選股研究�
 | --- | --- |
 | <img src="docs/assets/readme/omi-earnings.png" alt="Quarterly earnings chart and financial metric table" width="420"> | <img src="docs/assets/readme/omi-monthly-trend.png" alt="Monthly K-line chart with long-term technical indicators and chip-flow panel" width="480"> |
 
+## Repository Layout
+
+```text
+.
+  agents/
+    omi_mcp_server/       stdio MCP adapter; forwards to backend /api/ai.
+  backend/
+    app/
+      ai/                 OMI ask, evidence packs, report orchestration, local AI memory.
+      db/                 SQLAlchemy models, sessions, database initialization.
+      jobs/               Background jobs, scheduler, retry and status tracking.
+      market/             Taiwan market data, intraday, indicators, technical reports.
+      parsers/            TWSE, TPEx, MOPS, TDCC and related parsers.
+      pipelines/          Raw-result parse pipeline and quality flow.
+      quality/            Raw payload quality checks.
+      routers/            FastAPI routers.
+      sources/            Source registry seed definitions.
+      stocks/             Stock master/profile lookup and sync.
+      us_market/          US market sources, watchlists, OHLC, SEC facts and profile data.
+      watchlists/         Watchlist tree, ranking, group backfill.
+  frontend/
+    src/
+      app/                Next.js App Router entry.
+      components/         Dashboard, sidebar, stock detail, charts and loading UI.
+      lib/                API client, Taiwan/US market time helpers and job helpers.
+      types/              Shared frontend API types.
+  docs/assets/readme/     README screenshots.
+  data/                   Local SQLite database and generated data; ignored by git.
+  reports/                Local report outputs.
+  scripts/                Local maintenance helpers.
+```
+
 ## System Flow
 
 ```mermaid
 flowchart LR
-    user["使用者"] --> browser["Browser<br/>localhost:3000"]
-    browser --> next["Next.js App Router<br/>Dashboard UI"]
-    next --> proxy["Next.js Rewrite<br/>/omi-data"]
+    user["User"] --> browser["Browser<br/>localhost:3000"]
+    browser --> next["Next.js dashboard"]
+    next --> proxy["/omi-data proxy"]
     proxy --> api["FastAPI<br/>localhost:8300/api"]
 
-    api --> routers["Routers<br/>market / watchlists / stocks / jobs"]
-    routers --> services["Domain Services"]
+    api --> services["Domain services"]
     services --> db[("SQLite<br/>open_market_intelligence.db")]
-    services --> jobs["Job Service<br/>backfill / refresh"]
-    jobs --> pipelines["Fetch + Parse Pipelines"]
+    services --> jobs["Background jobs"]
+    jobs --> fetch["Fetch + parse pipelines"]
 
-    pipelines --> sources["source_registry"]
-    sources --> twse["TWSE"]
-    sources --> tpex["TPEx"]
-    sources --> mops["MOPS / MOPSOV"]
-    sources --> nstock["nStock"]
-    sources --> tdcc["TDCC"]
+    fetch --> registry["source_registry"]
+    registry --> twse["TWSE"]
+    registry --> tpex["TPEx"]
+    registry --> mops["MOPS / MOPSOV"]
+    registry --> tdcc["TDCC"]
+    registry --> nstock["nStock"]
+    registry --> yahoo["Yahoo chart"]
+    registry --> sec["SEC EDGAR"]
+    registry --> av["Alpha Vantage"]
 
-    twse --> raw["raw_fetch_result"]
-    tpex --> raw
-    mops --> raw
-    nstock --> raw
-    tdcc --> raw
-
+    fetch --> raw["raw_fetch_result"]
     raw --> quality["data_quality_check"]
-    quality --> parsers["Parsers"]
-    parsers --> tables["Market Tables"]
+    quality --> tables["Market tables"]
     tables --> db
-    db --> services
 ```
 
-## Frontend User Flow
+## Taiwan Market Workflow
 
 ```mermaid
 flowchart TD
-    open["Open Dashboard"] --> market["選擇市場分頁<br/>目前主力：台股"]
-    market --> group["選擇自選股群組"]
-    group --> ranking["讀取群組排名<br/>正常 / 漲幅 / Score / 成交量"]
-    ranking --> stock["選擇個股"]
-    stock --> timeframe{"時間框架"}
+    open["Open Dashboard"] --> group["Select watchlist group"]
+    group --> ranking["Watchlist ranking<br/>normal / change / score / volume"]
+    ranking --> stock["Select stock"]
+    stock --> timeframe{"Timeframe"}
 
-    timeframe --> today["今日"]
-    timeframe --> daily["日K"]
-    timeframe --> weekly["週K"]
-    timeframe --> monthly["月K"]
+    timeframe --> today["Today"]
+    timeframe --> daily["Daily K"]
+    timeframe --> weekly["Weekly K"]
+    timeframe --> monthly["Monthly K"]
 
     today --> intraday["IntradayTrendChart<br/>1m / 5m / 15m"]
-    intraday --> intradayIndicators["指標開關<br/>VOL / VWAP / TWAP / EMA / RSI / MACD"]
+    intraday --> liveIndicators["VOL / VWAP / TWAP / EMA / RSI / MACD"]
 
     daily --> kline["StockKLineChart"]
     weekly --> kline
     monthly --> kline
-    kline --> zoom["放大 / 縮小 / 回滾 / 滑桿"]
-    kline --> kIndicators["指標模板與參數<br/>MA / EMA / BOLL / RSI / MACD / ..."]
+    kline --> indicatorMenu["Indicator menu<br/>template + parameters"]
 
-    stock --> panels{"資料分頁"}
-    panels --> chips["籌碼<br/>集保 / 融資融券"]
-    panels --> inst["法人<br/>三大法人 / 持股比例"]
-    panels --> branch["分點<br/>1 / 3 / 5 / 10 / 20 / 60 / 120 日"]
-    panels --> revenue["營收"]
-    panels --> earnings["盈餘 / 財務"]
+    stock --> panels{"Data panels"}
+    panels --> chips["Chips<br/>shareholding / margin"]
+    panels --> inst["Institutions<br/>net buy/sell / holding ratio"]
+    panels --> branch["Broker branch<br/>1 / 3 / 5 / 10 / 20 / 60 / 120 days"]
+    panels --> revenue["Revenue"]
+    panels --> earnings["Earnings / financials"]
 ```
 
-## Backend Data Flow
+## US Market Workflow
+
+美股模組不是台股流程的替代品，而是台股研究的外部訊號層。建議先維護核心科技股 / ETF universe，再用美股指數、半導體、雲端、資料中心、AI megacap、記憶體與設備股作為台股供應鏈的領先訊號。
+
+Currently supported:
+
+- US index cards: S&P 500, NASDAQ Composite, Dow Jones Industrial Average, Philadelphia Semiconductor Index and related sector context.
+- US watchlist tree: multi-level categories and stock / ETF leaves.
+- OHLC: Yahoo chart and Alpha Vantage daily refresh, with daily / weekly / monthly aggregation.
+- Intraday: Yahoo chart 1m data with America/New_York regular-session polling.
+- SEC facts: revenue, gross profit, net income, EPS, assets, liabilities, cash, debt, cash flow and shares outstanding.
+- Company profile / corporate actions: Alpha Vantage overview, dividend and split data.
+- Short volume: FINRA daily short sale volume, not short interest position data.
+- Macro: FRED series observations.
+- Batch refresh: watchlist resource refresh jobs for daily price, SEC facts, profile and corporate actions.
+
+Important limits:
+
+- US coverage is universe-first. Do not full-backfill every NASDAQ symbol by default.
+- Alpha Vantage and FRED require API keys.
+- SEC EDGAR calls should use a descriptive `US_SEC_USER_AGENT`.
+- US LLM analysis/report persistence is still narrower than Taiwan stock analysis; use US data primarily as leading evidence and peer context.
+
+## AI And Agent Flow
+
+AI is treated as an evidence consumer, not the database owner. OMI reads local data through backend services, builds bounded evidence packs, checks freshness and warnings, and only calls OpenAI when a trusted request explicitly allows LLM use. External assistants should use `omi.ask` instead of direct internal routes.
 
 ```mermaid
 flowchart TD
-    seed["python -m app.scripts.seed_sources"] --> registry["source_registry"]
-    registry --> request["API / Job / Backfill request"]
-    request --> fetch["Fetch Service"]
-    fetch --> connector["HTTP connector / source-specific client"]
-    connector --> raw["raw_fetch_result"]
-    connector --> fetchLog["fetch_log"]
-    raw --> quality["data_quality_check"]
-    quality --> parser{"parser_type"}
-
-    parser --> daily["market_daily_price<br/>OHLCV"]
-    parser --> inst["institutional_trade_daily"]
-    parser --> margin["margin_trading_daily"]
-    parser --> share["shareholding_distribution_weekly"]
-    parser --> revenue["monthly_revenue"]
-    parser --> financials["financial_metric_quarterly"]
-    parser --> branch["broker_branch_trade_daily"]
-    parser --> stocks["stock_master / stock_profile"]
-
-    daily --> indicators["indicator service"]
-    branch --> branchSummary["branch summary / multi-day aggregate"]
-    indicators --> api["API response"]
-    branchSummary --> api
-    inst --> api
-    margin --> api
-    share --> api
-    revenue --> api
-    financials --> api
+    caller["Kuro / MCP client / local tool"] --> ask["POST /api/ai/ask<br/>or MCP omi.ask"]
+    ask --> resolve["Resolve target<br/>stock / watchlist / US stock / market / freshness"]
+    resolve --> policy["Trust + mode policy"]
+    policy --> freshness["Freshness check"]
+    freshness --> maybeRefresh{"Trusted stale-first<br/>refresh allowed?"}
+    maybeRefresh --> yes["Run allowlisted refresh/read tools"]
+    maybeRefresh --> no["Use local cached evidence"]
+    yes --> evidence["Evidence pack"]
+    no --> evidence
+    evidence --> mode{"Effective mode"}
+    mode --> data["data_only"]
+    mode --> brief["brief"]
+    mode --> analysis["analysis<br/>non-persistent LLM"]
+    mode --> report["report<br/>persistent LLM"]
+    analysis --> response["Stable OMI ask envelope"]
+    report --> response
+    data --> response
+    brief --> response
 ```
 
-## Intraday Flow
+### `omi.ask` Contract
 
-今日走勢不是只畫價格線。後端先取分K資料，再用交易所快照校正最新價與成交量；前端再依使用者選擇聚合成 1m / 5m / 15m，並即時計算盤中指標。
+Use `POST /api/ai/ask` or MCP `omi.ask` as the stable external entrypoint.
 
-```mermaid
-flowchart TD
-    api["GET /api/market/intraday/{stock_id}"] --> market["判斷 TWSE / TPEx"]
-    market --> minute["nStock minute data"]
-    minute --> hasMinute{"有分K資料?"}
-    hasMinute --> yes["建立分K OHLCV"]
-    hasMinute --> no["Yahoo Finance 1m fallback"]
-    no --> yahooOk{"有 Yahoo 資料?"}
-    yahooOk --> yes2["建立 1m points"]
-    yahooOk --> no2["TWSE MIS snapshot fallback"]
-    yes --> mis["TWSE MIS snapshot"]
-    yes2 --> mis
-    no2 --> response["IntradayTrendRead"]
-    mis --> volume["校正總量 / 最新價"]
-    volume --> response
+Supported modes:
 
-    response --> frontend["IntradayTrendChart"]
-    frontend --> interval["1m / 5m / 15m aggregation"]
-    interval --> calc["Frontend indicators<br/>VWAP / TWAP / EMA / RSI / MACD"]
-    calc --> chart["Chart + indicator menu"]
-```
-
-## K-Line And Indicator Flow
-
-```mermaid
-flowchart TD
-    stock["選擇個股"] --> timeframe{"日K / 週K / 月K"}
-    timeframe --> ohlc["GET /api/market/ohlc/{stock_id}"]
-    timeframe --> indicatorApi["GET /api/market/indicators/{stock_id}/daily"]
-    ohlc --> chartData["OHLC chart data"]
-    indicatorApi --> indicatorData["Daily indicator data"]
-    chartData --> chart["StockKLineChart"]
-    indicatorData --> chart
-    chart --> controls["縮放 / 回滾 / range slider"]
-    chart --> menu["指標選單"]
-    menu --> template["模板<br/>基本 / 短線 / 趨勢 / 波段 / 量價"]
-    menu --> params["參數<br/>MA / EMA / BOLL / RSI / MACD / ..."]
-    template --> render["Render overlays and panels"]
-    params --> render
-    controls --> render
-```
-
-## Broker Branch Flow
-
-分點資料來源目前是 nStock Top15。單日模式保留買超與賣超排名；多日模式會用已存每日 Top15 快照做分點加總，依淨買賣超重新排序。
-
-```mermaid
-flowchart TD
-    ui["分點 tab"] --> days["選擇天數<br/>1 / 3 / 5 / 10 / 20 / 60 / 120"]
-    days --> api["GET /api/market/broker-branches/{stock_id}/daily?days=N"]
-    api --> ensure{"ensure_daily?"}
-    ensure --> yes["確認預期交易日資料<br/>15:15 後才抓當日"]
-    ensure --> no["使用已存資料"]
-    yes --> fetch["fetch nStock Top15"]
-    fetch --> save["寫入 broker_branch_trade_daily"]
-    save --> recent["取最近 N 個交易日"]
-    no --> recent
-    recent --> single{"N = 1?"}
-    single --> rank["保留來源 Top15 rank"]
-    single --> aggregate["依分點加總 buy / sell / net / avg price"]
-    aggregate --> rerank["重新產生買超 / 賣超 Top15"]
-    rank --> response["BrokerBranchTradeDailySummaryRead"]
-    rerank --> response
-    response --> frontend["分點表格與天數狀態"]
-```
-
-## Directory Layout
-
-```text
-.
-  backend/
-    app/
-      connectors/      通用 HTTP 與資料來源連線器。
-      db/              SQLAlchemy models、session 與資料庫初始化。
-      jobs/            Background job、scheduler 與狀態查詢。
-      market/          台股市場資料、日線、盤中、回補、指標與分點服務。
-      parsers/         TWSE、TPEx、MOPS、TDCC 等 parser。
-      pipelines/       Raw result parse pipeline。
-      quality/         Raw payload 品質檢查。
-      routers/         FastAPI API routes。
-      scripts/         seed sources 與維運腳本。
-      sources/         預設資料來源定義。
-      stocks/          股票主檔查詢與同步。
-      watchlists/      自選股群組、排行與回補服務。
-  frontend/
-    src/
-      app/             Next.js App Router entry。
-      components/      Dashboard、側欄、個股面板、圖表元件。
-      lib/             API client、台股交易時間工具。
-      types/           前端 API 型別。
-  data/                本機 SQLite database，Git ignore。
-  alembic/             Database migrations。
-```
-
-## Important Backend Modules
-
-| Module | Responsibility |
+| Mode | Behavior |
 | --- | --- |
-| `backend/app/main.py` | FastAPI app、middleware、router registration、startup / shutdown lifecycle |
-| `backend/app/config.py` | `.env` 設定、database URL、timezone、scheduler options |
-| `backend/app/ai/tools.py` | AI 可用的本機資料工具與 evidence pack 組裝 |
-| `backend/app/ai/agentic_tools.py` | `omi.ask` v2 的 allowlisted refresh/read tool planner、budget enforcement 與 tool run 結果整理 |
-| `backend/app/ai/prompts.py` | AI 策略 profile、system prompt 與研究偏好 |
-| `backend/app/ai/llm.py` | OpenAI Responses API 呼叫、JSON schema 驗證與錯誤處理 |
-| `backend/app/ai/orchestrator.py` | 個股與自選群組 AI 報告產生流程 |
-| `backend/app/ai/memory.py` | AI 記憶建立、查詢、封存與相關記憶選取 |
-| `backend/app/market/intraday.py` | 今日分時資料來源、fallback 與交易所快照校正 |
-| `backend/app/market/backfill.py` | TWSE / TPEx 日線回補 |
-| `backend/app/market/daily_metrics_backfill.py` | 法人與融資融券回補 |
-| `backend/app/market/broker_branch.py` | 分點 Top15 擷取、單日查詢、多日加總 |
-| `backend/app/market/monthly_revenue_history_backfill.py` | 月營收歷史回補 |
-| `backend/app/market/financial_metrics_history_backfill.py` | 財務季度資料歷史回補 |
-| `backend/app/market/indicators.py` | 日線技術指標計算 |
-| `backend/app/watchlists/service.py` | 自選股 CRUD 與排行 |
-| `backend/app/watchlists/backfill_service.py` | 群組股票批次回補 |
+| `auto` | Backend chooses a safe effective mode from the request and trust policy. |
+| `data_only` | Returns structured local evidence without generating a narrative. |
+| `brief` | Returns a prompt-ready summary from local evidence. |
+| `analysis` | Calls OpenAI for a non-persistent analysis when trusted and `allow_llm=true`. |
+| `report` | Calls OpenAI and persists a report when trusted, `allow_llm=true`, and `allow_write=true`. |
 
-### US Market Backend Modules
+Supported analysis horizons:
 
-| Module | Responsibility |
+| Horizon | Intended use |
 | --- | --- |
-| `backend/app/us_market/sources.py` | 美股外部資料來源 parser / fetcher：NASDAQ Trader、Yahoo chart、Alpha Vantage、SEC EDGAR、FINRA、FRED |
-| `backend/app/us_market/service.py` | 美股主檔、自選樹、OHLC、SEC facts、profile、corporate actions、short volume、macro 與 watchlist resource refresh 服務層 |
-| `backend/app/routers/us_market.py` | `/api/us-market` router，提供美股自選、資料刷新、resource refresh job 與查詢 API |
+| `intraday` | 盤中 / 即時觀察，can include intraday points when available. |
+| `short` | 短線，usually daily evidence plus recent momentum. |
+| `swing` | 中短線 / 波段，default when the request is not explicit. |
+| `long` | 長線，weekly/monthly and fundamental context matter more. |
 
-## Important Frontend Components
+Minimal request:
 
-| Component | Responsibility |
-| --- | --- |
-| `MarketDashboardClient.tsx` | Dashboard 主狀態、群組選取、排序、股票選取、美股預設葉節點與 resource refresh 操作 |
-| `SidebarWatchlistExplorer.tsx` | 左側市場分頁、自選股樹、群組與股票操作 |
-| `StockDetailPanel.tsx` | 個股頁籤、API 載入、指標選單、籌碼/法人/分點/營收/財務面板 |
-| `JobStatusCenter.tsx` | 左側更新狀態中心，統一顯示 background job 進度、partial success、失敗項目與 retry |
-| `IntradayTrendChart.tsx` | 今日分時圖、1m/5m/15m、盤中指標與指標開關 |
-| `StockKLineChart.tsx` | K 線、縮放/回滾、技術指標模板、指標參數、副圖 |
-| `WatchlistManager.tsx` | 自選股管理輔助操作 |
+```json
+{
+  "contract_version": "omi.ai.ask.v2",
+  "question": "2330 現在中短線怎麼看？",
+  "target": {"type": "tw_stock", "id": "2330"},
+  "mode": "analysis",
+  "analysis_horizon": "swing",
+  "caller_profile": "desktop_agent",
+  "allow_llm": true,
+  "allow_write": false,
+  "allow_external_fetch": true,
+  "refresh_policy": {"mode": "stale_first", "before_answer": true},
+  "tool_budget": {
+    "max_calls": 5,
+    "max_external_fetches": 3,
+    "max_total_seconds": 25
+  }
+}
+```
 
-### US Market Frontend Components
+Stable response shape:
 
-| Component | Responsibility |
-| --- | --- |
-| `USWatchlistSidebar.tsx` | 美股市場切換、自選分類樹、個股搜尋 / 加入 / 停用 / 刪除 |
-| `USStockDetailPanel.tsx` | 美股個股 detail：OHLC、盤中、SEC fundamentals、profile、actions、short volume 與 right-side data readiness |
-| `USWatchlistRankingPanel.tsx` | 美股自選排行，依 change / volume / close 或原始 watchlist 順序展示 |
-| `usMarketTime.ts` | America/New_York regular session、盤中輪詢與 X 軸比例判斷 |
+```json
+{
+  "kind": "ai_ask",
+  "contract_version": "omi.ai.ask.v2",
+  "target": {"type": "tw_stock", "id": "2330", "label": "台積電"},
+  "mode": {"requested": "analysis", "effective": "analysis"},
+  "report_level": "analysis",
+  "analysis": {
+    "kind": "stock_analysis_digest",
+    "selected_horizon": "swing",
+    "horizon_label": "中短線",
+    "selected_score": 62,
+    "selected_summary": "..."
+  },
+  "warnings": [],
+  "missing": [],
+  "source_refs": [],
+  "tool_runs": []
+}
+```
+
+Preserve `warnings`, `missing`, `source_refs`, `freshness`, `tool_plan`, `tool_runs`, `mode.effective` and `analysis.human_answer` in downstream UIs. Those fields are part of the user-facing trust model.
+
+### MCP Adapter
+
+Run the MCP adapter after the backend is available:
+
+```powershell
+cd "C:\project\Open Market Intelligence"
+.\.venv\Scripts\Activate.ps1
+$env:OMI_API_BASE_URL = "http://127.0.0.1:8300"
+$env:OMI_API_TIMEOUT_SECONDS = "180"
+$env:OMI_MCP_EXPOSE_INTERNAL_TOOLS = "false"
+python agents\omi_mcp_server\server.py
+```
+
+Optional trusted-token bridge:
+
+```powershell
+$env:OMI_MCP_AI_TRUST_TOKEN = "<same value as backend OMI_AI_TRUST_TOKEN>"
+```
+
+`OMI_MCP_EXPOSE_INTERNAL_TOOLS=true` should only be used for debugging or a trusted local agent. Normal external callers should use `omi.ask`.
 
 ## API Map
 
 | Prefix | Examples | Purpose |
 | --- | --- | --- |
-| `/api/system` | `/health` | 健康檢查 |
-| `/api/sources` | `/`, `/{id}/run`, `/{id}/logs` | 資料來源、擷取與 raw result |
-| `/api/raw-results` | `/{id}`, `/{id}/quality` | Raw payload、品質檢查與 parse |
-| `/api/jobs` | `/`, `/{job_id}` | Background job 狀態 |
-| `/api/ai` | `/ask`, `/tools`, `/strategy-profiles`, `/stocks/{id}/brief/generate`, `/watchlists/{id}/brief/generate` | AI/agent 入口、工具清單、記憶、個股報告與自選群組報告 |
-| `/api/stocks` | `/search`, `/{stock_id}`, `/{stock_id}/profile` | 股票主檔與公司資料 |
-| `/api/watchlists` | `/tree`, `/groups`, `/items`, `/groups/{id}/ranking` | 自選股群組、項目、排行與群組回補 |
-| `/api/market/ohlc` | `/api/market/ohlc/2330?timeframe=daily` | 日週月 K 線 |
-| `/api/market/intraday` | `/api/market/intraday/2330` | 今日分時 |
-| `/api/market/indicators` | `/api/market/indicators/2330/daily` | 日線技術指標 |
-| `/api/market/broker-branches` | `/api/market/broker-branches/2330/daily?days=20` | 分點 Top15 與多日加總 |
-| `/api/market/institutional` | `/latest`, `/{stock_id}/history`, `/{stock_id}/holding-ratios` | 三大法人與持股比例 |
-| `/api/market/margin` | `/{stock_id}/latest`, `/{stock_id}/history` | 融資融券 |
-| `/api/market/shareholding` | `/{stock_id}/history` | 集保分布 |
-| `/api/market/revenue` | `/{stock_id}/latest`, `/{stock_id}/history` | 月營收 |
-| `/api/market/financials` | `/{stock_id}/latest`, `/{stock_id}/history` | 季度財務 |
-| `/api/market/backfill` | `/twse/{stock_id}`, `/revenue/{stock_id}/history`, `/financials/{stock_id}/history` | 資料回補 job |
+| `/api/system` | `/health` | Health check |
+| `/api/sources` | `/`, `/{id}/run`, `/{id}/logs` | Source registry and fetch logs |
+| `/api/raw-results` | `/{id}`, `/{id}/quality` | Raw payload and quality checks |
+| `/api/jobs` | `/`, `/{job_id}` | Background job state |
+| `/api/ai` | `/ask`, `/tools`, `/strategy-profiles`, `/reports` | Agent entrypoint, local AI tools, memory and reports |
+| `/api/stocks` | `/search`, `/{stock_id}`, `/{stock_id}/profile` | Taiwan stock master/profile |
+| `/api/watchlists` | `/tree`, `/groups`, `/items`, `/groups/{id}/ranking` | Watchlist tree, items, ranking and group backfill |
+| `/api/market/ohlc` | `/api/market/ohlc/2330?timeframe=daily` | Daily/weekly/monthly OHLC |
+| `/api/market/intraday` | `/api/market/intraday/2330` | Taiwan intraday trend |
+| `/api/market/indicators` | `/api/market/indicators/2330/daily` | Daily technical indicators |
+| `/api/market/technical-report` | `/api/market/technical-report/2330?timeframe=today` | Timeframe-specific technical summary |
+| `/api/market/broker-branches` | `/api/market/broker-branches/2330/daily?days=20` | Broker branch Top15 and multi-day aggregate |
+| `/api/market/institutional` | `/latest`, `/{stock_id}/history`, `/{stock_id}/holding-ratios` | Institutional trading and holding ratio |
+| `/api/market/margin` | `/{stock_id}/latest`, `/{stock_id}/history` | Margin trading |
+| `/api/market/shareholding` | `/{stock_id}/history` | TDCC shareholding distribution |
+| `/api/market/revenue` | `/{stock_id}/latest`, `/{stock_id}/history` | Monthly revenue |
+| `/api/market/financials` | `/{stock_id}/latest`, `/{stock_id}/history` | Quarterly financial metrics |
+| `/api/market/backfill` | `/twse/{stock_id}`, `/revenue/{stock_id}/history`, `/financials/{stock_id}/history` | Taiwan data backfill jobs |
+| `/api/us-market` | `/watchlists/tree`, `/watchlists/groups/{id}/refresh-resources`, `/stocks/search`, `/ohlc/{symbol}`, `/intraday/{symbol}`, `/sec/{symbol}/fundamentals`, `/profiles/{symbol}` | US market watchlists, OHLC, intraday and fundamentals |
 
-### US Market API
-
-| Prefix | Examples | Purpose |
-| --- | --- | --- |
-| `/api/us-market` | `/watchlists/tree`, `/watchlists/groups/{id}/refresh-resources`, `/stocks/search`, `/ohlc/{symbol}`, `/sec/{symbol}/fundamentals`, `/profiles/{symbol}`, `/corporate-actions/{symbol}`, `/short-volume/{symbol}/history`, `/macro/{series_id}/observations` | 美股主檔、自選樹、watchlist resource refresh、OHLC、SEC facts、profile、corporate actions、short volume、macro |
-
-## Setup
+## Local Setup
 
 ### Requirements
 
 - Windows PowerShell is the primary local workflow.
-- Python 3.10+ is required. Current local workflow has been used with Python 3.12.
+- Python 3.10+.
 - Node.js `>=20.9.0`.
 - npm `>=10`.
 
-### Backend First-Time Setup
+### Backend
 
 ```powershell
-cd "C:\Open Market Intelligence"
+cd "C:\project\Open Market Intelligence"
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
@@ -378,23 +326,13 @@ $env:PYTHONPATH = "backend"
 python -m app.scripts.seed_sources
 ```
 
-### Frontend First-Time Setup
+Run:
 
 ```powershell
-cd "C:\Open Market Intelligence\frontend"
-if (-not (Test-Path .env.local)) { Copy-Item .env.example .env.local }
-npm ci
-```
-
-## Running Locally
-
-### Backend
-
-```powershell
-cd "C:\Open Market Intelligence"
+cd "C:\project\Open Market Intelligence"
 .\.venv\Scripts\Activate.ps1
-cd backend
-python -m uvicorn app.main:app --reload --port 8300
+$env:PYTHONPATH = "backend"
+python -m uvicorn app.main:app --reload --port 8300 --app-dir backend
 ```
 
 Useful URLs:
@@ -408,7 +346,9 @@ http://127.0.0.1:8300/api/system/health
 ### Frontend
 
 ```powershell
-cd "C:\Open Market Intelligence\frontend"
+cd "C:\project\Open Market Intelligence\frontend"
+if (-not (Test-Path .env.local)) { Copy-Item .env.example .env.local }
+npm ci
 npm run dev
 ```
 
@@ -418,19 +358,27 @@ Open:
 http://127.0.0.1:3000
 ```
 
-## Environment Files
+### Optional Launcher
 
-Root `.env.example`:
+```powershell
+cd "C:\project\Open Market Intelligence"
+.\Start-OMI-Launcher.cmd
+```
+
+The launcher is a local convenience wrapper. Backend and frontend commands above remain the canonical development path.
+
+## Environment
+
+Root `.env.example` contains backend settings. Important keys:
 
 ```env
 APP_NAME=Open Market Intelligence
 APP_ENV=development
 APP_HOST=127.0.0.1
 APP_PORT=8300
-# DATABASE_URL 未設定時，預設使用 data/open_market_intelligence.db
-# DATABASE_URL=sqlite:///C:/Open Market Intelligence/data/open_market_intelligence.db
-ENABLE_SCHEDULER=false
 TIMEZONE=Asia/Taipei
+ENABLE_SCHEDULER=false
+
 OPENAI_API_KEY=
 OPENAI_LLM_API_KEY=
 OMI_OPENAI_ENV_FILE=
@@ -438,31 +386,20 @@ OPENAI_MODEL=gpt-5.4-mini
 OPENAI_RESPONSES_URL=https://api.openai.com/v1/responses
 OPENAI_TIMEOUT_SECONDS=120
 OPENAI_MAX_OUTPUT_TOKENS=1800
+
 OMI_AI_ALLOW_LOCAL_TRUST=true
 OMI_AI_TRUSTED_CLIENT_HOSTS=127.0.0.1,::1
 OMI_AI_TRUST_TOKEN=
 ```
 
-US market data settings:
+US market optional keys:
 
-- `ALPHAVANTAGE_API_KEY` is required for Alpha Vantage daily/profile/actions refreshes.
-- `FRED_API_KEY` is required for FRED macro series refreshes.
-- `US_SEC_USER_AGENT` should be set to a descriptive SEC EDGAR User-Agent before calling SEC APIs.
-- `ENABLE_US_MARKET_SCHEDULER=true` enables the scheduled US watchlist daily refresh.
-
-OpenAI key resolution order:
-
-1. `OPENAI_API_KEY`
-2. `OPENAI_LLM_API_KEY`
-3. `OMI_OPENAI_ENV_FILE`, pointing at a local env file that contains either key
-
-Do not commit real keys. `.env` is local-only and ignored by git.
-
-AI report generation and internal AI tool listing use server-side trust checks.
-Local development can trust loopback clients through `OMI_AI_ALLOW_LOCAL_TRUST`
-and `OMI_AI_TRUSTED_CLIENT_HOSTS`. Non-loopback clients should use
-`X-OMI-AI-Trust-Token` with `OMI_AI_TRUST_TOKEN`; `caller_profile` is only a
-label and is not a security boundary.
+```env
+ALPHAVANTAGE_API_KEY=
+FRED_API_KEY=
+US_SEC_USER_AGENT="Open Market Intelligence local research contact@example.com"
+ENABLE_US_MARKET_SCHEDULER=false
+```
 
 Frontend `.env.example`:
 
@@ -473,157 +410,27 @@ NEXT_PUBLIC_API_PROXY_PATH=/omi-data
 NEXT_PUBLIC_API_BASE_URL=
 ```
 
-Next.js rewrite:
+OpenAI key resolution order:
 
-```text
-/omi-data/wl/... -> http://127.0.0.1:8300/api/watchlists/...
-/omi-data/...    -> http://127.0.0.1:8300/api/...
-/api/...         -> http://127.0.0.1:8300/api/...
-```
+1. `OPENAI_API_KEY`
+2. `OPENAI_LLM_API_KEY`
+3. `OMI_OPENAI_ENV_FILE`, pointing at a local env file that contains either key
 
-## AI Research Flow
-
-AI 研究功能在 OMI 裡不是主要視覺介面，而是外部 Agent 的本機資料插座。Kuro 或其他桌面助理可以透過 `omi.ask` 接入；OMI 負責讀取 SQLite 與既有 service、整理 evidence pack、回傳 brief / report / freshness warnings，並在允許時才把資料交給 OpenAI 做摘要與判讀。LLM 不直接碰資料庫，也不自行假設缺漏資料。
-
-```mermaid
-flowchart TD
-    ask["AI question"] --> scope{"Scope"}
-    scope --> stock["Stock brief<br/>/api/ai/stocks/{id}/brief/generate"]
-    scope --> group["Watchlist brief<br/>/api/ai/watchlists/{id}/brief/generate"]
-    scope --> freshness["Data freshness / market overview<br/>read-only tools"]
-
-    stock --> stockData["OHLC, indicators, chips, branch, revenue, financials"]
-    group --> groupData["Watchlist ranking, score, change, volume, signal keys"]
-    freshness --> freshnessData["Latest local dates, missing tables, source refs"]
-
-    stockData --> pack["Evidence pack"]
-    groupData --> pack
-    freshnessData --> pack
-    pack --> profile["Strategy profile<br/>balanced / technical_swing / short_term_momentum / chip_flow / fundamentals_growth / dividend_value"]
-    profile --> memory["Relevant AI memories"]
-    memory --> llm["OpenAI Responses API"]
-    llm --> schema["Strict JSON schema validation"]
-    schema --> report["ai_report + ai_tool_call"]
-```
-
-### AI Question Modes
-
-For external agents, prefer `POST /api/ai/ask` or MCP `omi.ask`. This is the
-single public entry point: callers send a question and optional v2 `target`
-object, while OMI resolves ambiguous natural-language scope and
-decides whether to return raw data, a prompt-ready brief, or a persisted LLM
-report. It defaults to `strategy_profile=short_term_momentum` and does not call
-OpenAI unless analysis/report mode is explicitly allowed by server-side policy. `GET
-/api/ai/tools` also returns only `omi.ask` by default; add `debug=true` or
-`include_internal=true` only from a trusted local/token-authenticated request to
-list internal tools.
-
-The direct write/cost routes are internal integration paths. Creating/updating
-AI memory, saving briefs, and generating LLM reports require the same
-server-side trusted request policy used by `ask`. Read-only context and brief
-routes stay available for local dashboard inspection.
-
-### External Agent Contract
-
-External desktop assistants should treat OMI as the stock/market authority and
-should not call the internal AI routes directly. The supported contract is:
-
-1. Call `POST /api/ai/ask` or MCP `omi.ask`.
-2. Use `mode=data_only` when the caller only needs structured local evidence.
-3. Use `mode=brief` when the caller needs a compact prompt-ready summary.
-4. Use `mode=report` only when the request is server-side trusted and explicitly
-   sets both `allow_llm=true` and `allow_write=true`.
-5. Preserve `warnings`, `missing`, `source_refs`, `mode.effective`, and
-   `as_of` in downstream UIs so partial or stale local data is visible.
-
-The response envelope is intentionally stable for agents:
-
-```json
-{
-  "kind": "ai_ask",
-  "contract_version": "omi.ai.ask.v2",
-  "target": {"type": "tw_stock", "id": "2330", "label": "台積電"},
-  "mode": {"requested": "brief", "effective": "brief"},
-  "action": "omi.generate_stock_brief",
-  "resolution": {
-    "target": {"type": "tw_stock", "id": "2330", "label": "台積電"},
-    "confidence": "high",
-    "assumption": "Resolved 2330 as Taiwan stock 2330."
-  },
-  "policy": {
-    "allow_llm": false,
-    "allow_write": false,
-    "can_generate_report": false
-  },
-  "result": {
-    "kind": "stock_brief",
-    "as_of": "2026-05-26"
-  },
-  "warnings": [],
-  "source_refs": []
-}
-```
-
-For `target.type=us_stock`, trusted callers can set `allow_external_fetch=true`
-with a bounded `tool_budget`. OMI then lets its own LLM planner choose from
-backend allowlisted tools such as `us.read_intraday_trend`,
-`us.refresh_daily_price`, `us.refresh_company_profile`, and
-`us.refresh_sec_facts`; the backend validates budget/trust, executes the tools,
-records `tool_plan` and `tool_runs`, and folds the refreshed evidence into the
-answer. External API credentials stay in OMI and are never exposed to Kuro.
-
-For `target.type=tw_stock`, OMI defaults to `refresh_policy.mode=stale_first`.
-When freshness says the local Taiwan evidence pack is stale and the caller is
-trusted with `allow_external_fetch=true`, OMI runs the backend
-`tw.refresh_stock_evidence` tool before answering. If the exchange/source has
-not published the expected trading-day data yet, OMI falls back to cached data
-and surfaces the gap in `warnings`, `missing`, `freshness`, and `tool_runs`.
-
-For Kuro, the intended route is OMI-first: stock, watchlist, and local market
-questions should call `omi.ask` before any web search. Web search should be used
-only as enrichment for explicit realtime quote, fresh news, or missing-context
-questions.
-
-| Mode | API | Reads | Use case |
-| --- | --- | --- | --- |
-| OMI ask | `POST /api/ai/ask` / MCP `omi.ask` | Auto-dispatched data, stock, watchlist, or report path | External agent integration through one stable entry point |
-| Data freshness | `GET /api/ai/data-freshness` | Latest available dates and missing coverage | Check whether the local dataset is usable before analysis |
-| Market overview | `GET /api/ai/market-overview` | Latest market breadth and movers | Quick market context without an LLM call |
-| Stock context | `GET /api/ai/stocks/{stock_id}/context` | Full single-stock evidence pack | Inspect what would be sent to AI |
-| Stock LLM brief | `POST /api/ai/stocks/{stock_id}/brief/generate` | Single-stock evidence plus strategy profile and memory | Deep stock report |
-| Watchlist context | `GET /api/ai/watchlists/{group_id}/context` | Group ranking, score, change, volume, status and signal keys | Inspect group scan payload |
-| Watchlist LLM brief | `POST /api/ai/watchlists/{group_id}/brief/generate` | Compact group ranking plus strategy profile and memory | Sector/watchlist scan |
-
-For short-term trading research, use `strategy_profile=short_term_momentum` first. The intended flow is group scan first, then deep stock briefs only for selected candidates. This keeps the prompt small and avoids sending full single-stock data for every item in a large watchlist.
-
-### AI Cost And Token Controls
-
-- Watchlist AI reports send a scan pack: top 20 candidates, bottom 5 watchlist rows, and up to 20 attention rows. They do not send every stock's full branch, institutional, revenue and financial history.
-- Stock AI reports are heavier because they include one stock's chart, chips, branch, revenue and financial context.
-- Large groups should be treated as scan mode. If a group has many stocks, call the watchlist brief first, pick top candidates, then call stock briefs for those candidates.
-- The OpenAI output budget is controlled by `OPENAI_MAX_OUTPUT_TOKENS`; request timeout is controlled by `OPENAI_TIMEOUT_SECONDS`.
-- Generated reports are persisted in `ai_report` with `ai_tool_call` records so later agents can inspect what tools were used.
-- `caller_profile` is only a caller label. Trust is decided by backend policy:
-  loopback hosts listed in `OMI_AI_TRUSTED_CLIENT_HOSTS` when
-  `OMI_AI_ALLOW_LOCAL_TRUST=true`, or a matching `X-OMI-AI-Trust-Token` header
-  when `OMI_AI_TRUST_TOKEN` is configured.
+Never commit real keys. `.env` and `frontend/.env.local` are local-only.
 
 ## Database And Migrations
 
-The backend runs `alembic upgrade head` automatically during startup before
-opening application sessions. This keeps packaged releases and local runs on the
-current schema, including older SQLite databases that were created before
-Alembic version tracking existed.
+The backend runs `alembic upgrade head` during startup before opening application sessions. This keeps packaged releases and older local SQLite databases aligned with the current schema.
 
-新環境套用 migration：
+Manual migration:
 
 ```powershell
-cd "C:\Open Market Intelligence"
+cd "C:\project\Open Market Intelligence"
 .\.venv\Scripts\Activate.ps1
 python -m alembic upgrade head
 ```
 
-只有在你已經確認資料庫 schema 與目前程式碼一致、只想同步 Alembic 版本標記時，才使用：
+Only use `stamp head` when the schema is already confirmed to match code and you only need to synchronize Alembic metadata:
 
 ```powershell
 python -m alembic stamp head
@@ -638,6 +445,9 @@ frontend/node_modules/
 frontend/.next/
 .env
 frontend/.env.local
+logs/
+.tmp/
+.cache/
 暫存區/
 ```
 
@@ -648,6 +458,8 @@ These should not be committed.
 Backend:
 
 ```powershell
+cd "C:\project\Open Market Intelligence"
+.\.venv\Scripts\Activate.ps1
 $env:PYTHONPATH = "backend"
 python -m compileall backend\app
 python -m unittest discover -s backend\tests -p "test_*.py"
@@ -656,127 +468,55 @@ python -m unittest discover -s backend\tests -p "test_*.py"
 Frontend:
 
 ```powershell
-cd frontend
+cd "C:\project\Open Market Intelligence\frontend"
 npm run lint
 npm run build
 ```
 
-## Common Workflows
-
-### 1. Add Stocks To Watchlist
-
-```mermaid
-flowchart TD
-    sidebar["Sidebar"] --> market["選擇台股"]
-    market --> group["選擇或新增群組"]
-    group --> input["輸入股票代號 / 名稱"]
-    input --> add["Add Stock"]
-    add --> ranking["群組排行刷新"]
-    ranking --> detail["點選個股載入 StockDetailPanel"]
-```
-
-### 2. Backfill A Watchlist Group
-
-```mermaid
-flowchart TD
-    group["Watchlist Group"] --> action["POST /api/watchlists/groups/{id}/backfill/twse"]
-    action --> collect["收集群組與子群組股票"]
-    collect --> market{"TWSE / TPEx"}
-    market --> twse["TWSE STOCK_DAY"]
-    market --> tpex["TPEx tradingStock"]
-    twse --> raw["保存 raw result"]
-    tpex --> raw
-    raw --> parse["parse + quality check"]
-    parse --> save["market_daily_price upsert"]
-    save --> job["job progress"]
-    job --> ui["前端顯示補資料狀態"]
-```
-
-### 3. Study A Stock
-
-```mermaid
-flowchart TD
-    pick["選擇個股"] --> today["今日分時<br/>看盤中價格與量"]
-    pick --> kline["日K / 週K / 月K<br/>看趨勢與區間"]
-    pick --> chips["籌碼<br/>法人 / 融資 / 集保"]
-    pick --> branch["分點<br/>單日或多日 Top15"]
-    pick --> fundamentals["營收 / 盈餘 / 財務"]
-
-    today --> decision["短線觀察"]
-    kline --> decision
-    chips --> decision
-    branch --> decision
-    fundamentals --> decision
-```
-
-## Validation
-
-Backend syntax check:
-
-```powershell
-cd "C:\Open Market Intelligence\backend"
-python -m compileall app
-```
-
-Frontend type check:
-
-```powershell
-cd "C:\Open Market Intelligence\frontend"
-npx tsc --noEmit
-```
-
-Frontend lint:
-
-```powershell
-cd "C:\Open Market Intelligence\frontend"
-npm run lint
-```
-
-Frontend production build:
-
-```powershell
-cd "C:\Open Market Intelligence\frontend"
-npm run build
-```
-
-Useful API spot-checks:
+Useful API spot checks when services are running:
 
 ```powershell
 Invoke-RestMethod "http://127.0.0.1:8300/api/system/health"
 Invoke-RestMethod "http://127.0.0.1:8300/api/market/intraday/2330"
 Invoke-RestMethod "http://127.0.0.1:8300/api/market/ohlc/2330?timeframe=daily&limit=120"
-Invoke-RestMethod "http://127.0.0.1:8300/api/market/indicators/2330/daily?limit=120"
+Invoke-RestMethod "http://127.0.0.1:8300/api/market/technical-report/2330?timeframe=today"
 Invoke-RestMethod "http://127.0.0.1:8300/api/market/broker-branches/2330/daily?days=3&ensure_daily=false"
 ```
 
-Git whitespace check:
+Git hygiene:
 
 ```powershell
+git status --short
 git diff --check
 ```
 
 ## Operating Notes
 
-- GET routes should stay read-oriented. Expensive or mutating data fetches should go through POST backfill or job routes where possible.
+- GET routes should stay read-oriented. Expensive or mutating fetches should go through POST backfill/job routes.
 - New data sources should be registered in `source_registry` first, then wired through parser and quality checks.
-- Raw payloads should be saved before parsing so source format changes can be debugged later.
-- Frontend API access should go through `frontend/src/lib/api.ts` and the `/omi-data` proxy unless there is a deliberate reason not to.
-- 台股盤中時間、regular session 判斷與 X 軸比例集中在 `frontend/src/lib/taiwanMarketTime.ts`。
-- Chart controls should keep dimensions stable. Hover, indicator toggles, labels and refreshes should not cause incoherent layout shifts.
-- Multi-day branch data is an aggregate of stored daily Top15 snapshots, not a full broker ledger.
-- Intraday indicators are calculated client-side from the current intraday payload. Early-session RSI/MACD can show `-` until enough points exist.
+- Raw payloads should be saved before parsing so source-format changes can be debugged later.
+- Frontend API access should go through `frontend/src/lib/api.ts` and the `/omi-data` proxy unless there is a deliberate exception.
+- Taiwan market time, regular-session logic and X-axis ratio belong in `frontend/src/lib/taiwanMarketTime.ts` and `frontend/src/lib/taiwanMarketRules.ts`.
+- US regular-session logic belongs in `frontend/src/lib/usMarketTime.ts`.
+- Chart dimensions should stay stable. Hover states, indicator toggles, labels and refreshes should not cause layout shifts.
+- Multi-day broker branch data is an aggregate of stored daily Top15 snapshots, not a full branch ledger.
+- Intraday indicators are calculated from the current intraday payload. Early-session RSI/MACD can show `-` until enough points exist.
+- Agent responses should expose stale/partial data clearly instead of hiding `warnings` or `missing`.
 
 ## Current Limitations
 
-- 美股、日股、韓股、港股目前偏向入口與未來擴充，不是完整資料流。
-- 分點多日統計受限於已存的每日 Top15 快照；若資料庫只有 1 天資料，`days=3` 會回傳 partial 狀態。
-- 盤中資料依外部來源可用性 fallback；來源故障時可能只剩交易所快照。
-- SQLite 適合本機研究與開發；多使用者或長期服務應評估 PostgreSQL 等資料庫。
+- Taiwan stock flow is the primary production path. US market flow is useful but still universe-first and API-key dependent.
+- US-TW supply-chain mapping is not yet a complete semantic layer; use US data as peer/sector context first.
+- 日股、韓股、港股 currently remain navigation placeholders.
+- Broker branch multi-day analysis depends on stored daily Top15 snapshots. If the DB has only one day, multi-day mode returns partial coverage.
+- Intraday data depends on external source availability and can fall back to snapshot-only behavior.
+- SQLite is appropriate for local research and development; multi-user or long-running deployment should evaluate PostgreSQL or another managed database.
 
 ## Production Hygiene
 
-- Do not commit `.env`, `.env.local`, `.venv`, `node_modules`, `.next`, local SQLite databases, logs or downloaded raw private data.
-- Do not hard-code API keys or credentials. Use `.env`.
+- Do not commit `.env`, `.env.local`, `.venv`, `node_modules`, `.next`, local SQLite databases, logs, cache directories or downloaded private data.
+- Do not hard-code API keys, tokens or credentials.
 - Keep migrations explicit when schema changes.
-- Before push, run backend compile plus frontend type/lint/build at minimum.
-- When changing source parsing, add an API spot-check with a real stock id and inspect returned dates/counts.
+- Before push, run backend compile/tests plus frontend lint/build when practical.
+- When changing parsers or market-data fetches, add at least one API spot check with a real symbol and inspect dates/counts.
+- When changing AI behavior, preserve the `omi.ask` envelope and make partial freshness visible to downstream clients.

@@ -601,7 +601,7 @@ def get_stock_intraday_trend(
 @router.get("/technical/{stock_id}", response_model=TechnicalReportRead)
 def get_stock_technical_report(
     stock_id: str,
-    timeframe: str = Query(default="daily", pattern="^(today|daily)$"),
+    timeframe: str = Query(default="daily", pattern="^(today|daily|weekly|monthly)$"),
     include_intraday: bool = True,
     db: Session = Depends(get_db),
 ):

@@ -65,6 +65,12 @@ class AiAskRequest(BaseModel):
         }
     )
     strategy_profile: str = Field(default="short_term_momentum", min_length=1, max_length=80)
+    analysis_horizon: str = Field(
+        default="auto",
+        min_length=1,
+        max_length=50,
+        description="auto, intraday, short, swing, or long. auto defaults to swing for Taiwan stock analysis.",
+    )
     branch_days: int = Field(default=5, ge=1, le=120)
     rank_by: str = Field(default="score", min_length=1, max_length=50)
     sort_order: str = Field(default="desc", min_length=1, max_length=10)
@@ -89,6 +95,7 @@ class AiAskResponse(BaseModel):
     next_actions: list[dict[str, Any]] = Field(default_factory=list)
     answer_ready: bool = True
     report_level: str = "data_only"
+    analysis: dict[str, Any] = Field(default_factory=dict)
     policy: dict[str, Any] = Field(default_factory=dict)
     tool_plan: dict[str, Any] = Field(default_factory=dict)
     tool_runs: list[dict[str, Any]] = Field(default_factory=list)

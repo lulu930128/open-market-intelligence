@@ -21,6 +21,7 @@ from app.ai import freshness
 from app.market import stock_selection_refresh
 from app.us_market import service as us_market_service
 from app.us_market.sources import normalize_us_symbol
+from app.watchlists import backfill_service as watchlist_backfill_service
 
 
 DEFAULT_TOOL_BUDGET = {
@@ -49,6 +50,15 @@ ALLOWED_TOOLS: dict[str, ToolDefinition] = {
         description=(
             "Refresh the selected Taiwan stock evidence pack: daily price, institutional trade, "
             "margin trading, broker branch, shareholding, monthly revenue, and financial metrics."
+        ),
+        external_fetch=True,
+        writes_cache=True,
+    ),
+    "tw.refresh_watchlist_evidence": ToolDefinition(
+        name="tw.refresh_watchlist_evidence",
+        description=(
+            "Refresh the selected Taiwan watchlist/group daily price evidence used by ranking "
+            "and sector breadth. Full institutional/fundamental evidence remains per-stock."
         ),
         external_fetch=True,
         writes_cache=True,
@@ -175,7 +185,10 @@ def normalize_tool_budget(raw_budget: dict[str, Any] | None) -> dict[str, int]:
     }
 
 
-def tool_definitions_for_llm(prefix: str | None = None) -> list[dict[str, Any]]:
+def tool_definitions_for_llm(
+    prefix: str | None = None,
+    names: set[str] | None = None,
+) -> list[dict[str, Any]]:
     return [
         {
             "name": definition.name,
@@ -185,6 +198,7 @@ def tool_definitions_for_llm(prefix: str | None = None) -> list[dict[str, Any]]:
         }
         for definition in ALLOWED_TOOLS.values()
         if prefix is None or definition.name.startswith(prefix)
+        if names is None or definition.name in names
     ]
 
 
@@ -348,6 +362,47 @@ def _fallback_tw_stock_plan(*, stock_id: str, gaps: dict[str, Any]) -> dict[str,
     }
 
 
+def _fallback_tw_watchlist_plan(
+    *,
+    group_id: int,
+    gaps: dict[str, Any],
+    include_children: bool,
+    enabled_only: bool,
+) -> dict[str, Any]:
+    steps: list[dict[str, Any]] = []
+    refresh_params = gaps.get("refresh_params") if isinstance(gaps.get("refresh_params"), dict) else {}
+    missing = set(gaps.get("missing") or [])
+    if gaps.get("refresh_recommended") and "market_daily_price" in missing:
+        steps.append(
+            {
+                "tool": "tw.refresh_watchlist_evidence",
+                "args": {
+                    "group_id": group_id,
+                    "lookback_days": refresh_params.get("lookback_days", 14),
+                    "include_today": refresh_params.get("include_today", False),
+                    "include_children": refresh_params.get("include_children", include_children),
+                    "enabled_only": refresh_params.get("enabled_only", enabled_only),
+                    "sleep_seconds": min(float(refresh_params.get("sleep_seconds", 0.3) or 0.3), 0.3),
+                    "skip_existing_months": refresh_params.get("skip_existing_months", True),
+                },
+                "reason": "Local Taiwan watchlist daily price evidence is stale or incomplete before answering.",
+            }
+        )
+
+    reason = "Deterministic fallback selected Taiwan watchlist daily refresh from local freshness gaps."
+    if gaps.get("refresh_recommended") and not steps:
+        reason = (
+            "Watchlist freshness gaps do not include daily price; skipped group daily refresh "
+            "because full institutional/fundamental evidence is refreshed per stock."
+        )
+
+    return {
+        "provider": "fallback",
+        "reason": reason,
+        "tool_plan": steps,
+    }
+
+
 def _planner_input(
     *,
     question: str,
@@ -355,6 +410,7 @@ def _planner_input(
     gaps: dict[str, Any],
     budget: dict[str, int],
     allowed_tool_prefix: str | None = None,
+    allowed_tool_names: set[str] | None = None,
 ) -> dict[str, Any]:
     return {
         "question": question,
@@ -365,7 +421,10 @@ def _planner_input(
             "expected_dates": gaps.get("expected_dates") or {},
         },
         "budget": budget,
-        "allowed_tools": tool_definitions_for_llm(prefix=allowed_tool_prefix),
+        "allowed_tools": tool_definitions_for_llm(
+            prefix=allowed_tool_prefix,
+            names=allowed_tool_names,
+        ),
         "rules": [
             "Use only allowed tool names.",
             "Prefer local evidence when current enough.",
@@ -382,14 +441,20 @@ def _normalize_plan_step(step: dict[str, Any], *, default_symbol: str) -> dict[s
 
     raw_args = step.get("args") if isinstance(step.get("args"), dict) else {}
     args = dict(raw_args)
-    symbol = normalize_us_symbol(args.get("symbol") or step.get("symbol") or default_symbol)
+    symbol_source = args.get("symbol") or step.get("symbol")
+    if not symbol_source and tool_name.startswith("us."):
+        symbol_source = default_symbol
+    symbol = normalize_us_symbol(symbol_source)
     if symbol:
         args["symbol"] = symbol
     stock_id = str(args.get("stock_id") or step.get("stock_id") or "").strip()
-    if not stock_id and str(tool_name).startswith("tw."):
+    if not stock_id and tool_name == "tw.refresh_stock_evidence":
         stock_id = str(args.get("symbol") or step.get("symbol") or default_symbol).strip()
     if stock_id:
         args["stock_id"] = stock_id
+    group_id = str(args.get("group_id") or step.get("group_id") or "").strip()
+    if group_id:
+        args["group_id"] = group_id
     if step.get("provider") is not None and "provider" not in args:
         args["provider"] = str(step["provider"])
     if step.get("outputsize") is not None and "outputsize" not in args:
@@ -484,6 +549,7 @@ def plan_tw_stock_tools(
                     gaps=gaps,
                     budget=budget,
                     allowed_tool_prefix="tw.",
+                    allowed_tool_names={"tw.refresh_stock_evidence"},
                 )
             )
             return _normalize_plan(raw_plan, default_symbol=normalized_stock_id, provider="openai"), warnings
@@ -495,6 +561,27 @@ def plan_tw_stock_tools(
         default_symbol=normalized_stock_id,
         provider="fallback",
     ), warnings
+
+
+def plan_tw_watchlist_tools(
+    *,
+    group_id: int,
+    gaps: dict[str, Any],
+    budget: dict[str, int],
+    include_children: bool,
+    enabled_only: bool,
+) -> tuple[dict[str, Any], list[str]]:
+    del budget
+    return _normalize_plan(
+        _fallback_tw_watchlist_plan(
+            group_id=group_id,
+            gaps=gaps,
+            include_children=include_children,
+            enabled_only=enabled_only,
+        ),
+        default_symbol=str(group_id),
+        provider="fallback",
+    ), []
 
 
 def _compact_result(value: Any) -> dict[str, Any]:
@@ -515,9 +602,15 @@ def _compact_result(value: Any) -> dict[str, Any]:
         "inserted_count",
         "updated_count",
         "requested_count",
+        "requested_stock_count",
         "refreshed_count",
+        "current_count",
+        "success_count",
+        "warning_count",
         "skipped_count",
         "error_count",
+        "target_date",
+        "lookback_days",
         "point_count",
         "previous_close",
         "metric_count",
@@ -557,8 +650,11 @@ def _empty_tool_run(
 def _execute_tool(db: Session, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
     symbol = normalize_us_symbol(args.get("symbol"))
     stock_id = str(args.get("stock_id") or "").strip()
-    if tool_name.startswith("tw.") and not stock_id:
+    group_id_text = str(args.get("group_id") or "").strip()
+    if tool_name == "tw.refresh_stock_evidence" and not stock_id:
         raise ValueError("stock_id is required for Taiwan stock tools.")
+    if tool_name == "tw.refresh_watchlist_evidence" and not group_id_text:
+        raise ValueError("group_id is required for Taiwan watchlist tools.")
 
     if tool_name.startswith("us.") and not symbol and tool_name != "us.refresh_macro_series":
         raise ValueError("symbol is required for US stock tools.")
@@ -570,6 +666,24 @@ def _execute_tool(db: Session, tool_name: str, args: dict[str, Any]) -> dict[str
             stock_id=stock_id,
             include_today=_optional_bool(args.get("include_today")),
             sleep_seconds=sleep_seconds,
+        )
+
+    if tool_name == "tw.refresh_watchlist_evidence":
+        sleep_seconds = _safe_float(args.get("sleep_seconds"), default=0.05, minimum=0.0, maximum=3.0)
+        lookback_days = _safe_int(args.get("lookback_days"), default=14, minimum=1, maximum=365)
+        include_today = _optional_bool(args.get("include_today"))
+        include_children = _optional_bool(args.get("include_children"))
+        enabled_only = _optional_bool(args.get("enabled_only"))
+        skip_existing_months = _optional_bool(args.get("skip_existing_months"))
+        return watchlist_backfill_service.refresh_watchlist_group_daily_prices(
+            db=db,
+            group_id=int(group_id_text),
+            lookback_days=lookback_days,
+            include_today=include_today if include_today is not None else False,
+            include_children=include_children if include_children is not None else True,
+            enabled_only=enabled_only if enabled_only is not None else True,
+            sleep_seconds=sleep_seconds,
+            skip_existing_months=skip_existing_months if skip_existing_months is not None else True,
         )
 
     if tool_name == "us.read_intraday_trend":
@@ -816,6 +930,69 @@ def run_tw_stock_tool_session(
     refreshed_gaps = freshness.check_stock_data_freshness(
         db=db,
         stock_id=normalized_stock_id,
+    )
+    return {
+        "tool_plan": plan,
+        "tool_runs": runs,
+        "warnings": plan_warnings + run_warnings,
+        "freshness": refreshed_gaps,
+    }
+
+
+def run_tw_watchlist_tool_session(
+    *,
+    db: Session,
+    group_id: int,
+    target: dict[str, Any],
+    policy: dict[str, Any],
+    raw_budget: dict[str, Any] | None,
+    existing_freshness: dict[str, Any] | None = None,
+    include_children: bool = True,
+    enabled_only: bool = True,
+) -> dict[str, Any]:
+    del target
+    budget = normalize_tool_budget(raw_budget)
+    gaps = existing_freshness or freshness.check_watchlist_data_freshness(
+        db=db,
+        group_id=group_id,
+        include_children=include_children,
+        enabled_only=enabled_only,
+    )
+
+    if budget["max_calls"] <= 0:
+        return {
+            "tool_plan": {
+                "provider": "disabled",
+                "reason": "OMI tool budget max_calls is 0.",
+                "tool_plan": [],
+                "budget": budget,
+            },
+            "tool_runs": [],
+            "warnings": [],
+            "freshness": gaps,
+        }
+
+    plan, plan_warnings = plan_tw_watchlist_tools(
+        group_id=group_id,
+        gaps=gaps,
+        budget=budget,
+        include_children=include_children,
+        enabled_only=enabled_only,
+    )
+    if gaps.get("refresh_recommended") and not plan.get("tool_plan"):
+        plan_warnings.append(plan.get("reason") or "No Taiwan watchlist refresh tool was selected.")
+    plan["budget"] = budget
+    runs, run_warnings = execute_tool_plan(
+        db=db,
+        plan=plan,
+        budget=budget,
+        can_external_fetch=bool(policy.get("can_external_fetch")),
+    )
+    refreshed_gaps = freshness.check_watchlist_data_freshness(
+        db=db,
+        group_id=group_id,
+        include_children=include_children,
+        enabled_only=enabled_only,
     )
     return {
         "tool_plan": plan,

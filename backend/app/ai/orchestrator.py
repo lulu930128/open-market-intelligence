@@ -86,9 +86,10 @@ def generate_stock_llm_analysis(
     db: Session,
     stock_id: str,
     *,
-    strategy_profile: str = "balanced",
+    strategy_profile: str = "short_term_momentum",
     branch_days: int = 5,
     include_intraday: bool = False,
+    analysis_horizon: str = "swing",
 ) -> dict[str, Any]:
     envelope = reports.build_stock_brief(
         db=db,
@@ -96,6 +97,7 @@ def generate_stock_llm_analysis(
         strategy_profile=strategy_profile,
         branch_days=branch_days,
         include_intraday=include_intraday,
+        analysis_horizon=analysis_horizon,
     )
     return _build_non_persistent_analysis(envelope, kind="stock_llm_analysis")
 
@@ -104,7 +106,7 @@ def generate_watchlist_llm_analysis(
     db: Session,
     group_id: int,
     *,
-    strategy_profile: str = "balanced",
+    strategy_profile: str = "short_term_momentum",
     rank_by: str = "score",
     sort_order: str = "desc",
 ) -> dict[str, Any]:
@@ -122,9 +124,10 @@ def generate_stock_llm_report(
     db: Session,
     stock_id: str,
     *,
-    strategy_profile: str = "balanced",
+    strategy_profile: str = "short_term_momentum",
     branch_days: int = 5,
     include_intraday: bool = False,
+    analysis_horizon: str = "swing",
 ) -> dict[str, Any]:
     envelope = reports.build_stock_brief(
         db=db,
@@ -132,6 +135,7 @@ def generate_stock_llm_report(
         strategy_profile=strategy_profile,
         branch_days=branch_days,
         include_intraday=include_intraday,
+        analysis_horizon=analysis_horizon,
     )
 
     started_at = _now()
@@ -159,6 +163,7 @@ def generate_stock_llm_report(
                     "strategy_profile": strategy_profile,
                     "branch_days": branch_days,
                     "include_intraday": include_intraday,
+                    "analysis_horizon": analysis_horizon,
                 },
                 "result_summary": report_store.report_tool_summary(envelope),
             },
@@ -182,7 +187,7 @@ def generate_watchlist_llm_report(
     db: Session,
     group_id: int,
     *,
-    strategy_profile: str = "balanced",
+    strategy_profile: str = "short_term_momentum",
     rank_by: str = "score",
     sort_order: str = "desc",
 ) -> dict[str, Any]:

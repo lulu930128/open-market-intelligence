@@ -103,6 +103,141 @@ def _add_missing(missing: list[str], key: str, value: Any) -> None:
         missing.append(key)
 
 
+def normalize_analysis_horizon(value: str | None) -> str:
+    normalized = (value or "swing").strip().lower()
+    aliases = {
+        "auto": "swing",
+        "today": "intraday",
+        "live": "intraday",
+        "realtime": "intraday",
+        "real-time": "intraday",
+        "now": "intraday",
+        "daily": "short",
+        "day": "short",
+        "short_term": "short",
+        "short-term": "short",
+        "weekly": "swing",
+        "medium": "swing",
+        "medium_short": "swing",
+        "medium-short": "swing",
+        "monthly": "long",
+        "fundamental": "long",
+        "investment": "long",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in {"intraday", "short", "swing", "long"}:
+        return "swing"
+    return normalized
+
+
+def _report_score(report: dict[str, Any] | None) -> int | None:
+    if not isinstance(report, dict):
+        return None
+    score = report.get("score")
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        return None
+    return int(round(score))
+
+
+def _weighted_score(
+    technical_reports: dict[str, Any],
+    components: list[tuple[str, float]],
+) -> tuple[int | None, list[dict[str, Any]]]:
+    used: list[dict[str, Any]] = []
+    total_weight = 0.0
+    weighted_total = 0.0
+
+    for timeframe, weight in components:
+        report = technical_reports.get(timeframe)
+        score = _report_score(report)
+        if score is None:
+            used.append(
+                {
+                    "timeframe": timeframe,
+                    "weight": weight,
+                    "score": None,
+                    "included": False,
+                }
+            )
+            continue
+
+        total_weight += weight
+        weighted_total += score * weight
+        used.append(
+            {
+                "timeframe": timeframe,
+                "weight": weight,
+                "score": score,
+                "included": True,
+                "confidence": report.get("confidence") if isinstance(report, dict) else None,
+            }
+        )
+
+    if total_weight == 0:
+        return None, used
+
+    return int(round(weighted_total / total_weight)), used
+
+
+def _technical_analysis_summary(
+    *,
+    technical_reports: dict[str, Any],
+    requested_horizon: str,
+) -> dict[str, Any]:
+    selected_horizon = normalize_analysis_horizon(requested_horizon)
+    weights_by_horizon = {
+        "intraday": [("today", 1.0), ("daily", 0.35)],
+        "short": [("daily", 1.0)],
+        "swing": [("daily", 0.45), ("weekly", 0.55)],
+        "long": [("daily", 0.15), ("weekly", 0.30), ("monthly", 0.55)],
+    }
+    preferred_timeframe = {
+        "intraday": "today",
+        "short": "daily",
+        "swing": "weekly",
+        "long": "monthly",
+    }[selected_horizon]
+    selected_score, components = _weighted_score(
+        technical_reports,
+        weights_by_horizon[selected_horizon],
+    )
+    selected_report = technical_reports.get(preferred_timeframe)
+    if not isinstance(selected_report, dict):
+        selected_report = next(
+            (
+                technical_reports.get(component["timeframe"])
+                for component in components
+                if component.get("included")
+            ),
+            None,
+        )
+    if not isinstance(selected_report, dict):
+        selected_report = {}
+
+    scores_by_horizon: dict[str, int | None] = {}
+    score_components_by_horizon: dict[str, list[dict[str, Any]]] = {}
+    for horizon, components_for_horizon in weights_by_horizon.items():
+        score, horizon_components = _weighted_score(
+            technical_reports,
+            components_for_horizon,
+        )
+        scores_by_horizon[horizon] = score
+        score_components_by_horizon[horizon] = horizon_components
+
+    return {
+        "requested_horizon": requested_horizon,
+        "selected_horizon": selected_horizon,
+        "selected_timeframe": selected_report.get("timeframe") or preferred_timeframe,
+        "selected_score": selected_score,
+        "selected_title": selected_report.get("title"),
+        "selected_summary": selected_report.get("summary"),
+        "selected_confidence": selected_report.get("confidence"),
+        "scores": scores_by_horizon,
+        "components": components,
+        "components_by_horizon": score_components_by_horizon,
+    }
+
+
 def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
     tool_list = [
             {
@@ -150,6 +285,12 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                                 "dividend_value",
                             ],
                             "default": "short_term_momentum",
+                        },
+                        "analysis_horizon": {
+                            "type": "string",
+                            "enum": ["auto", "intraday", "short", "swing", "long"],
+                            "default": "auto",
+                            "description": "Analysis horizon. auto defaults to swing, meaning medium-short-term evidence.",
                         },
                         "caller_profile": {
                             "type": "string",
@@ -216,6 +357,11 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                             "default": False,
                             "description": "Include live Taiwan intraday technical report when trusted external fetch is allowed.",
                         },
+                        "analysis_horizon": {
+                            "type": "string",
+                            "enum": ["auto", "intraday", "short", "swing", "long"],
+                            "default": "auto",
+                        },
                     },
                     "required": ["stock_id"],
                 },
@@ -270,6 +416,11 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                                 "fundamentals_growth",
                                 "dividend_value",
                             ],
+                        },
+                        "analysis_horizon": {
+                            "type": "string",
+                            "enum": ["auto", "intraday", "short", "swing", "long"],
+                            "default": "auto",
                         },
                         "branch_days": {"type": "integer", "minimum": 1, "maximum": 120},
                     },
@@ -327,6 +478,11 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                                 "fundamentals_growth",
                                 "dividend_value",
                             ],
+                        },
+                        "analysis_horizon": {
+                            "type": "string",
+                            "enum": ["auto", "intraday", "short", "swing", "long"],
+                            "default": "auto",
                         },
                         "branch_days": {"type": "integer", "minimum": 1, "maximum": 120},
                     },
@@ -472,6 +628,11 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                                 "fundamentals_growth",
                                 "dividend_value",
                             ],
+                        },
+                        "analysis_horizon": {
+                            "type": "string",
+                            "enum": ["auto", "intraday", "short", "swing", "long"],
+                            "default": "auto",
                         },
                         "branch_days": {"type": "integer", "minimum": 1, "maximum": 120},
                     },
@@ -683,6 +844,7 @@ def read_stock_context(
     revenue_months: int = 12,
     financial_quarters: int = 8,
     include_intraday: bool = False,
+    analysis_horizon: str = "swing",
 ) -> dict[str, Any]:
     normalized_stock_id = stock_id.strip()
     missing: list[str] = []
@@ -723,30 +885,42 @@ def read_stock_context(
         days=max(branch_days, 1),
         ensure_daily=False,
     )
+    normalized_horizon = normalize_analysis_horizon(analysis_horizon)
     technical_reports: dict[str, Any] = {}
 
-    try:
-        technical_reports["daily"] = build_stock_technical_report(
-            db=db,
-            stock_id=normalized_stock_id,
-            timeframe="daily",
-            include_intraday=False,
-        )
-    except Exception as exc:
-        warnings.append(f"Daily technical report unavailable: {exc}")
-        missing.append("technical_report.daily")
+    for timeframe in ("daily", "weekly", "monthly"):
+        try:
+            technical_reports[timeframe] = build_stock_technical_report(
+                db=db,
+                stock_id=normalized_stock_id,
+                timeframe=timeframe,
+                include_intraday=False,
+            )
+        except Exception as exc:
+            warnings.append(f"{timeframe.title()} technical report unavailable: {exc}")
+            missing.append(f"technical_report.{timeframe}")
 
-    if include_intraday:
+    if include_intraday or normalized_horizon == "intraday":
         try:
             technical_reports["today"] = build_stock_technical_report(
                 db=db,
                 stock_id=normalized_stock_id,
                 timeframe="today",
-                include_intraday=True,
+                include_intraday=include_intraday,
             )
         except Exception as exc:
             warnings.append(f"Today technical report unavailable: {exc}")
             missing.append("technical_report.today")
+
+    if normalized_horizon == "intraday" and not include_intraday:
+        warnings.append(
+            "Intraday analysis horizon was requested without live intraday access; daily evidence is used as fallback context."
+        )
+
+    technical_analysis = _technical_analysis_summary(
+        technical_reports=technical_reports,
+        requested_horizon=analysis_horizon,
+    )
 
     if branch_summary.get("is_partial"):
         warnings.append(
@@ -806,6 +980,7 @@ def read_stock_context(
                 ],
             },
             "technical_reports": technical_reports,
+            "analysis": technical_analysis,
             "latest_institutional": _row_dict(
                 latest_institutional,
                 (

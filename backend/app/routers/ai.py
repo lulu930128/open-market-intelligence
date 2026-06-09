@@ -293,6 +293,7 @@ def read_stock_context(
     revenue_months: int = Query(default=12, ge=1, le=120),
     financial_quarters: int = Query(default=8, ge=1, le=40),
     include_intraday: bool = Query(default=False),
+    analysis_horizon: str = Query(default="swing", pattern="^(auto|intraday|short|swing|long)$"),
     db: Session = Depends(get_db),
 ):
     return tools.read_stock_context(
@@ -303,6 +304,7 @@ def read_stock_context(
         revenue_months=revenue_months,
         financial_quarters=financial_quarters,
         include_intraday=include_intraday,
+        analysis_horizon=analysis_horizon,
     )
 
 
@@ -335,9 +337,10 @@ def read_watchlist_context(
 @router.get("/stocks/{stock_id}/brief", response_model=AiReportEnvelope)
 def build_stock_brief(
     stock_id: str,
-    strategy_profile: str = "balanced",
+    strategy_profile: str = "short_term_momentum",
     branch_days: int = Query(default=5, ge=1, le=120),
     include_intraday: bool = Query(default=False),
+    analysis_horizon: str = Query(default="swing", pattern="^(auto|intraday|short|swing|long)$"),
     db: Session = Depends(get_db),
 ):
     return reports.build_stock_brief(
@@ -346,6 +349,7 @@ def build_stock_brief(
         strategy_profile=strategy_profile,
         branch_days=branch_days,
         include_intraday=include_intraday,
+        analysis_horizon=analysis_horizon,
     )
 
 
@@ -353,9 +357,10 @@ def build_stock_brief(
 def save_stock_brief(
     stock_id: str,
     request: Request,
-    strategy_profile: str = "balanced",
+    strategy_profile: str = "short_term_momentum",
     branch_days: int = Query(default=5, ge=1, le=120),
     include_intraday: bool = Query(default=False),
+    analysis_horizon: str = Query(default="swing", pattern="^(auto|intraday|short|swing|long)$"),
     db: Session = Depends(get_db),
 ):
     _require_trusted_ai_request(request, "Saving stock brief")
@@ -365,6 +370,7 @@ def save_stock_brief(
         strategy_profile=strategy_profile,
         branch_days=branch_days,
         include_intraday=include_intraday,
+        analysis_horizon=analysis_horizon,
     )
     return _save_brief_report(
         db=db,
@@ -380,6 +386,7 @@ def save_stock_brief(
             "strategy_profile": strategy_profile,
             "branch_days": branch_days,
             "include_intraday": include_intraday,
+            "analysis_horizon": analysis_horizon,
         },
     )
 
@@ -388,9 +395,10 @@ def save_stock_brief(
 def generate_stock_llm_report(
     stock_id: str,
     request: Request,
-    strategy_profile: str = "balanced",
+    strategy_profile: str = "short_term_momentum",
     branch_days: int = Query(default=5, ge=1, le=120),
     include_intraday: bool = Query(default=False),
+    analysis_horizon: str = Query(default="swing", pattern="^(auto|intraday|short|swing|long)$"),
     db: Session = Depends(get_db),
 ):
     _require_trusted_ai_request(request, "Generating stock LLM report")
@@ -401,6 +409,7 @@ def generate_stock_llm_report(
             strategy_profile=strategy_profile,
             branch_days=branch_days,
             include_intraday=include_intraday,
+            analysis_horizon=analysis_horizon,
         )
     except ai_llm.OpenAILLMError as exc:
         _raise_llm_http_error(exc)
@@ -409,7 +418,7 @@ def generate_stock_llm_report(
 @router.get("/watchlists/{group_id}/brief", response_model=AiReportEnvelope)
 def build_watchlist_brief(
     group_id: int,
-    strategy_profile: str = "balanced",
+    strategy_profile: str = "short_term_momentum",
     rank_by: str = Query(default="score", pattern="^(watchlist|score|change_pct|volume)$"),
     sort_order: str = Query(default="desc", pattern="^(asc|desc)$"),
     db: Session = Depends(get_db),
@@ -432,7 +441,7 @@ def build_watchlist_brief(
 def generate_watchlist_llm_report(
     group_id: int,
     request: Request,
-    strategy_profile: str = "balanced",
+    strategy_profile: str = "short_term_momentum",
     rank_by: str = Query(default="score", pattern="^(watchlist|score|change_pct|volume)$"),
     sort_order: str = Query(default="desc", pattern="^(asc|desc)$"),
     db: Session = Depends(get_db),
@@ -458,7 +467,7 @@ def generate_watchlist_llm_report(
 def save_watchlist_brief(
     group_id: int,
     request: Request,
-    strategy_profile: str = "balanced",
+    strategy_profile: str = "short_term_momentum",
     rank_by: str = Query(default="score", pattern="^(watchlist|score|change_pct|volume)$"),
     sort_order: str = Query(default="desc", pattern="^(asc|desc)$"),
     db: Session = Depends(get_db),

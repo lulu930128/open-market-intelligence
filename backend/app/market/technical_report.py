@@ -16,6 +16,25 @@ TAIPEI_TZ = timezone(timedelta(hours=8))
 SESSION_START_MINUTES = 9 * 60
 OPENING_OBSERVATION_MINUTES = 5
 OPENING_OBSERVATION_MIN_POINTS = 5
+AGGREGATED_REPORT_BARS = {
+    "weekly": 180,
+    "monthly": 120,
+}
+TIMEFRAME_LABELS = {
+    "daily": "日K",
+    "weekly": "週K",
+    "monthly": "月K",
+}
+TIMEFRAME_TITLE_LABELS = {
+    "daily": ("短線偏多", "短線整理", "短線偏弱"),
+    "weekly": ("波段偏多", "波段整理", "波段偏弱"),
+    "monthly": ("長線偏多", "長線整理", "長線偏弱"),
+}
+TIMEFRAME_SUMMARY_LABELS = {
+    "daily": "短線",
+    "weekly": "波段",
+    "monthly": "長線",
+}
 
 
 def _now() -> datetime:
@@ -144,6 +163,29 @@ def _daily_indicator(db: Session, stock_id: str) -> dict[str, Any] | None:
     )
 
 
+def _aggregated_indicator(
+    *,
+    db: Session,
+    stock_id: str,
+    timeframe: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    chart = market_service.list_stock_ohlc_chart_data(
+        db=db,
+        stock_id=stock_id,
+        timeframe=timeframe,
+        bars=AGGREGATED_REPORT_BARS[timeframe],
+        ensure_history=False,
+    )
+    points = chart.get("points") or []
+    indicators = indicator_service.calculate_indicator_points_from_ohlc_points(
+        points,
+        ma_windows="5,20,60",
+        volume_ma_windows="5,20",
+        max_gap_days=None,
+    )
+    return (indicators[-1] if indicators else None), chart
+
+
 def _daily_context(db: Session, stock_id: str) -> dict[str, Any]:
     latest_indicator = _daily_indicator(db=db, stock_id=stock_id)
     latest_institutional = market_service.get_latest_stock_institutional_trade(db, stock_id)
@@ -209,6 +251,242 @@ def _technical_source_refs(*, timeframe: str, include_intraday: bool) -> list[di
     if timeframe == "today" and include_intraday:
         refs.append({"type": "external_or_cache", "name": "taiwan_intraday_trend"})
     return refs
+
+
+def _indicator_data_missing_report(
+    *,
+    stock_id: str,
+    timeframe: str,
+    point_count: int | None = None,
+) -> dict[str, Any]:
+    label = TIMEFRAME_LABELS.get(timeframe, timeframe)
+    missing_key = "market_daily_price" if timeframe == "daily" else f"market_daily_price.{timeframe}"
+    return {
+        "kind": "tw_stock_technical_report",
+        "stock_id": stock_id,
+        "timeframe": timeframe,
+        "phase": timeframe,
+        "confidence": "low",
+        "generated_at": _now(),
+        "title": "資料不足",
+        "summary": f"尚無足夠{label}資料產生技術報告",
+        "score": 0,
+        "value": None,
+        "value_label": "vs MA20",
+        "rows": [
+            _row(
+                key="data_status",
+                label="資料狀態",
+                description=f"{label}價格或技術指標不足",
+                value=point_count,
+                display_value="-" if point_count is None else f"{point_count}筆",
+                basis=f"{timeframe} indicator availability",
+                source="market_daily_price",
+            )
+        ],
+        "badges": [],
+        "data": {
+            "indicator": None,
+            "timeframe": timeframe,
+            "point_count": point_count,
+        },
+        "missing": [missing_key],
+        "warnings": [],
+        "source_refs": _technical_source_refs(timeframe=timeframe, include_intraday=False),
+    }
+
+
+def _build_indicator_report(
+    *,
+    db: Session,
+    stock_id: str,
+    timeframe: str,
+    indicator: dict[str, Any] | None,
+    point_count: int | None = None,
+) -> dict[str, Any]:
+    if indicator is None:
+        return _indicator_data_missing_report(
+            stock_id=stock_id,
+            timeframe=timeframe,
+            point_count=point_count,
+        )
+
+    rows: list[dict[str, Any]] = []
+    badges: list[dict[str, str]] = []
+    warnings: list[str] = []
+    missing: list[str] = []
+    label = TIMEFRAME_LABELS.get(timeframe, timeframe)
+    summary_label = TIMEFRAME_SUMMARY_LABELS.get(timeframe, label)
+    close = indicator.get("close")
+    volume = indicator.get("volume")
+    change_pct = indicator.get("change_pct")
+    ma = indicator.get("ma") or {}
+    volume_ma = indicator.get("volume_ma") or {}
+    macd = indicator.get("macd") or {}
+    rsi = indicator.get("rsi") or {}
+    atr = indicator.get("atr") or {}
+    adx = indicator.get("adx") or {}
+    roc = indicator.get("roc") or {}
+    mfi = indicator.get("mfi") or {}
+    donchian = indicator.get("donchian") or {}
+    ma5 = ma.get("ma5")
+    ma20 = ma.get("ma20")
+    ma60 = ma.get("ma60")
+    price_vs_ma20 = _pct_change(close, ma20)
+    volume_ratio = _safe_ratio(volume, volume_ma.get("volume_ma20"))
+    volume_ratio_pct = (volume_ratio - 1) * 100 if volume_ratio is not None else None
+    macd_histogram = macd.get("histogram")
+    rsi14 = rsi.get("rsi14")
+    adx14 = adx.get("adx14")
+    plus_di14 = adx.get("plus_di14")
+    minus_di14 = adx.get("minus_di14")
+    atr14 = atr.get("atr14")
+    atr_pct = _safe_ratio(atr14, close)
+    atr_pct = atr_pct * 100 if atr_pct is not None else None
+    donchian_position = None
+    if _finite(donchian.get("upper20")) and _finite(donchian.get("lower20")) and donchian["upper20"] != donchian["lower20"]:
+        donchian_position = (close - donchian["lower20"]) / (donchian["upper20"] - donchian["lower20"]) * 100
+    daily = _daily_context(db=db, stock_id=stock_id)
+    latest_institutional = daily["institutional"]
+    institutional_net = (
+        getattr(latest_institutional, "total_institutional_net", None)
+        if latest_institutional is not None
+        else None
+    )
+    margin_change = _margin_balance_change(daily["margin"])
+    score = 0
+
+    if _finite(price_vs_ma20):
+        score += 1 if price_vs_ma20 >= 0 else -1
+    if _finite(ma5) and _finite(ma20):
+        score += 1 if ma5 >= ma20 else -1
+    if _finite(ma20) and _finite(ma60):
+        score += 1 if ma20 >= ma60 else -1
+    if _finite(macd_histogram):
+        score += 1 if macd_histogram >= 0 else -1
+    if _finite(rsi14):
+        if 50 <= rsi14 < 80:
+            score += 1
+        elif rsi14 < 40:
+            score -= 1
+    if _finite(adx14) and adx14 >= 25 and _finite(plus_di14) and _finite(minus_di14):
+        score += 1 if plus_di14 >= minus_di14 else -1
+    if timeframe == "daily" and _finite(institutional_net):
+        score += 1 if institutional_net > 0 else -1
+
+    rows.extend(
+        [
+            _row(
+                key="trend_structure",
+                label="趨勢結構",
+                description=f"{label} MA5/20/60 {_fmt_price(ma5)} / {_fmt_price(ma20)} / {_fmt_price(ma60)}，ADX {_fmt_number(adx14, 2)}",
+                value=price_vs_ma20,
+                display_value=_fmt_pct(price_vs_ma20),
+                direction=price_vs_ma20,
+                basis=f"{timeframe} close vs MA20 and moving average alignment",
+                source="market_daily_price",
+            ),
+            _row(
+                key="momentum",
+                label="動能指標",
+                description=f"RSI {_fmt_number(rsi14, 2)}，MACD H {_fmt_number(macd_histogram, 2)}，ROC12 {_fmt_pct(roc.get('roc12'))}",
+                value=rsi14,
+                display_value=_fmt_number(rsi14, 2),
+                direction=macd_histogram,
+                tone="warning" if _finite(rsi14) and rsi14 >= 80 else _tone(macd_histogram),
+                basis=f"{timeframe} RSI, MACD histogram, and ROC",
+                source="market_daily_price",
+            ),
+            _row(
+                key="volume_flow",
+                label="量價資金",
+                description=f"{label}量能 {_fmt_pct(volume_ratio_pct)} vs 20期均量，MFI {_fmt_number(mfi.get('mfi14'), 2)}",
+                value=volume_ratio_pct,
+                display_value=_fmt_pct(volume_ratio_pct),
+                direction=volume_ratio_pct,
+                tone="warning" if _finite(volume_ratio) and volume_ratio >= 1.5 else "neutral",
+                basis=f"{timeframe} volume vs 20-period average volume",
+                source="market_daily_price",
+            ),
+            _row(
+                key="volatility_risk",
+                label="波動風險",
+                description=f"ATR {_fmt_pct(atr_pct)}，Donchian 位置 {_fmt_pct(donchian_position)}",
+                value=atr_pct,
+                display_value=_fmt_pct(atr_pct),
+                direction=1 if _finite(atr_pct) and atr_pct > 5 else 0,
+                tone="warning" if _finite(atr_pct) and atr_pct > 5 else "neutral",
+                basis=f"{timeframe} ATR and 20-period Donchian range position",
+                source="market_daily_price",
+            ),
+            _row(
+                key="institutional_flow",
+                label="法人籌碼",
+                description=f"最新三大法人合計，融資餘額 {_fmt_signed_number(margin_change)}",
+                value=institutional_net,
+                display_value="-" if institutional_net is None else f"{_fmt_signed_lots(institutional_net)}張",
+                direction=institutional_net,
+                basis="latest published institutional trade and margin balance",
+                source="institutional_trade_daily",
+            ),
+        ]
+    )
+
+    if _finite(price_vs_ma20):
+        badges.append(_badge("站上 MA20" if price_vs_ma20 >= 0 else "跌破 MA20", "positive" if price_vs_ma20 >= 0 else "negative"))
+    if _finite(macd_histogram):
+        badges.append(_badge("MACD 偏多" if macd_histogram >= 0 else "MACD 偏弱", "positive" if macd_histogram >= 0 else "negative"))
+    if _finite(rsi14) and rsi14 >= 80:
+        badges.append(_badge("RSI 過熱", "warning"))
+    if _finite(volume_ratio) and volume_ratio >= 1.5:
+        badges.append(_badge("放量", "warning"))
+
+    summary_parts = [
+        "站上 MA20" if _finite(price_vs_ma20) and price_vs_ma20 >= 0 else "跌破 MA20" if _finite(price_vs_ma20) else "價格結構不足",
+        "MACD 偏多" if _finite(macd_histogram) and macd_histogram >= 0 else "MACD 偏弱" if _finite(macd_histogram) else "動能資料不足",
+        "放量" if _finite(volume_ratio) and volume_ratio >= 1.5 else "量能一般" if _finite(volume_ratio) else "量能資料不足",
+    ]
+    if indicator.get("time") is None:
+        missing.append("market_daily_price.time")
+    if point_count is not None and point_count < 60:
+        missing.append(f"market_daily_price.{timeframe}.ma60")
+        warnings.append(f"{label}資料少於 60 根，長均線與趨勢分數信心較低。")
+
+    confidence = "high"
+    if missing:
+        confidence = "medium"
+    if point_count is not None and point_count < 20:
+        confidence = "low"
+
+    positive, neutral, negative = TIMEFRAME_TITLE_LABELS.get(
+        timeframe,
+        ("技術偏多", "技術整理", "技術偏弱"),
+    )
+    return {
+        "kind": "tw_stock_technical_report",
+        "stock_id": stock_id,
+        "timeframe": timeframe,
+        "phase": timeframe,
+        "confidence": confidence,
+        "generated_at": _now(),
+        "title": _title_from_score(score, positive=positive, neutral=neutral, negative=negative),
+        "summary": f"{summary_label}：" + "，".join(summary_parts),
+        "score": score,
+        "value": price_vs_ma20,
+        "value_label": "vs MA20",
+        "rows": rows,
+        "badges": badges,
+        "data": {
+            "indicator": indicator,
+            "market": _stock_market(db=db, stock_id=stock_id),
+            "change_pct": change_pct,
+            "timeframe": timeframe,
+            "point_count": point_count,
+        },
+        "missing": list(dict.fromkeys(missing)),
+        "warnings": list(dict.fromkeys(warnings)),
+        "source_refs": _technical_source_refs(timeframe=timeframe, include_intraday=False),
+    }
 
 
 def _build_today_report(
@@ -661,6 +939,21 @@ def _build_daily_report(*, db: Session, stock_id: str) -> dict[str, Any]:
     }
 
 
+def _build_aggregated_report(*, db: Session, stock_id: str, timeframe: str) -> dict[str, Any]:
+    indicator, chart = _aggregated_indicator(
+        db=db,
+        stock_id=stock_id,
+        timeframe=timeframe,
+    )
+    return _build_indicator_report(
+        db=db,
+        stock_id=stock_id,
+        timeframe=timeframe,
+        indicator=indicator,
+        point_count=chart.get("point_count"),
+    )
+
+
 def build_stock_technical_report(
     *,
     db: Session,
@@ -681,4 +974,11 @@ def build_stock_technical_report(
     if normalized_timeframe == "daily":
         return _build_daily_report(db=db, stock_id=normalized_stock_id)
 
-    raise ValueError("timeframe must be one of: today, daily.")
+    if normalized_timeframe in {"weekly", "monthly"}:
+        return _build_aggregated_report(
+            db=db,
+            stock_id=normalized_stock_id,
+            timeframe=normalized_timeframe,
+        )
+
+    raise ValueError("timeframe must be one of: today, daily, weekly, monthly.")

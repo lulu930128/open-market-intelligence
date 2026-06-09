@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.ai import ask as ai_ask
 from app.ai import freshness
+from app.ai import reports as ai_reports
 from app.ai.schemas import AiAskRequest
 from app.db.models import (
     Base,
@@ -378,6 +379,276 @@ class AiFreshnessGuardTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_tw_watchlist_refreshes_stale_daily_prices_before_answer_when_allowed(self) -> None:
+        db = make_session()
+        try:
+            payload = AiAskRequest(
+                question="科技股狀況",
+                target={"type": "tw_watchlist", "id": "1"},
+                mode="brief",
+                allow_external_fetch=True,
+                tool_budget={"max_calls": 1, "max_external_fetches": 1, "max_total_seconds": 25},
+            )
+            server_policy = ai_ask.AiAskServerPolicy(
+                can_call_llm=False,
+                can_write=False,
+                can_external_fetch=True,
+                trust_source="local_allowlist",
+            )
+            stale_freshness = {
+                "kind": "ai_scope_freshness",
+                "scope_type": "watchlist",
+                "scope_id": "1",
+                "is_current": False,
+                "stale_stock_count": 2,
+                "missing": ["market_daily_price"],
+                "expected_dates": {"market_daily_price": "2026-06-08"},
+                "warnings": ["Local OMI data is incomplete for 2 stock(s)."],
+                "refresh_recommended": True,
+                "refresh_params": {
+                    "lookback_days": 14,
+                    "include_today": False,
+                    "include_children": True,
+                    "enabled_only": True,
+                    "sleep_seconds": 0.3,
+                    "skip_existing_months": True,
+                },
+            }
+            current_freshness = {
+                **stale_freshness,
+                "is_current": True,
+                "stale_stock_count": 0,
+                "missing": [],
+                "warnings": [],
+                "refresh_recommended": False,
+            }
+
+            with (
+                patch.object(
+                    ai_ask.freshness,
+                    "check_watchlist_data_freshness",
+                    side_effect=[stale_freshness, current_freshness],
+                ) as check_freshness,
+                patch.object(
+                    ai_ask.agentic_tools.watchlist_backfill_service,
+                    "refresh_watchlist_group_daily_prices",
+                    return_value={
+                        "group_id": 1,
+                        "requested_stock_count": 2,
+                        "current_count": 0,
+                        "success_count": 2,
+                        "warning_count": 0,
+                        "error_count": 0,
+                        "skipped_count": 0,
+                        "target_date": date(2026, 6, 8),
+                    },
+                ) as refresh_group,
+                patch.object(
+                    ai_ask.reports,
+                    "build_watchlist_brief",
+                    return_value={
+                        "kind": "watchlist_brief",
+                        "warnings": [],
+                        "strategy_profile": "short_term_momentum",
+                    },
+                ),
+            ):
+                response = ai_ask.ask(db=db, payload=payload, server_policy=server_policy)
+
+            self.assertEqual(check_freshness.call_count, 2)
+            refresh_group.assert_called_once()
+            self.assertEqual(refresh_group.call_args.kwargs["group_id"], 1)
+            self.assertTrue(refresh_group.call_args.kwargs["include_children"])
+            self.assertTrue(refresh_group.call_args.kwargs["enabled_only"])
+            self.assertEqual(response["tool_plan"]["provider"], "fallback")
+            self.assertEqual(response["tool_runs"][0]["tool"], "tw.refresh_watchlist_evidence")
+            self.assertEqual(response["tool_runs"][0]["status"], "success")
+            self.assertTrue(response["freshness"]["is_current"])
+            self.assertFalse(any(action["type"] == "refresh_data" for action in response["next_actions"]))
+        finally:
+            db.close()
+
+    def test_watchlist_brief_summary_exposes_sector_overview(self) -> None:
+        db = make_session()
+        try:
+            context = {
+                "kind": "watchlist_context",
+                "generated_at": "2026-06-08T09:05:00+08:00",
+                "as_of": "2026-06-08",
+                "scope": {
+                    "group_id": 1,
+                    "group_name": "科技股",
+                    "include_children": True,
+                    "enabled_only": True,
+                },
+                "data": {
+                    "ranking": {
+                        "group_id": 1,
+                        "rank_by": "score",
+                        "sort_order": "desc",
+                        "requested_stock_count": 3,
+                        "ranked_count": 3,
+                        "no_data_count": 0,
+                        "error_count": 0,
+                        "trade_date": date(2026, 6, 8),
+                        "target_trade_date": date(2026, 6, 8),
+                        "is_current": True,
+                        "current_stock_count": 3,
+                        "stale_stock_count": 0,
+                        "results": [
+                            {
+                                "rank": 1,
+                                "stock_id": "2330",
+                                "stock_name": "台積電",
+                                "time": "2026-06-08",
+                                "close": 2365,
+                                "volume": 38924,
+                                "change": 35,
+                                "change_pct": 1.50,
+                                "limit_status": None,
+                                "score": 72,
+                                "status": "bullish",
+                                "signal_count": 2,
+                                "signal_keys": ["macd_bullish"],
+                                "primary_signal_key": "macd_bullish",
+                                "primary_signal_label": "MACD偏多",
+                                "error_message": None,
+                            },
+                            {
+                                "rank": 2,
+                                "stock_id": "2303",
+                                "stock_name": "聯電",
+                                "time": "2026-06-08",
+                                "close": 131.5,
+                                "volume": 377472,
+                                "change": 6.5,
+                                "change_pct": 5.20,
+                                "limit_status": None,
+                                "score": 48,
+                                "status": "bullish",
+                                "signal_count": 1,
+                                "signal_keys": ["volume_price_up"],
+                                "primary_signal_key": "volume_price_up",
+                                "primary_signal_label": "量價上攻",
+                                "error_message": None,
+                            },
+                            {
+                                "rank": 3,
+                                "stock_id": "2454",
+                                "stock_name": "聯發科",
+                                "time": "2026-06-08",
+                                "close": 4300,
+                                "volume": 11889,
+                                "change": -130,
+                                "change_pct": -2.93,
+                                "limit_status": None,
+                                "score": -22,
+                                "status": "bearish",
+                                "signal_count": 1,
+                                "signal_keys": ["roc_negative"],
+                                "primary_signal_key": "roc_negative",
+                                "primary_signal_label": "動能轉弱",
+                                "error_message": None,
+                            },
+                        ],
+                    },
+                },
+                "missing": [],
+                "warnings": [],
+                "source_refs": [],
+            }
+
+            with patch.object(ai_reports.tools, "read_watchlist_context", return_value=context):
+                result = ai_reports.build_watchlist_brief(db=db, group_id=1, rank_by="score", sort_order="desc")
+
+            overview = result["summary"]["overview"]
+            self.assertEqual(result["data"]["overview"], overview)
+            self.assertEqual(overview["kind"], "watchlist_sector_overview")
+            self.assertEqual(overview["group_name"], "科技股")
+            self.assertEqual(overview["breadth"]["up_count"], 2)
+            self.assertEqual(overview["breadth"]["down_count"], 1)
+            self.assertEqual(overview["data_status"]["is_complete"], True)
+            self.assertIn("結論", overview["answer_outline"][0])
+            self.assertEqual(overview["human_answer"]["kind"], "watchlist_sector_human_answer")
+            self.assertEqual(
+                [section["label"] for section in overview["human_answer"]["sections"]],
+                ["結論", "追蹤", "等回測", "保守", "資料"],
+            )
+            self.assertIn("追蹤：", overview["human_answer"]["text"])
+            self.assertIn("等回測：2303 聯電", overview["human_answer"]["text"])
+            self.assertIn("2330 台積電", overview["strong_rows"][0]["label"])
+            self.assertIn("2330 台積電", overview["follow_rows"][0]["label"])
+            self.assertIn("2454 聯發科", overview["defensive_rows"][0]["label"])
+            self.assertIn("display", result["summary"]["top_rows"][0])
+        finally:
+            db.close()
+
+    def test_watchlist_human_answer_masks_raw_dataset_keys(self) -> None:
+        db = make_session()
+        try:
+            context = {
+                "kind": "watchlist_context",
+                "generated_at": "2026-06-08T09:05:00+08:00",
+                "as_of": "2026-06-05",
+                "scope": {
+                    "group_id": 1,
+                    "group_name": "科技股",
+                    "include_children": True,
+                    "enabled_only": True,
+                },
+                "data": {
+                    "ranking": {
+                        "group_id": 1,
+                        "rank_by": "score",
+                        "sort_order": "desc",
+                        "requested_stock_count": 2,
+                        "ranked_count": 1,
+                        "no_data_count": 1,
+                        "error_count": 0,
+                        "trade_date": date(2026, 6, 5),
+                        "target_trade_date": date(2026, 6, 8),
+                        "is_current": False,
+                        "current_stock_count": 1,
+                        "stale_stock_count": 1,
+                        "results": [
+                            {
+                                "rank": 1,
+                                "stock_id": "5289",
+                                "stock_name": "宜鼎",
+                                "time": "2026-06-05",
+                                "close": 100,
+                                "volume": 1000,
+                                "change": 1,
+                                "change_pct": 1.0,
+                                "limit_status": None,
+                                "score": 38,
+                                "status": "bullish",
+                                "signal_count": 1,
+                                "signal_keys": ["macd_bullish"],
+                                "primary_signal_key": "macd_bullish",
+                                "primary_signal_label": "MACD偏多",
+                                "error_message": None,
+                            }
+                        ],
+                    },
+                },
+                "missing": ["margin_trading_daily", "broker_branch_trade_daily"],
+                "warnings": [],
+                "source_refs": [],
+            }
+
+            with patch.object(ai_reports.tools, "read_watchlist_context", return_value=context):
+                result = ai_reports.build_watchlist_brief(db=db, group_id=1, rank_by="score", sort_order="desc")
+
+            human_text = result["summary"]["overview"]["human_answer"]["text"]
+            self.assertIn("融資券", human_text)
+            self.assertIn("分點", human_text)
+            self.assertNotIn("margin_trading_daily", human_text)
+            self.assertNotIn("broker_branch_trade_daily", human_text)
+            self.assertEqual(result["summary"]["overview"]["data_status"]["human_missing"], ["融資券", "分點"])
+        finally:
+            db.close()
+
     def test_ask_allows_non_persistent_analysis_without_write(self) -> None:
         db = make_session()
         try:
@@ -458,6 +729,29 @@ class AiFreshnessGuardTests(unittest.TestCase):
             self.assertFalse(response["clarification"]["required"])
             self.assertTrue(response["answer_ready"])
             self.assertIn(response["report_level"], {"brief", "brief_with_gaps"})
+        finally:
+            db.close()
+
+    def test_ask_defaults_auto_horizon_to_swing_for_tw_stock(self) -> None:
+        db = make_session()
+        try:
+            add_stock(db)
+            payload = AiAskRequest(
+                question="請看 2330 目前怎麼樣",
+                target={"type": "tw_stock", "id": "2330"},
+                mode="brief",
+            )
+
+            response = ai_ask.ask(db=db, payload=payload)
+
+            self.assertEqual(response["policy"]["analysis_horizon"]["requested"], "auto")
+            self.assertEqual(response["policy"]["analysis_horizon"]["effective"], "swing")
+            self.assertTrue(response["policy"]["analysis_horizon"]["defaulted"])
+            self.assertEqual(response["result"]["data"]["analysis"]["selected_horizon"], "swing")
+            self.assertEqual(response["analysis"]["selected_horizon"], "swing")
+            self.assertEqual(response["analysis"]["horizon_label"], "中短線")
+            self.assertEqual(response["analysis"]["source"], "result.data.analysis")
+            self.assertIn("中短線評分", response["analysis"]["display"])
         finally:
             db.close()
 
@@ -647,7 +941,31 @@ class AiFreshnessGuardTests(unittest.TestCase):
                 patch.object(
                     ai_ask.reports,
                     "build_watchlist_brief",
-                    return_value={"kind": "watchlist_brief", "warnings": [], "strategy_profile": "short_term_momentum"},
+                    return_value={
+                        "kind": "watchlist_brief",
+                        "warnings": [],
+                        "strategy_profile": "short_term_momentum",
+                        "data": {
+                            "overview": {
+                            "kind": "watchlist_sector_overview",
+                            "group_id": 1,
+                            "group_name": "科技股",
+                            "stance": "結構偏多",
+                            "confidence": "high",
+                            "display": "科技股 結構偏多；上漲 2、下跌 1。",
+                            "answer_outline": ["結論：科技股 結構偏多。"],
+                            "human_answer": {
+                                "kind": "watchlist_sector_human_answer",
+                                "lines": [
+                                    "結論：科技股 結構偏多；上漲 2、下跌 1。",
+                                    "追蹤：2330 台積電",
+                                ],
+                                "text": "結論：科技股 結構偏多；上漲 2、下跌 1。\n追蹤：2330 台積電",
+                            },
+                            "breadth": {"up_count": 2, "down_count": 1},
+                        }
+                    },
+                    },
                 ) as build_watchlist_brief,
             ):
                 response = ai_ask.ask(db=db, payload=payload)
@@ -657,6 +975,11 @@ class AiFreshnessGuardTests(unittest.TestCase):
             self.assertEqual(response["target"]["type"], "tw_watchlist")
             self.assertEqual(response["target"]["id"], "1")
             self.assertEqual(response["action"], "omi.generate_watchlist_brief")
+            self.assertEqual(response["analysis"]["kind"], "watchlist_sector_digest")
+            self.assertEqual(response["analysis"]["stance"], "結構偏多")
+            self.assertEqual(response["analysis"]["source"], "result.data.overview")
+            self.assertEqual(response["analysis"]["answer_outline"][1], "追蹤：2330 台積電")
+            self.assertIn("human_answer", response["analysis"])
             self.assertFalse(response["clarification"]["required"])
         finally:
             db.close()

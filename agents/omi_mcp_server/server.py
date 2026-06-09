@@ -66,7 +66,9 @@ ASK_TOOL: dict[str, Any] = {
     "description": (
         "Open Market Intelligence v2 entry point. Send a natural-language question "
         "and optional target; OMI resolves the target, returns clarification when "
-        "needed, and provides read-only evidence, brief, or trusted analysis."
+        "needed, and provides read-only evidence, brief, or trusted analysis. "
+        "For user-facing watchlist or sector answers, prefer analysis.human_answer "
+        "over raw result/missing/debug fields."
     ),
     "inputSchema": {
         "type": "object",
@@ -111,6 +113,12 @@ ASK_TOOL: dict[str, Any] = {
                     "dividend_value",
                 ],
                 "default": "short_term_momentum",
+            },
+            "analysis_horizon": {
+                "type": "string",
+                "enum": ["auto", "intraday", "short", "swing", "long"],
+                "default": "auto",
+                "description": "Analysis horizon. auto defaults to swing, meaning medium-short-term evidence.",
             },
             "caller_profile": {
                 "type": "string",
@@ -193,6 +201,12 @@ INTERNAL_TOOLS: list[dict[str, Any]] = [
                 "bars": {"type": "integer", "minimum": 20, "maximum": 1000, "default": 120},
                 "revenue_months": {"type": "integer", "minimum": 1, "maximum": 120, "default": 12},
                 "financial_quarters": {"type": "integer", "minimum": 1, "maximum": 40, "default": 8},
+                "include_intraday": {"type": "boolean", "default": False},
+                "analysis_horizon": {
+                    "type": "string",
+                    "enum": ["auto", "intraday", "short", "swing", "long"],
+                    "default": "auto",
+                },
             },
             "required": ["stock_id"],
         },
@@ -247,8 +261,14 @@ INTERNAL_TOOLS: list[dict[str, Any]] = [
                         "fundamentals_growth",
                         "dividend_value",
                     ],
-                    "default": "balanced",
+                    "default": "short_term_momentum",
                 },
+                "analysis_horizon": {
+                    "type": "string",
+                    "enum": ["auto", "intraday", "short", "swing", "long"],
+                    "default": "auto",
+                },
+                "include_intraday": {"type": "boolean", "default": False},
                 "branch_days": {"type": "integer", "minimum": 1, "maximum": 120, "default": 5},
             },
             "required": ["stock_id"],
@@ -272,7 +292,7 @@ INTERNAL_TOOLS: list[dict[str, Any]] = [
                         "fundamentals_growth",
                         "dividend_value",
                     ],
-                    "default": "balanced",
+                    "default": "short_term_momentum",
                 },
                 "rank_by": {
                     "type": "string",
@@ -302,8 +322,14 @@ INTERNAL_TOOLS: list[dict[str, Any]] = [
                         "fundamentals_growth",
                         "dividend_value",
                     ],
-                    "default": "balanced",
+                    "default": "short_term_momentum",
                 },
+                "analysis_horizon": {
+                    "type": "string",
+                    "enum": ["auto", "intraday", "short", "swing", "long"],
+                    "default": "auto",
+                },
+                "include_intraday": {"type": "boolean", "default": False},
                 "branch_days": {"type": "integer", "minimum": 1, "maximum": 120, "default": 5},
             },
             "required": ["stock_id"],
@@ -327,7 +353,7 @@ INTERNAL_TOOLS: list[dict[str, Any]] = [
                         "fundamentals_growth",
                         "dividend_value",
                     ],
-                    "default": "balanced",
+                    "default": "short_term_momentum",
                 },
                 "rank_by": {
                     "type": "string",
@@ -451,8 +477,14 @@ INTERNAL_TOOLS: list[dict[str, Any]] = [
                         "fundamentals_growth",
                         "dividend_value",
                     ],
-                    "default": "balanced",
+                    "default": "short_term_momentum",
                 },
+                "analysis_horizon": {
+                    "type": "string",
+                    "enum": ["auto", "intraday", "short", "swing", "long"],
+                    "default": "auto",
+                },
+                "include_intraday": {"type": "boolean", "default": False},
                 "branch_days": {"type": "integer", "minimum": 1, "maximum": 120, "default": 5},
             },
             "required": ["stock_id"],
@@ -476,7 +508,7 @@ INTERNAL_TOOLS: list[dict[str, Any]] = [
                         "fundamentals_growth",
                         "dividend_value",
                     ],
-                    "default": "balanced",
+                    "default": "short_term_momentum",
                 },
                 "rank_by": {
                     "type": "string",
@@ -650,6 +682,7 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
                     "fallback_to_cached": True,
                 },
                 "strategy_profile": arguments.get("strategy_profile", "short_term_momentum"),
+                "analysis_horizon": arguments.get("analysis_horizon", "auto"),
                 "branch_days": arguments.get("branch_days", 5),
                 "rank_by": arguments.get("rank_by", "score"),
                 "sort_order": arguments.get("sort_order", "desc"),
@@ -673,6 +706,8 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
                 "bars": arguments.get("bars", 120),
                 "revenue_months": arguments.get("revenue_months", 12),
                 "financial_quarters": arguments.get("financial_quarters", 8),
+                "include_intraday": _bool_arg(arguments, "include_intraday", False),
+                "analysis_horizon": arguments.get("analysis_horizon", "auto"),
             },
         )
 
@@ -697,8 +732,10 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
         return _api_get(
             f"/api/ai/stocks/{stock_id}/brief",
             {
-                "strategy_profile": arguments.get("strategy_profile", "balanced"),
+                "strategy_profile": arguments.get("strategy_profile", "short_term_momentum"),
                 "branch_days": arguments.get("branch_days", 5),
+                "include_intraday": _bool_arg(arguments, "include_intraday", False),
+                "analysis_horizon": arguments.get("analysis_horizon", "auto"),
             },
         )
 
@@ -707,7 +744,7 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
         return _api_get(
             f"/api/ai/watchlists/{group_id}/brief",
             {
-                "strategy_profile": arguments.get("strategy_profile", "balanced"),
+                "strategy_profile": arguments.get("strategy_profile", "short_term_momentum"),
                 "rank_by": arguments.get("rank_by", "score"),
                 "sort_order": arguments.get("sort_order", "desc"),
             },
@@ -718,8 +755,10 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
         return _api_post(
             f"/api/ai/stocks/{stock_id}/brief/generate",
             {
-                "strategy_profile": arguments.get("strategy_profile", "balanced"),
+                "strategy_profile": arguments.get("strategy_profile", "short_term_momentum"),
                 "branch_days": arguments.get("branch_days", 5),
+                "include_intraday": _bool_arg(arguments, "include_intraday", False),
+                "analysis_horizon": arguments.get("analysis_horizon", "auto"),
             },
         )
 
@@ -728,7 +767,7 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
         return _api_post(
             f"/api/ai/watchlists/{group_id}/brief/generate",
             {
-                "strategy_profile": arguments.get("strategy_profile", "balanced"),
+                "strategy_profile": arguments.get("strategy_profile", "short_term_momentum"),
                 "rank_by": arguments.get("rank_by", "score"),
                 "sort_order": arguments.get("sort_order", "desc"),
             },
@@ -799,8 +838,10 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
         return _api_post(
             f"/api/ai/stocks/{stock_id}/brief/save",
             {
-                "strategy_profile": arguments.get("strategy_profile", "balanced"),
+                "strategy_profile": arguments.get("strategy_profile", "short_term_momentum"),
                 "branch_days": arguments.get("branch_days", 5),
+                "include_intraday": _bool_arg(arguments, "include_intraday", False),
+                "analysis_horizon": arguments.get("analysis_horizon", "auto"),
             },
         )
 
@@ -809,7 +850,7 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
         return _api_post(
             f"/api/ai/watchlists/{group_id}/brief/save",
             {
-                "strategy_profile": arguments.get("strategy_profile", "balanced"),
+                "strategy_profile": arguments.get("strategy_profile", "short_term_momentum"),
                 "rank_by": arguments.get("rank_by", "score"),
                 "sort_order": arguments.get("sort_order", "desc"),
             },
@@ -839,7 +880,8 @@ def _handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
                 },
                 "instructions": (
                     "Use omi.ask as the public entry point. It is read-only by default; "
-                    "report generation requires a server-side trusted request. Do not treat missing data as a conclusion."
+                    "report generation requires a server-side trusted request. Do not treat missing data as a conclusion. "
+                    "When omi.ask returns analysis.human_answer, use that concise answer first and do not expose raw dataset keys unless asked."
                 ),
             },
         )

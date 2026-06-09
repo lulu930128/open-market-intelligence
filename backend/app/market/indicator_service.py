@@ -419,34 +419,25 @@ def _donchian_series(
     return upper, lower
 
 
-def calculate_daily_indicators(
-    db: Session,
-    stock_id: str,
-    from_date: date | None = None,
-    to_date: date | None = None,
-    limit: int = 250,
+def calculate_indicator_points_from_ohlc_points(
+    points: list[dict],
     ma_windows: str = "5,20,60",
     volume_ma_windows: str = "5,20",
+    *,
+    max_gap_days: int | None = 10,
 ) -> list[dict]:
     ma_window_list = _parse_windows(ma_windows, default=[5, 20, 60])
     volume_ma_window_list = _parse_windows(volume_ma_windows, default=[5, 20])
 
-    rows = list_stock_daily_history(
-        db=db,
-        stock_id=stock_id,
-        from_date=from_date,
-        to_date=to_date,
-        limit=limit,
-        ascending=True,
-    )
-
-    closes: list[float | None] = [row.close_price for row in rows]
-    highs: list[float | None] = [row.high_price for row in rows]
-    lows: list[float | None] = [row.low_price for row in rows]
-    row_dates: list[date] = [row.trade_date for row in rows]
+    closes: list[float | None] = [point.get("close") for point in points]
+    highs: list[float | None] = [point.get("high") for point in points]
+    lows: list[float | None] = [point.get("low") for point in points]
+    point_dates: list[date] | None = None
+    if max_gap_days is not None and all(isinstance(point.get("time"), date) for point in points):
+        point_dates = [point["time"] for point in points]
     volumes: list[float | None] = [
-        float(row.trade_volume) if row.trade_volume is not None else None
-        for row in rows
+        float(point["volume"]) if point.get("volume") is not None else None
+        for point in points
     ]
     ema12 = _ema_series(closes, 12)
     ema26 = _ema_series(closes, 26)
@@ -460,31 +451,43 @@ def calculate_daily_indicators(
 
     results: list[dict] = []
 
-    for index, row in enumerate(rows):
+    for index, point in enumerate(points):
         previous_close = closes[index - 1] if index > 0 else None
         change, change_pct = _calculate_change_from_price_change(
-            row.close_price,
-            row.price_change,
+            point.get("close"),
+            point.get("price_change"),
         )
 
         if change is None and change_pct is None:
-            change, change_pct = _calculate_change(row.close_price, previous_close)
+            change, change_pct = _calculate_change(point.get("close"), previous_close)
 
         ma_values = {
-            f"ma{window}": _moving_average(closes, index, window, row_dates)
+            f"ma{window}": _moving_average(
+                closes,
+                index,
+                window,
+                point_dates,
+                max_gap_days=max_gap_days or 10,
+            )
             for window in ma_window_list
         }
 
         volume_ma_values = {
-            f"volume_ma{window}": _moving_average(volumes, index, window, row_dates)
+            f"volume_ma{window}": _moving_average(
+                volumes,
+                index,
+                window,
+                point_dates,
+                max_gap_days=max_gap_days or 10,
+            )
             for window in volume_ma_window_list
         }
 
         results.append(
             {
-                "time": row.trade_date,
-                "close": row.close_price,
-                "volume": row.trade_volume,
+                "time": point.get("time"),
+                "close": point.get("close"),
+                "volume": point.get("volume"),
                 "change": change,
                 "change_pct": change_pct,
                 "ma": ma_values,
@@ -523,6 +526,44 @@ def calculate_daily_indicators(
         )
 
     return results
+
+
+def calculate_daily_indicators(
+    db: Session,
+    stock_id: str,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    limit: int = 250,
+    ma_windows: str = "5,20,60",
+    volume_ma_windows: str = "5,20",
+) -> list[dict]:
+    rows = list_stock_daily_history(
+        db=db,
+        stock_id=stock_id,
+        from_date=from_date,
+        to_date=to_date,
+        limit=limit,
+        ascending=True,
+    )
+
+    points = [
+        {
+            "time": row.trade_date,
+            "open": row.open_price,
+            "high": row.high_price,
+            "low": row.low_price,
+            "close": row.close_price,
+            "volume": row.trade_volume,
+            "price_change": row.price_change,
+        }
+        for row in rows
+    ]
+    return calculate_indicator_points_from_ohlc_points(
+        points,
+        ma_windows=ma_windows,
+        volume_ma_windows=volume_ma_windows,
+        max_gap_days=10,
+    )
 
 
 def calculate_latest_daily_indicator(

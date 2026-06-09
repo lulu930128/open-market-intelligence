@@ -327,7 +327,7 @@ export type StockTechnicalReportBadge = {
 export type StockTechnicalReportRead = {
   kind: string;
   stock_id: string;
-  timeframe: "today" | "daily";
+  timeframe: "today" | "daily" | "weekly" | "monthly";
   phase: string;
   confidence: "low" | "medium" | "high" | string;
   generated_at: string;

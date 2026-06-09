@@ -30,6 +30,13 @@ TARGET_TYPE_TO_INTERNAL_SCOPE = {
 VALID_MODES = {"auto", "data_only", "brief", "analysis", "report"}
 VALID_RANK_BY = {"watchlist", "score", "change_pct", "volume"}
 VALID_SORT_ORDER = {"asc", "desc"}
+VALID_ANALYSIS_HORIZONS = {"auto", "intraday", "short", "swing", "long"}
+ANALYSIS_HORIZON_LABELS = {
+    "intraday": "盤中",
+    "short": "短線",
+    "swing": "中短線",
+    "long": "長線",
+}
 
 
 @dataclass(frozen=True)
@@ -105,6 +112,49 @@ INTRADAY_HINTS = (
     "開盤",
     "最新",
 )
+SHORT_HORIZON_HINTS = (
+    "short",
+    "daily",
+    "day trade",
+    "next session",
+    "日k",
+    "日K",
+    "短線",
+    "明天",
+    "隔日",
+    "這幾天",
+    "1到5天",
+    "1-5天",
+)
+SWING_HORIZON_HINTS = (
+    "swing",
+    "weekly",
+    "week",
+    "週k",
+    "週K",
+    "周k",
+    "周K",
+    "波段",
+    "中短線",
+    "這幾週",
+    "幾週",
+)
+LONG_HORIZON_HINTS = (
+    "long",
+    "monthly",
+    "month",
+    "valuation",
+    "fundamental",
+    "月k",
+    "月K",
+    "長線",
+    "投資",
+    "基本面",
+    "估值",
+    "營收",
+    "財報",
+    "配息",
+)
 WATCHLIST_HINTS = (
     "watchlist",
     "group",
@@ -152,8 +202,50 @@ def _contains_hint(question: str, hints: tuple[str, ...]) -> bool:
     return any(hint.lower() in lowered for hint in hints)
 
 
+def _normalize_analysis_horizon(value: str | None) -> str:
+    normalized = (value or "auto").strip().lower()
+    if normalized in {"today", "live", "realtime", "real-time", "now"}:
+        return "intraday"
+    if normalized in {"daily", "day", "short_term", "short-term"}:
+        return "short"
+    if normalized in {"weekly", "medium", "medium_short", "medium-short"}:
+        return "swing"
+    if normalized in {"monthly", "fundamental", "investment"}:
+        return "long"
+    return normalized
+
+
+def _infer_analysis_horizon(payload: AiAskRequest) -> str:
+    requested = _normalize_analysis_horizon(payload.analysis_horizon)
+    if requested != "auto":
+        return requested
+
+    question = payload.question
+    if _contains_hint(question, INTRADAY_HINTS):
+        return "intraday"
+    if _contains_hint(question, LONG_HORIZON_HINTS):
+        return "long"
+    if _contains_hint(question, SWING_HORIZON_HINTS):
+        return "swing"
+    if _contains_hint(question, SHORT_HORIZON_HINTS):
+        return "short"
+
+    if payload.strategy_profile in {"fundamentals_growth", "dividend_value"}:
+        return "long"
+    if payload.strategy_profile == "technical_swing":
+        return "swing"
+
+    return "swing"
+
+
 def _include_tw_intraday(payload: AiAskRequest) -> bool:
-    return bool(payload.allow_external_fetch and _contains_hint(payload.question, INTRADAY_HINTS))
+    return bool(
+        payload.allow_external_fetch
+        and (
+            _infer_analysis_horizon(payload) == "intraday"
+            or _contains_hint(payload.question, INTRADAY_HINTS)
+        )
+    )
 
 
 def _normalize_text(value: str | None) -> str | None:
@@ -737,6 +829,11 @@ def _validate_request(payload: AiAskRequest) -> None:
     if payload.sort_order not in VALID_SORT_ORDER:
         raise ValueError(f"sort_order must be one of: {', '.join(sorted(VALID_SORT_ORDER))}")
 
+    if _normalize_analysis_horizon(payload.analysis_horizon) not in VALID_ANALYSIS_HORIZONS:
+        raise ValueError(
+            f"analysis_horizon must be one of: {', '.join(sorted(VALID_ANALYSIS_HORIZONS))}"
+        )
+
     if not isinstance(payload.tool_budget, dict):
         raise ValueError("tool_budget must be an object.")
 
@@ -866,6 +963,7 @@ def _read_data_only(db: Session, payload: AiAskRequest, scope_type: str) -> tupl
             stock_id=stock_id,
             branch_days=payload.branch_days,
             include_intraday=_include_tw_intraday(payload),
+            analysis_horizon=payload.analysis_horizon,
         )
 
     if scope_type == "us_stock":
@@ -896,6 +994,7 @@ def _build_brief(db: Session, payload: AiAskRequest, scope_type: str) -> tuple[s
             strategy_profile=payload.strategy_profile,
             branch_days=payload.branch_days,
             include_intraday=_include_tw_intraday(payload),
+            analysis_horizon=payload.analysis_horizon,
         )
 
     if scope_type == "watchlist":
@@ -927,6 +1026,7 @@ def _generate_report(db: Session, payload: AiAskRequest, scope_type: str) -> tup
             strategy_profile=payload.strategy_profile,
             branch_days=payload.branch_days,
             include_intraday=_include_tw_intraday(payload),
+            analysis_horizon=payload.analysis_horizon,
         )
 
     if scope_type == "watchlist":
@@ -951,6 +1051,7 @@ def _generate_analysis(db: Session, payload: AiAskRequest, scope_type: str) -> t
             strategy_profile=payload.strategy_profile,
             branch_days=payload.branch_days,
             include_intraday=_include_tw_intraday(payload),
+            analysis_horizon=payload.analysis_horizon,
         )
 
     if scope_type == "watchlist":
@@ -969,6 +1070,83 @@ def _generate_analysis(db: Session, payload: AiAskRequest, scope_type: str) -> t
 def _extract_list(result: dict[str, Any], key: str) -> list[Any]:
     value = result.get(key)
     return value if isinstance(value, list) else []
+
+
+def _score_display(value: Any) -> str | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    sign = "+" if value > 0 else ""
+    return f"{sign}{int(round(value))}"
+
+
+def _extract_analysis_digest(result: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
+    data = result.get("data")
+    analysis = (data or {}).get("analysis") if isinstance(data, dict) else None
+    if isinstance(analysis, dict) and analysis:
+        policy_horizon = policy.get("analysis_horizon") if isinstance(policy, dict) else {}
+        selected_horizon = (
+            analysis.get("selected_horizon")
+            or (policy_horizon or {}).get("effective")
+            or "swing"
+        )
+        horizon_label = ANALYSIS_HORIZON_LABELS.get(str(selected_horizon), str(selected_horizon))
+        selected_score = analysis.get("selected_score")
+        score_text = _score_display(selected_score)
+        title = analysis.get("selected_title")
+        summary = analysis.get("selected_summary")
+        display_parts = [f"{horizon_label}評分 {score_text}" if score_text is not None else f"{horizon_label}評分 -"]
+        if title:
+            display_parts.append(str(title))
+        if summary:
+            display_parts.append(str(summary))
+
+        return {
+            "kind": "stock_analysis_digest",
+            "requested_horizon": analysis.get("requested_horizon") or (policy_horizon or {}).get("requested"),
+            "selected_horizon": selected_horizon,
+            "horizon_label": horizon_label,
+            "selected_timeframe": analysis.get("selected_timeframe"),
+            "selected_score": selected_score,
+            "score_display": score_text,
+            "selected_title": title,
+            "selected_summary": summary,
+            "selected_confidence": analysis.get("selected_confidence"),
+            "display": "｜".join(display_parts),
+            "scores": analysis.get("scores") or {},
+            "components": analysis.get("components") or [],
+            "source": "result.data.analysis",
+        }
+
+    overview = (data or {}).get("overview") if isinstance(data, dict) else None
+    if isinstance(overview, dict) and overview.get("kind") == "watchlist_sector_overview":
+        human_answer = overview.get("human_answer") if isinstance(overview.get("human_answer"), dict) else {}
+        answer_outline = human_answer.get("lines") or overview.get("answer_outline") or []
+        return {
+            "kind": "watchlist_sector_digest",
+            "group_id": overview.get("group_id"),
+            "group_name": overview.get("group_name"),
+            "stance": overview.get("stance"),
+            "confidence": overview.get("confidence"),
+            "as_of": overview.get("as_of"),
+            "display": overview.get("display"),
+            "answer_outline": answer_outline,
+            "human_answer": human_answer,
+            "breadth": overview.get("breadth") or {},
+            "strong_rows": overview.get("strong_rows") or [],
+            "weak_rows": overview.get("weak_rows") or [],
+            "watch_rows": overview.get("watch_rows") or [],
+            "follow_rows": overview.get("follow_rows") or [],
+            "pullback_rows": overview.get("pullback_rows") or [],
+            "defensive_rows": overview.get("defensive_rows") or [],
+            "data_status": overview.get("data_status") or {},
+            "guidance": (
+                "Prefer analysis.human_answer for the user-facing reply; avoid exposing raw missing dataset keys "
+                "unless the user explicitly asks for debugging detail."
+            ),
+            "source": "result.data.overview",
+        }
+
+    return {}
 
 
 def _check_freshness(db: Session, payload: AiAskRequest, scope_type: str) -> dict[str, Any]:
@@ -1120,6 +1298,7 @@ def _clarification_response(
         "next_actions": next_actions,
         "answer_ready": False,
         "report_level": "clarification",
+        "analysis": {},
         "policy": policy,
         "tool_plan": {},
         "tool_runs": [],
@@ -1146,8 +1325,17 @@ def ask(
             update={"target": _resolution_target(resolution)}
         )
 
+    requested_horizon = payload.analysis_horizon
+    effective_horizon = _infer_analysis_horizon(payload)
+    payload = payload.model_copy(update={"analysis_horizon": effective_horizon})
+
     warnings: list[str] = []
     policy = _policy(payload, server_policy or AiAskServerPolicy())
+    policy["analysis_horizon"] = {
+        "requested": requested_horizon,
+        "effective": effective_horizon,
+        "defaulted": _normalize_analysis_horizon(requested_horizon) == "auto",
+    }
     requested_mode = _infer_mode(payload, scope_type, policy)
     if resolution.clarification_required:
         return _clarification_response(
@@ -1197,6 +1385,28 @@ def ask(
         warnings.extend(tool_session.get("warnings") or [])
         freshness_result = tool_session.get("freshness") or freshness_result
 
+    if (
+        scope_type == "watchlist"
+        and _refresh_before_answer_enabled(payload)
+        and payload.allow_external_fetch
+        and freshness_result
+        and freshness_result.get("refresh_recommended")
+    ):
+        tool_session = agentic_tools.run_tw_watchlist_tool_session(
+            db=db,
+            group_id=_require_group_id(payload),
+            target=_resolution_target(resolution),
+            policy=policy,
+            raw_budget=payload.tool_budget,
+            existing_freshness=freshness_result,
+            include_children=payload.include_children,
+            enabled_only=payload.enabled_only,
+        )
+        tool_plan = tool_session["tool_plan"]
+        tool_runs = tool_session["tool_runs"]
+        warnings.extend(tool_session.get("warnings") or [])
+        freshness_result = tool_session.get("freshness") or freshness_result
+
     if freshness_result:
         policy["freshness_guard"] = {
             "is_current": freshness_result.get("is_current"),
@@ -1238,6 +1448,7 @@ def ask(
     result_warnings = _extract_list(result, "warnings")
     result_missing = _extract_list(result, "missing")
     result_source_refs = _extract_list(result, "source_refs")
+    analysis_digest = _extract_analysis_digest(result, policy)
     freshness_warnings = _extract_list(freshness_result, "warnings")
     freshness_missing = _extract_list(freshness_result, "missing")
     clarification = _clarification_dict(resolution)
@@ -1272,6 +1483,7 @@ def ask(
         "next_actions": next_actions,
         "answer_ready": answer_ready,
         "report_level": _report_level(effective_mode, freshness_result),
+        "analysis": analysis_digest,
         "policy": policy,
         "tool_plan": tool_plan,
         "tool_runs": tool_runs,

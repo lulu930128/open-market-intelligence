@@ -7,6 +7,8 @@ from unittest.mock import patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from app.ai import reports as ai_reports
+from app.ai import tools as ai_tools
 from app.db.models import (
     Base,
     InstitutionalTradeDaily,
@@ -139,6 +141,54 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(report["value_label"], "vs MA20")
         self.assertTrue(report["rows"])
         self.assertIn("daily_indicator", report["data"])
+
+    def test_weekly_and_monthly_reports_return_scored_rows(self) -> None:
+        weekly = build_stock_technical_report(
+            db=self.db,
+            stock_id="2330",
+            timeframe="weekly",
+            include_intraday=False,
+        )
+        monthly = build_stock_technical_report(
+            db=self.db,
+            stock_id="2330",
+            timeframe="monthly",
+            include_intraday=False,
+        )
+
+        self.assertEqual(weekly["timeframe"], "weekly")
+        self.assertEqual(monthly["timeframe"], "monthly")
+        self.assertIsInstance(weekly["score"], int)
+        self.assertIsInstance(monthly["score"], int)
+        self.assertTrue(weekly["rows"])
+        self.assertTrue(monthly["rows"])
+
+    def test_stock_context_auto_horizon_defaults_to_swing_score(self) -> None:
+        context = ai_tools.read_stock_context(
+            db=self.db,
+            stock_id="2330",
+            analysis_horizon="auto",
+            include_intraday=False,
+        )
+
+        analysis = context["data"]["analysis"]
+        self.assertEqual(analysis["selected_horizon"], "swing")
+        self.assertEqual(analysis["selected_timeframe"], "weekly")
+        self.assertIn("daily", context["data"]["technical_reports"])
+        self.assertIn("weekly", context["data"]["technical_reports"])
+        self.assertIn("monthly", context["data"]["technical_reports"])
+
+    def test_stock_brief_summary_exposes_selected_analysis_score(self) -> None:
+        brief = ai_reports.build_stock_brief(
+            db=self.db,
+            stock_id="2330",
+            analysis_horizon="swing",
+        )
+
+        analysis = brief["summary"]["analysis"]
+        self.assertEqual(analysis["selected_horizon"], "swing")
+        self.assertEqual(analysis["horizon_label"], "中短線")
+        self.assertIn("中短線評分", analysis["display"])
 
     def test_today_report_waits_when_intraday_has_no_points(self) -> None:
         with patch(
