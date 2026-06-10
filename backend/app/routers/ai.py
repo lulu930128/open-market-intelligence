@@ -1,6 +1,7 @@
 from secrets import compare_digest
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.ai import ask as ai_ask
@@ -8,6 +9,7 @@ from app.ai import llm as ai_llm
 from app.ai import memory as ai_memory
 from app.ai import orchestrator, prompts, reports, tools
 from app.ai import report_store
+from app.ai import streaming as ai_streaming
 from app.ai.schemas import (
     AiAskRequest,
     AiAskResponse,
@@ -179,6 +181,27 @@ def ask_omi(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except ai_llm.OpenAILLMError as exc:
         _raise_llm_http_error(exc)
+
+
+@router.post("/ask/stream")
+def ask_omi_stream(
+    request: Request,
+    payload: AiAskRequest,
+    db: Session = Depends(get_db),
+):
+    return StreamingResponse(
+        ai_streaming.iter_ask_sse_events(
+            db=db,
+            payload=payload,
+            server_policy=_ai_server_policy(request),
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post(

@@ -33,6 +33,14 @@ from app.market.indices import (
     get_market_index_summary,
 )
 from app.market.intraday import get_intraday_trend
+from app.market.market_chips import (
+    MarketChipFetchError,
+    ensure_market_chip_daily,
+    get_latest_market_chip_daily,
+    list_market_chip_daily,
+    market_chip_daily_to_dict,
+)
+from app.market.overnight_impact import build_us_overnight_impact_report
 from app.market.technical_report import build_stock_technical_report
 from app.market.broker_branch import (
     BrokerBranchFetchError,
@@ -54,9 +62,11 @@ from app.market.schemas import (
     MarketIndexContributionRead,
     MarketIndexListRead,
     MarketIndexSummaryRead,
+    MarketChipDailyRead,
     MarketOhlcChartRead,
     MarketDailyPriceRead,
     MonthlyRevenueRead,
+    OvernightImpactRead,
     ShareholdingDistributionWeeklyRead,
     StockChipCoverageRead,
     TechnicalReportRead,
@@ -619,12 +629,87 @@ def get_stock_technical_report(
         ) from exc
 
 
+@router.get("/overnight-impact/{stock_id}", response_model=OvernightImpactRead)
+def get_stock_overnight_impact(
+    stock_id: str,
+    db: Session = Depends(get_db),
+):
+    try:
+        return build_us_overnight_impact_report(
+            db=db,
+            stock_id=stock_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
 @router.get("/indices/summary", response_model=MarketIndexSummaryRead)
 def get_indices_summary(
     force_refresh: bool = False,
     db: Session = Depends(get_db),
 ):
     return get_market_index_summary(db=db, force_refresh=force_refresh)
+
+
+@router.get("/market-chips/latest", response_model=MarketChipDailyRead)
+def get_latest_market_chip_daily_api(
+    index_id: str = Query(default="TAIEX", pattern="^(TAIEX|TPEX)$"),
+    ensure_latest: bool = False,
+    include_today: bool | None = None,
+    force: bool = False,
+    db: Session = Depends(get_db),
+):
+    try:
+        if ensure_latest:
+            row = ensure_market_chip_daily(
+                db=db,
+                index_id=index_id,
+                include_today=include_today,
+                force=force,
+            )
+        else:
+            row = get_latest_market_chip_daily(db=db, index_id=index_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except MarketChipFetchError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Latest market chip data for index_id='{index_id}' not found.",
+        )
+
+    return market_chip_daily_to_dict(row)
+
+
+@router.get("/market-chips", response_model=list[MarketChipDailyRead])
+def list_market_chip_daily_api(
+    index_id: str = Query(default="TAIEX", pattern="^(TAIEX|TPEX)$"),
+    from_date: date | None = None,
+    to_date: date | None = None,
+    limit: int = Query(default=120, ge=1, le=2000),
+    db: Session = Depends(get_db),
+):
+    return [
+        market_chip_daily_to_dict(row)
+        for row in list_market_chip_daily(
+            db=db,
+            index_id=index_id,
+            from_date=from_date,
+            to_date=to_date,
+            limit=limit,
+        )
+    ]
 
 
 @router.get("/indices/list", response_model=MarketIndexListRead)

@@ -296,6 +296,8 @@ class AiFreshnessGuardTests(unittest.TestCase):
             self.assertFalse(response["freshness"]["is_current"])
             self.assertIn("market_daily_price", response["missing"])
             self.assertIn("monthly_revenue", response["missing"])
+            self.assertIn(response["evidence_passport"]["trust_level"], {"low", "blocked"})
+            self.assertIn("market_daily_price", response["evidence_passport"]["missing"])
             self.assertTrue(
                 any("Report mode skipped" in warning for warning in response["warnings"])
             )
@@ -1023,6 +1025,8 @@ class AiFreshnessGuardTests(unittest.TestCase):
             self.assertEqual(response["action"], "omi.ask.clarify")
             self.assertTrue(response["clarification"]["required"])
             self.assertFalse(response["answer_ready"])
+            self.assertEqual(response["evidence_passport"]["trust_level"], "blocked")
+            self.assertIn("target_scope", response["evidence_passport"]["missing"])
             self.assertTrue(any(action["type"] == "ask_clarification" for action in response["next_actions"]))
         finally:
             db.close()

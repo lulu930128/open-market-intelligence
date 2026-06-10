@@ -127,6 +127,13 @@ function submitterValue(event: FormEvent<HTMLFormElement>) {
   return submitter?.value ?? "";
 }
 
+function isNestedInteractiveTarget(target: EventTarget | null) {
+  return (
+    target instanceof HTMLElement &&
+    target.closest("button,input,select,textarea,a,form") !== null
+  );
+}
+
 function getSidebarMarketOption(value: MarketRegion) {
   return (
     sidebarMarketOptions.find((option) => option.value === value) ??
@@ -895,6 +902,10 @@ export default function SidebarWatchlistExplorer({
                       : "text-slate-700 hover:bg-slate-100",
                   ].join(" ")}
                   style={{ paddingLeft: "24px" }}
+                  onMouseDown={(event) => {
+                    if (event.button !== 0) return;
+                    onSelectStock(item.stockId, item.stockName);
+                  }}
                   onClick={() => onSelectStock(item.stockId, item.stockName)}
                 >
                   <div className="min-w-0 flex-1">
@@ -1006,7 +1017,16 @@ export default function SidebarWatchlistExplorer({
                   ].join(" ")}
                   style={{ paddingLeft: `${28 + depth * 10}px` }}
                   data-watchlist-stock-id={item.id}
-                  onClick={() => onSelectStock(item.stock_id, item.stock_name)}
+                  onMouseDown={(event) => {
+                    if (event.button !== 0 || isNestedInteractiveTarget(event.target)) {
+                      return;
+                    }
+                    onSelectStock(item.stock_id, item.stock_name);
+                  }}
+                  onClick={(event) => {
+                    if (isNestedInteractiveTarget(event.target)) return;
+                    onSelectStock(item.stock_id, item.stock_name);
+                  }}
                 >
                   {stockDropBefore ? (
                     <div className="absolute left-0 right-0 top-0 h-0.5 bg-red-700" />

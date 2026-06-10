@@ -141,6 +141,14 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(report["value_label"], "vs MA20")
         self.assertTrue(report["rows"])
         self.assertIn("daily_indicator", report["data"])
+        self.assertEqual(report["evidence_passport"]["target_kind"], "tw_stock_technical_report")
+        self.assertIn(report["evidence_passport"]["trust_level"], {"high", "medium", "low"})
+        self.assertTrue(
+            any(
+                source["name"] == "market_daily_price"
+                for source in report["evidence_passport"]["source_breakdown"]
+            )
+        )
 
     def test_weekly_and_monthly_reports_return_scored_rows(self) -> None:
         weekly = build_stock_technical_report(
@@ -212,6 +220,8 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(report["phase"], "waiting_intraday")
         self.assertEqual(report["confidence"], "low")
         self.assertIn("intraday_trend.points", report["missing"])
+        self.assertIn(report["evidence_passport"]["trust_level"], {"low", "blocked"})
+        self.assertIn("intraday_trend.points", report["evidence_passport"]["missing"])
 
     def test_today_report_uses_opening_phase_for_sparse_intraday_points(self) -> None:
         with patch(

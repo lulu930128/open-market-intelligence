@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.ai import agentic_tools, freshness, orchestrator, reports, tools
+from app.ai.evidence_passport import build_evidence_passport
 from app.ai.schemas import AiAskRequest
 from app.db.models import StockMaster, USStockMaster, WatchlistGroup
 
@@ -1072,6 +1073,21 @@ def _extract_list(result: dict[str, Any], key: str) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def _result_as_of(result: dict[str, Any], analysis: dict[str, Any]) -> Any:
+    if result.get("as_of"):
+        return result.get("as_of")
+    if analysis.get("as_of"):
+        return analysis.get("as_of")
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    if summary.get("latest_trade_date"):
+        return summary.get("latest_trade_date")
+    data = result.get("data") if isinstance(result.get("data"), dict) else {}
+    overview = data.get("overview") if isinstance(data.get("overview"), dict) else {}
+    if overview.get("as_of"):
+        return overview.get("as_of")
+    return None
+
+
 def _score_display(value: Any) -> str | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
@@ -1151,9 +1167,15 @@ def _extract_analysis_digest(result: dict[str, Any], policy: dict[str, Any]) -> 
 
 def _check_freshness(db: Session, payload: AiAskRequest, scope_type: str) -> dict[str, Any]:
     if scope_type == "stock":
-        return freshness.check_stock_data_freshness(
+        stock_id = _require_scope_id(payload, "stock")
+        stock_freshness = freshness.check_stock_data_freshness(
             db=db,
-            stock_id=_require_scope_id(payload, "stock"),
+            stock_id=stock_id,
+        )
+        return agentic_tools.attach_us_overnight_gaps_to_tw_stock_freshness(
+            db,
+            stock_id=stock_id,
+            stock_freshness=stock_freshness,
         )
 
     if scope_type == "watchlist":
@@ -1280,6 +1302,13 @@ def _clarification_response(
         "message": clarification.get("question"),
         "reason": clarification.get("reason"),
     }
+    response_warnings = [clarification["reason"]] if clarification.get("reason") else []
+    evidence_passport = build_evidence_passport(
+        kind="ai_ask",
+        missing=["target_scope"],
+        warnings=response_warnings,
+        confidence="low",
+    )
 
     return {
         "kind": "ai_ask",
@@ -1305,8 +1334,9 @@ def _clarification_response(
         "result": result,
         "freshness": {},
         "missing": [],
-        "warnings": [clarification["reason"]] if clarification.get("reason") else [],
+        "warnings": response_warnings,
         "source_refs": [],
+        "evidence_passport": evidence_passport,
     }
 
 
@@ -1466,6 +1496,19 @@ def ask(
             "ADR-specific evidence is not connected to omi.ask yet; answered from the Taiwan stock context first."
         )
 
+    combined_missing = list(dict.fromkeys(result_missing + freshness_missing))
+    combined_warnings = list(dict.fromkeys(warnings + freshness_warnings + result_warnings))
+    evidence_passport = build_evidence_passport(
+        kind="ai_ask",
+        as_of=_result_as_of(result, analysis_digest),
+        source_refs=result_source_refs,
+        missing=combined_missing,
+        warnings=combined_warnings,
+        freshness=freshness_result,
+        tool_runs=tool_runs,
+        analysis=analysis_digest,
+    )
+
     return {
         "kind": "ai_ask",
         "contract_version": CONTRACT_VERSION,
@@ -1489,7 +1532,8 @@ def ask(
         "tool_runs": tool_runs,
         "result": result,
         "freshness": freshness_result,
-        "missing": list(dict.fromkeys(result_missing + freshness_missing)),
-        "warnings": list(dict.fromkeys(warnings + freshness_warnings + result_warnings)),
+        "missing": combined_missing,
+        "warnings": combined_warnings,
         "source_refs": result_source_refs,
+        "evidence_passport": evidence_passport,
     }

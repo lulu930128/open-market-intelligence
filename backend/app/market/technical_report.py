@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.db.models import StockMaster
+from app.ai.evidence_passport import build_evidence_passport
 from app.market import indicator_service
 from app.market import service as market_service
 from app.market.intraday import get_intraday_trend
@@ -251,6 +252,35 @@ def _technical_source_refs(*, timeframe: str, include_intraday: bool) -> list[di
     if timeframe == "today" and include_intraday:
         refs.append({"type": "external_or_cache", "name": "taiwan_intraday_trend"})
     return refs
+
+
+def _report_as_of(report: dict[str, Any]) -> Any:
+    data = report.get("data") if isinstance(report.get("data"), dict) else {}
+    for key in ("indicator", "daily_indicator", "daily_background"):
+        value = data.get(key)
+        if isinstance(value, dict) and value.get("time"):
+            return value.get("time")
+
+    intraday = data.get("intraday")
+    if isinstance(intraday, dict):
+        latest_point = intraday.get("latest_point")
+        if isinstance(latest_point, dict) and latest_point.get("time"):
+            return latest_point.get("time")
+
+    return None
+
+
+def _with_evidence_passport(report: dict[str, Any]) -> dict[str, Any]:
+    wrapped = dict(report)
+    wrapped["evidence_passport"] = build_evidence_passport(
+        kind=str(wrapped.get("kind") or "technical_report"),
+        as_of=_report_as_of(wrapped),
+        source_refs=wrapped.get("source_refs") or [],
+        missing=wrapped.get("missing") or [],
+        warnings=wrapped.get("warnings") or [],
+        confidence=str(wrapped.get("confidence") or ""),
+    )
+    return wrapped
 
 
 def _indicator_data_missing_report(
@@ -965,20 +995,24 @@ def build_stock_technical_report(
     normalized_stock_id = stock_id.strip()
 
     if normalized_timeframe == "today":
-        return _build_today_report(
-            db=db,
-            stock_id=normalized_stock_id,
-            include_intraday=include_intraday,
+        return _with_evidence_passport(
+            _build_today_report(
+                db=db,
+                stock_id=normalized_stock_id,
+                include_intraday=include_intraday,
+            )
         )
 
     if normalized_timeframe == "daily":
-        return _build_daily_report(db=db, stock_id=normalized_stock_id)
+        return _with_evidence_passport(_build_daily_report(db=db, stock_id=normalized_stock_id))
 
     if normalized_timeframe in {"weekly", "monthly"}:
-        return _build_aggregated_report(
-            db=db,
-            stock_id=normalized_stock_id,
-            timeframe=normalized_timeframe,
+        return _with_evidence_passport(
+            _build_aggregated_report(
+                db=db,
+                stock_id=normalized_stock_id,
+                timeframe=normalized_timeframe,
+            )
         )
 
     raise ValueError("timeframe must be one of: today, daily, weekly, monthly.")

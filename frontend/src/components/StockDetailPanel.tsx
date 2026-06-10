@@ -45,6 +45,7 @@ import type {
   InstitutionalTradeDailyRead,
   JobRunRead,
   MarginTradingDailyRead,
+  MarketChipDaily,
   MarketIndexContributionItem,
   MarketIndexContributionResponse,
   MarketIndexListItem,
@@ -53,6 +54,7 @@ import type {
   MarketIndexSummary,
   MonthlyRevenueRead,
   OhlcChartResponse,
+  OvernightImpactRead,
   ShareholdingDistributionWeeklyRead,
   StockChipCoverageRead,
   StockIndicatorPoint,
@@ -349,6 +351,19 @@ function formatTradeValueYi(value: number | null | undefined) {
     minimumFractionDigits: 0,
     maximumFractionDigits: 2,
   });
+}
+
+function formatSignedTradeValueYi(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "-";
+  const sign = value > 0 ? "+" : "";
+
+  return `${sign}${formatTradeValueYi(value)}`;
+}
+
+function formatSignedContracts(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "-";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${formatNumber(value)}口`;
 }
 
 function formatContributionPoint(value: number | null | undefined) {
@@ -938,6 +953,121 @@ function TechnicalLoadingPanel() {
   );
 }
 
+function overnightConfidenceLabel(value: string | null | undefined) {
+  if (value === "high") return "高信心";
+  if (value === "medium") return "中信心";
+  if (value === "low") return "低信心";
+  return "信心待確認";
+}
+
+function OvernightImpactPanel({
+  report,
+  loadState,
+}: {
+  report: OvernightImpactRead | null;
+  loadState: LoadState;
+}) {
+  if (loadState === "idle") return null;
+
+  if (loadState === "loading") {
+    return (
+      <div className="mt-3 border-t border-slate-200 pt-3">
+        <div className="flex items-center justify-between gap-3 text-xs">
+          <div>
+            <div className="font-bold uppercase tracking-[0.14em] text-slate-500">
+              Overnight
+            </div>
+            <div className="mt-1 text-slate-500">美股隔夜影響讀取中</div>
+          </div>
+          <LoadingDots label="讀取中" />
+        </div>
+      </div>
+    );
+  }
+
+  if (!report) {
+    return (
+      <div className="mt-3 border-t border-slate-200 pt-3">
+        <div className="flex items-start justify-between gap-4 text-xs">
+          <div>
+            <div className="font-bold uppercase tracking-[0.14em] text-slate-500">
+              Overnight
+            </div>
+            <div className="mt-1 text-sm font-bold text-slate-950">美股隔夜資料不足</div>
+            <div className="mt-0.5 text-slate-500">暫不納入台股映射判斷</div>
+          </div>
+          <div className="text-right font-bold text-slate-400">-</div>
+        </div>
+      </div>
+    );
+  }
+
+  const driverRows = [
+    ...report.factors.map((factor) => ({
+      key: `factor:${factor.symbol}`,
+      label: factor.label,
+      value: factor.change_pct,
+      contribution: factor.weighted_contribution,
+    })),
+    ...report.baskets.map((basket) => ({
+      key: `basket:${basket.group_id}`,
+      label: basket.group_name,
+      value: basket.average_change_pct,
+      contribution: basket.weighted_contribution,
+    })),
+  ]
+    .filter((item) => item.contribution !== null && item.contribution !== undefined)
+    .sort((a, b) => Math.abs(b.contribution ?? 0) - Math.abs(a.contribution ?? 0))
+    .slice(0, 3);
+  const hasWarning = report.warnings.length > 0 || report.confidence === "low";
+
+  return (
+    <div className="mt-3 border-t border-slate-200 pt-3">
+      <div className="omi-overnight-impact flex items-start justify-between gap-4 text-xs">
+        <div className="min-w-0">
+          <div className="font-bold uppercase tracking-[0.14em] text-slate-500">
+            Overnight
+          </div>
+          <div className="mt-0.5 text-sm font-bold text-slate-950">{report.title}</div>
+          <div className="mt-0.5 max-h-8 overflow-hidden leading-4 text-slate-500">{report.summary}</div>
+        </div>
+        <div className={`shrink-0 text-right text-sm font-bold ${valueTone(report.weighted_change_pct)}`}>
+          <PriceUpdatePulse
+            value={report.weighted_change_pct}
+            direction={report.weighted_change_pct}
+            resetKey={`${report.stock_id}:overnight:${report.as_of ?? "none"}`}
+            className="justify-end tabular-nums"
+          >
+            {formatPct(report.weighted_change_pct)}
+          </PriceUpdatePulse>
+          <div className="text-xs font-medium text-slate-500">{overnightConfidenceLabel(report.confidence)}</div>
+        </div>
+      </div>
+
+      {driverRows.length ? (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {driverRows.map((item) => (
+            <span
+              key={item.key}
+              className="inline-flex items-center gap-1 bg-slate-50 px-2 py-1 text-xs font-semibold text-slate-600"
+            >
+              <span>{item.label}</span>
+              <span className={valueTone(item.value)}>{formatPct(item.value)}</span>
+            </span>
+          ))}
+        </div>
+      ) : null}
+
+      {hasWarning ? (
+        <div className="mt-2 text-[11px] leading-4 text-amber-700">
+          {report.as_of ? `資料日期 ${formatDate(report.as_of)}，` : ""}
+          {report.warnings[0] ?? "資料完整度偏低，僅作參考"}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function marketRegimeLabel(index: MarketIndexSnapshot | null | undefined) {
   if (!index || index.close === null || index.close === undefined) return "資料不足";
 
@@ -1043,6 +1173,8 @@ function IndexDetailDataPanel({
   latestChart,
   todayStats,
   todayPreviousClose,
+  marketChip,
+  marketChipLoadState,
   contributions,
   contributionLoadState,
 }: {
@@ -1051,6 +1183,8 @@ function IndexDetailDataPanel({
   latestChart: ChartPoint | null;
   todayStats: ReturnType<typeof summarizeIntradayPoints>;
   todayPreviousClose: number | null;
+  marketChip: MarketChipDaily | null;
+  marketChipLoadState: LoadState;
   contributions: MarketIndexContributionResponse | null;
   contributionLoadState: LoadState;
 }) {
@@ -1108,6 +1242,93 @@ function IndexDetailDataPanel({
         <IndexMetricCard label="跌停家" value={formatNumber(breadth?.limit_down_count)} tone="text-emerald-600" />
         <IndexMetricCard label="平盤家" value={formatNumber(breadth?.unchanged_count)} />
         <IndexMetricCard label="總家數" value={formatNumber(breadth?.total_count)} />
+      </div>
+
+      <div className="border-b border-slate-200 px-5 py-4">
+        <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
+          <div>
+            <div className="text-xs font-bold text-slate-950">籌碼日報</div>
+            <div className="mt-0.5 text-xs text-slate-500">
+              大盤期貨未平倉、法人買賣超與信用交易摘要
+            </div>
+          </div>
+          <div className="text-xs text-slate-500">
+            資料日 {marketChip?.trade_date ? formatDate(marketChip.trade_date) : "-"}
+          </div>
+        </div>
+        {marketChipLoadState === "loading" ? (
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4" aria-hidden="true">
+            {Array.from({ length: 8 }).map((_, index) => (
+              <div key={index} className="border border-slate-200 bg-slate-50 px-3 py-2">
+                <div className="omi-skeleton h-3 w-24" />
+                <div className="omi-skeleton mt-2 h-4 w-20" />
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <IndexMetricCard
+              label="外資淨未平倉"
+              value={formatSignedContracts(marketChip?.foreign_futures_net_oi)}
+              tone={valueTone(marketChip?.foreign_futures_net_oi)}
+            />
+            <IndexMetricCard
+              label="外資未平倉加減"
+              value={formatSignedContracts(marketChip?.foreign_futures_net_oi_change)}
+              tone={valueTone(marketChip?.foreign_futures_net_oi_change)}
+            />
+            <IndexMetricCard
+              label="散戶淨未平倉"
+              value={formatSignedContracts(marketChip?.retail_futures_net_oi)}
+              tone={valueTone(marketChip?.retail_futures_net_oi)}
+            />
+            <IndexMetricCard
+              label="散戶未平倉加減"
+              value={formatSignedContracts(marketChip?.retail_futures_net_oi_change)}
+              tone={valueTone(marketChip?.retail_futures_net_oi_change)}
+            />
+            <IndexMetricCard
+              label="三大法人買賣超(億)"
+              value={formatSignedTradeValueYi(marketChip?.total_institutional_net_value)}
+              tone={valueTone(marketChip?.total_institutional_net_value)}
+            />
+            <IndexMetricCard
+              label="外資買賣超(億)"
+              value={formatSignedTradeValueYi(marketChip?.foreign_investor_net_value)}
+              tone={valueTone(marketChip?.foreign_investor_net_value)}
+            />
+            <IndexMetricCard
+              label="投信買賣超(億)"
+              value={formatSignedTradeValueYi(marketChip?.investment_trust_net_value)}
+              tone={valueTone(marketChip?.investment_trust_net_value)}
+            />
+            <IndexMetricCard
+              label="自營商買賣超(億)"
+              value={formatSignedTradeValueYi(marketChip?.dealer_net_value)}
+              tone={valueTone(marketChip?.dealer_net_value)}
+            />
+            <IndexMetricCard
+              label="官股買賣超(億)"
+              value={formatSignedTradeValueYi(marketChip?.government_bank_net_value)}
+              tone={valueTone(marketChip?.government_bank_net_value)}
+            />
+            <IndexMetricCard
+              label="融資變動(億)"
+              value={formatSignedTradeValueYi(marketChip?.margin_balance_change_value)}
+              tone={valueTone(marketChip?.margin_balance_change_value)}
+            />
+            <IndexMetricCard
+              label="融資變動(張)"
+              value={formatSignedLots(marketChip?.margin_balance_change_shares)}
+              tone={valueTone(marketChip?.margin_balance_change_shares)}
+            />
+            <IndexMetricCard
+              label="融券變動(張)"
+              value={formatSignedLots(marketChip?.short_balance_change_shares)}
+              tone={valueTone(marketChip?.short_balance_change_shares)}
+            />
+          </div>
+        )}
       </div>
 
       <IndexContributionRanking
@@ -2723,12 +2944,18 @@ export default function StockDetailPanel({
   const [chartHistoryMessage, setChartHistoryMessage] = useState<string | null>(null);
   const [backendTechnicalReport, setBackendTechnicalReport] =
     useState<StockTechnicalReportRead | null>(null);
+  const [overnightImpact, setOvernightImpact] =
+    useState<OvernightImpactRead | null>(null);
+  const [overnightImpactLoadState, setOvernightImpactLoadState] =
+    useState<LoadState>("idle");
   const [indexList, setIndexList] = useState<MarketIndexListItem[]>([]);
   const [indexListLoadState, setIndexListLoadState] = useState<LoadState>("idle");
   const [indexContributions, setIndexContributions] =
     useState<MarketIndexContributionResponse | null>(null);
   const [indexContributionLoadState, setIndexContributionLoadState] =
     useState<LoadState>("idle");
+  const [marketChip, setMarketChip] = useState<MarketChipDaily | null>(null);
+  const [marketChipLoadState, setMarketChipLoadState] = useState<LoadState>("idle");
   const finalIntradayRefreshDate = useRef<string | null>(null);
   const activeStockIdRef = useRef<string | null>(stockId);
   const activeDataTabRef = useRef<DataPanelTab>(activeDataTab);
@@ -2755,6 +2982,42 @@ export default function StockDetailPanel({
   useEffect(() => {
     branchDaysRef.current = branchDays;
   }, [branchDays]);
+
+  useEffect(() => {
+    if (!stockId || isIndexProduct) {
+      return;
+    }
+
+    let cancelled = false;
+    const currentStockId = stockId;
+
+    async function loadOvernightImpact() {
+      setOvernightImpact(null);
+      setOvernightImpactLoadState("loading");
+
+      try {
+        const response = await fetchJson<OvernightImpactRead>(
+          `/api/market/overnight-impact/${currentStockId}`
+        );
+
+        if (cancelled) return;
+
+        setOvernightImpact(response);
+        setOvernightImpactLoadState("success");
+      } catch {
+        if (cancelled) return;
+
+        setOvernightImpact(null);
+        setOvernightImpactLoadState("error");
+      }
+    }
+
+    void loadOvernightImpact();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isIndexProduct, stockId]);
 
   useEffect(() => {
     if (!isIndexProduct || !indexMarket) {
@@ -2827,6 +3090,46 @@ export default function StockDetailPanel({
     }
 
     void loadIndexContributions();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [indexId, isIndexProduct]);
+
+  useEffect(() => {
+    if (!isIndexProduct || !indexId) {
+      return;
+    }
+
+    let cancelled = false;
+    const currentIndexId = indexId;
+
+    async function loadMarketChip() {
+      setMarketChip(null);
+      setMarketChipLoadState("loading");
+
+      try {
+        const response = await fetchJson<MarketChipDaily>(
+          "/api/market/market-chips/latest",
+          {
+            index_id: currentIndexId,
+            ensure_latest: true,
+          }
+        );
+
+        if (cancelled) return;
+
+        setMarketChip(response);
+        setMarketChipLoadState("success");
+      } catch {
+        if (cancelled) return;
+
+        setMarketChip(null);
+        setMarketChipLoadState("error");
+      }
+    }
+
+    void loadMarketChip();
 
     return () => {
       cancelled = true;
@@ -3976,6 +4279,9 @@ export default function StockDetailPanel({
   const technicalStatus = technicalReport.title;
   const technicalSummaryText = technicalReport.summary;
   const visibleSignals = technicalReport.badges.slice(0, 4);
+  const displayOvernightImpact = !stockId || isIndexProduct ? null : overnightImpact;
+  const displayOvernightImpactLoadState: LoadState =
+    !stockId || isIndexProduct ? "idle" : overnightImpactLoadState;
   const technicalSourceReady =
     effectiveTimeframe === "today" ? todayTrend.length > 0 : currentChartReady;
   const showTechnicalLoading =
@@ -5735,6 +6041,8 @@ export default function StockDetailPanel({
             latestChart={latestChart}
             todayStats={todayStats}
             todayPreviousClose={todayPreviousClose}
+            marketChip={marketChip}
+            marketChipLoadState={marketChipLoadState}
             contributions={indexContributions}
             contributionLoadState={indexContributionLoadState}
           />
@@ -5793,6 +6101,11 @@ export default function StockDetailPanel({
                   />
                 ))}
               </div>
+
+              <OvernightImpactPanel
+                report={displayOvernightImpact}
+                loadState={displayOvernightImpactLoadState}
+              />
 
               <div className="mt-3 border-t border-slate-200 pt-3">
                 <div className="omi-technical-market flex items-start justify-between gap-4 text-xs">

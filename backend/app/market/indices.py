@@ -705,6 +705,23 @@ def _ensure_market_index_daily_stat_coverage(
     return result
 
 
+def ensure_market_index_daily_stat_coverage(
+    db: Session,
+    *,
+    index_id: str,
+    market: str,
+    from_date: date,
+    to_date: date,
+) -> dict | None:
+    return _ensure_market_index_daily_stat_coverage(
+        db=db,
+        index_id=index_id,
+        market=market,
+        from_date=from_date,
+        to_date=to_date,
+    )
+
+
 def _index_stat_period_key(value: date, timeframe: str) -> date:
     if timeframe == "weekly":
         return value - timedelta(days=value.weekday())

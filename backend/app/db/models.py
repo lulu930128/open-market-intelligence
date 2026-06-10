@@ -339,6 +339,52 @@ class MarketIndexDailyStat(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class MarketChipDaily(Base):
+    __tablename__ = "market_chip_daily"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "index_id",
+            "trade_date",
+            name="uq_market_chip_daily_index_date",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    index_id: Mapped[str] = mapped_column(String(20), index=True)
+    market: Mapped[str] = mapped_column(String(20), index=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+
+    close_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_change: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_change_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    trade_value: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    foreign_futures_net_oi: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    foreign_futures_net_oi_change: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    retail_futures_net_oi: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    retail_futures_net_oi_change: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    total_institutional_net_value: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    foreign_investor_net_value: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    investment_trust_net_value: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    dealer_net_value: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    dealer_self_net_value: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    dealer_hedge_net_value: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    government_bank_net_value: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    margin_balance_change_value: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    margin_balance_change_shares: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    short_balance_change_shares: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    source_grade: Mapped[str] = mapped_column(String(50), default="mixed", index=True)
+    source_details_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class InstitutionalTradeDaily(Base):
     __tablename__ = "institutional_trade_daily"
 

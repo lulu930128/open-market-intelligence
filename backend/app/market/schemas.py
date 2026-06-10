@@ -161,6 +161,41 @@ class MarketIndexSummaryRead(BaseModel):
     indices: list[MarketIndexSnapshotRead]
 
 
+class MarketChipDailyRead(BaseModel):
+    id: int
+    index_id: str
+    market: str
+    trade_date: date
+
+    close_value: float | None = None
+    price_change: float | None = None
+    price_change_pct: float | None = None
+    trade_value: int | None = None
+
+    foreign_futures_net_oi: int | None = None
+    foreign_futures_net_oi_change: int | None = None
+    retail_futures_net_oi: int | None = None
+    retail_futures_net_oi_change: int | None = None
+
+    total_institutional_net_value: int | None = None
+    foreign_investor_net_value: int | None = None
+    investment_trust_net_value: int | None = None
+    dealer_net_value: int | None = None
+    dealer_self_net_value: int | None = None
+    dealer_hedge_net_value: int | None = None
+    government_bank_net_value: int | None = None
+
+    margin_balance_change_value: int | None = None
+    margin_balance_change_shares: int | None = None
+    short_balance_change_shares: int | None = None
+
+    source_grade: str
+    source_details: dict[str, Any] | None = None
+
+    created_at: datetime
+    updated_at: datetime
+
+
 class MarketIndexListItemRead(BaseModel):
     rank: int
     market: str
@@ -258,6 +293,81 @@ class TechnicalReportRead(BaseModel):
     missing: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     source_refs: list[dict[str, str]] = Field(default_factory=list)
+
+
+class OvernightImpactSymbolMoveRead(BaseModel):
+    symbol: str
+    change_pct: float | None = None
+
+
+class OvernightImpactFactorRead(BaseModel):
+    key: str
+    symbol: str
+    label: str
+    role: str
+    trade_date: date | None = None
+    close: float | None = None
+    previous_close: float | None = None
+    change: float | None = None
+    change_pct: float | None = None
+    score_change_pct: float | None = None
+    weight: float
+    normalized_weight: float | None = None
+    weighted_contribution: float | None = None
+    tone: str = "neutral"
+    source: str
+    provider: str | None = None
+
+
+class OvernightImpactBasketRead(BaseModel):
+    group_id: int
+    group_name: str
+    role: str
+    trade_date: date | None = None
+    symbol_count: int
+    valid_count: int
+    missing_count: int = 0
+    average_change_pct: float | None = None
+    score_change_pct: float | None = None
+    weight: float
+    normalized_weight: float | None = None
+    weighted_contribution: float | None = None
+    tone: str = "neutral"
+    top_symbols: list[OvernightImpactSymbolMoveRead] = Field(default_factory=list)
+    bottom_symbols: list[OvernightImpactSymbolMoveRead] = Field(default_factory=list)
+    source: str
+
+
+class OvernightImpactMappingRead(BaseModel):
+    stock_id: str
+    stock_name: str | None = None
+    market: str | None = None
+    industry: str | None = None
+    category: str | None = None
+    profiles: list[str] = Field(default_factory=list)
+    reason: str
+
+
+class OvernightImpactRead(BaseModel):
+    kind: str
+    stock_id: str
+    stock_name: str | None = None
+    as_of: date | None = None
+    generated_at: datetime
+    stance: str
+    title: str
+    summary: str
+    score: int
+    weighted_change_pct: float | None = None
+    confidence: str
+    tw_mapping: OvernightImpactMappingRead
+    factors: list[OvernightImpactFactorRead] = Field(default_factory=list)
+    baskets: list[OvernightImpactBasketRead] = Field(default_factory=list)
+    missing: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    source_refs: list[dict[str, str]] = Field(default_factory=list)
+    freshness: dict[str, Any] = Field(default_factory=dict)
+    evidence_passport: dict[str, Any] = Field(default_factory=dict)
 
 
 class DailyIndicatorPointRead(BaseModel):

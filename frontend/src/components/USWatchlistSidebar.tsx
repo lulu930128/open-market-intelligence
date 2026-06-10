@@ -13,7 +13,7 @@ import type {
   USWatchlistGroupRead,
   USWatchlistItemRead,
 } from "@/types/market";
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, type MouseEvent as ReactMouseEvent, useMemo, useState } from "react";
 
 type Message = { type: "success" | "error"; text: string } | null;
 
@@ -68,6 +68,14 @@ function submitterValue(event: FormEvent<HTMLFormElement>) {
   const nativeEvent = event.nativeEvent as SubmitEvent;
   const submitter = nativeEvent.submitter as HTMLButtonElement | null;
   return submitter?.value ?? "";
+}
+
+function selectOnPrimaryMouseDown(
+  event: ReactMouseEvent<HTMLElement>,
+  select: () => void
+) {
+  if (event.button !== 0) return;
+  select();
 }
 
 function normalizeTickerInput(value: string) {
@@ -463,6 +471,11 @@ export default function USWatchlistSidebar({
                       : "text-slate-700 hover:bg-slate-100",
                   ].join(" ")}
                   style={{ paddingLeft: "24px" }}
+                  onMouseDown={(event) =>
+                    selectOnPrimaryMouseDown(event, () =>
+                      onSelectSymbol(item.symbol, item.name)
+                    )
+                  }
                   onClick={() => onSelectSymbol(item.symbol, item.name)}
                 >
                   <div className="min-w-0 flex-1">
@@ -538,6 +551,11 @@ export default function USWatchlistSidebar({
                   <button
                     type="button"
                     className="min-w-0 flex-1 text-left"
+                    onMouseDown={(event) =>
+                      selectOnPrimaryMouseDown(event, () =>
+                        onSelectSymbol(item.symbol, item.security_name)
+                      )
+                    }
                     onClick={() => onSelectSymbol(item.symbol, item.security_name)}
                   >
                     <div className="truncate font-semibold">

@@ -17,7 +17,9 @@ from app.db.models import (
     USShortVolumeDaily,
     USStockMaster,
 )
+from app.ai.evidence_passport import build_evidence_passport
 from app.ai import freshness
+from app.market.overnight_impact import scan_us_overnight_impact_gaps
 from app.market import stock_selection_refresh
 from app.us_market import service as us_market_service
 from app.us_market.sources import normalize_us_symbol
@@ -34,6 +36,10 @@ MAX_EXTERNAL_FETCHES = 8
 MAX_TOTAL_SECONDS = 90
 US_DAILY_STALE_DAYS = 5
 PROFILE_STALE_DAYS = 30
+TW_STOCK_REFRESH_KEYS = {
+    freshness.STOCK_MASTER_DATASET["key"],
+    *(spec.key for spec in freshness.DATASET_SPECS),
+}
 
 
 @dataclass(frozen=True)
@@ -276,6 +282,43 @@ def scan_us_stock_gaps(db: Session, symbol: str, *, question: str = "") -> dict[
     }
 
 
+def attach_us_overnight_gaps_to_tw_stock_freshness(
+    db: Session,
+    *,
+    stock_id: str,
+    stock_freshness: dict[str, Any],
+) -> dict[str, Any]:
+    merged = dict(stock_freshness)
+    try:
+        overnight_gaps = scan_us_overnight_impact_gaps(db=db, stock_id=stock_id)
+    except Exception as exc:
+        warnings = list(merged.get("warnings") or [])
+        warnings.append(f"美股隔夜影響 freshness 檢查失敗：{exc}")
+        merged["warnings"] = list(dict.fromkeys(warnings))
+        return merged
+
+    cross_market = dict(merged.get("cross_market") or {})
+    cross_market["us_overnight_impact"] = overnight_gaps
+    merged["cross_market"] = cross_market
+
+    if overnight_gaps.get("refresh_recommended"):
+        missing = list(merged.get("missing") or [])
+        missing.append("us_overnight_tw_impact")
+        merged["missing"] = list(dict.fromkeys(missing))
+        warnings = list(merged.get("warnings") or [])
+        warnings.extend(overnight_gaps.get("warnings") or [])
+        merged["warnings"] = list(dict.fromkeys(warnings))
+        expected_dates = dict(merged.get("expected_dates") or {})
+        expected_dates["us_overnight_impact"] = (
+            overnight_gaps.get("expected_dates") or {}
+        ).get("us_daily_price")
+        merged["expected_dates"] = expected_dates
+        merged["is_current"] = False
+        merged["refresh_recommended"] = True
+
+    return merged
+
+
 def _fallback_plan(*, symbol: str, gaps: dict[str, Any], question: str) -> dict[str, Any]:
     missing = set(gaps.get("missing") or [])
     lowered_question = question.lower()
@@ -340,9 +383,41 @@ def _fallback_plan(*, symbol: str, gaps: dict[str, Any], question: str) -> dict[
     }
 
 
-def _fallback_tw_stock_plan(*, stock_id: str, gaps: dict[str, Any]) -> dict[str, Any]:
+def _overnight_daily_refresh_steps(overnight_gaps: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(overnight_gaps, dict):
+        return []
+
     steps: list[dict[str, Any]] = []
-    if gaps.get("refresh_recommended"):
+    for symbol in overnight_gaps.get("refresh_symbols") or []:
+        normalized_symbol = normalize_us_symbol(symbol)
+        if not normalized_symbol:
+            continue
+        steps.append(
+            {
+                "tool": "us.refresh_daily_price",
+                "args": {
+                    "symbol": normalized_symbol,
+                    "provider": "auto",
+                    "outputsize": "compact",
+                    "adjusted": False,
+                },
+                "reason": "美股隔夜影響核心因素資料缺漏或過期，先刷新本機美股日線快取。",
+            }
+        )
+
+    return steps
+
+
+def _fallback_tw_stock_plan(
+    *,
+    stock_id: str,
+    gaps: dict[str, Any],
+    overnight_gaps: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    steps: list[dict[str, Any]] = []
+    missing = set(gaps.get("missing") or [])
+    tw_refresh_needed = bool(missing & TW_STOCK_REFRESH_KEYS)
+    if gaps.get("refresh_recommended") and tw_refresh_needed:
         steps.append(
             {
                 "tool": "tw.refresh_stock_evidence",
@@ -355,9 +430,17 @@ def _fallback_tw_stock_plan(*, stock_id: str, gaps: dict[str, Any]) -> dict[str,
             }
         )
 
+    steps.extend(_overnight_daily_refresh_steps(overnight_gaps))
+    reason = "Deterministic fallback selected Taiwan stock refresh from local freshness gaps."
+    if overnight_gaps and overnight_gaps.get("refresh_recommended"):
+        reason = (
+            "Deterministic fallback selected Taiwan stock refresh and US overnight factor refresh "
+            "from local freshness gaps."
+        )
+
     return {
         "provider": "fallback",
-        "reason": "Deterministic fallback selected Taiwan stock refresh from local freshness gaps.",
+        "reason": reason,
         "tool_plan": steps,
     }
 
@@ -534,11 +617,39 @@ def plan_tw_stock_tools(
     stock_id: str,
     target: dict[str, Any],
     gaps: dict[str, Any],
+    overnight_gaps: dict[str, Any] | None = None,
     budget: dict[str, int],
     can_call_llm: bool,
 ) -> tuple[dict[str, Any], list[str]]:
     warnings: list[str] = []
     normalized_stock_id = str(stock_id or "").strip()
+
+    def with_overnight_steps(plan: dict[str, Any]) -> dict[str, Any]:
+        overnight_steps = _overnight_daily_refresh_steps(overnight_gaps)
+        if not overnight_steps:
+            return plan
+        existing = {
+            (
+                step.get("tool"),
+                tuple(sorted((str(k), str(v)) for k, v in (step.get("args") or {}).items())),
+            )
+            for step in plan.get("tool_plan") or []
+            if isinstance(step, dict)
+        }
+        for step in overnight_steps:
+            key = (
+                step.get("tool"),
+                tuple(sorted((str(k), str(v)) for k, v in (step.get("args") or {}).items())),
+            )
+            if key not in existing:
+                plan.setdefault("tool_plan", []).append(step)
+                existing.add(key)
+        if overnight_gaps and overnight_gaps.get("refresh_recommended"):
+            plan["reason"] = (
+                (plan.get("reason") or "Taiwan stock refresh plan.")
+                + " Added deterministic US overnight factor refresh."
+            )
+        return plan
 
     if can_call_llm:
         try:
@@ -552,14 +663,22 @@ def plan_tw_stock_tools(
                     allowed_tool_names={"tw.refresh_stock_evidence"},
                 )
             )
-            return _normalize_plan(raw_plan, default_symbol=normalized_stock_id, provider="openai"), warnings
+            return with_overnight_steps(
+                _normalize_plan(raw_plan, default_symbol=normalized_stock_id, provider="openai")
+            ), warnings
         except llm.OpenAILLMError as exc:
             warnings.append(f"OMI LLM tool planner failed; used deterministic fallback. Error: {exc}")
 
-    return _normalize_plan(
-        _fallback_tw_stock_plan(stock_id=normalized_stock_id, gaps=gaps),
-        default_symbol=normalized_stock_id,
-        provider="fallback",
+    return with_overnight_steps(
+        _normalize_plan(
+            _fallback_tw_stock_plan(
+                stock_id=normalized_stock_id,
+                gaps=gaps,
+                overnight_gaps=overnight_gaps,
+            ),
+            default_symbol=normalized_stock_id,
+            provider="fallback",
+        )
     ), warnings
 
 
@@ -898,6 +1017,16 @@ def run_tw_stock_tool_session(
         db=db,
         stock_id=normalized_stock_id,
     )
+    gaps = attach_us_overnight_gaps_to_tw_stock_freshness(
+        db,
+        stock_id=normalized_stock_id,
+        stock_freshness=gaps,
+    )
+    overnight_gaps = (
+        (gaps.get("cross_market") or {}).get("us_overnight_impact")
+        if isinstance(gaps.get("cross_market"), dict)
+        else None
+    )
 
     if budget["max_calls"] <= 0:
         return {
@@ -917,6 +1046,7 @@ def run_tw_stock_tool_session(
         stock_id=normalized_stock_id,
         target=target,
         gaps=gaps,
+        overnight_gaps=overnight_gaps,
         budget=budget,
         can_call_llm=bool(policy.get("can_plan_tools")),
     )
@@ -930,6 +1060,11 @@ def run_tw_stock_tool_session(
     refreshed_gaps = freshness.check_stock_data_freshness(
         db=db,
         stock_id=normalized_stock_id,
+    )
+    refreshed_gaps = attach_us_overnight_gaps_to_tw_stock_freshness(
+        db,
+        stock_id=normalized_stock_id,
+        stock_freshness=refreshed_gaps,
     )
     return {
         "tool_plan": plan,
@@ -1011,6 +1146,13 @@ def _latest_tool_result(tool_runs: list[dict[str, Any]], tool_name: str) -> dict
     return None
 
 
+def _append_source_ref_once(source_refs: list[dict[str, Any]], ref: dict[str, Any]) -> None:
+    ref_key = ref.get("name") or ref.get("kind")
+    if any((item.get("name") or item.get("kind")) == ref_key for item in source_refs):
+        return
+    source_refs.append(ref)
+
+
 def read_us_stock_context(
     db: Session,
     *,
@@ -1082,8 +1224,16 @@ def read_us_stock_context(
             }
         )
 
+    _append_source_ref_once(source_refs, {"type": "table", "name": "us_daily_price"})
+    _append_source_ref_once(source_refs, {"type": "table", "name": "us_company_profile"})
+    _append_source_ref_once(source_refs, {"type": "table", "name": "us_sec_company_fact"})
+    if corporate_actions:
+        _append_source_ref_once(source_refs, {"type": "table", "name": "us_corporate_action"})
+    if short_volume_rows:
+        _append_source_ref_once(source_refs, {"type": "table", "name": "us_short_volume_daily"})
+
     intraday_summary = _latest_tool_result(tool_runs, "us.read_intraday_trend")
-    return {
+    envelope = {
         "kind": "us_stock_context",
         "generated_at": _now().isoformat(),
         "as_of": latest_daily.trade_date.isoformat() if latest_daily else None,
@@ -1183,3 +1333,13 @@ def read_us_stock_context(
         "warnings": list(dict.fromkeys(warnings)),
         "source_refs": source_refs,
     }
+    envelope["evidence_passport"] = build_evidence_passport(
+        kind="us_stock_context",
+        as_of=envelope["as_of"],
+        source_refs=source_refs,
+        missing=envelope["missing"],
+        warnings=envelope["warnings"],
+        freshness=gaps,
+        tool_runs=tool_runs,
+    )
+    return envelope

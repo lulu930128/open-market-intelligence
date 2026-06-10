@@ -177,6 +177,18 @@ ASK_TOOL: dict[str, Any] = {
     },
 }
 
+ASK_STREAM_TOOL: dict[str, Any] = {
+    **ASK_TOOL,
+    "name": "omi.ask_stream",
+    "title": "Ask OMI Stream",
+    "description": (
+        "Streaming variant of omi.ask. It calls OMI's text/event-stream endpoint "
+        "and returns collected status/evidence/tool_run/delta/final events for "
+        "MCP clients that cannot consume native HTTP SSE directly. Prefer direct "
+        "HTTP SSE when the client UI needs live incremental updates."
+    ),
+}
+
 INTERNAL_TOOLS: list[dict[str, Any]] = [
     {
         "name": "omi.read_market_overview",
@@ -523,7 +535,8 @@ INTERNAL_TOOLS: list[dict[str, Any]] = [
 ]
 
 
-TOOLS = [ASK_TOOL, *INTERNAL_TOOLS] if EXPOSE_INTERNAL_TOOLS else [ASK_TOOL]
+PUBLIC_TOOLS = [ASK_TOOL, ASK_STREAM_TOOL]
+TOOLS = [*PUBLIC_TOOLS, *INTERNAL_TOOLS] if EXPOSE_INTERNAL_TOOLS else PUBLIC_TOOLS
 
 
 def _json_default(value: Any) -> str:
@@ -640,6 +653,103 @@ def _api_post(
     return _api_request("POST", path, params=params, payload=payload)
 
 
+def _read_sse_events(response: Any) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    event_name = "message"
+    data_lines: list[str] = []
+
+    def commit_event() -> None:
+        nonlocal event_name, data_lines
+        if not data_lines and event_name == "message":
+            return
+
+        data_text = "\n".join(data_lines)
+        try:
+            data: Any = json.loads(data_text) if data_text else {}
+        except json.JSONDecodeError:
+            data = {"text": data_text}
+
+        events.append({"event": event_name, "data": data})
+        event_name = "message"
+        data_lines = []
+
+    for raw_line in response:
+        line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+        if not line:
+            commit_event()
+            continue
+        if line.startswith(":"):
+            continue
+        if line.startswith("event:"):
+            event_name = line.removeprefix("event:").strip() or "message"
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line.removeprefix("data:").lstrip())
+
+    commit_event()
+    return events
+
+
+def _api_stream_post(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    safe_payload = _sanitize_json_value(payload)
+    data = json.dumps(safe_payload, ensure_ascii=False).encode("utf-8")
+    headers = {
+        "Accept": "text/event-stream",
+        "Content-Type": "application/json",
+        "User-Agent": f"{SERVER_NAME}/{SERVER_VERSION}",
+    }
+    if AI_TRUST_TOKEN:
+        headers["X-OMI-AI-Trust-Token"] = AI_TRUST_TOKEN
+
+    request = Request(
+        f"{API_BASE_URL}{path}",
+        data=data,
+        headers=headers,
+        method="POST",
+    )
+
+    try:
+        with urlopen(request, timeout=API_TIMEOUT_SECONDS) as response:
+            events = _read_sse_events(response)
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"OMI API HTTP {exc.code}: {body}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"OMI API unavailable at {API_BASE_URL}: {exc}") from exc
+
+    final = None
+    evidence = None
+    error = None
+    done = None
+    delta_parts: list[str] = []
+    for event in events:
+        event_type = event.get("event")
+        event_data = event.get("data")
+        if event_type == "final" and isinstance(event_data, dict):
+            final = event_data
+        elif event_type == "evidence" and isinstance(event_data, dict):
+            evidence = event_data
+        elif event_type == "error" and isinstance(event_data, dict):
+            error = event_data
+        elif event_type == "done" and isinstance(event_data, dict):
+            done = event_data
+        elif event_type == "delta" and isinstance(event_data, dict):
+            text = event_data.get("text")
+            if isinstance(text, str):
+                delta_parts.append(text)
+
+    ok = bool(done.get("ok")) if isinstance(done, dict) else bool(final and not error)
+    return {
+        "kind": "omi_stream_result",
+        "ok": ok,
+        "events": events,
+        "final": final,
+        "evidence": evidence,
+        "delta_text": "".join(delta_parts),
+        "error": error,
+    }
+
+
 def _api_patch(path: str, payload: dict[str, Any]) -> Any:
     return _api_request("PATCH", path, payload=payload)
 
@@ -662,37 +772,41 @@ def _bool_arg(arguments: dict[str, Any], key: str, default: bool) -> bool:
     return bool(value)
 
 
+def _ask_payload(arguments: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "contract_version": arguments.get("contract_version", "omi.ai.ask.v2"),
+        "question": _require(arguments, "question"),
+        "target": arguments.get("target") or {"type": "auto"},
+        "mode": arguments.get("mode", "auto"),
+        "caller_profile": arguments.get("caller_profile", "kuro_readonly"),
+        "allow_llm": _bool_arg(arguments, "allow_llm", False),
+        "allow_write": _bool_arg(arguments, "allow_write", False),
+        "allow_external_fetch": _bool_arg(arguments, "allow_external_fetch", False),
+        "tool_budget": arguments.get("tool_budget") or {},
+        "refresh_policy": arguments.get("refresh_policy") or {
+            "mode": "stale_first",
+            "before_answer": True,
+            "fallback_to_cached": True,
+        },
+        "strategy_profile": arguments.get("strategy_profile", "short_term_momentum"),
+        "analysis_horizon": arguments.get("analysis_horizon", "auto"),
+        "branch_days": arguments.get("branch_days", 5),
+        "rank_by": arguments.get("rank_by", "score"),
+        "sort_order": arguments.get("sort_order", "desc"),
+        "market_limit": arguments.get("market_limit", 10),
+        "context_limit": arguments.get("context_limit", 100),
+        "include_children": _bool_arg(arguments, "include_children", True),
+        "enabled_only": _bool_arg(arguments, "enabled_only", True),
+        "conversation_context": arguments.get("conversation_context") or {},
+    }
+
+
 def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
     if name == "omi.ask":
-        return _api_post(
-            "/api/ai/ask",
-            payload={
-                "contract_version": arguments.get("contract_version", "omi.ai.ask.v2"),
-                "question": _require(arguments, "question"),
-                "target": arguments.get("target") or {"type": "auto"},
-                "mode": arguments.get("mode", "auto"),
-                "caller_profile": arguments.get("caller_profile", "kuro_readonly"),
-                "allow_llm": _bool_arg(arguments, "allow_llm", False),
-                "allow_write": _bool_arg(arguments, "allow_write", False),
-                "allow_external_fetch": _bool_arg(arguments, "allow_external_fetch", False),
-                "tool_budget": arguments.get("tool_budget") or {},
-                "refresh_policy": arguments.get("refresh_policy") or {
-                    "mode": "stale_first",
-                    "before_answer": True,
-                    "fallback_to_cached": True,
-                },
-                "strategy_profile": arguments.get("strategy_profile", "short_term_momentum"),
-                "analysis_horizon": arguments.get("analysis_horizon", "auto"),
-                "branch_days": arguments.get("branch_days", 5),
-                "rank_by": arguments.get("rank_by", "score"),
-                "sort_order": arguments.get("sort_order", "desc"),
-                "market_limit": arguments.get("market_limit", 10),
-                "context_limit": arguments.get("context_limit", 100),
-                "include_children": _bool_arg(arguments, "include_children", True),
-                "enabled_only": _bool_arg(arguments, "enabled_only", True),
-                "conversation_context": arguments.get("conversation_context") or {},
-            },
-        )
+        return _api_post("/api/ai/ask", payload=_ask_payload(arguments))
+
+    if name == "omi.ask_stream":
+        return _api_stream_post("/api/ai/ask/stream", payload=_ask_payload(arguments))
 
     if name == "omi.read_market_overview":
         return _api_get("/api/ai/market-overview", {"limit": arguments.get("limit", 10)})
@@ -879,7 +993,8 @@ def _handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
                     "version": SERVER_VERSION,
                 },
                 "instructions": (
-                    "Use omi.ask as the public entry point. It is read-only by default; "
+                    "Use omi.ask as the public entry point, or omi.ask_stream when collected stream events are useful. "
+                    "It is read-only by default; "
                     "report generation requires a server-side trusted request. Do not treat missing data as a conclusion. "
                     "When omi.ask returns analysis.human_answer, use that concise answer first and do not expose raw dataset keys unless asked."
                 ),

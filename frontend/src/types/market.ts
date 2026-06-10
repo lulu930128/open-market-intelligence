@@ -245,6 +245,35 @@ export type MarketIndexSummary = {
   indices: MarketIndexSnapshot[];
 };
 
+export type MarketChipDaily = {
+  id: number;
+  index_id: string;
+  market: string;
+  trade_date: string;
+  close_value: number | null;
+  price_change: number | null;
+  price_change_pct: number | null;
+  trade_value: number | null;
+  foreign_futures_net_oi: number | null;
+  foreign_futures_net_oi_change: number | null;
+  retail_futures_net_oi: number | null;
+  retail_futures_net_oi_change: number | null;
+  total_institutional_net_value: number | null;
+  foreign_investor_net_value: number | null;
+  investment_trust_net_value: number | null;
+  dealer_net_value: number | null;
+  dealer_self_net_value: number | null;
+  dealer_hedge_net_value: number | null;
+  government_bank_net_value: number | null;
+  margin_balance_change_value: number | null;
+  margin_balance_change_shares: number | null;
+  short_balance_change_shares: number | null;
+  source_grade: string;
+  source_details: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type MarketIndexListItem = {
   rank: number;
   market: string;
@@ -342,6 +371,79 @@ export type StockTechnicalReportRead = {
   missing: string[];
   warnings: string[];
   source_refs: Array<Record<string, string>>;
+};
+
+export type OvernightImpactSymbolMove = {
+  symbol: string;
+  change_pct: number | null;
+};
+
+export type OvernightImpactFactor = {
+  key: string;
+  symbol: string;
+  label: string;
+  role: string;
+  trade_date: string | null;
+  close: number | null;
+  previous_close: number | null;
+  change: number | null;
+  change_pct: number | null;
+  score_change_pct: number | null;
+  weight: number;
+  normalized_weight: number | null;
+  weighted_contribution: number | null;
+  tone: string;
+  source: string;
+  provider: string | null;
+};
+
+export type OvernightImpactBasket = {
+  group_id: number;
+  group_name: string;
+  role: string;
+  trade_date: string | null;
+  symbol_count: number;
+  valid_count: number;
+  missing_count: number;
+  average_change_pct: number | null;
+  score_change_pct: number | null;
+  weight: number;
+  normalized_weight: number | null;
+  weighted_contribution: number | null;
+  tone: string;
+  top_symbols: OvernightImpactSymbolMove[];
+  bottom_symbols: OvernightImpactSymbolMove[];
+  source: string;
+};
+
+export type OvernightImpactRead = {
+  kind: string;
+  stock_id: string;
+  stock_name: string | null;
+  as_of: string | null;
+  generated_at: string;
+  stance: string;
+  title: string;
+  summary: string;
+  score: number;
+  weighted_change_pct: number | null;
+  confidence: "low" | "medium" | "high" | string;
+  tw_mapping: {
+    stock_id: string;
+    stock_name: string | null;
+    market: string | null;
+    industry: string | null;
+    category: string | null;
+    profiles: string[];
+    reason: string;
+  };
+  factors: OvernightImpactFactor[];
+  baskets: OvernightImpactBasket[];
+  missing: string[];
+  warnings: string[];
+  source_refs: Array<Record<string, string>>;
+  freshness: Record<string, unknown>;
+  evidence_passport: Record<string, unknown>;
 };
 
 export type StockIndicatorPoint = {

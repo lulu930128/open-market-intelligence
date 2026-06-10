@@ -1235,6 +1235,10 @@ function WatchlistRankingPanel({
             <button
               key={row.key}
               type="button"
+              onMouseDown={(event) => {
+                if (event.button !== 0) return;
+                row.onSelect();
+              }}
               onClick={row.onSelect}
               className={[
                 "omi-ranking-row grid w-full grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-slate-200 px-4 py-2 text-left text-sm",
@@ -1926,6 +1930,7 @@ export default function MarketDashboardClient({
   function handleSelectStock(stockId: string, stockName: string | null) {
     setSelectedStockId(stockId);
     setSelectedStockName(stockName);
+    setErrorMessage(null);
   }
 
   function handleSelectUsGroup(group: USWatchlistGroupNode | null) {
@@ -2004,6 +2009,10 @@ export default function MarketDashboardClient({
       <button
         key={row.stock_id}
         type="button"
+        onMouseDown={(event) => {
+          if (event.button !== 0) return;
+          handleSelectStock(row.stock_id, row.stock_name);
+        }}
         onClick={() => handleSelectStock(row.stock_id, row.stock_name)}
         className={[
           "omi-ranking-row grid w-full grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-slate-200 px-4 py-2 text-left text-sm",
@@ -2262,6 +2271,7 @@ export default function MarketDashboardClient({
       onSelect: () => {
         setSelectedUsSymbol(row.symbol);
         setSelectedUsSecurityName(row.security_name);
+        setUsErrorMessage(null);
       },
     };
   });

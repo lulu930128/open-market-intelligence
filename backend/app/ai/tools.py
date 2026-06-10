@@ -14,9 +14,11 @@ from app.db.models import (
     ShareholdingDistributionWeekly,
     StockMaster,
 )
+from app.ai.evidence_passport import build_evidence_passport
 from app.market import service as market_service
 from app.market.technical_report import build_stock_technical_report
 from app.market.broker_branch import get_broker_branch_trade_summary
+from app.market.overnight_impact import build_us_overnight_impact_report
 from app.stocks import service as stock_service
 from app.watchlists import ranking_service
 from app.watchlists import service as watchlist_service
@@ -101,6 +103,29 @@ def _broker_branch_row(row: Any) -> dict[str, Any]:
 def _add_missing(missing: list[str], key: str, value: Any) -> None:
     if value is None or value == []:
         missing.append(key)
+
+
+def _with_evidence_passport(
+    envelope: dict[str, Any],
+    *,
+    freshness: dict[str, Any] | None = None,
+    tool_runs: list[dict[str, Any]] | None = None,
+    analysis: dict[str, Any] | None = None,
+    confidence: str | None = None,
+) -> dict[str, Any]:
+    data = envelope.get("data") if isinstance(envelope.get("data"), dict) else {}
+    envelope["evidence_passport"] = build_evidence_passport(
+        kind=str(envelope.get("kind") or "ai_data"),
+        as_of=envelope.get("as_of"),
+        source_refs=envelope.get("source_refs") or [],
+        missing=envelope.get("missing") or [],
+        warnings=envelope.get("warnings") or [],
+        freshness=freshness,
+        tool_runs=tool_runs,
+        analysis=analysis or data.get("analysis"),
+        confidence=confidence,
+    )
+    return envelope
 
 
 def normalize_analysis_horizon(value: str | None) -> str:
@@ -740,7 +765,7 @@ def read_data_freshness(db: Session, stock_id: str | None = None) -> dict[str, A
 
     missing = [name for name, info in tables.items() if not info["latest"] or info["row_count"] == 0]
 
-    return {
+    envelope = {
         "kind": "data_freshness",
         "generated_at": _now(),
         "as_of": _latest_date_string([info["latest"] for info in tables.values()]),
@@ -752,6 +777,14 @@ def read_data_freshness(db: Session, stock_id: str | None = None) -> dict[str, A
         ],
         "source_refs": [{"type": "database", "name": "open_market_intelligence.db"}],
     }
+    return _with_evidence_passport(
+        envelope,
+        freshness={
+            "is_current": not missing,
+            "missing": missing,
+            "warnings": envelope["warnings"],
+        },
+    )
 
 
 def read_market_overview(db: Session, limit: int = 10) -> dict[str, Any]:
@@ -759,7 +792,7 @@ def read_market_overview(db: Session, limit: int = 10) -> dict[str, Any]:
     missing: list[str] = []
 
     if latest_trade_date is None:
-        return {
+        envelope = {
             "kind": "market_overview",
             "generated_at": _now(),
             "as_of": None,
@@ -774,6 +807,14 @@ def read_market_overview(db: Session, limit: int = 10) -> dict[str, Any]:
             "warnings": ["No market daily rows are available in the local database."],
             "source_refs": [{"type": "table", "name": "market_daily_price"}],
         }
+        return _with_evidence_passport(
+            envelope,
+            freshness={
+                "is_current": False,
+                "missing": envelope["missing"],
+                "warnings": envelope["warnings"],
+            },
+        )
 
     rows = market_service.list_market_daily_prices(
         db=db,
@@ -810,7 +851,7 @@ def read_market_overview(db: Session, limit: int = 10) -> dict[str, Any]:
     if not ranked_with_change:
         missing.append("market_daily_price.change_pct")
 
-    return {
+    envelope = {
         "kind": "market_overview",
         "generated_at": _now(),
         "as_of": latest_trade_date.isoformat(),
@@ -833,6 +874,14 @@ def read_market_overview(db: Session, limit: int = 10) -> dict[str, Any]:
         ],
         "source_refs": [{"type": "table", "name": "market_daily_price"}],
     }
+    return _with_evidence_passport(
+        envelope,
+        freshness={
+            "is_current": not missing,
+            "missing": missing,
+            "warnings": envelope["warnings"],
+        },
+    )
 
 
 def read_stock_context(
@@ -921,6 +970,24 @@ def read_stock_context(
         technical_reports=technical_reports,
         requested_horizon=analysis_horizon,
     )
+    overnight_impact: dict[str, Any] | None = None
+
+    if stock is not None:
+        try:
+            overnight_impact = build_us_overnight_impact_report(
+                db=db,
+                stock_id=normalized_stock_id,
+            )
+            for warning in overnight_impact.get("warnings") or []:
+                warnings.append(f"US overnight impact warning: {warning}")
+            if overnight_impact.get("missing"):
+                warnings.append(
+                    "US overnight impact is partial: "
+                    + ", ".join(str(value) for value in overnight_impact.get("missing", [])[:5])
+                )
+        except Exception as exc:
+            warnings.append(f"US overnight impact unavailable: {exc}")
+            missing.append("us_overnight_tw_impact")
 
     if branch_summary.get("is_partial"):
         warnings.append(
@@ -935,6 +1002,7 @@ def read_stock_context(
     _add_missing(missing, "monthly_revenue", latest_revenue)
     _add_missing(missing, "financial_metric_quarterly", latest_financial)
     _add_missing(missing, "broker_branch_trade_daily", branch_summary.get("buy_top") or branch_summary.get("sell_top"))
+    _add_missing(missing, "us_overnight_tw_impact", overnight_impact)
 
     as_of = _latest_date_string(
         [
@@ -944,10 +1012,27 @@ def read_stock_context(
             branch_summary.get("trade_date"),
             getattr(latest_revenue, "period", None),
             getattr(latest_financial, "report_date", None),
+            overnight_impact.get("as_of") if isinstance(overnight_impact, dict) else None,
         ]
     )
 
-    return {
+    source_refs = [
+        {"type": "table", "name": "stock_master"},
+        {"type": "table", "name": "market_daily_price"},
+        {"type": "table", "name": "institutional_trade_daily"},
+        {"type": "table", "name": "margin_trading_daily"},
+        {"type": "table", "name": "shareholding_distribution_weekly"},
+        {"type": "table", "name": "broker_branch_trade_daily"},
+        {"type": "table", "name": "monthly_revenue"},
+        {"type": "table", "name": "financial_metric_quarterly"},
+        {"type": "derived", "name": "app.market.technical_report"},
+        {"type": "table", "name": "us_daily_price"},
+        {"type": "table", "name": "us_watchlist_group"},
+        {"type": "table", "name": "us_watchlist_item"},
+        {"type": "derived", "name": "app.market.overnight_impact"},
+    ]
+
+    envelope = {
         "kind": "stock_context",
         "generated_at": _now(),
         "as_of": as_of,
@@ -981,6 +1066,7 @@ def read_stock_context(
             },
             "technical_reports": technical_reports,
             "analysis": technical_analysis,
+            "overnight_impact": overnight_impact,
             "latest_institutional": _row_dict(
                 latest_institutional,
                 (
@@ -1084,18 +1170,13 @@ def read_stock_context(
         },
         "missing": missing,
         "warnings": warnings,
-        "source_refs": [
-            {"type": "table", "name": "stock_master"},
-            {"type": "table", "name": "market_daily_price"},
-            {"type": "table", "name": "institutional_trade_daily"},
-            {"type": "table", "name": "margin_trading_daily"},
-            {"type": "table", "name": "shareholding_distribution_weekly"},
-            {"type": "table", "name": "broker_branch_trade_daily"},
-            {"type": "table", "name": "monthly_revenue"},
-            {"type": "table", "name": "financial_metric_quarterly"},
-            {"type": "derived", "name": "app.market.technical_report"},
-        ],
+        "source_refs": source_refs,
     }
+    return _with_evidence_passport(
+        envelope,
+        analysis=technical_analysis,
+        confidence=str(technical_analysis.get("selected_confidence") or ""),
+    )
 
 
 def read_watchlist_context(
@@ -1130,7 +1211,7 @@ def read_watchlist_context(
 
     ranked_as_of = _latest_date_string([row.get("time") for row in results])
 
-    return {
+    envelope = {
         "kind": "watchlist_context",
         "generated_at": _now(),
         "as_of": ranked_as_of,
@@ -1151,3 +1232,4 @@ def read_watchlist_context(
             {"type": "table", "name": "market_daily_price"},
         ],
     }
+    return _with_evidence_passport(envelope)

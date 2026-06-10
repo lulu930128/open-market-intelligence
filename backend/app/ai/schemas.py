@@ -32,6 +32,7 @@ class AiDataEnvelope(BaseModel):
     missing: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     source_refs: list[dict[str, Any]] = Field(default_factory=list)
+    evidence_passport: dict[str, Any] = Field(default_factory=dict)
 
 
 class AiReportEnvelope(AiDataEnvelope):
@@ -104,6 +105,7 @@ class AiAskResponse(BaseModel):
     missing: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     source_refs: list[dict[str, Any]] = Field(default_factory=list)
+    evidence_passport: dict[str, Any] = Field(default_factory=dict)
 
 
 class AiMemoryCreate(BaseModel):
