@@ -32,13 +32,15 @@ from app.market.indices import (
     get_market_index_ohlc_chart_data,
     get_market_index_summary,
 )
-from app.market.intraday import get_intraday_trend
+from app.market.intraday import get_intraday_trend, get_market_intraday_history
 from app.market.market_chips import (
     MarketChipFetchError,
+    expected_market_chip_date,
     ensure_market_chip_daily,
     get_latest_market_chip_daily,
     list_market_chip_daily,
     market_chip_daily_to_dict,
+    normalize_market_chip_index_ids,
 )
 from app.market.overnight_impact import build_us_overnight_impact_report
 from app.market.technical_report import build_stock_technical_report
@@ -54,6 +56,7 @@ from app.market.trading_calendar import (
 from app.market.schemas import (
     BrokerBranchTradeDailySummaryRead,
     FinancialMetricQuarterlyRead,
+    MarketIntradayChartRead,
     IntradayTrendRead,
     InstitutionalHoldingRatioRead,
     InstitutionalTradeDailyRead,
@@ -103,6 +106,10 @@ router = APIRouter()
 
 def _split_categories(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _split_index_ids(value: str) -> list[str]:
+    return [item.strip().upper() for item in value.split(",") if item.strip()]
 
 
 def _resolve_daily_metric_include_today(
@@ -608,6 +615,29 @@ def get_stock_intraday_trend(
     return get_intraday_trend(db=db, stock_id=stock_id)
 
 
+@router.get("/intraday/{stock_id}/history", response_model=MarketIntradayChartRead)
+def get_stock_intraday_history(
+    stock_id: str,
+    interval: str = Query(default="1m", pattern="^(1m|5m|15m|30m|1h|4h)$"),
+    range_value: str = Query(default="auto", alias="range", pattern="^(auto|1d|5d|1mo|3mo)$"),
+    refresh: bool = True,
+    db: Session = Depends(get_db),
+):
+    try:
+        return get_market_intraday_history(
+            db=db,
+            stock_id=stock_id,
+            interval=interval,
+            range_value=range_value,
+            refresh=refresh,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
 @router.get("/technical/{stock_id}", response_model=TechnicalReportRead)
 def get_stock_technical_report(
     stock_id: str,
@@ -652,6 +682,47 @@ def get_indices_summary(
     db: Session = Depends(get_db),
 ):
     return get_market_index_summary(db=db, force_refresh=force_refresh)
+
+
+@router.post(
+    "/market-chips/refresh",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def refresh_market_chip_daily_api(
+    background_tasks: BackgroundTasks,
+    index_ids: str = Query(default="TAIEX,TPEX"),
+    trade_date: date | None = None,
+    include_today: bool | None = None,
+    force: bool = False,
+    db: Session = Depends(get_db),
+):
+    try:
+        index_id_list = normalize_market_chip_index_ids(_split_index_ids(index_ids))
+        target_trade_date = trade_date or expected_market_chip_date(
+            include_today=include_today
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    return _queue_backfill_job(
+        db=db,
+        background_tasks=background_tasks,
+        job_type="market.market_chip_daily_refresh",
+        target="market-chips",
+        request={
+            "index_ids": index_id_list,
+            "trade_date": target_trade_date,
+            "include_today": include_today,
+            "force": force,
+        },
+        progress_total=len(index_id_list),
+        task=backfill_tasks.run_market_chip_daily_refresh_job,
+        task_args=(index_id_list, target_trade_date, include_today, force),
+    )
 
 
 @router.get("/market-chips/latest", response_model=MarketChipDailyRead)

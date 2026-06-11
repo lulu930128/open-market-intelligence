@@ -15,6 +15,7 @@ from app.market.fundamental_metrics_backfill import (
     ensure_stock_fundamental_metrics,
 )
 from app.market.monthly_revenue_history_backfill import ensure_stock_monthly_revenue_history
+from app.market.market_chips import refresh_market_chip_daily
 from app.market.shareholding_history_backfill import ensure_stock_shareholding_history
 from app.market.stock_selection_refresh import refresh_selected_stock_data
 from app.us_market import service as us_market_service
@@ -103,6 +104,27 @@ def run_market_daily_metrics_job(
             include_today=include_today,
             sleep_seconds=sleep_seconds,
             skip_existing=skip_existing,
+        )
+
+    run_tracked_job(job_id, worker)
+
+
+def run_market_chip_daily_refresh_job(
+    job_id: int,
+    index_ids: list[str],
+    trade_date: date | None,
+    include_today: bool | None,
+    force: bool,
+) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        progress(0, len(index_ids) or 1, "Refreshing market chip daily.")
+        return refresh_market_chip_daily(
+            db=db,
+            index_ids=index_ids,
+            trade_date=trade_date,
+            include_today=include_today,
+            force=force,
+            progress=progress,
         )
 
     run_tracked_job(job_id, worker)

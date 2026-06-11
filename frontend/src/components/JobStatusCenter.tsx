@@ -13,6 +13,8 @@ const JOB_TYPE_LABELS: Record<string, string> = {
   "watchlist.group_daily_price_backfill": "自選股歷史日線",
   "market.daily_metrics_backfill": "法人 / 融資融券",
   "scheduler.market_daily_refresh": "排程法人 / 融資融券",
+  "market.market_chip_daily_refresh": "大盤籌碼日報",
+  "scheduler.market_chip_daily_refresh": "排程大盤籌碼日報",
   "market.stock_daily_metrics_history_backfill": "個股籌碼歷史",
   "market.stock_shareholding_history_backfill": "股權分散歷史",
   "market.stock_monthly_revenue_history_backfill": "營收歷史",
@@ -55,7 +57,8 @@ function getJobMarket(jobType: string): "tw" | "us" | "other" {
   if (
     jobType.startsWith("market.") ||
     jobType.startsWith("watchlist.") ||
-    jobType === "scheduler.market_daily_refresh"
+    jobType === "scheduler.market_daily_refresh" ||
+    jobType === "scheduler.market_chip_daily_refresh"
   ) {
     return "tw";
   }

@@ -8,10 +8,11 @@ import StockDetailPanel from "@/components/StockDetailPanel";
 import USStockDetailPanel from "@/components/USStockDetailPanel";
 import USWatchlistSidebar from "@/components/USWatchlistSidebar";
 import { fetchJson } from "@/lib/api";
-import { requestBackfillJob } from "@/lib/jobs";
+import { getJobResultStatus, requestBackfillJob } from "@/lib/jobs";
 import {
   TAIWAN_INTRADAY_REFRESH_MS,
   getTaiwanIntradayXRatio,
+  getTaiwanMarketChipRefreshState,
   getTaiwanMarketRefreshState,
   isTaiwanRegularSessionPoint,
 } from "@/lib/taiwanMarketTime";
@@ -51,6 +52,7 @@ type RankBy = "none" | "change_pct" | "score" | "volume";
 type USRankBy = "none" | "change_pct" | "volume" | "close";
 const WATCHLIST_INTRADAY_LIMIT = 30;
 const WATCHLIST_BACKFILL_LOOKBACK_YEARS = 8;
+const MARKET_CHIP_REFRESH_STORAGE_PREFIX = "omi:market-chip-refresh";
 type RankingDisplayRow = {
   key: string;
   rank: number;
@@ -69,6 +71,27 @@ type RankingDisplayRow = {
   loading?: boolean;
   onSelect: () => void;
 };
+
+function marketChipRefreshStorageKey(dateKey: string) {
+  return `${MARKET_CHIP_REFRESH_STORAGE_PREFIX}:${dateKey}`;
+}
+
+function isStoredMarketChipRefreshDone(dateKey: string) {
+  try {
+    return window.localStorage.getItem(marketChipRefreshStorageKey(dateKey)) === "done";
+  } catch {
+    return false;
+  }
+}
+
+function markStoredMarketChipRefreshDone(dateKey: string) {
+  try {
+    window.localStorage.setItem(marketChipRefreshStorageKey(dateKey), "done");
+  } catch {
+    // Ignore storage failures; job dedupe still prevents active duplicates.
+  }
+}
+
 type RankingPanelOption = {
   value: string;
   label: string;
@@ -1366,6 +1389,7 @@ export default function MarketDashboardClient({
   const [watchlistTree, setWatchlistTree] = useState<WatchlistGroupNode[]>(initialTree);
   const [watchlistItems, setWatchlistItems] = useState<WatchlistItemRead[]>(initialItems);
   const [activeMarket, setActiveMarket] = useState<MarketRegion>("tw");
+  const [twChartFocusMode, setTwChartFocusMode] = useState(false);
   const [selectedUsSymbol, setSelectedUsSymbol] = useState<string | null>(null);
   const [selectedUsSecurityName, setSelectedUsSecurityName] = useState<string | null>(null);
   const [selectedUsCompanyProfile, setSelectedUsCompanyProfile] =
@@ -1413,6 +1437,7 @@ export default function MarketDashboardClient({
   const selectedUsGroupIdRef = useRef<number | null>(selectedUsGroupId);
   const watchlistFreshnessRequestKeys = useRef<Set<string>>(new Set());
   const usWatchlistFreshnessRequestKeys = useRef<Set<string>>(new Set());
+  const marketChipRefreshRequestKeys = useRef<Set<string>>(new Set());
   const baseRows = useMemo(
     () => buildWatchlistRows(selectedGroup, watchlistItems),
     [selectedGroup, watchlistItems]
@@ -1600,6 +1625,36 @@ export default function MarketDashboardClient({
     }
   }
 
+  async function refreshMarketChipsForFreshness(dateKey: string) {
+    if (isStoredMarketChipRefreshDone(dateKey)) return;
+    if (marketChipRefreshRequestKeys.current.has(dateKey)) return;
+
+    marketChipRefreshRequestKeys.current.add(dateKey);
+
+    try {
+      const job = await requestBackfillJob(
+        "/api/market/market-chips/refresh",
+        { method: "POST" },
+        {
+          include_today: true,
+          force: false,
+        },
+        {
+          intervalMs: 1500,
+          timeoutMs: 600_000,
+        }
+      );
+
+      if (getJobResultStatus(job) === "success") {
+        markStoredMarketChipRefreshDone(dateKey);
+      }
+
+      await loadMarketIndices({ silent: true });
+    } catch (error) {
+      console.warn("Market chip daily refresh failed.", error);
+    }
+  }
+
   async function refreshWatchlistDailyPricesOnOpen(groupId: number, currentRankBy: RankBy) {
     const marketState = getTaiwanMarketRefreshState();
     const includeToday = marketState.isDailyPriceReleased;
@@ -1756,6 +1811,55 @@ export default function MarketDashboardClient({
         window.clearTimeout(refreshTimer);
       }
     };
+  }, [activeMarket]);
+
+  useEffect(() => {
+    if (activeMarket !== "tw") return;
+
+    let disposed = false;
+    let refreshTimer: number | undefined;
+
+    function clearRefreshTimer() {
+      if (refreshTimer !== undefined) {
+        window.clearTimeout(refreshTimer);
+        refreshTimer = undefined;
+      }
+    }
+
+    function scheduleRefresh() {
+      if (disposed) return;
+
+      const state = getTaiwanMarketChipRefreshState();
+      const alreadyQueued =
+        marketChipRefreshRequestKeys.current.has(state.dateKey) ||
+        isStoredMarketChipRefreshDone(state.dateKey);
+      const delay =
+        state.shouldRefreshNow && !alreadyQueued ? 0 : state.msUntilNextRefresh;
+
+      refreshTimer = window.setTimeout(() => {
+        const nextState = getTaiwanMarketChipRefreshState();
+        const nextAlreadyQueued =
+          marketChipRefreshRequestKeys.current.has(nextState.dateKey) ||
+          isStoredMarketChipRefreshDone(nextState.dateKey);
+
+        if (nextState.shouldRefreshNow && !nextAlreadyQueued) {
+          void refreshMarketChipsForFreshness(nextState.dateKey).finally(
+            scheduleRefresh
+          );
+          return;
+        }
+
+        scheduleRefresh();
+      }, delay);
+    }
+
+    scheduleRefresh();
+
+    return () => {
+      disposed = true;
+      clearRefreshTimer();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeMarket]);
 
   useEffect(() => {
@@ -2330,6 +2434,7 @@ export default function MarketDashboardClient({
                 setActiveMarket(market);
                 setErrorMessage(null);
                 setUsErrorMessage(null);
+                setTwChartFocusMode(false);
                 if (market === "us") {
                   ensureSelectedUsGroup();
                 }
@@ -2386,6 +2491,7 @@ export default function MarketDashboardClient({
               onMarketChange={(market) => {
                 setActiveMarket(market);
                 setErrorMessage(null);
+                setTwChartFocusMode(false);
                 if (market === "us") {
                   ensureSelectedUsGroup();
                 }
@@ -2415,7 +2521,9 @@ export default function MarketDashboardClient({
           <section className="min-w-0 flex-1 overflow-y-auto p-4">
             {activeMarket === "tw" ? (
               <>
-                <MarketTape summary={marketIndexSummary} loadState={marketIndexLoadState} />
+                {twChartFocusMode ? null : (
+                  <MarketTape summary={marketIndexSummary} loadState={marketIndexLoadState} />
+                )}
 
                 <StockDetailPanel
                   stockId={selectedStockId}
@@ -2424,6 +2532,7 @@ export default function MarketDashboardClient({
                   initialIndicatorData={initialIndicatorData}
                   watchlistRankingPanel={rankingPanel}
                   marketIndexSummary={marketIndexSummary}
+                  onChartFocusModeChange={setTwChartFocusMode}
                 />
               </>
             ) : activeMarket === "us" ? (

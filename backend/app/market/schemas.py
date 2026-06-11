@@ -258,6 +258,34 @@ class IntradayTrendRead(BaseModel):
     points: list[IntradayTrendPointRead]
 
 
+class MarketIntradayChartPointRead(BaseModel):
+    time: datetime
+
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    close: float | None = None
+
+    volume: int | None = None
+    trade_value: int | None = None
+    transaction_count: int | None = None
+
+
+class MarketIntradayChartRead(BaseModel):
+    stock_id: str
+    symbol: str | None = None
+    interval: str
+    range: str
+    provider: str
+    source: str
+    from_time: datetime | None = None
+    to_time: datetime | None = None
+    point_count: int
+    cached_count: int
+    refreshed_count: int
+    points: list[MarketIntradayChartPointRead]
+
+
 class TechnicalReportRowRead(BaseModel):
     key: str
     label: str

@@ -44,6 +44,40 @@ class JobRetryTests(unittest.TestCase):
         self.assertEqual(task_args, ("2330", True, 0.05, "full"))
         self.assertEqual(request["stock_id"], "2330")
 
+    def test_retry_config_recreates_market_chip_refresh_task(self) -> None:
+        job = SimpleNamespace(
+            id=14,
+            job_type="market.market_chip_daily_refresh",
+            status="error",
+            target="market-chips",
+            progress_current=0,
+            progress_total=2,
+            message=None,
+            error_message="source unavailable",
+            request_json=json.dumps(
+                {
+                    "index_ids": ["TAIEX", "TPEX"],
+                    "trade_date": "2026-06-09",
+                    "include_today": True,
+                    "force": False,
+                }
+            ),
+            result_json=None,
+            created_at=None,
+            started_at=None,
+            ended_at=None,
+            updated_at=None,
+        )
+
+        task, task_args, request = _retry_config(job)
+
+        self.assertIs(task, backfill_tasks.run_market_chip_daily_refresh_job)
+        self.assertEqual(
+            task_args,
+            (["TAIEX", "TPEX"], date(2026, 6, 9), True, False),
+        )
+        self.assertEqual(request["index_ids"], ["TAIEX", "TPEX"])
+
     def test_retry_config_preserves_basic_selection_refresh_profile(self) -> None:
         job = SimpleNamespace(
             id=13,

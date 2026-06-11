@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 from datetime import date
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.db.models import Base
 from app.market.market_chips import (
+    MarketChipFetchError,
     extract_index_futures_position_summary,
     market_chip_daily_to_dict,
+    normalize_market_chip_index_ids,
     parse_institutional_amount_summary,
     parse_taifex_futures_institutional_html,
+    refresh_market_chip_daily,
     upsert_market_chip_daily,
 )
 
@@ -102,6 +107,54 @@ class MarketChipParserTests(unittest.TestCase):
         self.assertEqual(payload["trade_date"], date(2026, 6, 9))
         self.assertEqual(result["foreign_futures_net_oi"], -61871)
         self.assertEqual(result["retail_futures_net_oi"], 10252)
+
+
+class MarketChipRefreshTests(unittest.TestCase):
+    def test_normalize_market_chip_index_ids_deduplicates_and_validates(self) -> None:
+        self.assertEqual(
+            normalize_market_chip_index_ids(["taiex", "TPEX", "TAIEX"]),
+            ["TAIEX", "TPEX"],
+        )
+
+        with self.assertRaises(ValueError):
+            normalize_market_chip_index_ids(["SPX"])
+
+    def test_refresh_market_chip_daily_collects_partial_source_errors(self) -> None:
+        trade_date = date(2026, 6, 9)
+        progress_calls: list[tuple[int | None, int | None, str | None]] = []
+
+        def fake_ensure_market_chip_daily(**kwargs):
+            if kwargs["index_id"] == "TPEX":
+                raise MarketChipFetchError("TPEx source unavailable")
+
+            return SimpleNamespace(
+                index_id="TAIEX",
+                market="TWSE",
+                trade_date=trade_date,
+                updated_at=None,
+            )
+
+        with patch(
+            "app.market.market_chips.ensure_market_chip_daily",
+            side_effect=fake_ensure_market_chip_daily,
+        ):
+            result = refresh_market_chip_daily(
+                db=SimpleNamespace(),
+                index_ids=["TAIEX", "TPEX"],
+                trade_date=trade_date,
+                progress=lambda current, total, message: progress_calls.append(
+                    (current, total, message)
+                ),
+            )
+
+        self.assertEqual(result["status"], "partial_success")
+        self.assertEqual(result["trade_date"], "2026-06-09")
+        self.assertEqual(result["requested_count"], 2)
+        self.assertEqual(result["success_count"], 1)
+        self.assertEqual(result["error_count"], 1)
+        self.assertEqual(result["results"][0]["index_id"], "TAIEX")
+        self.assertEqual(result["errors"][0]["index_id"], "TPEX")
+        self.assertGreaterEqual(len(progress_calls), 3)
 
 
 class MarketChipPersistenceTests(unittest.TestCase):

@@ -308,6 +308,42 @@ class MarketDailyPrice(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class MarketIntradayBar(Base):
+    __tablename__ = "market_intraday_bar"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "stock_id",
+            "interval",
+            "bar_time",
+            name="uq_market_intraday_provider_stock_interval_time",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(60), index=True)
+    stock_id: Mapped[str] = mapped_column(String(20), index=True)
+    market: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    symbol: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    interval: Mapped[str] = mapped_column(String(10), index=True)
+    bar_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+    open_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    close_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    trade_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    trade_value: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    source: Mapped[str] = mapped_column(String(120), index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class MarketIndexDailyStat(Base):
     __tablename__ = "market_index_daily_stat"
 

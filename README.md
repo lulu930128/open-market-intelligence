@@ -378,6 +378,8 @@ APP_HOST=127.0.0.1
 APP_PORT=8300
 TIMEZONE=Asia/Taipei
 ENABLE_SCHEDULER=false
+SCHEDULER_MARKET_REFRESH_TIME=15:15
+SCHEDULER_MARKET_CHIP_REFRESH_TIME=18:35
 
 OPENAI_API_KEY=
 OPENAI_LLM_API_KEY=
@@ -400,6 +402,10 @@ FRED_API_KEY=
 US_SEC_USER_AGENT="Open Market Intelligence local research contact@example.com"
 ENABLE_US_MARKET_SCHEDULER=false
 ```
+
+When `ENABLE_SCHEDULER=true`, Taiwan market jobs run on Asia/Taipei time by
+default: daily market metrics at `SCHEDULER_MARKET_REFRESH_TIME` and index chip
+daily refresh at `SCHEDULER_MARKET_CHIP_REFRESH_TIME`.
 
 Frontend `.env.example`:
 

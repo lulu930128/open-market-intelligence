@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     scheduler_market_refresh_time: str = "15:15"
     scheduler_market_refresh_lookback_days: int = 7
     scheduler_market_refresh_sleep_seconds: float = 0.2
+    scheduler_market_chip_refresh_time: str = "18:35"
+    scheduler_market_chip_refresh_index_ids: str = "TAIEX,TPEX"
+    scheduler_market_chip_refresh_force: bool = False
     enable_us_market_scheduler: bool = False
     scheduler_us_market_refresh_time: str = "06:30"
     scheduler_us_market_refresh_day_of_week: str = "tue-sat"

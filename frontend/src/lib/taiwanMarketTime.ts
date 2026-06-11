@@ -3,6 +3,7 @@ export const TAIWAN_PREOPEN_MINUTES = 8 * 60 + 30;
 export const TAIWAN_SESSION_START_MINUTES = 9 * 60;
 export const TAIWAN_SESSION_END_MINUTES = 13 * 60 + 30;
 export const TAIWAN_DAILY_PRICE_RELEASE_MINUTES = 15 * 60 + 15;
+export const TAIWAN_MARKET_CHIP_REFRESH_MINUTES = 18 * 60 + 35;
 
 const TAIWAN_MARKET_HOLIDAYS = new Set([
   "2025-01-01",
@@ -164,6 +165,40 @@ export function getTaiwanMarketRefreshState(now = new Date()) {
     isAfterClose,
     isDailyPriceReleased,
     msUntilNextPollingStart: Math.max(1_000, nextPollingStartMs - nowMs),
+  };
+}
+
+export function getTaiwanMarketChipRefreshState(now = new Date()) {
+  const parts = getTaipeiParts(now);
+  const dateKey = getTaipeiDateKey(now);
+  const isTradingDay = isTaiwanTradingDay(parts.year, parts.month, parts.day);
+  const nowMs = now.getTime();
+  const releaseHour = Math.floor(TAIWAN_MARKET_CHIP_REFRESH_MINUTES / 60);
+  const releaseMinute = TAIWAN_MARKET_CHIP_REFRESH_MINUTES % 60;
+  const todayRefreshMs = taipeiBoundaryToUtcMs(
+    parts.year,
+    parts.month,
+    parts.day,
+    releaseHour,
+    releaseMinute
+  );
+  const nextWeekday = nextTaiwanWeekday(parts);
+  const nextRefreshMs =
+    isTradingDay && nowMs < todayRefreshMs
+      ? todayRefreshMs
+      : taipeiBoundaryToUtcMs(
+          nextWeekday.year,
+          nextWeekday.month,
+          nextWeekday.day,
+          releaseHour,
+          releaseMinute
+        );
+
+  return {
+    dateKey,
+    isTradingDay,
+    shouldRefreshNow: isTradingDay && nowMs >= todayRefreshMs,
+    msUntilNextRefresh: Math.max(1_000, nextRefreshMs - nowMs),
   };
 }
 

@@ -19,6 +19,21 @@ def _parse_date(value: Any) -> date | None:
     return date.fromisoformat(str(value))
 
 
+def _parse_string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        items: list[str] = []
+        for item in value:
+            text = str(item).strip()
+            if text:
+                items.append(text)
+        return items
+
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+
+    return []
+
+
 def _request_dict(job: Any) -> dict[str, Any]:
     request = service.serialize_job(job).get("request")
 
@@ -68,6 +83,22 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
                 bool(request.get("include_today", False)),
                 float(request.get("sleep_seconds", 0.2)),
                 bool(request.get("skip_existing", True)),
+            ),
+            request,
+        )
+
+    if job_type in {
+        "market.market_chip_daily_refresh",
+        "scheduler.market_chip_daily_refresh",
+    }:
+        include_today = request.get("include_today")
+        return (
+            backfill_tasks.run_market_chip_daily_refresh_job,
+            (
+                _parse_string_list(request.get("index_ids")) or ["TAIEX", "TPEX"],
+                _parse_date(request.get("trade_date")),
+                include_today if isinstance(include_today, bool) else None,
+                bool(request.get("force", False)),
             ),
             request,
         )

@@ -336,6 +336,21 @@ export type IntradayTrendResponse = {
   points: IntradayTrendPoint[];
 };
 
+export type IntradayHistoryResponse = {
+  stock_id: string;
+  symbol: string | null;
+  interval: "1m" | "5m" | "15m" | "30m" | "1h" | "4h" | string;
+  range: string;
+  provider: string;
+  source: string;
+  from_time: string | null;
+  to_time: string | null;
+  point_count: number;
+  cached_count: number;
+  refreshed_count: number;
+  points: ChartPoint[];
+};
+
 export type StockTechnicalReportRow = {
   key: string;
   label: string;

@@ -30,21 +30,64 @@ export type IndicatorSettings = {
   vwap: boolean;
   psar: boolean;
   donchian: boolean;
+  ichimoku: boolean;
+  supertrend: boolean;
+  keltner: boolean;
   volume: boolean;
   rsi: boolean;
   macd: boolean;
   kd: boolean;
   atr: boolean;
   adx: boolean;
+  aroon: boolean;
   obv: boolean;
   mfi: boolean;
   cci: boolean;
   williamsR: boolean;
   roc: boolean;
   stochRsi: boolean;
+  trix: boolean;
 };
 
 export type IndicatorKey = keyof IndicatorSettings;
+
+export type IndicatorCategoryKey =
+  | "trend"
+  | "volatility"
+  | "momentum"
+  | "volume"
+  | "structure"
+  | "relative"
+  | "signals";
+
+export type IndicatorPlotType = "overlay" | "pane" | "signal" | "context";
+
+export type AvailableIndicatorOption = {
+  status: "available";
+  key: IndicatorKey;
+  label: string;
+  description: string;
+  category: IndicatorCategoryKey;
+  plot: IndicatorPlotType;
+};
+
+export type PlannedIndicatorOption = {
+  status: "planned";
+  key: string;
+  label: string;
+  description: string;
+  category: IndicatorCategoryKey;
+  plot: IndicatorPlotType;
+};
+
+export type ChartIndicatorOption = AvailableIndicatorOption | PlannedIndicatorOption;
+
+export type IndicatorCategoryGroup = {
+  key: IndicatorCategoryKey;
+  label: string;
+  description: string;
+  options: ChartIndicatorOption[];
+};
 
 export type IndicatorParameters = {
   maShort: number;
@@ -63,6 +106,16 @@ export type IndicatorParameters = {
   atrPeriod: number;
   adxPeriod: number;
   donchianPeriod: number;
+  ichimokuConversionPeriod: number;
+  ichimokuBasePeriod: number;
+  ichimokuSpanBPeriod: number;
+  ichimokuDisplacement: number;
+  supertrendAtrPeriod: number;
+  supertrendMultiplier: number;
+  keltnerPeriod: number;
+  keltnerAtrPeriod: number;
+  keltnerMultiplier: number;
+  aroonPeriod: number;
   obvMa: number;
   mfiPeriod: number;
   cciPeriod: number;
@@ -71,6 +124,8 @@ export type IndicatorParameters = {
   stochRsiPeriod: number;
   stochRsiSmoothK: number;
   stochRsiSmoothD: number;
+  trixPeriod: number;
+  trixSignal: number;
 };
 
 type MergedPoint = ChartPoint & {
@@ -145,27 +200,103 @@ type HoverPriceGuideState = {
   snap: "high" | "low" | null;
 };
 
-export const indicatorOptions: Array<{ key: IndicatorKey; label: string; description: string }> = [
-  { key: "signals", label: "SIGNAL", description: "交叉 / 突破標記" },
-  { key: "ma", label: "MA", description: "MA5 / MA20 / MA60" },
-  { key: "ema", label: "EMA", description: "EMA12 / EMA26" },
-  { key: "bollinger", label: "BOLL", description: "20MA +/- 2SD" },
-  { key: "vwap", label: "VWAP", description: "量價均價" },
-  { key: "psar", label: "SAR", description: "Parabolic SAR" },
-  { key: "donchian", label: "DONCH", description: "20 日通道" },
-  { key: "volume", label: "VOL", description: "成交量" },
-  { key: "rsi", label: "RSI", description: "RSI 14" },
-  { key: "macd", label: "MACD", description: "12 / 26 / 9" },
-  { key: "kd", label: "KD", description: "KD 9 / 3" },
-  { key: "atr", label: "ATR", description: "ATR 14" },
-  { key: "adx", label: "ADX", description: "ADX / +DI / -DI" },
-  { key: "obv", label: "OBV", description: "能量潮" },
-  { key: "mfi", label: "MFI", description: "Money Flow 14" },
-  { key: "cci", label: "CCI", description: "CCI 20" },
-  { key: "williamsR", label: "W%R", description: "Williams %R 14" },
-  { key: "roc", label: "ROC", description: "ROC 12" },
-  { key: "stochRsi", label: "StochRSI", description: "RSI 隨機指標" },
+export const indicatorCategoryDefinitions: Array<Omit<IndicatorCategoryGroup, "options">> = [
+  {
+    key: "trend",
+    label: "趨勢 / 均線類",
+    description: "判斷方向、均線排列、趨勢強度與轉向。",
+  },
+  {
+    key: "volatility",
+    label: "通道 / 波動類",
+    description: "觀察價格區間、波動擴張與風險位置。",
+  },
+  {
+    key: "momentum",
+    label: "動能 / 震盪類",
+    description: "判斷強弱、超買超賣與短線轉折。",
+  },
+  {
+    key: "volume",
+    label: "量價 / 資金流類",
+    description: "觀察成交量、量價背離與資金流向。",
+  },
+  {
+    key: "structure",
+    label: "價格結構 / 關鍵位",
+    description: "前高前低、支撐壓力、缺口與樞紐位。",
+  },
+  {
+    key: "relative",
+    label: "相對 / 市場類",
+    description: "相對大盤、族群與外部市場的強弱比較。",
+  },
+  {
+    key: "signals",
+    label: "訊號 / 標記類",
+    description: "交叉、突破、背離與型態提示。",
+  },
 ];
+
+export const indicatorOptions: AvailableIndicatorOption[] = [
+  { status: "available", key: "ma", label: "MA", description: "MA5 / MA20 / MA60", category: "trend", plot: "overlay" },
+  { status: "available", key: "ema", label: "EMA", description: "EMA12 / EMA26", category: "trend", plot: "overlay" },
+  { status: "available", key: "adx", label: "ADX", description: "ADX / +DI / -DI", category: "trend", plot: "pane" },
+  { status: "available", key: "psar", label: "SAR", description: "Parabolic SAR", category: "trend", plot: "overlay" },
+  { status: "available", key: "supertrend", label: "Supertrend", description: "ATR 趨勢帶", category: "trend", plot: "overlay" },
+  { status: "available", key: "ichimoku", label: "Ichimoku", description: "一目均衡表 9 / 26 / 52", category: "trend", plot: "overlay" },
+  { status: "available", key: "bollinger", label: "BOLL", description: "20MA +/- 2SD", category: "volatility", plot: "overlay" },
+  { status: "available", key: "donchian", label: "DONCH", description: "20 日通道", category: "volatility", plot: "overlay" },
+  { status: "available", key: "keltner", label: "Keltner", description: "EMA + ATR 通道", category: "volatility", plot: "overlay" },
+  { status: "available", key: "atr", label: "ATR", description: "ATR 14", category: "volatility", plot: "pane" },
+  { status: "available", key: "rsi", label: "RSI", description: "RSI 14", category: "momentum", plot: "pane" },
+  { status: "available", key: "macd", label: "MACD", description: "12 / 26 / 9", category: "momentum", plot: "pane" },
+  { status: "available", key: "kd", label: "KD", description: "KD 9 / 3", category: "momentum", plot: "pane" },
+  { status: "available", key: "aroon", label: "Aroon", description: "趨勢新高 / 新低強度", category: "momentum", plot: "pane" },
+  { status: "available", key: "cci", label: "CCI", description: "CCI 20", category: "momentum", plot: "pane" },
+  { status: "available", key: "williamsR", label: "W%R", description: "Williams %R 14", category: "momentum", plot: "pane" },
+  { status: "available", key: "roc", label: "ROC", description: "ROC 12", category: "momentum", plot: "pane" },
+  { status: "available", key: "stochRsi", label: "StochRSI", description: "RSI 隨機指標", category: "momentum", plot: "pane" },
+  { status: "available", key: "trix", label: "TRIX", description: "三重平滑動能", category: "momentum", plot: "pane" },
+  { status: "available", key: "volume", label: "VOL", description: "成交量", category: "volume", plot: "pane" },
+  { status: "available", key: "vwap", label: "VWAP", description: "量價均價", category: "volume", plot: "overlay" },
+  { status: "available", key: "obv", label: "OBV", description: "能量潮", category: "volume", plot: "pane" },
+  { status: "available", key: "mfi", label: "MFI", description: "Money Flow 14", category: "volume", plot: "pane" },
+  { status: "available", key: "signals", label: "SIGNAL", description: "交叉 / 突破標記", category: "signals", plot: "signal" },
+];
+
+export const plannedIndicatorOptions: PlannedIndicatorOption[] = [
+  { status: "planned", key: "wma", label: "WMA", description: "加權移動平均", category: "trend", plot: "overlay" },
+  { status: "planned", key: "hma", label: "HMA", description: "Hull Moving Average", category: "trend", plot: "overlay" },
+  { status: "planned", key: "vwma", label: "VWMA", description: "成交量加權均線", category: "trend", plot: "overlay" },
+  { status: "planned", key: "bb_width", label: "BB Width", description: "布林通道寬度", category: "volatility", plot: "pane" },
+  { status: "planned", key: "stddev", label: "StdDev", description: "標準差波動", category: "volatility", plot: "pane" },
+  { status: "planned", key: "choppiness", label: "CHOP", description: "盤整 / 趨勢程度", category: "volatility", plot: "pane" },
+  { status: "planned", key: "momentum", label: "Momentum", description: "價格動量", category: "momentum", plot: "pane" },
+  { status: "planned", key: "tsi", label: "TSI", description: "True Strength Index", category: "momentum", plot: "pane" },
+  { status: "planned", key: "awesome_oscillator", label: "AO", description: "Awesome Oscillator", category: "momentum", plot: "pane" },
+  { status: "planned", key: "ultimate_oscillator", label: "UO", description: "Ultimate Oscillator", category: "momentum", plot: "pane" },
+  { status: "planned", key: "cmf", label: "CMF", description: "Chaikin Money Flow", category: "volume", plot: "pane" },
+  { status: "planned", key: "ad_line", label: "A/D", description: "Accumulation / Distribution", category: "volume", plot: "pane" },
+  { status: "planned", key: "pvt", label: "PVT", description: "Price Volume Trend", category: "volume", plot: "pane" },
+  { status: "planned", key: "volume_profile", label: "VPVR", description: "成交量分布，需價位級資料近似", category: "volume", plot: "context" },
+  { status: "planned", key: "pivot_points", label: "Pivot", description: "日 / 週 / 月樞紐位", category: "structure", plot: "overlay" },
+  { status: "planned", key: "support_resistance", label: "S/R", description: "支撐壓力偵測", category: "structure", plot: "overlay" },
+  { status: "planned", key: "gap", label: "Gap", description: "跳空缺口標記", category: "structure", plot: "overlay" },
+  { status: "planned", key: "relative_strength", label: "RS", description: "相對大盤 / 族群強弱", category: "relative", plot: "pane" },
+  { status: "planned", key: "beta", label: "Beta", description: "相對市場敏感度", category: "relative", plot: "context" },
+  { status: "planned", key: "correlation", label: "Corr", description: "與指數 / 族群相關性", category: "relative", plot: "context" },
+  { status: "planned", key: "divergence", label: "Divergence", description: "價量 / 動能背離", category: "signals", plot: "signal" },
+  { status: "planned", key: "candlestick_patterns", label: "Pattern", description: "K 線型態辨識", category: "signals", plot: "signal" },
+];
+
+export const indicatorCategoryGroups: IndicatorCategoryGroup[] =
+  indicatorCategoryDefinitions.map((category) => ({
+    ...category,
+    options: [...indicatorOptions, ...plannedIndicatorOptions].filter(
+      (option) => option.category === category.key
+    ),
+  }));
 
 export const defaultIndicators: IndicatorSettings = {
   signals: true,
@@ -175,18 +306,23 @@ export const defaultIndicators: IndicatorSettings = {
   vwap: false,
   psar: false,
   donchian: false,
+  ichimoku: false,
+  supertrend: false,
+  keltner: false,
   volume: true,
   rsi: false,
   macd: false,
   kd: false,
   atr: false,
   adx: false,
+  aroon: false,
   obv: false,
   mfi: false,
   cci: false,
   williamsR: false,
   roc: false,
   stochRsi: false,
+  trix: false,
 };
 
 const playedKLineRevealKeys = new Set<string>();
@@ -208,6 +344,16 @@ export const defaultIndicatorParameters: IndicatorParameters = {
   atrPeriod: 14,
   adxPeriod: 14,
   donchianPeriod: 20,
+  ichimokuConversionPeriod: 9,
+  ichimokuBasePeriod: 26,
+  ichimokuSpanBPeriod: 52,
+  ichimokuDisplacement: 26,
+  supertrendAtrPeriod: 10,
+  supertrendMultiplier: 3,
+  keltnerPeriod: 20,
+  keltnerAtrPeriod: 10,
+  keltnerMultiplier: 2,
+  aroonPeriod: 25,
   obvMa: 10,
   mfiPeriod: 14,
   cciPeriod: 20,
@@ -216,6 +362,8 @@ export const defaultIndicatorParameters: IndicatorParameters = {
   stochRsiPeriod: 14,
   stochRsiSmoothK: 3,
   stochRsiSmoothD: 3,
+  trixPeriod: 15,
+  trixSignal: 9,
 };
 
 const DEFAULT_VISIBLE_BARS = 80;

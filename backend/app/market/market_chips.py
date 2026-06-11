@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from typing import Any
@@ -35,6 +35,7 @@ REQUEST_HEADERS = {
     "Accept": "application/json,text/html,text/plain,*/*",
 }
 SUPPORTED_MARKET_CHIP_INDEX_IDS = {"TAIEX", "TPEX"}
+MarketChipProgressCallback = Callable[[int | None, int | None, str | None], None]
 
 
 class MarketChipFetchError(RuntimeError):
@@ -59,6 +60,38 @@ def expected_market_chip_date(
         include_today=include_today,
         now=now,
     )
+
+
+def normalize_market_chip_index_ids(index_ids: Iterable[str] | None = None) -> list[str]:
+    if index_ids is None:
+        return sorted(SUPPORTED_MARKET_CHIP_INDEX_IDS)
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    unsupported: list[str] = []
+
+    for raw_index_id in index_ids:
+        index_id = str(raw_index_id).strip().upper()
+
+        if not index_id:
+            continue
+
+        if index_id not in SUPPORTED_MARKET_CHIP_INDEX_IDS:
+            unsupported.append(index_id)
+            continue
+
+        if index_id in seen:
+            continue
+
+        normalized.append(index_id)
+        seen.add(index_id)
+
+    if unsupported:
+        raise ValueError(
+            "Unsupported market chip index_id: " + ", ".join(sorted(set(unsupported)))
+        )
+
+    return normalized or sorted(SUPPORTED_MARKET_CHIP_INDEX_IDS)
 
 
 def _fetch_json(url: str, *, params: dict[str, Any] | None = None) -> HttpPayload:
@@ -816,6 +849,93 @@ def ensure_market_chip_daily(
         trade_date=target_trade_date,
     )
     return upsert_market_chip_daily(db=db, payload=payload)
+
+
+def refresh_market_chip_daily(
+    db: Session,
+    *,
+    index_ids: Iterable[str] | None = None,
+    trade_date: date | None = None,
+    include_today: bool | None = None,
+    force: bool = False,
+    progress: MarketChipProgressCallback | None = None,
+) -> dict[str, Any]:
+    target_trade_date = trade_date or expected_market_chip_date(
+        include_today=include_today
+    )
+    normalized_index_ids = normalize_market_chip_index_ids(index_ids)
+    total = len(normalized_index_ids)
+    results: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+
+    if progress is not None:
+        progress(0, total, f"Refreshing market chip daily for {target_trade_date}.")
+
+    for current, index_id in enumerate(normalized_index_ids, start=1):
+        if progress is not None:
+            progress(
+                current - 1,
+                total,
+                f"Refreshing market chip daily {index_id}.",
+            )
+
+        try:
+            row = ensure_market_chip_daily(
+                db=db,
+                index_id=index_id,
+                trade_date=target_trade_date,
+                include_today=include_today,
+                force=force,
+            )
+            results.append(
+                {
+                    "index_id": row.index_id,
+                    "market": row.market,
+                    "trade_date": row.trade_date.isoformat(),
+                    "status": "success",
+                    "updated_at": row.updated_at.isoformat()
+                    if row.updated_at
+                    else None,
+                }
+            )
+        except (MarketChipFetchError, ValueError) as exc:
+            errors.append(
+                {
+                    "index_id": index_id,
+                    "trade_date": target_trade_date.isoformat(),
+                    "status": "error",
+                    "error_message": str(exc),
+                }
+            )
+        finally:
+            if progress is not None:
+                progress(current, total, f"Refreshed {current}/{total} market chip rows.")
+
+    success_count = len(results)
+    error_count = len(errors)
+    result_status = (
+        "success"
+        if error_count == 0
+        else "partial_success"
+        if success_count > 0
+        else "error"
+    )
+
+    return {
+        "status": result_status,
+        "message": (
+            f"Market chip daily refresh completed for {target_trade_date}."
+            if error_count == 0
+            else f"Market chip daily refresh completed with {error_count} source errors."
+        ),
+        "trade_date": target_trade_date.isoformat(),
+        "requested_count": total,
+        "success_count": success_count,
+        "error_count": error_count,
+        "force": force,
+        "results": results,
+        "errors": errors,
+    }
 
 
 def get_latest_market_chip_daily(

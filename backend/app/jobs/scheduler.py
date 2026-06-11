@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from app.config import settings
 from app.db.session import SessionLocal
 from app.jobs import backfill_tasks, service as job_service
+from app.market.market_chips import normalize_market_chip_index_ids
 from app.market.trading_calendar import is_taiwan_trading_day
 
 
@@ -29,6 +30,10 @@ def _parse_hour_minute(value: str) -> tuple[int, int]:
 
 def _timezone() -> ZoneInfo:
     return ZoneInfo(settings.timezone)
+
+
+def _split_csv(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def enqueue_market_daily_refresh() -> None:
@@ -71,6 +76,59 @@ def enqueue_market_daily_refresh() -> None:
         )
         logger.info(
             "Scheduled market daily refresh %s job_id=%s",
+            "queued" if created else "deduped",
+            job.id,
+        )
+    finally:
+        db.close()
+
+
+def enqueue_market_chip_daily_refresh() -> None:
+    now = datetime.now(_timezone())
+
+    if not is_taiwan_trading_day(now.date()):
+        logger.info(
+            "Skipped scheduled market chip daily refresh because %s is not a trading day.",
+            now.date(),
+        )
+        return
+
+    try:
+        index_ids = normalize_market_chip_index_ids(
+            _split_csv(settings.scheduler_market_chip_refresh_index_ids)
+        )
+    except ValueError as exc:
+        logger.error("Skipped scheduled market chip daily refresh: %s", exc)
+        return
+
+    request = {
+        "schedule": "market_chip_daily_refresh",
+        "run_date": now.date().isoformat(),
+        "index_ids": index_ids,
+        "trade_date": now.date(),
+        "include_today": True,
+        "force": settings.scheduler_market_chip_refresh_force,
+    }
+    db = SessionLocal()
+
+    try:
+        job, created = job_service.enqueue_job(
+            db=db,
+            job_type="scheduler.market_chip_daily_refresh",
+            target="market-chips",
+            request=request,
+            progress_total=len(index_ids),
+            message="Queued by scheduler.",
+            task=backfill_tasks.run_market_chip_daily_refresh_job,
+            task_args=(
+                index_ids,
+                now.date(),
+                True,
+                settings.scheduler_market_chip_refresh_force,
+            ),
+        )
+        logger.info(
+            "Scheduled market chip daily refresh %s job_id=%s",
             "queued" if created else "deduped",
             job.id,
         )
@@ -131,6 +189,9 @@ def start_scheduler() -> Any | None:
         return None
 
     hour, minute = _parse_hour_minute(settings.scheduler_market_refresh_time)
+    chip_hour, chip_minute = _parse_hour_minute(
+        settings.scheduler_market_chip_refresh_time
+    )
     scheduler = BackgroundScheduler(timezone=_timezone())
     scheduler.add_job(
         enqueue_market_daily_refresh,
@@ -139,6 +200,17 @@ def start_scheduler() -> Any | None:
         hour=hour,
         minute=minute,
         id="market_daily_refresh",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+    scheduler.add_job(
+        enqueue_market_chip_daily_refresh,
+        trigger="cron",
+        day_of_week="mon-fri",
+        hour=chip_hour,
+        minute=chip_minute,
+        id="market_chip_daily_refresh",
         replace_existing=True,
         coalesce=True,
         max_instances=1,
@@ -158,8 +230,10 @@ def start_scheduler() -> Any | None:
         )
     scheduler.start()
     logger.info(
-        "Job scheduler started. market_daily_refresh=%s %s weekdays; us_market_daily_refresh=%s %s %s enabled=%s.",
+        "Job scheduler started. market_daily_refresh=%s %s weekdays; market_chip_daily_refresh=%s %s weekdays; us_market_daily_refresh=%s %s %s enabled=%s.",
         settings.scheduler_market_refresh_time,
+        settings.timezone,
+        settings.scheduler_market_chip_refresh_time,
         settings.timezone,
         settings.scheduler_us_market_refresh_time,
         settings.scheduler_us_market_refresh_day_of_week,

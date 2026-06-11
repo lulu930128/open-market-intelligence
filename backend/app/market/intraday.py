@@ -5,7 +5,7 @@ import time as monotonic_time
 import requests
 from sqlalchemy.orm import Session
 
-from app.db.models import StockMaster
+from app.db.models import MarketIntradayBar, StockMaster, utc_now
 
 
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
@@ -14,6 +14,29 @@ TWSE_MIS_STOCK_INFO_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 TAIPEI_TZ = timezone(timedelta(hours=8))
 INTRADAY_CACHE_TTL_SECONDS = 4.75
 _INTRADAY_CACHE: dict[str, tuple[float, dict]] = {}
+
+INTRADAY_HISTORY_PROVIDER = "yahoo_finance_chart"
+# Yahoo's `5d` minute range is trading-day based. Query the local DB with a
+# wider calendar-day window so weekends and holidays do not hide persisted bars.
+INTRADAY_HISTORY_FIVE_TRADING_DAY_QUERY_DAYS = 21
+INTRADAY_HISTORY_INTERVAL_CONFIGS = {
+    "1m": {
+        "fetch_interval": "1m",
+        "range": "5d",
+        "days": INTRADAY_HISTORY_FIVE_TRADING_DAY_QUERY_DAYS,
+    },
+    "5m": {"fetch_interval": "5m", "range": "1mo", "days": 31},
+    "15m": {"fetch_interval": "15m", "range": "1mo", "days": 31},
+    "30m": {"fetch_interval": "30m", "range": "1mo", "days": 31},
+    "1h": {"fetch_interval": "60m", "range": "3mo", "days": 93},
+    "4h": {"fetch_interval": "60m", "range": "3mo", "days": 93},
+}
+INTRADAY_HISTORY_RANGE_DAYS = {
+    "1d": 1,
+    "5d": INTRADAY_HISTORY_FIVE_TRADING_DAY_QUERY_DAYS,
+    "1mo": 31,
+    "3mo": 93,
+}
 
 
 def _cache_get(cache_key: str) -> dict | None:
@@ -79,12 +102,18 @@ def _mis_exchange(market: str | None) -> str:
     return "tse"
 
 
-def _fetch_yahoo_intraday(stock_id: str, market: str | None) -> dict:
+def _fetch_yahoo_intraday(
+    stock_id: str,
+    market: str | None,
+    *,
+    range_value: str = "1d",
+    interval: str = "1m",
+) -> dict:
     symbol = _yahoo_symbol(stock_id=stock_id, market=market)
     url = YAHOO_CHART_URL.format(symbol=symbol)
     response = requests.get(
         url,
-        params={"range": "1d", "interval": "1m", "includePrePost": "false"},
+        params={"range": range_value, "interval": interval, "includePrePost": "false"},
         headers={
             "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
             "Accept": "application/json,text/plain,*/*",
@@ -104,6 +133,7 @@ def _fetch_yahoo_intraday(stock_id: str, market: str | None) -> dict:
             "previous_close": None,
             "point_count": 0,
             "points": [],
+            "source_url": response.url,
         }
 
     meta = result.get("meta") or {}
@@ -147,6 +177,7 @@ def _fetch_yahoo_intraday(stock_id: str, market: str | None) -> dict:
         "previous_close": previous_close,
         "point_count": len(points),
         "points": points,
+        "source_url": response.url,
     }
 
 
@@ -304,6 +335,183 @@ def _point_time_key(point: dict) -> tuple[str, str] | None:
         return None
 
     return point_time.strftime("%Y%m%d"), point_time.strftime("%H:%M:%S")
+
+
+def _normalize_bar_time(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=TAIPEI_TZ)
+
+    return value.astimezone(TAIPEI_TZ)
+
+
+def _is_taiwan_regular_session_time(value: datetime) -> bool:
+    local_time = _normalize_bar_time(value)
+    minutes = local_time.hour * 60 + local_time.minute
+
+    return 9 * 60 <= minutes <= 13 * 60 + 30
+
+
+def _query_intraday_rows(
+    db: Session,
+    *,
+    stock_id: str,
+    interval: str,
+    from_time: datetime,
+) -> list[MarketIntradayBar]:
+    return (
+        db.query(MarketIntradayBar)
+        .filter(MarketIntradayBar.stock_id == stock_id)
+        .filter(MarketIntradayBar.interval == interval)
+        .filter(MarketIntradayBar.bar_time >= from_time)
+        .order_by(MarketIntradayBar.bar_time.asc())
+        .limit(5000)
+        .all()
+    )
+
+
+def _intraday_row_to_point(row: MarketIntradayBar) -> dict:
+    return {
+        "time": row.bar_time,
+        "open": row.open_price,
+        "high": row.high_price,
+        "low": row.low_price,
+        "close": row.close_price,
+        "volume": row.trade_volume,
+        "trade_value": row.trade_value,
+        "transaction_count": None,
+    }
+
+
+def _aggregate_intraday_points(points: list[dict], interval_minutes: int) -> list[dict]:
+    buckets: dict[tuple[str, int], list[dict]] = {}
+
+    for point in sorted(points, key=lambda item: str(item.get("time") or "")):
+        point_time = _point_datetime(point)
+        close_price = _as_float(point.get("price"))
+
+        if point_time is None or close_price is None:
+            continue
+
+        point_time = _normalize_bar_time(point_time)
+        if not _is_taiwan_regular_session_time(point_time):
+            continue
+
+        minutes = point_time.hour * 60 + point_time.minute
+        bucket_minute = 9 * 60 + ((minutes - 9 * 60) // interval_minutes) * interval_minutes
+        bucket_key = (point_time.strftime("%Y-%m-%d"), bucket_minute)
+        buckets.setdefault(bucket_key, []).append(point)
+
+    aggregated: list[dict] = []
+    for (date_key, bucket_minute), bucket_points in sorted(buckets.items()):
+        first = bucket_points[0]
+        last = bucket_points[-1]
+        first_time = _point_datetime(first)
+        if first_time is None:
+            continue
+        bucket_time = datetime.combine(
+            first_time.date(),
+            time(bucket_minute // 60, bucket_minute % 60, 0),
+            tzinfo=TAIPEI_TZ,
+        )
+        highs = [_as_float(point.get("high")) or _as_float(point.get("price")) for point in bucket_points]
+        lows = [_as_float(point.get("low")) or _as_float(point.get("price")) for point in bucket_points]
+        volumes = [_as_int(point.get("volume")) for point in bucket_points]
+        volume_total = sum(volume for volume in volumes if volume is not None and volume > 0)
+
+        aggregated.append(
+            {
+                "time": bucket_time.isoformat(),
+                "price": _as_float(last.get("price")),
+                "volume": volume_total if volume_total > 0 else None,
+                "open": _as_float(first.get("open")) or _as_float(first.get("price")),
+                "high": max((value for value in highs if value is not None), default=None),
+                "low": min((value for value in lows if value is not None), default=None),
+            }
+        )
+
+    return aggregated
+
+
+def _upsert_market_intraday_bars(
+    db: Session,
+    *,
+    stock_id: str,
+    market: str | None,
+    symbol: str | None,
+    interval: str,
+    source: str,
+    source_url: str | None,
+    points: list[dict],
+) -> int:
+    updated_at = utc_now()
+    changed_count = 0
+
+    for point in points:
+        point_time = _point_datetime(point)
+        close_price = _as_float(point.get("price"))
+
+        if point_time is None or close_price is None:
+            continue
+
+        bar_time = _normalize_bar_time(point_time)
+        if not _is_taiwan_regular_session_time(bar_time):
+            continue
+
+        values = {
+            "provider": INTRADAY_HISTORY_PROVIDER,
+            "stock_id": stock_id,
+            "market": market,
+            "symbol": symbol,
+            "interval": interval,
+            "bar_time": bar_time,
+            "open_price": _as_float(point.get("open")) or close_price,
+            "high_price": _as_float(point.get("high")) or close_price,
+            "low_price": _as_float(point.get("low")) or close_price,
+            "close_price": close_price,
+            "trade_volume": _as_int(point.get("volume")),
+            "trade_value": None,
+            "source": source,
+            "source_url": source_url,
+            "updated_at": updated_at,
+        }
+        existing = (
+            db.query(MarketIntradayBar)
+            .filter(MarketIntradayBar.provider == INTRADAY_HISTORY_PROVIDER)
+            .filter(MarketIntradayBar.stock_id == stock_id)
+            .filter(MarketIntradayBar.interval == interval)
+            .filter(MarketIntradayBar.bar_time == bar_time)
+            .first()
+        )
+
+        if existing is None:
+            db.add(MarketIntradayBar(**values))
+        else:
+            for key, value in values.items():
+                setattr(existing, key, value)
+        changed_count += 1
+
+    if changed_count:
+        db.commit()
+
+    return changed_count
+
+
+def _intraday_history_config(interval: str, range_value: str) -> dict:
+    config = INTRADAY_HISTORY_INTERVAL_CONFIGS.get(interval)
+    if config is None:
+        raise ValueError("interval must be one of: 1m, 5m, 15m, 30m, 1h, 4h.")
+
+    if range_value == "auto":
+        return dict(config)
+
+    days = INTRADAY_HISTORY_RANGE_DAYS.get(range_value)
+    if days is None:
+        raise ValueError("range must be one of: auto, 1d, 5d, 1mo, 3mo.")
+
+    resolved = dict(config)
+    resolved["range"] = range_value
+    resolved["days"] = days
+    return resolved
 
 
 def _volume_lots_to_shares(value) -> int | None:
@@ -525,7 +733,18 @@ def get_intraday_trend(db: Session, stock_id: str) -> dict:
                 message = _fetch_mis_message(stock_id=stock_id, market=market)
             except Exception:
                 message = None
-            return _cache_set(cache_key, _apply_mis_volume_adjustment(nstock_result, message))
+            result = _apply_mis_volume_adjustment(nstock_result, message)
+            _upsert_market_intraday_bars(
+                db,
+                stock_id=stock_id,
+                market=market,
+                symbol=result.get("symbol"),
+                interval="1m",
+                source=str(result.get("source") or "nstock_minute_stock_data"),
+                source_url=result.get("source_url"),
+                points=result.get("points") or [],
+            )
+            return _cache_set(cache_key, result)
     except Exception:
         pass
 
@@ -537,7 +756,18 @@ def get_intraday_trend(db: Session, stock_id: str) -> dict:
                 message = _fetch_mis_message(stock_id=stock_id, market=market)
             except Exception:
                 message = None
-            return _cache_set(cache_key, _apply_mis_volume_adjustment(yahoo_result, message))
+            result = _apply_mis_volume_adjustment(yahoo_result, message)
+            _upsert_market_intraday_bars(
+                db,
+                stock_id=stock_id,
+                market=market,
+                symbol=result.get("symbol"),
+                interval="1m",
+                source=str(result.get("source") or "yahoo_finance_chart"),
+                source_url=result.get("source_url"),
+                points=result.get("points") or [],
+            )
+            return _cache_set(cache_key, result)
     except Exception:
         pass
 
@@ -552,3 +782,85 @@ def get_intraday_trend(db: Session, stock_id: str) -> dict:
             "point_count": 0,
             "points": [],
         })
+
+
+def get_market_intraday_history(
+    db: Session,
+    *,
+    stock_id: str,
+    interval: str = "1m",
+    range_value: str = "auto",
+    refresh: bool = True,
+) -> dict:
+    stock = _get_stock(db=db, stock_id=stock_id)
+    market = stock.market.upper() if stock else None
+    symbol = _yahoo_symbol(stock_id=stock_id, market=market)
+    config = _intraday_history_config(interval=interval, range_value=range_value)
+    fetch_interval = str(config["fetch_interval"])
+    fetch_range = str(config["range"])
+    days = int(config["days"])
+    from_time = datetime.now(TAIPEI_TZ) - timedelta(days=days)
+    cached_rows = _query_intraday_rows(
+        db,
+        stock_id=stock_id,
+        interval=interval,
+        from_time=from_time,
+    )
+    refreshed_count = 0
+    source = "market_intraday_bar_cache"
+    source_url = None
+
+    if refresh:
+        try:
+            fetched = _fetch_yahoo_intraday(
+                stock_id=stock_id,
+                market=market,
+                range_value=fetch_range,
+                interval=fetch_interval,
+            )
+            fetched_points = fetched.get("points") or []
+            if interval == "4h":
+                fetched_points = _aggregate_intraday_points(fetched_points, 240)
+            refreshed_count = _upsert_market_intraday_bars(
+                db,
+                stock_id=stock_id,
+                market=market,
+                symbol=fetched.get("symbol") or symbol,
+                interval=interval,
+                source=str(fetched.get("source") or "yahoo_finance_chart"),
+                source_url=fetched.get("source_url"),
+                points=fetched_points,
+            )
+            source = str(fetched.get("source") or "yahoo_finance_chart")
+            source_url = fetched.get("source_url")
+        except Exception:
+            source = "market_intraday_bar_cache"
+
+    rows = _query_intraday_rows(
+        db,
+        stock_id=stock_id,
+        interval=interval,
+        from_time=from_time,
+    )
+    points = [_intraday_row_to_point(row) for row in rows]
+
+    if rows and source_url is None:
+        source_url = rows[-1].source_url
+    if rows and source == "market_intraday_bar_cache":
+        source = rows[-1].source
+
+    return {
+        "stock_id": stock_id,
+        "symbol": symbol,
+        "interval": interval,
+        "range": fetch_range if range_value == "auto" else range_value,
+        "provider": INTRADAY_HISTORY_PROVIDER,
+        "source": source,
+        "source_url": source_url,
+        "from_time": rows[0].bar_time if rows else None,
+        "to_time": rows[-1].bar_time if rows else None,
+        "point_count": len(points),
+        "cached_count": len(cached_rows),
+        "refreshed_count": refreshed_count,
+        "points": points,
+    }

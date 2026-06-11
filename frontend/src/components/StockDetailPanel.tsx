@@ -11,11 +11,12 @@ import PriceUpdatePulse from "@/components/PriceUpdatePulse";
 import StockKLineChart, {
   defaultIndicatorParameters,
   defaultIndicators,
-  indicatorOptions,
+  indicatorCategoryGroups,
   type IndicatorParameters,
   type IndicatorKey,
   type IndicatorSettings,
 } from "@/components/StockKLineChart";
+import type { ChartDrawing, ChartDrawingTool } from "@/components/LightweightKLineChart";
 import { fetchJson } from "@/lib/api";
 import { getJobResultStatus, requestBackfillJob } from "@/lib/jobs";
 import {
@@ -23,6 +24,7 @@ import {
   TAIWAN_SESSION_START_MINUTES,
   getTaipeiMinutesOfDay,
   getTaiwanMarketRefreshState,
+  isTaiwanRegularSessionPoint,
 } from "@/lib/taiwanMarketTime";
 import {
   getTaiwanChartHistoryRequirement,
@@ -39,6 +41,7 @@ import type {
   BrokerBranchTradeDailySummaryRead,
   ChartPoint,
   FinancialMetricQuarterlyRead,
+  IntradayHistoryResponse,
   IntradayTrendPoint,
   IntradayTrendResponse,
   InstitutionalHoldingRatioRead,
@@ -64,11 +67,25 @@ import type {
 import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
+import dynamic from "next/dynamic";
+
+const LightweightKLineChart = dynamic(
+  () => import("@/components/LightweightKLineChart"),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex h-[640px] items-center justify-center border-t border-slate-200 bg-white text-sm text-slate-500">
+        K 線引擎載入中...
+      </div>
+    ),
+  }
+);
 
 type Props = {
   stockId: string | null;
@@ -77,10 +94,14 @@ type Props = {
   initialIndicatorData?: StockIndicatorPoint[];
   watchlistRankingPanel?: ReactNode;
   marketIndexSummary?: MarketIndexSummary | null;
+  onChartFocusModeChange?: (active: boolean) => void;
 };
 
 type Timeframe = "today" | "daily" | "weekly" | "monthly";
 type ChartTimeframe = Exclude<Timeframe, "today">;
+type ProfessionalIntradayTimeframe = "1m" | "5m" | "15m" | "30m" | "1h" | "4h";
+type ProfessionalTimeframe = ProfessionalIntradayTimeframe | ChartTimeframe;
+type ProfessionalChartStyle = "candlestick" | "line";
 type LoadState = "idle" | "loading" | "success" | "error";
 type DataPanelTab = TaiwanDataPanelTab;
 type BranchTableSide = "buy" | "sell";
@@ -189,7 +210,54 @@ const timeframeLabels: Record<Timeframe, string> = {
   weekly: "週K",
   monthly: "月K",
 };
-const chartBarsByTimeframe: Record<Exclude<Timeframe, "today">, number> = {
+const professionalTimeframeOptions: Array<{
+  key: ProfessionalTimeframe;
+  label: string;
+}> = [
+  { key: "1m", label: "1分" },
+  { key: "5m", label: "5分" },
+  { key: "15m", label: "15分" },
+  { key: "30m", label: "30分" },
+  { key: "1h", label: "1小時" },
+  { key: "4h", label: "4小時" },
+  { key: "daily", label: "天" },
+  { key: "weekly", label: "週" },
+  { key: "monthly", label: "月" },
+];
+const chartDrawingToolOptions: Array<{
+  key: ChartDrawingTool;
+  label: string;
+}> = [
+  { key: "cursor", label: "游標" },
+  { key: "horizontal", label: "水平" },
+  { key: "trend", label: "趨勢" },
+  { key: "ray", label: "射線" },
+  { key: "rectangle", label: "區間" },
+  { key: "fibonacci", label: "Fib" },
+  { key: "measure", label: "量測" },
+  { key: "priceRange", label: "價幅%" },
+];
+const chartDrawingToolOptionMap = new Map(
+  chartDrawingToolOptions.map((option) => [option.key, option])
+);
+const chartDrawingToolGroups: Array<{
+  key: string;
+  tools: ChartDrawingTool[];
+}> = [
+  { key: "base", tools: ["cursor"] },
+  { key: "line", tools: ["horizontal", "trend", "ray"] },
+  { key: "area", tools: ["rectangle", "fibonacci"] },
+  { key: "measure", tools: ["measure", "priceRange"] },
+];
+const professionalIntradayMinutes: Record<ProfessionalIntradayTimeframe, number> = {
+  "1m": 1,
+  "5m": 5,
+  "15m": 15,
+  "30m": 30,
+  "1h": 60,
+  "4h": 240,
+};
+const chartBarsByTimeframe: Record<ChartTimeframe, number> = {
   daily: 2600,
   weekly: 520,
   monthly: 132,
@@ -262,6 +330,8 @@ const indicatorTemplates: Array<{
       ema: true,
       psar: true,
       donchian: true,
+      ichimoku: true,
+      supertrend: true,
       atr: true,
       adx: true,
       signals: true,
@@ -270,6 +340,12 @@ const indicatorTemplates: Array<{
       emaFast: 12,
       emaSlow: 26,
       donchianPeriod: 20,
+      ichimokuConversionPeriod: 9,
+      ichimokuBasePeriod: 26,
+      ichimokuSpanBPeriod: 52,
+      ichimokuDisplacement: 26,
+      supertrendAtrPeriod: 10,
+      supertrendMultiplier: 3,
       atrPeriod: 14,
       adxPeriod: 14,
     },
@@ -280,17 +356,26 @@ const indicatorTemplates: Array<{
     indicators: {
       ...defaultIndicators,
       bollinger: true,
+      keltner: true,
       rsi: true,
       macd: true,
+      aroon: true,
       roc: true,
+      trix: true,
       cci: true,
       signals: true,
     },
     parameters: {
       bollingerPeriod: 20,
       bollingerStdDev: 2,
+      keltnerPeriod: 20,
+      keltnerAtrPeriod: 10,
+      keltnerMultiplier: 2,
       rsiPeriod: 14,
+      aroonPeriod: 25,
       rocPeriod: 12,
+      trixPeriod: 15,
+      trixSignal: 9,
       cciPeriod: 20,
     },
   },
@@ -313,6 +398,283 @@ const indicatorTemplates: Array<{
     },
   },
 ];
+
+type ChartDrawingStorageState = {
+  key: string;
+  drawings: ChartDrawing[];
+};
+
+type ChartDrawingHistoryState = {
+  key: string;
+  past: ChartDrawing[][];
+  future: ChartDrawing[][];
+};
+
+function chartDrawingStorageKey(stockId: string | null, timeframe: ProfessionalTimeframe) {
+  return `omi:tw:chart-drawings:v1:${stockId ?? "empty"}:${timeframe}`;
+}
+
+function isChartDrawingType(value: unknown): value is ChartDrawing["type"] {
+  return (
+    value === "horizontal" ||
+    value === "trend" ||
+    value === "ray" ||
+    value === "rectangle" ||
+    value === "fibonacci" ||
+    value === "measure" ||
+    value === "priceRange"
+  );
+}
+
+function normalizeStoredChartDrawings(value: unknown): ChartDrawing[] {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .flatMap((item): ChartDrawing[] => {
+      if (!item || typeof item !== "object") return [];
+
+      const candidate = item as Partial<ChartDrawing>;
+      const type = candidate.type;
+      const points = Array.isArray(candidate.points)
+        ? candidate.points.filter(
+            (point): point is ChartDrawing["points"][number] =>
+              Boolean(point) &&
+              typeof point.time === "string" &&
+              typeof point.price === "number" &&
+              Number.isFinite(point.price)
+          )
+        : [];
+
+      if (
+        typeof candidate.id !== "string" ||
+        !isChartDrawingType(type) ||
+        typeof candidate.color !== "string" ||
+        typeof candidate.createdAt !== "string" ||
+        points.length === 0
+      ) {
+        return [];
+      }
+
+      const pointCount = type === "horizontal" ? 1 : 2;
+
+      if (points.length < pointCount) return [];
+
+      return [
+        {
+          id: candidate.id,
+          type,
+          points: points.slice(0, pointCount),
+          color: candidate.color,
+          createdAt: candidate.createdAt,
+        },
+      ];
+    })
+    .slice(-200);
+}
+
+function loadChartDrawings(storageKey: string): ChartDrawing[] {
+  if (typeof window === "undefined") return [];
+
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+
+    if (!raw) return [];
+
+    return normalizeStoredChartDrawings(JSON.parse(raw));
+  } catch {
+    return [];
+  }
+}
+
+function saveChartDrawings(storageKey: string, drawings: ChartDrawing[]) {
+  if (typeof window === "undefined") return;
+
+  try {
+    window.localStorage.setItem(storageKey, JSON.stringify(drawings.slice(-200)));
+  } catch {
+    // Best-effort local draft storage; chart drawing should never break the market view.
+  }
+}
+
+function serializeChartDrawings(drawings: ChartDrawing[]) {
+  return JSON.stringify(drawings);
+}
+
+function TechnicalIndicatorMenu({
+  indicators,
+  activeTemplate,
+  onApplyTemplate,
+  onToggleIndicator,
+  includeParameters = false,
+  parameters,
+  onUpdateParameter,
+  className = "w-80",
+}: {
+  indicators: IndicatorSettings;
+  activeTemplate: IndicatorTemplateKey | null;
+  onApplyTemplate: (templateKey: IndicatorTemplateKey) => void;
+  onToggleIndicator: (key: IndicatorKey) => void;
+  includeParameters?: boolean;
+  parameters?: IndicatorParameters;
+  onUpdateParameter?: (
+    key: keyof IndicatorParameters,
+    value: string,
+    min: number,
+    max: number
+  ) => void;
+  className?: string;
+}) {
+  return (
+    <div
+      className={[
+        "absolute right-0 z-30 mt-2 max-h-[74vh] overflow-y-auto border border-slate-200 bg-white p-3 text-left shadow-lg",
+        className,
+      ].join(" ")}
+    >
+      <div className="border-b border-slate-200 pb-3">
+        <div className="mb-2 text-xs font-bold text-slate-500">快速組合</div>
+        <div className="grid grid-cols-5 gap-1">
+          {indicatorTemplates.map((template) => (
+            <button
+              key={template.key}
+              type="button"
+              onClick={() => onApplyTemplate(template.key)}
+              className={[
+                "h-8 border text-xs font-semibold",
+                activeTemplate === template.key
+                  ? "border-red-700 bg-red-700 text-white"
+                  : "border-slate-300 bg-white text-slate-700 hover:border-slate-900",
+              ].join(" ")}
+            >
+              {template.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="space-y-3 border-b border-slate-200 py-3">
+        {indicatorCategoryGroups.map((group) => (
+          <div key={group.key}>
+            <div className="mb-1">
+              <div className="text-xs font-bold text-slate-700">{group.label}</div>
+              <div className="text-[11px] leading-4 text-slate-400">{group.description}</div>
+            </div>
+            <div className="space-y-0.5">
+              {group.options.map((option) =>
+                option.status === "available" ? (
+                  <label
+                    key={option.key}
+                    className="flex cursor-pointer items-start gap-2 px-2 py-1.5 text-xs hover:bg-slate-50"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={indicators[option.key]}
+                      onChange={() => onToggleIndicator(option.key)}
+                      className="mt-0.5"
+                    />
+                    <span className="min-w-0">
+                      <span className="flex items-center gap-2 font-semibold text-slate-800">
+                        <span>{option.label}</span>
+                        <span className="text-[10px] font-medium uppercase text-slate-400">
+                          {option.plot}
+                        </span>
+                      </span>
+                      <span className="block text-slate-500">{option.description}</span>
+                    </span>
+                  </label>
+                ) : (
+                  <div
+                    key={option.key}
+                    className="flex cursor-not-allowed items-start justify-between gap-3 px-2 py-1.5 text-xs opacity-60"
+                  >
+                    <span className="min-w-0">
+                      <span className="flex items-center gap-2 font-semibold text-slate-600">
+                        <span>{option.label}</span>
+                        <span className="text-[10px] font-medium uppercase text-slate-400">
+                          {option.plot}
+                        </span>
+                      </span>
+                      <span className="block text-slate-500">{option.description}</span>
+                    </span>
+                    <span className="shrink-0 bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-500">
+                      待補
+                    </span>
+                  </div>
+                )
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {includeParameters && parameters && onUpdateParameter ? (
+        <div className="pt-3">
+          <div className="mb-2 text-xs font-bold text-slate-500">參數</div>
+          <div className="grid grid-cols-2 gap-2">
+            {[
+              { label: "MA短", key: "maShort", min: 1, max: 300 },
+              { label: "MA中", key: "maMiddle", min: 1, max: 400 },
+              { label: "MA長", key: "maLong", min: 1, max: 600 },
+              { label: "EMA快", key: "emaFast", min: 1, max: 200 },
+              { label: "EMA慢", key: "emaSlow", min: 2, max: 400 },
+              { label: "BOLL週期", key: "bollingerPeriod", min: 2, max: 300 },
+              { label: "BOLL倍數", key: "bollingerStdDev", min: 0.5, max: 5, step: 0.1 },
+              { label: "量均", key: "volumeMa", min: 1, max: 300 },
+              { label: "RSI", key: "rsiPeriod", min: 2, max: 100 },
+              { label: "MACD快", key: "macdFast", min: 1, max: 100 },
+              { label: "MACD慢", key: "macdSlow", min: 2, max: 200 },
+              { label: "MACD Sig", key: "macdSignal", min: 1, max: 100 },
+              { label: "KD", key: "kdPeriod", min: 2, max: 100 },
+              { label: "ATR", key: "atrPeriod", min: 2, max: 100 },
+              { label: "ADX", key: "adxPeriod", min: 2, max: 100 },
+              { label: "DONCH", key: "donchianPeriod", min: 2, max: 300 },
+              { label: "一目轉換", key: "ichimokuConversionPeriod", min: 2, max: 120 },
+              { label: "一目基準", key: "ichimokuBasePeriod", min: 2, max: 240 },
+              { label: "一目SpanB", key: "ichimokuSpanBPeriod", min: 2, max: 360 },
+              { label: "一目位移", key: "ichimokuDisplacement", min: 0, max: 120 },
+              { label: "ST ATR", key: "supertrendAtrPeriod", min: 2, max: 100 },
+              { label: "ST倍數", key: "supertrendMultiplier", min: 0.5, max: 10, step: 0.1 },
+              { label: "KC週期", key: "keltnerPeriod", min: 2, max: 300 },
+              { label: "KC ATR", key: "keltnerAtrPeriod", min: 2, max: 100 },
+              { label: "KC倍數", key: "keltnerMultiplier", min: 0.5, max: 10, step: 0.1 },
+              { label: "Aroon", key: "aroonPeriod", min: 2, max: 200 },
+              { label: "OBV MA", key: "obvMa", min: 1, max: 200 },
+              { label: "MFI", key: "mfiPeriod", min: 2, max: 100 },
+              { label: "CCI", key: "cciPeriod", min: 2, max: 200 },
+              { label: "W%R", key: "williamsRPeriod", min: 2, max: 100 },
+              { label: "ROC", key: "rocPeriod", min: 1, max: 200 },
+              { label: "StochRSI", key: "stochRsiPeriod", min: 2, max: 100 },
+              { label: "Stoch K", key: "stochRsiSmoothK", min: 1, max: 20 },
+              { label: "Stoch D", key: "stochRsiSmoothD", min: 1, max: 20 },
+              { label: "TRIX", key: "trixPeriod", min: 2, max: 100 },
+              { label: "TRIX Sig", key: "trixSignal", min: 1, max: 50 },
+            ].map((field) => (
+              <label key={field.key} className="text-xs">
+                <span className="mb-1 block font-semibold text-slate-500">{field.label}</span>
+                <input
+                  type="number"
+                  min={field.min}
+                  max={field.max}
+                  step={field.step}
+                  value={parameters[field.key as keyof IndicatorParameters]}
+                  onChange={(event) =>
+                    onUpdateParameter(
+                      field.key as keyof IndicatorParameters,
+                      event.target.value,
+                      field.min,
+                      field.max
+                    )
+                  }
+                  className="h-8 w-full border border-slate-300 px-2 text-xs font-semibold text-slate-800"
+                />
+              </label>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 function formatPrice(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
@@ -636,6 +998,68 @@ function safeRatio(numerator: number | null | undefined, denominator: number | n
 
 function finiteNumber(value: number | null | undefined): value is number {
   return value !== null && value !== undefined && Number.isFinite(value);
+}
+
+function isProfessionalIntradayTimeframe(
+  value: ProfessionalTimeframe
+): value is ProfessionalIntradayTimeframe {
+  return value in professionalIntradayMinutes;
+}
+
+function intradayTimeMs(value: string) {
+  const date = new Date(value);
+  const timestamp = date.getTime();
+
+  return Number.isNaN(timestamp) ? 0 : timestamp;
+}
+
+function aggregateProfessionalIntradayBars(
+  points: IntradayTrendPoint[],
+  intervalMinutes: number
+): ChartPoint[] {
+  const buckets = new Map<number, IntradayTrendPoint[]>();
+
+  points
+    .filter((point) => finiteNumber(point.price) && isTaiwanRegularSessionPoint(point.time))
+    .slice()
+    .sort((left, right) => intradayTimeMs(left.time) - intradayTimeMs(right.time))
+    .forEach((point) => {
+      const minutes = getTaipeiMinutesOfDay(point.time);
+
+      if (minutes === null) return;
+
+      const bucket =
+        TAIWAN_SESSION_START_MINUTES +
+        Math.floor((minutes - TAIWAN_SESSION_START_MINUTES) / intervalMinutes) *
+          intervalMinutes;
+      const current = buckets.get(bucket) ?? [];
+
+      current.push(point);
+      buckets.set(bucket, current);
+    });
+
+  return Array.from(buckets.entries())
+    .sort(([left], [right]) => left - right)
+    .map(([, bucketPoints]) => {
+      const first = bucketPoints[0];
+      const last = bucketPoints[bucketPoints.length - 1];
+      const highs = bucketPoints.map((point) => point.high ?? point.price).filter(finiteNumber);
+      const lows = bucketPoints.map((point) => point.low ?? point.price).filter(finiteNumber);
+      const volume = bucketPoints.reduce((total, point) => {
+        return total + (finiteNumber(point.volume) && point.volume > 0 ? point.volume : 0);
+      }, 0);
+
+      return {
+        time: first.time,
+        open: first.open ?? first.price,
+        high: highs.length ? Math.max(...highs) : last.price,
+        low: lows.length ? Math.min(...lows) : last.price,
+        close: last.price,
+        volume: volume > 0 ? volume : null,
+        trade_value: null,
+        transaction_count: null,
+      };
+    });
 }
 
 async function fetchOptional<T>(
@@ -2893,11 +3317,45 @@ export default function StockDetailPanel({
   initialIndicatorData = [],
   watchlistRankingPanel,
   marketIndexSummary,
+  onChartFocusModeChange,
 }: Props) {
   const [timeframe, setTimeframe] = useState<Timeframe>("daily");
   const [indicatorMenuOpen, setIndicatorMenuOpen] = useState(false);
+  const [chartFocusMode, setChartFocusMode] = useState(false);
+  const [professionalTimeframe, setProfessionalTimeframe] =
+    useState<ProfessionalTimeframe>("daily");
+  const [professionalChartStyle, setProfessionalChartStyle] =
+    useState<ProfessionalChartStyle>("candlestick");
   const [chartIndicators, setChartIndicators] =
     useState<IndicatorSettings>(defaultIndicators);
+  const [chartDrawingTool, setChartDrawingTool] = useState<ChartDrawingTool>("cursor");
+  const [selectedChartDrawingId, setSelectedChartDrawingId] = useState<string | null>(null);
+  const [chartDrawingState, setChartDrawingState] = useState<ChartDrawingStorageState>({
+    key: "",
+    drawings: [],
+  });
+  const [chartDrawingHistoryState, setChartDrawingHistoryState] =
+    useState<ChartDrawingHistoryState>({
+      key: "",
+      past: [],
+      future: [],
+    });
+  const chartDrawingKey = chartDrawingStorageKey(stockId, professionalTimeframe);
+  const chartDrawings =
+    chartDrawingState.key === chartDrawingKey
+      ? chartDrawingState.drawings
+      : loadChartDrawings(chartDrawingKey);
+  const chartDrawingHistory =
+    chartDrawingHistoryState.key === chartDrawingKey
+      ? chartDrawingHistoryState
+      : { key: chartDrawingKey, past: [], future: [] };
+  const canUndoChartDrawing = chartDrawingHistory.past.length > 0;
+  const canRedoChartDrawing = chartDrawingHistory.future.length > 0;
+  const activeSelectedChartDrawingId = chartDrawings.some(
+    (drawing) => drawing.id === selectedChartDrawingId
+  )
+    ? selectedChartDrawingId
+    : null;
   const [intradayIndicators, setIntradayIndicators] =
     useState<IntradayIndicatorSettings>(defaultIntradayIndicators);
   const [activeIndicatorTemplate, setActiveIndicatorTemplate] =
@@ -2911,6 +3369,14 @@ export default function StockDetailPanel({
   const [todayPreviousClose, setTodayPreviousClose] = useState<number | null>(null);
   const [todaySource, setTodaySource] = useState("unavailable");
   const [todayUpdatedAt, setTodayUpdatedAt] = useState<string | null>(null);
+  const [professionalIntradayData, setProfessionalIntradayData] = useState<ChartPoint[]>([]);
+  const [professionalIntradayStockId, setProfessionalIntradayStockId] = useState<string | null>(
+    null
+  );
+  const [professionalIntradayInterval, setProfessionalIntradayInterval] =
+    useState<ProfessionalIntradayTimeframe | null>(null);
+  const [professionalIntradayFallbackActive, setProfessionalIntradayFallbackActive] =
+    useState(false);
   const [indicatorData, setIndicatorData] =
     useState<StockIndicatorPoint[]>(initialIndicatorData);
   const [institutional, setInstitutional] = useState<InstitutionalTradeDailyRead | null>(null);
@@ -2969,6 +3435,10 @@ export default function StockDetailPanel({
   const effectiveTimeframe = timeframe;
   const availableTimeframes = isIndexProduct ? indexTimeframes : allTimeframes;
   const indexMarket = indexProduct?.market ?? null;
+
+  useEffect(() => {
+    onChartFocusModeChange?.(chartFocusMode);
+  }, [chartFocusMode, onChartFocusModeChange]);
   const indexId = indexProduct?.indexId ?? null;
 
   useEffect(() => {
@@ -3154,6 +3624,15 @@ export default function StockDetailPanel({
     }));
   }
 
+  function handleProfessionalTimeframeChange(nextTimeframe: ProfessionalTimeframe) {
+    setProfessionalTimeframe(nextTimeframe);
+    setIndicatorMenuOpen(false);
+
+    if (!isProfessionalIntradayTimeframe(nextTimeframe)) {
+      setTimeframe(nextTimeframe);
+    }
+  }
+
   function applyIndicatorTemplate(templateKey: IndicatorTemplateKey) {
     const template = indicatorTemplates.find((item) => item.key === templateKey);
 
@@ -3183,6 +3662,143 @@ export default function StockDetailPanel({
       [key]: Math.max(min, Math.min(max, parsed)),
     }));
   }
+
+  const storeChartDrawings = useCallback((drawingsToSave: ChartDrawing[]) => {
+    setChartDrawingState({
+      key: chartDrawingKey,
+      drawings: drawingsToSave,
+    });
+    saveChartDrawings(chartDrawingKey, drawingsToSave);
+  }, [chartDrawingKey]);
+
+  function updateChartDrawings(
+    nextValue: ChartDrawing[] | ((current: ChartDrawing[]) => ChartDrawing[]),
+    options: { recordHistory?: boolean } = {}
+  ) {
+    const nextDrawings =
+      typeof nextValue === "function" ? nextValue(chartDrawings) : nextValue;
+    const drawingsToSave = nextDrawings.slice(-200);
+
+    if (serializeChartDrawings(chartDrawings) === serializeChartDrawings(drawingsToSave)) {
+      return;
+    }
+
+    if (options.recordHistory !== false) {
+      const currentPast =
+        chartDrawingHistoryState.key === chartDrawingKey ? chartDrawingHistoryState.past : [];
+
+      setChartDrawingHistoryState({
+        key: chartDrawingKey,
+        past: [...currentPast, chartDrawings].slice(-50),
+        future: [],
+      });
+    }
+
+    storeChartDrawings(drawingsToSave);
+  }
+
+  const undoChartDrawing = useCallback(() => {
+    if (!canUndoChartDrawing) return;
+
+    const past = chartDrawingHistory.past;
+    const previousDrawings = past[past.length - 1];
+
+    if (!previousDrawings) return;
+
+    setChartDrawingHistoryState({
+      key: chartDrawingKey,
+      past: past.slice(0, -1),
+      future: [chartDrawings, ...chartDrawingHistory.future].slice(0, 50),
+    });
+    storeChartDrawings(previousDrawings);
+    setSelectedChartDrawingId(null);
+  }, [
+    canUndoChartDrawing,
+    chartDrawingHistory.future,
+    chartDrawingHistory.past,
+    chartDrawingKey,
+    chartDrawings,
+    storeChartDrawings,
+  ]);
+
+  const redoChartDrawing = useCallback(() => {
+    if (!canRedoChartDrawing) return;
+
+    const nextDrawings = chartDrawingHistory.future[0];
+
+    if (!nextDrawings) return;
+
+    setChartDrawingHistoryState({
+      key: chartDrawingKey,
+      past: [...chartDrawingHistory.past, chartDrawings].slice(-50),
+      future: chartDrawingHistory.future.slice(1),
+    });
+    storeChartDrawings(nextDrawings);
+    setSelectedChartDrawingId(null);
+  }, [
+    canRedoChartDrawing,
+    chartDrawingHistory.future,
+    chartDrawingHistory.past,
+    chartDrawingKey,
+    chartDrawings,
+    storeChartDrawings,
+  ]);
+
+  function deleteSelectedChartDrawing() {
+    if (!activeSelectedChartDrawingId) return;
+
+    updateChartDrawings((current) =>
+      current.filter((drawing) => drawing.id !== activeSelectedChartDrawingId)
+    );
+    setSelectedChartDrawingId(null);
+  }
+
+  function clearChartDrawings() {
+    if (chartDrawings.length === 0) return;
+    if (!window.confirm("清除目前週期的所有畫線？")) return;
+
+    updateChartDrawings([]);
+    setSelectedChartDrawingId(null);
+  }
+
+  useEffect(() => {
+    if (!chartFocusMode) return;
+
+    function handleChartDrawingHistoryKeyDown(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null;
+      const tagName = target?.tagName.toLowerCase();
+
+      if (tagName === "input" || tagName === "textarea" || target?.isContentEditable) return;
+      if (!event.ctrlKey && !event.metaKey) return;
+
+      const key = event.key.toLowerCase();
+
+      if (key === "z" && !event.shiftKey) {
+        if (!canUndoChartDrawing) return;
+
+        event.preventDefault();
+        undoChartDrawing();
+        return;
+      }
+
+      if (key === "y" || (key === "z" && event.shiftKey)) {
+        if (!canRedoChartDrawing) return;
+
+        event.preventDefault();
+        redoChartDrawing();
+      }
+    }
+
+    window.addEventListener("keydown", handleChartDrawingHistoryKeyDown);
+
+    return () => window.removeEventListener("keydown", handleChartDrawingHistoryKeyDown);
+  }, [
+    canRedoChartDrawing,
+    canUndoChartDrawing,
+    chartFocusMode,
+    redoChartDrawing,
+    undoChartDrawing,
+  ]);
 
   useEffect(() => {
     dataPanelResolvedKeysRef.current.clear();
@@ -3311,6 +3927,10 @@ export default function StockDetailPanel({
     let cancelled = false;
     let intradayTimer: number | undefined;
     let intradayRequestInFlight = false;
+    const shouldLoadProfessionalIntraday =
+      chartFocusMode &&
+      !isIndexProduct &&
+      isProfessionalIntradayTimeframe(professionalTimeframe);
 
     function clearIntradayTimer() {
       if (intradayTimer !== undefined) {
@@ -3351,6 +3971,63 @@ export default function StockDetailPanel({
         setErrorMessage(error instanceof Error ? error.message : "資料讀取失敗");
       } finally {
         intradayRequestInFlight = false;
+      }
+    }
+
+    async function loadProfessionalIntradayHistory() {
+      if (!isProfessionalIntradayTimeframe(professionalTimeframe)) return;
+
+      setLoadState("loading");
+      setErrorMessage(null);
+      setProfessionalIntradayData([]);
+      setProfessionalIntradayStockId(effectStockId);
+      setProfessionalIntradayInterval(professionalTimeframe);
+      setProfessionalIntradayFallbackActive(false);
+
+      try {
+        const history = await fetchJson<IntradayHistoryResponse>(
+          `/api/market/intraday/${effectStockId}/history`,
+          {
+            interval: professionalTimeframe,
+            range: "auto",
+            refresh: true,
+          }
+        );
+
+        if (cancelled || activeStockIdRef.current !== effectStockId) return;
+
+        if (history.points.length === 0) {
+          await loadTodayTrend(false);
+
+          if (cancelled || activeStockIdRef.current !== effectStockId) return;
+
+          setProfessionalIntradayFallbackActive(true);
+          setErrorMessage("歷史分鐘線暫無資料，先以今日盤中資料顯示");
+          return;
+        }
+
+        setProfessionalIntradayData(history.points);
+        setProfessionalIntradayStockId(effectStockId);
+        setProfessionalIntradayInterval(professionalTimeframe);
+        setProfessionalIntradayFallbackActive(false);
+        setLoadState("success");
+        setErrorMessage(null);
+      } catch (error) {
+        if (cancelled || activeStockIdRef.current !== effectStockId) return;
+
+        setProfessionalIntradayData([]);
+        setProfessionalIntradayStockId(effectStockId);
+        setProfessionalIntradayInterval(professionalTimeframe);
+        await loadTodayTrend(false);
+
+        if (cancelled || activeStockIdRef.current !== effectStockId) return;
+
+        setProfessionalIntradayFallbackActive(true);
+        setErrorMessage(
+          error instanceof Error
+            ? `歷史分鐘線讀取失敗，暫以今日盤中資料顯示：${error.message}`
+            : "歷史分鐘線讀取失敗，暫以今日盤中資料顯示"
+        );
       }
     }
 
@@ -3492,6 +4169,11 @@ export default function StockDetailPanel({
     }
 
     async function loadChart() {
+      if (shouldLoadProfessionalIntraday) {
+        await loadProfessionalIntradayHistory();
+        return;
+      }
+
       if (effectiveTimeframe === "today") {
         await loadTodayTrend(true);
 
@@ -3561,7 +4243,15 @@ export default function StockDetailPanel({
       cancelled = true;
       clearIntradayTimer();
     };
-  }, [currentStockInfoId, currentStockInfoMarket, effectiveTimeframe, isIndexProduct, stockId]);
+  }, [
+    chartFocusMode,
+    currentStockInfoId,
+    currentStockInfoMarket,
+    effectiveTimeframe,
+    isIndexProduct,
+    professionalTimeframe,
+    stockId,
+  ]);
 
   useEffect(() => {
     if (!stockId || isIndexProduct || !["today", "daily"].includes(effectiveTimeframe)) {
@@ -3611,8 +4301,49 @@ export default function StockDetailPanel({
     effectiveTimeframe !== "today" &&
     chartStockId === stockId &&
     chartTimeframe === effectiveTimeframe;
+  const canUseFocusedKLine = currentChartReady && chartData.length > 0;
   const latestToday = todayTrend[todayTrend.length - 1] ?? null;
   const todayStats = useMemo(() => summarizeIntradayPoints(todayTrend), [todayTrend]);
+  const professionalIsIntraday = isProfessionalIntradayTimeframe(professionalTimeframe);
+  const professionalChartData = useMemo<ChartPoint[]>(() => {
+    if (!isProfessionalIntradayTimeframe(professionalTimeframe)) return chartData;
+
+    const hasMatchingHistory =
+      professionalIntradayStockId === stockId &&
+      professionalIntradayInterval === professionalTimeframe &&
+      professionalIntradayData.length > 0;
+
+    if (hasMatchingHistory) return professionalIntradayData;
+
+    const canUseTodayFallback =
+      professionalIntradayFallbackActive &&
+      professionalIntradayStockId === stockId &&
+      professionalIntradayInterval === professionalTimeframe;
+
+    if (!canUseTodayFallback) return [];
+
+    return aggregateProfessionalIntradayBars(
+      todayTrend,
+      professionalIntradayMinutes[professionalTimeframe]
+    );
+  }, [
+    chartData,
+    professionalIntradayData,
+    professionalIntradayFallbackActive,
+    professionalIntradayInterval,
+    professionalIntradayStockId,
+    professionalTimeframe,
+    stockId,
+    todayTrend,
+  ]);
+  const professionalChartReady =
+    chartFocusMode &&
+    professionalChartData.length > 0 &&
+    (professionalIsIntraday || currentChartReady);
+  const professionalTimeframeLabel =
+    professionalTimeframeOptions.find((option) => option.key === professionalTimeframe)?.label ??
+    timeframeLabels.daily;
+  const latestProfessionalChart = professionalChartData[professionalChartData.length - 1] ?? null;
   const latestClose =
     effectiveTimeframe === "today"
       ? latestToday?.price ?? null
@@ -3648,6 +4379,21 @@ export default function StockDetailPanel({
     effectiveTimeframe === "today" && latestToday && todayReferenceClose
       ? ((latestToday.price - todayReferenceClose) / todayReferenceClose) * 100
       : latestIndicator?.change_pct ?? chartChangePct;
+  const professionalLatestClose =
+    chartFocusMode && professionalIsIntraday
+      ? latestProfessionalChart?.close ?? latestToday?.price ?? latestClose
+      : latestClose;
+  const professionalLatestChange =
+    chartFocusMode && professionalIsIntraday && latestToday && todayReferenceClose
+      ? latestToday.price - todayReferenceClose
+      : latestChange;
+  const professionalLatestChangePct =
+    chartFocusMode && professionalIsIntraday && latestToday && todayReferenceClose
+      ? ((latestToday.price - todayReferenceClose) / todayReferenceClose) * 100
+      : latestChangePct;
+  const professionalHeaderLimitStatus = isIndexProduct
+    ? null
+    : estimatedPriceLimitStatus(professionalLatestChangePct);
   const headerLimitStatus = isIndexProduct ? null : estimatedPriceLimitStatus(latestChangePct);
   const ma5 = latestIndicator?.ma?.ma5 ?? averageRecentChartValue(chartData, "close", 5);
   const ma20 = latestIndicator?.ma?.ma20 ?? averageRecentChartValue(chartData, "close", 20);
@@ -5692,9 +6438,233 @@ export default function StockDetailPanel({
   }
 
   return (
-    <section className="grid w-full grid-cols-1 items-start justify-start gap-4 xl:grid-cols-[minmax(0,7fr)_minmax(360px,5fr)]">
-      <div className="min-w-0 space-y-4 self-start">
+    <section
+      className={[
+        "grid w-full grid-cols-1 items-start justify-start gap-4",
+        chartFocusMode ? "" : "xl:grid-cols-[minmax(0,7fr)_minmax(360px,5fr)]",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+    >
+      <div className={["min-w-0 self-start", chartFocusMode ? "space-y-0" : "space-y-4"].join(" ")}>
         <div className="min-w-0 border border-slate-200 bg-white">
+          {chartFocusMode ? (
+            <div className="border-b border-slate-200 px-4 py-2">
+              <div className="flex min-h-9 flex-wrap items-center justify-between gap-x-4 gap-y-2">
+                <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+                  <div className="truncate text-lg font-bold text-slate-950">
+                    {stockId} {indexProduct?.stockName ?? stockName ?? stockInfo?.stock_name ?? ""}
+                  </div>
+                  <div
+                    className={`flex items-baseline gap-2 ${priceLimitTone(
+                      professionalHeaderLimitStatus,
+                      professionalLatestChange
+                    )}`}
+                  >
+                    <PriceUpdatePulse
+                      value={professionalLatestClose}
+                      direction={professionalLatestChange}
+                      resetKey={`${stockId ?? "empty"}:professional:${professionalTimeframe}`}
+                      className={[
+                        "text-2xl font-bold leading-none tracking-normal tabular-nums",
+                        priceLimitBoxClass(professionalHeaderLimitStatus),
+                      ].join(" ")}
+                    >
+                      {formatPrice(professionalLatestClose)}
+                    </PriceUpdatePulse>
+                    <span className="text-sm font-semibold tabular-nums">
+                      {formatSignedPointChange(professionalLatestChange)}
+                    </span>
+                    {professionalLatestChangePct !== null &&
+                    professionalLatestChangePct !== undefined ? (
+                      <span className="text-sm font-semibold tabular-nums">
+                        ({formatPct(professionalLatestChangePct)})
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-end gap-1.5">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <div className="flex border border-slate-200 bg-slate-50 p-0.5">
+                      {professionalTimeframeOptions.map((option) => (
+                        <button
+                          key={option.key}
+                          type="button"
+                          onClick={() => handleProfessionalTimeframeChange(option.key)}
+                          className={[
+                            "h-7 px-2 text-xs font-semibold transition",
+                            professionalTimeframe === option.key
+                              ? "bg-slate-900 text-white"
+                              : "text-slate-600 hover:bg-white hover:text-slate-950",
+                          ].join(" ")}
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="flex border border-slate-200 bg-slate-50 p-0.5">
+                      {[
+                        ["candlestick", "K線"],
+                        ["line", "折線"],
+                      ].map(([key, labelText]) => (
+                        <button
+                          key={key}
+                          type="button"
+                          onClick={() => setProfessionalChartStyle(key as ProfessionalChartStyle)}
+                          className={[
+                            "h-7 px-2 text-xs font-semibold transition",
+                            professionalChartStyle === key
+                              ? "bg-slate-900 text-white"
+                              : "text-slate-600 hover:bg-white hover:text-slate-950",
+                          ].join(" ")}
+                        >
+                          {labelText}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => setIndicatorMenuOpen((value) => !value)}
+                      className="h-8 border border-slate-300 bg-white px-3 text-xs font-semibold text-slate-800 hover:border-slate-900 hover:text-slate-950"
+                    >
+                      技術指標
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIndicatorMenuOpen(false);
+                      setChartDrawingTool("cursor");
+                      setChartFocusMode(false);
+                    }}
+                    className="h-8 border border-slate-900 bg-slate-900 px-3 text-xs font-semibold text-white hover:bg-slate-800"
+                  >
+                    總覽
+                  </button>
+                </div>
+              </div>
+
+              <div className="mt-2 flex flex-wrap items-center justify-end gap-1.5 border-t border-slate-100 pt-2">
+                <div className="flex max-w-full flex-wrap items-center justify-end gap-1 border border-slate-200 bg-slate-50 p-0.5">
+                  {chartDrawingToolGroups.map((group, groupIndex) => (
+                    <div
+                      key={group.key}
+                      className={[
+                        "flex items-center gap-0.5",
+                        groupIndex > 0 ? "border-l border-slate-200 pl-1" : "",
+                      ].join(" ")}
+                    >
+                      {group.tools.map((toolKey) => {
+                        const option = chartDrawingToolOptionMap.get(toolKey);
+                        if (!option) return null;
+
+                        return (
+                          <button
+                            key={option.key}
+                            type="button"
+                            onClick={() => {
+                              setIndicatorMenuOpen(false);
+                              setChartDrawingTool(option.key);
+                              if (option.key === "cursor") {
+                                setSelectedChartDrawingId(null);
+                              }
+                            }}
+                            className={[
+                              "h-7 px-2 text-xs font-semibold transition",
+                              chartDrawingTool === option.key
+                                ? "bg-slate-900 text-white"
+                                : "text-slate-600 hover:bg-white hover:text-slate-950",
+                            ].join(" ")}
+                          >
+                            {option.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ))}
+                  <div className="flex items-center gap-0.5 border-l border-slate-200 pl-1">
+                    <button
+                      type="button"
+                      title="Undo (Ctrl+Z)"
+                      disabled={!canUndoChartDrawing}
+                      onClick={undoChartDrawing}
+                      className={[
+                        "h-7 px-2 text-xs font-semibold transition",
+                        canUndoChartDrawing
+                          ? "text-slate-600 hover:bg-white hover:text-slate-950"
+                          : "cursor-not-allowed text-slate-300",
+                      ].join(" ")}
+                    >
+                      Undo
+                    </button>
+                    <button
+                      type="button"
+                      title="Redo (Ctrl+Y)"
+                      disabled={!canRedoChartDrawing}
+                      onClick={redoChartDrawing}
+                      className={[
+                        "h-7 px-2 text-xs font-semibold transition",
+                        canRedoChartDrawing
+                          ? "text-slate-600 hover:bg-white hover:text-slate-950"
+                          : "cursor-not-allowed text-slate-300",
+                      ].join(" ")}
+                    >
+                      Redo
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!activeSelectedChartDrawingId}
+                      onClick={deleteSelectedChartDrawing}
+                      className={[
+                        "h-7 px-2 text-xs font-semibold transition",
+                        activeSelectedChartDrawingId
+                          ? "text-red-700 hover:bg-white"
+                          : "cursor-not-allowed text-slate-300",
+                      ].join(" ")}
+                    >
+                      刪除
+                    </button>
+                    <button
+                      type="button"
+                      disabled={chartDrawings.length === 0}
+                      onClick={clearChartDrawings}
+                      className={[
+                        "h-7 px-2 text-xs font-semibold transition",
+                        chartDrawings.length > 0
+                          ? "text-slate-500 hover:bg-white hover:text-slate-950"
+                          : "cursor-not-allowed text-slate-300",
+                      ].join(" ")}
+                    >
+                      畫線 {chartDrawings.length}
+                    </button>
+                    <span className="hidden h-7 items-center border-l border-slate-200 px-2 text-[11px] font-semibold tabular-nums text-slate-400 min-[1500px]:inline-flex">
+                      {chartDrawingHistory.past.length}/{chartDrawingHistory.future.length}
+                    </span>
+                  </div>
+                </div>
+              </div>
+              {indicatorMenuOpen ? (
+                <div className="relative h-0">
+                  <TechnicalIndicatorMenu
+                    indicators={chartIndicators}
+                    activeTemplate={activeIndicatorTemplate}
+                    onApplyTemplate={applyIndicatorTemplate}
+                    onToggleIndicator={toggleChartIndicator}
+                    includeParameters
+                    parameters={indicatorParameters}
+                    onUpdateParameter={updateIndicatorParameter}
+                    className="w-[25rem]"
+                  />
+                </div>
+              ) : null}
+            </div>
+          ) : (
           <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 px-5 py-4">
             <div>
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
@@ -5746,7 +6716,13 @@ export default function StockDetailPanel({
                     <button
                       key={item}
                       type="button"
-                      onClick={() => setTimeframe(item)}
+                      onClick={() => {
+                        setTimeframe(item);
+                        setIndicatorMenuOpen(false);
+                        if (item === "today") {
+                          setChartFocusMode(false);
+                        }
+                      }}
                       className={[
                         "h-8 min-w-12 px-3 text-sm font-semibold transition",
                         effectiveTimeframe === item
@@ -5796,203 +6772,57 @@ export default function StockDetailPanel({
                     ) : null}
                   </div>
                 ) : (
-                  <div className="relative">
+                  <div className="flex items-start gap-2">
+                    <div className="relative">
+                      <button
+                        type="button"
+                        onClick={() => setIndicatorMenuOpen((value) => !value)}
+                        className="h-8 border border-slate-900 bg-white px-3 text-sm font-semibold text-slate-900 hover:border-red-700 hover:text-red-700"
+                      >
+                        指標
+                      </button>
+                      {indicatorMenuOpen ? (
+                        <TechnicalIndicatorMenu
+                          indicators={chartIndicators}
+                          activeTemplate={activeIndicatorTemplate}
+                          onApplyTemplate={applyIndicatorTemplate}
+                          onToggleIndicator={toggleChartIndicator}
+                          includeParameters
+                          parameters={indicatorParameters}
+                          onUpdateParameter={updateIndicatorParameter}
+                          className="w-[26rem]"
+                        />
+                      ) : null}
+                    </div>
                     <button
                       type="button"
-                      onClick={() => setIndicatorMenuOpen((value) => !value)}
-                      className="h-8 border border-slate-900 bg-white px-3 text-sm font-semibold text-slate-900 hover:border-red-700 hover:text-red-700"
+                      disabled={!canUseFocusedKLine}
+                      onClick={() => {
+                        setIndicatorMenuOpen(false);
+                        setProfessionalTimeframe(effectiveTimeframe as ChartTimeframe);
+                        setChartFocusMode((value) => !value);
+                      }}
+                      className={[
+                        "h-8 border px-3 text-sm font-semibold transition",
+                        chartFocusMode
+                          ? "border-slate-900 bg-slate-900 text-white hover:bg-slate-800"
+                          : "border-slate-300 bg-white text-slate-700 hover:border-slate-900 hover:text-slate-950",
+                        !canUseFocusedKLine
+                          ? "cursor-not-allowed border-slate-200 bg-slate-50 text-slate-300 hover:border-slate-200 hover:text-slate-300"
+                          : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" ")}
                     >
-                      指標
+                      {chartFocusMode ? "總覽" : "放大"}
                     </button>
-                    {indicatorMenuOpen ? (
-                      <div className="absolute right-0 z-20 mt-2 max-h-[74vh] w-80 overflow-y-auto border border-slate-200 bg-white p-3 text-left shadow-lg">
-                        <div className="border-b border-slate-200 pb-3">
-                          <div className="mb-2 text-xs font-bold text-slate-500">指標模板</div>
-                          <div className="grid grid-cols-5 gap-1">
-                            {indicatorTemplates.map((template) => (
-                              <button
-                                key={template.key}
-                                type="button"
-                                onClick={() => applyIndicatorTemplate(template.key)}
-                                className={[
-                                  "h-8 border text-xs font-semibold",
-                                  activeIndicatorTemplate === template.key
-                                    ? "border-red-700 bg-red-700 text-white"
-                                    : "border-slate-300 bg-white text-slate-700 hover:border-slate-900",
-                                ].join(" ")}
-                              >
-                                {template.label}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-
-                        <div className="border-b border-slate-200 py-3">
-                          <div className="mb-2 text-xs font-bold text-slate-500">顯示項目</div>
-                        {indicatorOptions.map((option) => (
-                          <label
-                            key={option.key}
-                            className="flex cursor-pointer items-start gap-2 px-2 py-2 text-xs hover:bg-slate-50"
-                          >
-                            <input
-                              type="checkbox"
-                              checked={chartIndicators[option.key]}
-                              onChange={() => toggleChartIndicator(option.key)}
-                              className="mt-0.5"
-                            />
-                            <span>
-                              <span className="block font-semibold text-slate-800">
-                                {option.label}
-                              </span>
-                              <span className="block text-slate-500">
-                                {option.description}
-                              </span>
-                            </span>
-                          </label>
-                        ))}
-                        </div>
-
-                        <div className="pt-3">
-                          <div className="mb-2 text-xs font-bold text-slate-500">參數</div>
-                          <div className="grid grid-cols-2 gap-2">
-                            {[
-                              ["MA短", "maShort", 1, 300],
-                              ["MA中", "maMiddle", 1, 400],
-                              ["MA長", "maLong", 1, 600],
-                              ["EMA快", "emaFast", 1, 200],
-                              ["EMA慢", "emaSlow", 1, 400],
-                              ["量均", "volumeMa", 1, 300],
-                              ["RSI", "rsiPeriod", 2, 100],
-                              ["KD", "kdPeriod", 2, 100],
-                              ["ATR", "atrPeriod", 2, 100],
-                              ["ADX", "adxPeriod", 2, 100],
-                              ["Donch", "donchianPeriod", 2, 300],
-                              ["OBV MA", "obvMa", 1, 200],
-                              ["MFI", "mfiPeriod", 2, 100],
-                              ["CCI", "cciPeriod", 2, 200],
-                              ["W%R", "williamsRPeriod", 2, 100],
-                              ["ROC", "rocPeriod", 1, 200],
-                              ["StochRSI", "stochRsiPeriod", 2, 100],
-                              ["Stoch K", "stochRsiSmoothK", 1, 20],
-                              ["Stoch D", "stochRsiSmoothD", 1, 20],
-                            ].map(([labelText, key, min, max]) => (
-                              <label key={String(key)} className="text-xs">
-                                <span className="mb-1 block font-semibold text-slate-500">
-                                  {labelText}
-                                </span>
-                                <input
-                                  type="number"
-                                  min={Number(min)}
-                                  max={Number(max)}
-                                  value={indicatorParameters[key as keyof IndicatorParameters]}
-                                  onChange={(event) =>
-                                    updateIndicatorParameter(
-                                      key as keyof IndicatorParameters,
-                                      event.target.value,
-                                      Number(min),
-                                      Number(max)
-                                    )
-                                  }
-                                  className="h-8 w-full border border-slate-300 px-2 text-sm font-semibold text-slate-900 outline-none focus:border-red-700"
-                                />
-                              </label>
-                            ))}
-
-                            <label className="text-xs">
-                              <span className="mb-1 block font-semibold text-slate-500">
-                                BOLL週期
-                              </span>
-                              <input
-                                type="number"
-                                min={2}
-                                max={300}
-                                value={indicatorParameters.bollingerPeriod}
-                                onChange={(event) =>
-                                  updateIndicatorParameter(
-                                    "bollingerPeriod",
-                                    event.target.value,
-                                    2,
-                                    300
-                                  )
-                                }
-                                className="h-8 w-full border border-slate-300 px-2 text-sm font-semibold text-slate-900 outline-none focus:border-red-700"
-                              />
-                            </label>
-                            <label className="text-xs">
-                              <span className="mb-1 block font-semibold text-slate-500">
-                                BOLL倍數
-                              </span>
-                              <input
-                                type="number"
-                                min={0.5}
-                                max={5}
-                                step={0.1}
-                                value={indicatorParameters.bollingerStdDev}
-                                onChange={(event) =>
-                                  updateIndicatorParameter(
-                                    "bollingerStdDev",
-                                    event.target.value,
-                                    0.5,
-                                    5
-                                  )
-                                }
-                                className="h-8 w-full border border-slate-300 px-2 text-sm font-semibold text-slate-900 outline-none focus:border-red-700"
-                              />
-                            </label>
-                            <label className="text-xs">
-                              <span className="mb-1 block font-semibold text-slate-500">
-                                MACD快
-                              </span>
-                              <input
-                                type="number"
-                                min={1}
-                                max={100}
-                                value={indicatorParameters.macdFast}
-                                onChange={(event) =>
-                                  updateIndicatorParameter("macdFast", event.target.value, 1, 100)
-                                }
-                                className="h-8 w-full border border-slate-300 px-2 text-sm font-semibold text-slate-900 outline-none focus:border-red-700"
-                              />
-                            </label>
-                            <label className="text-xs">
-                              <span className="mb-1 block font-semibold text-slate-500">
-                                MACD慢
-                              </span>
-                              <input
-                                type="number"
-                                min={1}
-                                max={200}
-                                value={indicatorParameters.macdSlow}
-                                onChange={(event) =>
-                                  updateIndicatorParameter("macdSlow", event.target.value, 1, 200)
-                                }
-                                className="h-8 w-full border border-slate-300 px-2 text-sm font-semibold text-slate-900 outline-none focus:border-red-700"
-                              />
-                            </label>
-                            <label className="text-xs">
-                              <span className="mb-1 block font-semibold text-slate-500">
-                                MACD訊號
-                              </span>
-                              <input
-                                type="number"
-                                min={1}
-                                max={100}
-                                value={indicatorParameters.macdSignal}
-                                onChange={(event) =>
-                                  updateIndicatorParameter("macdSignal", event.target.value, 1, 100)
-                                }
-                                className="h-8 w-full border border-slate-300 px-2 text-sm font-semibold text-slate-900 outline-none focus:border-red-700"
-                              />
-                            </label>
-                          </div>
-                        </div>
-                      </div>
-                    ) : null}
                   </div>
                 )}
               </div>
             </div>
           </div>
+
+          )}
 
           {errorMessage ? (
             <div className="border-b border-red-200 bg-red-50 px-5 py-3 text-sm text-red-700">
@@ -6005,7 +6835,32 @@ export default function StockDetailPanel({
             </div>
           ) : null}
 
-          {effectiveTimeframe === "today" ? (
+          {chartFocusMode ? (
+            professionalChartReady ? (
+              <LightweightKLineChart
+                chartData={professionalChartData}
+                indicatorData={professionalIsIntraday ? [] : indicatorForTimeframe}
+                label={professionalTimeframeLabel}
+                height={780}
+                fillViewport
+                timeMode={professionalIsIntraday ? "intraday" : "date"}
+                chartStyle={professionalChartStyle}
+                showHeader={false}
+                showMovingAverages={chartIndicators.ma}
+                indicators={chartIndicators}
+                indicatorParameters={indicatorParameters}
+                volumePanelLabel={isIndexProduct ? "成交金額(億)" : "成交量(張)"}
+                volumeValueKey={isIndexProduct ? "trade_value" : "volume"}
+                drawingTool={chartDrawingTool}
+                drawings={chartDrawings}
+                selectedDrawingId={activeSelectedChartDrawingId}
+                onDrawingsChange={updateChartDrawings}
+                onSelectedDrawingChange={setSelectedChartDrawingId}
+              />
+            ) : (
+              <EmptyDataState message={`讀取${professionalTimeframeLabel}資料中...`} />
+            )
+          ) : effectiveTimeframe === "today" ? (
             <IntradayTrendChart
               points={todayTrend}
               previousClose={todayPreviousClose}
@@ -6034,7 +6889,7 @@ export default function StockDetailPanel({
           )}
         </div>
 
-        {isIndexProduct ? (
+        {!chartFocusMode && isIndexProduct ? (
           <IndexDetailDataPanel
             index={selectedIndexSnapshot}
             timeframe={effectiveTimeframe}
@@ -6046,11 +6901,12 @@ export default function StockDetailPanel({
             contributions={indexContributions}
             contributionLoadState={indexContributionLoadState}
           />
-        ) : watchlistRankingPanel ? (
+        ) : !chartFocusMode && watchlistRankingPanel ? (
           <div className="min-w-0">{watchlistRankingPanel}</div>
         ) : null}
       </div>
 
+      {!chartFocusMode ? (
       <aside
         className="flex min-w-0 flex-col border border-slate-200 bg-white"
       >
@@ -6258,6 +7114,7 @@ export default function StockDetailPanel({
             </div>
           </div>
       </aside>
+      ) : null}
 
     </section>
   );
