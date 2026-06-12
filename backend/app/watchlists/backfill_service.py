@@ -494,7 +494,20 @@ def refresh_watchlist_group_daily_prices(
             if progress_callback is not None:
                 progress_callback(index, total_count, f"Refresh failed for {stock_id} ({index}/{total_count}).")
 
+    completed_count = current_count + success_count + warning_count + skipped_count
+    if error_count > 0:
+        result_status = "partial_success" if completed_count > 0 else "error"
+    elif warning_count > 0:
+        result_status = "partial_success"
+    else:
+        result_status = "success"
+
     return {
+        "status": result_status,
+        "message": (
+            f"Target {target_date}: current {current_count}/{total_count}, "
+            f"refreshed {success_count}, warnings {warning_count}, errors {error_count}."
+        ),
         "group_id": group_id,
         "include_children": include_children,
         "enabled_only": enabled_only,

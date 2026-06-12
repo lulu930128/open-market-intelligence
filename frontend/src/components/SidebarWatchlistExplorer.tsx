@@ -1126,15 +1126,21 @@ export default function SidebarWatchlistExplorer({
         <h1 className="mt-2 text-xl font-bold text-slate-950">Market Dashboard</h1>
         <div className="mt-3 grid grid-cols-5 border border-slate-200 bg-slate-50 p-1">
           {sidebarMarketOptions.map((option) => (
-            <button
+            <a
               key={option.value}
-              type="button"
-              onClick={() => {
-                if (option.enabled) onMarketChange(option.value);
+              href={option.enabled ? `/?market=${option.value}` : undefined}
+              aria-disabled={!option.enabled}
+              onClick={(event) => {
+                if (!option.enabled) {
+                  event.preventDefault();
+                  return;
+                }
+
+                event.preventDefault();
+                onMarketChange(option.value);
               }}
-              disabled={!option.enabled}
               className={[
-                "h-8 text-xs font-semibold transition",
+                "flex h-8 items-center justify-center text-xs font-semibold transition",
                 selectedMarket === option.value
                   ? "bg-red-700 text-white"
                   : option.enabled
@@ -1143,7 +1149,7 @@ export default function SidebarWatchlistExplorer({
               ].join(" ")}
             >
               {option.label}
-            </button>
+            </a>
           ))}
         </div>
       </div>

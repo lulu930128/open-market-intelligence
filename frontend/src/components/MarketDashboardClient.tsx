@@ -69,6 +69,7 @@ type RankingDisplayRow = {
   volumeValue: number | null | undefined;
   selected: boolean;
   loading?: boolean;
+  href?: string;
   onSelect: () => void;
 };
 
@@ -96,10 +97,36 @@ type RankingPanelOption = {
   value: string;
   label: string;
 };
+
+function buildDashboardHref(params: {
+  market?: MarketRegion;
+  groupId?: number | null;
+  stockId?: string | null;
+  symbol?: string | null;
+}) {
+  const searchParams = new URLSearchParams();
+
+  if (params.market) searchParams.set("market", params.market);
+  if (params.groupId !== null && params.groupId !== undefined) {
+    searchParams.set("group_id", String(params.groupId));
+  }
+  if (params.stockId) searchParams.set("stock_id", params.stockId);
+  if (params.symbol) searchParams.set("symbol", params.symbol);
+
+  const query = searchParams.toString();
+
+  return query ? `/?${query}` : "/";
+}
+
 type Props = {
+  initialMarket: MarketRegion;
   initialTree: WatchlistGroupNode[];
   initialItems: WatchlistItemRead[];
   initialSelectedGroupId: number | null;
+  initialSelectedStockId: string | null;
+  initialSelectedStockName: string | null;
+  initialSelectedUsSymbol: string | null;
+  initialSelectedUsSecurityName: string | null;
   initialChartData: ChartPoint[];
   initialIndicatorData: StockIndicatorPoint[];
   initialRankingData: RankingResponse | null;
@@ -153,6 +180,27 @@ function isRankingItemPending(row: RankingItem) {
 
 function isUsRankingItemPending(row: USWatchlistRankingItemRead) {
   return row.status === "pending";
+}
+
+function formatWatchlistFreshnessLabel(
+  marketLabel: string,
+  targetDate: string | null | undefined,
+  staleCount: number | null | undefined,
+  requestedCount: number | null | undefined
+) {
+  const dateText = targetDate ? `等待 ${targetDate} ${marketLabel}` : `等待${marketLabel}`;
+
+  if (
+    staleCount !== null &&
+    staleCount !== undefined &&
+    requestedCount !== null &&
+    requestedCount !== undefined &&
+    requestedCount > 0
+  ) {
+    return `${dateText} · ${staleCount}/${requestedCount} 檔待補`;
+  }
+
+  return dateText;
 }
 
 function formatLots(value: number | null | undefined) {
@@ -1255,14 +1303,22 @@ function WatchlistRankingPanel({
         </div>
         {rows.length > 0 ? (
           rows.map((row) => (
-            <button
+            <a
               key={row.key}
-              type="button"
+              href={row.href ?? "#"}
+              data-ranking-symbol={row.symbol}
+              onPointerUp={(event) => {
+                if (event.button !== 0) return;
+                row.onSelect();
+              }}
               onMouseDown={(event) => {
                 if (event.button !== 0) return;
                 row.onSelect();
               }}
-              onClick={row.onSelect}
+              onClick={(event) => {
+                event.preventDefault();
+                row.onSelect();
+              }}
               className={[
                 "omi-ranking-row grid w-full grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-slate-200 px-4 py-2 text-left text-sm",
                 row.selected
@@ -1342,7 +1398,7 @@ function WatchlistRankingPanel({
                   </PriceUpdatePulse>
                 )}
               </span>
-            </button>
+            </a>
           ))
         ) : isLoadingRows ? (
           <RankingLoadingRows />
@@ -1357,9 +1413,14 @@ function WatchlistRankingPanel({
 }
 
 export default function MarketDashboardClient({
+  initialMarket,
   initialTree,
   initialItems,
   initialSelectedGroupId,
+  initialSelectedStockId,
+  initialSelectedStockName,
+  initialSelectedUsSymbol,
+  initialSelectedUsSecurityName,
   initialChartData,
   initialIndicatorData,
   initialRankingData,
@@ -1384,14 +1445,22 @@ export default function MarketDashboardClient({
   const [selectedGroup, setSelectedGroup] = useState<WatchlistGroupNode | null>(
     initialSelectedGroup
   );
-  const [selectedStockId, setSelectedStockId] = useState<string | null>(null);
-  const [selectedStockName, setSelectedStockName] = useState<string | null>(null);
+  const [selectedStockId, setSelectedStockId] = useState<string | null>(
+    initialSelectedStockId
+  );
+  const [selectedStockName, setSelectedStockName] = useState<string | null>(
+    initialSelectedStockName
+  );
   const [watchlistTree, setWatchlistTree] = useState<WatchlistGroupNode[]>(initialTree);
   const [watchlistItems, setWatchlistItems] = useState<WatchlistItemRead[]>(initialItems);
-  const [activeMarket, setActiveMarket] = useState<MarketRegion>("tw");
+  const [activeMarket, setActiveMarket] = useState<MarketRegion>(initialMarket);
   const [twChartFocusMode, setTwChartFocusMode] = useState(false);
-  const [selectedUsSymbol, setSelectedUsSymbol] = useState<string | null>(null);
-  const [selectedUsSecurityName, setSelectedUsSecurityName] = useState<string | null>(null);
+  const [selectedUsSymbol, setSelectedUsSymbol] = useState<string | null>(
+    initialSelectedUsSymbol
+  );
+  const [selectedUsSecurityName, setSelectedUsSecurityName] = useState<string | null>(
+    initialSelectedUsSecurityName
+  );
   const [selectedUsCompanyProfile, setSelectedUsCompanyProfile] =
     useState<USCompanyProfileRead | null>(null);
   const [selectedUsGroupId, setSelectedUsGroupId] = useState<number | null>(
@@ -1443,23 +1512,31 @@ export default function MarketDashboardClient({
     [selectedGroup, watchlistItems]
   );
   const rows = useMemo(() => {
+    if (ranking?.is_current === false) {
+      return baseRows;
+    }
+
     if (rankBy === "none") {
       return mergeWatchlistRows(baseRows, ranking);
     }
 
     return ranking?.results ?? baseRows;
   }, [baseRows, rankBy, ranking]);
-  const displayRows = useMemo(() => {
-    return ranking?.is_current === false ? [] : rows;
-  }, [ranking?.is_current, rows]);
+  const rankingFreshnessPending = ranking?.is_current === false;
+  const displayRows = rows;
   const rankingLoadState: LoadState =
-    ranking?.is_current === false && loadState !== "error" ? "loading" : loadState;
+    rankingFreshnessPending && loadState !== "error" ? "loading" : loadState;
   const hasPendingDisplayRows = displayRows.some(isRankingItemPending);
   const rankingListLoading =
     rankingLoadState === "loading" || hasPendingDisplayRows;
   const rankingPendingLabel =
-    ranking?.is_current === false && ranking.target_trade_date
-      ? `等待 ${ranking.target_trade_date} 自選股資料`
+    rankingFreshnessPending
+      ? formatWatchlistFreshnessLabel(
+          "自選股資料",
+          ranking?.target_trade_date,
+          ranking?.stale_stock_count,
+          ranking?.requested_stock_count
+        )
       : "載入中";
   const summary = useMemo(() => {
     const upCount = displayRows.filter((row) => {
@@ -1480,20 +1557,28 @@ export default function MarketDashboardClient({
     [selectedUsGroup, usWatchlistItems]
   );
   const usRows = useMemo(() => {
+    if (usRanking?.is_current === false) {
+      return usBaseRows;
+    }
+
     if (usRankBy === "none") {
       return mergeUsWatchlistRows(usBaseRows, usRanking);
     }
 
     return usRanking?.results ?? usBaseRows;
   }, [usBaseRows, usRankBy, usRanking]);
-  const usVisibleRows = useMemo(() => {
-    return usRanking?.is_current === false ? [] : usRows;
-  }, [usRanking?.is_current, usRows]);
+  const usRankingFreshnessPending = usRanking?.is_current === false;
+  const usVisibleRows = usRows;
   const usRankingLoadState: LoadState =
-    usRanking?.is_current === false && usLoadState !== "error" ? "loading" : usLoadState;
+    usRankingFreshnessPending && usLoadState !== "error" ? "loading" : usLoadState;
   const usRankingPendingLabel =
-    usRanking?.is_current === false && usRanking.target_trade_date
-      ? `等待 ${usRanking.target_trade_date} 美股自選資料`
+    usRankingFreshnessPending
+      ? formatWatchlistFreshnessLabel(
+          "美股自選資料",
+          usRanking?.target_trade_date,
+          usRanking?.stale_symbol_count,
+          usRanking?.requested_symbol_count
+        )
       : "載入中";
   const usSummary = useMemo(() => {
     const upCount = usVisibleRows.filter((row) => {
@@ -1686,6 +1771,7 @@ export default function MarketDashboardClient({
         await loadDashboard(groupId, currentRankBy, { silent: true });
       }
     } catch (error) {
+      watchlistFreshnessRequestKeys.current.delete(requestKey);
       console.warn("Watchlist daily price refresh failed.", error);
     }
   }
@@ -1928,6 +2014,27 @@ export default function MarketDashboardClient({
   }, [activeGroupId, activeMarket, rankBy]);
 
   useEffect(() => {
+    if (activeMarket !== "tw") return;
+    if (activeGroupId === null) return;
+    if (!rankingFreshnessPending) return;
+
+    const refreshTimer = window.setTimeout(() => {
+      void refreshWatchlistDailyPricesOnOpen(activeGroupId, rankBy);
+    }, 0);
+
+    return () => {
+      window.clearTimeout(refreshTimer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    activeGroupId,
+    activeMarket,
+    rankBy,
+    ranking?.target_trade_date,
+    rankingFreshnessPending,
+  ]);
+
+  useEffect(() => {
     if (activeMarket !== "us") return;
     if (selectedUsGroupId === null) return;
 
@@ -2016,6 +2123,12 @@ export default function MarketDashboardClient({
     usRanking?.target_trade_date,
   ]);
 
+  function pushDashboardUrl(params: Parameters<typeof buildDashboardHref>[0]) {
+    if (typeof window === "undefined") return;
+
+    window.history.pushState(null, "", buildDashboardHref(params));
+  }
+
   function handleSelectGroup(group: WatchlistGroupNode | null) {
     setSelectedGroup(group);
     setSelectedGroupId(group?.id ?? null);
@@ -2026,8 +2139,10 @@ export default function MarketDashboardClient({
       setRanking(null);
       setLoadState("idle");
       setErrorMessage(null);
+      pushDashboardUrl({ market: "tw", groupId: group.id });
     } else {
       setRanking(null);
+      pushDashboardUrl({ market: "tw" });
     }
   }
 
@@ -2035,6 +2150,7 @@ export default function MarketDashboardClient({
     setSelectedStockId(stockId);
     setSelectedStockName(stockName);
     setErrorMessage(null);
+    pushDashboardUrl({ market: "tw", groupId: activeGroupId, stockId });
   }
 
   function handleSelectUsGroup(group: USWatchlistGroupNode | null) {
@@ -2107,17 +2223,29 @@ export default function MarketDashboardClient({
 
   function renderRankingRow(row: RankingItem) {
     const selected = row.stock_id === selectedStockId;
-    const loading = isRankingItemPending(row);
+    const loading = rankingFreshnessPending || isRankingItemPending(row);
 
     return (
-      <button
+      <a
         key={row.stock_id}
-        type="button"
+        href={buildDashboardHref({
+          market: "tw",
+          groupId: activeGroupId,
+          stockId: row.stock_id,
+        })}
+        data-ranking-stock-id={row.stock_id}
+        onPointerUp={(event) => {
+          if (event.button !== 0) return;
+          handleSelectStock(row.stock_id, row.stock_name);
+        }}
         onMouseDown={(event) => {
           if (event.button !== 0) return;
           handleSelectStock(row.stock_id, row.stock_name);
         }}
-        onClick={() => handleSelectStock(row.stock_id, row.stock_name)}
+        onClick={(event) => {
+          event.preventDefault();
+          handleSelectStock(row.stock_id, row.stock_name);
+        }}
         className={[
           "omi-ranking-row grid w-full grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-slate-200 px-4 py-2 text-left text-sm",
           selected
@@ -2203,7 +2331,7 @@ export default function MarketDashboardClient({
             </PriceUpdatePulse>
           )}
         </span>
-      </button>
+      </a>
     );
   }
 
@@ -2346,7 +2474,7 @@ export default function MarketDashboardClient({
 
   const usDisplayRows: RankingDisplayRow[] = usVisibleRows.map((row) => {
     const selected = row.symbol === selectedUsSymbol;
-    const loading = isUsRankingItemPending(row);
+    const loading = usRankingFreshnessPending || isUsRankingItemPending(row);
 
     return {
       key: `${row.group_id}-${row.symbol}`,
@@ -2372,10 +2500,12 @@ export default function MarketDashboardClient({
       volumeValue: row.volume,
       selected,
       loading,
+      href: buildDashboardHref({ market: "us", symbol: row.symbol }),
       onSelect: () => {
         setSelectedUsSymbol(row.symbol);
         setSelectedUsSecurityName(row.security_name);
         setUsErrorMessage(null);
+        pushDashboardUrl({ market: "us", symbol: row.symbol });
       },
     };
   });
