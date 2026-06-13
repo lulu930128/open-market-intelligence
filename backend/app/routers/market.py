@@ -48,6 +48,14 @@ from app.market.broker_branch import (
     BrokerBranchFetchError,
     get_broker_branch_trade_summary,
 )
+from app.market.chart_drawings import (
+    ChartDrawingSnapshotNotFoundError,
+    delete_chart_drawing_snapshot,
+    get_chart_drawing_snapshot,
+    list_chart_drawing_snapshots,
+    serialize_chart_drawing_snapshot,
+    upsert_chart_drawing_snapshot,
+)
 from app.market.trading_calendar import (
     TAIWAN_TZ,
     is_taiwan_trading_day,
@@ -55,6 +63,8 @@ from app.market.trading_calendar import (
 )
 from app.market.schemas import (
     BrokerBranchTradeDailySummaryRead,
+    ChartDrawingSnapshotRead,
+    ChartDrawingSnapshotWrite,
     FinancialMetricQuarterlyRead,
     MarketIntradayChartRead,
     IntradayTrendRead,
@@ -175,6 +185,107 @@ def _queue_backfill_job(
         task_args=task_args,
     )
     return job_service.serialize_job(job)
+
+
+@router.get(
+    "/chart-drawings/{market}/{symbol}",
+    response_model=list[ChartDrawingSnapshotRead],
+)
+def list_stock_chart_drawing_snapshots_api(
+    market: str,
+    symbol: str,
+    db: Session = Depends(get_db),
+):
+    try:
+        rows = list_chart_drawing_snapshots(db=db, market=market, symbol=symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+    return [serialize_chart_drawing_snapshot(row) for row in rows]
+
+
+@router.get(
+    "/chart-drawings/{market}/{symbol}/{timeframe}",
+    response_model=ChartDrawingSnapshotRead,
+)
+def get_stock_chart_drawing_snapshot_api(
+    market: str,
+    symbol: str,
+    timeframe: str,
+    db: Session = Depends(get_db),
+):
+    try:
+        row = get_chart_drawing_snapshot(
+            db=db,
+            market=market,
+            symbol=symbol,
+            timeframe=timeframe,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Chart drawing snapshot for {market}:{symbol}:{timeframe} was not found.",
+        )
+
+    return serialize_chart_drawing_snapshot(row)
+
+
+@router.put(
+    "/chart-drawings/{market}/{symbol}/{timeframe}",
+    response_model=ChartDrawingSnapshotRead,
+)
+def put_stock_chart_drawing_snapshot_api(
+    market: str,
+    symbol: str,
+    timeframe: str,
+    payload: ChartDrawingSnapshotWrite,
+    db: Session = Depends(get_db),
+):
+    try:
+        row = upsert_chart_drawing_snapshot(
+            db=db,
+            market=market,
+            symbol=symbol,
+            timeframe=timeframe,
+            drawings=payload.drawings,
+            label=payload.label,
+            time_mode=payload.time_mode,
+            selected_drawing_id=payload.selected_drawing_id,
+            summary=payload.summary,
+            source=payload.source,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+    return serialize_chart_drawing_snapshot(row)
+
+
+@router.delete(
+    "/chart-drawings/{market}/{symbol}/{timeframe}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_stock_chart_drawing_snapshot_api(
+    market: str,
+    symbol: str,
+    timeframe: str,
+    db: Session = Depends(get_db),
+):
+    try:
+        delete_chart_drawing_snapshot(
+            db=db,
+            market=market,
+            symbol=symbol,
+            timeframe=timeframe,
+        )
+    except ChartDrawingSnapshotNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+    return None
 
 
 @router.post(

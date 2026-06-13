@@ -1455,6 +1455,7 @@ export default function MarketDashboardClient({
   const [watchlistItems, setWatchlistItems] = useState<WatchlistItemRead[]>(initialItems);
   const [activeMarket, setActiveMarket] = useState<MarketRegion>(initialMarket);
   const [twChartFocusMode, setTwChartFocusMode] = useState(false);
+  const [usChartFocusMode, setUsChartFocusMode] = useState(false);
   const [selectedUsSymbol, setSelectedUsSymbol] = useState<string | null>(
     initialSelectedUsSymbol
   );
@@ -2667,18 +2668,21 @@ export default function MarketDashboardClient({
               </>
             ) : activeMarket === "us" ? (
               <>
-                <USMarketTape
-                  selectedSymbol={selectedUsSymbol}
-                  selectedSecurityName={selectedUsSecurityName}
-                  selectedGroupName={selectedUsGroupName}
-                  companyProfile={selectedUsContextProfile}
-                />
+                {usChartFocusMode ? null : (
+                  <USMarketTape
+                    selectedSymbol={selectedUsSymbol}
+                    selectedSecurityName={selectedUsSecurityName}
+                    selectedGroupName={selectedUsGroupName}
+                    companyProfile={selectedUsContextProfile}
+                  />
+                )}
 
                 <USStockDetailPanel
                   selectedSymbol={selectedUsSymbol}
                   selectedSecurityName={selectedUsSecurityName}
                   watchlistRankingPanel={usRankingPanel}
                   onCompanyProfileChange={setSelectedUsCompanyProfile}
+                  onChartFocusModeChange={setUsChartFocusMode}
                 />
               </>
             ) : (

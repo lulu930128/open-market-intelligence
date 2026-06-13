@@ -1,6 +1,8 @@
-﻿from fastapi import APIRouter
+import sys
 
-from app.config import settings
+from fastapi import APIRouter
+
+from app.config import PROJECT_ROOT, settings
 
 router = APIRouter()
 
@@ -11,4 +13,10 @@ def health_check():
         "status": "ok",
         "app_name": settings.app_name,
         "environment": settings.app_env,
+        "runtime": {
+            "project_root": str(PROJECT_ROOT),
+            "backend_dir": str(PROJECT_ROOT / "backend"),
+            "python_executable": sys.executable,
+            "python_version": sys.version.split()[0],
+        },
     }

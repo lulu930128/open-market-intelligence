@@ -112,6 +112,31 @@ class MarketOhlcChartRead(BaseModel):
     backfill: dict | None = None
 
 
+class ChartDrawingSnapshotWrite(BaseModel):
+    label: str | None = None
+    time_mode: str | None = None
+    selected_drawing_id: str | None = None
+    drawings: list[dict[str, Any]] = Field(default_factory=list)
+    summary: dict[str, Any] | None = None
+    source: str = "frontend"
+
+
+class ChartDrawingSnapshotRead(BaseModel):
+    id: int
+    market: str
+    symbol: str
+    timeframe: str
+    label: str | None = None
+    time_mode: str | None = None
+    selected_drawing_id: str | None = None
+    drawing_count: int
+    drawings: list[dict[str, Any]] = Field(default_factory=list)
+    summary: dict[str, Any] | None = None
+    source: str
+    created_at: datetime
+    updated_at: datetime
+
+
 class MarketBreadthRead(BaseModel):
     market: str
     trade_date: date | None = None

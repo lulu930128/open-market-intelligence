@@ -74,6 +74,31 @@ export type JobRunRead = {
   updated_at: string;
 };
 
+export type ChartDrawingSnapshotRead = {
+  id: number;
+  market: string;
+  symbol: string;
+  timeframe: string;
+  label: string | null;
+  time_mode: string | null;
+  selected_drawing_id: string | null;
+  drawing_count: number;
+  drawings: Array<Record<string, unknown>>;
+  summary: Record<string, unknown> | null;
+  source: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ChartDrawingSnapshotWrite = {
+  label?: string | null;
+  time_mode?: string | null;
+  selected_drawing_id?: string | null;
+  drawings: Array<Record<string, unknown>>;
+  summary?: Record<string, unknown> | null;
+  source?: string;
+};
+
 export type RankingItem = {
   rank: number;
   stock_id: string;

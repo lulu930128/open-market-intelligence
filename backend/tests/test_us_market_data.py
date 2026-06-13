@@ -25,6 +25,7 @@ from app.db.models import (
 )
 from app.us_market.schemas import USWatchlistGroupCreate, USWatchlistItemCreate
 from app.us_market.service import (
+    USStockNotFoundError,
     create_us_watchlist_group,
     create_us_watchlist_item,
     get_us_sec_fundamental_summary,
@@ -135,6 +136,25 @@ YAHOO_CHART_DAILY_SAMPLE = {
                         }
                     ],
                 },
+            }
+        ],
+        "error": None,
+    }
+}
+
+
+YAHOO_CHART_DISCOVERY_SAMPLE = {
+    "chart": {
+        "result": [
+            {
+                "meta": {
+                    "symbol": "SPCX",
+                    "exchangeName": "NMS",
+                    "instrumentType": "EQUITY",
+                    "longName": "SpaceX Corp.",
+                },
+                "timestamp": [],
+                "indicators": {"quote": [{}]},
             }
         ],
         "error": None,
@@ -650,6 +670,52 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self.assertEqual(self.db.query(WatchlistGroup).count(), 0)
         self.assertEqual(self.db.query(WatchlistItem).count(), 0)
 
+    @patch("app.us_market.service.fetch_yahoo_chart_payload")
+    def test_create_us_watchlist_item_discovers_missing_stock_from_yahoo(self, mock_fetch) -> None:
+        mock_fetch.return_value = (
+            YAHOO_CHART_DISCOVERY_SAMPLE,
+            "https://query1.finance.yahoo.com/v8/finance/chart/SPCX?range=5d&interval=1d",
+        )
+        group = create_us_watchlist_group(
+            self.db,
+            USWatchlistGroupCreate(group_name="New Listings"),
+        )
+
+        item = create_us_watchlist_item(
+            self.db,
+            USWatchlistItemCreate(group_id=group.id, symbol="spcx"),
+        )
+        stock = self.db.query(USStockMaster).filter(USStockMaster.symbol == "SPCX").one()
+
+        self.assertEqual(item["symbol"], "SPCX")
+        self.assertEqual(item["security_name"], "SpaceX Corp.")
+        self.assertEqual(stock.security_name, "SpaceX Corp.")
+        self.assertEqual(stock.exchange, "NASDAQ")
+        self.assertEqual(stock.asset_type, "stock")
+        self.assertEqual(stock.listing_source, "discovered_yahoo_chart")
+        self.assertTrue(stock.is_active)
+        self.assertEqual(self.db.query(USWatchlistItem).count(), 1)
+        self.assertEqual(mock_fetch.call_args.kwargs["symbol"], "SPCX")
+        self.assertEqual(mock_fetch.call_args.kwargs["range_value"], "5d")
+        self.assertEqual(mock_fetch.call_args.kwargs["interval"], "1d")
+
+    @patch("app.us_market.service.fetch_yahoo_chart_payload")
+    def test_create_us_watchlist_item_does_not_write_unknown_symbol(self, mock_fetch) -> None:
+        mock_fetch.side_effect = USMarketDataFetchError("No data found for this symbol.")
+        group = create_us_watchlist_group(
+            self.db,
+            USWatchlistGroupCreate(group_name="New Listings"),
+        )
+
+        with self.assertRaisesRegex(USStockNotFoundError, "Yahoo discovery failed"):
+            create_us_watchlist_item(
+                self.db,
+                USWatchlistItemCreate(group_id=group.id, symbol="notreal"),
+            )
+
+        self.assertEqual(self.db.query(USStockMaster).count(), 0)
+        self.assertEqual(self.db.query(USWatchlistItem).count(), 0)
+
     def test_us_watchlist_ranking_uses_only_us_daily_prices(self) -> None:
         symbol_records = parse_symbol_directories(
             nasdaq_listed_text=NASDAQ_LISTED_SAMPLE,
@@ -1037,6 +1103,40 @@ class USMarketStorageIsolationTests(unittest.TestCase):
 
         labeled_results = search_us_stocks(self.db, keyword="MU / Micron", limit=5)
         self.assertEqual(labeled_results[0].symbol, "MU")
+
+    @patch("app.us_market.service.fetch_yahoo_chart_payload")
+    def test_us_stock_search_discovers_exact_missing_symbol(self, mock_fetch) -> None:
+        mock_fetch.return_value = (
+            YAHOO_CHART_DISCOVERY_SAMPLE,
+            "https://query1.finance.yahoo.com/v8/finance/chart/SPCX?range=5d&interval=1d",
+        )
+
+        results = search_us_stocks(
+            self.db,
+            keyword="spcx",
+            limit=5,
+            discover_missing_exact_symbol=True,
+        )
+        stock = self.db.query(USStockMaster).filter(USStockMaster.symbol == "SPCX").one()
+
+        self.assertEqual(results[0].symbol, "SPCX")
+        self.assertEqual(results[0].security_name, "SpaceX Corp.")
+        self.assertEqual(stock.listing_source, "discovered_yahoo_chart")
+        self.assertEqual(mock_fetch.call_args.kwargs["symbol"], "SPCX")
+
+    @patch("app.us_market.service.fetch_yahoo_chart_payload")
+    def test_us_stock_search_keeps_empty_result_when_discovery_fails(self, mock_fetch) -> None:
+        mock_fetch.side_effect = USMarketDataFetchError("No data found for this symbol.")
+
+        results = search_us_stocks(
+            self.db,
+            keyword="notreal",
+            limit=5,
+            discover_missing_exact_symbol=True,
+        )
+
+        self.assertEqual(results, [])
+        self.assertEqual(self.db.query(USStockMaster).count(), 0)
 
     def test_us_ohlc_chart_data_aggregates_monthly(self) -> None:
         records = [

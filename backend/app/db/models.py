@@ -344,6 +344,37 @@ class MarketIntradayBar(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class ChartDrawingSnapshot(Base):
+    __tablename__ = "chart_drawing_snapshot"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "market",
+            "symbol",
+            "timeframe",
+            name="uq_chart_drawing_snapshot_market_symbol_timeframe",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    market: Mapped[str] = mapped_column(String(20), index=True)
+    symbol: Mapped[str] = mapped_column(String(40), index=True)
+    timeframe: Mapped[str] = mapped_column(String(20), index=True)
+
+    label: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    time_mode: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    selected_drawing_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    drawing_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    drawings_json: Mapped[str] = mapped_column(Text, default="[]")
+    summary_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source: Mapped[str] = mapped_column(String(80), default="frontend", index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class MarketIndexDailyStat(Base):
     __tablename__ = "market_index_daily_stat"
 

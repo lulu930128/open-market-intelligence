@@ -15,6 +15,8 @@ type Props = {
   label: string;
   indicators: IndicatorSettings;
   indicatorParameters?: IndicatorParameters;
+  benchmarkData?: ChartPoint[];
+  benchmarkLabel?: string;
   revealKey?: string;
   volumePanelLabel?: string;
   volumeTooltipLabel?: string;
@@ -26,7 +28,13 @@ export type IndicatorSettings = {
   signals: boolean;
   ma: boolean;
   ema: boolean;
+  wma: boolean;
+  hma: boolean;
+  vwma: boolean;
   bollinger: boolean;
+  bbWidth: boolean;
+  stdDev: boolean;
+  choppiness: boolean;
   vwap: boolean;
   psar: boolean;
   donchian: boolean;
@@ -37,16 +45,32 @@ export type IndicatorSettings = {
   rsi: boolean;
   macd: boolean;
   kd: boolean;
+  momentum: boolean;
+  tsi: boolean;
+  awesomeOscillator: boolean;
+  ultimateOscillator: boolean;
   atr: boolean;
   adx: boolean;
   aroon: boolean;
   obv: boolean;
   mfi: boolean;
+  cmf: boolean;
+  adLine: boolean;
+  pvt: boolean;
   cci: boolean;
   williamsR: boolean;
   roc: boolean;
   stochRsi: boolean;
   trix: boolean;
+  volumeProfile: boolean;
+  pivotPoints: boolean;
+  supportResistance: boolean;
+  gap: boolean;
+  divergence: boolean;
+  candlestickPatterns: boolean;
+  relativeStrength: boolean;
+  beta: boolean;
+  correlation: boolean;
 };
 
 export type IndicatorKey = keyof IndicatorSettings;
@@ -95,14 +119,29 @@ export type IndicatorParameters = {
   maLong: number;
   emaFast: number;
   emaSlow: number;
+  wmaPeriod: number;
+  hmaPeriod: number;
+  vwmaPeriod: number;
   bollingerPeriod: number;
   bollingerStdDev: number;
+  bbWidthPeriod: number;
+  stdDevPeriod: number;
+  choppinessPeriod: number;
   volumeMa: number;
   rsiPeriod: number;
   macdFast: number;
   macdSlow: number;
   macdSignal: number;
   kdPeriod: number;
+  momentumPeriod: number;
+  tsiShortPeriod: number;
+  tsiLongPeriod: number;
+  tsiSignalPeriod: number;
+  awesomeFastPeriod: number;
+  awesomeSlowPeriod: number;
+  ultimateShortPeriod: number;
+  ultimateMiddlePeriod: number;
+  ultimateLongPeriod: number;
   atrPeriod: number;
   adxPeriod: number;
   donchianPeriod: number;
@@ -118,6 +157,7 @@ export type IndicatorParameters = {
   aroonPeriod: number;
   obvMa: number;
   mfiPeriod: number;
+  cmfPeriod: number;
   cciPeriod: number;
   williamsRPeriod: number;
   rocPeriod: number;
@@ -126,6 +166,13 @@ export type IndicatorParameters = {
   stochRsiSmoothD: number;
   trixPeriod: number;
   trixSignal: number;
+  volumeProfileRows: number;
+  pivotLookback: number;
+  supportResistanceLookback: number;
+  gapMinPct: number;
+  relativeStrengthLookback: number;
+  betaPeriod: number;
+  correlationPeriod: number;
 };
 
 type MergedPoint = ChartPoint & {
@@ -161,6 +208,9 @@ type MergedPoint = ChartPoint & {
   roc12: number | null;
   stochRsiK: number | null;
   stochRsiD: number | null;
+  relativeStrength: number | null;
+  beta: number | null;
+  correlation: number | null;
 };
 
 type Panel = {
@@ -176,7 +226,10 @@ type Panel = {
     | "cci"
     | "williamsR"
     | "roc"
-    | "stochRsi";
+    | "stochRsi"
+    | "relativeStrength"
+    | "beta"
+    | "correlation";
   label: string;
   top: number;
   height: number;
@@ -265,30 +318,32 @@ export const indicatorOptions: AvailableIndicatorOption[] = [
   { status: "available", key: "signals", label: "SIGNAL", description: "交叉 / 突破標記", category: "signals", plot: "signal" },
 ];
 
-export const plannedIndicatorOptions: PlannedIndicatorOption[] = [
-  { status: "planned", key: "wma", label: "WMA", description: "加權移動平均", category: "trend", plot: "overlay" },
-  { status: "planned", key: "hma", label: "HMA", description: "Hull Moving Average", category: "trend", plot: "overlay" },
-  { status: "planned", key: "vwma", label: "VWMA", description: "成交量加權均線", category: "trend", plot: "overlay" },
-  { status: "planned", key: "bb_width", label: "BB Width", description: "布林通道寬度", category: "volatility", plot: "pane" },
-  { status: "planned", key: "stddev", label: "StdDev", description: "標準差波動", category: "volatility", plot: "pane" },
-  { status: "planned", key: "choppiness", label: "CHOP", description: "盤整 / 趨勢程度", category: "volatility", plot: "pane" },
-  { status: "planned", key: "momentum", label: "Momentum", description: "價格動量", category: "momentum", plot: "pane" },
-  { status: "planned", key: "tsi", label: "TSI", description: "True Strength Index", category: "momentum", plot: "pane" },
-  { status: "planned", key: "awesome_oscillator", label: "AO", description: "Awesome Oscillator", category: "momentum", plot: "pane" },
-  { status: "planned", key: "ultimate_oscillator", label: "UO", description: "Ultimate Oscillator", category: "momentum", plot: "pane" },
-  { status: "planned", key: "cmf", label: "CMF", description: "Chaikin Money Flow", category: "volume", plot: "pane" },
-  { status: "planned", key: "ad_line", label: "A/D", description: "Accumulation / Distribution", category: "volume", plot: "pane" },
-  { status: "planned", key: "pvt", label: "PVT", description: "Price Volume Trend", category: "volume", plot: "pane" },
-  { status: "planned", key: "volume_profile", label: "VPVR", description: "成交量分布，需價位級資料近似", category: "volume", plot: "context" },
-  { status: "planned", key: "pivot_points", label: "Pivot", description: "日 / 週 / 月樞紐位", category: "structure", plot: "overlay" },
-  { status: "planned", key: "support_resistance", label: "S/R", description: "支撐壓力偵測", category: "structure", plot: "overlay" },
-  { status: "planned", key: "gap", label: "Gap", description: "跳空缺口標記", category: "structure", plot: "overlay" },
-  { status: "planned", key: "relative_strength", label: "RS", description: "相對大盤 / 族群強弱", category: "relative", plot: "pane" },
-  { status: "planned", key: "beta", label: "Beta", description: "相對市場敏感度", category: "relative", plot: "context" },
-  { status: "planned", key: "correlation", label: "Corr", description: "與指數 / 族群相關性", category: "relative", plot: "context" },
-  { status: "planned", key: "divergence", label: "Divergence", description: "價量 / 動能背離", category: "signals", plot: "signal" },
-  { status: "planned", key: "candlestick_patterns", label: "Pattern", description: "K 線型態辨識", category: "signals", plot: "signal" },
+export const professionalIndicatorOptions: AvailableIndicatorOption[] = [
+  { status: "available", key: "wma", label: "WMA", description: "加權移動平均", category: "trend", plot: "overlay" },
+  { status: "available", key: "hma", label: "HMA", description: "Hull Moving Average", category: "trend", plot: "overlay" },
+  { status: "available", key: "vwma", label: "VWMA", description: "成交量加權均線", category: "trend", plot: "overlay" },
+  { status: "available", key: "bbWidth", label: "BB Width", description: "布林通道寬度", category: "volatility", plot: "pane" },
+  { status: "available", key: "stdDev", label: "StdDev", description: "標準差波動", category: "volatility", plot: "pane" },
+  { status: "available", key: "choppiness", label: "CHOP", description: "盤整 / 趨勢程度", category: "volatility", plot: "pane" },
+  { status: "available", key: "momentum", label: "Momentum", description: "價格動量", category: "momentum", plot: "pane" },
+  { status: "available", key: "tsi", label: "TSI", description: "True Strength Index", category: "momentum", plot: "pane" },
+  { status: "available", key: "awesomeOscillator", label: "AO", description: "Awesome Oscillator", category: "momentum", plot: "pane" },
+  { status: "available", key: "ultimateOscillator", label: "UO", description: "Ultimate Oscillator", category: "momentum", plot: "pane" },
+  { status: "available", key: "cmf", label: "CMF", description: "Chaikin Money Flow", category: "volume", plot: "pane" },
+  { status: "available", key: "adLine", label: "A/D", description: "Accumulation / Distribution", category: "volume", plot: "pane" },
+  { status: "available", key: "pvt", label: "PVT", description: "Price Volume Trend", category: "volume", plot: "pane" },
+  { status: "available", key: "volumeProfile", label: "VPVR", description: "可視區成交量分布近似", category: "volume", plot: "context" },
+  { status: "available", key: "pivotPoints", label: "Pivot", description: "前一根 K 的樞紐位", category: "structure", plot: "overlay" },
+  { status: "available", key: "supportResistance", label: "S/R", description: "區間支撐壓力", category: "structure", plot: "overlay" },
+  { status: "available", key: "gap", label: "Gap", description: "跳空缺口標記", category: "structure", plot: "overlay" },
+  { status: "available", key: "divergence", label: "Divergence", description: "RSI / MACD 價格背離", category: "signals", plot: "signal" },
+  { status: "available", key: "candlestickPatterns", label: "Pattern", description: "K 線型態辨識", category: "signals", plot: "signal" },
+  { status: "available", key: "relativeStrength", label: "RS", description: "相對大盤強弱", category: "relative", plot: "pane" },
+  { status: "available", key: "beta", label: "Beta", description: "相對大盤敏感度", category: "relative", plot: "pane" },
+  { status: "available", key: "correlation", label: "Corr", description: "與大盤報酬相關性", category: "relative", plot: "pane" },
 ];
+
+export const plannedIndicatorOptions: PlannedIndicatorOption[] = [];
 
 export const indicatorCategoryGroups: IndicatorCategoryGroup[] =
   indicatorCategoryDefinitions.map((category) => ({
@@ -298,11 +353,27 @@ export const indicatorCategoryGroups: IndicatorCategoryGroup[] =
     ),
   }));
 
+export const professionalIndicatorCategoryGroups: IndicatorCategoryGroup[] =
+  indicatorCategoryDefinitions.map((category) => ({
+    ...category,
+    options: [
+      ...indicatorOptions,
+      ...professionalIndicatorOptions,
+      ...plannedIndicatorOptions,
+    ].filter((option) => option.category === category.key),
+  }));
+
 export const defaultIndicators: IndicatorSettings = {
   signals: true,
   ma: true,
   ema: false,
+  wma: false,
+  hma: false,
+  vwma: false,
   bollinger: false,
+  bbWidth: false,
+  stdDev: false,
+  choppiness: false,
   vwap: false,
   psar: false,
   donchian: false,
@@ -313,16 +384,32 @@ export const defaultIndicators: IndicatorSettings = {
   rsi: false,
   macd: false,
   kd: false,
+  momentum: false,
+  tsi: false,
+  awesomeOscillator: false,
+  ultimateOscillator: false,
   atr: false,
   adx: false,
   aroon: false,
   obv: false,
   mfi: false,
+  cmf: false,
+  adLine: false,
+  pvt: false,
   cci: false,
   williamsR: false,
   roc: false,
   stochRsi: false,
   trix: false,
+  volumeProfile: false,
+  pivotPoints: false,
+  supportResistance: false,
+  gap: false,
+  divergence: false,
+  candlestickPatterns: false,
+  relativeStrength: false,
+  beta: false,
+  correlation: false,
 };
 
 const playedKLineRevealKeys = new Set<string>();
@@ -333,14 +420,29 @@ export const defaultIndicatorParameters: IndicatorParameters = {
   maLong: 60,
   emaFast: 12,
   emaSlow: 26,
+  wmaPeriod: 20,
+  hmaPeriod: 20,
+  vwmaPeriod: 20,
   bollingerPeriod: 20,
   bollingerStdDev: 2,
+  bbWidthPeriod: 20,
+  stdDevPeriod: 20,
+  choppinessPeriod: 14,
   volumeMa: 20,
   rsiPeriod: 14,
   macdFast: 12,
   macdSlow: 26,
   macdSignal: 9,
   kdPeriod: 9,
+  momentumPeriod: 10,
+  tsiShortPeriod: 13,
+  tsiLongPeriod: 25,
+  tsiSignalPeriod: 7,
+  awesomeFastPeriod: 5,
+  awesomeSlowPeriod: 34,
+  ultimateShortPeriod: 7,
+  ultimateMiddlePeriod: 14,
+  ultimateLongPeriod: 28,
   atrPeriod: 14,
   adxPeriod: 14,
   donchianPeriod: 20,
@@ -356,6 +458,7 @@ export const defaultIndicatorParameters: IndicatorParameters = {
   aroonPeriod: 25,
   obvMa: 10,
   mfiPeriod: 14,
+  cmfPeriod: 20,
   cciPeriod: 20,
   williamsRPeriod: 14,
   rocPeriod: 12,
@@ -364,6 +467,13 @@ export const defaultIndicatorParameters: IndicatorParameters = {
   stochRsiSmoothD: 3,
   trixPeriod: 15,
   trixSignal: 9,
+  volumeProfileRows: 24,
+  pivotLookback: 1,
+  supportResistanceLookback: 20,
+  gapMinPct: 0.5,
+  relativeStrengthLookback: 20,
+  betaPeriod: 60,
+  correlationPeriod: 60,
 };
 
 const DEFAULT_VISIBLE_BARS = 80;
@@ -947,6 +1057,146 @@ function calculateRoc(closes: Array<number | null | undefined>, period = 12) {
   });
 }
 
+function calculateRelativeMetrics(
+  points: ChartPoint[],
+  benchmarkPoints: ChartPoint[] | undefined,
+  params: IndicatorParameters
+) {
+  const relativeStrength: Array<number | null> = points.map(() => null);
+  const beta: Array<number | null> = points.map(() => null);
+  const correlation: Array<number | null> = points.map(() => null);
+
+  if (!benchmarkPoints || benchmarkPoints.length === 0) {
+    return { relativeStrength, beta, correlation };
+  }
+
+  const benchmarkCloseByDate = new Map<string, number>();
+
+  benchmarkPoints.forEach((point) => {
+    if (validNumber(point.close)) {
+      benchmarkCloseByDate.set(point.time.slice(0, 10), point.close);
+    }
+  });
+
+  const stockReturns: Array<number | null> = points.map(() => null);
+  const benchmarkReturns: Array<number | null> = points.map(() => null);
+
+  points.forEach((point, index) => {
+    const previousPoint = points[index - 1];
+    const previousClose = previousPoint?.close;
+    const benchmarkClose = benchmarkCloseByDate.get(point.time.slice(0, 10));
+    const previousBenchmarkClose = previousPoint
+      ? benchmarkCloseByDate.get(previousPoint.time.slice(0, 10))
+      : undefined;
+
+    if (validNumber(point.close) && validNumber(previousClose) && previousClose !== 0) {
+      stockReturns[index] = point.close / previousClose - 1;
+    }
+
+    if (
+      validNumber(benchmarkClose) &&
+      validNumber(previousBenchmarkClose) &&
+      previousBenchmarkClose !== 0
+    ) {
+      benchmarkReturns[index] = benchmarkClose / previousBenchmarkClose - 1;
+    }
+  });
+
+  points.forEach((point, index) => {
+    const baseIndex = index - params.relativeStrengthLookback;
+    const basePoint = points[baseIndex];
+    const baseClose = basePoint?.close;
+    const benchmarkClose = benchmarkCloseByDate.get(point.time.slice(0, 10));
+    const baseBenchmarkClose = basePoint
+      ? benchmarkCloseByDate.get(basePoint.time.slice(0, 10))
+      : undefined;
+
+    if (
+      baseIndex >= 0 &&
+      validNumber(point.close) &&
+      validNumber(baseClose) &&
+      baseClose !== 0 &&
+      validNumber(benchmarkClose) &&
+      validNumber(baseBenchmarkClose) &&
+      baseBenchmarkClose !== 0
+    ) {
+      const stockReturn = point.close / baseClose - 1;
+      const benchmarkReturn = benchmarkClose / baseBenchmarkClose - 1;
+      relativeStrength[index] = (stockReturn - benchmarkReturn) * 100;
+    }
+  });
+
+  function collectPairedReturns(index: number, period: number) {
+    const startIndex = Math.max(1, index + 1 - period);
+    const pairedReturns: Array<{ stock: number; benchmark: number }> = [];
+
+    for (let cursor = startIndex; cursor <= index; cursor += 1) {
+      const stockReturn = stockReturns[cursor];
+      const benchmarkReturn = benchmarkReturns[cursor];
+
+      if (validNumber(stockReturn) && validNumber(benchmarkReturn)) {
+        pairedReturns.push({ stock: stockReturn, benchmark: benchmarkReturn });
+      }
+    }
+
+    return pairedReturns;
+  }
+
+  points.forEach((_, index) => {
+    const period = Math.max(5, Math.round(params.betaPeriod));
+    const pairedReturns = collectPairedReturns(index, period);
+    const minSamples = Math.max(8, Math.ceil(period * 0.6));
+
+    if (pairedReturns.length < minSamples) return;
+
+    const stockAverage =
+      pairedReturns.reduce((sum, item) => sum + item.stock, 0) / pairedReturns.length;
+    const benchmarkAverage =
+      pairedReturns.reduce((sum, item) => sum + item.benchmark, 0) / pairedReturns.length;
+    const covariance = pairedReturns.reduce(
+      (sum, item) => sum + (item.stock - stockAverage) * (item.benchmark - benchmarkAverage),
+      0
+    );
+    const variance = pairedReturns.reduce(
+      (sum, item) => sum + (item.benchmark - benchmarkAverage) ** 2,
+      0
+    );
+
+    beta[index] = variance > 0 ? covariance / variance : null;
+  });
+
+  points.forEach((_, index) => {
+    const period = Math.max(5, Math.round(params.correlationPeriod));
+    const pairedReturns = collectPairedReturns(index, period);
+    const minSamples = Math.max(8, Math.ceil(period * 0.6));
+
+    if (pairedReturns.length < minSamples) return;
+
+    const stockAverage =
+      pairedReturns.reduce((sum, item) => sum + item.stock, 0) / pairedReturns.length;
+    const benchmarkAverage =
+      pairedReturns.reduce((sum, item) => sum + item.benchmark, 0) / pairedReturns.length;
+    const covariance = pairedReturns.reduce(
+      (sum, item) => sum + (item.stock - stockAverage) * (item.benchmark - benchmarkAverage),
+      0
+    );
+    const stockVariance = pairedReturns.reduce(
+      (sum, item) => sum + (item.stock - stockAverage) ** 2,
+      0
+    );
+    const benchmarkVariance = pairedReturns.reduce(
+      (sum, item) => sum + (item.benchmark - benchmarkAverage) ** 2,
+      0
+    );
+    const denominator = Math.sqrt(stockVariance * benchmarkVariance);
+
+    correlation[index] =
+      denominator > 0 ? clamp(covariance / denominator, -1, 1) : null;
+  });
+
+  return { relativeStrength, beta, correlation };
+}
+
 function calculateStochRsi(
   rsiValues: Array<number | null>,
   period = 14,
@@ -1257,6 +1507,8 @@ export default function StockKLineChart({
   label,
   indicators,
   indicatorParameters,
+  benchmarkData = [],
+  benchmarkLabel,
   revealKey,
   volumePanelLabel = "成交量(張)",
   volumeTooltipLabel = "成交量(張)",
@@ -1321,6 +1573,7 @@ export default function StockKLineChart({
       params.stochRsiSmoothK,
       params.stochRsiSmoothD
     );
+    const relativeMetrics = calculateRelativeMetrics(chartData, benchmarkData, params);
 
     return chartData.map((point, index) => {
       const indicator = indicatorByTime.get(point.time);
@@ -1376,9 +1629,12 @@ export default function StockKLineChart({
         roc12: roc[index],
         stochRsiK: stochRsi.k[index],
         stochRsiD: stochRsi.d[index],
+        relativeStrength: relativeMetrics.relativeStrength[index],
+        beta: relativeMetrics.beta[index],
+        correlation: relativeMetrics.correlation[index],
       };
     });
-  }, [chartData, indicatorData, params]);
+  }, [benchmarkData, chartData, indicatorData, params]);
 
   const dataKey = `${label}:${data.length}:${data[0]?.time ?? ""}:${data[data.length - 1]?.time ?? ""}`;
   const activeVisibleRange =
@@ -1606,6 +1862,21 @@ export default function StockKLineChart({
   addPanel(indicators.williamsR, "williamsR", "Williams %R");
   addPanel(indicators.roc, "roc", `ROC ${params.rocPeriod}`);
   addPanel(indicators.stochRsi, "stochRsi", "StochRSI");
+  addPanel(
+    indicators.relativeStrength,
+    "relativeStrength",
+    `RS ${params.relativeStrengthLookback}${benchmarkLabel ? ` vs ${benchmarkLabel}` : ""}`
+  );
+  addPanel(
+    indicators.beta,
+    "beta",
+    `Beta ${params.betaPeriod}${benchmarkLabel ? ` vs ${benchmarkLabel}` : ""}`
+  );
+  addPanel(
+    indicators.correlation,
+    "correlation",
+    `Corr ${params.correlationPeriod}${benchmarkLabel ? ` vs ${benchmarkLabel}` : ""}`
+  );
 
   const height = Math.max(360, nextPanelTop - panelGap + bottomPadding);
   const labelY = height - 10;
@@ -1654,6 +1925,12 @@ export default function StockKLineChart({
     { includeZero: true }
   );
   const rocRange = numericRange(visibleData.map((point) => point.roc12), { includeZero: true });
+  const relativeStrengthRange = numericRange(
+    visibleData.map((point) => point.relativeStrength),
+    { includeZero: true }
+  );
+  const betaRange = numericRange(visibleData.map((point) => point.beta), { includeZero: true });
+  const correlationRange = { min: -1, max: 1 };
   const candleWidth = clamp((usableWidth / visibleData.length) * 0.58, 3, 12);
   const rangeHigh = visibleData.reduce<{ index: number; value: number } | null>(
     (best, point, index) => {
@@ -2028,6 +2305,39 @@ export default function StockKLineChart({
                   <span className="text-slate-400">StochRSI K/D</span>
                   <div className="font-semibold text-slate-800">
                     {formatIndicator(hoveredPoint.stochRsiK)} / {formatIndicator(hoveredPoint.stochRsiD)}
+                  </div>
+                </div>
+              ) : null}
+              {indicators.relativeStrength ? (
+                <div>
+                  <span className="text-slate-400">
+                    RS{params.relativeStrengthLookback}
+                    {benchmarkLabel ? ` vs ${benchmarkLabel}` : ""}
+                  </span>
+                  <div className={`font-semibold ${valueTone(hoveredPoint.relativeStrength)}`}>
+                    {formatPct(hoveredPoint.relativeStrength)}
+                  </div>
+                </div>
+              ) : null}
+              {indicators.beta ? (
+                <div>
+                  <span className="text-slate-400">
+                    Beta{params.betaPeriod}
+                    {benchmarkLabel ? ` vs ${benchmarkLabel}` : ""}
+                  </span>
+                  <div className="font-semibold text-slate-800">
+                    {formatIndicator(hoveredPoint.beta)}
+                  </div>
+                </div>
+              ) : null}
+              {indicators.correlation ? (
+                <div>
+                  <span className="text-slate-400">
+                    Corr{params.correlationPeriod}
+                    {benchmarkLabel ? ` vs ${benchmarkLabel}` : ""}
+                  </span>
+                  <div className={`font-semibold ${valueTone(hoveredPoint.correlation)}`}>
+                    {formatIndicator(hoveredPoint.correlation)}
                   </div>
                 </div>
               ) : null}
@@ -2810,6 +3120,86 @@ export default function StockKLineChart({
                     fill="none"
                     strokeWidth="1.7"
                     className="stroke-amber-500"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </>
+              ) : null}
+
+              {panel.key === "relativeStrength" ? (
+                <>
+                  <line
+                    x1={paddingLeft}
+                    x2={width - paddingRight}
+                    y1={getPanelY(panel, 0, relativeStrengthRange.min, relativeStrengthRange.max)}
+                    y2={getPanelY(panel, 0, relativeStrengthRange.min, relativeStrengthRange.max)}
+                    className="stroke-slate-200"
+                  />
+                  <path
+                    d={buildLinePath(visibleData, (point) => point.relativeStrength, getX, (value) =>
+                      getPanelY(panel, value, relativeStrengthRange.min, relativeStrengthRange.max)
+                    )}
+                    fill="none"
+                    strokeWidth="1.8"
+                    className="stroke-violet-600"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </>
+              ) : null}
+
+              {panel.key === "beta" ? (
+                <>
+                  <line
+                    x1={paddingLeft}
+                    x2={width - paddingRight}
+                    y1={getPanelY(panel, 0, betaRange.min, betaRange.max)}
+                    y2={getPanelY(panel, 0, betaRange.min, betaRange.max)}
+                    className="stroke-slate-100"
+                  />
+                  {betaRange.min <= 1 && betaRange.max >= 1 ? (
+                    <line
+                      x1={paddingLeft}
+                      x2={width - paddingRight}
+                      y1={getPanelY(panel, 1, betaRange.min, betaRange.max)}
+                      y2={getPanelY(panel, 1, betaRange.min, betaRange.max)}
+                      className="stroke-slate-300"
+                      strokeDasharray="4 4"
+                    />
+                  ) : null}
+                  <path
+                    d={buildLinePath(visibleData, (point) => point.beta, getX, (value) =>
+                      getPanelY(panel, value, betaRange.min, betaRange.max)
+                    )}
+                    fill="none"
+                    strokeWidth="1.8"
+                    className="stroke-teal-700"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </>
+              ) : null}
+
+              {panel.key === "correlation" ? (
+                <>
+                  {[-0.5, 0, 0.5].map((value) => (
+                    <line
+                      key={value}
+                      x1={paddingLeft}
+                      x2={width - paddingRight}
+                      y1={getPanelY(panel, value, correlationRange.min, correlationRange.max)}
+                      y2={getPanelY(panel, value, correlationRange.min, correlationRange.max)}
+                      className={value === 0 ? "stroke-slate-300" : "stroke-slate-100"}
+                      strokeDasharray={value === 0 ? undefined : "4 4"}
+                    />
+                  ))}
+                  <path
+                    d={buildLinePath(visibleData, (point) => point.correlation, getX, (value) =>
+                      getPanelY(panel, value, correlationRange.min, correlationRange.max)
+                    )}
+                    fill="none"
+                    strokeWidth="1.8"
+                    className="stroke-sky-700"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />

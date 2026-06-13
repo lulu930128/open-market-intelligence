@@ -29,6 +29,7 @@ $script:LastStatusText = $null
 $script:IsShuttingDown = $false
 $script:DashboardAutoOpened = $false
 $script:DashboardUrl = "http://localhost:3000"
+$script:BackendHealthUrl = "http://127.0.0.1:8300/api/system/health"
 
 New-Item -ItemType Directory -Force -Path $script:LogRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $script:DataRoot | Out-Null
@@ -183,6 +184,146 @@ function Test-HttpOk {
     }
 }
 
+function Get-ExpectedBackendPython {
+    if ($script:IsPackagedRelease -and (Test-Path -LiteralPath $script:PackagedPython)) {
+        return $script:PackagedPython
+    }
+
+    return (Join-Path $script:RepoRoot ".venv\Scripts\python.exe")
+}
+
+function ConvertTo-NormalizedPath {
+    param([AllowNull()][string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $null
+    }
+
+    try {
+        $normalized = [System.IO.Path]::GetFullPath($Path)
+    }
+    catch {
+        $normalized = $Path
+    }
+
+    return $normalized.TrimEnd([char[]]@('\', '/')).ToLowerInvariant()
+}
+
+function Get-BackendHealth {
+    param([string]$Url = $script:BackendHealthUrl)
+
+    $response = $null
+    $reader = $null
+
+    try {
+        $request = [System.Net.HttpWebRequest]::Create($Url)
+        $request.Method = "GET"
+        $request.Timeout = 1500
+        $request.ReadWriteTimeout = 1500
+        $response = $request.GetResponse()
+        $statusCode = [int]$response.StatusCode
+
+        if ($statusCode -lt 200 -or $statusCode -ge 400) {
+            return $null
+        }
+
+        $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+        $content = $reader.ReadToEnd()
+        return ($content | ConvertFrom-Json)
+    }
+    catch {
+        return $null
+    }
+    finally {
+        if ($null -ne $reader) {
+            $reader.Dispose()
+        }
+
+        if ($null -ne $response) {
+            $response.Close()
+        }
+    }
+}
+
+function Test-BackendHealthMatchesExpected {
+    param(
+        [Parameter(Mandatory = $true)]$Health,
+        [Parameter(Mandatory = $true)][string]$ExpectedPythonPath
+    )
+
+    $runtime = $Health.runtime
+
+    if ($null -eq $runtime) {
+        Write-LauncherLog "Backend health response has no runtime metadata; treating it as a stale backend." "WARN"
+        return $false
+    }
+
+    $expectedRepoRoot = ConvertTo-NormalizedPath $script:RepoRoot
+    $actualRepoRoot = ConvertTo-NormalizedPath ([string]$runtime.project_root)
+    if ($actualRepoRoot -ne $expectedRepoRoot) {
+        Write-LauncherLog "Backend project root mismatch. expected=$script:RepoRoot actual=$($runtime.project_root)" "WARN"
+        return $false
+    }
+
+    $expectedPython = ConvertTo-NormalizedPath $ExpectedPythonPath
+    $actualPython = ConvertTo-NormalizedPath ([string]$runtime.python_executable)
+    if ($actualPython -ne $expectedPython) {
+        Write-LauncherLog "Backend Python runtime mismatch. expected=$ExpectedPythonPath actual=$($runtime.python_executable)" "WARN"
+        return $false
+    }
+
+    return $true
+}
+
+function Get-ListeningProcessIdsOnPort {
+    param([Parameter(Mandatory = $true)][int]$Port)
+
+    $netstat = Join-Path $env:SystemRoot "System32\netstat.exe"
+    if (-not (Test-Path -LiteralPath $netstat)) {
+        return @()
+    }
+
+    $processIds = @()
+    $lines = & $netstat -ano -p TCP 2>$null
+    foreach ($line in $lines) {
+        if ($line -match "^\s*TCP\s+\S+:$Port\s+\S+\s+LISTENING\s+(\d+)\s*$") {
+            $processIds += [int]$Matches[1]
+        }
+    }
+
+    return ($processIds | Sort-Object -Unique)
+}
+
+function Stop-BackendPortOwners {
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+
+    $processIds = @(Get-ListeningProcessIdsOnPort -Port $Port)
+    if ($processIds.Count -eq 0) {
+        Write-LauncherLog "No listening process was found on backend port $Port."
+        return
+    }
+
+    $taskkill = Join-Path $env:SystemRoot "System32\taskkill.exe"
+    foreach ($processId in $processIds) {
+        if ($processId -eq $PID) {
+            Write-LauncherLog "Skipping current launcher process while clearing backend port $Port." "WARN"
+            continue
+        }
+
+        try {
+            $process = Get-Process -Id $processId -ErrorAction Stop
+            Write-LauncherLog "Stopping stale OMI backend port owner. port=$Port pid=$processId process=$($process.ProcessName) reason=$Reason" "WARN"
+            Start-Process -FilePath $taskkill -ArgumentList @("/PID", "$processId", "/T", "/F") -Wait -WindowStyle Hidden | Out-Null
+        }
+        catch {
+            throw "Failed to stop stale backend port owner pid=$processId on port $Port. error=$($_.Exception.Message)"
+        }
+    }
+}
+
 function Test-ProcessRunning {
     param($Process)
 
@@ -323,22 +464,12 @@ function Start-LoggedService {
 }
 
 function Start-Backend {
-    if (Test-HttpOk "http://127.0.0.1:8300/api/system/health") {
-        Write-LauncherLog "Backend health endpoint already responds; skipping backend start. Local Python runtime was not needed for this launch."
-        return
-    }
-
     if (Test-ProcessRunning $script:BackendProcess) {
         Write-LauncherLog "Backend process is already tracked pid=$($script:BackendProcess.Id)."
         return
     }
 
-    $python = if ($script:IsPackagedRelease -and (Test-Path -LiteralPath $script:PackagedPython)) {
-        $script:PackagedPython
-    }
-    else {
-        Join-Path $script:RepoRoot ".venv\Scripts\python.exe"
-    }
+    $python = Get-ExpectedBackendPython
 
     if (-not (Test-Path -LiteralPath $python)) {
         throw "Missing Python executable: $python"
@@ -346,6 +477,30 @@ function Start-Backend {
 
     if (-not (Test-Path -LiteralPath $script:BackendDir)) {
         throw "Missing backend directory: $($script:BackendDir)"
+    }
+
+    $backendHealth = Get-BackendHealth
+    if ($null -ne $backendHealth) {
+        if (Test-BackendHealthMatchesExpected -Health $backendHealth -ExpectedPythonPath $python) {
+            Write-LauncherLog "Backend health endpoint already responds with the expected project/runtime; skipping backend start."
+            return
+        }
+
+        if ([string]$backendHealth.app_name -eq "Open Market Intelligence") {
+            Write-LauncherLog "Existing OMI backend did not match the expected project/runtime. Clearing stale backend before start." "WARN"
+            Stop-BackendPortOwners -Port 8300 -Reason "runtime mismatch"
+            Start-Sleep -Milliseconds 750
+
+            if (Test-HttpOk $script:BackendHealthUrl) {
+                throw "Backend port 8300 is still occupied by an unexpected OMI runtime after cleanup."
+            }
+        }
+        else {
+            throw "Backend port 8300 already responds, but it is not this OMI runtime. Stop the process using port 8300 before starting OMI."
+        }
+    }
+    elseif (Test-HttpOk $script:BackendHealthUrl) {
+        throw "Backend health endpoint responded but could not be parsed. Stop the process using port 8300 before starting OMI."
     }
 
     Invoke-BackendPythonRuntimeCheck -PythonPath $python
@@ -498,7 +653,7 @@ $openDashboardItem.add_Click({ Open-Url $script:DashboardUrl })
 
 $openApiItem = New-Object System.Windows.Forms.ToolStripMenuItem
 $openApiItem.Text = "Open API Health"
-$openApiItem.add_Click({ Open-Url "http://127.0.0.1:8300/api/system/health" })
+$openApiItem.add_Click({ Open-Url $script:BackendHealthUrl })
 
 $openLogsItem = New-Object System.Windows.Forms.ToolStripMenuItem
 $openLogsItem.Text = "Open Logs Folder"
@@ -532,7 +687,7 @@ $script:NotifyIcon.add_DoubleClick({ Open-Url $script:DashboardUrl })
 $script:Timer = New-Object System.Windows.Forms.Timer
 $script:Timer.Interval = 5000
 $script:Timer.add_Tick({
-    $backendHttp = Test-HttpOk "http://127.0.0.1:8300/api/system/health"
+    $backendHttp = Test-HttpOk $script:BackendHealthUrl
     $frontendHttp = Test-HttpOk $script:DashboardUrl
     $backendProc = Test-ProcessRunning $script:BackendProcess
     $frontendProc = Test-ProcessRunning $script:FrontendProcess

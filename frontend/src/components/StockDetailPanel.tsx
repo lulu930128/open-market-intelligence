@@ -12,12 +12,14 @@ import StockKLineChart, {
   defaultIndicatorParameters,
   defaultIndicators,
   indicatorCategoryGroups,
+  professionalIndicatorCategoryGroups,
   type IndicatorParameters,
   type IndicatorKey,
   type IndicatorSettings,
+  type IndicatorCategoryGroup,
 } from "@/components/StockKLineChart";
 import type { ChartDrawing, ChartDrawingTool } from "@/components/LightweightKLineChart";
-import { fetchJson } from "@/lib/api";
+import { fetchJson, requestJson } from "@/lib/api";
 import { getJobResultStatus, requestBackfillJob } from "@/lib/jobs";
 import {
   TAIWAN_INTRADAY_REFRESH_MS,
@@ -39,6 +41,8 @@ import {
 import type {
   BrokerBranchTradeDailyRead,
   BrokerBranchTradeDailySummaryRead,
+  ChartDrawingSnapshotRead,
+  ChartDrawingSnapshotWrite,
   ChartPoint,
   FinancialMetricQuarterlyRead,
   IntradayHistoryResponse,
@@ -234,6 +238,8 @@ const chartDrawingToolOptions: Array<{
   { key: "ray", label: "射線" },
   { key: "rectangle", label: "區間" },
   { key: "fibonacci", label: "Fib" },
+  { key: "anchorVwap", label: "AVWAP" },
+  { key: "volumeProfileRange", label: "量價分布" },
   { key: "measure", label: "量測" },
   { key: "priceRange", label: "價幅%" },
 ];
@@ -246,7 +252,7 @@ const chartDrawingToolGroups: Array<{
 }> = [
   { key: "base", tools: ["cursor"] },
   { key: "line", tools: ["horizontal", "trend", "ray"] },
-  { key: "area", tools: ["rectangle", "fibonacci"] },
+  { key: "area", tools: ["rectangle", "fibonacci", "anchorVwap", "volumeProfileRange"] },
   { key: "measure", tools: ["measure", "priceRange"] },
 ];
 const professionalIntradayMinutes: Record<ProfessionalIntradayTimeframe, number> = {
@@ -310,15 +316,22 @@ const indicatorTemplates: Array<{
       ...defaultIndicators,
       ma: false,
       ema: true,
+      hma: true,
+      vwma: true,
       vwap: true,
       kd: true,
+      momentum: true,
       mfi: true,
       signals: true,
+      candlestickPatterns: true,
     },
     parameters: {
       emaFast: 5,
       emaSlow: 20,
+      hmaPeriod: 16,
+      vwmaPeriod: 20,
       kdPeriod: 9,
+      momentumPeriod: 5,
       mfiPeriod: 14,
     },
   },
@@ -328,17 +341,22 @@ const indicatorTemplates: Array<{
     indicators: {
       ...defaultIndicators,
       ema: true,
+      wma: true,
       psar: true,
       donchian: true,
       ichimoku: true,
       supertrend: true,
       atr: true,
       adx: true,
+      choppiness: true,
+      pivotPoints: true,
+      supportResistance: true,
       signals: true,
     },
     parameters: {
       emaFast: 12,
       emaSlow: 26,
+      wmaPeriod: 20,
       donchianPeriod: 20,
       ichimokuConversionPeriod: 9,
       ichimokuBasePeriod: 26,
@@ -348,6 +366,9 @@ const indicatorTemplates: Array<{
       supertrendMultiplier: 3,
       atrPeriod: 14,
       adxPeriod: 14,
+      choppinessPeriod: 14,
+      pivotLookback: 1,
+      supportResistanceLookback: 20,
     },
   },
   {
@@ -356,6 +377,7 @@ const indicatorTemplates: Array<{
     indicators: {
       ...defaultIndicators,
       bollinger: true,
+      bbWidth: true,
       keltner: true,
       rsi: true,
       macd: true,
@@ -363,7 +385,14 @@ const indicatorTemplates: Array<{
       roc: true,
       trix: true,
       cci: true,
+      tsi: true,
+      awesomeOscillator: true,
+      ultimateOscillator: true,
       signals: true,
+      divergence: true,
+      relativeStrength: true,
+      beta: true,
+      correlation: true,
     },
     parameters: {
       bollingerPeriod: 20,
@@ -377,6 +406,18 @@ const indicatorTemplates: Array<{
       trixPeriod: 15,
       trixSignal: 9,
       cciPeriod: 20,
+      bbWidthPeriod: 20,
+      tsiShortPeriod: 13,
+      tsiLongPeriod: 25,
+      tsiSignalPeriod: 7,
+      awesomeFastPeriod: 5,
+      awesomeSlowPeriod: 34,
+      ultimateShortPeriod: 7,
+      ultimateMiddlePeriod: 14,
+      ultimateLongPeriod: 28,
+      relativeStrengthLookback: 20,
+      betaPeriod: 60,
+      correlationPeriod: 60,
     },
   },
   {
@@ -388,6 +429,9 @@ const indicatorTemplates: Array<{
       vwap: true,
       obv: true,
       mfi: true,
+      cmf: true,
+      adLine: true,
+      pvt: true,
       volume: true,
       signals: true,
     },
@@ -395,6 +439,7 @@ const indicatorTemplates: Array<{
       volumeMa: 20,
       obvMa: 10,
       mfiPeriod: 14,
+      cmfPeriod: 20,
     },
   },
 ];
@@ -404,14 +449,107 @@ type ChartDrawingStorageState = {
   drawings: ChartDrawing[];
 };
 
+type ChartDrawingSnapshot = {
+  drawings: ChartDrawing[];
+  selectedDrawingId: string | null;
+};
+
 type ChartDrawingHistoryState = {
   key: string;
-  past: ChartDrawing[][];
-  future: ChartDrawing[][];
+  past: ChartDrawingSnapshot[];
+  future: ChartDrawingSnapshot[];
 };
 
 function chartDrawingStorageKey(stockId: string | null, timeframe: ProfessionalTimeframe) {
   return `omi:tw:chart-drawings:v1:${stockId ?? "empty"}:${timeframe}`;
+}
+
+const chartDrawingSyncDelayMs = 700;
+
+function chartDrawingApiPath(market: string, symbol: string, timeframe: ProfessionalTimeframe) {
+  return `/api/market/chart-drawings/${encodeURIComponent(market)}/${encodeURIComponent(
+    symbol
+  )}/${encodeURIComponent(timeframe)}`;
+}
+
+function chartDrawingTimeMode(timeframe: ProfessionalTimeframe) {
+  return isProfessionalIntradayTimeframe(timeframe) ? "intraday" : "date";
+}
+
+function buildChartDrawingSummarySnapshot({
+  drawings,
+  market,
+  selectedDrawingId,
+  stockName,
+  symbol,
+  timeframe,
+}: {
+  drawings: ChartDrawing[];
+  market: string;
+  selectedDrawingId: string | null;
+  stockName: string | null;
+  symbol: string;
+  timeframe: ProfessionalTimeframe;
+}): Record<string, unknown> {
+  const drawingsToSave = drawings.slice(-200);
+  const byType = drawingsToSave.reduce<Record<string, number>>((accumulator, drawing) => {
+    accumulator[drawing.type] = (accumulator[drawing.type] ?? 0) + 1;
+    return accumulator;
+  }, {});
+
+  return {
+    version: 1,
+    generated_at: new Date().toISOString(),
+    market,
+    symbol,
+    stock_name: stockName,
+    timeframe,
+    time_mode: chartDrawingTimeMode(timeframe),
+    drawing_count: drawingsToSave.length,
+    selected_drawing_id: selectedDrawingId,
+    by_type: byType,
+    items: drawingsToSave.map((drawing) => ({
+      id: drawing.id,
+      type: drawing.type,
+      context: drawing.context ?? null,
+      derived_metrics: drawing.derivedMetrics ?? null,
+      omi_summary: drawing.omiSummary ?? null,
+    })),
+  };
+}
+
+function buildChartDrawingSnapshotPayload({
+  drawings,
+  market,
+  selectedDrawingId,
+  stockName,
+  symbol,
+  timeframe,
+}: {
+  drawings: ChartDrawing[];
+  market: string;
+  selectedDrawingId: string | null;
+  stockName: string | null;
+  symbol: string;
+  timeframe: ProfessionalTimeframe;
+}): ChartDrawingSnapshotWrite {
+  const drawingsToSave = drawings.slice(-200);
+
+  return {
+    label: stockName ?? symbol,
+    time_mode: chartDrawingTimeMode(timeframe),
+    selected_drawing_id: normalizeChartDrawingSelection(drawingsToSave, selectedDrawingId),
+    drawings: drawingsToSave as unknown as Array<Record<string, unknown>>,
+    summary: buildChartDrawingSummarySnapshot({
+      drawings: drawingsToSave,
+      market,
+      selectedDrawingId,
+      stockName,
+      symbol,
+      timeframe,
+    }),
+    source: "frontend.professional_chart",
+  };
 }
 
 function isChartDrawingType(value: unknown): value is ChartDrawing["type"] {
@@ -421,6 +559,8 @@ function isChartDrawingType(value: unknown): value is ChartDrawing["type"] {
     value === "ray" ||
     value === "rectangle" ||
     value === "fibonacci" ||
+    value === "anchorVwap" ||
+    value === "volumeProfileRange" ||
     value === "measure" ||
     value === "priceRange"
   );
@@ -455,19 +595,36 @@ function normalizeStoredChartDrawings(value: unknown): ChartDrawing[] {
         return [];
       }
 
-      const pointCount = type === "horizontal" ? 1 : 2;
+      const pointCount = type === "horizontal" || type === "anchorVwap" ? 1 : 2;
 
       if (points.length < pointCount) return [];
 
-      return [
-        {
-          id: candidate.id,
-          type,
-          points: points.slice(0, pointCount),
-          color: candidate.color,
-          createdAt: candidate.createdAt,
-        },
-      ];
+      const normalizedDrawing: ChartDrawing = {
+        id: candidate.id,
+        type,
+        points: points.slice(0, pointCount),
+        color: candidate.color,
+        createdAt: candidate.createdAt,
+      };
+
+      if (candidate.context && typeof candidate.context === "object") {
+        normalizedDrawing.context = candidate.context as ChartDrawing["context"];
+      }
+
+      if (
+        candidate.derivedMetrics &&
+        typeof candidate.derivedMetrics === "object" &&
+        candidate.derivedMetrics.version === 1
+      ) {
+        normalizedDrawing.derivedMetrics =
+          candidate.derivedMetrics as ChartDrawing["derivedMetrics"];
+      }
+
+      if (candidate.omiSummary && typeof candidate.omiSummary === "object") {
+        normalizedDrawing.omiSummary = candidate.omiSummary as ChartDrawing["omiSummary"];
+      }
+
+      return [normalizedDrawing];
     })
     .slice(-200);
 }
@@ -500,11 +657,46 @@ function serializeChartDrawings(drawings: ChartDrawing[]) {
   return JSON.stringify(drawings);
 }
 
+function normalizeChartDrawingSelection(
+  drawings: ChartDrawing[],
+  selectedDrawingId: string | null
+) {
+  return drawings.some((drawing) => drawing.id === selectedDrawingId)
+    ? selectedDrawingId
+    : null;
+}
+
+function createChartDrawingSnapshot(
+  drawings: ChartDrawing[],
+  selectedDrawingId: string | null
+): ChartDrawingSnapshot {
+  const normalizedDrawings = drawings.slice(-200);
+
+  return {
+    drawings: normalizedDrawings,
+    selectedDrawingId: normalizeChartDrawingSelection(
+      normalizedDrawings,
+      selectedDrawingId
+    ),
+  };
+}
+
+function chartDrawingSnapshotsEqual(
+  first: ChartDrawingSnapshot,
+  second: ChartDrawingSnapshot
+) {
+  return (
+    first.selectedDrawingId === second.selectedDrawingId &&
+    serializeChartDrawings(first.drawings) === serializeChartDrawings(second.drawings)
+  );
+}
+
 function TechnicalIndicatorMenu({
   indicators,
   activeTemplate,
   onApplyTemplate,
   onToggleIndicator,
+  groups = indicatorCategoryGroups,
   includeParameters = false,
   parameters,
   onUpdateParameter,
@@ -514,6 +706,7 @@ function TechnicalIndicatorMenu({
   activeTemplate: IndicatorTemplateKey | null;
   onApplyTemplate: (templateKey: IndicatorTemplateKey) => void;
   onToggleIndicator: (key: IndicatorKey) => void;
+  groups?: IndicatorCategoryGroup[];
   includeParameters?: boolean;
   parameters?: IndicatorParameters;
   onUpdateParameter?: (
@@ -553,7 +746,7 @@ function TechnicalIndicatorMenu({
       </div>
 
       <div className="space-y-3 border-b border-slate-200 py-3">
-        {indicatorCategoryGroups.map((group) => (
+        {groups.map((group) => (
           <div key={group.key}>
             <div className="mb-1">
               <div className="text-xs font-bold text-slate-700">{group.label}</div>
@@ -617,14 +810,29 @@ function TechnicalIndicatorMenu({
               { label: "MA長", key: "maLong", min: 1, max: 600 },
               { label: "EMA快", key: "emaFast", min: 1, max: 200 },
               { label: "EMA慢", key: "emaSlow", min: 2, max: 400 },
+              { label: "WMA", key: "wmaPeriod", min: 1, max: 300 },
+              { label: "HMA", key: "hmaPeriod", min: 2, max: 300 },
+              { label: "VWMA", key: "vwmaPeriod", min: 1, max: 300 },
               { label: "BOLL週期", key: "bollingerPeriod", min: 2, max: 300 },
               { label: "BOLL倍數", key: "bollingerStdDev", min: 0.5, max: 5, step: 0.1 },
+              { label: "BB寬度", key: "bbWidthPeriod", min: 2, max: 300 },
+              { label: "StdDev", key: "stdDevPeriod", min: 2, max: 300 },
+              { label: "CHOP", key: "choppinessPeriod", min: 2, max: 100 },
               { label: "量均", key: "volumeMa", min: 1, max: 300 },
               { label: "RSI", key: "rsiPeriod", min: 2, max: 100 },
               { label: "MACD快", key: "macdFast", min: 1, max: 100 },
               { label: "MACD慢", key: "macdSlow", min: 2, max: 200 },
               { label: "MACD Sig", key: "macdSignal", min: 1, max: 100 },
               { label: "KD", key: "kdPeriod", min: 2, max: 100 },
+              { label: "Momentum", key: "momentumPeriod", min: 1, max: 200 },
+              { label: "TSI短", key: "tsiShortPeriod", min: 1, max: 100 },
+              { label: "TSI長", key: "tsiLongPeriod", min: 2, max: 200 },
+              { label: "TSI Sig", key: "tsiSignalPeriod", min: 1, max: 100 },
+              { label: "AO快", key: "awesomeFastPeriod", min: 1, max: 100 },
+              { label: "AO慢", key: "awesomeSlowPeriod", min: 2, max: 200 },
+              { label: "UO短", key: "ultimateShortPeriod", min: 1, max: 100 },
+              { label: "UO中", key: "ultimateMiddlePeriod", min: 2, max: 150 },
+              { label: "UO長", key: "ultimateLongPeriod", min: 3, max: 240 },
               { label: "ATR", key: "atrPeriod", min: 2, max: 100 },
               { label: "ADX", key: "adxPeriod", min: 2, max: 100 },
               { label: "DONCH", key: "donchianPeriod", min: 2, max: 300 },
@@ -640,6 +848,7 @@ function TechnicalIndicatorMenu({
               { label: "Aroon", key: "aroonPeriod", min: 2, max: 200 },
               { label: "OBV MA", key: "obvMa", min: 1, max: 200 },
               { label: "MFI", key: "mfiPeriod", min: 2, max: 100 },
+              { label: "CMF", key: "cmfPeriod", min: 2, max: 200 },
               { label: "CCI", key: "cciPeriod", min: 2, max: 200 },
               { label: "W%R", key: "williamsRPeriod", min: 2, max: 100 },
               { label: "ROC", key: "rocPeriod", min: 1, max: 200 },
@@ -648,6 +857,13 @@ function TechnicalIndicatorMenu({
               { label: "Stoch D", key: "stochRsiSmoothD", min: 1, max: 20 },
               { label: "TRIX", key: "trixPeriod", min: 2, max: 100 },
               { label: "TRIX Sig", key: "trixSignal", min: 1, max: 50 },
+              { label: "VPVR列", key: "volumeProfileRows", min: 8, max: 80 },
+              { label: "Pivot回看", key: "pivotLookback", min: 1, max: 20 },
+              { label: "S/R回看", key: "supportResistanceLookback", min: 2, max: 300 },
+              { label: "Gap%", key: "gapMinPct", min: 0.1, max: 20, step: 0.1 },
+              { label: "RS回看", key: "relativeStrengthLookback", min: 2, max: 260 },
+              { label: "Beta週期", key: "betaPeriod", min: 8, max: 260 },
+              { label: "Corr週期", key: "correlationPeriod", min: 8, max: 260 },
             ].map((field) => (
               <label key={field.key} className="text-xs">
                 <span className="mb-1 block font-semibold text-slate-500">{field.label}</span>
@@ -3341,10 +3557,14 @@ export default function StockDetailPanel({
       future: [],
     });
   const chartDrawingKey = chartDrawingStorageKey(stockId, professionalTimeframe);
+  const storedChartDrawings = useMemo(
+    () => loadChartDrawings(chartDrawingKey),
+    [chartDrawingKey]
+  );
   const chartDrawings =
     chartDrawingState.key === chartDrawingKey
       ? chartDrawingState.drawings
-      : loadChartDrawings(chartDrawingKey);
+      : storedChartDrawings;
   const chartDrawingHistory =
     chartDrawingHistoryState.key === chartDrawingKey
       ? chartDrawingHistoryState
@@ -3365,6 +3585,8 @@ export default function StockDetailPanel({
   const [chartData, setChartData] = useState<ChartPoint[]>(initialChartData);
   const [chartStockId, setChartStockId] = useState<string | null>(stockId);
   const [chartTimeframe, setChartTimeframe] = useState<ChartTimeframe>("daily");
+  const [benchmarkChartData, setBenchmarkChartData] = useState<ChartPoint[]>([]);
+  const [benchmarkChartKey, setBenchmarkChartKey] = useState<string | null>(null);
   const [todayTrend, setTodayTrend] = useState<IntradayTrendPoint[]>([]);
   const [todayPreviousClose, setTodayPreviousClose] = useState<number | null>(null);
   const [todaySource, setTodaySource] = useState("unavailable");
@@ -3430,6 +3652,7 @@ export default function StockDetailPanel({
   const dataPanelResolvedKeysRef = useRef<Set<string>>(new Set());
   const branchSummaryCacheRef = useRef<Map<string, BrokerBranchTradeDailySummaryRead>>(new Map());
   const chartHistoryBackfillKeysRef = useRef<Set<string>>(new Set());
+  const chartDrawingSyncTimerRef = useRef<number | null>(null);
   const indexProduct = stockId ? indexProducts.get(stockId) ?? null : null;
   const isIndexProduct = indexProduct !== null;
   const effectiveTimeframe = timeframe;
@@ -3608,6 +3831,10 @@ export default function StockDetailPanel({
 
   const currentStockInfoId = stockInfo?.stock_id ?? null;
   const currentStockInfoMarket = stockInfo?.market ?? null;
+  const chartDrawingRemoteMarket = isIndexProduct ? indexMarket : currentStockInfoMarket;
+  const benchmarkIndexId =
+    !isIndexProduct && stockId ? (currentStockInfoMarket === "TPEX" ? "TPEX" : "TAIEX") : null;
+  const benchmarkLabel = benchmarkIndexId === "TPEX" ? "櫃買" : benchmarkIndexId === "TAIEX" ? "加權" : undefined;
 
   function toggleChartIndicator(key: IndicatorKey) {
     setActiveIndicatorTemplate(null);
@@ -3663,23 +3890,155 @@ export default function StockDetailPanel({
     }));
   }
 
-  const storeChartDrawings = useCallback((drawingsToSave: ChartDrawing[]) => {
+  const queueChartDrawingRemoteSave = useCallback((
+    drawingsToSave: ChartDrawing[],
+    selectedDrawingIdToSave: string | null
+  ) => {
+    if (typeof window === "undefined") return;
+    if (!stockId || !chartDrawingRemoteMarket) return;
+
+    const path = chartDrawingApiPath(
+      chartDrawingRemoteMarket,
+      stockId,
+      professionalTimeframe
+    );
+    const payload = buildChartDrawingSnapshotPayload({
+      drawings: drawingsToSave,
+      market: chartDrawingRemoteMarket,
+      selectedDrawingId: selectedDrawingIdToSave,
+      stockName,
+      symbol: stockId,
+      timeframe: professionalTimeframe,
+    });
+
+    if (chartDrawingSyncTimerRef.current) {
+      window.clearTimeout(chartDrawingSyncTimerRef.current);
+    }
+
+    chartDrawingSyncTimerRef.current = window.setTimeout(() => {
+      void requestJson<ChartDrawingSnapshotRead>(path, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      }).catch(() => {
+        // Best-effort server sync. Local chart drawings remain available via localStorage.
+      });
+    }, chartDrawingSyncDelayMs);
+  }, [chartDrawingRemoteMarket, professionalTimeframe, stockId, stockName]);
+
+  const storeChartDrawings = useCallback((
+    drawingsToSave: ChartDrawing[],
+    selectedDrawingIdToSave = activeSelectedChartDrawingId
+  ) => {
     setChartDrawingState({
       key: chartDrawingKey,
       drawings: drawingsToSave,
     });
     saveChartDrawings(chartDrawingKey, drawingsToSave);
-  }, [chartDrawingKey]);
+    queueChartDrawingRemoteSave(drawingsToSave, selectedDrawingIdToSave);
+  }, [
+    activeSelectedChartDrawingId,
+    chartDrawingKey,
+    queueChartDrawingRemoteSave,
+  ]);
 
-  function updateChartDrawings(
+  useEffect(() => {
+    return () => {
+      if (chartDrawingSyncTimerRef.current && typeof window !== "undefined") {
+        window.clearTimeout(chartDrawingSyncTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!chartFocusMode || !stockId || !chartDrawingRemoteMarket) {
+      return;
+    }
+
+    let cancelled = false;
+    const remoteMarket = chartDrawingRemoteMarket;
+    const remoteSymbol = stockId;
+    const localDrawings = loadChartDrawings(chartDrawingKey);
+    const normalizedLocalSelection = normalizeChartDrawingSelection(
+      localDrawings,
+      activeSelectedChartDrawingId
+    );
+
+    if (localDrawings.length > 0) {
+      queueChartDrawingRemoteSave(localDrawings, normalizedLocalSelection);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    async function loadRemoteChartDrawings() {
+      try {
+        const snapshot = await fetchJson<ChartDrawingSnapshotRead>(
+          chartDrawingApiPath(remoteMarket, remoteSymbol, professionalTimeframe)
+        );
+
+        if (cancelled) return;
+
+        const remoteDrawings = normalizeStoredChartDrawings(snapshot.drawings);
+        if (remoteDrawings.length === 0) return;
+
+        const remoteSelection = normalizeChartDrawingSelection(
+          remoteDrawings,
+          snapshot.selected_drawing_id
+        );
+
+        setChartDrawingState({
+          key: chartDrawingKey,
+          drawings: remoteDrawings,
+        });
+        saveChartDrawings(chartDrawingKey, remoteDrawings);
+        setSelectedChartDrawingId(remoteSelection);
+      } catch {
+        // A missing remote snapshot simply means this chart has not been saved server-side yet.
+      }
+    }
+
+    void loadRemoteChartDrawings();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeSelectedChartDrawingId,
+    chartDrawingKey,
+    chartDrawingRemoteMarket,
+    chartFocusMode,
+    professionalTimeframe,
+    queueChartDrawingRemoteSave,
+    stockId,
+  ]);
+
+  function updateChartDrawingState(
     nextValue: ChartDrawing[] | ((current: ChartDrawing[]) => ChartDrawing[]),
+    nextSelectedDrawingId?: string | null,
     options: { recordHistory?: boolean } = {}
   ) {
     const nextDrawings =
       typeof nextValue === "function" ? nextValue(chartDrawings) : nextValue;
-    const drawingsToSave = nextDrawings.slice(-200);
+    const currentSnapshot = createChartDrawingSnapshot(
+      chartDrawings,
+      activeSelectedChartDrawingId
+    );
+    const nextSnapshot = createChartDrawingSnapshot(
+      nextDrawings,
+      nextSelectedDrawingId === undefined
+        ? activeSelectedChartDrawingId
+        : nextSelectedDrawingId
+    );
 
-    if (serializeChartDrawings(chartDrawings) === serializeChartDrawings(drawingsToSave)) {
+    if (chartDrawingSnapshotsEqual(currentSnapshot, nextSnapshot)) {
+      return;
+    }
+
+    if (
+      serializeChartDrawings(currentSnapshot.drawings) ===
+      serializeChartDrawings(nextSnapshot.drawings)
+    ) {
+      setSelectedChartDrawingId(nextSnapshot.selectedDrawingId);
       return;
     }
 
@@ -3689,30 +4048,42 @@ export default function StockDetailPanel({
 
       setChartDrawingHistoryState({
         key: chartDrawingKey,
-        past: [...currentPast, chartDrawings].slice(-50),
+        past: [...currentPast, currentSnapshot].slice(-50),
         future: [],
       });
     }
 
-    storeChartDrawings(drawingsToSave);
+    storeChartDrawings(nextSnapshot.drawings, nextSnapshot.selectedDrawingId);
+    setSelectedChartDrawingId(nextSnapshot.selectedDrawingId);
+  }
+
+  function updateChartDrawings(
+    nextValue: ChartDrawing[] | ((current: ChartDrawing[]) => ChartDrawing[]),
+    options: { recordHistory?: boolean } = {}
+  ) {
+    updateChartDrawingState(nextValue, undefined, options);
   }
 
   const undoChartDrawing = useCallback(() => {
     if (!canUndoChartDrawing) return;
 
     const past = chartDrawingHistory.past;
-    const previousDrawings = past[past.length - 1];
+    const previousSnapshot = past[past.length - 1];
 
-    if (!previousDrawings) return;
+    if (!previousSnapshot) return;
 
     setChartDrawingHistoryState({
       key: chartDrawingKey,
       past: past.slice(0, -1),
-      future: [chartDrawings, ...chartDrawingHistory.future].slice(0, 50),
+      future: [
+        createChartDrawingSnapshot(chartDrawings, activeSelectedChartDrawingId),
+        ...chartDrawingHistory.future,
+      ].slice(0, 50),
     });
-    storeChartDrawings(previousDrawings);
-    setSelectedChartDrawingId(null);
+    storeChartDrawings(previousSnapshot.drawings, previousSnapshot.selectedDrawingId);
+    setSelectedChartDrawingId(previousSnapshot.selectedDrawingId);
   }, [
+    activeSelectedChartDrawingId,
     canUndoChartDrawing,
     chartDrawingHistory.future,
     chartDrawingHistory.past,
@@ -3730,12 +4101,16 @@ export default function StockDetailPanel({
 
     setChartDrawingHistoryState({
       key: chartDrawingKey,
-      past: [...chartDrawingHistory.past, chartDrawings].slice(-50),
+      past: [
+        ...chartDrawingHistory.past,
+        createChartDrawingSnapshot(chartDrawings, activeSelectedChartDrawingId),
+      ].slice(-50),
       future: chartDrawingHistory.future.slice(1),
     });
-    storeChartDrawings(nextDrawings);
-    setSelectedChartDrawingId(null);
+    storeChartDrawings(nextDrawings.drawings, nextDrawings.selectedDrawingId);
+    setSelectedChartDrawingId(nextDrawings.selectedDrawingId);
   }, [
+    activeSelectedChartDrawingId,
     canRedoChartDrawing,
     chartDrawingHistory.future,
     chartDrawingHistory.past,
@@ -4254,6 +4629,46 @@ export default function StockDetailPanel({
   ]);
 
   useEffect(() => {
+    if (!benchmarkIndexId || effectiveTimeframe === "today") {
+      return;
+    }
+
+    let cancelled = false;
+    const requestedIndexId = benchmarkIndexId;
+    const requestedTimeframe = effectiveTimeframe as ChartTimeframe;
+    const requestedKey = `${requestedIndexId}:${requestedTimeframe}`;
+
+    async function loadBenchmarkChart() {
+      try {
+        const ohlc = await fetchJson<OhlcChartResponse>(
+          `/api/market/indices/${requestedIndexId}/ohlc`,
+          {
+            timeframe: requestedTimeframe,
+            bars: chartBarsByTimeframe[requestedTimeframe],
+            ensure_history: false,
+          }
+        );
+
+        if (cancelled) return;
+
+        setBenchmarkChartData(ohlc.points);
+        setBenchmarkChartKey(requestedKey);
+      } catch {
+        if (cancelled) return;
+
+        setBenchmarkChartData([]);
+        setBenchmarkChartKey(null);
+      }
+    }
+
+    void loadBenchmarkChart();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [benchmarkIndexId, effectiveTimeframe]);
+
+  useEffect(() => {
     if (!stockId || isIndexProduct || !["today", "daily"].includes(effectiveTimeframe)) {
       return;
     }
@@ -4305,6 +4720,23 @@ export default function StockDetailPanel({
   const latestToday = todayTrend[todayTrend.length - 1] ?? null;
   const todayStats = useMemo(() => summarizeIntradayPoints(todayTrend), [todayTrend]);
   const professionalIsIntraday = isProfessionalIntradayTimeframe(professionalTimeframe);
+  const emptyProfessionalIndicatorData = useMemo<StockIndicatorPoint[]>(() => [], []);
+  const emptyProfessionalBenchmarkData = useMemo<ChartPoint[]>(() => [], []);
+  const benchmarkDataForChart = useMemo(
+    () =>
+      benchmarkIndexId &&
+      benchmarkChartKey === `${benchmarkIndexId}:${effectiveTimeframe}` &&
+      effectiveTimeframe !== "today"
+        ? benchmarkChartData
+        : emptyProfessionalBenchmarkData,
+    [
+      benchmarkChartData,
+      benchmarkChartKey,
+      benchmarkIndexId,
+      effectiveTimeframe,
+      emptyProfessionalBenchmarkData,
+    ]
+  );
   const professionalChartData = useMemo<ChartPoint[]>(() => {
     if (!isProfessionalIntradayTimeframe(professionalTimeframe)) return chartData;
 
@@ -4383,6 +4815,14 @@ export default function StockDetailPanel({
     chartFocusMode && professionalIsIntraday
       ? latestProfessionalChart?.close ?? latestToday?.price ?? latestClose
       : latestClose;
+  const professionalDrawingContext = useMemo(
+    () => ({
+      symbol: stockId,
+      market: currentStockInfoMarket,
+      timeframe: professionalTimeframe,
+    }),
+    [currentStockInfoMarket, professionalTimeframe, stockId]
+  );
   const professionalLatestChange =
     chartFocusMode && professionalIsIntraday && latestToday && todayReferenceClose
       ? latestToday.price - todayReferenceClose
@@ -6656,6 +7096,7 @@ export default function StockDetailPanel({
                     activeTemplate={activeIndicatorTemplate}
                     onApplyTemplate={applyIndicatorTemplate}
                     onToggleIndicator={toggleChartIndicator}
+                    groups={professionalIndicatorCategoryGroups}
                     includeParameters
                     parameters={indicatorParameters}
                     onUpdateParameter={updateIndicatorParameter}
@@ -6839,7 +7280,9 @@ export default function StockDetailPanel({
             professionalChartReady ? (
               <LightweightKLineChart
                 chartData={professionalChartData}
-                indicatorData={professionalIsIntraday ? [] : indicatorForTimeframe}
+                indicatorData={
+                  professionalIsIntraday ? emptyProfessionalIndicatorData : indicatorForTimeframe
+                }
                 label={professionalTimeframeLabel}
                 height={780}
                 fillViewport
@@ -6849,12 +7292,18 @@ export default function StockDetailPanel({
                 showMovingAverages={chartIndicators.ma}
                 indicators={chartIndicators}
                 indicatorParameters={indicatorParameters}
+                benchmarkData={
+                  professionalIsIntraday ? emptyProfessionalBenchmarkData : benchmarkDataForChart
+                }
+                benchmarkLabel={benchmarkLabel}
                 volumePanelLabel={isIndexProduct ? "成交金額(億)" : "成交量(張)"}
                 volumeValueKey={isIndexProduct ? "trade_value" : "volume"}
                 drawingTool={chartDrawingTool}
                 drawings={chartDrawings}
                 selectedDrawingId={activeSelectedChartDrawingId}
+                drawingContext={professionalDrawingContext}
                 onDrawingsChange={updateChartDrawings}
+                onDrawingStateChange={updateChartDrawingState}
                 onSelectedDrawingChange={setSelectedChartDrawingId}
               />
             ) : (
@@ -6878,6 +7327,8 @@ export default function StockDetailPanel({
               label={timeframeLabels[effectiveTimeframe]}
               indicators={chartIndicators}
               indicatorParameters={indicatorParameters}
+              benchmarkData={benchmarkDataForChart}
+              benchmarkLabel={benchmarkLabel}
               revealKey={`${stockId}:${effectiveTimeframe}`}
               volumePanelLabel={isIndexProduct ? "成交金額(億)" : undefined}
               volumeTooltipLabel={isIndexProduct ? "成交金額(億)" : undefined}

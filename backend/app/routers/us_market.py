@@ -566,6 +566,7 @@ def search_us_stock_master(
         db=db,
         keyword=keyword,
         limit=limit,
+        discover_missing_exact_symbol=True,
     )
 
 

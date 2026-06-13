@@ -20,6 +20,7 @@ type Props = {
   revealKey?: string;
   refreshIntervalMs?: number;
   updatedAt?: string | null;
+  priceLimitEnabled?: boolean;
 };
 
 type IntradayInterval = 1 | 5 | 15;
@@ -218,14 +219,15 @@ function buildPriceTicks(
 function getPriceScale(
   prices: number[],
   previousClose: number | null,
-  showLimitRange: boolean
+  showLimitRange: boolean,
+  priceLimitEnabled: boolean
 ) {
   const referencePrice = previousClose ?? prices[prices.length - 1] ?? 1;
-  const hardMax = previousClose === null ? null : previousClose * 1.1;
-  const hardMin = previousClose === null ? null : previousClose * 0.9;
+  const hardMax = priceLimitEnabled && previousClose !== null ? previousClose * 1.1 : null;
+  const hardMin = priceLimitEnabled && previousClose !== null ? previousClose * 0.9 : null;
   const limitUp = hardMax === null ? null : floorToTaiwanPriceStep(hardMax);
   const limitDown = hardMin === null ? null : ceilToTaiwanPriceStep(hardMin);
-  const limitTolerance = getTaiwanPriceStep(referencePrice) * 0.51;
+  const limitTolerance = priceLimitEnabled ? getTaiwanPriceStep(referencePrice) * 0.51 : 0;
   const scaleValues = [...prices];
 
   if (previousClose !== null) scaleValues.push(previousClose);
@@ -619,6 +621,7 @@ export default function IntradayTrendChart({
   revealKey,
   refreshIntervalMs,
   updatedAt,
+  priceLimitEnabled = true,
 }: Props) {
   const chartId = useId();
   const safeChartId = chartId.replace(/[^a-zA-Z0-9_-]/g, "");
@@ -741,11 +744,17 @@ export default function IntradayTrendChart({
     ...(indicators.ema ? data.flatMap((point) => [point.emaFast, point.emaSlow]) : []),
     ...(previousClose !== null ? [previousClose] : []),
   ].filter(validNumber);
-  const priceScale = getPriceScale(priceValues, previousClose, showLimitRange);
+  const priceScale = getPriceScale(
+    priceValues,
+    previousClose,
+    showLimitRange && priceLimitEnabled,
+    priceLimitEnabled
+  );
   const yMin = priceScale.min;
   const yMax = priceScale.max;
   const yRange = yMax - yMin || 1;
-  const limitTolerance = previousClose === null ? 0 : getTaiwanPriceStep(previousClose) * 0.51;
+  const limitTolerance =
+    previousClose === null || !priceLimitEnabled ? 0 : getTaiwanPriceStep(previousClose) * 0.51;
   const volumes = data
     .map((point) => point.volume)
     .filter(validNumber);
@@ -1509,20 +1518,22 @@ export default function IntradayTrendChart({
         ) : null}
       </div>
 
-      <div className="flex items-center justify-end border-t border-slate-200 px-4 py-2">
-        <button
-          type="button"
-          onClick={() => setShowLimitRange((value) => !value)}
-          className={[
-            "h-8 border px-3 text-xs font-semibold transition",
-            showLimitRange
-              ? "border-red-700 bg-red-700 text-white"
-              : "border-slate-300 bg-white text-slate-700 hover:border-red-700 hover:text-red-700",
-          ].join(" ")}
-        >
-          顯示漲跌停
-        </button>
-      </div>
+      {priceLimitEnabled ? (
+        <div className="flex items-center justify-end border-t border-slate-200 px-4 py-2">
+          <button
+            type="button"
+            onClick={() => setShowLimitRange((value) => !value)}
+            className={[
+              "h-8 border px-3 text-xs font-semibold transition",
+              showLimitRange
+                ? "border-red-700 bg-red-700 text-white"
+                : "border-slate-300 bg-white text-slate-700 hover:border-red-700 hover:text-red-700",
+            ].join(" ")}
+          >
+            顯示漲跌停
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }

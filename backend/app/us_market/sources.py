@@ -31,6 +31,29 @@ OTHER_EXCHANGE_CODES = {
     "V": "IEX",
 }
 
+YAHOO_EXCHANGE_CODES = {
+    "ASE": "NYSE American",
+    "BTS": "Cboe BZX",
+    "NCM": "NASDAQ",
+    "NGM": "NASDAQ",
+    "NMS": "NASDAQ",
+    "NASDAQ CAPITAL MARKET": "NASDAQ",
+    "NASDAQ GLOBAL MARKET": "NASDAQ",
+    "NASDAQ GLOBAL SELECT": "NASDAQ",
+    "NASDAQCM": "NASDAQ",
+    "NASDAQGM": "NASDAQ",
+    "NASDAQGS": "NASDAQ",
+    "NYQ": "NYSE",
+    "PCX": "NYSE Arca",
+}
+
+YAHOO_INSTRUMENT_TYPES = {
+    "EQUITY": "stock",
+    "ETF": "ETF",
+    "INDEX": "index",
+    "MUTUALFUND": "fund",
+}
+
 
 class USMarketDataFetchError(Exception):
     pass
@@ -789,6 +812,67 @@ def parse_yahoo_daily_prices(
         )
 
     return sorted(records, key=lambda item: item.trade_date)
+
+
+def parse_yahoo_symbol_record(
+    payload: dict[str, Any],
+    *,
+    symbol: str,
+) -> USSymbolRecord:
+    normalized_symbol = normalize_us_symbol(symbol)
+    error = payload.get("chart", {}).get("error")
+    if error:
+        raise USMarketDataFetchError(str(error))
+
+    result = (payload.get("chart", {}).get("result") or [None])[0]
+    if not isinstance(result, dict):
+        raise USMarketDataFetchError("Yahoo chart payload does not contain chart result data.")
+
+    meta = result.get("meta") or {}
+    if not isinstance(meta, dict):
+        raise USMarketDataFetchError("Yahoo chart payload does not contain symbol metadata.")
+
+    discovered_symbol = normalize_us_symbol(meta.get("symbol") or normalized_symbol)
+    if not discovered_symbol:
+        raise USMarketDataFetchError("Yahoo chart payload does not contain a symbol.")
+
+    if normalized_symbol and discovered_symbol != normalized_symbol:
+        raise USMarketDataFetchError(
+            f"Yahoo chart symbol mismatch. requested={normalized_symbol} discovered={discovered_symbol}."
+        )
+
+    instrument_type = (_clean_text(meta.get("instrumentType")) or "").upper()
+    quote_type = (_clean_text(meta.get("quoteType")) or "").upper()
+    asset_type = (
+        YAHOO_INSTRUMENT_TYPES.get(instrument_type)
+        or YAHOO_INSTRUMENT_TYPES.get(quote_type)
+        or "unknown"
+    )
+    full_exchange = _clean_text(meta.get("fullExchangeName"))
+    exchange_code = _clean_text(meta.get("exchangeName"))
+    exchange = (
+        YAHOO_EXCHANGE_CODES.get((full_exchange or "").upper())
+        or full_exchange
+        or YAHOO_EXCHANGE_CODES.get(exchange_code or "")
+        or YAHOO_EXCHANGE_CODES.get((exchange_code or "").upper())
+        or exchange_code
+    )
+    is_etf = asset_type == "ETF"
+
+    return USSymbolRecord(
+        symbol=discovered_symbol,
+        security_name=(
+            _clean_text(meta.get("longName"))
+            or _clean_text(meta.get("shortName"))
+            or _clean_text(meta.get("regularMarketName"))
+            or discovered_symbol
+        ),
+        exchange=exchange,
+        asset_type=asset_type,
+        listing_source="discovered_yahoo_chart",
+        is_etf=is_etf,
+        is_test_issue=False,
+    )
 
 
 def parse_yahoo_intraday_prices(

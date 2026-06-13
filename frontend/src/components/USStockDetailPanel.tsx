@@ -11,7 +11,13 @@ import PriceUpdatePulse from "@/components/PriceUpdatePulse";
 import StockKLineChart, {
   defaultIndicatorParameters,
   defaultIndicators,
+  professionalIndicatorCategoryGroups,
+  type IndicatorCategoryGroup,
+  type IndicatorKey,
+  type IndicatorParameters,
+  type IndicatorSettings,
 } from "@/components/StockKLineChart";
+import type { ChartDrawing, ChartDrawingTool } from "@/components/LightweightKLineChart";
 import { fetchJson, requestJson } from "@/lib/api";
 import {
   US_INTRADAY_REFRESH_MS,
@@ -25,6 +31,8 @@ import {
 import { getUsMarketIndexConfig } from "@/lib/usMarketIndices";
 import type {
   ChartPoint,
+  ChartDrawingSnapshotRead,
+  ChartDrawingSnapshotWrite,
   IntradayTrendPoint,
   IntradayTrendResponse,
   USCompanyProfileRead,
@@ -39,6 +47,7 @@ import type {
   USShortVolumeDailyRead,
   USStockMasterRead,
 } from "@/types/market";
+import dynamic from "next/dynamic";
 import {
   type ReactNode,
   useCallback,
@@ -48,18 +57,50 @@ import {
   useState,
 } from "react";
 
+const LightweightKLineChart = dynamic(
+  () => import("@/components/LightweightKLineChart"),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex h-[640px] items-center justify-center border-t border-slate-200 bg-white text-sm text-slate-500">
+        K 線引擎載入中...
+      </div>
+    ),
+  }
+);
+
 type LoadState = "idle" | "loading" | "success" | "error";
 type Message = { type: "success" | "error"; text: string } | null;
 type USChartTimeframe = "today" | "daily" | "weekly" | "monthly";
 type USHistoricalTimeframe = Exclude<USChartTimeframe, "today">;
+type USProfessionalIntradayTimeframe = "1m" | "5m" | "15m" | "30m" | "1h" | "4h";
+type USProfessionalTimeframe = USProfessionalIntradayTimeframe | USHistoricalTimeframe;
+type USProfessionalChartStyle = "candlestick" | "line";
 type USDataPanelTab = "ownership" | "insider" | "short" | "filings";
 type CoverageStatus = "ready" | "missing" | "loading" | "stale";
+
+type ChartDrawingStorageState = {
+  key: string;
+  drawings: ChartDrawing[];
+};
+
+type ChartDrawingSnapshot = {
+  drawings: ChartDrawing[];
+  selectedDrawingId: string | null;
+};
+
+type ChartDrawingHistoryState = {
+  key: string;
+  past: ChartDrawingSnapshot[];
+  future: ChartDrawingSnapshot[];
+};
 
 type Props = {
   selectedSymbol: string | null;
   selectedSecurityName: string | null;
   watchlistRankingPanel?: ReactNode;
   onCompanyProfileChange?: (profile: USCompanyProfileRead | null) => void;
+  onChartFocusModeChange?: (active: boolean) => void;
 };
 
 const timeframeOptions: Array<{ value: USChartTimeframe; label: string }> = [
@@ -68,6 +109,57 @@ const timeframeOptions: Array<{ value: USChartTimeframe; label: string }> = [
   { value: "weekly", label: "週K" },
   { value: "monthly", label: "月K" },
 ];
+
+const usProfessionalTimeframeOptions: Array<{
+  key: USProfessionalTimeframe;
+  label: string;
+}> = [
+  { key: "1m", label: "1分" },
+  { key: "5m", label: "5分" },
+  { key: "15m", label: "15分" },
+  { key: "30m", label: "30分" },
+  { key: "1h", label: "1小時" },
+  { key: "4h", label: "4小時" },
+  { key: "daily", label: "日" },
+  { key: "weekly", label: "週" },
+  { key: "monthly", label: "月" },
+];
+
+const chartDrawingToolOptions: Array<{
+  key: ChartDrawingTool;
+  label: string;
+}> = [
+  { key: "cursor", label: "游標" },
+  { key: "horizontal", label: "水平" },
+  { key: "trend", label: "趨勢" },
+  { key: "ray", label: "射線" },
+  { key: "rectangle", label: "區間" },
+  { key: "fibonacci", label: "Fib" },
+  { key: "anchorVwap", label: "AVWAP" },
+  { key: "volumeProfileRange", label: "量價分布" },
+  { key: "measure", label: "量測" },
+  { key: "priceRange", label: "價幅%" },
+];
+const chartDrawingToolOptionMap = new Map(
+  chartDrawingToolOptions.map((option) => [option.key, option])
+);
+const chartDrawingToolGroups: Array<{
+  key: string;
+  tools: ChartDrawingTool[];
+}> = [
+  { key: "base", tools: ["cursor"] },
+  { key: "line", tools: ["horizontal", "trend", "ray"] },
+  { key: "area", tools: ["rectangle", "fibonacci", "anchorVwap", "volumeProfileRange"] },
+  { key: "measure", tools: ["measure", "priceRange"] },
+];
+const usProfessionalIntradayMinutes: Record<USProfessionalIntradayTimeframe, number> = {
+  "1m": 1,
+  "5m": 5,
+  "15m": 15,
+  "30m": 30,
+  "1h": 60,
+  "4h": 240,
+};
 
 const usDataPanelTabs: Array<{
   key: USDataPanelTab;
@@ -124,11 +216,12 @@ const barsByTimeframe: Record<USHistoricalTimeframe, number> = {
   monthly: 72,
 };
 
-const usChartIndicators = {
+const defaultUsChartIndicators: IndicatorSettings = {
   ...defaultIndicators,
   signals: false,
   ma: true,
   volume: true,
+  volumeProfile: false,
 };
 
 function formatNumber(value: number | null | undefined, maximumFractionDigits = 2) {
@@ -196,6 +289,61 @@ async function fetchOptionalJson<T>(
   }
 }
 
+type USSupplementalData = {
+  factData: USSecCompanyFactRead[];
+  fundamentalData: USSecFundamentalSummaryRead | null;
+  profileData: USCompanyProfileRead | null;
+  actionData: USCorporateActionRead[];
+  shortVolumeData: USShortVolumeDailyRead[];
+};
+
+async function fetchUsSupplementalData(symbol: string): Promise<USSupplementalData> {
+  const encodedSymbol = encodeURIComponent(symbol);
+  const [
+    factData,
+    fundamentalData,
+    profileData,
+    actionData,
+    shortVolumeData,
+  ] = await Promise.all([
+    fetchJson<USSecCompanyFactRead[]>(
+      `/api/us-market/sec/${encodedSymbol}/facts`,
+      {
+        limit: 24,
+        offset: 0,
+      }
+    ).catch(() => []),
+    fetchOptionalJson<USSecFundamentalSummaryRead>(
+      `/api/us-market/sec/${encodedSymbol}/fundamentals`
+    ).catch(() => null),
+    fetchOptionalJson<USCompanyProfileRead>(
+      `/api/us-market/profiles/${encodedSymbol}`
+    ).catch(() => null),
+    fetchJson<USCorporateActionRead[]>(
+      `/api/us-market/corporate-actions/${encodedSymbol}`,
+      {
+        limit: 8,
+        offset: 0,
+      }
+    ).catch(() => []),
+    fetchJson<USShortVolumeDailyRead[]>(
+      `/api/us-market/short-volume/${encodedSymbol}/history`,
+      {
+        limit: 8,
+        offset: 0,
+      }
+    ).catch(() => []),
+  ]);
+
+  return {
+    factData,
+    fundamentalData,
+    profileData,
+    actionData,
+    shortVolumeData,
+  };
+}
+
 const usIntradaySession: IntradaySessionConfig = {
   startMinutes: US_SESSION_START_MINUTES,
   endMinutes: US_SESSION_END_MINUTES,
@@ -242,6 +390,242 @@ function formatDateTime(value: string | null | undefined) {
     hour12: false,
     timeZone: "America/New_York",
   }).format(date);
+}
+
+const chartDrawingSyncDelayMs = 700;
+
+function chartDrawingStorageKey(symbol: string | null, timeframe: USProfessionalTimeframe) {
+  return `omi:us:chart-drawings:v1:${symbol ?? "empty"}:${timeframe}`;
+}
+
+function chartDrawingApiPath(market: string, symbol: string, timeframe: USProfessionalTimeframe) {
+  return `/api/market/chart-drawings/${encodeURIComponent(market)}/${encodeURIComponent(
+    symbol
+  )}/${encodeURIComponent(timeframe)}`;
+}
+
+function isUsProfessionalIntradayTimeframe(
+  value: USProfessionalTimeframe
+): value is USProfessionalIntradayTimeframe {
+  return value in usProfessionalIntradayMinutes;
+}
+
+function chartDrawingTimeMode(timeframe: USProfessionalTimeframe) {
+  return isUsProfessionalIntradayTimeframe(timeframe) ? "intraday" : "date";
+}
+
+function buildChartDrawingSummarySnapshot({
+  drawings,
+  market,
+  selectedDrawingId,
+  stockName,
+  symbol,
+  timeframe,
+}: {
+  drawings: ChartDrawing[];
+  market: string;
+  selectedDrawingId: string | null;
+  stockName: string | null;
+  symbol: string;
+  timeframe: USProfessionalTimeframe;
+}): Record<string, unknown> {
+  const drawingsToSave = drawings.slice(-200);
+  const byType = drawingsToSave.reduce<Record<string, number>>((accumulator, drawing) => {
+    accumulator[drawing.type] = (accumulator[drawing.type] ?? 0) + 1;
+    return accumulator;
+  }, {});
+
+  return {
+    version: 1,
+    generated_at: new Date().toISOString(),
+    market,
+    symbol,
+    stock_name: stockName,
+    timeframe,
+    time_mode: chartDrawingTimeMode(timeframe),
+    drawing_count: drawingsToSave.length,
+    selected_drawing_id: selectedDrawingId,
+    by_type: byType,
+    items: drawingsToSave.map((drawing) => ({
+      id: drawing.id,
+      type: drawing.type,
+      context: drawing.context ?? null,
+      derived_metrics: drawing.derivedMetrics ?? null,
+      omi_summary: drawing.omiSummary ?? null,
+    })),
+  };
+}
+
+function buildChartDrawingSnapshotPayload({
+  drawings,
+  market,
+  selectedDrawingId,
+  stockName,
+  symbol,
+  timeframe,
+}: {
+  drawings: ChartDrawing[];
+  market: string;
+  selectedDrawingId: string | null;
+  stockName: string | null;
+  symbol: string;
+  timeframe: USProfessionalTimeframe;
+}): ChartDrawingSnapshotWrite {
+  const drawingsToSave = drawings.slice(-200);
+
+  return {
+    label: stockName ?? symbol,
+    time_mode: chartDrawingTimeMode(timeframe),
+    selected_drawing_id: normalizeChartDrawingSelection(drawingsToSave, selectedDrawingId),
+    drawings: drawingsToSave as unknown as Array<Record<string, unknown>>,
+    summary: buildChartDrawingSummarySnapshot({
+      drawings: drawingsToSave,
+      market,
+      selectedDrawingId,
+      stockName,
+      symbol,
+      timeframe,
+    }),
+    source: "frontend.us_professional_chart",
+  };
+}
+
+function isChartDrawingType(value: unknown): value is ChartDrawing["type"] {
+  return (
+    value === "horizontal" ||
+    value === "trend" ||
+    value === "ray" ||
+    value === "rectangle" ||
+    value === "fibonacci" ||
+    value === "anchorVwap" ||
+    value === "volumeProfileRange" ||
+    value === "measure" ||
+    value === "priceRange"
+  );
+}
+
+function normalizeStoredChartDrawings(value: unknown): ChartDrawing[] {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .flatMap((item): ChartDrawing[] => {
+      if (!item || typeof item !== "object") return [];
+
+      const candidate = item as Partial<ChartDrawing>;
+      const type = candidate.type;
+      const points = Array.isArray(candidate.points)
+        ? candidate.points.filter(
+            (point): point is ChartDrawing["points"][number] =>
+              Boolean(point) &&
+              typeof point === "object" &&
+              typeof point.time === "string" &&
+              typeof point.price === "number" &&
+              Number.isFinite(point.price)
+          )
+        : [];
+
+      if (
+        typeof candidate.id !== "string" ||
+        !isChartDrawingType(type) ||
+        points.length === 0
+      ) {
+        return [];
+      }
+
+      const pointCount = type === "horizontal" || type === "anchorVwap" ? 1 : 2;
+      if (points.length < pointCount) return [];
+
+      const normalizedDrawing: ChartDrawing = {
+        id: candidate.id,
+        type,
+        points: points.slice(0, pointCount),
+        color: typeof candidate.color === "string" ? candidate.color : "#0f172a",
+        createdAt:
+          typeof candidate.createdAt === "string" ? candidate.createdAt : new Date().toISOString(),
+      };
+
+      if (candidate.context && typeof candidate.context === "object") {
+        normalizedDrawing.context = candidate.context as ChartDrawing["context"];
+      }
+
+      if (
+        candidate.derivedMetrics &&
+        typeof candidate.derivedMetrics === "object" &&
+        candidate.derivedMetrics.version === 1
+      ) {
+        normalizedDrawing.derivedMetrics =
+          candidate.derivedMetrics as ChartDrawing["derivedMetrics"];
+      }
+
+      if (candidate.omiSummary && typeof candidate.omiSummary === "object") {
+        normalizedDrawing.omiSummary = candidate.omiSummary as ChartDrawing["omiSummary"];
+      }
+
+      return [normalizedDrawing];
+    })
+    .slice(-200);
+}
+
+function loadChartDrawings(storageKey: string): ChartDrawing[] {
+  if (typeof window === "undefined") return [];
+
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+
+    if (!raw) return [];
+
+    return normalizeStoredChartDrawings(JSON.parse(raw));
+  } catch {
+    return [];
+  }
+}
+
+function saveChartDrawings(storageKey: string, drawings: ChartDrawing[]) {
+  if (typeof window === "undefined") return;
+
+  try {
+    window.localStorage.setItem(storageKey, JSON.stringify(drawings.slice(-200)));
+  } catch {
+    // Best-effort local draft storage; chart drawing should never break the market view.
+  }
+}
+
+function serializeChartDrawings(drawings: ChartDrawing[]) {
+  return JSON.stringify(drawings);
+}
+
+function normalizeChartDrawingSelection(
+  drawings: ChartDrawing[],
+  selectedDrawingId: string | null
+) {
+  return drawings.some((drawing) => drawing.id === selectedDrawingId)
+    ? selectedDrawingId
+    : null;
+}
+
+function createChartDrawingSnapshot(
+  drawings: ChartDrawing[],
+  selectedDrawingId: string | null
+): ChartDrawingSnapshot {
+  const normalizedDrawings = drawings.slice(-200);
+
+  return {
+    drawings: normalizedDrawings,
+    selectedDrawingId: normalizeChartDrawingSelection(
+      normalizedDrawings,
+      selectedDrawingId
+    ),
+  };
+}
+
+function chartDrawingSnapshotsEqual(
+  first: ChartDrawingSnapshot,
+  second: ChartDrawingSnapshot
+) {
+  return (
+    first.selectedDrawingId === second.selectedDrawingId &&
+    serializeChartDrawings(first.drawings) === serializeChartDrawings(second.drawings)
+  );
 }
 
 function formatPct(value: number | null | undefined) {
@@ -295,6 +679,17 @@ function averageLast(values: Array<number | null | undefined>, windowSize: numbe
   return validValues.reduce((total, value) => total + value, 0) / validValues.length;
 }
 
+function finiteNumber(value: number | null | undefined): value is number {
+  return value !== null && value !== undefined && Number.isFinite(value);
+}
+
+function intradayTimeMs(value: string) {
+  const date = new Date(value);
+  const timestamp = date.getTime();
+
+  return Number.isNaN(timestamp) ? 0 : timestamp;
+}
+
 function summarizeUsIntradayPoints(points: IntradayTrendPoint[]) {
   const regularPoints = points.filter((point) => isUsRegularSessionPoint(point.time));
   const usablePoints = regularPoints.length > 0 ? regularPoints : points;
@@ -319,6 +714,55 @@ function summarizeUsIntradayPoints(points: IntradayTrendPoint[]) {
         ? volumeValues.reduce((total, value) => total + value, 0)
         : null,
   };
+}
+
+function aggregateUsProfessionalIntradayBars(
+  points: IntradayTrendPoint[],
+  intervalMinutes: number
+): ChartPoint[] {
+  const buckets = new Map<number, IntradayTrendPoint[]>();
+
+  points
+    .filter((point) => finiteNumber(point.price) && isUsRegularSessionPoint(point.time))
+    .slice()
+    .sort((left, right) => intradayTimeMs(left.time) - intradayTimeMs(right.time))
+    .forEach((point) => {
+      const minutes = getNewYorkMinutesOfDay(point.time);
+
+      if (minutes === null) return;
+
+      const bucket =
+        US_SESSION_START_MINUTES +
+        Math.floor((minutes - US_SESSION_START_MINUTES) / intervalMinutes) *
+          intervalMinutes;
+      const current = buckets.get(bucket) ?? [];
+
+      current.push(point);
+      buckets.set(bucket, current);
+    });
+
+  return Array.from(buckets.entries())
+    .sort(([left], [right]) => left - right)
+    .map(([, bucketPoints]) => {
+      const first = bucketPoints[0];
+      const last = bucketPoints[bucketPoints.length - 1];
+      const highs = bucketPoints.map((point) => point.high ?? point.price).filter(finiteNumber);
+      const lows = bucketPoints.map((point) => point.low ?? point.price).filter(finiteNumber);
+      const volume = bucketPoints.reduce((total, point) => {
+        return total + (finiteNumber(point.volume) && point.volume > 0 ? point.volume : 0);
+      }, 0);
+
+      return {
+        time: first.time,
+        open: first.open ?? first.price,
+        high: highs.length > 0 ? Math.max(...highs) : last.price,
+        low: lows.length > 0 ? Math.min(...lows) : last.price,
+        close: last.price,
+        volume: volume > 0 ? volume : null,
+        trade_value: null,
+        transaction_count: null,
+      };
+    });
 }
 
 function formatFactValue(fact: USSecCompanyFactRead) {
@@ -587,14 +1031,111 @@ function FundamentalMetricCell({
   );
 }
 
+function USProfessionalIndicatorMenu({
+  indicators,
+  onToggleIndicator,
+  groups = professionalIndicatorCategoryGroups,
+}: {
+  indicators: IndicatorSettings;
+  onToggleIndicator: (key: IndicatorKey) => void;
+  groups?: IndicatorCategoryGroup[];
+}) {
+  return (
+    <div className="absolute right-0 z-30 mt-2 max-h-[560px] w-[25rem] overflow-y-auto border border-slate-200 bg-white p-3 text-left shadow-xl">
+      <div className="mb-3 flex items-center justify-between border-b border-slate-100 pb-2">
+        <div>
+          <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">
+            Indicators
+          </div>
+          <div className="mt-0.5 text-sm font-bold text-slate-950">技術指標</div>
+        </div>
+        <div className="text-[11px] font-semibold text-slate-400">美股日/週/月</div>
+      </div>
+
+      <div className="space-y-3">
+        {groups.map((group) => (
+          <div key={group.key} className="border border-slate-100">
+            <div className="border-b border-slate-100 bg-slate-50 px-3 py-2">
+              <div className="text-xs font-bold text-slate-900">{group.label}</div>
+              <div className="mt-0.5 text-[11px] text-slate-500">{group.description}</div>
+            </div>
+            <div className="grid grid-cols-1 gap-px bg-slate-100">
+              {group.options.map((option) => {
+                if (option.status !== "available") {
+                  return (
+                    <div
+                      key={option.key}
+                      className="flex items-start justify-between gap-2 bg-white px-3 py-2 text-xs text-slate-400"
+                    >
+                      <span>
+                        <span className="block font-semibold">{option.label}</span>
+                        <span className="block">{option.description}</span>
+                      </span>
+                      <span className="shrink-0 border border-slate-200 px-1.5 py-0.5 text-[10px] font-bold">
+                        待補
+                      </span>
+                    </div>
+                  );
+                }
+
+                return (
+                  <label
+                    key={option.key}
+                    className="flex cursor-pointer items-start gap-2 bg-white px-3 py-2 text-xs hover:bg-slate-50"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={indicators[option.key]}
+                      onChange={() => onToggleIndicator(option.key)}
+                      className="mt-0.5"
+                    />
+                    <span>
+                      <span className="block font-semibold text-slate-800">
+                        {option.label}
+                      </span>
+                      <span className="block text-slate-500">{option.description}</span>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function USStockDetailPanel({
   selectedSymbol,
   selectedSecurityName,
   watchlistRankingPanel,
   onCompanyProfileChange,
+  onChartFocusModeChange,
 }: Props) {
   const [timeframe, setTimeframe] = useState<USChartTimeframe>("daily");
   const [indicatorMenuOpen, setIndicatorMenuOpen] = useState(false);
+  const [chartFocusMode, setChartFocusMode] = useState(false);
+  const [professionalTimeframe, setProfessionalTimeframe] =
+    useState<USProfessionalTimeframe>("daily");
+  const [professionalChartStyle, setProfessionalChartStyle] =
+    useState<USProfessionalChartStyle>("candlestick");
+  const [chartIndicators, setChartIndicators] =
+    useState<IndicatorSettings>(defaultUsChartIndicators);
+  const [indicatorParameters] =
+    useState<IndicatorParameters>(defaultIndicatorParameters);
+  const [chartDrawingTool, setChartDrawingTool] = useState<ChartDrawingTool>("cursor");
+  const [chartDrawingState, setChartDrawingState] = useState<ChartDrawingStorageState>({
+    key: "",
+    drawings: [],
+  });
+  const [selectedChartDrawingId, setSelectedChartDrawingId] = useState<string | null>(null);
+  const [chartDrawingHistoryState, setChartDrawingHistoryState] =
+    useState<ChartDrawingHistoryState>({
+      key: "",
+      past: [],
+      future: [],
+    });
   const [activeDataTab, setActiveDataTab] = useState<USDataPanelTab>("ownership");
   const [selectedStock, setSelectedStock] = useState<USStockMasterRead | null>(null);
   const [chart, setChart] = useState<USOhlcChartRead | null>(null);
@@ -619,14 +1160,45 @@ export default function USStockDetailPanel({
   const [message, setMessage] = useState<Message>(null);
   const requestSeq = useRef(0);
   const finalIntradayRefreshDate = useRef<string | null>(null);
+  const chartDrawingSyncTimerRef = useRef<number | null>(null);
+  const chartDrawingKey = chartDrawingStorageKey(selectedSymbol, professionalTimeframe);
+  const storedChartDrawings = useMemo(
+    () => loadChartDrawings(chartDrawingKey),
+    [chartDrawingKey]
+  );
+  const chartDrawings =
+    chartDrawingState.key === chartDrawingKey
+      ? chartDrawingState.drawings
+      : storedChartDrawings;
+  const chartDrawingHistory =
+    chartDrawingHistoryState.key === chartDrawingKey
+      ? chartDrawingHistoryState
+      : { key: chartDrawingKey, past: [], future: [] };
+  const canUndoChartDrawing = chartDrawingHistory.past.length > 0;
+  const canRedoChartDrawing = chartDrawingHistory.future.length > 0;
+  const activeSelectedChartDrawingId = chartDrawings.some(
+    (drawing) => drawing.id === selectedChartDrawingId
+  )
+    ? selectedChartDrawingId
+    : null;
 
   const chartData = useMemo(() => {
     return chart?.points.map(toChartPoint) ?? [];
   }, [chart]);
+  const professionalIsIntraday = isUsProfessionalIntradayTimeframe(professionalTimeframe);
+  const professionalChartData = useMemo<ChartPoint[]>(() => {
+    if (!isUsProfessionalIntradayTimeframe(professionalTimeframe)) return chartData;
+
+    return aggregateUsProfessionalIntradayBars(
+      todayTrend,
+      usProfessionalIntradayMinutes[professionalTimeframe]
+    );
+  }, [chartData, professionalTimeframe, todayTrend]);
   const latestToday = todayTrend[todayTrend.length - 1] ?? null;
   const todayStats = useMemo(() => summarizeUsIntradayPoints(todayTrend), [todayTrend]);
   const latestPoint = chartData[chartData.length - 1] ?? null;
   const previousPoint = chartData[chartData.length - 2] ?? null;
+  const latestProfessionalPoint = professionalChartData[professionalChartData.length - 1] ?? null;
   const displayDate =
     timeframe === "today" ? latestToday?.time ?? latestPoint?.time ?? null : latestPoint?.time ?? null;
   const latestClose =
@@ -733,6 +1305,33 @@ export default function USStockDetailPanel({
             value: loadState === "loading" ? "Loading" : String(displayedPointCount),
           },
         ];
+  const professionalTimeframeLabel =
+    usProfessionalTimeframeOptions.find((option) => option.key === professionalTimeframe)?.label ??
+    "日";
+  const professionalChartReady =
+    chartFocusMode &&
+    professionalChartData.length > 0 &&
+    loadState !== "loading";
+  const professionalLatestClose =
+    chartFocusMode && professionalIsIntraday
+      ? latestProfessionalPoint?.close ?? latestClose
+      : latestClose;
+  const professionalDrawingContext = useMemo(
+    () => ({
+      symbol: selectedSymbol,
+      market: "US",
+      timeframe: professionalTimeframe,
+    }),
+    [professionalTimeframe, selectedSymbol]
+  );
+
+  useEffect(() => {
+    onChartFocusModeChange?.(chartFocusMode);
+  }, [chartFocusMode, onChartFocusModeChange]);
+
+  useEffect(() => {
+    return () => onChartFocusModeChange?.(false);
+  }, [onChartFocusModeChange]);
 
   const dataCoverageItems: Array<{
     label: string;
@@ -913,11 +1512,6 @@ export default function USStockDetailPanel({
             stockData,
             todayData,
             dailyChartData,
-            factData,
-            fundamentalData,
-            profileData,
-            actionData,
-            shortVolumeData,
           ] = await Promise.all([
             fetchJson<USStockMasterRead>(
               `/api/us-market/stocks/${encodeURIComponent(symbol)}`
@@ -932,33 +1526,6 @@ export default function USStockDetailPanel({
                 bars: barsByTimeframe.daily,
                 ensure_history: true,
                 outputsize: "compact",
-              }
-            ),
-            fetchJson<USSecCompanyFactRead[]>(
-              `/api/us-market/sec/${encodeURIComponent(symbol)}/facts`,
-              {
-                limit: 24,
-                offset: 0,
-              }
-            ),
-            fetchOptionalJson<USSecFundamentalSummaryRead>(
-              `/api/us-market/sec/${encodeURIComponent(symbol)}/fundamentals`
-            ),
-            fetchOptionalJson<USCompanyProfileRead>(
-              `/api/us-market/profiles/${encodeURIComponent(symbol)}`
-            ),
-            fetchJson<USCorporateActionRead[]>(
-              `/api/us-market/corporate-actions/${encodeURIComponent(symbol)}`,
-              {
-                limit: 8,
-                offset: 0,
-              }
-            ),
-            fetchJson<USShortVolumeDailyRead[]>(
-              `/api/us-market/short-volume/${encodeURIComponent(symbol)}/history`,
-              {
-                limit: 8,
-                offset: 0,
               }
             ),
           ]);
@@ -980,25 +1547,36 @@ export default function USStockDetailPanel({
           setTodayUpdatedAt(
             latestIntradayPoint ? formatDateTime(latestIntradayPoint.time) : null
           );
-          setFactRows(factData);
-          setFundamentalSummary(fundamentalData);
-          setCompanyProfile(profileData);
-          onCompanyProfileChange?.(profileData);
-          setCorporateActions(actionData);
-          setShortVolumeRows(shortVolumeData);
+          setFactRows([]);
+          setFundamentalSummary(null);
+          setCompanyProfile(null);
+          onCompanyProfileChange?.(null);
+          setCorporateActions([]);
+          setShortVolumeRows([]);
           setLoadState("success");
-          setFactLoadState("success");
+          setFactLoadState("loading");
+          void fetchUsSupplementalData(symbol)
+            .then((supplementalData) => {
+              if (requestSeq.current !== requestId) return;
+
+              setFactRows(supplementalData.factData);
+              setFundamentalSummary(supplementalData.fundamentalData);
+              setCompanyProfile(supplementalData.profileData);
+              onCompanyProfileChange?.(supplementalData.profileData);
+              setCorporateActions(supplementalData.actionData);
+              setShortVolumeRows(supplementalData.shortVolumeData);
+              setFactLoadState("success");
+            })
+            .catch(() => {
+              if (requestSeq.current !== requestId) return;
+              setFactLoadState("error");
+            });
           return;
         }
 
         const [
           stockData,
           chartDataResponse,
-          factData,
-          fundamentalData,
-          profileData,
-          actionData,
-          shortVolumeData,
         ] = await Promise.all([
           fetchJson<USStockMasterRead>(
             `/api/us-market/stocks/${encodeURIComponent(symbol)}`
@@ -1012,33 +1590,6 @@ export default function USStockDetailPanel({
               outputsize: nextTimeframe === "monthly" ? "full" : "compact",
             }
           ),
-          fetchJson<USSecCompanyFactRead[]>(
-            `/api/us-market/sec/${encodeURIComponent(symbol)}/facts`,
-            {
-              limit: 24,
-              offset: 0,
-            }
-          ),
-          fetchOptionalJson<USSecFundamentalSummaryRead>(
-            `/api/us-market/sec/${encodeURIComponent(symbol)}/fundamentals`
-          ),
-          fetchOptionalJson<USCompanyProfileRead>(
-            `/api/us-market/profiles/${encodeURIComponent(symbol)}`
-          ),
-          fetchJson<USCorporateActionRead[]>(
-            `/api/us-market/corporate-actions/${encodeURIComponent(symbol)}`,
-            {
-              limit: 8,
-              offset: 0,
-            }
-          ),
-          fetchJson<USShortVolumeDailyRead[]>(
-            `/api/us-market/short-volume/${encodeURIComponent(symbol)}/history`,
-            {
-              limit: 8,
-              offset: 0,
-            }
-          ),
         ]);
 
         if (requestSeq.current !== requestId) return;
@@ -1049,14 +1600,30 @@ export default function USStockDetailPanel({
         setTodayPreviousClose(null);
         setTodaySource("unavailable");
         setTodayUpdatedAt(null);
-        setFactRows(factData);
-        setFundamentalSummary(fundamentalData);
-        setCompanyProfile(profileData);
-        onCompanyProfileChange?.(profileData);
-        setCorporateActions(actionData);
-        setShortVolumeRows(shortVolumeData);
+        setFactRows([]);
+        setFundamentalSummary(null);
+        setCompanyProfile(null);
+        onCompanyProfileChange?.(null);
+        setCorporateActions([]);
+        setShortVolumeRows([]);
         setLoadState("success");
-        setFactLoadState("success");
+        setFactLoadState("loading");
+        void fetchUsSupplementalData(symbol)
+          .then((supplementalData) => {
+            if (requestSeq.current !== requestId) return;
+
+            setFactRows(supplementalData.factData);
+            setFundamentalSummary(supplementalData.fundamentalData);
+            setCompanyProfile(supplementalData.profileData);
+            onCompanyProfileChange?.(supplementalData.profileData);
+            setCorporateActions(supplementalData.actionData);
+            setShortVolumeRows(supplementalData.shortVolumeData);
+            setFactLoadState("success");
+          })
+          .catch(() => {
+            if (requestSeq.current !== requestId) return;
+            setFactLoadState("error");
+          });
       } catch (error) {
         if (requestSeq.current !== requestId) return;
 
@@ -1194,11 +1761,313 @@ export default function USStockDetailPanel({
     };
   }, [selectedSymbol, timeframe]);
 
+  const queueChartDrawingRemoteSave = useCallback((
+    drawingsToSave: ChartDrawing[],
+    selectedDrawingIdToSave: string | null
+  ) => {
+    if (typeof window === "undefined") return;
+    if (!selectedSymbol) return;
+
+    const path = chartDrawingApiPath("US", selectedSymbol, professionalTimeframe);
+    const payload = buildChartDrawingSnapshotPayload({
+      drawings: drawingsToSave,
+      market: "US",
+      selectedDrawingId: selectedDrawingIdToSave,
+      stockName: selectedDisplayName,
+      symbol: selectedSymbol,
+      timeframe: professionalTimeframe,
+    });
+
+    if (chartDrawingSyncTimerRef.current) {
+      window.clearTimeout(chartDrawingSyncTimerRef.current);
+    }
+
+    chartDrawingSyncTimerRef.current = window.setTimeout(() => {
+      void requestJson<ChartDrawingSnapshotRead>(path, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      }).catch(() => {
+        // Best-effort server sync. Local chart drawings remain available via localStorage.
+      });
+    }, chartDrawingSyncDelayMs);
+  }, [professionalTimeframe, selectedDisplayName, selectedSymbol]);
+
+  const storeChartDrawings = useCallback((
+    drawingsToSave: ChartDrawing[],
+    selectedDrawingIdToSave = activeSelectedChartDrawingId
+  ) => {
+    setChartDrawingState({
+      key: chartDrawingKey,
+      drawings: drawingsToSave,
+    });
+    saveChartDrawings(chartDrawingKey, drawingsToSave);
+    queueChartDrawingRemoteSave(drawingsToSave, selectedDrawingIdToSave);
+  }, [
+    activeSelectedChartDrawingId,
+    chartDrawingKey,
+    queueChartDrawingRemoteSave,
+  ]);
+
+  useEffect(() => {
+    return () => {
+      if (chartDrawingSyncTimerRef.current && typeof window !== "undefined") {
+        window.clearTimeout(chartDrawingSyncTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!chartFocusMode || !selectedSymbol) {
+      return;
+    }
+
+    let cancelled = false;
+    const remoteSymbol = selectedSymbol;
+    const localDrawings = loadChartDrawings(chartDrawingKey);
+    const normalizedLocalSelection = normalizeChartDrawingSelection(
+      localDrawings,
+      activeSelectedChartDrawingId
+    );
+
+    if (localDrawings.length > 0) {
+      queueChartDrawingRemoteSave(localDrawings, normalizedLocalSelection);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    async function loadRemoteChartDrawings() {
+      try {
+        const snapshot = await fetchJson<ChartDrawingSnapshotRead>(
+          chartDrawingApiPath("US", remoteSymbol, professionalTimeframe)
+        );
+
+        if (cancelled) return;
+
+        const remoteDrawings = normalizeStoredChartDrawings(snapshot.drawings);
+        if (remoteDrawings.length === 0) return;
+
+        const remoteSelection = normalizeChartDrawingSelection(
+          remoteDrawings,
+          snapshot.selected_drawing_id
+        );
+
+        setChartDrawingState({
+          key: chartDrawingKey,
+          drawings: remoteDrawings,
+        });
+        saveChartDrawings(chartDrawingKey, remoteDrawings);
+        setSelectedChartDrawingId(remoteSelection);
+      } catch {
+        // A missing remote snapshot simply means this chart has not been saved server-side yet.
+      }
+    }
+
+    void loadRemoteChartDrawings();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeSelectedChartDrawingId,
+    chartDrawingKey,
+    chartFocusMode,
+    professionalTimeframe,
+    queueChartDrawingRemoteSave,
+    selectedSymbol,
+  ]);
+
+  function updateChartDrawingState(
+    nextValue: ChartDrawing[] | ((current: ChartDrawing[]) => ChartDrawing[]),
+    nextSelectedDrawingId?: string | null,
+    options: { recordHistory?: boolean } = {}
+  ) {
+    const nextDrawings =
+      typeof nextValue === "function" ? nextValue(chartDrawings) : nextValue;
+    const currentSnapshot = createChartDrawingSnapshot(
+      chartDrawings,
+      activeSelectedChartDrawingId
+    );
+    const nextSnapshot = createChartDrawingSnapshot(
+      nextDrawings,
+      nextSelectedDrawingId === undefined
+        ? activeSelectedChartDrawingId
+        : nextSelectedDrawingId
+    );
+
+    if (chartDrawingSnapshotsEqual(currentSnapshot, nextSnapshot)) {
+      return;
+    }
+
+    if (
+      serializeChartDrawings(currentSnapshot.drawings) ===
+      serializeChartDrawings(nextSnapshot.drawings)
+    ) {
+      setSelectedChartDrawingId(nextSnapshot.selectedDrawingId);
+      return;
+    }
+
+    if (options.recordHistory !== false) {
+      const currentPast =
+        chartDrawingHistoryState.key === chartDrawingKey ? chartDrawingHistoryState.past : [];
+
+      setChartDrawingHistoryState({
+        key: chartDrawingKey,
+        past: [...currentPast, currentSnapshot].slice(-50),
+        future: [],
+      });
+    }
+
+    storeChartDrawings(nextSnapshot.drawings, nextSnapshot.selectedDrawingId);
+    setSelectedChartDrawingId(nextSnapshot.selectedDrawingId);
+  }
+
+  function updateChartDrawings(
+    nextValue: ChartDrawing[] | ((current: ChartDrawing[]) => ChartDrawing[]),
+    options: { recordHistory?: boolean } = {}
+  ) {
+    updateChartDrawingState(nextValue, undefined, options);
+  }
+
+  const undoChartDrawing = useCallback(() => {
+    if (!canUndoChartDrawing) return;
+
+    const past = chartDrawingHistory.past;
+    const previousSnapshot = past[past.length - 1];
+
+    if (!previousSnapshot) return;
+
+    setChartDrawingHistoryState({
+      key: chartDrawingKey,
+      past: past.slice(0, -1),
+      future: [
+        createChartDrawingSnapshot(chartDrawings, activeSelectedChartDrawingId),
+        ...chartDrawingHistory.future,
+      ].slice(0, 50),
+    });
+    storeChartDrawings(previousSnapshot.drawings, previousSnapshot.selectedDrawingId);
+    setSelectedChartDrawingId(previousSnapshot.selectedDrawingId);
+  }, [
+    activeSelectedChartDrawingId,
+    canUndoChartDrawing,
+    chartDrawingHistory.future,
+    chartDrawingHistory.past,
+    chartDrawingKey,
+    chartDrawings,
+    storeChartDrawings,
+  ]);
+
+  const redoChartDrawing = useCallback(() => {
+    if (!canRedoChartDrawing) return;
+
+    const nextDrawings = chartDrawingHistory.future[0];
+
+    if (!nextDrawings) return;
+
+    setChartDrawingHistoryState({
+      key: chartDrawingKey,
+      past: [
+        ...chartDrawingHistory.past,
+        createChartDrawingSnapshot(chartDrawings, activeSelectedChartDrawingId),
+      ].slice(-50),
+      future: chartDrawingHistory.future.slice(1),
+    });
+    storeChartDrawings(nextDrawings.drawings, nextDrawings.selectedDrawingId);
+    setSelectedChartDrawingId(nextDrawings.selectedDrawingId);
+  }, [
+    activeSelectedChartDrawingId,
+    canRedoChartDrawing,
+    chartDrawingHistory.future,
+    chartDrawingHistory.past,
+    chartDrawingKey,
+    chartDrawings,
+    storeChartDrawings,
+  ]);
+
+  useEffect(() => {
+    if (!chartFocusMode) return;
+
+    function handleChartDrawingHistoryKeyDown(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null;
+      const tagName = target?.tagName.toLowerCase();
+
+      if (tagName === "input" || tagName === "textarea" || target?.isContentEditable) return;
+      if (!event.ctrlKey && !event.metaKey) return;
+
+      const key = event.key.toLowerCase();
+
+      if (key === "z" && !event.shiftKey) {
+        if (!canUndoChartDrawing) return;
+
+        event.preventDefault();
+        undoChartDrawing();
+        return;
+      }
+
+      if (key === "y" || (key === "z" && event.shiftKey)) {
+        if (!canRedoChartDrawing) return;
+
+        event.preventDefault();
+        redoChartDrawing();
+      }
+    }
+
+    window.addEventListener("keydown", handleChartDrawingHistoryKeyDown);
+
+    return () => window.removeEventListener("keydown", handleChartDrawingHistoryKeyDown);
+  }, [
+    canRedoChartDrawing,
+    canUndoChartDrawing,
+    chartFocusMode,
+    redoChartDrawing,
+    undoChartDrawing,
+  ]);
+
   function toggleIntradayIndicator(key: IntradayIndicatorKey) {
     setIntradayIndicators((current) => ({
       ...current,
       [key]: !current[key],
     }));
+  }
+
+  function toggleChartIndicator(key: IndicatorKey) {
+    setChartIndicators((current) => ({
+      ...current,
+      [key]: !current[key],
+    }));
+  }
+
+  function handleProfessionalTimeframeChange(nextTimeframe: USProfessionalTimeframe) {
+    setProfessionalTimeframe(nextTimeframe);
+    setIndicatorMenuOpen(false);
+    setTimeframe(isUsProfessionalIntradayTimeframe(nextTimeframe) ? "today" : nextTimeframe);
+  }
+
+  function enterChartFocusMode() {
+    const nextTimeframe: USProfessionalTimeframe =
+      timeframe === "today" ? "1m" : timeframe;
+
+    setProfessionalTimeframe(nextTimeframe);
+    setTimeframe(isUsProfessionalIntradayTimeframe(nextTimeframe) ? "today" : nextTimeframe);
+    setIndicatorMenuOpen(false);
+    setChartFocusMode(true);
+  }
+
+  function deleteSelectedChartDrawing() {
+    if (!activeSelectedChartDrawingId) return;
+
+    updateChartDrawings((current) =>
+      current.filter((drawing) => drawing.id !== activeSelectedChartDrawingId)
+    );
+    setSelectedChartDrawingId(null);
+  }
+
+  function clearChartDrawings() {
+    if (chartDrawings.length === 0) return;
+    if (!window.confirm("清除目前週期的所有畫線？")) return;
+
+    updateChartDrawings([]);
+    setSelectedChartDrawingId(null);
   }
 
   async function refreshDailyRows() {
@@ -1682,8 +2551,246 @@ export default function USStockDetailPanel({
   }
 
   return (
-    <section className="grid w-full grid-cols-1 items-start justify-start gap-4 xl:grid-cols-[minmax(0,7fr)_minmax(360px,5fr)]">
-      <div className="min-w-0 space-y-4 self-start">
+    <section
+      className={[
+        "grid w-full grid-cols-1 items-start justify-start gap-4",
+        chartFocusMode ? "" : "xl:grid-cols-[minmax(0,7fr)_minmax(360px,5fr)]",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+    >
+      <div className={["min-w-0 self-start", chartFocusMode ? "space-y-0" : "space-y-4"].join(" ")}>
+        {chartFocusMode ? (
+          <section className="border border-slate-200 bg-white">
+            <div className="border-b border-slate-200 px-4 py-2">
+              <div className="flex min-h-9 flex-wrap items-center justify-between gap-x-4 gap-y-2">
+                <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+                  <div className="truncate text-lg font-bold text-slate-950">
+                    {selectedDisplaySymbol} {selectedDisplayName}
+                  </div>
+                  <div className={`flex items-baseline gap-2 ${valueTone(change)}`}>
+                    <PriceUpdatePulse
+                      value={professionalLatestClose}
+                      direction={change}
+                      resetKey={`${selectedSymbol ?? "empty"}:us-professional:${professionalTimeframe}`}
+                      className="text-2xl font-bold leading-none tracking-normal tabular-nums"
+                    >
+                      {formatNumber(professionalLatestClose)}
+                    </PriceUpdatePulse>
+                    <span className="text-sm font-semibold tabular-nums">
+                      {formatNumber(change)}
+                    </span>
+                    <span className="text-sm font-semibold tabular-nums">
+                      ({formatPct(changePct)})
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-end gap-1.5">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <div className="flex border border-slate-200 bg-slate-50 p-0.5">
+                      {usProfessionalTimeframeOptions.map((option) => (
+                        <button
+                          key={option.key}
+                          type="button"
+                          onClick={() => handleProfessionalTimeframeChange(option.key)}
+                          className={[
+                            "h-7 px-2 text-xs font-semibold transition",
+                            professionalTimeframe === option.key
+                              ? "bg-slate-900 text-white"
+                              : "text-slate-600 hover:bg-white hover:text-slate-950",
+                          ].join(" ")}
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="flex border border-slate-200 bg-slate-50 p-0.5">
+                      {[
+                        ["candlestick", "K線"],
+                        ["line", "折線"],
+                      ].map(([key, labelText]) => (
+                        <button
+                          key={key}
+                          type="button"
+                          onClick={() => setProfessionalChartStyle(key as USProfessionalChartStyle)}
+                          className={[
+                            "h-7 px-2 text-xs font-semibold transition",
+                            professionalChartStyle === key
+                              ? "bg-slate-900 text-white"
+                              : "text-slate-600 hover:bg-white hover:text-slate-950",
+                          ].join(" ")}
+                        >
+                          {labelText}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setIndicatorMenuOpen((value) => !value)}
+                      className="h-8 border border-slate-300 bg-white px-3 text-xs font-semibold text-slate-800 hover:border-slate-900 hover:text-slate-950"
+                    >
+                      技術指標
+                    </button>
+                    {indicatorMenuOpen ? (
+                      <USProfessionalIndicatorMenu
+                        indicators={chartIndicators}
+                        onToggleIndicator={toggleChartIndicator}
+                      />
+                    ) : null}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIndicatorMenuOpen(false);
+                      setChartDrawingTool("cursor");
+                      setChartFocusMode(false);
+                    }}
+                    className="h-8 border border-slate-900 bg-slate-900 px-3 text-xs font-semibold text-white hover:bg-slate-800"
+                  >
+                    總覽
+                  </button>
+                </div>
+              </div>
+
+              <div className="mt-2 flex flex-wrap items-center justify-end gap-1.5 border-t border-slate-100 pt-2">
+                <div className="flex max-w-full flex-wrap items-center justify-end gap-1 border border-slate-200 bg-slate-50 p-0.5">
+                  {chartDrawingToolGroups.map((group, groupIndex) => (
+                    <div
+                      key={group.key}
+                      className={[
+                        "flex items-center gap-0.5",
+                        groupIndex > 0 ? "border-l border-slate-200 pl-1" : "",
+                      ].join(" ")}
+                    >
+                      {group.tools.map((toolKey) => {
+                        const option = chartDrawingToolOptionMap.get(toolKey);
+                        if (!option) return null;
+
+                        return (
+                          <button
+                            key={option.key}
+                            type="button"
+                            onClick={() => {
+                              setIndicatorMenuOpen(false);
+                              setChartDrawingTool(option.key);
+                              if (option.key === "cursor") {
+                                setSelectedChartDrawingId(null);
+                              }
+                            }}
+                            className={[
+                              "h-7 px-2 text-xs font-semibold transition",
+                              chartDrawingTool === option.key
+                                ? "bg-slate-900 text-white"
+                                : "text-slate-600 hover:bg-white hover:text-slate-950",
+                            ].join(" ")}
+                          >
+                            {option.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ))}
+                  <div className="flex items-center gap-0.5 border-l border-slate-200 pl-1">
+                    <button
+                      type="button"
+                      title="Undo (Ctrl+Z)"
+                      disabled={!canUndoChartDrawing}
+                      onClick={undoChartDrawing}
+                      className={[
+                        "h-7 px-2 text-xs font-semibold transition",
+                        canUndoChartDrawing
+                          ? "text-slate-600 hover:bg-white hover:text-slate-950"
+                          : "cursor-not-allowed text-slate-300",
+                      ].join(" ")}
+                    >
+                      Undo
+                    </button>
+                    <button
+                      type="button"
+                      title="Redo (Ctrl+Y)"
+                      disabled={!canRedoChartDrawing}
+                      onClick={redoChartDrawing}
+                      className={[
+                        "h-7 px-2 text-xs font-semibold transition",
+                        canRedoChartDrawing
+                          ? "text-slate-600 hover:bg-white hover:text-slate-950"
+                          : "cursor-not-allowed text-slate-300",
+                      ].join(" ")}
+                    >
+                      Redo
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!activeSelectedChartDrawingId}
+                      onClick={deleteSelectedChartDrawing}
+                      className={[
+                        "h-7 px-2 text-xs font-semibold transition",
+                        activeSelectedChartDrawingId
+                          ? "text-red-700 hover:bg-white"
+                          : "cursor-not-allowed text-slate-300",
+                      ].join(" ")}
+                    >
+                      刪除
+                    </button>
+                    <button
+                      type="button"
+                      disabled={chartDrawings.length === 0}
+                      onClick={clearChartDrawings}
+                      className={[
+                        "h-7 px-2 text-xs font-semibold transition",
+                        chartDrawings.length > 0
+                          ? "text-slate-500 hover:bg-white hover:text-slate-950"
+                          : "cursor-not-allowed text-slate-300",
+                      ].join(" ")}
+                    >
+                      畫線 {chartDrawings.length}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {message ? (
+              <div className={`border-b px-5 py-3 text-sm ${messageClass(message)}`}>
+                {message.text}
+              </div>
+            ) : null}
+
+            {professionalChartReady ? (
+              <LightweightKLineChart
+                chartData={professionalChartData}
+                label={professionalTimeframeLabel}
+                height={780}
+                fillViewport
+                timeMode={professionalIsIntraday ? "intraday" : "date"}
+                chartStyle={professionalChartStyle}
+                showHeader={false}
+                showMovingAverages={chartIndicators.ma}
+                indicators={chartIndicators}
+                indicatorParameters={indicatorParameters}
+                volumePanelLabel="Volume"
+                drawingTool={chartDrawingTool}
+                drawings={chartDrawings}
+                selectedDrawingId={activeSelectedChartDrawingId}
+                drawingContext={professionalDrawingContext}
+                onDrawingsChange={updateChartDrawings}
+                onDrawingStateChange={updateChartDrawingState}
+                onSelectedDrawingChange={setSelectedChartDrawingId}
+              />
+            ) : (
+              <div className="flex h-[640px] items-center justify-center border-t border-slate-200 text-sm text-slate-500">
+                讀取{professionalTimeframeLabel} K 線中...
+              </div>
+            )}
+          </section>
+        ) : (
+          <>
         <section className="border border-slate-200 bg-white">
           <div className="flex flex-wrap items-start justify-between gap-4 px-5 py-4">
             <div>
@@ -1763,6 +2870,13 @@ export default function USStockDetailPanel({
               </div>
             </div>
             <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={enterChartFocusMode}
+                className="h-8 border border-slate-900 bg-white px-3 text-xs font-semibold text-slate-900 hover:border-red-700 hover:text-red-700"
+              >
+                放大
+              </button>
               {timeframe === "today" ? (
                 <div className="relative">
                   <button
@@ -1845,13 +2959,14 @@ export default function USStockDetailPanel({
               revealKey={`${selectedSymbol ?? "empty"}-${timeframe}-${todayTrend.length}`}
               refreshIntervalMs={US_INTRADAY_REFRESH_MS}
               updatedAt={todayUpdatedAt}
+              priceLimitEnabled={false}
             />
           ) : chartData.length > 0 ? (
             <StockKLineChart
               chartData={chartData}
               label={selectedDisplaySymbol}
-              indicators={usChartIndicators}
-              indicatorParameters={defaultIndicatorParameters}
+              indicators={chartIndicators}
+              indicatorParameters={indicatorParameters}
               revealKey={`${selectedSymbol ?? "empty"}-${timeframe}-${chartData.length}`}
               volumePanelLabel="Volume"
               volumeTooltipLabel="Volume"
@@ -1873,8 +2988,11 @@ export default function USStockDetailPanel({
         {watchlistRankingPanel ? (
           <div className="min-w-0">{watchlistRankingPanel}</div>
         ) : null}
+          </>
+        )}
       </div>
 
+      {!chartFocusMode ? (
       <aside className="flex min-w-0 flex-col border border-slate-200 bg-white">
         <section>
           <div className="flex items-start justify-between gap-4 border-b border-slate-200 px-5 py-4">
@@ -2058,6 +3176,7 @@ export default function USStockDetailPanel({
           </section>
         )}
       </aside>
+      ) : null}
     </section>
   );
 }

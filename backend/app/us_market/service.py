@@ -60,6 +60,7 @@ from app.us_market.sources import (
     parse_sec_company_tickers_exchange,
     parse_yahoo_daily_prices,
     parse_yahoo_intraday_prices,
+    parse_yahoo_symbol_record,
 )
 from app.us_market.trading_calendar import expected_us_daily_price_date
 
@@ -420,6 +421,7 @@ def search_us_stocks(
     *,
     keyword: str,
     limit: int = 50,
+    discover_missing_exact_symbol: bool = False,
 ) -> list[USStockMaster]:
     keyword = keyword.strip()
     if not keyword:
@@ -436,7 +438,7 @@ def search_us_stocks(
         else_=4,
     )
 
-    return (
+    results = (
         db.query(USStockMaster)
         .filter(
             or_(
@@ -452,6 +454,22 @@ def search_us_stocks(
         .limit(limit)
         .all()
     )
+    has_exact_match = any(stock.symbol == normalized_keyword for stock in results)
+
+    if discover_missing_exact_symbol and normalized_keyword and not has_exact_match:
+        is_exact_symbol_lookup = keyword.upper() == normalized_keyword
+        if is_exact_symbol_lookup:
+            try:
+                discovered = ensure_us_stock_master(db=db, symbol=normalized_keyword)
+            except USStockNotFoundError:
+                return results
+
+            return [
+                discovered,
+                *[stock for stock in results if stock.symbol != discovered.symbol],
+            ][:limit]
+
+    return results
 
 
 def get_us_stock(db: Session, *, symbol: str) -> USStockMaster:
@@ -466,6 +484,37 @@ def get_us_stock(db: Session, *, symbol: str) -> USStockMaster:
         raise USStockNotFoundError(f"US symbol='{normalized_symbol}' not found.")
 
     return stock
+
+
+def discover_us_stock_master_from_yahoo_chart(db: Session, *, symbol: str) -> USStockMaster:
+    normalized_symbol = normalize_us_symbol(symbol)
+    if not normalized_symbol:
+        raise USStockNotFoundError("US symbol is required.")
+
+    payload, _source_url = fetch_yahoo_chart_payload(
+        symbol=normalized_symbol,
+        range_value="5d",
+        interval="1d",
+        timeout_seconds=settings.us_market_http_timeout_seconds,
+    )
+    record = parse_yahoo_symbol_record(payload, symbol=normalized_symbol)
+    upsert_us_symbol_records(db=db, records=[record])
+    return get_us_stock(db=db, symbol=record.symbol)
+
+
+def ensure_us_stock_master(db: Session, *, symbol: str) -> USStockMaster:
+    normalized_symbol = normalize_us_symbol(symbol)
+    try:
+        return get_us_stock(db=db, symbol=normalized_symbol)
+    except USStockNotFoundError:
+        pass
+
+    try:
+        return discover_us_stock_master_from_yahoo_chart(db=db, symbol=normalized_symbol)
+    except (requests.RequestException, USMarketDataFetchError) as exc:
+        raise USStockNotFoundError(
+            f"US symbol='{normalized_symbol}' not found in us_stock_master and Yahoo discovery failed: {exc}"
+        ) from exc
 
 
 def upsert_us_daily_price_records(
@@ -2111,20 +2160,7 @@ def delete_us_watchlist_group(
 
 
 def _ensure_us_stock_exists(db: Session, symbol: str) -> USStockMaster:
-    normalized_symbol = normalize_us_symbol(symbol)
-    stock = (
-        db.query(USStockMaster)
-        .filter(USStockMaster.symbol == normalized_symbol)
-        .first()
-    )
-
-    if stock is None:
-        raise USStockNotFoundError(
-            f"US symbol='{normalized_symbol}' not found in us_stock_master. "
-            "Run /api/us-market/stocks/sync-symbols first or check symbol."
-        )
-
-    return stock
+    return ensure_us_stock_master(db=db, symbol=symbol)
 
 
 def _us_watchlist_item_to_dict(
@@ -2945,6 +2981,8 @@ __all__ = [
     "create_us_watchlist_item",
     "delete_us_watchlist_group",
     "delete_us_watchlist_item",
+    "discover_us_stock_master_from_yahoo_chart",
+    "ensure_us_stock_master",
     "get_us_company_profile",
     "get_us_intraday_trend",
     "get_us_sec_fundamental_summary",
