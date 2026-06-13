@@ -142,6 +142,35 @@ class AiStreamingTests(unittest.TestCase):
         self.assertIn("資料可信但需留意量能", text)
         self.assertIn("追蹤法人與成交量", text)
 
+    def test_extract_answer_text_prefers_consumer_human_answer(self) -> None:
+        text = ai_streaming.extract_answer_text(
+            {
+                "analysis": {
+                    "human_answer": {
+                        "kind": "consumer_market_answer",
+                        "headline": "短線偏多但追高風險偏高",
+                        "text": "結論：短線偏多但追高風險偏高\n重點：先看 MA20。",
+                    }
+                },
+                "result": {
+                    "llm": {
+                        "report": {
+                            "headline": "完整長文不應優先",
+                            "key_observations": ["這段不應優先出現在串流文字"],
+                            "interpretation": [],
+                            "risks": [],
+                            "missing_data": [],
+                            "next_checks": [],
+                            "disclaimer": "",
+                        }
+                    }
+                },
+            }
+        )
+
+        self.assertIn("短線偏多", text)
+        self.assertNotIn("完整長文不應優先", text)
+
 
 if __name__ == "__main__":
     unittest.main()

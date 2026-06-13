@@ -10,6 +10,7 @@ from app.ai import agentic_tools, freshness, orchestrator, reports, tools
 from app.ai.evidence_passport import build_evidence_passport
 from app.ai.schemas import AiAskRequest
 from app.db.models import StockMaster, USStockMaster, WatchlistGroup
+from app.us_market.sources import normalize_us_symbol
 
 
 CONTRACT_VERSION = "omi.ai.ask.v2"
@@ -38,6 +39,19 @@ ANALYSIS_HORIZON_LABELS = {
     "swing": "中短線",
     "long": "長線",
 }
+STANCE_LABELS = {
+    "bullish": "偏多",
+    "bearish": "偏空",
+    "neutral": "中性",
+    "mixed": "多空分歧",
+    "insufficient_data": "資料不足",
+}
+CONFIDENCE_LABELS = {
+    "low": "低",
+    "medium": "中",
+    "high": "高",
+}
+CONSUMER_SUMMARY_LIMIT = 3
 
 
 @dataclass(frozen=True)
@@ -181,6 +195,24 @@ ADR_HINTS = (
     "美股台積電",
     "美股台積",
 )
+US_SYMBOL_CONTEXT_HINTS = (
+    "us stock",
+    "u.s. stock",
+    "american stock",
+    "ticker",
+    "symbol",
+    "nasdaq",
+    "nyse",
+    "amex",
+    "arca",
+    "美股",
+    "美國股票",
+    "美國上市",
+    "那斯達克",
+    "納斯達克",
+    "紐交所",
+    "美國個股",
+)
 STOCK_REFERENCE_HINTS = (
     "stock",
     "company",
@@ -195,6 +227,52 @@ TAIWAN_TSMC_ALIASES = (
     "台積電",
     "台積",
     "tsmc",
+)
+US_SYMBOL_STOPWORDS = {
+    "A",
+    "AI",
+    "ALL",
+    "AND",
+    "ANALYZE",
+    "ADR",
+    "CAN",
+    "CEO",
+    "ETF",
+    "FOR",
+    "GENERATE",
+    "HOW",
+    "IT",
+    "LATEST",
+    "LLM",
+    "LOOK",
+    "MAKE",
+    "NOW",
+    "OK",
+    "ON",
+    "OR",
+    "PLEASE",
+    "REPORT",
+    "RISK",
+    "STOCK",
+    "THAT",
+    "THE",
+    "THIS",
+    "TODAY",
+    "US",
+    "USA",
+    "VIEW",
+    "WHAT",
+    "YOU",
+}
+US_EXCHANGE_SYMBOL_PATTERN = re.compile(
+    r"\b(?:NASDAQ|NYSE|AMEX|NYSEARCA|ARCA|CBOE|OTC|OTCMKTS)[:：]\s*([A-Za-z][A-Za-z0-9.$-]{0,15})\b",
+    flags=re.IGNORECASE,
+)
+US_DOLLAR_SYMBOL_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_$.-])\$([A-Za-z][A-Za-z0-9.$-]{0,15})(?![A-Za-z0-9.$-])"
+)
+US_PLAIN_SYMBOL_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9.$-])([A-Za-z][A-Za-z0-9.$-]{0,15})(?![A-Za-z0-9.$-])"
 )
 
 
@@ -315,6 +393,14 @@ def _looks_like_stock_id(value: str | None) -> bool:
     return bool(re.fullmatch(r"\d{4,6}[A-Za-z0-9]?", value.strip()))
 
 
+def _looks_like_us_symbol(value: str | None) -> bool:
+    normalized = normalize_us_symbol(value)
+    if not normalized:
+        return False
+
+    return bool(re.fullmatch(r"[A-Z][A-Z0-9.$-]{0,15}", normalized))
+
+
 def _resolution_candidate(
     *,
     scope_type: str,
@@ -393,6 +479,164 @@ def _us_stock_display_name(db: Session | None, symbol: str | None, fallback: str
         return fallback
 
     return stock.security_name or stock.sec_company_name or fallback
+
+
+def _get_us_stock(db: Session | None, symbol: str | None) -> USStockMaster | None:
+    if db is None or not symbol:
+        return None
+
+    normalized_symbol = normalize_us_symbol(symbol)
+    if not normalized_symbol:
+        return None
+
+    return (
+        db.query(USStockMaster)
+        .filter(USStockMaster.symbol == normalized_symbol)
+        .filter(USStockMaster.is_active.is_(True))
+        .first()
+    )
+
+
+def _us_stock_label(stock: USStockMaster | None, symbol: str) -> str:
+    return (
+        stock.security_name
+        if stock and stock.security_name
+        else stock.sec_company_name
+        if stock and stock.sec_company_name
+        else symbol
+    )
+
+
+def _resolve_us_stock_symbol(
+    db: Session | None,
+    symbol: str | None,
+    *,
+    source: str,
+    confidence: str = "high",
+    allow_unknown: bool = False,
+) -> ScopeResolution | None:
+    normalized_symbol = normalize_us_symbol(symbol)
+    if not _looks_like_us_symbol(normalized_symbol):
+        return None
+
+    stock = _get_us_stock(db, normalized_symbol)
+    if stock is None and not allow_unknown:
+        return None
+
+    label = _us_stock_label(stock, normalized_symbol)
+    return ScopeResolution(
+        selected_scope_type="us_stock",
+        selected_scope_id=normalized_symbol,
+        display_name=label,
+        confidence=confidence if stock is not None else "medium",
+        assumption=None if stock is not None else "未在 us_stock_master 找到完整主檔，先以 ticker 作為美股目標並回報資料缺口。",
+        source=source if stock is not None else f"{source}_unverified_symbol",
+        candidates=(
+            _resolution_candidate(
+                scope_type="us_stock",
+                scope_id=normalized_symbol,
+                label=label,
+                confidence=confidence if stock is not None else "medium",
+                source=source if stock is not None else f"{source}_unverified_symbol",
+            ),
+        ),
+    )
+
+
+def _question_has_us_symbol_context(question: str) -> bool:
+    return (
+        _contains_hint(question, US_SYMBOL_CONTEXT_HINTS)
+        or _contains_hint(question, ADR_HINTS)
+        or _contains_hint(question, STOCK_REFERENCE_HINTS)
+        or _contains_hint(question, ANALYSIS_HINTS)
+        or _contains_hint(question, INTRADAY_HINTS)
+        or _contains_hint(question, SHORT_HORIZON_HINTS)
+        or _contains_hint(question, SWING_HORIZON_HINTS)
+        or _contains_hint(question, LONG_HORIZON_HINTS)
+    )
+
+
+def _iter_us_symbol_mentions(question: str) -> list[tuple[str, str, bool]]:
+    mentions: list[tuple[str, str, bool]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(raw_symbol: str, source: str, explicit_marker: bool) -> None:
+        normalized_symbol = normalize_us_symbol(raw_symbol)
+        if not _looks_like_us_symbol(normalized_symbol):
+            return
+        key = (normalized_symbol, source)
+        if key in seen:
+            return
+        seen.add(key)
+        mentions.append((normalized_symbol, source, explicit_marker))
+
+    for match in US_EXCHANGE_SYMBOL_PATTERN.finditer(question):
+        add(match.group(1), "question_us_exchange_symbol", True)
+
+    for match in US_DOLLAR_SYMBOL_PATTERN.finditer(question):
+        add(match.group(1), "question_dollar_symbol", True)
+
+    for match in US_PLAIN_SYMBOL_PATTERN.finditer(question):
+        raw_symbol = match.group(1)
+        normalized_symbol = normalize_us_symbol(raw_symbol)
+        if raw_symbol.upper() != raw_symbol and len(normalized_symbol) <= 2:
+            continue
+        add(raw_symbol, "question_us_symbol", False)
+
+    return mentions
+
+
+def _resolve_us_stock_symbol_from_question(db: Session | None, question: str) -> ScopeResolution | None:
+    has_context = _question_has_us_symbol_context(question)
+    candidates: list[tuple[ScopeResolution, bool]] = []
+
+    for symbol, source, explicit_marker in _iter_us_symbol_mentions(question):
+        if (
+            not explicit_marker
+            and symbol in US_SYMBOL_STOPWORDS
+            and not _contains_hint(question, US_SYMBOL_CONTEXT_HINTS)
+        ):
+            continue
+
+        allow_unknown = explicit_marker or (
+            has_context and _contains_hint(question, US_SYMBOL_CONTEXT_HINTS)
+        )
+        resolution = _resolve_us_stock_symbol(
+            db,
+            symbol,
+            source=source,
+            confidence="high" if explicit_marker else "medium",
+            allow_unknown=allow_unknown,
+        )
+        if resolution is None:
+            continue
+
+        if explicit_marker or has_context:
+            candidates.append((resolution, explicit_marker))
+
+    if not candidates:
+        return None
+
+    selected, selected_explicit = candidates[0]
+    all_candidates = tuple(
+        _resolution_candidate(
+            scope_type="us_stock",
+            scope_id=resolution.selected_scope_id,
+            label=resolution.display_name,
+            confidence="high" if explicit_marker else resolution.confidence,
+            source=resolution.source,
+        )
+        for resolution, explicit_marker in candidates[:5]
+    )
+    return ScopeResolution(
+        selected_scope_type="us_stock",
+        selected_scope_id=selected.selected_scope_id,
+        display_name=selected.display_name,
+        confidence="high" if selected_explicit else selected.confidence,
+        assumption=selected.assumption,
+        source=selected.source,
+        candidates=all_candidates,
+    )
 
 
 def _target_from_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
@@ -705,6 +949,16 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
                 ),
             )
 
+        us_symbol_resolution = _resolve_us_stock_symbol(
+            db,
+            target_id,
+            source="explicit_scope_id",
+            confidence="high",
+            allow_unknown=_contains_hint(question, US_SYMBOL_CONTEXT_HINTS),
+        )
+        if us_symbol_resolution is not None:
+            return us_symbol_resolution
+
     if _contains_hint(question, FRESHNESS_HINTS):
         stock_id = _first_stock_id_in_text(question)
         tsmc_resolution = _resolve_tsmc_alias(db, question)
@@ -779,6 +1033,10 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
     tsmc_resolution = _resolve_tsmc_alias(db, question)
     if tsmc_resolution is not None:
         return tsmc_resolution
+
+    us_symbol_resolution = _resolve_us_stock_symbol_from_question(db, question)
+    if us_symbol_resolution is not None:
+        return us_symbol_resolution
 
     stock_name_resolution = _resolve_stock_name_from_db(db, question)
     if stock_name_resolution is not None:
@@ -900,8 +1158,10 @@ def _effective_mode(
     policy: dict[str, Any],
     warnings: list[str],
 ) -> str:
+    report_capable_scopes = {"stock", "watchlist", "us_stock"}
+
     if requested_mode == "report" and not policy["can_generate_report"]:
-        if policy["can_generate_analysis"] and scope_type in {"stock", "watchlist"}:
+        if policy["can_generate_analysis"] and scope_type in report_capable_scopes:
             warnings.append(
                 "Report mode requires allow_write=true and a server-side trusted request; returned non-persistent analysis instead."
             )
@@ -910,17 +1170,13 @@ def _effective_mode(
         warnings.append(
             "Report mode requires allow_llm=true, allow_write=true, and a server-side trusted request; returned a brief instead."
         )
-        return "brief" if scope_type in {"stock", "watchlist"} else "data_only"
+        return "brief" if scope_type in report_capable_scopes else "data_only"
 
     if requested_mode == "analysis" and not policy["can_generate_analysis"]:
         warnings.append(
             "Analysis mode requires allow_llm=true and a server-side trusted request; returned a brief instead."
         )
-        return "brief" if scope_type in {"stock", "watchlist"} else "data_only"
-
-    if requested_mode in {"analysis", "report"} and scope_type == "us_stock":
-        warnings.append("US stock LLM analysis/report is not persisted yet; returned a tool-augmented brief.")
-        return "brief"
+        return "brief" if scope_type in report_capable_scopes else "data_only"
 
     if requested_mode in {"brief", "analysis", "report"} and scope_type in {"market", "data_freshness"}:
         warnings.append(f"{scope_type} does not have a brief/analysis/report path yet; returned data_only.")
@@ -945,7 +1201,13 @@ def _require_group_id(payload: AiAskRequest) -> int:
         raise ValueError("scope_id must be a numeric watchlist group id.") from exc
 
 
-def _read_data_only(db: Session, payload: AiAskRequest, scope_type: str) -> tuple[str, dict[str, Any]]:
+def _read_data_only(
+    db: Session,
+    payload: AiAskRequest,
+    scope_type: str,
+    *,
+    tool_runs: list[dict[str, Any]] | None = None,
+) -> tuple[str, dict[str, Any]]:
     if scope_type == "market":
         return "omi.read_market_overview", tools.read_market_overview(
             db=db,
@@ -972,6 +1234,7 @@ def _read_data_only(db: Session, payload: AiAskRequest, scope_type: str) -> tupl
         return "omi.read_us_stock_context", agentic_tools.read_us_stock_context(
             db=db,
             symbol=symbol,
+            tool_runs=tool_runs,
         )
 
     group_id = _require_group_id(payload)
@@ -986,7 +1249,13 @@ def _read_data_only(db: Session, payload: AiAskRequest, scope_type: str) -> tupl
     )
 
 
-def _build_brief(db: Session, payload: AiAskRequest, scope_type: str) -> tuple[str, dict[str, Any]]:
+def _build_brief(
+    db: Session,
+    payload: AiAskRequest,
+    scope_type: str,
+    *,
+    tool_runs: list[dict[str, Any]] | None = None,
+) -> tuple[str, dict[str, Any]]:
     if scope_type == "stock":
         stock_id = _require_scope_id(payload, "stock")
         return "omi.generate_stock_brief", reports.build_stock_brief(
@@ -1010,15 +1279,24 @@ def _build_brief(db: Session, payload: AiAskRequest, scope_type: str) -> tuple[s
 
     if scope_type == "us_stock":
         symbol = _require_scope_id(payload, "us_stock")
-        context = agentic_tools.read_us_stock_context(db=db, symbol=symbol)
-        context["kind"] = "us_stock_brief"
-        context["strategy_profile"] = payload.strategy_profile
-        return "omi.generate_us_stock_brief", context
+        return "omi.generate_us_stock_brief", reports.build_us_stock_brief(
+            db=db,
+            symbol=symbol,
+            strategy_profile=payload.strategy_profile,
+            analysis_horizon=payload.analysis_horizon,
+            tool_runs=tool_runs,
+        )
 
-    return _read_data_only(db, payload, scope_type)
+    return _read_data_only(db, payload, scope_type, tool_runs=tool_runs)
 
 
-def _generate_report(db: Session, payload: AiAskRequest, scope_type: str) -> tuple[str, dict[str, Any]]:
+def _generate_report(
+    db: Session,
+    payload: AiAskRequest,
+    scope_type: str,
+    *,
+    tool_runs: list[dict[str, Any]] | None = None,
+) -> tuple[str, dict[str, Any]]:
     if scope_type == "stock":
         stock_id = _require_scope_id(payload, "stock")
         return "omi.generate_stock_llm_report", orchestrator.generate_stock_llm_report(
@@ -1040,10 +1318,26 @@ def _generate_report(db: Session, payload: AiAskRequest, scope_type: str) -> tup
             sort_order=payload.sort_order,
         )
 
-    return _read_data_only(db, payload, scope_type)
+    if scope_type == "us_stock":
+        symbol = _require_scope_id(payload, "us_stock")
+        return "omi.generate_us_stock_llm_report", orchestrator.generate_us_stock_llm_report(
+            db=db,
+            symbol=symbol,
+            strategy_profile=payload.strategy_profile,
+            analysis_horizon=payload.analysis_horizon,
+            tool_runs=tool_runs,
+        )
+
+    return _read_data_only(db, payload, scope_type, tool_runs=tool_runs)
 
 
-def _generate_analysis(db: Session, payload: AiAskRequest, scope_type: str) -> tuple[str, dict[str, Any]]:
+def _generate_analysis(
+    db: Session,
+    payload: AiAskRequest,
+    scope_type: str,
+    *,
+    tool_runs: list[dict[str, Any]] | None = None,
+) -> tuple[str, dict[str, Any]]:
     if scope_type == "stock":
         stock_id = _require_scope_id(payload, "stock")
         return "omi.generate_stock_llm_analysis", orchestrator.generate_stock_llm_analysis(
@@ -1065,7 +1359,17 @@ def _generate_analysis(db: Session, payload: AiAskRequest, scope_type: str) -> t
             sort_order=payload.sort_order,
         )
 
-    return _read_data_only(db, payload, scope_type)
+    if scope_type == "us_stock":
+        symbol = _require_scope_id(payload, "us_stock")
+        return "omi.generate_us_stock_llm_analysis", orchestrator.generate_us_stock_llm_analysis(
+            db=db,
+            symbol=symbol,
+            strategy_profile=payload.strategy_profile,
+            analysis_horizon=payload.analysis_horizon,
+            tool_runs=tool_runs,
+        )
+
+    return _read_data_only(db, payload, scope_type, tool_runs=tool_runs)
 
 
 def _extract_list(result: dict[str, Any], key: str) -> list[Any]:
@@ -1093,6 +1397,340 @@ def _score_display(value: Any) -> str | None:
         return None
     sign = "+" if value > 0 else ""
     return f"{sign}{int(round(value))}"
+
+
+def _text_value(value: Any) -> str | None:
+    if value is None:
+        return None
+
+    text = str(value).strip()
+    return text or None
+
+
+def _text_list(value: Any, *, limit: int | None = None) -> list[str]:
+    if not isinstance(value, list):
+        return []
+
+    texts: list[str] = []
+    for item in value:
+        text = _text_value(item)
+        if text is None:
+            continue
+        if text in texts:
+            continue
+        texts.append(text)
+        if limit is not None and len(texts) >= limit:
+            break
+    return texts
+
+
+def _append_unique_texts(target: list[str], values: list[str], *, limit: int) -> None:
+    for value in values:
+        if value in target:
+            continue
+        target.append(value)
+        if len(target) >= limit:
+            return
+
+
+def _llm_report_from_result(result: dict[str, Any]) -> dict[str, Any]:
+    llm = result.get("llm") if isinstance(result.get("llm"), dict) else {}
+    report = llm.get("report") if isinstance(llm.get("report"), dict) else None
+    if isinstance(report, dict):
+        return report
+
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    report = summary.get("llm") if isinstance(summary.get("llm"), dict) else None
+    return report if isinstance(report, dict) else {}
+
+
+def _consumer_detail_from_llm_report(report: dict[str, Any]) -> str:
+    lines: list[str] = []
+    headline = _text_value(report.get("headline"))
+    if headline:
+        lines.append(f"結論：{headline}")
+
+    sections = (
+        ("key_observations", "重點"),
+        ("interpretation", "解讀"),
+        ("risks", "風險"),
+        ("missing_data", "資料限制"),
+        ("next_checks", "下一步"),
+    )
+    for key, label in sections:
+        items = _text_list(report.get(key))
+        if not items:
+            continue
+        lines.append(f"{label}：")
+        lines.extend(f"- {item}" for item in items)
+
+    disclaimer = _text_value(report.get("disclaimer"))
+    if disclaimer:
+        lines.append(f"限制：{disclaimer}")
+    return "\n".join(lines)
+
+
+def _consumer_text(answer: dict[str, Any]) -> str:
+    lines: list[str] = []
+    headline = _text_value(answer.get("headline"))
+    if headline:
+        lines.append(f"結論：{headline}")
+
+    stance = _text_value(answer.get("stance_label"))
+    confidence = _text_value(answer.get("confidence_label"))
+    if stance or confidence:
+        parts = []
+        if stance:
+            parts.append(f"方向：{stance}")
+        if confidence:
+            parts.append(f"信心：{confidence}")
+        lines.append(" / ".join(parts))
+
+    summary = _text_list(answer.get("summary"), limit=CONSUMER_SUMMARY_LIMIT)
+    if summary:
+        lines.append("重點：")
+        lines.extend(f"- {item}" for item in summary)
+
+    actions = answer.get("action_plan")
+    if isinstance(actions, list) and actions:
+        lines.append("怎麼做：")
+        for item in actions[:CONSUMER_SUMMARY_LIMIT]:
+            if not isinstance(item, dict):
+                continue
+            label = _text_value(item.get("label"))
+            text = _text_value(item.get("text"))
+            if text:
+                lines.append(f"- {label + '：' if label else ''}{text}")
+
+    risks = _text_list(answer.get("risks"), limit=2)
+    if risks:
+        lines.append("風險：")
+        lines.extend(f"- {item}" for item in risks)
+
+    return "\n".join(lines)
+
+
+def _generic_data_limits(*, missing: list[Any], warnings: list[Any]) -> list[str]:
+    limits: list[str] = []
+    if missing:
+        limits.append(f"仍有 {len(missing)} 項資料缺口，結論需保留彈性。")
+    _append_unique_texts(limits, _text_list(warnings, limit=2), limit=3)
+    return limits
+
+
+def _build_llm_consumer_answer(
+    *,
+    report: dict[str, Any],
+    target: dict[str, Any],
+    analysis_digest: dict[str, Any],
+    missing: list[Any],
+    warnings: list[Any],
+) -> dict[str, Any]:
+    stance = _text_value(report.get("stance"))
+    confidence = _text_value(report.get("confidence"))
+    headline = (
+        _text_value(report.get("headline"))
+        or _text_value(analysis_digest.get("selected_title"))
+        or _text_value(target.get("label"))
+        or "OMI 已完成分析"
+    )
+
+    summary: list[str] = []
+    _append_unique_texts(summary, _text_list(report.get("key_observations"), limit=2), limit=CONSUMER_SUMMARY_LIMIT)
+    _append_unique_texts(summary, _text_list(report.get("interpretation"), limit=2), limit=CONSUMER_SUMMARY_LIMIT)
+    if not summary and analysis_digest.get("display"):
+        summary.append(str(analysis_digest["display"]))
+
+    interpretations = _text_list(report.get("interpretation"))
+    next_checks = _text_list(report.get("next_checks"))
+    risks = _text_list(report.get("risks"))
+    missing_data = _text_list(report.get("missing_data"))
+
+    action_plan = [
+        {
+            "label": "已持有",
+            "text": interpretations[0] if interpretations else "先依目前結論觀察，不把單一訊號當成確認。",
+        },
+        {
+            "label": "想進場",
+            "text": next_checks[0] if next_checks else "等下一筆價格、量能或關鍵均線確認後再判斷。",
+        },
+        {
+            "label": "失效",
+            "text": risks[0] if risks else "若價格或量能轉弱，原本結論需要降級。",
+        },
+    ]
+    data_limits = missing_data[:3] or _generic_data_limits(missing=missing, warnings=warnings)
+
+    answer = {
+        "kind": "consumer_market_answer",
+        "style": "layered_summary",
+        "source": "llm_report",
+        "headline": headline,
+        "stance": stance,
+        "stance_label": STANCE_LABELS.get(str(stance), stance or "未定"),
+        "confidence": confidence,
+        "confidence_label": CONFIDENCE_LABELS.get(str(confidence), confidence or "未定"),
+        "summary": summary,
+        "action_plan": action_plan,
+        "risks": risks[:2],
+        "data_limits": data_limits,
+        "detail": _consumer_detail_from_llm_report(report),
+    }
+    answer["text"] = _consumer_text(answer)
+    return answer
+
+
+def _build_watchlist_consumer_answer(
+    *,
+    human_answer: dict[str, Any],
+    overview: dict[str, Any],
+    missing: list[Any],
+    warnings: list[Any],
+) -> dict[str, Any]:
+    sections = human_answer.get("sections") if isinstance(human_answer.get("sections"), list) else []
+    section_map: dict[str, str] = {}
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        label = _text_value(section.get("label"))
+        text = _text_value(section.get("text"))
+        if label and text:
+            section_map[label] = text
+
+    lines = _text_list(human_answer.get("lines")) or _text_list(overview.get("answer_outline"))
+    headline = section_map.get("結論") or _text_value(overview.get("display")) or (lines[0] if lines else "自選股整理完成")
+    summary = [
+        text
+        for key in ("追蹤", "等回測", "保守")
+        if (text := section_map.get(key))
+    ]
+    if not summary:
+        summary = lines[1 : 1 + CONSUMER_SUMMARY_LIMIT]
+
+    action_plan = [
+        {"label": "優先看", "text": section_map.get("追蹤") or "先看排名與量價最明確的個股。"},
+        {"label": "等回測", "text": section_map.get("等回測") or "漲幅過大的標的等回測後再確認。"},
+        {"label": "保守", "text": section_map.get("保守") or "弱勢或資料不足標的先降低追蹤權重。"},
+    ]
+    data_limits = []
+    if section_map.get("資料"):
+        data_limits.append(section_map["資料"])
+    data_limits.extend(_generic_data_limits(missing=missing, warnings=warnings))
+
+    confidence = _text_value(overview.get("confidence"))
+    answer = {
+        "kind": "consumer_market_answer",
+        "style": "layered_summary",
+        "source": "watchlist_overview",
+        "headline": headline,
+        "stance": _text_value(overview.get("stance")),
+        "stance_label": _text_value(overview.get("stance")) or "未定",
+        "confidence": confidence,
+        "confidence_label": CONFIDENCE_LABELS.get(str(confidence), confidence or "未定"),
+        "summary": summary[:CONSUMER_SUMMARY_LIMIT],
+        "action_plan": action_plan,
+        "risks": [],
+        "data_limits": list(dict.fromkeys(data_limits))[:3],
+        "detail": _text_value(human_answer.get("text")) or "\n".join(lines),
+        "source_human_answer": human_answer,
+    }
+    answer["text"] = _consumer_text(answer)
+    return answer
+
+
+def _build_digest_consumer_answer(
+    *,
+    target: dict[str, Any],
+    analysis_digest: dict[str, Any],
+    missing: list[Any],
+    warnings: list[Any],
+) -> dict[str, Any]:
+    confidence = _text_value(analysis_digest.get("selected_confidence"))
+    headline = (
+        _text_value(analysis_digest.get("selected_title"))
+        or _text_value(analysis_digest.get("display"))
+        or _text_value(target.get("label"))
+        or "OMI 已完成資料整理"
+    )
+    summary = [
+        text
+        for text in (
+            _text_value(analysis_digest.get("display")),
+            _text_value(analysis_digest.get("selected_summary")),
+        )
+        if text
+    ]
+    scores = analysis_digest.get("scores") if isinstance(analysis_digest.get("scores"), dict) else {}
+    if scores:
+        score_parts = [
+            f"{ANALYSIS_HORIZON_LABELS.get(str(key), str(key))} {_score_display(value) or '-'}"
+            for key, value in scores.items()
+            if value is not None
+        ]
+        if score_parts:
+            summary.append("分數：" + "、".join(score_parts[:4]))
+
+    action_plan = [
+        {"label": "已持有", "text": "先依目前方向觀察，等待下一筆量價或指標確認。"},
+        {"label": "想進場", "text": "不要只看單一評分，等價格、量能與市場相對強弱同向再提高權重。"},
+        {"label": "失效", "text": "若主要均線或動能轉弱，這份短評需要重新計算。"},
+    ]
+    answer = {
+        "kind": "consumer_market_answer",
+        "style": "layered_summary",
+        "source": "analysis_digest",
+        "headline": headline,
+        "stance": None,
+        "stance_label": "未定",
+        "confidence": confidence,
+        "confidence_label": CONFIDENCE_LABELS.get(str(confidence), confidence or "未定"),
+        "summary": list(dict.fromkeys(summary))[:CONSUMER_SUMMARY_LIMIT],
+        "action_plan": action_plan,
+        "risks": [],
+        "data_limits": _generic_data_limits(missing=missing, warnings=warnings),
+        "detail": _text_value(analysis_digest.get("display")) or "",
+    }
+    answer["text"] = _consumer_text(answer)
+    return answer
+
+
+def _build_consumer_human_answer(
+    *,
+    target: dict[str, Any],
+    result: dict[str, Any],
+    analysis_digest: dict[str, Any],
+    missing: list[Any],
+    warnings: list[Any],
+) -> dict[str, Any]:
+    report = _llm_report_from_result(result)
+    if report:
+        return _build_llm_consumer_answer(
+            report=report,
+            target=target,
+            analysis_digest=analysis_digest,
+            missing=missing,
+            warnings=warnings,
+        )
+
+    human_answer = analysis_digest.get("human_answer") if isinstance(analysis_digest.get("human_answer"), dict) else {}
+    if human_answer:
+        return _build_watchlist_consumer_answer(
+            human_answer=human_answer,
+            overview=analysis_digest,
+            missing=missing,
+            warnings=warnings,
+        )
+
+    if analysis_digest:
+        return _build_digest_consumer_answer(
+            target=target,
+            analysis_digest=analysis_digest,
+            missing=missing,
+            warnings=warnings,
+        )
+
+    return {}
 
 
 def _extract_analysis_digest(result: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
@@ -1449,29 +2087,16 @@ def ask(
         warnings.append(
             "Report mode skipped because local OMI data is incomplete; returned a brief instead."
         )
-        effective_mode = "brief" if scope_type in {"stock", "watchlist"} else "data_only"
+        effective_mode = "brief" if scope_type in {"stock", "watchlist", "us_stock"} else "data_only"
 
-    if scope_type == "us_stock":
-        symbol = _require_scope_id(payload, "us_stock")
-        result = agentic_tools.read_us_stock_context(
-            db=db,
-            symbol=symbol,
-            tool_runs=tool_runs,
-        )
-        if effective_mode == "brief":
-            result["kind"] = "us_stock_brief"
-            result["strategy_profile"] = payload.strategy_profile
-            action = "omi.generate_us_stock_brief"
-        else:
-            action = "omi.read_us_stock_context"
-    elif effective_mode == "data_only":
-        action, result = _read_data_only(db, payload, scope_type)
+    if effective_mode == "data_only":
+        action, result = _read_data_only(db, payload, scope_type, tool_runs=tool_runs)
     elif effective_mode == "brief":
-        action, result = _build_brief(db, payload, scope_type)
+        action, result = _build_brief(db, payload, scope_type, tool_runs=tool_runs)
     elif effective_mode == "analysis":
-        action, result = _generate_analysis(db, payload, scope_type)
+        action, result = _generate_analysis(db, payload, scope_type, tool_runs=tool_runs)
     elif effective_mode == "report":
-        action, result = _generate_report(db, payload, scope_type)
+        action, result = _generate_report(db, payload, scope_type, tool_runs=tool_runs)
     else:
         raise ValueError(f"Unsupported mode: {effective_mode}")
 
@@ -1493,11 +2118,23 @@ def ask(
     answer_ready = not clarification.get("required")
     if any(action.get("type") == "connect_us_stock_context" for action in next_actions):
         warnings.append(
-            "ADR-specific evidence is not connected to omi.ask yet; answered from the Taiwan stock context first."
+            "ADR-specific evidence is available through target.type=us_stock; answered from the resolved Taiwan stock context first."
         )
 
     combined_missing = list(dict.fromkeys(result_missing + freshness_missing))
     combined_warnings = list(dict.fromkeys(warnings + freshness_warnings + result_warnings))
+    response_target = _resolution_target(resolution)
+    consumer_human_answer = _build_consumer_human_answer(
+        target=response_target,
+        result=result,
+        analysis_digest=analysis_digest,
+        missing=combined_missing,
+        warnings=combined_warnings,
+    )
+    response_analysis = dict(analysis_digest)
+    if consumer_human_answer:
+        response_analysis["human_answer"] = consumer_human_answer
+
     evidence_passport = build_evidence_passport(
         kind="ai_ask",
         as_of=_result_as_of(result, analysis_digest),
@@ -1513,7 +2150,7 @@ def ask(
         "kind": "ai_ask",
         "contract_version": CONTRACT_VERSION,
         "question": payload.question,
-        "target": _resolution_target(resolution),
+        "target": response_target,
         "mode": {
             "requested": requested_mode,
             "effective": effective_mode,
@@ -1526,7 +2163,7 @@ def ask(
         "next_actions": next_actions,
         "answer_ready": answer_ready,
         "report_level": _report_level(effective_mode, freshness_result),
-        "analysis": analysis_digest,
+        "analysis": response_analysis,
         "policy": policy,
         "tool_plan": tool_plan,
         "tool_runs": tool_runs,

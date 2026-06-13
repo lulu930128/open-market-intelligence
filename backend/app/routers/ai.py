@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from app.ai import agentic_tools
 from app.ai import ask as ai_ask
 from app.ai import llm as ai_llm
 from app.ai import memory as ai_memory
@@ -432,6 +433,83 @@ def generate_stock_llm_report(
             strategy_profile=strategy_profile,
             branch_days=branch_days,
             include_intraday=include_intraday,
+            analysis_horizon=analysis_horizon,
+        )
+    except ai_llm.OpenAILLMError as exc:
+        _raise_llm_http_error(exc)
+
+
+@router.get("/us-stocks/{symbol}/context", response_model=AiDataEnvelope)
+def read_us_stock_context(
+    symbol: str,
+    db: Session = Depends(get_db),
+):
+    return agentic_tools.read_us_stock_context(db=db, symbol=symbol)
+
+
+@router.get("/us-stocks/{symbol}/brief", response_model=AiReportEnvelope)
+def build_us_stock_brief(
+    symbol: str,
+    strategy_profile: str = "short_term_momentum",
+    analysis_horizon: str = Query(default="swing", pattern="^(auto|intraday|short|swing|long)$"),
+    db: Session = Depends(get_db),
+):
+    return reports.build_us_stock_brief(
+        db=db,
+        symbol=symbol,
+        strategy_profile=strategy_profile,
+        analysis_horizon=analysis_horizon,
+    )
+
+
+@router.post("/us-stocks/{symbol}/brief/save", response_model=AiStoredReportRead)
+def save_us_stock_brief(
+    symbol: str,
+    request: Request,
+    strategy_profile: str = "short_term_momentum",
+    analysis_horizon: str = Query(default="swing", pattern="^(auto|intraday|short|swing|long)$"),
+    db: Session = Depends(get_db),
+):
+    _require_trusted_ai_request(request, "Saving US stock brief")
+    envelope = reports.build_us_stock_brief(
+        db=db,
+        symbol=symbol,
+        strategy_profile=strategy_profile,
+        analysis_horizon=analysis_horizon,
+    )
+    target = (envelope.get("scope") or {}).get("target") or {}
+    normalized_symbol = str(target.get("id") or symbol).upper()
+    return _save_brief_report(
+        db=db,
+        envelope=envelope,
+        report_type="us_stock_brief",
+        scope_type="us_stock",
+        scope_id=normalized_symbol,
+        strategy_profile=envelope["strategy_profile"],
+        title=f"US stock brief {normalized_symbol}",
+        tool_name="omi.generate_us_stock_brief",
+        arguments={
+            "symbol": normalized_symbol,
+            "strategy_profile": strategy_profile,
+            "analysis_horizon": analysis_horizon,
+        },
+    )
+
+
+@router.post("/us-stocks/{symbol}/brief/generate", response_model=AiStoredReportRead)
+def generate_us_stock_llm_report(
+    symbol: str,
+    request: Request,
+    strategy_profile: str = "short_term_momentum",
+    analysis_horizon: str = Query(default="swing", pattern="^(auto|intraday|short|swing|long)$"),
+    db: Session = Depends(get_db),
+):
+    _require_trusted_ai_request(request, "Generating US stock LLM report")
+    try:
+        return orchestrator.generate_us_stock_llm_report(
+            db=db,
+            symbol=symbol,
+            strategy_profile=strategy_profile,
             analysis_horizon=analysis_horizon,
         )
     except ai_llm.OpenAILLMError as exc:

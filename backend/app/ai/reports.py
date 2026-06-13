@@ -2,6 +2,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.ai import agentic_tools
 from app.ai import memory as ai_memory
 from app.ai import prompts, tools
 
@@ -269,6 +270,165 @@ def _compact_watchlist_summary(
         "top_rows": top_rows,
         "bottom_rows": bottom_rows,
         "next_checks": context.get("missing", []),
+    }
+
+
+def _compact_us_stock_summary(context: dict[str, Any]) -> dict[str, Any]:
+    summary = context.get("summary") if isinstance(context.get("summary"), dict) else {}
+    data = context.get("data") if isinstance(context.get("data"), dict) else {}
+    daily_rows = data.get("daily_prices") if isinstance(data.get("daily_prices"), list) else []
+    sec_fundamentals = (
+        data.get("sec_fundamentals") if isinstance(data.get("sec_fundamentals"), dict) else {}
+    )
+    corporate_actions = (
+        data.get("corporate_actions") if isinstance(data.get("corporate_actions"), list) else []
+    )
+    short_volume = data.get("short_volume") if isinstance(data.get("short_volume"), list) else []
+    profile = summary.get("profile") if isinstance(summary.get("profile"), dict) else {}
+
+    latest_daily = daily_rows[0] if daily_rows else {}
+    previous_daily = daily_rows[1] if len(daily_rows) > 1 else {}
+    latest_close = _numeric(latest_daily.get("close_price"))
+    previous_close = _numeric(previous_daily.get("close_price"))
+    change_pct = None
+    if latest_close is not None and previous_close not in {None, 0.0}:
+        change_pct = ((latest_close - float(previous_close)) / float(previous_close)) * 100.0
+
+    highlights: list[str] = []
+    checks: list[str] = []
+    if latest_close is not None:
+        change_text = f" change={_pct_display(change_pct)}" if change_pct is not None else ""
+        highlights.append(
+            "Latest US close "
+            f"{latest_close} on {latest_daily.get('trade_date')}.{change_text}"
+        )
+    else:
+        checks.append("US daily price data is missing.")
+
+    if profile:
+        highlights.append(
+            "Profile "
+            f"{profile.get('company_name') or '-'} / {profile.get('sector') or '-'} / "
+            f"{profile.get('industry') or '-'}."
+        )
+    else:
+        checks.append("US company profile is missing.")
+
+    metric_count = sec_fundamentals.get("metric_count")
+    if metric_count:
+        highlights.append(
+            "SEC fundamentals "
+            f"{metric_count} metrics, latest filed {sec_fundamentals.get('latest_filed_date') or '-'}."
+        )
+    else:
+        checks.append("SEC company facts are missing.")
+
+    if short_volume:
+        latest_short = short_volume[0]
+        highlights.append(
+            "FINRA short volume "
+            f"{_pct_display(latest_short.get('short_ratio'))} on {latest_short.get('trade_date')}."
+        )
+    else:
+        checks.append("FINRA short volume is missing.")
+
+    if corporate_actions:
+        highlights.append(f"Corporate actions rows={len(corporate_actions)}.")
+
+    checks.extend(context.get("missing") or [])
+    return {
+        "highlights": highlights,
+        "intraday": summary.get("intraday"),
+        "latest": {
+            "trade_date": latest_daily.get("trade_date"),
+            "close": latest_close,
+            "previous_close": previous_close,
+            "change_pct": change_pct,
+            "change_pct_text": _pct_display(change_pct),
+            "volume": latest_daily.get("trade_volume"),
+        },
+        "coverage": {
+            "daily_rows": len(daily_rows),
+            "has_profile": bool(profile),
+            "sec_metric_count": metric_count or 0,
+            "corporate_action_count": len(corporate_actions),
+            "short_volume_rows": len(short_volume),
+        },
+        "next_checks": list(dict.fromkeys(checks)),
+    }
+
+
+def _build_us_stock_analysis(context: dict[str, Any], requested_horizon: str) -> dict[str, Any]:
+    compact = _compact_us_stock_summary(context)
+    latest = compact.get("latest") if isinstance(compact.get("latest"), dict) else {}
+    coverage = compact.get("coverage") if isinstance(compact.get("coverage"), dict) else {}
+    missing = context.get("missing") or []
+    warnings = context.get("warnings") or []
+
+    change_pct = _numeric(latest.get("change_pct"))
+    score = 0
+    if change_pct is not None:
+        score += int(max(-35, min(35, round(change_pct * 4))))
+    if coverage.get("daily_rows"):
+        score += 10
+    if coverage.get("has_profile"):
+        score += 8
+    if coverage.get("sec_metric_count"):
+        score += 8
+    if coverage.get("short_volume_rows"):
+        score += 4
+    score -= min(len(missing) * 6, 30)
+    score -= min(len(warnings) * 3, 15)
+    score = max(-100, min(100, score))
+
+    if not coverage.get("daily_rows"):
+        title = "美股資料不足"
+        confidence = "low"
+    elif score >= 25:
+        title = "美股短線偏強"
+        confidence = "medium" if missing else "high"
+    elif score <= -15:
+        title = "美股短線偏弱"
+        confidence = "medium" if missing else "high"
+    else:
+        title = "美股資料中性"
+        confidence = "medium" if not missing else "low"
+
+    horizon = tools.normalize_analysis_horizon(requested_horizon)
+    summary_parts = []
+    if latest.get("close") is not None:
+        summary_parts.append(
+            f"收盤 {latest.get('close')}，漲跌幅 {latest.get('change_pct_text') or '-'}"
+        )
+    summary_parts.append(
+        "覆蓋："
+        f"日線 {coverage.get('daily_rows') or 0} 筆、"
+        f"SEC {coverage.get('sec_metric_count') or 0} 指標、"
+        f"short volume {coverage.get('short_volume_rows') or 0} 筆"
+    )
+    if missing:
+        summary_parts.append(f"缺口 {len(missing)} 項")
+
+    return {
+        "requested_horizon": requested_horizon,
+        "selected_horizon": horizon,
+        "selected_timeframe": "us_daily",
+        "selected_score": score,
+        "selected_title": title,
+        "selected_summary": "；".join(summary_parts),
+        "selected_confidence": confidence,
+        "scores": {
+            "intraday": score if horizon == "intraday" else None,
+            "short": score,
+            "swing": score,
+            "long": score if coverage.get("sec_metric_count") else None,
+        },
+        "components": [
+            {"key": "daily_price", "included": bool(coverage.get("daily_rows")), "weight": 0.45},
+            {"key": "profile", "included": bool(coverage.get("has_profile")), "weight": 0.15},
+            {"key": "sec_fundamentals", "included": bool(coverage.get("sec_metric_count")), "weight": 0.25},
+            {"key": "short_volume", "included": bool(coverage.get("short_volume_rows")), "weight": 0.15},
+        ],
     }
 
 
@@ -677,6 +837,50 @@ def build_stock_brief(
             "memories": memories,
         },
         "summary": _compact_stock_summary(context),
+    }
+
+
+def build_us_stock_brief(
+    db: Session,
+    symbol: str,
+    *,
+    strategy_profile: str = "short_term_momentum",
+    analysis_horizon: str = "swing",
+    tool_runs: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    context = agentic_tools.read_us_stock_context(
+        db=db,
+        symbol=symbol,
+        tool_runs=tool_runs,
+    )
+    profile = prompts.get_strategy_profile(strategy_profile)
+    normalized_symbol = ((context.get("scope") or {}).get("target") or {}).get("id") or symbol
+    memories = _memory_context(
+        db=db,
+        scope_type="us_stock",
+        scope_id=str(normalized_symbol),
+        strategy_profile=profile.key,
+    )
+    data = dict(context.get("data") or {})
+    data["analysis"] = _build_us_stock_analysis(context, analysis_horizon)
+
+    return {
+        **context,
+        "kind": "us_stock_brief",
+        "data": data,
+        "strategy_profile": profile.key,
+        "prompt": {
+            "system": prompts.build_system_prompt(profile.key),
+            "profile": {
+                "key": profile.key,
+                "label": profile.label,
+                "description": profile.description,
+                "focus_points": list(profile.focus_points),
+                "risk_notes": list(profile.risk_notes),
+            },
+            "memories": memories,
+        },
+        "summary": _compact_us_stock_summary({**context, "data": data}),
     }
 
 

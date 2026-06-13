@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import traceback
 from typing import Any
@@ -59,6 +60,41 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 EXPOSE_INTERNAL_TOOLS = _env_bool("OMI_MCP_EXPOSE_INTERNAL_TOOLS", False)
+TRUSTED_DEFAULT_EXTERNAL_FETCH = _env_bool("OMI_MCP_TRUSTED_DEFAULT_EXTERNAL_FETCH", True)
+TRUSTED_DEFAULT_TOOL_BUDGET = {
+    "max_calls": 5,
+    "max_external_fetches": 3,
+    "max_total_seconds": 25,
+}
+US_CONTEXT_HINTS = (
+    "adr",
+    "amex",
+    "arca",
+    "nasdaq",
+    "nyse",
+    "otc",
+    "otcmkts",
+    "ticker",
+    "us stock",
+    "u.s. stock",
+    "美股",
+    "美國股票",
+    "美國個股",
+    "美國上市",
+    "納斯達克",
+    "那斯達克",
+    "紐交所",
+)
+US_EXCHANGE_SYMBOL_PATTERN = re.compile(
+    r"\b(?:NASDAQ|NYSE|AMEX|NYSEARCA|ARCA|CBOE|OTC|OTCMKTS)[:：]\s*([A-Za-z][A-Za-z0-9.$-]{0,15})\b",
+    flags=re.IGNORECASE,
+)
+US_DOLLAR_SYMBOL_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_$.-])\$([A-Za-z][A-Za-z0-9.$-]{0,15})(?![A-Za-z0-9.$-])"
+)
+US_UPPER_SYMBOL_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9.$-])([A-Z][A-Z0-9.$-]{0,15})(?![A-Za-z0-9.$-])"
+)
 
 ASK_TOOL: dict[str, Any] = {
     "name": "omi.ask",
@@ -138,7 +174,10 @@ ASK_TOOL: dict[str, Any] = {
             "allow_external_fetch": {
                 "type": "boolean",
                 "default": False,
-                "description": "Allow trusted OMI backend to call configured external market APIs and update local evidence cache.",
+                "description": (
+                    "Allow trusted OMI backend to call configured external market APIs and update local evidence cache. "
+                    "If omitted, trusted MCP calls default this to true only for clear US stock questions."
+                ),
             },
             "tool_budget": {
                 "type": "object",
@@ -224,6 +263,18 @@ INTERNAL_TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "omi.read_us_stock_context",
+        "title": "Read OMI US Stock Context",
+        "description": "Read an evidence pack for one US stock from local OMI data.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string"},
+            },
+            "required": ["symbol"],
+        },
+    },
+    {
         "name": "omi.read_watchlist_context",
         "title": "Read OMI Watchlist Context",
         "description": "Read ranking and signal context for a watchlist group.",
@@ -287,6 +338,35 @@ INTERNAL_TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "omi.generate_us_stock_brief",
+        "title": "Generate OMI US Stock Brief",
+        "description": "Generate a prompt-ready US stock brief envelope from local OMI evidence.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string"},
+                "strategy_profile": {
+                    "type": "string",
+                    "enum": [
+                        "balanced",
+                        "technical_swing",
+                        "short_term_momentum",
+                        "chip_flow",
+                        "fundamentals_growth",
+                        "dividend_value",
+                    ],
+                    "default": "short_term_momentum",
+                },
+                "analysis_horizon": {
+                    "type": "string",
+                    "enum": ["auto", "intraday", "short", "swing", "long"],
+                    "default": "auto",
+                },
+            },
+            "required": ["symbol"],
+        },
+    },
+    {
         "name": "omi.generate_watchlist_brief",
         "title": "Generate OMI Watchlist Brief",
         "description": "Generate a prompt-ready watchlist brief envelope from local OMI evidence.",
@@ -345,6 +425,35 @@ INTERNAL_TOOLS: list[dict[str, Any]] = [
                 "branch_days": {"type": "integer", "minimum": 1, "maximum": 120, "default": 5},
             },
             "required": ["stock_id"],
+        },
+    },
+    {
+        "name": "omi.generate_us_stock_llm_report",
+        "title": "Generate OMI US Stock LLM Report",
+        "description": "Generate and persist an OpenAI-backed US stock research report from local OMI evidence.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string"},
+                "strategy_profile": {
+                    "type": "string",
+                    "enum": [
+                        "balanced",
+                        "technical_swing",
+                        "short_term_momentum",
+                        "chip_flow",
+                        "fundamentals_growth",
+                        "dividend_value",
+                    ],
+                    "default": "short_term_momentum",
+                },
+                "analysis_horizon": {
+                    "type": "string",
+                    "enum": ["auto", "intraday", "short", "swing", "long"],
+                    "default": "auto",
+                },
+            },
+            "required": ["symbol"],
         },
     },
     {
@@ -500,6 +609,35 @@ INTERNAL_TOOLS: list[dict[str, Any]] = [
                 "branch_days": {"type": "integer", "minimum": 1, "maximum": 120, "default": 5},
             },
             "required": ["stock_id"],
+        },
+    },
+    {
+        "name": "omi.save_us_stock_brief",
+        "title": "Save OMI US Stock Brief",
+        "description": "Generate and persist a US stock brief report in OMI.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string"},
+                "strategy_profile": {
+                    "type": "string",
+                    "enum": [
+                        "balanced",
+                        "technical_swing",
+                        "short_term_momentum",
+                        "chip_flow",
+                        "fundamentals_growth",
+                        "dividend_value",
+                    ],
+                    "default": "short_term_momentum",
+                },
+                "analysis_horizon": {
+                    "type": "string",
+                    "enum": ["auto", "intraday", "short", "swing", "long"],
+                    "default": "auto",
+                },
+            },
+            "required": ["symbol"],
         },
     },
     {
@@ -772,7 +910,60 @@ def _bool_arg(arguments: dict[str, Any], key: str, default: bool) -> bool:
     return bool(value)
 
 
+def _target_from_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    target = arguments.get("target")
+    return target if isinstance(target, dict) else {}
+
+
+def _looks_like_us_symbol(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if text.isdecimal():
+        return False
+    return bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9.$-]{0,15}", text))
+
+
+def _looks_like_us_question(arguments: dict[str, Any]) -> bool:
+    target = _target_from_arguments(arguments)
+    target_type = str(target.get("type") or "").strip().lower()
+    target_id = target.get("id") or target.get("symbol")
+    if target_type == "us_stock":
+        return True
+    if target_type in {"", "auto"} and _looks_like_us_symbol(target_id):
+        return True
+
+    question = str(arguments.get("question") or "")
+    lowered_question = question.lower()
+    if any(hint in lowered_question for hint in US_CONTEXT_HINTS):
+        return True
+    if US_EXCHANGE_SYMBOL_PATTERN.search(question) or US_DOLLAR_SYMBOL_PATTERN.search(question):
+        return True
+    return bool(US_UPPER_SYMBOL_PATTERN.search(question))
+
+
+def _default_allow_external_fetch(arguments: dict[str, Any]) -> bool:
+    if "allow_external_fetch" in arguments:
+        return _bool_arg(arguments, "allow_external_fetch", False)
+
+    return bool(
+        AI_TRUST_TOKEN
+        and TRUSTED_DEFAULT_EXTERNAL_FETCH
+        and _looks_like_us_question(arguments)
+    )
+
+
+def _tool_budget_arg(arguments: dict[str, Any], *, allow_external_fetch: bool) -> dict[str, Any]:
+    tool_budget = arguments.get("tool_budget")
+    if isinstance(tool_budget, dict) and tool_budget:
+        return tool_budget
+    if allow_external_fetch:
+        return dict(TRUSTED_DEFAULT_TOOL_BUDGET)
+    return {}
+
+
 def _ask_payload(arguments: dict[str, Any]) -> dict[str, Any]:
+    allow_external_fetch = _default_allow_external_fetch(arguments)
     return {
         "contract_version": arguments.get("contract_version", "omi.ai.ask.v2"),
         "question": _require(arguments, "question"),
@@ -781,8 +972,8 @@ def _ask_payload(arguments: dict[str, Any]) -> dict[str, Any]:
         "caller_profile": arguments.get("caller_profile", "kuro_readonly"),
         "allow_llm": _bool_arg(arguments, "allow_llm", False),
         "allow_write": _bool_arg(arguments, "allow_write", False),
-        "allow_external_fetch": _bool_arg(arguments, "allow_external_fetch", False),
-        "tool_budget": arguments.get("tool_budget") or {},
+        "allow_external_fetch": allow_external_fetch,
+        "tool_budget": _tool_budget_arg(arguments, allow_external_fetch=allow_external_fetch),
         "refresh_policy": arguments.get("refresh_policy") or {
             "mode": "stale_first",
             "before_answer": True,
@@ -825,6 +1016,10 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
             },
         )
 
+    if name == "omi.read_us_stock_context":
+        symbol = quote(str(_require(arguments, "symbol")).upper(), safe="")
+        return _api_get(f"/api/ai/us-stocks/{symbol}/context")
+
     if name == "omi.read_watchlist_context":
         group_id = int(_require(arguments, "group_id"))
         return _api_get(
@@ -853,6 +1048,16 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
             },
         )
 
+    if name == "omi.generate_us_stock_brief":
+        symbol = quote(str(_require(arguments, "symbol")).upper(), safe="")
+        return _api_get(
+            f"/api/ai/us-stocks/{symbol}/brief",
+            {
+                "strategy_profile": arguments.get("strategy_profile", "short_term_momentum"),
+                "analysis_horizon": arguments.get("analysis_horizon", "auto"),
+            },
+        )
+
     if name == "omi.generate_watchlist_brief":
         group_id = int(_require(arguments, "group_id"))
         return _api_get(
@@ -872,6 +1077,16 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
                 "strategy_profile": arguments.get("strategy_profile", "short_term_momentum"),
                 "branch_days": arguments.get("branch_days", 5),
                 "include_intraday": _bool_arg(arguments, "include_intraday", False),
+                "analysis_horizon": arguments.get("analysis_horizon", "auto"),
+            },
+        )
+
+    if name == "omi.generate_us_stock_llm_report":
+        symbol = quote(str(_require(arguments, "symbol")).upper(), safe="")
+        return _api_post(
+            f"/api/ai/us-stocks/{symbol}/brief/generate",
+            {
+                "strategy_profile": arguments.get("strategy_profile", "short_term_momentum"),
                 "analysis_horizon": arguments.get("analysis_horizon", "auto"),
             },
         )
@@ -955,6 +1170,16 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
                 "strategy_profile": arguments.get("strategy_profile", "short_term_momentum"),
                 "branch_days": arguments.get("branch_days", 5),
                 "include_intraday": _bool_arg(arguments, "include_intraday", False),
+                "analysis_horizon": arguments.get("analysis_horizon", "auto"),
+            },
+        )
+
+    if name == "omi.save_us_stock_brief":
+        symbol = quote(str(_require(arguments, "symbol")).upper(), safe="")
+        return _api_post(
+            f"/api/ai/us-stocks/{symbol}/brief/save",
+            {
+                "strategy_profile": arguments.get("strategy_profile", "short_term_momentum"),
                 "analysis_horizon": arguments.get("analysis_horizon", "auto"),
             },
         )

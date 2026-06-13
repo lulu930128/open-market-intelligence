@@ -392,6 +392,18 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                 },
             },
             {
+                "name": "omi.read_us_stock_context",
+                "title": "Read US Stock Context",
+                "description": "Read an evidence pack for one US stock from local OMI data.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": {"type": "string"},
+                    },
+                    "required": ["symbol"],
+                },
+            },
+            {
                 "name": "omi.read_watchlist_context",
                 "title": "Read Watchlist Context",
                 "description": "Read ranking and signal context for a watchlist group.",
@@ -450,6 +462,34 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                         "branch_days": {"type": "integer", "minimum": 1, "maximum": 120},
                     },
                     "required": ["stock_id"],
+                },
+            },
+            {
+                "name": "omi.generate_us_stock_brief",
+                "title": "Generate US Stock Brief",
+                "description": "Generate a prompt-ready US stock brief envelope from local OMI evidence.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": {"type": "string"},
+                        "strategy_profile": {
+                            "type": "string",
+                            "enum": [
+                                "balanced",
+                                "technical_swing",
+                                "short_term_momentum",
+                                "chip_flow",
+                                "fundamentals_growth",
+                                "dividend_value",
+                            ],
+                        },
+                        "analysis_horizon": {
+                            "type": "string",
+                            "enum": ["auto", "intraday", "short", "swing", "long"],
+                            "default": "auto",
+                        },
+                    },
+                    "required": ["symbol"],
                 },
             },
             {
@@ -512,6 +552,34 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                         "branch_days": {"type": "integer", "minimum": 1, "maximum": 120},
                     },
                     "required": ["stock_id"],
+                },
+            },
+            {
+                "name": "omi.generate_us_stock_llm_report",
+                "title": "Generate US Stock LLM Report",
+                "description": "Generate and persist an OpenAI-backed US stock research report from local OMI evidence.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": {"type": "string"},
+                        "strategy_profile": {
+                            "type": "string",
+                            "enum": [
+                                "balanced",
+                                "technical_swing",
+                                "short_term_momentum",
+                                "chip_flow",
+                                "fundamentals_growth",
+                                "dividend_value",
+                            ],
+                        },
+                        "analysis_horizon": {
+                            "type": "string",
+                            "enum": ["auto", "intraday", "short", "swing", "long"],
+                            "default": "auto",
+                        },
+                    },
+                    "required": ["symbol"],
                 },
             },
             {
@@ -662,6 +730,34 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                         "branch_days": {"type": "integer", "minimum": 1, "maximum": 120},
                     },
                     "required": ["stock_id"],
+                },
+            },
+            {
+                "name": "omi.save_us_stock_brief",
+                "title": "Save US Stock Brief",
+                "description": "Generate and persist a US stock brief report in OMI.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": {"type": "string"},
+                        "strategy_profile": {
+                            "type": "string",
+                            "enum": [
+                                "balanced",
+                                "technical_swing",
+                                "short_term_momentum",
+                                "chip_flow",
+                                "fundamentals_growth",
+                                "dividend_value",
+                            ],
+                        },
+                        "analysis_horizon": {
+                            "type": "string",
+                            "enum": ["auto", "intraday", "short", "swing", "long"],
+                            "default": "auto",
+                        },
+                    },
+                    "required": ["symbol"],
                 },
             },
             {

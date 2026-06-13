@@ -685,6 +685,75 @@ class AiFreshnessGuardTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_ask_attaches_consumer_human_answer_from_llm_report(self) -> None:
+        db = make_session()
+        try:
+            add_stock(db)
+            payload = AiAskRequest(
+                question="請分析 2330 的短評與風險",
+                target={"type": "tw_stock", "id": "2330"},
+                mode="analysis",
+                allow_llm=True,
+                allow_write=False,
+            )
+            server_policy = ai_ask.AiAskServerPolicy(
+                can_call_llm=True,
+                can_write=False,
+                trust_source="token",
+            )
+            analysis_result = {
+                "kind": "stock_llm_analysis",
+                "strategy_profile": "short_term_momentum",
+                "data": {
+                    "analysis": {
+                        "requested_horizon": "swing",
+                        "selected_horizon": "swing",
+                        "selected_timeframe": "daily",
+                        "selected_score": 26,
+                        "selected_title": "短線偏多",
+                        "selected_summary": "站上 MA20，量能普通",
+                        "selected_confidence": "medium",
+                    }
+                },
+                "llm": {
+                    "report": {
+                        "headline": "短線偏多但不適合追高",
+                        "stance": "bullish",
+                        "confidence": "medium",
+                        "as_of": "2026-06-12",
+                        "key_observations": ["價格站上 MA20", "MACD 偏多"],
+                        "interpretation": ["短線結構仍偏多，但量能沒有明顯放大。"],
+                        "risks": ["若跌回 MA20，短線結論需要降級。"],
+                        "missing_data": ["盤中即時資料不足。"],
+                        "next_checks": ["觀察下一根 K 是否守住 MA20。"],
+                        "disclaimer": "僅根據 OMI 證據包。",
+                    }
+                },
+                "missing": [],
+                "warnings": [],
+                "source_refs": [{"type": "table", "name": "market_daily_price"}],
+            }
+
+            with patch.object(
+                ai_ask.orchestrator,
+                "generate_stock_llm_analysis",
+                return_value=analysis_result,
+            ):
+                response = ai_ask.ask(db=db, payload=payload, server_policy=server_policy)
+
+            human_answer = response["analysis"]["human_answer"]
+            self.assertEqual(human_answer["kind"], "consumer_market_answer")
+            self.assertEqual(human_answer["source"], "llm_report")
+            self.assertEqual(human_answer["stance_label"], "偏多")
+            self.assertEqual(human_answer["confidence_label"], "中")
+            self.assertIn("短線偏多", human_answer["headline"])
+            self.assertEqual(len(human_answer["summary"]), 3)
+            self.assertEqual([item["label"] for item in human_answer["action_plan"]], ["已持有", "想進場", "失效"])
+            self.assertIn("盤中即時資料不足", human_answer["data_limits"][0])
+            self.assertIn("怎麼做", human_answer["text"])
+        finally:
+            db.close()
+
     def test_ask_downgrades_analysis_without_trust(self) -> None:
         db = make_session()
         try:
@@ -816,6 +885,210 @@ class AiFreshnessGuardTests(unittest.TestCase):
             self.assertFalse(
                 any(action["type"] == "connect_us_stock_context" for action in response["next_actions"])
             )
+        finally:
+            db.close()
+
+    def test_ask_resolves_known_us_symbol_from_question_text(self) -> None:
+        db = make_session()
+        try:
+            add_us_stock(db, symbol="MU")
+            payload = AiAskRequest(
+                question="MU 怎麼看？",
+                mode="auto",
+                allow_llm=False,
+                allow_write=False,
+            )
+
+            response = ai_ask.ask(db=db, payload=payload)
+
+            self.assertEqual(response["target"]["type"], "us_stock")
+            self.assertEqual(response["target"]["id"], "MU")
+            self.assertEqual(response["action"], "omi.generate_us_stock_brief")
+            self.assertEqual(response["resolution"]["source"], "question_us_symbol")
+            self.assertFalse(response["clarification"]["required"])
+        finally:
+            db.close()
+
+    def test_ask_resolves_known_us_symbol_from_auto_target_id(self) -> None:
+        db = make_session()
+        try:
+            add_us_stock(db, symbol="SPCX")
+            payload = AiAskRequest(
+                question="幫我分析這檔",
+                target={"type": "auto", "id": "SPCX"},
+                mode="auto",
+                allow_llm=False,
+                allow_write=False,
+            )
+
+            response = ai_ask.ask(db=db, payload=payload)
+
+            self.assertEqual(response["target"]["type"], "us_stock")
+            self.assertEqual(response["target"]["id"], "SPCX")
+            self.assertEqual(response["action"], "omi.generate_us_stock_brief")
+            self.assertEqual(response["resolution"]["source"], "explicit_scope_id")
+        finally:
+            db.close()
+
+    def test_ask_does_not_treat_ambiguous_ai_word_as_us_stock_without_us_context(self) -> None:
+        db = make_session()
+        try:
+            add_us_stock(db, symbol="AI")
+            payload = AiAskRequest(
+                question="AI 技術趨勢怎麼看？",
+                mode="auto",
+                allow_llm=False,
+                allow_write=False,
+            )
+
+            response = ai_ask.ask(db=db, payload=payload)
+
+            self.assertNotEqual(response["target"]["type"], "us_stock")
+            self.assertEqual(response["action"], "omi.ask.clarify")
+            self.assertTrue(response["clarification"]["required"])
+        finally:
+            db.close()
+
+    def test_ask_resolves_ambiguous_symbol_when_us_context_is_explicit(self) -> None:
+        db = make_session()
+        try:
+            add_us_stock(db, symbol="AI")
+            payload = AiAskRequest(
+                question="AI 這檔美股怎麼看？",
+                mode="auto",
+                allow_llm=False,
+                allow_write=False,
+            )
+
+            response = ai_ask.ask(db=db, payload=payload)
+
+            self.assertEqual(response["target"]["type"], "us_stock")
+            self.assertEqual(response["target"]["id"], "AI")
+            self.assertEqual(response["action"], "omi.generate_us_stock_brief")
+        finally:
+            db.close()
+
+    def test_us_stock_analysis_uses_us_llm_analysis_path_when_trusted(self) -> None:
+        db = make_session()
+        try:
+            add_us_stock(db)
+            payload = AiAskRequest(
+                question="TSM ADR 怎麼看？",
+                target={"type": "us_stock", "id": "TSM"},
+                mode="analysis",
+                allow_llm=True,
+            )
+            server_policy = ai_ask.AiAskServerPolicy(
+                can_call_llm=True,
+                can_write=False,
+                can_external_fetch=False,
+                trust_source="token",
+            )
+            tool_session = {
+                "tool_plan": {"provider": "fallback", "tool_plan": []},
+                "tool_runs": [],
+                "warnings": [],
+                "freshness": {
+                    "kind": "us_stock_freshness",
+                    "is_current": True,
+                    "missing": [],
+                    "warnings": [],
+                },
+            }
+            analysis_result = {
+                "kind": "us_stock_llm_analysis",
+                "strategy_profile": "short_term_momentum",
+                "as_of": "2026-06-12",
+                "data": {
+                    "analysis": {
+                        "requested_horizon": "swing",
+                        "selected_horizon": "swing",
+                        "selected_timeframe": "us_daily",
+                        "selected_score": 18,
+                        "selected_title": "美股短線偏強",
+                        "selected_summary": "TSM ADR evidence ready",
+                        "selected_confidence": "medium",
+                    }
+                },
+                "missing": [],
+                "warnings": [],
+                "source_refs": [{"type": "table", "name": "us_daily_price"}],
+            }
+
+            with (
+                patch.object(ai_ask.agentic_tools, "run_us_stock_tool_session", return_value=tool_session),
+                patch.object(
+                    ai_ask.orchestrator,
+                    "generate_us_stock_llm_analysis",
+                    return_value=analysis_result,
+                ) as generate_analysis,
+            ):
+                response = ai_ask.ask(db=db, payload=payload, server_policy=server_policy)
+
+            generate_analysis.assert_called_once()
+            self.assertEqual(response["target"]["type"], "us_stock")
+            self.assertEqual(response["action"], "omi.generate_us_stock_llm_analysis")
+            self.assertEqual(response["mode"]["effective"], "analysis")
+            self.assertEqual(response["analysis"]["selected_timeframe"], "us_daily")
+        finally:
+            db.close()
+
+    def test_us_stock_report_uses_us_llm_report_path_when_trusted_and_current(self) -> None:
+        db = make_session()
+        try:
+            add_us_stock(db)
+            payload = AiAskRequest(
+                question="TSM ADR 產生正式報告",
+                target={"type": "us_stock", "id": "TSM"},
+                mode="report",
+                allow_llm=True,
+                allow_write=True,
+            )
+            server_policy = ai_ask.AiAskServerPolicy(
+                can_call_llm=True,
+                can_write=True,
+                can_external_fetch=False,
+                trust_source="token",
+            )
+            tool_session = {
+                "tool_plan": {"provider": "fallback", "tool_plan": []},
+                "tool_runs": [],
+                "warnings": [],
+                "freshness": {
+                    "kind": "us_stock_freshness",
+                    "is_current": True,
+                    "missing": [],
+                    "warnings": [],
+                },
+            }
+            report_result = {
+                "kind": "stored_ai_report",
+                "report_type": "us_stock_llm_brief",
+                "scope_type": "us_stock",
+                "scope_id": "TSM",
+                "strategy_profile": "short_term_momentum",
+                "as_of": "2026-06-12",
+                "summary": {},
+                "missing": [],
+                "warnings": [],
+                "source_refs": [{"type": "table", "name": "us_daily_price"}],
+            }
+
+            with (
+                patch.object(ai_ask.agentic_tools, "run_us_stock_tool_session", return_value=tool_session),
+                patch.object(
+                    ai_ask.orchestrator,
+                    "generate_us_stock_llm_report",
+                    return_value=report_result,
+                ) as generate_report,
+            ):
+                response = ai_ask.ask(db=db, payload=payload, server_policy=server_policy)
+
+            generate_report.assert_called_once()
+            self.assertEqual(response["target"]["type"], "us_stock")
+            self.assertEqual(response["action"], "omi.generate_us_stock_llm_report")
+            self.assertEqual(response["mode"]["effective"], "report")
+            self.assertEqual(response["report_level"], "full_report")
         finally:
             db.close()
 

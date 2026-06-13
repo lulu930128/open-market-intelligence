@@ -3,6 +3,7 @@
 import SidebarWatchlistExplorer from "@/components/SidebarWatchlistExplorer";
 import type { MarketRegion } from "@/components/SidebarWatchlistExplorer";
 import { LoadingDots } from "@/components/LoadingPlaceholders";
+import OmiAskDock, { type OmiAskDockContext } from "@/components/OmiAskDock";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
 import StockDetailPanel from "@/components/StockDetailPanel";
 import USStockDetailPanel from "@/components/USStockDetailPanel";
@@ -890,13 +891,17 @@ function USMarketTape({
   selectedGroupName: string | null;
   companyProfile: USCompanyProfileRead | null;
 }) {
-  const primaryIndex = getUsPrimaryMarketIndexConfig();
-  const contextIndex = resolveUsContextIndexConfig({
-    symbol: selectedSymbol,
-    securityName: selectedSecurityName,
-    groupName: selectedGroupName,
-    profile: companyProfile,
-  });
+  const primaryIndex = useMemo(() => getUsPrimaryMarketIndexConfig(), []);
+  const contextIndex = useMemo(
+    () =>
+      resolveUsContextIndexConfig({
+        symbol: selectedSymbol,
+        securityName: selectedSecurityName,
+        groupName: selectedGroupName,
+        profile: companyProfile,
+      }),
+    [companyProfile, selectedGroupName, selectedSecurityName, selectedSymbol]
+  );
   const [snapshots, setSnapshots] = useState<Record<string, USMarketTapeSnapshot>>({});
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -2551,6 +2556,107 @@ export default function MarketDashboardClient({
     />
   );
 
+  const omiAskContext = useMemo<OmiAskDockContext>(() => {
+    if (activeMarket === "us") {
+      if (selectedUsSymbol) {
+        return {
+          market: "us",
+          label: `${selectedUsSymbol}${selectedUsSecurityName ? ` ${selectedUsSecurityName}` : ""}`,
+          target: {
+            type: "us_stock",
+            id: selectedUsSymbol,
+            label: selectedUsSecurityName ?? selectedUsSymbol,
+            market: "US",
+          },
+          uiContext: {
+            market: "us",
+            selected_symbol: selectedUsSymbol,
+            selected_security_name: selectedUsSecurityName,
+            selected_group_id: selectedUsGroupId,
+            selected_group_name: selectedUsGroupName,
+          },
+        };
+      }
+
+      return {
+        market: "us",
+        label: selectedUsGroupName ? `美股 · ${selectedUsGroupName}` : "美股市場",
+        target: {
+          type: "auto",
+          market: "US",
+          label: selectedUsGroupName ?? "美股市場",
+        },
+        uiContext: {
+          market: "us",
+          selected_group_id: selectedUsGroupId,
+          selected_group_name: selectedUsGroupName,
+        },
+      };
+    }
+
+    if (selectedStockId) {
+      return {
+        market: "tw",
+        label: `${selectedStockId}${selectedStockName ? ` ${selectedStockName}` : ""}`,
+        target: {
+          type: "tw_stock",
+          id: selectedStockId,
+          label: selectedStockName ?? selectedStockId,
+          market: "TW",
+        },
+        uiContext: {
+          market: "tw",
+          selected_stock_id: selectedStockId,
+          selected_stock_name: selectedStockName,
+          selected_group_id: activeGroupId,
+          selected_group_name: selectedGroup?.group_name ?? null,
+        },
+      };
+    }
+
+    if (activeGroupId !== null) {
+      const groupLabel = selectedGroup?.group_name ?? String(activeGroupId);
+
+      return {
+        market: "tw",
+        label: `台股 · ${groupLabel}`,
+        target: {
+          type: "tw_watchlist",
+          id: String(activeGroupId),
+          label: groupLabel,
+          market: "TW",
+        },
+        uiContext: {
+          market: "tw",
+          selected_group_id: activeGroupId,
+          selected_group_name: selectedGroup?.group_name ?? null,
+        },
+      };
+    }
+
+    return {
+      market: activeMarket,
+      label: activeMarket === "tw" ? "台股市場" : `${activeMarket.toUpperCase()} 市場`,
+      target: {
+        type: "auto",
+        market: activeMarket.toUpperCase(),
+      },
+      uiContext: {
+        market: activeMarket,
+      },
+    };
+  }, [
+    activeGroupId,
+    activeMarket,
+    selectedGroup?.group_name,
+    selectedStockId,
+    selectedStockName,
+    selectedUsGroupId,
+    selectedUsGroupName,
+    selectedUsSecurityName,
+    selectedUsSymbol,
+  ]);
+
   return (
     <main className="h-screen overflow-hidden bg-slate-100 text-slate-950">
       <div className="flex h-full min-w-[1180px] flex-col">
@@ -2693,6 +2799,7 @@ export default function MarketDashboardClient({
           </section>
         </div>
       </div>
+      <OmiAskDock context={omiAskContext} />
     </main>
   );
 }

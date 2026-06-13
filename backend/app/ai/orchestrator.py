@@ -102,6 +102,24 @@ def generate_stock_llm_analysis(
     return _build_non_persistent_analysis(envelope, kind="stock_llm_analysis")
 
 
+def generate_us_stock_llm_analysis(
+    db: Session,
+    symbol: str,
+    *,
+    strategy_profile: str = "short_term_momentum",
+    analysis_horizon: str = "swing",
+    tool_runs: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    envelope = reports.build_us_stock_brief(
+        db=db,
+        symbol=symbol,
+        strategy_profile=strategy_profile,
+        analysis_horizon=analysis_horizon,
+        tool_runs=tool_runs,
+    )
+    return _build_non_persistent_analysis(envelope, kind="us_stock_llm_analysis")
+
+
 def generate_watchlist_llm_analysis(
     db: Session,
     group_id: int,
@@ -163,6 +181,67 @@ def generate_stock_llm_report(
                     "strategy_profile": strategy_profile,
                     "branch_days": branch_days,
                     "include_intraday": include_intraday,
+                    "analysis_horizon": analysis_horizon,
+                },
+                "result_summary": report_store.report_tool_summary(envelope),
+            },
+            _openai_tool_call(
+                arguments={
+                    "model": llm_result.get("model"),
+                    "response_format": "omi_research_report",
+                },
+                llm_result=llm_result,
+                started_at=started_at,
+                ended_at=ended_at,
+                duration_ms=duration_ms,
+            ),
+        ],
+    )
+    ai_memory.mark_memories_used(db, _memory_ids_from_envelope(envelope))
+    return report_store.serialize_report(report)
+
+
+def generate_us_stock_llm_report(
+    db: Session,
+    symbol: str,
+    *,
+    strategy_profile: str = "short_term_momentum",
+    analysis_horizon: str = "swing",
+    tool_runs: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    envelope = reports.build_us_stock_brief(
+        db=db,
+        symbol=symbol,
+        strategy_profile=strategy_profile,
+        analysis_horizon=analysis_horizon,
+        tool_runs=tool_runs,
+    )
+
+    started_at = _now()
+    started_tick = perf_counter()
+    llm_result = llm.generate_structured_report(envelope)
+    ended_at = _now()
+    duration_ms = int((perf_counter() - started_tick) * 1000)
+
+    enriched = _attach_llm_result(envelope, llm_result)
+    target = (enriched.get("scope") or {}).get("target") or {}
+    normalized_symbol = str(target.get("id") or symbol).upper()
+    report = report_store.save_report(
+        db=db,
+        envelope=enriched,
+        report_type="us_stock_llm_brief",
+        scope_type="us_stock",
+        scope_id=normalized_symbol,
+        strategy_profile=enriched["strategy_profile"],
+        title=_report_title(llm_result["report"].get("headline"), f"AI US stock brief {normalized_symbol}"),
+        model_name=llm_result.get("model"),
+        tool_calls=[
+            {
+                "tool_name": "omi.generate_us_stock_brief",
+                "source": "backend",
+                "arguments": {
+                    "symbol": normalized_symbol,
+                    "strategy_profile": strategy_profile,
                     "analysis_horizon": analysis_horizon,
                 },
                 "result_summary": report_store.report_tool_summary(envelope),

@@ -22,6 +22,7 @@ $env:OMI_API_BASE_URL = "http://127.0.0.1:8300"
 $env:OMI_API_TIMEOUT_SECONDS = "180"
 $env:OMI_MCP_EXPOSE_INTERNAL_TOOLS = "false"
 $env:OMI_MCP_AI_TRUST_TOKEN = ""
+$env:OMI_MCP_TRUSTED_DEFAULT_EXTERNAL_FETCH = "true"
 ```
 
 Public tool:
@@ -35,11 +36,15 @@ watchlist, market, or freshness context and chooses `data_only`, `brief`, `analy
 so it requires a backend server-side trusted request and `allow_llm=true`.
 Report mode calls OpenAI and persists an AI report, so it additionally requires
 `allow_write=true`.
-For US/ADR targets, trusted callers may set `allow_external_fetch=true` and a
-small `tool_budget`; OMI's backend may then ask its LLM planner to choose from
-allowlisted market-data tools, enforce the budget, execute the tools, and return
-`tool_plan` / `tool_runs` evidence. The MCP client does not call those APIs
-directly.
+For US/ADR targets, trusted MCP calls default to a small external-fetch budget
+when the request clearly looks like a US stock question, such as `target.type=us_stock`,
+`target.id=MU`, `$MU`, `NASDAQ:MU`, or a question containing US market hints.
+Set `allow_external_fetch=false` per request or
+`OMI_MCP_TRUSTED_DEFAULT_EXTERNAL_FETCH=false` for the MCP process to disable
+that default. OMI's backend may then ask its LLM planner or fallback planner to
+choose from allowlisted market-data tools, enforce the budget, execute the tools,
+and return `tool_plan` / `tool_runs` evidence. The MCP client does not call those
+APIs directly.
 For Taiwan stock targets, `refresh_policy.mode=stale_first` with
 `before_answer=true` makes OMI check local freshness first and, when trusted
 external fetch is allowed, run the backend `tw.refresh_stock_evidence` tool
@@ -64,11 +69,14 @@ Internal tools:
 
 - `omi.read_market_overview`
 - `omi.read_stock_context`
+- `omi.read_us_stock_context`
 - `omi.read_watchlist_context`
 - `omi.read_data_freshness`
 - `omi.generate_stock_brief`
+- `omi.generate_us_stock_brief`
 - `omi.generate_watchlist_brief`
 - `omi.generate_stock_llm_report`
+- `omi.generate_us_stock_llm_report`
 - `omi.generate_watchlist_llm_report`
 - `omi.read_memories`
 - `omi.write_memory`
@@ -77,6 +85,7 @@ Internal tools:
 - `omi.read_reports`
 - `omi.read_report`
 - `omi.save_stock_brief`
+- `omi.save_us_stock_brief`
 - `omi.save_watchlist_brief`
 
 Memory write tools only change AI research memory rows. They do not modify market,
