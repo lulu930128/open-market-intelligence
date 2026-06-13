@@ -6,6 +6,7 @@ import { LoadingDots } from "@/components/LoadingPlaceholders";
 import OmiAskDock, { type OmiAskDockContext } from "@/components/OmiAskDock";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
 import StockDetailPanel from "@/components/StockDetailPanel";
+import TaiwanFuturesDetailPanel from "@/components/TaiwanFuturesDetailPanel";
 import USStockDetailPanel from "@/components/USStockDetailPanel";
 import USWatchlistSidebar from "@/components/USWatchlistSidebar";
 import { fetchJson } from "@/lib/api";
@@ -103,6 +104,7 @@ function buildDashboardHref(params: {
   market?: MarketRegion;
   groupId?: number | null;
   stockId?: string | null;
+  futuresSymbol?: string | null;
   symbol?: string | null;
 }) {
   const searchParams = new URLSearchParams();
@@ -112,6 +114,7 @@ function buildDashboardHref(params: {
     searchParams.set("group_id", String(params.groupId));
   }
   if (params.stockId) searchParams.set("stock_id", params.stockId);
+  if (params.futuresSymbol) searchParams.set("futures", params.futuresSymbol);
   if (params.symbol) searchParams.set("symbol", params.symbol);
 
   const query = searchParams.toString();
@@ -126,6 +129,7 @@ type Props = {
   initialSelectedGroupId: number | null;
   initialSelectedStockId: string | null;
   initialSelectedStockName: string | null;
+  initialSelectedFuturesSymbol: string | null;
   initialSelectedUsSymbol: string | null;
   initialSelectedUsSecurityName: string | null;
   initialChartData: ChartPoint[];
@@ -1424,6 +1428,7 @@ export default function MarketDashboardClient({
   initialSelectedGroupId,
   initialSelectedStockId,
   initialSelectedStockName,
+  initialSelectedFuturesSymbol,
   initialSelectedUsSymbol,
   initialSelectedUsSecurityName,
   initialChartData,
@@ -1455,6 +1460,9 @@ export default function MarketDashboardClient({
   );
   const [selectedStockName, setSelectedStockName] = useState<string | null>(
     initialSelectedStockName
+  );
+  const [selectedFuturesSymbol, setSelectedFuturesSymbol] = useState<string | null>(
+    initialSelectedFuturesSymbol
   );
   const [watchlistTree, setWatchlistTree] = useState<WatchlistGroupNode[]>(initialTree);
   const [watchlistItems, setWatchlistItems] = useState<WatchlistItemRead[]>(initialItems);
@@ -2138,6 +2146,7 @@ export default function MarketDashboardClient({
   function handleSelectGroup(group: WatchlistGroupNode | null) {
     setSelectedGroup(group);
     setSelectedGroupId(group?.id ?? null);
+    setSelectedFuturesSymbol(null);
 
     if (group !== null) {
       setSelectedStockId(null);
@@ -2155,8 +2164,25 @@ export default function MarketDashboardClient({
   function handleSelectStock(stockId: string, stockName: string | null) {
     setSelectedStockId(stockId);
     setSelectedStockName(stockName);
+    setSelectedFuturesSymbol(null);
     setErrorMessage(null);
     pushDashboardUrl({ market: "tw", groupId: activeGroupId, stockId });
+  }
+
+  function handleSelectTaiwanFutures(symbol: string) {
+    const normalizedSymbol = symbol.trim().toUpperCase();
+
+    if (!normalizedSymbol) return;
+
+    setSelectedStockId(null);
+    setSelectedStockName(null);
+    setSelectedFuturesSymbol(normalizedSymbol);
+    setErrorMessage(null);
+    setTwChartFocusMode(false);
+    pushDashboardUrl({
+      market: "tw",
+      futuresSymbol: normalizedSymbol,
+    });
   }
 
   function handleSelectUsGroup(group: USWatchlistGroupNode | null) {
@@ -2594,6 +2620,27 @@ export default function MarketDashboardClient({
       };
     }
 
+    if (selectedFuturesSymbol) {
+      const futuresLabel = `${selectedFuturesSymbol} 台指期`;
+
+      return {
+        market: "tw",
+        label: futuresLabel,
+        target: {
+          type: "tw_futures",
+          id: selectedFuturesSymbol,
+          label: futuresLabel,
+          market: "TW",
+        },
+        uiContext: {
+          market: "tw",
+          selected_futures_symbol: selectedFuturesSymbol,
+          selected_group_id: activeGroupId,
+          selected_group_name: selectedGroup?.group_name ?? null,
+        },
+      };
+    }
+
     if (selectedStockId) {
       return {
         market: "tw",
@@ -2649,6 +2696,7 @@ export default function MarketDashboardClient({
     activeGroupId,
     activeMarket,
     selectedGroup?.group_name,
+    selectedFuturesSymbol,
     selectedStockId,
     selectedStockName,
     selectedUsGroupId,
@@ -2669,6 +2717,7 @@ export default function MarketDashboardClient({
               selectedSymbol={selectedUsSymbol}
               onMarketChange={(market) => {
                 setActiveMarket(market);
+                setSelectedFuturesSymbol(null);
                 setErrorMessage(null);
                 setUsErrorMessage(null);
                 setTwChartFocusMode(false);
@@ -2720,15 +2769,20 @@ export default function MarketDashboardClient({
             <SidebarWatchlistExplorer
               initialTree={watchlistTree}
               initialItems={watchlistItems}
-              selectedGroupId={activeGroupId}
+              selectedGroupId={selectedFuturesSymbol ? null : activeGroupId}
               selectedStockId={selectedStockId}
+              selectedFuturesSymbol={selectedFuturesSymbol}
               selectedMarket={activeMarket}
               onSelectGroup={handleSelectGroup}
               onSelectStock={handleSelectStock}
+              onSelectFutures={handleSelectTaiwanFutures}
               onMarketChange={(market) => {
                 setActiveMarket(market);
                 setErrorMessage(null);
                 setTwChartFocusMode(false);
+                if (market !== "tw") {
+                  setSelectedFuturesSymbol(null);
+                }
                 if (market === "us") {
                   ensureSelectedUsGroup();
                 }
@@ -2762,15 +2816,23 @@ export default function MarketDashboardClient({
                   <MarketTape summary={marketIndexSummary} loadState={marketIndexLoadState} />
                 )}
 
-                <StockDetailPanel
-                  stockId={selectedStockId}
-                  stockName={selectedStockName}
-                  initialChartData={initialChartData}
-                  initialIndicatorData={initialIndicatorData}
-                  watchlistRankingPanel={rankingPanel}
-                  marketIndexSummary={marketIndexSummary}
-                  onChartFocusModeChange={setTwChartFocusMode}
-                />
+                {selectedFuturesSymbol ? (
+                  <TaiwanFuturesDetailPanel
+                    marketIndexSummary={marketIndexSummary}
+                    onChartFocusModeChange={setTwChartFocusMode}
+                    symbol={selectedFuturesSymbol}
+                  />
+                ) : (
+                  <StockDetailPanel
+                    stockId={selectedStockId}
+                    stockName={selectedStockName}
+                    initialChartData={initialChartData}
+                    initialIndicatorData={initialIndicatorData}
+                    watchlistRankingPanel={rankingPanel}
+                    marketIndexSummary={marketIndexSummary}
+                    onChartFocusModeChange={setTwChartFocusMode}
+                  />
+                )}
               </>
             ) : activeMarket === "us" ? (
               <>

@@ -15,6 +15,7 @@ const JOB_TYPE_LABELS: Record<string, string> = {
   "scheduler.market_daily_refresh": "排程法人 / 融資融券",
   "market.market_chip_daily_refresh": "大盤籌碼日報",
   "scheduler.market_chip_daily_refresh": "排程大盤籌碼日報",
+  "market.tw_futures_quote_refresh": "台指期報價更新",
   "market.stock_daily_metrics_history_backfill": "個股籌碼歷史",
   "market.stock_shareholding_history_backfill": "股權分散歷史",
   "market.stock_monthly_revenue_history_backfill": "營收歷史",
@@ -30,6 +31,8 @@ const JOB_TYPE_LABELS: Record<string, string> = {
 };
 
 type JobMarketFilter = "all" | "tw" | "us";
+
+const NON_RETRYABLE_JOB_TYPES = new Set(["market.tw_futures_quote_refresh"]);
 
 const JOB_PANEL_TEXT: Record<
   JobMarketFilter,
@@ -188,7 +191,10 @@ function statusTone(job: JobRunRead) {
 
 function canRetry(job: JobRunRead) {
   const effectiveStatus = getEffectiveStatus(job);
-  return effectiveStatus === "error" || effectiveStatus === "partial_success";
+  return (
+    !NON_RETRYABLE_JOB_TYPES.has(job.job_type) &&
+    (effectiveStatus === "error" || effectiveStatus === "partial_success")
+  );
 }
 
 function formatShortText(value: string | null, maxLength = 220) {

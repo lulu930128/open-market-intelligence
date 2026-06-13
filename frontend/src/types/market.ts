@@ -299,6 +299,96 @@ export type MarketChipDaily = {
   updated_at: string;
 };
 
+export type TaiwanFuturesQuote = {
+  id: number;
+  provider: string;
+  market: string;
+  symbol: string;
+  product_code: string;
+  product_name: string;
+  contract_symbol: string;
+  contract_month: string | null;
+  session: string;
+  trade_date: string | null;
+  quote_time: string;
+  open_price: number | null;
+  high_price: number | null;
+  low_price: number | null;
+  last_price: number | null;
+  reference_price: number | null;
+  settlement_price: number | null;
+  change: number | null;
+  change_pct: number | null;
+  amplitude_pct: number | null;
+  total_volume: number | null;
+  open_interest: number | null;
+  bid_price: number | null;
+  bid_size: number | null;
+  ask_price: number | null;
+  ask_size: number | null;
+  source: string;
+  source_url: string | null;
+  fetched_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type TaiwanFuturesDailyBar = {
+  id: number;
+  provider: string;
+  market: string;
+  symbol: string;
+  product_code: string;
+  product_name: string;
+  contract_symbol: string;
+  contract_month: string;
+  trade_date: string;
+  open_price: number | null;
+  high_price: number | null;
+  low_price: number | null;
+  close_price: number | null;
+  settlement_price: number | null;
+  change: number | null;
+  change_pct: number | null;
+  after_hours_volume: number | null;
+  regular_volume: number | null;
+  total_volume: number | null;
+  open_interest: number | null;
+  bid_price: number | null;
+  ask_price: number | null;
+  historical_high_price: number | null;
+  historical_low_price: number | null;
+  source: string;
+  source_url: string | null;
+  fetched_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type TaiwanFuturesIntradayBar = {
+  id: number;
+  provider: string;
+  market: string;
+  symbol: string;
+  product_code: string;
+  product_name: string;
+  contract_symbol: string;
+  contract_month: string | null;
+  session: string;
+  interval: string;
+  bar_time: string;
+  open_price: number | null;
+  high_price: number | null;
+  low_price: number | null;
+  close_price: number | null;
+  total_volume: number | null;
+  open_interest: number | null;
+  source: string;
+  source_url: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type MarketIndexListItem = {
   rank: number;
   market: string;

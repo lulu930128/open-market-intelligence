@@ -12,6 +12,7 @@ import type {
 
 const apiProxyTarget = process.env.API_PROXY_TARGET ?? "http://127.0.0.1:8300";
 const indexProductIds = new Set(["TAIEX", "TPEX"]);
+const futuresProductIds = new Set(["TXF", "MXF", "TMF"]);
 
 function firstSearchParam(
   params: Record<string, string | string[] | undefined> | undefined,
@@ -67,9 +68,18 @@ export default async function Page({
     firstSearchParam(resolvedSearchParams, "stock_id") ??
     firstSearchParam(resolvedSearchParams, "stock");
   const symbolParam = firstSearchParam(resolvedSearchParams, "symbol");
+  const futuresParam =
+    firstSearchParam(resolvedSearchParams, "futures") ??
+    firstSearchParam(resolvedSearchParams, "futures_symbol");
   const groupIdParam = firstSearchParam(resolvedSearchParams, "group_id");
   const requestedGroupId = Number(groupIdParam);
-  const initialSelectedStockId = stockIdParam?.trim() || null;
+  const requestedFuturesSymbol = futuresParam?.trim().toUpperCase() || null;
+  const initialSelectedFuturesSymbol =
+    requestedFuturesSymbol && futuresProductIds.has(requestedFuturesSymbol)
+      ? requestedFuturesSymbol
+      : null;
+  const initialSelectedStockId =
+    initialSelectedFuturesSymbol === null ? stockIdParam?.trim() || null : null;
   const initialSelectedUsSymbol = symbolParam?.trim().toUpperCase() || null;
   const initialMarket = marketParam === "us" || initialSelectedUsSymbol ? "us" : "tw";
   const selectedStockItem =
@@ -120,6 +130,7 @@ export default async function Page({
       initialSelectedGroupId={initialSelectedGroupId}
       initialSelectedStockId={initialSelectedStockId}
       initialSelectedStockName={selectedStockItem?.stock_name ?? null}
+      initialSelectedFuturesSymbol={initialSelectedFuturesSymbol}
       initialSelectedUsSymbol={initialSelectedUsSymbol}
       initialSelectedUsSecurityName={selectedUsItem?.security_name ?? null}
       initialChartData={initialChartData}

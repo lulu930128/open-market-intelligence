@@ -4,6 +4,7 @@ import JobStatusCenter from "@/components/JobStatusCenter";
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
 import type {
   StockMasterRead,
+  TaiwanFuturesQuote,
   WatchlistGroupNode,
   WatchlistGroupRead,
   WatchlistItemRead,
@@ -22,9 +23,11 @@ type Props = {
   initialItems: WatchlistItemRead[];
   selectedGroupId: number | null;
   selectedStockId: string | null;
+  selectedFuturesSymbol?: string | null;
   selectedMarket: MarketRegion;
   onSelectGroup: (group: WatchlistGroupNode | null) => void;
   onSelectStock: (stockId: string, stockName: string | null) => void;
+  onSelectFutures?: (symbol: string) => void;
   onMarketChange: (market: MarketRegion) => void;
   onExplorerDataChanged?: (
     tree: WatchlistGroupNode[],
@@ -116,10 +119,18 @@ function buttonClass(kind: "primary" | "ghost" | "danger" = "ghost") {
 }
 
 const PINNED_INDEX_GROUP_NAME = "加權指數";
+const PINNED_TAIWAN_FUTURES_SYMBOLS = ["TXF", "MXF", "TMF"] as const;
+const PINNED_TAIWAN_FUTURES_REPRESENTATIVE = "TXF";
 const PINNED_INDEX_ITEMS = [
-  { stockId: "TAIEX", stockName: "加權指數", note: "TWSE" },
-  { stockId: "TPEX", stockName: "櫃買指數", note: "TPEx" },
-];
+  { kind: "index", stockId: "TAIEX", stockName: "加權指數", note: "TWSE" },
+  { kind: "index", stockId: "TPEX", stockName: "櫃買指數", note: "TPEx" },
+  {
+    kind: "futures",
+    symbol: PINNED_TAIWAN_FUTURES_REPRESENTATIVE,
+    stockName: "台指期",
+    note: "TXF / MXF / TMF",
+  },
+] as const;
 
 function submitterValue(event: FormEvent<HTMLFormElement>) {
   const nativeEvent = event.nativeEvent as SubmitEvent;
@@ -167,9 +178,11 @@ export default function SidebarWatchlistExplorer({
   initialItems,
   selectedGroupId,
   selectedStockId,
+  selectedFuturesSymbol = null,
   selectedMarket,
   onSelectGroup,
   onSelectStock,
+  onSelectFutures,
   onMarketChange,
   onExplorerDataChanged,
   onChanged,
@@ -178,6 +191,7 @@ export default function SidebarWatchlistExplorer({
   const [items, setItems] = useState<WatchlistItemRead[]>(initialItems);
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
   const [indexGroupExpanded, setIndexGroupExpanded] = useState(true);
+  const [futuresQuotes, setFuturesQuotes] = useState<TaiwanFuturesQuote[]>([]);
   const [loading, setLoading] = useState(false);
   const [reloadingExplorerData, setReloadingExplorerData] = useState(false);
   const [message, setMessage] = useState<Message>(null);
@@ -197,6 +211,9 @@ export default function SidebarWatchlistExplorer({
     return allGroups.find((group) => group.id === selectedGroupId) ?? null;
   }, [allGroups, selectedGroupId]);
   const hasPointerDrag = pointerDrag !== null;
+  const futuresQuotesBySymbol = useMemo(() => {
+    return new Map(futuresQuotes.map((quote) => [quote.symbol, quote]));
+  }, [futuresQuotes]);
 
   const itemsByGroupId = useMemo(() => {
     const map = new Map<number, WatchlistItemRead[]>();
@@ -336,6 +353,46 @@ export default function SidebarWatchlistExplorer({
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (selectedMarket !== "tw") return;
+
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      const loadQuotes = async () => {
+        const autoRows = await fetchJson<TaiwanFuturesQuote[]>(
+          "/api/market/tw-futures/latest",
+          {
+            symbols: PINNED_TAIWAN_FUTURES_SYMBOLS.join(","),
+            refresh: true,
+            session: "auto",
+          }
+        );
+
+        if (autoRows.length > 0) return autoRows;
+
+        return fetchJson<TaiwanFuturesQuote[]>("/api/market/tw-futures/latest", {
+          symbols: PINNED_TAIWAN_FUTURES_SYMBOLS.join(","),
+          refresh: true,
+          session: "regular",
+        });
+      };
+
+      loadQuotes()
+        .then((rows) => {
+          if (cancelled) return;
+          setFuturesQuotes(rows);
+        })
+        .catch(() => {
+          if (!cancelled) setFuturesQuotes([]);
+        });
+    }, 0);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [selectedMarket]);
 
   useEffect(() => {
     const keyword = stockInput.trim();
@@ -850,7 +907,11 @@ export default function SidebarWatchlistExplorer({
   }
 
   function renderPinnedIndexGroup() {
-    const selected = PINNED_INDEX_ITEMS.some((item) => item.stockId === selectedStockId);
+    const selected = PINNED_INDEX_ITEMS.some((item) =>
+      item.kind === "index"
+        ? item.stockId === selectedStockId
+        : selectedFuturesSymbol !== null
+    );
 
     return (
       <div>
@@ -889,11 +950,23 @@ export default function SidebarWatchlistExplorer({
         {indexGroupExpanded ? (
           <div>
             {PINNED_INDEX_ITEMS.map((item) => {
-              const itemSelected = item.stockId === selectedStockId;
+              const itemSelected =
+                item.kind === "index"
+                  ? item.stockId === selectedStockId
+                  : selectedFuturesSymbol !== null;
+              const key = item.kind === "index" ? item.stockId : item.symbol;
+              const quote =
+                item.kind === "futures"
+                  ? futuresQuotesBySymbol.get(item.symbol)
+                  : null;
+              const note =
+                item.kind === "futures" && quote?.contract_month
+                  ? `近月 ${quote.contract_month}`
+                  : item.note;
 
               return (
                 <button
-                  key={item.stockId}
+                  key={key}
                   type="button"
                   className={[
                     "group relative flex w-full cursor-pointer items-center gap-1 py-1.5 pr-2 text-left text-xs",
@@ -904,16 +977,28 @@ export default function SidebarWatchlistExplorer({
                   style={{ paddingLeft: "24px" }}
                   onMouseDown={(event) => {
                     if (event.button !== 0) return;
-                    onSelectStock(item.stockId, item.stockName);
+                    if (item.kind === "index") {
+                      onSelectStock(item.stockId, item.stockName);
+                    } else {
+                      onSelectFutures?.(item.symbol);
+                    }
                   }}
-                  onClick={() => onSelectStock(item.stockId, item.stockName)}
+                  onClick={() => {
+                    if (item.kind === "index") {
+                      onSelectStock(item.stockId, item.stockName);
+                    } else {
+                      onSelectFutures?.(item.symbol);
+                    }
+                  }}
                 >
                   <div className="min-w-0 flex-1">
                     <div className="truncate font-semibold">
-                      {item.stockId} {item.stockName}
+                      {item.kind === "index"
+                        ? `${item.stockId} ${item.stockName}`
+                        : item.stockName}
                     </div>
                     <div className={itemSelected ? "truncate text-slate-300" : "truncate text-slate-400"}>
-                      {item.note}
+                      {note}
                     </div>
                   </div>
                 </button>

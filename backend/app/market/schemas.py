@@ -311,6 +311,117 @@ class MarketIntradayChartRead(BaseModel):
     points: list[MarketIntradayChartPointRead]
 
 
+class TaiwanFuturesProductRead(BaseModel):
+    symbol: str
+    product_code: str
+    product_name: str
+    official_code: str
+    taifex_cid: str
+    multiplier: int
+    tick_size: float
+    underlying_index_id: str
+    regular_session: str
+    after_hours_session: str
+
+
+class TaiwanFuturesQuoteRead(BaseModel):
+    id: int
+    provider: str
+    market: str
+    symbol: str
+    product_code: str
+    product_name: str
+    contract_symbol: str
+    contract_month: str | None = None
+    session: str
+    trade_date: date | None = None
+    quote_time: datetime
+
+    open_price: float | None = None
+    high_price: float | None = None
+    low_price: float | None = None
+    last_price: float | None = None
+    reference_price: float | None = None
+    settlement_price: float | None = None
+    change: float | None = None
+    change_pct: float | None = None
+    amplitude_pct: float | None = None
+
+    total_volume: int | None = None
+    open_interest: int | None = None
+    bid_price: float | None = None
+    bid_size: int | None = None
+    ask_price: float | None = None
+    ask_size: int | None = None
+
+    source: str
+    source_url: str | None = None
+    fetched_at: datetime
+    created_at: datetime
+    updated_at: datetime
+
+
+class TaiwanFuturesIntradayBarRead(BaseModel):
+    id: int
+    provider: str
+    market: str
+    symbol: str
+    product_code: str
+    product_name: str
+    contract_symbol: str
+    contract_month: str | None = None
+    session: str
+    interval: str
+    bar_time: datetime
+
+    open_price: float | None = None
+    high_price: float | None = None
+    low_price: float | None = None
+    close_price: float | None = None
+    total_volume: int | None = None
+    open_interest: int | None = None
+
+    source: str
+    source_url: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class TaiwanFuturesDailyBarRead(BaseModel):
+    id: int
+    provider: str
+    market: str
+    symbol: str
+    product_code: str
+    product_name: str
+    contract_symbol: str
+    contract_month: str
+    trade_date: date
+
+    open_price: float | None = None
+    high_price: float | None = None
+    low_price: float | None = None
+    close_price: float | None = None
+    settlement_price: float | None = None
+    change: float | None = None
+    change_pct: float | None = None
+
+    after_hours_volume: int | None = None
+    regular_volume: int | None = None
+    total_volume: int | None = None
+    open_interest: int | None = None
+    bid_price: float | None = None
+    ask_price: float | None = None
+    historical_high_price: float | None = None
+    historical_low_price: float | None = None
+
+    source: str
+    source_url: str | None = None
+    fetched_at: datetime
+    created_at: datetime
+    updated_at: datetime
+
+
 class TechnicalReportRowRead(BaseModel):
     key: str
     label: str

@@ -18,6 +18,7 @@ from app.market.taiwan_rules import (
     normalize_refresh_profile,
     refresh_profile_step_count,
 )
+from app.db.models import JobRun, utc_now
 from app.db.session import get_db
 from app.jobs import backfill_tasks, service as job_service
 from app.jobs.schemas import JobRunRead
@@ -44,6 +45,18 @@ from app.market.market_chips import (
 )
 from app.market.overnight_impact import build_us_overnight_impact_report
 from app.market.technical_report import build_stock_technical_report
+from app.market.tw_futures import (
+    TaiwanFuturesFetchError,
+    get_latest_taiwan_futures_quotes,
+    list_taiwan_futures_daily_bars,
+    list_taiwan_futures_intraday_bars,
+    list_taiwan_futures_products,
+    refresh_taiwan_futures_daily_bars,
+    refresh_taiwan_futures_quotes,
+    taiwan_futures_daily_bar_to_dict,
+    taiwan_futures_intraday_bar_to_dict,
+    taiwan_futures_quote_to_dict,
+)
 from app.market.broker_branch import (
     BrokerBranchFetchError,
     get_broker_branch_trade_summary,
@@ -82,6 +95,10 @@ from app.market.schemas import (
     OvernightImpactRead,
     ShareholdingDistributionWeeklyRead,
     StockChipCoverageRead,
+    TaiwanFuturesIntradayBarRead,
+    TaiwanFuturesDailyBarRead,
+    TaiwanFuturesProductRead,
+    TaiwanFuturesQuoteRead,
     TechnicalReportRead,
 )
 from app.market.service import (
@@ -113,6 +130,8 @@ from app.market.service import (
 
 router = APIRouter()
 
+TAIWAN_FUTURES_QUOTE_REFRESH_JOB_TYPE = "market.tw_futures_quote_refresh"
+
 
 def _split_categories(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
@@ -120,6 +139,82 @@ def _split_categories(value: str) -> list[str]:
 
 def _split_index_ids(value: str) -> list[str]:
     return [item.strip().upper() for item in value.split(",") if item.strip()]
+
+
+def _format_taiwan_futures_quote_source_error(exc: TaiwanFuturesFetchError) -> str:
+    text = str(exc)
+    if "520" in text:
+        return "TAIFEX MIS 即時報價來源暫時回應 520，已改用快取資料。"
+
+    return "TAIFEX MIS 即時報價暫時無法讀取，已改用快取資料。"
+
+
+def _record_taiwan_futures_quote_refresh_issue(
+    db: Session,
+    *,
+    symbols: str,
+    session: str,
+    exc: TaiwanFuturesFetchError,
+    cached_count: int,
+) -> None:
+    symbol_list = _split_index_ids(symbols) or ["TXF", "MXF", "TMF"]
+    target = ",".join(symbol_list)
+    requested_count = max(len(symbol_list), 1)
+    message = _format_taiwan_futures_quote_source_error(exc)
+    has_cache = cached_count > 0
+    status_value = "partial_success" if has_cache else "error"
+    if not has_cache:
+        message = "TAIFEX MIS 即時報價暫時無法讀取，且目前沒有可用快取。"
+
+    result = {
+        "status": status_value,
+        "message": message,
+        "requested_count": requested_count,
+        "success_count": cached_count if has_cache else 0,
+        "warning_count": requested_count if has_cache else 0,
+        "error_count": 0 if has_cache else requested_count,
+        "results": [
+            {
+                "symbol": symbol,
+                "resource": "台指期即時報價",
+                "source_name": "TAIFEX MIS",
+                "status": "partial_success" if has_cache else "error",
+                "message": message,
+                "error_message": message,
+            }
+            for symbol in symbol_list
+        ],
+    }
+
+    cutoff = utc_now() - timedelta(minutes=5)
+    job = (
+        db.query(JobRun)
+        .filter(JobRun.job_type == TAIWAN_FUTURES_QUOTE_REFRESH_JOB_TYPE)
+        .filter(JobRun.target == target)
+        .filter(JobRun.updated_at >= cutoff)
+        .order_by(JobRun.updated_at.desc(), JobRun.id.desc())
+        .first()
+    )
+
+    if job is None:
+        job = job_service.create_job(
+            db=db,
+            job_type=TAIWAN_FUTURES_QUOTE_REFRESH_JOB_TYPE,
+            target=target,
+            request={"symbols": symbol_list, "session": session, "source": "TAIFEX MIS"},
+            progress_total=requested_count,
+            message="Refreshing Taiwan futures quotes.",
+        )
+    else:
+        job.progress_current = cached_count if has_cache else 0
+        job.progress_total = requested_count
+        db.commit()
+        db.refresh(job)
+
+    if has_cache:
+        job_service.complete_job(db=db, job_id=job.id, result=result, message=message)
+    else:
+        job_service.fail_job(db=db, job_id=job.id, error_message=message, result=result)
 
 
 def _resolve_daily_metric_include_today(
@@ -785,6 +880,175 @@ def get_stock_overnight_impact(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
+
+
+@router.get(
+    "/tw-futures/products",
+    response_model=list[TaiwanFuturesProductRead],
+)
+def list_taiwan_futures_products_api():
+    return list_taiwan_futures_products()
+
+
+@router.post(
+    "/tw-futures/refresh",
+    response_model=list[TaiwanFuturesQuoteRead],
+)
+def refresh_taiwan_futures_quotes_api(
+    symbols: str = Query(default="TXF,MXF,TMF"),
+    session: str = Query(default="auto", pattern="^(auto|regular|after_hours)$"),
+    active_only: bool = True,
+    db: Session = Depends(get_db),
+):
+    try:
+        rows = refresh_taiwan_futures_quotes(
+            db=db,
+            symbols=symbols,
+            session=session,
+            active_only=active_only,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except TaiwanFuturesFetchError as exc:
+        rows = get_latest_taiwan_futures_quotes(
+            db=db,
+            symbols=symbols,
+            refresh=False,
+            session=session,
+        )
+        _record_taiwan_futures_quote_refresh_issue(
+            db=db,
+            symbols=symbols,
+            session=session,
+            exc=exc,
+            cached_count=len(rows),
+        )
+
+    return [taiwan_futures_quote_to_dict(row) for row in rows]
+
+
+@router.get(
+    "/tw-futures/latest",
+    response_model=list[TaiwanFuturesQuoteRead],
+)
+def get_latest_taiwan_futures_quotes_api(
+    symbols: str = Query(default="TXF,MXF,TMF"),
+    refresh: bool = False,
+    session: str = Query(default="auto", pattern="^(auto|regular|after_hours)$"),
+    db: Session = Depends(get_db),
+):
+    try:
+        rows = get_latest_taiwan_futures_quotes(
+            db=db,
+            symbols=symbols,
+            refresh=refresh,
+            session=session,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except TaiwanFuturesFetchError as exc:
+        rows = get_latest_taiwan_futures_quotes(
+            db=db,
+            symbols=symbols,
+            refresh=False,
+            session=session,
+        )
+        _record_taiwan_futures_quote_refresh_issue(
+            db=db,
+            symbols=symbols,
+            session=session,
+            exc=exc,
+            cached_count=len(rows),
+        )
+
+    return [taiwan_futures_quote_to_dict(row) for row in rows]
+
+
+@router.get(
+    "/tw-futures/{symbol}/daily",
+    response_model=list[TaiwanFuturesDailyBarRead],
+)
+def list_taiwan_futures_daily_bars_api(
+    symbol: str,
+    limit: int = Query(default=120, ge=1, le=1000),
+    refresh: bool = False,
+    lookback_days: int = Query(default=45, ge=1, le=730),
+    start_date: date | None = None,
+    end_date: date | None = None,
+    active_only: bool = True,
+    db: Session = Depends(get_db),
+):
+    try:
+        if refresh:
+            try:
+                refresh_taiwan_futures_daily_bars(
+                    db=db,
+                    symbols=[symbol],
+                    start_date=start_date,
+                    end_date=end_date,
+                    lookback_days=lookback_days,
+                    force=False,
+                )
+            except TaiwanFuturesFetchError:
+                existing_rows = list_taiwan_futures_daily_bars(
+                    db=db,
+                    symbol=symbol,
+                    limit=limit,
+                    active_only=active_only,
+                )
+                if not existing_rows:
+                    raise
+
+        rows = list_taiwan_futures_daily_bars(
+            db=db,
+            symbol=symbol,
+            limit=limit,
+            active_only=active_only,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except TaiwanFuturesFetchError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+
+    return [taiwan_futures_daily_bar_to_dict(row) for row in rows]
+
+
+@router.get(
+    "/tw-futures/{symbol}/intraday",
+    response_model=list[TaiwanFuturesIntradayBarRead],
+)
+def list_taiwan_futures_intraday_bars_api(
+    symbol: str,
+    interval: str = Query(default="1m", pattern="^1m$"),
+    limit: int = Query(default=390, ge=1, le=3000),
+    db: Session = Depends(get_db),
+):
+    try:
+        rows = list_taiwan_futures_intraday_bars(
+            db=db,
+            symbol=symbol,
+            interval=interval,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    return [taiwan_futures_intraday_bar_to_dict(row) for row in rows]
 
 
 @router.get("/indices/summary", response_model=MarketIndexSummaryRead)

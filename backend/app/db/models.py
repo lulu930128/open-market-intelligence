@@ -344,6 +344,150 @@ class MarketIntradayBar(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class TaiwanFuturesQuoteSnapshot(Base):
+    __tablename__ = "taiwan_futures_quote_snapshot"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "symbol",
+            "contract_month",
+            "session",
+            "quote_time",
+            name="uq_tw_futures_quote_provider_symbol_contract_session_time",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(60), index=True)
+    market: Mapped[str] = mapped_column(String(20), default="TAIFEX", index=True)
+    symbol: Mapped[str] = mapped_column(String(20), index=True)
+    product_code: Mapped[str] = mapped_column(String(20), index=True)
+    product_name: Mapped[str] = mapped_column(String(80))
+    contract_symbol: Mapped[str] = mapped_column(String(40), index=True)
+    contract_month: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    session: Mapped[str] = mapped_column(String(20), index=True)
+    trade_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    quote_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+    open_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reference_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    settlement_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    change: Mapped[float | None] = mapped_column(Float, nullable=True)
+    change_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    amplitude_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    total_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    open_interest: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    bid_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bid_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    ask_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ask_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    source: Mapped[str] = mapped_column(String(120), index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class TaiwanFuturesIntradayBar(Base):
+    __tablename__ = "taiwan_futures_intraday_bar"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "symbol",
+            "contract_month",
+            "interval",
+            "bar_time",
+            name="uq_tw_futures_bar_provider_symbol_contract_interval_time",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(60), index=True)
+    market: Mapped[str] = mapped_column(String(20), default="TAIFEX", index=True)
+    symbol: Mapped[str] = mapped_column(String(20), index=True)
+    product_code: Mapped[str] = mapped_column(String(20), index=True)
+    product_name: Mapped[str] = mapped_column(String(80))
+    contract_symbol: Mapped[str] = mapped_column(String(40), index=True)
+    contract_month: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    session: Mapped[str] = mapped_column(String(20), index=True)
+    interval: Mapped[str] = mapped_column(String(10), index=True)
+    bar_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+    open_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    close_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    open_interest: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    source: Mapped[str] = mapped_column(String(120), index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class TaiwanFuturesDailyBar(Base):
+    __tablename__ = "taiwan_futures_daily_bar"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "symbol",
+            "contract_month",
+            "trade_date",
+            name="uq_tw_futures_daily_provider_symbol_contract_date",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(60), index=True)
+    market: Mapped[str] = mapped_column(String(20), default="TAIFEX", index=True)
+    symbol: Mapped[str] = mapped_column(String(20), index=True)
+    product_code: Mapped[str] = mapped_column(String(20), index=True)
+    product_name: Mapped[str] = mapped_column(String(80))
+    contract_symbol: Mapped[str] = mapped_column(String(40), index=True)
+    contract_month: Mapped[str] = mapped_column(String(20), index=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+
+    open_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    close_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    settlement_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    change: Mapped[float | None] = mapped_column(Float, nullable=True)
+    change_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    after_hours_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    regular_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    total_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    open_interest: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    bid_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ask_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    historical_high_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    historical_low_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    source: Mapped[str] = mapped_column(String(120), index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class ChartDrawingSnapshot(Base):
     __tablename__ = "chart_drawing_snapshot"
 
