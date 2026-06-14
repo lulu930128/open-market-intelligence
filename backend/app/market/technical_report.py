@@ -11,6 +11,12 @@ from app.ai.evidence_passport import build_evidence_passport
 from app.market import indicator_service
 from app.market import service as market_service
 from app.market.intraday import get_intraday_trend
+from app.market.trading_calendar import (
+    is_taiwan_trading_day,
+    next_taiwan_trading_day,
+    previous_taiwan_trading_day,
+    taiwan_market_holiday_name,
+)
 
 
 TAIPEI_TZ = timezone(timedelta(hours=8))
@@ -268,6 +274,29 @@ def _report_as_of(report: dict[str, Any]) -> Any:
             return latest_point.get("time")
 
     return None
+
+
+def _today_market_session() -> dict[str, Any]:
+    local_now = _now()
+    current_date = local_now.date()
+    is_trading_day = is_taiwan_trading_day(current_date)
+    holiday_name = taiwan_market_holiday_name(current_date)
+    reason = (
+        "trading_day"
+        if is_trading_day
+        else "holiday"
+        if holiday_name
+        else "weekend"
+    )
+    return {
+        "date": current_date,
+        "is_trading_day": is_trading_day,
+        "reason": reason,
+        "holiday_name": holiday_name,
+        "previous_trading_day": previous_taiwan_trading_day(current_date, include_value=is_trading_day),
+        "next_trading_day": next_taiwan_trading_day(current_date, include_value=False),
+        "checked_at": local_now,
+    }
 
 
 def _with_evidence_passport(report: dict[str, Any]) -> dict[str, Any]:
@@ -542,6 +571,80 @@ def _build_today_report(
         "point_count": 0,
         "points": [],
     }
+    market_session = _today_market_session()
+    latest_daily_date = indicator.get("time")
+
+    if not market_session["is_trading_day"]:
+        reference_close = previous_close
+        session_date = _json_value(market_session["date"])
+        previous_trading_day = _json_value(market_session["previous_trading_day"])
+        next_trading_day = _json_value(market_session["next_trading_day"])
+        latest_daily_text = _json_value(latest_daily_date) or previous_trading_day
+        rows.extend(
+            [
+                _row(
+                    key="market_session",
+                    label="市場狀態",
+                    description=f"{session_date} 台股休市，沒有今日盤中成交資料",
+                    value=0,
+                    display_value="休市",
+                    basis="Taiwan trading calendar",
+                    source="app.market.trading_calendar",
+                ),
+                _row(
+                    key="reference_close",
+                    label="參考基準",
+                    description="休市日以最近已公布日線作為判斷基準",
+                    value=reference_close,
+                    display_value=_fmt_price(reference_close),
+                    basis="latest published daily close",
+                    source="market_daily_price",
+                ),
+            ]
+        )
+        badges.append(_badge("台股休市", "neutral"))
+        warnings.append(
+            f"{session_date} is not a Taiwan trading day; intraday data is skipped."
+        )
+        return {
+            "kind": "tw_stock_technical_report",
+            "stock_id": stock_id,
+            "timeframe": "today",
+            "phase": "market_closed",
+            "confidence": "medium" if reference_close is not None else "low",
+            "generated_at": _now(),
+            "title": "台股休市",
+            "summary": (
+                f"{session_date} 台股休市，OMI 以最新日線 {latest_daily_text} "
+                "的日線資料作為背景；盤中突破或回測需等下一交易日確認。"
+            ),
+            "score": 0,
+            "value": None,
+            "value_label": "market session",
+            "rows": rows,
+            "badges": badges,
+            "data": {
+                "intraday": {
+                    "source": "market_closed",
+                    "point_count": 0,
+                    "previous_close": reference_close,
+                    "latest_point": None,
+                },
+                "daily_background": indicator,
+                "market_session": {
+                    **{key: _json_value(value) for key, value in market_session.items()},
+                    "latest_daily_date": _json_value(latest_daily_date),
+                    "summary": (
+                        f"{session_date} 台股休市，最新日線截至 "
+                        f"{latest_daily_text}；"
+                        f"下一交易日 {next_trading_day} 再確認盤中價量。"
+                    ),
+                },
+            },
+            "missing": [],
+            "warnings": list(dict.fromkeys(warnings)),
+            "source_refs": _technical_source_refs(timeframe="today", include_intraday=False),
+        }
 
     if include_intraday:
         intraday = get_intraday_trend(db=db, stock_id=stock_id)

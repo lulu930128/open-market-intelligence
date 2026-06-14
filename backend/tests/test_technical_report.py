@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 import unittest
 from unittest.mock import patch
 
@@ -18,7 +18,7 @@ from app.db.models import (
     SourceRegistry,
     StockMaster,
 )
-from app.market.technical_report import build_stock_technical_report
+from app.market.technical_report import TAIPEI_TZ, build_stock_technical_report
 
 
 def make_session() -> Session:
@@ -186,6 +186,43 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertIn("weekly", context["data"]["technical_reports"])
         self.assertIn("monthly", context["data"]["technical_reports"])
 
+    def test_stock_context_exposes_technical_price_levels(self) -> None:
+        context = ai_tools.read_stock_context(
+            db=self.db,
+            stock_id="2330",
+            analysis_horizon="swing",
+            include_intraday=False,
+        )
+
+        levels = context["data"]["technical_levels"]
+        self.assertEqual(levels["kind"], "technical_price_levels")
+        self.assertEqual(levels["basis_timeframe"], "daily")
+        self.assertIsNotNone(levels["latest_price"])
+        self.assertIn("preferred_zone", levels["entry"])
+        self.assertIsNotNone(levels["entry"]["preferred_zone"]["low"])
+        self.assertIsNotNone(levels["entry"]["preferred_zone"]["high"])
+        self.assertIn("do_not_chase_above", levels["entry"])
+        self.assertIn("short_stop", levels["risk"])
+        self.assertIn("technical_invalidation", levels["risk"])
+
+    def test_stock_context_exposes_refined_score_model(self) -> None:
+        context = ai_tools.read_stock_context(
+            db=self.db,
+            stock_id="2330",
+            analysis_horizon="swing",
+            include_intraday=False,
+        )
+
+        score_model = context["data"]["analysis"]["score_model"]
+        self.assertEqual(score_model["version"], "technical_factor_weight_v1")
+        self.assertEqual(score_model["score_range"], "-7..+7")
+        self.assertIn("swing", score_model["horizon_factor_scores"])
+        daily_factors = score_model["timeframe_factor_scores"]["daily"]
+        self.assertTrue(
+            {"trend", "momentum", "volume", "volatility", "chips"}.issubset(daily_factors)
+        )
+        self.assertIn("base_selected_score", score_model)
+
     def test_stock_brief_summary_exposes_selected_analysis_score(self) -> None:
         brief = ai_reports.build_stock_brief(
             db=self.db,
@@ -198,17 +235,49 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(analysis["horizon_label"], "中短線")
         self.assertIn("中短線評分", analysis["display"])
 
+    def test_today_report_marks_non_trading_day_without_intraday_fetch(self) -> None:
+        with (
+            patch(
+                "app.market.technical_report._now",
+                return_value=datetime(2026, 6, 14, 10, 0, tzinfo=TAIPEI_TZ),
+            ),
+            patch("app.market.technical_report.get_intraday_trend") as intraday,
+        ):
+            report = build_stock_technical_report(
+                db=self.db,
+                stock_id="2330",
+                timeframe="today",
+                include_intraday=True,
+            )
+
+        intraday.assert_not_called()
+        self.assertEqual(report["phase"], "market_closed")
+        self.assertEqual(report["confidence"], "medium")
+        self.assertEqual(report["title"], "台股休市")
+        self.assertIn("台股休市", report["summary"])
+        self.assertIn("下一交易日", report["data"]["market_session"]["summary"])
+        self.assertFalse(report["data"]["market_session"]["is_trading_day"])
+        self.assertEqual(report["data"]["intraday"]["point_count"], 0)
+        self.assertTrue(any(row["key"] == "market_session" for row in report["rows"]))
+        self.assertNotIn("intraday_trend.points", report["missing"])
+
     def test_today_report_waits_when_intraday_has_no_points(self) -> None:
-        with patch(
-            "app.market.technical_report.get_intraday_trend",
-            return_value={
-                "stock_id": "2330",
-                "symbol": "2330",
-                "source": "test_intraday",
-                "previous_close": 180.0,
-                "point_count": 0,
-                "points": [],
-            },
+        with (
+            patch(
+                "app.market.technical_report._now",
+                return_value=datetime(2026, 3, 23, 10, 0, tzinfo=TAIPEI_TZ),
+            ),
+            patch(
+                "app.market.technical_report.get_intraday_trend",
+                return_value={
+                    "stock_id": "2330",
+                    "symbol": "2330",
+                    "source": "test_intraday",
+                    "previous_close": 180.0,
+                    "point_count": 0,
+                    "points": [],
+                },
+            ),
         ):
             report = build_stock_technical_report(
                 db=self.db,
@@ -224,25 +293,31 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertIn("intraday_trend.points", report["evidence_passport"]["missing"])
 
     def test_today_report_uses_opening_phase_for_sparse_intraday_points(self) -> None:
-        with patch(
-            "app.market.technical_report.get_intraday_trend",
-            return_value={
-                "stock_id": "2330",
-                "symbol": "2330",
-                "source": "test_intraday",
-                "previous_close": 180.0,
-                "point_count": 1,
-                "points": [
-                    {
-                        "time": "2026-03-22T09:01:00+08:00",
-                        "price": 183.0,
-                        "volume": 3000,
-                        "open": 182.0,
-                        "high": 183.0,
-                        "low": 182.0,
-                    }
-                ],
-            },
+        with (
+            patch(
+                "app.market.technical_report._now",
+                return_value=datetime(2026, 3, 23, 10, 0, tzinfo=TAIPEI_TZ),
+            ),
+            patch(
+                "app.market.technical_report.get_intraday_trend",
+                return_value={
+                    "stock_id": "2330",
+                    "symbol": "2330",
+                    "source": "test_intraday",
+                    "previous_close": 180.0,
+                    "point_count": 1,
+                    "points": [
+                        {
+                            "time": "2026-03-23T09:01:00+08:00",
+                            "price": 183.0,
+                            "volume": 3000,
+                            "open": 182.0,
+                            "high": 183.0,
+                            "low": 182.0,
+                        }
+                    ],
+                },
+            ),
         ):
             report = build_stock_technical_report(
                 db=self.db,

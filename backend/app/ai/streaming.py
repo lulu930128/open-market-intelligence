@@ -14,6 +14,17 @@ from app.watchlists import service as watchlist_service
 
 
 DEFAULT_DELTA_CHARS = 160
+STAGE_LABELS = {
+    "accepted": "收到問題",
+    "resolving": "確認目標",
+    "question_understanding": "理解問題",
+    "evidence_read": "讀取資料",
+    "score_model": "五因子評分",
+    "price_levels": "推導價位",
+    "position_math": "部位試算",
+    "decision_synthesis": "組合回答",
+    "answer_ready": "回答就緒",
+}
 
 
 def _json_default(value: Any) -> str:
@@ -25,6 +36,22 @@ def _json_default(value: Any) -> str:
 def sse_event(event: str, data: dict[str, Any]) -> str:
     payload = json.dumps(data, ensure_ascii=False, default=_json_default)
     return f"event: {event}\ndata: {payload}\n\n"
+
+
+def _status_payload(
+    *,
+    stage: str,
+    message: str,
+    sequence: int,
+    **extra: Any,
+) -> dict[str, Any]:
+    return {
+        "stage": stage,
+        "stage_label": STAGE_LABELS.get(stage, stage),
+        "message": message,
+        "sequence": sequence,
+        **extra,
+    }
 
 
 def _first_text(*values: Any) -> str | None:
@@ -141,21 +168,26 @@ def iter_ask_sse_events(
     payload: AiAskRequest,
     server_policy: ai_ask.AiAskServerPolicy,
 ) -> Iterator[str]:
+    sequence = 1
     yield sse_event(
         "status",
-        {
-            "stage": "accepted",
-            "message": "OMI 已收到 AI 請求。",
-            "contract_version": payload.contract_version,
-        },
+        _status_payload(
+            stage="accepted",
+            message="OMI 已收到 AI 請求。",
+            sequence=sequence,
+            contract_version=payload.contract_version,
+        ),
     )
+    sequence += 1
     yield sse_event(
         "status",
-        {
-            "stage": "resolving",
-            "message": "正在確認目標、資料 freshness、可信度與可用工具。",
-        },
+        _status_payload(
+            stage="resolving",
+            message="正在確認目標、資料 freshness、可信度與可用工具。",
+            sequence=sequence,
+        ),
     )
+    sequence += 1
 
     try:
         response = ai_ask.ask(db=db, payload=payload, server_policy=server_policy)
@@ -172,14 +204,31 @@ def iter_ask_sse_events(
         if isinstance(tool_run, dict):
             yield sse_event("tool_run", tool_run)
 
+    for step in response.get("reasoning_steps") or []:
+        if not isinstance(step, dict):
+            continue
+        stage = step.get("stage")
+        message = step.get("message")
+        if stage and message:
+            yield sse_event(
+                "status",
+                _status_payload(
+                    stage=str(stage),
+                    message=str(message),
+                    sequence=sequence,
+                ),
+            )
+            sequence += 1
+
     yield sse_event(
         "status",
-        {
-            "stage": "answer_ready",
-            "message": "已完成資料檢查與回應組裝。",
-            "answer_ready": bool(response.get("answer_ready", True)),
-            "report_level": response.get("report_level"),
-        },
+        _status_payload(
+            stage="answer_ready",
+            message="已完成資料檢查與回應組裝。",
+            sequence=sequence,
+            answer_ready=bool(response.get("answer_ready", True)),
+            report_level=response.get("report_level"),
+        ),
     )
 
     answer_text = extract_answer_text(response)

@@ -723,7 +723,7 @@ class AiFreshnessGuardTests(unittest.TestCase):
                         "as_of": "2026-06-12",
                         "key_observations": ["價格站上 MA20", "MACD 偏多"],
                         "interpretation": ["短線結構仍偏多，但量能沒有明顯放大。"],
-                        "risks": ["若跌回 MA20，短線結論需要降級。"],
+                        "risks": ["缺少盤中即時資料，無法確認今日跟進力度。", "若跌回 MA20，短線結論需要降級。"],
                         "missing_data": ["盤中即時資料不足。"],
                         "next_checks": ["觀察下一根 K 是否守住 MA20。"],
                         "disclaimer": "僅根據 OMI 證據包。",
@@ -734,10 +734,13 @@ class AiFreshnessGuardTests(unittest.TestCase):
                 "source_refs": [{"type": "table", "name": "market_daily_price"}],
             }
 
-            with patch.object(
-                ai_ask.orchestrator,
-                "generate_stock_llm_analysis",
-                return_value=analysis_result,
+            with (
+                patch.object(ai_ask, "_check_freshness", return_value={"is_current": True, "missing": [], "warnings": []}),
+                patch.object(
+                    ai_ask.orchestrator,
+                    "generate_stock_llm_analysis",
+                    return_value=analysis_result,
+                ),
             ):
                 response = ai_ask.ask(db=db, payload=payload, server_policy=server_policy)
 
@@ -749,8 +752,77 @@ class AiFreshnessGuardTests(unittest.TestCase):
             self.assertIn("短線偏多", human_answer["headline"])
             self.assertEqual(len(human_answer["summary"]), 3)
             self.assertEqual([item["label"] for item in human_answer["action_plan"]], ["已持有", "想進場", "失效"])
-            self.assertIn("盤中即時資料不足", human_answer["data_limits"][0])
+            self.assertIn("跌回 MA20", human_answer["action_plan"][2]["text"])
+            self.assertFalse(any("缺少" in item for item in human_answer["risks"]))
+            self.assertEqual(human_answer["data_limits"], [])
+            self.assertNotIn("盤中即時資料不足", human_answer["text"])
+            self.assertNotIn("盤中即時資料不足", human_answer["detail"])
             self.assertIn("怎麼做", human_answer["text"])
+        finally:
+            db.close()
+
+    def test_ask_keeps_llm_missing_data_as_data_limit_when_backend_missing(self) -> None:
+        db = make_session()
+        try:
+            add_stock(db)
+            payload = AiAskRequest(
+                question="請分析 2330 的短評與風險",
+                target={"type": "tw_stock", "id": "2330"},
+                mode="analysis",
+                allow_llm=True,
+                allow_write=False,
+            )
+            server_policy = ai_ask.AiAskServerPolicy(
+                can_call_llm=True,
+                can_write=False,
+                trust_source="token",
+            )
+            analysis_result = {
+                "kind": "stock_llm_analysis",
+                "strategy_profile": "short_term_momentum",
+                "data": {
+                    "analysis": {
+                        "requested_horizon": "swing",
+                        "selected_horizon": "swing",
+                        "selected_timeframe": "daily",
+                        "selected_score": None,
+                        "selected_title": "資料不足",
+                        "selected_summary": "缺少日線，無法確認方向。",
+                        "selected_confidence": "low",
+                    }
+                },
+                "llm": {
+                    "report": {
+                        "headline": "資料不足，先不要下結論",
+                        "stance": "insufficient_data",
+                        "confidence": "low",
+                        "as_of": "2026-06-12",
+                        "key_observations": [],
+                        "interpretation": ["缺少日線時，不應判斷多空。"],
+                        "risks": ["資料缺口會讓方向判斷失真。"],
+                        "missing_data": ["market_daily_price 缺少最新日線。"],
+                        "next_checks": ["先補日線資料。"],
+                        "disclaimer": "僅根據 OMI 證據包。",
+                    }
+                },
+                "missing": ["market_daily_price"],
+                "warnings": [],
+                "source_refs": [{"type": "table", "name": "market_daily_price"}],
+            }
+
+            with (
+                patch.object(ai_ask, "_check_freshness", return_value={"is_current": True, "missing": [], "warnings": []}),
+                patch.object(
+                    ai_ask.orchestrator,
+                    "generate_stock_llm_analysis",
+                    return_value=analysis_result,
+                ),
+            ):
+                response = ai_ask.ask(db=db, payload=payload, server_policy=server_policy)
+
+            human_answer = response["analysis"]["human_answer"]
+            self.assertIn("market_daily_price 缺少最新日線", human_answer["data_limits"][0])
+            self.assertTrue(any("資料缺口" in item for item in human_answer["data_limits"]))
         finally:
             db.close()
 
@@ -823,6 +895,564 @@ class AiFreshnessGuardTests(unittest.TestCase):
             self.assertEqual(response["analysis"]["horizon_label"], "中短線")
             self.assertEqual(response["analysis"]["source"], "result.data.analysis")
             self.assertIn("中短線評分", response["analysis"]["display"])
+        finally:
+            db.close()
+
+    def test_direct_entry_question_returns_question_aware_answer(self) -> None:
+        db = make_session()
+        try:
+            add_stock(db)
+            payload = AiAskRequest(
+                question="可以幫我看看如果想抄底要抄哪裡嗎",
+                target={"type": "tw_stock", "id": "2330", "label": "2330 台積電"},
+                mode="auto",
+                allow_llm=False,
+                allow_write=False,
+            )
+            stock_brief = {
+                "kind": "stock_brief",
+                "data": {
+                    "analysis": {
+                        "requested_horizon": "swing",
+                        "selected_horizon": "swing",
+                        "selected_timeframe": "weekly",
+                        "selected_score": 4,
+                        "selected_title": "波段偏多",
+                        "selected_summary": "週線站上 MA20，動能偏多。",
+                        "selected_confidence": "high",
+                        "scores": {"short": 1, "swing": 4, "long": 5},
+                        "components": [],
+                    },
+                    "technical_levels": {
+                        "kind": "technical_price_levels",
+                        "version": "price_levels_v1",
+                        "latest_price": 855.0,
+                        "entry": {
+                            "preferred_zone": {"low": 803.0, "high": 834.0},
+                            "breakout_confirm_above": {"price": 919.0},
+                            "do_not_chase_above": {"price": 871.0},
+                        },
+                        "risk": {
+                            "short_stop": {"price": 771.0},
+                            "technical_invalidation": {"price": 716.0},
+                        },
+                        "context": {"extended": True},
+                    },
+                },
+                "missing": [],
+                "warnings": [],
+                "source_refs": [{"type": "table", "name": "market_daily_price"}],
+            }
+
+            with patch.object(ai_ask.reports, "build_stock_brief", return_value=stock_brief):
+                response = ai_ask.ask(db=db, payload=payload)
+
+            human_answer = response["analysis"]["human_answer"]
+            self.assertEqual(response["action"], "omi.generate_stock_brief")
+            self.assertEqual(response["analysis"]["question_intent"], "entry_decision")
+            self.assertEqual(human_answer["source"], "question_intent")
+            self.assertEqual(human_answer["intent"], "entry_decision")
+            self.assertEqual(
+                [item["label"] for item in human_answer["action_plan"]],
+                ["現在", "進場條件", "風控"],
+            )
+            self.assertIn("不建議直接追價", human_answer["headline"])
+            self.assertIn("803-834", human_answer["text"])
+            self.assertIn("919", human_answer["text"])
+            self.assertIn("771", human_answer["text"])
+            self.assertIn("716", human_answer["text"])
+            reasoning_stages = [step["stage"] for step in response["reasoning_steps"]]
+            self.assertIn("question_understanding", reasoning_stages)
+            self.assertIn("price_levels", reasoning_stages)
+            self.assertIn("decision_synthesis", reasoning_stages)
+        finally:
+            db.close()
+
+    def test_entry_question_inside_pullback_zone_uses_price_position(self) -> None:
+        db = make_session()
+        try:
+            add_stock(db, stock_id="3661")
+            payload = AiAskRequest(
+                question="你覺得目前價位是好買點嗎",
+                target={"type": "tw_stock", "id": "3661", "label": "3661 世芯-KY"},
+                mode="auto",
+                allow_llm=False,
+                allow_write=False,
+            )
+            stock_brief = {
+                "kind": "stock_brief",
+                "data": {
+                    "analysis": {
+                        "requested_horizon": "swing",
+                        "selected_horizon": "swing",
+                        "selected_timeframe": "weekly",
+                        "selected_score": -3,
+                        "selected_title": "波段偏多",
+                        "selected_summary": "波段：站上 MA20，MACD 偏多，量能一般。",
+                        "selected_confidence": "high",
+                        "scores": {"intraday": -7, "short": -7, "swing": -3, "long": 0},
+                        "components": [],
+                    },
+                    "technical_levels": {
+                        "kind": "technical_price_levels",
+                        "version": "price_levels_v1",
+                        "latest_price": 4105.0,
+                        "entry": {
+                            "preferred_zone": {"low": 4055.0, "high": 4195.0},
+                            "conservative_zone": {"low": 4403.0, "high": 4542.0},
+                            "breakout_confirm_above": {"price": 5050.0},
+                            "do_not_chase_above": {"price": 4175.0},
+                        },
+                        "risk": {
+                            "short_stop": {"price": 3915.0},
+                            "technical_invalidation": {"price": 3850.0},
+                        },
+                        "context": {"extended": True},
+                    },
+                },
+                "missing": [],
+                "warnings": [],
+                "source_refs": [{"type": "table", "name": "market_daily_price"}],
+            }
+
+            with patch.object(ai_ask.reports, "build_stock_brief", return_value=stock_brief):
+                response = ai_ask.ask(db=db, payload=payload)
+
+            human_answer = response["analysis"]["human_answer"]
+            text = human_answer["text"]
+            self.assertEqual(response["analysis"]["question_intent"], "entry_decision")
+            self.assertEqual(human_answer["source"], "question_intent")
+            self.assertIn("回檔觀察區", human_answer["headline"])
+            self.assertIn("不是好買點", human_answer["headline"])
+            self.assertNotIn("重新站回關鍵區", human_answer["headline"])
+            self.assertIn("現價 4,105 已落在 4,055-4,195", text)
+            self.assertIn("不是自動買點", text)
+            self.assertIn("4,403-4,542 視為重新轉強確認區", text)
+            self.assertIn("跌破 3,915", text)
+            self.assertIn("跌破 3,850", text)
+            self.assertNotIn("保守買點", text)
+        finally:
+            db.close()
+
+    def test_entry_question_uses_decision_evidence_context(self) -> None:
+        db = make_session()
+        try:
+            add_stock(db, stock_id="2303")
+            payload = AiAskRequest(
+                question="如果我現在還想進場可以嗎，還是價格太高?",
+                target={"type": "tw_stock", "id": "2303", "label": "2303 聯電"},
+                mode="auto",
+                allow_llm=False,
+                allow_write=False,
+            )
+            stock_brief = {
+                "kind": "stock_brief",
+                "data": {
+                    "analysis": {
+                        "requested_horizon": "swing",
+                        "selected_horizon": "swing",
+                        "selected_timeframe": "weekly",
+                        "selected_score": 3,
+                        "selected_title": "波段偏多",
+                        "selected_summary": "週線站上 MA20，MACD 偏多，量能一般。",
+                        "selected_confidence": "high",
+                        "scores": {"intraday": 1, "short": 2, "swing": 3, "long": 2},
+                        "components": [],
+                    },
+                    "technical_levels": {
+                        "kind": "technical_price_levels",
+                        "version": "price_levels_v1",
+                        "latest_price": 136.0,
+                        "entry": {
+                            "preferred_zone": {"low": 132.5, "high": 133.5},
+                            "breakout_confirm_above": {"price": 137.5},
+                            "do_not_chase_above": {"price": 136.5},
+                        },
+                        "risk": {
+                            "short_stop": {"price": 130.0},
+                            "technical_invalidation": {"price": 127.4},
+                        },
+                    },
+                    "decision_evidence": {
+                        "kind": "stock_decision_evidence_v1",
+                        "data_quality": {
+                            "price": {
+                                "source": "market_daily_price.close_price",
+                                "as_of": "2026-06-12",
+                            },
+                            "volume": {
+                                "source": "market_daily_price.trade_volume",
+                                "display_value": "393.6 張",
+                            },
+                        },
+                        "recent_volatility": {
+                            "label": "high",
+                            "summary": "近 5 日高波動，最大單日漲跌約 +6.80%，區間振幅約 +13.20%。",
+                        },
+                        "indicator_quality": {
+                            "warnings": [
+                                "MACD histogram 與 MACD-signal 不一致，需確認欄位口徑或正負號。"
+                            ],
+                        },
+                        "fundamentals": {
+                            "monthly_revenue": {
+                                "summary": "2026-05-01 營收，年增 +12.50%，月增 +3.20%。"
+                            },
+                        },
+                        "confidence_factors": {
+                            "negative": [
+                                "近 5 日高波動，追價需要降低部位。",
+                                "MACD histogram 口徑需校驗。",
+                            ],
+                            "data_limits": ["institutional_trade_daily 尚缺或不完整。"],
+                        },
+                    },
+                },
+                "missing": [],
+                "warnings": [],
+                "source_refs": [{"type": "table", "name": "market_daily_price"}],
+            }
+
+            with patch.object(ai_ask.reports, "build_stock_brief", return_value=stock_brief):
+                response = ai_ask.ask(db=db, payload=payload)
+
+            human_answer = response["analysis"]["human_answer"]
+            text = human_answer["text"]
+            self.assertEqual(response["analysis"]["question_intent"], "entry_decision")
+            self.assertEqual(human_answer["source"], "question_intent")
+            self.assertIn("近 5 日高波動", text)
+            self.assertIn("2026-05-01 營收", text)
+            self.assertIn("MACD histogram 口徑需校驗", text)
+            data_limit_text = "\n".join(human_answer["data_limits"])
+            self.assertIn("價格來源 market_daily_price.close_price，截至 2026-06-12", data_limit_text)
+            self.assertIn("成交量來源 market_daily_price.trade_volume，折算約 393.6 張", data_limit_text)
+            self.assertIn("institutional_trade_daily 尚缺或不完整", data_limit_text)
+            self.assertEqual(
+                human_answer["decision_evidence"]["kind"],
+                "stock_decision_evidence_v1",
+            )
+        finally:
+            db.close()
+
+    def test_entry_question_marks_non_trading_day_context(self) -> None:
+        db = make_session()
+        try:
+            add_stock(db, stock_id="2327")
+            payload = AiAskRequest(
+                question="你怎麼看這檔股票呢，以現在來說你覺得適合買入嗎",
+                target={"type": "tw_stock", "id": "2327", "label": "2327 國巨*"},
+                mode="auto",
+                allow_llm=False,
+                allow_write=False,
+            )
+            stock_brief = {
+                "kind": "stock_brief",
+                "data": {
+                    "analysis": {
+                        "requested_horizon": "swing",
+                        "selected_horizon": "swing",
+                        "selected_timeframe": "weekly",
+                        "selected_score": 1,
+                        "selected_title": "多空分歧",
+                        "selected_summary": "週線偏多但短線偏熱。",
+                        "selected_confidence": "medium",
+                        "scores": {"intraday": None, "short": 1, "swing": 1, "long": 2},
+                        "components": [],
+                    },
+                    "technical_levels": {
+                        "kind": "technical_price_levels",
+                        "version": "price_levels_v1",
+                        "latest_price": 855.0,
+                        "entry": {
+                            "preferred_zone": {"low": 839.0, "high": 855.0},
+                            "breakout_confirm_above": {"price": 903.0},
+                            "do_not_chase_above": {"price": 875.0},
+                        },
+                        "risk": {
+                            "short_stop": {"price": 803.0},
+                            "technical_invalidation": {"price": 774.0},
+                        },
+                    },
+                    "decision_evidence": {
+                        "kind": "stock_decision_evidence_v1",
+                        "data_quality": {
+                            "price": {
+                                "source": "market_daily_price.close_price",
+                                "as_of": "2026-06-12",
+                            },
+                            "volume": {
+                                "source": "market_daily_price.trade_volume",
+                                "display_value": "26.3 張",
+                            },
+                        },
+                        "market_session": {
+                            "phase": "market_closed",
+                            "is_trading_day": False,
+                            "date": "2026-06-14",
+                            "previous_trading_day": "2026-06-12",
+                            "next_trading_day": "2026-06-15",
+                            "latest_daily_date": "2026-06-12",
+                            "summary": (
+                                "2026-06-14 台股休市，最新日線截至 2026-06-12；"
+                                "下一交易日 2026-06-15 再確認盤中價量。"
+                            ),
+                        },
+                        "recent_volatility": {"label": "normal", "summary": "近 5 日波動正常。"},
+                        "indicator_quality": {"warnings": []},
+                        "fundamentals": {},
+                        "confidence_factors": {
+                            "negative": [],
+                            "data_limits": [],
+                        },
+                    },
+                },
+                "missing": [],
+                "warnings": [],
+                "source_refs": [{"type": "table", "name": "market_daily_price"}],
+            }
+
+            with patch.object(ai_ask.reports, "build_stock_brief", return_value=stock_brief):
+                response = ai_ask.ask(db=db, payload=payload)
+
+            human_answer = response["analysis"]["human_answer"]
+            text = human_answer["text"]
+            data_limit_text = "\n".join(human_answer["data_limits"])
+            self.assertEqual(response["analysis"]["question_intent"], "entry_decision")
+            self.assertIn("台股休市", text)
+            self.assertIn("下一交易日 2026-06-15", text)
+            self.assertIn("2026-06-14 非台股交易日", data_limit_text)
+            self.assertIn("最新日線截至 2026-06-12", data_limit_text)
+            self.assertFalse(human_answer["decision_evidence"]["market_session"]["is_trading_day"])
+        finally:
+            db.close()
+
+    def test_position_stop_loss_question_uses_entry_price_and_latest_price(self) -> None:
+        db = make_session()
+        try:
+            add_stock(db)
+            payload = AiAskRequest(
+                question="那如果我買在2440了，我該止損嗎",
+                target={"type": "tw_stock", "id": "2330", "label": "2330 台積電"},
+                mode="auto",
+                allow_llm=False,
+                allow_write=False,
+            )
+            stock_brief = {
+                "kind": "stock_brief",
+                "data": {
+                    "latest_daily": {
+                        "trade_date": "2026-06-12",
+                        "stock_id": "2330",
+                        "close_price": 2310.0,
+                    },
+                    "chart": {
+                        "points": [
+                            {"time": "2026-05-18", "low": 2260.0, "high": 2450.0, "close": 2320.0},
+                            {"time": "2026-05-19", "low": 2250.0, "high": 2420.0, "close": 2310.0},
+                        ],
+                    },
+                    "technical_reports": {
+                        "daily": {
+                            "timeframe": "daily",
+                            "latest_close": 2310.0,
+                            "ma20": 2298.5,
+                            "ma60": 2128.42,
+                            "score": 3,
+                            "confidence": "high",
+                        }
+                    },
+                    "analysis": {
+                        "requested_horizon": "swing",
+                        "selected_horizon": "swing",
+                        "selected_timeframe": "weekly",
+                        "selected_score": 4,
+                        "selected_title": "波段偏多",
+                        "selected_summary": "週線站上 MA20，MACD 偏多，量能一般。",
+                        "selected_confidence": "high",
+                        "scores": {"short": 1, "swing": 4, "long": 5},
+                        "components": [],
+                    },
+                },
+                "missing": [],
+                "warnings": [],
+                "source_refs": [{"type": "table", "name": "market_daily_price"}],
+            }
+
+            with patch.object(ai_ask.reports, "build_stock_brief", return_value=stock_brief):
+                response = ai_ask.ask(db=db, payload=payload)
+
+            decision = response["analysis"]["position_decision"]
+            human_answer = response["analysis"]["human_answer"]
+            self.assertEqual(response["analysis"]["question_intent"], "position_risk_decision")
+            self.assertEqual(decision["entry_price"], 2440.0)
+            self.assertEqual(decision["latest_price"], 2310.0)
+            self.assertAlmostEqual(decision["unrealized_return_pct"], -5.3279, places=3)
+            self.assertEqual(decision["llm_status"], "skipped_policy")
+            self.assertEqual(human_answer["source"], "position_decision")
+            self.assertIn("2440", human_answer["text"].replace(",", ""))
+            self.assertIn("-5.33%", human_answer["text"])
+            self.assertIn("停損", human_answer["text"])
+            self.assertTrue(
+                any(step["stage"] == "position_math" for step in response["reasoning_steps"])
+            )
+        finally:
+            db.close()
+
+    def test_position_stop_loss_question_uses_llm_synthesis_when_trusted(self) -> None:
+        db = make_session()
+        try:
+            add_stock(db)
+            payload = AiAskRequest(
+                question="那如果我買在2440了，我該止損嗎",
+                target={"type": "tw_stock", "id": "2330", "label": "2330 台積電"},
+                mode="auto",
+                allow_llm=True,
+                allow_write=False,
+            )
+            server_policy = ai_ask.AiAskServerPolicy(
+                can_call_llm=True,
+                can_write=False,
+                trust_source="token",
+            )
+            stock_brief = {
+                "kind": "stock_brief",
+                "data": {
+                    "latest_daily": {"trade_date": "2026-06-12", "close_price": 2310.0},
+                    "technical_reports": {
+                        "daily": {"latest_close": 2310.0, "ma20": 2298.5, "score": 3, "confidence": "high"}
+                    },
+                    "analysis": {
+                        "requested_horizon": "swing",
+                        "selected_horizon": "swing",
+                        "selected_timeframe": "weekly",
+                        "selected_score": 4,
+                        "selected_title": "波段偏多",
+                        "selected_summary": "週線站上 MA20，MACD 偏多，量能一般。",
+                        "selected_confidence": "high",
+                        "scores": {"short": 1, "swing": 4, "long": 5},
+                        "components": [],
+                    },
+                },
+                "missing": [],
+                "warnings": [],
+                "source_refs": [{"type": "table", "name": "market_daily_price"}],
+            }
+            llm_decision = {
+                "decision": {
+                    "headline": "2440 成本已觸及固定停損檢查線",
+                    "direct_answer": "若你的原始停損線是 -5%，現在應執行或至少減碼；若採技術停損，先守 MA20。",
+                    "confidence": "high",
+                    "position_math": ["成本 2440，最新 2310，浮動約 -5.33%。"],
+                    "evidence_used": ["OMI 最新日線收盤 2310。"],
+                    "decision_conditions": ["固定 -5% 停損已觸發。", "技術停損看 MA20 是否失守。"],
+                    "risk_notes": ["缺少部位大小與原始停損規則。"],
+                    "missing_context": ["持股比例與可承受虧損未知。"],
+                    "next_steps": ["先把停損規則寫成價格或百分比。"],
+                },
+                "response_id": "resp_test",
+                "model": "test-model",
+                "usage": {},
+            }
+
+            with (
+                patch.object(ai_ask.reports, "build_stock_brief", return_value=stock_brief),
+                patch.object(ai_ask.llm, "generate_decision_answer", return_value=llm_decision) as generate_decision,
+            ):
+                response = ai_ask.ask(db=db, payload=payload, server_policy=server_policy)
+
+            generate_decision.assert_called_once()
+            decision = response["analysis"]["position_decision"]
+            human_answer = response["analysis"]["human_answer"]
+            self.assertEqual(decision["llm_status"], "completed")
+            self.assertEqual(human_answer["source"], "position_decision_llm")
+            self.assertIn("觸及固定停損", human_answer["headline"])
+            self.assertIn("固定 -5% 停損已觸發", human_answer["text"])
+        finally:
+            db.close()
+
+    def test_tw_index_target_uses_index_context_reader(self) -> None:
+        db = make_session()
+        try:
+            payload = AiAskRequest(
+                question="你怎麼看現在走勢?",
+                target={"type": "tw_index", "id": "TAIEX", "label": "TAIEX 加權指數"},
+                mode="auto",
+                allow_llm=False,
+                allow_write=False,
+            )
+            context = {
+                "kind": "tw_index_context",
+                "data": {
+                    "analysis": {
+                        "requested_horizon": "swing",
+                        "selected_horizon": "swing",
+                        "selected_timeframe": "weekly",
+                        "selected_score": 2,
+                        "selected_title": "偏多觀察",
+                        "selected_summary": "指數站上短均，仍需量能確認。",
+                        "selected_confidence": "medium",
+                        "scores": {"short": 1, "swing": 2},
+                        "components": [],
+                    }
+                },
+                "missing": [],
+                "warnings": [],
+                "source_refs": [{"type": "table", "name": "market_index_daily_stat"}],
+            }
+
+            with patch.object(ai_ask.tools, "read_tw_index_context", return_value=context) as reader:
+                response = ai_ask.ask(db=db, payload=payload)
+
+            reader.assert_called_once()
+            self.assertEqual(response["target"]["type"], "tw_index")
+            self.assertEqual(response["target"]["id"], "TAIEX")
+            self.assertEqual(response["action"], "omi.read_tw_index_context")
+            self.assertEqual(response["analysis"]["question_intent"], "trend_view")
+            self.assertEqual(response["analysis"]["human_answer"]["source"], "question_intent")
+            self.assertNotIn("stock_master", response["missing"])
+        finally:
+            db.close()
+
+    def test_tw_futures_target_uses_futures_context_reader(self) -> None:
+        db = make_session()
+        try:
+            payload = AiAskRequest(
+                question="台指期現在走勢怎麼看?",
+                target={"type": "tw_futures", "id": "TXF", "label": "TXF 台指期"},
+                mode="auto",
+                allow_llm=False,
+                allow_write=False,
+            )
+            context = {
+                "kind": "tw_futures_context",
+                "data": {
+                    "analysis": {
+                        "requested_horizon": "swing",
+                        "selected_horizon": "swing",
+                        "selected_timeframe": "daily",
+                        "selected_score": -2,
+                        "selected_title": "偏弱觀察",
+                        "selected_summary": "日線跌破短均，先看反彈是否失敗。",
+                        "selected_confidence": "medium",
+                        "scores": {"short": -2, "swing": -2},
+                        "components": [],
+                    }
+                },
+                "missing": [],
+                "warnings": [],
+                "source_refs": [{"type": "table", "name": "taiwan_futures_daily_bar"}],
+            }
+
+            with patch.object(ai_ask.tools, "read_tw_futures_context", return_value=context) as reader:
+                response = ai_ask.ask(db=db, payload=payload)
+
+            reader.assert_called_once()
+            self.assertEqual(response["target"]["type"], "tw_futures")
+            self.assertEqual(response["target"]["id"], "TXF")
+            self.assertEqual(response["action"], "omi.read_tw_futures_context")
+            self.assertEqual(response["analysis"]["question_intent"], "trend_view")
+            self.assertEqual(response["analysis"]["human_answer"]["source"], "question_intent")
+            self.assertNotIn("stock_master", response["missing"])
         finally:
             db.close()
 

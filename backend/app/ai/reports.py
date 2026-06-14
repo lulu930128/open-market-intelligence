@@ -52,6 +52,50 @@ def _pct_display(value: Any) -> str | None:
     return f"{sign}{number:.2f}%"
 
 
+def _price_display(value: Any) -> str | None:
+    number = _numeric(value)
+    if number is None:
+        return None
+    if float(number).is_integer():
+        return f"{number:,.0f}"
+    return f"{number:,.2f}".rstrip("0").rstrip(".")
+
+
+def _level_price_display(level: Any) -> str | None:
+    if not isinstance(level, dict):
+        return None
+    return _price_display(level.get("price"))
+
+
+def _zone_display(zone: Any) -> str | None:
+    if not isinstance(zone, dict):
+        return None
+    low = _price_display(zone.get("low"))
+    high = _price_display(zone.get("high"))
+    if low and high:
+        return f"{low}-{high}"
+    return low or high
+
+
+def _compact_technical_levels(levels: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(levels, dict) or levels.get("kind") != "technical_price_levels":
+        return {}
+    entry = levels.get("entry") if isinstance(levels.get("entry"), dict) else {}
+    risk = levels.get("risk") if isinstance(levels.get("risk"), dict) else {}
+    compact = {
+        "latest": _price_display(levels.get("latest_price")),
+        "preferred_entry": _zone_display(entry.get("preferred_zone")),
+        "aggressive_entry": _zone_display(entry.get("aggressive_zone")),
+        "conservative_entry": _zone_display(entry.get("conservative_zone")),
+        "do_not_chase_above": _level_price_display(entry.get("do_not_chase_above")),
+        "breakout_confirm_above": _level_price_display(entry.get("breakout_confirm_above")),
+        "short_stop": _level_price_display(risk.get("short_stop")),
+        "technical_invalidation": _level_price_display(risk.get("technical_invalidation")),
+        "context": levels.get("context") if isinstance(levels.get("context"), dict) else {},
+    }
+    return {key: value for key, value in compact.items() if value not in (None, "", {})}
+
+
 def _row_label(row: dict[str, Any]) -> str:
     stock_id = str(row.get("stock_id") or "").strip()
     stock_name = str(row.get("stock_name") or "").strip()
@@ -174,6 +218,8 @@ def _compact_stock_summary(context: dict[str, Any]) -> dict[str, Any]:
     daily_technical = technical_reports.get("daily") or {}
     today_technical = technical_reports.get("today") or {}
     analysis = data.get("analysis") or {}
+    technical_levels = data.get("technical_levels") if isinstance(data.get("technical_levels"), dict) else {}
+    decision_evidence = data.get("decision_evidence") if isinstance(data.get("decision_evidence"), dict) else {}
 
     highlights: list[str] = []
     checks: list[str] = []
@@ -234,11 +280,47 @@ def _compact_stock_summary(context: dict[str, Any]) -> dict[str, Any]:
             f"confidence={analysis_summary.get('selected_confidence')}."
         )
 
+    levels_summary = _compact_technical_levels(technical_levels)
+    if levels_summary:
+        level_parts = []
+        if levels_summary.get("preferred_entry"):
+            level_parts.append(f"preferred_entry={levels_summary['preferred_entry']}")
+        if levels_summary.get("do_not_chase_above"):
+            level_parts.append(f"do_not_chase_above={levels_summary['do_not_chase_above']}")
+        if levels_summary.get("breakout_confirm_above"):
+            level_parts.append(f"breakout_confirm_above={levels_summary['breakout_confirm_above']}")
+        if levels_summary.get("short_stop"):
+            level_parts.append(f"short_stop={levels_summary['short_stop']}")
+        if levels_summary.get("technical_invalidation"):
+            level_parts.append(f"invalidation={levels_summary['technical_invalidation']}")
+        if level_parts:
+            highlights.append("Technical levels: " + ", ".join(level_parts) + ".")
+
+    market_session = decision_evidence.get("market_session") if isinstance(decision_evidence.get("market_session"), dict) else {}
+    if market_session.get("is_trading_day") is False and market_session.get("summary"):
+        highlights.append(f"Market session: {market_session['summary']}")
+
+    volatility = decision_evidence.get("recent_volatility") if isinstance(decision_evidence.get("recent_volatility"), dict) else {}
+    if volatility.get("summary"):
+        highlights.append(f"Recent volatility: {volatility['summary']}")
+
+    fundamentals = decision_evidence.get("fundamentals") if isinstance(decision_evidence.get("fundamentals"), dict) else {}
+    revenue = fundamentals.get("monthly_revenue") if isinstance(fundamentals.get("monthly_revenue"), dict) else {}
+    if revenue.get("summary"):
+        highlights.append(f"Fundamental revenue: {revenue['summary']}")
+
+    indicator_quality = decision_evidence.get("indicator_quality") if isinstance(decision_evidence.get("indicator_quality"), dict) else {}
+    indicator_warnings = indicator_quality.get("warnings") if isinstance(indicator_quality.get("warnings"), list) else []
+    for warning in indicator_warnings[:2]:
+        checks.append(str(warning))
+
     checks.extend(context.get("missing", []))
 
     return {
         "highlights": highlights,
         "analysis": analysis_summary,
+        "technical_levels": levels_summary,
+        "decision_evidence": decision_evidence,
         "next_checks": list(dict.fromkeys(checks)),
     }
 

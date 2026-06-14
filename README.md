@@ -271,6 +271,96 @@ analysis.human_answer
 
 這些欄位屬於 trust 與 freshness model，不只是 debug metadata。
 
+## AI Logic
+
+OMI 的 AI 問答以 deterministic local analysis 為主，LLM 是可選的敘事與報告層。一般使用者在右下角 OMI dock 直接提問時，後端會先把問題轉成可驗證的 decision task，再用本機 evidence 組回答。
+
+### 問題理解
+
+`POST /api/ai/ask` 與 `/api/ai/ask/stream` 會先解析 `question_intent`：
+
+| Intent | 典型問題 | 回答重點 |
+| --- | --- | --- |
+| `entry_decision` | 適合買嗎、買入、進場、回檔買點、追價 | 回檔區、突破確認、追價上限、停損、技術失效。 |
+| `exit_decision` | 要賣嗎、續抱、停利、出場 | 續抱條件、出場條件、失效線。 |
+| `risk_check` | 風險、會不會跌、空方條件 | 主要風險線、轉弱條件、風控提醒。 |
+| `position_risk_decision` | 已買在某價位，該止損嗎 | 成本距離、現價位置、部位風險。 |
+| `trend_view` | 怎麼看、趨勢如何 | 短線/波段/長線方向與確認條件。 |
+
+直接問「適合買入嗎、如果等回檔看哪裡」會走 `entry_decision`，不應退回通用技術摘要模板。
+
+### Evidence pipeline
+
+AI 回答會先讀取 bounded local evidence，而不是直接要求模型自由發揮：
+
+1. 解析 target：台股、台指期、群組或美股 context。
+2. 讀取 freshness：檢查資料日期、缺口、warnings、missing。
+3. 建立 technical summary：依 horizon 產生盤中、短線、波段或長線評分。
+4. 建立 decision evidence：整合價量、均線、MACD、波動、法人/籌碼、營收、財報與市場 context。
+5. 建立 technical price levels：推導回檔區、突破確認、追價上限、停損與技術失效。
+6. 組裝 `analysis.human_answer`：輸出 UI 可直接呈現的 headline、summary、action plan、risks、data limits。
+
+LLM enabled 時，模型只能基於這些 evidence 補強敘事；如果 freshness、coverage 或可信度不足，回答必須明確說明限制。
+
+### Trading-session awareness
+
+台股 target 會檢查台灣交易日：
+
+- 交易日盤中：可使用 intraday/today evidence。
+- 休市或週末：不使用盤中資料，改用最新日線與下一交易日提示。
+- 最新日線日期會暴露在 `data_limits`，例如「2026-06-14 非台股交易日；最新日線截至 2026-06-12；下一交易日 2026-06-15 再確認」。
+
+這個判斷會進入 `decision_evidence.market_session`，前端 OMI dock 會在 Signals 顯示「交易日判斷」。
+
+### Price-level logic
+
+`entry_decision` 會優先使用 `analysis.technical_levels`：
+
+| 欄位 | UI 顯示 | 用途 |
+| --- | --- | --- |
+| `latest_price` | 現價 | 判斷目前是否已離開買點。 |
+| `entry.preferred_zone` | 回檔觀察 | 偏好的低接/回測區間。 |
+| `entry.breakout_confirm_above` | 突破確認 | 追高前需要確認的強勢突破價。 |
+| `entry.do_not_chase_above` | 追價上限 | 高於此區不建議把它當低接買點。 |
+| `risk.short_stop` | 短線停損 | 短線防守價。 |
+| `risk.technical_invalidation` | 技術失效 | 波段假設失效價。 |
+
+這些價位來自 MA、ATR、Donchian、latest close 與風險緩衝，不是 LLM 自行生成的數字。
+
+### Confidence and limits
+
+OMI 會把回答分成方向、信心、風險與資料限制：
+
+- `stance_label`：偏多、偏空、多空分歧或未定。
+- `confidence_label`：由資料完整度、指標一致性與 warning 共同決定。
+- `risks`：波動放大、指標失真、追價過熱、關鍵線跌破。
+- `data_limits`：休市、資料 stale、缺少 intraday、缺少法人/籌碼/基本面或來源 partial coverage。
+
+如果資料不足，OMI 應說明「不能判斷哪一段」，而不是直接產生看似完整的買賣建議。
+
+### OMI dock rendering
+
+前端 `OmiAskDock` 會優先渲染 `analysis.human_answer`，而不是原始 technical digest。
+
+`entry_decision` 使用專屬版型：
+
+- 買入判斷：headline、方向、信心與來源。
+- 關鍵價位：現價、回檔觀察、突破確認、追價上限、短線停損、技術失效。
+- 判斷依據：從 evidence summary 與 technical summary 萃取。
+- 操作條件：現在、進場條件、風控。
+- 風險與資料限制：明確列在回答下方。
+
+Signals popover 顯示處理節點：
+
+- 辨識問題
+- 交易日判斷
+- 推導價位
+- 風控價位
+- 資料來源
+- 渲染答案
+
+底部計數使用 `資料 / 判斷`，其中資料數來自 `source_refs` 與 `decision_evidence.data_quality.source_names`，判斷數來自 technical levels、market session、volatility、indicator quality、fundamentals 等模組。
+
 ## MCP Adapter
 
 後端啟動後再啟動 MCP adapter：

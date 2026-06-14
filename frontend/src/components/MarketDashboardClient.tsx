@@ -55,6 +55,7 @@ type USRankBy = "none" | "change_pct" | "volume" | "close";
 const WATCHLIST_INTRADAY_LIMIT = 30;
 const WATCHLIST_BACKFILL_LOOKBACK_YEARS = 8;
 const MARKET_CHIP_REFRESH_STORAGE_PREFIX = "omi:market-chip-refresh";
+const TAIWAN_INDEX_TARGET_IDS = new Set(["TAIEX", "TPEX"]);
 type RankingDisplayRow = {
   key: string;
   rank: number;
@@ -2642,19 +2643,20 @@ export default function MarketDashboardClient({
     }
 
     if (selectedStockId) {
+      const isIndexTarget = TAIWAN_INDEX_TARGET_IDS.has(selectedStockId);
       return {
         market: "tw",
         label: `${selectedStockId}${selectedStockName ? ` ${selectedStockName}` : ""}`,
         target: {
-          type: "tw_stock",
+          type: isIndexTarget ? "tw_index" : "tw_stock",
           id: selectedStockId,
           label: selectedStockName ?? selectedStockId,
           market: "TW",
         },
         uiContext: {
           market: "tw",
-          selected_stock_id: selectedStockId,
-          selected_stock_name: selectedStockName,
+          [isIndexTarget ? "selected_index_id" : "selected_stock_id"]: selectedStockId,
+          [isIndexTarget ? "selected_index_name" : "selected_stock_name"]: selectedStockName,
           selected_group_id: activeGroupId,
           selected_group_name: selectedGroup?.group_name ?? null,
         },

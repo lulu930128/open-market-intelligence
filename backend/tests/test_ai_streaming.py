@@ -58,6 +58,10 @@ class AiStreamingTests(unittest.TestCase):
                         "text": "結論：短線偏多\n追蹤：2330 台積電",
                     }
                 },
+                "reasoning_steps": [
+                    {"stage": "question_understanding", "message": "已解析為持倉/停損問題。"},
+                    {"stage": "position_math", "message": "已計算成本距離與浮動損益。"},
+                ],
                 "tool_runs": [{"tool": "tw.refresh_stock_evidence", "status": "success"}],
                 "result": {},
                 "freshness": {"is_current": True},
@@ -87,7 +91,15 @@ class AiStreamingTests(unittest.TestCase):
             self.assertIn("tool_run", event_names)
             self.assertIn("delta", event_names)
             self.assertEqual(event_names[-2:], ["final", "done"])
+            first_status = events[0][1]
+            self.assertEqual(first_status["stage"], "accepted")
+            self.assertEqual(first_status["stage_label"], "收到問題")
+            self.assertEqual(first_status["sequence"], 1)
             self.assertEqual(events[event_names.index("evidence")][1]["trust_level"], "high")
+            self.assertIn("position_math", [data.get("stage") for name, data in events if name == "status"])
+            self.assertTrue(
+                all(data.get("stage_label") for name, data in events if name == "status")
+            )
             self.assertIn("短線偏多", "".join(data["text"] for name, data in events if name == "delta"))
             self.assertEqual(events[-2][1]["action"], "omi.generate_stock_brief")
             self.assertTrue(events[-1][1]["ok"])
