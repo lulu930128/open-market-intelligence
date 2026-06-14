@@ -14,7 +14,8 @@ Open Market Intelligence（OMI）是一套本機優先的市場情報與看盤�
 
 - 台股 dashboard：大盤脈絡、自選股群組、群組排行、背景更新狀態、資料過期 loading guard。
 - 台股個股頁：`今日`、`日K`、`週K`、`月K` 共用一致版型。
-- 專業 K 線模式：全寬圖表、壓縮 header、最低 1 分鐘週期、指標分類、畫線工具、量測工具、undo/redo、畫線快照保存。
+- 台指期頁：TXF、MXF、TMF 報價、日內/日週月 K、期現價差、成交量與商品比較。
+- 專業 K 線模式：台股、美股、台指期共用同一套全寬圖表 shell，支援壓縮 header、指標分類、畫線工具、量測工具、undo/redo、畫線快照保存。
 - 台股籌碼與基本面：法人、融資融券、集保、券商分點 Top15、營收、財報、盈餘。
 - 美股市場：主要指數、自選股、OHLC、盤中資料、SEC facts、Alpha Vantage profile/actions、FINRA short volume、FRED macro。
 - AI/Agent 入口：`POST /api/ai/ask` 與 MCP `omi.ask`，支援 evidence freshness、warnings、missing data、tool runs。
@@ -46,11 +47,17 @@ Open Market Intelligence（OMI）是一套本機優先的市場情報與看盤�
 
 ### 專業 K 線模式
 
-專業模式會保留左側自選股與目前個股 context，並將 K 線圖最大化。
+專業模式會保留左側自選股與目前商品 context，並將 K 線圖最大化。
+
+台股個股、美股個股/指數與台指期都使用共用的 `ProfessionalChartPanel`：
+
+- 台股：支援盤中分鐘線、日 K、週 K、月 K 與台股技術指標資料。
+- 美股：支援 Yahoo chart OHLC/intraday、指數與個股 context。
+- 台指期：支援 `今日`、`日K`、`週K`、`月K`，成交量以口數顯示，畫線 context 使用 `TW_FUTURES` market。
 
 支援控制：
 
-- 週期：`1分`、`5分`、`15分`、`30分`、`1小時`、`4小時`、`日`、`週`、`月`。
+- 週期：台股與美股支援 `1分`、`5分`、`15分`、`30分`、`1小時`、`4小時`、`日`、`週`、`月`；台指期支援 `今日`、`日K`、`週K`、`月K`。
 - 圖表型態：K 線、折線。
 - 指標分類：趨勢、均線、通道、波動、動能、成交量、相對強弱、型態、風險。
 - 畫線工具：游標、水平線、趨勢線、射線、區間、Fibonacci、anchored VWAP、量價分布、量測、價格百分比。
@@ -71,6 +78,18 @@ Open Market Intelligence（OMI）是一套本機優先的市場情報與看盤�
 - 分點：nStock 券商分點 Top15，支援單日與多日加總。
 - 營收：月營收歷史。
 - 盈餘與基本面：MOPS/MOPSOV 季度財務指標。
+
+### 台指期
+
+台指期是台股研究的衍生性商品 context，和台股 dashboard 共用同一個市場入口。
+
+目前支援：
+
+- 商品：TXF、MXF、TMF。
+- 報價：日盤/夜盤最新價、漲跌、漲跌幅、報價時間、契約月份。
+- K 線：日內、日 K、週 K、月 K。
+- 重點資訊：開高低、參考/結算、期現價差、振幅、成交量、未平倉、買賣價。
+- 專業模式：和台股/美股共用工具列、圖表型態切換、技術指標選單、畫線工具與本機/遠端畫線快照。
 
 ### 美股市場
 
@@ -163,7 +182,7 @@ flowchart LR
 ├─ frontend/
 │  └─ src/
 │     ├─ app/                  Next.js App Router
-│     ├─ components/           dashboard, charts, panels, loading UI
+│     ├─ components/           dashboard, shared professional charts, panels, loading UI
 │     ├─ lib/                  API client, market-time helpers, job helpers
 │     └─ types/                frontend API types
 ├─ docs/assets/readme/         README screenshots
@@ -194,6 +213,7 @@ flowchart LR
 | `/api/market/revenue` | 月營收 |
 | `/api/market/financials` | 季度財務指標 |
 | `/api/market/backfill` | 台股 backfill jobs |
+| `/api/market/tw-futures` | 台指期 TXF/MXF/TMF 報價、日內與日 K 資料 |
 | `/api/us-market` | 美股 symbols、watchlists、OHLC、intraday、SEC facts、profile、actions、macro |
 
 ## AI And Agent Contract
@@ -451,8 +471,9 @@ git diff --check
 - Frontend API access 應透過 `frontend/src/lib/api.ts` 與 `/omi-data` proxy，除非有明確例外。
 - 台股 market time 與 trading-session helpers 放在 `frontend/src/lib/taiwanMarketTime.ts` 與 `frontend/src/lib/taiwanMarketRules.ts`。
 - 美股 regular-session helpers 放在 `frontend/src/lib/usMarketTime.ts`。
+- 台股、美股與台指期的專業圖表模式應共用 `frontend/src/components/ProfessionalChartPanel.tsx` 與 `frontend/src/components/professionalChartDrawing.ts`；不要在單一 detail panel 重新實作一套工具列。
 - Chart dimensions 要穩定；indicator toggle、hover state、label、refresh 不應重置 visible range 或中斷畫線操作。
-- 專業 K 線模式要隱藏次要 dashboard panels，但保留左側自選股與目前個股 context。
+- 專業 K 線模式要隱藏次要 dashboard panels，但保留左側自選股與目前商品 context。
 - 券商分點多日資料是已存 daily Top15 snapshots 的 aggregate，不是完整券商分點帳本。
 - 盤中指標由目前 intraday points 計算；早盤 RSI/MACD 可能因資料不足顯示 `-`。
 - Agent responses 要明確暴露 stale/partial data，不要隱藏 `warnings` 或 `missing`。

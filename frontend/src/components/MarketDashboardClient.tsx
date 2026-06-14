@@ -2812,9 +2812,9 @@ export default function MarketDashboardClient({
           <section className="min-w-0 flex-1 overflow-y-auto p-4">
             {activeMarket === "tw" ? (
               <>
-                {twChartFocusMode ? null : (
+                <div className={twChartFocusMode ? "hidden" : ""}>
                   <MarketTape summary={marketIndexSummary} loadState={marketIndexLoadState} />
-                )}
+                </div>
 
                 {selectedFuturesSymbol ? (
                   <TaiwanFuturesDetailPanel
@@ -2836,14 +2836,14 @@ export default function MarketDashboardClient({
               </>
             ) : activeMarket === "us" ? (
               <>
-                {usChartFocusMode ? null : (
+                <div className={usChartFocusMode ? "hidden" : ""}>
                   <USMarketTape
                     selectedSymbol={selectedUsSymbol}
                     selectedSecurityName={selectedUsSecurityName}
                     selectedGroupName={selectedUsGroupName}
                     companyProfile={selectedUsContextProfile}
                   />
-                )}
+                </div>
 
                 <USStockDetailPanel
                   selectedSymbol={selectedUsSymbol}

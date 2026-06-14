@@ -2,35 +2,44 @@
 
 import { LoadingDots } from "@/components/LoadingPlaceholders";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
+import ProfessionalChartPanel, {
+  type ProfessionalChartStyle,
+} from "@/components/ProfessionalChartPanel";
 import StockKLineChart, {
   defaultIndicatorParameters,
   defaultIndicators,
+  professionalIndicatorCategoryGroups,
+  type IndicatorCategoryGroup,
+  type IndicatorKey,
   type IndicatorSettings,
 } from "@/components/StockKLineChart";
-import { fetchJson } from "@/lib/api";
+import type { ChartDrawing, ChartDrawingTool } from "@/components/LightweightKLineChart";
+import {
+  buildChartDrawingSnapshotPayload,
+  chartDrawingApiPath,
+  chartDrawingSnapshotsEqual,
+  chartDrawingSyncDelayMs,
+  createChartDrawingSnapshot,
+  loadChartDrawings,
+  normalizeChartDrawingSelection,
+  normalizeStoredChartDrawings,
+  saveChartDrawings,
+  serializeChartDrawings,
+  type ChartDrawingHistoryState,
+  type ChartDrawingStorageState,
+} from "@/components/professionalChartDrawing";
+import { fetchJson, requestJson } from "@/lib/api";
 import type {
+  ChartDrawingSnapshotRead,
   ChartPoint,
   MarketIndexSummary,
   TaiwanFuturesDailyBar,
   TaiwanFuturesIntradayBar,
   TaiwanFuturesQuote,
 } from "@/types/market";
-import dynamic from "next/dynamic";
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
-
-const LightweightKLineChart = dynamic(
-  () => import("@/components/LightweightKLineChart"),
-  {
-    ssr: false,
-    loading: () => (
-      <div className="flex h-[640px] items-center justify-center border-t border-slate-200 bg-white text-sm text-slate-500">
-        K 線引擎載入中...
-      </div>
-    ),
-  }
-);
 
 type Props = {
   marketIndexSummary?: MarketIndexSummary | null;
@@ -53,6 +62,23 @@ const FUTURES_TIMEFRAME_LABELS: Record<FuturesTimeframe, string> = {
   weekly: "週K",
   monthly: "月K",
 };
+const FUTURES_PROFESSIONAL_TIMEFRAME_OPTIONS: Array<{
+  key: FuturesTimeframe;
+  label: string;
+}> = [
+  { key: "today", label: "今日" },
+  { key: "daily", label: "日" },
+  { key: "weekly", label: "週" },
+  { key: "monthly", label: "月" },
+];
+
+function chartDrawingStorageKey(symbol: string | null, timeframe: FuturesTimeframe) {
+  return `omi:tw-futures:chart-drawings:v1:${symbol ?? "empty"}:${timeframe}`;
+}
+
+function chartDrawingTimeMode(timeframe: FuturesTimeframe) {
+  return timeframe === "today" ? "intraday" : "date";
+}
 
 const numberFormatter = new Intl.NumberFormat("zh-TW", {
   maximumFractionDigits: 2,
@@ -264,16 +290,89 @@ function EmptyChartState({ loading, message }: { loading: boolean; message: stri
   );
 }
 
+function FuturesProfessionalIndicatorMenu({
+  groups = professionalIndicatorCategoryGroups,
+  indicators,
+  onToggleIndicator,
+}: {
+  groups?: IndicatorCategoryGroup[];
+  indicators: IndicatorSettings;
+  onToggleIndicator: (key: IndicatorKey) => void;
+}) {
+  return (
+    <div className="absolute right-0 z-30 mt-2 max-h-[560px] w-[25rem] overflow-y-auto border border-slate-200 bg-white p-3 text-left shadow-xl">
+      <div className="mb-3 flex items-center justify-between border-b border-slate-100 pb-2">
+        <div>
+          <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">
+            Indicators
+          </div>
+          <div className="mt-0.5 text-sm font-bold text-slate-950">技術指標</div>
+        </div>
+        <div className="text-[11px] font-semibold text-slate-400">台指期</div>
+      </div>
+
+      <div className="space-y-3">
+        {groups.map((group) => (
+          <div key={group.key} className="border border-slate-100">
+            <div className="border-b border-slate-100 bg-slate-50 px-3 py-2">
+              <div className="text-xs font-bold text-slate-900">{group.label}</div>
+              <div className="mt-0.5 text-[11px] text-slate-500">{group.description}</div>
+            </div>
+            <div className="grid grid-cols-1 gap-px bg-slate-100">
+              {group.options.map((option) => {
+                if (option.status !== "available") {
+                  return (
+                    <div
+                      key={option.key}
+                      className="flex items-start justify-between gap-2 bg-white px-3 py-2 text-xs text-slate-400"
+                    >
+                      <span>
+                        <span className="block font-semibold">{option.label}</span>
+                        <span className="block">{option.description}</span>
+                      </span>
+                      <span className="shrink-0 border border-slate-200 px-1.5 py-0.5 text-[10px] font-bold">
+                        待補
+                      </span>
+                    </div>
+                  );
+                }
+
+                return (
+                  <label
+                    key={option.key}
+                    className="flex cursor-pointer items-start gap-2 bg-white px-3 py-2 text-xs hover:bg-slate-50"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={indicators[option.key]}
+                      onChange={() => onToggleIndicator(option.key)}
+                      className="mt-0.5"
+                    />
+                    <span>
+                      <span className="block font-semibold text-slate-800">
+                        {option.label}
+                      </span>
+                      <span className="block text-slate-500">{option.description}</span>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function FuturesKLineVisual({
   chartData,
-  expanded,
   indicators,
   loading,
   revealKey,
   timeframe,
 }: {
   chartData: ChartPoint[];
-  expanded: boolean;
   indicators: IndicatorSettings;
   loading: boolean;
   revealKey: string;
@@ -288,30 +387,6 @@ function FuturesKLineVisual({
             ? `${FUTURES_TIMEFRAME_LABELS[timeframe]}資料讀取中`
             : `${FUTURES_TIMEFRAME_LABELS[timeframe]}資料不足`
         }
-      />
-    );
-  }
-
-  if (expanded) {
-    return (
-      <LightweightKLineChart
-        chartData={chartData}
-        label={FUTURES_TIMEFRAME_LABELS[timeframe]}
-        height={780}
-        fillViewport
-        timeMode={timeframe === "today" ? "intraday" : "date"}
-        chartStyle="candlestick"
-        showHeader={false}
-        showMovingAverages={indicators.ma}
-        indicators={indicators}
-        indicatorParameters={defaultIndicatorParameters}
-        volumePanelLabel={timeframe === "today" ? "累積量(口)" : "成交量(口)"}
-        volumeValueKey="volume"
-        drawingContext={{
-          market: "TW_FUTURES",
-          symbol: revealKey.split(":")[0] ?? null,
-          timeframe,
-        }}
       />
     );
   }
@@ -345,6 +420,28 @@ export default function TaiwanFuturesDetailPanel({
   const [chartTimeframe, setChartTimeframe] = useState<FuturesTimeframe>("daily");
   const [showChartIndicators, setShowChartIndicators] = useState(false);
   const [chartExpanded, setChartExpanded] = useState(false);
+  const [indicatorMenuOpen, setIndicatorMenuOpen] = useState(false);
+  const [professionalChartStyle, setProfessionalChartStyle] =
+    useState<ProfessionalChartStyle>("candlestick");
+  const [professionalIndicators, setProfessionalIndicators] = useState<IndicatorSettings>(() => ({
+    ...defaultIndicators,
+    signals: false,
+    ma: true,
+    volume: true,
+  }));
+  const [chartDrawingTool, setChartDrawingTool] = useState<ChartDrawingTool>("cursor");
+  const [selectedChartDrawingId, setSelectedChartDrawingId] = useState<string | null>(null);
+  const [chartDrawingState, setChartDrawingState] = useState<ChartDrawingStorageState>({
+    key: "",
+    drawings: [],
+  });
+  const [chartDrawingHistoryState, setChartDrawingHistoryState] =
+    useState<ChartDrawingHistoryState>({
+      key: "",
+      past: [],
+      future: [],
+    });
+  const chartDrawingSyncTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     onChartFocusModeChange?.(chartExpanded);
@@ -356,7 +453,7 @@ export default function TaiwanFuturesDetailPanel({
     };
   }, [onChartFocusModeChange]);
 
-  const normalizedSymbol = symbol?.trim().toUpperCase() || null;
+  const normalizedSymbol = useMemo(() => symbol?.trim().toUpperCase() || null, [symbol]);
   const quotesBySymbol = useMemo(() => {
     return new Map(quotes.map((quote) => [quote.symbol, quote]));
   }, [quotes]);
@@ -364,6 +461,26 @@ export default function TaiwanFuturesDetailPanel({
   const displayProductName = normalizedSymbol
     ? `${normalizedSymbol} ${FUTURES_LABELS[normalizedSymbol] ?? quote?.product_name ?? "代表商品"}`
     : "TXF / MXF / TMF";
+  const chartDrawingKey = chartDrawingStorageKey(normalizedSymbol, chartTimeframe);
+  const storedChartDrawings = useMemo(
+    () => loadChartDrawings(chartDrawingKey),
+    [chartDrawingKey]
+  );
+  const chartDrawings =
+    chartDrawingState.key === chartDrawingKey
+      ? chartDrawingState.drawings
+      : storedChartDrawings;
+  const chartDrawingHistory =
+    chartDrawingHistoryState.key === chartDrawingKey
+      ? chartDrawingHistoryState
+      : { key: chartDrawingKey, past: [], future: [] };
+  const canUndoChartDrawing = chartDrawingHistory.past.length > 0;
+  const canRedoChartDrawing = chartDrawingHistory.future.length > 0;
+  const activeSelectedChartDrawingId = chartDrawings.some(
+    (drawing) => drawing.id === selectedChartDrawingId
+  )
+    ? selectedChartDrawingId
+    : null;
 
   useEffect(() => {
     if (!normalizedSymbol) {
@@ -540,6 +657,303 @@ export default function TaiwanFuturesDetailPanel({
     </div>
   );
 
+  function toggleProfessionalIndicator(key: IndicatorKey) {
+    setProfessionalIndicators((current) => ({
+      ...current,
+      [key]: !current[key],
+    }));
+  }
+
+  const professionalDrawingContext = useMemo(
+    () => ({
+      market: "TW_FUTURES",
+      symbol: normalizedSymbol,
+      timeframe: chartTimeframe,
+    }),
+    [chartTimeframe, normalizedSymbol]
+  );
+
+  const queueChartDrawingRemoteSave = useCallback((
+    drawingsToSave: ChartDrawing[],
+    selectedDrawingIdToSave: string | null
+  ) => {
+    if (typeof window === "undefined") return;
+    if (!normalizedSymbol) return;
+
+    const path = chartDrawingApiPath("TW_FUTURES", normalizedSymbol, chartTimeframe);
+    const payload = buildChartDrawingSnapshotPayload({
+      drawings: drawingsToSave,
+      market: "TW_FUTURES",
+      selectedDrawingId: selectedDrawingIdToSave,
+      source: "frontend.tw_futures_professional_chart",
+      stockName: displayProductName,
+      symbol: normalizedSymbol,
+      timeframe: chartTimeframe,
+      timeMode: chartDrawingTimeMode(chartTimeframe),
+    });
+
+    if (chartDrawingSyncTimerRef.current) {
+      window.clearTimeout(chartDrawingSyncTimerRef.current);
+    }
+
+    chartDrawingSyncTimerRef.current = window.setTimeout(() => {
+      void requestJson<ChartDrawingSnapshotRead>(path, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      }).catch(() => {
+        // Best-effort server sync. Local chart drawings remain available via localStorage.
+      });
+    }, chartDrawingSyncDelayMs);
+  }, [chartTimeframe, displayProductName, normalizedSymbol]);
+
+  const storeChartDrawings = useCallback((
+    drawingsToSave: ChartDrawing[],
+    selectedDrawingIdToSave = activeSelectedChartDrawingId
+  ) => {
+    setChartDrawingState({
+      key: chartDrawingKey,
+      drawings: drawingsToSave,
+    });
+    saveChartDrawings(chartDrawingKey, drawingsToSave);
+    queueChartDrawingRemoteSave(drawingsToSave, selectedDrawingIdToSave);
+  }, [
+    activeSelectedChartDrawingId,
+    chartDrawingKey,
+    queueChartDrawingRemoteSave,
+  ]);
+
+  useEffect(() => {
+    return () => {
+      if (chartDrawingSyncTimerRef.current && typeof window !== "undefined") {
+        window.clearTimeout(chartDrawingSyncTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!chartExpanded || !normalizedSymbol) {
+      return;
+    }
+
+    let cancelled = false;
+    const remoteSymbol = normalizedSymbol;
+    const localDrawings = loadChartDrawings(chartDrawingKey);
+    const normalizedLocalSelection = normalizeChartDrawingSelection(
+      localDrawings,
+      activeSelectedChartDrawingId
+    );
+
+    if (localDrawings.length > 0) {
+      queueChartDrawingRemoteSave(localDrawings, normalizedLocalSelection);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    async function loadRemoteChartDrawings() {
+      try {
+        const snapshot = await fetchJson<ChartDrawingSnapshotRead>(
+          chartDrawingApiPath("TW_FUTURES", remoteSymbol, chartTimeframe)
+        );
+
+        if (cancelled) return;
+
+        const remoteDrawings = normalizeStoredChartDrawings(snapshot.drawings);
+        if (remoteDrawings.length === 0) return;
+
+        const remoteSelection = normalizeChartDrawingSelection(
+          remoteDrawings,
+          snapshot.selected_drawing_id
+        );
+
+        setChartDrawingState({
+          key: chartDrawingKey,
+          drawings: remoteDrawings,
+        });
+        saveChartDrawings(chartDrawingKey, remoteDrawings);
+        setSelectedChartDrawingId(remoteSelection);
+      } catch {
+        // A missing remote snapshot simply means this chart has not been saved server-side yet.
+      }
+    }
+
+    void loadRemoteChartDrawings();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeSelectedChartDrawingId,
+    chartDrawingKey,
+    chartExpanded,
+    chartTimeframe,
+    normalizedSymbol,
+    queueChartDrawingRemoteSave,
+  ]);
+
+  function updateChartDrawingState(
+    nextValue: ChartDrawing[] | ((current: ChartDrawing[]) => ChartDrawing[]),
+    nextSelectedDrawingId?: string | null,
+    options: { recordHistory?: boolean } = {}
+  ) {
+    const nextDrawings =
+      typeof nextValue === "function" ? nextValue(chartDrawings) : nextValue;
+    const currentSnapshot = createChartDrawingSnapshot(
+      chartDrawings,
+      activeSelectedChartDrawingId
+    );
+    const nextSnapshot = createChartDrawingSnapshot(
+      nextDrawings,
+      nextSelectedDrawingId === undefined
+        ? activeSelectedChartDrawingId
+        : nextSelectedDrawingId
+    );
+
+    if (chartDrawingSnapshotsEqual(currentSnapshot, nextSnapshot)) {
+      return;
+    }
+
+    if (
+      serializeChartDrawings(currentSnapshot.drawings) ===
+      serializeChartDrawings(nextSnapshot.drawings)
+    ) {
+      setSelectedChartDrawingId(nextSnapshot.selectedDrawingId);
+      return;
+    }
+
+    if (options.recordHistory !== false) {
+      const currentPast =
+        chartDrawingHistoryState.key === chartDrawingKey ? chartDrawingHistoryState.past : [];
+
+      setChartDrawingHistoryState({
+        key: chartDrawingKey,
+        past: [...currentPast, currentSnapshot].slice(-50),
+        future: [],
+      });
+    }
+
+    storeChartDrawings(nextSnapshot.drawings, nextSnapshot.selectedDrawingId);
+    setSelectedChartDrawingId(nextSnapshot.selectedDrawingId);
+  }
+
+  function updateChartDrawings(
+    nextValue: ChartDrawing[] | ((current: ChartDrawing[]) => ChartDrawing[]),
+    options: { recordHistory?: boolean } = {}
+  ) {
+    updateChartDrawingState(nextValue, undefined, options);
+  }
+
+  const undoChartDrawing = useCallback(() => {
+    if (!canUndoChartDrawing) return;
+
+    const past = chartDrawingHistory.past;
+    const previousSnapshot = past[past.length - 1];
+
+    if (!previousSnapshot) return;
+
+    setChartDrawingHistoryState({
+      key: chartDrawingKey,
+      past: past.slice(0, -1),
+      future: [
+        createChartDrawingSnapshot(chartDrawings, activeSelectedChartDrawingId),
+        ...chartDrawingHistory.future,
+      ].slice(0, 50),
+    });
+    storeChartDrawings(previousSnapshot.drawings, previousSnapshot.selectedDrawingId);
+    setSelectedChartDrawingId(previousSnapshot.selectedDrawingId);
+  }, [
+    activeSelectedChartDrawingId,
+    canUndoChartDrawing,
+    chartDrawingHistory.future,
+    chartDrawingHistory.past,
+    chartDrawingKey,
+    chartDrawings,
+    storeChartDrawings,
+  ]);
+
+  const redoChartDrawing = useCallback(() => {
+    if (!canRedoChartDrawing) return;
+
+    const nextDrawings = chartDrawingHistory.future[0];
+
+    if (!nextDrawings) return;
+
+    setChartDrawingHistoryState({
+      key: chartDrawingKey,
+      past: [
+        ...chartDrawingHistory.past,
+        createChartDrawingSnapshot(chartDrawings, activeSelectedChartDrawingId),
+      ].slice(-50),
+      future: chartDrawingHistory.future.slice(1),
+    });
+    storeChartDrawings(nextDrawings.drawings, nextDrawings.selectedDrawingId);
+    setSelectedChartDrawingId(nextDrawings.selectedDrawingId);
+  }, [
+    activeSelectedChartDrawingId,
+    canRedoChartDrawing,
+    chartDrawingHistory.future,
+    chartDrawingHistory.past,
+    chartDrawingKey,
+    chartDrawings,
+    storeChartDrawings,
+  ]);
+
+  function deleteSelectedChartDrawing() {
+    if (!activeSelectedChartDrawingId) return;
+
+    updateChartDrawings((current) =>
+      current.filter((drawing) => drawing.id !== activeSelectedChartDrawingId)
+    );
+    setSelectedChartDrawingId(null);
+  }
+
+  function clearChartDrawings() {
+    if (chartDrawings.length === 0) return;
+    if (!window.confirm("清除目前週期的所有畫線？")) return;
+
+    updateChartDrawings([]);
+    setSelectedChartDrawingId(null);
+  }
+
+  useEffect(() => {
+    if (!chartExpanded) return;
+
+    function handleChartDrawingHistoryKeyDown(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null;
+      const tagName = target?.tagName.toLowerCase();
+
+      if (tagName === "input" || tagName === "textarea" || target?.isContentEditable) return;
+      if (!event.ctrlKey && !event.metaKey) return;
+
+      const key = event.key.toLowerCase();
+
+      if (key === "z" && !event.shiftKey) {
+        if (!canUndoChartDrawing) return;
+
+        event.preventDefault();
+        undoChartDrawing();
+        return;
+      }
+
+      if (key === "y" || (key === "z" && event.shiftKey)) {
+        if (!canRedoChartDrawing) return;
+
+        event.preventDefault();
+        redoChartDrawing();
+      }
+    }
+
+    window.addEventListener("keydown", handleChartDrawingHistoryKeyDown);
+
+    return () => window.removeEventListener("keydown", handleChartDrawingHistoryKeyDown);
+  }, [
+    canRedoChartDrawing,
+    canUndoChartDrawing,
+    chartExpanded,
+    redoChartDrawing,
+    undoChartDrawing,
+  ]);
+
   if (!normalizedSymbol) {
     return (
       <section className="border border-slate-200 bg-white px-5 py-10 text-center text-sm text-slate-500">
@@ -559,61 +973,95 @@ export default function TaiwanFuturesDetailPanel({
     >
       <div className={["min-w-0 self-start", chartExpanded ? "space-y-0" : "space-y-4"].join(" ")}>
         {chartExpanded ? (
-          <section className="border-x border-t border-slate-200 bg-white">
-            <div className="border-b border-slate-200 px-4 py-2">
-              <div className="flex min-h-9 flex-wrap items-center justify-between gap-x-4 gap-y-2">
-                <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
-                  <div className="truncate text-lg font-bold text-slate-950">
-                    台指期
-                  </div>
-                  <div
-                    className={[
-                      "flex items-baseline gap-2",
-                      valueToneClass(quoteDirection),
-                    ].join(" ")}
-                  >
-                    <PriceUpdatePulse
-                      value={latestPrice}
-                      direction={quoteDirection}
-                      resetKey={`${normalizedSymbol}:focus:${chartTimeframe}`}
-                      className="text-2xl font-bold leading-none tracking-normal tabular-nums"
-                    >
-                      {formatNumber(latestPrice)}
-                    </PriceUpdatePulse>
-                    <span className="text-sm font-semibold tabular-nums">
-                      {formatSigned(displayChange)}
-                    </span>
-                    <span className="text-sm font-semibold tabular-nums">
-                      ({formatPct(displayChangePct)})
-                    </span>
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap items-center justify-end gap-1.5">
-                  {renderTimeframeButtons("compact")}
-                  <button
-                    type="button"
-                    onClick={() => setShowChartIndicators((value) => !value)}
-                    className={[
-                      "h-8 border px-3 text-xs font-semibold transition",
-                      showChartIndicators
-                        ? "border-slate-900 bg-slate-900 text-white"
-                        : "border-slate-300 bg-white text-slate-800 hover:border-slate-900 hover:text-slate-950",
-                    ].join(" ")}
-                  >
-                    指標
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setChartExpanded(false)}
-                    className="h-8 border border-slate-900 bg-slate-900 px-3 text-xs font-semibold text-white hover:bg-slate-800"
-                  >
-                    總覽
-                  </button>
-                </div>
+          <ProfessionalChartPanel
+            title={`${normalizedSymbol} 台指期`}
+            priceSummary={
+              <div
+                className={["flex items-baseline gap-2", valueToneClass(quoteDirection)].join(" ")}
+              >
+                <PriceUpdatePulse
+                  value={latestPrice}
+                  direction={quoteDirection}
+                  resetKey={`${normalizedSymbol}:focus:${chartTimeframe}`}
+                  className="text-2xl font-bold leading-none tracking-normal tabular-nums"
+                >
+                  {formatNumber(latestPrice)}
+                </PriceUpdatePulse>
+                <span className="text-sm font-semibold tabular-nums">
+                  {formatSigned(displayChange)}
+                </span>
+                <span className="text-sm font-semibold tabular-nums">
+                  ({formatPct(displayChangePct)})
+                </span>
               </div>
-            </div>
-          </section>
+            }
+            timeframeOptions={FUTURES_PROFESSIONAL_TIMEFRAME_OPTIONS}
+            timeframe={chartTimeframe}
+            onTimeframeChange={(nextTimeframe) => {
+              setIndicatorMenuOpen(false);
+              setChartTimeframe(nextTimeframe);
+            }}
+            chartStyle={professionalChartStyle}
+            onChartStyleChange={setProfessionalChartStyle}
+            indicatorMenuOpen={indicatorMenuOpen}
+            onToggleIndicatorMenu={() => setIndicatorMenuOpen((value) => !value)}
+            onCloseIndicatorMenu={() => setIndicatorMenuOpen(false)}
+            indicatorMenu={
+              <FuturesProfessionalIndicatorMenu
+                indicators={professionalIndicators}
+                onToggleIndicator={toggleProfessionalIndicator}
+              />
+            }
+            onClose={() => {
+              setIndicatorMenuOpen(false);
+              setChartDrawingTool("cursor");
+              setChartExpanded(false);
+            }}
+            message={
+              errorMessage ? (
+                <div className="border-b border-red-100 bg-red-50 px-5 py-3 text-sm text-red-700">
+                  {errorMessage}
+                </div>
+              ) : null
+            }
+            chartReady={futuresChartData.length > 0}
+            emptyState={
+              <EmptyChartState
+                loading={chartLoading}
+                message={
+                  chartLoading
+                    ? `${FUTURES_TIMEFRAME_LABELS[chartTimeframe]}資料讀取中`
+                    : `${FUTURES_TIMEFRAME_LABELS[chartTimeframe]}資料不足`
+                }
+              />
+            }
+            chartData={futuresChartData}
+            label={FUTURES_TIMEFRAME_LABELS[chartTimeframe]}
+            timeMode={chartDrawingTimeMode(chartTimeframe)}
+            showMovingAverages={professionalIndicators.ma}
+            indicators={professionalIndicators}
+            indicatorParameters={defaultIndicatorParameters}
+            volumePanelLabel={chartTimeframe === "today" ? "累積量(口)" : "成交量(口)"}
+            volumeValueKey="volume"
+            drawingTool={chartDrawingTool}
+            drawings={chartDrawings}
+            selectedDrawingId={activeSelectedChartDrawingId}
+            drawingContext={professionalDrawingContext}
+            onDrawingToolChange={setChartDrawingTool}
+            onDrawingsChange={updateChartDrawings}
+            onDrawingStateChange={updateChartDrawingState}
+            onSelectedDrawingChange={setSelectedChartDrawingId}
+            canUndoDrawing={canUndoChartDrawing}
+            canRedoDrawing={canRedoChartDrawing}
+            onUndoDrawing={undoChartDrawing}
+            onRedoDrawing={redoChartDrawing}
+            onDeleteSelectedDrawing={deleteSelectedChartDrawing}
+            onClearDrawings={clearChartDrawings}
+            historyCounts={{
+              past: chartDrawingHistory.past.length,
+              future: chartDrawingHistory.future.length,
+            }}
+          />
         ) : (
           <section className="border border-slate-200 bg-white">
             <div className="grid gap-4 border-b border-slate-200 px-5 py-5 lg:grid-cols-[minmax(0,1fr)_auto]">
@@ -723,23 +1171,17 @@ export default function TaiwanFuturesDetailPanel({
           </section>
         )}
 
-      <div
-        className={[
-          "min-w-0",
-          chartExpanded ? "border-x border-b border-slate-200 bg-white" : "",
-        ]
-          .filter(Boolean)
-          .join(" ")}
-      >
-        <FuturesKLineVisual
-          chartData={futuresChartData}
-          expanded={chartExpanded}
-          indicators={futuresChartIndicators}
-          loading={chartLoading}
-          revealKey={`${normalizedSymbol}:${chartTimeframe}`}
-          timeframe={chartTimeframe}
-        />
-      </div>
+      {!chartExpanded ? (
+        <div className="min-w-0">
+          <FuturesKLineVisual
+            chartData={futuresChartData}
+            indicators={futuresChartIndicators}
+            loading={chartLoading}
+            revealKey={`${normalizedSymbol}:${chartTimeframe}`}
+            timeframe={chartTimeframe}
+          />
+        </div>
+      ) : null}
 
       {!chartExpanded ? (
         <section className="border border-slate-200 bg-white">

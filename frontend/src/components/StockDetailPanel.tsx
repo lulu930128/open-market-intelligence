@@ -8,6 +8,9 @@ import IntradayTrendChart, {
 } from "@/components/IntradayTrendChart";
 import { LoadingDots } from "@/components/LoadingPlaceholders";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
+import ProfessionalChartPanel, {
+  type ProfessionalChartStyle,
+} from "@/components/ProfessionalChartPanel";
 import StockKLineChart, {
   defaultIndicatorParameters,
   defaultIndicators,
@@ -19,6 +22,20 @@ import StockKLineChart, {
   type IndicatorCategoryGroup,
 } from "@/components/StockKLineChart";
 import type { ChartDrawing, ChartDrawingTool } from "@/components/LightweightKLineChart";
+import {
+  buildChartDrawingSnapshotPayload,
+  chartDrawingApiPath,
+  chartDrawingSnapshotsEqual,
+  chartDrawingSyncDelayMs,
+  createChartDrawingSnapshot,
+  loadChartDrawings,
+  normalizeChartDrawingSelection,
+  normalizeStoredChartDrawings,
+  saveChartDrawings,
+  serializeChartDrawings,
+  type ChartDrawingHistoryState,
+  type ChartDrawingStorageState,
+} from "@/components/professionalChartDrawing";
 import { fetchJson, requestJson } from "@/lib/api";
 import { getJobResultStatus, requestBackfillJob } from "@/lib/jobs";
 import {
@@ -42,7 +59,6 @@ import type {
   BrokerBranchTradeDailyRead,
   BrokerBranchTradeDailySummaryRead,
   ChartDrawingSnapshotRead,
-  ChartDrawingSnapshotWrite,
   ChartPoint,
   FinancialMetricQuarterlyRead,
   IntradayHistoryResponse,
@@ -77,19 +93,6 @@ import {
   useRef,
   useState,
 } from "react";
-import dynamic from "next/dynamic";
-
-const LightweightKLineChart = dynamic(
-  () => import("@/components/LightweightKLineChart"),
-  {
-    ssr: false,
-    loading: () => (
-      <div className="flex h-[640px] items-center justify-center border-t border-slate-200 bg-white text-sm text-slate-500">
-        K 線引擎載入中...
-      </div>
-    ),
-  }
-);
 
 type Props = {
   stockId: string | null;
@@ -105,7 +108,6 @@ type Timeframe = "today" | "daily" | "weekly" | "monthly";
 type ChartTimeframe = Exclude<Timeframe, "today">;
 type ProfessionalIntradayTimeframe = "1m" | "5m" | "15m" | "30m" | "1h" | "4h";
 type ProfessionalTimeframe = ProfessionalIntradayTimeframe | ChartTimeframe;
-type ProfessionalChartStyle = "candlestick" | "line";
 type LoadState = "idle" | "loading" | "success" | "error";
 type DataPanelTab = TaiwanDataPanelTab;
 type BranchTableSide = "buy" | "sell";
@@ -227,33 +229,6 @@ const professionalTimeframeOptions: Array<{
   { key: "daily", label: "天" },
   { key: "weekly", label: "週" },
   { key: "monthly", label: "月" },
-];
-const chartDrawingToolOptions: Array<{
-  key: ChartDrawingTool;
-  label: string;
-}> = [
-  { key: "cursor", label: "游標" },
-  { key: "horizontal", label: "水平" },
-  { key: "trend", label: "趨勢" },
-  { key: "ray", label: "射線" },
-  { key: "rectangle", label: "區間" },
-  { key: "fibonacci", label: "Fib" },
-  { key: "anchorVwap", label: "AVWAP" },
-  { key: "volumeProfileRange", label: "量價分布" },
-  { key: "measure", label: "量測" },
-  { key: "priceRange", label: "價幅%" },
-];
-const chartDrawingToolOptionMap = new Map(
-  chartDrawingToolOptions.map((option) => [option.key, option])
-);
-const chartDrawingToolGroups: Array<{
-  key: string;
-  tools: ChartDrawingTool[];
-}> = [
-  { key: "base", tools: ["cursor"] },
-  { key: "line", tools: ["horizontal", "trend", "ray"] },
-  { key: "area", tools: ["rectangle", "fibonacci", "anchorVwap", "volumeProfileRange"] },
-  { key: "measure", tools: ["measure", "priceRange"] },
 ];
 const professionalIntradayMinutes: Record<ProfessionalIntradayTimeframe, number> = {
   "1m": 1,
@@ -444,251 +419,12 @@ const indicatorTemplates: Array<{
   },
 ];
 
-type ChartDrawingStorageState = {
-  key: string;
-  drawings: ChartDrawing[];
-};
-
-type ChartDrawingSnapshot = {
-  drawings: ChartDrawing[];
-  selectedDrawingId: string | null;
-};
-
-type ChartDrawingHistoryState = {
-  key: string;
-  past: ChartDrawingSnapshot[];
-  future: ChartDrawingSnapshot[];
-};
-
 function chartDrawingStorageKey(stockId: string | null, timeframe: ProfessionalTimeframe) {
   return `omi:tw:chart-drawings:v1:${stockId ?? "empty"}:${timeframe}`;
 }
 
-const chartDrawingSyncDelayMs = 700;
-
-function chartDrawingApiPath(market: string, symbol: string, timeframe: ProfessionalTimeframe) {
-  return `/api/market/chart-drawings/${encodeURIComponent(market)}/${encodeURIComponent(
-    symbol
-  )}/${encodeURIComponent(timeframe)}`;
-}
-
 function chartDrawingTimeMode(timeframe: ProfessionalTimeframe) {
   return isProfessionalIntradayTimeframe(timeframe) ? "intraday" : "date";
-}
-
-function buildChartDrawingSummarySnapshot({
-  drawings,
-  market,
-  selectedDrawingId,
-  stockName,
-  symbol,
-  timeframe,
-}: {
-  drawings: ChartDrawing[];
-  market: string;
-  selectedDrawingId: string | null;
-  stockName: string | null;
-  symbol: string;
-  timeframe: ProfessionalTimeframe;
-}): Record<string, unknown> {
-  const drawingsToSave = drawings.slice(-200);
-  const byType = drawingsToSave.reduce<Record<string, number>>((accumulator, drawing) => {
-    accumulator[drawing.type] = (accumulator[drawing.type] ?? 0) + 1;
-    return accumulator;
-  }, {});
-
-  return {
-    version: 1,
-    generated_at: new Date().toISOString(),
-    market,
-    symbol,
-    stock_name: stockName,
-    timeframe,
-    time_mode: chartDrawingTimeMode(timeframe),
-    drawing_count: drawingsToSave.length,
-    selected_drawing_id: selectedDrawingId,
-    by_type: byType,
-    items: drawingsToSave.map((drawing) => ({
-      id: drawing.id,
-      type: drawing.type,
-      context: drawing.context ?? null,
-      derived_metrics: drawing.derivedMetrics ?? null,
-      omi_summary: drawing.omiSummary ?? null,
-    })),
-  };
-}
-
-function buildChartDrawingSnapshotPayload({
-  drawings,
-  market,
-  selectedDrawingId,
-  stockName,
-  symbol,
-  timeframe,
-}: {
-  drawings: ChartDrawing[];
-  market: string;
-  selectedDrawingId: string | null;
-  stockName: string | null;
-  symbol: string;
-  timeframe: ProfessionalTimeframe;
-}): ChartDrawingSnapshotWrite {
-  const drawingsToSave = drawings.slice(-200);
-
-  return {
-    label: stockName ?? symbol,
-    time_mode: chartDrawingTimeMode(timeframe),
-    selected_drawing_id: normalizeChartDrawingSelection(drawingsToSave, selectedDrawingId),
-    drawings: drawingsToSave as unknown as Array<Record<string, unknown>>,
-    summary: buildChartDrawingSummarySnapshot({
-      drawings: drawingsToSave,
-      market,
-      selectedDrawingId,
-      stockName,
-      symbol,
-      timeframe,
-    }),
-    source: "frontend.professional_chart",
-  };
-}
-
-function isChartDrawingType(value: unknown): value is ChartDrawing["type"] {
-  return (
-    value === "horizontal" ||
-    value === "trend" ||
-    value === "ray" ||
-    value === "rectangle" ||
-    value === "fibonacci" ||
-    value === "anchorVwap" ||
-    value === "volumeProfileRange" ||
-    value === "measure" ||
-    value === "priceRange"
-  );
-}
-
-function normalizeStoredChartDrawings(value: unknown): ChartDrawing[] {
-  if (!Array.isArray(value)) return [];
-
-  return value
-    .flatMap((item): ChartDrawing[] => {
-      if (!item || typeof item !== "object") return [];
-
-      const candidate = item as Partial<ChartDrawing>;
-      const type = candidate.type;
-      const points = Array.isArray(candidate.points)
-        ? candidate.points.filter(
-            (point): point is ChartDrawing["points"][number] =>
-              Boolean(point) &&
-              typeof point.time === "string" &&
-              typeof point.price === "number" &&
-              Number.isFinite(point.price)
-          )
-        : [];
-
-      if (
-        typeof candidate.id !== "string" ||
-        !isChartDrawingType(type) ||
-        typeof candidate.color !== "string" ||
-        typeof candidate.createdAt !== "string" ||
-        points.length === 0
-      ) {
-        return [];
-      }
-
-      const pointCount = type === "horizontal" || type === "anchorVwap" ? 1 : 2;
-
-      if (points.length < pointCount) return [];
-
-      const normalizedDrawing: ChartDrawing = {
-        id: candidate.id,
-        type,
-        points: points.slice(0, pointCount),
-        color: candidate.color,
-        createdAt: candidate.createdAt,
-      };
-
-      if (candidate.context && typeof candidate.context === "object") {
-        normalizedDrawing.context = candidate.context as ChartDrawing["context"];
-      }
-
-      if (
-        candidate.derivedMetrics &&
-        typeof candidate.derivedMetrics === "object" &&
-        candidate.derivedMetrics.version === 1
-      ) {
-        normalizedDrawing.derivedMetrics =
-          candidate.derivedMetrics as ChartDrawing["derivedMetrics"];
-      }
-
-      if (candidate.omiSummary && typeof candidate.omiSummary === "object") {
-        normalizedDrawing.omiSummary = candidate.omiSummary as ChartDrawing["omiSummary"];
-      }
-
-      return [normalizedDrawing];
-    })
-    .slice(-200);
-}
-
-function loadChartDrawings(storageKey: string): ChartDrawing[] {
-  if (typeof window === "undefined") return [];
-
-  try {
-    const raw = window.localStorage.getItem(storageKey);
-
-    if (!raw) return [];
-
-    return normalizeStoredChartDrawings(JSON.parse(raw));
-  } catch {
-    return [];
-  }
-}
-
-function saveChartDrawings(storageKey: string, drawings: ChartDrawing[]) {
-  if (typeof window === "undefined") return;
-
-  try {
-    window.localStorage.setItem(storageKey, JSON.stringify(drawings.slice(-200)));
-  } catch {
-    // Best-effort local draft storage; chart drawing should never break the market view.
-  }
-}
-
-function serializeChartDrawings(drawings: ChartDrawing[]) {
-  return JSON.stringify(drawings);
-}
-
-function normalizeChartDrawingSelection(
-  drawings: ChartDrawing[],
-  selectedDrawingId: string | null
-) {
-  return drawings.some((drawing) => drawing.id === selectedDrawingId)
-    ? selectedDrawingId
-    : null;
-}
-
-function createChartDrawingSnapshot(
-  drawings: ChartDrawing[],
-  selectedDrawingId: string | null
-): ChartDrawingSnapshot {
-  const normalizedDrawings = drawings.slice(-200);
-
-  return {
-    drawings: normalizedDrawings,
-    selectedDrawingId: normalizeChartDrawingSelection(
-      normalizedDrawings,
-      selectedDrawingId
-    ),
-  };
-}
-
-function chartDrawingSnapshotsEqual(
-  first: ChartDrawingSnapshot,
-  second: ChartDrawingSnapshot
-) {
-  return (
-    first.selectedDrawingId === second.selectedDrawingId &&
-    serializeChartDrawings(first.drawings) === serializeChartDrawings(second.drawings)
-  );
 }
 
 function TechnicalIndicatorMenu({
@@ -3906,9 +3642,11 @@ export default function StockDetailPanel({
       drawings: drawingsToSave,
       market: chartDrawingRemoteMarket,
       selectedDrawingId: selectedDrawingIdToSave,
+      source: "frontend.professional_chart",
       stockName,
       symbol: stockId,
       timeframe: professionalTimeframe,
+      timeMode: chartDrawingTimeMode(professionalTimeframe),
     });
 
     if (chartDrawingSyncTimerRef.current) {
@@ -6887,225 +6625,8 @@ export default function StockDetailPanel({
         .join(" ")}
     >
       <div className={["min-w-0 self-start", chartFocusMode ? "space-y-0" : "space-y-4"].join(" ")}>
-        <div className="min-w-0 border border-slate-200 bg-white">
-          {chartFocusMode ? (
-            <div className="border-b border-slate-200 px-4 py-2">
-              <div className="flex min-h-9 flex-wrap items-center justify-between gap-x-4 gap-y-2">
-                <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
-                  <div className="truncate text-lg font-bold text-slate-950">
-                    {stockId} {indexProduct?.stockName ?? stockName ?? stockInfo?.stock_name ?? ""}
-                  </div>
-                  <div
-                    className={`flex items-baseline gap-2 ${priceLimitTone(
-                      professionalHeaderLimitStatus,
-                      professionalLatestChange
-                    )}`}
-                  >
-                    <PriceUpdatePulse
-                      value={professionalLatestClose}
-                      direction={professionalLatestChange}
-                      resetKey={`${stockId ?? "empty"}:professional:${professionalTimeframe}`}
-                      className={[
-                        "text-2xl font-bold leading-none tracking-normal tabular-nums",
-                        priceLimitBoxClass(professionalHeaderLimitStatus),
-                      ].join(" ")}
-                    >
-                      {formatPrice(professionalLatestClose)}
-                    </PriceUpdatePulse>
-                    <span className="text-sm font-semibold tabular-nums">
-                      {formatSignedPointChange(professionalLatestChange)}
-                    </span>
-                    {professionalLatestChangePct !== null &&
-                    professionalLatestChangePct !== undefined ? (
-                      <span className="text-sm font-semibold tabular-nums">
-                        ({formatPct(professionalLatestChangePct)})
-                      </span>
-                    ) : null}
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap items-center justify-end gap-1.5">
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <div className="flex border border-slate-200 bg-slate-50 p-0.5">
-                      {professionalTimeframeOptions.map((option) => (
-                        <button
-                          key={option.key}
-                          type="button"
-                          onClick={() => handleProfessionalTimeframeChange(option.key)}
-                          className={[
-                            "h-7 px-2 text-xs font-semibold transition",
-                            professionalTimeframe === option.key
-                              ? "bg-slate-900 text-white"
-                              : "text-slate-600 hover:bg-white hover:text-slate-950",
-                          ].join(" ")}
-                        >
-                          {option.label}
-                        </button>
-                      ))}
-                    </div>
-
-                    <div className="flex border border-slate-200 bg-slate-50 p-0.5">
-                      {[
-                        ["candlestick", "K線"],
-                        ["line", "折線"],
-                      ].map(([key, labelText]) => (
-                        <button
-                          key={key}
-                          type="button"
-                          onClick={() => setProfessionalChartStyle(key as ProfessionalChartStyle)}
-                          className={[
-                            "h-7 px-2 text-xs font-semibold transition",
-                            professionalChartStyle === key
-                              ? "bg-slate-900 text-white"
-                              : "text-slate-600 hover:bg-white hover:text-slate-950",
-                          ].join(" ")}
-                        >
-                          {labelText}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div>
-                    <button
-                      type="button"
-                      onClick={() => setIndicatorMenuOpen((value) => !value)}
-                      className="h-8 border border-slate-300 bg-white px-3 text-xs font-semibold text-slate-800 hover:border-slate-900 hover:text-slate-950"
-                    >
-                      技術指標
-                    </button>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIndicatorMenuOpen(false);
-                      setChartDrawingTool("cursor");
-                      setChartFocusMode(false);
-                    }}
-                    className="h-8 border border-slate-900 bg-slate-900 px-3 text-xs font-semibold text-white hover:bg-slate-800"
-                  >
-                    總覽
-                  </button>
-                </div>
-              </div>
-
-              <div className="mt-2 flex flex-wrap items-center justify-end gap-1.5 border-t border-slate-100 pt-2">
-                <div className="flex max-w-full flex-wrap items-center justify-end gap-1 border border-slate-200 bg-slate-50 p-0.5">
-                  {chartDrawingToolGroups.map((group, groupIndex) => (
-                    <div
-                      key={group.key}
-                      className={[
-                        "flex items-center gap-0.5",
-                        groupIndex > 0 ? "border-l border-slate-200 pl-1" : "",
-                      ].join(" ")}
-                    >
-                      {group.tools.map((toolKey) => {
-                        const option = chartDrawingToolOptionMap.get(toolKey);
-                        if (!option) return null;
-
-                        return (
-                          <button
-                            key={option.key}
-                            type="button"
-                            onClick={() => {
-                              setIndicatorMenuOpen(false);
-                              setChartDrawingTool(option.key);
-                              if (option.key === "cursor") {
-                                setSelectedChartDrawingId(null);
-                              }
-                            }}
-                            className={[
-                              "h-7 px-2 text-xs font-semibold transition",
-                              chartDrawingTool === option.key
-                                ? "bg-slate-900 text-white"
-                                : "text-slate-600 hover:bg-white hover:text-slate-950",
-                            ].join(" ")}
-                          >
-                            {option.label}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  ))}
-                  <div className="flex items-center gap-0.5 border-l border-slate-200 pl-1">
-                    <button
-                      type="button"
-                      title="Undo (Ctrl+Z)"
-                      disabled={!canUndoChartDrawing}
-                      onClick={undoChartDrawing}
-                      className={[
-                        "h-7 px-2 text-xs font-semibold transition",
-                        canUndoChartDrawing
-                          ? "text-slate-600 hover:bg-white hover:text-slate-950"
-                          : "cursor-not-allowed text-slate-300",
-                      ].join(" ")}
-                    >
-                      Undo
-                    </button>
-                    <button
-                      type="button"
-                      title="Redo (Ctrl+Y)"
-                      disabled={!canRedoChartDrawing}
-                      onClick={redoChartDrawing}
-                      className={[
-                        "h-7 px-2 text-xs font-semibold transition",
-                        canRedoChartDrawing
-                          ? "text-slate-600 hover:bg-white hover:text-slate-950"
-                          : "cursor-not-allowed text-slate-300",
-                      ].join(" ")}
-                    >
-                      Redo
-                    </button>
-                    <button
-                      type="button"
-                      disabled={!activeSelectedChartDrawingId}
-                      onClick={deleteSelectedChartDrawing}
-                      className={[
-                        "h-7 px-2 text-xs font-semibold transition",
-                        activeSelectedChartDrawingId
-                          ? "text-red-700 hover:bg-white"
-                          : "cursor-not-allowed text-slate-300",
-                      ].join(" ")}
-                    >
-                      刪除
-                    </button>
-                    <button
-                      type="button"
-                      disabled={chartDrawings.length === 0}
-                      onClick={clearChartDrawings}
-                      className={[
-                        "h-7 px-2 text-xs font-semibold transition",
-                        chartDrawings.length > 0
-                          ? "text-slate-500 hover:bg-white hover:text-slate-950"
-                          : "cursor-not-allowed text-slate-300",
-                      ].join(" ")}
-                    >
-                      畫線 {chartDrawings.length}
-                    </button>
-                    <span className="hidden h-7 items-center border-l border-slate-200 px-2 text-[11px] font-semibold tabular-nums text-slate-400 min-[1500px]:inline-flex">
-                      {chartDrawingHistory.past.length}/{chartDrawingHistory.future.length}
-                    </span>
-                  </div>
-                </div>
-              </div>
-              {indicatorMenuOpen ? (
-                <div className="relative h-0">
-                  <TechnicalIndicatorMenu
-                    indicators={chartIndicators}
-                    activeTemplate={activeIndicatorTemplate}
-                    onApplyTemplate={applyIndicatorTemplate}
-                    onToggleIndicator={toggleChartIndicator}
-                    groups={professionalIndicatorCategoryGroups}
-                    includeParameters
-                    parameters={indicatorParameters}
-                    onUpdateParameter={updateIndicatorParameter}
-                    className="w-[25rem]"
-                  />
-                </div>
-              ) : null}
-            </div>
-          ) : (
+        <div className={chartFocusMode ? "min-w-0" : "min-w-0 border border-slate-200 bg-white"}>
+          {chartFocusMode ? null : (
           <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 px-5 py-4">
             <div>
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
@@ -7265,50 +6786,124 @@ export default function StockDetailPanel({
 
           )}
 
-          {errorMessage ? (
+          {!chartFocusMode && errorMessage ? (
             <div className="border-b border-red-200 bg-red-50 px-5 py-3 text-sm text-red-700">
               {errorMessage}
             </div>
           ) : null}
-          {chartHistoryMessage && !errorMessage ? (
+          {!chartFocusMode && chartHistoryMessage && !errorMessage ? (
             <div className="border-b border-amber-200 bg-amber-50 px-5 py-2 text-xs text-amber-800">
               {chartHistoryMessage}
             </div>
           ) : null}
 
           {chartFocusMode ? (
-            professionalChartReady ? (
-              <LightweightKLineChart
-                chartData={professionalChartData}
-                indicatorData={
-                  professionalIsIntraday ? emptyProfessionalIndicatorData : indicatorForTimeframe
-                }
-                label={professionalTimeframeLabel}
-                height={780}
-                fillViewport
-                timeMode={professionalIsIntraday ? "intraday" : "date"}
-                chartStyle={professionalChartStyle}
-                showHeader={false}
-                showMovingAverages={chartIndicators.ma}
-                indicators={chartIndicators}
-                indicatorParameters={indicatorParameters}
-                benchmarkData={
-                  professionalIsIntraday ? emptyProfessionalBenchmarkData : benchmarkDataForChart
-                }
-                benchmarkLabel={benchmarkLabel}
-                volumePanelLabel={isIndexProduct ? "成交金額(億)" : "成交量(張)"}
-                volumeValueKey={isIndexProduct ? "trade_value" : "volume"}
-                drawingTool={chartDrawingTool}
-                drawings={chartDrawings}
-                selectedDrawingId={activeSelectedChartDrawingId}
-                drawingContext={professionalDrawingContext}
-                onDrawingsChange={updateChartDrawings}
-                onDrawingStateChange={updateChartDrawingState}
-                onSelectedDrawingChange={setSelectedChartDrawingId}
-              />
-            ) : (
-              <EmptyDataState message={`讀取${professionalTimeframeLabel}資料中...`} />
-            )
+            <ProfessionalChartPanel
+              title={`${stockId} ${
+                indexProduct?.stockName ?? stockName ?? stockInfo?.stock_name ?? ""
+              }`}
+              priceSummary={
+                <div
+                  className={`flex items-baseline gap-2 ${priceLimitTone(
+                    professionalHeaderLimitStatus,
+                    professionalLatestChange
+                  )}`}
+                >
+                  <PriceUpdatePulse
+                    value={professionalLatestClose}
+                    direction={professionalLatestChange}
+                    resetKey={`${stockId ?? "empty"}:professional:${professionalTimeframe}`}
+                    className={[
+                      "text-2xl font-bold leading-none tracking-normal tabular-nums",
+                      priceLimitBoxClass(professionalHeaderLimitStatus),
+                    ].join(" ")}
+                  >
+                    {formatPrice(professionalLatestClose)}
+                  </PriceUpdatePulse>
+                  <span className="text-sm font-semibold tabular-nums">
+                    {formatSignedPointChange(professionalLatestChange)}
+                  </span>
+                  {professionalLatestChangePct !== null &&
+                  professionalLatestChangePct !== undefined ? (
+                    <span className="text-sm font-semibold tabular-nums">
+                      ({formatPct(professionalLatestChangePct)})
+                    </span>
+                  ) : null}
+                </div>
+              }
+              timeframeOptions={professionalTimeframeOptions}
+              timeframe={professionalTimeframe}
+              onTimeframeChange={handleProfessionalTimeframeChange}
+              chartStyle={professionalChartStyle}
+              onChartStyleChange={setProfessionalChartStyle}
+              indicatorMenuOpen={indicatorMenuOpen}
+              onToggleIndicatorMenu={() => setIndicatorMenuOpen((value) => !value)}
+              onCloseIndicatorMenu={() => setIndicatorMenuOpen(false)}
+              indicatorMenu={
+                <TechnicalIndicatorMenu
+                  indicators={chartIndicators}
+                  activeTemplate={activeIndicatorTemplate}
+                  onApplyTemplate={applyIndicatorTemplate}
+                  onToggleIndicator={toggleChartIndicator}
+                  groups={professionalIndicatorCategoryGroups}
+                  includeParameters
+                  parameters={indicatorParameters}
+                  onUpdateParameter={updateIndicatorParameter}
+                  className="w-[25rem]"
+                />
+              }
+              onClose={() => {
+                setIndicatorMenuOpen(false);
+                setChartDrawingTool("cursor");
+                setChartFocusMode(false);
+              }}
+              message={
+                errorMessage ? (
+                  <div className="border-b border-red-200 bg-red-50 px-5 py-3 text-sm text-red-700">
+                    {errorMessage}
+                  </div>
+                ) : chartHistoryMessage ? (
+                  <div className="border-b border-amber-200 bg-amber-50 px-5 py-2 text-xs text-amber-800">
+                    {chartHistoryMessage}
+                  </div>
+                ) : null
+              }
+              chartReady={professionalChartReady}
+              emptyState={<EmptyDataState message={`讀取${professionalTimeframeLabel}資料中...`} />}
+              chartData={professionalChartData}
+              indicatorData={
+                professionalIsIntraday ? emptyProfessionalIndicatorData : indicatorForTimeframe
+              }
+              label={professionalTimeframeLabel}
+              timeMode={professionalIsIntraday ? "intraday" : "date"}
+              showMovingAverages={chartIndicators.ma}
+              indicators={chartIndicators}
+              indicatorParameters={indicatorParameters}
+              benchmarkData={
+                professionalIsIntraday ? emptyProfessionalBenchmarkData : benchmarkDataForChart
+              }
+              benchmarkLabel={benchmarkLabel}
+              volumePanelLabel={isIndexProduct ? "成交金額(億)" : "成交量(張)"}
+              volumeValueKey={isIndexProduct ? "trade_value" : "volume"}
+              drawingTool={chartDrawingTool}
+              drawings={chartDrawings}
+              selectedDrawingId={activeSelectedChartDrawingId}
+              drawingContext={professionalDrawingContext}
+              onDrawingToolChange={setChartDrawingTool}
+              onDrawingsChange={updateChartDrawings}
+              onDrawingStateChange={updateChartDrawingState}
+              onSelectedDrawingChange={setSelectedChartDrawingId}
+              canUndoDrawing={canUndoChartDrawing}
+              canRedoDrawing={canRedoChartDrawing}
+              onUndoDrawing={undoChartDrawing}
+              onRedoDrawing={redoChartDrawing}
+              onDeleteSelectedDrawing={deleteSelectedChartDrawing}
+              onClearDrawings={clearChartDrawings}
+              historyCounts={{
+                past: chartDrawingHistory.past.length,
+                future: chartDrawingHistory.future.length,
+              }}
+            />
           ) : effectiveTimeframe === "today" ? (
             <IntradayTrendChart
               points={todayTrend}
