@@ -1,5 +1,5 @@
 param(
-    [string[]]$UnittestArgs = @("discover", "-s", "tests")
+    [string[]]$PytestArgs = @("backend/tests")
 )
 
 $ErrorActionPreference = "Stop"
@@ -7,6 +7,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $backendDir = Join-Path $repoRoot "backend"
 $python = Join-Path $repoRoot ".venv\Scripts\python.exe"
+$pycacheDir = Join-Path ([System.IO.Path]::GetTempPath()) "omi_pycache_pytest"
 
 if (-not (Test-Path -LiteralPath $backendDir)) {
     throw "Missing backend directory: $backendDir"
@@ -17,19 +18,22 @@ if (-not (Test-Path -LiteralPath $python)) {
 }
 
 $previousPythonPath = $env:PYTHONPATH
+$previousPycachePrefix = $env:PYTHONPYCACHEPREFIX
 if ([string]::IsNullOrWhiteSpace($previousPythonPath)) {
     $env:PYTHONPATH = $backendDir
 }
 else {
     $env:PYTHONPATH = "$backendDir;$previousPythonPath"
 }
+$env:PYTHONPYCACHEPREFIX = $pycacheDir
 
-Push-Location -LiteralPath $backendDir
+Push-Location -LiteralPath $repoRoot
 try {
-    & $python -m unittest @UnittestArgs
+    & $python -m pytest -p no:cacheprovider @PytestArgs
     exit $LASTEXITCODE
 }
 finally {
     Pop-Location
     $env:PYTHONPATH = $previousPythonPath
+    $env:PYTHONPYCACHEPREFIX = $previousPycachePrefix
 }
