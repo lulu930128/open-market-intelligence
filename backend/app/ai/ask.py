@@ -316,6 +316,7 @@ def ask(
         scope_type=scope_type,
         effective_mode=effective_mode,
         auto_mode_requested=auto_mode_requested,
+        question_intent=question_intent,
         tool_runs=tool_runs,
         warnings=warnings,
         progress=progress,

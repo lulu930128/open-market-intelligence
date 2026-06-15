@@ -24,11 +24,20 @@ def _include_tw_intraday(payload: AiAskRequest) -> bool:
     )
 
 
+def _watchlist_radar_mode(question_intent: str) -> str:
+    if question_intent in {"risk_check", "exit_decision"}:
+        return "risk"
+    if question_intent == "entry_decision":
+        return "momentum"
+    return "action"
+
+
 def _read_data_only(
     db: Session,
     payload: AiAskRequest,
     scope_type: str,
     *,
+    question_intent: str = "general",
     tool_runs: list[dict[str, Any]] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     if scope_type == "market":
@@ -87,6 +96,7 @@ def _read_data_only(
         rank_by=payload.rank_by,
         sort_order=payload.sort_order,
         limit=payload.context_limit,
+        radar_mode=_watchlist_radar_mode(question_intent),
     )
 
 
@@ -95,6 +105,7 @@ def _build_brief(
     payload: AiAskRequest,
     scope_type: str,
     *,
+    question_intent: str = "general",
     tool_runs: list[dict[str, Any]] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     if scope_type == "stock":
@@ -116,6 +127,7 @@ def _build_brief(
             strategy_profile=payload.strategy_profile,
             rank_by=payload.rank_by,
             sort_order=payload.sort_order,
+            radar_mode=_watchlist_radar_mode(question_intent),
         )
 
     if scope_type == "us_stock":
@@ -136,6 +148,7 @@ def _generate_report(
     payload: AiAskRequest,
     scope_type: str,
     *,
+    question_intent: str = "general",
     tool_runs: list[dict[str, Any]] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     if scope_type == "stock":
@@ -157,6 +170,7 @@ def _generate_report(
             strategy_profile=payload.strategy_profile,
             rank_by=payload.rank_by,
             sort_order=payload.sort_order,
+            radar_mode=_watchlist_radar_mode(question_intent),
         )
 
     if scope_type == "us_stock":
@@ -177,6 +191,7 @@ def _generate_analysis(
     payload: AiAskRequest,
     scope_type: str,
     *,
+    question_intent: str = "general",
     tool_runs: list[dict[str, Any]] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     if scope_type == "stock":
@@ -198,6 +213,7 @@ def _generate_analysis(
             strategy_profile=payload.strategy_profile,
             rank_by=payload.rank_by,
             sort_order=payload.sort_order,
+            radar_mode=_watchlist_radar_mode(question_intent),
         )
 
     if scope_type == "us_stock":

@@ -2,7 +2,7 @@ from datetime import date
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
-from app.watchlists import indicator_service, ranking_service, service, signal_service
+from app.watchlists import indicator_service, radar_service, ranking_service, service, signal_service
 from app.db.session import get_db
 from app.jobs import backfill_tasks, service as job_service
 from app.jobs.schemas import JobRunRead
@@ -12,6 +12,7 @@ from app.watchlists.schemas import (
     WatchlistGroupLatestIndicatorsRead,
     WatchlistGroupLatestSignalsRead,
     WatchlistGroupMove,
+    WatchlistGroupRadarRead,
     WatchlistGroupRankingRead,
     WatchlistGroupRead,
     WatchlistGroupTreeRead,
@@ -505,6 +506,45 @@ def get_watchlist_group_latest_ranking(
             ma_windows=ma_windows,
             volume_ma_windows=volume_ma_windows,
             limit=limit,
+            volume_ratio_threshold=volume_ratio_threshold,
+            use_intraday=use_intraday,
+            intraday_limit=intraday_limit,
+        )
+    except service.WatchlistGroupNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get(
+    "/groups/{group_id}/radar",
+    response_model=WatchlistGroupRadarRead,
+)
+def get_watchlist_group_radar(
+    group_id: int,
+    include_children: bool = True,
+    enabled_only: bool = True,
+    mode: str = Query(default="action", pattern="^(action|risk|momentum|all)$"),
+    max_results: int = Query(default=30, ge=1, le=200),
+    ma_windows: str = "5,20,60",
+    volume_ma_windows: str = "5,20",
+    calculation_limit: int = Query(default=100, ge=20, le=500),
+    volume_ratio_threshold: float = Query(default=1.5, ge=1.0, le=5.0),
+    use_intraday: bool = False,
+    intraday_limit: int = Query(default=30, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    try:
+        return radar_service.get_watchlist_group_radar(
+            db=db,
+            group_id=group_id,
+            include_children=include_children,
+            enabled_only=enabled_only,
+            mode=mode,
+            max_results=max_results,
+            ma_windows=ma_windows,
+            volume_ma_windows=volume_ma_windows,
+            calculation_limit=calculation_limit,
             volume_ratio_threshold=volume_ratio_threshold,
             use_intraday=use_intraday,
             intraday_limit=intraday_limit,

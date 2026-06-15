@@ -9,6 +9,7 @@ import StockDetailPanel from "@/components/StockDetailPanel";
 import TaiwanFuturesDetailPanel from "@/components/TaiwanFuturesDetailPanel";
 import USStockDetailPanel from "@/components/USStockDetailPanel";
 import USWatchlistSidebar from "@/components/USWatchlistSidebar";
+import WatchlistRadarPanel from "@/components/WatchlistRadarPanel";
 import { fetchJson } from "@/lib/api";
 import { getJobResultStatus, requestBackfillJob } from "@/lib/jobs";
 import { refreshMarketCalendarStatus } from "@/lib/marketCalendarStatus";
@@ -45,8 +46,10 @@ import type {
   USWatchlistItemRead,
   USWatchlistRankingItemRead,
   USWatchlistRankingRead,
+  WatchlistGroupRadarRead,
   WatchlistGroupNode,
   WatchlistItemRead,
+  WatchlistRadarMode,
 } from "@/types/market";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
@@ -54,9 +57,17 @@ type LoadState = "idle" | "loading" | "success" | "error";
 type RankBy = "none" | "change_pct" | "score" | "volume";
 type USRankBy = "none" | "change_pct" | "volume" | "close";
 const WATCHLIST_INTRADAY_LIMIT = 30;
+const WATCHLIST_RADAR_MAX_RESULTS = 8;
 const WATCHLIST_BACKFILL_LOOKBACK_YEARS = 8;
 const MARKET_CHIP_REFRESH_STORAGE_PREFIX = "omi:market-chip-refresh";
 const TAIWAN_INDEX_TARGET_IDS = new Set(["TAIEX", "TPEX"]);
+const WATCHLIST_ANALYSIS_PARAMS = {
+  include_children: true,
+  enabled_only: true,
+  ma_windows: "5,20,60",
+  volume_ma_windows: "5,20",
+  volume_ratio_threshold: 1.5,
+};
 type RankingDisplayRow = {
   key: string;
   rank: number;
@@ -97,6 +108,10 @@ function markStoredMarketChipRefreshDone(dateKey: string) {
   }
 }
 
+function apiErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
+}
+
 type RankingPanelOption = {
   value: string;
   label: string;
@@ -108,6 +123,7 @@ function buildDashboardHref(params: {
   stockId?: string | null;
   futuresSymbol?: string | null;
   symbol?: string | null;
+  radarMode?: WatchlistRadarMode | null;
 }) {
   const searchParams = new URLSearchParams();
 
@@ -118,6 +134,7 @@ function buildDashboardHref(params: {
   if (params.stockId) searchParams.set("stock_id", params.stockId);
   if (params.futuresSymbol) searchParams.set("futures", params.futuresSymbol);
   if (params.symbol) searchParams.set("symbol", params.symbol);
+  if (params.radarMode) searchParams.set("radar_mode", params.radarMode);
 
   const query = searchParams.toString();
 
@@ -137,6 +154,8 @@ type Props = {
   initialChartData: ChartPoint[];
   initialIndicatorData: StockIndicatorPoint[];
   initialRankingData: RankingResponse | null;
+  initialRadarMode: WatchlistRadarMode;
+  initialRadarData: WatchlistGroupRadarRead | null;
   initialMarketIndexSummary: MarketIndexSummary | null;
   initialUsWatchlistTree: USWatchlistGroupNode[];
   initialUsWatchlistItems: USWatchlistItemRead[];
@@ -1436,6 +1455,8 @@ export default function MarketDashboardClient({
   initialChartData,
   initialIndicatorData,
   initialRankingData,
+  initialRadarMode,
+  initialRadarData,
   initialMarketIndexSummary,
   initialUsWatchlistTree,
   initialUsWatchlistItems,
@@ -1495,6 +1516,8 @@ export default function MarketDashboardClient({
   const [usWatchlistVersion, setUsWatchlistVersion] = useState(0);
   const [rankBy, setRankBy] = useState<RankBy>("none");
   const [ranking, setRanking] = useState<RankingResponse | null>(initialRankingData);
+  const [radarMode, setRadarMode] = useState<WatchlistRadarMode>(initialRadarMode);
+  const [radar, setRadar] = useState<WatchlistGroupRadarRead | null>(initialRadarData);
   const [usRankBy, setUsRankBy] = useState<USRankBy>("none");
   const [usRanking, setUsRanking] = useState<USWatchlistRankingRead | null>(null);
   const [marketIndexSummary, setMarketIndexSummary] =
@@ -1502,16 +1525,22 @@ export default function MarketDashboardClient({
   const [marketIndexLoadState, setMarketIndexLoadState] =
     useState<LoadState>(initialMarketIndexSummary ? "success" : "idle");
   const [loadState, setLoadState] = useState<LoadState>("idle");
+  const [radarLoadState, setRadarLoadState] = useState<LoadState>(
+    initialRadarData ? "success" : "idle"
+  );
   const [twWatchlistBackfillState, setTwWatchlistBackfillState] =
     useState<LoadState>("idle");
   const [usLoadState, setUsLoadState] = useState<LoadState>("idle");
   const [usUniverseRefreshState, setUsUniverseRefreshState] =
     useState<LoadState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [radarErrorMessage, setRadarErrorMessage] = useState<string | null>(null);
   const [usErrorMessage, setUsErrorMessage] = useState<string | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
   const [usLastUpdatedAt, setUsLastUpdatedAt] = useState<string | null>(null);
   const dashboardRequestSeq = useRef(0);
+  const radarRequestSeq = useRef(0);
+  const radarModeRef = useRef<WatchlistRadarMode>(radarMode);
   const usDashboardRequestSeq = useRef(0);
   const marketIndexRequestSeq = useRef(0);
   const finalDashboardRefreshDate = useRef<string | null>(null);
@@ -1641,6 +1670,57 @@ export default function MarketDashboardClient({
       ? selectedUsCompanyProfile
       : null;
 
+  function watchlistRadarParams(
+    mode: WatchlistRadarMode,
+    useIntraday: boolean
+  ) {
+    return {
+      ...WATCHLIST_ANALYSIS_PARAMS,
+      mode,
+      max_results: WATCHLIST_RADAR_MAX_RESULTS,
+      calculation_limit: 100,
+      use_intraday: useIntraday,
+      intraday_limit: WATCHLIST_INTRADAY_LIMIT,
+    };
+  }
+
+  async function loadWatchlistRadar(
+    groupId: number,
+    options?: { mode?: WatchlistRadarMode; silent?: boolean }
+  ) {
+    const requestSeq = radarRequestSeq.current + 1;
+    radarRequestSeq.current = requestSeq;
+    const currentMode = options?.mode ?? radarModeRef.current;
+
+    if (!options?.silent) {
+      setRadarLoadState("loading");
+      setRadarErrorMessage(null);
+      setRadar(null);
+    }
+
+    try {
+      const marketState = getTaiwanMarketRefreshState();
+      const radarData = await fetchJson<WatchlistGroupRadarRead>(
+        `/api/watchlists/groups/${groupId}/radar`,
+        watchlistRadarParams(currentMode, marketState.isPollingWindow)
+      );
+
+      if (radarRequestSeq.current !== requestSeq) return;
+
+      setRadar(radarData);
+      setRadarLoadState("success");
+      setRadarErrorMessage(null);
+    } catch (error) {
+      if (radarRequestSeq.current !== requestSeq) return;
+
+      if (!options?.silent) {
+        setRadar(null);
+      }
+      setRadarLoadState("error");
+      setRadarErrorMessage(apiErrorMessage(error, "雷達資料讀取失敗"));
+    }
+  }
+
   async function loadDashboard(
     groupId: number,
     currentRankBy = rankBy,
@@ -1648,44 +1728,63 @@ export default function MarketDashboardClient({
   ) {
     const requestSeq = dashboardRequestSeq.current + 1;
     dashboardRequestSeq.current = requestSeq;
+    const radarSeq = radarRequestSeq.current + 1;
+    radarRequestSeq.current = radarSeq;
 
     if (!options?.silent) {
       setLoadState("loading");
+      setRadarLoadState("loading");
       setErrorMessage(null);
+      setRadarErrorMessage(null);
     }
 
     try {
       const marketState = getTaiwanMarketRefreshState();
-      const commonParams = {
-        include_children: true,
-        enabled_only: true,
-        ma_windows: "5,20,60",
-        volume_ma_windows: "5,20",
-      };
-
-      const rankingData = await fetchJson<RankingResponse>(
+      const useIntraday = marketState.isPollingWindow;
+      const rankingPromise = fetchJson<RankingResponse>(
         `/api/watchlists/groups/${groupId}/rankings/latest`,
         {
-          ...commonParams,
+          ...WATCHLIST_ANALYSIS_PARAMS,
           rank_by: currentRankBy === "none" ? "watchlist" : currentRankBy,
           sort_order: currentRankBy === "none" ? "asc" : "desc",
           limit: 100,
-          volume_ratio_threshold: 1.5,
-          use_intraday: marketState.isPollingWindow,
+          use_intraday: useIntraday,
           intraday_limit: WATCHLIST_INTRADAY_LIMIT,
         }
       );
+      const radarPromise = fetchJson<WatchlistGroupRadarRead>(
+        `/api/watchlists/groups/${groupId}/radar`,
+        watchlistRadarParams(radarModeRef.current, useIntraday)
+      )
+        .then((data) => {
+          if (radarRequestSeq.current !== radarSeq) return;
+
+          setRadar(data);
+          setRadarLoadState("success");
+          setRadarErrorMessage(null);
+        })
+        .catch((error: unknown) => {
+          if (radarRequestSeq.current !== radarSeq) return;
+
+          if (!options?.silent) {
+            setRadar(null);
+          }
+          setRadarLoadState("error");
+          setRadarErrorMessage(apiErrorMessage(error, "雷達資料讀取失敗"));
+        });
+      const rankingData = await rankingPromise;
 
       if (dashboardRequestSeq.current !== requestSeq) return;
 
       setRanking(rankingData);
       setLastUpdatedAt(formatDashboardTime(new Date()));
       setLoadState("success");
+      void radarPromise;
     } catch (error) {
       if (dashboardRequestSeq.current !== requestSeq) return;
 
       setLoadState("error");
-      setErrorMessage(error instanceof Error ? error.message : "資料讀取失敗");
+      setErrorMessage(apiErrorMessage(error, "資料讀取失敗"));
     }
   }
 
@@ -1904,6 +2003,10 @@ export default function MarketDashboardClient({
   useEffect(() => {
     activeGroupIdRef.current = activeGroupId;
   }, [activeGroupId]);
+
+  useEffect(() => {
+    radarModeRef.current = radarMode;
+  }, [radarMode]);
 
   useEffect(() => {
     selectedUsGroupIdRef.current = selectedUsGroupId;
@@ -2180,11 +2283,17 @@ export default function MarketDashboardClient({
       setSelectedStockId(null);
       setSelectedStockName(null);
       setRanking(null);
+      setRadar(null);
       setLoadState("idle");
+      setRadarLoadState("idle");
       setErrorMessage(null);
-      pushDashboardUrl({ market: "tw", groupId: group.id });
+      setRadarErrorMessage(null);
+      pushDashboardUrl({ market: "tw", groupId: group.id, radarMode });
     } else {
       setRanking(null);
+      setRadar(null);
+      setRadarLoadState("idle");
+      setRadarErrorMessage(null);
       pushDashboardUrl({ market: "tw" });
     }
   }
@@ -2194,7 +2303,7 @@ export default function MarketDashboardClient({
     setSelectedStockName(stockName);
     setSelectedFuturesSymbol(null);
     setErrorMessage(null);
-    pushDashboardUrl({ market: "tw", groupId: activeGroupId, stockId });
+    pushDashboardUrl({ market: "tw", groupId: activeGroupId, stockId, radarMode });
   }
 
   function handleSelectTaiwanFutures(symbol: string) {
@@ -2272,6 +2381,20 @@ export default function MarketDashboardClient({
     setRanking(null);
     setLoadState("idle");
     setErrorMessage(null);
+  }
+
+  function handleRadarModeChange(value: WatchlistRadarMode) {
+    radarModeRef.current = value;
+    setRadarMode(value);
+    pushDashboardUrl({
+      market: "tw",
+      groupId: activeGroupId,
+      stockId: selectedStockId,
+      radarMode: value,
+    });
+    if (activeGroupId !== null) {
+      void loadWatchlistRadar(activeGroupId, { mode: value });
+    }
   }
 
   function handleUsRankByChange(value: string) {
@@ -2493,6 +2616,29 @@ export default function MarketDashboardClient({
   const rankingPanel = (
     <div className="space-y-4">
       {groupSummaryPanel}
+      <WatchlistRadarPanel
+        radar={radar}
+        loadState={radarLoadState}
+        errorMessage={radarErrorMessage}
+        mode={radarMode}
+        selectedStockId={selectedStockId}
+        disabled={activeGroupId === null}
+        getModeHref={(nextMode) =>
+          buildDashboardHref({
+            market: "tw",
+            groupId: activeGroupId,
+            stockId: selectedStockId,
+            radarMode: nextMode,
+          })
+        }
+        onModeChange={handleRadarModeChange}
+        onReload={() => {
+          if (activeGroupId !== null) {
+            void loadWatchlistRadar(activeGroupId);
+          }
+        }}
+        onSelectStock={handleSelectStock}
+      />
       <section className="border border-slate-200 bg-white">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-3">
           <h3 className="text-sm font-bold text-slate-950">自選股列表</h3>
@@ -2833,6 +2979,9 @@ export default function MarketDashboardClient({
                   void loadDashboard(groupId);
                 } else {
                   setRanking(null);
+                  setRadar(null);
+                  setRadarLoadState("idle");
+                  setRadarErrorMessage(null);
                 }
               }}
             />

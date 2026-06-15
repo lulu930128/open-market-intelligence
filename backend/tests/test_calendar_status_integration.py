@@ -141,6 +141,7 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
             patch.object(scheduler, "_is_taiwan_futures_live_window", return_value=True),
             patch.object(scheduler.settings, "scheduler_taiwan_futures_symbols", "TXF,MXF"),
             patch.object(scheduler.settings, "scheduler_taiwan_futures_session", "auto"),
+            patch.object(scheduler.settings, "taiwan_futures_quote_provider", "taifex_mis"),
             patch.object(scheduler, "_should_record_taiwan_futures_success", return_value=True),
             patch.object(scheduler, "SessionLocal", return_value=fake_db),
             patch.object(
@@ -157,8 +158,10 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
             symbols=["TXF", "MXF"],
             session="auto",
             active_only=True,
+            provider="taifex_mis",
         )
         record_event.assert_called_once()
+        self.assertEqual(record_event.call_args.kwargs["provider"], "taifex_mis")
         self.assertEqual(record_event.call_args.kwargs["resource"], "tw_futures_quote")
         self.assertEqual(record_event.call_args.kwargs["target"], "TXF,MXF")
         self.assertEqual(record_event.call_args.kwargs["status"], "success")

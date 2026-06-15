@@ -52,6 +52,7 @@ from app.market.market_chips import (
 from app.market.overnight_impact import build_us_overnight_impact_report
 from app.market.technical_report import build_stock_technical_report
 from app.market.tw_futures import (
+    KGI_PROVIDER,
     TaiwanFuturesFetchError,
     get_latest_taiwan_futures_quotes,
     list_taiwan_futures_daily_bars,
@@ -59,6 +60,7 @@ from app.market.tw_futures import (
     list_taiwan_futures_products,
     refresh_taiwan_futures_daily_bars,
     refresh_taiwan_futures_quotes,
+    resolve_taiwan_futures_quote_provider,
     taiwan_futures_daily_bar_to_dict,
     taiwan_futures_intraday_bar_to_dict,
     taiwan_futures_quote_to_dict,
@@ -189,12 +191,23 @@ def get_taiwan_source_health(
     )
 
 
-def _format_taiwan_futures_quote_source_error(exc: TaiwanFuturesFetchError) -> str:
-    text = str(exc)
-    if "520" in text:
-        return "TAIFEX MIS 即時報價來源暫時回應 520，已改用快取資料。"
+def _taiwan_futures_quote_source_name(provider: str | None) -> str:
+    if resolve_taiwan_futures_quote_provider(provider) == KGI_PROVIDER:
+        return "KGI"
+    return "TAIFEX MIS"
 
-    return "TAIFEX MIS 即時報價暫時無法讀取，已改用快取資料。"
+
+def _format_taiwan_futures_quote_source_error(
+    exc: TaiwanFuturesFetchError,
+    *,
+    provider: str | None = None,
+) -> str:
+    text = str(exc)
+    source_name = _taiwan_futures_quote_source_name(provider)
+    if "520" in text:
+        return f"{source_name} 即時報價來源暫時回應 520，已改用快取資料。"
+
+    return f"{source_name} 即時報價暫時無法讀取，已改用快取資料。"
 
 
 def _record_taiwan_futures_quote_refresh_issue(
@@ -202,17 +215,20 @@ def _record_taiwan_futures_quote_refresh_issue(
     *,
     symbols: str,
     session: str,
+    provider: str | None,
     exc: TaiwanFuturesFetchError,
     cached_count: int,
 ) -> None:
     symbol_list = _split_index_ids(symbols) or ["TXF", "MXF", "TMF"]
     target = ",".join(symbol_list)
     requested_count = max(len(symbol_list), 1)
-    message = _format_taiwan_futures_quote_source_error(exc)
+    source_name = _taiwan_futures_quote_source_name(provider)
+    resolved_provider = resolve_taiwan_futures_quote_provider(provider)
+    message = _format_taiwan_futures_quote_source_error(exc, provider=provider)
     has_cache = cached_count > 0
     status_value = "partial_success" if has_cache else "error"
     if not has_cache:
-        message = "TAIFEX MIS 即時報價暫時無法讀取，且目前沒有可用快取。"
+        message = f"{source_name} 即時報價暫時無法讀取，且目前沒有可用快取。"
 
     result = {
         "status": status_value,
@@ -225,7 +241,7 @@ def _record_taiwan_futures_quote_refresh_issue(
             {
                 "symbol": symbol,
                 "resource": "台指期即時報價",
-                "source_name": "TAIFEX MIS",
+                "source_name": source_name,
                 "status": "partial_success" if has_cache else "error",
                 "message": message,
                 "error_message": message,
@@ -249,7 +265,12 @@ def _record_taiwan_futures_quote_refresh_issue(
             db=db,
             job_type=TAIWAN_FUTURES_QUOTE_REFRESH_JOB_TYPE,
             target=target,
-            request={"symbols": symbol_list, "session": session, "source": "TAIFEX MIS"},
+            request={
+                "symbols": symbol_list,
+                "session": session,
+                "source": source_name,
+                "provider": resolved_provider,
+            },
             progress_total=requested_count,
             message="Refreshing Taiwan futures quotes.",
         )
@@ -957,15 +978,18 @@ def list_taiwan_futures_products_api():
 def refresh_taiwan_futures_quotes_api(
     symbols: str = Query(default="TXF,MXF,TMF"),
     session: str = Query(default="auto", pattern="^(auto|regular|after_hours)$"),
+    provider: str | None = Query(default=None, pattern="^(auto|taifex_mis|kgi)$"),
     active_only: bool = True,
     db: Session = Depends(get_db),
 ):
+    source_error: str | None = None
     try:
         rows = refresh_taiwan_futures_quotes(
             db=db,
             symbols=symbols,
             session=session,
             active_only=active_only,
+            provider=provider,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -973,21 +997,31 @@ def refresh_taiwan_futures_quotes_api(
             detail=str(exc),
         ) from exc
     except TaiwanFuturesFetchError as exc:
+        source_error = str(exc)
         rows = get_latest_taiwan_futures_quotes(
             db=db,
             symbols=symbols,
             refresh=False,
             session=session,
+            provider=provider,
         )
         _record_taiwan_futures_quote_refresh_issue(
             db=db,
             symbols=symbols,
             session=session,
+            provider=provider,
             exc=exc,
             cached_count=len(rows),
         )
 
-    return [taiwan_futures_quote_to_dict(row) for row in rows]
+    return [
+        taiwan_futures_quote_to_dict(
+            row,
+            expected_session=session,
+            source_error=source_error,
+        )
+        for row in rows
+    ]
 
 
 @router.get(
@@ -998,14 +1032,17 @@ def get_latest_taiwan_futures_quotes_api(
     symbols: str = Query(default="TXF,MXF,TMF"),
     refresh: bool = False,
     session: str = Query(default="auto", pattern="^(auto|regular|after_hours)$"),
+    provider: str | None = Query(default=None, pattern="^(auto|taifex_mis|kgi)$"),
     db: Session = Depends(get_db),
 ):
+    source_error: str | None = None
     try:
         rows = get_latest_taiwan_futures_quotes(
             db=db,
             symbols=symbols,
             refresh=refresh,
             session=session,
+            provider=provider,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -1013,21 +1050,31 @@ def get_latest_taiwan_futures_quotes_api(
             detail=str(exc),
         ) from exc
     except TaiwanFuturesFetchError as exc:
+        source_error = str(exc)
         rows = get_latest_taiwan_futures_quotes(
             db=db,
             symbols=symbols,
             refresh=False,
             session=session,
+            provider=provider,
         )
         _record_taiwan_futures_quote_refresh_issue(
             db=db,
             symbols=symbols,
             session=session,
+            provider=provider,
             exc=exc,
             cached_count=len(rows),
         )
 
-    return [taiwan_futures_quote_to_dict(row) for row in rows]
+    return [
+        taiwan_futures_quote_to_dict(
+            row,
+            expected_session=session,
+            source_error=source_error,
+        )
+        for row in rows
+    ]
 
 
 @router.get(
@@ -1095,6 +1142,7 @@ def list_taiwan_futures_intraday_bars_api(
     limit: int = Query(default=390, ge=1, le=3000),
     refresh: bool = True,
     session: str = Query(default="auto", pattern="^(auto|regular|after_hours)$"),
+    provider: str | None = Query(default=None, pattern="^(auto|taifex_mis|kgi)$"),
     trade_date: date | None = None,
     db: Session = Depends(get_db),
 ):
@@ -1107,6 +1155,7 @@ def list_taiwan_futures_intraday_bars_api(
                     symbols=[symbol],
                     session=session,
                     active_only=True,
+                    provider=provider,
                 )
             except TaiwanFuturesFetchError as exc:
                 db.rollback()
@@ -1118,6 +1167,7 @@ def list_taiwan_futures_intraday_bars_api(
             interval=interval,
             limit=limit,
             trade_date=trade_date,
+            provider=provider,
         )
     except ValueError as exc:
         raise HTTPException(

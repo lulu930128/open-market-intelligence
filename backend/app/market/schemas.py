@@ -411,6 +411,17 @@ class TaiwanFuturesProductRead(BaseModel):
     after_hours_session: str
 
 
+class TaiwanFuturesQuoteFreshnessRead(BaseModel):
+    status: str
+    is_live: bool
+    is_stale: bool
+    is_session_mismatch: bool
+    expected_session: str
+    age_seconds: int | None = None
+    message: str
+    source_error: str | None = None
+
+
 class TaiwanFuturesQuoteRead(BaseModel):
     id: int
     provider: str
@@ -444,6 +455,7 @@ class TaiwanFuturesQuoteRead(BaseModel):
     source: str
     source_url: str | None = None
     fetched_at: datetime
+    freshness: TaiwanFuturesQuoteFreshnessRead
     created_at: datetime
     updated_at: datetime
 

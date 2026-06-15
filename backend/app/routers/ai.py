@@ -339,6 +339,7 @@ def read_watchlist_context(
     enabled_only: bool = True,
     rank_by: str = Query(default="score", pattern="^(watchlist|score|change_pct|volume)$"),
     sort_order: str = Query(default="desc", pattern="^(asc|desc)$"),
+    radar_mode: str = Query(default="action", pattern="^(action|risk|momentum|all)$"),
     limit: int = Query(default=100, ge=20, le=500),
     db: Session = Depends(get_db),
 ):
@@ -350,6 +351,7 @@ def read_watchlist_context(
             enabled_only=enabled_only,
             rank_by=rank_by,
             sort_order=sort_order,
+            radar_mode=radar_mode,
             limit=limit,
         )
     except watchlist_service.WatchlistGroupNotFoundError as exc:
@@ -522,6 +524,7 @@ def build_watchlist_brief(
     strategy_profile: str = "short_term_momentum",
     rank_by: str = Query(default="score", pattern="^(watchlist|score|change_pct|volume)$"),
     sort_order: str = Query(default="desc", pattern="^(asc|desc)$"),
+    radar_mode: str = Query(default="action", pattern="^(action|risk|momentum|all)$"),
     db: Session = Depends(get_db),
 ):
     try:
@@ -531,6 +534,7 @@ def build_watchlist_brief(
             strategy_profile=strategy_profile,
             rank_by=rank_by,
             sort_order=sort_order,
+            radar_mode=radar_mode,
         )
     except watchlist_service.WatchlistGroupNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -545,6 +549,7 @@ def generate_watchlist_llm_report(
     strategy_profile: str = "short_term_momentum",
     rank_by: str = Query(default="score", pattern="^(watchlist|score|change_pct|volume)$"),
     sort_order: str = Query(default="desc", pattern="^(asc|desc)$"),
+    radar_mode: str = Query(default="action", pattern="^(action|risk|momentum|all)$"),
     db: Session = Depends(get_db),
 ):
     _require_trusted_ai_request(request, "Generating watchlist LLM report")
@@ -555,6 +560,7 @@ def generate_watchlist_llm_report(
             strategy_profile=strategy_profile,
             rank_by=rank_by,
             sort_order=sort_order,
+            radar_mode=radar_mode,
         )
     except watchlist_service.WatchlistGroupNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -571,6 +577,7 @@ def save_watchlist_brief(
     strategy_profile: str = "short_term_momentum",
     rank_by: str = Query(default="score", pattern="^(watchlist|score|change_pct|volume)$"),
     sort_order: str = Query(default="desc", pattern="^(asc|desc)$"),
+    radar_mode: str = Query(default="action", pattern="^(action|risk|momentum|all)$"),
     db: Session = Depends(get_db),
 ):
     _require_trusted_ai_request(request, "Saving watchlist brief")
@@ -581,6 +588,7 @@ def save_watchlist_brief(
             strategy_profile=strategy_profile,
             rank_by=rank_by,
             sort_order=sort_order,
+            radar_mode=radar_mode,
         )
         return _save_brief_report(
             db=db,
@@ -596,6 +604,7 @@ def save_watchlist_brief(
                 "strategy_profile": strategy_profile,
                 "rank_by": rank_by,
                 "sort_order": sort_order,
+                "radar_mode": radar_mode,
             },
         )
     except watchlist_service.WatchlistGroupNotFoundError as exc:

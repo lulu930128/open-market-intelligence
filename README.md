@@ -13,12 +13,13 @@ Open Market Intelligence（OMI）是一套本機優先的市場情報與看盤�
 這版是台股 v2 基線版，日常本機研究流程已具備可用穩定度：
 
 - 台股 dashboard：大盤脈絡、自選股群組、群組排行、背景更新狀態、資料過期 loading guard。
+- 自選股 Radar：依技術訊號把群組股票分成重點、風險、動能與全部視角，支援 SSR 初始資料、URL mode、reload 與點選跳轉個股。
 - 台股個股頁：`今日`、`日K`、`週K`、`月K` 共用一致版型。
-- 台指期頁：TXF、MXF、TMF 報價、日內/日週月 K、期現價差、成交量與商品比較。
+- 台指期頁：TXF、MXF、TMF 報價、日內/日週月 K、期現價差、成交量與商品比較；即時報價帶 freshness 狀態與 provider fallback。
 - 專業 K 線模式：台股、美股、台指期共用同一套全寬圖表 shell，支援壓縮 header、指標分類、畫線工具、量測工具、undo/redo、畫線快照保存。
 - 台股籌碼與基本面：法人、融資融券、集保、券商分點 Top15、營收、財報、盈餘。
 - 美股市場：主要指數、自選股、OHLC、盤中資料、SEC facts、Alpha Vantage profile/actions、FINRA short volume、FRED macro。
-- AI/Agent 入口：`POST /api/ai/ask` 與 MCP `omi.ask`，支援 evidence freshness、warnings、missing data、tool runs。
+- AI/Agent 入口：`POST /api/ai/ask` 與 MCP `omi.ask`，支援 evidence freshness、warnings、missing data、tool runs；自選股問題會把 Watchlist Radar 納入回答與 action plan。
 
 ## 產品原則
 
@@ -34,6 +35,7 @@ Open Market Intelligence（OMI）是一套本機優先的市場情報與看盤�
 
 - TAIEX 與 TPEx 市場卡片。
 - 自選股樹狀群組、群組數量、群組總覽、排序、排行、reload/backfill 控制。
+- Watchlist Radar：以 `action`、`risk`、`momentum`、`all` 四種模式掃描群組，標出高優先風險、突破動能、量能異動、強勢回檔與一般觀察名單。
 - 背景工作中心，台股與美股工作分開顯示。
 - stale-date guard：資料日期不正確時先顯示 loading/empty 狀態，不直接展示舊資料。
 
@@ -87,6 +89,8 @@ Open Market Intelligence（OMI）是一套本機優先的市場情報與看盤�
 
 - 商品：TXF、MXF、TMF。
 - 報價：日盤/夜盤最新價、漲跌、漲跌幅、報價時間、契約月份。
+- 即時來源：預設 TAIFEX MIS；`TAIWAN_FUTURES_QUOTE_PROVIDER=kgi` 是預留給凱基 API 的插槽，目前會明確回傳 adapter 尚未實作，不會假裝有資料。
+- Freshness：報價會標記 `live`、`stale`、`cached` 或 `session_mismatch`，來源失敗時會使用快取並寫入 provider event/job issue。
 - K 線：日內、日 K、週 K、月 K。
 - 重點資訊：開高低、參考/結算、期現價差、振幅、成交量、未平倉、買賣價。
 - 專業模式：和台股/美股共用工具列、圖表型態切換、技術指標選單、畫線工具與本機/遠端畫線快照。
@@ -124,6 +128,8 @@ OMI 把每個來源都當作帶有 provenance 與 freshness 的 evidence，而�
 | 台股上市價量 | TWSE OpenAPI/RWD、TPEx endpoints | 優先官方來源；顯示前仍檢查日期與筆數。 |
 | 台股盤中 | nStock minute data、TWSE MIS volume adjustment | 適合本機監控；盤中可用性會受來源狀態影響。 |
 | 台股大盤/指數 | TWSE/TPEx market endpoints、部分 Yahoo fallback | 官方日資料優先；Yahoo 只補官方歷史覆蓋不足處。 |
+| 台指期即時報價 | TAIFEX MIS、KGI provider slot | 預設 TAIFEX MIS；KGI 目前只保留設定與錯誤邊界，adapter 實作前不會產生假即時資料。 |
+| 台指期日資料 | TAIFEX futures daily market report | 官方日資料，用於日/週/月 K 與非盤中 fallback。 |
 | 台股籌碼 | TWSE BFI82U、TPEx institutional summary、TDCC | 發布時間很重要，排程需晚於來源發布窗口。 |
 | 台股基本面 | MOPS/MOPSOV | 官方來源族群；parser 需用 quality check 防格式變動。 |
 | 券商分點 | nStock branch Top15 | 便利型非官方來源；多日模式是已存 Top15 snapshot 加總，不是完整分點帳本。 |
@@ -177,7 +183,7 @@ flowchart LR
 │  │  ├─ sources/              source registry seed definitions
 │  │  ├─ stocks/               Taiwan stock master/profile
 │  │  ├─ us_market/            US symbols, OHLC, SEC facts, profile, macro
-│  │  └─ watchlists/           Taiwan watchlist tree/ranking/backfills
+│  │  └─ watchlists/           Taiwan watchlist tree/ranking/radar/backfills
 │  └─ tests/
 ├─ frontend/
 │  └─ src/
@@ -201,7 +207,7 @@ flowchart LR
 | `/api/jobs` | Background job status |
 | `/api/ai` | `omi.ask`、tools、strategy profiles、reports |
 | `/api/stocks` | 台股 search、master、profile |
-| `/api/watchlists` | 台股 watchlists、groups、ranking、backfills |
+| `/api/watchlists` | 台股 watchlists、groups、ranking、Radar、backfills |
 | `/api/market/ohlc` | 台股日/週/月 OHLC |
 | `/api/market/intraday` | 台股盤中 trend |
 | `/api/market/technical-report` | timeframe-aware technical reports |
@@ -246,11 +252,23 @@ Minimal request：
 ```json
 {
   "question": "2330 近況如何？",
-  "target_type": "tw_stock",
-  "target_id": "2330",
+  "target": {"type": "tw_stock", "id": "2330"},
   "mode": "analysis",
-  "horizon": "swing",
+  "analysis_horizon": "swing",
   "allow_llm": true,
+  "allow_external_fetch": false,
+  "allow_write": false
+}
+```
+
+Watchlist request：
+
+```json
+{
+  "question": "watchlist group 1 哪些有風險？",
+  "target": {"type": "tw_watchlist", "id": "1"},
+  "mode": "brief",
+  "allow_llm": false,
   "allow_external_fetch": false,
   "allow_write": false
 }
@@ -288,6 +306,27 @@ OMI 的 AI 問答以 deterministic local analysis 為主，LLM 是可選的敘�
 | `trend_view` | 怎麼看、趨勢如何 | 短線/波段/長線方向與確認條件。 |
 
 直接問「適合買入嗎、如果等回檔看哪裡」會走 `entry_decision`，不應退回通用技術摘要模板。
+
+### Watchlist Radar for AI
+
+自選股群組會先建立 ranking，再由同一份 ranking 衍生 Radar，避免 AI 重新計算或拿到不同資料版本。
+
+Radar mode：
+
+| Mode | 用途 |
+| --- | --- |
+| `action` | 預設重點掃描，排除安靜、缺資料與錯誤列。 |
+| `risk` | 聚焦漲跌停/急漲急跌與風險優先標的。 |
+| `momentum` | 聚焦突破動能、量能異動、強勢回檔與趨勢延續。 |
+| `all` | 保留全部 bucket，適合除錯或完整檢查。 |
+
+`omi.ask` 會依 `question_intent` 自動選 mode：
+
+- `risk_check` / `exit_decision`：使用 `risk`。
+- `entry_decision`：使用 `momentum`。
+- `trend_view` / `general`：使用 `action`。
+
+AI 回答會優先使用 `analysis.radar_rows` 組 watchlist action plan；例如「哪些有風險」會先列風險 bucket，「可以買嗎」會先列動能候選，並保留「Radar 不是直接買賣訊號」的限制。
 
 ### Evidence pipeline
 
@@ -477,6 +516,12 @@ ENABLE_SCHEDULER=false
 
 ALPHAVANTAGE_API_KEY=
 FRED_API_KEY=
+TAIWAN_FUTURES_QUOTE_PROVIDER=taifex_mis
+KGI_API_KEY=
+KGI_API_SECRET=
+KGI_ACCOUNT=
+KGI_CERT_PATH=
+KGI_API_BASE_URL=
 US_SEC_USER_AGENT=Open Market Intelligence local research; contact=you@example.com
 US_MARKET_HTTP_TIMEOUT_SECONDS=30
 OMI_HTTP_TRUST_ENV=false
@@ -516,6 +561,11 @@ OpenAI key resolution order：
 ```env
 SCHEDULER_MARKET_REFRESH_TIME=15:15
 SCHEDULER_MARKET_CHIP_REFRESH_TIME=18:35
+ENABLE_TAIWAN_FUTURES_SCHEDULER=true
+SCHEDULER_TAIWAN_FUTURES_SYMBOLS=TXF,MXF,TMF
+SCHEDULER_TAIWAN_FUTURES_SESSION=auto
+SCHEDULER_TAIWAN_FUTURES_INTERVAL_SECONDS=30
+SCHEDULER_TAIWAN_FUTURES_SUCCESS_EVENT_INTERVAL_SECONDS=300
 ENABLE_US_MARKET_SCHEDULER=false
 SCHEDULER_US_MARKET_REFRESH_TIME=06:30
 SCHEDULER_US_MARKET_REFRESH_DAY_OF_WEEK=tue-sat
@@ -572,6 +622,8 @@ Invoke-RestMethod "http://127.0.0.1:8300/api/market/ohlc/2330?timeframe=daily&li
 Invoke-RestMethod "http://127.0.0.1:8300/api/market/technical-report/2330?timeframe=today"
 Invoke-RestMethod "http://127.0.0.1:8300/api/market/broker-branches/2330/daily?days=3&ensure_daily=false"
 Invoke-RestMethod "http://127.0.0.1:8300/api/market/source-health?stock_id=2330"
+Invoke-RestMethod "http://127.0.0.1:8300/api/watchlists/groups/1/radar?mode=action&max_results=8"
+Invoke-RestMethod "http://127.0.0.1:8300/api/market/tw-futures/latest?symbols=TXF&refresh=true&session=auto"
 Invoke-RestMethod "http://127.0.0.1:8300/api/us-market/stocks/search?q=SPCX"
 Invoke-RestMethod "http://127.0.0.1:8300/api/us-market/source-health?symbol=MU"
 ```
@@ -589,10 +641,12 @@ git diff --check
 - Backend 外部 HTTP 呼叫應透過 `backend/app/http_client.py`；預設 `OMI_HTTP_TRUST_ENV=false`，避免本機 shell 或 launcher 的 `HTTP_PROXY` / `HTTPS_PROXY` 把 OpenAI、Yahoo、TWSE/TPEx 等來源導到無效 proxy。只有確定需要真實 outbound proxy 時才設成 `true`。
 - Provider/source health observability 使用 `provider_event` 與 `source_health_snapshot` 兩張表；服務入口在 `backend/app/observability/provider_health.py`。`GET /api/system/provider-events` 可查 provider 事件歷史，`GET /api/system/source-health-snapshots` 可查目前持久化 health snapshot。台股與美股 source health API 會同步 snapshot；外部 fetcher 若要記錄錯誤、rate limit、retry-after，應呼叫 `record_provider_event()`。
 - 台股 source health 由 `backend/app/market/source_health.py` 從本地表與 `market_calendar_status` 的 release window 推導，API 為 `GET /api/market/source-health`；支援 `stock_id`、`dataset`、`index_id` 與 `now` filter。OMI 台股 context 會帶入 `data.source_health`，用來區分 `current`、`stale`、`empty` 與 ETF/權證等 `not_applicable` 資料。
+- 台指期即時資料預設使用 `TAIWAN_FUTURES_QUOTE_PROVIDER=taifex_mis`；若切到 `kgi`，目前只會檢查 KGI 設定並回傳「adapter 尚未實作」錯誤，避免把空 adapter 當成真實即時資料。相關 API 支援 `provider=auto|taifex_mis|kgi`。
 - 美股 provider adapter 入口放在 `backend/app/us_market/providers/`；source health 由 `backend/app/us_market/source_health.py` 從本地表推導，API 為 `GET /api/us-market/source-health`，OMI 美股 context 也會帶入 `data.source_health`。美股回答權重使用 `backend/app/ai/us_decision_adapter.py`，以 price trend、relative volume、fundamentals、FINRA short volume 與 source health 為核心，不套用台股法人/分點模型。
 - 台股 market time 與 trading-session helpers 放在 `frontend/src/lib/taiwanMarketTime.ts` 與 `frontend/src/lib/taiwanMarketRules.ts`；會優先使用 `frontend/src/lib/marketCalendarStatus.ts` 的後端 snapshot，沒有 snapshot 時才使用本地 fallback。
 - 美股 regular-session helpers 放在 `frontend/src/lib/usMarketTime.ts`；會優先使用 `frontend/src/lib/marketCalendarStatus.ts` 的後端 snapshot，沒有 snapshot 時才使用本地 fallback。
 - 台股、美股與台指期的專業圖表模式應共用 `frontend/src/components/ProfessionalChartPanel.tsx` 與 `frontend/src/components/professionalChartDrawing.ts`；不要在單一 detail panel 重新實作一套工具列。
+- 自選股 Radar 的前端入口在 `frontend/src/components/WatchlistRadarPanel.tsx`；後端入口是 `GET /api/watchlists/groups/{group_id}/radar`，AI 入口則透過 `read_watchlist_context` 與 `build_watchlist_brief` 帶入 `data.radar`、`summary.radar`、`analysis.radar_rows`。
 - `frontend/src/components/LightweightKLineChart.tsx` 的純 UI layer 應優先往 `frontend/src/components/chart/` 拆分；目前 header、選取畫線摘要卡與靜態 indicator overlay 已拆出。
 - Chart dimensions 要穩定；indicator toggle、hover state、label、refresh 不應重置 visible range 或中斷畫線操作。
 - 專業 K 線模式要隱藏次要 dashboard panels，但保留左側自選股與目前商品 context。
@@ -607,6 +661,7 @@ git diff --check
 - 日股、韓股、港股目前仍是入口 placeholder。
 - 券商分點多日分析取決於已存 daily Top15 snapshots；如果 DB 只有一天，就只能回傳 partial coverage。
 - 盤中資料取決於外部來源可用性，必要時會退回 snapshot-only 行為。
+- 凱基台指期 API 目前是設定與 provider slot，尚未實作 response adapter；正式接上前仍以 TAIFEX MIS 與本地快取為主。
 - SQLite 適合本機研究與開發；多使用者或長期部署應評估 PostgreSQL 或其他 managed database。
 
 ## Production Hygiene

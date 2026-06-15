@@ -244,6 +244,75 @@ class WatchlistGroupRankingRead(BaseModel):
     results: list[WatchlistRankingItemRead]
 
 
+class WatchlistRadarBucketRead(BaseModel):
+    key: str
+    label: str
+    description: str
+    count: int
+
+
+class WatchlistRadarItemRead(BaseModel):
+    rank: int
+    source_rank: int | None = None
+
+    bucket: str
+    bucket_label: str
+    urgency: str
+    priority_score: float
+    action_label: str
+    reason: str
+
+    stock_id: str
+    stock_name: str | None = None
+
+    time: str | date | None = None
+    trade_date: date | None = None
+    close: float | None = None
+    volume: int | None = None
+    change: float | None = None
+    previous_close: float | None = None
+    change_pct: float | None = None
+    limit_status: str | None = None
+
+    score: int
+    status: str
+
+    signal_count: int
+    signal_keys: list[str] = Field(default_factory=list)
+    matched_signal_keys: list[str] = Field(default_factory=list)
+    signal_labels: list[str] = Field(default_factory=list)
+
+    primary_signal_key: str | None = None
+    primary_signal_label: str | None = None
+
+    stale: bool = False
+    error_message: str | None = None
+
+
+class WatchlistGroupRadarRead(BaseModel):
+    group_id: int
+    include_children: bool
+
+    mode: str
+    max_results: int
+
+    requested_stock_count: int
+    ranked_count: int
+    matched_count: int
+    radar_count: int
+    no_data_count: int
+    error_count: int
+
+    trade_date: date | None = None
+    target_trade_date: date | None = None
+    is_current: bool = True
+    current_stock_count: int = 0
+    stale_stock_count: int = 0
+
+    buckets: list[WatchlistRadarBucketRead]
+    results: list[WatchlistRadarItemRead]
+
+
 class WatchlistGroupDeleteResultRead(BaseModel):
     group_id: int
     recursive: bool

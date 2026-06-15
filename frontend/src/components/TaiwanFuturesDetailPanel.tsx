@@ -62,6 +62,10 @@ const FUTURES_TIMEFRAME_LABELS: Record<FuturesTimeframe, string> = {
   weekly: "週K",
   monthly: "月K",
 };
+const FUTURES_SESSION_LABELS: Record<string, string> = {
+  regular: "日盤",
+  after_hours: "夜盤",
+};
 const FUTURES_PROFESSIONAL_TIMEFRAME_OPTIONS: Array<{
   key: FuturesTimeframe;
   label: string;
@@ -146,6 +150,11 @@ function formatDate(value: string | null | undefined) {
   }).format(date);
 }
 
+function formatSessionLabel(value: string | null | undefined) {
+  if (!value) return "未知時段";
+  return FUTURES_SESSION_LABELS[value] ?? value;
+}
+
 function valueToneClass(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "text-slate-950";
   if (value > 0) return "text-red-600";
@@ -166,6 +175,29 @@ function formatFuturesVolume(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
 
   return integerFormatter.format(value);
+}
+
+function quoteFreshnessToneClass(status: string | null | undefined) {
+  if (status === "live") return "text-emerald-700";
+  if (status === "cached" || status === "session_mismatch" || status === "stale") {
+    return "text-amber-700";
+  }
+  return "text-slate-950";
+}
+
+function quoteFreshnessBannerClass(status: string | null | undefined) {
+  if (status === "cached" || status === "session_mismatch" || status === "stale") {
+    return "border-b border-amber-100 bg-amber-50 px-5 py-3 text-sm text-amber-800";
+  }
+  return "border-b border-slate-100 bg-slate-50 px-5 py-3 text-sm text-slate-600";
+}
+
+function quoteFreshnessLabel(status: string | null | undefined) {
+  if (status === "live") return "已同步";
+  if (status === "cached") return "使用快取";
+  if (status === "session_mismatch") return "時段不符";
+  if (status === "stale") return "資料過舊";
+  return "尚無資料";
 }
 
 async function fetchLatestQuotes(symbols: readonly string[]) {
@@ -629,6 +661,17 @@ export default function TaiwanFuturesDetailPanel({
   const displayChange = quote?.change ?? latestDailyBar?.change ?? null;
   const displayChangePct = quote?.change_pct ?? latestDailyBar?.change_pct ?? null;
   const quoteDirection = displayChange ?? displayChangePct;
+  const quoteFreshness = quote?.freshness ?? null;
+  const quoteFreshnessStatus =
+    quoteState === "loading" ? "loading" : quoteFreshness?.status ?? null;
+  const quoteFreshnessMessage =
+    quoteState === "loading"
+      ? "正在重新讀取即時來源。"
+      : quoteFreshness?.message ?? (quote ? "尚未取得資料狀態。" : "尚無台指期報價。");
+  const quoteFreshnessTone =
+    quoteState === "loading" ? "text-sky-700" : quoteFreshnessToneClass(quoteFreshnessStatus);
+  const quoteFreshnessBanner =
+    quoteFreshness && quoteFreshness.status !== "live" ? quoteFreshness : null;
   const recentBars = useMemo(() => bars.slice(-6).reverse(), [bars]);
   const chartLoading =
     chartTimeframe === "today" ? barsState === "loading" : dailyState === "loading";
@@ -1082,7 +1125,7 @@ export default function TaiwanFuturesDetailPanel({
                 <h2 className="mt-2 text-2xl font-black text-slate-950">台指期</h2>
                 <div className="mt-2 text-sm text-slate-500">
                   TAIFEX · {displayProductName} ·{" "}
-                  {quote?.session === "after_hours" ? "夜盤" : "日盤"} ·{" "}
+                  {formatSessionLabel(quote?.session)} ·{" "}
                   {quote?.contract_month ?? latestDailyBar?.contract_month ?? "近月契約"}
                 </div>
               </div>
@@ -1161,9 +1204,12 @@ export default function TaiwanFuturesDetailPanel({
               </div>
               <div className="border-b border-r border-slate-200 px-5 py-4 sm:border-b-0">
                 <div className="text-xs font-semibold text-slate-500">資料狀態</div>
-                <div className="mt-1 font-black text-slate-950">
-                  {quoteState === "loading" ? "更新中" : quote ? "已同步" : "尚無資料"}
+                <div className={["mt-1 font-black", quoteFreshnessTone].join(" ")}>
+                  {quoteState === "loading"
+                    ? "更新中"
+                    : quoteFreshnessLabel(quoteFreshnessStatus)}
                 </div>
+                <div className="mt-1 text-xs text-slate-500">{quoteFreshnessMessage}</div>
               </div>
               <div className="px-5 py-4">
                 <div className="text-xs font-semibold text-slate-500">日 K 資料</div>
@@ -1176,6 +1222,11 @@ export default function TaiwanFuturesDetailPanel({
             {errorMessage ? (
               <div className="border-b border-red-100 bg-red-50 px-5 py-3 text-sm text-red-700">
                 {errorMessage}
+              </div>
+            ) : null}
+            {quoteFreshnessBanner ? (
+              <div className={quoteFreshnessBannerClass(quoteFreshnessBanner.status)}>
+                {quoteFreshnessBanner.message}
               </div>
             ) : null}
           </section>

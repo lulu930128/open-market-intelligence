@@ -23,6 +23,7 @@ from app.market.trading_calendar import is_taiwan_trading_day
 from app.market.tw_futures import (
     TaiwanFuturesFetchError,
     refresh_taiwan_futures_quotes,
+    resolve_taiwan_futures_quote_provider,
 )
 from app.observability.provider_health import record_provider_event
 
@@ -105,6 +106,7 @@ def _should_record_taiwan_futures_success(now: datetime) -> bool:
 def _record_taiwan_futures_provider_event(
     db,
     *,
+    provider: str,
     status: str,
     symbols: list[str],
     message: str | None = None,
@@ -115,7 +117,7 @@ def _record_taiwan_futures_provider_event(
         record_provider_event(
             db,
             market="tw",
-            provider="taifex_mis",
+            provider=provider,
             resource="tw_futures_quote",
             target=",".join(symbols) if symbols else "all",
             status=status,
@@ -340,24 +342,29 @@ def collect_taiwan_futures_quotes() -> None:
         logger.warning("Skipped Taiwan futures quote collector because no symbols are configured.")
         return
 
+    provider = settings.taiwan_futures_quote_provider
     db = SessionLocal()
 
     try:
+        provider = resolve_taiwan_futures_quote_provider(provider)
         rows = refresh_taiwan_futures_quotes(
             db=db,
             symbols=symbols,
             session=settings.scheduler_taiwan_futures_session,
             active_only=True,
+            provider=provider,
         )
         if _should_record_taiwan_futures_success(now):
             _record_taiwan_futures_provider_event(
                 db,
+                provider=provider,
                 status="success",
                 symbols=symbols,
                 message=f"Taiwan futures quote collector refreshed {len(rows)} active quote(s).",
                 detail={
                     "symbols": symbols,
                     "session": settings.scheduler_taiwan_futures_session,
+                    "provider": provider,
                     "row_count": len(rows),
                 },
             )
@@ -370,12 +377,14 @@ def collect_taiwan_futures_quotes() -> None:
         db.rollback()
         _record_taiwan_futures_provider_event(
             db,
+            provider=provider,
             status="error",
             symbols=symbols,
             error_message=str(exc),
             detail={
                 "symbols": symbols,
                 "session": settings.scheduler_taiwan_futures_session,
+                "provider": provider,
             },
         )
         logger.warning("Taiwan futures quote collector failed: %s", exc)

@@ -863,6 +863,191 @@ def build_llm_consumer_answer(
     return answer
 
 
+WATCHLIST_RADAR_RISK_BUCKETS = {"risk", "limit_move"}
+WATCHLIST_RADAR_MOMENTUM_BUCKETS = {"breakout", "volume", "pullback", "momentum", "limit_move"}
+
+
+def watchlist_radar_rows_for_intent(
+    analysis_digest: dict[str, Any],
+    *,
+    question_intent: str,
+    limit: int = SUMMARY_LIMIT_DEFAULT,
+) -> list[dict[str, Any]]:
+    rows = analysis_digest.get("radar_rows") if isinstance(analysis_digest.get("radar_rows"), list) else []
+    radar_rows = [row for row in rows if isinstance(row, dict)]
+    if not radar_rows:
+        return []
+
+    if question_intent in {"risk_check", "exit_decision"}:
+        risk_rows = [
+            row
+            for row in radar_rows
+            if row.get("bucket") in WATCHLIST_RADAR_RISK_BUCKETS
+        ]
+        high_priority_rows = [
+            row
+            for row in radar_rows
+            if row.get("bucket") not in WATCHLIST_RADAR_RISK_BUCKETS
+            and row.get("urgency") == "high"
+        ]
+        selected = []
+        seen: set[tuple[Any, Any]] = set()
+        for row in [*risk_rows, *high_priority_rows]:
+            key = (row.get("stock_id"), row.get("label"))
+            if key in seen:
+                continue
+            seen.add(key)
+            selected.append(row)
+        return (selected or radar_rows)[:limit]
+
+    if question_intent == "entry_decision":
+        selected = [
+            row
+            for row in radar_rows
+            if row.get("bucket") in WATCHLIST_RADAR_MOMENTUM_BUCKETS
+            and row.get("bucket") != "risk"
+        ]
+        return (selected or radar_rows)[:limit]
+
+    return radar_rows[:limit]
+
+
+def watchlist_radar_row_text(row: dict[str, Any]) -> str:
+    label = text_value(row.get("label"))
+    if not label:
+        stock_id = text_value(row.get("stock_id"))
+        stock_name = text_value(row.get("stock_name"))
+        label = " ".join(part for part in (stock_id, stock_name) if part) or "未命名標的"
+
+    details: list[str] = []
+    bucket_label = text_value(row.get("bucket_label"))
+    urgency = text_value(row.get("urgency"))
+    action = text_value(row.get("action_label"))
+    change_pct = text_value(row.get("change_pct_text"))
+    primary_signal = text_value(row.get("primary_signal_label"))
+
+    if bucket_label:
+        details.append(bucket_label)
+    if urgency == "high":
+        details.append("高優先")
+    elif urgency == "medium":
+        details.append("中優先")
+    if change_pct:
+        details.append(change_pct)
+    if primary_signal:
+        details.append(primary_signal)
+    if action:
+        details.append(action)
+
+    return f"{label}（{'，'.join(details)}）" if details else label
+
+
+def watchlist_radar_bucket_summary(radar: dict[str, Any]) -> str:
+    buckets = radar.get("buckets") if isinstance(radar.get("buckets"), list) else []
+    parts = [
+        f"{bucket.get('label')} {bucket.get('count')}"
+        for bucket in buckets
+        if isinstance(bucket, dict) and bucket.get("label") and int(bucket.get("count") or 0) > 0
+    ]
+    return "、".join(parts[:4])
+
+
+def build_watchlist_radar_consumer_answer(
+    *,
+    question_intent: str,
+    target: dict[str, Any],
+    analysis_digest: dict[str, Any],
+    missing: list[Any],
+    warnings: list[Any],
+    summary_limit: int = SUMMARY_LIMIT_DEFAULT,
+) -> dict[str, Any]:
+    if analysis_digest.get("kind") != "watchlist_sector_digest":
+        return {}
+
+    radar = analysis_digest.get("radar") if isinstance(analysis_digest.get("radar"), dict) else {}
+    if not radar:
+        return {}
+
+    selected_rows = watchlist_radar_rows_for_intent(
+        analysis_digest,
+        question_intent=question_intent,
+        limit=summary_limit,
+    )
+    matched_count = int(radar.get("matched_count") or 0)
+    bucket_text = watchlist_radar_bucket_summary(radar)
+    group_name = (
+        text_value(analysis_digest.get("group_name"))
+        or text_value(target.get("label"))
+        or "自選股"
+    )
+    row_text = "、".join(watchlist_radar_row_text(row) for row in selected_rows)
+
+    if question_intent in {"risk_check", "exit_decision"}:
+        headline = f"{group_name} 先處理雷達標出的風險與失效名單"
+        focus_label = "風險名單"
+        primary_action = "先檢查高優先或轉弱標的，必要時降低權重，不等完整確認才控風險。"
+    elif question_intent == "entry_decision":
+        headline = f"{group_name} 先從雷達命中的強勢候選挑，不建議整包追價"
+        focus_label = "候選名單"
+        primary_action = "只把雷達命中當候選清單，等價格、量能與回測位置確認後再提高權重。"
+    else:
+        headline = f"{group_name} 今日先看雷達命中名單"
+        focus_label = "優先名單"
+        primary_action = "先看高優先與訊號最集中的標的，再回到排名與基本資料確認。"
+
+    summary = []
+    radar_line = f"雷達 {matched_count} 檔命中"
+    if bucket_text:
+        radar_line += f"：{bucket_text}"
+    summary.append(radar_line + "。")
+    if row_text:
+        summary.append(f"{focus_label}：{row_text}。")
+    elif matched_count <= 0:
+        summary.append("目前沒有符合條件的雷達項目，先用原本排名與資料完整度觀察。")
+    if analysis_digest.get("display"):
+        summary.append(str(analysis_digest["display"]))
+
+    action_plan = [
+        {"label": "先看", "text": row_text or "目前沒有雷達命中標的，先看原本自選股排名。"},
+        {"label": "確認", "text": primary_action},
+        {
+            "label": "排除",
+            "text": "資料落後、缺資料或只靠單一訊號的標的先降級，避免把雷達當成直接買賣訊號。",
+        },
+    ]
+    data_limits = generic_data_limits(missing=missing, warnings=warnings)
+    if radar.get("is_current") is False or radar.get("stale_stock_count"):
+        data_limits.append("雷達含有落後日線資料，需等更新後再確認排序。")
+
+    answer = {
+        "kind": "consumer_market_answer",
+        "style": "watchlist_radar_summary",
+        "source": "watchlist_radar",
+        "intent": question_intent,
+        "headline": headline,
+        "stance": text_value(analysis_digest.get("stance")),
+        "stance_label": text_value(analysis_digest.get("stance")) or "未定",
+        "confidence": text_value(analysis_digest.get("confidence")),
+        "confidence_label": CONFIDENCE_LABELS.get(
+            str(analysis_digest.get("confidence")),
+            text_value(analysis_digest.get("confidence")) or "未定",
+        ),
+        "summary": list(dict.fromkeys(summary))[:summary_limit],
+        "action_plan": action_plan,
+        "risks": [],
+        "data_limits": list(dict.fromkeys(data_limits))[:3],
+        "detail": text_value(
+            (analysis_digest.get("human_answer") or {}).get("text")
+            if isinstance(analysis_digest.get("human_answer"), dict)
+            else None
+        ) or text_value(analysis_digest.get("display")) or "",
+        "radar": radar,
+        "radar_rows": selected_rows,
+    }
+    answer["text"] = consumer_text(answer, summary_limit=summary_limit)
+    return answer
+
+
 def build_watchlist_consumer_answer(
     *,
     human_answer: dict[str, Any],
@@ -885,17 +1070,20 @@ def build_watchlist_consumer_answer(
     headline = section_map.get("結論") or text_value(overview.get("display")) or (lines[0] if lines else "自選股整理完成")
     summary = [
         text
-        for key in ("追蹤", "等回測", "保守")
+        for key in ("雷達", "追蹤", "等回測", "保守")
         if (text := section_map.get(key))
     ]
     if not summary:
         summary = lines[1 : 1 + summary_limit]
 
-    action_plan = [
+    action_plan = []
+    if section_map.get("雷達"):
+        action_plan.append({"label": "雷達", "text": section_map["雷達"]})
+    action_plan.extend([
         {"label": "優先看", "text": section_map.get("追蹤") or "先看排名與量價最明確的個股。"},
         {"label": "等回測", "text": section_map.get("等回測") or "漲幅過大的標的等回測後再確認。"},
         {"label": "保守", "text": section_map.get("保守") or "弱勢或資料不足標的先降低追蹤權重。"},
-    ]
+    ])
     data_limits = []
     if section_map.get("資料"):
         data_limits.append(section_map["資料"])
@@ -998,6 +1186,20 @@ def build_consumer_human_answer(
             summary_limit=summary_limit,
         )
         return append_source_health_data_limits(answer, analysis_digest=analysis_digest)
+
+    watchlist_radar_answer = build_watchlist_radar_consumer_answer(
+        question_intent=question_intent,
+        target=target,
+        analysis_digest=analysis_digest,
+        missing=missing,
+        warnings=warnings,
+        summary_limit=summary_limit,
+    )
+    if watchlist_radar_answer and (
+        not llm_report
+        or question_intent in {"entry_decision", "exit_decision", "risk_check", "trend_view"}
+    ):
+        return append_source_health_data_limits(watchlist_radar_answer, analysis_digest=analysis_digest)
 
     question_answer = build_question_aware_consumer_answer(
         question_intent=question_intent,

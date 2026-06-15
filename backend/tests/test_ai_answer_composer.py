@@ -165,6 +165,129 @@ class AiAnswerComposerTests(unittest.TestCase):
         self.assertIn("position_decision", answer)
         self.assertIn("方向：偏多", answer["text"])
 
+    def test_watchlist_answer_uses_radar_section_only_when_available(self) -> None:
+        with_radar = answer_composer.build_watchlist_consumer_answer(
+            human_answer={
+                "sections": [
+                    {"label": "結論", "text": "科技股偏多。"},
+                    {"label": "雷達", "text": "2 檔命中；優先看 2330 台積電。"},
+                    {"label": "追蹤", "text": "2330 台積電"},
+                    {"label": "等回測", "text": "2303 聯電"},
+                    {"label": "保守", "text": "2454 聯發科"},
+                ],
+                "text": "結論：科技股偏多。",
+            },
+            overview={"stance": "偏多", "confidence": "high"},
+            missing=[],
+            warnings=[],
+        )
+
+        self.assertEqual(with_radar["summary"][0], "2 檔命中；優先看 2330 台積電。")
+        self.assertEqual(with_radar["action_plan"][0]["label"], "雷達")
+        self.assertIn("雷達：2 檔命中", with_radar["text"])
+
+        without_radar = answer_composer.build_watchlist_consumer_answer(
+            human_answer={
+                "sections": [
+                    {"label": "結論", "text": "科技股偏多。"},
+                    {"label": "追蹤", "text": "2330 台積電"},
+                    {"label": "等回測", "text": "2303 聯電"},
+                    {"label": "保守", "text": "2454 聯發科"},
+                ],
+                "text": "結論：科技股偏多。",
+            },
+            overview={"stance": "偏多", "confidence": "high"},
+            missing=[],
+            warnings=[],
+        )
+
+        self.assertEqual(
+            [item["label"] for item in without_radar["action_plan"]],
+            ["優先看", "等回測", "保守"],
+        )
+
+    def test_watchlist_radar_answer_is_question_aware(self) -> None:
+        digest = {
+            "kind": "watchlist_sector_digest",
+            "group_name": "科技股",
+            "stance": "結構偏多",
+            "confidence": "high",
+            "display": "科技股 結構偏多；上漲 2、下跌 1。",
+            "human_answer": {
+                "text": "結論：科技股 結構偏多。\n雷達：2 檔命中。",
+            },
+            "radar": {
+                "mode": "action",
+                "matched_count": 2,
+                "radar_count": 2,
+                "is_current": True,
+                "buckets": [
+                    {"key": "breakout", "label": "突破動能", "count": 1},
+                    {"key": "risk", "label": "風險優先", "count": 1},
+                ],
+            },
+            "radar_rows": [
+                {
+                    "stock_id": "2330",
+                    "label": "2330 台積電",
+                    "bucket": "breakout",
+                    "bucket_label": "突破動能",
+                    "urgency": "high",
+                    "action_label": "追蹤突破延續",
+                    "change_pct_text": "+1.50%",
+                    "primary_signal_label": "突破 20 日高",
+                },
+                {
+                    "stock_id": "2454",
+                    "label": "2454 聯發科",
+                    "bucket": "risk",
+                    "bucket_label": "風險優先",
+                    "urgency": "medium",
+                    "action_label": "優先檢查風控",
+                    "change_pct_text": "-2.93%",
+                    "primary_signal_label": "動能轉弱",
+                },
+            ],
+        }
+
+        risk_answer = answer_composer.build_consumer_human_answer(
+            question_intent="risk_check",
+            target={"type": "tw_watchlist", "label": "科技股"},
+            analysis_digest=digest,
+            missing=[],
+            warnings=[],
+        )
+
+        self.assertEqual(risk_answer["source"], "watchlist_radar")
+        self.assertEqual(risk_answer["style"], "watchlist_radar_summary")
+        self.assertIn("風險", risk_answer["headline"])
+        self.assertEqual(risk_answer["radar_rows"][0]["stock_id"], "2454")
+        self.assertIn("2454 聯發科", risk_answer["summary"][1])
+        self.assertNotIn("目前標的", risk_answer["text"])
+
+        risk_answer_with_llm = answer_composer.build_consumer_human_answer(
+            question_intent="risk_check",
+            target={"type": "tw_watchlist", "label": "科技股"},
+            analysis_digest=digest,
+            missing=[],
+            warnings=[],
+            llm_report={"headline": "LLM 報告"},
+        )
+        self.assertEqual(risk_answer_with_llm["source"], "watchlist_radar")
+
+        entry_answer = answer_composer.build_consumer_human_answer(
+            question_intent="entry_decision",
+            target={"type": "tw_watchlist", "label": "科技股"},
+            analysis_digest=digest,
+            missing=[],
+            warnings=[],
+        )
+
+        self.assertEqual(entry_answer["source"], "watchlist_radar")
+        self.assertIn("不建議整包追價", entry_answer["headline"])
+        self.assertEqual(entry_answer["radar_rows"][0]["stock_id"], "2330")
+        self.assertIn("雷達 2 檔命中", entry_answer["text"])
+
     def test_ask_wrappers_delegate_to_answer_composer(self) -> None:
         answer = {
             "headline": "測試",

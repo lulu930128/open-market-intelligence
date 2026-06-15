@@ -6,8 +6,10 @@ import type {
   StockIndicatorPoint,
   USWatchlistGroupNode,
   USWatchlistItemRead,
+  WatchlistGroupRadarRead,
   WatchlistGroupNode,
   WatchlistItemRead,
+  WatchlistRadarMode,
 } from "@/types/market";
 
 const apiProxyTarget = process.env.API_PROXY_TARGET ?? "http://127.0.0.1:8300";
@@ -21,6 +23,31 @@ function firstSearchParam(
   const value = params?.[key];
 
   return Array.isArray(value) ? value[0] : value;
+}
+
+function normalizeRadarMode(value: string | undefined): WatchlistRadarMode {
+  if (value === "risk" || value === "momentum" || value === "all") {
+    return value;
+  }
+
+  return "action";
+}
+
+function watchlistRadarPath(groupId: number, mode: WatchlistRadarMode) {
+  const params = new URLSearchParams({
+    include_children: "true",
+    enabled_only: "true",
+    mode,
+    max_results: "8",
+    ma_windows: "5,20,60",
+    volume_ma_windows: "5,20",
+    calculation_limit: "100",
+    volume_ratio_threshold: "1.5",
+    use_intraday: "false",
+    intraday_limit: "30",
+  });
+
+  return `/api/watchlists/groups/${groupId}/radar?${params.toString()}`;
 }
 
 async function fetchBackendJson<T>(path: string, fallback: T): Promise<T> {
@@ -72,6 +99,9 @@ export default async function Page({
     firstSearchParam(resolvedSearchParams, "futures") ??
     firstSearchParam(resolvedSearchParams, "futures_symbol");
   const groupIdParam = firstSearchParam(resolvedSearchParams, "group_id");
+  const initialRadarMode = normalizeRadarMode(
+    firstSearchParam(resolvedSearchParams, "radar_mode")
+  );
   const requestedGroupId = Number(groupIdParam);
   const requestedFuturesSymbol = futuresParam?.trim().toUpperCase() || null;
   const initialSelectedFuturesSymbol =
@@ -97,6 +127,13 @@ export default async function Page({
     : selectedStockItem?.group_id ?? null;
   const isIndexProduct =
     initialSelectedStockId !== null && indexProductIds.has(initialSelectedStockId);
+  const initialRadarData =
+    initialMarket === "tw" && initialSelectedGroupId !== null
+      ? await fetchBackendJson<WatchlistGroupRadarRead | null>(
+          watchlistRadarPath(initialSelectedGroupId, initialRadarMode),
+          null
+        )
+      : null;
   const [initialOhlc, initialIndicatorData] =
     initialMarket === "tw" && initialSelectedStockId
       ? await Promise.all([
@@ -136,6 +173,8 @@ export default async function Page({
       initialChartData={initialChartData}
       initialIndicatorData={initialIndicatorData}
       initialRankingData={null}
+      initialRadarMode={initialRadarMode}
+      initialRadarData={initialRadarData}
       initialMarketIndexSummary={initialMarketIndexSummary}
       initialUsWatchlistTree={initialUsWatchlistTree}
       initialUsWatchlistItems={initialUsWatchlistItems}

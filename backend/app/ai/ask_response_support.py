@@ -643,6 +643,8 @@ def _extract_analysis_digest(result: dict[str, Any], policy: dict[str, Any]) -> 
             "follow_rows": overview.get("follow_rows") or [],
             "pullback_rows": overview.get("pullback_rows") or [],
             "defensive_rows": overview.get("defensive_rows") or [],
+            "radar": overview.get("radar") or {},
+            "radar_rows": overview.get("radar_rows") or [],
             "data_status": overview.get("data_status") or {},
             "guidance": (
                 "Prefer analysis.human_answer for the user-facing reply; avoid exposing raw missing dataset keys "

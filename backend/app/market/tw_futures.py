@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import requests
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.db.models import (
     TaiwanFuturesDailyBar,
     TaiwanFuturesIntradayBar,
@@ -26,9 +27,16 @@ TAIFEX_MIS_REFERER = "https://mis.taifex.com.tw/futures/"
 TAIFEX_DAILY_REPORT_URL = "https://www.taifex.com.tw/cht/3/futDailyMarketReport"
 TAIFEX_PROVIDER = "taifex_mis"
 TAIFEX_DAILY_PROVIDER = "taifex_daily"
+KGI_PROVIDER = "kgi"
 
 SUPPORTED_TAIWAN_FUTURES_SYMBOLS = {"TXF", "MXF", "TMF"}
 SUPPORTED_TAIWAN_FUTURES_SESSIONS = {"auto", "regular", "after_hours"}
+SUPPORTED_TAIWAN_FUTURES_QUOTE_PROVIDERS = {"auto", TAIFEX_PROVIDER, KGI_PROVIDER}
+TAIWAN_FUTURES_SESSION_LABELS = {
+    "regular": "日盤",
+    "after_hours": "夜盤",
+}
+TAIWAN_FUTURES_LIVE_QUOTE_MAX_AGE_SECONDS = 180
 TAIFEX_MARKET_TYPE_BY_SESSION = {
     "regular": "0",
     "after_hours": "1",
@@ -115,6 +123,24 @@ def normalize_taiwan_futures_session(session: str | None = None) -> str:
     return normalized
 
 
+def normalize_taiwan_futures_quote_provider(provider: str | None = None) -> str:
+    configured_provider = provider if provider is not None else settings.taiwan_futures_quote_provider
+    normalized = (configured_provider or TAIFEX_PROVIDER).strip().lower()
+    if normalized not in SUPPORTED_TAIWAN_FUTURES_QUOTE_PROVIDERS:
+        raise ValueError(
+            "Unsupported Taiwan futures quote provider: "
+            f"{configured_provider}. Expected one of: auto, {TAIFEX_PROVIDER}, {KGI_PROVIDER}."
+        )
+    return normalized
+
+
+def resolve_taiwan_futures_quote_provider(provider: str | None = None) -> str:
+    normalized = normalize_taiwan_futures_quote_provider(provider)
+    if normalized == "auto":
+        return TAIFEX_PROVIDER
+    return normalized
+
+
 def resolve_taiwan_futures_session(session: str | None = None) -> str:
     normalized = normalize_taiwan_futures_session(session)
     if normalized != "auto":
@@ -124,6 +150,77 @@ def resolve_taiwan_futures_session(session: str | None = None) -> str:
     if now_time >= time(15, 0) or now_time <= time(5, 0):
         return "after_hours"
     return "regular"
+
+
+def _ensure_taiwan_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=TAIWAN_TZ)
+    return value.astimezone(TAIWAN_TZ)
+
+
+def _session_label(session: str | None) -> str:
+    return TAIWAN_FUTURES_SESSION_LABELS.get(str(session or ""), str(session or "未知時段"))
+
+
+def _format_age_message(age_seconds: int | None) -> str:
+    if age_seconds is None:
+        return "報價時間無法判定。"
+    if age_seconds < 60:
+        return "報價剛更新。"
+    if age_seconds < 3600:
+        return f"報價已 {age_seconds // 60} 分鐘未更新。"
+    return f"報價已 {age_seconds // 3600} 小時未更新。"
+
+
+def build_taiwan_futures_quote_freshness(
+    row: TaiwanFuturesQuoteSnapshot,
+    *,
+    expected_session: str | None = None,
+    source_error: str | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    resolved_expected_session = resolve_taiwan_futures_session(expected_session or "auto")
+    quote_time = _ensure_taiwan_datetime(row.quote_time)
+    current_time = _ensure_taiwan_datetime(now) or datetime.now(TAIWAN_TZ)
+    age_seconds = (
+        max(int((current_time - quote_time).total_seconds()), 0)
+        if quote_time is not None
+        else None
+    )
+    is_session_mismatch = row.session != resolved_expected_session
+    is_stale = (
+        age_seconds is None
+        or age_seconds > TAIWAN_FUTURES_LIVE_QUOTE_MAX_AGE_SECONDS
+    )
+
+    if source_error:
+        status_value = "cached"
+        message = f"即時來源失敗，使用{_session_label(row.session)}快取。"
+    elif is_session_mismatch:
+        status_value = "session_mismatch"
+        message = (
+            f"預期{_session_label(resolved_expected_session)}，"
+            f"目前顯示{_session_label(row.session)}快取。"
+        )
+    elif is_stale:
+        status_value = "stale"
+        message = _format_age_message(age_seconds)
+    else:
+        status_value = "live"
+        message = "即時報價已同步。"
+
+    return {
+        "status": status_value,
+        "is_live": status_value == "live",
+        "is_stale": is_stale or bool(source_error),
+        "is_session_mismatch": is_session_mismatch,
+        "expected_session": resolved_expected_session,
+        "age_seconds": age_seconds,
+        "message": message,
+        "source_error": source_error,
+    }
 
 
 def list_taiwan_futures_products() -> list[dict[str, Any]]:
@@ -508,13 +605,55 @@ def fetch_taifex_mis_quote_payload(
         raise TaiwanFuturesFetchError("TAIFEX MIS quote response is not valid JSON.") from exc
 
 
-def fetch_taiwan_futures_quotes(
+def _configured_kgi_settings() -> list[str]:
+    fields = {
+        "KGI_API_KEY": settings.kgi_api_key,
+        "KGI_API_SECRET": settings.kgi_api_secret,
+        "KGI_ACCOUNT": settings.kgi_account,
+        "KGI_CERT_PATH": settings.kgi_cert_path,
+        "KGI_API_BASE_URL": settings.kgi_api_base_url,
+    }
+    return [name for name, value in fields.items() if str(value or "").strip()]
+
+
+def fetch_kgi_taiwan_futures_quotes(
     *,
     symbols: Iterable[str] | str | None = None,
     session: str = "auto",
     active_only: bool = True,
 ) -> list[dict[str, Any]]:
+    normalize_taiwan_futures_symbols(symbols)
+    normalize_taiwan_futures_session(session)
+
+    configured_settings = _configured_kgi_settings()
+    if not configured_settings:
+        raise TaiwanFuturesFetchError(
+            "KGI Taiwan futures provider is selected but no KGI settings are configured. "
+            "Set KGI_API_KEY/KGI_API_SECRET/KGI_ACCOUNT or use TAIWAN_FUTURES_QUOTE_PROVIDER=taifex_mis."
+        )
+
+    raise TaiwanFuturesFetchError(
+        "KGI Taiwan futures provider slot is configured but the API adapter is not implemented yet. "
+        "Wire the KGI SDK/API response mapping in fetch_kgi_taiwan_futures_quotes()."
+    )
+
+
+def fetch_taiwan_futures_quotes(
+    *,
+    symbols: Iterable[str] | str | None = None,
+    session: str = "auto",
+    active_only: bool = True,
+    provider: str | None = None,
+) -> list[dict[str, Any]]:
     normalized_symbols = normalize_taiwan_futures_symbols(symbols)
+    resolved_provider = resolve_taiwan_futures_quote_provider(provider)
+    if resolved_provider == KGI_PROVIDER:
+        return fetch_kgi_taiwan_futures_quotes(
+            symbols=normalized_symbols,
+            session=session,
+            active_only=active_only,
+        )
+
     fetched_at = datetime.now(TAIWAN_TZ)
     parsed: list[dict[str, Any]] = []
     errors: list[str] = []
@@ -738,11 +877,13 @@ def refresh_taiwan_futures_quotes(
     symbols: Iterable[str] | str | None = None,
     session: str = "auto",
     active_only: bool = True,
+    provider: str | None = None,
 ) -> list[TaiwanFuturesQuoteSnapshot]:
     quotes = fetch_taiwan_futures_quotes(
         symbols=symbols,
         session=session,
         active_only=active_only,
+        provider=provider,
     )
 
     rows: list[TaiwanFuturesQuoteSnapshot] = []
@@ -821,24 +962,29 @@ def get_latest_taiwan_futures_quotes(
     symbols: Iterable[str] | str | None = None,
     refresh: bool = False,
     session: str = "auto",
+    provider: str | None = None,
 ) -> list[TaiwanFuturesQuoteSnapshot]:
     normalized_symbols = normalize_taiwan_futures_symbols(symbols)
+    resolved_provider = normalize_taiwan_futures_quote_provider(provider)
     if refresh:
         return refresh_taiwan_futures_quotes(
             db=db,
             symbols=normalized_symbols,
             session=session,
             active_only=True,
+            provider=provider,
         )
 
     rows: list[TaiwanFuturesQuoteSnapshot] = []
     for symbol in normalized_symbols:
-        row = (
+        query = (
             db.query(TaiwanFuturesQuoteSnapshot)
             .filter(TaiwanFuturesQuoteSnapshot.symbol == symbol)
-            .order_by(TaiwanFuturesQuoteSnapshot.quote_time.desc())
-            .first()
         )
+        if resolved_provider != "auto":
+            query = query.filter(TaiwanFuturesQuoteSnapshot.provider == resolved_provider)
+
+        row = query.order_by(TaiwanFuturesQuoteSnapshot.quote_time.desc()).first()
         if row is not None:
             rows.append(row)
     return rows
@@ -885,18 +1031,25 @@ def list_taiwan_futures_intraday_bars(
     interval: str = "1m",
     limit: int = 390,
     trade_date: date | None = None,
+    provider: str | None = None,
 ) -> list[TaiwanFuturesIntradayBar]:
     normalized_symbol = normalize_taiwan_futures_symbols([symbol])[0]
+    resolved_provider = normalize_taiwan_futures_quote_provider(provider)
     if interval != "1m":
         raise ValueError("Taiwan futures intraday bars currently support interval='1m' only.")
 
     query_limit = max(limit, min(limit * 4, 12_000))
+    query = (
+        db.query(TaiwanFuturesIntradayBar)
+        .filter(TaiwanFuturesIntradayBar.symbol == normalized_symbol)
+        .filter(TaiwanFuturesIntradayBar.interval == interval)
+    )
+    if resolved_provider != "auto":
+        query = query.filter(TaiwanFuturesIntradayBar.provider == resolved_provider)
+
     rows = list(
         reversed(
-            db.query(TaiwanFuturesIntradayBar)
-            .filter(TaiwanFuturesIntradayBar.symbol == normalized_symbol)
-            .filter(TaiwanFuturesIntradayBar.interval == interval)
-            .order_by(TaiwanFuturesIntradayBar.bar_time.desc())
+            query.order_by(TaiwanFuturesIntradayBar.bar_time.desc())
             .limit(query_limit)
             .all()
         )
@@ -916,7 +1069,12 @@ def list_taiwan_futures_intraday_bars(
     return filtered_rows[-limit:]
 
 
-def taiwan_futures_quote_to_dict(row: TaiwanFuturesQuoteSnapshot) -> dict[str, Any]:
+def taiwan_futures_quote_to_dict(
+    row: TaiwanFuturesQuoteSnapshot,
+    *,
+    expected_session: str | None = None,
+    source_error: str | None = None,
+) -> dict[str, Any]:
     return {
         "id": row.id,
         "provider": row.provider,
@@ -947,6 +1105,11 @@ def taiwan_futures_quote_to_dict(row: TaiwanFuturesQuoteSnapshot) -> dict[str, A
         "source": row.source,
         "source_url": row.source_url,
         "fetched_at": row.fetched_at,
+        "freshness": build_taiwan_futures_quote_freshness(
+            row,
+            expected_session=expected_session,
+            source_error=source_error,
+        ),
         "created_at": row.created_at,
         "updated_at": row.updated_at,
     }

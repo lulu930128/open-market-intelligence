@@ -127,6 +127,7 @@ def generate_watchlist_llm_analysis(
     strategy_profile: str = "short_term_momentum",
     rank_by: str = "score",
     sort_order: str = "desc",
+    radar_mode: str = "action",
 ) -> dict[str, Any]:
     envelope = reports.build_watchlist_brief(
         db=db,
@@ -134,6 +135,7 @@ def generate_watchlist_llm_analysis(
         strategy_profile=strategy_profile,
         rank_by=rank_by,
         sort_order=sort_order,
+        radar_mode=radar_mode,
     )
     return _build_non_persistent_analysis(envelope, kind="watchlist_llm_analysis")
 
@@ -269,6 +271,7 @@ def generate_watchlist_llm_report(
     strategy_profile: str = "short_term_momentum",
     rank_by: str = "score",
     sort_order: str = "desc",
+    radar_mode: str = "action",
 ) -> dict[str, Any]:
     envelope = reports.build_watchlist_brief(
         db=db,
@@ -276,6 +279,7 @@ def generate_watchlist_llm_report(
         strategy_profile=strategy_profile,
         rank_by=rank_by,
         sort_order=sort_order,
+        radar_mode=radar_mode,
     )
 
     started_at = _now()

@@ -332,12 +332,14 @@ def _compact_watchlist_summary(
     overview: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ranking = (context.get("data") or {}).get("ranking") or {}
+    radar = (context.get("data") or {}).get("radar") or {}
     results = ranking.get("results") or []
     top_rows = [_compact_watchlist_row(row) for row in results[:5]]
     bottom_rows = [_compact_watchlist_row(row) for row in results[-5:]] if len(results) > 5 else []
 
     return {
         "overview": overview or {},
+        "radar": _compact_watchlist_radar(radar),
         "ranking": {
             "rank_by": ranking.get("rank_by"),
             "sort_order": ranking.get("sort_order"),
@@ -538,6 +540,111 @@ def _compact_watchlist_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _compact_watchlist_radar_item(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "rank": row.get("rank"),
+        "stock_id": row.get("stock_id"),
+        "stock_name": row.get("stock_name"),
+        "label": _row_label(row),
+        "bucket": row.get("bucket"),
+        "bucket_label": row.get("bucket_label"),
+        "urgency": row.get("urgency"),
+        "action_label": row.get("action_label"),
+        "reason": row.get("reason"),
+        "trade_date": row.get("trade_date"),
+        "time": row.get("time"),
+        "close": row.get("close"),
+        "change_pct": row.get("change_pct"),
+        "change_pct_text": _pct_display(row.get("change_pct")),
+        "score": row.get("score"),
+        "status": row.get("status"),
+        "signal_labels": list(row.get("signal_labels") or [])[:5],
+        "matched_signal_keys": list(row.get("matched_signal_keys") or [])[:5],
+        "primary_signal_label": row.get("primary_signal_label"),
+        "stale": bool(row.get("stale")),
+    }
+
+
+def _compact_watchlist_radar(radar: dict[str, Any], *, item_limit: int = 8) -> dict[str, Any]:
+    if not isinstance(radar, dict) or not radar:
+        return {}
+
+    buckets = [
+        {
+            "key": bucket.get("key"),
+            "label": bucket.get("label"),
+            "count": bucket.get("count"),
+        }
+        for bucket in (radar.get("buckets") or [])
+        if isinstance(bucket, dict) and int(bucket.get("count") or 0) > 0
+    ]
+    results = [
+        _compact_watchlist_radar_item(row)
+        for row in (radar.get("results") or [])[:item_limit]
+        if isinstance(row, dict)
+    ]
+
+    return {
+        "mode": radar.get("mode"),
+        "requested_stock_count": radar.get("requested_stock_count"),
+        "matched_count": radar.get("matched_count"),
+        "radar_count": radar.get("radar_count"),
+        "trade_date": radar.get("trade_date"),
+        "target_trade_date": radar.get("target_trade_date"),
+        "is_current": radar.get("is_current"),
+        "stale_stock_count": radar.get("stale_stock_count"),
+        "buckets": buckets,
+        "results": results,
+    }
+
+
+def _radar_item_labels(rows: list[dict[str, Any]], *, limit: int = HUMAN_ANSWER_MAX_ITEMS) -> str:
+    labels: list[str] = []
+
+    for row in rows[:limit]:
+        label = _row_label(row)
+        action = str(row.get("action_label") or "").strip()
+        urgency = str(row.get("urgency") or "").strip()
+        suffix_parts = []
+
+        if urgency == "high":
+            suffix_parts.append("高")
+        if action:
+            suffix_parts.append(action)
+
+        labels.append(
+            f"{label}（{'，'.join(suffix_parts)}）" if suffix_parts else label
+        )
+
+    return "、".join(labels) if labels else "暫無明確名單"
+
+
+def _build_watchlist_radar_sections(radar: dict[str, Any]) -> list[dict[str, str]]:
+    if not isinstance(radar, dict) or not radar:
+        return []
+
+    rows = [row for row in (radar.get("results") or []) if isinstance(row, dict)]
+    buckets = [bucket for bucket in (radar.get("buckets") or []) if isinstance(bucket, dict)]
+    matched_count = int(radar.get("matched_count") or 0)
+
+    if not rows and matched_count <= 0:
+        return [{"label": "雷達", "text": "目前沒有符合條件的雷達項目。"}]
+
+    bucket_text = "、".join(
+        f"{bucket.get('label')} {bucket.get('count')}"
+        for bucket in buckets[:3]
+        if bucket.get("label") and int(bucket.get("count") or 0) > 0
+    )
+    radar_text = f"{matched_count} 檔命中"
+    if bucket_text:
+        radar_text += f"；{bucket_text}"
+    if rows:
+        radar_text += f"；優先看 {_radar_item_labels(rows)}"
+    radar_text += "。"
+
+    return [{"label": "雷達", "text": radar_text}]
+
+
 def _is_watchlist_attention_row(row: dict[str, Any]) -> bool:
     signal_keys = set(row.get("signal_keys") or [])
     status = row.get("status")
@@ -576,6 +683,7 @@ def _append_unique_watchlist_rows(
 
 def _build_watchlist_scan_data(context: dict[str, Any]) -> dict[str, Any]:
     ranking = (context.get("data") or {}).get("ranking") or {}
+    radar = (context.get("data") or {}).get("radar") or {}
     results = ranking.get("results") or []
     seen: set[tuple[Any, Any]] = set()
 
@@ -635,6 +743,7 @@ def _build_watchlist_scan_data(context: dict[str, Any]) -> dict[str, Any]:
             "bottom_watchlist": bottom_watchlist,
             "attention_rows": attention_rows,
         },
+        "radar": _compact_watchlist_radar(radar),
     }
 
 
@@ -682,6 +791,7 @@ def _watchlist_overview_confidence(
 
 def _build_watchlist_overview(context: dict[str, Any], scan_data: dict[str, Any]) -> dict[str, Any]:
     ranking = (context.get("data") or {}).get("ranking") or {}
+    radar = (context.get("data") or {}).get("radar") or {}
     results = ranking.get("results") or []
     scope = context.get("scope") or {}
     group_name = scope.get("group_name") or f"Watchlist #{scope.get('group_id') or '-'}"
@@ -780,6 +890,9 @@ def _build_watchlist_overview(context: dict[str, Any], scan_data: dict[str, Any]
         error_count=error_count,
         stale_stock_count=stale_stock_count,
     )
+    radar_summary = _compact_watchlist_radar(radar)
+    radar_rows = radar_summary.get("results") or []
+    radar_sections = _build_watchlist_radar_sections(radar_summary)
 
     breadth_line = (
         f"{group_name} {stance}；"
@@ -791,6 +904,7 @@ def _build_watchlist_overview(context: dict[str, Any], scan_data: dict[str, Any]
 
     human_sections = [
         {"label": "結論", "text": breadth_line},
+        *radar_sections,
         {"label": "追蹤", "text": _row_labels(follow_rows)},
         {"label": "等回測", "text": _row_labels(pullback_rows)},
         {"label": "保守", "text": _row_labels(defensive_rows)},
@@ -833,6 +947,8 @@ def _build_watchlist_overview(context: dict[str, Any], scan_data: dict[str, Any]
             "average_change_pct_text": _pct_display(average_change_pct),
             "average_score": average_score,
         },
+        "radar": radar_summary,
+        "radar_rows": radar_rows,
         "strong_rows": [_compact_watchlist_row(row) for row in strong_rows],
         "weak_rows": [_compact_watchlist_row(row) for row in weak_rows],
         "watch_rows": [_compact_watchlist_row(row) for row in watch_rows],
@@ -943,12 +1059,14 @@ def build_watchlist_brief(
     strategy_profile: str = "short_term_momentum",
     rank_by: str = "score",
     sort_order: str = "desc",
+    radar_mode: str = "action",
 ) -> dict[str, Any]:
     context = tools.read_watchlist_context(
         db=db,
         group_id=group_id,
         rank_by=rank_by,
         sort_order=sort_order,
+        radar_mode=radar_mode,
     )
     scan_data = _build_watchlist_scan_data(context)
     overview = _build_watchlist_overview(context, scan_data)

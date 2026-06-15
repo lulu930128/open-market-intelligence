@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from itertools import count
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -11,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.ai import ask as ai_ask
 from app.ai import freshness
 from app.ai import reports as ai_reports
+from app.ai import tools as ai_tools
 from app.ai.schemas import AiAskRequest
 from app.db.models import (
     Base,
@@ -554,15 +556,80 @@ class AiFreshnessGuardTests(unittest.TestCase):
                             },
                         ],
                     },
+                    "radar": {
+                        "group_id": 1,
+                        "include_children": True,
+                        "mode": "action",
+                        "requested_stock_count": 3,
+                        "matched_count": 2,
+                        "radar_count": 2,
+                        "trade_date": date(2026, 6, 8),
+                        "target_trade_date": date(2026, 6, 8),
+                        "is_current": True,
+                        "stale_stock_count": 0,
+                        "buckets": [
+                            {"key": "breakout", "label": "突破動能", "count": 1},
+                            {"key": "risk", "label": "風險優先", "count": 1},
+                        ],
+                        "results": [
+                            {
+                                "rank": 1,
+                                "stock_id": "2330",
+                                "stock_name": "台積電",
+                                "bucket": "breakout",
+                                "bucket_label": "突破動能",
+                                "urgency": "high",
+                                "action_label": "追蹤突破延續",
+                                "reason": "主要訊號：MACD偏多",
+                                "trade_date": date(2026, 6, 8),
+                                "time": "2026-06-08",
+                                "close": 2365,
+                                "change_pct": 1.50,
+                                "score": 72,
+                                "status": "bullish",
+                                "signal_labels": ["MACD偏多"],
+                                "matched_signal_keys": ["macd_bullish"],
+                                "primary_signal_label": "MACD偏多",
+                                "stale": False,
+                            },
+                            {
+                                "rank": 2,
+                                "stock_id": "2454",
+                                "stock_name": "聯發科",
+                                "bucket": "risk",
+                                "bucket_label": "風險優先",
+                                "urgency": "medium",
+                                "action_label": "優先檢查風控",
+                                "reason": "主要訊號：動能轉弱",
+                                "trade_date": date(2026, 6, 8),
+                                "time": "2026-06-08",
+                                "close": 4300,
+                                "change_pct": -2.93,
+                                "score": -22,
+                                "status": "bearish",
+                                "signal_labels": ["動能轉弱"],
+                                "matched_signal_keys": ["roc_negative"],
+                                "primary_signal_label": "動能轉弱",
+                                "stale": False,
+                            },
+                        ],
+                    },
                 },
                 "missing": [],
                 "warnings": [],
                 "source_refs": [],
             }
 
-            with patch.object(ai_reports.tools, "read_watchlist_context", return_value=context):
-                result = ai_reports.build_watchlist_brief(db=db, group_id=1, rank_by="score", sort_order="desc")
+            with patch.object(ai_reports.tools, "read_watchlist_context", return_value=context) as read_context:
+                result = ai_reports.build_watchlist_brief(
+                    db=db,
+                    group_id=1,
+                    rank_by="score",
+                    sort_order="desc",
+                    radar_mode="risk",
+                )
 
+            self.assertEqual(read_context.call_args.kwargs["radar_mode"], "risk")
             overview = result["summary"]["overview"]
             self.assertEqual(result["data"]["overview"], overview)
             self.assertEqual(overview["kind"], "watchlist_sector_overview")
@@ -574,8 +641,13 @@ class AiFreshnessGuardTests(unittest.TestCase):
             self.assertEqual(overview["human_answer"]["kind"], "watchlist_sector_human_answer")
             self.assertEqual(
                 [section["label"] for section in overview["human_answer"]["sections"]],
-                ["結論", "追蹤", "等回測", "保守", "資料"],
+                ["結論", "雷達", "追蹤", "等回測", "保守", "資料"],
             )
+            self.assertEqual(result["summary"]["radar"]["matched_count"], 2)
+            self.assertEqual(result["data"]["radar"]["results"][0]["label"], "2330 台積電")
+            self.assertEqual(overview["radar_rows"][0]["label"], "2330 台積電")
+            self.assertIn("雷達：2 檔命中", overview["human_answer"]["text"])
+            self.assertIn("2330 台積電（高，追蹤突破延續）", overview["human_answer"]["text"])
             self.assertIn("追蹤：", overview["human_answer"]["text"])
             self.assertIn("等回測：2303 聯電", overview["human_answer"]["text"])
             self.assertIn("2330 台積電", overview["strong_rows"][0]["label"])
@@ -584,6 +656,83 @@ class AiFreshnessGuardTests(unittest.TestCase):
             self.assertIn("display", result["summary"]["top_rows"][0])
         finally:
             db.close()
+
+    def test_read_watchlist_context_attaches_radar_from_single_ranking_read(self) -> None:
+        ranking = {
+            "group_id": 1,
+            "rank_by": "score",
+            "sort_order": "desc",
+            "requested_stock_count": 1,
+            "ranked_count": 1,
+            "no_data_count": 0,
+            "error_count": 0,
+            "trade_date": date(2026, 6, 8),
+            "target_trade_date": date(2026, 6, 8),
+            "is_current": True,
+            "current_stock_count": 1,
+            "stale_stock_count": 0,
+            "results": [
+                {
+                    "rank": 1,
+                    "stock_id": "2330",
+                    "stock_name": "台積電",
+                    "time": "2026-06-08",
+                    "close": 2365,
+                    "volume": 38924,
+                    "change": 35,
+                    "change_pct": 1.50,
+                    "limit_status": None,
+                    "score": 72,
+                    "status": "bullish",
+                    "signal_count": 2,
+                    "signal_keys": ["donchian_breakout", "volume_price_up"],
+                    "primary_signal_key": "donchian_breakout",
+                    "primary_signal_label": "突破 20 日高",
+                    "error_message": None,
+                }
+            ],
+        }
+
+        with (
+            patch.object(
+                ai_tools.watchlist_service,
+                "get_group",
+                return_value=SimpleNamespace(group_name="科技股"),
+            ),
+            patch.object(
+                ai_tools.ranking_service,
+                "get_watchlist_group_latest_ranking",
+                return_value=ranking,
+            ) as read_ranking,
+        ):
+            context = ai_tools.read_watchlist_context(
+                db=object(),
+                group_id=1,
+                include_children=False,
+                enabled_only=True,
+                rank_by="score",
+                sort_order="desc",
+                limit=20,
+                radar_mode="momentum",
+            )
+
+        read_ranking.assert_called_once()
+        self.assertEqual(read_ranking.call_args.kwargs["group_id"], 1)
+        self.assertFalse(read_ranking.call_args.kwargs["include_children"])
+        self.assertEqual(read_ranking.call_args.kwargs["limit"], 20)
+        self.assertEqual(context["as_of"], "2026-06-08")
+        self.assertEqual(context["scope"]["group_name"], "科技股")
+        self.assertIn("watchlist_radar", [source["name"] for source in context["source_refs"]])
+        self.assertIn("radar", context["warnings"][0].lower())
+
+        radar = context["data"]["radar"]
+        self.assertEqual(radar["group_id"], 1)
+        self.assertEqual(radar["mode"], "momentum")
+        self.assertEqual(context["scope"]["radar_mode"], "momentum")
+        self.assertEqual(radar["matched_count"], 1)
+        self.assertEqual(radar["radar_count"], 1)
+        self.assertEqual(radar["results"][0]["stock_id"], "2330")
+        self.assertEqual(radar["results"][0]["bucket"], "breakout")
 
     def test_watchlist_human_answer_masks_raw_dataset_keys(self) -> None:
         db = make_session()
@@ -1877,6 +2026,7 @@ class AiFreshnessGuardTests(unittest.TestCase):
 
             build_watchlist_brief.assert_called_once()
             self.assertEqual(build_watchlist_brief.call_args.kwargs["group_id"], 1)
+            self.assertEqual(build_watchlist_brief.call_args.kwargs["radar_mode"], "action")
             self.assertEqual(response["target"]["type"], "tw_watchlist")
             self.assertEqual(response["target"]["id"], "1")
             self.assertEqual(response["action"], "omi.generate_watchlist_brief")
@@ -1886,6 +2036,159 @@ class AiFreshnessGuardTests(unittest.TestCase):
             self.assertEqual(response["analysis"]["answer_outline"][1], "追蹤：2330 台積電")
             self.assertIn("human_answer", response["analysis"])
             self.assertFalse(response["clarification"]["required"])
+        finally:
+            db.close()
+
+    def test_ask_watchlist_risk_question_uses_radar_rows(self) -> None:
+        db = make_session()
+        try:
+            payload = AiAskRequest(
+                question="watchlist group 1 哪些有風險",
+                mode="auto",
+                allow_llm=False,
+                allow_write=False,
+            )
+            report_result = {
+                "kind": "watchlist_brief",
+                "warnings": [],
+                "missing": [],
+                "strategy_profile": "short_term_momentum",
+                "data": {
+                    "overview": {
+                        "kind": "watchlist_sector_overview",
+                        "group_id": 1,
+                        "group_name": "科技股",
+                        "stance": "結構偏多",
+                        "confidence": "high",
+                        "display": "科技股 結構偏多；上漲 2、下跌 1。",
+                        "answer_outline": [
+                            "結論：科技股 結構偏多；上漲 2、下跌 1。",
+                            "雷達：2 檔命中。",
+                        ],
+                        "human_answer": {
+                            "kind": "watchlist_sector_human_answer",
+                            "lines": [
+                                "結論：科技股 結構偏多；上漲 2、下跌 1。",
+                                "雷達：2 檔命中。",
+                            ],
+                            "text": "結論：科技股 結構偏多；上漲 2、下跌 1。\n雷達：2 檔命中。",
+                        },
+                        "breadth": {"up_count": 2, "down_count": 1},
+                        "radar": {
+                            "mode": "action",
+                            "matched_count": 2,
+                            "radar_count": 2,
+                            "is_current": True,
+                            "buckets": [
+                                {"key": "breakout", "label": "突破動能", "count": 1},
+                                {"key": "risk", "label": "風險優先", "count": 1},
+                            ],
+                        },
+                        "radar_rows": [
+                            {
+                                "stock_id": "2330",
+                                "label": "2330 台積電",
+                                "bucket": "breakout",
+                                "bucket_label": "突破動能",
+                                "urgency": "high",
+                                "action_label": "追蹤突破延續",
+                                "change_pct_text": "+1.50%",
+                                "primary_signal_label": "突破 20 日高",
+                            },
+                            {
+                                "stock_id": "2454",
+                                "label": "2454 聯發科",
+                                "bucket": "risk",
+                                "bucket_label": "風險優先",
+                                "urgency": "medium",
+                                "action_label": "優先檢查風控",
+                                "change_pct_text": "-2.93%",
+                                "primary_signal_label": "動能轉弱",
+                            },
+                        ],
+                    }
+                },
+            }
+
+            with (
+                patch.object(ai_ask.freshness, "check_watchlist_data_freshness", return_value={}),
+                patch.object(ai_ask.reports, "build_watchlist_brief", return_value=report_result) as build_watchlist_brief,
+            ):
+                response = ai_ask.ask(db=db, payload=payload)
+
+            build_watchlist_brief.assert_called_once()
+            self.assertEqual(build_watchlist_brief.call_args.kwargs["radar_mode"], "risk")
+            human_answer = response["analysis"]["human_answer"]
+            self.assertEqual(response["analysis"]["question_intent"], "risk_check")
+            self.assertEqual(human_answer["source"], "watchlist_radar")
+            self.assertEqual(human_answer["radar_rows"][0]["stock_id"], "2454")
+            self.assertIn("2454 聯發科", human_answer["text"])
+            self.assertNotIn("目前標的", human_answer["text"])
+        finally:
+            db.close()
+
+    def test_ask_watchlist_entry_question_uses_momentum_radar_mode(self) -> None:
+        db = make_session()
+        try:
+            payload = AiAskRequest(
+                question="watchlist group 1 可以買嗎",
+                mode="auto",
+                allow_llm=False,
+                allow_write=False,
+            )
+            report_result = {
+                "kind": "watchlist_brief",
+                "warnings": [],
+                "missing": [],
+                "strategy_profile": "short_term_momentum",
+                "data": {
+                    "overview": {
+                        "kind": "watchlist_sector_overview",
+                        "group_id": 1,
+                        "group_name": "科技股",
+                        "stance": "結構偏多",
+                        "confidence": "high",
+                        "display": "科技股 結構偏多；上漲 2、下跌 1。",
+                        "human_answer": {
+                            "kind": "watchlist_sector_human_answer",
+                            "lines": ["結論：科技股 結構偏多。"],
+                            "text": "結論：科技股 結構偏多。",
+                        },
+                        "breadth": {"up_count": 2, "down_count": 1},
+                        "radar": {
+                            "mode": "momentum",
+                            "matched_count": 1,
+                            "radar_count": 1,
+                            "is_current": True,
+                            "buckets": [{"key": "breakout", "label": "突破動能", "count": 1}],
+                        },
+                        "radar_rows": [
+                            {
+                                "stock_id": "2330",
+                                "label": "2330 台積電",
+                                "bucket": "breakout",
+                                "bucket_label": "突破動能",
+                                "urgency": "high",
+                                "action_label": "追蹤突破延續",
+                                "change_pct_text": "+1.50%",
+                                "primary_signal_label": "突破 20 日高",
+                            },
+                        ],
+                    }
+                },
+            }
+
+            with (
+                patch.object(ai_ask.freshness, "check_watchlist_data_freshness", return_value={}),
+                patch.object(ai_ask.reports, "build_watchlist_brief", return_value=report_result) as build_watchlist_brief,
+            ):
+                response = ai_ask.ask(db=db, payload=payload)
+
+            build_watchlist_brief.assert_called_once()
+            self.assertEqual(build_watchlist_brief.call_args.kwargs["radar_mode"], "momentum")
+            self.assertEqual(response["analysis"]["question_intent"], "entry_decision")
+            self.assertEqual(response["analysis"]["human_answer"]["source"], "watchlist_radar")
+            self.assertIn("2330 台積電", response["analysis"]["human_answer"]["text"])
         finally:
             db.close()
 

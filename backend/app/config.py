@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     scheduler_market_chip_refresh_index_ids: str = "TAIEX,TPEX"
     scheduler_market_chip_refresh_force: bool = False
     enable_taiwan_futures_scheduler: bool = True
+    taiwan_futures_quote_provider: str = "taifex_mis"
     scheduler_taiwan_futures_symbols: str = "TXF,MXF,TMF"
     scheduler_taiwan_futures_session: str = "auto"
     scheduler_taiwan_futures_interval_seconds: int = 30
@@ -76,6 +77,11 @@ class Settings(BaseSettings):
     finmind_token: str | None = None
     alphavantage_api_key: str | None = None
     fred_api_key: str | None = None
+    kgi_api_key: str | None = None
+    kgi_api_secret: str | None = None
+    kgi_account: str | None = None
+    kgi_cert_path: str | None = None
+    kgi_api_base_url: str | None = None
     us_sec_user_agent: str = "Open Market Intelligence local research; set US_SEC_USER_AGENT"
     us_market_http_timeout_seconds: int = 30
     omi_http_trust_env: bool = False

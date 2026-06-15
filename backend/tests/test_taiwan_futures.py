@@ -14,6 +14,9 @@ from app.db.models import (
     TaiwanFuturesQuoteSnapshot,
 )
 from app.market.tw_futures import (
+    TaiwanFuturesFetchError,
+    fetch_taiwan_futures_quotes,
+    get_latest_taiwan_futures_quotes,
     list_taiwan_futures_intraday_bars,
     list_taiwan_futures_daily_bars,
     parse_taifex_daily_market_html,
@@ -21,6 +24,7 @@ from app.market.tw_futures import (
     refresh_taiwan_futures_daily_bars,
     refresh_taiwan_futures_quotes,
     select_active_taiwan_futures_quote,
+    taiwan_futures_quote_to_dict,
 )
 
 
@@ -189,6 +193,52 @@ class TaiwanFuturesParserTests(unittest.TestCase):
 
 
 class TaiwanFuturesPersistenceTests(unittest.TestCase):
+    def test_quote_dict_marks_session_mismatch_cache(self) -> None:
+        row = TaiwanFuturesQuoteSnapshot(
+            id=1,
+            provider="taifex_mis",
+            market="TAIFEX",
+            symbol="TXF",
+            product_code="TX",
+            product_name="大台 台指期",
+            contract_symbol="TXFF6-F",
+            contract_month="202606",
+            session="regular",
+            trade_date=date(2026, 6, 15),
+            quote_time=datetime(2026, 6, 15, 13, 44, tzinfo=TAIWAN_TZ),
+            last_price=45580,
+            source="test",
+            fetched_at=datetime(2026, 6, 15, 21, 30, tzinfo=TAIWAN_TZ),
+            created_at=datetime(2026, 6, 15, 21, 30, tzinfo=TAIWAN_TZ),
+            updated_at=datetime(2026, 6, 15, 21, 30, tzinfo=TAIWAN_TZ),
+        )
+
+        payload = taiwan_futures_quote_to_dict(
+            row,
+            expected_session="after_hours",
+        )
+
+        self.assertEqual(payload["freshness"]["status"], "session_mismatch")
+        self.assertTrue(payload["freshness"]["is_session_mismatch"])
+        self.assertEqual(payload["freshness"]["expected_session"], "after_hours")
+        self.assertIn("預期夜盤", payload["freshness"]["message"])
+
+    def test_kgi_provider_slot_reports_clear_error_before_adapter_is_wired(self) -> None:
+        from app.market import tw_futures
+
+        original_configured_settings = tw_futures._configured_kgi_settings
+        try:
+            tw_futures._configured_kgi_settings = lambda: []
+            with self.assertRaises(TaiwanFuturesFetchError) as context:
+                fetch_taiwan_futures_quotes(
+                    symbols=["TXF"],
+                    provider="kgi",
+                )
+        finally:
+            tw_futures._configured_kgi_settings = original_configured_settings
+
+        self.assertIn("KGI Taiwan futures provider is selected", str(context.exception))
+
     def test_refresh_upserts_quote_and_one_minute_bar(self) -> None:
         engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(bind=engine)
@@ -214,6 +264,69 @@ class TaiwanFuturesPersistenceTests(unittest.TestCase):
                 self.assertEqual(bar.symbol, "MXF")
                 self.assertEqual(bar.contract_month, "202606")
                 self.assertEqual(bar.close_price, 44199.0)
+        finally:
+            engine.dispose()
+
+    def test_latest_quotes_can_filter_by_provider(self) -> None:
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(bind=engine)
+        try:
+            with Session(engine) as db:
+                db.add_all(
+                    [
+                        TaiwanFuturesQuoteSnapshot(
+                            provider="taifex_mis",
+                            market="TAIFEX",
+                            symbol="TXF",
+                            product_code="TX",
+                            product_name="大台 台指期",
+                            contract_symbol="TXFF6-F",
+                            contract_month="202606",
+                            session="regular",
+                            trade_date=date(2026, 6, 15),
+                            quote_time=datetime(2026, 6, 15, 13, 44, tzinfo=TAIWAN_TZ),
+                            last_price=45580,
+                            source="test",
+                        ),
+                        TaiwanFuturesQuoteSnapshot(
+                            provider="kgi",
+                            market="TAIFEX",
+                            symbol="TXF",
+                            product_code="TX",
+                            product_name="大台 台指期",
+                            contract_symbol="TXFR1",
+                            contract_month="202606",
+                            session="after_hours",
+                            trade_date=date(2026, 6, 15),
+                            quote_time=datetime(2026, 6, 15, 21, 30, tzinfo=TAIWAN_TZ),
+                            last_price=45620,
+                            source="test",
+                        ),
+                    ]
+                )
+                db.commit()
+
+                taifex_rows = get_latest_taiwan_futures_quotes(
+                    db=db,
+                    symbols=["TXF"],
+                    provider="taifex_mis",
+                )
+                kgi_rows = get_latest_taiwan_futures_quotes(
+                    db=db,
+                    symbols=["TXF"],
+                    provider="kgi",
+                )
+                auto_rows = get_latest_taiwan_futures_quotes(
+                    db=db,
+                    symbols=["TXF"],
+                    provider="auto",
+                )
+
+                self.assertEqual(taifex_rows[0].provider, "taifex_mis")
+                self.assertEqual(taifex_rows[0].last_price, 45580)
+                self.assertEqual(kgi_rows[0].provider, "kgi")
+                self.assertEqual(kgi_rows[0].last_price, 45620)
+                self.assertEqual(auto_rows[0].provider, "kgi")
         finally:
             engine.dispose()
 

@@ -141,6 +141,66 @@ export type RankingResponse = {
   results: RankingItem[];
 };
 
+export type WatchlistRadarMode = "action" | "risk" | "momentum" | "all";
+
+export type WatchlistRadarBucketRead = {
+  key: string;
+  label: string;
+  description: string;
+  count: number;
+};
+
+export type WatchlistRadarItemRead = {
+  rank: number;
+  source_rank: number | null;
+  bucket: string;
+  bucket_label: string;
+  urgency: "high" | "medium" | "low" | string;
+  priority_score: number;
+  action_label: string;
+  reason: string;
+  stock_id: string;
+  stock_name: string | null;
+  time: string | null;
+  trade_date: string | null;
+  close: number | null;
+  volume: number | null;
+  change: number | null;
+  previous_close: number | null;
+  change_pct: number | null;
+  limit_status: "limit_up" | "limit_down" | null;
+  score: number;
+  status: string;
+  signal_count: number;
+  signal_keys: string[];
+  matched_signal_keys: string[];
+  signal_labels: string[];
+  primary_signal_key: string | null;
+  primary_signal_label: string | null;
+  stale: boolean;
+  error_message: string | null;
+};
+
+export type WatchlistGroupRadarRead = {
+  group_id: number;
+  include_children: boolean;
+  mode: WatchlistRadarMode;
+  max_results: number;
+  requested_stock_count: number;
+  ranked_count: number;
+  matched_count: number;
+  radar_count: number;
+  no_data_count: number;
+  error_count: number;
+  trade_date: string | null;
+  target_trade_date: string | null;
+  is_current: boolean;
+  current_stock_count: number;
+  stale_stock_count: number;
+  buckets: WatchlistRadarBucketRead[];
+  results: WatchlistRadarItemRead[];
+};
+
 export type Signal = {
   key: string;
   label: string;
@@ -329,6 +389,16 @@ export type TaiwanFuturesQuote = {
   source: string;
   source_url: string | null;
   fetched_at: string;
+  freshness: {
+    status: "live" | "cached" | "session_mismatch" | "stale" | string;
+    is_live: boolean;
+    is_stale: boolean;
+    is_session_mismatch: boolean;
+    expected_session: string;
+    age_seconds: number | null;
+    message: string;
+    source_error: string | null;
+  };
   created_at: string;
   updated_at: string;
 };

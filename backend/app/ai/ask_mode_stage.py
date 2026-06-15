@@ -34,6 +34,7 @@ def execute_mode_stage(
     scope_type: str,
     effective_mode: str,
     auto_mode_requested: bool,
+    question_intent: str = "general",
     tool_runs: list[dict[str, Any]],
     warnings: list[str],
     progress: pipeline_progress.OmiPipelineProgress,
@@ -46,18 +47,36 @@ def execute_mode_stage(
     if mode == "data_only":
         action, result = progress.run_read_mode(
             mode=mode,
-            operation=lambda: read_data_only(db, payload, scope_type, tool_runs=tool_runs),
+            operation=lambda: read_data_only(
+                db,
+                payload,
+                scope_type,
+                question_intent=question_intent,
+                tool_runs=tool_runs,
+            ),
         )
     elif mode == "brief":
         action, result = progress.run_read_mode(
             mode=mode,
-            operation=lambda: build_brief(db, payload, scope_type, tool_runs=tool_runs),
+            operation=lambda: build_brief(
+                db,
+                payload,
+                scope_type,
+                question_intent=question_intent,
+                tool_runs=tool_runs,
+            ),
         )
     elif mode == "analysis":
         try:
             action, result = progress.run_read_mode(
                 mode=mode,
-                operation=lambda: generate_analysis(db, payload, scope_type, tool_runs=tool_runs),
+                operation=lambda: generate_analysis(
+                    db,
+                    payload,
+                    scope_type,
+                    question_intent=question_intent,
+                    tool_runs=tool_runs,
+                ),
             )
         except llm.OpenAILLMError as exc:
             if not auto_mode_requested:
@@ -69,12 +88,24 @@ def execute_mode_stage(
             progress.llm_fallback_to_brief()
             action, result = progress.run_read_mode(
                 mode=mode,
-                operation=lambda: build_brief(db, payload, scope_type, tool_runs=tool_runs),
+                operation=lambda: build_brief(
+                    db,
+                    payload,
+                    scope_type,
+                    question_intent=question_intent,
+                    tool_runs=tool_runs,
+                ),
             )
     elif mode == "report":
         action, result = progress.run_read_mode(
             mode=mode,
-            operation=lambda: generate_report(db, payload, scope_type, tool_runs=tool_runs),
+            operation=lambda: generate_report(
+                db,
+                payload,
+                scope_type,
+                question_intent=question_intent,
+                tool_runs=tool_runs,
+            ),
         )
     else:
         raise ValueError(f"Unsupported mode: {mode}")
