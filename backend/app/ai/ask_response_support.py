@@ -617,6 +617,7 @@ def _extract_analysis_digest(result: dict[str, Any], policy: dict[str, Any]) -> 
             "score_model": analysis.get("score_model") or {},
             "technical_levels": data.get("technical_levels") or {},
             "decision_evidence": data.get("decision_evidence") or {},
+            "source_health": data.get("source_health") or {},
             "components": analysis.get("components") or [],
             "source": "result.data.analysis",
         }

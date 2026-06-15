@@ -80,6 +80,70 @@ class AiAnswerComposerTests(unittest.TestCase):
         self.assertNotIn("缺少 intraday_trend", answer["detail"])
         self.assertIn("站上 MA20", answer["summary"])
 
+    def test_source_health_data_limits_are_user_readable(self) -> None:
+        limits = answer_composer.source_health_data_limits(
+            {
+                "entries": [
+                    {
+                        "resource": "market_daily_price",
+                        "label": "Daily price",
+                        "status": "stale",
+                        "required": True,
+                        "latest_data_date": "2026-06-12",
+                        "expected_data_date": "2026-06-15",
+                    },
+                    {
+                        "resource": "monthly_revenue",
+                        "label": "Monthly revenue",
+                        "status": "not_applicable",
+                        "required": False,
+                    },
+                    {
+                        "resource": "broker_branch_trade_daily",
+                        "label": "Broker branch trade",
+                        "status": "empty",
+                        "required": True,
+                    },
+                ]
+            }
+        )
+
+        self.assertEqual(
+            limits,
+            [
+                "日收盤資料落後：最新 2026-06-12，預期 2026-06-15。",
+                "券商分點目前沒有本地資料。",
+            ],
+        )
+
+    def test_consumer_answer_includes_source_health_data_limits(self) -> None:
+        answer = answer_composer.build_consumer_human_answer(
+            question_intent="trend_view",
+            target={"label": "2330 台積電"},
+            analysis_digest={
+                "display": "中短線評分 +2｜偏多",
+                "selected_score": 2,
+                "selected_confidence": "medium",
+                "source_health": {
+                    "entries": [
+                        {
+                            "resource": "institutional_trade_daily",
+                            "label": "Institutional trade",
+                            "status": "stale",
+                            "required": True,
+                            "latest_data_date": "2026-06-12",
+                            "expected_data_date": "2026-06-15",
+                        }
+                    ]
+                },
+            },
+            missing=[],
+            warnings=[],
+        )
+
+        self.assertIn("法人買賣超資料落後", answer["data_limits"][0])
+        self.assertIn("資料限制", answer["text"])
+
     def test_position_decision_answer_keeps_decision_contract(self) -> None:
         answer = answer_composer.build_position_decision_consumer_answer(
             position_decision={

@@ -59,6 +59,31 @@ LLM_INTRADAY_GAP_HINTS = (
     "成交",
     "快照",
 )
+SOURCE_HEALTH_PROBLEM_STATUSES = {
+    "stale",
+    "empty",
+    "error",
+    "unavailable",
+    "partial",
+}
+SOURCE_HEALTH_STATUS_LABELS = {
+    "stale": "落後",
+    "empty": "無本地資料",
+    "error": "讀取失敗",
+    "unavailable": "不可用",
+    "partial": "不完整",
+}
+SOURCE_HEALTH_RESOURCE_LABELS = {
+    "stock_master": "股票主檔",
+    "market_daily_price": "日收盤",
+    "institutional_trade_daily": "法人買賣超",
+    "margin_trading_daily": "融資融券",
+    "broker_branch_trade_daily": "券商分點",
+    "shareholding_distribution_weekly": "股權分散",
+    "monthly_revenue": "月營收",
+    "financial_metric_quarterly": "季財務",
+    "market_chip_daily": "大盤籌碼",
+}
 
 
 def text_value(value: Any) -> str | None:
@@ -166,6 +191,11 @@ def consumer_text(
         lines.append("風險：")
         lines.extend(f"- {item}" for item in risks)
 
+    data_limits = text_list(answer.get("data_limits"), limit=2)
+    if data_limits:
+        lines.append("資料限制：")
+        lines.extend(f"- {item}" for item in data_limits)
+
     return "\n".join(lines)
 
 
@@ -207,6 +237,77 @@ def generic_data_limits(*, missing: list[Any], warnings: list[Any]) -> list[str]
         limit=3,
     )
     return limits
+
+
+def source_health_data_limits(source_health: Any, *, limit: int = 3) -> list[str]:
+    if not isinstance(source_health, dict):
+        return []
+
+    entries = source_health.get("entries")
+    if not isinstance(entries, list):
+        return []
+
+    limits: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("required") is False:
+            continue
+
+        status = text_value(entry.get("status"))
+        if status not in SOURCE_HEALTH_PROBLEM_STATUSES:
+            continue
+
+        resource = text_value(entry.get("resource"))
+        label = (
+            SOURCE_HEALTH_RESOURCE_LABELS.get(resource or "")
+            or text_value(entry.get("label"))
+            or resource
+            or "資料來源"
+        )
+        latest = text_value(entry.get("latest_data_date")) or text_value(entry.get("latest_data_key"))
+        expected = text_value(entry.get("expected_data_date"))
+
+        if status == "stale":
+            if latest and expected:
+                message = f"{label}資料落後：最新 {latest}，預期 {expected}。"
+            elif latest:
+                message = f"{label}資料可能過期：最新 {latest}。"
+            else:
+                message = f"{label}資料可能過期，需重新確認。"
+        elif status == "empty":
+            message = f"{label}目前沒有本地資料。"
+        else:
+            status_label = SOURCE_HEALTH_STATUS_LABELS.get(status, status)
+            message = f"{label}資料狀態為{status_label}，結論需保留彈性。"
+
+        if message not in limits:
+            limits.append(message)
+        if len(limits) >= limit:
+            break
+
+    return limits
+
+
+def append_source_health_data_limits(
+    answer: dict[str, Any],
+    *,
+    analysis_digest: dict[str, Any],
+    limit: int = 3,
+) -> dict[str, Any]:
+    source_limits = source_health_data_limits(analysis_digest.get("source_health"), limit=limit)
+    if not source_limits:
+        return answer
+
+    current_limits = text_list(answer.get("data_limits"), limit=limit)
+    combined_limits = list(dict.fromkeys(current_limits + source_limits))[:limit]
+    if combined_limits == current_limits:
+        return answer
+
+    next_answer = dict(answer)
+    next_answer["data_limits"] = combined_limits
+    next_answer["text"] = consumer_text(next_answer)
+    return next_answer
 
 
 def digest_summary_lines(
@@ -890,12 +991,13 @@ def build_consumer_human_answer(
     summary_limit: int = SUMMARY_LIMIT_DEFAULT,
 ) -> dict[str, Any]:
     if position_decision:
-        return build_position_decision_consumer_answer(
+        answer = build_position_decision_consumer_answer(
             position_decision=position_decision,
             missing=missing,
             warnings=warnings,
             summary_limit=summary_limit,
         )
+        return append_source_health_data_limits(answer, analysis_digest=analysis_digest)
 
     question_answer = build_question_aware_consumer_answer(
         question_intent=question_intent,
@@ -906,10 +1008,10 @@ def build_consumer_human_answer(
         summary_limit=summary_limit,
     )
     if question_intent in {"entry_decision", "exit_decision"} and question_answer:
-        return question_answer
+        return append_source_health_data_limits(question_answer, analysis_digest=analysis_digest)
 
     if llm_report:
-        return build_llm_consumer_answer(
+        answer = build_llm_consumer_answer(
             report=llm_report,
             target=target,
             analysis_digest=analysis_digest,
@@ -917,27 +1019,30 @@ def build_consumer_human_answer(
             warnings=warnings,
             summary_limit=summary_limit,
         )
+        return append_source_health_data_limits(answer, analysis_digest=analysis_digest)
 
     human_answer = analysis_digest.get("human_answer") if isinstance(analysis_digest.get("human_answer"), dict) else {}
     if human_answer:
-        return build_watchlist_consumer_answer(
+        answer = build_watchlist_consumer_answer(
             human_answer=human_answer,
             overview=analysis_digest,
             missing=missing,
             warnings=warnings,
             summary_limit=summary_limit,
         )
+        return append_source_health_data_limits(answer, analysis_digest=analysis_digest)
 
     if question_answer:
-        return question_answer
+        return append_source_health_data_limits(question_answer, analysis_digest=analysis_digest)
 
     if analysis_digest:
-        return build_digest_consumer_answer(
+        answer = build_digest_consumer_answer(
             target=target,
             analysis_digest=analysis_digest,
             missing=missing,
             warnings=warnings,
             summary_limit=summary_limit,
         )
+        return append_source_health_data_limits(answer, analysis_digest=analysis_digest)
 
     return {}
