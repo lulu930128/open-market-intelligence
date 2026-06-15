@@ -7,11 +7,11 @@ from datetime import date, datetime, time, timedelta, timezone
 from time import monotonic
 from urllib.parse import quote
 
-import requests
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import MarketDailyPrice, MarketIndexDailyStat, SourceRegistry
+from app.http_client import get as http_get
 from app.sources.defaults import (
     TPEX_DAILY_QUOTES_SOURCE_NAME,
     TWSE_DAILY_TRADING_SOURCE_NAME,
@@ -93,7 +93,7 @@ def _list_value(values, index: int):
 
 
 def _fetch_json(url: str):
-    response = requests.get(
+    response = http_get(
         url,
         headers={
             "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
@@ -476,7 +476,13 @@ def _parse_tpex_market_daily_rows(payload) -> list[dict]:
             transaction_count=_as_int(
                 _row_value(row, keys=("Transaction", "TransactionCount"), positions=(3,))
             ),
-            close_value=_as_float(_row_value(row, keys=("Index", "Close", "TPEX"), positions=(4,))),
+            close_value=_as_float(
+                _row_value(
+                    row,
+                    keys=("TPExIndex", "Index", "Close", "TPEX"),
+                    positions=(4,),
+                )
+            ),
             price_change=_as_float(_row_value(row, keys=("Change",), positions=(5,))),
         )
         if item is not None:
@@ -816,6 +822,205 @@ def _apply_market_index_stat_values(
         point["transaction_count"] = values.get("transaction_count")
 
 
+def _latest_market_index_daily_stat(
+    db: Session,
+    *,
+    index_id: str,
+) -> MarketIndexDailyStat | None:
+    return (
+        db.query(MarketIndexDailyStat)
+        .filter(MarketIndexDailyStat.index_id == index_id)
+        .order_by(MarketIndexDailyStat.trade_date.desc())
+        .first()
+    )
+
+
+def _market_index_daily_stats_after(
+    db: Session,
+    *,
+    index_id: str,
+    after_date: date | None,
+    to_date: date,
+) -> list[MarketIndexDailyStat]:
+    query = (
+        db.query(MarketIndexDailyStat)
+        .filter(MarketIndexDailyStat.index_id == index_id)
+        .filter(MarketIndexDailyStat.trade_date <= to_date)
+        .filter(MarketIndexDailyStat.close_value.isnot(None))
+        .order_by(MarketIndexDailyStat.trade_date.asc())
+    )
+
+    if after_date is not None:
+        query = query.filter(MarketIndexDailyStat.trade_date > after_date)
+
+    return query.all()
+
+
+def _market_index_point_from_daily_stat(
+    row: MarketIndexDailyStat,
+    *,
+    previous_close: float | None,
+) -> dict | None:
+    close = row.close_value
+
+    if close is None:
+        return None
+
+    reference_close = previous_close
+    if row.price_change is not None:
+        reference_close = close - row.price_change
+
+    open_value = reference_close if reference_close is not None else close
+    high_candidates = [value for value in (open_value, close) if value is not None]
+    high = max(high_candidates) if high_candidates else close
+    low = min(high_candidates) if high_candidates else close
+
+    return {
+        "time": row.trade_date,
+        "open": open_value,
+        "high": high,
+        "low": low,
+        "close": close,
+        "volume": row.trade_volume,
+        "trade_value": row.trade_value,
+        "transaction_count": row.transaction_count,
+    }
+
+
+def _append_official_market_index_daily_points(
+    db: Session,
+    points: list[dict],
+    *,
+    index_id: str,
+    to_date: date,
+) -> None:
+    latest_point_date = points[-1].get("time") if points else None
+    latest_point_date = latest_point_date if isinstance(latest_point_date, date) else None
+    previous_close = _as_float(points[-1].get("close")) if points else None
+    existing_dates = {
+        point["time"]
+        for point in points
+        if isinstance(point.get("time"), date)
+    }
+
+    for row in _market_index_daily_stats_after(
+        db=db,
+        index_id=index_id,
+        after_date=latest_point_date,
+        to_date=to_date,
+    ):
+        if row.trade_date in existing_dates:
+            continue
+
+        point = _market_index_point_from_daily_stat(row, previous_close=previous_close)
+        if point is None:
+            continue
+
+        points.append(point)
+        previous_close = point["close"]
+        existing_dates.add(row.trade_date)
+
+
+def _apply_latest_official_market_index_stat(
+    db: Session,
+    *,
+    config: dict,
+    payload: dict,
+) -> None:
+    index_id = str(config["index_id"])
+    latest_stat = _latest_market_index_daily_stat(db, index_id=index_id)
+
+    if latest_stat is None or latest_stat.close_value is None:
+        return
+
+    payload_time = payload.get("time")
+    if isinstance(payload_time, date) and latest_stat.trade_date < payload_time:
+        return
+
+    previous_close = payload.get("previous_close")
+    point = _market_index_point_from_daily_stat(
+        latest_stat,
+        previous_close=_as_float(previous_close),
+    )
+
+    if point is None:
+        return
+
+    points = payload.get("points")
+    if isinstance(points, list):
+        matching_point = next(
+            (
+                existing
+                for existing in points
+                if isinstance(existing, dict) and existing.get("time") == latest_stat.trade_date
+            ),
+            None,
+        )
+        if isinstance(matching_point, dict):
+            matching_point.update(point)
+        else:
+            points.append(point)
+            del points[:-90]
+
+    close = point["close"]
+    official_previous_close = (
+        close - latest_stat.price_change
+        if latest_stat.price_change is not None
+        else _as_float(previous_close)
+    )
+    change = (
+        close - official_previous_close
+        if official_previous_close not in (None, 0)
+        else latest_stat.price_change
+    )
+    change_pct = (
+        (change / official_previous_close) * 100
+        if change is not None and official_previous_close not in (None, 0)
+        else None
+    )
+    ma20 = _moving_average(
+        [
+            _as_float(item.get("close"))
+            for item in points
+            if isinstance(points, list) and isinstance(item, dict)
+        ],
+        20,
+    ) if isinstance(points, list) else payload.get("ma20")
+    price_vs_ma20 = (
+        ((close - ma20) / ma20) * 100
+        if close is not None and ma20 not in (None, 0)
+        else None
+    )
+    as_of = datetime.combine(latest_stat.trade_date, time(13, 30), tzinfo=TAIPEI_TZ)
+
+    payload.update(
+        {
+            "source": f"{payload.get('source') or 'index_chart'}+market_index_daily_stat",
+            "as_of": as_of,
+            "time": latest_stat.trade_date,
+            "open": point["open"],
+            "high": point["high"],
+            "low": point["low"],
+            "close": close,
+            "previous_close": official_previous_close,
+            "change": change,
+            "change_pct": change_pct,
+            "volume": point["volume"],
+            "estimated_volume": _estimate_session_volume(
+                volume=point["volume"],
+                as_of=as_of,
+            ),
+            "trade_value": point["trade_value"],
+            "estimated_trade_value": _estimate_session_volume(
+                volume=point["trade_value"],
+                as_of=as_of,
+            ),
+            "ma20": ma20,
+            "price_vs_ma20": price_vs_ma20,
+        }
+    )
+
+
 def _index_range_for(timeframe: str, bars: int) -> str:
     if timeframe == "monthly":
         return "max"
@@ -860,7 +1065,7 @@ def _fetch_yahoo_index_points(
     interval: str,
 ) -> tuple[list[dict], dict, timezone]:
     symbol = str(config["symbol"])
-    response = requests.get(
+    response = http_get(
         YAHOO_CHART_URL.format(symbol=quote(symbol, safe="")),
         params={
             "range": range_value,
@@ -1086,7 +1291,7 @@ def _fetch_yahoo_index_intraday(config: dict) -> dict:
     symbol = str(config["symbol"])
     intraday_points: list[dict] = []
 
-    response = requests.get(
+    response = http_get(
         YAHOO_CHART_URL.format(symbol=quote(symbol, safe="")),
         params={
             "range": "1d",
@@ -1444,7 +1649,7 @@ def _market_index_item_for_contribution(market: str) -> dict | None:
     return items[0] if items else None
 
 
-def _contribution_quote_rows(market: str) -> tuple[list[dict], dict[str, int], str, dict[str, str]]:
+def _source_contribution_quote_rows(market: str) -> tuple[list[dict], dict[str, int], str, dict[str, str]]:
     if market == "TPEX":
         payload = _fetch_json(TPEX_DAILY_QUOTES_URL)
         rows = payload if isinstance(payload, list) else []
@@ -1477,7 +1682,134 @@ def _contribution_quote_rows(market: str) -> tuple[list[dict], dict[str, int], s
     }
 
 
-def get_market_index_contributions(index_id: str, limit: int = 20) -> dict:
+def _latest_market_daily_price_date(
+    db: Session,
+    *,
+    market: str,
+) -> date | None:
+    source_name = _market_source_name(market)
+    return (
+        db.query(func.max(MarketDailyPrice.trade_date))
+        .join(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id)
+        .filter(SourceRegistry.source_name == source_name)
+        .scalar()
+    )
+
+
+def _local_contribution_quote_rows(
+    db: Session,
+    *,
+    market: str,
+    shares_by_code: dict[str, int],
+) -> tuple[list[dict], dict[str, int], str, dict[str, str]]:
+    source_name = _market_source_name(market)
+    latest_trade_date = _latest_market_daily_price_date(db, market=market)
+
+    if latest_trade_date is None:
+        return [], shares_by_code, f"market_daily_price:{source_name}", {
+            "code": "stock_id",
+            "name": "stock_name",
+            "close": "close_price",
+            "change": "price_change",
+            "trade_value": "trade_value",
+            "date": "trade_date",
+        }
+
+    rows = (
+        db.query(MarketDailyPrice)
+        .join(SourceRegistry, SourceRegistry.id == MarketDailyPrice.source_id)
+        .filter(SourceRegistry.source_name == source_name)
+        .filter(MarketDailyPrice.trade_date == latest_trade_date)
+        .order_by(MarketDailyPrice.stock_id.asc())
+        .all()
+    )
+    payload_rows = [
+        {
+            "stock_id": row.stock_id,
+            "stock_name": row.stock_name,
+            "close_price": row.close_price,
+            "price_change": row.price_change,
+            "trade_value": row.trade_value,
+            "trade_date": row.trade_date,
+        }
+        for row in rows
+    ]
+    return payload_rows, shares_by_code, f"market_daily_price:{source_name}", {
+        "code": "stock_id",
+        "name": "stock_name",
+        "close": "close_price",
+        "change": "price_change",
+        "trade_value": "trade_value",
+        "date": "trade_date",
+    }
+
+
+def _contribution_quote_rows(
+    market: str,
+    db: Session | None = None,
+) -> tuple[list[dict], dict[str, int], str, dict[str, str]]:
+    source_rows: list[dict] = []
+    source_shares_by_code: dict[str, int] = {}
+    source = ""
+    source_keys: dict[str, str] = {
+        "code": "stock_id",
+        "name": "stock_name",
+        "close": "close_price",
+        "change": "price_change",
+        "trade_value": "trade_value",
+        "date": "trade_date",
+    }
+    source_trade_date: date | None = None
+
+    try:
+        source_rows, source_shares_by_code, source, source_keys = _source_contribution_quote_rows(
+            market
+        )
+        source_trade_date = (
+            _parse_trade_date(source_rows[0].get(source_keys["date"]))
+            if source_rows
+            else None
+        )
+    except Exception:
+        source_rows = []
+
+    if db is not None:
+        local_rows, local_shares_by_code, local_source, local_keys = _local_contribution_quote_rows(
+            db,
+            market=market,
+            shares_by_code=source_shares_by_code,
+        )
+        local_trade_date = (
+            _parse_trade_date(local_rows[0].get(local_keys["date"]))
+            if local_rows
+            else None
+        )
+
+        if local_rows and (
+            source_trade_date is None
+            or local_trade_date is None
+            or local_trade_date >= source_trade_date
+        ):
+            return local_rows, local_shares_by_code, local_source, local_keys
+
+    if source_rows:
+        return source_rows, source_shares_by_code, source, source_keys
+
+    if db is not None:
+        return _local_contribution_quote_rows(
+            db,
+            market=market,
+            shares_by_code=source_shares_by_code,
+        )
+
+    return source_rows, source_shares_by_code, source or "unavailable", source_keys
+
+
+def get_market_index_contributions(
+    index_id: str,
+    limit: int = 20,
+    db: Session | None = None,
+) -> dict:
     normalized_index_id = index_id.upper()
     config = INDEX_CONFIG_BY_ID.get(normalized_index_id)
 
@@ -1492,18 +1824,30 @@ def get_market_index_contributions(index_id: str, limit: int = 20) -> dict:
     cache_key = f"{normalized_index_id}:{normalized_limit}"
     cached = _CONTRIBUTION_CACHE.get(cache_key)
 
-    if cached and monotonic() < float(cached["expires_at"]):
+    if db is None and cached and monotonic() < float(cached["expires_at"]):
         payload = cached.get("payload")
 
         if isinstance(payload, dict):
             return payload
 
     market = str(config["market"])
-    rows, shares_by_code, source, keys = _contribution_quote_rows(market)
-    index_item = _market_index_item_for_contribution(market)
+    rows, shares_by_code, source, keys = _contribution_quote_rows(market, db=db)
+    try:
+        index_item = _market_index_item_for_contribution(market)
+    except Exception:
+        index_item = None
     index_close = _as_float(index_item.get("close")) if index_item else None
     index_change = _as_float(index_item.get("change")) if index_item else None
     trade_date = _parse_trade_date(rows[0].get(keys["date"])) if rows else None
+    if db is not None:
+        latest_stat = _latest_market_index_daily_stat(db, index_id=normalized_index_id)
+        if (
+            latest_stat is not None
+            and latest_stat.trade_date == trade_date
+            and latest_stat.close_value is not None
+        ):
+            index_close = latest_stat.close_value
+            index_change = latest_stat.price_change
     candidates: list[dict] = []
     total_market_value = 0.0
 
@@ -1585,10 +1929,11 @@ def get_market_index_contributions(index_id: str, limit: int = 20) -> dict:
         "positive": ranked(positive),
         "negative": ranked(negative),
     }
-    _CONTRIBUTION_CACHE[cache_key] = {
-        "expires_at": monotonic() + INDEX_LIST_CACHE_TTL_SECONDS,
-        "payload": payload,
-    }
+    if db is None:
+        _CONTRIBUTION_CACHE[cache_key] = {
+            "expires_at": monotonic() + INDEX_LIST_CACHE_TTL_SECONDS,
+            "payload": payload,
+        }
     return payload
 
 
@@ -1632,6 +1977,7 @@ def get_market_index_ohlc_chart_data(
         from_date=from_date,
         to_date=to_date,
     )
+    coverage_to_date = max(stat_to_date, datetime.now(TAIPEI_TZ).date())
     backfill_result = None
 
     if db is not None and selected_points:
@@ -1641,7 +1987,7 @@ def get_market_index_ohlc_chart_data(
                 index_id=normalized_index_id,
                 market=str(config["market"]),
                 from_date=stat_from_date,
-                to_date=stat_to_date,
+                to_date=coverage_to_date,
             )
         except Exception as exc:
             db.rollback()
@@ -1657,13 +2003,21 @@ def get_market_index_ohlc_chart_data(
             index_id=normalized_index_id,
             timeframe=timeframe,
             from_date=stat_from_date,
-            to_date=stat_to_date,
+            to_date=coverage_to_date,
         )
         _apply_market_index_stat_values(
             selected_points,
             timeframe=timeframe,
             values_by_period=values_by_period,
         )
+        if timeframe == "daily":
+            _append_official_market_index_daily_points(
+                db=db,
+                points=selected_points,
+                index_id=normalized_index_id,
+                to_date=coverage_to_date,
+            )
+            selected_points = selected_points[-bars:]
     else:
         try:
             trade_values_by_date = _fetch_recent_index_trade_values(str(config["market"]))
@@ -1672,6 +2026,10 @@ def get_market_index_ohlc_chart_data(
                 point["trade_value"] = trade_values_by_date.get(point["time"])
         except Exception:
             pass
+
+    if selected_points:
+        from_date = selected_points[0]["time"]
+        to_date = selected_points[-1]["time"]
 
     return {
         "stock_id": normalized_index_id,
@@ -1700,6 +2058,28 @@ def get_market_index_summary(db: Session, force_refresh: bool = False) -> dict:
             index_payload = _fetch_yahoo_index(config)
         except Exception as exc:
             index_payload = _unavailable_index(config, exc)
+
+        try:
+            latest_yahoo_date = index_payload.get("time")
+            coverage_start = (
+                latest_yahoo_date
+                if isinstance(latest_yahoo_date, date)
+                else datetime.now(TAIPEI_TZ).date() - timedelta(days=14)
+            )
+            _ensure_market_index_daily_stat_coverage(
+                db=db,
+                index_id=str(config["index_id"]),
+                market=str(config["market"]),
+                from_date=coverage_start,
+                to_date=datetime.now(TAIPEI_TZ).date(),
+            )
+            _apply_latest_official_market_index_stat(
+                db=db,
+                config=config,
+                payload=index_payload,
+            )
+        except Exception:
+            db.rollback()
 
         market_breadth = _resolve_market_breadth(
             db=db,

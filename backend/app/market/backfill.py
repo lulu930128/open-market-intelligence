@@ -3,7 +3,6 @@ import time
 from calendar import monthrange
 from datetime import date, datetime, timedelta, timezone
 
-import requests
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -25,6 +24,7 @@ from app.market.trading_calendar import (
     previous_taiwan_trading_day,
     taiwan_today,
 )
+from app.http_client import get as http_get, post as http_post
 from app.sources.defaults import (
     TPEX_DAILY_QUOTES_SOURCE_NAME,
     TWSE_DAILY_TRADING_SOURCE_NAME,
@@ -427,7 +427,7 @@ def backfill_twse_stock_day(
         raw_result: RawFetchResult | None = None
 
         try:
-            response = requests.get(url, headers=headers, timeout=30)
+            response = http_get(url, headers=headers, timeout=30)
             raw_text = response.text
             content_hash = sha256_text(raw_text)
             content_type = response.headers.get("content-type")
@@ -699,7 +699,7 @@ def backfill_tpex_trading_stock(
         raw_result: RawFetchResult | None = None
 
         try:
-            response = requests.post(
+            response = http_post(
                 TPEX_TRADING_STOCK_URL,
                 data={
                     "code": stock_id,

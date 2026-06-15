@@ -1,14 +1,15 @@
 from collections.abc import Callable
-from datetime import date, time, timedelta
+from datetime import date, timedelta
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import MarketDailyPrice, StockMaster
 from app.market.backfill import backfill_tpex_trading_stock, backfill_twse_stock_day
+from app.market.calendar_status import expected_taiwan_trade_date
+from app.market.taiwan_rules import TAIWAN_DATASET_DAILY_PRICE
 from app.market.trading_calendar import (
     is_taiwan_trading_day,
-    latest_released_trading_day,
     previous_taiwan_trading_day,
 )
 from app.watchlists import service as watchlist_service
@@ -103,10 +104,14 @@ def _expected_latest_trade_date(to_date: date | None, include_today: bool) -> da
     if to_date is not None:
         return previous_taiwan_trading_day(to_date, include_value=True)
 
-    return latest_released_trading_day(
-        release_time=time(hour=15, minute=15),
+    expected_date = expected_taiwan_trade_date(
+        TAIWAN_DATASET_DAILY_PRICE,
         include_today=True if include_today else None,
     )
+    if expected_date is None:
+        return previous_taiwan_trading_day(date.today(), include_value=False)
+
+    return expected_date
 
 
 def _list_unique_watchlist_items(

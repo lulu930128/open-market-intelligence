@@ -12,6 +12,8 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import requests
 
+from app.http_client import get as http_get
+
 
 NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NASDAQ_OTHER_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -504,7 +506,7 @@ def parse_symbol_directories(
 
 
 def _get_json(url: str, *, timeout_seconds: int, headers: dict[str, str] | None = None) -> dict[str, Any]:
-    response = requests.get(url, headers=headers, timeout=timeout_seconds)
+    response = http_get(url, headers=headers, timeout=timeout_seconds)
     response.raise_for_status()
     payload = response.json()
 
@@ -515,7 +517,7 @@ def _get_json(url: str, *, timeout_seconds: int, headers: dict[str, str] | None 
 
 
 def _get_text(url: str, *, timeout_seconds: int, headers: dict[str, str] | None = None) -> str:
-    response = requests.get(url, headers=headers, timeout=timeout_seconds)
+    response = http_get(url, headers=headers, timeout=timeout_seconds)
     response.raise_for_status()
     return response.text
 
@@ -565,7 +567,7 @@ def fetch_alphavantage_daily_payload(
     timeout_seconds: int,
 ) -> tuple[dict[str, Any], str]:
     function_name = "TIME_SERIES_DAILY_ADJUSTED" if adjusted else "TIME_SERIES_DAILY"
-    response = requests.get(
+    response = http_get(
         ALPHAVANTAGE_QUERY_URL,
         params={
             "function": function_name,
@@ -585,7 +587,7 @@ def fetch_alphavantage_overview_payload(
     api_key: str,
     timeout_seconds: int,
 ) -> tuple[dict[str, Any], str]:
-    response = requests.get(
+    response = http_get(
         ALPHAVANTAGE_QUERY_URL,
         params={
             "function": "OVERVIEW",
@@ -604,7 +606,7 @@ def fetch_alphavantage_dividends_payload(
     api_key: str,
     timeout_seconds: int,
 ) -> tuple[dict[str, Any], str]:
-    response = requests.get(
+    response = http_get(
         ALPHAVANTAGE_QUERY_URL,
         params={
             "function": "DIVIDENDS",
@@ -623,7 +625,7 @@ def fetch_alphavantage_splits_payload(
     api_key: str,
     timeout_seconds: int,
 ) -> tuple[dict[str, Any], str]:
-    response = requests.get(
+    response = http_get(
         ALPHAVANTAGE_QUERY_URL,
         params={
             "function": "SPLITS",
@@ -663,7 +665,7 @@ def fetch_fred_series_observations_payload(
     if observation_end is not None:
         params["observation_end"] = observation_end.isoformat()
 
-    response = requests.get(
+    response = http_get(
         FRED_SERIES_OBSERVATIONS_URL,
         params=params,
         timeout=timeout_seconds,
@@ -688,7 +690,7 @@ def fetch_yahoo_chart_payload(
     timeout_seconds: int,
 ) -> tuple[dict[str, Any], str]:
     normalized_symbol = normalize_us_symbol(symbol)
-    response = requests.get(
+    response = http_get(
         YAHOO_CHART_URL.format(symbol=quote(normalized_symbol, safe="")),
         params={
             "range": range_value,

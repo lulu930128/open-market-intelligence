@@ -2,15 +2,20 @@ from datetime import date, datetime
 
 from sqlalchemy.orm import Session
 
+from app.market.calendar_status import expected_taiwan_trade_date
 from app.market.intraday import get_intraday_trend
 from app.market.signal_service import calculate_latest_stock_signals
-from app.market.taiwan_rules import expected_daily_price_date
+from app.market.taiwan_rules import TAIWAN_DATASET_DAILY_PRICE
 from app.watchlists import service as watchlist_service
 
 
 _ALLOWED_RANK_FIELDS = {"watchlist", "score", "change_pct", "volume"}
 _ALLOWED_SORT_ORDERS = {"asc", "desc"}
 ESTIMATED_LIMIT_PCT_THRESHOLD = 9.5
+
+
+def expected_daily_price_date() -> date | None:
+    return expected_taiwan_trade_date(TAIWAN_DATASET_DAILY_PRICE)
 
 
 def _pick_primary_signal(signals: list[dict]) -> dict | None:
@@ -132,6 +137,8 @@ def _parse_row_trade_date(value) -> date | None:
 
 def _ranking_freshness(rows: list[dict], requested_stock_count: int) -> dict:
     target_trade_date = expected_daily_price_date()
+    if target_trade_date is None:
+        target_trade_date = date.today()
     row_dates = [_parse_row_trade_date(row.get("time")) for row in rows]
     latest_trade_date = max(
         (row_date for row_date in row_dates if row_date is not None),

@@ -10,18 +10,49 @@ from app.market.daily_metrics_backfill import ensure_stock_daily_metrics
 from app.market.financial_metrics_history_backfill import ensure_stock_financial_metrics_history
 from app.market.monthly_revenue_history_backfill import ensure_stock_monthly_revenue_history
 from app.market.shareholding_history_backfill import ensure_stock_shareholding_history
+from app.market.calendar_status import expected_taiwan_trade_date
 from app.market.taiwan_rules import (
+    TAIWAN_DATASET_BROKER_BRANCH,
+    TAIWAN_DATASET_DAILY_PRICE,
+    TAIWAN_DATASET_INSTITUTIONAL_TRADE,
+    TAIWAN_DATASET_MARGIN_TRADING,
+    TAIWAN_REFRESH_BROKER_BRANCH,
+    TAIWAN_REFRESH_DAILY_PRICE,
+    TAIWAN_REFRESH_INSTITUTIONAL_TRADE,
+    TAIWAN_REFRESH_MARGIN_TRADING,
     TAIWAN_REFRESH_STEP_LABELS,
-    expected_broker_branch_date,
-    expected_daily_price_date,
-    expected_institutional_trade_date,
-    expected_margin_trade_date,
     normalize_refresh_profile,
     refresh_profile_steps,
 )
 
 
 ProgressCallback = Callable[[int | None, int | None, str | None], None]
+def expected_daily_price_date(*, include_today: bool | None = None) -> date | None:
+    return expected_taiwan_trade_date(
+        TAIWAN_DATASET_DAILY_PRICE,
+        include_today=include_today,
+    )
+
+
+def expected_institutional_trade_date(*, include_today: bool | None = None) -> date | None:
+    return expected_taiwan_trade_date(
+        TAIWAN_DATASET_INSTITUTIONAL_TRADE,
+        include_today=include_today,
+    )
+
+
+def expected_margin_trade_date(*, include_today: bool | None = None) -> date | None:
+    return expected_taiwan_trade_date(
+        TAIWAN_DATASET_MARGIN_TRADING,
+        include_today=include_today,
+    )
+
+
+def expected_broker_branch_date(*, include_today: bool | None = None) -> date | None:
+    return expected_taiwan_trade_date(
+        TAIWAN_DATASET_BROKER_BRANCH,
+        include_today=include_today,
+    )
 
 
 def _step_status(result: dict) -> str:
@@ -70,6 +101,24 @@ def _get_stock_market(db: Session, stock_id: str) -> str | None:
         return None
 
     return stock.market.upper()
+
+
+def _expected_refresh_trade_date(
+    step_key: str,
+    *,
+    include_today: bool | None,
+) -> date:
+    expected_by_step = {
+        TAIWAN_REFRESH_DAILY_PRICE: expected_daily_price_date,
+        TAIWAN_REFRESH_INSTITUTIONAL_TRADE: expected_institutional_trade_date,
+        TAIWAN_REFRESH_MARGIN_TRADING: expected_margin_trade_date,
+        TAIWAN_REFRESH_BROKER_BRANCH: expected_broker_branch_date,
+    }
+    expected_date = expected_by_step[step_key](include_today=include_today)
+    if expected_date is None:
+        raise ValueError(f"No expected trade date is configured for refresh step '{step_key}'.")
+
+    return expected_date
 
 
 def _ensure_current_month_daily_prices(
@@ -124,16 +173,20 @@ def refresh_selected_stock_data(
     requested_steps = refresh_profile_steps(refresh_profile)
     step_total = len(requested_steps)
     results: dict[str, dict] = {}
-    daily_price_date = expected_daily_price_date(
+    daily_price_date = _expected_refresh_trade_date(
+        TAIWAN_REFRESH_DAILY_PRICE,
         include_today=include_today,
     )
-    institutional_trade_date = expected_institutional_trade_date(
+    institutional_trade_date = _expected_refresh_trade_date(
+        TAIWAN_REFRESH_INSTITUTIONAL_TRADE,
         include_today=include_today,
     )
-    margin_trade_date = expected_margin_trade_date(
+    margin_trade_date = _expected_refresh_trade_date(
+        TAIWAN_REFRESH_MARGIN_TRADING,
         include_today=include_today,
     )
-    branch_trade_date = expected_broker_branch_date(
+    branch_trade_date = _expected_refresh_trade_date(
+        TAIWAN_REFRESH_BROKER_BRANCH,
         include_today=include_today,
     )
 

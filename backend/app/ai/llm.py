@@ -5,6 +5,7 @@ import json
 
 import requests
 
+from app.http_client import post as http_post
 from app.config import settings
 
 
@@ -438,7 +439,7 @@ def generate_structured_report(envelope: dict[str, Any]) -> dict[str, Any]:
     }
 
     try:
-        response = requests.post(
+        response = http_post(
             settings.openai_responses_url,
             headers=headers,
             json=payload,
@@ -484,7 +485,7 @@ def generate_decision_answer(decision_input: dict[str, Any]) -> dict[str, Any]:
     }
 
     try:
-        response = requests.post(
+        response = http_post(
             settings.openai_responses_url,
             headers=headers,
             json=payload,
@@ -530,7 +531,7 @@ def generate_tool_plan(planner_input: dict[str, Any]) -> dict[str, Any]:
     }
 
     try:
-        response = requests.post(
+        response = http_post(
             settings.openai_responses_url,
             headers=headers,
             json=payload,

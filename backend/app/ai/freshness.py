@@ -18,12 +18,9 @@ from app.market.taiwan_rules import (
     TAIWAN_DATASET_SPECS,
     TAIWAN_STOCK_MASTER_DATASET,
     TaiwanDatasetSpec,
-    expected_broker_branch_date,
-    expected_daily_price_date,
-    expected_institutional_trade_date,
-    expected_margin_trade_date,
     is_equity_only_dataset_required as _is_equity_only_dataset_required,
 )
+from app.market.calendar_status import expected_taiwan_trade_date
 from app.watchlists import service as watchlist_service
 
 
@@ -43,6 +40,22 @@ DATASET_LABELS = TAIWAN_DATASET_LABELS
 DATASET_FREQUENCIES = TAIWAN_DATASET_FREQUENCIES
 
 
+def expected_daily_price_date() -> date | None:
+    return expected_taiwan_trade_date(TAIWAN_DATASET_DAILY_PRICE)
+
+
+def expected_institutional_trade_date() -> date | None:
+    return expected_taiwan_trade_date(TAIWAN_DATASET_INSTITUTIONAL_TRADE)
+
+
+def expected_margin_trade_date() -> date | None:
+    return expected_taiwan_trade_date(TAIWAN_DATASET_MARGIN_TRADING)
+
+
+def expected_broker_branch_date() -> date | None:
+    return expected_taiwan_trade_date(TAIWAN_DATASET_BROKER_BRANCH)
+
+
 def _expected_date_for_dataset(key: str) -> date | None:
     if key == TAIWAN_DATASET_DAILY_PRICE:
         return expected_daily_price_date()
@@ -57,6 +70,7 @@ def _expected_date_for_dataset(key: str) -> date | None:
         return expected_broker_branch_date()
 
     return None
+
 
 
 def _json_value(value: Any) -> Any:

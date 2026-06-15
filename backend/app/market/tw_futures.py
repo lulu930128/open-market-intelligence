@@ -17,6 +17,7 @@ from app.db.models import (
     TaiwanFuturesIntradayBar,
     TaiwanFuturesQuoteSnapshot,
 )
+from app.http_client import new_session
 
 
 TAIWAN_TZ = ZoneInfo("Asia/Taipei")
@@ -412,8 +413,7 @@ def fetch_taifex_daily_market_html(
     }
 
     try:
-        with requests.Session() as session_client:
-            session_client.trust_env = False
+        with new_session() as session_client:
             response = session_client.get(url, headers=headers, timeout=timeout)
             response.raise_for_status()
     except requests.RequestException as exc:
@@ -491,8 +491,7 @@ def fetch_taifex_mis_quote_payload(
     }
 
     try:
-        with requests.Session() as session_client:
-            session_client.trust_env = False
+        with new_session() as session_client:
             response = session_client.post(
                 TAIFEX_MIS_QUOTE_URL,
                 data=json.dumps(body),
@@ -885,21 +884,36 @@ def list_taiwan_futures_intraday_bars(
     symbol: str,
     interval: str = "1m",
     limit: int = 390,
+    trade_date: date | None = None,
 ) -> list[TaiwanFuturesIntradayBar]:
     normalized_symbol = normalize_taiwan_futures_symbols([symbol])[0]
     if interval != "1m":
         raise ValueError("Taiwan futures intraday bars currently support interval='1m' only.")
 
-    return list(
+    query_limit = max(limit, min(limit * 4, 12_000))
+    rows = list(
         reversed(
             db.query(TaiwanFuturesIntradayBar)
             .filter(TaiwanFuturesIntradayBar.symbol == normalized_symbol)
             .filter(TaiwanFuturesIntradayBar.interval == interval)
             .order_by(TaiwanFuturesIntradayBar.bar_time.desc())
-            .limit(limit)
+            .limit(query_limit)
             .all()
         )
     )
+
+    if not rows:
+        return []
+
+    def row_trade_date(row: TaiwanFuturesIntradayBar) -> date:
+        value = row.bar_time
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=TAIWAN_TZ)
+        return value.astimezone(TAIWAN_TZ).date()
+
+    resolved_trade_date = trade_date or row_trade_date(rows[-1])
+    filtered_rows = [row for row in rows if row_trade_date(row) == resolved_trade_date]
+    return filtered_rows[-limit:]
 
 
 def taiwan_futures_quote_to_dict(row: TaiwanFuturesQuoteSnapshot) -> dict[str, Any]:

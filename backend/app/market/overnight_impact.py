@@ -9,7 +9,15 @@ from sqlalchemy.orm import Session
 
 from app.ai.evidence_passport import build_evidence_passport
 from app.db.models import StockMaster, USDailyPrice, USWatchlistGroup, USWatchlistItem
-from app.us_market.trading_calendar import expected_us_daily_price_date
+from app.market.calendar_status import expected_us_trade_date
+
+
+def expected_us_daily_price_date() -> date:
+    expected_date = expected_us_trade_date("us_daily_price")
+    if expected_date is None:
+        return date.today()
+
+    return expected_date
 
 
 INDEX_FACTORS = {

@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.ai import agentic_tools
 from app.ai import memory as ai_memory
 from app.ai import prompts, tools
+from app.ai.us_decision_adapter import build_us_stock_decision_adapter
 
 
 ANALYSIS_HORIZON_LABELS = {
@@ -445,38 +446,11 @@ def _build_us_stock_analysis(context: dict[str, Any], requested_horizon: str) ->
     latest = compact.get("latest") if isinstance(compact.get("latest"), dict) else {}
     coverage = compact.get("coverage") if isinstance(compact.get("coverage"), dict) else {}
     missing = context.get("missing") or []
-    warnings = context.get("warnings") or []
-
-    change_pct = _numeric(latest.get("change_pct"))
-    score = 0
-    if change_pct is not None:
-        score += int(max(-35, min(35, round(change_pct * 4))))
-    if coverage.get("daily_rows"):
-        score += 10
-    if coverage.get("has_profile"):
-        score += 8
-    if coverage.get("sec_metric_count"):
-        score += 8
-    if coverage.get("short_volume_rows"):
-        score += 4
-    score -= min(len(missing) * 6, 30)
-    score -= min(len(warnings) * 3, 15)
-    score = max(-100, min(100, score))
-
-    if not coverage.get("daily_rows"):
-        title = "美股資料不足"
-        confidence = "low"
-    elif score >= 25:
-        title = "美股短線偏強"
-        confidence = "medium" if missing else "high"
-    elif score <= -15:
-        title = "美股短線偏弱"
-        confidence = "medium" if missing else "high"
-    else:
-        title = "美股資料中性"
-        confidence = "medium" if not missing else "low"
-
-    horizon = tools.normalize_analysis_horizon(requested_horizon)
+    adapter = build_us_stock_decision_adapter(context, requested_horizon)
+    score = int(adapter["selected_score"])
+    title = str(adapter["selected_title"])
+    confidence = str(adapter["selected_confidence"])
+    horizon = str(adapter["selected_horizon"])
     summary_parts = []
     if latest.get("close") is not None:
         summary_parts.append(
@@ -499,18 +473,14 @@ def _build_us_stock_analysis(context: dict[str, Any], requested_horizon: str) ->
         "selected_title": title,
         "selected_summary": "；".join(summary_parts),
         "selected_confidence": confidence,
+        "decision_adapter": adapter,
         "scores": {
             "intraday": score if horizon == "intraday" else None,
             "short": score,
             "swing": score,
             "long": score if coverage.get("sec_metric_count") else None,
         },
-        "components": [
-            {"key": "daily_price", "included": bool(coverage.get("daily_rows")), "weight": 0.45},
-            {"key": "profile", "included": bool(coverage.get("has_profile")), "weight": 0.15},
-            {"key": "sec_fundamentals", "included": bool(coverage.get("sec_metric_count")), "weight": 0.25},
-            {"key": "short_volume", "included": bool(coverage.get("short_volume_rows")), "weight": 0.15},
-        ],
+        "components": adapter["components"],
     }
 
 

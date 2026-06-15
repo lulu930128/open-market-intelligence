@@ -262,6 +262,89 @@ class DataQualityCheck(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class ProviderEvent(Base):
+    __tablename__ = "provider_event"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    market: Mapped[str] = mapped_column(String(20), index=True)
+    provider: Mapped[str] = mapped_column(String(80), default="unknown", index=True)
+    resource: Mapped[str] = mapped_column(String(120), index=True)
+    target: Mapped[str] = mapped_column(String(160), default="all", index=True)
+
+    status: Mapped[str] = mapped_column(String(40), index=True)
+    severity: Mapped[str] = mapped_column(String(30), default="info", index=True)
+    event_type: Mapped[str] = mapped_column(String(60), default="fetch", index=True)
+
+    event_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+    http_status_code: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    rate_limited: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    retry_after_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    detail_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    job_run_id: Mapped[int | None] = mapped_column(ForeignKey("job_run.id"), nullable=True, index=True)
+    fetch_log_id: Mapped[int | None] = mapped_column(ForeignKey("fetch_log.id"), nullable=True, index=True)
+    raw_result_id: Mapped[int | None] = mapped_column(ForeignKey("raw_fetch_result.id"), nullable=True, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class SourceHealthSnapshot(Base):
+    __tablename__ = "source_health_snapshot"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "market",
+            "resource",
+            "target",
+            "provider",
+            name="uq_source_health_market_resource_target_provider",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    market: Mapped[str] = mapped_column(String(20), index=True)
+    resource: Mapped[str] = mapped_column(String(120), index=True)
+    target: Mapped[str] = mapped_column(String(160), default="all", index=True)
+    provider: Mapped[str] = mapped_column(String(80), default="all", index=True)
+
+    status: Mapped[str] = mapped_column(String(40), index=True)
+    ok: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    required: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    data_quality: Mapped[str] = mapped_column(String(60), default="unknown", index=True)
+
+    latest_data_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    latest_data_key: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    latest_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    expected_data_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    freshness_lag_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    release_status: Mapped[str | None] = mapped_column(String(60), nullable=True, index=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    latest_event_id: Mapped[int | None] = mapped_column(ForeignKey("provider_event.id"), nullable=True, index=True)
+    latest_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    latest_event_status: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    latest_event_severity: Mapped[str | None] = mapped_column(String(30), nullable=True, index=True)
+    latest_event_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    recent_event_count: Mapped[int] = mapped_column(Integer, default=0)
+    recent_error_count: Mapped[int] = mapped_column(Integer, default=0)
+    consecutive_error_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    snapshot_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class MarketDailyPrice(Base):
     __tablename__ = "market_daily_price"
 

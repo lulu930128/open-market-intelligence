@@ -5,6 +5,7 @@ import requests
 from app.connectors.base import BaseConnector, FetchResult, utc_now
 from app.connectors.http_api_connector import _decode_response_text
 from app.db.models import SourceRegistry
+from app.http_client import get as http_get
 
 
 class HttpBundleConnector(BaseConnector):
@@ -53,7 +54,7 @@ class HttpBundleConnector(BaseConnector):
                 continue
 
             try:
-                response = requests.get(endpoint_url, headers=headers, timeout=30)
+                response = http_get(endpoint_url, headers=headers, timeout=30)
                 raw_text = _decode_response_text(response)
 
                 bundle[name] = {

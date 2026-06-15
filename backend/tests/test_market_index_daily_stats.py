@@ -7,7 +7,7 @@ from unittest.mock import patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.db.models import Base, MarketIndexDailyStat
+from app.db.models import Base, MarketDailyPrice, MarketIndexDailyStat, RawFetchResult, SourceRegistry
 from app.market import indices
 
 
@@ -129,6 +129,161 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertEqual(payload["points"][0]["trade_value"], 3000)
         self.assertEqual(payload["points"][0]["volume"], 30)
         self.assertEqual(payload["points"][0]["transaction_count"], 300)
+
+    def test_tpex_daily_rows_parse_tpex_index_close(self) -> None:
+        rows = indices._parse_tpex_market_daily_rows(
+            [
+                {
+                    "Date": "2026/06/15",
+                    "TradeVolume": "1,188,371,725",
+                    "TradeAmount": "225,151,077,847",
+                    "Transaction": "668,067",
+                    "TPExIndex": "429.37",
+                    "Change": "9.65",
+                }
+            ]
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["trade_date"], date(2026, 6, 15))
+        self.assertEqual(rows[0]["close_value"], 429.37)
+        self.assertEqual(rows[0]["price_change"], 9.65)
+
+    def test_daily_ohlc_appends_newer_official_index_stat_when_yahoo_is_stale(self) -> None:
+        yahoo_points = [
+            yahoo_point(date(2026, 6, 11), 43000),
+            yahoo_point(date(2026, 6, 12), 44169.04),
+        ]
+        official_rows = [
+            {
+                "trade_date": date(2026, 6, 12),
+                "trade_volume": 12_336_471_343,
+                "trade_value": 1_169_186_958_350,
+                "transaction_count": 1_000_000,
+                "close_value": 44169.04,
+                "price_change": 1019.58,
+            },
+            {
+                "trade_date": date(2026, 6, 15),
+                "trade_volume": 12_695_045_659,
+                "trade_value": 1_115_744_351_199,
+                "transaction_count": 900_000,
+                "close_value": 45396.99,
+                "price_change": 1227.95,
+            },
+        ]
+
+        with (
+            patch.object(
+                indices,
+                "_fetch_yahoo_index_points",
+                return_value=(yahoo_points, {}, timezone(timedelta(hours=8))),
+            ),
+            patch.object(indices, "_fetch_recent_market_index_daily_stats", return_value=official_rows),
+        ):
+            payload = indices.get_market_index_ohlc_chart_data(
+                index_id="TAIEX",
+                timeframe="daily",
+                bars=2,
+                db=self.db,
+            )
+
+        self.assertEqual([point["time"] for point in payload["points"]], [date(2026, 6, 12), date(2026, 6, 15)])
+        self.assertEqual(payload["to_date"], date(2026, 6, 15))
+        self.assertEqual(payload["points"][-1]["close"], 45396.99)
+        self.assertEqual(payload["points"][-1]["trade_value"], 1_115_744_351_199)
+
+    def test_index_contributions_prefer_newer_local_daily_prices(self) -> None:
+        source = SourceRegistry(
+            source_name="TWSE OpenAPI Daily Trading",
+            source_type="openapi",
+            category="market",
+        )
+        self.db.add(source)
+        self.db.flush()
+        raw_result = RawFetchResult(source_id=source.id, status_code=200)
+        self.db.add(raw_result)
+        self.db.flush()
+        self.db.add_all(
+            [
+                MarketDailyPrice(
+                    source_id=source.id,
+                    raw_result_id=raw_result.id,
+                    trade_date=date(2026, 6, 15),
+                    stock_id="2330",
+                    stock_name="台積電",
+                    close_price=100.0,
+                    price_change=10.0,
+                    trade_value=1000,
+                ),
+                MarketDailyPrice(
+                    source_id=source.id,
+                    raw_result_id=raw_result.id,
+                    trade_date=date(2026, 6, 15),
+                    stock_id="2383",
+                    stock_name="台光電",
+                    close_price=50.0,
+                    price_change=-5.0,
+                    trade_value=800,
+                ),
+                MarketIndexDailyStat(
+                    index_id="TAIEX",
+                    market="TWSE",
+                    trade_date=date(2026, 6, 15),
+                    close_value=120.0,
+                    price_change=12.0,
+                    source="twse_openapi_fmtqik",
+                ),
+            ]
+        )
+        self.db.commit()
+
+        stale_rows = [
+            {
+                "Code": "2330",
+                "Name": "台積電",
+                "ClosingPrice": "90",
+                "Change": "1",
+                "TradeValue": "100",
+                "Date": "2026-06-12",
+            }
+        ]
+
+        with (
+            patch.object(
+                indices,
+                "_source_contribution_quote_rows",
+                return_value=(
+                    stale_rows,
+                    {"2330": 1000, "2383": 1000},
+                    "twse_openapi_stock_day_all+t187ap03_L",
+                    {
+                        "code": "Code",
+                        "name": "Name",
+                        "close": "ClosingPrice",
+                        "change": "Change",
+                        "trade_value": "TradeValue",
+                        "date": "Date",
+                    },
+                ),
+            ),
+            patch.object(
+                indices,
+                "_market_index_item_for_contribution",
+                return_value={
+                    "close": 90.0,
+                    "change": 1.0,
+                    "trade_date": date(2026, 6, 12),
+                },
+            ),
+        ):
+            payload = indices.get_market_index_contributions("TAIEX", limit=5, db=self.db)
+
+        self.assertEqual(payload["source"], "market_daily_price:TWSE OpenAPI Daily Trading")
+        self.assertEqual(payload["trade_date"], date(2026, 6, 15))
+        self.assertEqual(payload["index_close"], 120.0)
+        self.assertEqual(payload["positive"][0]["stock_id"], "2330")
+        self.assertEqual(payload["negative"][0]["stock_id"], "2383")
 
 
 if __name__ == "__main__":

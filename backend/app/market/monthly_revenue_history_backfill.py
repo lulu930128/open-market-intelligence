@@ -11,6 +11,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import MonthlyRevenue, RawFetchResult, SourceRegistry, StockMaster
+from app.http_client import new_session
 from app.parsers.twse_common import parse_float, parse_int
 
 
@@ -291,7 +292,7 @@ def ensure_stock_monthly_revenue_history(
         lookback_months=lookback_months,
     )
 
-    session = requests.Session()
+    session = new_session()
     results: list[dict] = []
     fetched_count = 0
     cached_count = 0

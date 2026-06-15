@@ -13,8 +13,15 @@ from app.market.financial_metrics_history_backfill import ensure_stock_financial
 from app.market.monthly_revenue_history_backfill import ensure_stock_monthly_revenue_history
 from app.market.shareholding_history_backfill import ensure_stock_shareholding_history
 from app.market.taiwan_rules import (
+    TAIWAN_DATASET_BROKER_BRANCH,
+    TAIWAN_DATASET_DAILY_PRICE,
+    TAIWAN_DATASET_INSTITUTIONAL_TRADE,
+    TAIWAN_DATASET_MARGIN_TRADING,
+    TAIWAN_REFRESH_BROKER_BRANCH,
+    TAIWAN_REFRESH_DAILY_PRICE,
+    TAIWAN_REFRESH_INSTITUTIONAL_TRADE,
+    TAIWAN_REFRESH_MARGIN_TRADING,
     TAIWAN_REFRESH_PROFILE_PATTERN,
-    daily_metric_release_time,
     normalize_refresh_profile,
     refresh_profile_step_count,
 )
@@ -36,7 +43,6 @@ from app.market.indices import (
 from app.market.intraday import get_intraday_trend, get_market_intraday_history
 from app.market.market_chips import (
     MarketChipFetchError,
-    expected_market_chip_date,
     ensure_market_chip_daily,
     get_latest_market_chip_daily,
     list_market_chip_daily,
@@ -61,6 +67,13 @@ from app.market.broker_branch import (
     BrokerBranchFetchError,
     get_broker_branch_trade_summary,
 )
+from app.market.calendar_status import (
+    build_market_calendar_status,
+    build_taiwan_calendar_status,
+    expected_taiwan_trade_date,
+    is_release_released_from_calendar,
+)
+from app.market.source_health import build_taiwan_source_health
 from app.market.chart_drawings import (
     ChartDrawingSnapshotNotFoundError,
     delete_chart_drawing_snapshot,
@@ -71,7 +84,6 @@ from app.market.chart_drawings import (
 )
 from app.market.trading_calendar import (
     TAIWAN_TZ,
-    is_taiwan_trading_day,
     previous_taiwan_trading_day,
 )
 from app.market.schemas import (
@@ -79,6 +91,7 @@ from app.market.schemas import (
     ChartDrawingSnapshotRead,
     ChartDrawingSnapshotWrite,
     FinancialMetricQuarterlyRead,
+    MarketCalendarStatusRead,
     MarketIntradayChartRead,
     IntradayTrendRead,
     InstitutionalHoldingRatioRead,
@@ -99,6 +112,7 @@ from app.market.schemas import (
     TaiwanFuturesDailyBarRead,
     TaiwanFuturesProductRead,
     TaiwanFuturesQuoteRead,
+    TaiwanSourceHealthRead,
     TechnicalReportRead,
 )
 from app.market.service import (
@@ -131,6 +145,12 @@ from app.market.service import (
 router = APIRouter()
 
 TAIWAN_FUTURES_QUOTE_REFRESH_JOB_TYPE = "market.tw_futures_quote_refresh"
+TAIWAN_DAILY_METRIC_CATEGORY_DATASET_KEYS = {
+    TAIWAN_REFRESH_DAILY_PRICE: TAIWAN_DATASET_DAILY_PRICE,
+    TAIWAN_REFRESH_INSTITUTIONAL_TRADE: TAIWAN_DATASET_INSTITUTIONAL_TRADE,
+    TAIWAN_REFRESH_MARGIN_TRADING: TAIWAN_DATASET_MARGIN_TRADING,
+    TAIWAN_REFRESH_BROKER_BRANCH: TAIWAN_DATASET_BROKER_BRANCH,
+}
 
 
 def _split_categories(value: str) -> list[str]:
@@ -139,6 +159,34 @@ def _split_categories(value: str) -> list[str]:
 
 def _split_index_ids(value: str) -> list[str]:
     return [item.strip().upper() for item in value.split(",") if item.strip()]
+
+
+@router.get("/calendar-status", response_model=MarketCalendarStatusRead)
+def get_market_calendar_status(
+    market: str = Query(default="all", pattern="^(all|tw|us)$"),
+    now: datetime | None = Query(default=None),
+):
+    try:
+        return build_market_calendar_status(market=market, now=now)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/source-health", response_model=TaiwanSourceHealthRead)
+def get_taiwan_source_health(
+    stock_id: str | None = None,
+    dataset: str | None = None,
+    index_id: str | None = None,
+    now: datetime | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    return build_taiwan_source_health(
+        db=db,
+        stock_id=stock_id,
+        dataset=dataset,
+        index_id=index_id,
+        now=now,
+    )
 
 
 def _format_taiwan_futures_quote_source_error(exc: TaiwanFuturesFetchError) -> str:
@@ -225,15 +273,27 @@ def _resolve_daily_metric_include_today(
         return include_today
 
     now = datetime.now(TAIWAN_TZ)
+    calendar_status = build_taiwan_calendar_status(now=now)
 
-    if not is_taiwan_trading_day(now.date()):
+    if not calendar_status.get("is_trading_day"):
         return False
 
-    release_time = max(
-        (daily_metric_release_time(category) for category in categories),
-        default=daily_metric_release_time(""),
+    release_keys = [
+        TAIWAN_DAILY_METRIC_CATEGORY_DATASET_KEYS[category]
+        for category in categories
+        if category in TAIWAN_DAILY_METRIC_CATEGORY_DATASET_KEYS
+    ]
+    if not release_keys:
+        return False
+
+    return all(
+        is_release_released_from_calendar(
+            calendar_status,
+            market="tw",
+            key=release_key,
+        )
+        for release_key in release_keys
     )
-    return now.time() >= release_time
 
 
 def _daily_metric_history_range(
@@ -1033,20 +1093,43 @@ def list_taiwan_futures_intraday_bars_api(
     symbol: str,
     interval: str = Query(default="1m", pattern="^1m$"),
     limit: int = Query(default=390, ge=1, le=3000),
+    refresh: bool = True,
+    session: str = Query(default="auto", pattern="^(auto|regular|after_hours)$"),
+    trade_date: date | None = None,
     db: Session = Depends(get_db),
 ):
+    refresh_error: TaiwanFuturesFetchError | None = None
     try:
+        if refresh:
+            try:
+                refresh_taiwan_futures_quotes(
+                    db=db,
+                    symbols=[symbol],
+                    session=session,
+                    active_only=True,
+                )
+            except TaiwanFuturesFetchError as exc:
+                db.rollback()
+                refresh_error = exc
+
         rows = list_taiwan_futures_intraday_bars(
             db=db,
             symbol=symbol,
             interval=interval,
             limit=limit,
+            trade_date=trade_date,
         )
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
+
+    if not rows and refresh_error is not None:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(refresh_error),
+        ) from refresh_error
 
     return [taiwan_futures_intraday_bar_to_dict(row) for row in rows]
 
@@ -1074,9 +1157,12 @@ def refresh_market_chip_daily_api(
 ):
     try:
         index_id_list = normalize_market_chip_index_ids(_split_index_ids(index_ids))
-        target_trade_date = trade_date or expected_market_chip_date(
-            include_today=include_today
+        target_trade_date = trade_date or expected_taiwan_trade_date(
+            "market_chip_daily",
+            include_today=include_today,
         )
+        if target_trade_date is None:
+            raise ValueError("No expected trade date is available for market chip refresh.")
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1197,9 +1283,10 @@ def get_index_intraday_trend(index_id: str):
 def get_index_contributions(
     index_id: str,
     limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
 ):
     try:
-        return get_market_index_contributions(index_id=index_id, limit=limit)
+        return get_market_index_contributions(index_id=index_id, limit=limit, db=db)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

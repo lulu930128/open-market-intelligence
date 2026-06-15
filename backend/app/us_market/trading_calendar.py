@@ -59,22 +59,30 @@ def _easter_sunday(year: int) -> date:
 
 
 def us_market_holidays(year: int) -> set[date]:
+    return set(us_market_holiday_names(year))
+
+
+def us_market_holiday_names(year: int) -> dict[date, str]:
     holidays = {
-        _observed_fixed_holiday(year, 1, 1),
-        _nth_weekday(year, 1, weekday=0, n=3),
-        _nth_weekday(year, 2, weekday=0, n=3),
-        _easter_sunday(year) - timedelta(days=2),
-        _last_weekday(year, 5, weekday=0),
-        _observed_fixed_holiday(year, 7, 4),
-        _nth_weekday(year, 9, weekday=0, n=1),
-        _nth_weekday(year, 11, weekday=3, n=4),
-        _observed_fixed_holiday(year, 12, 25),
+        _observed_fixed_holiday(year, 1, 1): "New Year's Day",
+        _nth_weekday(year, 1, weekday=0, n=3): "Martin Luther King Jr. Day",
+        _nth_weekday(year, 2, weekday=0, n=3): "Washington's Birthday",
+        _easter_sunday(year) - timedelta(days=2): "Good Friday",
+        _last_weekday(year, 5, weekday=0): "Memorial Day",
+        _observed_fixed_holiday(year, 7, 4): "Independence Day",
+        _nth_weekday(year, 9, weekday=0, n=1): "Labor Day",
+        _nth_weekday(year, 11, weekday=3, n=4): "Thanksgiving Day",
+        _observed_fixed_holiday(year, 12, 25): "Christmas Day",
     }
 
     if year >= 2022:
-        holidays.add(_observed_fixed_holiday(year, 6, 19))
+        holidays[_observed_fixed_holiday(year, 6, 19)] = "Juneteenth National Independence Day"
 
     return holidays
+
+
+def us_market_holiday_name(value: date) -> str | None:
+    return us_market_holiday_names(value.year).get(value)
 
 
 def is_us_trading_day(value: date) -> bool:
@@ -86,6 +94,15 @@ def previous_us_trading_day(value: date, *, include_value: bool = True) -> date:
 
     while not is_us_trading_day(current):
         current -= timedelta(days=1)
+
+    return current
+
+
+def next_us_trading_day(value: date, *, include_value: bool = False) -> date:
+    current = value if include_value else value + timedelta(days=1)
+
+    while not is_us_trading_day(current):
+        current += timedelta(days=1)
 
     return current
 
@@ -126,6 +143,9 @@ __all__ = [
     "US_MARKET_TIMEZONE",
     "expected_us_daily_price_date",
     "is_us_trading_day",
+    "next_us_trading_day",
     "previous_us_trading_day",
+    "us_market_holiday_name",
+    "us_market_holiday_names",
     "us_market_holidays",
 ]

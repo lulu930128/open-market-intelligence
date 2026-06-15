@@ -5,6 +5,7 @@ import requests
 from sqlalchemy.orm import Session
 
 from app.db.models import BrokerBranchTradeDaily, RawFetchResult, SourceRegistry
+from app.http_client import get as http_get
 from app.market.taiwan_rules import TAIWAN_BROKER_BRANCH_RELEASE_TIME
 from app.market.trading_calendar import latest_released_trading_day
 from app.parsers.twse_common import parse_date, parse_float, parse_int
@@ -55,7 +56,7 @@ def _get_or_create_source(db: Session) -> SourceRegistry:
 
 def _fetch_nstock_branch_top15(stock_id: str) -> BrokerBranchFetchResult:
     try:
-        response = requests.get(
+        response = http_get(
             NSTOCK_BRANCH_TOP15_URL,
             params={"stock_id": stock_id},
             headers={

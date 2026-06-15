@@ -2,10 +2,10 @@ from copy import deepcopy
 from datetime import datetime, time, timedelta, timezone
 import time as monotonic_time
 
-import requests
 from sqlalchemy.orm import Session
 
 from app.db.models import MarketIntradayBar, StockMaster, utc_now
+from app.http_client import get as http_get
 
 
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
@@ -111,7 +111,7 @@ def _fetch_yahoo_intraday(
 ) -> dict:
     symbol = _yahoo_symbol(stock_id=stock_id, market=market)
     url = YAHOO_CHART_URL.format(symbol=symbol)
-    response = requests.get(
+    response = http_get(
         url,
         params={"range": range_value, "interval": interval, "includePrePost": "false"},
         headers={
@@ -230,7 +230,7 @@ def _parse_nstock_time(date_text: str | None, time_text: str | None) -> datetime
 
 
 def _fetch_nstock_intraday(stock_id: str) -> dict:
-    response = requests.get(
+    response = http_get(
         NSTOCK_MINUTE_URL,
         params={"stock_id": stock_id},
         headers={
@@ -290,7 +290,7 @@ def _fetch_nstock_intraday(stock_id: str) -> dict:
 
 def _fetch_mis_message(stock_id: str, market: str | None) -> dict | None:
     exchange = _mis_exchange(market)
-    response = requests.get(
+    response = http_get(
         TWSE_MIS_STOCK_INFO_URL,
         params={
             "ex_ch": f"{exchange}_{stock_id}.tw",

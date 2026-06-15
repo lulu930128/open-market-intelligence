@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.ai import llm
+from app.ai import llm, progress_events
 from app.db.models import (
     USDailyPrice,
     USCompanyProfile,
@@ -111,6 +111,46 @@ def _now() -> datetime:
 
 def _today() -> date:
     return _now().date()
+
+
+def _emit_tool_progress(
+    progress_callback: progress_events.ProgressCallback | None,
+    *,
+    tool_name: str,
+    status: str,
+    reason: Any = None,
+    external_fetch: bool | None = None,
+    writes_cache: bool | None = None,
+    error: Any = None,
+    duration_ms: int | None = None,
+) -> None:
+    status_text = {
+        "running": "執行中",
+        "success": "已完成",
+        "blocked": "已阻擋",
+        "skipped": "已略過",
+        "error": "失敗",
+    }.get(status, status)
+    progress_events.emit_progress(
+        progress_callback,
+        stage="tool_execution",
+        message=f"{tool_name} {status_text}。",
+        phase={
+            "running": "running",
+            "success": "completed",
+            "blocked": "blocked",
+            "skipped": "skipped",
+            "error": "failed",
+        }.get(status, "completed"),
+        dedupe_key=f"tool:{tool_name}:{status}",
+        tool=tool_name,
+        status=status,
+        reason=reason,
+        external_fetch=external_fetch,
+        writes_cache=writes_cache,
+        error=str(error) if error else None,
+        duration_ms=duration_ms,
+    )
 
 
 def _age_days(value: datetime) -> int:
@@ -844,6 +884,7 @@ def execute_tool_plan(
     plan: dict[str, Any],
     budget: dict[str, int],
     can_external_fetch: bool,
+    progress_callback: progress_events.ProgressCallback | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     runs: list[dict[str, Any]] = []
     warnings: list[str] = []
@@ -862,13 +903,19 @@ def execute_tool_plan(
         tool_name = str(step.get("tool") or "").strip()
         definition = ALLOWED_TOOLS.get(tool_name)
         if definition is None:
-            runs.append(
-                _empty_tool_run(
-                    step=step,
-                    definition=None,
-                    status="skipped",
-                    error=f"Tool is not in OMI allowlist: {tool_name}",
-                )
+            run = _empty_tool_run(
+                step=step,
+                definition=None,
+                status="skipped",
+                error=f"Tool is not in OMI allowlist: {tool_name}",
+            )
+            runs.append(run)
+            _emit_tool_progress(
+                progress_callback,
+                tool_name=tool_name or "unknown",
+                status="skipped",
+                reason=step.get("reason"),
+                error=run.get("error"),
             )
             continue
 
@@ -878,36 +925,60 @@ def execute_tool_plan(
             tuple(sorted((str(k), str(v)) for k, v in args.items())),
         )
         if key in seen:
-            runs.append(
-                _empty_tool_run(
-                    step=step,
-                    definition=definition,
-                    status="skipped",
-                    error="Duplicate tool call skipped.",
-                )
+            run = _empty_tool_run(
+                step=step,
+                definition=definition,
+                status="skipped",
+                error="Duplicate tool call skipped.",
+            )
+            runs.append(run)
+            _emit_tool_progress(
+                progress_callback,
+                tool_name=tool_name,
+                status="skipped",
+                reason=step.get("reason"),
+                external_fetch=definition.external_fetch,
+                writes_cache=definition.writes_cache,
+                error=run.get("error"),
             )
             continue
         seen.add(key)
 
         if definition.external_fetch and not can_external_fetch:
-            runs.append(
-                _empty_tool_run(
-                    step=step,
-                    definition=definition,
-                    status="blocked",
-                    error="External fetch is not allowed by request/server policy.",
-                )
+            run = _empty_tool_run(
+                step=step,
+                definition=definition,
+                status="blocked",
+                error="External fetch is not allowed by request/server policy.",
+            )
+            runs.append(run)
+            _emit_tool_progress(
+                progress_callback,
+                tool_name=tool_name,
+                status="blocked",
+                reason=step.get("reason"),
+                external_fetch=definition.external_fetch,
+                writes_cache=definition.writes_cache,
+                error=run.get("error"),
             )
             continue
 
         if definition.external_fetch and external_fetches >= budget["max_external_fetches"]:
-            runs.append(
-                _empty_tool_run(
-                    step=step,
-                    definition=definition,
-                    status="skipped",
-                    error="External fetch budget reached.",
-                )
+            run = _empty_tool_run(
+                step=step,
+                definition=definition,
+                status="skipped",
+                error="External fetch budget reached.",
+            )
+            runs.append(run)
+            _emit_tool_progress(
+                progress_callback,
+                tool_name=tool_name,
+                status="skipped",
+                reason=step.get("reason"),
+                external_fetch=definition.external_fetch,
+                writes_cache=definition.writes_cache,
+                error=run.get("error"),
             )
             continue
 
@@ -920,6 +991,14 @@ def execute_tool_plan(
         if definition.external_fetch:
             external_fetches += 1
 
+        _emit_tool_progress(
+            progress_callback,
+            tool_name=tool_name,
+            status="running",
+            reason=step.get("reason"),
+            external_fetch=definition.external_fetch,
+            writes_cache=definition.writes_cache,
+        )
         try:
             result = _execute_tool(db, tool_name, args)
             status = "success"
@@ -931,20 +1010,29 @@ def execute_tool_plan(
 
         ended_at = _now()
         duration_ms = int((perf_counter() - started_tick) * 1000)
-        runs.append(
-            {
-                "tool": tool_name,
-                "status": status,
-                "reason": step.get("reason"),
-                "arguments": args,
-                "external_fetch": definition.external_fetch,
-                "writes_cache": definition.writes_cache,
-                "result_summary": _compact_result(result),
-                "error": error,
-                "started_at": started_at.isoformat(),
-                "ended_at": ended_at.isoformat(),
-                "duration_ms": duration_ms,
-            }
+        run = {
+            "tool": tool_name,
+            "status": status,
+            "reason": step.get("reason"),
+            "arguments": args,
+            "external_fetch": definition.external_fetch,
+            "writes_cache": definition.writes_cache,
+            "result_summary": _compact_result(result),
+            "error": error,
+            "started_at": started_at.isoformat(),
+            "ended_at": ended_at.isoformat(),
+            "duration_ms": duration_ms,
+        }
+        runs.append(run)
+        _emit_tool_progress(
+            progress_callback,
+            tool_name=tool_name,
+            status=status,
+            reason=step.get("reason"),
+            external_fetch=definition.external_fetch,
+            writes_cache=definition.writes_cache,
+            error=error,
+            duration_ms=duration_ms,
         )
 
     return runs, warnings
@@ -958,6 +1046,7 @@ def run_us_stock_tool_session(
     target: dict[str, Any],
     policy: dict[str, Any],
     raw_budget: dict[str, Any] | None,
+    progress_callback: progress_events.ProgressCallback | None = None,
 ) -> dict[str, Any]:
     normalized_symbol = normalize_us_symbol(symbol)
     budget = normalize_tool_budget(raw_budget)
@@ -991,6 +1080,7 @@ def run_us_stock_tool_session(
         plan=plan,
         budget=budget,
         can_external_fetch=bool(policy.get("can_external_fetch")),
+        progress_callback=progress_callback,
     )
     refreshed_gaps = scan_us_stock_gaps(db, normalized_symbol, question=question)
     return {
@@ -1010,6 +1100,7 @@ def run_tw_stock_tool_session(
     policy: dict[str, Any],
     raw_budget: dict[str, Any] | None,
     existing_freshness: dict[str, Any] | None = None,
+    progress_callback: progress_events.ProgressCallback | None = None,
 ) -> dict[str, Any]:
     normalized_stock_id = str(stock_id or "").strip()
     budget = normalize_tool_budget(raw_budget)
@@ -1056,6 +1147,7 @@ def run_tw_stock_tool_session(
         plan=plan,
         budget=budget,
         can_external_fetch=bool(policy.get("can_external_fetch")),
+        progress_callback=progress_callback,
     )
     refreshed_gaps = freshness.check_stock_data_freshness(
         db=db,
@@ -1084,6 +1176,7 @@ def run_tw_watchlist_tool_session(
     existing_freshness: dict[str, Any] | None = None,
     include_children: bool = True,
     enabled_only: bool = True,
+    progress_callback: progress_events.ProgressCallback | None = None,
 ) -> dict[str, Any]:
     del target
     budget = normalize_tool_budget(raw_budget)
@@ -1122,6 +1215,7 @@ def run_tw_watchlist_tool_session(
         plan=plan,
         budget=budget,
         can_external_fetch=bool(policy.get("can_external_fetch")),
+        progress_callback=progress_callback,
     )
     refreshed_gaps = freshness.check_watchlist_data_freshness(
         db=db,
@@ -1193,6 +1287,10 @@ def read_us_stock_context(
         limit=10,
     )
     gaps = scan_us_stock_gaps(db, normalized_symbol)
+    source_health = us_market_service.build_us_source_health(
+        db=db,
+        symbol=normalized_symbol,
+    )
     latest_daily = daily_rows[0] if daily_rows else None
     warnings = list(gaps.get("warnings") or [])
     missing = list(gaps.get("missing") or [])
@@ -1200,6 +1298,12 @@ def read_us_stock_context(
         missing.append("us_sec_company_fact")
     if sec_warning:
         warnings.append(sec_warning)
+    for entry in source_health.get("entries") or []:
+        if not isinstance(entry, dict) or entry.get("status") != "stale":
+            continue
+        warnings.append(
+            f"US source health stale: {entry.get('resource')} via {entry.get('provider')} - {entry.get('reason')}"
+        )
 
     source_refs: list[dict[str, Any]] = []
     for row in daily_rows[:3]:
@@ -1231,6 +1335,7 @@ def read_us_stock_context(
         _append_source_ref_once(source_refs, {"type": "table", "name": "us_corporate_action"})
     if short_volume_rows:
         _append_source_ref_once(source_refs, {"type": "table", "name": "us_short_volume_daily"})
+    _append_source_ref_once(source_refs, {"type": "derived", "name": "app.us_market.source_health"})
 
     intraday_summary = _latest_tool_result(tool_runs, "us.read_intraday_trend")
     envelope = {
@@ -1269,6 +1374,7 @@ def read_us_stock_context(
                 ),
             ),
             "sec_metric_count": (sec_summary or {}).get("metric_count") if sec_summary else 0,
+            "source_health": source_health.get("summary"),
         },
         "data": {
             "stock": _row_dict(
@@ -1327,6 +1433,7 @@ def read_us_stock_context(
                     "fetched_at",
                 ),
             ),
+            "source_health": source_health,
             "tool_runs": tool_runs,
         },
         "missing": list(dict.fromkeys(missing)),

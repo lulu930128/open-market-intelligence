@@ -71,6 +71,7 @@ const FUTURES_PROFESSIONAL_TIMEFRAME_OPTIONS: Array<{
   { key: "weekly", label: "週" },
   { key: "monthly", label: "月" },
 ];
+const FUTURES_INTRADAY_REFRESH_MS = 30_000;
 
 function chartDrawingStorageKey(symbol: string | null, timeframe: FuturesTimeframe) {
   return `omi:tw-futures:chart-drawings:v1:${symbol ?? "empty"}:${timeframe}`;
@@ -490,9 +491,11 @@ export default function TaiwanFuturesDetailPanel({
     const symbolKey = normalizedSymbol;
     let cancelled = false;
 
-    async function loadQuotes() {
-      setQuoteState("loading");
-      setErrorMessage(null);
+    async function loadQuotes(silent = false) {
+      if (!silent) {
+        setQuoteState("loading");
+        setErrorMessage(null);
+      }
 
       try {
         const nextQuotes = await fetchLatestQuotes(FUTURES_ORDER);
@@ -508,13 +511,15 @@ export default function TaiwanFuturesDetailPanel({
       }
     }
 
-    async function loadBars() {
-      setBarsState("loading");
+    async function loadBars(silent = false) {
+      if (!silent) {
+        setBarsState("loading");
+      }
 
       try {
         const nextBars = await fetchJson<TaiwanFuturesIntradayBar[]>(
           `/api/market/tw-futures/${encodeURIComponent(symbolKey)}/intraday`,
-          { interval: "1m", limit: 180 }
+          { interval: "1m", limit: 180, refresh: true }
         );
         if (cancelled) return;
 
@@ -577,9 +582,14 @@ export default function TaiwanFuturesDetailPanel({
     void loadQuotes();
     void loadDailyBars();
     void loadBars();
+    const liveRefreshTimer = window.setInterval(() => {
+      void loadQuotes(true);
+      void loadBars(true);
+    }, FUTURES_INTRADAY_REFRESH_MS);
 
     return () => {
       cancelled = true;
+      window.clearInterval(liveRefreshTimer);
     };
   }, [normalizedSymbol]);
 

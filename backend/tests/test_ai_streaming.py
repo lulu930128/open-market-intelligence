@@ -96,7 +96,10 @@ class AiStreamingTests(unittest.TestCase):
             self.assertEqual(first_status["stage_label"], "收到問題")
             self.assertEqual(first_status["sequence"], 1)
             self.assertEqual(events[event_names.index("evidence")][1]["trust_level"], "high")
-            self.assertIn("position_math", [data.get("stage") for name, data in events if name == "status"])
+            status_stages = [data.get("stage") for name, data in events if name == "status"]
+            self.assertIn("evidence_passport", status_stages)
+            self.assertIn("tool_execution", status_stages)
+            self.assertIn("position_math", status_stages)
             self.assertTrue(
                 all(data.get("stage_label") for name, data in events if name == "status")
             )
@@ -127,6 +130,156 @@ class AiStreamingTests(unittest.TestCase):
             self.assertEqual(events[-2][1]["status_code"], 400)
             self.assertEqual(events[-2][1]["kind"], "bad_request")
             self.assertEqual(events[-1], ("done", {"ok": False}))
+        finally:
+            engine = db.get_bind()
+            db.close()
+            engine.dispose()
+
+    def test_stream_emits_ask_progress_callback_statuses(self) -> None:
+        db = make_session()
+        try:
+            payload = AiAskRequest(
+                question="2330 可以買嗎",
+                target={"type": "tw_stock", "id": "2330"},
+                mode="brief",
+            )
+            fake_response = {
+                "kind": "ai_ask",
+                "contract_version": "omi.ai.ask.v2",
+                "question": payload.question,
+                "target": {"type": "tw_stock", "id": "2330", "label": "2330 台積電"},
+                "mode": {"requested": "brief", "effective": "brief"},
+                "action": "omi.generate_stock_brief",
+                "strategy_profile": "short_term_momentum",
+                "caller_profile": "kuro_readonly",
+                "answer_ready": True,
+                "report_level": "brief",
+                "analysis": {"human_answer": {"text": "結論：等待回檔確認。"}},
+                "reasoning_steps": [],
+                "tool_runs": [],
+                "result": {},
+                "freshness": {"is_current": True},
+                "missing": [],
+                "warnings": [],
+                "source_refs": [],
+                "evidence_passport": {},
+            }
+
+            def fake_ask(**kwargs):
+                progress_callback = kwargs["progress_callback"]
+                progress_callback(
+                    {
+                        "stage": "score_model",
+                        "message": "已完成五因子評分。",
+                        "question_intent": "entry_decision",
+                    }
+                )
+                return fake_response
+
+            with patch.object(ai_streaming.ai_ask, "ask", side_effect=fake_ask):
+                payload_text = "".join(
+                    ai_streaming.iter_ask_sse_events(
+                        db=db,
+                        payload=payload,
+                        server_policy=ai_ask.AiAskServerPolicy(),
+                    )
+                )
+
+            events = parse_sse_events(payload_text)
+            event_names = [event_name for event_name, _ in events]
+            score_status_index = next(
+                index
+                for index, (event_name, data) in enumerate(events)
+                if event_name == "status" and data.get("stage") == "score_model"
+            )
+            self.assertLess(score_status_index, event_names.index("final"))
+            score_status = events[score_status_index][1]
+            self.assertEqual(score_status["sequence"], 3)
+            self.assertEqual(score_status["stage_label"], "五因子評分")
+            self.assertEqual(score_status["question_intent"], "entry_decision")
+        finally:
+            engine = db.get_bind()
+            db.close()
+            engine.dispose()
+
+    def test_stream_dedupes_statuses_by_dedupe_key_not_stage_only(self) -> None:
+        db = make_session()
+        try:
+            payload = AiAskRequest(
+                question="2330 可以買嗎",
+                target={"type": "tw_stock", "id": "2330"},
+                mode="brief",
+            )
+            fake_response = {
+                "kind": "ai_ask",
+                "contract_version": "omi.ai.ask.v2",
+                "question": payload.question,
+                "target": {"type": "tw_stock", "id": "2330", "label": "2330 台積電"},
+                "mode": {"requested": "brief", "effective": "brief"},
+                "action": "omi.generate_stock_brief",
+                "strategy_profile": "short_term_momentum",
+                "caller_profile": "kuro_readonly",
+                "answer_ready": True,
+                "report_level": "brief",
+                "analysis": {"human_answer": {"text": "結論：等待回檔確認。"}},
+                "reasoning_steps": [],
+                "tool_runs": [],
+                "result": {},
+                "freshness": {"is_current": True},
+                "missing": [],
+                "warnings": [],
+                "source_refs": [],
+                "evidence_passport": {},
+            }
+
+            def fake_ask(**kwargs):
+                progress_callback = kwargs["progress_callback"]
+                progress_callback(
+                    {
+                        "stage": "evidence_read",
+                        "message": "已完成台股資料檢查，資料可用。",
+                        "phase": "completed",
+                        "dedupe_key": "evidence_read:freshness",
+                    }
+                )
+                progress_callback(
+                    {
+                        "stage": "evidence_read",
+                        "message": "正在讀取摘要所需的市場與技術資料。",
+                        "phase": "running",
+                        "dedupe_key": "evidence_read:mode:brief",
+                    }
+                )
+                progress_callback(
+                    {
+                        "stage": "evidence_read",
+                        "message": "已完成台股資料檢查，資料可用。",
+                        "phase": "completed",
+                        "dedupe_key": "evidence_read:freshness",
+                    }
+                )
+                return fake_response
+
+            with patch.object(ai_streaming.ai_ask, "ask", side_effect=fake_ask):
+                payload_text = "".join(
+                    ai_streaming.iter_ask_sse_events(
+                        db=db,
+                        payload=payload,
+                        server_policy=ai_ask.AiAskServerPolicy(),
+                    )
+                )
+
+            events = parse_sse_events(payload_text)
+            evidence_statuses = [
+                data
+                for event_name, data in events
+                if event_name == "status" and data.get("stage") == "evidence_read"
+            ]
+            self.assertEqual(
+                [status["dedupe_key"] for status in evidence_statuses],
+                ["evidence_read:freshness", "evidence_read:mode:brief"],
+            )
+            self.assertEqual([status["sequence"] for status in evidence_statuses], [3, 4])
         finally:
             engine = db.get_bind()
             db.close()

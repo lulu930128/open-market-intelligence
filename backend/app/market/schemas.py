@@ -4,6 +4,93 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class MarketCalendarReleaseWindowRead(BaseModel):
+    key: str
+    label: str
+    release_time: str
+    release_at: datetime
+    next_release_at: datetime
+    expected_trade_date: date | None = None
+    status: str
+    is_released: bool
+
+
+class MarketCalendarSessionRead(BaseModel):
+    preopen_time: str | None = None
+    open_time: str
+    close_time: str
+    next_session_start_at: datetime
+    is_polling_window: bool
+    is_after_close: bool
+
+
+class MarketCalendarMarketStatusRead(BaseModel):
+    market: str
+    timezone: str
+    checked_at: datetime
+    date: date
+    is_trading_day: bool
+    phase: str
+    reason: str
+    holiday_name: str | None = None
+    previous_trading_day: date
+    next_trading_day: date
+    session: MarketCalendarSessionRead
+    release_windows: dict[str, MarketCalendarReleaseWindowRead] = Field(default_factory=dict)
+
+
+class MarketCalendarStatusRead(BaseModel):
+    kind: str
+    generated_at: datetime
+    markets: dict[str, MarketCalendarMarketStatusRead] = Field(default_factory=dict)
+
+
+class TaiwanSourceHealthEntryRead(BaseModel):
+    resource: str
+    label: str
+    frequency: str
+    target: str
+    status: str
+    ok: bool
+    row_count: int
+    required: bool = True
+    latest_data_date: date | None = None
+    latest_data_key: str | None = None
+    latest_updated_at: datetime | None = None
+    expected_data_date: date | None = None
+    freshness_lag_days: int | None = None
+    release_status: str | None = None
+    release_is_released: bool | None = None
+    data_quality: str
+    reason: str
+    latest_event_id: int | None = None
+    latest_event_at: datetime | None = None
+    latest_event_status: str | None = None
+    latest_event_severity: str | None = None
+    latest_event_message: str | None = None
+    recent_event_count: int = 0
+    recent_error_count: int = 0
+    consecutive_error_count: int = 0
+
+
+class TaiwanSourceHealthSummaryRead(BaseModel):
+    entry_count: int
+    ok_count: int
+    empty_count: int
+    stale_count: int
+    not_applicable_count: int
+    error_count: int
+
+
+class TaiwanSourceHealthRead(BaseModel):
+    kind: str
+    generated_at: datetime
+    filters: dict[str, str | None] = Field(default_factory=dict)
+    market_calendar: dict[str, Any] = Field(default_factory=dict)
+    summary: TaiwanSourceHealthSummaryRead
+    entries: list[TaiwanSourceHealthEntryRead] = Field(default_factory=list)
+
+
 class MarketDailyPriceRead(BaseModel):
     id: int
 

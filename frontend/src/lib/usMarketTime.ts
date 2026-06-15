@@ -1,3 +1,8 @@
+import {
+  getMarketCalendarStatusSnapshot,
+  msUntilIsoTime,
+} from "@/lib/marketCalendarStatus";
+
 export const US_INTRADAY_REFRESH_MS = 5_000;
 export const US_SESSION_START_MINUTES = 9 * 60 + 30;
 export const US_SESSION_END_MINUTES = 16 * 60;
@@ -112,6 +117,20 @@ export function getNewYorkMinutesOfDay(value: string | Date) {
 export function getUsMarketRefreshState(now = new Date()) {
   const parts = getNewYorkParts(now);
   const dateKey = newYorkDateKey(parts);
+  const calendarStatus = getMarketCalendarStatusSnapshot("us");
+
+  if (calendarStatus?.date === dateKey) {
+    const nextPollingMs =
+      msUntilIsoTime(calendarStatus.session.next_session_start_at, now) ?? 60_000;
+
+    return {
+      dateKey,
+      isPollingWindow: calendarStatus.session.is_polling_window,
+      isAfterClose: calendarStatus.session.is_after_close,
+      msUntilNextPollingStart: nextPollingMs,
+    };
+  }
+
   const isTradingDay = isUsWeekday(parts);
   const nowMs = now.getTime();
   const openMs = newYorkBoundaryToUtcMs(parts.year, parts.month, parts.day, 9, 30);

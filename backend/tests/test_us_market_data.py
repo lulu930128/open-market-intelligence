@@ -26,6 +26,7 @@ from app.db.models import (
 from app.us_market.schemas import USWatchlistGroupCreate, USWatchlistItemCreate
 from app.us_market.service import (
     USStockNotFoundError,
+    build_us_source_health,
     create_us_watchlist_group,
     create_us_watchlist_item,
     get_us_sec_fundamental_summary,
@@ -642,6 +643,70 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self.assertEqual(result["updated_count"], 0)
         self.assertEqual(row.short_volume, 250)
         self.assertEqual(row.raw_payload_hash, "new")
+
+    def test_us_source_health_summarizes_provider_freshness(self) -> None:
+        self.db.add(
+            USStockMaster(
+                symbol="IBM",
+                security_name="International Business Machines Corporation",
+                exchange="NYSE",
+                asset_type="stock",
+                listing_source="nasdaq_trader",
+                cik="0000051143",
+                sec_company_name="International Business Machines Corp",
+                is_active=True,
+            )
+        )
+        self.db.commit()
+        upsert_us_daily_price_records(
+            self.db,
+            [
+                USDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="IBM",
+                    trade_date=date(2026, 5, 29),
+                    open_price=100.0,
+                    high_price=105.0,
+                    low_price=99.0,
+                    close_price=104.5,
+                    adjusted_close=None,
+                    trade_volume=1234567,
+                    dividend_amount=None,
+                    split_coefficient=None,
+                    source_url="https://query1.finance.yahoo.com/v8/finance/chart/IBM",
+                    raw_payload_hash="ibm-yahoo",
+                )
+            ],
+        )
+        upsert_us_company_profile_records(
+            self.db,
+            [
+                parse_alphavantage_company_profile(
+                    ALPHAVANTAGE_OVERVIEW_SAMPLE,
+                    symbol="IBM",
+                    source_url="https://www.alphavantage.co/query?function=OVERVIEW&symbol=IBM&apikey=REDACTED",
+                )
+            ],
+        )
+
+        health = build_us_source_health(
+            self.db,
+            symbol="ibm",
+            expected_daily_price_date=date(2026, 6, 2),
+        )
+        entries = {
+            (entry["resource"], entry["provider"]): entry
+            for entry in health["entries"]
+        }
+
+        self.assertEqual(health["filters"]["symbol"], "IBM")
+        self.assertEqual(entries[("daily_price", "yahoo_chart")]["status"], "stale")
+        self.assertEqual(entries[("daily_price", "yahoo_chart")]["freshness_lag_days"], 4)
+        self.assertEqual(entries[("daily_price", "alphavantage")]["status"], "empty")
+        self.assertEqual(entries[("profile", "alphavantage")]["status"], "available")
+        self.assertEqual(entries[("sec_facts", "sec_edgar")]["status"], "empty")
+        self.assertEqual(health["summary"]["stale_count"], 1)
+        self.assertGreaterEqual(health["summary"]["empty_count"], 1)
 
     def test_us_watchlists_write_only_us_tables(self) -> None:
         symbol_records = parse_symbol_directories(

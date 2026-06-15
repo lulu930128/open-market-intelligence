@@ -30,6 +30,19 @@ from app.us_market.schemas import (
     USWatchlistItemCreate,
     USWatchlistItemUpdate,
 )
+from app.us_market.providers.alphavantage import (
+    fetch_alphavantage_daily_payload,
+    fetch_alphavantage_dividends_payload,
+    fetch_alphavantage_overview_payload,
+    fetch_alphavantage_splits_payload,
+)
+from app.us_market.providers.finra import fetch_finra_short_volume_payload
+from app.us_market.providers.fred import fetch_fred_series_observations_payload
+from app.us_market.providers.sec import (
+    fetch_sec_company_tickers_exchange_payload,
+    fetch_sec_companyfacts_payload,
+)
+from app.us_market.providers.yahoo import fetch_yahoo_chart_payload
 from app.us_market.sources import (
     MacroSeriesObservationRecord,
     USDailyPriceRecord,
@@ -39,16 +52,7 @@ from app.us_market.sources import (
     USSecFactRecord,
     USShortVolumeRecord,
     USSymbolRecord,
-    fetch_alphavantage_daily_payload,
-    fetch_alphavantage_dividends_payload,
-    fetch_alphavantage_overview_payload,
-    fetch_alphavantage_splits_payload,
-    fetch_finra_short_volume_payload,
-    fetch_fred_series_observations_payload,
-    fetch_sec_company_tickers_exchange_payload,
-    fetch_sec_companyfacts_payload,
     fetch_symbol_directories,
-    fetch_yahoo_chart_payload,
     normalize_us_symbol,
     parse_alphavantage_company_profile,
     parse_alphavantage_daily_prices,
@@ -62,7 +66,16 @@ from app.us_market.sources import (
     parse_yahoo_intraday_prices,
     parse_yahoo_symbol_record,
 )
-from app.us_market.trading_calendar import expected_us_daily_price_date
+from app.us_market.source_health import build_us_source_health
+from app.market.calendar_status import expected_us_trade_date
+
+
+def expected_us_daily_price_date() -> date:
+    expected_date = expected_us_trade_date("us_daily_price")
+    if expected_date is None:
+        return date.today()
+
+    return expected_date
 
 
 class USStockNotFoundError(Exception):
@@ -2983,6 +2996,7 @@ __all__ = [
     "delete_us_watchlist_item",
     "discover_us_stock_master_from_yahoo_chart",
     "ensure_us_stock_master",
+    "build_us_source_health",
     "get_us_company_profile",
     "get_us_intraday_trend",
     "get_us_sec_fundamental_summary",

@@ -14,6 +14,7 @@ from app.db.models import (
     TaiwanFuturesQuoteSnapshot,
 )
 from app.market.tw_futures import (
+    list_taiwan_futures_intraday_bars,
     list_taiwan_futures_daily_bars,
     parse_taifex_daily_market_html,
     parse_taifex_mis_quote_payload,
@@ -213,6 +214,82 @@ class TaiwanFuturesPersistenceTests(unittest.TestCase):
                 self.assertEqual(bar.symbol, "MXF")
                 self.assertEqual(bar.contract_month, "202606")
                 self.assertEqual(bar.close_price, 44199.0)
+        finally:
+            engine.dispose()
+
+    def test_intraday_bars_default_to_latest_trade_date(self) -> None:
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(bind=engine)
+        try:
+            with Session(engine) as db:
+                db.add_all(
+                    [
+                        TaiwanFuturesIntradayBar(
+                            provider="taifex_mis",
+                            market="TAIFEX",
+                            symbol="MXF",
+                            product_code="MTX",
+                            product_name="小台 台指期",
+                            contract_symbol="MXFF6-F",
+                            contract_month="202606",
+                            session="regular",
+                            interval="1m",
+                            bar_time=datetime(2026, 6, 12, 13, 45, tzinfo=TAIWAN_TZ),
+                            open_price=44199,
+                            high_price=44199,
+                            low_price=44199,
+                            close_price=44199,
+                            total_volume=408801,
+                            source="test",
+                        ),
+                        TaiwanFuturesIntradayBar(
+                            provider="taifex_mis",
+                            market="TAIFEX",
+                            symbol="MXF",
+                            product_code="MTX",
+                            product_name="小台 台指期",
+                            contract_symbol="MXFF6-F",
+                            contract_month="202606",
+                            session="regular",
+                            interval="1m",
+                            bar_time=datetime(2026, 6, 15, 9, 0, tzinfo=TAIWAN_TZ),
+                            open_price=45000,
+                            high_price=45000,
+                            low_price=45000,
+                            close_price=45000,
+                            total_volume=100,
+                            source="test",
+                        ),
+                        TaiwanFuturesIntradayBar(
+                            provider="taifex_mis",
+                            market="TAIFEX",
+                            symbol="MXF",
+                            product_code="MTX",
+                            product_name="小台 台指期",
+                            contract_symbol="MXFF6-F",
+                            contract_month="202606",
+                            session="regular",
+                            interval="1m",
+                            bar_time=datetime(2026, 6, 15, 9, 1, tzinfo=TAIWAN_TZ),
+                            open_price=45010,
+                            high_price=45010,
+                            low_price=45010,
+                            close_price=45010,
+                            total_volume=120,
+                            source="test",
+                        ),
+                    ]
+                )
+                db.commit()
+
+                rows = list_taiwan_futures_intraday_bars(
+                    db=db,
+                    symbol="MXF",
+                    limit=10,
+                )
+
+                self.assertEqual(len(rows), 2)
+                self.assertEqual([row.bar_time.date() for row in rows], [date(2026, 6, 15), date(2026, 6, 15)])
         finally:
             engine.dispose()
 

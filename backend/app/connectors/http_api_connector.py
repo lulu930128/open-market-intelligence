@@ -5,6 +5,7 @@ import requests
 
 from app.connectors.base import BaseConnector, FetchResult, utc_now
 from app.db.models import SourceRegistry
+from app.http_client import get as http_get
 
 
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
@@ -85,7 +86,7 @@ class HttpAPIConnector(BaseConnector):
         }
 
         try:
-            response = requests.get(
+            response = http_get(
                 endpoint_url,
                 headers=headers,
                 timeout=30,

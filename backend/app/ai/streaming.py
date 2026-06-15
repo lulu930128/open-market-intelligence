@@ -3,28 +3,20 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import date, datetime
 import json
+from queue import Queue
+from threading import Thread
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.ai import ask as ai_ask
 from app.ai import llm as ai_llm
+from app.ai import stage_events
 from app.ai.schemas import AiAskRequest
 from app.watchlists import service as watchlist_service
 
 
 DEFAULT_DELTA_CHARS = 160
-STAGE_LABELS = {
-    "accepted": "收到問題",
-    "resolving": "確認目標",
-    "question_understanding": "理解問題",
-    "evidence_read": "讀取資料",
-    "score_model": "五因子評分",
-    "price_levels": "推導價位",
-    "position_math": "部位試算",
-    "decision_synthesis": "組合回答",
-    "answer_ready": "回答就緒",
-}
 
 
 def _json_default(value: Any) -> str:
@@ -36,22 +28,6 @@ def _json_default(value: Any) -> str:
 def sse_event(event: str, data: dict[str, Any]) -> str:
     payload = json.dumps(data, ensure_ascii=False, default=_json_default)
     return f"event: {event}\ndata: {payload}\n\n"
-
-
-def _status_payload(
-    *,
-    stage: str,
-    message: str,
-    sequence: int,
-    **extra: Any,
-) -> dict[str, Any]:
-    return {
-        "stage": stage,
-        "stage_label": STAGE_LABELS.get(stage, stage),
-        "message": message,
-        "sequence": sequence,
-        **extra,
-    }
 
 
 def _first_text(*values: Any) -> str | None:
@@ -162,37 +138,114 @@ def _error_payload(exc: Exception) -> dict[str, Any]:
     return {"status_code": 500, "error": str(exc), "kind": "internal_error"}
 
 
+def _status_dedupe_key(payload: dict[str, Any]) -> tuple[str, ...]:
+    stage = str(payload.get("stage") or "")
+    dedupe_key = payload.get("dedupe_key")
+    if dedupe_key:
+        return (stage, str(dedupe_key))
+    if stage == "tool_execution":
+        return (
+            stage,
+            str(payload.get("tool") or ""),
+            str(payload.get("status") or ""),
+        )
+    return (
+        stage,
+        str(payload.get("phase") or ""),
+        str(payload.get("message") or ""),
+    )
+
+
+def _ask_worker(
+    *,
+    event_queue: Queue[tuple[str, Any]],
+    db: Session,
+    payload: AiAskRequest,
+    server_policy: ai_ask.AiAskServerPolicy,
+) -> None:
+    def progress_callback(progress_event: dict[str, Any]) -> None:
+        event_queue.put(("progress", progress_event))
+
+    try:
+        response = ai_ask.ask(
+            db=db,
+            payload=payload,
+            server_policy=server_policy,
+            progress_callback=progress_callback,
+        )
+    except Exception as exc:
+        event_queue.put(("error", exc))
+    else:
+        event_queue.put(("response", response))
+    finally:
+        event_queue.put(("worker_done", None))
+
+
 def iter_ask_sse_events(
     *,
     db: Session,
     payload: AiAskRequest,
     server_policy: ai_ask.AiAskServerPolicy,
 ) -> Iterator[str]:
-    sequence = 1
-    yield sse_event(
-        "status",
-        _status_payload(
-            stage="accepted",
-            message="OMI 已收到 AI 請求。",
-            sequence=sequence,
-            contract_version=payload.contract_version,
-        ),
+    initial_payloads = stage_events.initial_status_payloads(
+        contract_version=payload.contract_version,
     )
-    sequence += 1
-    yield sse_event(
-        "status",
-        _status_payload(
-            stage="resolving",
-            message="正在確認目標、資料 freshness、可信度與可用工具。",
-            sequence=sequence,
-        ),
-    )
-    sequence += 1
+    emitted_statuses: set[tuple[str, ...]] = set()
+    for status_payload in initial_payloads:
+        emitted_statuses.add(_status_dedupe_key(status_payload))
+        yield sse_event("status", status_payload)
+    sequence = len(initial_payloads) + 1
 
+    event_queue: Queue[tuple[str, Any]] = Queue()
+    worker = Thread(
+        target=_ask_worker,
+        kwargs={
+            "event_queue": event_queue,
+            "db": db,
+            "payload": payload,
+            "server_policy": server_policy,
+        },
+        name="omi-ai-ask-stream",
+        daemon=True,
+    )
+    worker.start()
+
+    response: dict[str, Any] | None = None
     try:
-        response = ai_ask.ask(db=db, payload=payload, server_policy=server_policy)
-    except Exception as exc:
-        yield sse_event("error", _error_payload(exc))
+        while True:
+            event_kind, event_payload = event_queue.get()
+            if event_kind == "progress":
+                status_payload = stage_events.progress_status_payload(
+                    event_payload,
+                    sequence=sequence,
+                )
+                if status_payload:
+                    status_key = _status_dedupe_key(status_payload)
+                    if status_key not in emitted_statuses:
+                        emitted_statuses.add(status_key)
+                        yield sse_event("status", status_payload)
+                        sequence += 1
+                continue
+
+            if event_kind == "error":
+                yield sse_event("error", _error_payload(event_payload))
+                yield sse_event("done", {"ok": False})
+                return
+
+            if event_kind == "response":
+                response = event_payload
+                continue
+
+            if event_kind == "worker_done":
+                break
+    finally:
+        worker.join(timeout=1)
+
+    if response is None:
+        yield sse_event(
+            "error",
+            {"status_code": 500, "error": "OMI stream worker finished without a response.", "kind": "internal_error"},
+        )
         yield sse_event("done", {"ok": False})
         return
 
@@ -204,32 +257,16 @@ def iter_ask_sse_events(
         if isinstance(tool_run, dict):
             yield sse_event("tool_run", tool_run)
 
-    for step in response.get("reasoning_steps") or []:
-        if not isinstance(step, dict):
-            continue
-        stage = step.get("stage")
-        message = step.get("message")
-        if stage and message:
-            yield sse_event(
-                "status",
-                _status_payload(
-                    stage=str(stage),
-                    message=str(message),
-                    sequence=sequence,
-                ),
-            )
-            sequence += 1
-
-    yield sse_event(
-        "status",
-        _status_payload(
-            stage="answer_ready",
-            message="已完成資料檢查與回應組裝。",
-            sequence=sequence,
-            answer_ready=bool(response.get("answer_ready", True)),
-            report_level=response.get("report_level"),
-        ),
+    status_payloads, sequence = stage_events.response_status_payloads(
+        response,
+        start_sequence=sequence,
     )
+    for status_payload in status_payloads:
+        status_key = _status_dedupe_key(status_payload)
+        if status_key in emitted_statuses:
+            continue
+        emitted_statuses.add(status_key)
+        yield sse_event("status", status_payload)
 
     answer_text = extract_answer_text(response)
     for chunk in chunk_text(answer_text):

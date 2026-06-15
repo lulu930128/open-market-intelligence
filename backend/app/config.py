@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     scheduler_market_chip_refresh_time: str = "18:35"
     scheduler_market_chip_refresh_index_ids: str = "TAIEX,TPEX"
     scheduler_market_chip_refresh_force: bool = False
+    enable_taiwan_futures_scheduler: bool = True
+    scheduler_taiwan_futures_symbols: str = "TXF,MXF,TMF"
+    scheduler_taiwan_futures_session: str = "auto"
+    scheduler_taiwan_futures_interval_seconds: int = 30
+    scheduler_taiwan_futures_success_event_interval_seconds: int = 300
     enable_us_market_scheduler: bool = False
     scheduler_us_market_refresh_time: str = "06:30"
     scheduler_us_market_refresh_day_of_week: str = "tue-sat"
@@ -73,6 +78,7 @@ class Settings(BaseSettings):
     fred_api_key: str | None = None
     us_sec_user_agent: str = "Open Market Intelligence local research; set US_SEC_USER_AGENT"
     us_market_http_timeout_seconds: int = 30
+    omi_http_trust_env: bool = False
     openai_api_key: str | None = None
     openai_llm_api_key: str | None = None
     omi_openai_env_file: str | None = None

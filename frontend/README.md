@@ -141,6 +141,7 @@ npm run dev
 npm run lint
 npx tsc --noEmit
 npm run build
+npm run test:e2e
 ```
 
 ## 主要元件責任
@@ -152,6 +153,10 @@ npm run build
 | `StockDetailPanel.tsx` | 個股資料載入、分頁與明細區塊 |
 | `IntradayTrendChart.tsx` | 今日走勢、成交量、昨收線、最高最低與 hover 狀態 |
 | `StockKLineChart.tsx` | 日 K、週 K、月 K 與技術指標 |
+| `LightweightKLineChart.tsx` | 專業模式 K 線 engine、指標 series、畫線互動與 projection orchestration |
+| `components/chart/*` | 專業圖表純 UI layer，例如 header、選取畫線摘要卡、靜態 indicator overlay |
+| `OmiAskDock.tsx` | OMI 即時問答 portal UI、signals、回答渲染 |
+| `hooks/useOmiAskStream.ts` | OMI SSE fetch、abort、request stale guard 與 buffer parsing |
 | `WatchlistManager.tsx` | 自選股與群組維護操作 |
 
 ## 圖表資料約定
@@ -170,6 +175,7 @@ npm run build
 cd "C:\Open Market Intelligence\frontend"
 npm run lint
 npx tsc --noEmit
+npm run test:e2e
 ```
 
 正式版建置檢查：

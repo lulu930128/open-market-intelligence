@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, time, timedelta
 import logging
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -6,11 +6,37 @@ from zoneinfo import ZoneInfo
 from app.config import settings
 from app.db.session import SessionLocal
 from app.jobs import backfill_tasks, service as job_service
+from app.market.calendar_status import (
+    build_taiwan_calendar_status,
+    build_us_calendar_status,
+    expected_trade_date_from_calendar,
+    is_release_released_from_calendar,
+)
 from app.market.market_chips import normalize_market_chip_index_ids
+from app.market.taiwan_rules import (
+    TAIWAN_DATASET_INSTITUTIONAL_TRADE,
+    TAIWAN_DATASET_MARGIN_TRADING,
+    TAIWAN_REFRESH_INSTITUTIONAL_TRADE,
+    TAIWAN_REFRESH_MARGIN_TRADING,
+)
 from app.market.trading_calendar import is_taiwan_trading_day
+from app.market.tw_futures import (
+    TaiwanFuturesFetchError,
+    refresh_taiwan_futures_quotes,
+)
+from app.observability.provider_health import record_provider_event
 
 
 logger = logging.getLogger(__name__)
+TAIWAN_FUTURES_REGULAR_START = time(8, 40)
+TAIWAN_FUTURES_REGULAR_END = time(13, 50)
+TAIWAN_FUTURES_AFTER_HOURS_START = time(15, 0)
+TAIWAN_FUTURES_AFTER_HOURS_END = time(5, 10)
+TAIWAN_REFRESH_CATEGORY_DATASET_KEYS = {
+    TAIWAN_REFRESH_INSTITUTIONAL_TRADE: TAIWAN_DATASET_INSTITUTIONAL_TRADE,
+    TAIWAN_REFRESH_MARGIN_TRADING: TAIWAN_DATASET_MARGIN_TRADING,
+}
+_LAST_TAIWAN_FUTURES_SUCCESS_EVENT_AT: datetime | None = None
 
 
 def _parse_hour_minute(value: str) -> tuple[int, int]:
@@ -36,20 +62,107 @@ def _split_csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def enqueue_market_daily_refresh() -> None:
-    categories = ["institutional_trade", "margin_trading"]
-    now = datetime.now(_timezone())
+def _is_taiwan_futures_live_window(now: datetime) -> bool:
+    local_now = now.astimezone(_timezone()) if now.tzinfo else now.replace(tzinfo=_timezone())
+    current_date = local_now.date()
+    current_time = local_now.time()
 
-    if not is_taiwan_trading_day(now.date()):
-        logger.info("Skipped scheduled market daily refresh because %s is not a trading day.", now.date())
+    if TAIWAN_FUTURES_REGULAR_START <= current_time <= TAIWAN_FUTURES_REGULAR_END:
+        return is_taiwan_trading_day(current_date)
+
+    if current_time >= TAIWAN_FUTURES_AFTER_HOURS_START:
+        return is_taiwan_trading_day(current_date)
+
+    if current_time <= TAIWAN_FUTURES_AFTER_HOURS_END:
+        previous_date = current_date - timedelta(days=1)
+        return is_taiwan_trading_day(previous_date)
+
+    return False
+
+
+def _should_record_taiwan_futures_success(now: datetime) -> bool:
+    global _LAST_TAIWAN_FUTURES_SUCCESS_EVENT_AT
+
+    interval_seconds = max(
+        int(settings.scheduler_taiwan_futures_success_event_interval_seconds),
+        0,
+    )
+    if interval_seconds == 0:
+        _LAST_TAIWAN_FUTURES_SUCCESS_EVENT_AT = now
+        return True
+
+    if _LAST_TAIWAN_FUTURES_SUCCESS_EVENT_AT is None:
+        _LAST_TAIWAN_FUTURES_SUCCESS_EVENT_AT = now
+        return True
+
+    if (now - _LAST_TAIWAN_FUTURES_SUCCESS_EVENT_AT).total_seconds() >= interval_seconds:
+        _LAST_TAIWAN_FUTURES_SUCCESS_EVENT_AT = now
+        return True
+
+    return False
+
+
+def _record_taiwan_futures_provider_event(
+    db,
+    *,
+    status: str,
+    symbols: list[str],
+    message: str | None = None,
+    error_message: str | None = None,
+    detail: dict[str, Any] | None = None,
+) -> None:
+    try:
+        record_provider_event(
+            db,
+            market="tw",
+            provider="taifex_mis",
+            resource="tw_futures_quote",
+            target=",".join(symbols) if symbols else "all",
+            status=status,
+            event_type="poll",
+            message=message,
+            error_message=error_message,
+            detail=detail,
+        )
+    except Exception:
+        db.rollback()
+        logger.warning("Failed to record Taiwan futures provider event.", exc_info=True)
+
+
+def enqueue_market_daily_refresh() -> None:
+    categories = [TAIWAN_REFRESH_INSTITUTIONAL_TRADE, TAIWAN_REFRESH_MARGIN_TRADING]
+    now = datetime.now(_timezone())
+    calendar_status = build_taiwan_calendar_status(now=now)
+
+    if not calendar_status.get("is_trading_day"):
+        logger.info(
+            "Skipped scheduled market daily refresh because %s is not a trading day phase=%s reason=%s.",
+            calendar_status.get("date"),
+            calendar_status.get("phase"),
+            calendar_status.get("reason"),
+        )
         return
+
+    include_today = all(
+        is_release_released_from_calendar(
+            calendar_status,
+            market="tw",
+            key=TAIWAN_REFRESH_CATEGORY_DATASET_KEYS[category],
+        )
+        for category in categories
+    )
 
     request = {
         "schedule": "market_daily_refresh",
         "run_date": now.date().isoformat(),
         "categories": categories,
         "lookback_days": settings.scheduler_market_refresh_lookback_days,
-        "include_today": True,
+        "include_today": include_today,
+        "calendar_phase": calendar_status.get("phase"),
+        "calendar_release_windows": {
+            dataset_key: calendar_status.get("release_windows", {}).get(dataset_key)
+            for dataset_key in TAIWAN_REFRESH_CATEGORY_DATASET_KEYS.values()
+        },
         "sleep_seconds": settings.scheduler_market_refresh_sleep_seconds,
         "skip_existing": True,
     }
@@ -69,7 +182,7 @@ def enqueue_market_daily_refresh() -> None:
                 None,
                 categories,
                 settings.scheduler_market_refresh_lookback_days,
-                True,
+                include_today,
                 settings.scheduler_market_refresh_sleep_seconds,
                 True,
             ),
@@ -85,11 +198,14 @@ def enqueue_market_daily_refresh() -> None:
 
 def enqueue_market_chip_daily_refresh() -> None:
     now = datetime.now(_timezone())
+    calendar_status = build_taiwan_calendar_status(now=now)
 
-    if not is_taiwan_trading_day(now.date()):
+    if not calendar_status.get("is_trading_day"):
         logger.info(
-            "Skipped scheduled market chip daily refresh because %s is not a trading day.",
-            now.date(),
+            "Skipped scheduled market chip daily refresh because %s is not a trading day phase=%s reason=%s.",
+            calendar_status.get("date"),
+            calendar_status.get("phase"),
+            calendar_status.get("reason"),
         )
         return
 
@@ -101,12 +217,25 @@ def enqueue_market_chip_daily_refresh() -> None:
         logger.error("Skipped scheduled market chip daily refresh: %s", exc)
         return
 
+    trade_date = expected_trade_date_from_calendar(
+        calendar_status,
+        market="tw",
+        key="market_chip_daily",
+    ) or now.date()
+    include_today = is_release_released_from_calendar(
+        calendar_status,
+        market="tw",
+        key="market_chip_daily",
+    )
+
     request = {
         "schedule": "market_chip_daily_refresh",
         "run_date": now.date().isoformat(),
         "index_ids": index_ids,
-        "trade_date": now.date(),
-        "include_today": True,
+        "trade_date": trade_date,
+        "include_today": include_today,
+        "calendar_phase": calendar_status.get("phase"),
+        "calendar_release_window": calendar_status.get("release_windows", {}).get("market_chip_daily"),
         "force": settings.scheduler_market_chip_refresh_force,
     }
     db = SessionLocal()
@@ -122,8 +251,8 @@ def enqueue_market_chip_daily_refresh() -> None:
             task=backfill_tasks.run_market_chip_daily_refresh_job,
             task_args=(
                 index_ids,
-                now.date(),
-                True,
+                trade_date,
+                include_today,
                 settings.scheduler_market_chip_refresh_force,
             ),
         )
@@ -138,9 +267,28 @@ def enqueue_market_chip_daily_refresh() -> None:
 
 def enqueue_us_market_daily_refresh() -> None:
     now = datetime.now(_timezone())
+    calendar_status = build_us_calendar_status(now=now)
+
+    if not calendar_status.get("is_trading_day"):
+        logger.info(
+            "Skipped scheduled US market daily refresh because %s is not a trading day phase=%s reason=%s.",
+            calendar_status.get("date"),
+            calendar_status.get("phase"),
+            calendar_status.get("reason"),
+        )
+        return
+
     request = {
         "schedule": "us_market_daily_refresh",
         "run_date": now.date().isoformat(),
+        "market_date": calendar_status.get("date"),
+        "expected_trade_date": expected_trade_date_from_calendar(
+            calendar_status,
+            market="us",
+            key="us_daily_price",
+        ),
+        "calendar_phase": calendar_status.get("phase"),
+        "calendar_release_window": calendar_status.get("release_windows", {}).get("us_daily_price"),
         "group_id": None,
         "include_children": True,
         "enabled_only": True,
@@ -177,8 +325,84 @@ def enqueue_us_market_daily_refresh() -> None:
         db.close()
 
 
+def collect_taiwan_futures_quotes() -> None:
+    now = datetime.now(_timezone())
+
+    if not _is_taiwan_futures_live_window(now):
+        logger.debug(
+            "Skipped Taiwan futures quote collector outside live window now=%s.",
+            now.isoformat(),
+        )
+        return
+
+    symbols = _split_csv(settings.scheduler_taiwan_futures_symbols)
+    if not symbols:
+        logger.warning("Skipped Taiwan futures quote collector because no symbols are configured.")
+        return
+
+    db = SessionLocal()
+
+    try:
+        rows = refresh_taiwan_futures_quotes(
+            db=db,
+            symbols=symbols,
+            session=settings.scheduler_taiwan_futures_session,
+            active_only=True,
+        )
+        if _should_record_taiwan_futures_success(now):
+            _record_taiwan_futures_provider_event(
+                db,
+                status="success",
+                symbols=symbols,
+                message=f"Taiwan futures quote collector refreshed {len(rows)} active quote(s).",
+                detail={
+                    "symbols": symbols,
+                    "session": settings.scheduler_taiwan_futures_session,
+                    "row_count": len(rows),
+                },
+            )
+        logger.info(
+            "Taiwan futures quote collector refreshed %s active quote(s) symbols=%s.",
+            len(rows),
+            ",".join(symbols),
+        )
+    except (TaiwanFuturesFetchError, ValueError) as exc:
+        db.rollback()
+        _record_taiwan_futures_provider_event(
+            db,
+            status="error",
+            symbols=symbols,
+            error_message=str(exc),
+            detail={
+                "symbols": symbols,
+                "session": settings.scheduler_taiwan_futures_session,
+            },
+        )
+        logger.warning("Taiwan futures quote collector failed: %s", exc)
+    finally:
+        db.close()
+
+
+def _add_taiwan_futures_collector_job(scheduler: Any) -> bool:
+    if not settings.enable_taiwan_futures_scheduler:
+        return False
+
+    interval_seconds = max(int(settings.scheduler_taiwan_futures_interval_seconds), 10)
+    scheduler.add_job(
+        collect_taiwan_futures_quotes,
+        trigger="interval",
+        seconds=interval_seconds,
+        id="taiwan_futures_quote_collector",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        next_run_time=datetime.now(_timezone()),
+    )
+    return True
+
+
 def start_scheduler() -> Any | None:
-    if not settings.enable_scheduler:
+    if not settings.enable_scheduler and not settings.enable_taiwan_futures_scheduler:
         logger.info("Job scheduler disabled.")
         return None
 
@@ -188,34 +412,37 @@ def start_scheduler() -> Any | None:
         logger.warning("APScheduler is not installed; job scheduler disabled.")
         return None
 
-    hour, minute = _parse_hour_minute(settings.scheduler_market_refresh_time)
-    chip_hour, chip_minute = _parse_hour_minute(
-        settings.scheduler_market_chip_refresh_time
-    )
     scheduler = BackgroundScheduler(timezone=_timezone())
-    scheduler.add_job(
-        enqueue_market_daily_refresh,
-        trigger="cron",
-        day_of_week="mon-fri",
-        hour=hour,
-        minute=minute,
-        id="market_daily_refresh",
-        replace_existing=True,
-        coalesce=True,
-        max_instances=1,
-    )
-    scheduler.add_job(
-        enqueue_market_chip_daily_refresh,
-        trigger="cron",
-        day_of_week="mon-fri",
-        hour=chip_hour,
-        minute=chip_minute,
-        id="market_chip_daily_refresh",
-        replace_existing=True,
-        coalesce=True,
-        max_instances=1,
-    )
-    if settings.enable_us_market_scheduler:
+
+    if settings.enable_scheduler:
+        hour, minute = _parse_hour_minute(settings.scheduler_market_refresh_time)
+        chip_hour, chip_minute = _parse_hour_minute(
+            settings.scheduler_market_chip_refresh_time
+        )
+        scheduler.add_job(
+            enqueue_market_daily_refresh,
+            trigger="cron",
+            day_of_week="mon-fri",
+            hour=hour,
+            minute=minute,
+            id="market_daily_refresh",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+        scheduler.add_job(
+            enqueue_market_chip_daily_refresh,
+            trigger="cron",
+            day_of_week="mon-fri",
+            hour=chip_hour,
+            minute=chip_minute,
+            id="market_chip_daily_refresh",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+
+    if settings.enable_scheduler and settings.enable_us_market_scheduler:
         us_hour, us_minute = _parse_hour_minute(settings.scheduler_us_market_refresh_time)
         scheduler.add_job(
             enqueue_us_market_daily_refresh,
@@ -228,9 +455,11 @@ def start_scheduler() -> Any | None:
             coalesce=True,
             max_instances=1,
         )
+    taiwan_futures_collector_enabled = _add_taiwan_futures_collector_job(scheduler)
     scheduler.start()
     logger.info(
-        "Job scheduler started. market_daily_refresh=%s %s weekdays; market_chip_daily_refresh=%s %s weekdays; us_market_daily_refresh=%s %s %s enabled=%s.",
+        "Job scheduler started. core_scheduler_enabled=%s; market_daily_refresh=%s %s weekdays; market_chip_daily_refresh=%s %s weekdays; us_market_daily_refresh=%s %s %s enabled=%s; taiwan_futures_quote_collector interval=%ss enabled=%s.",
+        settings.enable_scheduler,
         settings.scheduler_market_refresh_time,
         settings.timezone,
         settings.scheduler_market_chip_refresh_time,
@@ -239,6 +468,8 @@ def start_scheduler() -> Any | None:
         settings.scheduler_us_market_refresh_day_of_week,
         settings.timezone,
         settings.enable_us_market_scheduler,
+        max(int(settings.scheduler_taiwan_futures_interval_seconds), 10),
+        taiwan_futures_collector_enabled,
     )
     return scheduler
 

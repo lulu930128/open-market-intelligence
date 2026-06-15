@@ -1,3 +1,8 @@
+import {
+  getMarketCalendarStatusSnapshot,
+  msUntilIsoTime,
+} from "@/lib/marketCalendarStatus";
+
 export const TAIWAN_INTRADAY_REFRESH_MS = 5_000;
 export const TAIWAN_PREOPEN_MINUTES = 8 * 60 + 30;
 export const TAIWAN_SESSION_START_MINUTES = 9 * 60;
@@ -139,6 +144,22 @@ export function getTaipeiMinutesOfDay(value: string | Date) {
 export function getTaiwanMarketRefreshState(now = new Date()) {
   const parts = getTaipeiParts(now);
   const dateKey = getTaipeiDateKey(now);
+  const calendarStatus = getMarketCalendarStatusSnapshot("tw");
+
+  if (calendarStatus?.date === dateKey) {
+    const nextPollingMs =
+      msUntilIsoTime(calendarStatus.session.next_session_start_at, now) ?? 60_000;
+    const dailyPriceRelease = calendarStatus.release_windows.market_daily_price;
+
+    return {
+      dateKey,
+      isPollingWindow: calendarStatus.session.is_polling_window,
+      isAfterClose: calendarStatus.session.is_after_close,
+      isDailyPriceReleased: Boolean(dailyPriceRelease?.is_released),
+      msUntilNextPollingStart: nextPollingMs,
+    };
+  }
+
   const isTradingDay = isTaiwanTradingDay(parts.year, parts.month, parts.day);
   const nowMs = now.getTime();
   const preopenMs = taipeiBoundaryToUtcMs(parts.year, parts.month, parts.day, 8, 30);
@@ -171,6 +192,21 @@ export function getTaiwanMarketRefreshState(now = new Date()) {
 export function getTaiwanMarketChipRefreshState(now = new Date()) {
   const parts = getTaipeiParts(now);
   const dateKey = getTaipeiDateKey(now);
+  const calendarStatus = getMarketCalendarStatusSnapshot("tw");
+
+  if (calendarStatus?.date === dateKey) {
+    const marketChipRelease = calendarStatus.release_windows.market_chip_daily;
+    const nextRefreshMs =
+      msUntilIsoTime(marketChipRelease?.next_release_at, now) ?? 60_000;
+
+    return {
+      dateKey,
+      isTradingDay: calendarStatus.is_trading_day,
+      shouldRefreshNow: Boolean(marketChipRelease?.is_released),
+      msUntilNextRefresh: nextRefreshMs,
+    };
+  }
+
   const isTradingDay = isTaiwanTradingDay(parts.year, parts.month, parts.day);
   const nowMs = now.getTime();
   const releaseHour = Math.floor(TAIWAN_MARKET_CHIP_REFRESH_MINUTES / 60);

@@ -23,6 +23,7 @@ from app.us_market.schemas import (
     USSecFactRefreshResultRead,
     USSecFundamentalSummaryRead,
     USShortVolumeDailyRead,
+    USSourceHealthRead,
     USStockMasterRead,
     USSymbolSyncResultRead,
     USWatchlistGroupCreate,
@@ -48,6 +49,7 @@ from app.us_market.service import (
     create_us_watchlist_item,
     delete_us_watchlist_group,
     delete_us_watchlist_item,
+    build_us_source_health,
     get_us_company_profile,
     get_us_intraday_trend,
     get_us_sec_fundamental_summary,
@@ -554,6 +556,19 @@ def sync_us_stock_sec_company_data(db: Session = Depends(get_db)):
         raise _fetch_error(exc) from exc
     except USMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
+
+
+@router.get("/source-health", response_model=USSourceHealthRead)
+def get_us_source_health(
+    symbol: str | None = None,
+    series_id: str | None = None,
+    db: Session = Depends(get_db),
+):
+    return build_us_source_health(
+        db=db,
+        symbol=symbol,
+        series_id=series_id,
+    )
 
 
 @router.get("/stocks/search", response_model=list[USStockMasterRead])

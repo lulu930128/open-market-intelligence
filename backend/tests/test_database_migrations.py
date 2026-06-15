@@ -62,6 +62,8 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("taiwan_futures_quote_snapshot", table_names)
             self.assertIn("taiwan_futures_intraday_bar", table_names)
             self.assertIn("taiwan_futures_daily_bar", table_names)
+            self.assertIn("provider_event", table_names)
+            self.assertIn("source_health_snapshot", table_names)
             self.assertEqual(get_database_revision(database_url), get_head_revision())
 
     def test_upgrade_legacy_create_all_database_preserves_rows(self) -> None:

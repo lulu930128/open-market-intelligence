@@ -12,6 +12,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import FinancialMetricQuarterly, RawFetchResult, SourceRegistry, StockMaster
+from app.http_client import new_session
 from app.parsers.twse_common import parse_float
 
 
@@ -398,7 +399,7 @@ def ensure_stock_financial_metrics_history(
         lookback_quarters=lookback_quarters,
     )
 
-    session = requests.Session()
+    session = new_session()
     results: list[dict] = []
     fetched_count = 0
     cached_count = 0

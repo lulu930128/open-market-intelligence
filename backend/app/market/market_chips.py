@@ -13,6 +13,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import MarketChipDaily, MarketIndexDailyStat
+from app.http_client import get as http_get
 from app.market.indices import ensure_market_index_daily_stat_coverage
 from app.market.trading_calendar import latest_released_trading_day
 from app.parsers.twse_common import (
@@ -96,7 +97,7 @@ def normalize_market_chip_index_ids(index_ids: Iterable[str] | None = None) -> l
 
 def _fetch_json(url: str, *, params: dict[str, Any] | None = None) -> HttpPayload:
     try:
-        response = requests.get(
+        response = http_get(
             url,
             params=params,
             headers=REQUEST_HEADERS,
@@ -120,7 +121,7 @@ def _fetch_json(url: str, *, params: dict[str, Any] | None = None) -> HttpPayloa
 
 def _fetch_text(url: str, *, params: dict[str, Any] | None = None) -> HttpPayload:
     try:
-        response = requests.get(
+        response = http_get(
             url,
             params=params,
             headers=REQUEST_HEADERS,

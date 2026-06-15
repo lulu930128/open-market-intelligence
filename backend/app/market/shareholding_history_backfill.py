@@ -10,6 +10,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import RawFetchResult, ShareholdingDistributionWeekly, SourceRegistry
+from app.http_client import new_session
 
 
 TDCC_SHAREHOLDING_URL = "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock"
@@ -226,7 +227,7 @@ def ensure_stock_shareholding_history(
     skip_existing: bool = True,
 ) -> dict:
     source = _get_tdcc_source(db)
-    session = requests.Session()
+    session = new_session()
     dates, form_base = _load_query_form(session)
     selected_dates = []
 

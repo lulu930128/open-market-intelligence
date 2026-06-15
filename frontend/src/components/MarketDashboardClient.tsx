@@ -11,6 +11,7 @@ import USStockDetailPanel from "@/components/USStockDetailPanel";
 import USWatchlistSidebar from "@/components/USWatchlistSidebar";
 import { fetchJson } from "@/lib/api";
 import { getJobResultStatus, requestBackfillJob } from "@/lib/jobs";
+import { refreshMarketCalendarStatus } from "@/lib/marketCalendarStatus";
 import {
   TAIWAN_INTRADAY_REFRESH_MS,
   getTaiwanIntradayXRatio,
@@ -1515,6 +1516,32 @@ export default function MarketDashboardClient({
   const marketIndexRequestSeq = useRef(0);
   const finalDashboardRefreshDate = useRef<string | null>(null);
   const finalUsDashboardRefreshDate = useRef<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | undefined;
+
+    async function loadCalendarStatus() {
+      try {
+        await refreshMarketCalendarStatus("all");
+      } catch (error) {
+        console.warn("Market calendar status refresh failed.", error);
+      } finally {
+        if (!cancelled) {
+          timer = window.setTimeout(loadCalendarStatus, 60_000);
+        }
+      }
+    }
+
+    void loadCalendarStatus();
+
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, []);
 
   const activeGroupId = selectedGroupId ?? selectedGroup?.id ?? null;
   const activeGroupIdRef = useRef<number | null>(activeGroupId);

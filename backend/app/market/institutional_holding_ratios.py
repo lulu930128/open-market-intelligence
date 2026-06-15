@@ -8,6 +8,8 @@ from datetime import date, datetime, timedelta, timezone
 import requests
 from bs4 import BeautifulSoup
 
+from app.http_client import get as http_get
+
 
 NSTOCK_INSTITUTIONAL_URL = "https://www.nstock.tw/stock_info?status=8&stock_id={stock_id}"
 TAIPEI_TIMEZONE = timezone(timedelta(hours=8))
@@ -507,7 +509,7 @@ def fetch_institutional_holding_ratios(stock_id: str) -> InstitutionalHoldingRat
     source_url = NSTOCK_INSTITUTIONAL_URL.format(stock_id=stock_id)
 
     try:
-        response = requests.get(
+        response = http_get(
             source_url,
             headers={
                 "User-Agent": (

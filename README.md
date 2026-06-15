@@ -304,13 +304,22 @@ LLM enabled 時，模型只能基於這些 evidence 補強敘事；如果 freshn
 
 ### Trading-session awareness
 
+`GET /api/market/calendar-status` 是交易日與資料發布窗口的後端單一來源，回傳 `tw` / `us` market status：
+
+- `is_trading_day`、`phase`、`reason`、`holiday_name`
+- `previous_trading_day`、`next_trading_day`
+- `session.next_session_start_at`、`session.is_polling_window`、`session.is_after_close`
+- `release_windows`，包含日線、法人、融資融券、分點、市場籌碼與美股日線的 `expected_trade_date` / `status`
+
 台股 target 會檢查台灣交易日：
 
 - 交易日盤中：可使用 intraday/today evidence。
 - 休市或週末：不使用盤中資料，改用最新日線與下一交易日提示。
 - 最新日線日期會暴露在 `data_limits`，例如「2026-06-14 非台股交易日；最新日線截至 2026-06-12；下一交易日 2026-06-15 再確認」。
 
-這個判斷會進入 `decision_evidence.market_session`，前端 OMI dock 會在 Signals 顯示「交易日判斷」。
+這個判斷會進入 `decision_evidence.market_session`，來源優先使用 `app.market.calendar_status`；前端 OMI dock 會在 Signals 顯示「交易日判斷」。
+
+Scheduler、refresh policy、AI freshness、watchlist ranking freshness 與美股 overnight context 也會從 calendar status helper 推導 expected trade date；低階 parser/backfill helper 仍保留 trading-day function 作為日期區間計算。
 
 ### Price-level logic
 
@@ -342,6 +351,8 @@ OMI 會把回答分成方向、信心、風險與資料限制：
 
 前端 `OmiAskDock` 會優先渲染 `analysis.human_answer`，而不是原始 technical digest。
 
+Dock 入口以 React portal 掛載到自身的 stable anchor，避免 raw script、runtime globals 或 `dangerouslySetInnerHTML`。SSE 串流由 `frontend/src/hooks/useOmiAskStream.ts` 集中處理，負責 fetch、abort、request id stale guard 與 buffer parsing；dock component 只管理 UI state、signals 與回答渲染。
+
 `entry_decision` 使用專屬版型：
 
 - 買入判斷：headline、方向、信心與來源。
@@ -359,7 +370,16 @@ Signals popover 顯示處理節點：
 - 資料來源
 - 渲染答案
 
-底部計數使用 `資料 / 判斷`，其中資料數來自 `source_refs` 與 `decision_evidence.data_quality.source_names`，判斷數來自 technical levels、market session、volatility、indicator quality、fundamentals 等模組。
+底部計數使用 `資料 / 工具`，其中資料數來自 `source_refs` 與 `decision_evidence.data_quality.source_names`，工具數來自本次 SSE `tool_run` 事件。判斷模組數會保留在 Signals 的資料來源訊號中，包含 technical levels、market session、volatility、indicator quality、fundamentals 等模組。
+
+### Frontend interaction tests
+
+`frontend/e2e/omi-smoke.spec.ts` 提供 Playwright smoke tests：
+
+- OMI dock 可開啟，並能消化 mocked `/omi-data/ai/ask/stream` SSE 回答。
+- 台股指數專業圖表 shell 可從一般 K 線切到 focus mode，且 chart canvas 可見。
+
+測試使用 route mock，不依賴本機後端資料庫內容。Playwright 預設使用 `127.0.0.1:3100`，避免干擾日常開發用的 `3000` port；若同一專案已有 `next dev` process，Next 可能因 dev lock 阻止第二個 dev server，需要先停止既有 dev server 或用 `PLAYWRIGHT_PORT` 指向可用 runtime。
 
 ## MCP Adapter
 
@@ -458,6 +478,8 @@ ENABLE_SCHEDULER=false
 ALPHAVANTAGE_API_KEY=
 FRED_API_KEY=
 US_SEC_USER_AGENT=Open Market Intelligence local research; contact=you@example.com
+US_MARKET_HTTP_TIMEOUT_SECONDS=30
+OMI_HTTP_TRUST_ENV=false
 
 OPENAI_API_KEY=
 OPENAI_LLM_API_KEY=
@@ -536,17 +558,22 @@ cd "C:\project\Open Market Intelligence\frontend"
 npm run lint
 npm exec tsc -- --noEmit --incremental false
 npm run build
+npm run test:e2e
 ```
 
 API spot checks：
 
 ```powershell
 Invoke-RestMethod "http://127.0.0.1:8300/api/system/health"
+Invoke-RestMethod "http://127.0.0.1:8300/api/system/provider-events?limit=20"
+Invoke-RestMethod "http://127.0.0.1:8300/api/system/source-health-snapshots?market=tw"
 Invoke-RestMethod "http://127.0.0.1:8300/api/market/intraday/2330"
 Invoke-RestMethod "http://127.0.0.1:8300/api/market/ohlc/2330?timeframe=daily&limit=120"
 Invoke-RestMethod "http://127.0.0.1:8300/api/market/technical-report/2330?timeframe=today"
 Invoke-RestMethod "http://127.0.0.1:8300/api/market/broker-branches/2330/daily?days=3&ensure_daily=false"
+Invoke-RestMethod "http://127.0.0.1:8300/api/market/source-health?stock_id=2330"
 Invoke-RestMethod "http://127.0.0.1:8300/api/us-market/stocks/search?q=SPCX"
+Invoke-RestMethod "http://127.0.0.1:8300/api/us-market/source-health?symbol=MU"
 ```
 
 Git hygiene：
@@ -559,9 +586,14 @@ git diff --check
 ## Operating Notes
 
 - Frontend API access 應透過 `frontend/src/lib/api.ts` 與 `/omi-data` proxy，除非有明確例外。
-- 台股 market time 與 trading-session helpers 放在 `frontend/src/lib/taiwanMarketTime.ts` 與 `frontend/src/lib/taiwanMarketRules.ts`。
-- 美股 regular-session helpers 放在 `frontend/src/lib/usMarketTime.ts`。
+- Backend 外部 HTTP 呼叫應透過 `backend/app/http_client.py`；預設 `OMI_HTTP_TRUST_ENV=false`，避免本機 shell 或 launcher 的 `HTTP_PROXY` / `HTTPS_PROXY` 把 OpenAI、Yahoo、TWSE/TPEx 等來源導到無效 proxy。只有確定需要真實 outbound proxy 時才設成 `true`。
+- Provider/source health observability 使用 `provider_event` 與 `source_health_snapshot` 兩張表；服務入口在 `backend/app/observability/provider_health.py`。`GET /api/system/provider-events` 可查 provider 事件歷史，`GET /api/system/source-health-snapshots` 可查目前持久化 health snapshot。台股與美股 source health API 會同步 snapshot；外部 fetcher 若要記錄錯誤、rate limit、retry-after，應呼叫 `record_provider_event()`。
+- 台股 source health 由 `backend/app/market/source_health.py` 從本地表與 `market_calendar_status` 的 release window 推導，API 為 `GET /api/market/source-health`；支援 `stock_id`、`dataset`、`index_id` 與 `now` filter。OMI 台股 context 會帶入 `data.source_health`，用來區分 `current`、`stale`、`empty` 與 ETF/權證等 `not_applicable` 資料。
+- 美股 provider adapter 入口放在 `backend/app/us_market/providers/`；source health 由 `backend/app/us_market/source_health.py` 從本地表推導，API 為 `GET /api/us-market/source-health`，OMI 美股 context 也會帶入 `data.source_health`。美股回答權重使用 `backend/app/ai/us_decision_adapter.py`，以 price trend、relative volume、fundamentals、FINRA short volume 與 source health 為核心，不套用台股法人/分點模型。
+- 台股 market time 與 trading-session helpers 放在 `frontend/src/lib/taiwanMarketTime.ts` 與 `frontend/src/lib/taiwanMarketRules.ts`；會優先使用 `frontend/src/lib/marketCalendarStatus.ts` 的後端 snapshot，沒有 snapshot 時才使用本地 fallback。
+- 美股 regular-session helpers 放在 `frontend/src/lib/usMarketTime.ts`；會優先使用 `frontend/src/lib/marketCalendarStatus.ts` 的後端 snapshot，沒有 snapshot 時才使用本地 fallback。
 - 台股、美股與台指期的專業圖表模式應共用 `frontend/src/components/ProfessionalChartPanel.tsx` 與 `frontend/src/components/professionalChartDrawing.ts`；不要在單一 detail panel 重新實作一套工具列。
+- `frontend/src/components/LightweightKLineChart.tsx` 的純 UI layer 應優先往 `frontend/src/components/chart/` 拆分；目前 header、選取畫線摘要卡與靜態 indicator overlay 已拆出。
 - Chart dimensions 要穩定；indicator toggle、hover state、label、refresh 不應重置 visible range 或中斷畫線操作。
 - 專業 K 線模式要隱藏次要 dashboard panels，但保留左側自選股與目前商品 context。
 - 券商分點多日資料是已存 daily Top15 snapshots 的 aggregate，不是完整券商分點帳本。
