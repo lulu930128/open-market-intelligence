@@ -863,8 +863,19 @@ def build_llm_consumer_answer(
     return answer
 
 
-WATCHLIST_RADAR_RISK_BUCKETS = {"risk", "limit_move"}
-WATCHLIST_RADAR_MOMENTUM_BUCKETS = {"breakout", "volume", "pullback", "momentum", "limit_move"}
+WATCHLIST_RADAR_RISK_BUCKETS = {
+    "risk",
+    "limit_move",
+    "limit_down_move",
+}
+WATCHLIST_RADAR_MOMENTUM_BUCKETS = {
+    "breakout",
+    "volume",
+    "pullback",
+    "momentum",
+    "limit_move",
+    "limit_up_move",
+}
 
 
 def watchlist_radar_rows_for_intent(

@@ -11,12 +11,39 @@ from app.watchlists import ranking_service
 
 ALLOWED_RADAR_MODES = {"action", "risk", "momentum", "all"}
 HIGH_MOVE_PCT_THRESHOLD = 7.0
+LEGACY_LIMIT_MOVE_BUCKET = "limit_move"
+ACTION_MODE_BUCKETS = {
+    LEGACY_LIMIT_MOVE_BUCKET,
+    "limit_up_move",
+    "limit_down_move",
+    "risk",
+    "breakout",
+    "volume",
+}
+RISK_MODE_BUCKETS = {
+    LEGACY_LIMIT_MOVE_BUCKET,
+    "limit_down_move",
+    "risk",
+}
+MOMENTUM_MODE_BUCKETS = {
+    LEGACY_LIMIT_MOVE_BUCKET,
+    "limit_up_move",
+    "breakout",
+    "volume",
+    "pullback",
+    "momentum",
+}
 
 BUCKET_META = [
     {
-        "key": "limit_move",
-        "label": "漲跌停 / 急漲急跌",
-        "description": "漲跌停或單日大幅波動，優先確認追價與停損風險。",
+        "key": "limit_up_move",
+        "label": "漲停 / 急漲",
+        "description": "漲停或單日大幅上漲，優先確認續強、追價與過熱風險。",
+    },
+    {
+        "key": "limit_down_move",
+        "label": "跌停 / 急跌",
+        "description": "跌停或單日大幅下跌，優先確認停損、流動性與是否破線。",
     },
     {
         "key": "risk",
@@ -247,10 +274,19 @@ def _bucket_for_row(row: dict) -> tuple[str, list[str]]:
     if limit_status in {"limit_up", "limit_down"} or (
         change_pct is not None and abs(change_pct) >= HIGH_MOVE_PCT_THRESHOLD
     ):
-        if limit_status == "limit_down" or (change_pct is not None and change_pct < 0):
-            return "limit_move", _matched_keys(keys, RISK_SIGNAL_KEYS)
+        if limit_status == "limit_down":
+            return "limit_down_move", _matched_keys(keys, RISK_SIGNAL_KEYS)
 
-        return "limit_move", _matched_keys(
+        if limit_status == "limit_up":
+            return "limit_up_move", _matched_keys(
+                keys,
+                HIGH_MOMENTUM_SIGNAL_KEYS | MOMENTUM_SIGNAL_KEYS | VOLUME_SIGNAL_KEYS,
+            )
+
+        if change_pct is not None and change_pct < 0:
+            return "limit_down_move", _matched_keys(keys, RISK_SIGNAL_KEYS)
+
+        return "limit_up_move", _matched_keys(
             keys,
             HIGH_MOMENTUM_SIGNAL_KEYS | MOMENTUM_SIGNAL_KEYS | VOLUME_SIGNAL_KEYS,
         )
@@ -290,12 +326,12 @@ def _mode_accepts_bucket(mode: str, bucket: str) -> bool:
         return True
 
     if mode == "risk":
-        return bucket in {"limit_move", "risk"}
+        return bucket in RISK_MODE_BUCKETS
 
     if mode == "momentum":
-        return bucket in {"breakout", "volume", "pullback", "momentum"}
+        return bucket in MOMENTUM_MODE_BUCKETS
 
-    return bucket not in {"quiet", "no_data", "error"}
+    return bucket in ACTION_MODE_BUCKETS
 
 
 def _urgency(row: dict, bucket: str, stale: bool) -> str:
@@ -412,6 +448,8 @@ def _priority_score(row: dict, bucket: str, urgency: str, stale: bool) -> float:
 
     bucket_base = {
         "limit_move": 100,
+        "limit_up_move": 100,
+        "limit_down_move": 100,
         "risk": 90,
         "breakout": 80,
         "volume": 70,

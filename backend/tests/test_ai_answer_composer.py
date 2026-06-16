@@ -288,6 +288,45 @@ class AiAnswerComposerTests(unittest.TestCase):
         self.assertEqual(entry_answer["radar_rows"][0]["stock_id"], "2330")
         self.assertIn("雷達 2 檔命中", entry_answer["text"])
 
+    def test_watchlist_radar_intent_understands_split_large_move_buckets(self) -> None:
+        digest = {
+            "radar_rows": [
+                {
+                    "stock_id": "3008",
+                    "label": "3008 大立光",
+                    "bucket": "limit_up_move",
+                    "bucket_label": "漲停 / 急漲",
+                    "urgency": "high",
+                },
+                {
+                    "stock_id": "3661",
+                    "label": "3661 世芯-KY",
+                    "bucket": "limit_down_move",
+                    "bucket_label": "跌停 / 急跌",
+                    "urgency": "high",
+                },
+                {
+                    "stock_id": "2454",
+                    "label": "2454 聯發科",
+                    "bucket": "breakout",
+                    "bucket_label": "突破動能",
+                    "urgency": "medium",
+                },
+            ],
+        }
+
+        risk_rows = answer_composer.watchlist_radar_rows_for_intent(
+            digest,
+            question_intent="risk_check",
+        )
+        entry_rows = answer_composer.watchlist_radar_rows_for_intent(
+            digest,
+            question_intent="entry_decision",
+        )
+
+        self.assertEqual([row["stock_id"] for row in risk_rows], ["3661", "3008"])
+        self.assertEqual([row["stock_id"] for row in entry_rows], ["3008", "2454"])
+
     def test_ask_wrappers_delegate_to_answer_composer(self) -> None:
         answer = {
             "headline": "測試",

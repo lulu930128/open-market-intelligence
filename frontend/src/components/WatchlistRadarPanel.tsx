@@ -71,8 +71,12 @@ function urgencyClass(value: string) {
 }
 
 function bucketClass(bucket: string) {
-  if (bucket === "risk" || bucket === "limit_move") {
+  if (bucket === "risk" || bucket === "limit_move" || bucket === "limit_up_move") {
     return "border-red-200 bg-red-50 text-red-700";
+  }
+
+  if (bucket === "limit_down_move") {
+    return "border-emerald-200 bg-emerald-50 text-emerald-700";
   }
 
   if (bucket === "breakout" || bucket === "momentum") {
