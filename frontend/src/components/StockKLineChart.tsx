@@ -2726,9 +2726,7 @@ export default function StockKLineChart({
               >
                 {signal.label}
               </text>
-              <title>
-                {visibleData[signal.index]?.time} {signal.label}
-              </title>
+              <title>{`${visibleData[signal.index]?.time ?? ""} ${signal.label}`}</title>
             </g>
           );
         })}

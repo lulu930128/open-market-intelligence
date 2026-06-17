@@ -16,6 +16,9 @@ logs/*
 !logs/.gitkeep
 *.log
 
+# Local scratch / browser automation state
+.tmp/
+
 # Local data
 data/*
 !data/.gitkeep
@@ -46,6 +49,7 @@ build/
 # Misc
 .cache/
 .pytest_cache/
+backend/pytest-cache-files-*/
 coverage/
 
 # Installer build artifacts

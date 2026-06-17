@@ -43,6 +43,19 @@ type DockSignal = {
   label: string;
   message: string;
   tone: SignalTone;
+  priority: number;
+};
+type SignalInput = {
+  key?: unknown;
+  signal_key?: unknown;
+  dedupe_key?: unknown;
+  stage: unknown;
+  label?: unknown;
+  stage_label?: unknown;
+  message?: unknown;
+  status?: unknown;
+  phase?: unknown;
+  tone?: SignalTone;
 };
 
 type StatusTone = "idle" | "asking" | "done" | "error";
@@ -492,6 +505,8 @@ function StructuredAnswer({ response }: { response: UnknownRecord | null }) {
         title={isEntryDecision ? "操作條件" : "怎麼做"}
         actions={consumer.action_plan}
       />
+      <ActionPlan title="情境劇本" actions={consumer.scenarios} />
+      <TextList title="反證條件" items={textItems(consumer.counter_evidence, 2)} />
       <TextList title="風險" items={textItems(consumer.risks, 2)} />
       <TextList title="資料限制" items={textItems(consumer.data_limits, 3)} />
 
@@ -528,19 +543,30 @@ function AnswerPanel({
   );
 }
 
-function buildSignal(raw: {
-  stage: unknown;
-  label?: unknown;
-  stage_label?: unknown;
-  message?: unknown;
-  tone?: SignalTone;
-}) {
+function signalPriority(raw: SignalInput) {
+  const status = stringValue(raw.status)?.toLowerCase();
+  const phase = stringValue(raw.phase)?.toLowerCase();
+  if (status === "error" || status === "failed" || phase === "failed") return 50;
+  if (raw.tone === "error") return 50;
+  if (status === "success" || status === "completed" || phase === "completed") return 40;
+  if (raw.tone === "done") return 40;
+  if (status === "blocked" || phase === "blocked") return 30;
+  if (status === "skipped" || phase === "skipped") return 20;
+  if (status === "running" || phase === "running" || raw.tone === "running") return 10;
+  return 0;
+}
+
+function buildSignal(raw: SignalInput) {
   const stage = stringValue(raw.stage) || "status";
   const label = stringValue(raw.label) || stageLabel(stage, raw.stage_label);
   const message = stringValue(raw.message) || label;
   const tone = raw.tone || "running";
-  const key = `${stage}|${label}|${message}|${tone}`;
-  return { key, stage, label, message, tone };
+  const key =
+    stringValue(raw.key) ||
+    stringValue(raw.signal_key) ||
+    stringValue(raw.dedupe_key) ||
+    `${stage}|${label}|${message}|${tone}`;
+  return { key, stage, label, message, tone, priority: signalPriority(raw) };
 }
 
 function buildRequest({
@@ -622,9 +648,17 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
   );
   const dataCount = dataCountFromResponse(finalResponse, evidence);
 
-  const appendSignal = useCallback((signalInput: Omit<DockSignal, "key">) => {
+  const appendSignal = useCallback((signalInput: SignalInput) => {
     const signal = buildSignal(signalInput);
     setSignals((current) => {
+      const existingIndex = current.findIndex((item) => item.key === signal.key);
+      if (existingIndex >= 0) {
+        const existing = current[existingIndex];
+        if (signal.priority < existing.priority) return current;
+        const next = [...current];
+        next[existingIndex] = signal;
+        return next.slice(-10);
+      }
       const last = current[current.length - 1];
       if (last?.key === signal.key) return current;
       return [...current, signal].slice(-10);
@@ -734,6 +768,9 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
           label,
           message: stringValue(data.message) || label,
           tone: "running",
+          key: data.signal_key || data.dedupe_key,
+          status: data.status,
+          phase: data.phase,
         });
         return;
       }
@@ -750,12 +787,19 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
       }
 
       if (message.event === "tool_run") {
+        const toolName = stringValue(data.tool) || stringValue(data.name) || "工具";
+        const toolScope = stringValue(data.tool_scope) || "default";
+        const toolLabel = stringValue(data.tool_label) || toolName;
+        const status = stringValue(data.status) || "已回傳";
         setToolRuns((value) => value + 1);
         appendSignal({
           stage: "tool_run",
           label: "工具執行",
-          message: `${stringValue(data.tool) || stringValue(data.name) || "工具"}：${stringValue(data.status) || "已回傳"}`,
+          message: stringValue(data.message) || `${toolLabel}：${status}`,
           tone: "tool",
+          key: data.signal_key || `tool:${toolName}:${toolScope}`,
+          status: data.status,
+          phase: data.phase,
         });
         return;
       }

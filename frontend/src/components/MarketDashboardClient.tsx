@@ -37,6 +37,7 @@ import type {
   IntradayTrendResponse,
   MarketIndexSnapshot,
   MarketIndexSummary,
+  RankingBatchResponse,
   RankingItem,
   RankingResponse,
   StockIndicatorPoint,
@@ -57,7 +58,8 @@ type LoadState = "idle" | "loading" | "success" | "error";
 type RankBy = "none" | "change_pct" | "score" | "volume";
 type USRankBy = "none" | "change_pct" | "volume" | "close";
 const WATCHLIST_INTRADAY_LIMIT = 30;
-const WATCHLIST_RADAR_MAX_RESULTS = 8;
+const WATCHLIST_RADAR_MAX_RESULTS = 20;
+const WATCHLIST_RANKING_BATCH_SIZE = 3;
 const WATCHLIST_BACKFILL_LOOKBACK_YEARS = 8;
 const MARKET_CHIP_REFRESH_STORAGE_PREFIX = "omi:market-chip-refresh";
 const TAIWAN_INDEX_TARGET_IDS = new Set(["TAIEX", "TPEX"]);
@@ -1085,6 +1087,8 @@ function buildWatchlistRows(
         signal_keys: [],
         primary_signal_key: null,
         primary_signal_label: null,
+        indicator_snapshot: {},
+        context_snapshot: {},
         intraday_previous_close: null,
         intraday_points: [],
         error_message: null,
@@ -1113,6 +1117,66 @@ function mergeWatchlistRows(
     ...(rankingByStockId.get(row.stock_id) ?? {}),
     rank: index + 1,
   }));
+}
+
+function rankingRowDateKey(value: string | null | undefined) {
+  return value?.slice(0, 10) ?? null;
+}
+
+function latestRankingTradeDate(rows: RankingItem[]) {
+  return rows.reduce<string | null>((latest, row) => {
+    const value = rankingRowDateKey(row.time);
+    if (!value) return latest;
+    return latest === null || value > latest ? value : latest;
+  }, null);
+}
+
+function mergeRankingBatchRows(
+  currentRows: RankingItem[],
+  batchRows: RankingItem[]
+) {
+  const rowsByStockId = new Map(currentRows.map((row) => [row.stock_id, row]));
+
+  batchRows.forEach((row) => {
+    rowsByStockId.set(row.stock_id, row);
+  });
+
+  return Array.from(rowsByStockId.values()).sort((a, b) => a.rank - b.rank);
+}
+
+function buildProgressiveRankingResponse({
+  batch,
+  rows,
+  currentStockCount,
+  staleStockCount,
+  noDataCount,
+  errorCount,
+  complete,
+}: {
+  batch: RankingBatchResponse;
+  rows: RankingItem[];
+  currentStockCount: number;
+  staleStockCount: number;
+  noDataCount: number;
+  errorCount: number;
+  complete: boolean;
+}): RankingResponse {
+  return {
+    group_id: batch.group_id,
+    include_children: batch.include_children,
+    rank_by: batch.rank_by,
+    sort_order: batch.sort_order,
+    requested_stock_count: batch.total_stock_count,
+    ranked_count: rows.length,
+    no_data_count: noDataCount,
+    error_count: errorCount,
+    trade_date: latestRankingTradeDate(rows),
+    target_trade_date: batch.target_trade_date,
+    is_current: complete ? staleStockCount === 0 : true,
+    current_stock_count: currentStockCount,
+    stale_stock_count: complete ? staleStockCount : 0,
+    results: rows,
+  };
 }
 
 function buildUsWatchlistRows(
@@ -1224,7 +1288,10 @@ function WatchlistRankingPanel({
   volumeHeader: string;
   emptyMessage: string;
 }) {
-  const isLoadingRows = loadState === "loading" || rows.some((row) => row.loading);
+  const hasRows = rows.length > 0;
+  const hasLoadingRows = rows.some((row) => row.loading);
+  const isLoadingRows = (loadState === "loading" && !hasRows) || hasLoadingRows;
+  const showLoadingStatus = loadState === "loading" || hasLoadingRows;
 
   return (
     <div className="space-y-4">
@@ -1308,7 +1375,7 @@ function WatchlistRankingPanel({
       <section className="border border-slate-200 bg-white">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-3">
           <h3 className="text-sm font-bold text-slate-950">自選股列表</h3>
-          {isLoadingRows ? (
+          {showLoadingStatus ? (
             <span className="inline-flex items-center gap-2 text-xs text-slate-500">
               {loadingLabel ?? "載入中"}
               <LoadingDots label="排行資料讀取中" />
@@ -1524,7 +1591,9 @@ export default function MarketDashboardClient({
     useState<MarketIndexSummary | null>(initialMarketIndexSummary);
   const [marketIndexLoadState, setMarketIndexLoadState] =
     useState<LoadState>(initialMarketIndexSummary ? "success" : "idle");
-  const [loadState, setLoadState] = useState<LoadState>("idle");
+  const [loadState, setLoadState] = useState<LoadState>(
+    initialRankingData ? "success" : "idle"
+  );
   const [radarLoadState, setRadarLoadState] = useState<LoadState>(
     initialRadarData ? "success" : "idle"
   );
@@ -1545,6 +1614,7 @@ export default function MarketDashboardClient({
   const marketIndexRequestSeq = useRef(0);
   const finalDashboardRefreshDate = useRef<string | null>(null);
   const finalUsDashboardRefreshDate = useRef<string | null>(null);
+  const initialUsWatchlistPreloadQueued = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -1583,11 +1653,7 @@ export default function MarketDashboardClient({
     [selectedGroup, watchlistItems]
   );
   const rows = useMemo(() => {
-    if (ranking?.is_current === false) {
-      return baseRows;
-    }
-
-    if (rankBy === "none") {
+    if (rankBy === "none" || ranking?.is_current === false) {
       return mergeWatchlistRows(baseRows, ranking);
     }
 
@@ -1595,11 +1661,16 @@ export default function MarketDashboardClient({
   }, [baseRows, rankBy, ranking]);
   const rankingFreshnessPending = ranking?.is_current === false;
   const displayRows = rows;
-  const rankingLoadState: LoadState =
-    rankingFreshnessPending && loadState !== "error" ? "loading" : loadState;
+  const rankingLoadState: LoadState = loadState;
   const hasPendingDisplayRows = displayRows.some(isRankingItemPending);
   const rankingListLoading =
-    rankingLoadState === "loading" || hasPendingDisplayRows;
+    displayRows.length === 0 && (rankingLoadState === "loading" || hasPendingDisplayRows);
+  const rankingStatusLoading = rankingLoadState === "loading" || hasPendingDisplayRows;
+  const loadedRankingCount = ranking?.results.length ?? 0;
+  const rankingProgressLabel =
+    rankingStatusLoading && baseRows.length > 0
+      ? `載入中 ${Math.min(loadedRankingCount, baseRows.length)}/${baseRows.length}`
+      : "載入中";
   const rankingPendingLabel =
     rankingFreshnessPending
       ? formatWatchlistFreshnessLabel(
@@ -1608,7 +1679,7 @@ export default function MarketDashboardClient({
           ranking?.stale_stock_count,
           ranking?.requested_stock_count
         )
-      : "載入中";
+      : rankingProgressLabel;
   const summary = useMemo(() => {
     const upCount = displayRows.filter((row) => {
       return row.change_pct !== null && row.change_pct !== undefined && row.change_pct > 0;
@@ -1628,11 +1699,7 @@ export default function MarketDashboardClient({
     [selectedUsGroup, usWatchlistItems]
   );
   const usRows = useMemo(() => {
-    if (usRanking?.is_current === false) {
-      return usBaseRows;
-    }
-
-    if (usRankBy === "none") {
+    if (usRankBy === "none" || usRanking?.is_current === false) {
       return mergeUsWatchlistRows(usBaseRows, usRanking);
     }
 
@@ -1640,8 +1707,7 @@ export default function MarketDashboardClient({
   }, [usBaseRows, usRankBy, usRanking]);
   const usRankingFreshnessPending = usRanking?.is_current === false;
   const usVisibleRows = usRows;
-  const usRankingLoadState: LoadState =
-    usRankingFreshnessPending && usLoadState !== "error" ? "loading" : usLoadState;
+  const usRankingLoadState: LoadState = usLoadState;
   const usRankingPendingLabel =
     usRankingFreshnessPending
       ? formatWatchlistFreshnessLabel(
@@ -1741,37 +1807,107 @@ export default function MarketDashboardClient({
     try {
       const marketState = getTaiwanMarketRefreshState();
       const useIntraday = marketState.isPollingWindow;
+      let radarPromise: Promise<void> | null = null;
+
+      function queueRadarLoad() {
+        if (radarPromise) return radarPromise;
+
+        radarPromise = fetchJson<WatchlistGroupRadarRead>(
+          `/api/watchlists/groups/${groupId}/radar`,
+          watchlistRadarParams(radarModeRef.current, useIntraday)
+        )
+          .then((data) => {
+            if (radarRequestSeq.current !== radarSeq) return;
+
+            setRadar(data);
+            setRadarLoadState("success");
+            setRadarErrorMessage(null);
+          })
+          .catch((error: unknown) => {
+            if (radarRequestSeq.current !== radarSeq) return;
+
+            if (!options?.silent) {
+              setRadar(null);
+            }
+            setRadarLoadState("error");
+            setRadarErrorMessage(apiErrorMessage(error, "雷達資料讀取失敗"));
+          });
+
+        return radarPromise;
+      }
+
+      function markRadarLoadQueued() {
+        if (radarPromise) return;
+
+        void queueRadarLoad();
+      }
+
+      if (currentRankBy === "none") {
+        let offset = 0;
+        let loadedRows: RankingItem[] = [];
+        let currentStockCount = 0;
+        let staleStockCount = 0;
+        let noDataCount = 0;
+        let errorCount = 0;
+
+        while (true) {
+          const batch = await fetchJson<RankingBatchResponse>(
+            `/api/watchlists/groups/${groupId}/rankings/latest-batch`,
+            {
+              ...WATCHLIST_ANALYSIS_PARAMS,
+              rank_by: "watchlist",
+              sort_order: "asc",
+              limit: 100,
+              use_intraday: useIntraday,
+              intraday_limit: WATCHLIST_INTRADAY_LIMIT,
+              offset,
+              batch_size: WATCHLIST_RANKING_BATCH_SIZE,
+            }
+          );
+
+          if (dashboardRequestSeq.current !== requestSeq) return;
+
+          loadedRows = mergeRankingBatchRows(loadedRows, batch.results);
+          currentStockCount += batch.current_stock_count;
+          staleStockCount += batch.stale_stock_count;
+          noDataCount += batch.no_data_count;
+          errorCount += batch.error_count;
+
+          const nextRanking = buildProgressiveRankingResponse({
+            batch,
+            rows: loadedRows,
+            currentStockCount,
+            staleStockCount,
+            noDataCount,
+            errorCount,
+            complete: !batch.has_more,
+          });
+
+          setRanking(nextRanking);
+          markRadarLoadQueued();
+
+          if (!batch.has_more || batch.requested_stock_count === 0) {
+            setLastUpdatedAt(formatDashboardTime(new Date()));
+            setLoadState("success");
+            void radarPromise;
+            return;
+          }
+
+          offset += batch.requested_stock_count;
+        }
+      }
+
       const rankingPromise = fetchJson<RankingResponse>(
         `/api/watchlists/groups/${groupId}/rankings/latest`,
         {
           ...WATCHLIST_ANALYSIS_PARAMS,
-          rank_by: currentRankBy === "none" ? "watchlist" : currentRankBy,
-          sort_order: currentRankBy === "none" ? "asc" : "desc",
+          rank_by: currentRankBy,
+          sort_order: "desc",
           limit: 100,
           use_intraday: useIntraday,
           intraday_limit: WATCHLIST_INTRADAY_LIMIT,
         }
       );
-      const radarPromise = fetchJson<WatchlistGroupRadarRead>(
-        `/api/watchlists/groups/${groupId}/radar`,
-        watchlistRadarParams(radarModeRef.current, useIntraday)
-      )
-        .then((data) => {
-          if (radarRequestSeq.current !== radarSeq) return;
-
-          setRadar(data);
-          setRadarLoadState("success");
-          setRadarErrorMessage(null);
-        })
-        .catch((error: unknown) => {
-          if (radarRequestSeq.current !== radarSeq) return;
-
-          if (!options?.silent) {
-            setRadar(null);
-          }
-          setRadarLoadState("error");
-          setRadarErrorMessage(apiErrorMessage(error, "雷達資料讀取失敗"));
-        });
       const rankingData = await rankingPromise;
 
       if (dashboardRequestSeq.current !== requestSeq) return;
@@ -1779,7 +1915,7 @@ export default function MarketDashboardClient({
       setRanking(rankingData);
       setLastUpdatedAt(formatDashboardTime(new Date()));
       setLoadState("success");
-      void radarPromise;
+      void queueRadarLoad();
     } catch (error) {
       if (dashboardRequestSeq.current !== requestSeq) return;
 
@@ -1792,7 +1928,7 @@ export default function MarketDashboardClient({
     groupId: number,
     currentRankBy = usRankBy,
     options?: { silent?: boolean }
-  ) {
+  ): Promise<USWatchlistRankingRead | null> {
     const requestSeq = usDashboardRequestSeq.current + 1;
     usDashboardRequestSeq.current = requestSeq;
 
@@ -1816,16 +1952,18 @@ export default function MarketDashboardClient({
         }
       );
 
-      if (usDashboardRequestSeq.current !== requestSeq) return;
+      if (usDashboardRequestSeq.current !== requestSeq) return null;
 
       setUsRanking(rankingData);
       setUsLastUpdatedAt(formatDashboardTime(new Date()));
       setUsLoadState("success");
+      return rankingData;
     } catch (error) {
-      if (usDashboardRequestSeq.current !== requestSeq) return;
+      if (usDashboardRequestSeq.current !== requestSeq) return null;
 
       setUsLoadState("error");
       setUsErrorMessage(error instanceof Error ? error.message : "US ranking load failed");
+      return null;
     }
   }
 
@@ -2011,6 +2149,34 @@ export default function MarketDashboardClient({
   useEffect(() => {
     selectedUsGroupIdRef.current = selectedUsGroupId;
   }, [selectedUsGroupId]);
+
+  useEffect(() => {
+    if (selectedUsGroupId === null) return;
+    if (activeMarket === "us") return;
+    if (initialUsWatchlistPreloadQueued.current) return;
+
+    initialUsWatchlistPreloadQueued.current = true;
+    const groupId = selectedUsGroupId;
+    const refreshTimer = window.setTimeout(() => {
+      void loadUsDashboard(groupId, usRankBy, { silent: true }).then(
+        (rankingData) => {
+          if (selectedUsGroupIdRef.current !== groupId) return;
+          if (rankingData?.is_current !== false) return;
+
+          void refreshUsWatchlistDailyPricesForFreshness(
+            groupId,
+            usRankBy,
+            rankingData.target_trade_date
+          );
+        }
+      );
+    }, 0);
+
+    return () => {
+      window.clearTimeout(refreshTimer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeMarket, selectedUsGroupId]);
 
   useEffect(() => {
     if (activeMarket !== "tw") return;
@@ -2406,7 +2572,7 @@ export default function MarketDashboardClient({
 
   function renderRankingRow(row: RankingItem) {
     const selected = row.stock_id === selectedStockId;
-    const loading = rankingFreshnessPending || isRankingItemPending(row);
+    const loading = isRankingItemPending(row);
 
     return (
       <a
@@ -2529,11 +2695,15 @@ export default function MarketDashboardClient({
             {selectedGroup?.group_name ?? "尚未選擇分組"}
           </h2>
           <div className="mt-1 text-sm text-slate-500">
-            {ranking?.is_current === false
+            {rankingStatusLoading
+              ? rankingPendingLabel
+              : ranking?.is_current === false
               ? rankingPendingLabel
               : lastUpdatedAt
                 ? `更新時間 ${lastUpdatedAt}`
-                : "選擇左側分組後載入資料"}
+                : ranking?.trade_date
+                  ? `資料日期 ${ranking.trade_date}`
+                  : "選擇左側分組後載入資料"}
           </div>
         </div>
 
@@ -2642,7 +2812,7 @@ export default function MarketDashboardClient({
       <section className="border border-slate-200 bg-white">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-3">
           <h3 className="text-sm font-bold text-slate-950">自選股列表</h3>
-          {rankingListLoading ? (
+          {rankingStatusLoading ? (
             <span className="inline-flex items-center gap-2 text-xs text-slate-500">
               {rankingPendingLabel}
               <LoadingDots label="自選股排行資料讀取中" />
@@ -2680,7 +2850,7 @@ export default function MarketDashboardClient({
 
   const usDisplayRows: RankingDisplayRow[] = usVisibleRows.map((row) => {
     const selected = row.symbol === selectedUsSymbol;
-    const loading = usRankingFreshnessPending || isUsRankingItemPending(row);
+    const loading = isUsRankingItemPending(row);
 
     return {
       key: `${row.group_id}-${row.symbol}`,

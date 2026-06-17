@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import re
+from typing import Any
 
 
 REPORT_HINTS = (
@@ -180,6 +181,45 @@ TREND_VIEW_HINTS = (
     "短線",
     "波段",
 )
+TREND_ANALYSIS_REQUEST_HINTS = (
+    "trend",
+    "direction",
+    "走勢",
+    "趨勢",
+    "多空",
+    "方向",
+    "強弱",
+    "還強嗎",
+    "弱嗎",
+    "強嗎",
+    "波段",
+    "中線",
+    "中短線",
+)
+TREND_ANALYSIS_PRIORITY_HINTS = (
+    "中線波段",
+    "波段角度",
+    "支撐壓力",
+)
+TREND_ANALYSIS_CONTEXT_HINTS = (
+    "日k",
+    "日K",
+    "週k",
+    "週K",
+    "周k",
+    "周K",
+    "均線",
+    "動能",
+    "量能",
+    "籌碼",
+    "營收",
+    "相對市場",
+    "支撐",
+    "壓力",
+    "觀察條件",
+)
+UI_TREND_VIEW_INTENTS = {"swing"}
+UI_RISK_INTENTS = {"risk"}
 POSITION_CONTEXT_HINTS = (
     "position",
     "holding",
@@ -410,7 +450,7 @@ US_PLAIN_SYMBOL_PATTERN = re.compile(
 )
 
 VALID_ANALYSIS_HORIZONS = {"auto", "intraday", "short", "swing", "long"}
-POSITION_RISK_TOPICS = {"stop_loss", "take_profit", "exit", "hold", "risk"}
+POSITION_RISK_TOPICS = {"stop_loss", "take_profit", "exit", "hold", "risk", "position"}
 
 
 @dataclass(frozen=True)
@@ -456,6 +496,39 @@ def matched_hints(question: str, hints: tuple[str, ...], *, limit: int = 6) -> t
     lowered = question.lower()
     matches = [hint for hint in hints if hint.lower() in lowered]
     return tuple(matches[:limit])
+
+
+def conversation_ui_ask_intent(conversation_context: dict[str, Any] | None) -> str | None:
+    if not isinstance(conversation_context, dict):
+        return None
+
+    ui_context = conversation_context.get("ui_context")
+    if not isinstance(ui_context, dict):
+        return None
+
+    intent = ui_context.get("ask_intent")
+    if not isinstance(intent, str):
+        return None
+
+    normalized = intent.strip().lower()
+    return normalized or None
+
+
+def looks_like_analysis_request(question: str) -> bool:
+    return contains_hint(question, ANALYSIS_HINTS) or contains_hint(
+        question,
+        ("結論", "分析目前標的", "分析目前目標"),
+    )
+
+
+def looks_like_structured_trend_prompt(question: str) -> bool:
+    if not looks_like_analysis_request(question):
+        return False
+    if contains_hint(question, TREND_ANALYSIS_PRIORITY_HINTS):
+        return True
+    if not contains_hint(question, TREND_ANALYSIS_REQUEST_HINTS):
+        return False
+    return len(matched_hints(question, TREND_ANALYSIS_CONTEXT_HINTS, limit=6)) >= 2
 
 
 def parse_number_token(value: str | None) -> float | None:
@@ -511,13 +584,25 @@ def infer_position_context(question: str) -> PositionContext:
     )
 
 
-def infer_question_intent(question: str) -> str:
+def infer_question_intent(
+    question: str,
+    *,
+    conversation_context: dict[str, Any] | None = None,
+) -> str:
     position_context = infer_position_context(question)
+    ui_ask_intent = conversation_ui_ask_intent(conversation_context)
+    structured_trend_prompt = looks_like_structured_trend_prompt(question)
     if (
         position_context.has_position_context
         and position_context.decision_topic in POSITION_RISK_TOPICS
     ):
         return "position_risk_decision"
+    if structured_trend_prompt:
+        return "trend_view"
+    if ui_ask_intent in UI_TREND_VIEW_INTENTS and looks_like_analysis_request(question):
+        return "trend_view"
+    if ui_ask_intent in UI_RISK_INTENTS and looks_like_analysis_request(question):
+        return "risk_check"
     if contains_hint(question, RISK_PRIORITY_HINTS):
         return "risk_check"
     if contains_hint(question, ENTRY_DECISION_HINTS):
@@ -594,9 +679,10 @@ def understand_question(
     question: str,
     requested_horizon: str | None = None,
     strategy_profile: str | None = None,
+    conversation_context: dict[str, Any] | None = None,
 ) -> QuestionUnderstanding:
     position_context = infer_position_context(question)
-    intent = infer_question_intent(question)
+    intent = infer_question_intent(question, conversation_context=conversation_context)
     horizon, horizon_source = infer_analysis_horizon(
         question=question,
         requested_horizon=requested_horizon,

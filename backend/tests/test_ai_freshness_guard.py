@@ -732,7 +732,7 @@ class AiFreshnessGuardTests(unittest.TestCase):
         self.assertEqual(radar["matched_count"], 1)
         self.assertEqual(radar["radar_count"], 1)
         self.assertEqual(radar["results"][0]["stock_id"], "2330")
-        self.assertEqual(radar["results"][0]["bucket"], "breakout")
+        self.assertEqual(radar["results"][0]["bucket"], "breakout_high")
 
     def test_watchlist_human_answer_masks_raw_dataset_keys(self) -> None:
         db = make_session()
@@ -907,6 +907,90 @@ class AiFreshnessGuardTests(unittest.TestCase):
             self.assertNotIn("盤中即時資料不足", human_answer["text"])
             self.assertNotIn("盤中即時資料不足", human_answer["detail"])
             self.assertIn("怎麼做", human_answer["text"])
+        finally:
+            db.close()
+
+    def test_analysis_mode_trend_view_prefers_structured_answer_over_llm_wording(self) -> None:
+        db = make_session()
+        try:
+            add_stock(db, stock_id="2303")
+            payload = AiAskRequest(
+                question=(
+                    "用中線波段角度分析目前標的。請使用日K/週K、均線、動能、量能、籌碼、營收與相對市場資料；"
+                    "先給結論，再列出趨勢、支撐壓力、觀察條件與主要風險。"
+                ),
+                target={"type": "tw_stock", "id": "2303", "label": "2303 聯電"},
+                mode="analysis",
+                allow_llm=True,
+                allow_write=False,
+                strategy_profile="technical_swing",
+                analysis_horizon="swing",
+                conversation_context={"ui_context": {"ask_intent": "swing"}},
+            )
+            server_policy = ai_ask.AiAskServerPolicy(
+                can_call_llm=True,
+                can_write=False,
+                trust_source="token",
+            )
+            analysis_result = {
+                "kind": "stock_llm_analysis",
+                "strategy_profile": "technical_swing",
+                "data": {
+                    "analysis": {
+                        "requested_horizon": "swing",
+                        "selected_horizon": "swing",
+                        "selected_timeframe": "weekly",
+                        "selected_score": 3,
+                        "selected_title": "波段偏多",
+                        "selected_summary": "中線結構偏多，但短線偏熱。",
+                        "selected_confidence": "high",
+                    },
+                    "technical_levels": {
+                        "kind": "technical_price_levels",
+                        "latest_price": 141.0,
+                        "entry": {
+                            "preferred_zone": {"low": 129.0, "high": 134.0},
+                            "breakout_confirm_above": {"price": 156.0},
+                            "do_not_chase_above": {"price": 143.0},
+                        },
+                        "risk": {
+                            "short_stop": {"price": 124.0},
+                            "technical_invalidation": {"price": 130.0},
+                        },
+                    },
+                },
+                "llm": {
+                    "report": {
+                        "headline": "2303 聯電：波段偏多但短線偏熱，141 元靠近追價上限",
+                        "interpretation": ["請觀察是否站穩 141 附近。"],
+                        "confidence": "high",
+                        "stance": "bullish",
+                    }
+                },
+                "missing": [],
+                "warnings": [],
+                "source_refs": [{"type": "table", "name": "market_daily_price"}],
+            }
+
+            with (
+                patch.object(ai_ask, "_check_freshness", return_value={"is_current": True, "missing": [], "warnings": []}),
+                patch.object(
+                    ai_ask.orchestrator,
+                    "generate_stock_llm_analysis",
+                    return_value=analysis_result,
+                ),
+            ):
+                response = ai_ask.ask(db=db, payload=payload, server_policy=server_policy)
+
+            human_answer = response["analysis"]["human_answer"]
+            self.assertEqual(response["analysis"]["question_intent"], "trend_view")
+            self.assertEqual(human_answer["source"], "question_intent")
+            self.assertIn("129-134", human_answer["headline"])
+            self.assertIn("129-134", human_answer["text"])
+            self.assertIn("143", human_answer["text"])
+            self.assertIn("156", human_answer["text"])
+            self.assertIn("130", human_answer["text"])
+            self.assertNotIn("站穩 141", human_answer["text"])
         finally:
             db.close()
 
@@ -1444,6 +1528,66 @@ class AiFreshnessGuardTests(unittest.TestCase):
             self.assertTrue(
                 any(step["stage"] == "position_math" for step in response["reasoning_steps"])
             )
+        finally:
+            db.close()
+
+    def test_position_cost_question_without_stop_words_uses_position_decision(self) -> None:
+        db = make_session()
+        try:
+            add_stock(db, stock_id="6449")
+            payload = AiAskRequest(
+                question="我今天這檔買在444，你怎麼看",
+                target={"type": "tw_stock", "id": "6449", "label": "6449 鈺邦"},
+                mode="auto",
+                allow_llm=False,
+                allow_write=False,
+            )
+            stock_brief = {
+                "kind": "stock_brief",
+                "data": {
+                    "latest_daily": {
+                        "trade_date": "2026-06-16",
+                        "stock_id": "6449",
+                        "close_price": 445.0,
+                    },
+                    "technical_reports": {
+                        "daily": {
+                            "timeframe": "daily",
+                            "latest_close": 445.0,
+                            "ma20": 435.0,
+                            "score": 3,
+                            "confidence": "high",
+                        }
+                    },
+                    "analysis": {
+                        "requested_horizon": "swing",
+                        "selected_horizon": "swing",
+                        "selected_timeframe": "weekly",
+                        "selected_score": 3,
+                        "selected_title": "波段偏多",
+                        "selected_summary": "價格仍在支撐區上方。",
+                        "selected_confidence": "high",
+                        "scores": {"short": 2, "swing": 3, "long": 2},
+                        "components": [],
+                    },
+                },
+                "missing": [],
+                "warnings": [],
+                "source_refs": [{"type": "table", "name": "market_daily_price"}],
+            }
+
+            with patch.object(ai_ask.reports, "build_stock_brief", return_value=stock_brief):
+                response = ai_ask.ask(db=db, payload=payload)
+
+            decision = response["analysis"]["position_decision"]
+            human_answer = response["analysis"]["human_answer"]
+            self.assertEqual(response["analysis"]["question_intent"], "position_risk_decision")
+            self.assertEqual(decision["entry_price"], 444.0)
+            self.assertEqual(decision["latest_price"], 445.0)
+            self.assertEqual(human_answer["source"], "position_decision")
+            self.assertIn("成本 444", human_answer["text"].replace(",", ""))
+            self.assertIn("最新 445", human_answer["text"].replace(",", ""))
+            self.assertIn("部位", human_answer["text"])
         finally:
             db.close()
 

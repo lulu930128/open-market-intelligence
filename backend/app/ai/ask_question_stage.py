@@ -39,6 +39,7 @@ def build_question_stage(
         question=payload.question,
         requested_horizon=requested_horizon,
         strategy_profile=payload.strategy_profile,
+        conversation_context=payload.conversation_context,
     )
     effective_horizon = question_understanding.analysis_horizon
     normalized_payload = payload.model_copy(update={"analysis_horizon": effective_horizon})

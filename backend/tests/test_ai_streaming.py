@@ -96,6 +96,10 @@ class AiStreamingTests(unittest.TestCase):
             self.assertEqual(first_status["stage_label"], "收到問題")
             self.assertEqual(first_status["sequence"], 1)
             self.assertEqual(events[event_names.index("evidence")][1]["trust_level"], "high")
+            tool_event = events[event_names.index("tool_run")][1]
+            self.assertEqual(tool_event["tool_label"], "台股資料刷新")
+            self.assertEqual(tool_event["signal_key"], "tool:tw.refresh_stock_evidence:default")
+            self.assertIn("已完成", tool_event["message"])
             status_stages = [data.get("stage") for name, data in events if name == "status"]
             self.assertIn("evidence_passport", status_stages)
             self.assertIn("tool_execution", status_stages)

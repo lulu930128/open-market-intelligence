@@ -619,6 +619,7 @@ def _extract_analysis_digest(result: dict[str, Any], policy: dict[str, Any]) -> 
             "decision_evidence": data.get("decision_evidence") or {},
             "source_health": data.get("source_health") or {},
             "components": analysis.get("components") or [],
+            "source_refs": result.get("source_refs") or [],
             "source": "result.data.analysis",
         }
 
@@ -646,6 +647,7 @@ def _extract_analysis_digest(result: dict[str, Any], policy: dict[str, Any]) -> 
             "radar": overview.get("radar") or {},
             "radar_rows": overview.get("radar_rows") or [],
             "data_status": overview.get("data_status") or {},
+            "source_refs": result.get("source_refs") or [],
             "guidance": (
                 "Prefer analysis.human_answer for the user-facing reply; avoid exposing raw missing dataset keys "
                 "unless the user explicitly asks for debugging detail."

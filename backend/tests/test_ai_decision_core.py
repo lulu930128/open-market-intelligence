@@ -36,6 +36,18 @@ class AiDecisionCoreTests(unittest.TestCase):
             "position_risk_decision",
         )
 
+    def test_position_context_with_cost_price_routes_to_position_decision(self) -> None:
+        understanding = decision_core.understand_question(
+            question="我今天這檔買在444，你怎麼看",
+            requested_horizon="auto",
+            strategy_profile="technical_swing",
+        )
+
+        self.assertEqual(understanding.intent, "position_risk_decision")
+        self.assertTrue(understanding.position_context.has_position_context)
+        self.assertEqual(understanding.position_context.entry_price, 444)
+        self.assertEqual(understanding.position_context.decision_topic, "position")
+
     def test_intraday_risk_question_sets_intraday_horizon(self) -> None:
         understanding = decision_core.understand_question(
             question="今天盤中 2330 追高風險怎麼看？跌到多少要先防守？",
@@ -61,6 +73,34 @@ class AiDecisionCoreTests(unittest.TestCase):
 
         self.assertEqual((swing_horizon, swing_source), ("swing", "question_swing_hint"))
         self.assertEqual((long_horizon, long_source), ("long", "question_long_hint"))
+
+    def test_structured_swing_prompt_prefers_trend_view_over_generic_risk_wording(self) -> None:
+        question = (
+            "用中線波段角度分析目前標的。請使用日K/週K、均線、動能、量能、籌碼、營收與相對市場資料；"
+            "先給結論，再列出趨勢、支撐壓力、觀察條件與主要風險。"
+        )
+
+        understanding = decision_core.understand_question(
+            question=question,
+            requested_horizon="swing",
+            strategy_profile="technical_swing",
+        )
+
+        self.assertEqual(understanding.intent, "trend_view")
+        self.assertEqual(understanding.analysis_horizon, "swing")
+        self.assertIn("波段", understanding.matched_hints)
+        self.assertIn("趨勢", understanding.matched_hints)
+
+    def test_ui_swing_intent_guides_analysis_prompt_without_explicit_trend_keywords(self) -> None:
+        understanding = decision_core.understand_question(
+            question="請用這個角度分析目前標的，先給結論，再列觀察條件與主要風險。",
+            requested_horizon="auto",
+            strategy_profile="technical_swing",
+            conversation_context={"ui_context": {"ask_intent": "swing"}},
+        )
+
+        self.assertEqual(understanding.intent, "trend_view")
+        self.assertEqual(understanding.analysis_horizon, "swing")
 
     def test_common_chinese_question_phrasings_are_classified(self) -> None:
         cases = [

@@ -813,10 +813,10 @@ export function TechnicalLoadingPanel() {
 }
 
 export function overnightConfidenceLabel(value: string | null | undefined) {
-  if (value === "high") return "高信心";
-  if (value === "medium") return "中信心";
-  if (value === "low") return "低信心";
-  return "信心待確認";
+  if (value === "high") return "資料完整";
+  if (value === "medium") return "部分參考";
+  if (value === "low") return "低完整度";
+  return "完整度待確認";
 }
 
 export function OvernightImpactPanel({

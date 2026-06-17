@@ -30,6 +30,24 @@ def sse_event(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {payload}\n\n"
 
 
+def _tool_run_event_payload(tool_run: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(tool_run)
+    status_payload = stage_events.tool_status_payload(tool_run, sequence=0)
+    if not status_payload:
+        return payload
+    for key in (
+        "message",
+        "phase",
+        "dedupe_key",
+        "signal_key",
+        "tool_label",
+        "tool_scope",
+    ):
+        if key in status_payload:
+            payload[key] = status_payload[key]
+    return payload
+
+
 def _first_text(*values: Any) -> str | None:
     for value in values:
         if isinstance(value, str) and value.strip():
@@ -255,7 +273,7 @@ def iter_ask_sse_events(
 
     for tool_run in response.get("tool_runs") or []:
         if isinstance(tool_run, dict):
-            yield sse_event("tool_run", tool_run)
+            yield sse_event("tool_run", _tool_run_event_payload(tool_run))
 
     status_payloads, sequence = stage_events.response_status_payloads(
         response,

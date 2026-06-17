@@ -419,6 +419,152 @@ def _donchian_series(
     return upper, lower
 
 
+def _standard_deviation(values: list[float]) -> float | None:
+    if not values:
+        return None
+
+    mean = sum(values) / len(values)
+    variance = sum((value - mean) ** 2 for value in values) / len(values)
+    return variance**0.5
+
+
+def _bollinger_series(
+    closes: list[float | None],
+    period: int = 20,
+    std_dev: float = 2.0,
+) -> tuple[list[float | None], list[float | None], list[float | None], list[float | None]]:
+    upper: list[float | None] = []
+    middle: list[float | None] = []
+    lower: list[float | None] = []
+    bandwidth_pct: list[float | None] = []
+
+    for index in range(len(closes)):
+        if index + 1 < period:
+            upper.append(None)
+            middle.append(None)
+            lower.append(None)
+            bandwidth_pct.append(None)
+            continue
+
+        window = closes[index + 1 - period : index + 1]
+        if any(value is None for value in window):
+            upper.append(None)
+            middle.append(None)
+            lower.append(None)
+            bandwidth_pct.append(None)
+            continue
+
+        values = [float(value) for value in window if value is not None]
+        middle_value = sum(values) / period
+        std_value = _standard_deviation(values)
+
+        if std_value is None:
+            upper.append(None)
+            middle.append(None)
+            lower.append(None)
+            bandwidth_pct.append(None)
+            continue
+
+        upper_value = middle_value + (std_value * std_dev)
+        lower_value = middle_value - (std_value * std_dev)
+        upper.append(_round(upper_value))
+        middle.append(_round(middle_value))
+        lower.append(_round(lower_value))
+        bandwidth_pct.append(
+            _round(((upper_value - lower_value) / middle_value) * 100)
+            if middle_value != 0
+            else None
+        )
+
+    return upper, middle, lower, bandwidth_pct
+
+
+def _simple_average_from_series(
+    values: list[float | None],
+    index: int,
+    period: int,
+) -> float | None:
+    if index + 1 < period:
+        return None
+
+    window = values[index + 1 - period : index + 1]
+    if any(value is None for value in window):
+        return None
+
+    return _round(sum(value for value in window if value is not None) / period)
+
+
+def _kd_series(
+    highs: list[float | None],
+    lows: list[float | None],
+    closes: list[float | None],
+    period: int = 9,
+    smooth_period: int = 3,
+) -> tuple[list[float | None], list[float | None]]:
+    rsv_values: list[float | None] = []
+
+    for index, close in enumerate(closes):
+        if close is None or index + 1 < period:
+            rsv_values.append(None)
+            continue
+
+        high_window = highs[index + 1 - period : index + 1]
+        low_window = lows[index + 1 - period : index + 1]
+
+        if any(value is None for value in high_window + low_window):
+            rsv_values.append(None)
+            continue
+
+        highest = max(value for value in high_window if value is not None)
+        lowest = min(value for value in low_window if value is not None)
+
+        if highest == lowest:
+            rsv_values.append(50)
+        else:
+            rsv_values.append(_round((close - lowest) / (highest - lowest) * 100))
+
+    k_values = [
+        _simple_average_from_series(rsv_values, index, smooth_period)
+        for index in range(len(rsv_values))
+    ]
+    d_values = [
+        _simple_average_from_series(k_values, index, smooth_period)
+        for index in range(len(k_values))
+    ]
+
+    return k_values, d_values
+
+
+def _support_resistance_series(
+    highs: list[float | None],
+    lows: list[float | None],
+    period: int = 20,
+) -> tuple[list[float | None], list[float | None]]:
+    support: list[float | None] = []
+    resistance: list[float | None] = []
+
+    for index in range(len(highs)):
+        start = index - period
+
+        if start < 0:
+            support.append(None)
+            resistance.append(None)
+            continue
+
+        high_window = highs[start:index]
+        low_window = lows[start:index]
+
+        if any(value is None for value in high_window + low_window):
+            support.append(None)
+            resistance.append(None)
+            continue
+
+        support.append(_round(min(value for value in low_window if value is not None)))
+        resistance.append(_round(max(value for value in high_window if value is not None)))
+
+    return support, resistance
+
+
 def calculate_indicator_points_from_ohlc_points(
     points: list[dict],
     ma_windows: str = "5,20,60",
@@ -448,6 +594,9 @@ def calculate_indicator_points_from_ohlc_points(
     roc12 = _roc_series(closes)
     mfi14 = _mfi_series(highs, lows, closes, volumes)
     donchian_upper20, donchian_lower20 = _donchian_series(highs, lows)
+    bollinger_upper20, bollinger_middle20, bollinger_lower20, bollinger_bandwidth20_pct = _bollinger_series(closes)
+    kd_k9, kd_d9 = _kd_series(highs, lows, closes)
+    support20, resistance20 = _support_resistance_series(highs, lows)
 
     results: list[dict] = []
 
@@ -521,6 +670,20 @@ def calculate_indicator_points_from_ohlc_points(
                 "donchian": {
                     "upper20": donchian_upper20[index],
                     "lower20": donchian_lower20[index],
+                },
+                "bollinger": {
+                    "upper20": bollinger_upper20[index],
+                    "middle20": bollinger_middle20[index],
+                    "lower20": bollinger_lower20[index],
+                    "bandwidth20_pct": bollinger_bandwidth20_pct[index],
+                },
+                "kd": {
+                    "k9": kd_k9[index],
+                    "d9": kd_d9[index],
+                },
+                "support_resistance": {
+                    "support20": support20[index],
+                    "resistance20": resistance20[index],
                 },
             }
         )

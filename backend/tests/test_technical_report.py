@@ -18,6 +18,7 @@ from app.db.models import (
     SourceRegistry,
     StockMaster,
 )
+from app.market.indicator_service import calculate_indicator_points_from_ohlc_points
 from app.market.technical_report import TAIPEI_TZ, build_stock_technical_report
 
 
@@ -126,6 +127,32 @@ class TechnicalReportTests(unittest.TestCase):
         engine = self.db.get_bind()
         self.db.close()
         engine.dispose()
+
+    def test_indicator_points_include_scanning_indicators(self) -> None:
+        start = date(2026, 1, 1)
+        points = [
+            {
+                "time": start + timedelta(days=index),
+                "open": 100.0 + index,
+                "high": 102.0 + index,
+                "low": 98.0 + index,
+                "close": 100.0 + index,
+                "volume": 1_000_000 + index * 1000,
+                "price_change": 1.0 if index else None,
+            }
+            for index in range(30)
+        ]
+
+        indicators = calculate_indicator_points_from_ohlc_points(points)
+        latest = indicators[-1]
+
+        self.assertIn("bollinger", latest)
+        self.assertIn("kd", latest)
+        self.assertIn("support_resistance", latest)
+        self.assertIsNotNone(latest["bollinger"]["upper20"])
+        self.assertIsNotNone(latest["kd"]["k9"])
+        self.assertEqual(latest["support_resistance"]["support20"], 107.0)
+        self.assertEqual(latest["support_resistance"]["resistance20"], 130.0)
 
     def test_daily_report_returns_prompt_ready_rows(self) -> None:
         report = build_stock_technical_report(

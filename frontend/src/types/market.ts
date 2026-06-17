@@ -116,6 +116,8 @@ export type RankingItem = {
   signal_keys: string[];
   primary_signal_key: string | null;
   primary_signal_label: string | null;
+  indicator_snapshot: Record<string, Record<string, number | null>>;
+  context_snapshot: Record<string, Record<string, number | string | null>>;
   intraday_previous_close: number | null;
   intraday_points: Array<{
     time: string;
@@ -141,13 +143,54 @@ export type RankingResponse = {
   results: RankingItem[];
 };
 
-export type WatchlistRadarMode = "action" | "risk" | "momentum" | "all";
+export type RankingBatchResponse = {
+  group_id: number;
+  include_children: boolean;
+  rank_by: string;
+  sort_order: string;
+  offset: number;
+  batch_size: number;
+  total_stock_count: number;
+  requested_stock_count: number;
+  ranked_count: number;
+  no_data_count: number;
+  error_count: number;
+  trade_date: string | null;
+  target_trade_date: string | null;
+  is_current: boolean;
+  current_stock_count: number;
+  stale_stock_count: number;
+  has_more: boolean;
+  results: RankingItem[];
+};
+
+export type WatchlistRadarMode =
+  | "action"
+  | "surge"
+  | "breakout"
+  | "volume"
+  | "overheat"
+  | "weakness"
+  | "risk"
+  | "momentum";
 
 export type WatchlistRadarBucketRead = {
   key: string;
   label: string;
   description: string;
   count: number;
+};
+
+export type WatchlistRadarPriceLevels = Record<string, number | string | null>;
+
+export type WatchlistRadarContextSignal = {
+  key: string;
+  source: string;
+  label: string;
+  tone: "positive" | "negative" | "warning" | "neutral" | string;
+  stance: "confirm" | "contradict" | "risk" | "info" | string;
+  description: string;
+  value_label: string | null;
 };
 
 export type WatchlistRadarItemRead = {
@@ -157,6 +200,19 @@ export type WatchlistRadarItemRead = {
   bucket_label: string;
   urgency: "high" | "medium" | "low" | string;
   priority_score: number;
+  technical_evidence_score: number;
+  technical_score: number;
+  technical_grade: "strong" | "medium" | "watch" | string;
+  technical_grade_label: string;
+  technical_grade_description: string;
+  direction: "bullish" | "bearish" | "mixed" | "neutral" | string;
+  direction_label: string;
+  setup_label: string;
+  timing_label: string;
+  risk_label: string;
+  factor_scores: Record<string, number>;
+  price_levels: WatchlistRadarPriceLevels;
+  technical_notes: string[];
   action_label: string;
   reason: string;
   stock_id: string;
@@ -174,9 +230,15 @@ export type WatchlistRadarItemRead = {
   signal_count: number;
   signal_keys: string[];
   matched_signal_keys: string[];
+  matched_signal_labels: string[];
   signal_labels: string[];
   primary_signal_key: string | null;
   primary_signal_label: string | null;
+  indicator_snapshot: Record<string, Record<string, number | null>>;
+  context_snapshot: Record<string, Record<string, number | string | null>>;
+  context_signals: WatchlistRadarContextSignal[];
+  context_summary: string;
+  context_score: number;
   stale: boolean;
   error_message: string | null;
 };
@@ -662,6 +724,9 @@ export type StockIndicatorPoint = {
   roc?: Record<string, number | null>;
   mfi?: Record<string, number | null>;
   donchian?: Record<string, number | null>;
+  bollinger?: Record<string, number | null>;
+  kd?: Record<string, number | null>;
+  support_resistance?: Record<string, number | null>;
 };
 
 export type StockMasterRead = {

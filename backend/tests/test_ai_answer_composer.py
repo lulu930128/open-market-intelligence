@@ -54,6 +54,15 @@ class AiAnswerComposerTests(unittest.TestCase):
         self.assertIn("追價上限 871", answer["summary"][0])
         self.assertIn("2026-06-14 非台股交易日", answer["data_limits"][0])
         self.assertIn("價格來源 market_daily_price.close_price", answer["data_limits"][1])
+        self.assertEqual(
+            [item["label"] for item in answer["scenarios"]],
+            ["回測支撐", "突破延伸", "失效防守"],
+        )
+        self.assertIn("803-834", answer["scenarios"][0]["text"])
+        self.assertIn("950", answer["scenarios"][1]["text"])
+        self.assertIn("716", answer["counter_evidence"][0])
+        self.assertIn("情境：", answer["text"])
+        self.assertIn("反證：", answer["text"])
         self.assertIn("結論：", answer["text"])
 
     def test_llm_answer_filters_soft_missing_data_when_backend_has_no_gap(self) -> None:
@@ -144,6 +153,80 @@ class AiAnswerComposerTests(unittest.TestCase):
         self.assertIn("法人買賣超資料落後", answer["data_limits"][0])
         self.assertIn("資料限制", answer["text"])
 
+    def test_consumer_answer_caps_high_confidence_when_source_health_has_gaps(self) -> None:
+        answer = answer_composer.build_consumer_human_answer(
+            question_intent="trend_view",
+            target={"label": "6449 鈺邦"},
+            analysis_digest={
+                "display": "中短線評分 +3｜偏多",
+                "selected_score": 3,
+                "selected_confidence": "high",
+                "source_health": {
+                    "entries": [
+                        {
+                            "resource": "institutional_trade_daily",
+                            "label": "Institutional trade",
+                            "status": "stale",
+                            "required": True,
+                            "latest_data_date": "2026-06-12",
+                            "expected_data_date": "2026-06-16",
+                        }
+                    ]
+                },
+            },
+            missing=[],
+            warnings=[],
+        )
+
+        self.assertEqual(answer["confidence"], "medium")
+        self.assertEqual(answer["confidence_label"], "中")
+        self.assertIn("資料可信度限制", "\n".join(answer["data_limits"]))
+        self.assertIn("信心：中", answer["text"])
+
+    def test_trend_view_prefers_structured_price_levels_over_llm_wording(self) -> None:
+        answer = answer_composer.build_consumer_human_answer(
+            question_intent="trend_view",
+            target={"label": "2303 聯電"},
+            analysis_digest={
+                "display": "中線結構偏多，但短線偏熱。",
+                "selected_score": 3,
+                "selected_confidence": "high",
+                "technical_levels": {
+                    "kind": "technical_price_levels",
+                    "latest_price": 141.0,
+                    "entry": {
+                        "preferred_zone": {"low": 129.0, "high": 134.0},
+                        "breakout_confirm_above": {"price": 156.0},
+                        "do_not_chase_above": {"price": 143.0},
+                    },
+                    "risk": {
+                        "short_stop": {"price": 124.0},
+                        "technical_invalidation": {"price": 130.0},
+                    },
+                },
+            },
+            missing=[],
+            warnings=[],
+            llm_report={
+                "headline": "2303 聯電：波段偏多但短線偏熱，141 元靠近追價上限",
+                "interpretation": ["請觀察是否站穩 141 附近。"],
+            },
+        )
+
+        self.assertEqual(answer["source"], "question_intent")
+        self.assertEqual(answer["intent"], "trend_view")
+        self.assertIn("129-134", answer["headline"])
+        self.assertIn("129-134", answer["text"])
+        self.assertIn("143", answer["text"])
+        self.assertIn("156", answer["text"])
+        self.assertIn("130", answer["text"])
+        self.assertIn("回測支撐", [item["label"] for item in answer["scenarios"]])
+        self.assertTrue(
+            any("突破 156" in item["text"] for item in answer["scenarios"])
+        )
+        self.assertTrue(any("130" in item for item in answer["counter_evidence"]))
+        self.assertNotIn("站穩 141", answer["text"])
+
     def test_position_decision_answer_keeps_decision_contract(self) -> None:
         answer = answer_composer.build_position_decision_consumer_answer(
             position_decision={
@@ -154,6 +237,9 @@ class AiAnswerComposerTests(unittest.TestCase):
                 "action_plan": [{"label": "技術停損", "text": "觀察 MA20 2,280。"}],
                 "risks": ["缺少部位大小。"],
                 "data_limits": ["缺少部位大小。"],
+                "entry_price": 2390,
+                "latest_price": 2310,
+                "levels": {"ma20": 2280},
                 "direct_answer": "先看 MA20 是否失守。",
             },
             missing=[],
@@ -163,6 +249,11 @@ class AiAnswerComposerTests(unittest.TestCase):
         self.assertEqual(answer["source"], "position_decision")
         self.assertEqual(answer["intent"], "position_risk_decision")
         self.assertIn("position_decision", answer)
+        self.assertEqual(
+            [item["label"] for item in answer["scenarios"]],
+            ["成本附近", "技術防守", "續抱條件"],
+        )
+        self.assertIn("MA20 2,280", answer["counter_evidence"][0])
         self.assertIn("方向：偏多", answer["text"])
 
     def test_watchlist_answer_uses_radar_section_only_when_available(self) -> None:
@@ -294,22 +385,22 @@ class AiAnswerComposerTests(unittest.TestCase):
                 {
                     "stock_id": "3008",
                     "label": "3008 大立光",
-                    "bucket": "limit_up_move",
-                    "bucket_label": "漲停 / 急漲",
+                    "bucket": "surge_up",
+                    "bucket_label": "急漲追價",
                     "urgency": "high",
                 },
                 {
                     "stock_id": "3661",
                     "label": "3661 世芯-KY",
-                    "bucket": "limit_down_move",
-                    "bucket_label": "跌停 / 急跌",
+                    "bucket": "selloff_risk",
+                    "bucket_label": "急跌風控",
                     "urgency": "high",
                 },
                 {
                     "stock_id": "2454",
                     "label": "2454 聯發科",
-                    "bucket": "breakout",
-                    "bucket_label": "突破動能",
+                    "bucket": "trend_reclaim",
+                    "bucket_label": "轉強站回",
                     "urgency": "medium",
                 },
             ],

@@ -26,7 +26,15 @@ function firstSearchParam(
 }
 
 function normalizeRadarMode(value: string | undefined): WatchlistRadarMode {
-  if (value === "risk" || value === "momentum" || value === "all") {
+  if (
+    value === "surge" ||
+    value === "breakout" ||
+    value === "volume" ||
+    value === "overheat" ||
+    value === "weakness" ||
+    value === "risk" ||
+    value === "momentum"
+  ) {
     return value;
   }
 
@@ -38,7 +46,7 @@ function watchlistRadarPath(groupId: number, mode: WatchlistRadarMode) {
     include_children: "true",
     enabled_only: "true",
     mode,
-    max_results: "8",
+    max_results: "20",
     ma_windows: "5,20,60",
     volume_ma_windows: "5,20",
     calculation_limit: "100",
@@ -48,6 +56,10 @@ function watchlistRadarPath(groupId: number, mode: WatchlistRadarMode) {
   });
 
   return `/api/watchlists/groups/${groupId}/radar?${params.toString()}`;
+}
+
+function flattenGroups(nodes: WatchlistGroupNode[]): WatchlistGroupNode[] {
+  return nodes.flatMap((node) => [node, ...flattenGroups(node.children)]);
 }
 
 async function fetchBackendJson<T>(path: string, fallback: T): Promise<T> {
@@ -122,41 +134,50 @@ export default async function Page({
       : initialUsWatchlistItems.find(
           (item) => item.symbol.toUpperCase() === initialSelectedUsSymbol
         ) ?? null;
+  const defaultSelectedGroup = flattenGroups(initialTree)[0] ?? null;
   const initialSelectedGroupId = Number.isFinite(requestedGroupId)
     ? requestedGroupId
-    : selectedStockItem?.group_id ?? null;
+    : selectedStockItem?.group_id ?? defaultSelectedGroup?.id ?? null;
   const isIndexProduct =
     initialSelectedStockId !== null && indexProductIds.has(initialSelectedStockId);
-  const initialRadarData =
+  const initialRadarPromise =
     initialMarket === "tw" && initialSelectedGroupId !== null
-      ? await fetchBackendJson<WatchlistGroupRadarRead | null>(
+      ? fetchBackendJson<WatchlistGroupRadarRead | null>(
           watchlistRadarPath(initialSelectedGroupId, initialRadarMode),
           null
         )
-      : null;
-  const [initialOhlc, initialIndicatorData] =
+      : Promise.resolve<WatchlistGroupRadarRead | null>(null);
+  const initialOhlcPromise =
     initialMarket === "tw" && initialSelectedStockId
-      ? await Promise.all([
-          fetchBackendJson<OhlcChartResponse | null>(
-            isIndexProduct
-              ? `/api/market/indices/${encodeURIComponent(
-                  initialSelectedStockId
-                )}/ohlc?timeframe=daily&bars=180&ensure_history=false`
-              : `/api/market/ohlc/${encodeURIComponent(
-                  initialSelectedStockId
-                )}?timeframe=daily&bars=180&ensure_history=false`,
-            null
-          ),
+      ? fetchBackendJson<OhlcChartResponse | null>(
           isIndexProduct
-            ? Promise.resolve<StockIndicatorPoint[]>([])
-            : fetchBackendJson<StockIndicatorPoint[]>(
-                `/api/market/indicators/${encodeURIComponent(
-                  initialSelectedStockId
-                )}/daily?limit=240&ma_windows=5,20,60&volume_ma_windows=5,20`,
-                []
-              ),
-        ])
-      : [null, [] as StockIndicatorPoint[]];
+            ? `/api/market/indices/${encodeURIComponent(
+                initialSelectedStockId
+              )}/ohlc?timeframe=daily&bars=180&ensure_history=false`
+            : `/api/market/ohlc/${encodeURIComponent(
+                initialSelectedStockId
+              )}?timeframe=daily&bars=180&ensure_history=false`,
+          null
+        )
+      : Promise.resolve<OhlcChartResponse | null>(null);
+  const initialIndicatorDataPromise =
+    initialMarket === "tw" && initialSelectedStockId && !isIndexProduct
+      ? fetchBackendJson<StockIndicatorPoint[]>(
+          `/api/market/indicators/${encodeURIComponent(
+            initialSelectedStockId
+          )}/daily?limit=240&ma_windows=5,20,60&volume_ma_windows=5,20`,
+          []
+        )
+      : Promise.resolve<StockIndicatorPoint[]>([]);
+  const [
+    initialRadarData,
+    initialOhlc,
+    initialIndicatorData,
+  ] = await Promise.all([
+    initialRadarPromise,
+    initialOhlcPromise,
+    initialIndicatorDataPromise,
+  ]);
   const initialChartData: ChartPoint[] = initialOhlc?.points ?? [];
 
   return (

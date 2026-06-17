@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from collections.abc import Callable
 from copy import deepcopy
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import time
 
 import requests
@@ -109,6 +109,10 @@ class USWatchlistDuplicateItemError(Exception):
 ProgressCallback = Callable[[int | None, int | None, str | None], None]
 US_INTRADAY_CACHE_TTL_SECONDS = 4.75
 _US_INTRADAY_CACHE: dict[str, tuple[float, dict]] = {}
+US_DAILY_CANONICAL_PROVIDER_PRIORITY = {
+    "yahoo_chart": 20,
+    "alphavantage": 10,
+}
 US_CHART_LOOKBACK_MULTIPLIER = {
     "daily": 2,
     "weekly": 8,
@@ -853,15 +857,34 @@ def refresh_us_daily_prices(
         raise ValueError("provider must be one of: auto, alphavantage, yahoo_chart.")
 
     api_key = _clean_setting(settings.alphavantage_api_key)
-    if normalized_provider == "alphavantage" or (
-        normalized_provider == "auto" and api_key
-    ):
+
+    if normalized_provider == "alphavantage":
         return refresh_us_daily_prices_from_alphavantage(
             db=db,
             symbol=symbol,
             outputsize=outputsize,
             adjusted=adjusted,
         )
+
+    if normalized_provider == "auto" and api_key and outputsize == "compact":
+        try:
+            return refresh_us_daily_prices_from_alphavantage(
+                db=db,
+                symbol=symbol,
+                outputsize=outputsize,
+                adjusted=adjusted,
+            )
+        except (USMarketConfigurationError, USMarketDataFetchError, requests.RequestException):
+            fallback_result = refresh_us_daily_prices_from_yahoo_chart(
+                db=db,
+                symbol=symbol,
+                outputsize=outputsize,
+            )
+            fallback_result["message"] = (
+                f"{fallback_result['message']} Alpha Vantage auto refresh failed first; "
+                "used Yahoo chart fallback."
+            )
+            return fallback_result
 
     if normalized_provider == "auto" or normalized_provider == "yahoo_chart":
         return refresh_us_daily_prices_from_yahoo_chart(
@@ -920,6 +943,47 @@ def _us_ohlc_point(row: USDailyPrice, time_value: date | None = None) -> dict:
         "close": row.close_price,
         "volume": row.trade_volume,
     }
+
+
+def _datetime_sort_value(value: datetime | None) -> float:
+    if value is None:
+        return 0.0
+
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+
+    return value.astimezone(timezone.utc).timestamp()
+
+
+def _us_daily_row_completeness_score(row: USDailyPrice) -> int:
+    values = (
+        row.open_price,
+        row.high_price,
+        row.low_price,
+        row.close_price,
+        row.trade_volume,
+    )
+    return sum(1 for value in values if value is not None)
+
+
+def _us_daily_canonical_sort_key(row: USDailyPrice) -> tuple[int, float, int, int]:
+    return (
+        _us_daily_row_completeness_score(row),
+        _datetime_sort_value(row.fetched_at),
+        US_DAILY_CANONICAL_PROVIDER_PRIORITY.get(row.provider, 0),
+        row.id or 0,
+    )
+
+
+def _dedupe_us_daily_rows_by_trade_date(rows: list[USDailyPrice]) -> list[USDailyPrice]:
+    canonical_by_date: "OrderedDict[date, USDailyPrice]" = OrderedDict()
+
+    for row in rows:
+        existing = canonical_by_date.get(row.trade_date)
+        if existing is None or _us_daily_canonical_sort_key(row) > _us_daily_canonical_sort_key(existing):
+            canonical_by_date[row.trade_date] = row
+
+    return [canonical_by_date[trade_date] for trade_date in sorted(canonical_by_date)]
 
 
 def _aggregate_us_daily_rows(rows: list[USDailyPrice], timeframe: str) -> list[dict]:
@@ -994,7 +1058,8 @@ def _is_sparse_daily_ohlc_shape(points: list[dict]) -> bool:
 
 
 def _filter_us_ohlc_source_rows(rows: list[USDailyPrice]) -> list[USDailyPrice]:
-    return [row for row in rows if not _is_yahoo_range_max_record(row)]
+    filtered_rows = [row for row in rows if not _is_yahoo_range_max_record(row)]
+    return _dedupe_us_daily_rows_by_trade_date(filtered_rows)
 
 
 def _has_newer_untrusted_yahoo_rows(
@@ -1073,7 +1138,7 @@ def _refresh_us_ohlc_history_if_needed(
             provider=provider,
         )
     except (USMarketConfigurationError, USMarketDataFetchError, requests.RequestException) as exc:
-        if len(points) < bars:
+        if not points:
             raise
 
         return {

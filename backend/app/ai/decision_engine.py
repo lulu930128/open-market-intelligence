@@ -385,6 +385,164 @@ def entry_decision_with_levels(
     return headline, summary, action_plan
 
 
+def trend_view_with_levels(
+    *,
+    target_label: str,
+    score: float | None,
+    weak_evidence: bool,
+    fields: dict[str, str],
+    numbers: dict[str, float | None],
+    summary_limit: int = SUMMARY_LIMIT_DEFAULT,
+) -> tuple[str, list[str], list[dict[str, str]], list[str]]:
+    price_position = entry_price_position(numbers)
+    latest = fields.get("latest") or "-"
+    preferred = fields.get("preferred")
+    breakout = fields.get("breakout")
+    chase = fields.get("chase")
+    stop = fields.get("stop")
+    invalidation = fields.get("invalidation")
+    score_bullish = score is not None and score >= 2
+    score_bearish = score is not None and score <= -2
+
+    if weak_evidence:
+        headline = f"{target_label} 方向先保留，等資料與下一筆價量確認"
+    elif price_position == "above_chase" and chase:
+        headline = f"{target_label} 波段偏多，但現價 {latest} 已接近追價上限 {chase}"
+    elif price_position == "above_preferred" and preferred:
+        headline = f"{target_label} 波段偏多，但現價 {latest} 已離開支撐區 {preferred}"
+    elif price_position == "in_preferred" and preferred:
+        headline = f"{target_label} 回到支撐觀察區，接下來看 {preferred} 能否守穩"
+    elif price_position == "below_preferred" and preferred:
+        headline = f"{target_label} 已跌破首道支撐區，先看 {preferred} 能否收回"
+    elif price_position == "breakout_confirmed" and breakout:
+        headline = f"{target_label} 已到突破確認區，重點看 {breakout} 之上能否站穩"
+    elif price_position in {"below_stop", "below_invalidation"}:
+        guardrail = invalidation or stop or "-"
+        headline = f"{target_label} 已跌近風控區 {guardrail}，波段結構要重新確認"
+    elif score_bullish:
+        headline = f"{target_label} 波段偏多，先看支撐承接與突破延續"
+    elif score_bearish:
+        headline = f"{target_label} 波段偏弱，先看支撐是否失守"
+    else:
+        headline = f"{target_label} 多空拉扯，先看支撐壓力哪邊先表態"
+
+    summary: list[str] = []
+    if price_position == "above_chase" and chase:
+        summary.append(
+            f"現價 {latest} 已接近追價上限 {chase}；現價附近屬偏熱延伸，不把 {latest} 當成新的支撐。"
+        )
+    elif price_position == "above_preferred" and preferred:
+        summary.append(
+            f"現價 {latest} 仍高於支撐觀察區 {preferred}；重點是回測能否守住，不是盯著現價數字本身。"
+        )
+    elif price_position == "in_preferred" and preferred:
+        summary.append(f"現價 {latest} 已回到支撐觀察區 {preferred}；先看是否止跌守穩。")
+    elif price_position == "below_preferred" and preferred:
+        summary.append(f"現價 {latest} 已跌破支撐觀察區 {preferred}；若無法快速收回，波段結構要降級。")
+    elif price_position == "breakout_confirmed" and breakout:
+        summary.append(
+            f"現價 {latest} 已來到突破確認 {breakout} 附近；重點看站穩後是否有量能延續。"
+        )
+    elif price_position in {"below_stop", "below_invalidation"}:
+        summary.append(f"現價 {latest} 已落入風控區；先看失效線能否收復。")
+    elif latest:
+        summary.append(f"現價 {latest}；趨勢判讀仍要配合支撐壓力、量能與動能一起看。")
+
+    support_parts = []
+    if preferred:
+        support_parts.append(f"下方支撐先看 {preferred}")
+    if breakout:
+        support_parts.append(f"上方壓力 / 突破確認看 {breakout}")
+    elif chase:
+        support_parts.append(f"{chase} 以上屬偏熱延伸")
+    if support_parts:
+        summary.append("；".join(support_parts) + "。")
+
+    risk_parts = []
+    if invalidation:
+        risk_parts.append(f"跌破 {invalidation} 視為波段假設失效")
+    elif stop:
+        risk_parts.append(f"跌破 {stop} 後短線結構會明顯轉弱")
+    if risk_parts:
+        summary.append("；".join(risk_parts) + "。")
+
+    if weak_evidence:
+        trend_text = "先把這次解讀當方向參考，不把單一分數或單日收盤價當成最後結論。"
+    elif price_position == "above_chase" and chase:
+        trend_text = f"方向仍偏多，但現價 {latest} 已在偏熱區，追價報酬比不佳。"
+    elif price_position == "above_preferred" and preferred:
+        trend_text = f"方向仍偏多，結構重點從追價轉成回測 {preferred} 是否守住。"
+    elif price_position == "in_preferred" and preferred:
+        trend_text = f"方向關鍵從追價轉成支撐承接；{preferred} 守住，波段才有續強空間。"
+    elif price_position == "below_preferred" and preferred:
+        trend_text = f"方向開始轉弱；若無法收回 {preferred}，原本偏多結構要先降級。"
+    elif price_position == "breakout_confirmed" and breakout:
+        trend_text = f"方向重點從支撐承接轉成突破延續；看 {breakout} 之上是否站穩。"
+    else:
+        trend_text = (
+            "先用多週期分數判斷大方向，再用支撐壓力與量能確認延續性。"
+            if score_bullish
+            else "先看價格、量能與主要均線是否同向，避免只用單一價位下結論。"
+        )
+
+    support_text_parts = []
+    if preferred:
+        support_text_parts.append(f"支撐先看 {preferred}")
+    if breakout:
+        support_text_parts.append(f"上方先看 {breakout} 是否突破站穩")
+    if chase:
+        support_text_parts.append(f"接近或高於 {chase} 時視為偏熱延伸")
+    if invalidation:
+        support_text_parts.append(f"跌破 {invalidation} 視為波段失效")
+    support_text = (
+        "；".join(support_text_parts) + "。"
+        if support_text_parts
+        else "先看關鍵均線、前低與量能是否同向確認。"
+    )
+
+    if price_position == "above_chase" and preferred:
+        observation_text = (
+            f"優先等回測 {preferred} 是否守住；若直接上攻，至少要突破 {breakout} 並站穩，"
+            "不要把現價區當成新的支撐。"
+            if breakout
+            else f"優先等回測 {preferred} 是否守住，不要把現價區當成新的支撐。"
+        )
+    elif price_position == "above_preferred" and preferred:
+        observation_text = (
+            f"觀察回測 {preferred} 時量能是否收斂、動能是否守住；若回測不破，波段延續機率較高。"
+        )
+    elif price_position == "in_preferred" and preferred:
+        observation_text = f"觀察 {preferred} 是否止跌守穩，且量能與動能是否同步回升。"
+    elif price_position == "below_preferred" and preferred:
+        observation_text = f"先看能否快速收回 {preferred}；若反彈站不回去，先視為波段轉弱。"
+    elif price_position == "breakout_confirmed" and breakout:
+        observation_text = f"觀察突破 {breakout} 後 1-2 根 K 是否站穩，避免假突破後回到原區間。"
+    elif price_position in {"below_stop", "below_invalidation"}:
+        guardrail = invalidation or stop or "-"
+        observation_text = f"先看價格能否收回 {guardrail} 之上，否則趨勢判斷先降級。"
+    else:
+        observation_text = "觀察價格、量能、均線與相對市場是否持續同向，不把單一收盤價當條件。"
+
+    action_plan = [
+        {"label": "趨勢", "text": trend_text},
+        {"label": "支撐壓力", "text": support_text},
+        {"label": "觀察", "text": observation_text},
+    ]
+
+    risks: list[str] = []
+    if chase:
+        if price_position == "above_chase":
+            risks.append(f"現價已靠近或高於追價上限 {chase}，短線容易從偏熱區快速回吐。")
+        else:
+            risks.append(f"若續漲接近 {chase} 以上，代表偏熱延伸，不把現價區當新支撐。")
+    if invalidation:
+        risks.append(f"跌破 {invalidation} 後，原本波段偏多假設要降級。")
+    elif stop:
+        risks.append(f"跌破 {stop} 後，短線結構會明顯轉弱。")
+
+    return headline, summary[:summary_limit], action_plan, risks[:2]
+
+
 def technical_level_summary_lines(
     levels: dict[str, Any],
     *,

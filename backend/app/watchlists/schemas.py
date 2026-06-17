@@ -217,6 +217,9 @@ class WatchlistRankingItemRead(BaseModel):
     primary_signal_key: str | None = None
     primary_signal_label: str | None = None
 
+    indicator_snapshot: dict[str, dict[str, float | None]] = Field(default_factory=dict)
+    context_snapshot: dict[str, dict[str, object]] = Field(default_factory=dict)
+
     intraday_previous_close: float | None = None
     intraday_points: list[dict] = Field(default_factory=list)
 
@@ -244,6 +247,31 @@ class WatchlistGroupRankingRead(BaseModel):
     results: list[WatchlistRankingItemRead]
 
 
+class WatchlistGroupRankingBatchRead(BaseModel):
+    group_id: int
+    include_children: bool
+
+    rank_by: str
+    sort_order: str
+
+    offset: int
+    batch_size: int
+    total_stock_count: int
+    requested_stock_count: int
+    ranked_count: int
+    no_data_count: int
+    error_count: int
+
+    trade_date: date | None = None
+    target_trade_date: date | None = None
+    is_current: bool = True
+    current_stock_count: int = 0
+    stale_stock_count: int = 0
+    has_more: bool
+
+    results: list[WatchlistRankingItemRead]
+
+
 class WatchlistRadarBucketRead(BaseModel):
     key: str
     label: str
@@ -259,6 +287,19 @@ class WatchlistRadarItemRead(BaseModel):
     bucket_label: str
     urgency: str
     priority_score: float
+    technical_evidence_score: float
+    technical_score: float = 0
+    technical_grade: str = "watch"
+    technical_grade_label: str = "觀察"
+    technical_grade_description: str = ""
+    direction: str = "neutral"
+    direction_label: str = "觀望"
+    setup_label: str = ""
+    timing_label: str = ""
+    risk_label: str = ""
+    factor_scores: dict[str, float] = Field(default_factory=dict)
+    price_levels: dict[str, object] = Field(default_factory=dict)
+    technical_notes: list[str] = Field(default_factory=list)
     action_label: str
     reason: str
 
@@ -280,10 +321,17 @@ class WatchlistRadarItemRead(BaseModel):
     signal_count: int
     signal_keys: list[str] = Field(default_factory=list)
     matched_signal_keys: list[str] = Field(default_factory=list)
+    matched_signal_labels: list[str] = Field(default_factory=list)
     signal_labels: list[str] = Field(default_factory=list)
 
     primary_signal_key: str | None = None
     primary_signal_label: str | None = None
+
+    indicator_snapshot: dict[str, dict[str, float | None]] = Field(default_factory=dict)
+    context_snapshot: dict[str, dict[str, object]] = Field(default_factory=dict)
+    context_signals: list[dict[str, object]] = Field(default_factory=list)
+    context_summary: str = ""
+    context_score: float = 0
 
     stale: bool = False
     error_message: str | None = None

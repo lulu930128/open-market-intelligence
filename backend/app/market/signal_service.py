@@ -31,6 +31,9 @@ def _to_dict(value) -> dict:
         "roc",
         "mfi",
         "donchian",
+        "bollinger",
+        "kd",
+        "support_resistance",
     ]:
         result[key] = getattr(value, key, None)
 
@@ -86,6 +89,51 @@ def _score_to_status(score: int) -> str:
     return "neutral"
 
 
+def _safe_ratio(value: float | None, reference: float | None) -> float | None:
+    if value is None or reference is None or reference == 0:
+        return None
+
+    return value / reference
+
+
+def _near_level_pct(value: float, reference: float, threshold_pct: float = 2.0) -> bool:
+    if reference == 0:
+        return False
+
+    return abs(value - reference) / reference * 100 <= threshold_pct
+
+
+def _indicator_snapshot(point: dict) -> dict[str, dict[str, float | None]]:
+    snapshot: dict[str, dict[str, float | None]] = {}
+
+    for key in [
+        "ma",
+        "volume_ma",
+        "ema",
+        "macd",
+        "rsi",
+        "atr",
+        "adx",
+        "roc",
+        "mfi",
+        "donchian",
+        "bollinger",
+        "kd",
+        "support_resistance",
+    ]:
+        raw_values = point.get(key) or {}
+        if not isinstance(raw_values, dict):
+            snapshot[key] = {}
+            continue
+
+        snapshot[key] = {
+            str(name): _num(value)
+            for name, value in raw_values.items()
+        }
+
+    return snapshot
+
+
 def calculate_latest_stock_signals(
     db: Session,
     stock_id: str,
@@ -121,6 +169,7 @@ def calculate_latest_stock_signals(
             "score": 0,
             "status": "no_data",
             "signals": [],
+            "indicator_snapshot": {},
         }
 
     latest = normalized_points[-1]
@@ -139,6 +188,11 @@ def calculate_latest_stock_signals(
     adx = latest.get("adx") or {}
     roc = latest.get("roc") or {}
     mfi = latest.get("mfi") or {}
+    atr = latest.get("atr") or {}
+    donchian = latest.get("donchian") or {}
+    bollinger = latest.get("bollinger") or {}
+    kd = latest.get("kd") or {}
+    support_resistance = latest.get("support_resistance") or {}
 
     ma5 = _num(ma.get("ma5"))
     ma20 = _num(ma.get("ma20"))
@@ -157,9 +211,21 @@ def calculate_latest_stock_signals(
     adx14 = _num(adx.get("adx14"))
     roc12 = _num(roc.get("roc12"))
     mfi14 = _num(mfi.get("mfi14"))
+    atr14 = _num(atr.get("atr14"))
+    donchian_upper20 = _num(donchian.get("upper20"))
+    donchian_lower20 = _num(donchian.get("lower20"))
+    bollinger_upper20 = _num(bollinger.get("upper20"))
+    bollinger_lower20 = _num(bollinger.get("lower20"))
+    bollinger_bandwidth20_pct = _num(bollinger.get("bandwidth20_pct"))
+    kd_k9 = _num(kd.get("k9"))
+    kd_d9 = _num(kd.get("d9"))
+    support20 = _num(support_resistance.get("support20"))
+    resistance20 = _num(support_resistance.get("resistance20"))
 
     signals: list[dict] = []
     score = 0
+
+    indicator_snapshot = _indicator_snapshot(latest)
 
     if close is None:
         return {
@@ -172,6 +238,7 @@ def calculate_latest_stock_signals(
             "score": 0,
             "status": "no_data",
             "signals": [],
+            "indicator_snapshot": indicator_snapshot,
         }
 
     # Price direction
@@ -460,6 +527,91 @@ def calculate_latest_stock_signals(
                 reference=prev_lower20,
             )
 
+    # Price structure beyond Donchian: previous 20-day support/resistance
+    if support20 is not None and close < support20:
+        score -= 2
+        _add_signal(
+            signals,
+            key="structure_support_break",
+            label="跌破 20 日支撐",
+            direction="bearish",
+            level="strong",
+            message="收盤價跌破前 20 日區間支撐。",
+            value=close,
+            reference=support20,
+        )
+    elif resistance20 is not None and close > resistance20:
+        score += 2
+        _add_signal(
+            signals,
+            key="structure_resistance_breakout",
+            label="突破 20 日壓力",
+            direction="bullish",
+            level="strong",
+            message="收盤價突破前 20 日區間壓力。",
+            value=close,
+            reference=resistance20,
+        )
+    elif support20 is not None and _near_level_pct(close, support20):
+        _add_signal(
+            signals,
+            key="near_support",
+            label="貼近 20 日支撐",
+            direction="neutral",
+            level="info",
+            message="收盤價貼近前 20 日支撐，適合觀察是否止穩。",
+            value=close,
+            reference=support20,
+        )
+    elif resistance20 is not None and _near_level_pct(close, resistance20):
+        _add_signal(
+            signals,
+            key="near_resistance",
+            label="貼近 20 日壓力",
+            direction="neutral",
+            level="info",
+            message="收盤價貼近前 20 日壓力，適合觀察是否放量突破。",
+            value=close,
+            reference=resistance20,
+        )
+
+    # Bollinger Band breakout and compression
+    if bollinger_upper20 is not None and close > bollinger_upper20:
+        score += 2
+        _add_signal(
+            signals,
+            key="bollinger_breakout",
+            label="突破布林上緣",
+            direction="bullish",
+            level="strong",
+            message="收盤價突破 Bollinger 20 日上緣，動能擴張。",
+            value=close,
+            reference=bollinger_upper20,
+        )
+    elif bollinger_lower20 is not None and close < bollinger_lower20:
+        score -= 2
+        _add_signal(
+            signals,
+            key="bollinger_breakdown",
+            label="跌破布林下緣",
+            direction="bearish",
+            level="strong",
+            message="收盤價跌破 Bollinger 20 日下緣，需優先控管下行風險。",
+            value=close,
+            reference=bollinger_lower20,
+        )
+    elif bollinger_bandwidth20_pct is not None and bollinger_bandwidth20_pct <= 8:
+        _add_signal(
+            signals,
+            key="bollinger_squeeze",
+            label="布林壓縮",
+            direction="neutral",
+            level="info",
+            message="Bollinger Band 寬度偏窄，後續方向突破值得追蹤。",
+            value=bollinger_bandwidth20_pct,
+            reference=8,
+        )
+
     # Oscillator and flow confirmation
     if rsi14 is not None:
         if 50 <= rsi14 <= 70:
@@ -550,6 +702,93 @@ def calculate_latest_stock_signals(
                 reference=0,
             )
 
+    if kd_k9 is not None and kd_d9 is not None:
+        if previous is not None:
+            prev_kd = previous.get("kd") or {}
+            prev_k9 = _num(prev_kd.get("k9"))
+            prev_d9 = _num(prev_kd.get("d9"))
+
+            if prev_k9 is not None and prev_d9 is not None:
+                if prev_k9 <= prev_d9 and kd_k9 > kd_d9:
+                    score += 1
+                    _add_signal(
+                        signals,
+                        key="kd_bullish_cross",
+                        label="KD 黃金交叉",
+                        direction="bullish",
+                        level="info",
+                        message="KD K 值由下往上穿越 D 值，短線動能轉強。",
+                        value=kd_k9,
+                        reference=kd_d9,
+                    )
+                elif prev_k9 >= prev_d9 and kd_k9 < kd_d9:
+                    score -= 1
+                    _add_signal(
+                        signals,
+                        key="kd_bearish_cross",
+                        label="KD 死亡交叉",
+                        direction="bearish",
+                        level="info",
+                        message="KD K 值由上往下跌破 D 值，短線動能轉弱。",
+                        value=kd_k9,
+                        reference=kd_d9,
+                    )
+
+        if kd_k9 >= 80 and kd_d9 >= 70:
+            _add_signal(
+                signals,
+                key="kd_overbought",
+                label="KD 過熱",
+                direction="neutral",
+                level="warning",
+                message="KD 位於高檔，追價需確認量價延續。",
+                value=kd_k9,
+                reference=80,
+            )
+        elif kd_k9 <= 20 and kd_d9 <= 30:
+            _add_signal(
+                signals,
+                key="kd_oversold",
+                label="KD 低檔",
+                direction="neutral",
+                level="info",
+                message="KD 位於低檔，需等待止穩或轉強確認。",
+                value=kd_k9,
+                reference=20,
+            )
+
+    atr_pct = _safe_ratio(atr14, close)
+    atr_pct = atr_pct * 100 if atr_pct is not None else None
+    if atr_pct is not None and atr_pct >= 5:
+        _add_signal(
+            signals,
+            key="atr_high_volatility",
+            label="ATR 高波動",
+            direction="neutral",
+            level="warning",
+            message="ATR 佔股價比重偏高，停損距離與追價風險需放大評估。",
+            value=atr_pct,
+            reference=5,
+        )
+    elif previous is not None and atr_pct is not None:
+        prev_atr = previous.get("atr") or {}
+        prev_close = _num(previous.get("close"))
+        prev_atr14 = _num(prev_atr.get("atr14"))
+        prev_atr_pct = _safe_ratio(prev_atr14, prev_close)
+        prev_atr_pct = prev_atr_pct * 100 if prev_atr_pct is not None else None
+
+        if prev_atr_pct is not None and atr_pct >= prev_atr_pct * 1.2 and atr_pct >= 2:
+            _add_signal(
+                signals,
+                key="atr_expanding",
+                label="ATR 波動擴大",
+                direction="neutral",
+                level="warning",
+                message="ATR 較前一交易日明顯擴大，代表波動與失敗成本上升。",
+                value=atr_pct,
+                reference=prev_atr_pct,
+            )
+
     # Volume expansion
     if volume is not None and volume_ma20 is not None and volume_ma20 > 0:
         volume_ratio = volume / volume_ma20
@@ -617,4 +856,5 @@ def calculate_latest_stock_signals(
         "score": score,
         "status": _score_to_status(score),
         "signals": signals,
+        "indicator_snapshot": indicator_snapshot,
     }

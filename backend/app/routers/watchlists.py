@@ -13,6 +13,7 @@ from app.watchlists.schemas import (
     WatchlistGroupLatestSignalsRead,
     WatchlistGroupMove,
     WatchlistGroupRadarRead,
+    WatchlistGroupRankingBatchRead,
     WatchlistGroupRankingRead,
     WatchlistGroupRead,
     WatchlistGroupTreeRead,
@@ -517,6 +518,49 @@ def get_watchlist_group_latest_ranking(
 
 
 @router.get(
+    "/groups/{group_id}/rankings/latest-batch",
+    response_model=WatchlistGroupRankingBatchRead,
+)
+def get_watchlist_group_latest_ranking_batch(
+    group_id: int,
+    include_children: bool = True,
+    enabled_only: bool = True,
+    rank_by: str = "watchlist",
+    sort_order: str = "asc",
+    ma_windows: str = "5,20,60",
+    volume_ma_windows: str = "5,20",
+    limit: int = Query(default=100, ge=20, le=500),
+    volume_ratio_threshold: float = Query(default=1.5, ge=1.0, le=5.0),
+    use_intraday: bool = False,
+    intraday_limit: int = Query(default=30, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    batch_size: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    try:
+        return ranking_service.get_watchlist_group_latest_ranking_batch(
+            db=db,
+            group_id=group_id,
+            include_children=include_children,
+            enabled_only=enabled_only,
+            rank_by=rank_by,
+            sort_order=sort_order,
+            ma_windows=ma_windows,
+            volume_ma_windows=volume_ma_windows,
+            limit=limit,
+            volume_ratio_threshold=volume_ratio_threshold,
+            use_intraday=use_intraday,
+            intraday_limit=intraday_limit,
+            offset=offset,
+            batch_size=batch_size,
+        )
+    except service.WatchlistGroupNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get(
     "/groups/{group_id}/radar",
     response_model=WatchlistGroupRadarRead,
 )
@@ -524,7 +568,10 @@ def get_watchlist_group_radar(
     group_id: int,
     include_children: bool = True,
     enabled_only: bool = True,
-    mode: str = Query(default="action", pattern="^(action|risk|momentum|all)$"),
+    mode: str = Query(
+        default="action",
+        pattern="^(action|surge|breakout|volume|overheat|weakness|risk|momentum|all)$",
+    ),
     max_results: int = Query(default=30, ge=1, le=200),
     ma_windows: str = "5,20,60",
     volume_ma_windows: str = "5,20",

@@ -35,6 +35,7 @@ from app.us_market.service import (
     list_us_ohlc_chart_data,
     list_us_watchlist_items,
     list_us_watchlist_symbols,
+    refresh_us_daily_prices,
     refresh_us_daily_prices_from_yahoo_chart,
     refresh_us_sec_companyfacts,
     refresh_us_watchlist_resources,
@@ -484,6 +485,24 @@ class USMarketStorageIsolationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.db.close()
         self.engine.dispose()
+
+    def _set_daily_fetched_at(
+        self,
+        *,
+        provider: str,
+        symbol: str,
+        trade_date: date,
+        fetched_at: datetime,
+    ) -> None:
+        row = (
+            self.db.query(USDailyPrice)
+            .filter(USDailyPrice.provider == provider)
+            .filter(USDailyPrice.symbol == symbol)
+            .filter(USDailyPrice.trade_date == trade_date)
+            .one()
+        )
+        row.fetched_at = fetched_at
+        self.db.commit()
 
     def test_upserts_write_only_us_tables(self) -> None:
         symbol_records = parse_symbol_directories(
@@ -1317,6 +1336,160 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self.assertEqual(chart["points"][0]["close"], 382.09)
         self.assertEqual(chart["points"][1]["close"], 355.46)
 
+    def test_us_daily_ohlc_uses_one_canonical_row_per_trade_date(self) -> None:
+        records = [
+            USDailyPriceRecord(
+                provider="yahoo_chart",
+                symbol="MU",
+                trade_date=date(2026, 3, 25),
+                open_price=100.0,
+                high_price=110.0,
+                low_price=95.0,
+                close_price=105.0,
+                adjusted_close=None,
+                trade_volume=1000,
+                dividend_amount=None,
+                split_coefficient=None,
+                source_url="https://query1.finance.yahoo.com/v8/finance/chart/MU?range=1y&interval=1d",
+                raw_payload_hash="yahoo-duplicate-date",
+            ),
+            USDailyPriceRecord(
+                provider="alphavantage",
+                symbol="MU",
+                trade_date=date(2026, 3, 25),
+                open_price=101.0,
+                high_price=112.0,
+                low_price=96.0,
+                close_price=111.0,
+                adjusted_close=None,
+                trade_volume=2000,
+                dividend_amount=None,
+                split_coefficient=None,
+                source_url="https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=MU&apikey=REDACTED",
+                raw_payload_hash="alphavantage-duplicate-date",
+            ),
+        ]
+        upsert_us_daily_price_records(self.db, records)
+        self._set_daily_fetched_at(
+            provider="yahoo_chart",
+            symbol="MU",
+            trade_date=date(2026, 3, 25),
+            fetched_at=datetime(2026, 3, 25, 20, 0, tzinfo=timezone.utc),
+        )
+        self._set_daily_fetched_at(
+            provider="alphavantage",
+            symbol="MU",
+            trade_date=date(2026, 3, 25),
+            fetched_at=datetime(2026, 3, 25, 22, 0, tzinfo=timezone.utc),
+        )
+
+        chart = list_us_ohlc_chart_data(
+            self.db,
+            symbol="MU",
+            timeframe="daily",
+            bars=5,
+            to_date=date(2026, 3, 25),
+        )
+
+        self.assertEqual(chart["point_count"], 1)
+        self.assertEqual(chart["points"][0]["time"], date(2026, 3, 25))
+        self.assertEqual(chart["points"][0]["close"], 111.0)
+        self.assertEqual(chart["points"][0]["volume"], 2000)
+
+    def test_us_weekly_ohlc_does_not_double_count_duplicate_providers(self) -> None:
+        records = [
+            USDailyPriceRecord(
+                provider="yahoo_chart",
+                symbol="MU",
+                trade_date=date(2026, 3, 23),
+                open_price=100.0,
+                high_price=105.0,
+                low_price=98.0,
+                close_price=104.0,
+                adjusted_close=None,
+                trade_volume=100,
+                dividend_amount=None,
+                split_coefficient=None,
+                source_url="https://query1.finance.yahoo.com/v8/finance/chart/MU?range=1y&interval=1d",
+                raw_payload_hash="weekly-yahoo-1",
+            ),
+            USDailyPriceRecord(
+                provider="alphavantage",
+                symbol="MU",
+                trade_date=date(2026, 3, 23),
+                open_price=101.0,
+                high_price=106.0,
+                low_price=99.0,
+                close_price=105.0,
+                adjusted_close=None,
+                trade_volume=200,
+                dividend_amount=None,
+                split_coefficient=None,
+                source_url="https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=MU&apikey=REDACTED",
+                raw_payload_hash="weekly-alpha-1",
+            ),
+            USDailyPriceRecord(
+                provider="yahoo_chart",
+                symbol="MU",
+                trade_date=date(2026, 3, 24),
+                open_price=106.0,
+                high_price=112.0,
+                low_price=104.0,
+                close_price=110.0,
+                adjusted_close=None,
+                trade_volume=300,
+                dividend_amount=None,
+                split_coefficient=None,
+                source_url="https://query1.finance.yahoo.com/v8/finance/chart/MU?range=1y&interval=1d",
+                raw_payload_hash="weekly-yahoo-2",
+            ),
+            USDailyPriceRecord(
+                provider="alphavantage",
+                symbol="MU",
+                trade_date=date(2026, 3, 24),
+                open_price=107.0,
+                high_price=113.0,
+                low_price=105.0,
+                close_price=111.0,
+                adjusted_close=None,
+                trade_volume=400,
+                dividend_amount=None,
+                split_coefficient=None,
+                source_url="https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=MU&apikey=REDACTED",
+                raw_payload_hash="weekly-alpha-2",
+            ),
+        ]
+        upsert_us_daily_price_records(self.db, records)
+        for trade_date in (date(2026, 3, 23), date(2026, 3, 24)):
+            self._set_daily_fetched_at(
+                provider="yahoo_chart",
+                symbol="MU",
+                trade_date=trade_date,
+                fetched_at=datetime(2026, 3, 25, 20, 0, tzinfo=timezone.utc),
+            )
+            self._set_daily_fetched_at(
+                provider="alphavantage",
+                symbol="MU",
+                trade_date=trade_date,
+                fetched_at=datetime(2026, 3, 25, 22, 0, tzinfo=timezone.utc),
+            )
+
+        chart = list_us_ohlc_chart_data(
+            self.db,
+            symbol="MU",
+            timeframe="weekly",
+            bars=5,
+            to_date=date(2026, 3, 27),
+        )
+
+        self.assertEqual(chart["point_count"], 1)
+        self.assertEqual(chart["points"][0]["time"], date(2026, 3, 23))
+        self.assertEqual(chart["points"][0]["open"], 101.0)
+        self.assertEqual(chart["points"][0]["high"], 113.0)
+        self.assertEqual(chart["points"][0]["low"], 99.0)
+        self.assertEqual(chart["points"][0]["close"], 111.0)
+        self.assertEqual(chart["points"][0]["volume"], 600)
+
     def test_us_daily_ohlc_skips_refresh_when_local_points_are_enough(self) -> None:
         records = [
             USDailyPriceRecord(
@@ -1629,6 +1802,44 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self.assertEqual(chart["backfill"]["status"], "error")
         self.assertIn("using cached clean rows", chart["backfill"]["message"])
         self.assertNotIn(date(2026, 6, 1), [point["time"] for point in chart["points"]])
+
+    def test_us_daily_ohlc_uses_partial_cache_when_refresh_fails(self) -> None:
+        records = [
+            USDailyPriceRecord(
+                provider="yahoo_chart",
+                symbol="MU",
+                trade_date=date(2026, 5, 29),
+                open_price=100.0,
+                high_price=105.0,
+                low_price=95.0,
+                close_price=102.0,
+                adjusted_close=None,
+                trade_volume=1000,
+                dividend_amount=None,
+                split_coefficient=None,
+                source_url="https://query1.finance.yahoo.com/v8/finance/chart/MU?range=1y&interval=1d",
+                raw_payload_hash="partial-cache-row",
+            )
+        ]
+        upsert_us_daily_price_records(self.db, records)
+
+        with patch("app.us_market.service.refresh_us_daily_prices") as refresh_mock:
+            refresh_mock.side_effect = USMarketDataFetchError("provider down")
+            chart = list_us_ohlc_chart_data(
+                self.db,
+                symbol="MU",
+                timeframe="daily",
+                bars=5,
+                ensure_history=True,
+                outputsize="compact",
+                provider="auto",
+                to_date=date(2026, 5, 31),
+            )
+
+        self.assertEqual(chart["point_count"], 1)
+        self.assertEqual(chart["points"][0]["time"], date(2026, 5, 29))
+        self.assertEqual(chart["backfill"]["status"], "error")
+        self.assertIn("using cached clean rows", chart["backfill"]["message"])
 
     def test_us_daily_upsert_does_not_replace_clean_yahoo_row_with_range_max(self) -> None:
         upsert_us_daily_price_records(
@@ -2046,6 +2257,75 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         )
         self.assertEqual(chart["symbol"], "^GSPC")
         self.assertEqual(chart["backfill"]["provider"], "yahoo_chart")
+
+    def test_auto_daily_refresh_uses_yahoo_for_full_history(self) -> None:
+        yahoo_result = {
+            "status": "success",
+            "provider": "yahoo_chart",
+            "symbol": "MU",
+            "fetched_count": 2,
+            "inserted_count": 1,
+            "updated_count": 1,
+            "message": "US daily prices refreshed from Yahoo chart.",
+        }
+
+        with (
+            patch("app.us_market.service.settings.alphavantage_api_key", "demo"),
+            patch("app.us_market.service.refresh_us_daily_prices_from_alphavantage") as alpha_mock,
+            patch(
+                "app.us_market.service.refresh_us_daily_prices_from_yahoo_chart",
+                return_value=yahoo_result,
+            ) as yahoo_mock,
+        ):
+            result = refresh_us_daily_prices(
+                self.db,
+                symbol="MU",
+                outputsize="full",
+                provider="auto",
+            )
+
+        alpha_mock.assert_not_called()
+        yahoo_mock.assert_called_once_with(db=self.db, symbol="MU", outputsize="full")
+        self.assertEqual(result["provider"], "yahoo_chart")
+
+    def test_auto_daily_refresh_falls_back_to_yahoo_after_alphavantage_error(self) -> None:
+        yahoo_result = {
+            "status": "success",
+            "provider": "yahoo_chart",
+            "symbol": "MU",
+            "fetched_count": 2,
+            "inserted_count": 1,
+            "updated_count": 1,
+            "message": "US daily prices refreshed from Yahoo chart.",
+        }
+
+        with (
+            patch("app.us_market.service.settings.alphavantage_api_key", "demo"),
+            patch(
+                "app.us_market.service.refresh_us_daily_prices_from_alphavantage",
+                side_effect=USMarketDataFetchError("premium feature"),
+            ) as alpha_mock,
+            patch(
+                "app.us_market.service.refresh_us_daily_prices_from_yahoo_chart",
+                return_value=yahoo_result,
+            ) as yahoo_mock,
+        ):
+            result = refresh_us_daily_prices(
+                self.db,
+                symbol="MU",
+                outputsize="compact",
+                provider="auto",
+            )
+
+        alpha_mock.assert_called_once_with(
+            db=self.db,
+            symbol="MU",
+            outputsize="compact",
+            adjusted=False,
+        )
+        yahoo_mock.assert_called_once_with(db=self.db, symbol="MU", outputsize="compact")
+        self.assertEqual(result["provider"], "yahoo_chart")
+        self.assertIn("Alpha Vantage auto refresh failed first", result["message"])
 
     def test_us_monthly_ohlc_skips_refresh_when_local_points_are_enough(self) -> None:
         records = [

@@ -26,6 +26,25 @@ TOOL_LABELS = {
     "us.refresh_finra_short_volume": "FINRA 放空資料刷新",
     "us.refresh_fred_macro": "FRED 總經資料刷新",
 }
+TOOL_STATUS_PRIORITY = {
+    "running": 1,
+    "skipped": 2,
+    "blocked": 3,
+    "success": 4,
+    "completed": 4,
+    "error": 5,
+    "failed": 5,
+}
+TOOL_STATUS_LABELS = {
+    "success": "成功",
+    "completed": "成功",
+    "blocked": "阻擋",
+    "skipped": "略過",
+    "error": "失敗",
+    "failed": "失敗",
+    "running": "執行中",
+    "unknown": "未知",
+}
 
 
 def stage_label(stage: str) -> str:
@@ -60,6 +79,11 @@ def progress_status_payload(
     message = _text_value(progress_event.get("message"))
     if not stage or not message:
         return None
+
+    if stage == "tool_execution" and (
+        _text_value(progress_event.get("tool")) or _text_value(progress_event.get("tool_name"))
+    ):
+        return tool_status_payload(progress_event, sequence=sequence)
 
     extra = {
         key: value
@@ -105,25 +129,104 @@ def _text_value(value: Any) -> str | None:
     return text or None
 
 
-def _tool_label(tool_name: str) -> str:
+def _tool_scope(tool_run: dict[str, Any]) -> str:
+    tool_name = _text_value(tool_run.get("tool")) or _text_value(tool_run.get("tool_name")) or ""
+    if tool_name != "us.refresh_daily_price":
+        return "default"
+
+    reason = (_text_value(tool_run.get("reason")) or "").lower()
+    if any(marker in reason for marker in ("隔夜", "overnight", "cross_market", "us_overnight")):
+        return "us_overnight_reference"
+    return "default"
+
+
+def _tool_label(tool_name: str, tool_run: dict[str, Any] | None = None) -> str:
+    if tool_run is not None and _tool_scope(tool_run) == "us_overnight_reference":
+        return "美股隔夜參考資料"
     return TOOL_LABELS.get(tool_name, tool_name)
+
+
+def _status_counts_text(counts: dict[str, int]) -> str | None:
+    parts = []
+    for key in ("success", "blocked", "skipped", "error", "failed", "running", "unknown"):
+        count = counts.get(key)
+        if not isinstance(count, int) or count <= 0:
+            continue
+        label = TOOL_STATUS_LABELS.get(key, key)
+        if key == "failed" and counts.get("error"):
+            continue
+        parts.append(f"{label} {count}")
+    return "、".join(parts) if parts else None
 
 
 def _tool_status_message(tool_run: dict[str, Any]) -> str:
     tool_name = _text_value(tool_run.get("tool")) or _text_value(tool_run.get("tool_name")) or "工具"
-    label = _tool_label(tool_name)
+    label = _tool_label(tool_name, tool_run)
     status = (_text_value(tool_run.get("status")) or "unknown").lower()
     error = _text_value(tool_run.get("error")) or _text_value(tool_run.get("error_message"))
+    counts = tool_run.get("status_counts") if isinstance(tool_run.get("status_counts"), dict) else {}
+    counts_text = _status_counts_text(counts)
+    count_suffix = f"（{counts_text}）" if counts_text else ""
 
     if status == "success":
-        return f"{label}已完成。"
+        return f"{label}已完成{count_suffix}。"
+    if status == "running":
+        return f"{label}執行中。"
     if status == "blocked":
-        return f"{label}未執行" + (f"：{error}。" if error else "。")
+        return f"{label}未執行{count_suffix}" + (f"：{error}。" if error else "。")
     if status in {"failed", "error"}:
-        return f"{label}失敗" + (f"：{error}。" if error else "。")
+        return f"{label}失敗{count_suffix}" + (f"：{error}。" if error else "。")
     if status == "skipped":
-        return f"{label}已略過。"
+        return f"{label}已略過{count_suffix}。"
     return f"{label}狀態：{status}。"
+
+
+def _tool_status(status: Any) -> str:
+    return (_text_value(status) or "unknown").lower()
+
+
+def _tool_group_key(tool_run: dict[str, Any]) -> tuple[str, str] | None:
+    tool_name = _text_value(tool_run.get("tool")) or _text_value(tool_run.get("tool_name"))
+    if not tool_name:
+        return None
+    return tool_name, _tool_scope(tool_run)
+
+
+def _representative_tool_run(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    def priority(run: dict[str, Any]) -> int:
+        return TOOL_STATUS_PRIORITY.get(_tool_status(run.get("status")), 0)
+
+    return max(runs, key=priority)
+
+
+def _aggregate_tool_runs(tool_runs: list[Any]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    ordered_keys: list[tuple[str, str]] = []
+    for tool_run in tool_runs:
+        if not isinstance(tool_run, dict):
+            continue
+        key = _tool_group_key(tool_run)
+        if key is None:
+            continue
+        if key not in grouped:
+            grouped[key] = []
+            ordered_keys.append(key)
+        grouped[key].append(tool_run)
+
+    aggregated: list[dict[str, Any]] = []
+    for key in ordered_keys:
+        runs = grouped[key]
+        representative = dict(_representative_tool_run(runs))
+        counts: dict[str, int] = {}
+        for run in runs:
+            status = _tool_status(run.get("status"))
+            counts[status] = counts.get(status, 0) + 1
+        representative["tool"] = key[0]
+        representative["tool_scope"] = key[1]
+        representative["attempt_count"] = len(runs)
+        representative["status_counts"] = counts
+        aggregated.append(representative)
+    return aggregated
 
 
 def tool_status_payload(
@@ -137,23 +240,39 @@ def tool_status_payload(
     if not tool_name:
         return None
     status = _text_value(tool_run.get("status"))
+    status_key = (status or "unknown").lower()
+    tool_scope = _tool_scope(tool_run)
     phase = {
+        "running": "running",
         "success": "completed",
         "blocked": "blocked",
         "skipped": "skipped",
         "error": "failed",
         "failed": "failed",
-    }.get((status or "").lower(), "completed")
-    return status_payload(
+    }.get(status_key, "completed")
+    payload = status_payload(
         stage="tool_execution",
         message=_tool_status_message(tool_run),
         sequence=sequence,
         phase=phase,
-        dedupe_key=f"tool:{tool_name}:{status or 'unknown'}",
+        dedupe_key=f"tool:{tool_name}:{tool_scope}:{status or 'unknown'}",
+        signal_key=f"tool:{tool_name}:{tool_scope}",
         tool=tool_name,
-        tool_label=_tool_label(tool_name),
+        tool_label=_tool_label(tool_name, tool_run),
+        tool_scope=tool_scope,
         status=status,
     )
+    for key in (
+        "reason",
+        "external_fetch",
+        "writes_cache",
+        "duration_ms",
+        "attempt_count",
+        "status_counts",
+    ):
+        if key in tool_run:
+            payload[key] = tool_run[key]
+    return payload
 
 
 def evidence_status_payload(
@@ -231,9 +350,7 @@ def response_status_payloads(
         payloads.append(evidence_payload)
         sequence += 1
 
-    for tool_run in response.get("tool_runs") or []:
-        if not isinstance(tool_run, dict):
-            continue
+    for tool_run in _aggregate_tool_runs(response.get("tool_runs") or []):
         tool_payload = tool_status_payload(tool_run, sequence=sequence)
         if tool_payload:
             payloads.append(tool_payload)

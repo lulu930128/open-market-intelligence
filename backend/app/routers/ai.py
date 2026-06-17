@@ -339,7 +339,10 @@ def read_watchlist_context(
     enabled_only: bool = True,
     rank_by: str = Query(default="score", pattern="^(watchlist|score|change_pct|volume)$"),
     sort_order: str = Query(default="desc", pattern="^(asc|desc)$"),
-    radar_mode: str = Query(default="action", pattern="^(action|risk|momentum|all)$"),
+    radar_mode: str = Query(
+        default="action",
+        pattern="^(action|surge|breakout|volume|overheat|weakness|risk|momentum|all)$",
+    ),
     limit: int = Query(default=100, ge=20, le=500),
     db: Session = Depends(get_db),
 ):
@@ -524,7 +527,10 @@ def build_watchlist_brief(
     strategy_profile: str = "short_term_momentum",
     rank_by: str = Query(default="score", pattern="^(watchlist|score|change_pct|volume)$"),
     sort_order: str = Query(default="desc", pattern="^(asc|desc)$"),
-    radar_mode: str = Query(default="action", pattern="^(action|risk|momentum|all)$"),
+    radar_mode: str = Query(
+        default="action",
+        pattern="^(action|surge|breakout|volume|overheat|weakness|risk|momentum|all)$",
+    ),
     db: Session = Depends(get_db),
 ):
     try:
@@ -549,7 +555,10 @@ def generate_watchlist_llm_report(
     strategy_profile: str = "short_term_momentum",
     rank_by: str = Query(default="score", pattern="^(watchlist|score|change_pct|volume)$"),
     sort_order: str = Query(default="desc", pattern="^(asc|desc)$"),
-    radar_mode: str = Query(default="action", pattern="^(action|risk|momentum|all)$"),
+    radar_mode: str = Query(
+        default="action",
+        pattern="^(action|surge|breakout|volume|overheat|weakness|risk|momentum|all)$",
+    ),
     db: Session = Depends(get_db),
 ):
     _require_trusted_ai_request(request, "Generating watchlist LLM report")
@@ -577,7 +586,10 @@ def save_watchlist_brief(
     strategy_profile: str = "short_term_momentum",
     rank_by: str = Query(default="score", pattern="^(watchlist|score|change_pct|volume)$"),
     sort_order: str = Query(default="desc", pattern="^(asc|desc)$"),
-    radar_mode: str = Query(default="action", pattern="^(action|risk|momentum|all)$"),
+    radar_mode: str = Query(
+        default="action",
+        pattern="^(action|surge|breakout|volume|overheat|weakness|risk|momentum|all)$",
+    ),
     db: Session = Depends(get_db),
 ):
     _require_trusted_ai_request(request, "Saving watchlist brief")

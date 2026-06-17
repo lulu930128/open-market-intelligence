@@ -27,6 +27,44 @@ class AiStageEventsTests(unittest.TestCase):
         self.assertEqual(payload["tool_label"], "台股資料刷新")
         self.assertIn("已完成", payload["message"])
 
+    def test_tool_status_payload_labels_us_overnight_reference(self) -> None:
+        payload = stage_events.tool_status_payload(
+            {
+                "tool": "us.refresh_daily_price",
+                "status": "success",
+                "reason": "美股隔夜影響核心因素資料缺漏或過期，先刷新本機美股日線快取。",
+            },
+            sequence=3,
+        )
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload["tool_label"], "美股隔夜參考資料")
+        self.assertEqual(payload["tool_scope"], "us_overnight_reference")
+        self.assertEqual(payload["signal_key"], "tool:us.refresh_daily_price:us_overnight_reference")
+        self.assertIn("美股隔夜參考資料已完成", payload["message"])
+
+    def test_progress_status_payload_normalizes_tool_progress(self) -> None:
+        payload = stage_events.progress_status_payload(
+            {
+                "stage": "tool_execution",
+                "message": "us.refresh_daily_price success。",
+                "phase": "completed",
+                "dedupe_key": "tool:us.refresh_daily_price:success",
+                "tool": "us.refresh_daily_price",
+                "status": "success",
+                "reason": "US overnight factor refresh.",
+            },
+            sequence=4,
+        )
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload["stage"], "tool_execution")
+        self.assertEqual(payload["tool_label"], "美股隔夜參考資料")
+        self.assertEqual(payload["phase"], "completed")
+        self.assertIn("已完成", payload["message"])
+
     def test_progress_status_payload_adds_sequence_and_label(self) -> None:
         payload = stage_events.progress_status_payload(
             {
@@ -89,6 +127,40 @@ class AiStageEventsTests(unittest.TestCase):
         self.assertIn("信任度 high", payloads[0]["message"])
         self.assertIn("未執行", payloads[2]["message"])
         self.assertEqual(payloads[-1]["report_level"], "brief")
+
+    def test_response_status_payloads_aggregate_duplicate_tool_runs(self) -> None:
+        payloads, next_sequence = stage_events.response_status_payloads(
+            {
+                "tool_runs": [
+                    {
+                        "tool": "us.refresh_daily_price",
+                        "status": "success",
+                        "reason": "美股隔夜影響核心因素資料缺漏或過期，先刷新本機美股日線快取。",
+                        "arguments": {"symbol": "^SOX"},
+                    },
+                    {
+                        "tool": "us.refresh_daily_price",
+                        "status": "skipped",
+                        "reason": "美股隔夜影響核心因素資料缺漏或過期，先刷新本機美股日線快取。",
+                        "arguments": {"symbol": "^SOX"},
+                        "error": "Duplicate tool call skipped.",
+                    },
+                ],
+                "reasoning_steps": [],
+                "answer_ready": True,
+            },
+            start_sequence=10,
+        )
+
+        tool_payloads = [
+            payload for payload in payloads if payload["stage"] == "tool_execution"
+        ]
+        self.assertEqual(len(tool_payloads), 1)
+        self.assertEqual(next_sequence, 12)
+        self.assertEqual(tool_payloads[0]["status"], "success")
+        self.assertEqual(tool_payloads[0]["attempt_count"], 2)
+        self.assertEqual(tool_payloads[0]["status_counts"], {"success": 1, "skipped": 1})
+        self.assertIn("成功 1、略過 1", tool_payloads[0]["message"])
 
 
 if __name__ == "__main__":

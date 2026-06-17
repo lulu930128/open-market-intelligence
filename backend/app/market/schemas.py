@@ -652,6 +652,9 @@ class DailyIndicatorPointRead(BaseModel):
     roc: dict[str, float | None] = Field(default_factory=dict)
     mfi: dict[str, float | None] = Field(default_factory=dict)
     donchian: dict[str, float | None] = Field(default_factory=dict)
+    bollinger: dict[str, float | None] = Field(default_factory=dict)
+    kd: dict[str, float | None] = Field(default_factory=dict)
+    support_resistance: dict[str, float | None] = Field(default_factory=dict)
 
 
 class InstitutionalTradeDailyRead(BaseModel):

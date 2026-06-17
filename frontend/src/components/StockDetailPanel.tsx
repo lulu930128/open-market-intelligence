@@ -229,6 +229,291 @@ const indexProducts = new Map([
   ],
 ]);
 
+type StockSignalTone = "positive" | "negative" | "warning" | "neutral";
+
+type StockSignalChip = {
+  key: string;
+  source: string;
+  label: string;
+  tone: StockSignalTone;
+  title?: string;
+};
+
+function stockSignalToneClass(tone: StockSignalTone) {
+  if (tone === "positive") return "border-red-200 bg-red-50 text-red-700";
+  if (tone === "negative") return "border-emerald-200 bg-emerald-50 text-emerald-700";
+  if (tone === "warning") return "border-amber-200 bg-amber-50 text-amber-700";
+  return "border-slate-200 bg-slate-50 text-slate-600";
+}
+
+function stockSignalToneFromNumber(value: number | null | undefined): StockSignalTone {
+  if (!finiteNumber(value)) return "neutral";
+  if (value > 0) return "positive";
+  if (value < 0) return "negative";
+  return "neutral";
+}
+
+function stockSignalToneFromTechnical(tone: TechnicalTone | undefined): StockSignalTone {
+  if (tone === "positive" || tone === "negative" || tone === "warning") return tone;
+  return "neutral";
+}
+
+function addStockSignalChip(
+  chips: StockSignalChip[],
+  chip: StockSignalChip | null
+) {
+  if (!chip || !chip.label || chips.some((item) => item.key === chip.key)) return;
+  chips.push(chip);
+}
+
+function findTechnicalRow(report: TechnicalReport, title: string) {
+  return report.rows.find((row) => row.title.includes(title)) ?? null;
+}
+
+function findTechnicalBadge(report: TechnicalReport, patterns: string[]) {
+  return (
+    report.badges.find((badge) =>
+      patterns.some((pattern) => badge.label.includes(pattern))
+    ) ?? null
+  );
+}
+
+function stockSignalToneFromBadgeLabel(label: string): StockSignalTone {
+  if (label.includes("過熱") || label.includes("放量") || label.includes("高位")) {
+    return "warning";
+  }
+
+  if (
+    label.includes("跌破") ||
+    label.includes("偏弱") ||
+    label.includes("衰退") ||
+    label.includes("減少")
+  ) {
+    return "negative";
+  }
+
+  if (
+    label.includes("站上") ||
+    label.includes("偏多") ||
+    label.includes("成長") ||
+    label.includes("增加") ||
+    label.includes("走升")
+  ) {
+    return "positive";
+  }
+
+  return "neutral";
+}
+
+function usableTechnicalRowValue(row: TechnicalReportRow | null) {
+  const value = row?.value?.trim();
+  return value && value !== "-" ? value : null;
+}
+
+function signedTextTone(valueText: string | null): StockSignalTone {
+  if (!valueText) return "neutral";
+  if (valueText.trim().startsWith("+")) return "positive";
+  if (valueText.trim().startsWith("-")) return "negative";
+  return "neutral";
+}
+
+function signedLabelFromValue(valueText: string, positiveLabel: string, negativeLabel: string, neutralLabel: string) {
+  if (valueText.trim().startsWith("+")) return positiveLabel;
+  if (valueText.trim().startsWith("-")) return negativeLabel;
+  return neutralLabel;
+}
+
+function extractSignedNumberAfter(text: string | null | undefined, keyword: string) {
+  if (!text) return null;
+
+  const index = text.indexOf(keyword);
+  if (index < 0) return null;
+  const tail = text.slice(index + keyword.length);
+  const match = tail.match(/[+-]?\d[\d,]*(?:\.\d+)?/);
+  if (!match) return null;
+
+  const value = Number(match[0].replace(/,/g, ""));
+  return Number.isFinite(value) ? value : null;
+}
+
+function buildStockSignalChips({
+  technicalReport,
+  institutional,
+  margin,
+  monthlyRevenue,
+  overnightImpact,
+  relativeToPrimaryIndex,
+  primaryMarketLabel,
+}: {
+  technicalReport: TechnicalReport;
+  institutional: InstitutionalTradeDailyRead | null;
+  margin: MarginTradingDailyRead | null;
+  monthlyRevenue: MonthlyRevenueRead | null;
+  overnightImpact: OvernightImpactRead | null;
+  relativeToPrimaryIndex: number | null;
+  primaryMarketLabel: string;
+}) {
+  const chips: StockSignalChip[] = [];
+  const trendBadge = findTechnicalBadge(technicalReport, ["MA20", "月線", "週線"]);
+  const momentumBadge = findTechnicalBadge(technicalReport, ["MACD", "RSI", "動能"]);
+  const volumeBadge = findTechnicalBadge(technicalReport, ["放量", "量能"]);
+  const trendRow = findTechnicalRow(technicalReport, "趨勢") ?? findTechnicalRow(technicalReport, "背景");
+  const momentumRow = findTechnicalRow(technicalReport, "動能");
+  const volumeRow = findTechnicalRow(technicalReport, "量價") ?? findTechnicalRow(technicalReport, "量能");
+  const institutionalRow = findTechnicalRow(technicalReport, "法人");
+  const institutionalRowValue = usableTechnicalRowValue(institutionalRow);
+  const rowMarginBalanceChange = extractSignedNumberAfter(
+    institutionalRow?.description,
+    "融資餘額"
+  );
+  const marginTodayBalance = margin?.margin_today_balance ?? null;
+  const marginPreviousBalance = margin?.margin_previous_balance ?? null;
+  const marginBalanceChange =
+    finiteNumber(marginTodayBalance) && finiteNumber(marginPreviousBalance)
+      ? marginTodayBalance - marginPreviousBalance
+      : rowMarginBalanceChange;
+  const institutionalNet = institutional?.total_institutional_net ?? null;
+  const revenueGrowth = monthlyRevenue?.year_over_year_pct ?? null;
+  const overnightChange = overnightImpact?.weighted_change_pct ?? null;
+
+  addStockSignalChip(chips, {
+    key: "classification",
+    source: "分類",
+    label: technicalReport.title,
+    tone: stockSignalToneFromNumber(technicalReport.value),
+    title: technicalReport.summary,
+  });
+
+  addStockSignalChip(chips, {
+    key: "trend",
+    source: "趨勢",
+    label:
+      trendBadge?.label ??
+      (trendRow?.value && trendRow.value !== "-" ? `${trendRow.title} ${trendRow.value}` : ""),
+    tone: trendBadge
+      ? stockSignalToneFromBadgeLabel(trendBadge.label)
+      : stockSignalToneFromTechnical(trendRow?.tone),
+    title: trendRow?.description,
+  });
+
+  addStockSignalChip(chips, {
+    key: "momentum",
+    source: "動能",
+    label:
+      momentumBadge?.label ??
+      (momentumRow?.direction !== null && momentumRow?.direction !== undefined
+        ? momentumRow.direction >= 0
+          ? "MACD 偏多"
+          : "MACD 偏弱"
+        : ""),
+    tone: momentumBadge
+      ? stockSignalToneFromBadgeLabel(momentumBadge.label)
+      : stockSignalToneFromTechnical(momentumRow?.tone),
+    title: momentumRow?.description,
+  });
+
+  addStockSignalChip(chips, {
+    key: "volume",
+    source: "量價",
+    label:
+      volumeBadge?.label ??
+      (volumeRow?.value && volumeRow.value !== "-" ? `量能 ${volumeRow.value}` : ""),
+    tone: volumeBadge
+      ? stockSignalToneFromBadgeLabel(volumeBadge.label)
+      : stockSignalToneFromTechnical(volumeRow?.tone),
+    title: volumeRow?.description,
+  });
+
+  if (finiteNumber(institutionalNet) || institutionalRowValue) {
+    addStockSignalChip(chips, {
+      key: "institutional",
+      source: "籌碼",
+      label: finiteNumber(institutionalNet)
+        ? `${
+            institutionalNet > 0
+              ? "法人買超"
+              : institutionalNet < 0
+                ? "法人賣超"
+                : "法人持平"
+          } ${formatSignedLots(institutionalNet)}張`
+        : `${signedLabelFromValue(
+            institutionalRowValue ?? "",
+            "法人買超",
+            "法人賣超",
+            "法人持平"
+          )} ${institutionalRowValue}`,
+      tone: finiteNumber(institutionalNet)
+        ? stockSignalToneFromNumber(institutionalNet)
+        : signedTextTone(institutionalRowValue),
+      title: finiteNumber(institutionalNet)
+        ? `最新三大法人合計 ${formatSignedLots(institutionalNet)}張`
+        : institutionalRow?.description,
+    });
+  }
+
+  if (finiteNumber(marginBalanceChange)) {
+    addStockSignalChip(chips, {
+      key: "margin",
+      source: "融資",
+      label:
+        marginBalanceChange > 0
+          ? `融資增加 ${formatSignedNumber(marginBalanceChange)}`
+          : marginBalanceChange < 0
+            ? `融資下降 ${formatSignedNumber(marginBalanceChange)}`
+            : "融資持平",
+      tone: marginBalanceChange > 0 ? "warning" : stockSignalToneFromNumber(-marginBalanceChange),
+      title: `融資餘額變化 ${formatSignedNumber(marginBalanceChange)}`,
+    });
+  }
+
+  if (finiteNumber(revenueGrowth)) {
+    addStockSignalChip(chips, {
+      key: "revenue",
+      source: "營收",
+      label:
+        revenueGrowth > 0
+          ? `營收成長 ${formatPct(revenueGrowth)}`
+          : revenueGrowth < 0
+            ? `營收衰退 ${formatPct(revenueGrowth)}`
+            : "營收持平",
+      tone: stockSignalToneFromNumber(revenueGrowth),
+      title: `月營收 YoY ${formatPct(revenueGrowth)}`,
+    });
+  }
+
+  if (finiteNumber(overnightChange)) {
+    addStockSignalChip(chips, {
+      key: "overnight",
+      source: "隔夜",
+      label:
+        overnightChange > 0
+          ? `美股偏多 ${formatPct(overnightChange)}`
+          : overnightChange < 0
+            ? `美股偏空 ${formatPct(overnightChange)}`
+            : "隔夜中性",
+      tone: stockSignalToneFromNumber(overnightChange),
+      title: `${overnightImpact?.title ?? "美股隔夜映射"} ${formatPct(overnightChange)}`,
+    });
+  }
+
+  if (finiteNumber(relativeToPrimaryIndex)) {
+    addStockSignalChip(chips, {
+      key: "market-relative",
+      source: "市場",
+      label:
+        relativeToPrimaryIndex > 0
+          ? `強於大盤 ${formatPct(relativeToPrimaryIndex)}`
+          : relativeToPrimaryIndex < 0
+            ? `弱於大盤 ${formatPct(relativeToPrimaryIndex)}`
+            : "同步大盤",
+      tone: stockSignalToneFromNumber(relativeToPrimaryIndex),
+      title: `相對${primaryMarketLabel} ${formatPct(relativeToPrimaryIndex)}`,
+    });
+  }
+
+  return chips;
+}
+
 function chartDrawingStorageKey(stockId: string | null, timeframe: ProfessionalTimeframe) {
   return `omi:tw:chart-drawings:v1:${stockId ?? "empty"}:${timeframe}`;
 }
@@ -980,10 +1265,18 @@ export default function StockDetailPanel({
 
     async function loadBasicDetail() {
       try {
-        const [institutionalData, stockData] = await Promise.all([
+        const [institutionalData, marginData, revenueData, stockData] = await Promise.all([
           fetchOptional<InstitutionalTradeDailyRead>(
             `/api/market/institutional/${stockId}/latest`,
             { ensure_daily: false }
+          ),
+          fetchOptional<MarginTradingDailyRead>(
+            `/api/market/margin/${stockId}/latest`,
+            { ensure_daily: false }
+          ),
+          fetchOptional<MonthlyRevenueRead>(
+            `/api/market/revenue/${stockId}/latest`,
+            { ensure_latest: false }
           ),
           fetchOptional<StockMasterRead>(`/api/stocks/${stockId}`),
         ]);
@@ -991,10 +1284,14 @@ export default function StockDetailPanel({
         if (cancelled) return;
 
         setInstitutional(institutionalData);
+        setMargin(marginData);
+        setMonthlyRevenue(revenueData);
         setStockInfo(stockData);
       } catch {
         if (!cancelled) {
           setInstitutional(null);
+          setMargin(null);
+          setMonthlyRevenue(null);
           setStockInfo(null);
         }
       }
@@ -2177,10 +2474,30 @@ export default function StockDetailPanel({
   const technicalReport = backendTechnicalReportView ?? fallbackTechnicalReport;
   const technicalStatus = technicalReport.title;
   const technicalSummaryText = technicalReport.summary;
-  const visibleSignals = technicalReport.badges.slice(0, 4);
   const displayOvernightImpact = !stockId || isIndexProduct ? null : overnightImpact;
   const displayOvernightImpactLoadState: LoadState =
     !stockId || isIndexProduct ? "idle" : overnightImpactLoadState;
+  const stockSignalChips = useMemo(
+    () =>
+      buildStockSignalChips({
+        technicalReport,
+        institutional,
+        margin,
+        monthlyRevenue,
+        overnightImpact: displayOvernightImpact,
+        relativeToPrimaryIndex,
+        primaryMarketLabel: primaryMarketIndex?.short_label ?? "大盤",
+      }),
+    [
+      displayOvernightImpact,
+      institutional,
+      margin,
+      monthlyRevenue,
+      primaryMarketIndex?.short_label,
+      relativeToPrimaryIndex,
+      technicalReport,
+    ]
+  );
   const technicalSourceReady =
     effectiveTimeframe === "today" ? todayTrend.length > 0 : currentChartReady;
   const showTechnicalLoading =
@@ -3098,6 +3415,26 @@ export default function StockDetailPanel({
                   <div className="text-xs font-medium text-slate-500">{technicalReport.valueLabel}</div>
                 </div>
               </div>
+              {stockSignalChips.length ? (
+                <div
+                  className="mt-3 flex flex-wrap gap-1.5"
+                  aria-label="個股技術訊號"
+                >
+                  {stockSignalChips.map((signal) => (
+                    <span
+                      key={signal.key}
+                      className={[
+                        "omi-technical-badge inline-flex items-center gap-1 border px-2 py-1 text-[11px] font-semibold",
+                        stockSignalToneClass(signal.tone),
+                      ].join(" ")}
+                      title={signal.title}
+                    >
+                      <span className="text-[10px] opacity-75">{signal.source}：</span>
+                      <span>{signal.label}</span>
+                    </span>
+                  ))}
+                </div>
+              ) : null}
             </div>
 
             <div className="px-5 py-3">
@@ -3139,19 +3476,6 @@ export default function StockDetailPanel({
                   </div>
                 </div>
               </div>
-
-              {visibleSignals.length ? (
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {visibleSignals.map((signal) => (
-                    <span
-                      key={signal.label}
-                      className={`omi-technical-badge px-2.5 py-1 text-xs font-semibold ${signal.tone}`}
-                    >
-                      {signal.label}
-                    </span>
-                  ))}
-                </div>
-              ) : null}
             </div>
           </>
         )}

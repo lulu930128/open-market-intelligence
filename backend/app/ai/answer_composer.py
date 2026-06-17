@@ -24,6 +24,16 @@ CONFIDENCE_LABELS = {
     "medium": "中",
     "high": "高",
 }
+CONFIDENCE_ORDER = {
+    "low": 0,
+    "medium": 1,
+    "high": 2,
+}
+CRITICAL_SOURCE_HEALTH_RESOURCES = {
+    "stock_master",
+    "market_daily_price",
+    "us_daily_price",
+}
 DATA_LIMIT_WARNING_HINTS = (
     "missing",
     "stale",
@@ -186,6 +196,22 @@ def consumer_text(
             if text:
                 lines.append(f"- {label + '：' if label else ''}{text}")
 
+    scenarios = answer.get("scenarios")
+    if isinstance(scenarios, list) and scenarios:
+        lines.append("情境：")
+        for item in scenarios[:summary_limit]:
+            if not isinstance(item, dict):
+                continue
+            label = text_value(item.get("label"))
+            text = text_value(item.get("text"))
+            if text:
+                lines.append(f"- {label + '：' if label else ''}{text}")
+
+    counter_evidence = text_list(answer.get("counter_evidence"), limit=2)
+    if counter_evidence:
+        lines.append("反證：")
+        lines.extend(f"- {item}" for item in counter_evidence)
+
     risks = text_list(answer.get("risks"), limit=2)
     if risks:
         lines.append("風險：")
@@ -289,25 +315,125 @@ def source_health_data_limits(source_health: Any, *, limit: int = 3) -> list[str
     return limits
 
 
+def confidence_cap_from_evidence(
+    *,
+    analysis_digest: dict[str, Any],
+    missing: list[Any] | None = None,
+    warnings: list[Any] | None = None,
+) -> tuple[str | None, list[str]]:
+    caps: list[str] = []
+    reasons: list[str] = []
+
+    source_health = analysis_digest.get("source_health")
+    if isinstance(source_health, dict):
+        entries = source_health.get("entries")
+        problem_entries = []
+        critical_entries = []
+        if isinstance(entries, list):
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("required") is False:
+                    continue
+                status = text_value(entry.get("status"))
+                if status not in SOURCE_HEALTH_PROBLEM_STATUSES:
+                    continue
+                problem_entries.append(entry)
+                resource = text_value(entry.get("resource"))
+                if resource in CRITICAL_SOURCE_HEALTH_RESOURCES or status in {"empty", "error", "unavailable"}:
+                    critical_entries.append(entry)
+
+        if critical_entries or len(problem_entries) >= 2:
+            caps.append("low")
+            reasons.append("關鍵資料來源有缺口，信心上限降為低。")
+        elif problem_entries:
+            caps.append("medium")
+            reasons.append("部分資料來源落後或不完整，信心上限降為中。")
+
+    clean_missing = text_list(missing or [], limit=6)
+    if clean_missing:
+        critical_missing = any(
+            item in CRITICAL_SOURCE_HEALTH_RESOURCES or item.startswith("market_daily_price")
+            for item in clean_missing
+        )
+        caps.append("low" if critical_missing else "medium")
+        reasons.append("仍有資料缺口，不能標示為高信心。")
+
+    data_warning_count = sum(1 for warning in text_list(warnings or [], limit=6) if warning_is_data_limit(warning))
+    if data_warning_count:
+        caps.append("medium")
+        reasons.append("資料警示仍存在，信心上限降為中。")
+
+    source_refs = analysis_digest.get("source_refs")
+    if isinstance(source_refs, list) and not source_refs:
+        caps.append("low" if clean_missing or data_warning_count else "medium")
+        reasons.append("未取得可追溯資料來源，不能標示為高信心。")
+
+    if not caps:
+        return None, []
+
+    cap = min(caps, key=lambda value: CONFIDENCE_ORDER[value])
+    return cap, list(dict.fromkeys(reasons))[:2]
+
+
+def apply_confidence_cap(
+    answer: dict[str, Any],
+    *,
+    analysis_digest: dict[str, Any],
+    missing: list[Any] | None = None,
+    warnings: list[Any] | None = None,
+    summary_limit: int = SUMMARY_LIMIT_DEFAULT,
+    data_limit_cap: int = 3,
+) -> dict[str, Any]:
+    cap, reasons = confidence_cap_from_evidence(
+        analysis_digest=analysis_digest,
+        missing=missing,
+        warnings=warnings,
+    )
+    if cap is None:
+        return answer
+
+    current = text_value(answer.get("confidence"))
+    if current not in CONFIDENCE_ORDER:
+        return answer
+    if CONFIDENCE_ORDER[current] <= CONFIDENCE_ORDER[cap]:
+        return answer
+
+    next_answer = dict(answer)
+    next_answer["confidence"] = cap
+    next_answer["confidence_label"] = CONFIDENCE_LABELS.get(cap, cap)
+    current_limits = text_list(next_answer.get("data_limits"))
+    capped_reasons = [f"資料可信度限制：{reason}" for reason in reasons]
+    next_answer["data_limits"] = list(dict.fromkeys(current_limits + capped_reasons))
+    next_answer["text"] = consumer_text(next_answer, summary_limit=summary_limit)
+    return next_answer
+
+
 def append_source_health_data_limits(
     answer: dict[str, Any],
     *,
     analysis_digest: dict[str, Any],
+    missing: list[Any] | None = None,
+    warnings: list[Any] | None = None,
     limit: int = 3,
 ) -> dict[str, Any]:
     source_limits = source_health_data_limits(analysis_digest.get("source_health"), limit=limit)
-    if not source_limits:
-        return answer
-
-    current_limits = text_list(answer.get("data_limits"), limit=limit)
-    combined_limits = list(dict.fromkeys(current_limits + source_limits))[:limit]
-    if combined_limits == current_limits:
-        return answer
-
     next_answer = dict(answer)
-    next_answer["data_limits"] = combined_limits
-    next_answer["text"] = consumer_text(next_answer)
-    return next_answer
+
+    if source_limits:
+        current_limits = text_list(next_answer.get("data_limits"))
+        combined_limits = list(dict.fromkeys(current_limits + source_limits[:limit]))
+        if combined_limits != current_limits:
+            next_answer["data_limits"] = combined_limits
+            next_answer["text"] = consumer_text(next_answer)
+
+    return apply_confidence_cap(
+        next_answer,
+        analysis_digest=analysis_digest,
+        missing=missing,
+        warnings=warnings,
+        data_limit_cap=limit,
+    )
 
 
 def digest_summary_lines(
@@ -456,6 +582,155 @@ def decision_evidence_data_lines(decision_evidence: dict[str, Any]) -> list[str]
     return list(dict.fromkeys(lines))[:3]
 
 
+def scenario_plan_from_levels(
+    *,
+    question_intent: str,
+    fields: dict[str, str],
+    numbers: dict[str, float | None],
+    score: float | None,
+    weak_evidence: bool,
+    summary_limit: int = SUMMARY_LIMIT_DEFAULT,
+) -> list[dict[str, str]]:
+    if not fields or weak_evidence:
+        return []
+
+    latest = fields.get("latest")
+    preferred = fields.get("preferred")
+    breakout = fields.get("breakout")
+    chase = fields.get("chase")
+    stop = fields.get("stop")
+    invalidation = fields.get("invalidation")
+    price_position = decision_engine.entry_price_position(numbers)
+    score_bullish = score is not None and score >= 2
+
+    scenarios: list[dict[str, str]] = []
+
+    if preferred:
+        if question_intent == "entry_decision":
+            text = f"回測 {preferred} 且止跌、量能沒有放大轉弱，才把它視為買點觀察；沒有守住就不低接。"
+        elif question_intent == "risk_check":
+            text = f"若回測 {preferred} 無法守住，風險等級要上調，先降低部位或等待收復。"
+        else:
+            text = f"回測 {preferred} 時看量能是否收斂、動能是否守住；守住才代表支撐有效。"
+        scenarios.append({"label": "回測支撐", "text": text})
+    elif latest:
+        scenarios.append(
+            {
+                "label": "盤整觀察",
+                "text": f"以現價 {latest} 當觀察基準，但不把單一收盤價當支撐；要等量能與動能同步確認。",
+            }
+        )
+
+    if breakout:
+        if question_intent == "entry_decision":
+            text = f"突破 {breakout} 並站穩後，買點邏輯要從低接改成突破後回測不破。"
+        else:
+            text = f"突破 {breakout} 並站穩，才代表波段延伸；若突破後快速跌回，視為假突破。"
+        scenarios.append({"label": "突破延伸", "text": text})
+    elif chase:
+        scenarios.append(
+            {
+                "label": "偏熱延伸",
+                "text": f"接近或高於 {chase} 時，先視為偏熱區；不要把追價區當新的支撐。",
+            }
+        )
+
+    guardrail = invalidation or stop
+    if guardrail:
+        text = (
+            f"跌破 {guardrail} 後，原本偏多假設降級，先防守再重新計算。"
+            if score_bullish or price_position not in {"below_stop", "below_invalidation"}
+            else f"若仍站不回 {guardrail}，弱勢假設延續，不用急著預設反彈。"
+        )
+        scenarios.append({"label": "失效防守", "text": text})
+
+    return scenarios[:summary_limit]
+
+
+def counter_evidence_from_levels(
+    *,
+    question_intent: str,
+    fields: dict[str, str],
+    score: float | None,
+    weak_evidence: bool,
+    evidence_risks: list[str],
+    summary_limit: int = 2,
+) -> list[str]:
+    lines: list[str] = []
+    if weak_evidence:
+        lines.append("資料或信心不足時，不把目前結論當成可執行訊號。")
+
+    stop = fields.get("stop")
+    invalidation = fields.get("invalidation")
+    preferred = fields.get("preferred")
+    breakout = fields.get("breakout")
+
+    if invalidation:
+        lines.append(f"收盤跌破 {invalidation}，原本波段假設需要降級。")
+    elif stop:
+        lines.append(f"跌破 {stop}，短線結構先視為轉弱。")
+
+    if question_intent in {"entry_decision", "trend_view"} and preferred:
+        lines.append(f"回測 {preferred} 量能放大但價格守不住，代表支撐承接失敗。")
+
+    if breakout:
+        lines.append(f"突破 {breakout} 後無法站穩並快速跌回，代表突破延伸失敗。")
+
+    if score is not None and score <= -2:
+        lines.append("多週期分數轉弱時，不應只因價格便宜就維持偏多假設。")
+
+    lines.extend(evidence_risks)
+    return list(dict.fromkeys(lines))[:summary_limit]
+
+
+def position_scenarios_from_decision(
+    position_decision: dict[str, Any],
+    *,
+    summary_limit: int = SUMMARY_LIMIT_DEFAULT,
+) -> tuple[list[dict[str, str]], list[str]]:
+    if not isinstance(position_decision, dict):
+        return [], []
+
+    entry_price = decision_engine.numeric_data_value(position_decision.get("entry_price"))
+    latest_price = decision_engine.numeric_data_value(position_decision.get("latest_price"))
+    levels = position_decision.get("levels") if isinstance(position_decision.get("levels"), dict) else {}
+    support_text = decision_engine.level_text(levels)
+    return_pct = decision_engine.numeric_data_value(position_decision.get("unrealized_return_pct"))
+
+    scenarios: list[dict[str, str]] = []
+    if entry_price is not None and latest_price is not None:
+        scenarios.append(
+            {
+                "label": "成本附近",
+                "text": (
+                    f"成本 {decision_engine.format_price(entry_price)}、最新 {decision_engine.format_price(latest_price)}；"
+                    "若價格仍在成本附近震盪，先用部位大小與技術線決定，不用單一漲跌判斷去留。"
+                ),
+            }
+        )
+    if support_text:
+        scenarios.append(
+            {
+                "label": "技術防守",
+                "text": f"若跌破 {support_text} 且動能轉弱，持倉假設要降級，先減碼或執行停損規則。",
+            }
+        )
+    scenarios.append(
+        {
+            "label": "續抱條件",
+            "text": "若回測不破、量能收斂且重新轉強，才把它視為續抱；反彈無量或站不上壓力就不要加碼。",
+        }
+    )
+
+    counter: list[str] = []
+    if return_pct is not None and return_pct <= -5:
+        counter.append("若你的固定停損規則是 -5%，目前已觸發，不應再用波段偏多作為延後停損理由。")
+    counter.append(f"跌破 {support_text} 且無法快速收復，代表技術停損條件成立。")
+    counter.append("若部位過大或可承受虧損不足，即使技術尚未失效，也要先降低風險。")
+
+    return scenarios[:summary_limit], list(dict.fromkeys(counter))[:2]
+
+
 def build_position_decision_consumer_answer(
     *,
     position_decision: dict[str, Any],
@@ -529,6 +804,12 @@ def build_position_decision_consumer_answer(
             "position_decision": position_decision,
         }
 
+    scenarios, counter_evidence = position_scenarios_from_decision(
+        position_decision,
+        summary_limit=summary_limit,
+    )
+    answer["scenarios"] = scenarios
+    answer["counter_evidence"] = counter_evidence
     answer["text"] = consumer_text(answer, summary_limit=summary_limit)
     return answer
 
@@ -560,6 +841,7 @@ def build_question_aware_consumer_answer(
     )
     evidence_summary = decision_evidence_summary_lines(decision_evidence)
     evidence_risks = decision_evidence_risk_lines(decision_evidence)
+    answer_risks = list(evidence_risks)
     data_limits = list(
         dict.fromkeys(data_limits + decision_evidence_data_lines(decision_evidence))
     )
@@ -741,6 +1023,51 @@ def build_question_aware_consumer_answer(
             },
             {"label": "風控", "text": "不要等到資料完全確認才控風險；條件失效時先縮小部位。"},
         ]
+    elif question_intent == "trend_view":
+        if evidence_summary:
+            summary = list(dict.fromkeys(evidence_summary + summary))[:summary_limit]
+        if level_fields:
+            headline, trend_summary, action_plan, trend_risks = decision_engine.trend_view_with_levels(
+                target_label=target_label,
+                score=score,
+                weak_evidence=weak_evidence,
+                fields=level_fields,
+                numbers=level_numbers,
+                summary_limit=summary_limit,
+            )
+            summary = list(dict.fromkeys(trend_summary + summary))[:summary_limit]
+            answer_risks = list(dict.fromkeys(trend_risks + evidence_risks))
+        elif weak_evidence:
+            headline = f"{target_label} 目前方向信心不足，先看下一筆確認"
+            action_plan = [
+                {
+                    "label": "趨勢",
+                    "text": "先把這次解讀當方向參考，不把單一分數或單日收盤價當成最後結論。",
+                },
+                {"label": "支撐壓力", "text": "先看主要均線、前低與量能，確認支撐壓力是否一致。"},
+                {"label": "觀察", "text": "等價格、量能與市場相對強弱出現同向訊號後，再提高判斷強度。"},
+            ]
+        elif score >= 2:
+            headline = f"{target_label} 走勢偏多，先看支撐承接與突破延續"
+            action_plan = [
+                {"label": "趨勢", "text": "先用多週期分數判斷大方向，再用支撐壓力與量能確認延續性。"},
+                {"label": "支撐壓力", "text": "先看回測支撐是否守住，再看上方壓力是否突破站穩。"},
+                {"label": "觀察", "text": "觀察價格、量能、均線與相對市場是否持續同向。"},
+            ]
+        elif score <= -2:
+            headline = f"{target_label} 走勢偏弱，先看支撐是否失守"
+            action_plan = [
+                {"label": "趨勢", "text": "先把方向降級，不用單一收盤價硬撐原本的多方假設。"},
+                {"label": "支撐壓力", "text": "優先確認主要支撐是否失守，以及反彈壓力是否有效。"},
+                {"label": "觀察", "text": "若量能與動能都轉弱，原本的波段判斷要重新計算。"},
+            ]
+        else:
+            headline = f"{target_label} 方向未定，先看支撐壓力哪邊先表態"
+            action_plan = [
+                {"label": "趨勢", "text": f"目前評分為 {score_text or '-'}，先把它當方向線索，不直接等同買賣訊號。"},
+                {"label": "支撐壓力", "text": "先看關鍵均線、前低與上方壓力是否收斂成一致訊號。"},
+                {"label": "觀察", "text": "等價格、量能與市場相對強弱同向後，再提高結論強度。"},
+            ]
     else:
         if evidence_summary:
             summary = list(dict.fromkeys(evidence_summary + summary))[:summary_limit]
@@ -759,6 +1086,22 @@ def build_question_aware_consumer_answer(
             {"label": "失效", "text": "若主要均線或動能轉弱，原本走勢判斷要重新計算。"},
         ]
 
+    scenarios = scenario_plan_from_levels(
+        question_intent=question_intent,
+        fields=level_fields,
+        numbers=level_numbers,
+        score=score,
+        weak_evidence=weak_evidence,
+        summary_limit=summary_limit,
+    )
+    counter_evidence = counter_evidence_from_levels(
+        question_intent=question_intent,
+        fields=level_fields,
+        score=score,
+        weak_evidence=weak_evidence,
+        evidence_risks=answer_risks,
+    )
+
     answer = {
         "kind": "consumer_market_answer",
         "style": "question_aware_summary",
@@ -771,7 +1114,9 @@ def build_question_aware_consumer_answer(
         "confidence_label": confidence_label,
         "summary": summary,
         "action_plan": action_plan,
-        "risks": list(dict.fromkeys(evidence_risks + (data_limits[:2] if weak_evidence else [])))[:2],
+        "scenarios": scenarios,
+        "counter_evidence": counter_evidence,
+        "risks": list(dict.fromkeys(answer_risks + (data_limits[:2] if weak_evidence else [])))[:2],
         "data_limits": data_limits,
         "detail": text_value(analysis_digest.get("display")) or "",
         "decision_evidence": decision_evidence,
@@ -866,6 +1211,13 @@ def build_llm_consumer_answer(
 WATCHLIST_RADAR_RISK_BUCKETS = {
     "risk",
     "limit_move",
+    "limit_down_liquidity",
+    "selloff_risk",
+    "overheated",
+    "volatility_risk",
+    "support_break",
+    "volume_down",
+    "bearish_momentum",
     "limit_down_move",
 }
 WATCHLIST_RADAR_MOMENTUM_BUCKETS = {
@@ -874,6 +1226,12 @@ WATCHLIST_RADAR_MOMENTUM_BUCKETS = {
     "pullback",
     "momentum",
     "limit_move",
+    "limit_up_lock",
+    "surge_up",
+    "breakout_high",
+    "trend_reclaim",
+    "volume_up",
+    "compression_watch",
     "limit_up_move",
 }
 
@@ -1196,7 +1554,12 @@ def build_consumer_human_answer(
             warnings=warnings,
             summary_limit=summary_limit,
         )
-        return append_source_health_data_limits(answer, analysis_digest=analysis_digest)
+        return append_source_health_data_limits(
+            answer,
+            analysis_digest=analysis_digest,
+            missing=missing,
+            warnings=warnings,
+        )
 
     watchlist_radar_answer = build_watchlist_radar_consumer_answer(
         question_intent=question_intent,
@@ -1210,7 +1573,12 @@ def build_consumer_human_answer(
         not llm_report
         or question_intent in {"entry_decision", "exit_decision", "risk_check", "trend_view"}
     ):
-        return append_source_health_data_limits(watchlist_radar_answer, analysis_digest=analysis_digest)
+        return append_source_health_data_limits(
+            watchlist_radar_answer,
+            analysis_digest=analysis_digest,
+            missing=missing,
+            warnings=warnings,
+        )
 
     question_answer = build_question_aware_consumer_answer(
         question_intent=question_intent,
@@ -1220,8 +1588,13 @@ def build_consumer_human_answer(
         warnings=warnings,
         summary_limit=summary_limit,
     )
-    if question_intent in {"entry_decision", "exit_decision"} and question_answer:
-        return append_source_health_data_limits(question_answer, analysis_digest=analysis_digest)
+    if question_intent in {"entry_decision", "exit_decision", "trend_view"} and question_answer:
+        return append_source_health_data_limits(
+            question_answer,
+            analysis_digest=analysis_digest,
+            missing=missing,
+            warnings=warnings,
+        )
 
     if llm_report:
         answer = build_llm_consumer_answer(
@@ -1232,7 +1605,12 @@ def build_consumer_human_answer(
             warnings=warnings,
             summary_limit=summary_limit,
         )
-        return append_source_health_data_limits(answer, analysis_digest=analysis_digest)
+        return append_source_health_data_limits(
+            answer,
+            analysis_digest=analysis_digest,
+            missing=missing,
+            warnings=warnings,
+        )
 
     human_answer = analysis_digest.get("human_answer") if isinstance(analysis_digest.get("human_answer"), dict) else {}
     if human_answer:
@@ -1243,10 +1621,20 @@ def build_consumer_human_answer(
             warnings=warnings,
             summary_limit=summary_limit,
         )
-        return append_source_health_data_limits(answer, analysis_digest=analysis_digest)
+        return append_source_health_data_limits(
+            answer,
+            analysis_digest=analysis_digest,
+            missing=missing,
+            warnings=warnings,
+        )
 
     if question_answer:
-        return append_source_health_data_limits(question_answer, analysis_digest=analysis_digest)
+        return append_source_health_data_limits(
+            question_answer,
+            analysis_digest=analysis_digest,
+            missing=missing,
+            warnings=warnings,
+        )
 
     if analysis_digest:
         answer = build_digest_consumer_answer(
@@ -1256,6 +1644,11 @@ def build_consumer_human_answer(
             warnings=warnings,
             summary_limit=summary_limit,
         )
-        return append_source_health_data_limits(answer, analysis_digest=analysis_digest)
+        return append_source_health_data_limits(
+            answer,
+            analysis_digest=analysis_digest,
+            missing=missing,
+            warnings=warnings,
+        )
 
     return {}

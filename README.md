@@ -13,7 +13,7 @@ Open Market Intelligence（OMI）是一套本機優先的市場情報與看盤�
 這版是台股 v2 基線版，日常本機研究流程已具備可用穩定度：
 
 - 台股 dashboard：大盤脈絡、自選股群組、群組排行、背景更新狀態、資料過期 loading guard。
-- 自選股 Radar：依技術訊號把群組股票分成重點、風險、動能與全部視角，支援 SSR 初始資料、URL mode、reload 與點選跳轉個股。
+- 今日雷達：依技術、價量、風險與籌碼/基本面 context，把群組股票分成重點、急漲、突破、量能、過熱、弱勢、風險、動能等掃描視角，支援 SSR 初始資料、URL mode、reload 與點選跳轉個股。
 - 台股個股頁：`今日`、`日K`、`週K`、`月K` 共用一致版型。
 - 台指期頁：TXF、MXF、TMF 報價、日內/日週月 K、期現價差、成交量與商品比較；即時報價帶 freshness 狀態與 provider fallback。
 - 專業 K 線模式：台股、美股、台指期共用同一套全寬圖表 shell，支援壓縮 header、指標分類、畫線工具、量測工具、undo/redo、畫線快照保存。
@@ -35,7 +35,8 @@ Open Market Intelligence（OMI）是一套本機優先的市場情報與看盤�
 
 - TAIEX 與 TPEx 市場卡片。
 - 自選股樹狀群組、群組數量、群組總覽、排序、排行、reload/backfill 控制。
-- Watchlist Radar：以 `action`、`risk`、`momentum`、`all` 四種模式掃描群組，標出高優先風險、突破動能、量能異動、強勢回檔與一般觀察名單。
+- 今日雷達：以 `action`、`surge`、`breakout`、`volume`、`overheat`、`weakness`、`risk`、`momentum` 八種模式掃描群組，標出急漲、突破、量價攻擊、過熱警戒、跌破支撐、量價轉弱、動能轉弱與趨勢延續。
+- 雷達結果以一排訊號 chip 呈現分類、急迫性、技術強度與 context：法人、融資、營收、財務、盤中等訊號會直接標註來源與方向，方便快速掃過判斷方向。
 - 背景工作中心，台股與美股工作分開顯示。
 - stale-date guard：資料日期不正確時先顯示 loading/empty 狀態，不直接展示舊資料。
 
@@ -44,7 +45,7 @@ Open Market Intelligence（OMI）是一套本機優先的市場情報與看盤�
 - Header 顯示代號、名稱、價格、漲跌點、漲跌幅，並有價格更新 pulse。
 - `今日` 使用盤中資料、昨收、VWAP、TWAP、EMA、RSI、MACD、成交量與 hover guide line。
 - `日K`、`週K`、`月K` 使用歷史 OHLC 與衍生技術指標。
-- Technical summary 依 timeframe 切換盤中、短線、波段、長線觀點。
+- Technical summary 依 timeframe 切換盤中、短線、波段、長線觀點，並在卡片上方彙整分類、趨勢、動能、量價、籌碼、融資、營收、隔夜與相對大盤訊號。
 - 分析區與資料區分離，避免技術解讀和基本面/籌碼資料混在同一層。
 
 ### 專業 K 線模式
@@ -210,7 +211,7 @@ flowchart LR
 | `/api/watchlists` | 台股 watchlists、groups、ranking、Radar、backfills |
 | `/api/market/ohlc` | 台股日/週/月 OHLC |
 | `/api/market/intraday` | 台股盤中 trend |
-| `/api/market/technical-report` | timeframe-aware technical reports |
+| `/api/market/technical` | timeframe-aware technical reports |
 | `/api/market/chart-drawings` | K 線畫線快照保存 |
 | `/api/market/broker-branches` | 券商分點 Top15 與 aggregate summaries |
 | `/api/market/institutional` | 法人買賣與持股比例 |
