@@ -4,6 +4,7 @@ const apiProxyTarget = process.env.API_PROXY_TARGET ?? "http://127.0.0.1:8300";
 const apiProxyPath = process.env.API_PROXY_PATH ?? "/omi-data";
 
 const nextConfig: NextConfig = {
+  allowedDevOrigins: ["127.0.0.1"],
   output: "standalone",
   async rewrites() {
     return [

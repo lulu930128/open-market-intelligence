@@ -4,22 +4,76 @@ Open Market Intelligence（OMI）是一套本機優先的市場情報與看盤�
 
 目前產品主軸是台股。美股模組已可作為台股研究的領先訊號層，特別適合觀察半導體、AI 基建、雲端、記憶體、ETF 與大型科技股對台股供應鏈的影響。日股、韓股、港股入口先保留，後續再擴充。
 
+## 產品畫面
+
+### 台股 Dashboard 與 Watchlist Radar
+
 <p align="center">
-  <img src="docs/assets/readme/omi-stock-workbench.png" alt="Open Market Intelligence stock workbench with watchlist, K-line chart, technical indicators and chip-flow panels" width="960">
+  <img src="docs/assets/readme/omi-dashboard-overview.png" alt="Open Market Intelligence Taiwan dashboard with market cards, watchlist group summary, radar tabs and ranking table" width="1120">
 </p>
+
+Dashboard 整合大盤卡片、自選股群組、Watchlist Radar 與排行表；固定的加權指數入口預設收起，讓主要空間留給自選股操作。
+
+### 個股研究工作台
+
+<p align="center">
+  <img src="docs/assets/readme/omi-stock-research-workbench.png" alt="Open Market Intelligence stock research workbench for 2330 with daily K-line summary and technical signal panel" width="1120">
+</p>
+
+個股頁把 K 線、技術摘要、雷達候選與資料分頁放在同一個研究工作台；一般 K 線預設不顯示交叉/突破標記，保留乾淨讀圖視野。
+
+### 籌碼、分點與資料面板
+
+<p align="center">
+  <img src="docs/assets/readme/omi-stock-data-branch-panel.png" alt="Open Market Intelligence stock data panel with broker branch Top15 buy and sell detail table" width="1120">
+</p>
+
+資料面板覆蓋籌碼、法人、券商分點、融資融券、營收、財報與盈餘，支援把同一檔股票的價格、技術與基本面證據分層檢視。
+
+### 專業 K 線模式
+
+<p align="center">
+  <img src="docs/assets/readme/omi-professional-chart-vpvr-signals.png" alt="Open Market Intelligence professional chart mode with VPVR volume profile and crossover breakout signal markers" width="1120">
+</p>
+
+專業模式保留左側選股 context，將主要空間交給全寬 K 線圖；VPVR 與交叉/突破標記會在切換商品、週期或圖表重建後重新投影。
+
+### OMI 即時問答
+
+<p align="center">
+  <img src="docs/assets/readme/omi-ai-dock-decision.png" alt="Open Market Intelligence OMI dock with evidence based trading decision and key levels" width="1120">
+</p>
+
+OMI dock 以本機 evidence 為預設，直接回傳買入判斷、關鍵價位、風險條件與資料引用，不需要讓日常 UI 依賴 LLM 或外部抓取才能完成回答。
+
+### 台指期 Context
+
+<p align="center">
+  <img src="docs/assets/readme/omi-taiwan-futures-context.png" alt="Open Market Intelligence Taiwan futures page with TXF quote context and futures candlestick chart" width="1120">
+</p>
+
+台指期頁提供 TXF、MXF、TMF 報價、期現價差、成交量、契約月份與 K 線，作為台股研究的衍生性商品 context。
+
+### 美股隔夜與跨市場 Context
+
+<p align="center">
+  <img src="docs/assets/readme/omi-us-market-context.png" alt="Open Market Intelligence US market context with index cards and US watchlist ranking" width="1120">
+</p>
+
+美股模組提供指數、自選股、OHLC、盤中資料、SEC facts、Alpha Vantage actions、FINRA short volume 與 FRED macro，定位為台股供應鏈與隔夜市場脈絡。
 
 ## 目前狀態
 
 這版是台股 v2 基線版，日常本機研究流程已具備可用穩定度：
 
-- 台股 dashboard：大盤脈絡、自選股群組、群組排行、背景更新狀態、資料過期 loading guard。
+- 台股 dashboard：大盤脈絡、自選股群組、群組排行、背景更新狀態、資料過期 loading guard；固定的加權指數資料夾預設收起，避免干擾主要自選股操作。
 - 今日雷達：依技術、價量、風險與籌碼/基本面 context，把群組股票分成重點、急漲、突破、量能、過熱、弱勢、風險、動能等掃描視角，支援 SSR 初始資料、URL mode、reload 與點選跳轉個股。
-- 台股個股頁：`今日`、`日K`、`週K`、`月K` 共用一致版型。
+- 台股個股頁：`今日`、`日K`、`週K`、`月K` 共用一致版型；一般 K 線預設保留乾淨視圖，交叉/突破標記改為 opt-in。
 - 台指期頁：TXF、MXF、TMF 報價、日內/日週月 K、期現價差、成交量與商品比較；即時報價帶 freshness 狀態與 provider fallback。
-- 專業 K 線模式：台股、美股、台指期共用同一套全寬圖表 shell，支援壓縮 header、指標分類、畫線工具、量測工具、undo/redo、畫線快照保存。
+- 專業 K 線模式：台股、美股、台指期共用同一套全寬圖表 shell，支援壓縮 header、指標分類、VPVR、交叉/突破標記、畫線工具、量測工具、undo/redo、畫線快照保存。
 - 台股籌碼與基本面：法人、融資融券、集保、券商分點 Top15、營收、財報、盈餘。
 - 美股市場：主要指數、自選股、OHLC、盤中資料、SEC facts、Alpha Vantage profile/actions、FINRA short volume、FRED macro。
-- AI/Agent 入口：`POST /api/ai/ask` 與 MCP `omi.ask`，支援 evidence freshness、warnings、missing data、tool runs；自選股問題會把 Watchlist Radar 納入回答與 action plan。
+- AI/Agent 入口：`POST /api/ai/ask` 與 MCP `omi.ask`，支援 evidence freshness、warnings、missing data、tool runs；前端 OMI dock 預設走本機 evidence-only brief answer，自選股問題會把 Watchlist Radar 納入回答與 action plan。
 
 ## 產品原則
 
@@ -35,6 +89,7 @@ Open Market Intelligence（OMI）是一套本機優先的市場情報與看盤�
 
 - TAIEX 與 TPEx 市場卡片。
 - 自選股樹狀群組、群組數量、群組總覽、排序、排行、reload/backfill 控制。
+- 固定的加權指數入口包含 TAIEX、TPEx 與台指期 context，預設收起，讓左側主要空間保留給使用者自選股。
 - 今日雷達：以 `action`、`surge`、`breakout`、`volume`、`overheat`、`weakness`、`risk`、`momentum` 八種模式掃描群組，標出急漲、突破、量價攻擊、過熱警戒、跌破支撐、量價轉弱、動能轉弱與趨勢延續。
 - 雷達結果以一排訊號 chip 呈現分類、急迫性、技術強度與 context：法人、融資、營收、財務、盤中等訊號會直接標註來源與方向，方便快速掃過判斷方向。
 - 背景工作中心，台股與美股工作分開顯示。
@@ -45,6 +100,7 @@ Open Market Intelligence（OMI）是一套本機優先的市場情報與看盤�
 - Header 顯示代號、名稱、價格、漲跌點、漲跌幅，並有價格更新 pulse。
 - `今日` 使用盤中資料、昨收、VWAP、TWAP、EMA、RSI、MACD、成交量與 hover guide line。
 - `日K`、`週K`、`月K` 使用歷史 OHLC 與衍生技術指標。
+- 一般 K 線預設關閉 `交叉 / 突破標記`，需要時再從指標選單打開，避免一般讀圖時被訊號標籤遮住。
 - Technical summary 依 timeframe 切換盤中、短線、波段、長線觀點，並在卡片上方彙整分類、趨勢、動能、量價、籌碼、融資、營收、隔夜與相對大盤訊號。
 - 分析區與資料區分離，避免技術解讀和基本面/籌碼資料混在同一層。
 
@@ -63,6 +119,7 @@ Open Market Intelligence（OMI）是一套本機優先的市場情報與看盤�
 - 週期：台股與美股支援 `1分`、`5分`、`15分`、`30分`、`1小時`、`4小時`、`日`、`週`、`月`；台指期支援 `今日`、`日K`、`週K`、`月K`。
 - 圖表型態：K 線、折線。
 - 指標分類：趨勢、均線、通道、波動、動能、成交量、相對強弱、型態、風險。
+- 視覺化 overlay：VPVR 可視區成交量分布、支撐壓力、缺口、交叉/突破標記、背離與型態訊號；專業模式會在 chart resize / rebuild 後重新投影 overlay，避免切換後消失。
 - 畫線工具：游標、水平線、趨勢線、射線、區間、Fibonacci、anchored VWAP、量價分布、量測、價格百分比。
 - 操作工具：undo、redo、刪除選取物件、清除畫線、保存畫線數。
 
@@ -292,7 +349,7 @@ analysis.human_answer
 
 ## AI Logic
 
-OMI 的 AI 問答以 deterministic local analysis 為主，LLM 是可選的敘事與報告層。一般使用者在右下角 OMI dock 直接提問時，後端會先把問題轉成可驗證的 decision task，再用本機 evidence 組回答。
+OMI 的 AI 問答以 deterministic local analysis 為主，LLM 是可選的敘事與報告層。一般使用者在右下角 OMI dock 直接提問時，前端預設送出 `brief` / evidence-only request（`allow_llm=false`、`allow_external_fetch=false`），後端會先把問題轉成可驗證的 decision task，再用本機 evidence 組回答。
 
 ### 問題理解
 

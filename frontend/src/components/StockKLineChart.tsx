@@ -364,7 +364,7 @@ export const professionalIndicatorCategoryGroups: IndicatorCategoryGroup[] =
   }));
 
 export const defaultIndicators: IndicatorSettings = {
-  signals: true,
+  signals: false,
   ma: true,
   ema: false,
   wma: false,

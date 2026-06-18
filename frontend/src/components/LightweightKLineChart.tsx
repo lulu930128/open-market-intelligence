@@ -96,6 +96,9 @@ import {
 import {
   buildDefaultVisibleLogicalRange,
   buildSeriesData,
+  calculateDmi,
+  calculateDonchian,
+  calculateEma,
   calculateMacd,
   calculateRsi,
   chartKeyboardBoundaryPaddingBars,
@@ -103,6 +106,7 @@ import {
   formatPrice,
   logicalRange,
   mergeIndicators,
+  movingAverage,
 } from "@/components/chart/LightweightKLineChartIndicators";
 export type {
   ChartDrawing,
@@ -688,6 +692,181 @@ export default function LightweightKLineChart({
       });
     }
 
+    if (activeIndicators.signals) {
+      const closes = chartData.map((point) => point.close);
+      const emaFast = calculateEma(closes, params.emaFast);
+      const emaSlow = calculateEma(closes, params.emaSlow);
+      const macdValues = calculateMacd(
+        closes,
+        params.macdFast,
+        params.macdSlow,
+        params.macdSignal
+      );
+      const donchian = calculateDonchian(chartData, params.donchianPeriod);
+      const dmi = calculateDmi(chartData, params.adxPeriod);
+      const volumes = chartData.map((point) =>
+        volumeValueKey === "trade_value" ? point.trade_value : point.volume
+      );
+
+      entries.forEach(({ point, index }) => {
+        if (index < 1) return;
+
+        const previous = chartData[index - 1];
+        const bullishPrice = point.low ?? point.close;
+        const bearishPrice = point.high ?? point.close;
+        const previousDonchianUpper = donchian[index - 1]?.upper;
+        const previousDonchianLower = donchian[index - 1]?.lower;
+        const previousAdx = dmi[index - 1]?.adx;
+        const currentAdx = dmi[index]?.adx;
+        const previousEmaFast = emaFast[index - 1];
+        const previousEmaSlow = emaSlow[index - 1];
+        const currentEmaFast = emaFast[index];
+        const currentEmaSlow = emaSlow[index];
+        const previousMacd = macdValues.macd[index - 1];
+        const previousMacdSignal = macdValues.signal[index - 1];
+        const currentMacd = macdValues.macd[index];
+        const currentMacdSignal = macdValues.signal[index];
+
+        if (
+          finiteNumber(previousEmaFast) &&
+          finiteNumber(previousEmaSlow) &&
+          finiteNumber(currentEmaFast) &&
+          finiteNumber(currentEmaSlow) &&
+          finiteNumber(bullishPrice) &&
+          previousEmaFast <= previousEmaSlow &&
+          currentEmaFast > currentEmaSlow
+        ) {
+          projectSignal(`signal-${point.time}-ema-up`, point, bullishPrice, "EMA金叉", "bullish");
+        }
+
+        if (
+          finiteNumber(previousEmaFast) &&
+          finiteNumber(previousEmaSlow) &&
+          finiteNumber(currentEmaFast) &&
+          finiteNumber(currentEmaSlow) &&
+          finiteNumber(bearishPrice) &&
+          previousEmaFast >= previousEmaSlow &&
+          currentEmaFast < currentEmaSlow
+        ) {
+          projectSignal(
+            `signal-${point.time}-ema-down`,
+            point,
+            bearishPrice,
+            "EMA死叉",
+            "bearish"
+          );
+        }
+
+        if (
+          finiteNumber(previousMacd) &&
+          finiteNumber(previousMacdSignal) &&
+          finiteNumber(currentMacd) &&
+          finiteNumber(currentMacdSignal) &&
+          finiteNumber(bullishPrice) &&
+          previousMacd <= previousMacdSignal &&
+          currentMacd > currentMacdSignal
+        ) {
+          projectSignal(
+            `signal-${point.time}-macd-up`,
+            point,
+            bullishPrice,
+            "MACD翻紅",
+            "bullish"
+          );
+        }
+
+        if (
+          finiteNumber(previousMacd) &&
+          finiteNumber(previousMacdSignal) &&
+          finiteNumber(currentMacd) &&
+          finiteNumber(currentMacdSignal) &&
+          finiteNumber(bearishPrice) &&
+          previousMacd >= previousMacdSignal &&
+          currentMacd < currentMacdSignal
+        ) {
+          projectSignal(
+            `signal-${point.time}-macd-down`,
+            point,
+            bearishPrice,
+            "MACD翻黑",
+            "bearish"
+          );
+        }
+
+        if (
+          finiteNumber(point.close) &&
+          finiteNumber(previousDonchianUpper) &&
+          finiteNumber(bullishPrice) &&
+          point.close > previousDonchianUpper
+        ) {
+          projectSignal(
+            `signal-${point.time}-donch-up`,
+            point,
+            bullishPrice,
+            "通道突破",
+            "bullish"
+          );
+        }
+
+        if (
+          finiteNumber(point.close) &&
+          finiteNumber(previousDonchianLower) &&
+          finiteNumber(bearishPrice) &&
+          point.close < previousDonchianLower
+        ) {
+          projectSignal(
+            `signal-${point.time}-donch-down`,
+            point,
+            bearishPrice,
+            "通道跌破",
+            "bearish"
+          );
+        }
+
+        const volumeMa = movingAverage(volumes, index, params.volumeMa);
+        const volume = volumes[index];
+        const previousClose = previous?.close;
+        const changePct =
+          finiteNumber(point.close) && finiteNumber(previousClose) && previousClose !== 0
+            ? ((point.close - previousClose) / previousClose) * 100
+            : null;
+
+        if (
+          finiteNumber(volume) &&
+          finiteNumber(volumeMa) &&
+          finiteNumber(changePct) &&
+          finiteNumber(bullishPrice) &&
+          volumeMa > 0 &&
+          volume / volumeMa >= 1.8 &&
+          changePct > 0
+        ) {
+          projectSignal(
+            `signal-${point.time}-volume-up`,
+            point,
+            bullishPrice,
+            "放量上攻",
+            "bullish"
+          );
+        }
+
+        if (
+          finiteNumber(previousAdx) &&
+          finiteNumber(currentAdx) &&
+          finiteNumber(point.close) &&
+          previousAdx <= 25 &&
+          currentAdx > 25
+        ) {
+          projectSignal(
+            `signal-${point.time}-adx-trend`,
+            point,
+            point.close,
+            "趨勢成形",
+            "neutral"
+          );
+        }
+      });
+    }
+
     if (activeIndicators.candlestickPatterns) {
       entries.forEach(({ point, index }) => {
         const pattern = detectCandlestickPattern(point, chartData[index - 1]);
@@ -850,15 +1029,22 @@ export default function LightweightKLineChart({
   }, [
     activeIndicators.candlestickPatterns,
     activeIndicators.divergence,
+    activeIndicators.signals,
     chartData,
     overlaySize.height,
     overlaySize.width,
+    params.adxPeriod,
+    params.donchianPeriod,
+    params.emaFast,
+    params.emaSlow,
     params.macdFast,
     params.macdSignal,
     params.macdSlow,
     params.rsiPeriod,
+    params.volumeMa,
     timeMode,
     visibleChartPointEntries,
+    volumeValueKey,
   ]);
 
   const drawingTimeFromCoordinateX = useCallback((coordinateX: number) => {
@@ -1854,7 +2040,9 @@ export default function LightweightKLineChart({
         ? buildSupportResistanceProjection()
         : [];
       const nextTechnicalSignals =
-        activeIndicators.candlestickPatterns || activeIndicators.divergence
+        activeIndicators.signals ||
+        activeIndicators.candlestickPatterns ||
+        activeIndicators.divergence
           ? buildTechnicalSignalProjection()
           : [];
 
@@ -1877,6 +2065,7 @@ export default function LightweightKLineChart({
     activeIndicators.candlestickPatterns,
     activeIndicators.divergence,
     activeIndicators.gap,
+    activeIndicators.signals,
     activeIndicators.supportResistance,
     activeIndicators.volumeProfile,
     buildGapZoneProjection,
@@ -2443,8 +2632,10 @@ export default function LightweightKLineChart({
           ? current
           : nextSize;
       });
+      scheduleOverlayRevision();
     });
     resizeObserver.observe(container);
+    scheduleOverlayRevision();
 
     return () => {
       const latestLogicalRange = chart.timeScale().getVisibleLogicalRange();

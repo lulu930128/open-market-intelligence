@@ -590,11 +590,11 @@ function buildRequest({
   return {
     question,
     target,
-    mode: "auto",
+    mode: "brief",
     caller_profile: "kuro_readonly",
-    allow_llm: true,
+    allow_llm: false,
     allow_write: false,
-    allow_external_fetch: true,
+    allow_external_fetch: false,
     tool_budget: {
       max_calls: targetType === "us_stock" ? 5 : 4,
       max_external_fetches: targetType === "us_stock" ? 3 : 2,

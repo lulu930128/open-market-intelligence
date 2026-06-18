@@ -190,7 +190,7 @@ export default function SidebarWatchlistExplorer({
   const [tree, setTree] = useState<WatchlistGroupNode[]>(initialTree);
   const [items, setItems] = useState<WatchlistItemRead[]>(initialItems);
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
-  const [indexGroupExpanded, setIndexGroupExpanded] = useState(true);
+  const [indexGroupExpanded, setIndexGroupExpanded] = useState(false);
   const [futuresQuotes, setFuturesQuotes] = useState<TaiwanFuturesQuote[]>([]);
   const [loading, setLoading] = useState(false);
   const [reloadingExplorerData, setReloadingExplorerData] = useState(false);

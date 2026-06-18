@@ -325,12 +325,6 @@ function trendClass(
   return "bg-slate-100 text-slate-600";
 }
 
-function selectedTrendClass(limitStatus?: RankingItem["limit_status"]) {
-  if (limitStatus === "limit_up") return "bg-red-500 text-white";
-  if (limitStatus === "limit_down") return "bg-emerald-500 text-white";
-  return "bg-white text-slate-900";
-}
-
 function sparklineTone(
   latestPrice: number | null,
   previousClose: number | null,
@@ -1419,18 +1413,18 @@ function WatchlistRankingPanel({
               className={[
                 "omi-ranking-row grid w-full grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-slate-200 px-4 py-2 text-left text-sm",
                 row.selected
-                  ? "omi-ranking-row-selected bg-slate-900 text-white"
+                  ? "omi-ranking-row-selected relative z-10 bg-white text-slate-900 ring-1 ring-red-100"
                   : "bg-white text-slate-800 hover:bg-slate-50",
               ].join(" ")}
             >
-              <span className={row.selected ? "text-slate-300" : "text-slate-500"}>
+              <span className={row.selected ? "font-semibold text-red-700" : "text-slate-500"}>
                 #{row.rank}
               </span>
               <span className="min-w-0">
                 <span className="block truncate font-semibold">
                   {row.symbol} {row.name ?? ""}
                 </span>
-                <span className={row.selected ? "block truncate text-xs text-slate-300" : "block truncate text-xs text-slate-500"}>
+                <span className={row.selected ? "block truncate text-xs font-medium text-slate-700" : "block truncate text-xs text-slate-500"}>
                   {row.loading ? <RankingCellSkeleton className="h-2.5 w-16" /> : row.meta ?? "-"}
                 </span>
               </span>
@@ -1451,7 +1445,7 @@ function WatchlistRankingPanel({
                   </PriceUpdatePulse>
                 )}
               </span>
-              <span className={`text-right font-semibold ${row.selected ? "" : valueTone(row.changePct)}`}>
+              <span className={`text-right font-semibold ${valueTone(row.changePct)}`}>
                 {row.loading ? (
                   <RankingCellSkeleton className="h-3 w-12" />
                 ) : (
@@ -1473,7 +1467,7 @@ function WatchlistRankingPanel({
                     className={[
                       "omi-ranking-trend-chip px-2 py-1 text-xs font-semibold",
                       row.selected
-                        ? "omi-ranking-trend-chip-selected bg-white text-slate-900"
+                        ? `omi-ranking-trend-chip-selected ${trendClass(row.changePct)}`
                         : trendClass(row.changePct),
                     ].join(" ")}
                   >
@@ -2598,16 +2592,16 @@ export default function MarketDashboardClient({
         className={[
           "omi-ranking-row grid w-full grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-slate-200 px-4 py-2 text-left text-sm",
           selected
-            ? "omi-ranking-row-selected bg-slate-900 text-white"
+            ? "omi-ranking-row-selected relative z-10 bg-white text-slate-900 ring-1 ring-red-100"
             : "bg-white text-slate-800 hover:bg-slate-50",
         ].join(" ")}
       >
-        <span className={selected ? "text-slate-300" : "text-slate-500"}>#{row.rank}</span>
+        <span className={selected ? "font-semibold text-red-700" : "text-slate-500"}>#{row.rank}</span>
         <span className="min-w-0">
           <span className="block truncate font-semibold">
             {row.stock_id} {row.stock_name ?? ""}
           </span>
-          <span className={selected ? "block truncate text-xs text-slate-300" : "block truncate text-xs text-slate-500"}>
+          <span className={selected ? "block truncate text-xs font-medium text-slate-700" : "block truncate text-xs text-slate-500"}>
             {loading ? (
               <RankingCellSkeleton className="h-2.5 w-16" />
             ) : (
@@ -2636,7 +2630,7 @@ export default function MarketDashboardClient({
             </PriceUpdatePulse>
           )}
         </span>
-        <span className={`text-right font-semibold ${selected ? "" : valueTone(row.change_pct)}`}>
+        <span className={`text-right font-semibold ${valueTone(row.change_pct)}`}>
           {loading ? (
             <RankingCellSkeleton className="h-3 w-12" />
           ) : (
@@ -2658,7 +2652,7 @@ export default function MarketDashboardClient({
               className={[
                 "omi-ranking-trend-chip px-2 py-1 text-xs font-semibold",
                 selected
-                  ? `omi-ranking-trend-chip-selected ${selectedTrendClass(row.limit_status)}`
+                  ? `omi-ranking-trend-chip-selected ${trendClass(row.change_pct, row.limit_status)}`
                   : trendClass(row.change_pct, row.limit_status),
               ].join(" ")}
             >

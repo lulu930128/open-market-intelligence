@@ -144,14 +144,17 @@ select {
 }
 
 .omi-ranking-row-selected {
-  box-shadow: inset 3px 0 0 #dc2626;
+  transform: translateY(-1px);
+  box-shadow:
+    inset 4px 0 0 #dc2626,
+    0 10px 24px rgb(15 23 42 / 0.12);
 }
 
 .omi-ranking-row-selected::after {
   background: linear-gradient(
     90deg,
     rgb(255 255 255 / 0) 0%,
-    rgb(255 255 255 / 0.18) 46%,
+    rgb(239 68 68 / 0.08) 46%,
     rgb(255 255 255 / 0) 100%
   );
   animation: omi-row-sweep 860ms cubic-bezier(0.22, 1, 0.36, 1);
