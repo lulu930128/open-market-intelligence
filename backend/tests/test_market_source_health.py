@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 import unittest
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import create_engine
@@ -17,6 +18,7 @@ from app.db.models import (
     StockMaster,
 )
 from app.market.source_health import build_taiwan_source_health
+from app.observability import provider_health
 from app.observability.provider_health import record_provider_event
 
 
@@ -86,23 +88,25 @@ class TaiwanSourceHealthTests(unittest.TestCase):
                 updated_at=updated_at,
             )
         )
-        event = record_provider_event(
-            self.db,
-            market="tw",
-            provider="twse",
-            resource="market_daily_price",
-            target="2330",
-            status="error",
-            event_time=datetime(2026, 6, 15, 16, 0, tzinfo=timezone.utc),
-            error_message="TWSE daily source unavailable",
-        )
-        self.db.commit()
+        now = datetime(2026, 6, 15, 16, 0, tzinfo=timezone.utc)
+        with patch.object(provider_health, "_now", return_value=now):
+            event = record_provider_event(
+                self.db,
+                market="tw",
+                provider="twse",
+                resource="market_daily_price",
+                target="2330",
+                status="error",
+                event_time=now,
+                error_message="TWSE daily source unavailable",
+            )
+            self.db.commit()
 
-        health = build_taiwan_source_health(
-            self.db,
-            stock_id="2330",
-            now=datetime(2026, 6, 15, 18, 31, tzinfo=ZoneInfo("Asia/Taipei")),
-        )
+            health = build_taiwan_source_health(
+                self.db,
+                stock_id="2330",
+                now=datetime(2026, 6, 15, 18, 31, tzinfo=ZoneInfo("Asia/Taipei")),
+            )
         entries = {entry["resource"]: entry for entry in health["entries"]}
 
         self.assertEqual(health["filters"]["stock_id"], "2330")

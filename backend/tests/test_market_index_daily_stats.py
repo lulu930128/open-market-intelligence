@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import unittest
 from unittest.mock import patch
 
@@ -28,6 +28,12 @@ def yahoo_point(trade_date: date, close: float) -> dict:
         "trade_value": None,
         "transaction_count": None,
     }
+
+
+class FixedDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return datetime(2026, 6, 15, 18, 0, tzinfo=tz or timezone.utc)
 
 
 class MarketIndexDailyStatTests(unittest.TestCase):
@@ -178,6 +184,12 @@ class MarketIndexDailyStatTests(unittest.TestCase):
                 indices,
                 "_fetch_yahoo_index_points",
                 return_value=(yahoo_points, {}, timezone(timedelta(hours=8))),
+            ),
+            patch.object(indices, "datetime", FixedDateTime),
+            patch.object(
+                indices,
+                "_fetch_twse_market_daily_stats_for_month",
+                return_value=([], "https://example.test/fmtqik"),
             ),
             patch.object(indices, "_fetch_recent_market_index_daily_stats", return_value=official_rows),
         ):
