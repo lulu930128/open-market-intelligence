@@ -221,18 +221,18 @@ function stageLabel(stage: unknown, fallback?: unknown) {
 }
 
 function signalDotClass(tone: SignalTone) {
-  if (tone === "error") return "bg-red-600";
-  if (tone === "done") return "bg-emerald-500";
-  if (tone === "tool") return "bg-amber-500";
-  if (tone === "data") return "bg-sky-500";
-  return "bg-slate-400";
+  if (tone === "error") return "bg-omi-market-up";
+  if (tone === "done") return "bg-omi-market-down-flash";
+  if (tone === "tool") return "bg-omi-warning";
+  if (tone === "data") return "bg-omi-info";
+  return "bg-omi-text-subtle";
 }
 
 function statusDotClass(tone: StatusTone) {
-  if (tone === "error") return "bg-red-400";
-  if (tone === "asking") return "bg-blue-400";
-  if (tone === "done") return "bg-emerald-400";
-  return "bg-slate-500";
+  if (tone === "error") return "bg-omi-market-up-flash";
+  if (tone === "asking") return "bg-omi-info";
+  if (tone === "done") return "bg-omi-market-down-flash";
+  return "bg-omi-text-muted";
 }
 
 function consumerAnswer(response: UnknownRecord) {
@@ -371,20 +371,20 @@ function fallbackAnswer(response: UnknownRecord) {
 }
 
 function priceToneClass(tone: string) {
-  if (tone === "entry") return "border-emerald-200 bg-emerald-50 text-emerald-950";
-  if (tone === "breakout") return "border-blue-200 bg-blue-50 text-blue-950";
-  if (tone === "warning") return "border-amber-200 bg-amber-50 text-amber-950";
-  if (tone === "risk") return "border-red-200 bg-red-50 text-red-950";
-  return "border-slate-200 bg-slate-50 text-slate-950";
+  if (tone === "entry") return "border-omi-success-border bg-omi-success-soft text-omi-success-strong";
+  if (tone === "breakout") return "border-omi-info-border bg-omi-info-soft text-omi-info-strong";
+  if (tone === "warning") return "border-omi-warning-border bg-omi-warning-soft text-omi-warning-strong";
+  if (tone === "risk") return "border-omi-danger-border bg-omi-danger-soft text-omi-danger-strong";
+  return "border-omi-border-subtle bg-omi-surface-subtle text-omi-text-strong";
 }
 
 function Pill({ label, value }: { label: string; value: string | null }) {
   if (!value) return null;
 
   return (
-    <span className="inline-flex items-center gap-1 border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-700">
-      <span className="text-slate-400">{label}</span>
-      <span className="text-slate-900">{value}</span>
+    <span className="inline-flex items-center gap-1 border border-omi-border-subtle bg-omi-surface-subtle px-2 py-1 text-[11px] font-semibold text-omi-text">
+      <span className="text-omi-text-subtle">{label}</span>
+      <span className="text-omi-text">{value}</span>
     </span>
   );
 }
@@ -394,13 +394,13 @@ function TextList({ title, items }: { title: string; items: string[] }) {
 
   return (
     <section className="space-y-1">
-      <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-400">
+      <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-omi-text-subtle">
         {title}
       </div>
       <div className="space-y-1">
         {items.map((item) => (
-          <div key={item} className="flex gap-2 text-sm leading-6 text-slate-800">
-            <span className="mt-2 h-1.5 w-1.5 flex-none rounded-full bg-red-600" />
+          <div key={item} className="flex gap-2 text-sm leading-6 text-omi-text">
+            <span className="mt-2 h-1.5 w-1.5 flex-none rounded-full bg-omi-market-up" />
             <span>{item}</span>
           </div>
         ))}
@@ -415,13 +415,13 @@ function PriceLevels({ response }: { response: UnknownRecord }) {
 
   return (
     <section className="space-y-1">
-      <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-400">
+      <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-omi-text-subtle">
         關鍵價位
       </div>
       <div className="grid grid-cols-2 gap-1.5">
         {items.map((item) => (
           <div key={item.label} className={`border px-2.5 py-2 ${priceToneClass(item.tone)}`}>
-            <div className="text-[11px] font-bold text-slate-500">{item.label}</div>
+            <div className="text-[11px] font-bold text-omi-text-muted">{item.label}</div>
             <div className="mt-0.5 text-sm font-black leading-5">{item.value}</div>
           </div>
         ))}
@@ -452,14 +452,14 @@ function ActionPlan({
 
   return (
     <section className="space-y-1">
-      <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-400">
+      <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-omi-text-subtle">
         {title}
       </div>
       <div className="grid gap-1.5">
         {cleanActions.map((item) => (
-          <div key={`${item.label}:${item.text}`} className="border border-slate-200 bg-slate-50 px-2.5 py-2">
-            <div className="text-xs font-bold text-slate-950">{item.label}</div>
-            <div className="mt-0.5 text-sm leading-6 text-slate-700">{item.text}</div>
+          <div key={`${item.label}:${item.text}`} className="border border-omi-border-subtle bg-omi-surface-subtle px-2.5 py-2">
+            <div className="text-xs font-bold text-omi-text-strong">{item.label}</div>
+            <div className="mt-0.5 text-sm leading-6 text-omi-text">{item.text}</div>
           </div>
         ))}
       </div>
@@ -481,11 +481,11 @@ function StructuredAnswer({ response }: { response: UnknownRecord | null }) {
 
   return (
     <div className="space-y-3">
-      <div className="border-l-4 border-red-600 bg-slate-50 px-3 py-2">
-        <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-400">
+      <div className="border-l-4 border-omi-market-up bg-omi-surface-subtle px-3 py-2">
+        <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-omi-text-subtle">
           {isEntryDecision ? "買入判斷" : "結論"}
         </div>
-        <div className="mt-1 text-base font-black leading-6 text-slate-950">
+        <div className="mt-1 text-base font-black leading-6 text-omi-text-strong">
           {headline}
         </div>
         <div className="mt-2 flex flex-wrap gap-1.5">
@@ -511,11 +511,11 @@ function StructuredAnswer({ response }: { response: UnknownRecord | null }) {
       <TextList title="資料限制" items={textItems(consumer.data_limits, 3)} />
 
       {detail ? (
-        <details className="border border-slate-200 bg-white px-3 py-2 text-sm leading-6 text-slate-700">
-          <summary className="cursor-pointer text-xs font-bold text-slate-500">
+        <details className="border border-omi-border-subtle bg-omi-surface px-3 py-2 text-sm leading-6 text-omi-text">
+          <summary className="cursor-pointer text-xs font-bold text-omi-text-muted">
             展開完整解讀
           </summary>
-          <div className="mt-2 whitespace-pre-wrap text-slate-700">{detail}</div>
+          <div className="mt-2 whitespace-pre-wrap text-omi-text">{detail}</div>
         </details>
       ) : null}
     </div>
@@ -537,7 +537,7 @@ function AnswerPanel({
   if (answerText) return <div className="whitespace-pre-wrap">{answerText}</div>;
 
   return (
-    <div className="border border-dashed border-slate-300 bg-slate-50 px-3 py-4 text-sm leading-6 text-slate-500">
+    <div className="border border-dashed border-omi-border bg-omi-surface-subtle px-3 py-4 text-sm leading-6 text-omi-text-muted">
       直接問 OMI 目前畫面上的標的或群組。系統會使用現有行情、技術、籌碼與基本面資料回答，這裡只保留短期上下文。
     </div>
   );
@@ -921,18 +921,18 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
       {!open ? (
         <button
           type="button"
-          className="inline-flex h-11 items-center gap-2 border border-slate-900 bg-slate-950 px-3 text-sm font-black text-white shadow-lg transition hover:bg-red-700"
+          className="inline-flex h-11 items-center gap-2 border border-omi-control bg-omi-control px-3 text-sm font-black text-omi-text-inverse shadow-lg transition hover:bg-omi-accent"
           aria-label="開啟 OMI 即時問答"
           onClick={() => setOpen(true)}
         >
-          <span className="h-2 w-2 rounded-full bg-red-400" />
+          <span className="h-2 w-2 rounded-full bg-omi-market-up-flash" />
           <span>OMI 問答</span>
         </button>
       ) : (
-        <aside className="flex max-h-[calc(100vh-2rem)] w-[390px] max-w-[calc(100vw-2rem)] flex-col border border-slate-300 bg-white shadow-2xl">
-          <header className="flex items-center justify-between border-b border-slate-200 bg-slate-950 py-2 pl-3 pr-3 text-white">
+        <aside className="flex max-h-[calc(100vh-2rem)] w-[390px] max-w-[calc(100vw-2rem)] flex-col border border-omi-border bg-omi-surface shadow-2xl">
+          <header className="flex items-center justify-between border-b border-omi-border-subtle bg-omi-control py-2 pl-3 pr-3 text-omi-text-inverse">
             <div>
-              <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-red-300">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-omi-market-up-flash">
                 OMI
               </div>
               <div className="text-sm font-bold">即時問答</div>
@@ -941,7 +941,7 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
               <div className="relative">
                 <button
                   type="button"
-                  className="inline-flex max-w-[170px] items-center gap-1.5 text-xs text-slate-300 transition hover:text-white"
+                  className="inline-flex max-w-[170px] items-center gap-1.5 text-xs text-omi-text-inverse-muted transition hover:text-omi-text-inverse"
                   aria-label="查看 OMI 處理訊號"
                   onClick={() => setSignalsOpen((value) => !value)}
                 >
@@ -949,23 +949,23 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
                   <span className="truncate">{statusLabel}</span>
                 </button>
                 {signalsOpen ? (
-                  <div className="absolute right-0 top-7 z-10 w-72 max-w-[calc(100vw-2rem)] border border-slate-700 bg-slate-950 p-2 text-xs text-slate-200 shadow-2xl">
-                    <div className="mb-1 text-[10px] font-bold uppercase tracking-[0.18em] text-slate-500">
+                  <div className="absolute right-0 top-7 z-10 w-72 max-w-[calc(100vw-2rem)] border border-omi-control-border bg-omi-control p-2 text-xs text-omi-text-inverse-muted shadow-2xl">
+                    <div className="mb-1 text-[10px] font-bold uppercase tracking-[0.18em] text-omi-text-muted">
                       Signals
                     </div>
                     <div className="space-y-1.5">
                       {signals.length > 0 ? (
                         signals.map((signal) => (
-                          <div key={signal.key} className="flex gap-2 text-xs leading-5 text-slate-300">
+                          <div key={signal.key} className="flex gap-2 text-xs leading-5 text-omi-text-inverse-muted">
                             <span className={`mt-1.5 h-2 w-2 flex-none rounded-full ${signalDotClass(signal.tone)}`} />
                             <div className="min-w-0 flex-1">
-                              <div className="font-bold text-slate-100">{signal.label}</div>
-                              <div className="break-words text-slate-400">{signal.message}</div>
+                              <div className="font-bold text-omi-text-inverse-muted">{signal.label}</div>
+                              <div className="break-words text-omi-text-subtle">{signal.message}</div>
                             </div>
                           </div>
                         ))
                       ) : (
-                        <div className="text-slate-500">尚無處理訊號。</div>
+                        <div className="text-omi-text-muted">尚無處理訊號。</div>
                       )}
                     </div>
                   </div>
@@ -973,7 +973,7 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
               </div>
               <button
                 type="button"
-                className="grid h-7 w-7 place-items-center border border-slate-600 text-sm font-bold text-slate-200 hover:border-white hover:text-white"
+                className="grid h-7 w-7 place-items-center border border-omi-control-border text-sm font-bold text-omi-text-inverse-muted hover:border-omi-surface hover:text-omi-text-inverse"
                 aria-label="收起 OMI 即時問答"
                 onClick={() => {
                   setSignalsOpen(false);
@@ -985,11 +985,11 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
             </div>
           </header>
 
-          <div className="border-b border-slate-200 bg-slate-50 px-3 py-2">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+          <div className="border-b border-omi-border-subtle bg-omi-surface-subtle px-3 py-2">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
               目前標的
             </div>
-            <div className="mt-0.5 truncate text-sm font-bold text-slate-950">
+            <div className="mt-0.5 truncate text-sm font-bold text-omi-text-strong">
               {context.label || "目前標的"}
             </div>
           </div>
@@ -997,36 +997,36 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
           <div className="min-h-[220px] flex-1 overflow-y-auto px-3 py-3">
             {askedQuestion ? (
               <section className="mb-3">
-                <div className="mb-1 text-[11px] font-bold uppercase tracking-[0.18em] text-slate-400">
+                <div className="mb-1 text-[11px] font-bold uppercase tracking-[0.18em] text-omi-text-subtle">
                   Question
                 </div>
-                <div className="border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-bold leading-6 text-slate-900">
+                <div className="border border-omi-border-subtle bg-omi-surface-subtle px-3 py-2 text-sm font-bold leading-6 text-omi-text">
                   {askedQuestion}
                 </div>
               </section>
             ) : null}
             <section>
-              <div className="mb-1 text-[11px] font-bold uppercase tracking-[0.18em] text-slate-400">
+              <div className="mb-1 text-[11px] font-bold uppercase tracking-[0.18em] text-omi-text-subtle">
                 Answer
               </div>
-              <div className="border border-slate-200 bg-white p-2 text-sm leading-6 text-slate-800">
+              <div className="border border-omi-border-subtle bg-omi-surface p-2 text-sm leading-6 text-omi-text">
                 <AnswerPanel answerText={answerText} finalResponse={finalResponse} />
               </div>
             </section>
           </div>
 
-          <div className="border-t border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500">
+          <div className="border-t border-omi-border-subtle bg-omi-surface-subtle px-3 py-2 text-xs text-omi-text-muted">
             資料 {dataCount} / 工具 {toolRuns}
           </div>
 
-          <div className="border-t border-slate-200 bg-slate-50 px-3 py-3">
+          <div className="border-t border-omi-border-subtle bg-omi-surface-subtle px-3 py-3">
             <div className="mb-2 flex flex-wrap gap-1.5">
               {QUICK_QUESTIONS.map((item) => (
                 <button
                   key={item.label}
                   type="button"
                   disabled={isStreaming}
-                  className="border border-slate-300 bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 hover:border-slate-950 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="border border-omi-border bg-omi-surface px-3 py-1.5 text-sm font-semibold text-omi-text hover:border-omi-control disabled:cursor-not-allowed disabled:opacity-50"
                   onClick={() => submitQuestion(item.question, item)}
                 >
                   {item.label}
@@ -1045,7 +1045,7 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
                 value={question}
                 disabled={isStreaming}
                 placeholder="輸入問題..."
-                className="min-h-[44px] flex-1 resize-none border border-slate-300 bg-white px-3 py-2 text-sm text-slate-950 outline-none transition placeholder:text-slate-400 focus:border-slate-950 disabled:bg-slate-100"
+                className="min-h-[44px] flex-1 resize-none border border-omi-border bg-omi-surface px-3 py-2 text-sm text-omi-text-strong outline-none transition placeholder:text-omi-text-subtle focus:border-omi-control disabled:bg-omi-surface-muted"
                 onChange={(event) => setQuestion(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key !== "Enter" || event.shiftKey) return;
@@ -1056,7 +1056,7 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
               {isStreaming ? (
                 <button
                   type="button"
-                  className="h-11 border border-slate-900 bg-white px-4 text-sm font-bold text-slate-950 hover:bg-slate-100"
+                  className="h-11 border border-omi-control bg-omi-surface px-4 text-sm font-bold text-omi-text-strong hover:bg-omi-surface-muted"
                   onClick={stopAsk}
                 >
                   Stop
@@ -1065,7 +1065,7 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
               <button
                 type="submit"
                 disabled={isStreaming || !question.trim()}
-                className="h-11 bg-red-700 px-4 text-sm font-bold text-white hover:bg-slate-950 disabled:bg-slate-300"
+                className="h-11 bg-omi-accent px-4 text-sm font-bold text-omi-text-inverse hover:bg-omi-control disabled:bg-omi-border"
               >
                 送出
               </button>

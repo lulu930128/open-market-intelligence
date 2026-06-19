@@ -4,6 +4,8 @@ from datetime import date, datetime
 import math
 from typing import Any
 
+from app.market.technical_parameters import get_technical_analysis_parameters
+
 
 def _json_value(value: Any) -> Any:
     if isinstance(value, (date, datetime)):
@@ -49,6 +51,16 @@ def _finite_number(value: Any) -> float | None:
     if not math.isfinite(number):
         return None
     return number
+
+
+def _indicator_value(values: dict[str, Any], key: str | None, legacy_key: str | None = None) -> Any:
+    if not isinstance(values, dict):
+        return None
+    if key and values.get(key) is not None:
+        return values.get(key)
+    if legacy_key and values.get(legacy_key) is not None:
+        return values.get(legacy_key)
+    return None
 
 
 def _report_score(report: dict[str, Any] | None) -> int | None:
@@ -440,19 +452,24 @@ def _indicator_from_report(report: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _indicator_level_values(indicator: dict[str, Any]) -> dict[str, float | None]:
+    technical_parameters = get_technical_analysis_parameters()
     ma = indicator.get("ma") if isinstance(indicator.get("ma"), dict) else {}
     atr = indicator.get("atr") if isinstance(indicator.get("atr"), dict) else {}
     donchian = indicator.get("donchian") if isinstance(indicator.get("donchian"), dict) else {}
     rsi = indicator.get("rsi") if isinstance(indicator.get("rsi"), dict) else {}
     return {
         "close": _finite_number(indicator.get("close")),
-        "ma5": _finite_number(ma.get("ma5")),
-        "ma20": _finite_number(ma.get("ma20")),
-        "ma60": _finite_number(ma.get("ma60")),
-        "atr14": _finite_number(atr.get("atr14")),
-        "donchian_upper20": _finite_number(donchian.get("upper20")),
-        "donchian_lower20": _finite_number(donchian.get("lower20")),
-        "rsi14": _finite_number(rsi.get("rsi14")),
+        "ma5": _finite_number(_indicator_value(ma, technical_parameters.ma_short_key, "ma5")),
+        "ma20": _finite_number(_indicator_value(ma, technical_parameters.ma_medium_key, "ma20")),
+        "ma60": _finite_number(_indicator_value(ma, technical_parameters.ma_long_key, "ma60")),
+        "atr14": _finite_number(_indicator_value(atr, technical_parameters.atr_key, "atr14")),
+        "donchian_upper20": _finite_number(
+            _indicator_value(donchian, technical_parameters.donchian_upper_key, "upper20")
+        ),
+        "donchian_lower20": _finite_number(
+            _indicator_value(donchian, technical_parameters.donchian_lower_key, "lower20")
+        ),
+        "rsi14": _finite_number(_indicator_value(rsi, technical_parameters.rsi_key, "rsi14")),
     }
 
 
@@ -467,6 +484,7 @@ def _technical_price_levels(
     technical_reports: dict[str, Any],
     latest_daily: Any,
 ) -> dict[str, Any]:
+    technical_parameters = get_technical_analysis_parameters()
     daily_report = technical_reports.get("daily") if isinstance(technical_reports, dict) else {}
     daily_indicator = _indicator_from_report(daily_report)
     daily_values = _indicator_level_values(daily_indicator)
@@ -495,8 +513,8 @@ def _technical_price_levels(
     donchian_position = _donchian_position(latest_price, upper20, lower20)
     extended = bool(
         (donchian_position is not None and donchian_position >= 80)
-        or (weekly_rsi is not None and weekly_rsi >= 80)
-        or (atr_pct is not None and atr_pct >= 5)
+        or (weekly_rsi is not None and weekly_rsi >= technical_parameters.rsi_overheated_at)
+        or (atr_pct is not None and atr_pct >= technical_parameters.atr_high_volatility_pct)
     )
 
     aggressive_zone = _price_zone(
@@ -629,6 +647,11 @@ def _technical_report_from_points(
     timeframe: str,
     asset_label: str,
 ) -> dict[str, Any]:
+    technical_parameters = get_technical_analysis_parameters()
+    short_window = technical_parameters.ma_short_window or 5
+    medium_window = technical_parameters.ma_medium_window or 20
+    long_window = technical_parameters.ma_long_window or 60
+    structure_window = technical_parameters.donchian_period
     closes = [_finite_number(point.get("close")) for point in points]
     closes = [value for value in closes if value is not None]
     if len(closes) < 2:
@@ -643,12 +666,12 @@ def _technical_report_from_points(
 
     latest = closes[-1]
     previous = closes[-2]
-    ma5 = _moving_average(closes, 5)
-    ma20 = _moving_average(closes, 20)
-    ma60 = _moving_average(closes, 60)
+    ma5 = _moving_average(closes, short_window)
+    ma20 = _moving_average(closes, medium_window)
+    ma60 = _moving_average(closes, long_window)
     change_1 = _pct_change(previous, latest)
-    change_5 = _pct_change(closes[-6], latest) if len(closes) >= 6 else None
-    change_20 = _pct_change(closes[-21], latest) if len(closes) >= 21 else None
+    change_5 = _pct_change(closes[-(short_window + 1)], latest) if len(closes) >= short_window + 1 else None
+    change_20 = _pct_change(closes[-(medium_window + 1)], latest) if len(closes) >= medium_window + 1 else None
 
     score = 0
     if ma5 is not None:
@@ -662,7 +685,7 @@ def _technical_report_from_points(
     if change_20 is not None:
         score += 1 if change_20 > 0 else -1 if change_20 < 0 else 0
 
-    recent_range = closes[-20:] if len(closes) >= 20 else closes
+    recent_range = closes[-structure_window:] if len(closes) >= structure_window else closes
     recent_high = max(recent_range)
     recent_low = min(recent_range)
     if recent_high > recent_low:
@@ -684,16 +707,16 @@ def _technical_report_from_points(
     else:
         title = "方向未定"
 
-    confidence = "high" if len(closes) >= 60 else "medium" if len(closes) >= 20 else "low"
+    confidence = "high" if len(closes) >= long_window else "medium" if len(closes) >= medium_window else "low"
     relation_parts = []
     if ma20 is not None:
-        relation_parts.append(f"{'站上' if latest >= ma20 else '跌破'} MA20")
+        relation_parts.append(f"{'站上' if latest >= ma20 else '跌破'} MA{medium_window}")
     if ma60 is not None:
-        relation_parts.append(f"{'站上' if latest >= ma60 else '跌破'} MA60")
+        relation_parts.append(f"{'站上' if latest >= ma60 else '跌破'} MA{long_window}")
     relation_text = "、".join(relation_parts) if relation_parts else "均線資料有限"
     summary = (
         f"最新 {_format_number(latest)}，單期 {_format_pct(change_1)}、"
-        f"5期 {_format_pct(change_5)}、20期 {_format_pct(change_20)}；{relation_text}。"
+        f"{short_window}期 {_format_pct(change_5)}、{medium_window}期 {_format_pct(change_20)}；{relation_text}。"
     )
 
     return {

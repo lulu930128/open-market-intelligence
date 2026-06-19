@@ -1,6 +1,7 @@
 from sqlalchemy.orm import Session
 
 from app.market.indicator_service import calculate_daily_indicators
+from app.market.technical_parameters import get_technical_analysis_parameters
 
 
 def _to_dict(value) -> dict:
@@ -50,6 +51,16 @@ def _num(value) -> float | None:
         return None
 
 
+def _indicator_value(values: dict, key: str | None, legacy_key: str | None = None) -> float | None:
+    if not isinstance(values, dict):
+        return None
+    if key and values.get(key) is not None:
+        return _num(values.get(key))
+    if legacy_key and values.get(legacy_key) is not None:
+        return _num(values.get(legacy_key))
+    return None
+
+
 def _add_signal(
     signals: list[dict],
     key: str,
@@ -96,7 +107,7 @@ def _safe_ratio(value: float | None, reference: float | None) -> float | None:
     return value / reference
 
 
-def _near_level_pct(value: float, reference: float, threshold_pct: float = 2.0) -> bool:
+def _near_level_pct(value: float, reference: float, threshold_pct: float) -> bool:
     if reference == 0:
         return False
 
@@ -137,10 +148,10 @@ def _indicator_snapshot(point: dict) -> dict[str, dict[str, float | None]]:
 def calculate_latest_stock_signals(
     db: Session,
     stock_id: str,
-    ma_windows: str = "5,20,60",
-    volume_ma_windows: str = "5,20",
+    ma_windows: str | None = None,
+    volume_ma_windows: str | None = None,
     limit: int = 100,
-    volume_ratio_threshold: float = 1.5,
+    volume_ratio_threshold: float | None = None,
 ) -> dict:
     """
     Calculate latest rule-based signals for a stock.
@@ -148,12 +159,19 @@ def calculate_latest_stock_signals(
     This is intentionally rule-based and explainable.
     It does not make buy/sell decisions; it only emits observable conditions.
     """
+    technical_parameters = get_technical_analysis_parameters(
+        ma_windows=ma_windows,
+        volume_ma_windows=volume_ma_windows,
+        volume_ratio_threshold=volume_ratio_threshold,
+    )
+    volume_ratio_threshold = technical_parameters.volume_ratio_threshold
     points = calculate_daily_indicators(
         db=db,
         stock_id=stock_id,
         limit=limit,
-        ma_windows=ma_windows,
-        volume_ma_windows=volume_ma_windows,
+        ma_windows=technical_parameters.ma_windows_text,
+        volume_ma_windows=technical_parameters.volume_ma_windows_text,
+        parameters=technical_parameters,
     )
 
     normalized_points = [_to_dict(point) for point in points]
@@ -194,33 +212,37 @@ def calculate_latest_stock_signals(
     kd = latest.get("kd") or {}
     support_resistance = latest.get("support_resistance") or {}
 
-    ma5 = _num(ma.get("ma5"))
-    ma20 = _num(ma.get("ma20"))
-    ma60 = _num(ma.get("ma60"))
+    ma5 = _indicator_value(ma, technical_parameters.ma_short_key, "ma5")
+    ma20 = _indicator_value(ma, technical_parameters.ma_medium_key, "ma20")
+    ma60 = _indicator_value(ma, technical_parameters.ma_long_key, "ma60")
 
-    volume_ma5 = _num(volume_ma.get("volume_ma5"))
-    volume_ma20 = _num(volume_ma.get("volume_ma20"))
-    ema12 = _num(ema.get("ema12"))
-    ema26 = _num(ema.get("ema26"))
+    volume_ma5 = _indicator_value(volume_ma, technical_parameters.volume_ma_short_key, "volume_ma5")
+    volume_ma20 = _indicator_value(volume_ma, technical_parameters.volume_ma_medium_key, "volume_ma20")
+    ema12 = _indicator_value(ema, technical_parameters.ema_fast_key, "ema12")
+    ema26 = _indicator_value(ema, technical_parameters.ema_slow_key, "ema26")
     macd_value = _num(macd.get("macd"))
     macd_signal = _num(macd.get("signal"))
     macd_histogram = _num(macd.get("histogram"))
-    rsi14 = _num(rsi.get("rsi14"))
-    plus_di14 = _num(adx.get("plus_di14"))
-    minus_di14 = _num(adx.get("minus_di14"))
-    adx14 = _num(adx.get("adx14"))
-    roc12 = _num(roc.get("roc12"))
-    mfi14 = _num(mfi.get("mfi14"))
-    atr14 = _num(atr.get("atr14"))
-    donchian_upper20 = _num(donchian.get("upper20"))
-    donchian_lower20 = _num(donchian.get("lower20"))
-    bollinger_upper20 = _num(bollinger.get("upper20"))
-    bollinger_lower20 = _num(bollinger.get("lower20"))
-    bollinger_bandwidth20_pct = _num(bollinger.get("bandwidth20_pct"))
-    kd_k9 = _num(kd.get("k9"))
-    kd_d9 = _num(kd.get("d9"))
-    support20 = _num(support_resistance.get("support20"))
-    resistance20 = _num(support_resistance.get("resistance20"))
+    rsi14 = _indicator_value(rsi, technical_parameters.rsi_key, "rsi14")
+    plus_di14 = _indicator_value(adx, technical_parameters.plus_di_key, "plus_di14")
+    minus_di14 = _indicator_value(adx, technical_parameters.minus_di_key, "minus_di14")
+    adx14 = _indicator_value(adx, technical_parameters.adx_key, "adx14")
+    roc12 = _indicator_value(roc, technical_parameters.roc_key, "roc12")
+    mfi14 = _indicator_value(mfi, technical_parameters.mfi_key, "mfi14")
+    atr14 = _indicator_value(atr, technical_parameters.atr_key, "atr14")
+    donchian_upper20 = _indicator_value(donchian, technical_parameters.donchian_upper_key, "upper20")
+    donchian_lower20 = _indicator_value(donchian, technical_parameters.donchian_lower_key, "lower20")
+    bollinger_upper20 = _indicator_value(bollinger, technical_parameters.bollinger_upper_key, "upper20")
+    bollinger_lower20 = _indicator_value(bollinger, technical_parameters.bollinger_lower_key, "lower20")
+    bollinger_bandwidth20_pct = _indicator_value(
+        bollinger,
+        technical_parameters.bollinger_bandwidth_key,
+        "bandwidth20_pct",
+    )
+    kd_k9 = _indicator_value(kd, technical_parameters.kd_k_key, "k9")
+    kd_d9 = _indicator_value(kd, technical_parameters.kd_d_key, "d9")
+    support20 = _indicator_value(support_resistance, technical_parameters.support_key, "support20")
+    resistance20 = _indicator_value(support_resistance, technical_parameters.resistance_key, "resistance20")
 
     signals: list[dict] = []
     score = 0
@@ -472,7 +494,7 @@ def calculate_latest_stock_signals(
 
     # Trend strength and breakout
     if adx14 is not None and plus_di14 is not None and minus_di14 is not None:
-        if adx14 >= 25 and plus_di14 > minus_di14:
+        if adx14 >= technical_parameters.adx_trend_threshold and plus_di14 > minus_di14:
             score += 2
             _add_signal(
                 signals,
@@ -482,9 +504,9 @@ def calculate_latest_stock_signals(
                 level="strong",
                 message="ADX 高於 25 且 +DI 高於 -DI，趨勢強度偏多。",
                 value=adx14,
-                reference=25,
+                reference=technical_parameters.adx_trend_threshold,
             )
-        elif adx14 >= 25 and minus_di14 > plus_di14:
+        elif adx14 >= technical_parameters.adx_trend_threshold and minus_di14 > plus_di14:
             score -= 2
             _add_signal(
                 signals,
@@ -494,7 +516,7 @@ def calculate_latest_stock_signals(
                 level="strong",
                 message="ADX 高於 25 且 -DI 高於 +DI，趨勢強度偏空。",
                 value=adx14,
-                reference=25,
+                reference=technical_parameters.adx_trend_threshold,
             )
 
     if previous is not None:
@@ -552,7 +574,11 @@ def calculate_latest_stock_signals(
             value=close,
             reference=resistance20,
         )
-    elif support20 is not None and _near_level_pct(close, support20):
+    elif support20 is not None and _near_level_pct(
+        close,
+        support20,
+        threshold_pct=technical_parameters.near_level_threshold_pct,
+    ):
         _add_signal(
             signals,
             key="near_support",
@@ -563,7 +589,11 @@ def calculate_latest_stock_signals(
             value=close,
             reference=support20,
         )
-    elif resistance20 is not None and _near_level_pct(close, resistance20):
+    elif resistance20 is not None and _near_level_pct(
+        close,
+        resistance20,
+        threshold_pct=technical_parameters.near_level_threshold_pct,
+    ):
         _add_signal(
             signals,
             key="near_resistance",
@@ -600,7 +630,10 @@ def calculate_latest_stock_signals(
             value=close,
             reference=bollinger_lower20,
         )
-    elif bollinger_bandwidth20_pct is not None and bollinger_bandwidth20_pct <= 8:
+    elif (
+        bollinger_bandwidth20_pct is not None
+        and bollinger_bandwidth20_pct <= technical_parameters.bollinger_squeeze_bandwidth_pct
+    ):
         _add_signal(
             signals,
             key="bollinger_squeeze",
@@ -609,12 +642,12 @@ def calculate_latest_stock_signals(
             level="info",
             message="Bollinger Band 寬度偏窄，後續方向突破值得追蹤。",
             value=bollinger_bandwidth20_pct,
-            reference=8,
+            reference=technical_parameters.bollinger_squeeze_bandwidth_pct,
         )
 
     # Oscillator and flow confirmation
     if rsi14 is not None:
-        if 50 <= rsi14 <= 70:
+        if technical_parameters.rsi_bull_min <= rsi14 <= technical_parameters.rsi_bull_max:
             score += 1
             _add_signal(
                 signals,
@@ -624,9 +657,9 @@ def calculate_latest_stock_signals(
                 level="info",
                 message="RSI 位於 50 至 70，動能健康偏多。",
                 value=rsi14,
-                reference=50,
+                reference=technical_parameters.rsi_bull_min,
             )
-        elif rsi14 < 40:
+        elif rsi14 < technical_parameters.rsi_weak_below:
             score -= 1
             _add_signal(
                 signals,
@@ -636,9 +669,9 @@ def calculate_latest_stock_signals(
                 level="info",
                 message="RSI 低於 40，短線動能偏弱。",
                 value=rsi14,
-                reference=40,
+                reference=technical_parameters.rsi_weak_below,
             )
-        elif rsi14 >= 80:
+        elif rsi14 >= technical_parameters.rsi_overheated_at:
             _add_signal(
                 signals,
                 key="rsi_overheated",
@@ -647,11 +680,11 @@ def calculate_latest_stock_signals(
                 level="warning",
                 message="RSI 高於 80，留意短線過熱。",
                 value=rsi14,
-                reference=80,
+                reference=technical_parameters.rsi_overheated_at,
             )
 
     if mfi14 is not None:
-        if 50 <= mfi14 <= 80:
+        if technical_parameters.mfi_inflow_min <= mfi14 <= technical_parameters.mfi_inflow_max:
             score += 1
             _add_signal(
                 signals,
@@ -661,9 +694,9 @@ def calculate_latest_stock_signals(
                 level="info",
                 message="MFI 位於多方區，量價資金流偏正向。",
                 value=mfi14,
-                reference=50,
+                reference=technical_parameters.mfi_inflow_min,
             )
-        elif mfi14 < 35:
+        elif mfi14 < technical_parameters.mfi_outflow_below:
             score -= 1
             _add_signal(
                 signals,
@@ -673,7 +706,7 @@ def calculate_latest_stock_signals(
                 level="info",
                 message="MFI 低於 35，量價資金流偏弱。",
                 value=mfi14,
-                reference=35,
+                reference=technical_parameters.mfi_outflow_below,
             )
 
     if roc12 is not None:
@@ -734,7 +767,7 @@ def calculate_latest_stock_signals(
                         reference=kd_d9,
                     )
 
-        if kd_k9 >= 80 and kd_d9 >= 70:
+        if kd_k9 >= technical_parameters.kd_overbought_k and kd_d9 >= technical_parameters.kd_overbought_d:
             _add_signal(
                 signals,
                 key="kd_overbought",
@@ -743,9 +776,9 @@ def calculate_latest_stock_signals(
                 level="warning",
                 message="KD 位於高檔，追價需確認量價延續。",
                 value=kd_k9,
-                reference=80,
+                reference=technical_parameters.kd_overbought_k,
             )
-        elif kd_k9 <= 20 and kd_d9 <= 30:
+        elif kd_k9 <= technical_parameters.kd_oversold_k and kd_d9 <= technical_parameters.kd_oversold_d:
             _add_signal(
                 signals,
                 key="kd_oversold",
@@ -754,12 +787,12 @@ def calculate_latest_stock_signals(
                 level="info",
                 message="KD 位於低檔，需等待止穩或轉強確認。",
                 value=kd_k9,
-                reference=20,
+                reference=technical_parameters.kd_oversold_k,
             )
 
     atr_pct = _safe_ratio(atr14, close)
     atr_pct = atr_pct * 100 if atr_pct is not None else None
-    if atr_pct is not None and atr_pct >= 5:
+    if atr_pct is not None and atr_pct >= technical_parameters.atr_high_volatility_pct:
         _add_signal(
             signals,
             key="atr_high_volatility",
@@ -768,7 +801,7 @@ def calculate_latest_stock_signals(
             level="warning",
             message="ATR 佔股價比重偏高，停損距離與追價風險需放大評估。",
             value=atr_pct,
-            reference=5,
+            reference=technical_parameters.atr_high_volatility_pct,
         )
     elif previous is not None and atr_pct is not None:
         prev_atr = previous.get("atr") or {}
@@ -777,7 +810,11 @@ def calculate_latest_stock_signals(
         prev_atr_pct = _safe_ratio(prev_atr14, prev_close)
         prev_atr_pct = prev_atr_pct * 100 if prev_atr_pct is not None else None
 
-        if prev_atr_pct is not None and atr_pct >= prev_atr_pct * 1.2 and atr_pct >= 2:
+        if (
+            prev_atr_pct is not None
+            and atr_pct >= prev_atr_pct * technical_parameters.atr_expansion_multiplier
+            and atr_pct >= technical_parameters.atr_expansion_min_pct
+        ):
             _add_signal(
                 signals,
                 key="atr_expanding",

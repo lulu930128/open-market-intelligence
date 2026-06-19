@@ -312,22 +312,22 @@ function priceToneClass(
   const step = getTaiwanPriceStep(price) * 0.51;
 
   if (limitUp !== null && nearlyEqual(price, limitUp, step)) {
-    return "fill-red-600 font-bold";
+    return "fill-omi-market-up font-bold";
   }
 
   if (limitDown !== null && nearlyEqual(price, limitDown, step)) {
-    return "fill-emerald-600 font-bold";
+    return "fill-omi-market-down font-bold";
   }
 
-  if (previousClose === null || price === previousClose) return "fill-slate-600";
-  if (price > previousClose) return "fill-red-600";
-  return "fill-emerald-600";
+  if (previousClose === null || price === previousClose) return "fill-omi-text-muted";
+  if (price > previousClose) return "fill-omi-market-up";
+  return "fill-omi-market-down";
 }
 
 function pricePctToneClass(value: number) {
-  if (value > 0) return "fill-red-600";
-  if (value < 0) return "fill-emerald-600";
-  return "fill-slate-700";
+  if (value > 0) return "fill-omi-market-up";
+  if (value < 0) return "fill-omi-market-down";
+  return "fill-omi-text";
 }
 
 function formatPct(value: number) {
@@ -344,22 +344,22 @@ function livePointTone(price: number | null, reference: number | null) {
   if (validNumber(price) && validNumber(reference) && reference !== 0) {
     if (price > reference) {
       return {
-        core: "fill-red-600",
-        ring: "stroke-red-400",
+        core: "fill-omi-market-up",
+        ring: "stroke-omi-market-up-border",
       };
     }
 
     if (price < reference) {
       return {
-        core: "fill-emerald-600",
-        ring: "stroke-emerald-400",
+        core: "fill-omi-market-down",
+        ring: "stroke-omi-market-down-border",
       };
     }
   }
 
   return {
-    core: "fill-slate-500",
-    ring: "stroke-slate-300",
+    core: "fill-omi-text-muted",
+    ring: "stroke-omi-border",
   };
 }
 
@@ -692,7 +692,7 @@ export default function IntradayTrendChart({
 
   if (data.length < 2) {
     return (
-      <div className="flex h-[420px] items-center justify-center border border-slate-200 bg-white text-sm text-slate-500">
+      <div className="flex h-[420px] items-center justify-center border border-omi-border-subtle bg-omi-surface text-sm text-omi-text-muted">
         今日走勢資料不足
       </div>
     );
@@ -921,16 +921,16 @@ export default function IntradayTrendChart({
     hoverPriceGuideValue !== null ? formatPrice(hoverPriceGuideValue) : null;
   const hoverPriceGuideStrokeClass =
     hoverPriceGuideSnap === "high"
-      ? "stroke-red-500"
+      ? "stroke-omi-market-up-flash"
       : hoverPriceGuideSnap === "low"
-        ? "stroke-emerald-500"
-        : "stroke-slate-500";
+        ? "stroke-omi-market-down-flash"
+        : "stroke-omi-text-muted";
   const hoverPriceGuideTextClass =
     hoverPriceGuideSnap === "high"
-      ? "fill-red-700"
+      ? "fill-omi-market-up-strong"
       : hoverPriceGuideSnap === "low"
-        ? "fill-emerald-700"
-        : "fill-slate-800";
+        ? "fill-omi-market-down-strong"
+        : "fill-omi-text";
   const previousCloseY = previousClose !== null ? getPriceY(previousClose) : null;
   const baselineY = previousCloseY ?? volumeTop;
   const areaPath = buildBaselineAreaPath(linePath, firstPointX, lastPointX, baselineY);
@@ -944,21 +944,21 @@ export default function IntradayTrendChart({
   const formatVolumeValue = session.volumeFormatter ?? formatLots;
 
   return (
-    <div className="border border-slate-200 bg-white">
-      <div className="flex min-h-16 items-start justify-between gap-4 border-b border-slate-200 px-4 py-3">
+    <div className="border border-omi-border-subtle bg-omi-surface">
+      <div className="flex min-h-16 items-start justify-between gap-4 border-b border-omi-border-subtle px-4 py-3">
         <div>
-          <div className="text-sm font-semibold text-slate-900">今日走勢 / 成交量</div>
-          <div className="mt-1 text-xs text-slate-500">
+          <div className="text-sm font-semibold text-omi-text">今日走勢 / 成交量</div>
+          <div className="mt-1 text-xs text-omi-text-muted">
             {label} · {formatSource(source)} · {data.length} 點
           </div>
           {refreshIntervalMs ? (
-            <div className="mt-1 text-xs text-slate-500">
+            <div className="mt-1 text-xs text-omi-text-muted">
               盤中每 {Math.round(refreshIntervalMs / 1000)} 秒更新
               {updatedAt ? `，最後更新 ${updatedAt}` : ""}
             </div>
           ) : null}
           <div className="mt-3 flex flex-wrap items-center gap-2">
-            <div className="inline-flex border border-slate-300 bg-white">
+            <div className="inline-flex border border-omi-border bg-omi-surface">
               {intervalOptions.map((option) => (
                 <button
                   key={option.value}
@@ -971,8 +971,8 @@ export default function IntradayTrendChart({
                   className={[
                     "h-7 px-2.5 text-xs font-semibold transition",
                     interval === option.value
-                      ? "bg-slate-900 text-white"
-                      : "text-slate-600 hover:bg-slate-100",
+                      ? "bg-omi-control text-omi-text-inverse"
+                      : "text-omi-text-muted hover:bg-omi-surface-muted",
                   ].join(" ")}
                 >
                   {option.label}
@@ -984,26 +984,26 @@ export default function IntradayTrendChart({
 
         <div className="grid shrink-0 grid-cols-2 gap-x-8 gap-y-2 text-right sm:grid-cols-4">
           <div>
-            <span className="text-xs text-slate-400">昨收</span>
-            <div className="mt-1 text-base font-bold text-slate-800">
+            <span className="text-xs text-omi-text-subtle">昨收</span>
+            <div className="mt-1 text-base font-bold text-omi-text">
               {formatPrice(previousClose)}
             </div>
           </div>
           <div>
-            <span className="text-xs text-slate-400">最低</span>
-            <div className="mt-1 text-base font-bold text-emerald-600">
+            <span className="text-xs text-omi-text-subtle">最低</span>
+            <div className="mt-1 text-base font-bold text-omi-market-down">
               {formatPrice(rangeLow?.value)}
             </div>
           </div>
           <div>
-            <span className="text-xs text-slate-400">最高</span>
-            <div className="mt-1 text-base font-bold text-red-600">
+            <span className="text-xs text-omi-text-subtle">最高</span>
+            <div className="mt-1 text-base font-bold text-omi-market-up">
               {formatPrice(rangeHigh?.value)}
             </div>
           </div>
           <div>
-            <span className="text-xs text-slate-400">成交量(張)</span>
-            <div className="mt-1 text-base font-bold text-slate-800">
+            <span className="text-xs text-omi-text-subtle">成交量(張)</span>
+            <div className="mt-1 text-base font-bold text-omi-text">
               {formatVolumeValue(displayedVolume)}
             </div>
           </div>
@@ -1012,7 +1012,7 @@ export default function IntradayTrendChart({
 
       <div className="relative overflow-hidden">
         <svg viewBox={`0 0 ${width} ${height}`} className="w-full" style={{ height }}>
-        <rect x="0" y="0" width={width} height={height} className="fill-white" />
+        <rect x="0" y="0" width={width} height={height} className="fill-omi-surface" />
         <defs>
           <clipPath id={clipAboveId}>
             <rect
@@ -1046,7 +1046,7 @@ export default function IntradayTrendChart({
                 x2={chartAreaRight}
                 y1={y}
                 y2={y}
-                className="stroke-slate-100"
+                className="stroke-omi-border-subtle"
               />
               <text
                 x={paddingLeft - 10}
@@ -1088,13 +1088,13 @@ export default function IntradayTrendChart({
                 x2={x}
                 y1={priceTop}
                 y2={volumeTop + volumeHeight}
-                className="stroke-slate-100"
+                className="stroke-omi-border-subtle"
               />
               <text
                 x={x}
                 y={labelY}
                 textAnchor={tick.label === "09:00" ? "start" : tick.label === "13:30" ? "end" : "middle"}
-                className="fill-slate-500 text-[11px]"
+                className="fill-omi-text-muted text-[11px]"
               >
                 {tick.label}
               </text>
@@ -1109,14 +1109,14 @@ export default function IntradayTrendChart({
               x2={chartAreaRight}
               y1={previousCloseY}
               y2={previousCloseY}
-              className="stroke-blue-500"
+              className="stroke-omi-chart-blue"
               strokeDasharray="4 4"
             />
             <text
               x={chartAreaRight + 8}
               y={previousCloseY - 6}
               textAnchor="start"
-              className="fill-blue-600 text-[11px]"
+              className="fill-omi-chart-blue text-[11px]"
             >
               昨收 {formatPrice(previousClose)}
             </text>
@@ -1130,7 +1130,7 @@ export default function IntradayTrendChart({
               x2={chartAreaRight}
               y1={getPriceY(priceScale.limitUp)}
               y2={getPriceY(priceScale.limitUp)}
-              className="stroke-red-200"
+              className="stroke-omi-market-up-border"
               strokeDasharray="4 4"
             />
           </g>
@@ -1143,7 +1143,7 @@ export default function IntradayTrendChart({
               x2={chartAreaRight}
               y1={getPriceY(priceScale.limitDown)}
               y2={getPriceY(priceScale.limitDown)}
-              className="stroke-emerald-200"
+              className="stroke-omi-market-down-border"
               strokeDasharray="4 4"
             />
           </g>
@@ -1151,17 +1151,17 @@ export default function IntradayTrendChart({
 
         {previousCloseY !== null ? (
           <>
-            <path d={areaPath} className="fill-red-100 opacity-80" clipPath={`url(#${clipAboveId})`} />
+            <path d={areaPath} className="fill-omi-market-up-soft opacity-80" clipPath={`url(#${clipAboveId})`} />
             <path
               d={areaPath}
-              className="fill-emerald-100 opacity-80"
+              className="fill-omi-market-down-soft opacity-80"
               clipPath={`url(#${clipBelowId})`}
             />
             <path
               d={linePath}
               fill="none"
               strokeWidth="2.4"
-              className="stroke-red-600"
+              className="stroke-omi-market-up"
               strokeLinecap="round"
               strokeLinejoin="round"
               clipPath={`url(#${clipAboveId})`}
@@ -1170,7 +1170,7 @@ export default function IntradayTrendChart({
               d={linePath}
               fill="none"
               strokeWidth="2.4"
-              className="stroke-emerald-600"
+              className="stroke-omi-market-down"
               strokeLinecap="round"
               strokeLinejoin="round"
               clipPath={`url(#${clipBelowId})`}
@@ -1181,7 +1181,7 @@ export default function IntradayTrendChart({
             d={linePath}
             fill="none"
             strokeWidth="2.4"
-            className={change !== null && change < 0 ? "stroke-emerald-600" : "stroke-red-600"}
+            className={change !== null && change < 0 ? "stroke-omi-market-down" : "stroke-omi-market-up"}
             strokeLinecap="round"
             strokeLinejoin="round"
           />
@@ -1192,7 +1192,7 @@ export default function IntradayTrendChart({
             d={vwapPath}
             fill="none"
             strokeWidth="1.8"
-            className="stroke-blue-600"
+            className="stroke-omi-chart-blue"
             strokeLinecap="round"
             strokeLinejoin="round"
           />
@@ -1202,7 +1202,7 @@ export default function IntradayTrendChart({
             d={twapPath}
             fill="none"
             strokeWidth="1.4"
-            className="stroke-slate-500"
+            className="stroke-omi-text-muted"
             strokeDasharray="5 4"
             strokeLinecap="round"
             strokeLinejoin="round"
@@ -1213,7 +1213,7 @@ export default function IntradayTrendChart({
             d={emaFastPath}
             fill="none"
             strokeWidth="1.4"
-            className="stroke-cyan-600"
+            className="stroke-omi-chart-cyan"
             strokeLinecap="round"
             strokeLinejoin="round"
           />
@@ -1223,7 +1223,7 @@ export default function IntradayTrendChart({
             d={emaSlowPath}
             fill="none"
             strokeWidth="1.4"
-            className="stroke-amber-500"
+            className="stroke-omi-chart-amber"
             strokeLinecap="round"
             strokeLinejoin="round"
           />
@@ -1239,20 +1239,20 @@ export default function IntradayTrendChart({
 
               return (
                 <>
-                  <circle cx={x} cy={y} r="3.5" className="fill-red-600" />
+                  <circle cx={x} cy={y} r="3.5" className="fill-omi-market-up" />
                   <line
                     x1={x}
                     x2={label.x}
                     y1={y}
                     y2={markerLabelY}
-                    className="stroke-red-400"
+                    className="stroke-omi-market-up-border"
                     strokeDasharray="3 3"
                   />
                   <text
                     x={label.x}
                     y={markerLabelY - 3}
                     textAnchor={label.anchor}
-                    className="fill-red-600 text-[11px] font-semibold"
+                    className="fill-omi-market-up text-[11px] font-semibold"
                   >
                     最高 {formatPrice(rangeHigh.value)}
                   </text>
@@ -1272,20 +1272,20 @@ export default function IntradayTrendChart({
 
               return (
                 <>
-                  <circle cx={x} cy={y} r="3.5" className="fill-emerald-600" />
+                  <circle cx={x} cy={y} r="3.5" className="fill-omi-market-down" />
                   <line
                     x1={x}
                     x2={label.x}
                     y1={y}
                     y2={markerLabelY}
-                    className="stroke-emerald-400"
+                    className="stroke-omi-market-down-border"
                     strokeDasharray="3 3"
                   />
                   <text
                     x={label.x}
                     y={markerLabelY + 10}
                     textAnchor={label.anchor}
-                    className="fill-emerald-600 text-[11px] font-semibold"
+                    className="fill-omi-market-down text-[11px] font-semibold"
                   >
                     最低 {formatPrice(rangeLow.value)}
                   </text>
@@ -1323,7 +1323,7 @@ export default function IntradayTrendChart({
                   y={volumeY}
                   width={barWidth}
                   height={Math.max(volumeBarHeight, 1)}
-                  className="fill-amber-300 opacity-70"
+                  className="fill-omi-chart-amber-soft opacity-70"
                 />
               );
             })
@@ -1335,7 +1335,7 @@ export default function IntradayTrendChart({
             x2={chartAreaRight}
             y1={volumeTop}
             y2={volumeTop}
-            className="stroke-slate-100"
+            className="stroke-omi-border-subtle"
           />
         ) : null}
 
@@ -1346,13 +1346,13 @@ export default function IntradayTrendChart({
               x2={chartAreaRight}
               y1={rsiTop}
               y2={rsiTop}
-              className="stroke-slate-200"
+              className="stroke-omi-border-subtle"
             />
             <text
               x={paddingLeft - 10}
               y={rsiTop + 12}
               textAnchor="end"
-              className="fill-slate-500 text-[11px]"
+              className="fill-omi-text-muted text-[11px]"
             >
               RSI
             </text>
@@ -1366,7 +1366,7 @@ export default function IntradayTrendChart({
                   x2={chartAreaRight}
                   y1={y}
                   y2={y}
-                  className={value === 50 ? "stroke-slate-200" : "stroke-slate-100"}
+                  className={value === 50 ? "stroke-omi-border-subtle" : "stroke-omi-border-subtle"}
                   strokeDasharray={value === 50 ? undefined : "4 4"}
                 />
               );
@@ -1376,7 +1376,7 @@ export default function IntradayTrendChart({
                 d={rsiPath}
                 fill="none"
                 strokeWidth="1.6"
-                className="stroke-fuchsia-600"
+                className="stroke-omi-chart-fuchsia"
                 strokeLinecap="round"
                 strokeLinejoin="round"
               />
@@ -1391,13 +1391,13 @@ export default function IntradayTrendChart({
               x2={chartAreaRight}
               y1={macdTop}
               y2={macdTop}
-              className="stroke-slate-200"
+              className="stroke-omi-border-subtle"
             />
             <text
               x={paddingLeft - 10}
               y={macdTop + 12}
               textAnchor="end"
-              className="fill-slate-500 text-[11px]"
+              className="fill-omi-text-muted text-[11px]"
             >
               MACD
             </text>
@@ -1406,7 +1406,7 @@ export default function IntradayTrendChart({
               x2={chartAreaRight}
               y1={getPanelY(macdTop, 0, -macdAbsMax, macdAbsMax)}
               y2={getPanelY(macdTop, 0, -macdAbsMax, macdAbsMax)}
-              className="stroke-slate-200"
+              className="stroke-omi-border-subtle"
             />
             {data.map((point, index) => {
               if (!validNumber(point.macdHistogram)) return null;
@@ -1423,7 +1423,7 @@ export default function IntradayTrendChart({
                   y={y}
                   width={barWidth}
                   height={height}
-                  className={point.macdHistogram >= 0 ? "fill-red-200" : "fill-emerald-200"}
+                  className={point.macdHistogram >= 0 ? "fill-omi-market-up-border" : "fill-omi-market-down-border"}
                 />
               );
             })}
@@ -1432,7 +1432,7 @@ export default function IntradayTrendChart({
                 d={macdPath}
                 fill="none"
                 strokeWidth="1.5"
-                className="stroke-blue-600"
+                className="stroke-omi-chart-blue"
                 strokeLinecap="round"
                 strokeLinejoin="round"
               />
@@ -1442,7 +1442,7 @@ export default function IntradayTrendChart({
                 d={macdSignalPath}
                 fill="none"
                 strokeWidth="1.5"
-                className="stroke-amber-500"
+                className="stroke-omi-chart-amber"
                 strokeLinecap="round"
                 strokeLinejoin="round"
               />
@@ -1457,7 +1457,7 @@ export default function IntradayTrendChart({
               x2={hoverX}
               y1={priceTop}
               y2={indicatorBottom}
-              className="stroke-slate-400"
+              className="stroke-omi-border-strong"
               strokeDasharray="4 4"
             />
             {hoverPriceGuideY !== null && hoverPriceGuideLabel !== null ? (
@@ -1476,7 +1476,7 @@ export default function IntradayTrendChart({
                   width={paddingLeft - 10}
                   height={24}
                   rx={3}
-                  className={`fill-white ${hoverPriceGuideStrokeClass}`}
+                  className={`fill-omi-surface ${hoverPriceGuideStrokeClass}`}
                   strokeWidth="1.5"
                 />
                 <text
@@ -1509,7 +1509,7 @@ export default function IntradayTrendChart({
           <div
             ref={revealCoverRef}
             key={activeRevealKey}
-            className="pointer-events-none absolute inset-0 z-10 bg-white"
+            className="pointer-events-none absolute inset-0 z-10 bg-omi-surface"
             aria-hidden="true"
             style={{
               willChange: "opacity, transform",
@@ -1519,15 +1519,15 @@ export default function IntradayTrendChart({
       </div>
 
       {priceLimitEnabled ? (
-        <div className="flex items-center justify-end border-t border-slate-200 px-4 py-2">
+        <div className="flex items-center justify-end border-t border-omi-border-subtle px-4 py-2">
           <button
             type="button"
             onClick={() => setShowLimitRange((value) => !value)}
             className={[
               "h-8 border px-3 text-xs font-semibold transition",
               showLimitRange
-                ? "border-red-700 bg-red-700 text-white"
-                : "border-slate-300 bg-white text-slate-700 hover:border-red-700 hover:text-red-700",
+                ? "border-omi-accent bg-omi-accent text-omi-text-inverse"
+                : "border-omi-border bg-omi-surface text-omi-text hover:border-omi-accent hover:text-omi-danger",
             ].join(" ")}
           >
             顯示漲跌停

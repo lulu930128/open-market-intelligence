@@ -20,7 +20,7 @@ const LightweightKLineChart = dynamic(
   {
     ssr: false,
     loading: () => (
-      <div className="flex h-[640px] items-center justify-center border-t border-slate-200 bg-white text-sm text-slate-500">
+      <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle bg-omi-surface text-sm text-omi-text-muted">
         K 線引擎載入中...
       </div>
     ),
@@ -125,17 +125,17 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
   volumeValueKey,
 }: Props<TTimeframe>) {
   return (
-    <section className="border border-slate-200 bg-white">
-      <div className="border-b border-slate-200 px-4 py-2">
+    <section className="border border-omi-border-subtle bg-omi-surface">
+      <div className="border-b border-omi-border-subtle px-4 py-2">
         <div className="flex min-h-9 flex-wrap items-center justify-between gap-x-4 gap-y-2">
           <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
-            <div className="truncate text-lg font-bold text-slate-950">{title}</div>
+            <div className="truncate text-lg font-bold text-omi-text-strong">{title}</div>
             {priceSummary ? <div className="min-w-0">{priceSummary}</div> : null}
           </div>
 
           <div className="flex flex-wrap items-center justify-end gap-1.5">
             <div className="flex flex-wrap items-center gap-1.5">
-              <div className="flex border border-slate-200 bg-slate-50 p-0.5">
+              <div className="flex border border-omi-border-subtle bg-omi-surface-subtle p-0.5">
                 {timeframeOptions.map((option) => (
                   <button
                     key={option.key}
@@ -144,8 +144,8 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
                     className={[
                       "h-7 px-2 text-xs font-semibold transition",
                       timeframe === option.key
-                        ? "bg-slate-900 text-white"
-                        : "text-slate-600 hover:bg-white hover:text-slate-950",
+                        ? "bg-omi-control text-omi-text-inverse"
+                        : "text-omi-text-muted hover:bg-omi-surface hover:text-omi-text-strong",
                     ].join(" ")}
                   >
                     {option.label}
@@ -153,7 +153,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
                 ))}
               </div>
 
-              <div className="flex border border-slate-200 bg-slate-50 p-0.5">
+              <div className="flex border border-omi-border-subtle bg-omi-surface-subtle p-0.5">
                 {[
                   ["candlestick", "K線"],
                   ["line", "折線"],
@@ -165,8 +165,8 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
                     className={[
                       "h-7 px-2 text-xs font-semibold transition",
                       chartStyle === key
-                        ? "bg-slate-900 text-white"
-                        : "text-slate-600 hover:bg-white hover:text-slate-950",
+                        ? "bg-omi-control text-omi-text-inverse"
+                        : "text-omi-text-muted hover:bg-omi-surface hover:text-omi-text-strong",
                     ].join(" ")}
                   >
                     {labelText}
@@ -179,7 +179,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
               <button
                 type="button"
                 onClick={onToggleIndicatorMenu}
-                className="h-8 border border-slate-300 bg-white px-3 text-xs font-semibold text-slate-800 hover:border-slate-900 hover:text-slate-950"
+                className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text hover:border-omi-control hover:text-omi-text-strong"
               >
                 技術指標
               </button>
@@ -188,21 +188,21 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
             <button
               type="button"
               onClick={onClose}
-              className="h-8 border border-slate-900 bg-slate-900 px-3 text-xs font-semibold text-white hover:bg-slate-800"
+              className="h-8 border border-omi-control bg-omi-control px-3 text-xs font-semibold text-omi-text-inverse hover:bg-omi-control-muted"
             >
               總覽
             </button>
           </div>
         </div>
 
-        <div className="mt-2 flex flex-wrap items-center justify-end gap-1.5 border-t border-slate-100 pt-2">
-          <div className="flex max-w-full flex-wrap items-center justify-end gap-1 border border-slate-200 bg-slate-50 p-0.5">
+        <div className="mt-2 flex flex-wrap items-center justify-end gap-1.5 border-t border-omi-border-subtle pt-2">
+          <div className="flex max-w-full flex-wrap items-center justify-end gap-1 border border-omi-border-subtle bg-omi-surface-subtle p-0.5">
             {professionalChartDrawingToolGroups.map((group, groupIndex) => (
               <div
                 key={group.key}
                 className={[
                   "flex items-center gap-0.5",
-                  groupIndex > 0 ? "border-l border-slate-200 pl-1" : "",
+                  groupIndex > 0 ? "border-l border-omi-border-subtle pl-1" : "",
                 ].join(" ")}
               >
                 {group.tools.map((toolKey) => {
@@ -223,8 +223,8 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
                       className={[
                         "h-7 px-2 text-xs font-semibold transition",
                         drawingTool === option.key
-                          ? "bg-slate-900 text-white"
-                          : "text-slate-600 hover:bg-white hover:text-slate-950",
+                          ? "bg-omi-control text-omi-text-inverse"
+                          : "text-omi-text-muted hover:bg-omi-surface hover:text-omi-text-strong",
                       ].join(" ")}
                     >
                       {option.label}
@@ -233,7 +233,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
                 })}
               </div>
             ))}
-            <div className="flex items-center gap-0.5 border-l border-slate-200 pl-1">
+            <div className="flex items-center gap-0.5 border-l border-omi-border-subtle pl-1">
               <button
                 type="button"
                 title="Undo (Ctrl+Z)"
@@ -242,8 +242,8 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
                 className={[
                   "h-7 px-2 text-xs font-semibold transition",
                   canUndoDrawing
-                    ? "text-slate-600 hover:bg-white hover:text-slate-950"
-                    : "cursor-not-allowed text-slate-300",
+                    ? "text-omi-text-muted hover:bg-omi-surface hover:text-omi-text-strong"
+                    : "cursor-not-allowed text-omi-text-inverse-muted",
                 ].join(" ")}
               >
                 Undo
@@ -256,8 +256,8 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
                 className={[
                   "h-7 px-2 text-xs font-semibold transition",
                   canRedoDrawing
-                    ? "text-slate-600 hover:bg-white hover:text-slate-950"
-                    : "cursor-not-allowed text-slate-300",
+                    ? "text-omi-text-muted hover:bg-omi-surface hover:text-omi-text-strong"
+                    : "cursor-not-allowed text-omi-text-inverse-muted",
                 ].join(" ")}
               >
                 Redo
@@ -269,8 +269,8 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
                 className={[
                   "h-7 px-2 text-xs font-semibold transition",
                   selectedDrawingId
-                    ? "text-red-700 hover:bg-white"
-                    : "cursor-not-allowed text-slate-300",
+                    ? "text-omi-danger hover:bg-omi-surface"
+                    : "cursor-not-allowed text-omi-text-inverse-muted",
                 ].join(" ")}
               >
                 刪除
@@ -282,14 +282,14 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
                 className={[
                   "h-7 px-2 text-xs font-semibold transition",
                   drawings.length > 0
-                    ? "text-slate-500 hover:bg-white hover:text-slate-950"
-                    : "cursor-not-allowed text-slate-300",
+                    ? "text-omi-text-muted hover:bg-omi-surface hover:text-omi-text-strong"
+                    : "cursor-not-allowed text-omi-text-inverse-muted",
                 ].join(" ")}
               >
                 畫線 {drawings.length}
               </button>
               {historyCounts ? (
-                <span className="hidden h-7 items-center border-l border-slate-200 px-2 text-[11px] font-semibold tabular-nums text-slate-400 min-[1500px]:inline-flex">
+                <span className="hidden h-7 items-center border-l border-omi-border-subtle px-2 text-[11px] font-semibold tabular-nums text-omi-text-subtle min-[1500px]:inline-flex">
                   {historyCounts.past}/{historyCounts.future}
                 </span>
               ) : null}
@@ -331,7 +331,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
         />
       ) : (
         emptyState ?? (
-          <div className="flex h-[640px] items-center justify-center border-t border-slate-200 text-sm text-slate-500">
+          <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle text-sm text-omi-text-muted">
             讀取{label} K 線中...
           </div>
         )

@@ -1676,10 +1676,10 @@ def get_watchlist_group_radar(
     enabled_only: bool = True,
     mode: str = "action",
     max_results: int = 30,
-    ma_windows: str = "5,20,60",
-    volume_ma_windows: str = "5,20",
+    ma_windows: str | None = None,
+    volume_ma_windows: str | None = None,
     calculation_limit: int = 100,
-    volume_ratio_threshold: float = 1.5,
+    volume_ratio_threshold: float | None = None,
     use_intraday: bool = False,
     intraday_limit: int = 30,
 ) -> dict:

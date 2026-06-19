@@ -51,11 +51,11 @@ function formatDate(value: string | null | undefined) {
 
 function valueTone(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) {
-    return "text-slate-500";
+    return "text-omi-text-muted";
   }
-  if (value > 0) return "text-red-600";
-  if (value < 0) return "text-emerald-600";
-  return "text-slate-700";
+  if (value > 0) return "text-omi-market-up";
+  if (value < 0) return "text-omi-market-down";
+  return "text-omi-text";
 }
 
 function trendLabel(value: number | null | undefined) {
@@ -67,11 +67,11 @@ function trendLabel(value: number | null | undefined) {
 
 function trendClass(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) {
-    return "bg-slate-100 text-slate-600";
+    return "bg-omi-surface-muted text-omi-text-muted";
   }
-  if (value > 0) return "bg-red-50 text-red-700";
-  if (value < 0) return "bg-emerald-50 text-emerald-700";
-  return "bg-slate-100 text-slate-600";
+  if (value > 0) return "bg-omi-market-up-soft text-omi-market-up";
+  if (value < 0) return "bg-omi-market-down-soft text-omi-market-down";
+  return "bg-omi-surface-muted text-omi-text-muted";
 }
 
 function statusLabel(status: string) {
@@ -205,22 +205,22 @@ export default function USWatchlistRankingPanel({
         type="button"
         onClick={() => onSelectSymbol(row.symbol, row.security_name)}
         className={[
-          "grid w-full grid-cols-[46px_minmax(160px,1fr)_94px_86px_86px_104px_78px] items-center border-t border-slate-200 px-4 py-2 text-left text-sm",
-          selected ? "bg-slate-900 text-white" : "bg-white text-slate-800 hover:bg-slate-50",
+          "grid w-full grid-cols-[46px_minmax(160px,1fr)_94px_86px_86px_104px_78px] items-center border-t border-omi-border-subtle px-4 py-2 text-left text-sm",
+          selected ? "bg-omi-control text-omi-text-inverse" : "bg-omi-surface text-omi-text hover:bg-omi-surface-subtle",
         ].join(" ")}
       >
-        <span className={selected ? "text-slate-300" : "text-slate-500"}>#{row.rank}</span>
+        <span className={selected ? "text-omi-text-inverse-muted" : "text-omi-text-muted"}>#{row.rank}</span>
         <span className="min-w-0">
           <span className="block truncate font-semibold">
             {row.symbol} {row.security_name ?? ""}
           </span>
-          <span className={selected ? "block truncate text-xs text-slate-300" : "block truncate text-xs text-slate-500"}>
+          <span className={selected ? "block truncate text-xs text-omi-text-inverse-muted" : "block truncate text-xs text-omi-text-muted"}>
             {[row.time ? formatDate(row.time) : null, row.exchange, row.asset_type]
               .filter(Boolean)
               .join(" · ") || statusLabel(row.status)}
           </span>
         </span>
-        <span className={selected ? "text-slate-300" : "text-slate-500"}>
+        <span className={selected ? "text-omi-text-inverse-muted" : "text-omi-text-muted"}>
           {row.time ? "盤中" : formatDate(row.trade_date)}
         </span>
         <span className="text-right font-semibold">
@@ -257,7 +257,7 @@ export default function USWatchlistRankingPanel({
           <span
             className={[
               "px-2 py-1 text-xs font-semibold",
-              selected ? "bg-white text-slate-900" : trendClass(row.change_pct),
+              selected ? "bg-omi-surface text-omi-text" : trendClass(row.change_pct),
             ].join(" ")}
           >
             {trendLabel(row.change_pct)}
@@ -269,16 +269,16 @@ export default function USWatchlistRankingPanel({
 
   return (
     <div className="space-y-4">
-      <section className="border border-slate-200 bg-white">
+      <section className="border border-omi-border-subtle bg-omi-surface">
         <div className="flex flex-wrap items-start justify-between gap-4 px-5 py-4">
           <div>
-            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
               Selected Group
             </div>
-            <h2 className="mt-1 text-2xl font-bold text-slate-950">
+            <h2 className="mt-1 text-2xl font-bold text-omi-text-strong">
               {selectedGroupName ?? "美股自選"}
             </h2>
-            <div className="mt-1 text-sm text-slate-500">
+            <div className="mt-1 text-sm text-omi-text-muted">
               {lastUpdatedAt ? `更新時間 ${lastUpdatedAt}` : "尚未更新"}
             </div>
           </div>
@@ -287,7 +287,7 @@ export default function USWatchlistRankingPanel({
             <select
               value={rankBy}
               onChange={(event) => setRankBy(event.target.value as USRankBy)}
-              className="h-9 border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-700 outline-none focus:border-red-700"
+              className="h-9 border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text-muted outline-none focus:border-omi-accent"
             >
               <option value="none">正常排序</option>
               <option value="change_pct">漲跌幅</option>
@@ -297,7 +297,7 @@ export default function USWatchlistRankingPanel({
             <button
               type="button"
               onClick={() => void loadRanking()}
-              className="h-9 bg-slate-900 px-4 text-sm font-semibold text-white hover:bg-slate-700 disabled:bg-slate-300"
+              className="h-9 bg-omi-control px-4 text-sm font-semibold text-omi-text-inverse hover:bg-omi-control-border disabled:bg-omi-surface-strong"
               disabled={loadState === "loading"}
             >
               Reload
@@ -306,42 +306,42 @@ export default function USWatchlistRankingPanel({
         </div>
 
         {errorMessage ? (
-          <div className="border-t border-red-200 bg-red-50 px-5 py-3 text-sm text-red-700">
+          <div className="border-t border-omi-danger-border bg-omi-danger-soft px-5 py-3 text-sm text-omi-danger">
             {errorMessage}
           </div>
         ) : null}
 
-        <div className="grid grid-cols-2 border-t border-slate-200 md:grid-cols-4">
+        <div className="grid grid-cols-2 border-t border-omi-border-subtle md:grid-cols-4">
           <div className="px-5 py-3">
-            <div className="text-xs text-slate-500">股票數</div>
+            <div className="text-xs text-omi-text-muted">股票數</div>
             <div className="mt-1 text-xl font-bold">{summary.stockCount}</div>
           </div>
-          <div className="border-l border-slate-200 px-5 py-3">
-            <div className="text-xs text-slate-500">上漲</div>
-            <div className="mt-1 text-xl font-bold text-red-600">{summary.upCount}</div>
+          <div className="border-l border-omi-border-subtle px-5 py-3">
+            <div className="text-xs text-omi-text-muted">上漲</div>
+            <div className="mt-1 text-xl font-bold text-omi-market-up">{summary.upCount}</div>
           </div>
-          <div className="border-l border-slate-200 px-5 py-3">
-            <div className="text-xs text-slate-500">下跌</div>
-            <div className="mt-1 text-xl font-bold text-emerald-600">{summary.downCount}</div>
+          <div className="border-l border-omi-border-subtle px-5 py-3">
+            <div className="text-xs text-omi-text-muted">下跌</div>
+            <div className="mt-1 text-xl font-bold text-omi-market-down">{summary.downCount}</div>
           </div>
-          <div className="border-l border-slate-200 px-5 py-3">
-            <div className="text-xs text-slate-500">排序</div>
+          <div className="border-l border-omi-border-subtle px-5 py-3">
+            <div className="text-xs text-omi-text-muted">排序</div>
             <div className="mt-1 text-xl font-bold">{rankLabel(ranking?.rank_by ?? rankBy)}</div>
           </div>
         </div>
       </section>
 
-      <section className="border border-slate-200 bg-white">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-3">
-          <h3 className="text-sm font-bold text-slate-950">自選股列表</h3>
-          <span className="text-xs text-slate-500">
+      <section className="border border-omi-border-subtle bg-omi-surface">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-omi-border-subtle px-5 py-3">
+          <h3 className="text-sm font-bold text-omi-text-strong">自選股列表</h3>
+          <span className="text-xs text-omi-text-muted">
             {loadState === "loading"
               ? "Loading"
               : `${rows.length} 檔 · ${summary.noDataCount} 檔尚無資料`}
           </span>
         </div>
 
-        <div className="grid grid-cols-[46px_minmax(160px,1fr)_94px_86px_86px_104px_78px] bg-slate-50 px-4 py-2 text-xs font-bold uppercase tracking-wide text-slate-500">
+        <div className="grid grid-cols-[46px_minmax(160px,1fr)_94px_86px_86px_104px_78px] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
           <span>名次</span>
           <span>股票</span>
           <span>日期</span>
@@ -353,7 +353,7 @@ export default function USWatchlistRankingPanel({
         {rows.length > 0 ? (
           rows.map(renderRow)
         ) : (
-          <div className="border-t border-slate-200 px-5 py-10 text-center text-sm text-slate-500">
+          <div className="border-t border-omi-border-subtle px-5 py-10 text-center text-sm text-omi-text-muted">
             {loadState === "loading" ? "Loading" : "尚無美股自選排行"}
           </div>
         )}

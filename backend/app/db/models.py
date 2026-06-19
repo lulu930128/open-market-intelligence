@@ -13,6 +13,20 @@ class Base(DeclarativeBase):
     pass
 
 
+class AppSetting(Base):
+    __tablename__ = "app_setting"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    setting_key: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    value_json: Mapped[str] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(String(80), default="user", index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class SourceRegistry(Base):
     __tablename__ = "source_registry"
 

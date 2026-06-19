@@ -63,9 +63,7 @@ import {
   createDrawingId,
   defaultLightweightParameters,
   detectCandlestickPattern,
-  downColor,
   drawingDefaultColor,
-  drawingHandleBorderColor,
   drawingModeBadgeWidth,
   drawingSnapDistancePx,
   drawingTimeFromChartTime,
@@ -79,19 +77,15 @@ import {
   formatChartDateTime,
   formatCompactVolume,
   formatDrawingPrice,
-  hoveredDrawingColor,
   isProjectedDrawingHit,
   isTwoPointDrawingTool,
   isTwoPointDrawingType,
   lockCoordinateToNearestAngle,
-  maColors,
   measurementStatsFromMetrics,
   measurementToneColor,
   pad2,
   preserveEmptyProjection,
   rectangleBounds,
-  selectedDrawingColor,
-  upColor,
 } from "@/components/chart/LightweightKLineChartDrawing";
 import {
   buildDefaultVisibleLogicalRange,
@@ -108,6 +102,7 @@ import {
   mergeIndicators,
   movingAverage,
 } from "@/components/chart/LightweightKLineChartIndicators";
+import { getOmiChartColors, type OmiTheme } from "@/lib/themeColors";
 export type {
   ChartDrawing,
   ChartDrawingAnchoredVwapAnalysis,
@@ -124,6 +119,13 @@ export type {
   ChartDrawingZoneAnalysis,
   ChartTimeMode,
 } from "@/components/chart/LightweightKLineChartDrawing";
+
+function readOmiTheme(): OmiTheme {
+  if (typeof document === "undefined") return "light";
+
+  return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+}
+
 export default function LightweightKLineChart({
   chartData,
   indicatorData = emptyIndicatorData,
@@ -175,6 +177,21 @@ export default function LightweightKLineChart({
   const [projectedDrawings, setProjectedDrawings] = useState<ProjectedDrawing[]>([]);
   const [projectedDraftDrawing, setProjectedDraftDrawing] =
     useState<ProjectedDraftDrawing | null>(null);
+  const [omiTheme, setOmiTheme] = useState<OmiTheme>(() => readOmiTheme());
+  const omiChartColors = useMemo(() => getOmiChartColors(omiTheme), [omiTheme]);
+  const maColors = useMemo(
+    () => ({
+      maShort: omiChartColors.indicator.maShort,
+      maMiddle: omiChartColors.indicator.maMiddle,
+      maLong: omiChartColors.indicator.maLong,
+    }),
+    [omiChartColors]
+  );
+  const upColor = omiChartColors.marketUp;
+  const downColor = omiChartColors.marketDown;
+  const selectedDrawingColor = omiChartColors.drawing.selected;
+  const hoveredDrawingColor = omiChartColors.drawing.hovered;
+  const drawingHandleBorderColor = omiChartColors.drawing.handleBorder;
   const activeDrawings = dragPreviewDrawings ?? drawings;
   const activeIndicators = useMemo(
     () => mergeIndicators(indicators, showMovingAverages),
@@ -238,6 +255,25 @@ export default function LightweightKLineChart({
     (nextDrawings: ChartDrawing[]) => nextDrawings.map(attachActiveDrawingAnalytics),
     [attachActiveDrawingAnalytics]
   );
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+
+    const root = document.documentElement;
+    const updateTheme = () => {
+      setOmiTheme(readOmiTheme());
+    };
+    const observer = new MutationObserver(updateTheme);
+
+    updateTheme();
+    observer.observe(root, { attributes: true, attributeFilter: ["data-theme"] });
+    window.addEventListener("storage", updateTheme);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("storage", updateTheme);
+    };
+  }, []);
 
   const drawingPointToCoordinate = useCallback((point: ChartDrawingPoint): DrawingCoordinate | null => {
     const chart = chartRef.current;
@@ -2085,31 +2121,31 @@ export default function LightweightKLineChart({
       width: container.clientWidth,
       height: initialHeight,
       layout: {
-        background: { type: ColorType.Solid, color: "#ffffff" },
-        textColor: "#475569",
+        background: { type: ColorType.Solid, color: omiChartColors.surface },
+        textColor: omiChartColors.neutralMuted,
         fontSize: 12,
         fontFamily:
           'ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
         attributionLogo: false,
         panes: {
-          separatorColor: "#e2e8f0",
-          separatorHoverColor: "#cbd5e1",
+          separatorColor: omiChartColors.grid,
+          separatorHoverColor: omiChartColors.tooltipBorder,
           enableResize: true,
         },
       },
       grid: {
-        vertLines: { color: "#f1f5f9" },
-        horzLines: { color: "#e2e8f0" },
+        vertLines: { color: omiChartColors.gridSubtle },
+        horzLines: { color: omiChartColors.grid },
       },
       rightPriceScale: {
-        borderColor: "#dbe3ef",
+        borderColor: omiChartColors.axisBorder,
         scaleMargins: {
           top: 0.07,
           bottom: activeIndicators.volume ? 0.27 : 0.08,
         },
       },
       timeScale: {
-        borderColor: "#dbe3ef",
+        borderColor: omiChartColors.axisBorder,
         timeVisible: timeMode === "intraday",
         secondsVisible: false,
         rightOffset: chartRightPaddingBars(timeMode),
@@ -2130,13 +2166,13 @@ export default function LightweightKLineChart({
       crosshair: {
         mode: CrosshairMode.MagnetOHLC,
         vertLine: {
-          color: "#94a3b8",
-          labelBackgroundColor: "#0f172a",
+          color: omiChartColors.crosshair,
+          labelBackgroundColor: omiChartColors.text,
           style: 2,
         },
         horzLine: {
-          color: "#94a3b8",
-          labelBackgroundColor: "#0f172a",
+          color: omiChartColors.crosshair,
+          labelBackgroundColor: omiChartColors.text,
           style: 2,
         },
       },
@@ -2164,7 +2200,7 @@ export default function LightweightKLineChart({
     if (chartStyle === "line") {
       const mainLineSeries = chart.addSeries(LineSeries, {
         title: "Close",
-        color: "#0f172a",
+        color: omiChartColors.text,
         lineWidth: 2,
         priceLineVisible: true,
         lastValueVisible: true,
@@ -2202,7 +2238,7 @@ export default function LightweightKLineChart({
         priceFormat: {
           type: "volume",
         },
-        color: "rgba(100, 116, 139, 0.18)",
+        color: omiChartColors.volume,
       });
       volumeSeries.setData(seriesData.volumes);
       chart.priceScale("").applyOptions({
@@ -2274,46 +2310,46 @@ export default function LightweightKLineChart({
     }
 
     if (activeIndicators.ema) {
-      addMainLine(seriesData.lines.emaFast, `EMA${params.emaFast}`, "#0891b2");
-      addMainLine(seriesData.lines.emaSlow, `EMA${params.emaSlow}`, "#f43f5e");
+      addMainLine(seriesData.lines.emaFast, `EMA${params.emaFast}`, omiChartColors.cyan);
+      addMainLine(seriesData.lines.emaSlow, `EMA${params.emaSlow}`, omiChartColors.rose);
     }
 
     if (activeIndicators.wma) {
-      addMainLine(seriesData.lines.wma, `WMA${params.wmaPeriod}`, "#0ea5e9");
+      addMainLine(seriesData.lines.wma, `WMA${params.wmaPeriod}`, omiChartColors.sky);
     }
 
     if (activeIndicators.hma) {
-      addMainLine(seriesData.lines.hma, `HMA${params.hmaPeriod}`, "#be185d");
+      addMainLine(seriesData.lines.hma, `HMA${params.hmaPeriod}`, omiChartColors.roseDark);
     }
 
     if (activeIndicators.vwma) {
-      addMainLine(seriesData.lines.vwma, `VWMA${params.vwmaPeriod}`, "#16a34a", {
+      addMainLine(seriesData.lines.vwma, `VWMA${params.vwmaPeriod}`, omiChartColors.green, {
         dashed: true,
       });
     }
 
     if (activeIndicators.bollinger) {
-      addMainLine(seriesData.lines.bollingerUpper, "BOLL Upper", "#0284c7", { lineWidth: 1 });
-      addMainLine(seriesData.lines.bollingerMiddle, "BOLL Mid", "#38bdf8", {
+      addMainLine(seriesData.lines.bollingerUpper, "BOLL Upper", omiChartColors.indicator.bollinger, { lineWidth: 1 });
+      addMainLine(seriesData.lines.bollingerMiddle, "BOLL Mid", omiChartColors.indicator.bollingerMiddle, {
         lineWidth: 1,
         dashed: true,
       });
-      addMainLine(seriesData.lines.bollingerLower, "BOLL Lower", "#0284c7", { lineWidth: 1 });
+      addMainLine(seriesData.lines.bollingerLower, "BOLL Lower", omiChartColors.indicator.bollinger, { lineWidth: 1 });
     }
 
     if (activeIndicators.vwap) {
-      addMainLine(seriesData.lines.vwap, "VWAP", "#334155", { dashed: true });
+      addMainLine(seriesData.lines.vwap, "VWAP", omiChartColors.neutralLine, { dashed: true });
     }
 
     if (activeIndicators.psar) {
-      addMainLine(seriesData.lines.psar, "SAR", "#7c3aed", { pointsOnly: true, lineWidth: 1 });
+      addMainLine(seriesData.lines.psar, "SAR", omiChartColors.purple, { pointsOnly: true, lineWidth: 1 });
     }
 
     if (activeIndicators.donchian) {
-      addMainLine(seriesData.lines.donchianUpper, `DONCH${params.donchianPeriod} U`, "#65a30d", {
+      addMainLine(seriesData.lines.donchianUpper, `DONCH${params.donchianPeriod} U`, omiChartColors.lime, {
         lineWidth: 1,
       });
-      addMainLine(seriesData.lines.donchianLower, `DONCH${params.donchianPeriod} L`, "#65a30d", {
+      addMainLine(seriesData.lines.donchianLower, `DONCH${params.donchianPeriod} L`, omiChartColors.lime, {
         lineWidth: 1,
       });
     }
@@ -2322,74 +2358,74 @@ export default function LightweightKLineChart({
       addMainLine(
         seriesData.lines.ichimokuConversion,
         `Tenkan${params.ichimokuConversionPeriod}`,
-        "#dc2626",
+        omiChartColors.marketUp,
         { lineWidth: 1 }
       );
       addMainLine(
         seriesData.lines.ichimokuBase,
         `Kijun${params.ichimokuBasePeriod}`,
-        "#2563eb",
+        omiChartColors.info,
         { lineWidth: 1 }
       );
-      addMainLine(seriesData.lines.ichimokuSpanA, "Senkou A", "#059669", {
+      addMainLine(seriesData.lines.ichimokuSpanA, "Senkou A", omiChartColors.marketDown, {
         lineWidth: 1,
         dashed: true,
       });
-      addMainLine(seriesData.lines.ichimokuSpanB, "Senkou B", "#b45309", {
+      addMainLine(seriesData.lines.ichimokuSpanB, "Senkou B", omiChartColors.amberDark, {
         lineWidth: 1,
         dashed: true,
       });
-      addMainLine(seriesData.lines.ichimokuLagging, "Chikou", "#64748b", {
+      addMainLine(seriesData.lines.ichimokuLagging, "Chikou", omiChartColors.textMuted, {
         lineWidth: 1,
         dashed: true,
       });
     }
 
     if (activeIndicators.supertrend) {
-      addMainLine(seriesData.lines.supertrendUp, `ST${params.supertrendAtrPeriod}`, "#059669", {
+      addMainLine(seriesData.lines.supertrendUp, `ST${params.supertrendAtrPeriod}`, omiChartColors.marketDown, {
         lineWidth: 2,
       });
-      addMainLine(seriesData.lines.supertrendDown, `ST${params.supertrendAtrPeriod}`, "#dc2626", {
+      addMainLine(seriesData.lines.supertrendDown, `ST${params.supertrendAtrPeriod}`, omiChartColors.marketUp, {
         lineWidth: 2,
       });
     }
 
     if (activeIndicators.keltner) {
-      addMainLine(seriesData.lines.keltnerUpper, `KC${params.keltnerPeriod} U`, "#0f766e", {
+      addMainLine(seriesData.lines.keltnerUpper, `KC${params.keltnerPeriod} U`, omiChartColors.teal, {
         lineWidth: 1,
       });
-      addMainLine(seriesData.lines.keltnerMiddle, `KC${params.keltnerPeriod} M`, "#14b8a6", {
+      addMainLine(seriesData.lines.keltnerMiddle, `KC${params.keltnerPeriod} M`, omiChartColors.tealBright, {
         lineWidth: 1,
         dashed: true,
       });
-      addMainLine(seriesData.lines.keltnerLower, `KC${params.keltnerPeriod} L`, "#0f766e", {
+      addMainLine(seriesData.lines.keltnerLower, `KC${params.keltnerPeriod} L`, omiChartColors.teal, {
         lineWidth: 1,
       });
     }
 
     if (activeIndicators.pivotPoints) {
-      addMainLine(seriesData.lines.pivot, "Pivot", "#475569", { lineWidth: 1, dashed: true });
-      addMainLine(seriesData.lines.pivotR1, "R1", "#dc2626", { lineWidth: 1, dashed: true });
-      addMainLine(seriesData.lines.pivotS1, "S1", "#059669", { lineWidth: 1, dashed: true });
+      addMainLine(seriesData.lines.pivot, "Pivot", omiChartColors.neutralMuted, { lineWidth: 1, dashed: true });
+      addMainLine(seriesData.lines.pivotR1, "R1", omiChartColors.marketUp, { lineWidth: 1, dashed: true });
+      addMainLine(seriesData.lines.pivotS1, "S1", omiChartColors.marketDown, { lineWidth: 1, dashed: true });
     }
 
     if (activeIndicators.supportResistance) {
-      addMainLine(seriesData.lines.resistance, `R${params.supportResistanceLookback}`, "#ef4444", {
+      addMainLine(seriesData.lines.resistance, `R${params.supportResistanceLookback}`, omiChartColors.marketUpFlash, {
         lineWidth: 1,
         dashed: true,
       });
-      addMainLine(seriesData.lines.support, `S${params.supportResistanceLookback}`, "#10b981", {
+      addMainLine(seriesData.lines.support, `S${params.supportResistanceLookback}`, omiChartColors.marketDownFlash, {
         lineWidth: 1,
         dashed: true,
       });
     }
 
     if (activeIndicators.gap) {
-      addMainLine(seriesData.lines.gapUp, `Gap Up ${params.gapMinPct}%`, "#dc2626", {
+      addMainLine(seriesData.lines.gapUp, `Gap Up ${params.gapMinPct}%`, omiChartColors.marketUp, {
         pointsOnly: true,
         lineWidth: 1,
       });
-      addMainLine(seriesData.lines.gapDown, `Gap Down ${params.gapMinPct}%`, "#059669", {
+      addMainLine(seriesData.lines.gapDown, `Gap Down ${params.gapMinPct}%`, omiChartColors.marketDown, {
         pointsOnly: true,
         lineWidth: 1,
       });
@@ -2397,7 +2433,7 @@ export default function LightweightKLineChart({
 
     if (activeIndicators.rsi) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.rsi, `RSI${params.rsiPeriod}`, "#c026d3");
+      addPaneLine(paneIndex, seriesData.lines.rsi, `RSI${params.rsiPeriod}`, omiChartColors.fuchsia);
     }
 
     if (activeIndicators.macd) {
@@ -2406,7 +2442,7 @@ export default function LightweightKLineChart({
         HistogramSeries,
         {
           title: "MACD H",
-          color: "rgba(100, 116, 139, 0.35)",
+          color: omiChartColors.volumeStrong,
           priceLineVisible: false,
           lastValueVisible: true,
           priceFormat: { type: "price", precision: 2, minMove: 0.01 },
@@ -2414,25 +2450,25 @@ export default function LightweightKLineChart({
         paneIndex
       );
       histogramSeries.setData(seriesData.macdHistogram);
-      addPaneLine(paneIndex, seriesData.lines.macd, "MACD", "#2563eb", { lineWidth: 1 });
-      addPaneLine(paneIndex, seriesData.lines.macdSignal, "Signal", "#f59e0b", { lineWidth: 1 });
+      addPaneLine(paneIndex, seriesData.lines.macd, "MACD", omiChartColors.info, { lineWidth: 1 });
+      addPaneLine(paneIndex, seriesData.lines.macdSignal, "Signal", omiChartColors.warning, { lineWidth: 1 });
     }
 
     if (activeIndicators.kd) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.kdK, `K${params.kdPeriod}`, "#2563eb");
-      addPaneLine(paneIndex, seriesData.lines.kdD, `D${params.kdPeriod}`, "#f59e0b");
+      addPaneLine(paneIndex, seriesData.lines.kdK, `K${params.kdPeriod}`, omiChartColors.info);
+      addPaneLine(paneIndex, seriesData.lines.kdD, `D${params.kdPeriod}`, omiChartColors.warning);
     }
 
     if (activeIndicators.momentum) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.momentum, `MOM${params.momentumPeriod}`, "#0e7490");
+      addPaneLine(paneIndex, seriesData.lines.momentum, `MOM${params.momentumPeriod}`, omiChartColors.indicator.momentum);
     }
 
     if (activeIndicators.tsi) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.tsi, `TSI${params.tsiLongPeriod}/${params.tsiShortPeriod}`, "#7c3aed");
-      addPaneLine(paneIndex, seriesData.lines.tsiSignal, `TSI Sig${params.tsiSignalPeriod}`, "#f59e0b", {
+      addPaneLine(paneIndex, seriesData.lines.tsi, `TSI${params.tsiLongPeriod}/${params.tsiShortPeriod}`, omiChartColors.purple);
+      addPaneLine(paneIndex, seriesData.lines.tsiSignal, `TSI Sig${params.tsiSignalPeriod}`, omiChartColors.warning, {
         lineWidth: 1,
       });
     }
@@ -2443,7 +2479,7 @@ export default function LightweightKLineChart({
         paneIndex,
         seriesData.lines.awesomeOscillator,
         `AO${params.awesomeFastPeriod}/${params.awesomeSlowPeriod}`,
-        "#db2777"
+        omiChartColors.pink
       );
     }
 
@@ -2453,69 +2489,69 @@ export default function LightweightKLineChart({
         paneIndex,
         seriesData.lines.ultimateOscillator,
         `UO${params.ultimateShortPeriod}/${params.ultimateMiddlePeriod}/${params.ultimateLongPeriod}`,
-        "#9333ea"
+        omiChartColors.purpleAlt
       );
     }
 
     if (activeIndicators.atr) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.atr, `ATR${params.atrPeriod}`, "#f97316");
+      addPaneLine(paneIndex, seriesData.lines.atr, `ATR${params.atrPeriod}`, omiChartColors.heat);
     }
 
     if (activeIndicators.bbWidth) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.bbWidth, `BB Width${params.bbWidthPeriod}`, "#0284c7");
+      addPaneLine(paneIndex, seriesData.lines.bbWidth, `BB Width${params.bbWidthPeriod}`, omiChartColors.indicator.bollinger);
     }
 
     if (activeIndicators.stdDev) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.stdDev, `StdDev${params.stdDevPeriod}`, "#334155");
+      addPaneLine(paneIndex, seriesData.lines.stdDev, `StdDev${params.stdDevPeriod}`, omiChartColors.neutralLine);
     }
 
     if (activeIndicators.choppiness) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.choppiness, `CHOP${params.choppinessPeriod}`, "#92400e");
+      addPaneLine(paneIndex, seriesData.lines.choppiness, `CHOP${params.choppinessPeriod}`, omiChartColors.brown);
     }
 
     if (activeIndicators.adx) {
       const paneIndex = addIndicatorPane(104);
-      addPaneLine(paneIndex, seriesData.lines.adx, `ADX${params.adxPeriod}`, "#7c3aed");
-      addPaneLine(paneIndex, seriesData.lines.plusDi, "+DI", "#dc2626", { lineWidth: 1 });
-      addPaneLine(paneIndex, seriesData.lines.minusDi, "-DI", "#059669", { lineWidth: 1 });
+      addPaneLine(paneIndex, seriesData.lines.adx, `ADX${params.adxPeriod}`, omiChartColors.purple);
+      addPaneLine(paneIndex, seriesData.lines.plusDi, "+DI", omiChartColors.marketUp, { lineWidth: 1 });
+      addPaneLine(paneIndex, seriesData.lines.minusDi, "-DI", omiChartColors.marketDown, { lineWidth: 1 });
     }
 
     if (activeIndicators.aroon) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.aroonUp, `Aroon Up${params.aroonPeriod}`, "#dc2626");
-      addPaneLine(paneIndex, seriesData.lines.aroonDown, `Aroon Down${params.aroonPeriod}`, "#059669");
+      addPaneLine(paneIndex, seriesData.lines.aroonUp, `Aroon Up${params.aroonPeriod}`, omiChartColors.marketUp);
+      addPaneLine(paneIndex, seriesData.lines.aroonDown, `Aroon Down${params.aroonPeriod}`, omiChartColors.marketDown);
     }
 
     if (activeIndicators.obv) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.obv, "OBV", "#334155");
-      addPaneLine(paneIndex, seriesData.lines.obvMa, `OBV MA${params.obvMa}`, "#f59e0b", {
+      addPaneLine(paneIndex, seriesData.lines.obv, "OBV", omiChartColors.neutralLine);
+      addPaneLine(paneIndex, seriesData.lines.obvMa, `OBV MA${params.obvMa}`, omiChartColors.warning, {
         lineWidth: 1,
       });
     }
 
     if (activeIndicators.mfi) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.mfi, `MFI${params.mfiPeriod}`, "#0f766e");
+      addPaneLine(paneIndex, seriesData.lines.mfi, `MFI${params.mfiPeriod}`, omiChartColors.teal);
     }
 
     if (activeIndicators.cmf) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.cmf, `CMF${params.cmfPeriod}`, "#059669");
+      addPaneLine(paneIndex, seriesData.lines.cmf, `CMF${params.cmfPeriod}`, omiChartColors.marketDown);
     }
 
     if (activeIndicators.adLine) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.adLine, "A/D", "#475569");
+      addPaneLine(paneIndex, seriesData.lines.adLine, "A/D", omiChartColors.neutralMuted);
     }
 
     if (activeIndicators.pvt) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.pvt, "PVT", "#0369a1");
+      addPaneLine(paneIndex, seriesData.lines.pvt, "PVT", omiChartColors.skyDark);
     }
 
     if (activeIndicators.relativeStrength) {
@@ -2524,7 +2560,7 @@ export default function LightweightKLineChart({
         paneIndex,
         seriesData.lines.relativeStrength,
         `RS${params.relativeStrengthLookback}${benchmarkLabel ? ` vs ${benchmarkLabel}` : ""}`,
-        "#7c3aed"
+        omiChartColors.purple
       );
     }
 
@@ -2534,7 +2570,7 @@ export default function LightweightKLineChart({
         paneIndex,
         seriesData.lines.beta,
         `Beta${params.betaPeriod}${benchmarkLabel ? ` vs ${benchmarkLabel}` : ""}`,
-        "#0f766e"
+        omiChartColors.teal
       );
     }
 
@@ -2544,35 +2580,35 @@ export default function LightweightKLineChart({
         paneIndex,
         seriesData.lines.correlation,
         `Corr${params.correlationPeriod}${benchmarkLabel ? ` vs ${benchmarkLabel}` : ""}`,
-        "#0369a1"
+        omiChartColors.skyDark
       );
     }
 
     if (activeIndicators.cci) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.cci, `CCI${params.cciPeriod}`, "#4f46e5");
+      addPaneLine(paneIndex, seriesData.lines.cci, `CCI${params.cciPeriod}`, omiChartColors.indigo);
     }
 
     if (activeIndicators.williamsR) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.williamsR, `W%R${params.williamsRPeriod}`, "#db2777");
+      addPaneLine(paneIndex, seriesData.lines.williamsR, `W%R${params.williamsRPeriod}`, omiChartColors.pink);
     }
 
     if (activeIndicators.roc) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.roc, `ROC${params.rocPeriod}`, "#0e7490");
+      addPaneLine(paneIndex, seriesData.lines.roc, `ROC${params.rocPeriod}`, omiChartColors.indicator.momentum);
     }
 
     if (activeIndicators.stochRsi) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.stochRsiK, "StochRSI K", "#2563eb");
-      addPaneLine(paneIndex, seriesData.lines.stochRsiD, "StochRSI D", "#f59e0b");
+      addPaneLine(paneIndex, seriesData.lines.stochRsiK, "StochRSI K", omiChartColors.info);
+      addPaneLine(paneIndex, seriesData.lines.stochRsiD, "StochRSI D", omiChartColors.warning);
     }
 
     if (activeIndicators.trix) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.trix, `TRIX${params.trixPeriod}`, "#7c3aed");
-      addPaneLine(paneIndex, seriesData.lines.trixSignal, `Signal${params.trixSignal}`, "#f59e0b", {
+      addPaneLine(paneIndex, seriesData.lines.trix, `TRIX${params.trixPeriod}`, omiChartColors.purple);
+      addPaneLine(paneIndex, seriesData.lines.trixSignal, `Signal${params.trixSignal}`, omiChartColors.warning, {
         lineWidth: 1,
       });
     }
@@ -2664,11 +2700,15 @@ export default function LightweightKLineChart({
     benchmarkLabel,
     chartSeriesKey,
     chartStyle,
+    downColor,
     height,
+    maColors,
+    omiChartColors,
     params,
     scheduleOverlayRevision,
     seriesData,
     timeMode,
+    upColor,
     volumePanelLabel,
   ]);
 
@@ -2696,7 +2736,7 @@ export default function LightweightKLineChart({
 
   if (seriesData.candles.length === 0) {
     return (
-      <div className="flex h-[520px] items-center justify-center border-t border-slate-200 bg-white text-sm text-slate-500">
+      <div className="flex h-[520px] items-center justify-center border-t border-omi-border-subtle bg-omi-surface text-sm text-omi-text-muted">
         尚無可繪製的 K 線資料
       </div>
     );
@@ -2736,7 +2776,7 @@ export default function LightweightKLineChart({
       : null;
 
   return (
-    <div className="border-t border-slate-200 bg-white">
+    <div className="border-t border-omi-border-subtle bg-omi-surface">
       {showHeader ? (
         <ProfessionalChartHeader
           candleCount={seriesData.candles.length}
@@ -2825,6 +2865,7 @@ export default function LightweightKLineChart({
           }}
         >
           <ChartStaticIndicatorLayer
+            chartColors={omiChartColors}
             cloudPolygons={projectedCloudPolygons}
             gapZones={projectedGapZones}
             overlaySize={overlaySize}
@@ -2905,11 +2946,11 @@ export default function LightweightKLineChart({
                     pointerEvents="none"
                   />
                   <g transform={`translate(${labelX}, ${labelY})`} pointerEvents="none">
-                    <rect width={labelWidth} height={30} rx={3} fill="white" stroke={stroke} opacity={0.95} />
-                    <text x={10} y={13} className="fill-slate-800 text-[10px] font-bold tabular-nums">
+                    <rect width={labelWidth} height={30} rx={3} fill={omiChartColors.surface} stroke={stroke} opacity={0.95} />
+                    <text x={10} y={13} className="fill-omi-text text-[10px] font-bold tabular-nums">
                       AVWAP {anchoredVwapAnalysis?.labels.vwap ?? drawingLabel}
                     </text>
-                    <text x={10} y={25} className="fill-slate-500 text-[10px] font-semibold tabular-nums">
+                    <text x={10} y={25} className="fill-omi-text-muted text-[10px] font-semibold tabular-nums">
                       {anchoredVwapAnalysis?.labels.status ?? "錨定 VWAP"}
                     </text>
                   </g>
@@ -2989,11 +3030,11 @@ export default function LightweightKLineChart({
                       ))
                     : null}
                   <g transform={`translate(${labelX}, ${labelY})`} pointerEvents="none">
-                    <rect width={labelWidth} height={38} rx={3} fill="white" stroke={actionStroke} opacity={0.96} />
-                    <text x={10} y={15} className="fill-slate-800 text-[10px] font-bold tabular-nums">
+                    <rect width={labelWidth} height={38} rx={3} fill={omiChartColors.surface} stroke={actionStroke} opacity={0.96} />
+                    <text x={10} y={15} className="fill-omi-text text-[10px] font-bold tabular-nums">
                       價差 {measurementStats.priceDiffLabel} ({measurementStats.percentLabel})
                     </text>
-                    <text x={10} y={30} className="fill-slate-500 text-[10px] font-semibold tabular-nums">
+                    <text x={10} y={30} className="fill-omi-text-muted text-[10px] font-semibold tabular-nums">
                       {measurementStats.barsLabel ?? "跨距 -"} · 高 {measurementStats.highLabel} / 低 {measurementStats.lowLabel}
                     </text>
                   </g>
@@ -3112,15 +3153,15 @@ export default function LightweightKLineChart({
                       ))
                     : null}
                   <g transform={`translate(${labelX}, ${labelY})`} pointerEvents="none">
-                    <rect width={labelWidth} height={labelHeight} rx={3} fill="white" stroke={actionStroke} opacity={0.96} />
-                    <text x={10} y={15} className="fill-slate-800 text-[10px] font-bold tabular-nums">
+                    <rect width={labelWidth} height={labelHeight} rx={3} fill={omiChartColors.surface} stroke={actionStroke} opacity={0.96} />
+                    <text x={10} y={15} className="fill-omi-text text-[10px] font-bold tabular-nums">
                       {measurementStats.priceDiffLabel} ({measurementStats.percentLabel})
                     </text>
-                    <text x={10} y={30} className="fill-slate-500 text-[10px] font-semibold tabular-nums">
+                    <text x={10} y={30} className="fill-omi-text-muted text-[10px] font-semibold tabular-nums">
                       高 {measurementStats.highLabel} / 低 {measurementStats.lowLabel}
                     </text>
                     {zoneAnalysis ? (
-                      <text x={10} y={45} className="fill-slate-500 text-[10px] font-semibold tabular-nums">
+                      <text x={10} y={45} className="fill-omi-text-muted text-[10px] font-semibold tabular-nums">
                         {zoneAnalysis.labels.status} · 位置 {zoneAnalysis.labels.position}
                       </text>
                     ) : null}
@@ -3185,7 +3226,7 @@ export default function LightweightKLineChart({
                         y={bin.y}
                         width={bin.width}
                         height={bin.height}
-                        fill="#0f172a"
+                        fill={omiChartColors.text}
                         opacity={bin.poc ? 0.12 : bin.valueArea ? 0.065 : 0.035}
                       />
                       <rect
@@ -3193,7 +3234,7 @@ export default function LightweightKLineChart({
                         y={bin.y}
                         width={bin.sellWidth}
                         height={bin.height}
-                        fill="#059669"
+                        fill={omiChartColors.marketDown}
                         opacity={bin.poc ? 0.44 : bin.valueArea ? 0.3 : 0.2}
                       />
                       <rect
@@ -3201,7 +3242,7 @@ export default function LightweightKLineChart({
                         y={bin.y}
                         width={bin.buyWidth}
                         height={bin.height}
-                        fill="#dc2626"
+                        fill={omiChartColors.marketUp}
                         opacity={bin.poc ? 0.44 : bin.valueArea ? 0.3 : 0.2}
                       />
                       {bin.poc ? (
@@ -3246,14 +3287,14 @@ export default function LightweightKLineChart({
                       ))
                     : null}
                   <g transform={`translate(${labelX}, ${labelY})`} pointerEvents="none">
-                    <rect width={labelWidth} height={labelHeight} rx={3} fill="white" stroke={stroke} opacity={0.95} />
-                    <text x={10} y={14} className="fill-slate-800 text-[10px] font-bold tabular-nums">
+                    <rect width={labelWidth} height={labelHeight} rx={3} fill={omiChartColors.surface} stroke={stroke} opacity={0.95} />
+                    <text x={10} y={14} className="fill-omi-text text-[10px] font-bold tabular-nums">
                       POC {volumeProfileAnalysis?.labels.poc ?? "-"}
                     </text>
-                    <text x={10} y={28} className="fill-slate-500 text-[10px] font-semibold tabular-nums">
+                    <text x={10} y={28} className="fill-omi-text-muted text-[10px] font-semibold tabular-nums">
                       VA {volumeProfileAnalysis?.labels.valueArea ?? "-"}
                     </text>
-                    <text x={10} y={41} className="fill-slate-500 text-[10px] font-semibold tabular-nums">
+                    <text x={10} y={41} className="fill-omi-text-muted text-[10px] font-semibold tabular-nums">
                       {volumeProfileAnalysis?.labels.latestPosition ?? "成交量分布"}
                     </text>
                   </g>
@@ -3351,12 +3392,12 @@ export default function LightweightKLineChart({
                     transform={`translate(${labelX}, ${labelY})`}
                     pointerEvents="none"
                   >
-                    <rect width={labelWidth} height={labelHeight} rx={3} fill="white" stroke={stroke} opacity={0.94} />
+                    <rect width={labelWidth} height={labelHeight} rx={3} fill={omiChartColors.surface} stroke={stroke} opacity={0.94} />
                     <text
                       x={labelWidth / 2}
                       y={12}
                       textAnchor="middle"
-                      className="fill-slate-800 text-[10px] font-bold tabular-nums"
+                      className="fill-omi-text text-[10px] font-bold tabular-nums"
                     >
                       {zoneAnalysis ? zoneAnalysis.labels.role : drawingLabel}
                     </text>
@@ -3365,7 +3406,7 @@ export default function LightweightKLineChart({
                         x={labelWidth / 2}
                         y={27}
                         textAnchor="middle"
-                        className="fill-slate-500 text-[10px] font-semibold tabular-nums"
+                        className="fill-omi-text-muted text-[10px] font-semibold tabular-nums"
                       >
                         {zoneAnalysis.labels.status} · {zoneAnalysis.labels.position}
                       </text>
@@ -3433,7 +3474,7 @@ export default function LightweightKLineChart({
                           width={96}
                           height={18}
                           rx={3}
-                          fill={nearest && active ? "#fff7ed" : "white"}
+                          fill={nearest && active ? omiChartColors.heatSoft : omiChartColors.surface}
                           stroke={stroke}
                           opacity={nearest && active ? 0.98 : 0.92}
                         />
@@ -3441,7 +3482,7 @@ export default function LightweightKLineChart({
                           x={48}
                           y={12}
                           textAnchor="middle"
-                          className="fill-slate-800 text-[10px] font-bold tabular-nums"
+                          className="fill-omi-text text-[10px] font-bold tabular-nums"
                         >
                           {level.label} {level.priceLabel}
                         </text>
@@ -3551,12 +3592,12 @@ export default function LightweightKLineChart({
                   </>
                 ) : null}
                 <g transform={`translate(${Math.max(8, Math.min(points[1].x + 8, overlaySize.width - 74))}, ${Math.max(16, points[1].y - 8)})`}>
-                  <rect width={66} height={18} rx={3} fill="white" stroke={stroke} opacity={0.94} />
+                  <rect width={66} height={18} rx={3} fill={omiChartColors.surface} stroke={stroke} opacity={0.94} />
                   <text
                     x={33}
                     y={12}
                     textAnchor="middle"
-                    className="fill-slate-800 text-[10px] font-bold tabular-nums"
+                    className="fill-omi-text text-[10px] font-bold tabular-nums"
                   >
                     {drawingLabel}
                   </text>
@@ -3571,9 +3612,9 @@ export default function LightweightKLineChart({
                 y={draftRectangleBox.y}
                 width={draftRectangleBox.width}
                 height={draftRectangleBox.height}
-                fill="#dc2626"
+                fill={omiChartColors.marketUp}
                 opacity={0.06}
-                stroke="#dc2626"
+                stroke={omiChartColors.marketUp}
                 strokeWidth={1.5}
                 strokeDasharray="5 4"
                 pointerEvents="none"
@@ -3597,8 +3638,8 @@ export default function LightweightKLineChart({
                     Math.min(draftPriceRangeBox.x + draftPriceRangeBox.width + 8, overlaySize.width - 132)
                   )}, ${Math.max(18, Math.min(draftPriceRangeBox.y + 8, overlaySize.height - 40))})`}
                 >
-                  <rect width={124} height={24} rx={3} fill="white" stroke={measurementToneColor(projectedDraftDrawing.measurementStats.tone)} opacity={0.94} />
-                  <text x={10} y={16} className="fill-slate-800 text-[10px] font-bold tabular-nums">
+                  <rect width={124} height={24} rx={3} fill={omiChartColors.surface} stroke={measurementToneColor(projectedDraftDrawing.measurementStats.tone)} opacity={0.94} />
+                  <text x={10} y={16} className="fill-omi-text text-[10px] font-bold tabular-nums">
                     {projectedDraftDrawing.measurementStats.priceDiffLabel} ({projectedDraftDrawing.measurementStats.percentLabel})
                   </text>
                 </g>
@@ -3612,7 +3653,7 @@ export default function LightweightKLineChart({
                     y1={level.y}
                     x2={overlaySize.width}
                     y2={level.y}
-                    stroke="#dc2626"
+                    stroke={omiChartColors.marketUp}
                     strokeWidth={1.25}
                     strokeDasharray="5 4"
                     opacity={0.7}
@@ -3645,8 +3686,8 @@ export default function LightweightKLineChart({
                     )
                   )})`}
                 >
-                  <rect width={142} height={24} rx={3} fill="white" stroke={measurementToneColor(projectedDraftDrawing.measurementStats.tone)} opacity={0.94} />
-                  <text x={10} y={16} className="fill-slate-800 text-[10px] font-bold tabular-nums">
+                  <rect width={142} height={24} rx={3} fill={omiChartColors.surface} stroke={measurementToneColor(projectedDraftDrawing.measurementStats.tone)} opacity={0.94} />
+                  <text x={10} y={16} className="fill-omi-text text-[10px] font-bold tabular-nums">
                     {projectedDraftDrawing.measurementStats.priceDiffLabel} ({projectedDraftDrawing.measurementStats.percentLabel})
                   </text>
                 </g>
@@ -3657,7 +3698,7 @@ export default function LightweightKLineChart({
                 y1={projectedDraftDrawing.points[0].y}
                 x2={projectedDraftDrawing.points[1].x}
                 y2={projectedDraftDrawing.points[1].y}
-                stroke="#dc2626"
+                stroke={omiChartColors.marketUp}
                 strokeWidth={1.5}
                 strokeDasharray="5 4"
                 pointerEvents="none"
@@ -3669,29 +3710,29 @@ export default function LightweightKLineChart({
               cx={snapCoordinate.x}
               cy={snapCoordinate.y}
               r={5}
-              fill="#dc2626"
-              stroke="white"
+              fill={omiChartColors.marketUp}
+              stroke={omiChartColors.surface}
               strokeWidth={2}
               pointerEvents="none"
             />
           ) : null}
           {drawingTool !== "cursor" ? (
             <g transform="translate(12, 12)" pointerEvents="none">
-              <rect width={drawingModeBadgeWidth(drawingTool)} height={24} rx={3} fill="#0f172a" opacity={0.92} />
-              <text x={12} y={16} className="fill-white text-[11px] font-bold">
+              <rect width={drawingModeBadgeWidth(drawingTool)} height={24} rx={3} fill={omiChartColors.text} opacity={0.92} />
+              <text x={12} y={16} className="fill-omi-surface text-[11px] font-bold">
                 {drawingToolModeLabel(drawingTool)}
               </text>
             </g>
           ) : null}
         </svg>
       </div>
-      <div className="border-t border-slate-100 px-4 py-1.5 text-right text-[10px] text-slate-400">
+      <div className="border-t border-omi-border-subtle px-4 py-1.5 text-right text-[10px] text-omi-text-subtle">
         Chart engine:{" "}
         <a
           href="https://www.tradingview.com/"
           target="_blank"
           rel="noreferrer"
-          className="font-medium text-slate-500 hover:text-slate-700"
+          className="font-medium text-omi-text-muted hover:text-omi-text"
         >
           TradingView Lightweight Charts
         </a>

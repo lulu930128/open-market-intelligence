@@ -240,10 +240,10 @@ type StockSignalChip = {
 };
 
 function stockSignalToneClass(tone: StockSignalTone) {
-  if (tone === "positive") return "border-red-200 bg-red-50 text-red-700";
-  if (tone === "negative") return "border-emerald-200 bg-emerald-50 text-emerald-700";
-  if (tone === "warning") return "border-amber-200 bg-amber-50 text-amber-700";
-  return "border-slate-200 bg-slate-50 text-slate-600";
+  if (tone === "positive") return "omi-signal-chip-positive";
+  if (tone === "negative") return "omi-signal-chip-negative";
+  if (tone === "warning") return "omi-signal-chip-warning";
+  return "omi-signal-chip-neutral";
 }
 
 function stockSignalToneFromNumber(value: number | null | undefined): StockSignalTone {
@@ -1924,7 +1924,7 @@ export default function StockDetailPanel({
     }
 
     if (effectiveTimeframe === "today" && !latestToday) {
-      addBadge("等待盤中", "text-slate-600 bg-slate-100");
+      addBadge("等待盤中", "text-omi-text-muted bg-omi-surface-muted");
 
       return {
         title: loadState === "loading" ? "資料讀取中" : "等待盤中資料",
@@ -2117,20 +2117,20 @@ export default function StockDetailPanel({
         }
       );
 
-      if (isOpeningPhase) addBadge("開盤資料少", "text-amber-700 bg-amber-50");
+      if (isOpeningPhase) addBadge("開盤資料少", "text-omi-warning bg-omi-warning-soft");
       if (finiteNumber(openingGapPct)) {
         addBadge(
           openingGapPct >= 0 ? "開高" : "開低",
-          openingGapPct >= 0 ? "text-red-700 bg-red-50" : "text-emerald-700 bg-emerald-50"
+          openingGapPct >= 0 ? "text-omi-danger bg-omi-danger-soft" : "text-omi-success bg-omi-success-soft"
         );
       }
       if (finiteNumber(priceVsMa20)) {
         addBadge(
           priceVsMa20 >= 0 ? "日線站上 MA20" : "日線跌破 MA20",
-          priceVsMa20 >= 0 ? "text-red-700 bg-red-50" : "text-emerald-700 bg-emerald-50"
+          priceVsMa20 >= 0 ? "text-omi-danger bg-omi-danger-soft" : "text-omi-success bg-omi-success-soft"
         );
       }
-      if (finiteNumber(rsi14) && rsi14 >= 80) addBadge("日線 RSI 過熱", "text-amber-700 bg-amber-50");
+      if (finiteNumber(rsi14) && rsi14 >= 80) addBadge("日線 RSI 過熱", "text-omi-warning bg-omi-warning-soft");
 
       return {
         title: isOpeningPhase
@@ -2232,10 +2232,10 @@ export default function StockDetailPanel({
         }
       );
 
-      if (finiteNumber(priceVsMa20)) addBadge(priceVsMa20 >= 0 ? "站上 MA20" : "跌破 MA20", priceVsMa20 >= 0 ? "text-red-700 bg-red-50" : "text-emerald-700 bg-emerald-50");
-      if (finiteNumber(macdHistogram)) addBadge(macdHistogram >= 0 ? "MACD 偏多" : "MACD 偏弱", macdHistogram >= 0 ? "text-red-700 bg-red-50" : "text-emerald-700 bg-emerald-50");
-      if (finiteNumber(rsi14) && rsi14 >= 80) addBadge("RSI 過熱", "text-amber-700 bg-amber-50");
-      if (finiteNumber(volumeRatio) && volumeRatio >= 1.5) addBadge("放量", "text-amber-700 bg-amber-50");
+      if (finiteNumber(priceVsMa20)) addBadge(priceVsMa20 >= 0 ? "站上 MA20" : "跌破 MA20", priceVsMa20 >= 0 ? "text-omi-danger bg-omi-danger-soft" : "text-omi-success bg-omi-success-soft");
+      if (finiteNumber(macdHistogram)) addBadge(macdHistogram >= 0 ? "MACD 偏多" : "MACD 偏弱", macdHistogram >= 0 ? "text-omi-danger bg-omi-danger-soft" : "text-omi-success bg-omi-success-soft");
+      if (finiteNumber(rsi14) && rsi14 >= 80) addBadge("RSI 過熱", "text-omi-warning bg-omi-warning-soft");
+      if (finiteNumber(volumeRatio) && volumeRatio >= 1.5) addBadge("放量", "text-omi-warning bg-omi-warning-soft");
 
       return {
         title: titleFor("短線偏多", "短線整理", "短線偏弱"),
@@ -2319,9 +2319,9 @@ export default function StockDetailPanel({
         }
       );
 
-      if (finiteNumber(weeklyMa4) && finiteNumber(weeklyMa13)) addBadge(weeklyMa4 >= weeklyMa13 ? "週線偏多" : "週線偏弱", weeklyMa4 >= weeklyMa13 ? "text-red-700 bg-red-50" : "text-emerald-700 bg-emerald-50");
-      if (finiteNumber(weekStats26.rangePositionPct) && weekStats26.rangePositionPct >= 80) addBadge("接近26週高位", "text-amber-700 bg-amber-50");
-      if (finiteNumber(weeklyVolumeRatio) && weeklyVolumeRatio >= 1.5) addBadge("週量放大", "text-amber-700 bg-amber-50");
+      if (finiteNumber(weeklyMa4) && finiteNumber(weeklyMa13)) addBadge(weeklyMa4 >= weeklyMa13 ? "週線偏多" : "週線偏弱", weeklyMa4 >= weeklyMa13 ? "text-omi-danger bg-omi-danger-soft" : "text-omi-success bg-omi-success-soft");
+      if (finiteNumber(weekStats26.rangePositionPct) && weekStats26.rangePositionPct >= 80) addBadge("接近26週高位", "text-omi-warning bg-omi-warning-soft");
+      if (finiteNumber(weeklyVolumeRatio) && weeklyVolumeRatio >= 1.5) addBadge("週量放大", "text-omi-warning bg-omi-warning-soft");
 
       return {
         title: titleFor("中線轉強", "中線整理", "中線偏弱"),
@@ -2408,9 +2408,9 @@ export default function StockDetailPanel({
       }
     );
 
-    if (finiteNumber(monthlyMa6) && finiteNumber(monthlyMa12)) addBadge(monthlyMa6 >= monthlyMa12 ? "月線偏多" : "月線偏弱", monthlyMa6 >= monthlyMa12 ? "text-red-700 bg-red-50" : "text-emerald-700 bg-emerald-50");
-    if (finiteNumber(revenueGrowth)) addBadge(revenueGrowth >= 0 ? "營收成長" : "營收衰退", revenueGrowth >= 0 ? "text-red-700 bg-red-50" : "text-emerald-700 bg-emerald-50");
-    if (finiteNumber(monthStats12.rangePositionPct) && monthStats12.rangePositionPct >= 80) addBadge("接近12月高位", "text-amber-700 bg-amber-50");
+    if (finiteNumber(monthlyMa6) && finiteNumber(monthlyMa12)) addBadge(monthlyMa6 >= monthlyMa12 ? "月線偏多" : "月線偏弱", monthlyMa6 >= monthlyMa12 ? "text-omi-danger bg-omi-danger-soft" : "text-omi-success bg-omi-success-soft");
+    if (finiteNumber(revenueGrowth)) addBadge(revenueGrowth >= 0 ? "營收成長" : "營收衰退", revenueGrowth >= 0 ? "text-omi-danger bg-omi-danger-soft" : "text-omi-success bg-omi-success-soft");
+    if (finiteNumber(monthStats12.rangePositionPct) && monthStats12.rangePositionPct >= 80) addBadge("接近12月高位", "text-omi-warning bg-omi-warning-soft");
 
     return {
       title: titleFor("長線偏多", "長線觀察", "長線偏弱"),
@@ -3053,17 +3053,17 @@ export default function StockDetailPanel({
         .join(" ")}
     >
       <div className={["min-w-0 self-start", chartFocusMode ? "space-y-0" : "space-y-4"].join(" ")}>
-        <div className={chartFocusMode ? "min-w-0" : "min-w-0 border border-slate-200 bg-white"}>
+        <div className={chartFocusMode ? "min-w-0" : "min-w-0 border border-omi-border-subtle bg-omi-surface"}>
           {chartFocusMode ? null : (
-          <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 px-5 py-4">
+          <div className="flex flex-wrap items-start justify-between gap-4 border-b border-omi-border-subtle px-5 py-4">
             <div>
-              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
                 {isIndexProduct ? "Index" : "Stock"}
               </div>
-              <h2 className="mt-1 text-2xl font-bold text-slate-950">
+              <h2 className="mt-1 text-2xl font-bold text-omi-text-strong">
                 {stockId} {indexProduct?.stockName ?? stockName ?? stockInfo?.stock_name ?? ""}
               </h2>
-              <div className="mt-1 text-sm text-slate-500">
+              <div className="mt-1 text-sm text-omi-text-muted">
                 {indexProduct
                   ? `${indexProduct.market} · 指數 · ${indexProduct.symbol}`
                   : `${stockInfo?.market ?? "-"} · ${stockInfo?.industry ?? "未分類"}`}{" "}
@@ -3084,7 +3084,7 @@ export default function StockDetailPanel({
                   direction={latestChange}
                   resetKey={`${stockId ?? "empty"}:${effectiveTimeframe}`}
                   className={[
-                    "text-4xl font-bold leading-none tracking-normal tabular-nums",
+                    "text-3xl font-bold leading-none tracking-normal tabular-nums",
                     priceLimitBoxClass(headerLimitStatus),
                   ].join(" ")}
                 >
@@ -3101,7 +3101,7 @@ export default function StockDetailPanel({
               </div>
 
               <div className="flex flex-col items-end gap-2">
-                <div className="flex border border-slate-200 bg-slate-50 p-1">
+                <div className="flex border border-omi-border-subtle bg-omi-surface-subtle p-1">
                   {availableTimeframes.map((item) => (
                     <button
                       key={item}
@@ -3116,8 +3116,8 @@ export default function StockDetailPanel({
                       className={[
                         "h-8 min-w-12 px-3 text-sm font-semibold transition",
                         effectiveTimeframe === item
-                          ? "bg-red-700 text-white"
-                          : "text-slate-600 hover:bg-white",
+                          ? "omi-timeframe-tab-active"
+                          : "text-omi-text-muted hover:bg-omi-surface",
                       ].join(" ")}
                     >
                       {timeframeLabels[item]}
@@ -3130,17 +3130,17 @@ export default function StockDetailPanel({
                     <button
                       type="button"
                       onClick={() => setIndicatorMenuOpen((value) => !value)}
-                      className="h-8 border border-slate-900 bg-white px-3 text-sm font-semibold text-slate-900 hover:border-red-700 hover:text-red-700"
+                      className="h-8 border border-omi-control bg-omi-surface px-3 text-sm font-semibold text-omi-text hover:border-omi-accent hover:text-omi-danger"
                     >
                       指標
                     </button>
                     {indicatorMenuOpen ? (
-                      <div className="absolute right-0 z-20 mt-2 w-56 border border-slate-200 bg-white p-3 text-left shadow-lg">
-                        <div className="mb-2 text-xs font-bold text-slate-500">顯示項目</div>
+                      <div className="absolute right-0 z-20 mt-2 w-56 border border-omi-border-subtle bg-omi-surface p-3 text-left shadow-lg">
+                        <div className="mb-2 text-xs font-bold text-omi-text-muted">顯示項目</div>
                         {intradayIndicatorOptions.map((option) => (
                           <label
                             key={option.key}
-                            className="flex cursor-pointer items-start gap-2 px-2 py-2 text-xs hover:bg-slate-50"
+                            className="flex cursor-pointer items-start gap-2 px-2 py-2 text-xs hover:bg-omi-surface-subtle"
                           >
                             <input
                               type="checkbox"
@@ -3149,10 +3149,10 @@ export default function StockDetailPanel({
                               className="mt-0.5"
                             />
                             <span>
-                              <span className="block font-semibold text-slate-800">
+                              <span className="block font-semibold text-omi-text">
                                 {option.label}
                               </span>
-                              <span className="block text-slate-500">
+                              <span className="block text-omi-text-muted">
                                 {option.description}
                               </span>
                             </span>
@@ -3167,7 +3167,7 @@ export default function StockDetailPanel({
                       <button
                         type="button"
                         onClick={() => setIndicatorMenuOpen((value) => !value)}
-                        className="h-8 border border-slate-900 bg-white px-3 text-sm font-semibold text-slate-900 hover:border-red-700 hover:text-red-700"
+                        className="h-8 border border-omi-control bg-omi-surface px-3 text-sm font-semibold text-omi-text hover:border-omi-accent hover:text-omi-danger"
                       >
                         指標
                       </button>
@@ -3195,10 +3195,10 @@ export default function StockDetailPanel({
                       className={[
                         "h-8 border px-3 text-sm font-semibold transition",
                         chartFocusMode
-                          ? "border-slate-900 bg-slate-900 text-white hover:bg-slate-800"
-                          : "border-slate-300 bg-white text-slate-700 hover:border-slate-900 hover:text-slate-950",
+                          ? "border-omi-control bg-omi-control text-omi-text-inverse hover:bg-omi-control-muted"
+                          : "border-omi-border bg-omi-surface text-omi-text hover:border-omi-control hover:text-omi-text-strong",
                         !canUseFocusedKLine
-                          ? "cursor-not-allowed border-slate-200 bg-slate-50 text-slate-300 hover:border-slate-200 hover:text-slate-300"
+                          ? "cursor-not-allowed border-omi-border-subtle bg-omi-surface-subtle text-omi-text-inverse-muted hover:border-omi-border-subtle hover:text-omi-text-inverse-muted"
                           : "",
                       ]
                         .filter(Boolean)
@@ -3215,12 +3215,12 @@ export default function StockDetailPanel({
           )}
 
           {!chartFocusMode && errorMessage ? (
-            <div className="border-b border-red-200 bg-red-50 px-5 py-3 text-sm text-red-700">
+            <div className="border-b border-omi-danger-border bg-omi-danger-soft px-5 py-3 text-sm text-omi-danger">
               {errorMessage}
             </div>
           ) : null}
           {!chartFocusMode && chartHistoryMessage && !errorMessage ? (
-            <div className="border-b border-amber-200 bg-amber-50 px-5 py-2 text-xs text-amber-800">
+            <div className="border-b border-omi-warning-border bg-omi-warning-soft px-5 py-2 text-xs text-omi-warning-strong">
               {chartHistoryMessage}
             </div>
           ) : null}
@@ -3287,11 +3287,11 @@ export default function StockDetailPanel({
               }}
               message={
                 errorMessage ? (
-                  <div className="border-b border-red-200 bg-red-50 px-5 py-3 text-sm text-red-700">
+                  <div className="border-b border-omi-danger-border bg-omi-danger-soft px-5 py-3 text-sm text-omi-danger">
                     {errorMessage}
                   </div>
                 ) : chartHistoryMessage ? (
-                  <div className="border-b border-amber-200 bg-amber-50 px-5 py-2 text-xs text-amber-800">
+                  <div className="border-b border-omi-warning-border bg-omi-warning-soft px-5 py-2 text-xs text-omi-warning-strong">
                     {chartHistoryMessage}
                   </div>
                 ) : null
@@ -3382,7 +3382,7 @@ export default function StockDetailPanel({
 
       {!chartFocusMode ? (
       <aside
-        className="flex min-w-0 flex-col border border-slate-200 bg-white"
+        className="flex min-w-0 flex-col border border-omi-border-subtle bg-omi-surface"
       >
         {isIndexProduct ? (
           <IndexListPanel
@@ -3394,14 +3394,14 @@ export default function StockDetailPanel({
           <TechnicalLoadingPanel />
         ) : (
           <>
-            <div className="omi-technical-summary border-b border-slate-200 px-5 py-3">
-              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+            <div className="omi-technical-summary border-b border-omi-border-subtle px-5 py-3">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
                 Technical
               </div>
               <div className="mt-1.5 flex items-start justify-between gap-4">
                 <div className="min-w-0">
-                  <div className="text-xl font-bold text-slate-950">{technicalStatus}</div>
-                  <div className="mt-0.5 text-xs leading-4 text-slate-500">{technicalSummaryText}</div>
+                  <div className="text-xl font-bold text-omi-text-strong">{technicalStatus}</div>
+                  <div className="mt-0.5 text-xs leading-4 text-omi-text-muted">{technicalSummaryText}</div>
                 </div>
                 <div className={`omi-technical-score shrink-0 text-right text-lg font-bold ${valueTone(technicalReport.value)}`}>
                   <PriceUpdatePulse
@@ -3412,7 +3412,7 @@ export default function StockDetailPanel({
                   >
                     {formatPct(technicalReport.value)}
                   </PriceUpdatePulse>
-                  <div className="text-xs font-medium text-slate-500">{technicalReport.valueLabel}</div>
+                  <div className="text-xs font-medium text-omi-text-muted">{technicalReport.valueLabel}</div>
                 </div>
               </div>
               {stockSignalChips.length ? (
@@ -3424,7 +3424,7 @@ export default function StockDetailPanel({
                     <span
                       key={signal.key}
                       className={[
-                        "omi-technical-badge inline-flex items-center gap-1 border px-2 py-1 text-[11px] font-semibold",
+                        "omi-technical-badge omi-signal-chip inline-flex items-center gap-1 border px-2 py-1 text-[11px] font-semibold",
                         stockSignalToneClass(signal.tone),
                       ].join(" ")}
                       title={signal.title}
@@ -3457,19 +3457,19 @@ export default function StockDetailPanel({
                 loadState={displayOvernightImpactLoadState}
               />
 
-              <div className="mt-3 border-t border-slate-200 pt-3">
+              <div className="mt-3 border-t border-omi-border-subtle pt-3">
                 <div className="omi-technical-market flex items-start justify-between gap-4 text-xs">
                   <div>
-                    <div className="font-bold uppercase tracking-[0.14em] text-slate-500">
+                    <div className="font-bold uppercase tracking-[0.14em] text-omi-text-muted">
                       Market
                     </div>
-                    <div className="mt-0.5 text-sm font-bold text-slate-950">
+                    <div className="mt-0.5 text-sm font-bold text-omi-text-strong">
                       {primaryMarketIndex?.short_label ?? "大盤"}
                     </div>
-                    <div className="mt-0.5 text-slate-500">{marketRegimeLabel(primaryMarketIndex)}</div>
+                    <div className="mt-0.5 text-omi-text-muted">{marketRegimeLabel(primaryMarketIndex)}</div>
                   </div>
                   <div className="text-right">
-                    <div className="font-bold text-slate-950">{formatPrice(primaryMarketIndex?.close)}</div>
+                    <div className="font-bold text-omi-text-strong">{formatPrice(primaryMarketIndex?.close)}</div>
                     <div className={valueTone(primaryMarketIndex?.change_pct)}>
                       {formatPct(primaryMarketIndex?.change_pct)}
                     </div>
@@ -3481,13 +3481,13 @@ export default function StockDetailPanel({
         )}
 
         {!isIndexProduct ? (
-          <div className="border-t border-slate-200 bg-white">
+          <div className="border-t border-omi-border-subtle bg-omi-surface">
             <div
               aria-hidden="true"
-              className="h-2 border-b border-slate-200 bg-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.75)]"
+              className="h-2 border-b border-omi-border-subtle bg-omi-surface-muted shadow-[var(--omi-shadow-surface-inset)]"
             />
 
-            <div className="flex border-b border-slate-200">
+            <div className="flex border-b border-omi-border-subtle">
               {dataPanelTabs.map((tab) => (
                 <DataTabButton
                   key={tab.key}
@@ -3499,12 +3499,12 @@ export default function StockDetailPanel({
             </div>
 
             <div className="px-5 py-4">
-              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
                 Data
               </div>
               <div className="mt-1 flex items-end justify-between gap-4">
                 <div>
-                  <div className="text-lg font-bold text-slate-950">
+                  <div className="text-lg font-bold text-omi-text-strong">
                     {dataPanelTabs.find((tab) => tab.key === activeDataTab)?.label ?? "資料"}
                     資料
                   </div>
@@ -3554,13 +3554,13 @@ export default function StockDetailPanel({
         ) : null}
 
           <div className="hidden">
-            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
               Data
             </div>
             <div className="mt-1 flex items-end justify-between gap-4">
               <div>
-                <div className="text-lg font-bold text-slate-950">籌碼資料</div>
-                <div className="mt-1 text-xs text-slate-500">依資料日期分類</div>
+                <div className="text-lg font-bold text-omi-text-strong">籌碼資料</div>
+                <div className="mt-1 text-xs text-omi-text-muted">依資料日期分類</div>
               </div>
             </div>
 
@@ -3568,11 +3568,11 @@ export default function StockDetailPanel({
               {chipDateGroups.length ? (
                 chipDateGroups.map((group) => (
                   <div key={group.tradeDate} className="space-y-3">
-                    <div className="flex items-center justify-between border-b border-slate-200 pb-2">
-                      <span className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
+                    <div className="flex items-center justify-between border-b border-omi-border-subtle pb-2">
+                      <span className="text-xs font-semibold uppercase tracking-[0.16em] text-omi-text-muted">
                         Date
                       </span>
-                      <span className="text-sm font-bold text-slate-900">
+                      <span className="text-sm font-bold text-omi-text">
                         {group.tradeDate}
                       </span>
                     </div>
@@ -3625,7 +3625,7 @@ export default function StockDetailPanel({
                   </div>
                 ))
               ) : (
-                <div className="border border-dashed border-slate-200 px-4 py-6 text-center text-sm text-slate-500">
+                <div className="border border-dashed border-omi-border-subtle px-4 py-6 text-center text-sm text-omi-text-muted">
                   尚無三大法人或融資融券資料
                 </div>
               )}

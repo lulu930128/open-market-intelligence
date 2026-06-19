@@ -1,4 +1,5 @@
 import MarketDashboardClient from "@/components/MarketDashboardClient";
+import { getApiProxyTarget } from "@/lib/serverApiConfig";
 import type {
   ChartPoint,
   MarketIndexSummary,
@@ -12,7 +13,7 @@ import type {
   WatchlistRadarMode,
 } from "@/types/market";
 
-const apiProxyTarget = process.env.API_PROXY_TARGET ?? "http://127.0.0.1:8300";
+const apiProxyTarget = getApiProxyTarget();
 const indexProductIds = new Set(["TAIEX", "TPEX"]);
 const futuresProductIds = new Set(["TXF", "MXF", "TMF"]);
 

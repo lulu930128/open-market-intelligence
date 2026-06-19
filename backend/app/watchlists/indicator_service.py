@@ -51,8 +51,8 @@ def get_watchlist_group_latest_indicators(
     group_id: int,
     include_children: bool = True,
     enabled_only: bool = True,
-    ma_windows: str = "5,20,60",
-    volume_ma_windows: str = "5,20",
+    ma_windows: str | None = None,
+    volume_ma_windows: str | None = None,
 ) -> dict:
     watchlist_service.get_group(db=db, group_id=group_id)
 

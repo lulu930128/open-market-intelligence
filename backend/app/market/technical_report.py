@@ -11,6 +11,10 @@ from app.ai.evidence_passport import build_evidence_passport
 from app.market import indicator_service
 from app.market import service as market_service
 from app.market.intraday import get_intraday_trend
+from app.market.technical_parameters import (
+    TechnicalAnalysisParameters,
+    get_technical_analysis_parameters,
+)
 from app.market.trading_calendar import (
     is_taiwan_trading_day,
     next_taiwan_trading_day,
@@ -62,6 +66,16 @@ def _safe_ratio(numerator: Any, denominator: Any) -> float | None:
     if not _finite(numerator) or not _finite(denominator) or denominator == 0:
         return None
     return numerator / denominator
+
+
+def _indicator_value(values: dict[str, Any], key: str | None, legacy_key: str | None = None) -> Any:
+    if not isinstance(values, dict):
+        return None
+    if key and values.get(key) is not None:
+        return values.get(key)
+    if legacy_key and values.get(legacy_key) is not None:
+        return values.get(legacy_key)
+    return None
 
 
 def _pct_change(current: Any, reference: Any) -> float | None:
@@ -161,12 +175,18 @@ def _stock_market(db: Session, stock_id: str) -> str | None:
     return stock.market.upper() if stock and stock.market else None
 
 
-def _daily_indicator(db: Session, stock_id: str) -> dict[str, Any] | None:
+def _daily_indicator(
+    db: Session,
+    stock_id: str,
+    parameters: TechnicalAnalysisParameters | None = None,
+) -> dict[str, Any] | None:
+    technical_parameters = parameters or get_technical_analysis_parameters()
     return indicator_service.calculate_latest_daily_indicator(
         db=db,
         stock_id=stock_id,
-        ma_windows="5,20,60",
-        volume_ma_windows="5,20",
+        ma_windows=technical_parameters.ma_windows_text,
+        volume_ma_windows=technical_parameters.volume_ma_windows_text,
+        parameters=technical_parameters,
     )
 
 
@@ -175,7 +195,9 @@ def _aggregated_indicator(
     db: Session,
     stock_id: str,
     timeframe: str,
+    parameters: TechnicalAnalysisParameters | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    technical_parameters = parameters or get_technical_analysis_parameters()
     chart = market_service.list_stock_ohlc_chart_data(
         db=db,
         stock_id=stock_id,
@@ -186,15 +208,21 @@ def _aggregated_indicator(
     points = chart.get("points") or []
     indicators = indicator_service.calculate_indicator_points_from_ohlc_points(
         points,
-        ma_windows="5,20,60",
-        volume_ma_windows="5,20",
+        ma_windows=technical_parameters.ma_windows_text,
+        volume_ma_windows=technical_parameters.volume_ma_windows_text,
         max_gap_days=None,
+        parameters=technical_parameters,
     )
     return (indicators[-1] if indicators else None), chart
 
 
-def _daily_context(db: Session, stock_id: str) -> dict[str, Any]:
-    latest_indicator = _daily_indicator(db=db, stock_id=stock_id)
+def _daily_context(
+    db: Session,
+    stock_id: str,
+    parameters: TechnicalAnalysisParameters | None = None,
+) -> dict[str, Any]:
+    technical_parameters = parameters or get_technical_analysis_parameters()
+    latest_indicator = _daily_indicator(db=db, stock_id=stock_id, parameters=technical_parameters)
     latest_institutional = market_service.get_latest_stock_institutional_trade(db, stock_id)
     latest_margin = market_service.get_latest_stock_margin_trade(db, stock_id)
     return {
@@ -362,7 +390,9 @@ def _build_indicator_report(
     timeframe: str,
     indicator: dict[str, Any] | None,
     point_count: int | None = None,
+    parameters: TechnicalAnalysisParameters | None = None,
 ) -> dict[str, Any]:
+    technical_parameters = parameters or get_technical_analysis_parameters()
     if indicator is None:
         return _indicator_data_missing_report(
             stock_id=stock_id,
@@ -388,24 +418,29 @@ def _build_indicator_report(
     roc = indicator.get("roc") or {}
     mfi = indicator.get("mfi") or {}
     donchian = indicator.get("donchian") or {}
-    ma5 = ma.get("ma5")
-    ma20 = ma.get("ma20")
-    ma60 = ma.get("ma60")
+    ma5 = _indicator_value(ma, technical_parameters.ma_short_key, "ma5")
+    ma20 = _indicator_value(ma, technical_parameters.ma_medium_key, "ma20")
+    ma60 = _indicator_value(ma, technical_parameters.ma_long_key, "ma60")
     price_vs_ma20 = _pct_change(close, ma20)
-    volume_ratio = _safe_ratio(volume, volume_ma.get("volume_ma20"))
+    volume_ratio = _safe_ratio(
+        volume,
+        _indicator_value(volume_ma, technical_parameters.volume_ma_medium_key, "volume_ma20"),
+    )
     volume_ratio_pct = (volume_ratio - 1) * 100 if volume_ratio is not None else None
     macd_histogram = macd.get("histogram")
-    rsi14 = rsi.get("rsi14")
-    adx14 = adx.get("adx14")
-    plus_di14 = adx.get("plus_di14")
-    minus_di14 = adx.get("minus_di14")
-    atr14 = atr.get("atr14")
+    rsi14 = _indicator_value(rsi, technical_parameters.rsi_key, "rsi14")
+    adx14 = _indicator_value(adx, technical_parameters.adx_key, "adx14")
+    plus_di14 = _indicator_value(adx, technical_parameters.plus_di_key, "plus_di14")
+    minus_di14 = _indicator_value(adx, technical_parameters.minus_di_key, "minus_di14")
+    atr14 = _indicator_value(atr, technical_parameters.atr_key, "atr14")
     atr_pct = _safe_ratio(atr14, close)
     atr_pct = atr_pct * 100 if atr_pct is not None else None
+    donchian_upper = _indicator_value(donchian, technical_parameters.donchian_upper_key, "upper20")
+    donchian_lower = _indicator_value(donchian, technical_parameters.donchian_lower_key, "lower20")
     donchian_position = None
-    if _finite(donchian.get("upper20")) and _finite(donchian.get("lower20")) and donchian["upper20"] != donchian["lower20"]:
-        donchian_position = (close - donchian["lower20"]) / (donchian["upper20"] - donchian["lower20"]) * 100
-    daily = _daily_context(db=db, stock_id=stock_id)
+    if _finite(donchian_upper) and _finite(donchian_lower) and donchian_upper != donchian_lower:
+        donchian_position = (close - donchian_lower) / (donchian_upper - donchian_lower) * 100
+    daily = _daily_context(db=db, stock_id=stock_id, parameters=technical_parameters)
     latest_institutional = daily["institutional"]
     institutional_net = (
         getattr(latest_institutional, "total_institutional_net", None)
@@ -424,11 +459,16 @@ def _build_indicator_report(
     if _finite(macd_histogram):
         score += 1 if macd_histogram >= 0 else -1
     if _finite(rsi14):
-        if 50 <= rsi14 < 80:
+        if technical_parameters.rsi_bull_min <= rsi14 < technical_parameters.rsi_overheated_at:
             score += 1
-        elif rsi14 < 40:
+        elif rsi14 < technical_parameters.rsi_weak_below:
             score -= 1
-    if _finite(adx14) and adx14 >= 25 and _finite(plus_di14) and _finite(minus_di14):
+    if (
+        _finite(adx14)
+        and adx14 >= technical_parameters.adx_trend_threshold
+        and _finite(plus_di14)
+        and _finite(minus_di14)
+    ):
         score += 1 if plus_di14 >= minus_di14 else -1
     if timeframe == "daily" and _finite(institutional_net):
         score += 1 if institutional_net > 0 else -1
@@ -448,22 +488,22 @@ def _build_indicator_report(
             _row(
                 key="momentum",
                 label="動能指標",
-                description=f"RSI {_fmt_number(rsi14, 2)}，MACD H {_fmt_number(macd_histogram, 2)}，ROC12 {_fmt_pct(roc.get('roc12'))}",
+                description=f"RSI {_fmt_number(rsi14, 2)}，MACD H {_fmt_number(macd_histogram, 2)}，ROC12 {_fmt_pct(_indicator_value(roc, technical_parameters.roc_key, 'roc12'))}",
                 value=rsi14,
                 display_value=_fmt_number(rsi14, 2),
                 direction=macd_histogram,
-                tone="warning" if _finite(rsi14) and rsi14 >= 80 else _tone(macd_histogram),
+                tone="warning" if _finite(rsi14) and rsi14 >= technical_parameters.rsi_overheated_at else _tone(macd_histogram),
                 basis=f"{timeframe} RSI, MACD histogram, and ROC",
                 source="market_daily_price",
             ),
             _row(
                 key="volume_flow",
                 label="量價資金",
-                description=f"{label}量能 {_fmt_pct(volume_ratio_pct)} vs 20期均量，MFI {_fmt_number(mfi.get('mfi14'), 2)}",
+                description=f"{label}量能 {_fmt_pct(volume_ratio_pct)} vs 20期均量，MFI {_fmt_number(_indicator_value(mfi, technical_parameters.mfi_key, 'mfi14'), 2)}",
                 value=volume_ratio_pct,
                 display_value=_fmt_pct(volume_ratio_pct),
                 direction=volume_ratio_pct,
-                tone="warning" if _finite(volume_ratio) and volume_ratio >= 1.5 else "neutral",
+                tone="warning" if _finite(volume_ratio) and volume_ratio >= technical_parameters.volume_ratio_threshold else "neutral",
                 basis=f"{timeframe} volume vs 20-period average volume",
                 source="market_daily_price",
             ),
@@ -473,8 +513,8 @@ def _build_indicator_report(
                 description=f"ATR {_fmt_pct(atr_pct)}，Donchian 位置 {_fmt_pct(donchian_position)}",
                 value=atr_pct,
                 display_value=_fmt_pct(atr_pct),
-                direction=1 if _finite(atr_pct) and atr_pct > 5 else 0,
-                tone="warning" if _finite(atr_pct) and atr_pct > 5 else "neutral",
+                direction=1 if _finite(atr_pct) and atr_pct > technical_parameters.atr_high_volatility_pct else 0,
+                tone="warning" if _finite(atr_pct) and atr_pct > technical_parameters.atr_high_volatility_pct else "neutral",
                 basis=f"{timeframe} ATR and 20-period Donchian range position",
                 source="market_daily_price",
             ),
@@ -495,21 +535,22 @@ def _build_indicator_report(
         badges.append(_badge("站上 MA20" if price_vs_ma20 >= 0 else "跌破 MA20", "positive" if price_vs_ma20 >= 0 else "negative"))
     if _finite(macd_histogram):
         badges.append(_badge("MACD 偏多" if macd_histogram >= 0 else "MACD 偏弱", "positive" if macd_histogram >= 0 else "negative"))
-    if _finite(rsi14) and rsi14 >= 80:
+    if _finite(rsi14) and rsi14 >= technical_parameters.rsi_overheated_at:
         badges.append(_badge("RSI 過熱", "warning"))
-    if _finite(volume_ratio) and volume_ratio >= 1.5:
+    if _finite(volume_ratio) and volume_ratio >= technical_parameters.volume_ratio_threshold:
         badges.append(_badge("放量", "warning"))
 
     summary_parts = [
         "站上 MA20" if _finite(price_vs_ma20) and price_vs_ma20 >= 0 else "跌破 MA20" if _finite(price_vs_ma20) else "價格結構不足",
         "MACD 偏多" if _finite(macd_histogram) and macd_histogram >= 0 else "MACD 偏弱" if _finite(macd_histogram) else "動能資料不足",
-        "放量" if _finite(volume_ratio) and volume_ratio >= 1.5 else "量能一般" if _finite(volume_ratio) else "量能資料不足",
+        "放量" if _finite(volume_ratio) and volume_ratio >= technical_parameters.volume_ratio_threshold else "量能一般" if _finite(volume_ratio) else "量能資料不足",
     ]
     if indicator.get("time") is None:
         missing.append("market_daily_price.time")
-    if point_count is not None and point_count < 60:
-        missing.append(f"market_daily_price.{timeframe}.ma60")
-        warnings.append(f"{label}資料少於 60 根，長均線與趨勢分數信心較低。")
+    long_window = technical_parameters.ma_long_window or 60
+    if point_count is not None and point_count < long_window:
+        missing.append(f"market_daily_price.{timeframe}.ma{long_window}")
+        warnings.append(f"{label}資料少於 {long_window} 根，長均線與趨勢分數信心較低。")
 
     confidence = "high"
     if missing:
@@ -553,12 +594,14 @@ def _build_today_report(
     db: Session,
     stock_id: str,
     include_intraday: bool,
+    parameters: TechnicalAnalysisParameters | None = None,
 ) -> dict[str, Any]:
+    technical_parameters = parameters or get_technical_analysis_parameters()
     warnings: list[str] = []
     missing: list[str] = []
     rows: list[dict[str, Any]] = []
     badges: list[dict[str, str]] = []
-    daily = _daily_context(db=db, stock_id=stock_id)
+    daily = _daily_context(db=db, stock_id=stock_id, parameters=technical_parameters)
     indicator = daily["indicator"] or {}
     ma = indicator.get("ma") or {}
     volume_ma = indicator.get("volume_ma") or {}
@@ -735,15 +778,15 @@ def _build_today_report(
         if _finite(high_price) and _finite(low_price) and low_price != 0
         else None
     )
-    volume_ma20 = volume_ma.get("volume_ma20")
+    volume_ma20 = _indicator_value(volume_ma, technical_parameters.volume_ma_medium_key, "volume_ma20")
     volume_vs_daily_average_pct = (
         _safe_ratio(current_volume, volume_ma20) * 100
         if _safe_ratio(current_volume, volume_ma20) is not None
         else None
     )
-    ma20 = ma.get("ma20")
+    ma20 = _indicator_value(ma, technical_parameters.ma_medium_key, "ma20")
     price_vs_ma20 = _pct_change(latest_price, ma20)
-    rsi14 = rsi.get("rsi14")
+    rsi14 = _indicator_value(rsi, technical_parameters.rsi_key, "rsi14")
     macd_histogram = macd.get("histogram")
     latest_institutional = daily["institutional"]
     institutional_net = (
@@ -804,7 +847,7 @@ def _build_today_report(
                 value=price_vs_ma20,
                 display_value=_fmt_pct(price_vs_ma20),
                 direction=price_vs_ma20,
-                tone="warning" if _finite(rsi14) and rsi14 >= 80 else _tone(price_vs_ma20),
+                tone="warning" if _finite(rsi14) and rsi14 >= technical_parameters.rsi_overheated_at else _tone(price_vs_ma20),
                 basis="latest daily indicators, not live intraday momentum",
                 source="market_daily_price",
             ),
@@ -827,7 +870,7 @@ def _build_today_report(
         badges.append(_badge("開高" if opening_gap_pct >= 0 else "開低", "positive" if opening_gap_pct >= 0 else "negative"))
     if _finite(price_vs_ma20):
         badges.append(_badge("日線站上 MA20" if price_vs_ma20 >= 0 else "日線跌破 MA20", "positive" if price_vs_ma20 >= 0 else "negative"))
-    if _finite(rsi14) and rsi14 >= 80:
+    if _finite(rsi14) and rsi14 >= technical_parameters.rsi_overheated_at:
         badges.append(_badge("日線 RSI 過熱", "warning"))
 
     title = (
@@ -877,12 +920,18 @@ def _build_today_report(
     }
 
 
-def _build_daily_report(*, db: Session, stock_id: str) -> dict[str, Any]:
+def _build_daily_report(
+    *,
+    db: Session,
+    stock_id: str,
+    parameters: TechnicalAnalysisParameters | None = None,
+) -> dict[str, Any]:
+    technical_parameters = parameters or get_technical_analysis_parameters()
     rows: list[dict[str, Any]] = []
     badges: list[dict[str, str]] = []
     warnings: list[str] = []
     missing: list[str] = []
-    daily = _daily_context(db=db, stock_id=stock_id)
+    daily = _daily_context(db=db, stock_id=stock_id, parameters=technical_parameters)
     indicator = daily["indicator"]
 
     if indicator is None:
@@ -928,23 +977,28 @@ def _build_daily_report(*, db: Session, stock_id: str) -> dict[str, Any]:
     roc = indicator.get("roc") or {}
     mfi = indicator.get("mfi") or {}
     donchian = indicator.get("donchian") or {}
-    ma5 = ma.get("ma5")
-    ma20 = ma.get("ma20")
-    ma60 = ma.get("ma60")
+    ma5 = _indicator_value(ma, technical_parameters.ma_short_key, "ma5")
+    ma20 = _indicator_value(ma, technical_parameters.ma_medium_key, "ma20")
+    ma60 = _indicator_value(ma, technical_parameters.ma_long_key, "ma60")
     price_vs_ma20 = _pct_change(close, ma20)
-    volume_ratio = _safe_ratio(volume, volume_ma.get("volume_ma20"))
+    volume_ratio = _safe_ratio(
+        volume,
+        _indicator_value(volume_ma, technical_parameters.volume_ma_medium_key, "volume_ma20"),
+    )
     volume_ratio_pct = (volume_ratio - 1) * 100 if volume_ratio is not None else None
     macd_histogram = macd.get("histogram")
-    rsi14 = rsi.get("rsi14")
-    adx14 = adx.get("adx14")
-    plus_di14 = adx.get("plus_di14")
-    minus_di14 = adx.get("minus_di14")
-    atr14 = atr.get("atr14")
+    rsi14 = _indicator_value(rsi, technical_parameters.rsi_key, "rsi14")
+    adx14 = _indicator_value(adx, technical_parameters.adx_key, "adx14")
+    plus_di14 = _indicator_value(adx, technical_parameters.plus_di_key, "plus_di14")
+    minus_di14 = _indicator_value(adx, technical_parameters.minus_di_key, "minus_di14")
+    atr14 = _indicator_value(atr, technical_parameters.atr_key, "atr14")
     atr_pct = _safe_ratio(atr14, close)
     atr_pct = atr_pct * 100 if atr_pct is not None else None
+    donchian_upper = _indicator_value(donchian, technical_parameters.donchian_upper_key, "upper20")
+    donchian_lower = _indicator_value(donchian, technical_parameters.donchian_lower_key, "lower20")
     donchian_position = None
-    if _finite(donchian.get("upper20")) and _finite(donchian.get("lower20")) and donchian["upper20"] != donchian["lower20"]:
-        donchian_position = (close - donchian["lower20"]) / (donchian["upper20"] - donchian["lower20"]) * 100
+    if _finite(donchian_upper) and _finite(donchian_lower) and donchian_upper != donchian_lower:
+        donchian_position = (close - donchian_lower) / (donchian_upper - donchian_lower) * 100
     latest_institutional = daily["institutional"]
     institutional_net = (
         getattr(latest_institutional, "total_institutional_net", None)
@@ -963,11 +1017,16 @@ def _build_daily_report(*, db: Session, stock_id: str) -> dict[str, Any]:
     if _finite(macd_histogram):
         score += 1 if macd_histogram >= 0 else -1
     if _finite(rsi14):
-        if 50 <= rsi14 < 80:
+        if technical_parameters.rsi_bull_min <= rsi14 < technical_parameters.rsi_overheated_at:
             score += 1
-        elif rsi14 < 40:
+        elif rsi14 < technical_parameters.rsi_weak_below:
             score -= 1
-    if _finite(adx14) and adx14 >= 25 and _finite(plus_di14) and _finite(minus_di14):
+    if (
+        _finite(adx14)
+        and adx14 >= technical_parameters.adx_trend_threshold
+        and _finite(plus_di14)
+        and _finite(minus_di14)
+    ):
         score += 1 if plus_di14 >= minus_di14 else -1
     if _finite(institutional_net):
         score += 1 if institutional_net > 0 else -1
@@ -987,22 +1046,22 @@ def _build_daily_report(*, db: Session, stock_id: str) -> dict[str, Any]:
             _row(
                 key="momentum",
                 label="動能指標",
-                description=f"RSI {_fmt_number(rsi14, 2)}，MACD H {_fmt_number(macd_histogram, 2)}，ROC12 {_fmt_pct(roc.get('roc12'))}",
+                description=f"RSI {_fmt_number(rsi14, 2)}，MACD H {_fmt_number(macd_histogram, 2)}，ROC12 {_fmt_pct(_indicator_value(roc, technical_parameters.roc_key, 'roc12'))}",
                 value=rsi14,
                 display_value=_fmt_number(rsi14, 2),
                 direction=macd_histogram,
-                tone="warning" if _finite(rsi14) and rsi14 >= 80 else _tone(macd_histogram),
+                tone="warning" if _finite(rsi14) and rsi14 >= technical_parameters.rsi_overheated_at else _tone(macd_histogram),
                 basis="daily RSI, MACD histogram, and ROC",
                 source="market_daily_price",
             ),
             _row(
                 key="volume_flow",
                 label="量價資金",
-                description=f"量能 {_fmt_pct(volume_ratio_pct)} vs 20日均量，MFI {_fmt_number(mfi.get('mfi14'), 2)}",
+                description=f"量能 {_fmt_pct(volume_ratio_pct)} vs 20日均量，MFI {_fmt_number(_indicator_value(mfi, technical_parameters.mfi_key, 'mfi14'), 2)}",
                 value=volume_ratio_pct,
                 display_value=_fmt_pct(volume_ratio_pct),
                 direction=volume_ratio_pct,
-                tone="warning" if _finite(volume_ratio) and volume_ratio >= 1.5 else "neutral",
+                tone="warning" if _finite(volume_ratio) and volume_ratio >= technical_parameters.volume_ratio_threshold else "neutral",
                 basis="daily volume vs 20-day average volume",
                 source="market_daily_price",
             ),
@@ -1012,8 +1071,8 @@ def _build_daily_report(*, db: Session, stock_id: str) -> dict[str, Any]:
                 description=f"ATR {_fmt_pct(atr_pct)}，Donchian 位置 {_fmt_pct(donchian_position)}",
                 value=atr_pct,
                 display_value=_fmt_pct(atr_pct),
-                direction=1 if _finite(atr_pct) and atr_pct > 5 else 0,
-                tone="warning" if _finite(atr_pct) and atr_pct > 5 else "neutral",
+                direction=1 if _finite(atr_pct) and atr_pct > technical_parameters.atr_high_volatility_pct else 0,
+                tone="warning" if _finite(atr_pct) and atr_pct > technical_parameters.atr_high_volatility_pct else "neutral",
                 basis="daily ATR and 20-day Donchian range position",
                 source="market_daily_price",
             ),
@@ -1034,15 +1093,15 @@ def _build_daily_report(*, db: Session, stock_id: str) -> dict[str, Any]:
         badges.append(_badge("站上 MA20" if price_vs_ma20 >= 0 else "跌破 MA20", "positive" if price_vs_ma20 >= 0 else "negative"))
     if _finite(macd_histogram):
         badges.append(_badge("MACD 偏多" if macd_histogram >= 0 else "MACD 偏弱", "positive" if macd_histogram >= 0 else "negative"))
-    if _finite(rsi14) and rsi14 >= 80:
+    if _finite(rsi14) and rsi14 >= technical_parameters.rsi_overheated_at:
         badges.append(_badge("RSI 過熱", "warning"))
-    if _finite(volume_ratio) and volume_ratio >= 1.5:
+    if _finite(volume_ratio) and volume_ratio >= technical_parameters.volume_ratio_threshold:
         badges.append(_badge("放量", "warning"))
 
     summary_parts = [
         "站上 MA20" if _finite(price_vs_ma20) and price_vs_ma20 >= 0 else "跌破 MA20" if _finite(price_vs_ma20) else "價格結構不足",
         "MACD 偏多" if _finite(macd_histogram) and macd_histogram >= 0 else "MACD 偏弱" if _finite(macd_histogram) else "動能資料不足",
-        "放量" if _finite(volume_ratio) and volume_ratio >= 1.5 else "量能一般" if _finite(volume_ratio) else "量能資料不足",
+        "放量" if _finite(volume_ratio) and volume_ratio >= technical_parameters.volume_ratio_threshold else "量能一般" if _finite(volume_ratio) else "量能資料不足",
     ]
     if indicator.get("time") is None:
         missing.append("market_daily_price.time")
@@ -1072,11 +1131,19 @@ def _build_daily_report(*, db: Session, stock_id: str) -> dict[str, Any]:
     }
 
 
-def _build_aggregated_report(*, db: Session, stock_id: str, timeframe: str) -> dict[str, Any]:
+def _build_aggregated_report(
+    *,
+    db: Session,
+    stock_id: str,
+    timeframe: str,
+    parameters: TechnicalAnalysisParameters | None = None,
+) -> dict[str, Any]:
+    technical_parameters = parameters or get_technical_analysis_parameters()
     indicator, chart = _aggregated_indicator(
         db=db,
         stock_id=stock_id,
         timeframe=timeframe,
+        parameters=technical_parameters,
     )
     return _build_indicator_report(
         db=db,
@@ -1084,6 +1151,7 @@ def _build_aggregated_report(*, db: Session, stock_id: str, timeframe: str) -> d
         timeframe=timeframe,
         indicator=indicator,
         point_count=chart.get("point_count"),
+        parameters=technical_parameters,
     )
 
 
@@ -1096,6 +1164,7 @@ def build_stock_technical_report(
 ) -> dict[str, Any]:
     normalized_timeframe = timeframe.strip().lower()
     normalized_stock_id = stock_id.strip()
+    technical_parameters = get_technical_analysis_parameters()
 
     if normalized_timeframe == "today":
         return _with_evidence_passport(
@@ -1103,11 +1172,18 @@ def build_stock_technical_report(
                 db=db,
                 stock_id=normalized_stock_id,
                 include_intraday=include_intraday,
+                parameters=technical_parameters,
             )
         )
 
     if normalized_timeframe == "daily":
-        return _with_evidence_passport(_build_daily_report(db=db, stock_id=normalized_stock_id))
+        return _with_evidence_passport(
+            _build_daily_report(
+                db=db,
+                stock_id=normalized_stock_id,
+                parameters=technical_parameters,
+            )
+        )
 
     if normalized_timeframe in {"weekly", "monthly"}:
         return _with_evidence_passport(
@@ -1115,6 +1191,7 @@ def build_stock_technical_report(
                 db=db,
                 stock_id=normalized_stock_id,
                 timeframe=normalized_timeframe,
+                parameters=technical_parameters,
             )
         )
 

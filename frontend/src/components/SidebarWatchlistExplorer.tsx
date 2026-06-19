@@ -1,6 +1,7 @@
 "use client";
 
 import JobStatusCenter from "@/components/JobStatusCenter";
+import SettingsDock from "@/components/SettingsDock";
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
 import type {
   StockMasterRead,
@@ -103,19 +104,19 @@ function isDescendantGroup(
 }
 
 function inputClass() {
-  return "h-9 w-full border border-slate-300 bg-white px-3 text-sm text-slate-800 outline-none transition focus:border-red-700";
+  return "h-9 w-full border border-omi-border bg-omi-surface px-3 text-sm text-omi-text outline-none transition focus:border-omi-accent";
 }
 
 function buttonClass(kind: "primary" | "ghost" | "danger" = "ghost") {
   if (kind === "primary") {
-    return "h-8 bg-red-700 px-3 text-xs font-semibold text-white hover:bg-red-800 disabled:cursor-not-allowed disabled:bg-slate-300";
+    return "h-8 border border-omi-accent-border bg-omi-accent-soft px-3 text-xs font-semibold text-omi-accent transition hover:border-omi-accent hover:bg-omi-surface-subtle hover:text-omi-accent-hover disabled:cursor-not-allowed disabled:border-omi-border-subtle disabled:bg-omi-surface-strong disabled:text-omi-text-subtle";
   }
 
   if (kind === "danger") {
-    return "h-8 bg-red-50 px-3 text-xs font-semibold text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:text-slate-300";
+    return "h-8 border border-omi-danger-border bg-omi-surface px-3 text-xs font-semibold text-omi-danger transition hover:bg-omi-danger-soft disabled:cursor-not-allowed disabled:border-omi-border-subtle disabled:text-omi-text-subtle";
   }
 
-  return "h-8 bg-slate-100 px-3 text-xs font-semibold text-slate-700 hover:bg-slate-200 disabled:cursor-not-allowed disabled:text-slate-300";
+  return "h-8 bg-omi-surface-muted px-3 text-xs font-semibold text-omi-text-muted hover:bg-omi-surface-strong disabled:cursor-not-allowed disabled:text-omi-text-subtle";
 }
 
 const PINNED_INDEX_GROUP_NAME = "加權指數";
@@ -156,16 +157,16 @@ function SidebarMarketSummary({ selectedMarket }: { selectedMarket: MarketRegion
   const option = getSidebarMarketOption(selectedMarket);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col border-b border-slate-200 px-4 py-4">
-      <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+    <div className="flex min-h-0 flex-1 flex-col border-b border-omi-border-subtle px-4 py-4">
+      <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
         Market
       </div>
-      <div className="mt-1 text-lg font-bold text-slate-950">{option.label}</div>
-      <div className="mt-2 border border-slate-200 bg-slate-50 px-3 py-3 text-sm font-semibold text-slate-700">
+      <div className="mt-1 text-lg font-bold text-omi-text-strong">{option.label}</div>
+      <div className="mt-2 border border-omi-border-subtle bg-omi-surface-subtle px-3 py-3 text-sm font-semibold text-omi-text-muted">
         {option.summary}
       </div>
       {!option.enabled ? (
-        <div className="mt-3 border border-slate-200 bg-white px-3 py-3 text-xs text-slate-500">
+        <div className="mt-3 border border-omi-border-subtle bg-omi-surface px-3 py-3 text-xs text-omi-text-muted">
           目前先保留市場入口。
         </div>
       ) : null}
@@ -918,7 +919,7 @@ export default function SidebarWatchlistExplorer({
         <div
           className={[
             "relative flex cursor-pointer items-center gap-1 py-1 pr-1 text-sm",
-            selected ? "bg-red-700 text-white" : "text-slate-700 hover:bg-slate-100",
+            selected ? "omi-sidebar-selected text-omi-text-strong" : "text-omi-text-muted hover:bg-omi-surface-muted",
           ].join(" ")}
           style={{ paddingLeft: "4px" }}
           onClick={() => setIndexGroupExpanded((previous) => !previous)}
@@ -931,7 +932,7 @@ export default function SidebarWatchlistExplorer({
             }}
             className={[
               "h-6 w-4 text-xs",
-              selected ? "text-white" : "text-slate-500",
+              selected ? "text-omi-accent" : "text-omi-text-muted",
             ].join(" ")}
             aria-label="切換加權指數資料夾"
           >
@@ -942,7 +943,7 @@ export default function SidebarWatchlistExplorer({
             <div className="truncate font-semibold">{PINNED_INDEX_GROUP_NAME}</div>
           </div>
 
-          <span className={selected ? "pr-2 text-xs text-red-100" : "pr-2 text-xs text-slate-400"}>
+          <span className={selected ? "pr-2 text-xs text-omi-accent" : "pr-2 text-xs text-omi-text-subtle"}>
             {PINNED_INDEX_ITEMS.length}
           </span>
         </div>
@@ -971,8 +972,8 @@ export default function SidebarWatchlistExplorer({
                   className={[
                     "group relative flex w-full cursor-pointer items-center gap-1 py-1.5 pr-2 text-left text-xs",
                     itemSelected
-                      ? "bg-slate-900 text-white"
-                      : "text-slate-700 hover:bg-slate-100",
+                      ? "omi-sidebar-selected text-omi-text-strong"
+                      : "text-omi-text-muted hover:bg-omi-surface-muted",
                   ].join(" ")}
                   style={{ paddingLeft: "24px" }}
                   onMouseDown={(event) => {
@@ -997,7 +998,7 @@ export default function SidebarWatchlistExplorer({
                         ? `${item.stockId} ${item.stockName}`
                         : item.stockName}
                     </div>
-                    <div className={itemSelected ? "truncate text-slate-300" : "truncate text-slate-400"}>
+                    <div className={itemSelected ? "truncate text-omi-text-muted" : "truncate text-omi-text-subtle"}>
                       {note}
                     </div>
                   </div>
@@ -1029,18 +1030,18 @@ export default function SidebarWatchlistExplorer({
             dragPayload?.type === "group" && dragPayload.groupId === node.id
               ? "opacity-50"
               : "",
-            groupDropInside ? "ring-1 ring-inset ring-red-600" : "",
-            selected ? "bg-red-700 text-white" : "text-slate-700 hover:bg-slate-100",
+            groupDropInside ? "ring-1 ring-inset ring-omi-accent" : "",
+            selected ? "omi-sidebar-selected text-omi-text-strong" : "text-omi-text-muted hover:bg-omi-surface-muted",
           ].join(" ")}
           style={{ paddingLeft: `${6 + depth * 10}px` }}
           data-watchlist-group-id={node.id}
           onClick={() => selectGroup(node)}
         >
           {groupDropBefore ? (
-            <div className="absolute left-0 right-0 top-0 h-0.5 bg-red-700" />
+            <div className="absolute left-0 right-0 top-0 h-0.5 bg-omi-accent" />
           ) : null}
           {groupDropAfter ? (
-            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-700" />
+            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-omi-accent" />
           ) : null}
           <button
             type="button"
@@ -1051,7 +1052,7 @@ export default function SidebarWatchlistExplorer({
             onClick={(event) => event.stopPropagation()}
             className={[
               "h-6 w-3 select-none text-[9px] font-bold leading-none",
-              selected ? "text-red-100" : "text-slate-400 hover:text-red-700",
+              selected ? "text-omi-accent" : "text-omi-text-subtle hover:text-omi-accent",
             ].join(" ")}
           >
             ::
@@ -1064,7 +1065,7 @@ export default function SidebarWatchlistExplorer({
             }}
             className={[
               "h-6 w-4 text-xs",
-              selected ? "text-white" : "text-slate-500",
+              selected ? "text-omi-accent" : "text-omi-text-muted",
               !hasContent ? "opacity-40" : "",
             ].join(" ")}
           >
@@ -1075,7 +1076,7 @@ export default function SidebarWatchlistExplorer({
             <div className="truncate font-semibold">{node.group_name}</div>
           </div>
 
-          <span className={selected ? "pr-2 text-xs text-red-100" : "pr-2 text-xs text-slate-400"}>
+          <span className={selected ? "pr-2 text-xs text-omi-accent" : "pr-2 text-xs text-omi-text-subtle"}>
             {totalItemCount}
           </span>
         </div>
@@ -1095,10 +1096,10 @@ export default function SidebarWatchlistExplorer({
                       ? "opacity-50"
                       : "",
                     itemSelected
-                      ? "bg-slate-900 text-white"
+                      ? "omi-sidebar-selected text-omi-text-strong"
                       : item.enabled
-                        ? "text-slate-700 hover:bg-slate-100"
-                        : "text-slate-400",
+                        ? "text-omi-text-muted hover:bg-omi-surface-muted"
+                        : "text-omi-text-subtle",
                   ].join(" ")}
                   style={{ paddingLeft: `${28 + depth * 10}px` }}
                   data-watchlist-stock-id={item.id}
@@ -1114,7 +1115,7 @@ export default function SidebarWatchlistExplorer({
                   }}
                 >
                   {stockDropBefore ? (
-                    <div className="absolute left-0 right-0 top-0 h-0.5 bg-red-700" />
+                    <div className="absolute left-0 right-0 top-0 h-0.5 bg-omi-accent" />
                   ) : null}
                   <button
                     type="button"
@@ -1130,7 +1131,7 @@ export default function SidebarWatchlistExplorer({
                     onClick={(event) => event.stopPropagation()}
                     className={[
                       "h-5 w-3 select-none text-[9px] font-bold leading-none",
-                      itemSelected ? "text-slate-300" : "text-slate-300 hover:text-red-700",
+                      itemSelected ? "text-omi-accent" : "text-omi-text-subtle hover:text-omi-accent",
                     ].join(" ")}
                   >
                     ::
@@ -1140,7 +1141,7 @@ export default function SidebarWatchlistExplorer({
                       {item.stock_id} {item.stock_name ?? ""}
                     </div>
                     {item.tags || item.note ? (
-                      <div className={itemSelected ? "truncate text-slate-300" : "truncate text-slate-400"}>
+                      <div className={itemSelected ? "truncate text-omi-text-muted" : "truncate text-omi-text-subtle"}>
                         {item.tags || item.note}
                       </div>
                     ) : null}
@@ -1164,7 +1165,7 @@ export default function SidebarWatchlistExplorer({
                       onClick={(event) => event.stopPropagation()}
                       className={[
                         "hidden px-1.5 py-0.5 text-[10px] font-semibold group-hover:block",
-                        itemSelected ? "bg-white text-slate-900" : "bg-slate-200 text-slate-700",
+                        itemSelected ? "bg-omi-surface text-omi-text" : "bg-omi-surface-strong text-omi-text-muted",
                       ].join(" ")}
                     >
                       {item.enabled ? "off" : "on"}
@@ -1186,7 +1187,7 @@ export default function SidebarWatchlistExplorer({
                       type="submit"
                       draggable={false}
                       onClick={(event) => event.stopPropagation()}
-                      className="hidden bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold text-red-700 group-hover:block"
+                      className="hidden bg-omi-danger-soft px-1.5 py-0.5 text-[10px] font-semibold text-omi-danger group-hover:block"
                     >
                       x
                     </button>
@@ -1203,13 +1204,13 @@ export default function SidebarWatchlistExplorer({
   }
 
   return (
-    <aside className="flex h-full w-[300px] shrink-0 flex-col border-r border-slate-200 bg-white">
-      <div className="border-b border-slate-200 px-4 py-4">
-        <div className="text-xs font-semibold uppercase tracking-[0.22em] text-red-700">
+    <aside className="flex h-full w-[300px] shrink-0 flex-col border-r border-omi-border-subtle bg-omi-surface">
+      <div className="border-b border-omi-border-subtle px-4 py-4">
+        <div className="text-xs font-semibold uppercase tracking-[0.22em] text-omi-accent">
           Open Market Intelligence
         </div>
-        <h1 className="mt-2 text-xl font-bold text-slate-950">Market Dashboard</h1>
-        <div className="mt-3 grid grid-cols-5 border border-slate-200 bg-slate-50 p-1">
+        <h1 className="mt-2 text-xl font-bold text-omi-text-strong">Market Dashboard</h1>
+        <div className="mt-3 grid grid-cols-5 border border-omi-border-subtle bg-omi-surface-subtle p-1">
           {sidebarMarketOptions.map((option) => (
             <a
               key={option.value}
@@ -1227,10 +1228,10 @@ export default function SidebarWatchlistExplorer({
               className={[
                 "flex h-8 items-center justify-center text-xs font-semibold transition",
                 selectedMarket === option.value
-                  ? "bg-red-700 text-white"
+                  ? "omi-sidebar-market-tab-active"
                   : option.enabled
-                    ? "text-slate-600 hover:bg-white"
-                    : "cursor-not-allowed text-slate-300",
+                    ? "text-omi-text-muted hover:bg-omi-surface"
+                    : "cursor-not-allowed text-omi-text-subtle",
               ].join(" ")}
             >
               {option.label}
@@ -1241,10 +1242,10 @@ export default function SidebarWatchlistExplorer({
 
       {selectedMarket === "tw" ? (
         <>
-      <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
+      <div className="flex items-center justify-between border-b border-omi-border-subtle px-4 py-3">
         <div>
-          <div className="text-xs font-semibold text-slate-500">自選股</div>
-          <div className="text-sm font-bold text-slate-950">
+          <div className="text-xs font-semibold text-omi-text-muted">自選股</div>
+          <div className="text-sm font-bold text-omi-text-strong">
             {selectedGroup?.group_name ?? "尚未選擇"}
           </div>
         </div>
@@ -1264,8 +1265,8 @@ export default function SidebarWatchlistExplorer({
             className={[
               "mx-2 mb-2 border border-dashed px-3 py-2 text-center text-xs font-semibold",
               dragOverKey === "root"
-                ? "border-red-700 bg-red-50 text-red-700"
-                : "border-slate-300 text-slate-500",
+                ? "border-omi-accent bg-omi-danger-soft text-omi-danger"
+                : "border-omi-border text-omi-text-muted",
             ].join(" ")}
             data-watchlist-root-drop="true"
           >
@@ -1276,13 +1277,13 @@ export default function SidebarWatchlistExplorer({
         {tree.length > 0 ? (
           tree.map((node) => renderGroupNode(node))
         ) : (
-          <div className="px-4 py-6 text-sm text-slate-500">尚未建立分組</div>
+          <div className="px-4 py-6 text-sm text-omi-text-muted">尚未建立分組</div>
         )}
       </div>
 
       {pointerDrag?.active ? (
         <div
-          className="pointer-events-none fixed z-50 max-w-48 border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-800 shadow-sm"
+          className="pointer-events-none fixed z-50 max-w-48 border border-omi-border bg-omi-surface px-2 py-1 text-xs font-semibold text-omi-text shadow-sm"
           style={{
             left: pointerDrag.currentX + 10,
             top: pointerDrag.currentY + 10,
@@ -1297,15 +1298,15 @@ export default function SidebarWatchlistExplorer({
           className={[
             "mx-4 mb-3 border px-3 py-2 text-xs",
             message.type === "success"
-              ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-              : "border-red-200 bg-red-50 text-red-700",
+              ? "border-omi-market-down-border bg-omi-market-down-soft text-omi-market-down"
+              : "border-omi-danger-border bg-omi-danger-soft text-omi-danger",
           ].join(" ")}
         >
           {message.text}
         </div>
       ) : null}
 
-      <div className="border-b border-slate-200 px-4 py-4">
+      <div className="border-b border-omi-border-subtle px-4 py-4">
         <JobStatusCenter placement="inline" market="tw" />
       </div>
 
@@ -1315,7 +1316,7 @@ export default function SidebarWatchlistExplorer({
           method="post"
           onSubmit={handleFolderSubmit}
         >
-          <div className="mb-2 text-xs font-bold text-slate-600">分組管理</div>
+          <div className="mb-2 text-xs font-bold text-omi-text-muted">分組管理</div>
           <input
             className={inputClass()}
             name="group_name"
@@ -1382,61 +1383,68 @@ export default function SidebarWatchlistExplorer({
           </div>
         </form>
 
-        <form
-          action="/omi-form/watchlists/items"
-          method="post"
-          onSubmit={handleStockSubmit}
-          className="space-y-2"
-        >
-          <div className="text-xs font-bold text-slate-600">加入股票</div>
-          <input type="hidden" name="intent" value="create" />
-          <input type="hidden" name="group_id" value={selectedGroupId ?? ""} />
-          <input
-            className={inputClass()}
-            name="stock_id"
-            placeholder="股票代號或名稱，例如 2330"
-            value={stockInput}
-            onChange={(event) => setStockInput(event.target.value)}
-          />
-          {stockSuggestions.length > 0 ? (
-            <div className="max-h-28 overflow-y-auto border border-slate-200 bg-white">
-              {stockSuggestions.map((stock) => (
-                <button
-                  key={stock.stock_id}
-                  type="button"
-                  className="block w-full px-3 py-1.5 text-left text-xs text-slate-700 hover:bg-slate-100"
-                  onClick={() => {
-                    setStockInput(stock.stock_id);
-                    setStockSuggestions([]);
-                  }}
-                >
-                  {stock.stock_id} {stock.stock_name ?? ""} · {stock.market}
-                </button>
-              ))}
-            </div>
-          ) : null}
-          <input
-            className={inputClass()}
-            name="note"
-            placeholder="備註"
-            value={stockNote}
-            onChange={(event) => setStockNote(event.target.value)}
-          />
-          <input
-            className={inputClass()}
-            name="tags"
-            placeholder="標籤，例如 ETF,core"
-            value={stockTags}
-            onChange={(event) => setStockTags(event.target.value)}
-          />
-          <button
-            type="submit"
-            className={buttonClass("primary")}
-            disabled={loading || selectedGroupId === null}
+        <div className="space-y-2">
+          <form
+            id="tw-watchlist-stock-form"
+            action="/omi-form/watchlists/items"
+            method="post"
+            onSubmit={handleStockSubmit}
+            className="space-y-2"
           >
-            + Stock
-          </button>
-        </form>
+            <div className="text-xs font-bold text-omi-text-muted">加入股票</div>
+            <input type="hidden" name="intent" value="create" />
+            <input type="hidden" name="group_id" value={selectedGroupId ?? ""} />
+            <input
+              className={inputClass()}
+              name="stock_id"
+              placeholder="股票代號或名稱，例如 2330"
+              value={stockInput}
+              onChange={(event) => setStockInput(event.target.value)}
+            />
+            {stockSuggestions.length > 0 ? (
+              <div className="max-h-28 overflow-y-auto border border-omi-border-subtle bg-omi-surface">
+                {stockSuggestions.map((stock) => (
+                  <button
+                    key={stock.stock_id}
+                    type="button"
+                    className="block w-full px-3 py-1.5 text-left text-xs text-omi-text-muted hover:bg-omi-surface-muted"
+                    onClick={() => {
+                      setStockInput(stock.stock_id);
+                      setStockSuggestions([]);
+                    }}
+                  >
+                    {stock.stock_id} {stock.stock_name ?? ""} · {stock.market}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            <input
+              className={inputClass()}
+              name="note"
+              placeholder="備註"
+              value={stockNote}
+              onChange={(event) => setStockNote(event.target.value)}
+            />
+            <input
+              className={inputClass()}
+              name="tags"
+              placeholder="標籤，例如 ETF,core"
+              value={stockTags}
+              onChange={(event) => setStockTags(event.target.value)}
+            />
+          </form>
+          <div className="flex items-center justify-between gap-2">
+            <button
+              type="submit"
+              form="tw-watchlist-stock-form"
+              className={buttonClass("primary")}
+              disabled={loading || selectedGroupId === null}
+            >
+              + Stock
+            </button>
+            <SettingsDock placement="inline" />
+          </div>
+        </div>
       </div>
         </>
       ) : (

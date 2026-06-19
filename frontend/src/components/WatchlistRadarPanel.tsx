@@ -60,39 +60,39 @@ function formatRadarPct(value: number | null | undefined) {
 
 function radarValueTone(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) {
-    return "text-slate-500";
+    return "text-omi-text-muted";
   }
 
-  if (value > 0) return "text-red-600";
-  if (value < 0) return "text-emerald-600";
-  return "text-slate-700";
+  if (value > 0) return "text-omi-market-up";
+  if (value < 0) return "text-omi-market-down";
+  return "text-omi-text";
 }
 
 function urgencyClass(value: string) {
-  if (value === "high") return "border-red-200 bg-red-50 text-red-700";
-  if (value === "medium") return "border-amber-200 bg-amber-50 text-amber-700";
-  return "border-slate-200 bg-slate-50 text-slate-600";
+  if (value === "high") return "omi-signal-chip-positive";
+  if (value === "medium") return "omi-signal-chip-warning";
+  return "omi-signal-chip-neutral";
 }
 
 function technicalGradeClass(value: string) {
-  if (value === "strong") return "border-red-200 bg-red-50 text-red-700";
-  if (value === "medium") return "border-blue-200 bg-blue-50 text-blue-700";
-  return "border-slate-200 bg-slate-50 text-slate-600";
+  if (value === "strong") return "omi-signal-chip-positive";
+  if (value === "medium") return "omi-signal-chip-info";
+  return "omi-signal-chip-neutral";
 }
 
 function contextSignalClass(tone: string, stance: string) {
   if (stance === "contradict" || tone === "warning") {
-    return "border-amber-200 bg-amber-50 text-amber-700";
+    return "omi-signal-chip-warning";
   }
 
-  if (tone === "positive") return "border-red-200 bg-red-50 text-red-700";
-  if (tone === "negative") return "border-emerald-200 bg-emerald-50 text-emerald-700";
-  return "border-slate-200 bg-slate-50 text-slate-600";
+  if (tone === "positive") return "omi-signal-chip-positive";
+  if (tone === "negative") return "omi-signal-chip-negative";
+  return "omi-signal-chip-neutral";
 }
 
 function bucketClass(bucket: string) {
   if (bucket === "limit_up_lock" || bucket === "surge_up" || bucket === "limit_up_move") {
-    return "border-red-200 bg-red-50 text-red-700";
+    return "omi-signal-chip-positive";
   }
 
   if (
@@ -100,7 +100,7 @@ function bucketClass(bucket: string) {
     bucket === "selloff_risk" ||
     bucket === "limit_down_move"
   ) {
-    return "border-emerald-200 bg-emerald-50 text-emerald-700";
+    return "omi-signal-chip-negative";
   }
 
   if (
@@ -109,15 +109,15 @@ function bucketClass(bucket: string) {
     bucket === "volume_down" ||
     bucket === "bearish_momentum"
   ) {
-    return "border-red-200 bg-red-50 text-red-700";
+    return "omi-signal-chip-danger";
   }
 
   if (bucket === "overheated") {
-    return "border-amber-200 bg-amber-50 text-amber-700";
+    return "omi-signal-chip-warning";
   }
 
   if (bucket === "volatility_risk") {
-    return "border-orange-200 bg-orange-50 text-orange-700";
+    return "omi-signal-chip-heat";
   }
 
   if (
@@ -126,7 +126,7 @@ function bucketClass(bucket: string) {
     bucket === "trend_reclaim" ||
     bucket === "momentum"
   ) {
-    return "border-blue-200 bg-blue-50 text-blue-700";
+    return "omi-signal-chip-info";
   }
 
   if (
@@ -135,10 +135,10 @@ function bucketClass(bucket: string) {
     bucket === "pullback" ||
     bucket === "compression_watch"
   ) {
-    return "border-amber-200 bg-amber-50 text-amber-700";
+    return "omi-signal-chip-warning";
   }
 
-  return "border-slate-200 bg-slate-50 text-slate-600";
+  return "omi-signal-chip-neutral";
 }
 
 function itemMeta(item: WatchlistRadarItemRead) {
@@ -196,7 +196,7 @@ function signalBadge(
   return (
     <span
       className={[
-        "inline-flex shrink-0 items-center gap-1 border px-1.5 py-0.5 text-[11px] font-semibold",
+        "omi-signal-chip inline-flex shrink-0 items-center gap-1 border px-1.5 py-0.5 text-[11px] font-semibold",
         className,
       ].join(" ")}
       title={title}
@@ -209,18 +209,18 @@ function signalBadge(
 
 function RadarLoadingRows() {
   return (
-    <div className="divide-y divide-slate-100">
+    <div className="divide-y divide-omi-border-subtle">
       {Array.from({ length: 4 }).map((_, index) => (
         <div
           key={index}
           className="grid grid-cols-[42px_minmax(180px,1fr)_86px] items-center gap-3 px-4 py-3"
         >
-          <span className="h-3 w-7 animate-pulse bg-slate-200" />
+          <span className="h-3 w-7 animate-pulse bg-omi-surface-strong" />
           <span className="space-y-2">
-            <span className="block h-3 w-32 animate-pulse bg-slate-200" />
-            <span className="block h-2.5 w-64 animate-pulse bg-slate-100" />
+            <span className="block h-3 w-32 animate-pulse bg-omi-surface-strong" />
+            <span className="block h-2.5 w-64 animate-pulse bg-omi-surface-muted" />
           </span>
-          <span className="h-3 w-14 animate-pulse bg-slate-100" />
+          <span className="h-3 w-14 animate-pulse bg-omi-surface-muted" />
         </div>
       ))}
     </div>
@@ -247,20 +247,20 @@ export default function WatchlistRadarPanel({
     : "尚未載入";
 
   return (
-    <section className="border border-slate-200 bg-white" data-testid="watchlist-radar-panel">
-      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
+    <section className="border border-omi-border-subtle bg-omi-surface" data-testid="watchlist-radar-panel">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-omi-border-subtle px-5 py-4">
         <div>
-          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
             Watchlist Radar
           </div>
-          <h3 className="mt-1 text-lg font-bold text-slate-950">今日雷達</h3>
+          <h3 className="mt-1 text-lg font-bold text-omi-text-strong">今日雷達</h3>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <div className="mr-1 text-xs font-medium text-slate-500">
+          <div className="mr-1 text-xs font-medium text-omi-text-muted">
             {radarDateLabel}
           </div>
-          <div className="inline-flex border border-slate-300 bg-white">
+          <div className="inline-flex border border-omi-border bg-omi-surface">
             {RADAR_MODE_OPTIONS.map((option) => (
               <a
                 key={option.value}
@@ -279,8 +279,8 @@ export default function WatchlistRadarPanel({
                 className={[
                   "inline-flex h-8 items-center px-3 text-xs font-semibold",
                   mode === option.value
-                    ? "bg-slate-900 text-white"
-                    : "text-slate-600 hover:bg-slate-50",
+                    ? "bg-omi-control text-omi-text-inverse"
+                    : "text-omi-text-muted hover:bg-omi-surface-subtle",
                 ].join(" ")}
               >
                 {option.label}
@@ -291,7 +291,7 @@ export default function WatchlistRadarPanel({
             type="button"
             onClick={onReload}
             disabled={disabled || loadState === "loading"}
-            className="h-8 border border-slate-300 bg-white px-3 text-xs font-semibold text-slate-700 hover:border-red-700 hover:text-red-700 disabled:border-slate-200 disabled:text-slate-400"
+            className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text-muted hover:border-omi-accent hover:text-omi-accent disabled:border-omi-border-subtle disabled:text-omi-text-subtle"
           >
             Reload
           </button>
@@ -299,25 +299,25 @@ export default function WatchlistRadarPanel({
       </div>
 
       {errorMessage ? (
-        <div className="border-b border-amber-200 bg-amber-50 px-5 py-3 text-sm text-amber-700">
+        <div className="border-b border-omi-warning-border bg-omi-warning-soft px-5 py-3 text-sm text-omi-warning">
           {errorMessage}
         </div>
       ) : null}
 
       {radar?.is_current === false ? (
-        <div className="border-b border-amber-200 bg-amber-50 px-5 py-3 text-sm text-amber-700">
+        <div className="border-b border-omi-warning-border bg-omi-warning-soft px-5 py-3 text-sm text-omi-warning">
           自選股資料尚未完全同步，{radar.stale_stock_count} 檔落後目標日{" "}
           {formatRadarDate(radar.target_trade_date)}。
         </div>
       ) : null}
 
       {activeBuckets.length > 0 ? (
-        <div className="flex flex-wrap gap-2 border-b border-slate-200 px-5 py-3">
+        <div className="flex flex-wrap gap-2 border-b border-omi-border-subtle px-5 py-3">
           {activeBuckets.map((bucket) => (
             <span
               key={bucket.key}
               className={[
-                "inline-flex items-center gap-1 border px-2 py-1 text-xs font-semibold",
+                "omi-signal-chip inline-flex items-center gap-1 border px-2 py-1 text-xs font-semibold",
                 bucketClass(bucket.key),
               ].join(" ")}
             >
@@ -332,7 +332,7 @@ export default function WatchlistRadarPanel({
         <RadarLoadingRows />
       ) : hasResults ? (
         <div
-          className="max-h-[36rem] space-y-1 overflow-y-auto overscroll-contain bg-slate-50/50 p-2"
+          className="max-h-[36rem] space-y-1 overflow-y-auto overscroll-contain bg-omi-surface-subtle p-2"
           tabIndex={0}
           aria-label="Watchlist radar results"
         >
@@ -348,11 +348,11 @@ export default function WatchlistRadarPanel({
                 className={[
                   "relative grid w-full grid-cols-[42px_minmax(180px,1fr)_86px] items-center gap-3 border px-4 py-3 text-left text-sm transition",
                   selected
-                    ? "z-10 -translate-y-px border-red-200 border-l-4 border-l-red-600 bg-white text-slate-900 shadow-[0_10px_24px_rgba(15,23,42,0.12)] ring-1 ring-red-100"
-                    : "border-transparent bg-white text-slate-800 hover:border-slate-200 hover:bg-white hover:shadow-sm",
+                    ? "omi-radar-row-selected z-10 text-omi-text"
+                    : "border-transparent bg-omi-surface text-omi-text hover:border-omi-border-subtle hover:bg-omi-surface hover:shadow-sm",
                 ].join(" ")}
               >
-                <span className={selected ? "font-semibold text-red-700" : "text-slate-500"}>
+                <span className={selected ? "font-semibold text-omi-accent" : "text-omi-text-muted"}>
                   #{item.rank}
                 </span>
                 <span className="min-w-0">
@@ -383,7 +383,7 @@ export default function WatchlistRadarPanel({
                       <span
                         key={`${signal.key}-${signal.label}`}
                         className={[
-                          "inline-flex shrink-0 items-center gap-1 border px-1.5 py-0.5 text-[11px] font-semibold",
+                          "omi-signal-chip inline-flex shrink-0 items-center gap-1 border px-1.5 py-0.5 text-[11px] font-semibold",
                           contextSignalClass(signal.tone, signal.stance),
                         ].join(" ")}
                         title={signal.description}
@@ -394,13 +394,13 @@ export default function WatchlistRadarPanel({
                     ))}
                   </span>
                   <span
-                    className={selected ? "mt-1 block truncate text-xs font-medium text-slate-800" : "mt-1 block truncate text-xs font-medium text-slate-700"}
+                    className={selected ? "mt-1 block truncate text-xs font-medium text-omi-text" : "mt-1 block truncate text-xs font-medium text-omi-text-muted"}
                     title={scanLine(item)}
                   >
                     {scanLine(item)}
                   </span>
                   <span
-                    className="mt-1 block truncate text-xs text-slate-500"
+                    className="mt-1 block truncate text-xs text-omi-text-muted"
                     title={item.reason}
                   >
                     {item.action_label} · {itemMeta(item)}
@@ -410,7 +410,7 @@ export default function WatchlistRadarPanel({
                   <span className={`block font-semibold ${radarValueTone(item.change_pct)}`}>
                     {formatRadarPct(item.change_pct)}
                   </span>
-                  <span className="block text-xs text-slate-500">
+                  <span className="block text-xs text-omi-text-muted">
                     {formatRadarPrice(item.close)}
                   </span>
                 </span>
@@ -419,7 +419,7 @@ export default function WatchlistRadarPanel({
           })}
         </div>
       ) : (
-        <div className="px-5 py-8 text-center text-sm text-slate-500">
+        <div className="px-5 py-8 text-center text-sm text-omi-text-muted">
           {radar ? "目前沒有符合條件的雷達項目" : "選擇分組後顯示今日雷達"}
         </div>
       )}

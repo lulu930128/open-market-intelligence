@@ -165,11 +165,11 @@ type Props = {
 
 function RankingLoadingRows({ rows = 5 }: { rows?: number }) {
   return (
-    <div className="border-t border-slate-200" aria-hidden="true">
+    <div className="border-t border-omi-border-subtle" aria-hidden="true">
       {Array.from({ length: rows }).map((_, index) => (
         <div
           key={index}
-          className="omi-ranking-loading-row grid w-full grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-slate-100 px-4 py-2 text-sm first:border-t-0"
+          className="omi-ranking-loading-row grid w-full grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-omi-border-subtle px-4 py-2 text-sm first:border-t-0"
         >
           <div className="omi-skeleton h-3 w-7" />
           <div className="min-w-0 space-y-2">
@@ -275,10 +275,10 @@ function formatTradeValueYi(value: number | null | undefined) {
 }
 
 function valueTone(value: number | null | undefined) {
-  if (value === null || value === undefined) return "text-slate-500";
-  if (value > 0) return "text-red-600";
-  if (value < 0) return "text-emerald-600";
-  return "text-slate-700";
+  if (value === null || value === undefined) return "text-omi-text-muted";
+  if (value > 0) return "text-omi-market-up";
+  if (value < 0) return "text-omi-market-down";
+  return "text-omi-text";
 }
 
 function statusLabel(status: string) {
@@ -315,14 +315,14 @@ function trendClass(
   value: number | null | undefined,
   limitStatus?: RankingItem["limit_status"]
 ) {
-  if (limitStatus === "limit_up") return "bg-red-600 text-white shadow-sm";
-  if (limitStatus === "limit_down") return "bg-emerald-600 text-white shadow-sm";
+  if (limitStatus === "limit_up") return "omi-ranking-trend-limit-up";
+  if (limitStatus === "limit_down") return "omi-ranking-trend-limit-down";
   if (value === null || value === undefined || Number.isNaN(value)) {
-    return "bg-slate-100 text-slate-600";
+    return "omi-ranking-trend-neutral";
   }
-  if (value > 0) return "bg-red-50 text-red-700";
-  if (value < 0) return "bg-emerald-50 text-emerald-700";
-  return "bg-slate-100 text-slate-600";
+  if (value > 0) return "omi-ranking-trend-up";
+  if (value < 0) return "omi-ranking-trend-down";
+  return "omi-ranking-trend-neutral";
 }
 
 function sparklineTone(
@@ -331,12 +331,12 @@ function sparklineTone(
   selected: boolean
 ) {
   if (latestPrice === null || previousClose === null || previousClose === 0) {
-    return selected ? "stroke-slate-300" : "stroke-slate-400";
+    return selected ? "stroke-omi-text-inverse-muted" : "stroke-omi-text-subtle";
   }
 
-  if (latestPrice > previousClose) return "stroke-red-500";
-  if (latestPrice < previousClose) return "stroke-emerald-500";
-  return selected ? "stroke-slate-300" : "stroke-slate-400";
+  if (latestPrice > previousClose) return "stroke-omi-market-up";
+  if (latestPrice < previousClose) return "stroke-omi-market-down";
+  return selected ? "stroke-omi-text-inverse-muted" : "stroke-omi-text-subtle";
 }
 
 function formatRowTime(value: string | null | undefined) {
@@ -443,22 +443,22 @@ function sparklinePointTone(
   if (latestPrice !== null && previousClose !== null && previousClose !== 0) {
     if (latestPrice > previousClose) {
       return {
-        core: selected ? "fill-red-300" : "fill-red-500",
-        ring: selected ? "stroke-red-200" : "stroke-red-400",
+        core: selected ? "fill-omi-market-up-border" : "fill-omi-market-up",
+        ring: selected ? "stroke-omi-market-up-border" : "stroke-omi-market-up",
       };
     }
 
     if (latestPrice < previousClose) {
       return {
-        core: selected ? "fill-emerald-300" : "fill-emerald-500",
-        ring: selected ? "stroke-emerald-200" : "stroke-emerald-400",
+        core: selected ? "fill-omi-market-down-border" : "fill-omi-market-down",
+        ring: selected ? "stroke-omi-market-down-border" : "stroke-omi-market-down",
       };
     }
   }
 
   return {
-    core: selected ? "fill-slate-200" : "fill-slate-400",
-    ring: selected ? "stroke-slate-300" : "stroke-slate-300",
+    core: selected ? "fill-omi-text-inverse-muted" : "fill-omi-text-subtle",
+    ring: selected ? "stroke-omi-text-inverse-muted" : "stroke-omi-text-inverse-muted",
   };
 }
 
@@ -481,7 +481,7 @@ function RankingSparkline({
 
   if (points.length < 2) {
     return (
-      <span className={selected ? "text-center text-xs text-slate-400" : "text-center text-xs text-slate-400"}>
+      <span className="text-center text-xs text-omi-text-subtle">
         -
       </span>
     );
@@ -506,7 +506,7 @@ function RankingSparkline({
           x2={chart.width - 2}
           y1={chart.previousCloseY}
           y2={chart.previousCloseY}
-          className={selected ? "stroke-slate-600" : "stroke-slate-200"}
+          className={selected ? "stroke-omi-text-inverse-subtle" : "stroke-omi-border-subtle"}
           strokeDasharray="3 3"
         />
       ) : null}
@@ -559,7 +559,7 @@ function USRankingSparkline({
 
   if (points.length < 2) {
     return (
-      <span className={selected ? "text-center text-xs text-slate-400" : "text-center text-xs text-slate-400"}>
+      <span className="text-center text-xs text-omi-text-subtle">
         {row.time ? "盤中" : "-"}
       </span>
     );
@@ -584,7 +584,7 @@ function USRankingSparkline({
           x2={chart.width - 2}
           y1={chart.previousCloseY}
           y2={chart.previousCloseY}
-          className={selected ? "stroke-slate-600" : "stroke-slate-200"}
+          className={selected ? "stroke-omi-text-inverse-subtle" : "stroke-omi-border-subtle"}
           strokeDasharray="3 3"
         />
       ) : null}
@@ -644,8 +644,8 @@ function MarketTape({
   const asOf = summary?.as_of ? formatDashboardTime(new Date(summary.as_of)) : null;
 
   return (
-    <section className="mb-3 border border-slate-200 bg-white">
-      <div className="grid gap-px bg-slate-200 lg:grid-cols-2">
+    <section className="mb-3 border border-omi-border-subtle bg-omi-surface">
+      <div className="grid gap-px bg-omi-surface-strong lg:grid-cols-2">
         {indices.length > 0 ? (
           indices.map((index) => {
             const breadth = index.breadth;
@@ -655,15 +655,15 @@ function MarketTape({
                 : null;
 
             return (
-              <div key={index.index_id} className="bg-white px-4 py-3">
+              <div key={index.index_id} className="bg-omi-surface px-4 py-3">
                 <div className="flex items-start justify-between gap-4">
                   <div>
-                    <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
+                    <div className="text-xs font-semibold uppercase tracking-[0.16em] text-omi-text-muted">
                       Market
                     </div>
                     <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                      <span className="text-lg font-bold text-slate-950">{index.label}</span>
-                      <span className="text-2xl font-black text-slate-950">
+                      <span className="text-lg font-bold text-omi-text-strong">{index.label}</span>
+                      <span className="text-2xl font-black text-omi-text-strong">
                         {formatPrice(index.close)}
                       </span>
                       <span className={`text-sm font-bold ${valueTone(index.change_pct)}`}>
@@ -672,7 +672,7 @@ function MarketTape({
                     </div>
                   </div>
                   <div className="text-right text-xs">
-                    <div className="font-semibold text-slate-900">{marketRegimeLabel(index)}</div>
+                    <div className="font-semibold text-omi-text">{marketRegimeLabel(index)}</div>
                     <div className={valueTone(index.price_vs_ma20)}>
                       {formatPct(index.price_vs_ma20)} vs MA20
                     </div>
@@ -680,22 +680,22 @@ function MarketTape({
                 </div>
 
                 <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
-                  <div className="border border-slate-100 bg-slate-50 px-2 py-2">
-                    <div className="text-slate-500">成交金額(億)</div>
-                    <div className="mt-1 font-semibold text-slate-900">
+                  <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
+                    <div className="text-omi-text-muted">成交金額(億)</div>
+                    <div className="mt-1 font-semibold text-omi-text">
                       {formatTradeValueYi(index.trade_value)}
                     </div>
                   </div>
-                  <div className="border border-slate-100 bg-slate-50 px-2 py-2">
-                    <div className="text-slate-500">上漲 / 下跌</div>
+                  <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
+                    <div className="text-omi-text-muted">上漲 / 下跌</div>
                     <div className="mt-1 font-semibold">
-                      <span className="text-red-600">{breadth?.advance_count ?? "-"}</span>
-                      <span className="px-1 text-slate-400">/</span>
-                      <span className="text-emerald-600">{breadth?.decline_count ?? "-"}</span>
+                      <span className="text-omi-market-up">{breadth?.advance_count ?? "-"}</span>
+                      <span className="px-1 text-omi-text-subtle">/</span>
+                      <span className="text-omi-market-down">{breadth?.decline_count ?? "-"}</span>
                     </div>
                   </div>
-                  <div className="border border-slate-100 bg-slate-50 px-2 py-2">
-                    <div className="text-slate-500">廣度</div>
+                  <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
+                    <div className="text-omi-text-muted">廣度</div>
                     <div className={`mt-1 font-semibold ${valueTone((advanceRatio ?? 50) - 50)}`}>
                       {advanceRatio === null ? "-" : `${advanceRatio.toFixed(0)}% 上漲`}
                     </div>
@@ -705,12 +705,12 @@ function MarketTape({
             );
           })
         ) : (
-          <div className="bg-white px-4 py-3 text-sm text-slate-500">
+          <div className="bg-omi-surface px-4 py-3 text-sm text-omi-text-muted">
             {loadState === "loading" ? "市場指數載入中..." : "市場指數暫無資料"}
           </div>
         )}
       </div>
-      <div className="border-t border-slate-200 px-4 py-2 text-xs text-slate-500">
+      <div className="border-t border-omi-border-subtle px-4 py-2 text-xs text-omi-text-muted">
         {asOf ? `市場環境更新 ${asOf}` : "市場環境等待更新"}
       </div>
     </section>
@@ -842,24 +842,24 @@ function USMarketTapeCard({
   loadState: LoadState;
 }) {
   return (
-    <div className="bg-white px-4 py-3">
+    <div className="bg-omi-surface px-4 py-3">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
+          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-omi-text-muted">
             {title}
           </div>
           <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-            <span className="text-lg font-bold text-slate-950">
+            <span className="text-lg font-bold text-omi-text-strong">
               {snapshot ? snapshot.name : loadState === "loading" ? "Loading" : "-"}
             </span>
-            <span className="text-2xl font-black text-slate-950">
+            <span className="text-2xl font-black text-omi-text-strong">
               {formatPrice(snapshot?.close)}
             </span>
             <span className={`text-sm font-bold ${valueTone(snapshot?.changePct)}`}>
               {formatSignedNumber(snapshot?.change)} / {formatPct(snapshot?.changePct)}
             </span>
           </div>
-          <div className="mt-1 text-xs text-slate-500">
+          <div className="mt-1 text-xs text-omi-text-muted">
             {snapshot
               ? `${snapshot.displaySymbol} · ${snapshot.exchange} · ${
                   snapshot.source === "intraday" ? "盤中" : "日線"
@@ -868,7 +868,7 @@ function USMarketTapeCard({
           </div>
         </div>
         <div className="text-right text-xs">
-          <div className="font-semibold text-slate-900">
+          <div className="font-semibold text-omi-text">
             {usMarketRegimeLabel(snapshot)}
           </div>
           <div className={valueTone(snapshot?.priceVsMa20)}>
@@ -878,21 +878,21 @@ function USMarketTapeCard({
       </div>
 
       <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
-        <div className="border border-slate-100 bg-slate-50 px-2 py-2">
-          <div className="text-slate-500">成交量</div>
-          <div className="mt-1 font-semibold text-slate-900">
+        <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
+          <div className="text-omi-text-muted">成交量</div>
+          <div className="mt-1 font-semibold text-omi-text">
             {formatWholeNumber(snapshot?.volume)}
           </div>
         </div>
-        <div className="border border-slate-100 bg-slate-50 px-2 py-2">
-          <div className="text-slate-500">K 線筆數</div>
-          <div className="mt-1 font-semibold text-slate-900">
+        <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
+          <div className="text-omi-text-muted">K 線筆數</div>
+          <div className="mt-1 font-semibold text-omi-text">
             {snapshot?.pointCount ?? "-"}
           </div>
         </div>
-        <div className="border border-slate-100 bg-slate-50 px-2 py-2">
-          <div className="text-slate-500">更新</div>
-          <div className="mt-1 truncate font-semibold text-slate-900">
+        <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
+          <div className="text-omi-text-muted">更新</div>
+          <div className="mt-1 truncate font-semibold text-omi-text">
             {snapshot?.asOf ? formatRowTime(snapshot.asOf) ?? snapshot.asOf.slice(0, 10) : "-"}
           </div>
         </div>
@@ -1009,8 +1009,8 @@ function USMarketTape({
     .at(-1);
 
   return (
-    <section className="mb-3 border border-slate-200 bg-white">
-      <div className="grid gap-px bg-slate-200 lg:grid-cols-2">
+    <section className="mb-3 border border-omi-border-subtle bg-omi-surface">
+      <div className="grid gap-px bg-omi-surface-strong lg:grid-cols-2">
         <USMarketTapeCard
           title="Market"
           snapshot={primarySnapshot}
@@ -1022,7 +1022,7 @@ function USMarketTape({
           loadState={loadState}
         />
       </div>
-      <div className="border-t border-slate-200 px-4 py-2 text-xs text-slate-500">
+      <div className="border-t border-omi-border-subtle px-4 py-2 text-xs text-omi-text-muted">
         {errorMessage
           ? errorMessage
           : asOf
@@ -1289,16 +1289,16 @@ function WatchlistRankingPanel({
 
   return (
     <div className="space-y-4">
-      <section className="border border-slate-200 bg-white">
+      <section className="border border-omi-border-subtle bg-omi-surface">
         <div className="flex flex-wrap items-start justify-between gap-4 px-5 py-4">
           <div>
-            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
               Selected Group
             </div>
-            <h2 className="mt-1 text-2xl font-bold text-slate-950">
+            <h2 className="mt-1 text-2xl font-bold text-omi-text-strong">
               {groupName ?? "尚未選擇分組"}
             </h2>
-            <div className="mt-1 text-sm text-slate-500">
+            <div className="mt-1 text-sm text-omi-text-muted">
               {statusLabel ??
                 (lastUpdatedAt ? `更新時間 ${lastUpdatedAt}` : "尚未載入分組資料")}
             </div>
@@ -1308,7 +1308,7 @@ function WatchlistRankingPanel({
             <select
               value={rankBy}
               onChange={(event) => onRankByChange(event.target.value)}
-              className="h-9 border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-700 outline-none focus:border-red-700"
+              className="h-9 border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text-muted outline-none focus:border-omi-accent"
             >
               {rankOptions.map((option) => (
                 <option key={option.value} value={option.value}>
@@ -1320,7 +1320,7 @@ function WatchlistRankingPanel({
             <button
               type="button"
               onClick={onReload}
-              className="h-9 bg-slate-900 px-4 text-sm font-semibold text-white hover:bg-slate-700 disabled:bg-slate-300"
+              className="h-9 bg-omi-control px-4 text-sm font-semibold text-omi-text-inverse hover:bg-omi-control-border disabled:bg-omi-surface-strong"
               disabled={reloadDisabled}
             >
               Reload
@@ -1329,53 +1329,53 @@ function WatchlistRankingPanel({
         </div>
 
         {errorMessage ? (
-          <div className="border-t border-red-200 bg-red-50 px-5 py-3 text-sm text-red-700">
+          <div className="border-t border-omi-danger-border bg-omi-danger-soft px-5 py-3 text-sm text-omi-danger">
             {errorMessage}
           </div>
         ) : null}
 
-        <div className="grid grid-cols-2 border-t border-slate-200 md:grid-cols-4">
+        <div className="grid grid-cols-2 border-t border-omi-border-subtle md:grid-cols-4">
           <div className="px-5 py-3">
-            <div className="text-xs text-slate-500">股票數</div>
+            <div className="text-xs text-omi-text-muted">股票數</div>
             <div className="mt-1 text-xl font-bold">{summary.stockCount}</div>
           </div>
-          <div className="border-l border-slate-200 px-5 py-3">
-            <div className="text-xs text-slate-500">上漲</div>
-            <div className="mt-1 text-xl font-bold text-red-600">
+          <div className="border-l border-omi-border-subtle px-5 py-3">
+            <div className="text-xs text-omi-text-muted">上漲</div>
+            <div className="mt-1 text-xl font-bold text-omi-market-up">
               {isLoadingRows ? (
-                <span className="block h-6 w-8 animate-pulse bg-slate-200" />
+                <span className="block h-6 w-8 animate-pulse bg-omi-surface-strong" />
               ) : (
                 summary.upCount
               )}
             </div>
           </div>
-          <div className="border-l border-slate-200 px-5 py-3">
-            <div className="text-xs text-slate-500">下跌</div>
-            <div className="mt-1 text-xl font-bold text-emerald-600">
+          <div className="border-l border-omi-border-subtle px-5 py-3">
+            <div className="text-xs text-omi-text-muted">下跌</div>
+            <div className="mt-1 text-xl font-bold text-omi-market-down">
               {isLoadingRows ? (
-                <span className="block h-6 w-8 animate-pulse bg-slate-200" />
+                <span className="block h-6 w-8 animate-pulse bg-omi-surface-strong" />
               ) : (
                 summary.downCount
               )}
             </div>
           </div>
-          <div className="border-l border-slate-200 px-5 py-3">
-            <div className="text-xs text-slate-500">排序</div>
+          <div className="border-l border-omi-border-subtle px-5 py-3">
+            <div className="text-xs text-omi-text-muted">排序</div>
             <div className="mt-1 text-xl font-bold">{rankLabel(rankBy)}</div>
           </div>
         </div>
       </section>
 
-      <section className="border border-slate-200 bg-white">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-3">
-          <h3 className="text-sm font-bold text-slate-950">自選股列表</h3>
+      <section className="border border-omi-border-subtle bg-omi-surface">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-omi-border-subtle px-5 py-3">
+          <h3 className="text-sm font-bold text-omi-text-strong">自選股列表</h3>
           {showLoadingStatus ? (
-            <span className="inline-flex items-center gap-2 text-xs text-slate-500">
+            <span className="inline-flex items-center gap-2 text-xs text-omi-text-muted">
               {loadingLabel ?? "載入中"}
               <LoadingDots label="排行資料讀取中" />
             </span>
           ) : (
-            <span className="text-xs text-slate-500">
+            <span className="text-xs text-omi-text-muted">
               {rankBy === "none"
                 ? `${rows.length} 檔 · 正常排序`
                 : `${rows.length} 檔 · 依 ${rankLabel(rankBy)} 排序`}
@@ -1383,13 +1383,13 @@ function WatchlistRankingPanel({
           )}
         </div>
 
-        <div className="grid grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] bg-slate-50 px-4 py-2 text-xs font-bold uppercase tracking-wide text-slate-500">
+        <div className="grid grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
           <span>名次</span>
           <span>股票</span>
           <span className="text-center">走勢</span>
           <span className="text-right">收盤</span>
           <span className="text-right">漲幅</span>
-          <span className="text-right">漲跌</span>
+          <span className="text-right">狀態</span>
           <span className="text-right">{volumeHeader}</span>
         </div>
         {rows.length > 0 ? (
@@ -1411,20 +1411,20 @@ function WatchlistRankingPanel({
                 row.onSelect();
               }}
               className={[
-                "omi-ranking-row grid w-full grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-slate-200 px-4 py-2 text-left text-sm",
+                "omi-ranking-row grid w-full grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-omi-border-subtle px-4 py-2 text-left text-sm",
                 row.selected
-                  ? "omi-ranking-row-selected relative z-10 bg-white text-slate-900 ring-1 ring-red-100"
-                  : "bg-white text-slate-800 hover:bg-slate-50",
+                  ? "omi-ranking-row-selected relative z-10 bg-omi-surface text-omi-text ring-1 ring-omi-market-up-border"
+                  : "bg-omi-surface text-omi-text hover:bg-omi-surface-subtle",
               ].join(" ")}
             >
-              <span className={row.selected ? "font-semibold text-red-700" : "text-slate-500"}>
+              <span className={row.selected ? "font-semibold text-omi-market-up" : "text-omi-text-muted"}>
                 #{row.rank}
               </span>
               <span className="min-w-0">
                 <span className="block truncate font-semibold">
                   {row.symbol} {row.name ?? ""}
                 </span>
-                <span className={row.selected ? "block truncate text-xs font-medium text-slate-700" : "block truncate text-xs text-slate-500"}>
+                <span className={row.selected ? "block truncate text-xs font-medium text-omi-text" : "block truncate text-xs text-omi-text-muted"}>
                   {row.loading ? <RankingCellSkeleton className="h-2.5 w-16" /> : row.meta ?? "-"}
                 </span>
               </span>
@@ -1494,7 +1494,7 @@ function WatchlistRankingPanel({
         ) : isLoadingRows ? (
           <RankingLoadingRows />
         ) : (
-          <div className="border-t border-slate-200 px-5 py-10 text-center text-sm text-slate-500">
+          <div className="border-t border-omi-border-subtle px-5 py-10 text-center text-sm text-omi-text-muted">
             {emptyMessage}
           </div>
         )}
@@ -2590,18 +2590,18 @@ export default function MarketDashboardClient({
           handleSelectStock(row.stock_id, row.stock_name);
         }}
         className={[
-          "omi-ranking-row grid w-full grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-slate-200 px-4 py-2 text-left text-sm",
+          "omi-ranking-row grid w-full grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-omi-border-subtle px-4 py-2 text-left text-sm",
           selected
-            ? "omi-ranking-row-selected relative z-10 bg-white text-slate-900 ring-1 ring-red-100"
-            : "bg-white text-slate-800 hover:bg-slate-50",
+            ? "omi-ranking-row-selected relative z-10 bg-omi-surface text-omi-text ring-1 ring-omi-market-up-border"
+            : "bg-omi-surface text-omi-text hover:bg-omi-surface-subtle",
         ].join(" ")}
       >
-        <span className={selected ? "font-semibold text-red-700" : "text-slate-500"}>#{row.rank}</span>
+        <span className={selected ? "font-semibold text-omi-market-up" : "text-omi-text-muted"}>#{row.rank}</span>
         <span className="min-w-0">
           <span className="block truncate font-semibold">
             {row.stock_id} {row.stock_name ?? ""}
           </span>
-          <span className={selected ? "block truncate text-xs font-medium text-slate-700" : "block truncate text-xs text-slate-500"}>
+          <span className={selected ? "block truncate text-xs font-medium text-omi-text" : "block truncate text-xs text-omi-text-muted"}>
             {loading ? (
               <RankingCellSkeleton className="h-2.5 w-16" />
             ) : (
@@ -2679,16 +2679,16 @@ export default function MarketDashboardClient({
   }
 
   const groupSummaryPanel = (
-    <section className="border border-slate-200 bg-white">
+    <section className="border border-omi-border-subtle bg-omi-surface">
       <div className="flex flex-wrap items-start justify-between gap-4 px-5 py-4">
         <div>
-          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
             Selected Group
           </div>
-          <h2 className="mt-1 text-2xl font-bold text-slate-950">
+          <h2 className="mt-1 text-2xl font-bold text-omi-text-strong">
             {selectedGroup?.group_name ?? "尚未選擇分組"}
           </h2>
-          <div className="mt-1 text-sm text-slate-500">
+          <div className="mt-1 text-sm text-omi-text-muted">
             {rankingStatusLoading
               ? rankingPendingLabel
               : ranking?.is_current === false
@@ -2705,7 +2705,7 @@ export default function MarketDashboardClient({
           <select
             value={rankBy}
             onChange={(event) => handleRankByChange(event.target.value as RankBy)}
-            className="h-9 border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-700 outline-none focus:border-red-700"
+            className="h-9 border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text-muted outline-none focus:border-omi-accent"
           >
             <option value="none">正常排序</option>
             <option value="change_pct">漲幅</option>
@@ -2715,7 +2715,7 @@ export default function MarketDashboardClient({
           <button
             type="button"
             onClick={() => void backfillSelectedTwWatchlistGroup()}
-            className="h-9 whitespace-nowrap border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-700 hover:border-red-700 hover:text-red-700 disabled:border-slate-200 disabled:text-slate-400"
+            className="h-9 whitespace-nowrap border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text-muted hover:border-omi-accent hover:text-omi-accent disabled:border-omi-border-subtle disabled:text-omi-text-subtle"
             disabled={
               activeGroupId === null || twWatchlistBackfillState === "loading"
             }
@@ -2728,7 +2728,7 @@ export default function MarketDashboardClient({
               void loadMarketIndices({ silent: true });
               if (activeGroupId !== null) void loadDashboard(activeGroupId);
             }}
-            className="h-9 bg-slate-900 px-4 text-sm font-semibold text-white hover:bg-slate-700 disabled:bg-slate-300"
+            className="h-9 bg-omi-control px-4 text-sm font-semibold text-omi-text-inverse hover:bg-omi-control-border disabled:bg-omi-surface-strong"
             disabled={activeGroupId === null || loadState === "loading"}
           >
             Reload
@@ -2737,38 +2737,38 @@ export default function MarketDashboardClient({
       </div>
 
       {errorMessage ? (
-        <div className="border-t border-red-200 bg-red-50 px-5 py-3 text-sm text-red-700">
+        <div className="border-t border-omi-danger-border bg-omi-danger-soft px-5 py-3 text-sm text-omi-danger">
           {errorMessage}
         </div>
       ) : null}
 
-      <div className="grid grid-cols-2 border-t border-slate-200 md:grid-cols-4">
+      <div className="grid grid-cols-2 border-t border-omi-border-subtle md:grid-cols-4">
         <div className="px-5 py-3">
-          <div className="text-xs text-slate-500">股票數</div>
+          <div className="text-xs text-omi-text-muted">股票數</div>
           <div className="mt-1 text-xl font-bold">{summary.stockCount}</div>
         </div>
-        <div className="border-l border-slate-200 px-5 py-3">
-          <div className="text-xs text-slate-500">上漲</div>
-          <div className="mt-1 text-xl font-bold text-red-600">
+        <div className="border-l border-omi-border-subtle px-5 py-3">
+          <div className="text-xs text-omi-text-muted">上漲</div>
+          <div className="mt-1 text-xl font-bold text-omi-market-up">
             {rankingListLoading ? (
-              <span className="block h-6 w-8 animate-pulse bg-slate-200" />
+              <span className="block h-6 w-8 animate-pulse bg-omi-surface-strong" />
             ) : (
               summary.upCount
             )}
           </div>
         </div>
-        <div className="border-l border-slate-200 px-5 py-3">
-          <div className="text-xs text-slate-500">下跌</div>
-          <div className="mt-1 text-xl font-bold text-emerald-600">
+        <div className="border-l border-omi-border-subtle px-5 py-3">
+          <div className="text-xs text-omi-text-muted">下跌</div>
+          <div className="mt-1 text-xl font-bold text-omi-market-down">
             {rankingListLoading ? (
-              <span className="block h-6 w-8 animate-pulse bg-slate-200" />
+              <span className="block h-6 w-8 animate-pulse bg-omi-surface-strong" />
             ) : (
               summary.downCount
             )}
           </div>
         </div>
-        <div className="border-l border-slate-200 px-5 py-3">
-          <div className="text-xs text-slate-500">排序</div>
+        <div className="border-l border-omi-border-subtle px-5 py-3">
+          <div className="text-xs text-omi-text-muted">排序</div>
           <div className="mt-1 text-xl font-bold">
             {rankLabel(ranking?.rank_by ?? rankBy)}
           </div>
@@ -2803,16 +2803,16 @@ export default function MarketDashboardClient({
         }}
         onSelectStock={handleSelectStock}
       />
-      <section className="border border-slate-200 bg-white">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-3">
-          <h3 className="text-sm font-bold text-slate-950">自選股列表</h3>
+      <section className="border border-omi-border-subtle bg-omi-surface">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-omi-border-subtle px-5 py-3">
+          <h3 className="text-sm font-bold text-omi-text-strong">自選股列表</h3>
           {rankingStatusLoading ? (
-            <span className="inline-flex items-center gap-2 text-xs text-slate-500">
+            <span className="inline-flex items-center gap-2 text-xs text-omi-text-muted">
               {rankingPendingLabel}
               <LoadingDots label="自選股排行資料讀取中" />
             </span>
           ) : (
-            <span className="text-xs text-slate-500">
+            <span className="text-xs text-omi-text-muted">
               {rankBy === "none"
                 ? `${displayRows.length} 檔 · 正常排序`
                 : `${displayRows.length} 檔 · 依 ${rankLabel(ranking?.rank_by ?? rankBy)} 排序`}
@@ -2820,13 +2820,13 @@ export default function MarketDashboardClient({
           )}
         </div>
 
-        <div className="grid grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] bg-slate-50 px-4 py-2 text-xs font-bold uppercase tracking-wide text-slate-500">
+        <div className="grid grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
           <span>名次</span>
           <span>股票</span>
           <span className="text-center">走勢</span>
           <span className="text-right">收盤</span>
           <span className="text-right">漲幅</span>
-          <span className="text-right">漲跌</span>
+          <span className="text-right">狀態</span>
           <span className="text-right">成交量(張)</span>
         </div>
         {displayRows.length > 0 ? (
@@ -2834,7 +2834,7 @@ export default function MarketDashboardClient({
         ) : rankingListLoading ? (
           <RankingLoadingRows />
         ) : (
-          <div className="border-t border-slate-200 px-5 py-10 text-center text-sm text-slate-500">
+          <div className="border-t border-omi-border-subtle px-5 py-10 text-center text-sm text-omi-text-muted">
             尚無排行資料
           </div>
         )}
@@ -2902,7 +2902,7 @@ export default function MarketDashboardClient({
         <button
           type="button"
           onClick={() => void refreshSelectedUsUniverse()}
-          className="h-9 whitespace-nowrap border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-700 hover:border-red-700 hover:text-red-700 disabled:border-slate-200 disabled:text-slate-400"
+          className="h-9 whitespace-nowrap border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text-muted hover:border-omi-accent hover:text-omi-accent disabled:border-omi-border-subtle disabled:text-omi-text-subtle"
           disabled={
             selectedUsGroupId === null || usUniverseRefreshState === "loading"
           }
@@ -3045,7 +3045,7 @@ export default function MarketDashboardClient({
   ]);
 
   return (
-    <main className="h-screen overflow-hidden bg-slate-100 text-slate-950">
+    <main className="h-screen overflow-hidden bg-omi-canvas text-omi-text-strong">
       <div className="flex h-full min-w-[1180px] flex-col">
         <div className="flex min-h-0 flex-1">
           {activeMarket === "us" ? (
@@ -3196,7 +3196,7 @@ export default function MarketDashboardClient({
                 />
               </>
             ) : (
-              <section className="border border-slate-200 bg-white px-5 py-10 text-sm text-slate-500">
+              <section className="border border-omi-border-subtle bg-omi-surface px-5 py-10 text-sm text-omi-text-muted">
                 尚未啟用
               </section>
             )}

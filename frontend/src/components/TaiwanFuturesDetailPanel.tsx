@@ -156,19 +156,19 @@ function formatSessionLabel(value: string | null | undefined) {
 }
 
 function valueToneClass(value: number | null | undefined) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "text-slate-950";
-  if (value > 0) return "text-red-600";
-  if (value < 0) return "text-emerald-600";
+  if (value === null || value === undefined || Number.isNaN(value)) return "text-omi-text-strong";
+  if (value > 0) return "text-omi-market-up";
+  if (value < 0) return "text-omi-market-down";
 
-  return "text-slate-950";
+  return "text-omi-text-strong";
 }
 
 function valueToneBackground(value: number | null | undefined) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "bg-slate-100";
-  if (value > 0) return "bg-red-50 text-red-700";
-  if (value < 0) return "bg-emerald-50 text-emerald-700";
+  if (value === null || value === undefined || Number.isNaN(value)) return "bg-omi-surface-muted";
+  if (value > 0) return "bg-omi-danger-soft text-omi-danger";
+  if (value < 0) return "bg-omi-success-soft text-omi-success";
 
-  return "bg-slate-100 text-slate-700";
+  return "bg-omi-surface-muted text-omi-text";
 }
 
 function formatFuturesVolume(value: number | null | undefined) {
@@ -178,18 +178,18 @@ function formatFuturesVolume(value: number | null | undefined) {
 }
 
 function quoteFreshnessToneClass(status: string | null | undefined) {
-  if (status === "live") return "text-emerald-700";
+  if (status === "live") return "text-omi-success";
   if (status === "cached" || status === "session_mismatch" || status === "stale") {
-    return "text-amber-700";
+    return "text-omi-warning";
   }
-  return "text-slate-950";
+  return "text-omi-text-strong";
 }
 
 function quoteFreshnessBannerClass(status: string | null | undefined) {
   if (status === "cached" || status === "session_mismatch" || status === "stale") {
-    return "border-b border-amber-100 bg-amber-50 px-5 py-3 text-sm text-amber-800";
+    return "border-b border-omi-warning-border bg-omi-warning-soft px-5 py-3 text-sm text-omi-warning-strong";
   }
-  return "border-b border-slate-100 bg-slate-50 px-5 py-3 text-sm text-slate-600";
+  return "border-b border-omi-border-subtle bg-omi-surface-subtle px-5 py-3 text-sm text-omi-text-muted";
 }
 
 function quoteFreshnessLabel(status: string | null | undefined) {
@@ -229,17 +229,17 @@ function StatCell({
   value: ReactNode;
 }) {
   return (
-    <div className="border border-slate-200 bg-slate-50 px-3 py-2">
-      <div className="text-xs font-semibold text-slate-500">{label}</div>
+    <div className="border border-omi-border-subtle bg-omi-surface-subtle px-3 py-2">
+      <div className="text-xs font-semibold text-omi-text-muted">{label}</div>
       <div
         className={[
           "mt-1 text-base font-bold tabular-nums",
-          toneValue === undefined ? "text-slate-950" : valueToneClass(toneValue),
+          toneValue === undefined ? "text-omi-text-strong" : valueToneClass(toneValue),
         ].join(" ")}
       >
         {value}
       </div>
-      {note ? <div className="mt-1 text-xs text-slate-500">{note}</div> : null}
+      {note ? <div className="mt-1 text-xs text-omi-text-muted">{note}</div> : null}
     </div>
   );
 }
@@ -317,7 +317,7 @@ function aggregateChartPoints(points: ChartPoint[], mode: "weekly" | "monthly"):
 
 function EmptyChartState({ loading, message }: { loading: boolean; message: string }) {
   return (
-    <div className="flex min-h-[420px] items-center justify-center border border-slate-200 bg-white text-sm text-slate-500">
+    <div className="flex min-h-[420px] items-center justify-center border border-omi-border-subtle bg-omi-surface text-sm text-omi-text-muted">
       {loading ? <LoadingDots label={message} /> : message}
     </div>
   );
@@ -333,37 +333,37 @@ function FuturesProfessionalIndicatorMenu({
   onToggleIndicator: (key: IndicatorKey) => void;
 }) {
   return (
-    <div className="absolute right-0 z-30 mt-2 max-h-[560px] w-[25rem] overflow-y-auto border border-slate-200 bg-white p-3 text-left shadow-xl">
-      <div className="mb-3 flex items-center justify-between border-b border-slate-100 pb-2">
+    <div className="absolute right-0 z-30 mt-2 max-h-[560px] w-[25rem] overflow-y-auto border border-omi-border-subtle bg-omi-surface p-3 text-left shadow-xl">
+      <div className="mb-3 flex items-center justify-between border-b border-omi-border-subtle pb-2">
         <div>
-          <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">
+          <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-omi-text-muted">
             Indicators
           </div>
-          <div className="mt-0.5 text-sm font-bold text-slate-950">技術指標</div>
+          <div className="mt-0.5 text-sm font-bold text-omi-text-strong">技術指標</div>
         </div>
-        <div className="text-[11px] font-semibold text-slate-400">台指期</div>
+        <div className="text-[11px] font-semibold text-omi-text-subtle">台指期</div>
       </div>
 
       <div className="space-y-3">
         {groups.map((group) => (
-          <div key={group.key} className="border border-slate-100">
-            <div className="border-b border-slate-100 bg-slate-50 px-3 py-2">
-              <div className="text-xs font-bold text-slate-900">{group.label}</div>
-              <div className="mt-0.5 text-[11px] text-slate-500">{group.description}</div>
+          <div key={group.key} className="border border-omi-border-subtle">
+            <div className="border-b border-omi-border-subtle bg-omi-surface-subtle px-3 py-2">
+              <div className="text-xs font-bold text-omi-text">{group.label}</div>
+              <div className="mt-0.5 text-[11px] text-omi-text-muted">{group.description}</div>
             </div>
-            <div className="grid grid-cols-1 gap-px bg-slate-100">
+            <div className="grid grid-cols-1 gap-px bg-omi-surface-muted">
               {group.options.map((option) => {
                 if (option.status !== "available") {
                   return (
                     <div
                       key={option.key}
-                      className="flex items-start justify-between gap-2 bg-white px-3 py-2 text-xs text-slate-400"
+                      className="flex items-start justify-between gap-2 bg-omi-surface px-3 py-2 text-xs text-omi-text-subtle"
                     >
                       <span>
                         <span className="block font-semibold">{option.label}</span>
                         <span className="block">{option.description}</span>
                       </span>
-                      <span className="shrink-0 border border-slate-200 px-1.5 py-0.5 text-[10px] font-bold">
+                      <span className="shrink-0 border border-omi-border-subtle px-1.5 py-0.5 text-[10px] font-bold">
                         待補
                       </span>
                     </div>
@@ -373,7 +373,7 @@ function FuturesProfessionalIndicatorMenu({
                 return (
                   <label
                     key={option.key}
-                    className="flex cursor-pointer items-start gap-2 bg-white px-3 py-2 text-xs hover:bg-slate-50"
+                    className="flex cursor-pointer items-start gap-2 bg-omi-surface px-3 py-2 text-xs hover:bg-omi-surface-subtle"
                   >
                     <input
                       type="checkbox"
@@ -382,10 +382,10 @@ function FuturesProfessionalIndicatorMenu({
                       className="mt-0.5"
                     />
                     <span>
-                      <span className="block font-semibold text-slate-800">
+                      <span className="block font-semibold text-omi-text">
                         {option.label}
                       </span>
-                      <span className="block text-slate-500">{option.description}</span>
+                      <span className="block text-omi-text-muted">{option.description}</span>
                     </span>
                   </label>
                 );
@@ -669,7 +669,7 @@ export default function TaiwanFuturesDetailPanel({
       ? "正在重新讀取即時來源。"
       : quoteFreshness?.message ?? (quote ? "尚未取得資料狀態。" : "尚無台指期報價。");
   const quoteFreshnessTone =
-    quoteState === "loading" ? "text-sky-700" : quoteFreshnessToneClass(quoteFreshnessStatus);
+    quoteState === "loading" ? "text-omi-info" : quoteFreshnessToneClass(quoteFreshnessStatus);
   const quoteFreshnessBanner =
     quoteFreshness && quoteFreshness.status !== "live" ? quoteFreshness : null;
   const recentBars = useMemo(() => bars.slice(-6).reverse(), [bars]);
@@ -684,7 +684,7 @@ export default function TaiwanFuturesDetailPanel({
   const renderTimeframeButtons = (mode: "normal" | "compact") => (
     <div
       className={[
-        "flex border border-slate-200 bg-slate-50",
+        "flex border border-omi-border-subtle bg-omi-surface-subtle",
         mode === "compact" ? "p-0.5" : "p-1",
       ].join(" ")}
     >
@@ -699,9 +699,9 @@ export default function TaiwanFuturesDetailPanel({
               : "h-8 min-w-12 px-3 text-sm font-semibold transition",
             chartTimeframe === item
               ? mode === "compact"
-                ? "bg-slate-900 text-white"
-                : "bg-red-700 text-white"
-              : "text-slate-600 hover:bg-white hover:text-slate-950",
+                ? "bg-omi-control text-omi-text-inverse"
+                : "bg-omi-accent text-omi-text-inverse"
+              : "text-omi-text-muted hover:bg-omi-surface hover:text-omi-text-strong",
           ].join(" ")}
         >
           {FUTURES_TIMEFRAME_LABELS[item]}
@@ -1009,7 +1009,7 @@ export default function TaiwanFuturesDetailPanel({
 
   if (!normalizedSymbol) {
     return (
-      <section className="border border-slate-200 bg-white px-5 py-10 text-center text-sm text-slate-500">
+      <section className="border border-omi-border-subtle bg-omi-surface px-5 py-10 text-center text-sm text-omi-text-muted">
         請從左側選擇台指期商品
       </section>
     );
@@ -1072,7 +1072,7 @@ export default function TaiwanFuturesDetailPanel({
             }}
             message={
               errorMessage ? (
-                <div className="border-b border-red-100 bg-red-50 px-5 py-3 text-sm text-red-700">
+                <div className="border-b border-omi-danger-border bg-omi-danger-soft px-5 py-3 text-sm text-omi-danger">
                   {errorMessage}
                 </div>
               ) : null
@@ -1116,14 +1116,14 @@ export default function TaiwanFuturesDetailPanel({
             }}
           />
         ) : (
-          <section className="border border-slate-200 bg-white">
-            <div className="grid gap-4 border-b border-slate-200 px-5 py-5 lg:grid-cols-[minmax(0,1fr)_auto]">
+          <section className="border border-omi-border-subtle bg-omi-surface">
+            <div className="grid gap-4 border-b border-omi-border-subtle px-5 py-5 lg:grid-cols-[minmax(0,1fr)_auto]">
               <div>
-                <div className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">
+                <div className="text-xs font-semibold uppercase tracking-[0.22em] text-omi-text-muted">
                   FUTURES
                 </div>
-                <h2 className="mt-2 text-2xl font-black text-slate-950">台指期</h2>
-                <div className="mt-2 text-sm text-slate-500">
+                <h2 className="mt-2 text-2xl font-black text-omi-text-strong">台指期</h2>
+                <div className="mt-2 text-sm text-omi-text-muted">
                   TAIFEX · {displayProductName} ·{" "}
                   {formatSessionLabel(quote?.session)} ·{" "}
                   {quote?.contract_month ?? latestDailyBar?.contract_month ?? "近月契約"}
@@ -1166,8 +1166,8 @@ export default function TaiwanFuturesDetailPanel({
                       className={[
                         "h-8 border px-3 text-sm font-semibold transition",
                         showChartIndicators
-                          ? "border-slate-900 bg-slate-900 text-white"
-                          : "border-slate-900 bg-white text-slate-900 hover:border-red-700 hover:text-red-700",
+                          ? "border-omi-control bg-omi-control text-omi-text-inverse"
+                          : "border-omi-control bg-omi-surface text-omi-text hover:border-omi-accent hover:text-omi-danger",
                       ].join(" ")}
                     >
                       指標
@@ -1178,8 +1178,8 @@ export default function TaiwanFuturesDetailPanel({
                       className={[
                         "h-8 border px-3 text-sm font-semibold transition",
                         chartExpanded
-                          ? "border-slate-900 bg-slate-900 text-white hover:bg-slate-800"
-                          : "border-slate-300 bg-white text-slate-700 hover:border-slate-900 hover:text-slate-950",
+                          ? "border-omi-control bg-omi-control text-omi-text-inverse hover:bg-omi-control-muted"
+                          : "border-omi-border bg-omi-surface text-omi-text hover:border-omi-control hover:text-omi-text-strong",
                       ].join(" ")}
                     >
                       {chartExpanded ? "總覽" : "放大"}
@@ -1189,38 +1189,38 @@ export default function TaiwanFuturesDetailPanel({
               </div>
             </div>
 
-            <div className="grid border-b border-slate-200 sm:grid-cols-2 xl:grid-cols-4">
-              <div className="border-b border-r border-slate-200 px-5 py-4 xl:border-b-0">
-                <div className="text-xs font-semibold text-slate-500">交易日</div>
-                <div className="mt-1 font-black text-slate-950">
+            <div className="grid border-b border-omi-border-subtle sm:grid-cols-2 xl:grid-cols-4">
+              <div className="border-b border-r border-omi-border-subtle px-5 py-4 xl:border-b-0">
+                <div className="text-xs font-semibold text-omi-text-muted">交易日</div>
+                <div className="mt-1 font-black text-omi-text-strong">
                   {formatDate(quote?.trade_date ?? latestDailyBar?.trade_date)}
                 </div>
               </div>
-              <div className="border-b border-r border-slate-200 px-5 py-4 xl:border-b-0">
-                <div className="text-xs font-semibold text-slate-500">報價時間</div>
-                <div className="mt-1 font-black text-slate-950">
+              <div className="border-b border-r border-omi-border-subtle px-5 py-4 xl:border-b-0">
+                <div className="text-xs font-semibold text-omi-text-muted">報價時間</div>
+                <div className="mt-1 font-black text-omi-text-strong">
                   {formatDateTime(quote?.quote_time ?? latestDailyBar?.fetched_at)}
                 </div>
               </div>
-              <div className="border-b border-r border-slate-200 px-5 py-4 sm:border-b-0">
-                <div className="text-xs font-semibold text-slate-500">資料狀態</div>
+              <div className="border-b border-r border-omi-border-subtle px-5 py-4 sm:border-b-0">
+                <div className="text-xs font-semibold text-omi-text-muted">資料狀態</div>
                 <div className={["mt-1 font-black", quoteFreshnessTone].join(" ")}>
                   {quoteState === "loading"
                     ? "更新中"
                     : quoteFreshnessLabel(quoteFreshnessStatus)}
                 </div>
-                <div className="mt-1 text-xs text-slate-500">{quoteFreshnessMessage}</div>
+                <div className="mt-1 text-xs text-omi-text-muted">{quoteFreshnessMessage}</div>
               </div>
               <div className="px-5 py-4">
-                <div className="text-xs font-semibold text-slate-500">日 K 資料</div>
-                <div className="mt-1 font-black text-slate-950">
+                <div className="text-xs font-semibold text-omi-text-muted">日 K 資料</div>
+                <div className="mt-1 font-black text-omi-text-strong">
                   {dailyState === "loading" ? "補資料中" : `${dailyBars.length} 根`}
                 </div>
               </div>
             </div>
 
             {errorMessage ? (
-              <div className="border-b border-red-100 bg-red-50 px-5 py-3 text-sm text-red-700">
+              <div className="border-b border-omi-danger-border bg-omi-danger-soft px-5 py-3 text-sm text-omi-danger">
                 {errorMessage}
               </div>
             ) : null}
@@ -1245,12 +1245,12 @@ export default function TaiwanFuturesDetailPanel({
       ) : null}
 
       {!chartExpanded ? (
-        <section className="border border-slate-200 bg-white">
-          <div className="border-b border-slate-200 px-5 py-4">
-            <div className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">
+        <section className="border border-omi-border-subtle bg-omi-surface">
+          <div className="border-b border-omi-border-subtle px-5 py-4">
+            <div className="text-xs font-semibold uppercase tracking-[0.22em] text-omi-text-muted">
               SIGNAL
             </div>
-            <h3 className="mt-1 text-lg font-black text-slate-950">期貨重點</h3>
+            <h3 className="mt-1 text-lg font-black text-omi-text-strong">期貨重點</h3>
           </div>
           <div className="grid gap-2 p-4 md:grid-cols-2 xl:grid-cols-3">
             <StatCell
@@ -1297,15 +1297,15 @@ export default function TaiwanFuturesDetailPanel({
 
       {!chartExpanded ? (
         <aside className="flex min-w-0 flex-col gap-4 self-start">
-          <section className="border border-slate-200 bg-white">
-            <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
+          <section className="border border-omi-border-subtle bg-omi-surface">
+            <div className="flex items-center justify-between border-b border-omi-border-subtle px-5 py-4">
               <div>
-                <div className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">
+                <div className="text-xs font-semibold uppercase tracking-[0.22em] text-omi-text-muted">
                   CONTRACTS
                 </div>
-                <h3 className="mt-1 text-lg font-black text-slate-950">台指期商品比較</h3>
+                <h3 className="mt-1 text-lg font-black text-omi-text-strong">台指期商品比較</h3>
               </div>
-              <div className="text-xs text-slate-500">TXF / MXF / TMF</div>
+              <div className="text-xs text-omi-text-muted">TXF / MXF / TMF</div>
             </div>
 
             <div className="divide-y divide-slate-200">
@@ -1315,11 +1315,11 @@ export default function TaiwanFuturesDetailPanel({
                 return (
                   <div
                     key={contractSymbol}
-                    className="bg-white p-5 text-slate-950"
+                    className="bg-omi-surface p-5 text-omi-text-strong"
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div>
-                        <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+                        <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
                           {contractSymbol}
                         </div>
                         <div className="mt-1 text-xl font-black">
@@ -1355,25 +1355,25 @@ export default function TaiwanFuturesDetailPanel({
 
                     <div className="mt-5 grid grid-cols-2 gap-3 text-sm">
                       <div>
-                        <div className="text-slate-500">量</div>
+                        <div className="text-omi-text-muted">量</div>
                         <div className="font-bold tabular-nums">
                           {formatInteger(row?.total_volume)}
                         </div>
                       </div>
                       <div>
-                        <div className="text-slate-500">未平倉</div>
+                        <div className="text-omi-text-muted">未平倉</div>
                         <div className="font-bold tabular-nums">
                           {formatInteger(row?.open_interest)}
                         </div>
                       </div>
                       <div>
-                        <div className="text-slate-500">最高</div>
+                        <div className="text-omi-text-muted">最高</div>
                         <div className="font-bold tabular-nums">
                           {formatNumber(row?.high_price)}
                         </div>
                       </div>
                       <div>
-                        <div className="text-slate-500">最低</div>
+                        <div className="text-omi-text-muted">最低</div>
                         <div className="font-bold tabular-nums">
                           {formatNumber(row?.low_price)}
                         </div>
@@ -1385,21 +1385,21 @@ export default function TaiwanFuturesDetailPanel({
             </div>
           </section>
 
-          <section className="border border-slate-200 bg-white">
-            <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
+          <section className="border border-omi-border-subtle bg-omi-surface">
+            <div className="flex items-center justify-between border-b border-omi-border-subtle px-5 py-4">
               <div>
-                <div className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">
+                <div className="text-xs font-semibold uppercase tracking-[0.22em] text-omi-text-muted">
                   DATA
                 </div>
-                <h3 className="mt-1 text-lg font-black text-slate-950">近期 1 分鐘資料</h3>
+                <h3 className="mt-1 text-lg font-black text-omi-text-strong">近期 1 分鐘資料</h3>
               </div>
-              <div className="text-right text-xs text-slate-500">最近 6 根</div>
+              <div className="text-right text-xs text-omi-text-muted">最近 6 根</div>
             </div>
 
             {recentBars.length > 0 ? (
               <div className="overflow-x-auto">
                 <table className="min-w-full text-sm">
-                  <thead className="bg-slate-50 text-xs text-slate-500">
+                  <thead className="bg-omi-surface-subtle text-xs text-omi-text-muted">
                     <tr>
                       <th className="px-5 py-2 text-left font-semibold">時間</th>
                       <th className="px-5 py-2 text-right font-semibold">開</th>
@@ -1411,17 +1411,17 @@ export default function TaiwanFuturesDetailPanel({
                   </thead>
                   <tbody>
                     {recentBars.map((bar) => (
-                      <tr key={bar.id} className="border-t border-slate-100">
-                        <td className="px-5 py-2 text-slate-600">
+                      <tr key={bar.id} className="border-t border-omi-border-subtle">
+                        <td className="px-5 py-2 text-omi-text-muted">
                           {formatDateTime(bar.bar_time)}
                         </td>
                         <td className="px-5 py-2 text-right tabular-nums">
                           {formatNumber(bar.open_price)}
                         </td>
-                        <td className="px-5 py-2 text-right tabular-nums text-red-600">
+                        <td className="px-5 py-2 text-right tabular-nums text-omi-market-up">
                           {formatNumber(bar.high_price)}
                         </td>
-                        <td className="px-5 py-2 text-right tabular-nums text-emerald-600">
+                        <td className="px-5 py-2 text-right tabular-nums text-omi-market-down">
                           {formatNumber(bar.low_price)}
                         </td>
                         <td className="px-5 py-2 text-right font-bold tabular-nums">
@@ -1436,7 +1436,7 @@ export default function TaiwanFuturesDetailPanel({
                 </table>
               </div>
             ) : (
-              <div className="px-5 py-10 text-center text-sm text-slate-500">
+              <div className="px-5 py-10 text-center text-sm text-omi-text-muted">
                 {barsState === "loading" ? (
                   <LoadingDots label="1 分鐘資料讀取中" />
                 ) : (

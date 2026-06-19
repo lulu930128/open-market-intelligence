@@ -1,4 +1,5 @@
 import type { IndicatorParameters, IndicatorSettings } from "@/components/StockKLineChart";
+import { omiChartColors } from "@/lib/themeColors";
 import type { ChartPoint, StockIndicatorPoint } from "@/types/market";
 import {
   type CandlestickData,
@@ -545,14 +546,14 @@ export type BuiltSeriesData = {
   lines: LineSeriesData;
 };
 
-export const upColor = "#dc2626";
-export const downColor = "#059669";
+export const upColor = omiChartColors.marketUp;
+export const downColor = omiChartColors.marketDown;
 export const drawingSnapDistancePx = 14;
 export const DEFAULT_LIGHTWEIGHT_VISIBLE_BARS = 80;
 export const maColors = {
-  maShort: "#2563eb",
-  maMiddle: "#f59e0b",
-  maLong: "#a855f7",
+  maShort: omiChartColors.info,
+  maMiddle: omiChartColors.warning,
+  maLong: omiChartColors.purpleLight,
 };
 
 export const defaultLightweightIndicators: IndicatorSettings = {
@@ -979,15 +980,15 @@ export function isTwoPointDrawingType(
 }
 
 export function drawingDefaultColor(type: ChartDrawing["type"]) {
-  if (type === "anchorVwap") return "#0891b2";
-  if (type === "volumeProfileRange") return "#475569";
-  if (type === "priceRange") return "#64748b";
-  if (type === "measure") return "#334155";
-  if (type === "rectangle") return "#2563eb";
-  if (type === "fibonacci") return "#7c3aed";
-  if (type === "ray") return "#0f766e";
+  if (type === "anchorVwap") return omiChartColors.cyan;
+  if (type === "volumeProfileRange") return omiChartColors.neutralMuted;
+  if (type === "priceRange") return omiChartColors.textMuted;
+  if (type === "measure") return omiChartColors.neutralLine;
+  if (type === "rectangle") return omiChartColors.info;
+  if (type === "fibonacci") return omiChartColors.purple;
+  if (type === "ray") return omiChartColors.teal;
 
-  return "#0f172a";
+  return omiChartColors.text;
 }
 
 export function drawingToolModeLabel(tool: ChartDrawingTool) {
@@ -1035,10 +1036,10 @@ export function drawingModeBadgeWidth(tool: ChartDrawingTool) {
 }
 
 export function measurementToneColor(tone: ProjectedMeasurementStats["tone"]) {
-  if (tone === "up") return "#dc2626";
-  if (tone === "down") return "#059669";
+  if (tone === "up") return omiChartColors.marketUp;
+  if (tone === "down") return omiChartColors.marketDown;
 
-  return "#334155";
+  return omiChartColors.neutralLine;
 }
 
 export function medianFinite(values: number[]) {
@@ -2431,9 +2432,9 @@ export const fibonacciRatios = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1] as const;
 export const fibonacciAnalysisRatios = [-0.618, -0.272, ...fibonacciRatios, 1.272, 1.618] as const;
 export const drawingVolumeProfileRows = 24;
 export const drawingValueAreaTargetPct = 70;
-export const selectedDrawingColor = "#dc2626";
-export const hoveredDrawingColor = "#2563eb";
-export const drawingHandleBorderColor = "#ffffff";
+export const selectedDrawingColor = omiChartColors.marketUp;
+export const hoveredDrawingColor = omiChartColors.info;
+export const drawingHandleBorderColor = omiChartColors.surface;
 
 export function formatFibonacciRatio(ratio: number) {
   if (ratio === 0 || ratio === 1) return `${ratio * 100}%`;

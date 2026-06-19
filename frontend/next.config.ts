@@ -1,7 +1,9 @@
 import type { NextConfig } from "next";
 
-const apiProxyTarget = process.env.API_PROXY_TARGET ?? "http://127.0.0.1:8300";
-const apiProxyPath = process.env.API_PROXY_PATH ?? "/omi-data";
+import { getApiProxyPath, getApiProxyTarget } from "./src/lib/serverApiConfig";
+
+const apiProxyTarget = getApiProxyTarget();
+const apiProxyPath = getApiProxyPath();
 
 const nextConfig: NextConfig = {
   allowedDevOrigins: ["127.0.0.1"],

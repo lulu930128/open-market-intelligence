@@ -4,6 +4,7 @@ import { LoadingDots } from "@/components/LoadingPlaceholders";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
 import { fetchJson } from "@/lib/api";
 import { getJobResultStatus } from "@/lib/jobs";
+import { omiChartColors } from "@/lib/themeColors";
 import {
   TAIWAN_SESSION_START_MINUTES,
   getTaipeiMinutesOfDay,
@@ -390,10 +391,10 @@ export function rebuildInstitutionalCumulative(points: InstitutionalSeriesPoint[
 }
 
 export function valueTone(value: number | null | undefined) {
-  if (value === null || value === undefined) return "text-slate-500";
-  if (value > 0) return "text-red-600";
-  if (value < 0) return "text-emerald-600";
-  return "text-slate-700";
+  if (value === null || value === undefined) return "text-omi-text-muted";
+  if (value > 0) return "text-omi-market-up";
+  if (value < 0) return "text-omi-market-down";
+  return "text-omi-text";
 }
 
 export type PriceLimitStatus = "limit_up" | "limit_down" | null;
@@ -406,18 +407,18 @@ export function estimatedPriceLimitStatus(value: number | null | undefined): Pri
 }
 
 export function priceLimitTone(status: PriceLimitStatus, fallback: number | null | undefined) {
-  if (status === "limit_up") return "text-red-600";
-  if (status === "limit_down") return "text-emerald-600";
+  if (status === "limit_up") return "text-omi-market-up";
+  if (status === "limit_down") return "text-omi-market-down";
   return valueTone(fallback);
 }
 
 export function priceLimitBoxClass(status: PriceLimitStatus) {
   if (status === "limit_up") {
-    return "rounded-[4px] bg-red-500 px-3 py-2 text-white shadow-sm";
+    return "omi-price-limit-value omi-price-limit-up";
   }
 
   if (status === "limit_down") {
-    return "rounded-[4px] bg-emerald-500 px-3 py-2 text-white shadow-sm";
+    return "omi-price-limit-value omi-price-limit-down";
   }
 
   return "";
@@ -673,10 +674,10 @@ export type TechnicalReport = {
 };
 
 export function technicalToneClass(tone: TechnicalTone) {
-  if (tone === "positive") return "text-red-600";
-  if (tone === "negative") return "text-emerald-600";
-  if (tone === "warning") return "text-amber-600";
-  return "text-slate-700";
+  if (tone === "positive") return "text-omi-market-up";
+  if (tone === "negative") return "text-omi-market-down";
+  if (tone === "warning") return "text-omi-warning";
+  return "text-omi-text";
 }
 
 export function semanticTechnicalTone(tone: string | null | undefined): TechnicalTone {
@@ -685,10 +686,10 @@ export function semanticTechnicalTone(tone: string | null | undefined): Technica
 }
 
 export function semanticBadgeToneClass(tone: string | null | undefined) {
-  if (tone === "positive") return "text-red-700 bg-red-50";
-  if (tone === "negative") return "text-emerald-700 bg-emerald-50";
-  if (tone === "warning") return "text-amber-700 bg-amber-50";
-  return "text-slate-600 bg-slate-100";
+  if (tone === "positive") return "text-omi-danger bg-omi-danger-soft";
+  if (tone === "negative") return "text-omi-success bg-omi-success-soft";
+  if (tone === "warning") return "text-omi-warning bg-omi-warning-soft";
+  return "text-omi-text-muted bg-omi-surface-muted";
 }
 
 export function numberValue(value: unknown) {
@@ -733,10 +734,10 @@ export function TechnicalSignalRow({
   tone?: TechnicalTone;
 }) {
   return (
-    <div className={`omi-technical-row omi-technical-row-${tone} flex items-start justify-between gap-4 border-t border-slate-100 py-2 first:border-t-0 first:pt-0`}>
+    <div className={`omi-technical-row omi-technical-row-${tone} flex items-start justify-between gap-4 border-t border-omi-border-subtle py-2 first:border-t-0 first:pt-0`}>
       <div className="min-w-0">
-        <div className="text-sm font-bold text-slate-950">{title}</div>
-        <div className="mt-0.5 text-xs leading-4 text-slate-500">{description}</div>
+        <div className="text-sm font-bold text-omi-text-strong">{title}</div>
+        <div className="mt-0.5 text-xs leading-4 text-omi-text-muted">{description}</div>
       </div>
       <div className={`omi-technical-score shrink-0 text-right text-sm font-bold ${technicalToneClass(tone)}`}>
         <PriceUpdatePulse
@@ -755,9 +756,9 @@ export function TechnicalSignalRow({
 export function TechnicalLoadingPanel() {
   return (
     <>
-      <div className="omi-technical-summary border-b border-slate-200 px-5 py-3">
+      <div className="omi-technical-summary border-b border-omi-border-subtle px-5 py-3">
         <div className="flex items-center justify-between gap-4">
-          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
             Technical
           </div>
           <LoadingDots label="Technical 分析讀取中" />
@@ -779,7 +780,7 @@ export function TechnicalLoadingPanel() {
           {Array.from({ length: 5 }).map((_, index) => (
             <div
               key={index}
-              className="omi-technical-loading-row flex items-start justify-between gap-4 border-t border-slate-100 py-2 first:border-t-0 first:pt-0"
+              className="omi-technical-loading-row flex items-start justify-between gap-4 border-t border-omi-border-subtle py-2 first:border-t-0 first:pt-0"
               aria-hidden="true"
             >
               <div className="min-w-0 flex-1 space-y-2">
@@ -794,7 +795,7 @@ export function TechnicalLoadingPanel() {
           ))}
         </div>
 
-        <div className="mt-3 border-t border-slate-200 pt-3">
+        <div className="mt-3 border-t border-omi-border-subtle pt-3">
           <div className="omi-technical-loading-row flex items-start justify-between gap-4 text-xs">
             <div className="space-y-2">
               <div className="omi-skeleton h-3 w-16" />
@@ -836,13 +837,13 @@ export function OvernightImpactPanel({
 
   if (loadState === "loading") {
     return (
-      <div className="mt-3 border-t border-slate-200 pt-3">
+      <div className="mt-3 border-t border-omi-border-subtle pt-3">
         <div className="flex items-center justify-between gap-3 text-xs">
           <div>
-            <div className="font-bold uppercase tracking-[0.14em] text-slate-500">
+            <div className="font-bold uppercase tracking-[0.14em] text-omi-text-muted">
               Overnight
             </div>
-            <div className="mt-1 text-slate-500">美股隔夜影響讀取中</div>
+            <div className="mt-1 text-omi-text-muted">美股隔夜影響讀取中</div>
           </div>
           <LoadingDots label="讀取中" />
         </div>
@@ -852,16 +853,16 @@ export function OvernightImpactPanel({
 
   if (!report) {
     return (
-      <div className="mt-3 border-t border-slate-200 pt-3">
+      <div className="mt-3 border-t border-omi-border-subtle pt-3">
         <div className="flex items-start justify-between gap-4 text-xs">
           <div>
-            <div className="font-bold uppercase tracking-[0.14em] text-slate-500">
+            <div className="font-bold uppercase tracking-[0.14em] text-omi-text-muted">
               Overnight
             </div>
-            <div className="mt-1 text-sm font-bold text-slate-950">美股隔夜資料不足</div>
-            <div className="mt-0.5 text-slate-500">暫不納入台股映射判斷</div>
+            <div className="mt-1 text-sm font-bold text-omi-text-strong">美股隔夜資料不足</div>
+            <div className="mt-0.5 text-omi-text-muted">暫不納入台股映射判斷</div>
           </div>
-          <div className="text-right font-bold text-slate-400">-</div>
+          <div className="text-right font-bold text-omi-text-subtle">-</div>
         </div>
       </div>
     );
@@ -887,14 +888,14 @@ export function OvernightImpactPanel({
   const hasWarning = report.warnings.length > 0 || report.confidence === "low";
 
   return (
-    <div className="mt-3 border-t border-slate-200 pt-3">
+    <div className="mt-3 border-t border-omi-border-subtle pt-3">
       <div className="omi-overnight-impact flex items-start justify-between gap-4 text-xs">
         <div className="min-w-0">
-          <div className="font-bold uppercase tracking-[0.14em] text-slate-500">
+          <div className="font-bold uppercase tracking-[0.14em] text-omi-text-muted">
             Overnight
           </div>
-          <div className="mt-0.5 text-sm font-bold text-slate-950">{report.title}</div>
-          <div className="mt-0.5 max-h-8 overflow-hidden leading-4 text-slate-500">{report.summary}</div>
+          <div className="mt-0.5 text-sm font-bold text-omi-text-strong">{report.title}</div>
+          <div className="mt-0.5 max-h-8 overflow-hidden leading-4 text-omi-text-muted">{report.summary}</div>
         </div>
         <div className={`shrink-0 text-right text-sm font-bold ${valueTone(report.weighted_change_pct)}`}>
           <PriceUpdatePulse
@@ -905,7 +906,7 @@ export function OvernightImpactPanel({
           >
             {formatPct(report.weighted_change_pct)}
           </PriceUpdatePulse>
-          <div className="text-xs font-medium text-slate-500">{overnightConfidenceLabel(report.confidence)}</div>
+          <div className="text-xs font-medium text-omi-text-muted">{overnightConfidenceLabel(report.confidence)}</div>
         </div>
       </div>
 
@@ -914,7 +915,7 @@ export function OvernightImpactPanel({
           {driverRows.map((item) => (
             <span
               key={item.key}
-              className="inline-flex items-center gap-1 bg-slate-50 px-2 py-1 text-xs font-semibold text-slate-600"
+              className="inline-flex items-center gap-1 bg-omi-surface-subtle px-2 py-1 text-xs font-semibold text-omi-text-muted"
             >
               <span>{item.label}</span>
               <span className={valueTone(item.value)}>{formatPct(item.value)}</span>
@@ -924,7 +925,7 @@ export function OvernightImpactPanel({
       ) : null}
 
       {hasWarning ? (
-        <div className="mt-2 text-[11px] leading-4 text-amber-700">
+        <div className="mt-2 text-[11px] leading-4 text-omi-warning">
           {report.as_of ? `資料日期 ${formatDate(report.as_of)}，` : ""}
           {report.warnings[0] ?? "資料完整度偏低，僅作參考"}
         </div>
@@ -960,23 +961,23 @@ export function IndexListPanel({
 }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="border-b border-slate-200 px-5 py-4">
-        <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+      <div className="border-b border-omi-border-subtle px-5 py-4">
+        <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
           Market
         </div>
         <div className="mt-2 flex items-end justify-between gap-4">
           <div>
-            <div className="text-xl font-bold text-slate-950">{marketLabel}指數列表</div>
+            <div className="text-xl font-bold text-omi-text-strong">{marketLabel}指數列表</div>
             {loadState === "loading" ? (
-              <div className="mt-1 inline-flex items-center gap-2 text-xs text-slate-500">
+              <div className="mt-1 inline-flex items-center gap-2 text-xs text-omi-text-muted">
                 讀取中
                 <LoadingDots label={`${marketLabel}指數列表讀取中`} />
               </div>
             ) : (
-              <div className="mt-1 text-xs text-slate-500">{`${items.length} 檔指數`}</div>
+              <div className="mt-1 text-xs text-omi-text-muted">{`${items.length} 檔指數`}</div>
             )}
           </div>
-          <div className="text-right text-xs font-semibold text-slate-500">
+          <div className="text-right text-xs font-semibold text-omi-text-muted">
             {marketLabel}
           </div>
         </div>
@@ -987,17 +988,17 @@ export function IndexListPanel({
           items.map((item) => (
             <div
               key={`${item.market}-${item.rank}-${item.name}`}
-              className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 border-t border-slate-100 py-2 text-sm first:border-t-0"
+              className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 border-t border-omi-border-subtle py-2 text-sm first:border-t-0"
             >
               <div className="min-w-0">
-                <div className="truncate font-semibold text-slate-900">
+                <div className="truncate font-semibold text-omi-text">
                   {item.rank}. {item.name}
                 </div>
-                <div className="mt-0.5 text-xs text-slate-500">
+                <div className="mt-0.5 text-xs text-omi-text-muted">
                   {item.trade_date ?? "-"}
                 </div>
               </div>
-              <div className="text-right font-semibold text-slate-950">
+              <div className="text-right font-semibold text-omi-text-strong">
                 {formatPrice(item.close)}
               </div>
               <div className={`min-w-20 text-right font-semibold ${valueTone(item.change_pct)}`}>
@@ -1011,7 +1012,7 @@ export function IndexListPanel({
             {Array.from({ length: 6 }).map((_, index) => (
               <div
                 key={index}
-                className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 border-t border-slate-100 py-2 first:border-t-0"
+                className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 border-t border-omi-border-subtle py-2 first:border-t-0"
               >
                 <div className="min-w-0 space-y-2">
                   <div className="omi-skeleton h-3.5 w-32" />
@@ -1023,7 +1024,7 @@ export function IndexListPanel({
             ))}
           </div>
         ) : (
-          <div className="py-10 text-center text-sm text-slate-500">
+          <div className="py-10 text-center text-sm text-omi-text-muted">
             尚無指數列表資料
           </div>
         )}
@@ -1069,20 +1070,20 @@ export function IndexDetailDataPanel({
   const estimatedTradeValue = index?.estimated_trade_value ?? tradeValue;
 
   return (
-    <section className="border border-slate-200 bg-white">
-      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
+    <section className="border border-omi-border-subtle bg-omi-surface">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-omi-border-subtle px-5 py-4">
         <div>
-          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
             Index Data
           </div>
-          <div className="mt-1 text-lg font-bold text-slate-950">指數詳細數據</div>
+          <div className="mt-1 text-lg font-bold text-omi-text-strong">指數詳細數據</div>
         </div>
-        <div className="text-right text-xs text-slate-500">
+        <div className="text-right text-xs text-omi-text-muted">
           更新 {formatDateTime(index?.as_of)}
         </div>
       </div>
 
-      <div className="grid gap-2 border-b border-slate-200 p-5 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-2 border-b border-omi-border-subtle p-5 sm:grid-cols-2 xl:grid-cols-4">
         <IndexMetricCard
           label="開盤"
           value={formatPrice(open)}
@@ -1101,30 +1102,30 @@ export function IndexDetailDataPanel({
         <IndexMetricCard label="參考" value={formatPrice(reference)} />
         <IndexMetricCard label="成交金額(億)" value={formatTradeValueYi(tradeValue)} />
         <IndexMetricCard label="估計金額(億)" value={formatTradeValueYi(estimatedTradeValue)} />
-        <IndexMetricCard label="上漲家" value={formatNumber(breadth?.advance_count)} tone="text-red-600" />
-        <IndexMetricCard label="下跌家" value={formatNumber(breadth?.decline_count)} tone="text-emerald-600" />
-        <IndexMetricCard label="漲停家" value={formatNumber(breadth?.limit_up_count)} tone="text-red-600" />
-        <IndexMetricCard label="跌停家" value={formatNumber(breadth?.limit_down_count)} tone="text-emerald-600" />
+        <IndexMetricCard label="上漲家" value={formatNumber(breadth?.advance_count)} tone="text-omi-market-up" />
+        <IndexMetricCard label="下跌家" value={formatNumber(breadth?.decline_count)} tone="text-omi-market-down" />
+        <IndexMetricCard label="漲停家" value={formatNumber(breadth?.limit_up_count)} tone="text-omi-market-up" />
+        <IndexMetricCard label="跌停家" value={formatNumber(breadth?.limit_down_count)} tone="text-omi-market-down" />
         <IndexMetricCard label="平盤家" value={formatNumber(breadth?.unchanged_count)} />
         <IndexMetricCard label="總家數" value={formatNumber(breadth?.total_count)} />
       </div>
 
-      <div className="border-b border-slate-200 px-5 py-4">
+      <div className="border-b border-omi-border-subtle px-5 py-4">
         <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
           <div>
-            <div className="text-xs font-bold text-slate-950">籌碼日報</div>
-            <div className="mt-0.5 text-xs text-slate-500">
+            <div className="text-xs font-bold text-omi-text-strong">籌碼日報</div>
+            <div className="mt-0.5 text-xs text-omi-text-muted">
               大盤期貨未平倉、法人買賣超與信用交易摘要
             </div>
           </div>
-          <div className="text-xs text-slate-500">
+          <div className="text-xs text-omi-text-muted">
             資料日 {marketChip?.trade_date ? formatDate(marketChip.trade_date) : "-"}
           </div>
         </div>
         {marketChipLoadState === "loading" ? (
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4" aria-hidden="true">
             {Array.from({ length: 8 }).map((_, index) => (
-              <div key={index} className="border border-slate-200 bg-slate-50 px-3 py-2">
+              <div key={index} className="border border-omi-border-subtle bg-omi-surface-subtle px-3 py-2">
                 <div className="omi-skeleton h-3 w-24" />
                 <div className="omi-skeleton mt-2 h-4 w-20" />
               </div>
@@ -1201,7 +1202,7 @@ export function IndexDetailDataPanel({
         loadState={contributionLoadState}
       />
 
-      <div className="px-5 py-3 text-xs text-slate-500">
+      <div className="px-5 py-3 text-xs text-omi-text-muted">
         {breadth?.source
           ? `市場廣度來源 ${breadth.source}；貢獻排行為估算值`
           : "市場廣度待資料更新"}
@@ -1213,15 +1214,15 @@ export function IndexDetailDataPanel({
 export function IndexMetricCard({
   label,
   value,
-  tone = "text-slate-900",
+  tone = "text-omi-text",
 }: {
   label: string;
   value: string;
   tone?: string;
 }) {
   return (
-    <div className="border border-slate-200 bg-slate-50 px-3 py-2">
-      <div className="text-xs font-semibold text-slate-500">{label}</div>
+    <div className="border border-omi-border-subtle bg-omi-surface-subtle px-3 py-2">
+      <div className="text-xs font-semibold text-omi-text-muted">{label}</div>
       <div className={`mt-1 text-base font-bold ${tone}`}>{value}</div>
     </div>
   );
@@ -1238,35 +1239,35 @@ export function ContributionColumn({
 }) {
   return (
     <div className="min-w-0">
-      <div className="mb-2 text-xs font-bold uppercase tracking-[0.14em] text-slate-500">
+      <div className="mb-2 text-xs font-bold uppercase tracking-[0.14em] text-omi-text-muted">
         {title}
       </div>
-      <div className="overflow-hidden border border-slate-200">
+      <div className="overflow-hidden border border-omi-border-subtle">
         {items.length > 0 ? (
           items.map((item) => (
             <div
               key={`${title}-${item.stock_id}`}
-              className="grid grid-cols-[34px_minmax(0,1fr)_82px_88px] items-center border-b border-slate-100 px-3 py-2 text-xs last:border-b-0"
+              className="grid grid-cols-[34px_minmax(0,1fr)_82px_88px] items-center border-b border-omi-border-subtle px-3 py-2 text-xs last:border-b-0"
             >
-              <div className="text-slate-500">#{item.rank}</div>
+              <div className="text-omi-text-muted">#{item.rank}</div>
               <div className="min-w-0">
-                <div className="truncate font-semibold text-slate-950">
+                <div className="truncate font-semibold text-omi-text-strong">
                   {item.stock_id} {item.stock_name ?? ""}
                 </div>
-                <div className="mt-0.5 text-slate-500">
+                <div className="mt-0.5 text-omi-text-muted">
                   {formatPrice(item.close)} / {formatPct(item.change_pct)}
                 </div>
               </div>
               <div className={`text-right font-bold ${tone}`}>
                 {formatContributionPoint(item.contribution_points)}
               </div>
-              <div className="text-right text-slate-600">
+              <div className="text-right text-omi-text-muted">
                 {formatTradeValueYi(item.trade_value)}
               </div>
             </div>
           ))
         ) : (
-          <div className="px-3 py-8 text-center text-sm text-slate-500">尚無資料</div>
+          <div className="px-3 py-8 text-center text-sm text-omi-text-muted">尚無資料</div>
         )}
       </div>
     </div>
@@ -1281,15 +1282,15 @@ export function IndexContributionRanking({
   loadState: LoadState;
 }) {
   return (
-    <div className="border-b border-slate-200 px-5 py-4">
+    <div className="border-b border-omi-border-subtle px-5 py-4">
       <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
         <div>
-          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
             Contribution
           </div>
-          <div className="mt-1 text-base font-bold text-slate-950">個股貢獻排行</div>
+          <div className="mt-1 text-base font-bold text-omi-text-strong">個股貢獻排行</div>
         </div>
-        <div className="text-right text-xs text-slate-500">
+        <div className="text-right text-xs text-omi-text-muted">
           {loadState === "loading"
             ? "讀取中"
             : contributions?.trade_date
@@ -1302,12 +1303,12 @@ export function IndexContributionRanking({
         <ContributionColumn
           title="正貢獻"
           items={contributions?.positive ?? []}
-          tone="text-red-600"
+          tone="text-omi-market-up"
         />
         <ContributionColumn
           title="負貢獻"
           items={contributions?.negative ?? []}
-          tone="text-emerald-600"
+          tone="text-omi-market-down"
         />
       </div>
     </div>
@@ -1317,15 +1318,15 @@ export function IndexContributionRanking({
 export function MetricRow({
   label,
   value,
-  tone = "text-slate-900",
+  tone = "text-omi-text",
 }: {
   label: string;
   value: string;
   tone?: string;
 }) {
   return (
-    <div className="flex items-center justify-between gap-4 border-t border-slate-100 py-2 text-xs">
-      <span className="text-slate-500">{label}</span>
+    <div className="flex items-center justify-between gap-4 border-t border-omi-border-subtle py-2 text-xs">
+      <span className="text-omi-text-muted">{label}</span>
       <span className={`font-semibold ${tone}`}>{value}</span>
     </div>
   );
@@ -1339,8 +1340,8 @@ export function ChipMetricBlock({
   children: ReactNode;
 }) {
   return (
-    <div className="border border-slate-200 bg-white px-3 py-2">
-      <div className="text-xs font-bold text-slate-900">{title}</div>
+    <div className="border border-omi-border-subtle bg-omi-surface px-3 py-2">
+      <div className="text-xs font-bold text-omi-text">{title}</div>
       <div className="mt-1">{children}</div>
     </div>
   );
@@ -1415,10 +1416,10 @@ export function DataTabButton({
       type="button"
       onClick={onClick}
       className={[
-        "omi-data-tab flex h-11 min-w-0 flex-1 items-center justify-center gap-2 border-r border-slate-200 text-sm font-semibold transition last:border-r-0",
+        "omi-data-tab flex h-11 min-w-0 flex-1 items-center justify-center gap-2 border-r border-omi-border-subtle text-sm font-semibold transition last:border-r-0",
         active
-          ? "omi-data-tab-active bg-white text-slate-950"
-          : "bg-slate-50 text-slate-500 hover:bg-white hover:text-slate-900",
+          ? "omi-data-tab-active bg-omi-surface text-omi-text-strong"
+          : "bg-omi-surface-subtle text-omi-text-muted hover:bg-omi-surface hover:text-omi-text",
       ].join(" ")}
     >
       <DataTabIcon type={tab.key} />
@@ -1429,7 +1430,7 @@ export function DataTabButton({
 
 export function EmptyDataState({ message }: { message: string }) {
   return (
-    <div className="border border-dashed border-slate-200 px-4 py-8 text-center text-sm text-slate-500">
+    <div className="border border-dashed border-omi-border-subtle px-4 py-8 text-center text-sm text-omi-text-muted">
       {message}
     </div>
   );
@@ -1437,14 +1438,14 @@ export function EmptyDataState({ message }: { message: string }) {
 
 export function DataPanelLoadingState({ message }: { message: string }) {
   return (
-    <div className="omi-tab-panel border border-slate-200 bg-white px-4 py-5">
+    <div className="omi-tab-panel border border-omi-border-subtle bg-omi-surface px-4 py-5">
       <div className="mb-4 flex items-center justify-between gap-4">
-        <div className="inline-flex min-w-0 items-center gap-2 text-sm font-semibold text-slate-700">
+        <div className="inline-flex min-w-0 items-center gap-2 text-sm font-semibold text-omi-text">
           <span className="truncate">{message}</span>
           <LoadingDots label={message} />
         </div>
-        <div className="h-1.5 w-20 overflow-hidden bg-slate-100">
-          <div className="omi-loading-bar h-full w-1/2 bg-slate-900" />
+        <div className="h-1.5 w-20 overflow-hidden bg-omi-surface-muted">
+          <div className="omi-loading-bar h-full w-1/2 bg-omi-control" />
         </div>
       </div>
       <div className="space-y-3">
@@ -1463,11 +1464,11 @@ export function DataPanelLoadingState({ message }: { message: string }) {
 export function DataPanelRefreshRail({ message }: { message: string | null }) {
   return (
     <div className="pointer-events-none absolute inset-x-0 top-0 z-10">
-      <div className="h-0.5 overflow-hidden bg-slate-100">
-        <div className="omi-loading-bar h-full w-1/3 bg-red-700" />
+      <div className="h-0.5 overflow-hidden bg-omi-surface-muted">
+        <div className="omi-loading-bar h-full w-1/3 bg-omi-accent" />
       </div>
       {message ? (
-        <div className="absolute right-0 top-2 max-w-[70%] truncate bg-white/90 px-2 py-1 text-[11px] font-medium text-slate-500 shadow-sm ring-1 ring-slate-200">
+        <div className="absolute right-0 top-2 max-w-[70%] truncate bg-omi-surface/90 px-2 py-1 text-[11px] font-medium text-omi-text-muted shadow-sm ring-1 ring-slate-200">
           {message}
         </div>
       ) : null}
@@ -1490,25 +1491,25 @@ export function SegmentedNumberButtons({
 }) {
   return (
     <div className="flex items-center gap-2 text-xs">
-      <span className="w-24 shrink-0 text-right font-semibold text-slate-600">{label}</span>
-      <div className="grid flex-1 grid-cols-6 overflow-hidden border border-slate-400">
+      <span className="w-24 shrink-0 text-right font-semibold text-omi-text-muted">{label}</span>
+      <div className="grid flex-1 grid-cols-6 overflow-hidden border border-omi-border-strong">
         {options.map((option) => (
           <button
             key={option}
             type="button"
             onClick={() => onChange(option)}
             className={[
-              "h-7 border-r border-slate-400 text-xs font-semibold last:border-r-0",
+              "h-7 border-r border-omi-border-strong text-xs font-semibold last:border-r-0",
               value === option
-                ? "bg-slate-700 text-white"
-                : "bg-white text-slate-700 hover:bg-slate-50",
+                ? "bg-omi-control-border text-omi-text-inverse"
+                : "bg-omi-surface text-omi-text hover:bg-omi-surface-subtle",
             ].join(" ")}
           >
             {option}
           </button>
         ))}
       </div>
-      <span className="w-4 shrink-0 text-slate-500">{suffix}</span>
+      <span className="w-4 shrink-0 text-omi-text-muted">{suffix}</span>
     </div>
   );
 }
@@ -1855,14 +1856,14 @@ export function RevenueTrendChart({
   const hoverTipY = tooltipY(hoverGrowthY ?? hoverRevenueY ?? top + height / 2, hoverTipHeight, top, height);
 
   return (
-    <div className="border border-slate-200 bg-white px-4 py-5">
+    <div className="border border-omi-border-subtle bg-omi-surface px-4 py-5">
       <div className="mb-3 flex items-center justify-center gap-4 text-xs">
-        <span className="inline-flex items-center gap-1 text-slate-600">
-          <span className="h-3 w-5 rounded-sm bg-orange-300" />
+        <span className="inline-flex items-center gap-1 text-omi-text-muted">
+          <span className="h-3 w-5 rounded-sm bg-omi-heat-border" />
           {view === "monthly" ? "單月營收(億)" : view === "quarterly" ? "單季營收(億)" : "年度營收(億)"}
         </span>
-        <span className="inline-flex items-center gap-1 text-slate-600">
-          <span className="h-2 w-2 rounded-full border-2 border-red-400" />
+        <span className="inline-flex items-center gap-1 text-omi-text-muted">
+          <span className="h-2 w-2 rounded-full border-2 border-omi-market-up-border" />
           年增(%)
         </span>
       </div>
@@ -1878,12 +1879,12 @@ export function RevenueTrendChart({
       >
         {[0, 1, 2, 3].map((tick) => {
           const y = top + (tick / 3) * height;
-          return <line key={tick} x1={left} x2={left + width} y1={y} y2={y} stroke="#e2e8f0" />;
+          return <line key={tick} x1={left} x2={left + width} y1={y} y2={y} stroke={omiChartColors.grid} />;
         })}
-        <text x={left} y={20} className="fill-slate-500 text-[10px]">
+        <text x={left} y={20} className="fill-omi-text-muted text-[10px]">
           營收(億)
         </text>
-        <text x={left + width + right} y={20} textAnchor="end" className="fill-slate-500 text-[10px]">
+        <text x={left + width + right} y={20} textAnchor="end" className="fill-omi-text-muted text-[10px]">
           年增(%)
         </text>
         {chartPoints.map((point, index) => {
@@ -1898,36 +1899,36 @@ export function RevenueTrendChart({
               y={y}
               width={barWidth}
               height={top + height - y}
-              fill="#fdba74"
+              fill={omiChartColors.heatMuted}
               opacity="0.76"
             />
           );
         })}
         {growthPath ? (
-          <path d={growthPath} fill="none" stroke="#ff5b5b" strokeWidth="2.4" strokeLinecap="round" />
+          <path d={growthPath} fill="none" stroke={omiChartColors.growth} strokeWidth="2.4" strokeLinecap="round" />
         ) : null}
         {chartPoints.map((point, index) => {
           if (point.growthPct === null || point.growthPct === undefined) return null;
           const x = chartX(index, chartPoints.length, left, width);
           const y = chartY(point.growthPct, lineScale.min, lineScale.max, top, height);
-          return <circle key={`${point.period}-growth`} cx={x} cy={y} r={3} fill="white" stroke="#ff5b5b" strokeWidth="2" />;
+          return <circle key={`${point.period}-growth`} cx={x} cy={y} r={3} fill={omiChartColors.surface} stroke={omiChartColors.growth} strokeWidth="2" />;
         })}
-        <text x={left - 4} y={top + 4} textAnchor="end" className="fill-slate-500 text-[10px]">
+        <text x={left - 4} y={top + 4} textAnchor="end" className="fill-omi-text-muted text-[10px]">
           {formatRevenueYiValue(revenueScale.max)}
         </text>
-        <text x={left - 4} y={top + height} textAnchor="end" className="fill-slate-500 text-[10px]">
+        <text x={left - 4} y={top + height} textAnchor="end" className="fill-omi-text-muted text-[10px]">
           {formatRevenueYiValue(revenueScale.min)}
         </text>
-        <text x={left + width + 4} y={top + 4} className="fill-slate-500 text-[10px]">
+        <text x={left + width + 4} y={top + 4} className="fill-omi-text-muted text-[10px]">
           {formatPct(lineScale.max)}
         </text>
-        <text x={left + width + 4} y={top + height} className="fill-slate-500 text-[10px]">
+        <text x={left + width + 4} y={top + height} className="fill-omi-text-muted text-[10px]">
           {formatPct(lineScale.min)}
         </text>
-        <text x={left} y={top + height + 28} className="fill-slate-500 text-[10px]">
+        <text x={left} y={top + height + 28} className="fill-omi-text-muted text-[10px]">
           {chartPoints[0]?.label}
         </text>
-        <text x={left + width} y={top + height + 28} textAnchor="end" className="fill-slate-500 text-[10px]">
+        <text x={left + width} y={top + height + 28} textAnchor="end" className="fill-omi-text-muted text-[10px]">
           {chartPoints[chartPoints.length - 1]?.label}
         </text>
         {hoverPoint && hoverX !== null ? (
@@ -1937,33 +1938,33 @@ export function RevenueTrendChart({
               x2={hoverX}
               y1={top}
               y2={top + height}
-              stroke="#94a3b8"
+              stroke={omiChartColors.crosshair}
               strokeDasharray="4 4"
             />
-            <rect x={hoverX - 34} y={top + height + 34} width={68} height={22} rx={3} fill="#6b7280" />
-            <text x={hoverX} y={top + height + 49} textAnchor="middle" className="fill-white text-[11px] font-semibold">
+            <rect x={hoverX - 34} y={top + height + 34} width={68} height={22} rx={3} fill={omiChartColors.tooltip} />
+            <text x={hoverX} y={top + height + 49} textAnchor="middle" className="fill-omi-surface text-[11px] font-semibold">
               {hoverPoint.label}
             </text>
             <g transform={`translate(${hoverTipX} ${hoverTipY})`}>
-              <rect width={hoverTipWidth} height={hoverTipHeight} rx={4} fill="white" stroke="#cbd5e1" />
-              <text x={12} y={20} className="fill-slate-500 text-[12px] font-semibold">
+              <rect width={hoverTipWidth} height={hoverTipHeight} rx={4} fill={omiChartColors.surface} stroke={omiChartColors.tooltipBorder} />
+              <text x={12} y={20} className="fill-omi-text-muted text-[12px] font-semibold">
                 {hoverPoint.label}
               </text>
-              <rect x={12} y={34} width={10} height={10} fill="#fdba74" />
-              <text x={30} y={43} className="fill-slate-600 text-[12px]">
+              <rect x={12} y={34} width={10} height={10} fill={omiChartColors.heatMuted} />
+              <text x={30} y={43} className="fill-omi-text-muted text-[12px]">
                 營收(億)
               </text>
-              <text x={hoverTipWidth - 12} y={43} textAnchor="end" className="fill-slate-900 text-[12px] font-semibold">
+              <text x={hoverTipWidth - 12} y={43} textAnchor="end" className="fill-omi-text text-[12px] font-semibold">
                 {formatRevenueYiValue(hoverPoint.revenue)}
               </text>
-              <circle cx={17} cy={62} r={4} fill="#ff5b5b" />
-              <text x={30} y={66} className="fill-slate-600 text-[12px]">
+              <circle cx={17} cy={62} r={4} fill={omiChartColors.growth} />
+              <text x={30} y={66} className="fill-omi-text-muted text-[12px]">
                 年增
               </text>
               <text x={hoverTipWidth - 12} y={66} textAnchor="end" className={`text-[12px] font-semibold ${valueTone(hoverPoint.growthPct).replace("text-", "fill-")}`}>
                 {formatPct(hoverPoint.growthPct)}
               </text>
-              <text x={30} y={86} className="fill-slate-500 text-[11px]">
+              <text x={30} y={86} className="fill-omi-text-muted text-[11px]">
                 月數 {hoverPoint.monthCount}
               </text>
             </g>
@@ -2026,14 +2027,14 @@ export function EarningsTrendChart({
   const hoverTipY = tooltipY(hoverGrowthY ?? hoverEpsY ?? top + height / 2, hoverTipHeight, top, height);
 
   return (
-    <div className="border border-slate-200 bg-white px-4 py-5">
+    <div className="border border-omi-border-subtle bg-omi-surface px-4 py-5">
       <div className="mb-3 flex items-center justify-center gap-4 text-xs">
-        <span className="inline-flex items-center gap-1 text-slate-600">
-          <span className="h-3 w-5 rounded-sm bg-orange-300" />
+        <span className="inline-flex items-center gap-1 text-omi-text-muted">
+          <span className="h-3 w-5 rounded-sm bg-omi-heat-border" />
           {view === "quarterly" ? "每股盈餘" : "年度EPS"}
         </span>
-        <span className="inline-flex items-center gap-1 text-slate-600">
-          <span className="h-2 w-2 rounded-full border-2 border-red-400" />
+        <span className="inline-flex items-center gap-1 text-omi-text-muted">
+          <span className="h-2 w-2 rounded-full border-2 border-omi-market-up-border" />
           年增(%)
         </span>
       </div>
@@ -2049,12 +2050,12 @@ export function EarningsTrendChart({
       >
         {[0, 1, 2, 3].map((tick) => {
           const y = top + (tick / 3) * height;
-          return <line key={tick} x1={left} x2={left + width} y1={y} y2={y} stroke="#e2e8f0" />;
+          return <line key={tick} x1={left} x2={left + width} y1={y} y2={y} stroke={omiChartColors.grid} />;
         })}
-        <text x={left} y={20} className="fill-slate-500 text-[10px]">
+        <text x={left} y={20} className="fill-omi-text-muted text-[10px]">
           EPS(元)
         </text>
-        <text x={left + width + right} y={20} textAnchor="end" className="fill-slate-500 text-[10px]">
+        <text x={left + width + right} y={20} textAnchor="end" className="fill-omi-text-muted text-[10px]">
           年增(%)
         </text>
         {chartPoints.map((point, index) => {
@@ -2069,36 +2070,36 @@ export function EarningsTrendChart({
               y={y}
               width={barWidth}
               height={top + height - y}
-              fill="#fdba74"
+              fill={omiChartColors.heatMuted}
               opacity="0.78"
             />
           );
         })}
         {growthPath ? (
-          <path d={growthPath} fill="none" stroke="#ff5b5b" strokeWidth="2.4" strokeLinecap="round" />
+          <path d={growthPath} fill="none" stroke={omiChartColors.growth} strokeWidth="2.4" strokeLinecap="round" />
         ) : null}
         {chartPoints.map((point, index) => {
           if (point.growthPct === null || point.growthPct === undefined) return null;
           const x = chartX(index, chartPoints.length, left, width);
           const y = chartY(point.growthPct, lineScale.min, lineScale.max, top, height);
-          return <circle key={`${point.period}-growth`} cx={x} cy={y} r={3} fill="white" stroke="#ff5b5b" strokeWidth="2" />;
+          return <circle key={`${point.period}-growth`} cx={x} cy={y} r={3} fill={omiChartColors.surface} stroke={omiChartColors.growth} strokeWidth="2" />;
         })}
-        <text x={left - 4} y={top + 4} textAnchor="end" className="fill-slate-500 text-[10px]">
+        <text x={left - 4} y={top + 4} textAnchor="end" className="fill-omi-text-muted text-[10px]">
           {formatPrice(epsScale.max)}
         </text>
-        <text x={left - 4} y={top + height} textAnchor="end" className="fill-slate-500 text-[10px]">
+        <text x={left - 4} y={top + height} textAnchor="end" className="fill-omi-text-muted text-[10px]">
           {formatPrice(epsScale.min)}
         </text>
-        <text x={left + width + 4} y={top + 4} className="fill-slate-500 text-[10px]">
+        <text x={left + width + 4} y={top + 4} className="fill-omi-text-muted text-[10px]">
           {formatPct(lineScale.max)}
         </text>
-        <text x={left + width + 4} y={top + height} className="fill-slate-500 text-[10px]">
+        <text x={left + width + 4} y={top + height} className="fill-omi-text-muted text-[10px]">
           {formatPct(lineScale.min)}
         </text>
-        <text x={left} y={top + height + 28} className="fill-slate-500 text-[10px]">
+        <text x={left} y={top + height + 28} className="fill-omi-text-muted text-[10px]">
           {chartPoints[0]?.label}
         </text>
-        <text x={left + width} y={top + height + 28} textAnchor="end" className="fill-slate-500 text-[10px]">
+        <text x={left + width} y={top + height + 28} textAnchor="end" className="fill-omi-text-muted text-[10px]">
           {chartPoints[chartPoints.length - 1]?.label}
         </text>
         {hoverPoint && hoverX !== null ? (
@@ -2108,36 +2109,36 @@ export function EarningsTrendChart({
               x2={hoverX}
               y1={top}
               y2={top + height}
-              stroke="#94a3b8"
+              stroke={omiChartColors.crosshair}
               strokeDasharray="4 4"
             />
-            <rect x={hoverX - 34} y={top + height + 34} width={68} height={22} rx={3} fill="#6b7280" />
-            <text x={hoverX} y={top + height + 49} textAnchor="middle" className="fill-white text-[11px] font-semibold">
+            <rect x={hoverX - 34} y={top + height + 34} width={68} height={22} rx={3} fill={omiChartColors.tooltip} />
+            <text x={hoverX} y={top + height + 49} textAnchor="middle" className="fill-omi-surface text-[11px] font-semibold">
               {hoverPoint.label}
             </text>
             <g transform={`translate(${hoverTipX} ${hoverTipY})`}>
-              <rect width={hoverTipWidth} height={hoverTipHeight} rx={4} fill="white" stroke="#cbd5e1" />
-              <text x={12} y={20} className="fill-slate-500 text-[12px] font-semibold">
+              <rect width={hoverTipWidth} height={hoverTipHeight} rx={4} fill={omiChartColors.surface} stroke={omiChartColors.tooltipBorder} />
+              <text x={12} y={20} className="fill-omi-text-muted text-[12px] font-semibold">
                 {hoverPoint.label}
               </text>
-              <rect x={12} y={34} width={10} height={10} fill="#fdba74" />
-              <text x={30} y={43} className="fill-slate-600 text-[12px]">
+              <rect x={12} y={34} width={10} height={10} fill={omiChartColors.heatMuted} />
+              <text x={30} y={43} className="fill-omi-text-muted text-[12px]">
                 EPS
               </text>
-              <text x={hoverTipWidth - 12} y={43} textAnchor="end" className="fill-slate-900 text-[12px] font-semibold">
+              <text x={hoverTipWidth - 12} y={43} textAnchor="end" className="fill-omi-text text-[12px] font-semibold">
                 {formatPrice(hoverPoint.eps)}
               </text>
-              <circle cx={17} cy={62} r={4} fill="#ff5b5b" />
-              <text x={30} y={66} className="fill-slate-600 text-[12px]">
+              <circle cx={17} cy={62} r={4} fill={omiChartColors.growth} />
+              <text x={30} y={66} className="fill-omi-text-muted text-[12px]">
                 年增
               </text>
               <text x={hoverTipWidth - 12} y={66} textAnchor="end" className={`text-[12px] font-semibold ${valueTone(hoverPoint.growthPct).replace("text-", "fill-")}`}>
                 {formatPct(hoverPoint.growthPct)}
               </text>
-              <text x={30} y={86} className="fill-slate-500 text-[11px]">
+              <text x={30} y={86} className="fill-omi-text-muted text-[11px]">
                 ROE {formatRatioPct(hoverPoint.roe)}
               </text>
-              <text x={hoverTipWidth - 12} y={86} textAnchor="end" className="fill-slate-500 text-[11px]">
+              <text x={hoverTipWidth - 12} y={86} textAnchor="end" className="fill-omi-text-muted text-[11px]">
                 ROA {formatRatioPct(hoverPoint.roa)}
               </text>
             </g>
@@ -2189,14 +2190,14 @@ export function ShareholdingMixedChart({ points }: { points: ShareholdingSeriesP
   const hoverTipY = tooltipY(hoverPrimaryY, hoverTipHeight, top, height);
 
   return (
-    <div className="border border-slate-200 bg-white px-4 py-5">
+    <div className="border border-omi-border-subtle bg-omi-surface px-4 py-5">
       <div className="mb-3 flex items-center justify-center gap-4 text-xs">
-        <span className="inline-flex items-center gap-1 text-slate-600">
-          <span className="h-3 w-5 rounded-sm bg-orange-300" />
+        <span className="inline-flex items-center gap-1 text-omi-text-muted">
+          <span className="h-3 w-5 rounded-sm bg-omi-heat-border" />
           大股東持股(%)
         </span>
-        <span className="inline-flex items-center gap-1 text-slate-600">
-          <span className="h-2 w-2 rounded-full border-2 border-red-400" />
+        <span className="inline-flex items-center gap-1 text-omi-text-muted">
+          <span className="h-2 w-2 rounded-full border-2 border-omi-market-up-border" />
           收盤價
         </span>
       </div>
@@ -2211,12 +2212,12 @@ export function ShareholdingMixedChart({ points }: { points: ShareholdingSeriesP
       >
         {[0, 1, 2, 3].map((tick) => {
           const y = top + (tick / 3) * height;
-          return <line key={tick} x1={left} x2={left + width} y1={y} y2={y} stroke="#e2e8f0" />;
+          return <line key={tick} x1={left} x2={left + width} y1={y} y2={y} stroke={omiChartColors.grid} />;
         })}
-        <text x={left} y={18} className="fill-slate-500 text-[10px]">
+        <text x={left} y={18} className="fill-omi-text-muted text-[10px]">
           大股東持股(%)
         </text>
-        <text x={left + width + right} y={18} textAnchor="end" className="fill-slate-500 text-[10px]">
+        <text x={left + width + right} y={18} textAnchor="end" className="fill-omi-text-muted text-[10px]">
           收盤價
         </text>
         {points.map((point, index) => {
@@ -2230,34 +2231,34 @@ export function ShareholdingMixedChart({ points }: { points: ShareholdingSeriesP
               y={y}
               width={barWidth}
               height={top + height - y}
-              fill="#fdba74"
+              fill={omiChartColors.heatMuted}
               opacity="0.72"
             />
           );
         })}
         {closePath ? (
-          <path d={closePath} fill="none" stroke="#ff5b5b" strokeWidth="2" strokeLinecap="round" />
+          <path d={closePath} fill="none" stroke={omiChartColors.growth} strokeWidth="2" strokeLinecap="round" />
         ) : null}
-        <text x={left - 4} y={top + 4} textAnchor="end" className="fill-slate-500 text-[10px]">
+        <text x={left - 4} y={top + 4} textAnchor="end" className="fill-omi-text-muted text-[10px]">
           {largeScale.max.toFixed(2)}
         </text>
-        <text x={left - 4} y={top + height} textAnchor="end" className="fill-slate-500 text-[10px]">
+        <text x={left - 4} y={top + height} textAnchor="end" className="fill-omi-text-muted text-[10px]">
           {largeScale.min.toFixed(2)}
         </text>
         {closeScale ? (
           <>
-            <text x={left + width + 4} y={top + 4} className="fill-slate-500 text-[10px]">
+            <text x={left + width + 4} y={top + 4} className="fill-omi-text-muted text-[10px]">
               {formatPrice(closeScale.max)}
             </text>
-            <text x={left + width + 4} y={top + height} className="fill-slate-500 text-[10px]">
+            <text x={left + width + 4} y={top + height} className="fill-omi-text-muted text-[10px]">
               {formatPrice(closeScale.min)}
             </text>
           </>
         ) : null}
-        <text x={left} y={top + height + 24} className="fill-slate-500 text-[10px]">
+        <text x={left} y={top + height + 24} className="fill-omi-text-muted text-[10px]">
           {formatCompactDate(points[0]?.date)}
         </text>
-        <text x={left + width} y={top + height + 24} textAnchor="end" className="fill-slate-500 text-[10px]">
+        <text x={left + width} y={top + height + 24} textAnchor="end" className="fill-omi-text-muted text-[10px]">
           {formatCompactDate(points[points.length - 1]?.date)}
         </text>
         {hoverPoint && hoverX !== null ? (
@@ -2267,17 +2268,17 @@ export function ShareholdingMixedChart({ points }: { points: ShareholdingSeriesP
               x2={hoverX}
               y1={top}
               y2={top + height}
-              stroke="#94a3b8"
+              stroke={omiChartColors.crosshair}
               strokeDasharray="4 4"
             />
             {hoverLargeY !== null ? (
               <g>
-                <rect x={8} y={hoverLargeY - 12} width={48} height={22} rx={3} fill="#6b7280" />
+                <rect x={8} y={hoverLargeY - 12} width={48} height={22} rx={3} fill={omiChartColors.tooltip} />
                 <text
                   x={32}
                   y={hoverLargeY + 3}
                   textAnchor="middle"
-                  className="fill-white text-[11px] font-semibold"
+                  className="fill-omi-surface text-[11px] font-semibold"
                 >
                   {formatPrice(hoverPoint.largeRatio)}
                 </text>
@@ -2286,7 +2287,7 @@ export function ShareholdingMixedChart({ points }: { points: ShareholdingSeriesP
                   x2={left + width}
                   y1={hoverLargeY}
                   y2={hoverLargeY}
-                  stroke="#94a3b8"
+                  stroke={omiChartColors.crosshair}
                   strokeDasharray="4 4"
                 />
               </g>
@@ -2299,44 +2300,44 @@ export function ShareholdingMixedChart({ points }: { points: ShareholdingSeriesP
                   width={50}
                   height={22}
                   rx={3}
-                  fill="#6b7280"
+                  fill={omiChartColors.tooltip}
                 />
                 <text
                   x={viewWidth - 33}
                   y={hoverCloseY + 3}
                   textAnchor="middle"
-                  className="fill-white text-[11px] font-semibold"
+                  className="fill-omi-surface text-[11px] font-semibold"
                 >
                   {formatPrice(hoverPoint.close)}
                 </text>
               </g>
             ) : null}
-            <rect x={hoverX - 34} y={top + height + 28} width={68} height={22} rx={3} fill="#6b7280" />
+            <rect x={hoverX - 34} y={top + height + 28} width={68} height={22} rx={3} fill={omiChartColors.tooltip} />
             <text
               x={hoverX}
               y={top + height + 43}
               textAnchor="middle"
-              className="fill-white text-[11px] font-semibold"
+              className="fill-omi-surface text-[11px] font-semibold"
             >
               {formatCompactDate(hoverPoint.date)}
             </text>
             <g transform={`translate(${hoverTipX} ${hoverTipY})`}>
-              <rect width={hoverTipWidth} height={hoverTipHeight} rx={4} fill="white" stroke="#cbd5e1" />
-              <text x={12} y={20} className="fill-slate-500 text-[12px] font-semibold">
+              <rect width={hoverTipWidth} height={hoverTipHeight} rx={4} fill={omiChartColors.surface} stroke={omiChartColors.tooltipBorder} />
+              <text x={12} y={20} className="fill-omi-text-muted text-[12px] font-semibold">
                 {formatCompactDate(hoverPoint.date)}
               </text>
-              <circle cx={16} cy={40} r={4} fill="#fdba74" />
-              <text x={28} y={44} className="fill-slate-600 text-[12px]">
+              <circle cx={16} cy={40} r={4} fill={omiChartColors.heatMuted} />
+              <text x={28} y={44} className="fill-omi-text-muted text-[12px]">
                 大股東持股(%)
               </text>
-              <text x={hoverTipWidth - 12} y={44} textAnchor="end" className="fill-slate-900 text-[12px] font-semibold">
+              <text x={hoverTipWidth - 12} y={44} textAnchor="end" className="fill-omi-text text-[12px] font-semibold">
                 {formatPrice(hoverPoint.largeRatio)}
               </text>
-              <circle cx={16} cy={62} r={4} fill="#ff5b5b" />
-              <text x={28} y={66} className="fill-slate-600 text-[12px]">
+              <circle cx={16} cy={62} r={4} fill={omiChartColors.growth} />
+              <text x={28} y={66} className="fill-omi-text-muted text-[12px]">
                 收盤價
               </text>
-              <text x={hoverTipWidth - 12} y={66} textAnchor="end" className="fill-slate-900 text-[12px] font-semibold">
+              <text x={hoverTipWidth - 12} y={66} textAnchor="end" className="fill-omi-text text-[12px] font-semibold">
                 {formatPrice(hoverPoint.close)}
               </text>
             </g>
@@ -2391,14 +2392,14 @@ export function ShareholdingRatioChart({ points }: { points: ShareholdingSeriesP
   const hoverTipY = tooltipY(hoverPrimaryY, hoverTipHeight, top, height);
 
   return (
-    <div className="border border-slate-200 bg-white px-4 py-5">
+    <div className="border border-omi-border-subtle bg-omi-surface px-4 py-5">
       <div className="mb-3 flex items-center justify-center gap-4 text-xs">
-        <span className="inline-flex items-center gap-1 text-slate-600">
-          <span className="h-2 w-2 rounded-full border-2 border-orange-300" />
+        <span className="inline-flex items-center gap-1 text-omi-text-muted">
+          <span className="h-2 w-2 rounded-full border-2 border-omi-heat-border" />
           大股東持股(%)
         </span>
-        <span className="inline-flex items-center gap-1 text-slate-600">
-          <span className="h-2 w-2 rounded-full border-2 border-red-400" />
+        <span className="inline-flex items-center gap-1 text-omi-text-muted">
+          <span className="h-2 w-2 rounded-full border-2 border-omi-market-up-border" />
           小股東持股(%)
         </span>
       </div>
@@ -2413,32 +2414,32 @@ export function ShareholdingRatioChart({ points }: { points: ShareholdingSeriesP
       >
         {[0, 1, 2, 3].map((tick) => {
           const y = top + (tick / 3) * height;
-          return <line key={tick} x1={left} x2={left + width} y1={y} y2={y} stroke="#e2e8f0" />;
+          return <line key={tick} x1={left} x2={left + width} y1={y} y2={y} stroke={omiChartColors.grid} />;
         })}
-        <path d={largePath} fill="none" stroke="#fdba74" strokeWidth="2" strokeLinecap="round" />
-        <path d={smallPath} fill="none" stroke="#ff5b5b" strokeWidth="2" strokeLinecap="round" />
-        <text x={left} y={18} className="fill-slate-500 text-[10px]">
+        <path d={largePath} fill="none" stroke={omiChartColors.heatMuted} strokeWidth="2" strokeLinecap="round" />
+        <path d={smallPath} fill="none" stroke={omiChartColors.growth} strokeWidth="2" strokeLinecap="round" />
+        <text x={left} y={18} className="fill-omi-text-muted text-[10px]">
           大股東持股(%)
         </text>
-        <text x={left + width + right} y={18} textAnchor="end" className="fill-slate-500 text-[10px]">
+        <text x={left + width + right} y={18} textAnchor="end" className="fill-omi-text-muted text-[10px]">
           小股東持股(%)
         </text>
-        <text x={left - 4} y={top + 4} textAnchor="end" className="fill-slate-500 text-[10px]">
+        <text x={left - 4} y={top + 4} textAnchor="end" className="fill-omi-text-muted text-[10px]">
           {largeScale.max.toFixed(2)}
         </text>
-        <text x={left - 4} y={top + height} textAnchor="end" className="fill-slate-500 text-[10px]">
+        <text x={left - 4} y={top + height} textAnchor="end" className="fill-omi-text-muted text-[10px]">
           {largeScale.min.toFixed(2)}
         </text>
-        <text x={left + width + 4} y={top + 4} className="fill-slate-500 text-[10px]">
+        <text x={left + width + 4} y={top + 4} className="fill-omi-text-muted text-[10px]">
           {smallScale.max.toFixed(2)}
         </text>
-        <text x={left + width + 4} y={top + height} className="fill-slate-500 text-[10px]">
+        <text x={left + width + 4} y={top + height} className="fill-omi-text-muted text-[10px]">
           {smallScale.min.toFixed(2)}
         </text>
-        <text x={left} y={top + height + 24} className="fill-slate-500 text-[10px]">
+        <text x={left} y={top + height + 24} className="fill-omi-text-muted text-[10px]">
           {formatCompactDate(points[0]?.date)}
         </text>
-        <text x={left + width} y={top + height + 24} textAnchor="end" className="fill-slate-500 text-[10px]">
+        <text x={left + width} y={top + height + 24} textAnchor="end" className="fill-omi-text-muted text-[10px]">
           {formatCompactDate(points[points.length - 1]?.date)}
         </text>
         {hoverPoint && hoverX !== null ? (
@@ -2448,17 +2449,17 @@ export function ShareholdingRatioChart({ points }: { points: ShareholdingSeriesP
               x2={hoverX}
               y1={top}
               y2={top + height}
-              stroke="#94a3b8"
+              stroke={omiChartColors.crosshair}
               strokeDasharray="4 4"
             />
             {hoverLargeY !== null ? (
               <g>
-                <rect x={8} y={hoverLargeY - 12} width={48} height={22} rx={3} fill="#6b7280" />
+                <rect x={8} y={hoverLargeY - 12} width={48} height={22} rx={3} fill={omiChartColors.tooltip} />
                 <text
                   x={32}
                   y={hoverLargeY + 3}
                   textAnchor="middle"
-                  className="fill-white text-[11px] font-semibold"
+                  className="fill-omi-surface text-[11px] font-semibold"
                 >
                   {formatPrice(hoverPoint.largeRatio)}
                 </text>
@@ -2467,7 +2468,7 @@ export function ShareholdingRatioChart({ points }: { points: ShareholdingSeriesP
                   x2={left + width}
                   y1={hoverLargeY}
                   y2={hoverLargeY}
-                  stroke="#94a3b8"
+                  stroke={omiChartColors.crosshair}
                   strokeDasharray="4 4"
                 />
               </g>
@@ -2480,44 +2481,44 @@ export function ShareholdingRatioChart({ points }: { points: ShareholdingSeriesP
                   width={50}
                   height={22}
                   rx={3}
-                  fill="#6b7280"
+                  fill={omiChartColors.tooltip}
                 />
                 <text
                   x={viewWidth - 33}
                   y={hoverSmallY + 3}
                   textAnchor="middle"
-                  className="fill-white text-[11px] font-semibold"
+                  className="fill-omi-surface text-[11px] font-semibold"
                 >
                   {formatPrice(hoverPoint.smallRatio)}
                 </text>
               </g>
             ) : null}
-            <rect x={hoverX - 34} y={top + height + 28} width={68} height={22} rx={3} fill="#6b7280" />
+            <rect x={hoverX - 34} y={top + height + 28} width={68} height={22} rx={3} fill={omiChartColors.tooltip} />
             <text
               x={hoverX}
               y={top + height + 43}
               textAnchor="middle"
-              className="fill-white text-[11px] font-semibold"
+              className="fill-omi-surface text-[11px] font-semibold"
             >
               {formatCompactDate(hoverPoint.date)}
             </text>
             <g transform={`translate(${hoverTipX} ${hoverTipY})`}>
-              <rect width={hoverTipWidth} height={hoverTipHeight} rx={4} fill="white" stroke="#cbd5e1" />
-              <text x={12} y={20} className="fill-slate-500 text-[12px] font-semibold">
+              <rect width={hoverTipWidth} height={hoverTipHeight} rx={4} fill={omiChartColors.surface} stroke={omiChartColors.tooltipBorder} />
+              <text x={12} y={20} className="fill-omi-text-muted text-[12px] font-semibold">
                 {formatCompactDate(hoverPoint.date)}
               </text>
-              <circle cx={16} cy={40} r={4} fill="#fdba74" />
-              <text x={28} y={44} className="fill-slate-600 text-[12px]">
+              <circle cx={16} cy={40} r={4} fill={omiChartColors.heatMuted} />
+              <text x={28} y={44} className="fill-omi-text-muted text-[12px]">
                 大股東持股(%)
               </text>
-              <text x={hoverTipWidth - 12} y={44} textAnchor="end" className="fill-slate-900 text-[12px] font-semibold">
+              <text x={hoverTipWidth - 12} y={44} textAnchor="end" className="fill-omi-text text-[12px] font-semibold">
                 {formatPrice(hoverPoint.largeRatio)}
               </text>
-              <circle cx={16} cy={62} r={4} fill="#ff5b5b" />
-              <text x={28} y={66} className="fill-slate-600 text-[12px]">
+              <circle cx={16} cy={62} r={4} fill={omiChartColors.growth} />
+              <text x={28} y={66} className="fill-omi-text-muted text-[12px]">
                 小股東持股(%)
               </text>
-              <text x={hoverTipWidth - 12} y={66} textAnchor="end" className="fill-slate-900 text-[12px] font-semibold">
+              <text x={hoverTipWidth - 12} y={66} textAnchor="end" className="fill-omi-text text-[12px] font-semibold">
                 {formatPrice(hoverPoint.smallRatio)}
               </text>
             </g>
@@ -2610,16 +2611,16 @@ export function InstitutionalFlowChart({
   }
 
   return (
-    <div className="border-t border-slate-200 py-3 first:border-t-0">
+    <div className="border-t border-omi-border-subtle py-3 first:border-t-0">
       <div className="mb-2 flex items-center justify-between gap-4 text-xs">
-        <div className="font-semibold text-slate-900">
+        <div className="font-semibold text-omi-text">
           {title}
           <span className={`ml-2 ${valueTone(latestPoint?.[cumulativeKey])}`}>
             累計 {formatSignedLots(latestPoint?.[cumulativeKey])}張
           </span>
         </div>
         <div>
-          <span className="text-slate-500">買賣超：</span>
+          <span className="text-omi-text-muted">買賣超：</span>
           <span className={valueTone(latestPoint?.[netKey])}>
             {formatSignedLots(latestPoint?.[netKey])}張
           </span>
@@ -2641,9 +2642,9 @@ export function InstitutionalFlowChart({
       >
         {[0, 1, 2].map((tick) => {
           const y = top + (tick / 2) * height;
-          return <line key={tick} x1={left} x2={left + width} y1={y} y2={y} stroke="#e2e8f0" />;
+          return <line key={tick} x1={left} x2={left + width} y1={y} y2={y} stroke={omiChartColors.grid} />;
         })}
-        <line x1={left} x2={left + width} y1={zeroY} y2={zeroY} stroke="#94a3b8" />
+        <line x1={left} x2={left + width} y1={zeroY} y2={zeroY} stroke={omiChartColors.crosshair} />
         {chartPoints.map((point, index) => {
           const value = point[netKey] ?? 0;
           const x = chartX(index, chartPoints.length, left, width) - barWidth / 2;
@@ -2655,32 +2656,32 @@ export function InstitutionalFlowChart({
               y={Math.min(y, zeroY)}
               width={barWidth}
               height={Math.max(1, Math.abs(zeroY - y))}
-              fill={value >= 0 ? "#ef4444" : "#10b981"}
+              fill={value >= 0 ? omiChartColors.marketUpFlash : omiChartColors.marketDownFlash}
               opacity="0.78"
             />
           );
         })}
         {cumulativePath ? (
-          <path d={cumulativePath} fill="none" stroke="#93c5fd" strokeWidth="2" strokeLinecap="round" />
+          <path d={cumulativePath} fill="none" stroke={omiChartColors.cumulative} strokeWidth="2" strokeLinecap="round" />
         ) : null}
-        <text x={left - 4} y={top + 4} textAnchor="end" className="fill-slate-500 text-[10px]">
+        <text x={left - 4} y={top + 4} textAnchor="end" className="fill-omi-text-muted text-[10px]">
           {formatLots(netScale.max)}
         </text>
-        <text x={left - 4} y={top + height} textAnchor="end" className="fill-slate-500 text-[10px]">
+        <text x={left - 4} y={top + height} textAnchor="end" className="fill-omi-text-muted text-[10px]">
           {formatSignedLots(netScale.min)}
         </text>
-        <text x={left + width + 4} y={top + 4} className="fill-slate-500 text-[10px]">
+        <text x={left + width + 4} y={top + 4} className="fill-omi-text-muted text-[10px]">
           {formatLots(cumulativeScale.max)}
         </text>
-        <text x={left + width + 4} y={top + height} className="fill-slate-500 text-[10px]">
+        <text x={left + width + 4} y={top + height} className="fill-omi-text-muted text-[10px]">
           {formatSignedLots(cumulativeScale.min)}
         </text>
         {showXAxisLabels ? (
           <>
-            <text x={left} y={top + height + 24} className="fill-slate-500 text-[10px]">
+            <text x={left} y={top + height + 24} className="fill-omi-text-muted text-[10px]">
               {formatMonthDay(chartPoints[0]?.date)}
             </text>
-            <text x={left + width} y={top + height + 24} textAnchor="end" className="fill-slate-500 text-[10px]">
+            <text x={left + width} y={top + height + 24} textAnchor="end" className="fill-omi-text-muted text-[10px]">
               {formatMonthDay(chartPoints[chartPoints.length - 1]?.date)}
             </text>
           </>
@@ -2692,7 +2693,7 @@ export function InstitutionalFlowChart({
               x2={guideX}
               y1={top}
               y2={top + height}
-              stroke="#94a3b8"
+              stroke={omiChartColors.crosshair}
               strokeDasharray="4 4"
             />
           </g>
@@ -2701,45 +2702,45 @@ export function InstitutionalFlowChart({
           <g pointerEvents="none">
             {hoverNetY !== null ? (
               <g>
-                <rect x={8} y={hoverNetY - 12} width={52} height={22} rx={3} fill="#6b7280" />
-                <text x={34} y={hoverNetY + 3} textAnchor="middle" className="fill-white text-[11px] font-semibold">
+                <rect x={8} y={hoverNetY - 12} width={52} height={22} rx={3} fill={omiChartColors.tooltip} />
+                <text x={34} y={hoverNetY + 3} textAnchor="middle" className="fill-omi-surface text-[11px] font-semibold">
                   {formatSignedLots(hoverPoint[netKey])}
                 </text>
               </g>
             ) : null}
             {hoverCumY !== null ? (
               <g>
-                <rect x={viewWidth - 62} y={hoverCumY - 12} width={54} height={22} rx={3} fill="#6b7280" />
-                <text x={viewWidth - 35} y={hoverCumY + 3} textAnchor="middle" className="fill-white text-[11px] font-semibold">
+                <rect x={viewWidth - 62} y={hoverCumY - 12} width={54} height={22} rx={3} fill={omiChartColors.tooltip} />
+                <text x={viewWidth - 35} y={hoverCumY + 3} textAnchor="middle" className="fill-omi-surface text-[11px] font-semibold">
                   {formatSignedLots(hoverPoint[cumulativeKey])}
                 </text>
               </g>
             ) : null}
             {showXAxisLabels ? (
               <>
-                <rect x={hoverX - 28} y={top + height + 28} width={56} height={20} rx={3} fill="#6b7280" />
-                <text x={hoverX} y={top + height + 42} textAnchor="middle" className="fill-white text-[11px] font-semibold">
+                <rect x={hoverX - 28} y={top + height + 28} width={56} height={20} rx={3} fill={omiChartColors.tooltip} />
+                <text x={hoverX} y={top + height + 42} textAnchor="middle" className="fill-omi-surface text-[11px] font-semibold">
                   {formatMonthDay(hoverPoint.date)}
                 </text>
               </>
             ) : null}
             <g transform={`translate(${hoverTipX} ${hoverTipY})`}>
-              <rect width={hoverTipWidth} height={hoverTipHeight} rx={4} fill="white" stroke="#cbd5e1" />
-              <text x={12} y={20} className="fill-slate-500 text-[12px] font-semibold">
+              <rect width={hoverTipWidth} height={hoverTipHeight} rx={4} fill={omiChartColors.surface} stroke={omiChartColors.tooltipBorder} />
+              <text x={12} y={20} className="fill-omi-text-muted text-[12px] font-semibold">
                 {formatDate(hoverPoint.date)}
               </text>
-              <rect x={12} y={34} width={8} height={8} fill={(hoverPoint[netKey] ?? 0) >= 0 ? "#ef4444" : "#10b981"} />
-              <text x={28} y={43} className="fill-slate-600 text-[12px]">
+              <rect x={12} y={34} width={8} height={8} fill={(hoverPoint[netKey] ?? 0) >= 0 ? omiChartColors.marketUpFlash : omiChartColors.marketDownFlash} />
+              <text x={28} y={43} className="fill-omi-text-muted text-[12px]">
                 買賣超(張)
               </text>
-              <text x={hoverTipWidth - 12} y={43} textAnchor="end" className="fill-slate-900 text-[12px] font-semibold">
+              <text x={hoverTipWidth - 12} y={43} textAnchor="end" className="fill-omi-text text-[12px] font-semibold">
                 {formatSignedLots(hoverPoint[netKey])}
               </text>
-              <circle cx={16} cy={62} r={4} fill="#93c5fd" />
-              <text x={28} y={66} className="fill-slate-600 text-[12px]">
+              <circle cx={16} cy={62} r={4} fill={omiChartColors.cumulative} />
+              <text x={28} y={66} className="fill-omi-text-muted text-[12px]">
                 累計(張)
               </text>
-              <text x={hoverTipWidth - 12} y={66} textAnchor="end" className="fill-slate-900 text-[12px] font-semibold">
+              <text x={hoverTipWidth - 12} y={66} textAnchor="end" className="fill-omi-text text-[12px] font-semibold">
                 {formatSignedLots(hoverPoint[cumulativeKey])}
               </text>
             </g>

@@ -19,8 +19,8 @@ def get_stock_daily_indicators(
     from_date: date | None = None,
     to_date: date | None = None,
     limit: int = Query(default=250, ge=1, le=5000),
-    ma_windows: str = "5,20,60",
-    volume_ma_windows: str = "5,20",
+    ma_windows: str | None = None,
+    volume_ma_windows: str | None = None,
     db: Session = Depends(get_db),
 ):
     try:
@@ -43,8 +43,8 @@ def get_stock_daily_indicators(
 @router.get("/{stock_id}/latest", response_model=DailyIndicatorPointRead)
 def get_latest_stock_daily_indicator(
     stock_id: str,
-    ma_windows: str = "5,20,60",
-    volume_ma_windows: str = "5,20",
+    ma_windows: str | None = None,
+    volume_ma_windows: str | None = None,
     db: Session = Depends(get_db),
 ):
     try:

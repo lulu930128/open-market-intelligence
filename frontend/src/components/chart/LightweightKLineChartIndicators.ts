@@ -20,6 +20,7 @@ import {
   type LineSeriesData,
   type PlotLineData,
 } from "@/components/chart/LightweightKLineChartDrawing";
+import { omiChartColors } from "@/lib/themeColors";
 export function average(values: Array<number | null | undefined>) {
   const valid = values.filter(finiteNumber);
 
@@ -1437,7 +1438,7 @@ export function buildSeriesData(
       volumesSeries.push({
         time,
         value: volumeValue,
-        color: point.close >= point.open ? "rgba(220, 38, 38, 0.24)" : "rgba(5, 150, 105, 0.24)",
+        color: point.close >= point.open ? omiChartColors.marketUpVolume : omiChartColors.marketDownVolume,
       });
     }
 
@@ -1445,7 +1446,7 @@ export function buildSeriesData(
       macdHistogram.push({
         time,
         value: macdHistogramValue,
-        color: macdHistogramValue >= 0 ? "rgba(220, 38, 38, 0.35)" : "rgba(5, 150, 105, 0.35)",
+        color: macdHistogramValue >= 0 ? omiChartColors.marketUpHistogram : omiChartColors.marketDownHistogram,
       });
     }
 

@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const apiProxyTarget = process.env.API_PROXY_TARGET ?? "http://127.0.0.1:8300";
+import { getApiProxyTarget } from "@/lib/serverApiConfig";
+
+const apiProxyTarget = getApiProxyTarget();
 
 function redirectHome(request: NextRequest, groupId?: string | number | null) {
   const url = new URL("/", request.url);

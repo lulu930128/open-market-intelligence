@@ -179,14 +179,14 @@ function formatDateTime(value: string | null) {
 function statusTone(job: JobRunRead) {
   const effectiveStatus = getEffectiveStatus(job);
 
-  if (effectiveStatus === "error") return "border-red-200 bg-red-50 text-red-700";
-  if (isActiveJob(job)) return "border-blue-200 bg-blue-50 text-blue-700";
+  if (effectiveStatus === "error") return "border-omi-danger-border bg-omi-danger-soft text-omi-danger";
+  if (isActiveJob(job)) return "border-omi-info-border bg-omi-info-soft text-omi-info";
 
   if (effectiveStatus === "partial_success") {
-    return "border-amber-200 bg-amber-50 text-amber-700";
+    return "border-omi-warning-border bg-omi-warning-soft text-omi-warning";
   }
 
-  return "border-emerald-200 bg-emerald-50 text-emerald-700";
+  return "border-omi-success-border bg-omi-success-soft text-omi-success";
 }
 
 function canRetry(job: JobRunRead) {
@@ -195,6 +195,27 @@ function canRetry(job: JobRunRead) {
     !NON_RETRYABLE_JOB_TYPES.has(job.job_type) &&
     (effectiveStatus === "error" || effectiveStatus === "partial_success")
   );
+}
+
+function buildStatusSummary(activeCount: number, failedCount: number) {
+  if (activeCount > 0) {
+    return {
+      className: "omi-job-status-pill-active",
+      label: `同步中 ${activeCount}`,
+    };
+  }
+
+  if (failedCount > 0) {
+    return {
+      className: "omi-job-status-pill-attention",
+      label: `待確認 ${failedCount}`,
+    };
+  }
+
+  return {
+    className: "omi-job-status-pill-idle",
+    label: "正常",
+  };
 }
 
 function formatShortText(value: string | null, maxLength = 220) {
@@ -285,28 +306,28 @@ function JobRow({
   const errorMessage = formatShortText(job.error_message);
 
   return (
-    <div className="border-t border-slate-200 px-3 py-2">
+    <div className="border-t border-omi-border-subtle px-3 py-2">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="truncate text-sm font-bold text-slate-900">
+          <div className="truncate text-sm font-bold text-omi-text">
             {getJobTypeLabel(job.job_type)}
-            {job.target ? <span className="ml-1 text-slate-500">#{job.target}</span> : null}
+            {job.target ? <span className="ml-1 text-omi-text-muted">#{job.target}</span> : null}
           </div>
-          <div className="mt-1 text-xs text-slate-600">{formatJobStatus(job)}</div>
+          <div className="mt-1 text-xs text-omi-text-muted">{formatJobStatus(job)}</div>
         </div>
         <span className={`shrink-0 border px-2 py-1 text-[11px] font-bold ${statusTone(job)}`}>
           {getEffectiveStatus(job)}
         </span>
       </div>
 
-      <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-slate-500">
+      <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-omi-text-muted">
         <span>更新 {formatDateTime(job.updated_at)}</span>
       </div>
 
       {summaryParts.length ? (
         <div className="mt-2 flex flex-wrap gap-1">
           {summaryParts.map((part) => (
-            <span key={part} className="border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] text-slate-600">
+            <span key={part} className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-0.5 text-[11px] text-omi-text-muted">
               {part}
             </span>
           ))}
@@ -316,7 +337,7 @@ function JobRow({
       {visibleFailedItems.length ? (
         <div className="mt-2 space-y-1">
           {visibleFailedItems.map((row, index) => (
-            <div key={`${formatResultItemTitle(row)}-${index}`} className="border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700">
+            <div key={`${formatResultItemTitle(row)}-${index}`} className="border border-omi-danger-border bg-omi-danger-soft px-2 py-1 text-xs text-omi-danger">
               <div className="font-bold">{formatResultItemTitle(row)}</div>
               <div className="mt-0.5 break-words text-[11px]">
                 {formatShortText(formatResultItemMessage(row))}
@@ -324,7 +345,7 @@ function JobRow({
             </div>
           ))}
           {failedItems.length > visibleFailedItems.length ? (
-            <div className="text-[11px] text-slate-500">
+            <div className="text-[11px] text-omi-text-muted">
               還有 {failedItems.length - visibleFailedItems.length} 筆失敗項目
             </div>
           ) : null}
@@ -332,7 +353,7 @@ function JobRow({
       ) : null}
 
       {errorMessage ? (
-        <div className="mt-2 break-words border border-red-200 bg-red-50 px-2 py-1 text-xs text-red-700">
+        <div className="mt-2 break-words border border-omi-danger-border bg-omi-danger-soft px-2 py-1 text-xs text-omi-danger">
           {errorMessage}
         </div>
       ) : null}
@@ -340,7 +361,7 @@ function JobRow({
       {canRetry(job) ? (
         <button
           type="button"
-          className="mt-2 border border-slate-300 px-2 py-1 text-xs font-bold text-slate-700 hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-50"
+          className="mt-2 border border-omi-border px-2 py-1 text-xs font-bold text-omi-text hover:border-omi-border-strong disabled:cursor-not-allowed disabled:opacity-50"
           disabled={retryingJobId === job.id}
           onClick={() => onRetry(job)}
         >
@@ -428,6 +449,10 @@ export default function JobStatusCenter({
       }).length,
     [jobs]
   );
+  const statusSummary = useMemo(
+    () => buildStatusSummary(activeCount, failedCount),
+    [activeCount, failedCount]
+  );
 
   async function handleRetry(job: JobRunRead) {
     setRetryingJobId(job.id);
@@ -448,40 +473,32 @@ export default function JobStatusCenter({
         type="button"
         aria-expanded={open}
         className={[
-          "flex min-w-[104px] items-center justify-between gap-2 border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-800 shadow-sm hover:border-slate-500",
+          "flex min-w-[104px] items-center justify-between gap-2 border border-omi-border bg-omi-surface px-3 py-2 text-sm font-bold text-omi-text shadow-sm hover:border-omi-border-strong",
           inline ? "w-full" : "",
         ].join(" ")}
         onClick={() => setOpen((value) => !value)}
       >
         <span>更新狀態</span>
-        <span
-          className={
-            activeCount
-              ? "bg-blue-600 px-2 py-0.5 text-xs text-white"
-              : failedCount
-                ? "bg-amber-500 px-2 py-0.5 text-xs text-white"
-                : "bg-slate-200 px-2 py-0.5 text-xs text-slate-700"
-          }
-        >
-          {activeCount || failedCount || "OK"}
+        <span className={`omi-job-status-pill ${statusSummary.className}`}>
+          {statusSummary.label}
         </span>
       </button>
 
       {open ? (
         <section
           className={[
-            "mt-2 border border-slate-300 bg-white shadow-xl",
+            "mt-2 border border-omi-border bg-omi-surface shadow-xl",
             inline ? "w-full" : "w-[420px]",
           ].join(" ")}
         >
-          <div className="flex items-start justify-between gap-2 border-b border-slate-200 px-3 py-2">
+          <div className="flex items-start justify-between gap-2 border-b border-omi-border-subtle px-3 py-2">
             <div className="min-w-0">
-              <h2 className="text-sm font-black text-slate-950">背景工作</h2>
-              <p className="text-xs text-slate-500">{panelText.subtitle}</p>
+              <h2 className="text-sm font-black text-omi-text-strong">背景工作</h2>
+              <p className="text-xs text-omi-text-muted">{panelText.subtitle}</p>
             </div>
             <button
               type="button"
-              className="h-7 shrink-0 whitespace-nowrap border border-slate-300 px-2 text-[11px] font-bold text-slate-700 hover:border-slate-500"
+              className="h-7 shrink-0 whitespace-nowrap border border-omi-border px-2 text-[11px] font-bold text-omi-text hover:border-omi-border-strong"
               onClick={() => void loadJobs()}
             >
               重整
@@ -489,7 +506,7 @@ export default function JobStatusCenter({
           </div>
 
           {errorMessage ? (
-            <div className="border-b border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+            <div className="border-b border-omi-danger-border bg-omi-danger-soft px-3 py-2 text-xs text-omi-danger">
               {errorMessage}
             </div>
           ) : null}
@@ -500,7 +517,7 @@ export default function JobStatusCenter({
                 <JobRow key={job.id} job={job} retryingJobId={retryingJobId} onRetry={handleRetry} />
               ))
             ) : (
-              <div className="px-3 py-8 text-center text-sm text-slate-500">
+              <div className="px-3 py-8 text-center text-sm text-omi-text-muted">
                 {panelText.empty}
               </div>
             )}

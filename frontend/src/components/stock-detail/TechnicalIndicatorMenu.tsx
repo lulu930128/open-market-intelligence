@@ -185,12 +185,12 @@ export default function TechnicalIndicatorMenu({
   return (
     <div
       className={[
-        "absolute right-0 z-30 mt-2 max-h-[74vh] overflow-y-auto border border-slate-200 bg-white p-3 text-left shadow-lg",
+        "absolute right-0 z-30 mt-2 max-h-[74vh] overflow-y-auto border border-omi-border-subtle bg-omi-surface p-3 text-left shadow-lg",
         className,
       ].join(" ")}
     >
-      <div className="border-b border-slate-200 pb-3">
-        <div className="mb-2 text-xs font-bold text-slate-500">快速組合</div>
+      <div className="border-b border-omi-border-subtle pb-3">
+        <div className="mb-2 text-xs font-bold text-omi-text-muted">快速組合</div>
         <div className="grid grid-cols-5 gap-1">
           {indicatorTemplates.map((template) => (
             <button
@@ -200,8 +200,8 @@ export default function TechnicalIndicatorMenu({
               className={[
                 "h-8 border text-xs font-semibold",
                 activeTemplate === template.key
-                  ? "border-red-700 bg-red-700 text-white"
-                  : "border-slate-300 bg-white text-slate-700 hover:border-slate-900",
+                  ? "border-omi-accent bg-omi-accent text-omi-text-inverse"
+                  : "border-omi-border bg-omi-surface text-omi-text hover:border-omi-control",
               ].join(" ")}
             >
               {template.label}
@@ -210,19 +210,19 @@ export default function TechnicalIndicatorMenu({
         </div>
       </div>
 
-      <div className="space-y-3 border-b border-slate-200 py-3">
+      <div className="space-y-3 border-b border-omi-border-subtle py-3">
         {groups.map((group) => (
           <div key={group.key}>
             <div className="mb-1">
-              <div className="text-xs font-bold text-slate-700">{group.label}</div>
-              <div className="text-[11px] leading-4 text-slate-400">{group.description}</div>
+              <div className="text-xs font-bold text-omi-text">{group.label}</div>
+              <div className="text-[11px] leading-4 text-omi-text-subtle">{group.description}</div>
             </div>
             <div className="space-y-0.5">
               {group.options.map((option) =>
                 option.status === "available" ? (
                   <label
                     key={option.key}
-                    className="flex cursor-pointer items-start gap-2 px-2 py-1.5 text-xs hover:bg-slate-50"
+                    className="flex cursor-pointer items-start gap-2 px-2 py-1.5 text-xs hover:bg-omi-surface-subtle"
                   >
                     <input
                       type="checkbox"
@@ -231,13 +231,13 @@ export default function TechnicalIndicatorMenu({
                       className="mt-0.5"
                     />
                     <span className="min-w-0">
-                      <span className="flex items-center gap-2 font-semibold text-slate-800">
+                      <span className="flex items-center gap-2 font-semibold text-omi-text">
                         <span>{option.label}</span>
-                        <span className="text-[10px] font-medium uppercase text-slate-400">
+                        <span className="text-[10px] font-medium uppercase text-omi-text-subtle">
                           {option.plot}
                         </span>
                       </span>
-                      <span className="block text-slate-500">{option.description}</span>
+                      <span className="block text-omi-text-muted">{option.description}</span>
                     </span>
                   </label>
                 ) : (
@@ -246,15 +246,15 @@ export default function TechnicalIndicatorMenu({
                     className="flex cursor-not-allowed items-start justify-between gap-3 px-2 py-1.5 text-xs opacity-60"
                   >
                     <span className="min-w-0">
-                      <span className="flex items-center gap-2 font-semibold text-slate-600">
+                      <span className="flex items-center gap-2 font-semibold text-omi-text-muted">
                         <span>{option.label}</span>
-                        <span className="text-[10px] font-medium uppercase text-slate-400">
+                        <span className="text-[10px] font-medium uppercase text-omi-text-subtle">
                           {option.plot}
                         </span>
                       </span>
-                      <span className="block text-slate-500">{option.description}</span>
+                      <span className="block text-omi-text-muted">{option.description}</span>
                     </span>
-                    <span className="shrink-0 bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-500">
+                    <span className="shrink-0 bg-omi-surface-muted px-1.5 py-0.5 text-[10px] font-bold text-omi-text-muted">
                       待補
                     </span>
                   </div>
@@ -267,7 +267,7 @@ export default function TechnicalIndicatorMenu({
 
       {includeParameters && parameters && onUpdateParameter ? (
         <div className="pt-3">
-          <div className="mb-2 text-xs font-bold text-slate-500">參數</div>
+          <div className="mb-2 text-xs font-bold text-omi-text-muted">參數</div>
           <div className="grid grid-cols-2 gap-2">
             {[
               { label: "MA短", key: "maShort", min: 1, max: 300 },
@@ -331,7 +331,7 @@ export default function TechnicalIndicatorMenu({
               { label: "Corr週期", key: "correlationPeriod", min: 8, max: 260 },
             ].map((field) => (
               <label key={field.key} className="text-xs">
-                <span className="mb-1 block font-semibold text-slate-500">{field.label}</span>
+                <span className="mb-1 block font-semibold text-omi-text-muted">{field.label}</span>
                 <input
                   type="number"
                   min={field.min}
@@ -346,7 +346,7 @@ export default function TechnicalIndicatorMenu({
                       field.max
                     )
                   }
-                  className="h-8 w-full border border-slate-300 px-2 text-xs font-semibold text-slate-800"
+                  className="h-8 w-full border border-omi-border px-2 text-xs font-semibold text-omi-text"
                 />
               </label>
             ))}

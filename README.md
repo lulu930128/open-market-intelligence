@@ -206,7 +206,7 @@ flowchart LR
     user["User"] --> browser["Browser<br/>127.0.0.1:3000"]
     browser --> next["Next.js dashboard"]
     next --> proxy["/omi-data proxy"]
-    proxy --> api["FastAPI<br/>127.0.0.1:8300/api"]
+    proxy --> api["FastAPI<br/>127.0.0.1:8400/api"]
 
     api --> services["Domain services"]
     services --> db[("SQLite<br/>data/open_market_intelligence.db")]
@@ -484,7 +484,7 @@ Signals popover 顯示處理節點：
 
 ```powershell
 cd "C:\project\Open Market Intelligence"
-$env:OMI_API_BASE = "http://127.0.0.1:8300/api"
+$env:OMI_API_BASE = "http://127.0.0.1:8400/api"
 python agents\omi_mcp_server\server.py
 ```
 
@@ -525,13 +525,13 @@ Run：
 ```powershell
 cd "C:\project\Open Market Intelligence"
 $env:PYTHONPATH = (Resolve-Path backend).Path
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8300 --app-dir backend
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8400 --app-dir backend
 ```
 
 Useful URLs：
 
-- `http://127.0.0.1:8300/api/system/health`
-- `http://127.0.0.1:8300/docs`
+- `http://127.0.0.1:8400/api/system/health`
+- `http://127.0.0.1:8400/docs`
 
 ### Frontend
 
@@ -557,7 +557,7 @@ cd "C:\project\Open Market Intelligence"
 
 Launcher 是本機 convenience wrapper。開發時後端與前端命令仍是 canonical path。
 
-開發模式下 launcher 預期使用 `.\.venv\Scripts\python.exe`。如果 `8300` 被其他 checkout 或其他 Python runtime 的舊 OMI backend 佔用，launcher 會嘗試清掉 stale OMI process 後再啟動目前 checkout。
+開發模式下 launcher 預期使用 `.\.venv\Scripts\python.exe`。Backend port 由 `OMI_BACKEND_PORT` 或 `APP_PORT` 決定，預設 `8400`。Frontend port 由 `OMI_FRONTEND_PORT` 或 `FRONTEND_PORT` 決定，預設 `3000`。如果 frontend 預設 port 已被其他 process 佔用且不是目前 checkout 的 `/omi-ui-health`，launcher 會自動改用下一個可用 port 並開啟正確 Dashboard URL。如果 backend port 被其他 checkout 或其他 Python runtime 的舊 OMI backend 佔用，launcher 會嘗試清掉 stale OMI process 後再啟動目前 checkout；如果該 port 落在 Windows TCP excluded range，launcher 會要求改用可綁定的 port。
 
 ## Environment
 
@@ -568,7 +568,7 @@ APP_NAME=Open Market Intelligence
 APP_ENV=development
 DEBUG=true
 APP_HOST=127.0.0.1
-APP_PORT=8300
+APP_PORT=8400
 TIMEZONE=Asia/Taipei
 ENABLE_SCHEDULER=false
 
@@ -599,7 +599,7 @@ OMI_AI_TRUST_TOKEN=
 Frontend `.env.example`：
 
 ```env
-NEXT_PUBLIC_OMI_API_BASE=http://127.0.0.1:8300/api
+NEXT_PUBLIC_OMI_API_BASE=http://127.0.0.1:8400/api
 ```
 
 OpenAI key resolution order：
@@ -672,18 +672,18 @@ npm run test:e2e
 API spot checks：
 
 ```powershell
-Invoke-RestMethod "http://127.0.0.1:8300/api/system/health"
-Invoke-RestMethod "http://127.0.0.1:8300/api/system/provider-events?limit=20"
-Invoke-RestMethod "http://127.0.0.1:8300/api/system/source-health-snapshots?market=tw"
-Invoke-RestMethod "http://127.0.0.1:8300/api/market/intraday/2330"
-Invoke-RestMethod "http://127.0.0.1:8300/api/market/ohlc/2330?timeframe=daily&limit=120"
-Invoke-RestMethod "http://127.0.0.1:8300/api/market/technical-report/2330?timeframe=today"
-Invoke-RestMethod "http://127.0.0.1:8300/api/market/broker-branches/2330/daily?days=3&ensure_daily=false"
-Invoke-RestMethod "http://127.0.0.1:8300/api/market/source-health?stock_id=2330"
-Invoke-RestMethod "http://127.0.0.1:8300/api/watchlists/groups/1/radar?mode=action&max_results=8"
-Invoke-RestMethod "http://127.0.0.1:8300/api/market/tw-futures/latest?symbols=TXF&refresh=true&session=auto"
-Invoke-RestMethod "http://127.0.0.1:8300/api/us-market/stocks/search?q=SPCX"
-Invoke-RestMethod "http://127.0.0.1:8300/api/us-market/source-health?symbol=MU"
+Invoke-RestMethod "http://127.0.0.1:8400/api/system/health"
+Invoke-RestMethod "http://127.0.0.1:8400/api/system/provider-events?limit=20"
+Invoke-RestMethod "http://127.0.0.1:8400/api/system/source-health-snapshots?market=tw"
+Invoke-RestMethod "http://127.0.0.1:8400/api/market/intraday/2330"
+Invoke-RestMethod "http://127.0.0.1:8400/api/market/ohlc/2330?timeframe=daily&limit=120"
+Invoke-RestMethod "http://127.0.0.1:8400/api/market/technical-report/2330?timeframe=today"
+Invoke-RestMethod "http://127.0.0.1:8400/api/market/broker-branches/2330/daily?days=3&ensure_daily=false"
+Invoke-RestMethod "http://127.0.0.1:8400/api/market/source-health?stock_id=2330"
+Invoke-RestMethod "http://127.0.0.1:8400/api/watchlists/groups/1/radar?mode=action&max_results=8"
+Invoke-RestMethod "http://127.0.0.1:8400/api/market/tw-futures/latest?symbols=TXF&refresh=true&session=auto"
+Invoke-RestMethod "http://127.0.0.1:8400/api/us-market/stocks/search?q=SPCX"
+Invoke-RestMethod "http://127.0.0.1:8400/api/us-market/source-health?symbol=MU"
 ```
 
 Git hygiene：

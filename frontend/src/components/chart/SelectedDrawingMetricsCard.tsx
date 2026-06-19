@@ -33,16 +33,16 @@ type SelectedDrawingMetricsCardProps = {
 };
 
 function metricValueClass(direction: DrawingMetricDirection) {
-  if (direction === "up") return "text-red-500";
-  if (direction === "down") return "text-emerald-600";
-  return "text-slate-600";
+  if (direction === "up") return "text-omi-market-up";
+  if (direction === "down") return "text-omi-market-down";
+  return "text-omi-text-muted";
 }
 
 function MetricRow({ label, value }: { label: string; value: string }) {
   return (
     <>
       <span>{label}</span>
-      <span className="text-right font-semibold text-slate-900 tabular-nums">
+      <span className="text-right font-semibold text-omi-text tabular-nums">
         {value}
       </span>
     </>
@@ -57,14 +57,14 @@ export default function SelectedDrawingMetricsCard({
   const labels = metrics.labels;
 
   return (
-    <div className="pointer-events-none absolute left-3 top-3 z-20 w-[15.5rem] border border-slate-300 bg-white/95 px-3 py-2 text-[11px] shadow-sm backdrop-blur">
+    <div className="pointer-events-none absolute left-3 top-3 z-20 w-[15.5rem] border border-omi-border bg-omi-surface/95 px-3 py-2 text-[11px] shadow-sm backdrop-blur">
       <div className="mb-1 flex items-center justify-between gap-2">
-        <span className="font-bold text-slate-950">{drawingType}</span>
+        <span className="font-bold text-omi-text-strong">{drawingType}</span>
         <span className={`font-bold tabular-nums ${metricValueClass(metrics.direction)}`}>
           {labels.percentChange}
         </span>
       </div>
-      <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-slate-500">
+      <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-omi-text-muted">
         <MetricRow label="價差" value={labels.priceDiff} />
         <MetricRow label="區間" value={`${labels.low} - ${labels.high}`} />
         <MetricRow
@@ -152,7 +152,7 @@ export default function SelectedDrawingMetricsCard({
         ) : null}
       </div>
       {summaryText ? (
-        <div className="mt-2 border-t border-slate-100 pt-1 text-[10px] font-medium leading-relaxed text-slate-500">
+        <div className="mt-2 border-t border-omi-border-subtle pt-1 text-[10px] font-medium leading-relaxed text-omi-text-muted">
           {summaryText}
         </div>
       ) : null}

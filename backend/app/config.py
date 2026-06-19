@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     app_name: str = "Open Market Intelligence"
     app_env: str = "development"
     app_host: str = "127.0.0.1"
-    app_port: int = 8300
+    app_port: int = 8400
 
     database_url: str = f"sqlite:///{DEFAULT_DB_PATH.as_posix()}"
 
@@ -55,6 +55,43 @@ class Settings(BaseSettings):
     timezone: str = "Asia/Taipei"
     job_worker_max_concurrency: int = 1
     job_dedupe_active: bool = True
+
+    technical_ma_windows: str = "5,20,60"
+    technical_volume_ma_windows: str = "5,20"
+    technical_macd_fast_period: int = 12
+    technical_macd_slow_period: int = 26
+    technical_macd_signal_period: int = 9
+    technical_rsi_period: int = 14
+    technical_atr_period: int = 14
+    technical_adx_period: int = 14
+    technical_roc_period: int = 12
+    technical_mfi_period: int = 14
+    technical_donchian_period: int = 20
+    technical_bollinger_period: int = 20
+    technical_bollinger_std_dev: float = 2.0
+    technical_kd_period: int = 9
+    technical_kd_smooth_period: int = 3
+    technical_kd_overbought_k: float = 80.0
+    technical_kd_overbought_d: float = 70.0
+    technical_kd_oversold_k: float = 20.0
+    technical_kd_oversold_d: float = 30.0
+    technical_support_resistance_period: int = 20
+    technical_max_gap_days: int = 10
+    technical_volume_ratio_threshold: float = 1.5
+    technical_near_level_threshold_pct: float = 2.0
+    technical_adx_trend_threshold: float = 25.0
+    technical_rsi_bull_min: float = 50.0
+    technical_rsi_bull_max: float = 70.0
+    technical_rsi_weak_below: float = 40.0
+    technical_rsi_overheated_at: float = 80.0
+    technical_mfi_inflow_min: float = 50.0
+    technical_mfi_inflow_max: float = 80.0
+    technical_mfi_outflow_below: float = 35.0
+    technical_atr_high_volatility_pct: float = 5.0
+    technical_atr_expansion_multiplier: float = 1.2
+    technical_atr_expansion_min_pct: float = 2.0
+    technical_bollinger_squeeze_bandwidth_pct: float = 8.0
+
     scheduler_market_refresh_time: str = "15:15"
     scheduler_market_refresh_lookback_days: int = 7
     scheduler_market_refresh_sleep_seconds: float = 0.2

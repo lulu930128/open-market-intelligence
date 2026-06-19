@@ -5,6 +5,7 @@ import type {
   ChartDrawingTool,
   ChartTimeMode,
 } from "@/components/LightweightKLineChart";
+import { omiChartColors } from "@/lib/themeColors";
 import type { ChartDrawingSnapshotWrite } from "@/types/market";
 
 export type ChartDrawingStorageState = {
@@ -193,7 +194,7 @@ export function normalizeStoredChartDrawings(value: unknown): ChartDrawing[] {
         id: candidate.id,
         type,
         points: points.slice(0, pointCount),
-        color: typeof candidate.color === "string" ? candidate.color : "#0f172a",
+        color: typeof candidate.color === "string" ? candidate.color : omiChartColors.text,
         createdAt:
           typeof candidate.createdAt === "string" ? candidate.createdAt : new Date().toISOString(),
       };

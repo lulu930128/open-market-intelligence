@@ -30,7 +30,7 @@ flowchart LR
     detail --> apiClient
     manager --> apiClient
     apiClient --> rewrite["Next.js rewrite<br/>/omi-data"]
-    rewrite --> backend["FastAPI backend<br/>127.0.0.1:8300/api"]
+    rewrite --> backend["FastAPI backend<br/>127.0.0.1:8400/api"]
 ```
 
 ## 資料流
@@ -101,7 +101,7 @@ npm ci
 cd "C:\Open Market Intelligence"
 .\.venv\Scripts\Activate.ps1
 cd backend
-python -m uvicorn app.main:app --reload --port 8300
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8400
 ```
 
 再啟動前端：
@@ -122,7 +122,8 @@ http://127.0.0.1:3000
 `.env.local` 預設值：
 
 ```env
-API_PROXY_TARGET=http://127.0.0.1:8300
+APP_PORT=8400
+# API_PROXY_TARGET=http://127.0.0.1:8400
 API_PROXY_PATH=/omi-data
 NEXT_PUBLIC_API_PROXY_PATH=/omi-data
 NEXT_PUBLIC_API_BASE_URL=
@@ -131,7 +132,7 @@ NEXT_PUBLIC_API_BASE_URL=
 API rewrite：
 
 ```text
-/omi-data/... -> http://127.0.0.1:8300/api/...
+/omi-data/... -> http://127.0.0.1:8400/api/...
 ```
 
 ## 常用指令

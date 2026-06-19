@@ -227,7 +227,7 @@ export default function StockDetailDataPanel({
     return (
       <div className="space-y-5">
         {currentChipCoverage ? (
-          <div className="text-xs leading-5 text-slate-500">
+          <div className="text-xs leading-5 text-omi-text-muted">
             集保最新 {formatDate(currentChipCoverage.shareholding_latest_date)}，
             共 {currentChipCoverage.shareholding_week_count} 週；融資融券最新{" "}
             {formatDate(currentChipCoverage.margin_latest_trade_date)}，
@@ -255,13 +255,13 @@ export default function StockDetailDataPanel({
         <ShareholdingMixedChart points={shareholdingSeries} />
         <ShareholdingRatioChart points={shareholdingSeries} />
 
-        <div className="overflow-hidden border border-slate-200">
-          <div className="grid grid-cols-[1.1fr_1fr_1fr_1fr_1fr] bg-slate-50 text-center text-xs font-semibold text-slate-600">
+        <div className="overflow-hidden border border-omi-border-subtle">
+          <div className="grid grid-cols-[1.1fr_1fr_1fr_1fr_1fr] bg-omi-surface-subtle text-center text-xs font-semibold text-omi-text-muted">
             <div className="px-2 py-2 text-left">日期</div>
-            <div className="border-l border-slate-200 px-2 py-2">大股東持股比例(%)</div>
-            <div className="border-l border-slate-200 px-2 py-2">大股東持股變動(%)</div>
-            <div className="border-l border-slate-200 px-2 py-2">大股東持股人數</div>
-            <div className="border-l border-slate-200 px-2 py-2">小股東持股比例(%)</div>
+            <div className="border-l border-omi-border-subtle px-2 py-2">大股東持股比例(%)</div>
+            <div className="border-l border-omi-border-subtle px-2 py-2">大股東持股變動(%)</div>
+            <div className="border-l border-omi-border-subtle px-2 py-2">大股東持股人數</div>
+            <div className="border-l border-omi-border-subtle px-2 py-2">小股東持股比例(%)</div>
           </div>
           {shareholdingSeries
             .slice()
@@ -270,21 +270,21 @@ export default function StockDetailDataPanel({
             .map((row) => (
               <div
                 key={row.date}
-                className="grid grid-cols-[1.1fr_1fr_1fr_1fr_1fr] border-t border-slate-200 text-center text-xs"
+                className="grid grid-cols-[1.1fr_1fr_1fr_1fr_1fr] border-t border-omi-border-subtle text-center text-xs"
               >
-                <div className="bg-slate-50 px-2 py-2 text-left font-semibold text-slate-600">
+                <div className="bg-omi-surface-subtle px-2 py-2 text-left font-semibold text-omi-text-muted">
                   {formatCompactDate(row.date)}
                 </div>
-                <div className="border-l border-slate-200 px-2 py-2 text-slate-950">
+                <div className="border-l border-omi-border-subtle px-2 py-2 text-omi-text-strong">
                   {formatPrice(row.largeRatio)}
                 </div>
-                <div className={`border-l border-slate-200 px-2 py-2 ${valueTone(row.largeRatioChange)}`}>
+                <div className={`border-l border-omi-border-subtle px-2 py-2 ${valueTone(row.largeRatioChange)}`}>
                   {formatPct(row.largeRatioChange)}
                 </div>
-                <div className="border-l border-slate-200 px-2 py-2 text-slate-950">
+                <div className="border-l border-omi-border-subtle px-2 py-2 text-omi-text-strong">
                   {formatNumber(row.largeHolders)}
                 </div>
-                <div className="border-l border-slate-200 px-2 py-2 text-slate-950">
+                <div className="border-l border-omi-border-subtle px-2 py-2 text-omi-text-strong">
                   {formatPrice(row.smallRatio)}
                 </div>
               </div>
@@ -336,11 +336,11 @@ export default function StockDetailDataPanel({
 
     return (
       <div className="space-y-5">
-        <div className="flex items-center justify-between border-b border-slate-200 pb-2">
-          <span className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
+        <div className="flex items-center justify-between border-b border-omi-border-subtle pb-2">
+          <span className="text-xs font-semibold uppercase tracking-[0.16em] text-omi-text-muted">
             Date
           </span>
-          <span className="text-sm font-bold text-slate-900">
+          <span className="text-sm font-bold text-omi-text">
             {formatDate(latestPoint.date)}
           </span>
         </div>
@@ -351,18 +351,18 @@ export default function StockDetailDataPanel({
             { label: "投信", value: displayLatestPoint.investmentTrustCumulative },
             { label: "自營商", value: displayLatestPoint.dealerCumulative },
           ].map((item) => (
-            <div key={item.label} className="border border-slate-200 px-3 py-3">
-              <div className="font-semibold text-slate-700">{item.label}</div>
+            <div key={item.label} className="border border-omi-border-subtle px-3 py-3">
+              <div className="font-semibold text-omi-text">{item.label}</div>
               <div className={`mt-2 text-base font-bold ${valueTone(item.value)}`}>
                 {formatSignedLots(item.value)}張
               </div>
-              <div className="mt-1 text-[11px] text-slate-500">近3個月累計</div>
+              <div className="mt-1 text-[11px] text-omi-text-muted">近3個月累計</div>
             </div>
           ))}
         </div>
 
-        <div className="border border-slate-200 bg-white px-4 py-3">
-          <div className="mb-2 text-sm font-bold text-slate-950">三大法人動向</div>
+        <div className="border border-omi-border-subtle bg-omi-surface px-4 py-3">
+          <div className="mb-2 text-sm font-bold text-omi-text-strong">三大法人動向</div>
           <InstitutionalFlowChart
             points={recentPoints}
             title="外資"
@@ -390,15 +390,15 @@ export default function StockDetailDataPanel({
           />
         </div>
 
-        <div className="border border-slate-200 bg-white px-4 py-3">
+        <div className="border border-omi-border-subtle bg-omi-surface px-4 py-3">
           <div className="mb-3 flex items-center justify-between gap-4">
             <div>
-              <div className="text-sm font-bold text-slate-950">法人持有比例</div>
-              <div className="mt-1 text-[11px] text-slate-500">
+              <div className="text-sm font-bold text-omi-text-strong">法人持有比例</div>
+              <div className="mt-1 text-[11px] text-omi-text-muted">
                 實際持股比例
               </div>
             </div>
-            <div className="text-sm font-bold text-slate-900">
+            <div className="text-sm font-bold text-omi-text">
               {formatDate(ratioDate)}
             </div>
           </div>
@@ -418,22 +418,22 @@ export default function StockDetailDataPanel({
                 value: activeHoldingRatio?.dealer_ratio ?? null,
               },
             ].map((item) => (
-              <div key={item.label} className="border border-slate-200 px-3 py-3">
-                <div className="font-semibold text-slate-700">{item.label}</div>
-                <div className="mt-2 text-base font-bold text-slate-950">
+              <div key={item.label} className="border border-omi-border-subtle px-3 py-3">
+                <div className="font-semibold text-omi-text">{item.label}</div>
+                <div className="mt-2 text-base font-bold text-omi-text-strong">
                   {formatRatioPct(item.value)}
                 </div>
-                <div className="mt-1 text-[11px] text-slate-500">持股比例</div>
+                <div className="mt-1 text-[11px] text-omi-text-muted">持股比例</div>
               </div>
             ))}
           </div>
         </div>
 
-        <div className="overflow-hidden border border-slate-200">
-          <div className="border-b border-slate-200 bg-slate-50 px-3 py-2 text-center text-sm font-bold text-slate-900">
+        <div className="overflow-hidden border border-omi-border-subtle">
+          <div className="border-b border-omi-border-subtle bg-omi-surface-subtle px-3 py-2 text-center text-sm font-bold text-omi-text">
             近3個月三大法人買賣超明細
           </div>
-          <div className="grid grid-cols-[0.9fr_1fr_1fr_1fr_1fr] border-b border-slate-200 bg-white text-center text-xs font-semibold text-slate-600">
+          <div className="grid grid-cols-[0.9fr_1fr_1fr_1fr_1fr] border-b border-omi-border-subtle bg-omi-surface text-center text-xs font-semibold text-omi-text-muted">
             <div className="px-2 py-2">日期</div>
             <div className="px-2 py-2">外資(張)</div>
             <div className="px-2 py-2">投信(張)</div>
@@ -443,9 +443,9 @@ export default function StockDetailDataPanel({
           {tableRows.map((row) => (
             <div
               key={row.date}
-              className="grid grid-cols-[0.9fr_1fr_1fr_1fr_1fr] border-b border-slate-100 text-center text-xs last:border-b-0"
+              className="grid grid-cols-[0.9fr_1fr_1fr_1fr_1fr] border-b border-omi-border-subtle text-center text-xs last:border-b-0"
             >
-              <div className="px-2 py-2 text-slate-700">{formatMonthDay(row.date)}</div>
+              <div className="px-2 py-2 text-omi-text">{formatMonthDay(row.date)}</div>
               <div className={`px-2 py-2 ${valueTone(row.foreignNet)}`}>
                 {formatSignedLots(row.foreignNet)}
               </div>
@@ -508,7 +508,7 @@ export default function StockDetailDataPanel({
     const detailTotalLabel =
       branchTableSide === "buy" ? "Top15總買超" : "Top15總賣超";
     const detailTone =
-      branchTableSide === "buy" ? "text-red-500" : "text-emerald-600";
+      branchTableSide === "buy" ? "text-omi-market-up" : "text-omi-market-down";
 
     const branchDisplayName = (row: BrokerBranchTradeDailyRead | null) =>
       row?.branch_name || "-";
@@ -533,14 +533,14 @@ export default function StockDetailDataPanel({
     return (
       <div className="space-y-6">
         <div className="flex items-center justify-between gap-4">
-          <div className="text-lg font-bold text-slate-950">分點</div>
-          <div className="text-right text-[11px] text-slate-500">
+          <div className="text-lg font-bold text-omi-text-strong">分點</div>
+          <div className="text-right text-[11px] text-omi-text-muted">
             <div>資料日期：{branchDateRange}</div>
             <a
               href={brokerBranchSummary.source_url}
               target="_blank"
               rel="noreferrer"
-              className="font-semibold text-slate-700 underline-offset-2 hover:underline"
+              className="font-semibold text-omi-text underline-offset-2 hover:underline"
             >
               {brokerBranchSummary.source_name ?? "nStock"}
             </a>
@@ -548,8 +548,8 @@ export default function StockDetailDataPanel({
         </div>
 
         <div className="flex items-center justify-center gap-3 text-xs">
-          <span className="font-semibold text-slate-600">天數</span>
-          <div className="grid grid-cols-8 overflow-hidden border border-slate-800">
+          <span className="font-semibold text-omi-text-muted">天數</span>
+          <div className="grid grid-cols-8 overflow-hidden border border-omi-control">
             {branchDayOptions.map((option) => {
               const disabled = option.days === null;
               const selected = option.days === branchDays;
@@ -563,12 +563,12 @@ export default function StockDetailDataPanel({
                   }}
                   disabled={disabled}
                   className={[
-                    "h-7 w-12 border-r border-slate-800 text-xs font-semibold last:border-r-0",
+                    "h-7 w-12 border-r border-omi-control text-xs font-semibold last:border-r-0",
                     selected
-                      ? "bg-slate-700 text-white"
+                      ? "bg-omi-control-border text-omi-text-inverse"
                       : disabled
-                        ? "bg-slate-100 text-slate-400"
-                        : "bg-white text-slate-800 hover:bg-slate-50",
+                        ? "bg-omi-surface-muted text-omi-text-subtle"
+                        : "bg-omi-surface text-omi-text hover:bg-omi-surface-subtle",
                   ].join(" ")}
                 >
                   {option.label}
@@ -579,7 +579,7 @@ export default function StockDetailDataPanel({
         </div>
 
         <div className="space-y-2">
-          <div className="grid grid-cols-[1.2fr_1fr_1fr_1.2fr] text-xs font-semibold text-slate-500">
+          <div className="grid grid-cols-[1.2fr_1fr_1fr_1.2fr] text-xs font-semibold text-omi-text-muted">
             <div>買超Top15</div>
             <div className="text-right">買超(張)</div>
             <div className="text-left">賣超(張)</div>
@@ -592,67 +592,67 @@ export default function StockDetailDataPanel({
                 key={`branch-compare-${index}`}
                 className="grid grid-cols-[1.2fr_1fr_1fr_1.2fr] items-center gap-2 text-xs"
               >
-                <div className="min-w-0 truncate font-semibold text-slate-900">
+                <div className="min-w-0 truncate font-semibold text-omi-text">
                   {branchDisplayName(row.buy)}
                 </div>
-                <div className="relative h-6 overflow-hidden bg-red-50 text-right">
+                <div className="relative h-6 overflow-hidden bg-omi-danger-soft text-right">
                   <div
-                    className="absolute bottom-0 right-0 top-0 bg-red-100"
+                    className="absolute bottom-0 right-0 top-0 bg-omi-market-up-soft"
                     style={{ width: branchBarWidth(row.buy) }}
                   />
-                  <span className="relative z-10 pr-1 font-semibold text-red-500">
+                  <span className="relative z-10 pr-1 font-semibold text-omi-market-up">
                     {formatLotUnits(branchNetAbs(row.buy))}
                   </span>
                 </div>
-                <div className="relative h-6 overflow-hidden bg-emerald-50 text-left">
+                <div className="relative h-6 overflow-hidden bg-omi-success-soft text-left">
                   <div
-                    className="absolute bottom-0 left-0 top-0 bg-emerald-100"
+                    className="absolute bottom-0 left-0 top-0 bg-omi-market-down-soft"
                     style={{ width: branchBarWidth(row.sell) }}
                   />
-                  <span className="relative z-10 pl-1 font-semibold text-emerald-600">
+                  <span className="relative z-10 pl-1 font-semibold text-omi-market-down">
                     {formatLotUnits(branchNetAbs(row.sell))}
                   </span>
                 </div>
-                <div className="min-w-0 truncate text-right font-semibold text-slate-900">
+                <div className="min-w-0 truncate text-right font-semibold text-omi-text">
                   {branchDisplayName(row.sell)}
                 </div>
               </div>
             ))}
           </div>
 
-          <div className="border-t border-slate-200 pt-2">
-            <div className="mb-1 flex items-center justify-between text-xs font-semibold text-slate-900">
+          <div className="border-t border-omi-border-subtle pt-2">
+            <div className="mb-1 flex items-center justify-between text-xs font-semibold text-omi-text">
               <span>Top15總買超</span>
               <span>Top15總賣超</span>
             </div>
             <div className="grid grid-cols-2 overflow-hidden text-xs">
-              <div className="bg-red-50 px-1 py-1 text-left font-semibold text-red-500">
+              <div className="bg-omi-danger-soft px-1 py-1 text-left font-semibold text-omi-market-up">
                 {formatLotUnits(buyTotal)}
               </div>
-              <div className="bg-emerald-50 px-1 py-1 text-right font-semibold text-emerald-600">
+              <div className="bg-omi-success-soft px-1 py-1 text-right font-semibold text-omi-market-down">
                 {formatLotUnits(sellTotal)}
               </div>
             </div>
           </div>
         </div>
 
-        <div className="space-y-3 border-t border-slate-200 pt-5">
-          <div className="text-center text-sm font-bold text-slate-950">
+        <div className="space-y-3 border-t border-omi-border-subtle pt-5">
+          <div className="text-center text-sm font-bold text-omi-text-strong">
             Top15券商分點買賣超
           </div>
 
           <div className="flex items-center justify-center text-sm font-semibold">
-            <div className="flex overflow-hidden border border-slate-800">
+            <div className="flex overflow-hidden border border-omi-control">
               {branchTableSideOptions.map((item) => (
                 <button
                   key={item.key}
                   type="button"
                   onClick={() => setBranchTableSide(item.key as BranchTableSide)}
                   className={[
-                    "h-8 w-12 border-r border-slate-800 text-sm last:border-r-0",
+                    "h-8 w-12 border-r border-omi-control text-sm last:border-r-0",
                     branchTableSide === item.key
-                      ? "bg-slate-700 text-white"
-                      : "bg-white text-slate-800 hover:bg-slate-50",
+                      ? "bg-omi-control-border text-omi-text-inverse"
+                      : "bg-omi-surface text-omi-text hover:bg-omi-surface-subtle",
                   ].join(" ")}
                 >
                   {item.label}
@@ -661,9 +661,9 @@ export default function StockDetailDataPanel({
             </div>
           </div>
 
-          <div className="overflow-hidden border-t border-slate-200">
+          <div className="overflow-hidden border-t border-omi-border-subtle">
             <div
-              className="grid grid-cols-[1.5fr_0.9fr_0.8fr_0.8fr_0.9fr_0.9fr] border-b border-slate-200 text-xs font-semibold text-slate-500"
+              className="grid grid-cols-[1.5fr_0.9fr_0.8fr_0.8fr_0.9fr_0.9fr] border-b border-omi-border-subtle text-xs font-semibold text-omi-text-muted"
             >
               <div className="px-1 py-2">{detailNameLabel}</div>
               <div className="px-1 py-2 text-right">{detailNetLabel}</div>
@@ -675,32 +675,32 @@ export default function StockDetailDataPanel({
             {detailRows.map((row) => (
               <div
                 key={`${branchTableSide}-${row.branch_code}-${row.branch_name}`}
-                className="grid grid-cols-[1.5fr_0.9fr_0.8fr_0.8fr_0.9fr_0.9fr] border-b border-slate-200 text-sm last:border-b-0"
+                className="grid grid-cols-[1.5fr_0.9fr_0.8fr_0.8fr_0.9fr_0.9fr] border-b border-omi-border-subtle text-sm last:border-b-0"
               >
-                <div className="min-w-0 truncate px-1 py-2 font-semibold text-slate-950">
+                <div className="min-w-0 truncate px-1 py-2 font-semibold text-omi-text-strong">
                   {row.branch_name || "-"}
                 </div>
                 <div className={`px-1 py-2 text-right ${detailTone}`}>
                   {formatLotUnits(Math.abs(row.net_lots ?? 0))}
                 </div>
-                <div className="px-1 py-2 text-right text-slate-950">
+                <div className="px-1 py-2 text-right text-omi-text-strong">
                   {formatLotUnits(row.buy_lots)}
                 </div>
-                <div className="px-1 py-2 text-right text-slate-950">
+                <div className="px-1 py-2 text-right text-omi-text-strong">
                   {formatLotUnits(row.sell_lots)}
                 </div>
-                <div className="px-1 py-2 text-right text-slate-950">
+                <div className="px-1 py-2 text-right text-omi-text-strong">
                   {formatPrice(row.buy_avg_price)}
                 </div>
-                <div className="px-1 py-2 text-right text-slate-950">
+                <div className="px-1 py-2 text-right text-omi-text-strong">
                   {formatPrice(row.sell_avg_price)}
                 </div>
               </div>
             ))}
             <div
-              className="grid grid-cols-[1.5fr_0.9fr_0.8fr_0.8fr_0.9fr_0.9fr] border-t border-slate-200 text-sm font-semibold"
+              className="grid grid-cols-[1.5fr_0.9fr_0.8fr_0.8fr_0.9fr_0.9fr] border-t border-omi-border-subtle text-sm font-semibold"
             >
-              <div className="px-1 py-2 text-slate-950">{detailTotalLabel}</div>
+              <div className="px-1 py-2 text-omi-text-strong">{detailTotalLabel}</div>
               <div className={`px-1 py-2 text-right ${detailTone}`}>
                 {formatLotUnits(detailTotal)}
               </div>
@@ -711,7 +711,7 @@ export default function StockDetailDataPanel({
             </div>
           </div>
 
-          <div className="text-right text-[11px] text-slate-500">
+          <div className="text-right text-[11px] text-omi-text-muted">
             {branchCoverageText}；多日為已存每日 Top15 快照加總。
           </div>
         </div>
@@ -757,11 +757,11 @@ export default function StockDetailDataPanel({
 
     return (
       <div className="space-y-5">
-        <div className="flex items-center justify-between border-b border-slate-200 pb-2">
-          <span className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
+        <div className="flex items-center justify-between border-b border-omi-border-subtle pb-2">
+          <span className="text-xs font-semibold uppercase tracking-[0.16em] text-omi-text-muted">
             Revenue
           </span>
-          <div className="flex overflow-hidden border border-slate-900 text-sm font-semibold">
+          <div className="flex overflow-hidden border border-omi-control text-sm font-semibold">
             {[
               { key: "monthly", label: "月" },
               { key: "quarterly", label: "季" },
@@ -772,10 +772,10 @@ export default function StockDetailDataPanel({
                 type="button"
                 onClick={() => setRevenueView(item.key as RevenueView)}
                 className={[
-                  "h-8 w-12 border-r border-slate-900 last:border-r-0",
+                  "h-8 w-12 border-r border-omi-control last:border-r-0",
                   revenueView === item.key
-                    ? "bg-slate-800 text-white"
-                    : "bg-white text-slate-900 hover:bg-slate-50",
+                    ? "bg-omi-control-muted text-omi-text-inverse"
+                    : "bg-omi-surface text-omi-text hover:bg-omi-surface-subtle",
                 ].join(" ")}
               >
                 {item.label}
@@ -787,13 +787,13 @@ export default function StockDetailDataPanel({
         <RevenueTrendChart points={activeRows} view={revenueView} />
 
         {revenueView === "monthly" ? (
-          <div className="overflow-hidden border border-slate-200">
-            <div className="grid grid-cols-[0.7fr_1fr_1fr_1fr_1fr_1fr] border-b border-slate-200 bg-slate-50 text-center text-xs font-semibold text-slate-600">
+          <div className="overflow-hidden border border-omi-border-subtle">
+            <div className="grid grid-cols-[0.7fr_1fr_1fr_1fr_1fr_1fr] border-b border-omi-border-subtle bg-omi-surface-subtle text-center text-xs font-semibold text-omi-text-muted">
               <div className="px-2 py-1">
                 <select
                   value={selectedRevenueYear}
                   onChange={(event) => setRevenueYear(Number(event.target.value))}
-                  className="h-8 w-full bg-white px-2 text-center text-sm font-semibold text-slate-800 outline outline-1 outline-slate-200"
+                  className="h-8 w-full bg-omi-surface px-2 text-center text-sm font-semibold text-omi-text outline outline-1 outline-slate-200"
                   aria-label="選擇營收年度"
                 >
                   {revenueYearOptions.map((year) => (
@@ -803,11 +803,11 @@ export default function StockDetailDataPanel({
                   ))}
                 </select>
               </div>
-              <div className="border-l border-slate-200 px-2 py-2">營收(億)</div>
-              <div className="border-l border-slate-200 px-2 py-2">年增</div>
-              <div className="border-l border-slate-200 px-2 py-2">年累(億)</div>
-              <div className="border-l border-slate-200 px-2 py-2">累積年增</div>
-              <div className="border-l border-slate-200 px-2 py-2">去年營收(億)</div>
+              <div className="border-l border-omi-border-subtle px-2 py-2">營收(億)</div>
+              <div className="border-l border-omi-border-subtle px-2 py-2">年增</div>
+              <div className="border-l border-omi-border-subtle px-2 py-2">年累(億)</div>
+              <div className="border-l border-omi-border-subtle px-2 py-2">累積年增</div>
+              <div className="border-l border-omi-border-subtle px-2 py-2">去年營收(億)</div>
             </div>
             {Array.from({ length: 12 }, (_, index) => 12 - index).map((month) => {
               const row = monthlyRowsByMonth.get(month);
@@ -815,24 +815,24 @@ export default function StockDetailDataPanel({
               return (
                 <div
                   key={month}
-                  className="grid grid-cols-[0.7fr_1fr_1fr_1fr_1fr_1fr] border-b border-slate-100 text-center text-xs last:border-b-0"
+                  className="grid grid-cols-[0.7fr_1fr_1fr_1fr_1fr_1fr] border-b border-omi-border-subtle text-center text-xs last:border-b-0"
                 >
-                  <div className="bg-slate-50 px-2 py-2 font-semibold text-slate-700">
+                  <div className="bg-omi-surface-subtle px-2 py-2 font-semibold text-omi-text">
                     {month}月
                   </div>
-                  <div className="border-l border-slate-100 px-2 py-2 text-slate-950">
+                  <div className="border-l border-omi-border-subtle px-2 py-2 text-omi-text-strong">
                     {formatRevenueYiValue(toRevenueYi(row?.monthly_revenue))}
                   </div>
-                  <div className={`border-l border-slate-100 px-2 py-2 ${valueTone(row?.year_over_year_pct)}`}>
+                  <div className={`border-l border-omi-border-subtle px-2 py-2 ${valueTone(row?.year_over_year_pct)}`}>
                     {formatPct(row?.year_over_year_pct)}
                   </div>
-                  <div className="border-l border-slate-100 px-2 py-2 text-slate-950">
+                  <div className="border-l border-omi-border-subtle px-2 py-2 text-omi-text-strong">
                     {formatRevenueYiValue(toRevenueYi(row?.cumulative_revenue))}
                   </div>
-                  <div className={`border-l border-slate-100 px-2 py-2 ${valueTone(row?.cumulative_year_over_year_pct)}`}>
+                  <div className={`border-l border-omi-border-subtle px-2 py-2 ${valueTone(row?.cumulative_year_over_year_pct)}`}>
                     {formatPct(row?.cumulative_year_over_year_pct)}
                   </div>
-                  <div className="border-l border-slate-100 px-2 py-2 text-slate-950">
+                  <div className="border-l border-omi-border-subtle px-2 py-2 text-omi-text-strong">
                     {formatRevenueYiValue(toRevenueYi(row?.previous_year_month_revenue))}
                   </div>
                 </div>
@@ -840,32 +840,32 @@ export default function StockDetailDataPanel({
             })}
           </div>
         ) : (
-          <div className="overflow-hidden border border-slate-200">
-            <div className="grid grid-cols-[1fr_1fr_1fr_1fr_0.7fr] border-b border-slate-200 bg-slate-50 text-center text-xs font-semibold text-slate-600">
+          <div className="overflow-hidden border border-omi-border-subtle">
+            <div className="grid grid-cols-[1fr_1fr_1fr_1fr_0.7fr] border-b border-omi-border-subtle bg-omi-surface-subtle text-center text-xs font-semibold text-omi-text-muted">
               <div className="px-2 py-2 text-left">期間</div>
-              <div className="border-l border-slate-200 px-2 py-2">營收(億)</div>
-              <div className="border-l border-slate-200 px-2 py-2">年增</div>
-              <div className="border-l border-slate-200 px-2 py-2">去年同期(億)</div>
-              <div className="border-l border-slate-200 px-2 py-2">月數</div>
+              <div className="border-l border-omi-border-subtle px-2 py-2">營收(億)</div>
+              <div className="border-l border-omi-border-subtle px-2 py-2">年增</div>
+              <div className="border-l border-omi-border-subtle px-2 py-2">去年同期(億)</div>
+              <div className="border-l border-omi-border-subtle px-2 py-2">月數</div>
             </div>
             {latestRows.map((row) => (
               <div
                 key={row.period}
-                className="grid grid-cols-[1fr_1fr_1fr_1fr_0.7fr] border-b border-slate-100 text-center text-xs last:border-b-0"
+                className="grid grid-cols-[1fr_1fr_1fr_1fr_0.7fr] border-b border-omi-border-subtle text-center text-xs last:border-b-0"
               >
-                <div className="bg-slate-50 px-2 py-2 text-left font-semibold text-slate-700">
+                <div className="bg-omi-surface-subtle px-2 py-2 text-left font-semibold text-omi-text">
                   {row.label}
                 </div>
-                <div className="border-l border-slate-100 px-2 py-2 text-slate-950">
+                <div className="border-l border-omi-border-subtle px-2 py-2 text-omi-text-strong">
                   {formatRevenueYiValue(row.revenue)}
                 </div>
-                <div className={`border-l border-slate-100 px-2 py-2 ${valueTone(row.growthPct)}`}>
+                <div className={`border-l border-omi-border-subtle px-2 py-2 ${valueTone(row.growthPct)}`}>
                   {formatPct(row.growthPct)}
                 </div>
-                <div className="border-l border-slate-100 px-2 py-2 text-slate-950">
+                <div className="border-l border-omi-border-subtle px-2 py-2 text-omi-text-strong">
                   {formatRevenueYiValue(row.previousRevenue)}
                 </div>
-                <div className="border-l border-slate-100 px-2 py-2 text-slate-600">
+                <div className="border-l border-omi-border-subtle px-2 py-2 text-omi-text-muted">
                   {row.monthCount}
                 </div>
               </div>
@@ -891,11 +891,11 @@ export default function StockDetailDataPanel({
 
     return (
       <div className="space-y-5">
-        <div className="flex items-center justify-between border-b border-slate-200 pb-2">
-          <span className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
+        <div className="flex items-center justify-between border-b border-omi-border-subtle pb-2">
+          <span className="text-xs font-semibold uppercase tracking-[0.16em] text-omi-text-muted">
             Earnings
           </span>
-          <div className="flex overflow-hidden border border-slate-900 text-sm font-semibold">
+          <div className="flex overflow-hidden border border-omi-control text-sm font-semibold">
             {[
               { key: "quarterly", label: "季" },
               { key: "yearly", label: "年" },
@@ -905,10 +905,10 @@ export default function StockDetailDataPanel({
                 type="button"
                 onClick={() => setEarningsView(item.key as EarningsView)}
                 className={[
-                  "h-8 w-12 border-r border-slate-900 last:border-r-0",
+                  "h-8 w-12 border-r border-omi-control last:border-r-0",
                   earningsView === item.key
-                    ? "bg-slate-800 text-white"
-                    : "bg-white text-slate-900 hover:bg-slate-50",
+                    ? "bg-omi-control-muted text-omi-text-inverse"
+                    : "bg-omi-surface text-omi-text hover:bg-omi-surface-subtle",
                 ].join(" ")}
               >
                 {item.label}
@@ -919,32 +919,32 @@ export default function StockDetailDataPanel({
 
         <EarningsTrendChart points={activeRows} view={earningsView} />
 
-        <div className="overflow-hidden border border-slate-200">
-          <div className="grid grid-cols-[1fr_1fr_1fr_1fr_1fr] border-b border-slate-200 bg-slate-50 text-center text-xs font-semibold text-slate-600">
+        <div className="overflow-hidden border border-omi-border-subtle">
+          <div className="grid grid-cols-[1fr_1fr_1fr_1fr_1fr] border-b border-omi-border-subtle bg-omi-surface-subtle text-center text-xs font-semibold text-omi-text-muted">
             <div className="px-2 py-2 text-left">期間</div>
-            <div className="border-l border-slate-200 px-2 py-2">EPS(元)</div>
-            <div className="border-l border-slate-200 px-2 py-2">年增率</div>
-            <div className="border-l border-slate-200 px-2 py-2">ROE</div>
-            <div className="border-l border-slate-200 px-2 py-2">ROA</div>
+            <div className="border-l border-omi-border-subtle px-2 py-2">EPS(元)</div>
+            <div className="border-l border-omi-border-subtle px-2 py-2">年增率</div>
+            <div className="border-l border-omi-border-subtle px-2 py-2">ROE</div>
+            <div className="border-l border-omi-border-subtle px-2 py-2">ROA</div>
           </div>
           {latestRows.map((row) => (
             <div
               key={row.period}
-              className="grid grid-cols-[1fr_1fr_1fr_1fr_1fr] border-b border-slate-100 text-center text-xs last:border-b-0"
+              className="grid grid-cols-[1fr_1fr_1fr_1fr_1fr] border-b border-omi-border-subtle text-center text-xs last:border-b-0"
             >
-              <div className="bg-slate-50 px-2 py-2 text-left font-semibold text-slate-700">
+              <div className="bg-omi-surface-subtle px-2 py-2 text-left font-semibold text-omi-text">
                 {row.label}
               </div>
-              <div className="border-l border-slate-100 px-2 py-2 text-slate-950">
+              <div className="border-l border-omi-border-subtle px-2 py-2 text-omi-text-strong">
                 {formatPrice(row.eps)}
               </div>
-              <div className={`border-l border-slate-100 px-2 py-2 ${valueTone(row.growthPct)}`}>
+              <div className={`border-l border-omi-border-subtle px-2 py-2 ${valueTone(row.growthPct)}`}>
                 {formatPct(row.growthPct)}
               </div>
-              <div className={`border-l border-slate-100 px-2 py-2 ${valueTone(row.roe)}`}>
+              <div className={`border-l border-omi-border-subtle px-2 py-2 ${valueTone(row.roe)}`}>
                 {formatRatioPct(row.roe)}
               </div>
-              <div className={`border-l border-slate-100 px-2 py-2 ${valueTone(row.roa)}`}>
+              <div className={`border-l border-omi-border-subtle px-2 py-2 ${valueTone(row.roa)}`}>
                 {formatRatioPct(row.roa)}
               </div>
             </div>

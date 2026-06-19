@@ -1323,10 +1323,10 @@ function buildBandAreaPath(
 }
 
 function valueTone(value: number | null | undefined) {
-  if (!validNumber(value)) return "text-slate-700";
-  if (value > 0) return "text-red-600";
-  if (value < 0) return "text-emerald-600";
-  return "text-slate-700";
+  if (!validNumber(value)) return "text-omi-text";
+  if (value > 0) return "text-omi-market-up";
+  if (value < 0) return "text-omi-market-down";
+  return "text-omi-text";
 }
 
 function labelPosition(
@@ -1819,7 +1819,7 @@ export default function StockKLineChart({
 
   if (data.length < 1) {
     return (
-      <div className="flex h-[420px] items-center justify-center border border-slate-200 bg-white text-sm text-slate-500">
+      <div className="flex h-[420px] items-center justify-center border border-omi-border-subtle bg-omi-surface text-sm text-omi-text-muted">
         K 線資料不足
       </div>
     );
@@ -2135,24 +2135,24 @@ export default function StockKLineChart({
       : null;
   const hoverPriceGuideStrokeClass =
     hoverPriceGuideSnap === "high"
-      ? "stroke-red-500"
+      ? "stroke-omi-market-up-flash"
       : hoverPriceGuideSnap === "low"
-        ? "stroke-emerald-500"
-        : "stroke-slate-500";
+        ? "stroke-omi-market-down-flash"
+        : "stroke-omi-text-muted";
   const hoverPriceGuideFillClass =
     hoverPriceGuideSnap === "high"
-      ? "fill-red-700"
+      ? "fill-omi-market-up-strong"
       : hoverPriceGuideSnap === "low"
-        ? "fill-emerald-700"
-        : "fill-slate-800";
+        ? "fill-omi-market-down-strong"
+        : "fill-omi-text";
   const shouldShowRevealCover = activeRevealKey === stableRevealKey;
 
   return (
-    <div className="border border-slate-200 bg-white">
-      <div className="flex min-h-16 items-start justify-between gap-4 border-b border-slate-200 px-4 py-3">
+    <div className="border border-omi-border-subtle bg-omi-surface">
+      <div className="flex min-h-16 items-start justify-between gap-4 border-b border-omi-border-subtle px-4 py-3">
         <div>
-          <div className="text-sm font-semibold text-slate-900">K 線 / 技術指標</div>
-          <div className="mt-1 text-xs text-slate-500">
+          <div className="text-sm font-semibold text-omi-text">K 線 / 技術指標</div>
+          <div className="mt-1 text-xs text-omi-text-muted">
             {label} · {data.length} 根 K 線
           </div>
         </div>
@@ -2161,100 +2161,100 @@ export default function StockKLineChart({
           {hoveredPoint ? (
             <div className="grid min-h-[4.75rem] max-w-full grid-cols-[repeat(4,minmax(10.5rem,max-content))] gap-x-5 gap-y-1 overflow-x-auto pb-1 text-right text-xs [&>div>div]:whitespace-nowrap [&>div>div]:tabular-nums [&>div>span]:whitespace-nowrap [&>div]:min-w-[10.5rem] [&>div]:whitespace-nowrap">
               <div>
-                <span className="text-slate-400">日期</span>
-                <div className="font-semibold text-slate-800">{hoveredPoint.time}</div>
+                <span className="text-omi-text-subtle">日期</span>
+                <div className="font-semibold text-omi-text">{hoveredPoint.time}</div>
               </div>
               <div>
-                <span className="text-slate-400">收盤</span>
-                <div className="font-semibold text-slate-800">
+                <span className="text-omi-text-subtle">收盤</span>
+                <div className="font-semibold text-omi-text">
                   {formatPrice(hoveredPoint.close)}
                 </div>
               </div>
               <div>
-                <span className="text-slate-400">漲跌</span>
+                <span className="text-omi-text-subtle">漲跌</span>
                 <div className={`font-semibold ${valueTone(hoveredPoint.changePct)}`}>
                   {formatPct(hoveredPoint.changePct)}
                 </div>
               </div>
               <div>
-                <span className="text-slate-400">{volumeTooltipLabel}</span>
-                <div className="font-semibold text-slate-800">
+                <span className="text-omi-text-subtle">{volumeTooltipLabel}</span>
+                <div className="font-semibold text-omi-text">
                   {volumeValueFormatter(getVolumeMetric(hoveredPoint))}
                 </div>
               </div>
               {volumeValueKey !== "trade_value" ? (
                 <div>
-                  <span className="text-slate-400">成交金額</span>
-                  <div className="font-semibold text-slate-800">
+                  <span className="text-omi-text-subtle">成交金額</span>
+                  <div className="font-semibold text-omi-text">
                     {formatTradeValue(hoveredPoint.trade_value)}
                   </div>
                 </div>
               ) : null}
               <div>
-                <span className="text-slate-400">
+                <span className="text-omi-text-subtle">
                   MA{params.maShort}/{params.maMiddle}/{params.maLong}
                 </span>
-                <div className="font-semibold text-slate-800">
+                <div className="font-semibold text-omi-text">
                   {formatPrice(hoveredPoint.ma5)} / {formatPrice(hoveredPoint.ma20)} /{" "}
                   {formatPrice(hoveredPoint.ma60)}
                 </div>
               </div>
               {indicators.ema ? (
                 <div>
-                  <span className="text-slate-400">
+                  <span className="text-omi-text-subtle">
                     EMA{params.emaFast}/{params.emaSlow}
                   </span>
-                  <div className="font-semibold text-slate-800">
+                  <div className="font-semibold text-omi-text">
                     {formatPrice(hoveredPoint.ema12)} / {formatPrice(hoveredPoint.ema26)}
                   </div>
                 </div>
               ) : null}
               {indicators.vwap ? (
                 <div>
-                  <span className="text-slate-400">VWAP</span>
-                  <div className="font-semibold text-slate-800">
+                  <span className="text-omi-text-subtle">VWAP</span>
+                  <div className="font-semibold text-omi-text">
                     {formatPrice(hoveredPoint.vwap)}
                   </div>
                 </div>
               ) : null}
               {indicators.psar ? (
                 <div>
-                  <span className="text-slate-400">SAR</span>
-                  <div className="font-semibold text-slate-800">
+                  <span className="text-omi-text-subtle">SAR</span>
+                  <div className="font-semibold text-omi-text">
                     {formatPrice(hoveredPoint.psar)}
                   </div>
                 </div>
               ) : null}
               <div>
-                <span className="text-slate-400">RSI</span>
-                <div className="font-semibold text-slate-800">
+                <span className="text-omi-text-subtle">RSI</span>
+                <div className="font-semibold text-omi-text">
                   {formatIndicator(hoveredPoint.rsi14)}
                 </div>
               </div>
               <div>
-                <span className="text-slate-400">MACD</span>
+                <span className="text-omi-text-subtle">MACD</span>
                 <div className={`font-semibold ${valueTone(hoveredPoint.macdHistogram)}`}>
                   {formatIndicator(hoveredPoint.macdHistogram)}
                 </div>
               </div>
               <div>
-                <span className="text-slate-400">K/D</span>
-                <div className="font-semibold text-slate-800">
+                <span className="text-omi-text-subtle">K/D</span>
+                <div className="font-semibold text-omi-text">
                   {formatIndicator(hoveredPoint.k)} / {formatIndicator(hoveredPoint.d)}
                 </div>
               </div>
               {indicators.atr ? (
                 <div>
-                  <span className="text-slate-400">ATR</span>
-                  <div className="font-semibold text-slate-800">
+                  <span className="text-omi-text-subtle">ATR</span>
+                  <div className="font-semibold text-omi-text">
                     {formatIndicator(hoveredPoint.atr14)}
                   </div>
                 </div>
               ) : null}
               {indicators.adx ? (
                 <div>
-                  <span className="text-slate-400">ADX/+DI/-DI</span>
-                  <div className="font-semibold text-slate-800">
+                  <span className="text-omi-text-subtle">ADX/+DI/-DI</span>
+                  <div className="font-semibold text-omi-text">
                     {formatIndicator(hoveredPoint.adx14)} / {formatIndicator(hoveredPoint.plusDi14)} /{" "}
                     {formatIndicator(hoveredPoint.minusDi14)}
                   </div>
@@ -2262,7 +2262,7 @@ export default function StockKLineChart({
               ) : null}
               {indicators.obv ? (
                 <div>
-                  <span className="text-slate-400">OBV(張)</span>
+                  <span className="text-omi-text-subtle">OBV(張)</span>
                   <div className={`font-semibold ${valueTone(hoveredPoint.obv)}`}>
                     {formatLots(hoveredPoint.obv)}
                   </div>
@@ -2270,15 +2270,15 @@ export default function StockKLineChart({
               ) : null}
               {indicators.mfi ? (
                 <div>
-                  <span className="text-slate-400">MFI</span>
-                  <div className="font-semibold text-slate-800">
+                  <span className="text-omi-text-subtle">MFI</span>
+                  <div className="font-semibold text-omi-text">
                     {formatIndicator(hoveredPoint.mfi14)}
                   </div>
                 </div>
               ) : null}
               {indicators.cci ? (
                 <div>
-                  <span className="text-slate-400">CCI</span>
+                  <span className="text-omi-text-subtle">CCI</span>
                   <div className={`font-semibold ${valueTone(hoveredPoint.cci20)}`}>
                     {formatIndicator(hoveredPoint.cci20)}
                   </div>
@@ -2286,15 +2286,15 @@ export default function StockKLineChart({
               ) : null}
               {indicators.williamsR ? (
                 <div>
-                  <span className="text-slate-400">Williams %R</span>
-                  <div className="font-semibold text-slate-800">
+                  <span className="text-omi-text-subtle">Williams %R</span>
+                  <div className="font-semibold text-omi-text">
                     {formatIndicator(hoveredPoint.williamsR14)}
                   </div>
                 </div>
               ) : null}
               {indicators.roc ? (
                 <div>
-                  <span className="text-slate-400">ROC</span>
+                  <span className="text-omi-text-subtle">ROC</span>
                   <div className={`font-semibold ${valueTone(hoveredPoint.roc12)}`}>
                     {formatPct(hoveredPoint.roc12)}
                   </div>
@@ -2302,15 +2302,15 @@ export default function StockKLineChart({
               ) : null}
               {indicators.stochRsi ? (
                 <div>
-                  <span className="text-slate-400">StochRSI K/D</span>
-                  <div className="font-semibold text-slate-800">
+                  <span className="text-omi-text-subtle">StochRSI K/D</span>
+                  <div className="font-semibold text-omi-text">
                     {formatIndicator(hoveredPoint.stochRsiK)} / {formatIndicator(hoveredPoint.stochRsiD)}
                   </div>
                 </div>
               ) : null}
               {indicators.relativeStrength ? (
                 <div>
-                  <span className="text-slate-400">
+                  <span className="text-omi-text-subtle">
                     RS{params.relativeStrengthLookback}
                     {benchmarkLabel ? ` vs ${benchmarkLabel}` : ""}
                   </span>
@@ -2321,18 +2321,18 @@ export default function StockKLineChart({
               ) : null}
               {indicators.beta ? (
                 <div>
-                  <span className="text-slate-400">
+                  <span className="text-omi-text-subtle">
                     Beta{params.betaPeriod}
                     {benchmarkLabel ? ` vs ${benchmarkLabel}` : ""}
                   </span>
-                  <div className="font-semibold text-slate-800">
+                  <div className="font-semibold text-omi-text">
                     {formatIndicator(hoveredPoint.beta)}
                   </div>
                 </div>
               ) : null}
               {indicators.correlation ? (
                 <div>
-                  <span className="text-slate-400">
+                  <span className="text-omi-text-subtle">
                     Corr{params.correlationPeriod}
                     {benchmarkLabel ? ` vs ${benchmarkLabel}` : ""}
                   </span>
@@ -2346,7 +2346,7 @@ export default function StockKLineChart({
             <div className="min-h-[4.75rem]" aria-hidden="true" />
           )}
           <div className="flex w-full flex-wrap items-center justify-end gap-2 text-xs">
-            <span className="whitespace-nowrap text-slate-500">
+            <span className="whitespace-nowrap text-omi-text-muted">
               {visibleStart + 1}-{visibleEnd} / {data.length}
             </span>
             <button
@@ -2355,7 +2355,7 @@ export default function StockKLineChart({
               title="往左回看"
               onClick={() => panVisibleBars(-visibleStep)}
               disabled={!canMoveRange || visibleStart <= 0}
-              className="h-7 w-7 border border-slate-300 bg-white font-semibold text-slate-700 hover:border-slate-500 disabled:cursor-not-allowed disabled:text-slate-300"
+              className="h-7 w-7 border border-omi-border bg-omi-surface font-semibold text-omi-text hover:border-omi-border-strong disabled:cursor-not-allowed disabled:text-omi-text-inverse-muted"
             >
               &lt;
             </button>
@@ -2365,7 +2365,7 @@ export default function StockKLineChart({
               title="往右移動"
               onClick={() => panVisibleBars(visibleStep)}
               disabled={!canMoveRange || visibleStart >= maxVisibleStart}
-              className="h-7 w-7 border border-slate-300 bg-white font-semibold text-slate-700 hover:border-slate-500 disabled:cursor-not-allowed disabled:text-slate-300"
+              className="h-7 w-7 border border-omi-border bg-omi-surface font-semibold text-omi-text hover:border-omi-border-strong disabled:cursor-not-allowed disabled:text-omi-text-inverse-muted"
             >
               &gt;
             </button>
@@ -2375,7 +2375,7 @@ export default function StockKLineChart({
               title="放大 K 線"
               onClick={() => updateVisibleCount(visibleBarCount * 0.72)}
               disabled={visibleBarCount <= minVisibleBars}
-              className="h-7 w-7 border border-slate-300 bg-white font-semibold text-slate-700 hover:border-slate-500 disabled:cursor-not-allowed disabled:text-slate-300"
+              className="h-7 w-7 border border-omi-border bg-omi-surface font-semibold text-omi-text hover:border-omi-border-strong disabled:cursor-not-allowed disabled:text-omi-text-inverse-muted"
             >
               +
             </button>
@@ -2385,7 +2385,7 @@ export default function StockKLineChart({
               title="縮小 K 線"
               onClick={() => updateVisibleCount(visibleBarCount * 1.38)}
               disabled={visibleBarCount >= maxVisibleBars}
-              className="h-7 w-7 border border-slate-300 bg-white font-semibold text-slate-700 hover:border-slate-500 disabled:cursor-not-allowed disabled:text-slate-300"
+              className="h-7 w-7 border border-omi-border bg-omi-surface font-semibold text-omi-text hover:border-omi-border-strong disabled:cursor-not-allowed disabled:text-omi-text-inverse-muted"
             >
               -
             </button>
@@ -2395,7 +2395,7 @@ export default function StockKLineChart({
               title="跳到最新 K 線"
               onClick={jumpToLatest}
               disabled={!canMoveRange || visibleStart >= maxVisibleStart}
-              className="h-7 border border-slate-300 bg-white px-2 font-semibold text-slate-700 hover:border-slate-500 disabled:cursor-not-allowed disabled:text-slate-300"
+              className="h-7 border border-omi-border bg-omi-surface px-2 font-semibold text-omi-text hover:border-omi-border-strong disabled:cursor-not-allowed disabled:text-omi-text-inverse-muted"
             >
               最新
             </button>
@@ -2403,7 +2403,7 @@ export default function StockKLineChart({
               type="button"
               onClick={showAllBars}
               disabled={visibleBarCount >= maxVisibleBars}
-              className="h-7 border border-slate-300 bg-white px-2 font-semibold text-slate-700 hover:border-slate-500 disabled:cursor-not-allowed disabled:text-slate-300"
+              className="h-7 border border-omi-border bg-omi-surface px-2 font-semibold text-omi-text hover:border-omi-border-strong disabled:cursor-not-allowed disabled:text-omi-text-inverse-muted"
             >
               全部
             </button>
@@ -2435,7 +2435,7 @@ export default function StockKLineChart({
 
       <div className="relative overflow-hidden">
         <svg viewBox={`0 0 ${width} ${height}`} className="w-full" style={{ height }}>
-        <rect x="0" y="0" width={width} height={height} className="fill-white" />
+        <rect x="0" y="0" width={width} height={height} className="fill-omi-surface" />
 
         {[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
           const y = chartTop + ratio * priceHeight;
@@ -2448,13 +2448,13 @@ export default function StockKLineChart({
                 x2={width - paddingRight}
                 y1={y}
                 y2={y}
-                className="stroke-slate-100"
+                className="stroke-omi-border-subtle"
               />
               <text
                 x={paddingLeft - 10}
                 y={y + 4}
                 textAnchor="end"
-                className="fill-slate-600 text-[12px] font-medium"
+                className="fill-omi-text-muted text-[12px] font-medium"
               >
                 {formatPrice(price)}
               </text>
@@ -2463,11 +2463,11 @@ export default function StockKLineChart({
         })}
 
         {indicators.bollinger && bbAreaPath ? (
-          <path d={bbAreaPath} className="fill-sky-100/70" />
+          <path d={bbAreaPath} className="fill-omi-chart-sky-soft/70" />
         ) : null}
 
         {indicators.donchian && donchianAreaPath ? (
-          <path d={donchianAreaPath} className="fill-lime-100/50" />
+          <path d={donchianAreaPath} className="fill-omi-chart-lime-soft/50" />
         ) : null}
 
         {visibleData.map((point, index) => {
@@ -2489,8 +2489,8 @@ export default function StockKLineChart({
           const bodyY = Math.min(openY, closeY);
           const bodyHeight = Math.max(Math.abs(openY - closeY), 1.5);
           const candleClass = isUp
-            ? "fill-red-600 stroke-red-600"
-            : "fill-emerald-600 stroke-emerald-600";
+            ? "fill-omi-market-up stroke-omi-market-up"
+            : "fill-omi-market-down stroke-omi-market-down";
 
           return (
             <g key={`${point.time}-${index}`}>
@@ -2516,13 +2516,13 @@ export default function StockKLineChart({
         {indicators.bollinger ? (
           <>
             {bbUpperPath ? (
-              <path d={bbUpperPath} fill="none" strokeWidth="1.4" className="stroke-sky-500" />
+              <path d={bbUpperPath} fill="none" strokeWidth="1.4" className="stroke-omi-chart-sky" />
             ) : null}
             {bbMiddlePath ? (
-              <path d={bbMiddlePath} fill="none" strokeWidth="1.2" className="stroke-sky-400" strokeDasharray="4 4" />
+              <path d={bbMiddlePath} fill="none" strokeWidth="1.2" className="stroke-omi-chart-sky" strokeDasharray="4 4" />
             ) : null}
             {bbLowerPath ? (
-              <path d={bbLowerPath} fill="none" strokeWidth="1.4" className="stroke-sky-500" />
+              <path d={bbLowerPath} fill="none" strokeWidth="1.4" className="stroke-omi-chart-sky" />
             ) : null}
           </>
         ) : null}
@@ -2530,10 +2530,10 @@ export default function StockKLineChart({
         {indicators.donchian ? (
           <>
             {donchianUpperPath ? (
-              <path d={donchianUpperPath} fill="none" strokeWidth="1.3" className="stroke-lime-600" />
+              <path d={donchianUpperPath} fill="none" strokeWidth="1.3" className="stroke-omi-chart-lime" />
             ) : null}
             {donchianLowerPath ? (
-              <path d={donchianLowerPath} fill="none" strokeWidth="1.3" className="stroke-lime-600" />
+              <path d={donchianLowerPath} fill="none" strokeWidth="1.3" className="stroke-omi-chart-lime" />
             ) : null}
           </>
         ) : null}
@@ -2543,7 +2543,7 @@ export default function StockKLineChart({
             d={ma5Path}
             fill="none"
             strokeWidth="2"
-            className="stroke-blue-600"
+            className="stroke-omi-chart-blue"
             strokeLinecap="round"
             strokeLinejoin="round"
           />
@@ -2553,7 +2553,7 @@ export default function StockKLineChart({
             d={ma20Path}
             fill="none"
             strokeWidth="2"
-            className="stroke-amber-500"
+            className="stroke-omi-chart-amber"
             strokeLinecap="round"
             strokeLinejoin="round"
           />
@@ -2563,7 +2563,7 @@ export default function StockKLineChart({
             d={ma60Path}
             fill="none"
             strokeWidth="1.6"
-            className="stroke-purple-500"
+            className="stroke-omi-chart-purple"
             strokeLinecap="round"
             strokeLinejoin="round"
           />
@@ -2573,7 +2573,7 @@ export default function StockKLineChart({
             d={ema12Path}
             fill="none"
             strokeWidth="1.8"
-            className="stroke-cyan-600"
+            className="stroke-omi-chart-cyan"
             strokeLinecap="round"
             strokeLinejoin="round"
           />
@@ -2583,7 +2583,7 @@ export default function StockKLineChart({
             d={ema26Path}
             fill="none"
             strokeWidth="1.8"
-            className="stroke-rose-500"
+            className="stroke-omi-chart-rose"
             strokeLinecap="round"
             strokeLinejoin="round"
           />
@@ -2593,7 +2593,7 @@ export default function StockKLineChart({
             d={vwapPath}
             fill="none"
             strokeWidth="2"
-            className="stroke-slate-700"
+            className="stroke-omi-text"
             strokeDasharray="6 4"
             strokeLinecap="round"
             strokeLinejoin="round"
@@ -2609,7 +2609,7 @@ export default function StockKLineChart({
                   cx={getX(index)}
                   cy={getPriceY(point.psar)}
                   r="2.5"
-                  className="fill-violet-600"
+                  className="fill-omi-chart-violet"
                 />
               );
             })
@@ -2625,20 +2625,20 @@ export default function StockKLineChart({
 
               return (
                 <>
-                  <circle cx={x} cy={y} r="3.5" className="fill-red-600" />
+                  <circle cx={x} cy={y} r="3.5" className="fill-omi-market-up" />
                   <line
                     x1={x}
                     x2={label.x}
                     y1={y}
                     y2={labelY}
-                    className="stroke-red-400"
+                    className="stroke-omi-market-up-border"
                     strokeDasharray="3 3"
                   />
                   <text
                     x={label.x}
                     y={labelY - 3}
                     textAnchor={label.anchor}
-                    className="fill-red-600 text-[11px] font-semibold"
+                    className="fill-omi-market-up text-[11px] font-semibold"
                   >
                     最高 {formatPrice(rangeHigh.value)}
                   </text>
@@ -2658,20 +2658,20 @@ export default function StockKLineChart({
 
               return (
                 <>
-                  <circle cx={x} cy={y} r="3.5" className="fill-emerald-600" />
+                  <circle cx={x} cy={y} r="3.5" className="fill-omi-market-down" />
                   <line
                     x1={x}
                     x2={label.x}
                     y1={y}
                     y2={labelY}
-                    className="stroke-emerald-400"
+                    className="stroke-omi-market-down-border"
                     strokeDasharray="3 3"
                   />
                   <text
                     x={label.x}
                     y={labelY + 10}
                     textAnchor={label.anchor}
-                    className="fill-emerald-600 text-[11px] font-semibold"
+                    className="fill-omi-market-down text-[11px] font-semibold"
                   >
                     最低 {formatPrice(rangeLow.value)}
                   </text>
@@ -2694,10 +2694,10 @@ export default function StockKLineChart({
           const rectX = label.anchor === "end" ? labelX - labelWidth : labelX;
           const tone =
             signal.direction === "bullish"
-              ? "fill-red-600"
+              ? "fill-omi-market-up"
               : signal.direction === "bearish"
-                ? "fill-emerald-600"
-                : "fill-violet-600";
+                ? "fill-omi-market-down"
+                : "fill-omi-chart-violet";
 
           return (
             <g key={signal.key}>
@@ -2706,7 +2706,7 @@ export default function StockKLineChart({
                 x2={labelX}
                 y1={getPriceY(signal.price)}
                 y2={y}
-                className="stroke-slate-300"
+                className="stroke-omi-border"
                 strokeDasharray="3 3"
               />
               <circle cx={x} cy={getPriceY(signal.price)} r="3" className={tone} />
@@ -2722,7 +2722,7 @@ export default function StockKLineChart({
                 x={label.anchor === "end" ? labelX - 6 : labelX + 6}
                 y={y + 3}
                 textAnchor={label.anchor}
-                className="fill-white text-[10px] font-semibold"
+                className="fill-omi-surface text-[10px] font-semibold"
               >
                 {signal.label}
               </text>
@@ -2741,13 +2741,13 @@ export default function StockKLineChart({
                 x2={width - paddingRight}
                 y1={panel.top}
                 y2={panel.top}
-                className="stroke-slate-200"
+                className="stroke-omi-border-subtle"
               />
               <text
                 x={paddingLeft - 10}
                 y={panel.top + 12}
                 textAnchor="end"
-                className="fill-slate-500 text-[11px]"
+                className="fill-omi-text-muted text-[11px]"
               >
                 {panel.label}
               </text>
@@ -2772,7 +2772,7 @@ export default function StockKLineChart({
                         y={y}
                         width={candleWidth}
                         height={Math.max(barHeight, 1)}
-                        className={isUp ? "fill-red-200" : "fill-emerald-200"}
+                        className={isUp ? "fill-omi-market-up-border" : "fill-omi-market-down-border"}
                       />
                     );
                   })}
@@ -2780,7 +2780,7 @@ export default function StockKLineChart({
                     x={paddingLeft - 10}
                     y={panelBottom}
                     textAnchor="end"
-                    className="fill-slate-400 text-[10px]"
+                    className="fill-omi-text-subtle text-[10px]"
                   >
                     0
                   </text>
@@ -2796,7 +2796,7 @@ export default function StockKLineChart({
                       x2={width - paddingRight}
                       y1={getPanelY(panel, value, 0, 100)}
                       y2={getPanelY(panel, value, 0, 100)}
-                      className={value === 50 ? "stroke-slate-100" : "stroke-slate-200"}
+                      className={value === 50 ? "stroke-omi-border-subtle" : "stroke-omi-border-subtle"}
                       strokeDasharray={value === 50 ? undefined : "4 4"}
                     />
                   ))}
@@ -2804,7 +2804,7 @@ export default function StockKLineChart({
                     d={buildLinePath(visibleData, (point) => point.rsi14, getX, (value) => getPanelY(panel, value, 0, 100))}
                     fill="none"
                     strokeWidth="1.8"
-                    className="stroke-fuchsia-600"
+                    className="stroke-omi-chart-fuchsia"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
@@ -2818,7 +2818,7 @@ export default function StockKLineChart({
                     x2={width - paddingRight}
                     y1={getPanelY(panel, 0, -macdAbsMax, macdAbsMax)}
                     y2={getPanelY(panel, 0, -macdAbsMax, macdAbsMax)}
-                    className="stroke-slate-200"
+                    className="stroke-omi-border-subtle"
                   />
                   {visibleData.map((point, index) => {
                     if (!validNumber(point.macdHistogram)) return null;
@@ -2834,7 +2834,7 @@ export default function StockKLineChart({
                         y={Math.min(zeroY, valueY)}
                         width={candleWidth}
                         height={Math.max(Math.abs(zeroY - valueY), 1)}
-                        className={point.macdHistogram >= 0 ? "fill-red-200" : "fill-emerald-200"}
+                        className={point.macdHistogram >= 0 ? "fill-omi-market-up-border" : "fill-omi-market-down-border"}
                       />
                     );
                   })}
@@ -2844,7 +2844,7 @@ export default function StockKLineChart({
                     )}
                     fill="none"
                     strokeWidth="1.7"
-                    className="stroke-blue-600"
+                    className="stroke-omi-chart-blue"
                   />
                   <path
                     d={buildLinePath(visibleData, (point) => point.macdSignal, getX, (value) =>
@@ -2852,7 +2852,7 @@ export default function StockKLineChart({
                     )}
                     fill="none"
                     strokeWidth="1.7"
-                    className="stroke-amber-500"
+                    className="stroke-omi-chart-amber"
                   />
                 </>
               ) : null}
@@ -2866,7 +2866,7 @@ export default function StockKLineChart({
                       x2={width - paddingRight}
                       y1={getPanelY(panel, value, 0, 100)}
                       y2={getPanelY(panel, value, 0, 100)}
-                      className={value === 50 ? "stroke-slate-100" : "stroke-slate-200"}
+                      className={value === 50 ? "stroke-omi-border-subtle" : "stroke-omi-border-subtle"}
                       strokeDasharray={value === 50 ? undefined : "4 4"}
                     />
                   ))}
@@ -2874,13 +2874,13 @@ export default function StockKLineChart({
                     d={buildLinePath(visibleData, (point) => point.k, getX, (value) => getPanelY(panel, value, 0, 100))}
                     fill="none"
                     strokeWidth="1.7"
-                    className="stroke-blue-600"
+                    className="stroke-omi-chart-blue"
                   />
                   <path
                     d={buildLinePath(visibleData, (point) => point.d, getX, (value) => getPanelY(panel, value, 0, 100))}
                     fill="none"
                     strokeWidth="1.7"
-                    className="stroke-amber-500"
+                    className="stroke-omi-chart-amber"
                   />
                 </>
               ) : null}
@@ -2891,7 +2891,7 @@ export default function StockKLineChart({
                     x={paddingLeft - 10}
                     y={panel.top + panel.height}
                     textAnchor="end"
-                    className="fill-slate-400 text-[10px]"
+                    className="fill-omi-text-subtle text-[10px]"
                   >
                     0
                   </text>
@@ -2901,7 +2901,7 @@ export default function StockKLineChart({
                     )}
                     fill="none"
                     strokeWidth="1.8"
-                    className="stroke-orange-500"
+                    className="stroke-omi-chart-orange"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
@@ -2917,7 +2917,7 @@ export default function StockKLineChart({
                       x2={width - paddingRight}
                       y1={getPanelY(panel, value, 0, 100)}
                       y2={getPanelY(panel, value, 0, 100)}
-                      className={value === 25 ? "stroke-slate-300" : "stroke-slate-100"}
+                      className={value === 25 ? "stroke-omi-border" : "stroke-omi-border-subtle"}
                       strokeDasharray={value === 25 ? "4 4" : undefined}
                     />
                   ))}
@@ -2927,7 +2927,7 @@ export default function StockKLineChart({
                     )}
                     fill="none"
                     strokeWidth="1.8"
-                    className="stroke-violet-600"
+                    className="stroke-omi-chart-violet"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
@@ -2937,7 +2937,7 @@ export default function StockKLineChart({
                     )}
                     fill="none"
                     strokeWidth="1.5"
-                    className="stroke-red-500"
+                    className="stroke-omi-market-up-flash"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
@@ -2947,7 +2947,7 @@ export default function StockKLineChart({
                     )}
                     fill="none"
                     strokeWidth="1.5"
-                    className="stroke-emerald-500"
+                    className="stroke-omi-market-down-flash"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
@@ -2962,7 +2962,7 @@ export default function StockKLineChart({
                       x2={width - paddingRight}
                       y1={getPanelY(panel, 0, obvRange.min, obvRange.max)}
                       y2={getPanelY(panel, 0, obvRange.min, obvRange.max)}
-                      className="stroke-slate-200"
+                      className="stroke-omi-border-subtle"
                     />
                   ) : null}
                   <path
@@ -2971,7 +2971,7 @@ export default function StockKLineChart({
                     )}
                     fill="none"
                     strokeWidth="1.8"
-                    className="stroke-slate-700"
+                    className="stroke-omi-text"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
@@ -2981,7 +2981,7 @@ export default function StockKLineChart({
                     )}
                     fill="none"
                     strokeWidth="1.5"
-                    className="stroke-amber-500"
+                    className="stroke-omi-chart-amber"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
@@ -2997,7 +2997,7 @@ export default function StockKLineChart({
                       x2={width - paddingRight}
                       y1={getPanelY(panel, value, 0, 100)}
                       y2={getPanelY(panel, value, 0, 100)}
-                      className={value === 50 ? "stroke-slate-100" : "stroke-slate-200"}
+                      className={value === 50 ? "stroke-omi-border-subtle" : "stroke-omi-border-subtle"}
                       strokeDasharray={value === 50 ? undefined : "4 4"}
                     />
                   ))}
@@ -3007,7 +3007,7 @@ export default function StockKLineChart({
                     )}
                     fill="none"
                     strokeWidth="1.8"
-                    className="stroke-teal-600"
+                    className="stroke-omi-chart-teal"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
@@ -3023,7 +3023,7 @@ export default function StockKLineChart({
                       x2={width - paddingRight}
                       y1={getPanelY(panel, value, cciRange.min, cciRange.max)}
                       y2={getPanelY(panel, value, cciRange.min, cciRange.max)}
-                      className={value === 0 ? "stroke-slate-200" : "stroke-slate-300"}
+                      className={value === 0 ? "stroke-omi-border-subtle" : "stroke-omi-border"}
                       strokeDasharray={value === 0 ? undefined : "4 4"}
                     />
                   ))}
@@ -3033,7 +3033,7 @@ export default function StockKLineChart({
                     )}
                     fill="none"
                     strokeWidth="1.8"
-                    className="stroke-indigo-600"
+                    className="stroke-omi-chart-indigo"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
@@ -3049,7 +3049,7 @@ export default function StockKLineChart({
                       x2={width - paddingRight}
                       y1={getPanelY(panel, value, -100, 0)}
                       y2={getPanelY(panel, value, -100, 0)}
-                      className={value === -50 ? "stroke-slate-100" : "stroke-slate-200"}
+                      className={value === -50 ? "stroke-omi-border-subtle" : "stroke-omi-border-subtle"}
                       strokeDasharray={value === -50 ? undefined : "4 4"}
                     />
                   ))}
@@ -3059,7 +3059,7 @@ export default function StockKLineChart({
                     )}
                     fill="none"
                     strokeWidth="1.8"
-                    className="stroke-pink-600"
+                    className="stroke-omi-chart-pink"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
@@ -3073,7 +3073,7 @@ export default function StockKLineChart({
                     x2={width - paddingRight}
                     y1={getPanelY(panel, 0, rocRange.min, rocRange.max)}
                     y2={getPanelY(panel, 0, rocRange.min, rocRange.max)}
-                    className="stroke-slate-200"
+                    className="stroke-omi-border-subtle"
                   />
                   <path
                     d={buildLinePath(visibleData, (point) => point.roc12, getX, (value) =>
@@ -3081,7 +3081,7 @@ export default function StockKLineChart({
                     )}
                     fill="none"
                     strokeWidth="1.8"
-                    className="stroke-cyan-700"
+                    className="stroke-omi-chart-cyan"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
@@ -3097,7 +3097,7 @@ export default function StockKLineChart({
                       x2={width - paddingRight}
                       y1={getPanelY(panel, value, 0, 100)}
                       y2={getPanelY(panel, value, 0, 100)}
-                      className={value === 50 ? "stroke-slate-100" : "stroke-slate-200"}
+                      className={value === 50 ? "stroke-omi-border-subtle" : "stroke-omi-border-subtle"}
                       strokeDasharray={value === 50 ? undefined : "4 4"}
                     />
                   ))}
@@ -3107,7 +3107,7 @@ export default function StockKLineChart({
                     )}
                     fill="none"
                     strokeWidth="1.7"
-                    className="stroke-blue-600"
+                    className="stroke-omi-chart-blue"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
@@ -3117,7 +3117,7 @@ export default function StockKLineChart({
                     )}
                     fill="none"
                     strokeWidth="1.7"
-                    className="stroke-amber-500"
+                    className="stroke-omi-chart-amber"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
@@ -3131,7 +3131,7 @@ export default function StockKLineChart({
                     x2={width - paddingRight}
                     y1={getPanelY(panel, 0, relativeStrengthRange.min, relativeStrengthRange.max)}
                     y2={getPanelY(panel, 0, relativeStrengthRange.min, relativeStrengthRange.max)}
-                    className="stroke-slate-200"
+                    className="stroke-omi-border-subtle"
                   />
                   <path
                     d={buildLinePath(visibleData, (point) => point.relativeStrength, getX, (value) =>
@@ -3139,7 +3139,7 @@ export default function StockKLineChart({
                     )}
                     fill="none"
                     strokeWidth="1.8"
-                    className="stroke-violet-600"
+                    className="stroke-omi-chart-violet"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
@@ -3153,7 +3153,7 @@ export default function StockKLineChart({
                     x2={width - paddingRight}
                     y1={getPanelY(panel, 0, betaRange.min, betaRange.max)}
                     y2={getPanelY(panel, 0, betaRange.min, betaRange.max)}
-                    className="stroke-slate-100"
+                    className="stroke-omi-border-subtle"
                   />
                   {betaRange.min <= 1 && betaRange.max >= 1 ? (
                     <line
@@ -3161,7 +3161,7 @@ export default function StockKLineChart({
                       x2={width - paddingRight}
                       y1={getPanelY(panel, 1, betaRange.min, betaRange.max)}
                       y2={getPanelY(panel, 1, betaRange.min, betaRange.max)}
-                      className="stroke-slate-300"
+                      className="stroke-omi-border"
                       strokeDasharray="4 4"
                     />
                   ) : null}
@@ -3171,7 +3171,7 @@ export default function StockKLineChart({
                     )}
                     fill="none"
                     strokeWidth="1.8"
-                    className="stroke-teal-700"
+                    className="stroke-omi-chart-teal"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
@@ -3187,7 +3187,7 @@ export default function StockKLineChart({
                       x2={width - paddingRight}
                       y1={getPanelY(panel, value, correlationRange.min, correlationRange.max)}
                       y2={getPanelY(panel, value, correlationRange.min, correlationRange.max)}
-                      className={value === 0 ? "stroke-slate-300" : "stroke-slate-100"}
+                      className={value === 0 ? "stroke-omi-border" : "stroke-omi-border-subtle"}
                       strokeDasharray={value === 0 ? undefined : "4 4"}
                     />
                   ))}
@@ -3197,7 +3197,7 @@ export default function StockKLineChart({
                     )}
                     fill="none"
                     strokeWidth="1.8"
-                    className="stroke-sky-700"
+                    className="stroke-omi-chart-sky"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
@@ -3214,7 +3214,7 @@ export default function StockKLineChart({
               x2={hoverX}
               y1={chartTop}
               y2={plotBottom}
-              className="stroke-slate-400"
+              className="stroke-omi-border-strong"
               strokeDasharray="4 4"
             />
             {hoverPriceGuideY !== null && hoverPriceGuideLabel !== null ? (
@@ -3239,7 +3239,7 @@ export default function StockKLineChart({
                   x={paddingLeft - 14}
                   y={clamp(hoverPriceGuideY + 4, chartTop + 18, priceBottom - 8)}
                   textAnchor="end"
-                  className="fill-white text-[12px] font-semibold tabular-nums"
+                  className="fill-omi-surface text-[12px] font-semibold tabular-nums"
                 >
                   {hoverPriceGuideLabel}
                 </text>
@@ -3248,14 +3248,14 @@ export default function StockKLineChart({
           </g>
         ) : null}
 
-        <text x={paddingLeft} y={labelY} textAnchor="start" className="fill-slate-500 text-[11px]">
+        <text x={paddingLeft} y={labelY} textAnchor="start" className="fill-omi-text-muted text-[11px]">
           {visibleData[0]?.time ?? "-"}
         </text>
         <text
           x={width - paddingRight}
           y={labelY}
           textAnchor="end"
-          className="fill-slate-500 text-[11px]"
+          className="fill-omi-text-muted text-[11px]"
         >
           {visibleData[visibleData.length - 1]?.time ?? "-"}
         </text>
@@ -3263,60 +3263,60 @@ export default function StockKLineChart({
         <g transform={`translate(${paddingLeft}, 18)`}>
           {indicators.ma ? (
             <>
-              <circle cx="0" cy="0" r="4" className="fill-blue-600" />
-              <text x="10" y="4" className="fill-slate-600 text-[11px]">
+              <circle cx="0" cy="0" r="4" className="fill-omi-chart-blue" />
+              <text x="10" y="4" className="fill-omi-text-muted text-[11px]">
                 MA{params.maShort}
               </text>
-              <circle cx="58" cy="0" r="4" className="fill-amber-500" />
-              <text x="68" y="4" className="fill-slate-600 text-[11px]">
+              <circle cx="58" cy="0" r="4" className="fill-omi-chart-amber" />
+              <text x="68" y="4" className="fill-omi-text-muted text-[11px]">
                 MA{params.maMiddle}
               </text>
-              <circle cx="126" cy="0" r="4" className="fill-purple-500" />
-              <text x="136" y="4" className="fill-slate-600 text-[11px]">
+              <circle cx="126" cy="0" r="4" className="fill-omi-chart-purple" />
+              <text x="136" y="4" className="fill-omi-text-muted text-[11px]">
                 MA{params.maLong}
               </text>
             </>
           ) : null}
           {indicators.bollinger ? (
             <>
-              <rect x={190} y={-4} width={8} height={8} className="fill-sky-400" />
-              <text x="204" y="4" className="fill-slate-600 text-[11px]">
+              <rect x={190} y={-4} width={8} height={8} className="fill-omi-chart-sky" />
+              <text x="204" y="4" className="fill-omi-text-muted text-[11px]">
                 BOLL
               </text>
             </>
           ) : null}
           {indicators.ema ? (
             <>
-              <circle cx="248" cy="0" r="4" className="fill-cyan-600" />
-              <text x="258" y="4" className="fill-slate-600 text-[11px]">
+              <circle cx="248" cy="0" r="4" className="fill-omi-chart-cyan" />
+              <text x="258" y="4" className="fill-omi-text-muted text-[11px]">
                 EMA{params.emaFast}
               </text>
-              <circle cx="318" cy="0" r="4" className="fill-rose-500" />
-              <text x="328" y="4" className="fill-slate-600 text-[11px]">
+              <circle cx="318" cy="0" r="4" className="fill-omi-chart-rose" />
+              <text x="328" y="4" className="fill-omi-text-muted text-[11px]">
                 EMA{params.emaSlow}
               </text>
             </>
           ) : null}
           {indicators.vwap ? (
             <>
-              <circle cx="388" cy="0" r="4" className="fill-slate-700" />
-              <text x="398" y="4" className="fill-slate-600 text-[11px]">
+              <circle cx="388" cy="0" r="4" className="fill-omi-text" />
+              <text x="398" y="4" className="fill-omi-text-muted text-[11px]">
                 VWAP
               </text>
             </>
           ) : null}
           {indicators.psar ? (
             <>
-              <circle cx="452" cy="0" r="4" className="fill-violet-600" />
-              <text x="462" y="4" className="fill-slate-600 text-[11px]">
+              <circle cx="452" cy="0" r="4" className="fill-omi-chart-violet" />
+              <text x="462" y="4" className="fill-omi-text-muted text-[11px]">
                 SAR
               </text>
             </>
           ) : null}
           {indicators.donchian ? (
             <>
-              <rect x={506} y={-4} width={8} height={8} className="fill-lime-500" />
-              <text x="520" y="4" className="fill-slate-600 text-[11px]">
+              <rect x={506} y={-4} width={8} height={8} className="fill-omi-chart-lime" />
+              <text x="520" y="4" className="fill-omi-text-muted text-[11px]">
                 DONCH
               </text>
             </>
@@ -3357,7 +3357,7 @@ export default function StockKLineChart({
           <div
             ref={revealCoverRef}
             key={activeRevealKey}
-            className="pointer-events-none absolute inset-0 z-10 bg-white"
+            className="pointer-events-none absolute inset-0 z-10 bg-omi-surface"
             aria-hidden="true"
             style={{
               willChange: "opacity, transform",

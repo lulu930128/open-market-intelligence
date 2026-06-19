@@ -21,6 +21,8 @@ $script:LogRoot = Join-Path $script:AppDataRoot "logs"
 $script:DataRoot = Join-Path $script:AppDataRoot "data"
 $script:DatabasePath = Join-Path $script:DataRoot "open_market_intelligence.db"
 $script:ServiceRunner = Join-Path $PSScriptRoot "run-service-logged.ps1"
+$script:RepoEnvPath = Join-Path $script:RepoRoot ".env"
+$script:FrontendEnvPath = Join-Path $script:FrontendDir ".env.local"
 $script:PackagedPython = Join-Path $script:RepoRoot "runtime\python\python.exe"
 $script:PackagedNode = Join-Path $script:RepoRoot "runtime\node\node.exe"
 $script:BackendProcess = $null
@@ -28,8 +30,20 @@ $script:FrontendProcess = $null
 $script:LastStatusText = $null
 $script:IsShuttingDown = $false
 $script:DashboardAutoOpened = $false
-$script:DashboardUrl = "http://localhost:3000"
-$script:BackendHealthUrl = "http://127.0.0.1:8300/api/system/health"
+$script:DefaultFrontendHost = "127.0.0.1"
+$script:DefaultFrontendPort = 3000
+$script:DefaultBackendHost = "127.0.0.1"
+$script:DefaultBackendPort = 8400
+$script:DefaultApiProxyPath = "/omi-data"
+$script:FrontendHost = $script:DefaultFrontendHost
+$script:FrontendPort = $script:DefaultFrontendPort
+$script:DashboardUrl = "http://$($script:DefaultFrontendHost):$($script:DefaultFrontendPort)"
+$script:FrontendHealthUrl = "$($script:DashboardUrl)/omi-ui-health"
+$script:BackendHost = $script:DefaultBackendHost
+$script:BackendPort = $script:DefaultBackendPort
+$script:ApiProxyPath = $script:DefaultApiProxyPath
+$script:BackendBaseUrl = "http://$($script:DefaultBackendHost):$($script:DefaultBackendPort)"
+$script:BackendHealthUrl = "$($script:BackendBaseUrl)/api/system/health"
 
 New-Item -ItemType Directory -Force -Path $script:LogRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $script:DataRoot | Out-Null
@@ -85,6 +99,185 @@ function ConvertTo-SqliteUrl {
 
     $absolutePath = [System.IO.Path]::GetFullPath($Path)
     return "sqlite:///$($absolutePath.Replace('\', '/'))"
+}
+
+function Get-ProcessEnvironmentValue {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Names,
+        [string]$DefaultValue = $null
+    )
+
+    foreach ($name in $Names) {
+        $value = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            return $value.Trim()
+        }
+    }
+
+    return $DefaultValue
+}
+
+function Set-ProcessEnvironmentValue {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [AllowEmptyString()][string]$Value
+    )
+
+    [Environment]::SetEnvironmentVariable($Name, $Value, [EnvironmentVariableTarget]::Process)
+}
+
+function Get-EnvFileValue {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string[]]$Names
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $null
+    }
+
+    try {
+        $lines = [System.IO.File]::ReadAllLines($Path, [System.Text.Encoding]::UTF8)
+    }
+    catch {
+        Write-LauncherLog "Failed to read env file $Path. error=$($_.Exception.Message)" "WARN"
+        return $null
+    }
+
+    foreach ($line in $lines) {
+        $trimmed = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed) -or
+            $trimmed.StartsWith("#") -or
+            (-not $trimmed.Contains("="))) {
+            continue
+        }
+
+        $parts = $trimmed.Split("=", 2)
+        $key = $parts[0].Trim()
+        if ($Names -notcontains $key) {
+            continue
+        }
+
+        $value = $parts[1].Trim().Trim('"').Trim("'")
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            return $value
+        }
+    }
+
+    return $null
+}
+
+function Get-ConfigurationValue {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Names,
+        [string]$DefaultValue = $null,
+        [string[]]$EnvFilePaths = @($script:RepoEnvPath, $script:FrontendEnvPath)
+    )
+
+    $processValue = Get-ProcessEnvironmentValue -Names $Names
+    if (-not [string]::IsNullOrWhiteSpace($processValue)) {
+        return $processValue
+    }
+
+    foreach ($path in $EnvFilePaths) {
+        $fileValue = Get-EnvFileValue -Path $path -Names $Names
+        if (-not [string]::IsNullOrWhiteSpace($fileValue)) {
+            return $fileValue
+        }
+    }
+
+    return $DefaultValue
+}
+
+function Format-UrlHost {
+    param([Parameter(Mandatory = $true)][string]$HostName)
+
+    if ($HostName.Contains(":") -and
+        (-not $HostName.StartsWith("[")) -and
+        (-not $HostName.EndsWith("]"))) {
+        return "[$HostName]"
+    }
+
+    return $HostName
+}
+
+function Resolve-BackendPort {
+    $rawPort = Get-ConfigurationValue `
+        -Names @("OMI_BACKEND_PORT", "APP_PORT") `
+        -DefaultValue ([string]$script:DefaultBackendPort)
+
+    $port = 0
+    if ((-not [int]::TryParse($rawPort, [ref]$port)) -or
+        $port -lt 1 -or
+        $port -gt 65535) {
+        throw "Invalid backend port '$rawPort'. Set OMI_BACKEND_PORT or APP_PORT to a TCP port between 1 and 65535."
+    }
+
+    return $port
+}
+
+function Resolve-FrontendPort {
+    $rawPort = Get-ConfigurationValue `
+        -Names @("OMI_FRONTEND_PORT", "FRONTEND_PORT", "PORT") `
+        -DefaultValue ([string]$script:DefaultFrontendPort)
+
+    $port = 0
+    if ((-not [int]::TryParse($rawPort, [ref]$port)) -or
+        $port -lt 1 -or
+        $port -gt 65535) {
+        throw "Invalid frontend port '$rawPort'. Set OMI_FRONTEND_PORT or FRONTEND_PORT to a TCP port between 1 and 65535."
+    }
+
+    return $port
+}
+
+function Update-FrontendServiceUrls {
+    $urlHost = Format-UrlHost -HostName $script:FrontendHost
+    $script:DashboardUrl = "http://$urlHost`:$($script:FrontendPort)"
+    $script:FrontendHealthUrl = "$($script:DashboardUrl)/omi-ui-health"
+
+    Set-ProcessEnvironmentValue -Name "HOSTNAME" -Value $script:FrontendHost
+    Set-ProcessEnvironmentValue -Name "PORT" -Value ([string]$script:FrontendPort)
+    Set-ProcessEnvironmentValue -Name "OMI_FRONTEND_HOST" -Value $script:FrontendHost
+    Set-ProcessEnvironmentValue -Name "OMI_FRONTEND_PORT" -Value ([string]$script:FrontendPort)
+}
+
+function Initialize-ServiceEnvironment {
+    $script:FrontendHost = Get-ConfigurationValue `
+        -Names @("OMI_FRONTEND_HOST", "FRONTEND_HOST", "HOSTNAME") `
+        -DefaultValue $script:DefaultFrontendHost
+    $script:FrontendPort = Resolve-FrontendPort
+    $script:BackendHost = Get-ConfigurationValue `
+        -Names @("OMI_BACKEND_HOST", "APP_HOST") `
+        -DefaultValue $script:DefaultBackendHost
+    $script:BackendPort = Resolve-BackendPort
+    $script:ApiProxyPath = Get-ConfigurationValue `
+        -Names @("API_PROXY_PATH", "NEXT_PUBLIC_API_PROXY_PATH") `
+        -DefaultValue $script:DefaultApiProxyPath
+
+    if (-not $script:ApiProxyPath.StartsWith("/")) {
+        $script:ApiProxyPath = "/$($script:ApiProxyPath)"
+    }
+
+    Update-FrontendServiceUrls
+
+    $urlHost = Format-UrlHost -HostName $script:BackendHost
+    $script:BackendBaseUrl = "http://$urlHost`:$($script:BackendPort)"
+    $script:BackendHealthUrl = "$($script:BackendBaseUrl)/api/system/health"
+
+    Set-ProcessEnvironmentValue -Name "APP_HOST" -Value $script:BackendHost
+    Set-ProcessEnvironmentValue -Name "APP_PORT" -Value ([string]$script:BackendPort)
+    Set-ProcessEnvironmentValue -Name "OMI_BACKEND_HOST" -Value $script:BackendHost
+    Set-ProcessEnvironmentValue -Name "OMI_BACKEND_PORT" -Value ([string]$script:BackendPort)
+    Set-ProcessEnvironmentValue -Name "API_PROXY_TARGET" -Value $script:BackendBaseUrl
+    Set-ProcessEnvironmentValue -Name "API_PROXY_PATH" -Value $script:ApiProxyPath
+    Set-ProcessEnvironmentValue -Name "NEXT_PUBLIC_API_PROXY_PATH" -Value $script:ApiProxyPath
+
+    if ([string]::IsNullOrWhiteSpace((Get-ProcessEnvironmentValue -Names @("NEXT_PUBLIC_API_BASE_URL")))) {
+        Set-ProcessEnvironmentValue -Name "NEXT_PUBLIC_API_BASE_URL" -Value ""
+    }
+
+    Write-LauncherLog "Service environment initialized. backend=$($script:BackendBaseUrl) frontend=$($script:DashboardUrl) proxy_path=$($script:ApiProxyPath)"
 }
 
 function Invoke-StockMasterSeed {
@@ -154,26 +347,23 @@ function Initialize-ReleaseEnvironment {
 
     $env:APP_ENV = "production"
     $env:DATABASE_URL = ConvertTo-SqliteUrl $script:DatabasePath
-    $env:API_PROXY_TARGET = "http://127.0.0.1:8300"
-    $env:API_PROXY_PATH = "/omi-data"
-    $env:NEXT_PUBLIC_API_PROXY_PATH = "/omi-data"
-    $env:NEXT_PUBLIC_API_BASE_URL = ""
-    $env:HOSTNAME = "127.0.0.1"
-    $env:PORT = "3000"
-
     Write-LauncherLog "Release environment initialized. database=$($script:DatabasePath)"
 }
 
 Initialize-ReleaseEnvironment
+Initialize-ServiceEnvironment
 
 function Test-HttpOk {
-    param([Parameter(Mandatory = $true)][string]$Url)
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [int]$TimeoutMs = 1500
+    )
 
     try {
         $request = [System.Net.HttpWebRequest]::Create($Url)
         $request.Method = "GET"
-        $request.Timeout = 1500
-        $request.ReadWriteTimeout = 1500
+        $request.Timeout = $TimeoutMs
+        $request.ReadWriteTimeout = $TimeoutMs
         $response = $request.GetResponse()
         $statusCode = [int]$response.StatusCode
         $response.Close()
@@ -245,6 +435,42 @@ function Get-BackendHealth {
     }
 }
 
+function Get-FrontendHealth {
+    param([string]$Url = $script:FrontendHealthUrl)
+
+    $response = $null
+    $reader = $null
+
+    try {
+        $request = [System.Net.HttpWebRequest]::Create($Url)
+        $request.Method = "GET"
+        $request.Timeout = 1500
+        $request.ReadWriteTimeout = 1500
+        $response = $request.GetResponse()
+        $statusCode = [int]$response.StatusCode
+
+        if ($statusCode -lt 200 -or $statusCode -ge 400) {
+            return $null
+        }
+
+        $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+        $content = $reader.ReadToEnd()
+        return ($content | ConvertFrom-Json)
+    }
+    catch {
+        return $null
+    }
+    finally {
+        if ($null -ne $reader) {
+            $reader.Dispose()
+        }
+
+        if ($null -ne $response) {
+            $response.Close()
+        }
+    }
+}
+
 function Test-BackendHealthMatchesExpected {
     param(
         [Parameter(Mandatory = $true)]$Health,
@@ -275,6 +501,45 @@ function Test-BackendHealthMatchesExpected {
     return $true
 }
 
+function Test-FrontendHealthMatchesExpected {
+    param([Parameter(Mandatory = $true)]$Health)
+
+    $runtime = $Health.runtime
+
+    if ($null -eq $runtime) {
+        Write-LauncherLog "Frontend health response has no runtime metadata; treating it as a stale frontend." "WARN"
+        return $false
+    }
+
+    $expectedFrontendDir = ConvertTo-NormalizedPath $script:FrontendDir
+    $actualFrontendDir = ConvertTo-NormalizedPath ([string]$runtime.frontend_dir)
+    if ($actualFrontendDir -ne $expectedFrontendDir) {
+        Write-LauncherLog "Frontend directory mismatch. expected=$($script:FrontendDir) actual=$($runtime.frontend_dir)" "WARN"
+        return $false
+    }
+
+    $expectedProxyTarget = $script:BackendBaseUrl.TrimEnd("/").ToLowerInvariant()
+    $actualProxyTarget = ([string]$runtime.api_proxy_target).TrimEnd("/").ToLowerInvariant()
+    if ($actualProxyTarget -ne $expectedProxyTarget) {
+        Write-LauncherLog "Frontend API proxy target mismatch. expected=$($script:BackendBaseUrl) actual=$($runtime.api_proxy_target)" "WARN"
+        return $false
+    }
+
+    $expectedProxyPath = $script:ApiProxyPath.TrimEnd("/").ToLowerInvariant()
+    $actualProxyPath = ([string]$runtime.api_proxy_path).TrimEnd("/").ToLowerInvariant()
+    if ($actualProxyPath -ne $expectedProxyPath) {
+        Write-LauncherLog "Frontend API proxy path mismatch. expected=$($script:ApiProxyPath) actual=$($runtime.api_proxy_path)" "WARN"
+        return $false
+    }
+
+    return $true
+}
+
+function Test-FrontendOk {
+    $frontendHealth = Get-FrontendHealth
+    return ($null -ne $frontendHealth -and (Test-FrontendHealthMatchesExpected -Health $frontendHealth))
+}
+
 function Get-ListeningProcessIdsOnPort {
     param([Parameter(Mandatory = $true)][int]$Port)
 
@@ -292,6 +557,61 @@ function Get-ListeningProcessIdsOnPort {
     }
 
     return ($processIds | Sort-Object -Unique)
+}
+
+function Test-TcpPortExcluded {
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [string]$ServiceName = "service"
+    )
+
+    $netsh = Join-Path $env:SystemRoot "System32\netsh.exe"
+    if (-not (Test-Path -LiteralPath $netsh)) {
+        Write-LauncherLog "netsh.exe was not found; skipping TCP excluded port range check." "WARN"
+        return $false
+    }
+
+    foreach ($addressFamily in @("ipv4", "ipv6")) {
+        $lines = & $netsh interface $addressFamily show excludedportrange protocol=tcp 2>$null
+        foreach ($line in $lines) {
+            if ($line -match "^\s*(\d+)\s+(\d+)\s*(?:\*)?\s*$") {
+                $startPort = [int]$Matches[1]
+                $endPort = [int]$Matches[2]
+                if ($Port -ge $startPort -and $Port -le $endPort) {
+                    Write-LauncherLog "$ServiceName port $Port is inside Windows $addressFamily TCP excluded range $startPort-$endPort." "WARN"
+                    return $true
+                }
+            }
+        }
+    }
+
+    return $false
+}
+
+function Assert-BackendPortBindable {
+    if (Test-TcpPortExcluded -Port $script:BackendPort -ServiceName "Backend") {
+        throw "Backend port $($script:BackendPort) is reserved by Windows TCP excluded port range. Set APP_PORT or OMI_BACKEND_PORT to an available port and restart OMI."
+    }
+}
+
+function Find-AvailableFrontendPort {
+    param([Parameter(Mandatory = $true)][int]$PreferredPort)
+
+    $maxPort = [Math]::Min($PreferredPort + 50, 65535)
+    for ($port = $PreferredPort; $port -le $maxPort; $port++) {
+        $processIds = @(Get-ListeningProcessIdsOnPort -Port $port)
+        if ($processIds.Count -gt 0) {
+            continue
+        }
+
+        if (Test-TcpPortExcluded -Port $port -ServiceName "Frontend") {
+            continue
+        }
+
+        return $port
+    }
+
+    throw "Could not find an available frontend port from $PreferredPort to $maxPort. Set OMI_FRONTEND_PORT to an available port and restart OMI."
 }
 
 function Stop-BackendPortOwners {
@@ -479,6 +799,8 @@ function Start-Backend {
         throw "Missing backend directory: $($script:BackendDir)"
     }
 
+    Assert-BackendPortBindable
+
     $backendHealth = Get-BackendHealth
     if ($null -ne $backendHealth) {
         if (Test-BackendHealthMatchesExpected -Health $backendHealth -ExpectedPythonPath $python) {
@@ -488,29 +810,29 @@ function Start-Backend {
 
         if ([string]$backendHealth.app_name -eq "Open Market Intelligence") {
             Write-LauncherLog "Existing OMI backend did not match the expected project/runtime. Clearing stale backend before start." "WARN"
-            Stop-BackendPortOwners -Port 8300 -Reason "runtime mismatch"
+            Stop-BackendPortOwners -Port $script:BackendPort -Reason "runtime mismatch"
             Start-Sleep -Milliseconds 750
 
             if (Test-HttpOk $script:BackendHealthUrl) {
-                throw "Backend port 8300 is still occupied by an unexpected OMI runtime after cleanup."
+                throw "Backend port $($script:BackendPort) is still occupied by an unexpected OMI runtime after cleanup."
             }
         }
         else {
-            throw "Backend port 8300 already responds, but it is not this OMI runtime. Stop the process using port 8300 before starting OMI."
+            throw "Backend port $($script:BackendPort) already responds, but it is not this OMI runtime. Stop the process using port $($script:BackendPort) before starting OMI."
         }
     }
     elseif (Test-HttpOk $script:BackendHealthUrl) {
-        throw "Backend health endpoint responded but could not be parsed. Stop the process using port 8300 before starting OMI."
+        throw "Backend health endpoint responded but could not be parsed. Stop the process using port $($script:BackendPort) before starting OMI."
     }
 
     Invoke-BackendPythonRuntimeCheck -PythonPath $python
 
-    Write-LauncherLog "Starting backend with $python."
+    Write-LauncherLog "Starting backend with $python on $($script:BackendBaseUrl)."
     $backendArguments = if ($script:IsPackagedRelease) {
-        @("-m", "uvicorn", "app.main:app", "--port", "8300")
+        @("-m", "uvicorn", "app.main:app", "--host", $script:BackendHost, "--port", ([string]$script:BackendPort))
     }
     else {
-        @("-m", "uvicorn", "app.main:app", "--reload", "--port", "8300")
+        @("-m", "uvicorn", "app.main:app", "--reload", "--host", $script:BackendHost, "--port", ([string]$script:BackendPort))
     }
 
     $script:BackendProcess = Start-LoggedService `
@@ -522,8 +844,9 @@ function Start-Backend {
 }
 
 function Start-Frontend {
-    if (Test-HttpOk $script:DashboardUrl) {
-        Write-LauncherLog "Frontend already responds; skipping frontend start."
+    $frontendHealth = Get-FrontendHealth
+    if ($null -ne $frontendHealth -and (Test-FrontendHealthMatchesExpected -Health $frontendHealth)) {
+        Write-LauncherLog "Frontend health endpoint already responds with the expected project/runtime; skipping frontend start."
         return
     }
 
@@ -534,6 +857,13 @@ function Start-Frontend {
 
     if (-not (Test-Path -LiteralPath $script:FrontendDir)) {
         throw "Missing frontend directory: $($script:FrontendDir)"
+    }
+
+    if (($null -ne $frontendHealth) -or (Test-HttpOk -Url $script:DashboardUrl -TimeoutMs 2000)) {
+        $previousUrl = $script:DashboardUrl
+        $script:FrontendPort = Find-AvailableFrontendPort -PreferredPort ($script:FrontendPort + 1)
+        Update-FrontendServiceUrls
+        Write-LauncherLog "Frontend port already responds but is not the expected runtime. previous=$previousUrl selected=$($script:DashboardUrl)" "WARN"
     }
 
     if ($script:IsPackagedRelease) {
@@ -547,7 +877,7 @@ function Start-Frontend {
             throw "Missing packaged frontend server: $serverScript"
         }
 
-        Write-LauncherLog "Starting packaged frontend with $($script:PackagedNode)."
+        Write-LauncherLog "Starting packaged frontend with $($script:PackagedNode) on $($script:DashboardUrl)."
         $script:FrontendProcess = Start-LoggedService `
             -ServiceName "frontend" `
             -FilePath $script:PackagedNode `
@@ -562,11 +892,11 @@ function Start-Frontend {
         throw "npm.cmd was not found on PATH. Install Node.js/npm or open the launcher from a shell with npm available."
     }
 
-    Write-LauncherLog "Starting frontend with $($npm.Source)."
+    Write-LauncherLog "Starting frontend with $($npm.Source) on $($script:DashboardUrl)."
     $script:FrontendProcess = Start-LoggedService `
         -ServiceName "frontend" `
         -FilePath $npm.Source `
-        -Arguments @("run", "dev") `
+        -Arguments @("run", "dev", "--", "--hostname", $script:FrontendHost, "--port", ([string]$script:FrontendPort)) `
         -WorkingDirectory $script:FrontendDir
     Write-LauncherLog "Frontend started pid=$($script:FrontendProcess.Id)."
 }
@@ -688,7 +1018,7 @@ $script:Timer = New-Object System.Windows.Forms.Timer
 $script:Timer.Interval = 5000
 $script:Timer.add_Tick({
     $backendHttp = Test-HttpOk $script:BackendHealthUrl
-    $frontendHttp = Test-HttpOk $script:DashboardUrl
+    $frontendHttp = Test-FrontendOk
     $backendProc = Test-ProcessRunning $script:BackendProcess
     $frontendProc = Test-ProcessRunning $script:FrontendProcess
 

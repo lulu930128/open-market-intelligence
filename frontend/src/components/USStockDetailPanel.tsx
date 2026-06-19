@@ -374,11 +374,11 @@ function formatPct(value: number | null | undefined) {
 
 function valueTone(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) {
-    return "text-slate-500";
+    return "text-omi-text-muted";
   }
-  if (value > 0) return "text-red-600";
-  if (value < 0) return "text-emerald-600";
-  return "text-slate-700";
+  if (value > 0) return "text-omi-market-up";
+  if (value < 0) return "text-omi-market-down";
+  return "text-omi-text";
 }
 
 function assetTypeLabel(stock: USStockMasterRead | null) {
@@ -541,8 +541,8 @@ function messageClass(message: Message) {
   if (!message) return "";
 
   return message.type === "success"
-    ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-    : "border-red-200 bg-red-50 text-red-700";
+    ? "border-omi-success-border bg-omi-success-soft text-omi-success"
+    : "border-omi-danger-border bg-omi-danger-soft text-omi-danger";
 }
 
 function daysSince(value: string | null | undefined) {
@@ -585,10 +585,10 @@ function coverageStatus(
 
 function coverageClass(status: CoverageStatus) {
   const classes: Record<CoverageStatus, string> = {
-    ready: "border-emerald-200 bg-emerald-50 text-emerald-700",
-    missing: "border-slate-200 bg-slate-50 text-slate-500",
-    loading: "border-sky-200 bg-sky-50 text-sky-700",
-    stale: "border-amber-200 bg-amber-50 text-amber-700",
+    ready: "border-omi-success-border bg-omi-success-soft text-omi-success",
+    missing: "border-omi-border-subtle bg-omi-surface-subtle text-omi-text-muted",
+    loading: "border-omi-info-border bg-omi-info-soft text-omi-info",
+    stale: "border-omi-warning-border bg-omi-warning-soft text-omi-warning",
   };
 
   return classes[status];
@@ -631,10 +631,10 @@ function metricBarWidth(value: number | null | undefined) {
 }
 
 function metricBarClass(value: number | null | undefined) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "bg-slate-300";
-  if (value > 0) return "bg-red-500";
-  if (value < 0) return "bg-emerald-500";
-  return "bg-slate-300";
+  if (value === null || value === undefined || Number.isNaN(value)) return "bg-omi-border";
+  if (value > 0) return "bg-omi-market-up-flash";
+  if (value < 0) return "bg-omi-market-down-flash";
+  return "bg-omi-border";
 }
 
 function safeDivide(
@@ -656,7 +656,7 @@ function safeDivide(
 
 function EmptyDataState({ message }: { message: string }) {
   return (
-    <div className="border border-dashed border-slate-200 px-4 py-8 text-center text-sm text-slate-500">
+    <div className="border border-dashed border-omi-border-subtle px-4 py-8 text-center text-sm text-omi-text-muted">
       {message}
     </div>
   );
@@ -720,10 +720,10 @@ function USDataTabButton({
       type="button"
       onClick={onClick}
       className={[
-        "flex h-11 min-w-0 flex-1 items-center justify-center gap-2 border-r border-slate-200 text-sm font-semibold transition last:border-r-0",
+        "flex h-11 min-w-0 flex-1 items-center justify-center gap-2 border-r border-omi-border-subtle text-sm font-semibold transition last:border-r-0",
         active
-          ? "bg-white text-slate-950 shadow-[inset_0_-2px_0_#b91c1c]"
-          : "bg-slate-50 text-slate-500 hover:bg-white hover:text-slate-900",
+          ? "bg-omi-surface text-omi-text-strong shadow-[inset_0_-2px_0_var(--omi-color-accent)]"
+          : "bg-omi-surface-subtle text-omi-text-muted hover:bg-omi-surface hover:text-omi-text",
       ].join(" ")}
     >
       <USDataTabIcon type={tab.key} />
@@ -735,15 +735,15 @@ function USDataTabButton({
 function MetricCell({
   label,
   value,
-  tone = "text-slate-950",
+  tone = "text-omi-text-strong",
 }: {
   label: string;
   value: ReactNode;
   tone?: string;
 }) {
   return (
-    <div className="bg-white px-4 py-3">
-      <div className="text-xs text-slate-500">{label}</div>
+    <div className="bg-omi-surface px-4 py-3">
+      <div className="text-xs text-omi-text-muted">{label}</div>
       <div className={`mt-1 break-words text-sm font-bold ${tone}`}>{value}</div>
     </div>
   );
@@ -757,12 +757,12 @@ function FundamentalMetricCell({
   metric: USSecFundamentalMetricRead | null | undefined;
 }) {
   return (
-    <div className="bg-white px-4 py-3">
-      <div className="text-xs text-slate-500">{label}</div>
-      <div className="mt-1 break-words text-sm font-bold text-slate-950">
+    <div className="bg-omi-surface px-4 py-3">
+      <div className="text-xs text-omi-text-muted">{label}</div>
+      <div className="mt-1 break-words text-sm font-bold text-omi-text-strong">
         {formatFundamentalValue(metric)}
       </div>
-      <div className="mt-1 truncate text-[11px] font-semibold text-slate-400">
+      <div className="mt-1 truncate text-[11px] font-semibold text-omi-text-subtle">
         {formatFundamentalPeriod(metric)}
       </div>
     </div>
@@ -779,37 +779,37 @@ function USProfessionalIndicatorMenu({
   groups?: IndicatorCategoryGroup[];
 }) {
   return (
-    <div className="absolute right-0 z-30 mt-2 max-h-[560px] w-[25rem] overflow-y-auto border border-slate-200 bg-white p-3 text-left shadow-xl">
-      <div className="mb-3 flex items-center justify-between border-b border-slate-100 pb-2">
+    <div className="absolute right-0 z-30 mt-2 max-h-[560px] w-[25rem] overflow-y-auto border border-omi-border-subtle bg-omi-surface p-3 text-left shadow-xl">
+      <div className="mb-3 flex items-center justify-between border-b border-omi-border-subtle pb-2">
         <div>
-          <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">
+          <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-omi-text-muted">
             Indicators
           </div>
-          <div className="mt-0.5 text-sm font-bold text-slate-950">技術指標</div>
+          <div className="mt-0.5 text-sm font-bold text-omi-text-strong">技術指標</div>
         </div>
-        <div className="text-[11px] font-semibold text-slate-400">美股日/週/月</div>
+        <div className="text-[11px] font-semibold text-omi-text-subtle">美股日/週/月</div>
       </div>
 
       <div className="space-y-3">
         {groups.map((group) => (
-          <div key={group.key} className="border border-slate-100">
-            <div className="border-b border-slate-100 bg-slate-50 px-3 py-2">
-              <div className="text-xs font-bold text-slate-900">{group.label}</div>
-              <div className="mt-0.5 text-[11px] text-slate-500">{group.description}</div>
+          <div key={group.key} className="border border-omi-border-subtle">
+            <div className="border-b border-omi-border-subtle bg-omi-surface-subtle px-3 py-2">
+              <div className="text-xs font-bold text-omi-text">{group.label}</div>
+              <div className="mt-0.5 text-[11px] text-omi-text-muted">{group.description}</div>
             </div>
-            <div className="grid grid-cols-1 gap-px bg-slate-100">
+            <div className="grid grid-cols-1 gap-px bg-omi-surface-muted">
               {group.options.map((option) => {
                 if (option.status !== "available") {
                   return (
                     <div
                       key={option.key}
-                      className="flex items-start justify-between gap-2 bg-white px-3 py-2 text-xs text-slate-400"
+                      className="flex items-start justify-between gap-2 bg-omi-surface px-3 py-2 text-xs text-omi-text-subtle"
                     >
                       <span>
                         <span className="block font-semibold">{option.label}</span>
                         <span className="block">{option.description}</span>
                       </span>
-                      <span className="shrink-0 border border-slate-200 px-1.5 py-0.5 text-[10px] font-bold">
+                      <span className="shrink-0 border border-omi-border-subtle px-1.5 py-0.5 text-[10px] font-bold">
                         待補
                       </span>
                     </div>
@@ -819,7 +819,7 @@ function USProfessionalIndicatorMenu({
                 return (
                   <label
                     key={option.key}
-                    className="flex cursor-pointer items-start gap-2 bg-white px-3 py-2 text-xs hover:bg-slate-50"
+                    className="flex cursor-pointer items-start gap-2 bg-omi-surface px-3 py-2 text-xs hover:bg-omi-surface-subtle"
                   >
                     <input
                       type="checkbox"
@@ -828,10 +828,10 @@ function USProfessionalIndicatorMenu({
                       className="mt-0.5"
                     />
                     <span>
-                      <span className="block font-semibold text-slate-800">
+                      <span className="block font-semibold text-omi-text">
                         {option.label}
                       </span>
-                      <span className="block text-slate-500">{option.description}</span>
+                      <span className="block text-omi-text-muted">{option.description}</span>
                     </span>
                   </label>
                 );
@@ -1932,7 +1932,7 @@ export default function USStockDetailPanel({
         <button
           type="button"
           onClick={() => void refreshProfile()}
-          className="h-8 bg-slate-900 px-3 text-xs font-semibold text-white hover:bg-slate-700 disabled:bg-slate-300"
+          className="h-8 bg-omi-control px-3 text-xs font-semibold text-omi-text-inverse hover:bg-omi-control-border disabled:bg-omi-border"
           disabled={!selectedSymbol || refreshingProfile}
         >
           {refreshingProfile ? "Updating" : "Profile"}
@@ -1946,7 +1946,7 @@ export default function USStockDetailPanel({
           <button
             type="button"
             onClick={() => void refreshFacts()}
-            className="h-8 bg-slate-900 px-3 text-xs font-semibold text-white hover:bg-slate-700 disabled:bg-slate-300"
+            className="h-8 bg-omi-control px-3 text-xs font-semibold text-omi-text-inverse hover:bg-omi-control-border disabled:bg-omi-border"
             disabled={!selectedSymbol || refreshingFacts}
           >
             {refreshingFacts ? "Updating" : "SEC Facts"}
@@ -1954,7 +1954,7 @@ export default function USStockDetailPanel({
           <button
             type="button"
             onClick={() => void refreshActions()}
-            className="h-8 border border-slate-900 bg-white px-3 text-xs font-semibold text-slate-900 hover:border-red-700 hover:text-red-700 disabled:border-slate-200 disabled:text-slate-400"
+            className="h-8 border border-omi-control bg-omi-surface px-3 text-xs font-semibold text-omi-text hover:border-omi-accent hover:text-omi-danger disabled:border-omi-border-subtle disabled:text-omi-text-subtle"
             disabled={!selectedSymbol || refreshingActions}
           >
             {refreshingActions ? "Updating" : "Actions"}
@@ -1965,14 +1965,14 @@ export default function USStockDetailPanel({
 
     if (activeDataTab === "short") {
       return (
-        <div className="border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500">
+        <div className="border border-omi-border-subtle px-3 py-2 text-xs font-semibold text-omi-text-muted">
           FINRA
         </div>
       );
     }
 
     return (
-      <div className="border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500">
+      <div className="border border-omi-border-subtle px-3 py-2 text-xs font-semibold text-omi-text-muted">
         Form 4
       </div>
     );
@@ -1981,8 +1981,8 @@ export default function USStockDetailPanel({
   function renderOwnershipTab() {
     return (
       <div className="space-y-4">
-        <div className="overflow-hidden border border-slate-200">
-          <div className="grid grid-cols-2 gap-px bg-slate-200 text-sm">
+        <div className="overflow-hidden border border-omi-border-subtle">
+          <div className="grid grid-cols-2 gap-px bg-omi-surface-strong text-sm">
             <MetricCell label="Exchange" value={selectedStock?.exchange ?? "-"} />
             <MetricCell label="Type" value={assetTypeLabel(selectedStock)} />
             <MetricCell label="CIK" value={selectedStock?.cik ?? "-"} />
@@ -2035,10 +2035,10 @@ export default function USStockDetailPanel({
           </div>
         </div>
 
-        <div className="border border-slate-200 px-4 py-3 text-xs leading-5 text-slate-500">
+        <div className="border border-omi-border-subtle px-4 py-3 text-xs leading-5 text-omi-text-muted">
           {companyProfile ? (
             <>
-              <span className="font-semibold text-slate-700">
+              <span className="font-semibold text-omi-text">
                 {companyProfile.sector ?? "-"}
               </span>
               {" / "}
@@ -2051,7 +2051,7 @@ export default function USStockDetailPanel({
           ) : (
             fundamentalSummary ? (
               <>
-                <span className="font-semibold text-slate-700">
+                <span className="font-semibold text-omi-text">
                   {fundamentalSummary.entity_name ?? selectedStock?.sec_company_name ?? "-"}
                 </span>
                 {" · SEC fundamentals "}
@@ -2065,13 +2065,13 @@ export default function USStockDetailPanel({
           )}
         </div>
 
-        <div className="overflow-hidden border border-slate-200">
-          <div className="grid grid-cols-[1fr_96px_96px] bg-slate-50 px-4 py-2 text-xs font-bold uppercase tracking-wide text-slate-500">
+        <div className="overflow-hidden border border-omi-border-subtle">
+          <div className="grid grid-cols-[1fr_96px_96px] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
             <span>13F Holder</span>
             <span className="text-right">Shares</span>
             <span className="text-right">QoQ</span>
           </div>
-          <div className="border-t border-slate-200 p-4">
+          <div className="border-t border-omi-border-subtle p-4">
             <EmptyDataState message="尚未接入 SEC 13F 機構持倉資料" />
           </div>
         </div>
@@ -2082,22 +2082,22 @@ export default function USStockDetailPanel({
   function renderInsiderTab() {
     return (
       <div className="space-y-4">
-        <div className="overflow-hidden border border-slate-200">
-          <div className="grid grid-cols-3 gap-px bg-slate-200 text-center text-sm">
+        <div className="overflow-hidden border border-omi-border-subtle">
+          <div className="grid grid-cols-3 gap-px bg-omi-surface-strong text-center text-sm">
             <MetricCell label="Latest Filing" value="-" />
             <MetricCell label="Transactions" value="-" />
             <MetricCell label="Net Shares" value="-" />
           </div>
         </div>
 
-        <div className="overflow-hidden border border-slate-200">
-          <div className="grid grid-cols-[88px_1fr_88px_92px] bg-slate-50 px-4 py-2 text-xs font-bold uppercase tracking-wide text-slate-500">
+        <div className="overflow-hidden border border-omi-border-subtle">
+          <div className="grid grid-cols-[88px_1fr_88px_92px] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
             <span>Date</span>
             <span>Insider</span>
             <span className="text-right">Type</span>
             <span className="text-right">Shares</span>
           </div>
-          <div className="border-t border-slate-200 p-4">
+          <div className="border-t border-omi-border-subtle p-4">
             <EmptyDataState message="尚未接入 SEC Form 4 內部人交易資料" />
           </div>
         </div>
@@ -2108,8 +2108,8 @@ export default function USStockDetailPanel({
   function renderShortTab() {
     return (
       <div className="space-y-4">
-        <div className="overflow-hidden border border-slate-200">
-          <div className="grid grid-cols-2 gap-px bg-slate-200 text-sm md:grid-cols-4">
+        <div className="overflow-hidden border border-omi-border-subtle">
+          <div className="grid grid-cols-2 gap-px bg-omi-surface-strong text-sm md:grid-cols-4">
             <MetricCell label="Date" value={formatDate(latestShortVolume?.trade_date)} />
             <MetricCell label="Short Ratio" value={formatRatioAsPct(latestShortVolume?.short_ratio)} />
             <MetricCell label="Short Volume" value={formatVolume(latestShortVolume?.short_volume)} />
@@ -2117,12 +2117,12 @@ export default function USStockDetailPanel({
           </div>
         </div>
 
-        <div className="border border-amber-200 bg-amber-50 px-4 py-3 text-xs leading-5 text-amber-800">
+        <div className="border border-omi-warning-border bg-omi-warning-soft px-4 py-3 text-xs leading-5 text-omi-warning-strong">
           目前為 FINRA daily short sale volume，非 short interest 部位資料。
         </div>
 
-        <div className="overflow-hidden border border-slate-200">
-          <div className="grid grid-cols-[88px_1fr_92px] bg-slate-50 px-4 py-2 text-xs font-bold uppercase tracking-wide text-slate-500">
+        <div className="overflow-hidden border border-omi-border-subtle">
+          <div className="grid grid-cols-[88px_1fr_92px] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
             <span>Date</span>
             <span>Short / Total</span>
             <span className="text-right">Ratio</span>
@@ -2132,24 +2132,24 @@ export default function USStockDetailPanel({
               shortVolumeRows.slice(0, 8).map((row) => (
                 <div
                   key={`${row.trade_date}-${row.market_center}-${row.id}`}
-                  className="grid grid-cols-[88px_1fr_92px] border-t border-slate-200 px-4 py-2 text-sm"
+                  className="grid grid-cols-[88px_1fr_92px] border-t border-omi-border-subtle px-4 py-2 text-sm"
                 >
-                  <span className="text-slate-500">{formatDate(row.trade_date)}</span>
+                  <span className="text-omi-text-muted">{formatDate(row.trade_date)}</span>
                   <span className="min-w-0">
-                    <span className="block font-semibold text-slate-800">
+                    <span className="block font-semibold text-omi-text">
                       {formatVolume(row.short_volume)} / {formatVolume(row.total_volume)}
                     </span>
-                    <span className="block truncate text-xs text-slate-500">
+                    <span className="block truncate text-xs text-omi-text-muted">
                       {row.market_center || row.provider}
                     </span>
                   </span>
-                  <span className="text-right font-bold text-slate-950">
+                  <span className="text-right font-bold text-omi-text-strong">
                     {formatRatioAsPct(row.short_ratio)}
                   </span>
                 </div>
               ))
             ) : (
-              <div className="border-t border-slate-200 px-5 py-8 text-center text-sm text-slate-500">
+              <div className="border-t border-omi-border-subtle px-5 py-8 text-center text-sm text-omi-text-muted">
                 尚無 short volume 資料
               </div>
             )}
@@ -2162,8 +2162,8 @@ export default function USStockDetailPanel({
   function renderFilingsTab() {
     return (
       <div className="space-y-4">
-        <div className="overflow-hidden border border-slate-200">
-          <div className="grid grid-cols-2 gap-px bg-slate-200 text-sm md:grid-cols-3">
+        <div className="overflow-hidden border border-omi-border-subtle">
+          <div className="grid grid-cols-2 gap-px bg-omi-surface-strong text-sm md:grid-cols-3">
             <MetricCell label="CIK" value={selectedStock?.cik ?? "-"} />
             <MetricCell label="SEC Facts" value={factRows.length} />
             <MetricCell label="Fundamentals" value={fundamentalSummary?.metric_count ?? 0} />
@@ -2181,18 +2181,18 @@ export default function USStockDetailPanel({
           </div>
         </div>
 
-        <div className="overflow-hidden border border-slate-200">
-          <div className="border-b border-slate-200 bg-slate-50 px-4 py-2 text-xs font-bold uppercase tracking-wide text-slate-500">
+        <div className="overflow-hidden border border-omi-border-subtle">
+          <div className="border-b border-omi-border-subtle bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
             SEC Fundamentals
           </div>
           {fundamentalMetrics.length > 0 ? (
             <>
-              <div className="grid grid-cols-2 gap-px bg-slate-200 text-sm md:grid-cols-3">
+              <div className="grid grid-cols-2 gap-px bg-omi-surface-strong text-sm md:grid-cols-3">
                 <MetricCell label="Gross Margin" value={formatRatioAsPct(grossMargin)} />
                 <MetricCell label="Net Margin" value={formatRatioAsPct(netMargin)} />
                 <MetricCell label="Debt / Equity" value={formatNumber(debtToEquity, 2)} />
               </div>
-              <div className="grid grid-cols-2 gap-px bg-slate-200 text-sm md:grid-cols-3">
+              <div className="grid grid-cols-2 gap-px bg-omi-surface-strong text-sm md:grid-cols-3">
                 {secFundamentalCards.map((card) => (
                   <FundamentalMetricCell
                     key={card.metric}
@@ -2209,8 +2209,8 @@ export default function USStockDetailPanel({
           )}
         </div>
 
-        <div className="overflow-hidden border border-slate-200">
-          <div className="grid grid-cols-[minmax(120px,1fr)_56px_88px_minmax(86px,0.8fr)] bg-slate-50 px-4 py-2 text-xs font-bold uppercase tracking-wide text-slate-500">
+        <div className="overflow-hidden border border-omi-border-subtle">
+          <div className="grid grid-cols-[minmax(120px,1fr)_56px_88px_minmax(86px,0.8fr)] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
             <span>Tag</span>
             <span>FY</span>
             <span>End</span>
@@ -2221,11 +2221,11 @@ export default function USStockDetailPanel({
               factRows.slice(0, 12).map((fact) => (
                 <div
                   key={fact.fact_key}
-                  className="grid grid-cols-[minmax(120px,1fr)_56px_88px_minmax(86px,0.8fr)] border-t border-slate-200 px-4 py-2 text-sm text-slate-800"
+                  className="grid grid-cols-[minmax(120px,1fr)_56px_88px_minmax(86px,0.8fr)] border-t border-omi-border-subtle px-4 py-2 text-sm text-omi-text"
                 >
                   <span className="min-w-0">
                     <span className="block truncate font-semibold">{fact.tag}</span>
-                    <span className="block truncate text-xs text-slate-500">{fact.unit}</span>
+                    <span className="block truncate text-xs text-omi-text-muted">{fact.unit}</span>
                   </span>
                   <span>{fact.fiscal_year ?? "-"}</span>
                   <span>{formatDate(fact.period_end_date)}</span>
@@ -2233,15 +2233,15 @@ export default function USStockDetailPanel({
                 </div>
               ))
             ) : (
-              <div className="border-t border-slate-200 px-5 py-8 text-center text-sm text-slate-500">
+              <div className="border-t border-omi-border-subtle px-5 py-8 text-center text-sm text-omi-text-muted">
                 {factLoadState === "loading" ? "Loading" : "尚無 SEC facts"}
               </div>
             )}
           </div>
         </div>
 
-        <div className="overflow-hidden border border-slate-200">
-          <div className="grid grid-cols-[88px_1fr_88px] bg-slate-50 px-4 py-2 text-xs font-bold uppercase tracking-wide text-slate-500">
+        <div className="overflow-hidden border border-omi-border-subtle">
+          <div className="grid grid-cols-[88px_1fr_88px] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
             <span>Date</span>
             <span>Action</span>
             <span className="text-right">Value</span>
@@ -2251,19 +2251,19 @@ export default function USStockDetailPanel({
               corporateActions.slice(0, 8).map((action) => (
                 <div
                   key={`${action.action_type}-${action.event_date}-${action.id}`}
-                  className="grid grid-cols-[88px_1fr_88px] border-t border-slate-200 px-4 py-2 text-sm"
+                  className="grid grid-cols-[88px_1fr_88px] border-t border-omi-border-subtle px-4 py-2 text-sm"
                 >
-                  <span className="text-slate-500">{formatDate(action.event_date)}</span>
-                  <span className="font-semibold text-slate-800">
+                  <span className="text-omi-text-muted">{formatDate(action.event_date)}</span>
+                  <span className="font-semibold text-omi-text">
                     {action.action_type === "dividend" ? "Dividend" : "Split"}
                   </span>
-                  <span className="text-right font-bold text-slate-950">
+                  <span className="text-right font-bold text-omi-text-strong">
                     {formatActionValue(action)}
                   </span>
                 </div>
               ))
             ) : (
-              <div className="border-t border-slate-200 px-5 py-8 text-center text-sm text-slate-500">
+              <div className="border-t border-omi-border-subtle px-5 py-8 text-center text-sm text-omi-text-muted">
                 尚無股利 / 拆股資料
               </div>
             )}
@@ -2284,7 +2284,7 @@ export default function USStockDetailPanel({
     return watchlistRankingPanel ? (
       <section className="min-w-0">{watchlistRankingPanel}</section>
     ) : (
-      <section className="border border-slate-200 bg-white px-5 py-10 text-sm text-slate-500">
+      <section className="border border-omi-border-subtle bg-omi-surface px-5 py-10 text-sm text-omi-text-muted">
         尚未選擇股票
       </section>
     );
@@ -2349,7 +2349,7 @@ export default function USStockDetailPanel({
             }
             chartReady={professionalChartReady}
             emptyState={
-              <div className="flex h-[640px] items-center justify-center border-t border-slate-200 text-sm text-slate-500">
+              <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle text-sm text-omi-text-muted">
                 讀取{professionalTimeframeLabel} K 線中...
               </div>
             }
@@ -2381,16 +2381,16 @@ export default function USStockDetailPanel({
           />
         ) : (
           <>
-        <section className="border border-slate-200 bg-white">
+        <section className="border border-omi-border-subtle bg-omi-surface">
           <div className="flex flex-wrap items-start justify-between gap-4 px-5 py-4">
             <div>
-              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
                 {selectedIndexConfig ? "Index" : "Stock"}
               </div>
-              <h2 className="mt-1 text-2xl font-bold text-slate-950">
+              <h2 className="mt-1 text-2xl font-bold text-omi-text-strong">
                 {selectedDisplaySymbol} {selectedDisplayName}
               </h2>
-              <div className="mt-1 text-sm text-slate-500">
+              <div className="mt-1 text-sm text-omi-text-muted">
                 {selectedSubtitle}
               </div>
             </div>
@@ -2400,7 +2400,7 @@ export default function USStockDetailPanel({
                 value={latestClose}
                 direction={change}
                 resetKey={`${selectedSymbol ?? "empty"}:${timeframe}`}
-                className="text-3xl font-black text-slate-950"
+                className="text-3xl font-black text-omi-text-strong"
               >
                 {formatNumber(latestClose)}
               </PriceUpdatePulse>
@@ -2416,8 +2416,8 @@ export default function USStockDetailPanel({
                     className={[
                       "h-8 border px-3 text-sm font-semibold",
                       timeframe === option.value
-                        ? "border-red-700 bg-red-700 text-white"
-                        : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
+                        ? "border-omi-accent bg-omi-accent text-omi-text-inverse"
+                        : "border-omi-border-subtle bg-omi-surface text-omi-text hover:bg-omi-surface-subtle",
                     ].join(" ")}
                   >
                     {option.label}
@@ -2433,29 +2433,29 @@ export default function USStockDetailPanel({
             </div>
           ) : null}
 
-          <div className="grid grid-cols-2 border-t border-slate-200 md:grid-cols-4">
+          <div className="grid grid-cols-2 border-t border-omi-border-subtle md:grid-cols-4">
             {headerMetrics.map((item, index) => (
               <div
                 key={item.label}
                 className={[
                   "px-5 py-3",
-                  index % 2 === 1 ? "border-l border-slate-200" : "",
-                  index >= 2 ? "border-t border-slate-200 md:border-t-0" : "",
-                  index > 0 ? "md:border-l md:border-slate-200" : "",
+                  index % 2 === 1 ? "border-l border-omi-border-subtle" : "",
+                  index >= 2 ? "border-t border-omi-border-subtle md:border-t-0" : "",
+                  index > 0 ? "md:border-l md:border-omi-border-subtle" : "",
                 ].join(" ")}
               >
-                <div className="text-xs text-slate-500">{item.label}</div>
+                <div className="text-xs text-omi-text-muted">{item.label}</div>
                 <div className="mt-1 break-words text-sm font-bold">{item.value}</div>
               </div>
             ))}
           </div>
         </section>
 
-        <section className="border border-slate-200 bg-white">
-          <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3">
+        <section className="border border-omi-border-subtle bg-omi-surface">
+          <div className="flex items-center justify-between border-b border-omi-border-subtle px-5 py-3">
             <div>
-              <h3 className="text-sm font-bold text-slate-950">K 線 / 技術指標</h3>
-              <div className="mt-1 text-xs text-slate-500">
+              <h3 className="text-sm font-bold text-omi-text-strong">K 線 / 技術指標</h3>
+              <div className="mt-1 text-xs text-omi-text-muted">
                 {timeframeOptions.find((option) => option.value === timeframe)?.label} · {displayedPointCount} 筆資料
               </div>
             </div>
@@ -2463,7 +2463,7 @@ export default function USStockDetailPanel({
               <button
                 type="button"
                 onClick={enterChartFocusMode}
-                className="h-8 border border-slate-900 bg-white px-3 text-xs font-semibold text-slate-900 hover:border-red-700 hover:text-red-700"
+                className="h-8 border border-omi-control bg-omi-surface px-3 text-xs font-semibold text-omi-text hover:border-omi-accent hover:text-omi-danger"
               >
                 放大
               </button>
@@ -2472,17 +2472,17 @@ export default function USStockDetailPanel({
                   <button
                     type="button"
                     onClick={() => setIndicatorMenuOpen((value) => !value)}
-                    className="h-8 border border-slate-900 bg-white px-3 text-xs font-semibold text-slate-900 hover:border-red-700 hover:text-red-700"
+                    className="h-8 border border-omi-control bg-omi-surface px-3 text-xs font-semibold text-omi-text hover:border-omi-accent hover:text-omi-danger"
                   >
                     指標
                   </button>
                   {indicatorMenuOpen ? (
-                    <div className="absolute right-0 z-20 mt-2 w-56 border border-slate-200 bg-white p-3 text-left shadow-lg">
-                      <div className="mb-2 text-xs font-bold text-slate-500">顯示項目</div>
+                    <div className="absolute right-0 z-20 mt-2 w-56 border border-omi-border-subtle bg-omi-surface p-3 text-left shadow-lg">
+                      <div className="mb-2 text-xs font-bold text-omi-text-muted">顯示項目</div>
                       {intradayIndicatorOptions.map((option) => (
                         <label
                           key={option.key}
-                          className="flex cursor-pointer items-start gap-2 px-2 py-2 text-xs hover:bg-slate-50"
+                          className="flex cursor-pointer items-start gap-2 px-2 py-2 text-xs hover:bg-omi-surface-subtle"
                         >
                           <input
                             type="checkbox"
@@ -2491,10 +2491,10 @@ export default function USStockDetailPanel({
                             className="mt-0.5"
                           />
                           <span>
-                            <span className="block font-semibold text-slate-800">
+                            <span className="block font-semibold text-omi-text">
                               {option.label}
                             </span>
-                            <span className="block text-slate-500">
+                            <span className="block text-omi-text-muted">
                               {option.description}
                             </span>
                           </span>
@@ -2516,7 +2516,7 @@ export default function USStockDetailPanel({
 
                   void refreshDailyRows();
                 }}
-                className="h-8 bg-slate-900 px-3 text-xs font-semibold text-white hover:bg-slate-700 disabled:bg-slate-300"
+                className="h-8 bg-omi-control px-3 text-xs font-semibold text-omi-text-inverse hover:bg-omi-control-border disabled:bg-omi-border"
                 disabled={
                   !selectedSymbol ||
                   refreshingDaily ||
@@ -2563,7 +2563,7 @@ export default function USStockDetailPanel({
               volumeValueFormatter={formatVolume}
             />
           ) : (
-            <div className="flex h-[460px] items-center justify-center border-t border-slate-200 text-sm text-slate-500">
+            <div className="flex h-[460px] items-center justify-center border-t border-omi-border-subtle text-sm text-omi-text-muted">
               {loadState === "loading"
                 ? "讀取 K 線中"
                 : selectedSymbol
@@ -2583,15 +2583,15 @@ export default function USStockDetailPanel({
       </div>
 
       {!chartFocusMode ? (
-      <aside className="flex min-w-0 flex-col border border-slate-200 bg-white">
+      <aside className="flex min-w-0 flex-col border border-omi-border-subtle bg-omi-surface">
         <section>
-          <div className="flex items-start justify-between gap-4 border-b border-slate-200 px-5 py-4">
+          <div className="flex items-start justify-between gap-4 border-b border-omi-border-subtle px-5 py-4">
             <div>
-              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
                 Technical
               </div>
-              <h3 className="mt-1 text-xl font-bold text-slate-950">{technicalTitle}</h3>
-              <div className="mt-1 text-sm text-slate-500">均線、量能、價格相對位置</div>
+              <h3 className="mt-1 text-xl font-bold text-omi-text-strong">{technicalTitle}</h3>
+              <div className="mt-1 text-sm text-omi-text-muted">均線、量能、價格相對位置</div>
             </div>
             <div className={`text-right text-lg font-black ${valueTone(priceVsMa20)}`}>
               <PriceUpdatePulse
@@ -2602,13 +2602,13 @@ export default function USStockDetailPanel({
               >
                 {formatPct(priceVsMa20)}
               </PriceUpdatePulse>
-              <div className="text-xs font-semibold text-slate-500">vs MA20</div>
+              <div className="text-xs font-semibold text-omi-text-muted">vs MA20</div>
             </div>
           </div>
 
           <div className="space-y-3 px-5 py-4 text-sm">
             <div>
-              <div className="mb-1 flex justify-between text-xs text-slate-500">
+              <div className="mb-1 flex justify-between text-xs text-omi-text-muted">
                 <span>價格相對 MA20</span>
                 <span className={valueTone(priceVsMa20)}>
                   <PriceUpdatePulse
@@ -2621,7 +2621,7 @@ export default function USStockDetailPanel({
                   </PriceUpdatePulse>
                 </span>
               </div>
-              <div className="h-2 bg-slate-100">
+              <div className="h-2 bg-omi-surface-muted">
                 <div
                   className={`omi-technical-bar h-2 ${metricBarClass(priceVsMa20)}`}
                   style={{ width: metricBarWidth(priceVsMa20) }}
@@ -2629,7 +2629,7 @@ export default function USStockDetailPanel({
               </div>
             </div>
             <div>
-              <div className="mb-1 flex justify-between text-xs text-slate-500">
+              <div className="mb-1 flex justify-between text-xs text-omi-text-muted">
                 <span>量能相對 20 日均量</span>
                 <span className={valueTone(volumeVsMa20)}>
                   <PriceUpdatePulse
@@ -2642,7 +2642,7 @@ export default function USStockDetailPanel({
                   </PriceUpdatePulse>
                 </span>
               </div>
-              <div className="h-2 bg-slate-100">
+              <div className="h-2 bg-omi-surface-muted">
                 <div
                   className={`omi-technical-bar h-2 ${metricBarClass(volumeVsMa20)}`}
                   style={{ width: metricBarWidth(volumeVsMa20) }}
@@ -2650,7 +2650,7 @@ export default function USStockDetailPanel({
               </div>
             </div>
             <div>
-              <div className="mb-1 flex justify-between text-xs text-slate-500">
+              <div className="mb-1 flex justify-between text-xs text-omi-text-muted">
                 <span>日漲跌幅</span>
                 <span className={valueTone(changePct)}>
                   <PriceUpdatePulse
@@ -2663,7 +2663,7 @@ export default function USStockDetailPanel({
                   </PriceUpdatePulse>
                 </span>
               </div>
-              <div className="h-2 bg-slate-100">
+              <div className="h-2 bg-omi-surface-muted">
                 <div
                   className={`omi-technical-bar h-2 ${metricBarClass(changePct)}`}
                   style={{ width: metricBarWidth(changePct) }}
@@ -2672,33 +2672,33 @@ export default function USStockDetailPanel({
             </div>
           </div>
 
-          <div className="grid grid-cols-3 border-t border-slate-200 text-center text-sm">
+          <div className="grid grid-cols-3 border-t border-omi-border-subtle text-center text-sm">
             <div className="px-4 py-3">
-              <div className="text-xs text-slate-500">MA5</div>
+              <div className="text-xs text-omi-text-muted">MA5</div>
               <div className="mt-1 font-bold">{formatNumber(ma5)}</div>
             </div>
-            <div className="border-l border-slate-200 px-4 py-3">
-              <div className="text-xs text-slate-500">MA20</div>
+            <div className="border-l border-omi-border-subtle px-4 py-3">
+              <div className="text-xs text-omi-text-muted">MA20</div>
               <div className="mt-1 font-bold">{formatNumber(ma20)}</div>
             </div>
-            <div className="border-l border-slate-200 px-4 py-3">
-              <div className="text-xs text-slate-500">MA60</div>
+            <div className="border-l border-omi-border-subtle px-4 py-3">
+              <div className="text-xs text-omi-text-muted">MA60</div>
               <div className="mt-1 font-bold">{formatNumber(ma60)}</div>
             </div>
           </div>
         </section>
 
-        <section className="border-t border-slate-200 px-5 py-4">
+        <section className="border-t border-omi-border-subtle px-5 py-4">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div>
-              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
                 Coverage
               </div>
-              <div className="mt-1 text-sm font-bold text-slate-950">
+              <div className="mt-1 text-sm font-bold text-omi-text-strong">
                 Right-side data readiness
               </div>
             </div>
-            <div className="text-right text-[11px] font-semibold text-slate-500">
+            <div className="text-right text-[11px] font-semibold text-omi-text-muted">
               {readyCoverageCount}/{dataCoverageItems.length} ready
             </div>
           </div>
@@ -2715,17 +2715,17 @@ export default function USStockDetailPanel({
         </section>
 
         {selectedIndexConfig ? (
-          <section className="border-t border-slate-200 px-5 py-4">
-            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+          <section className="border-t border-omi-border-subtle px-5 py-4">
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
               Data
             </div>
-            <h3 className="mt-1 text-lg font-bold text-slate-950">
+            <h3 className="mt-1 text-lg font-bold text-omi-text-strong">
               {selectedDisplayName}
             </h3>
-            <div className="mt-1 text-sm leading-6 text-slate-500">
+            <div className="mt-1 text-sm leading-6 text-omi-text-muted">
               目前接入 Yahoo chart 的日K、週K、月K與盤中 1 分 K。成分股廣度、權重貢獻與產業分解待下一版補上。
             </div>
-            <div className="mt-4 grid grid-cols-2 gap-px bg-slate-200 text-sm">
+            <div className="mt-4 grid grid-cols-2 gap-px bg-omi-surface-strong text-sm">
               <MetricCell label="Symbol" value={selectedIndexConfig.symbol} />
               <MetricCell label="Display" value={selectedIndexConfig.displaySymbol} />
               <MetricCell label="Exchange" value={selectedIndexConfig.exchange} />
@@ -2733,8 +2733,8 @@ export default function USStockDetailPanel({
             </div>
           </section>
         ) : (
-          <section className="border-t border-slate-200">
-            <div className="grid grid-cols-4 border-b border-slate-200">
+          <section className="border-t border-omi-border-subtle">
+            <div className="grid grid-cols-4 border-b border-omi-border-subtle">
               {usDataPanelTabs.map((tab) => (
                 <USDataTabButton
                   key={tab.key}
@@ -2748,13 +2748,13 @@ export default function USStockDetailPanel({
             <div className="px-5 py-4">
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+                  <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
                     Data
                   </div>
-                  <h3 className="mt-1 text-lg font-bold text-slate-950">
+                  <h3 className="mt-1 text-lg font-bold text-omi-text-strong">
                     {activeDataTabMeta.title}
                   </h3>
-                  <div className="mt-1 text-xs text-slate-500">
+                  <div className="mt-1 text-xs text-omi-text-muted">
                     {activeDataTabMeta.description}
                   </div>
                 </div>

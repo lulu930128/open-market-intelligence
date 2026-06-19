@@ -1,5 +1,7 @@
 "use client";
 
+import { omiChartColors, type OmiChartColors } from "@/lib/themeColors";
+
 type OverlaySize = {
   height: number;
   width: number;
@@ -56,6 +58,7 @@ type TechnicalSignal = {
 };
 
 type ChartStaticIndicatorLayerProps = {
+  chartColors?: OmiChartColors;
   cloudPolygons: CloudPolygon[];
   gapZones: GapZone[];
   overlaySize: OverlaySize;
@@ -64,13 +67,14 @@ type ChartStaticIndicatorLayerProps = {
   volumeProfile: VolumeProfileBin[];
 };
 
-function signalColor(tone: TechnicalSignal["tone"]) {
-  if (tone === "bullish") return "#dc2626";
-  if (tone === "bearish") return "#059669";
-  return "#7c3aed";
+function signalColor(tone: TechnicalSignal["tone"], chartColors: OmiChartColors) {
+  if (tone === "bullish") return chartColors.marketUp;
+  if (tone === "bearish") return chartColors.marketDown;
+  return chartColors.purple;
 }
 
 export default function ChartStaticIndicatorLayer({
+  chartColors = omiChartColors,
   cloudPolygons,
   gapZones,
   overlaySize,
@@ -84,14 +88,14 @@ export default function ChartStaticIndicatorLayer({
         <polygon
           key={polygon.id}
           points={polygon.points}
-          fill={polygon.tone === "bullish" ? "#10b981" : "#ef4444"}
+          fill={polygon.tone === "bullish" ? chartColors.marketDownFlash : chartColors.marketUpFlash}
           opacity={0.1}
           pointerEvents="none"
         />
       ))}
 
       {gapZones.map((zone) => {
-        const color = zone.tone === "up" ? "#dc2626" : "#059669";
+        const color = zone.tone === "up" ? chartColors.marketUp : chartColors.marketDown;
 
         return (
           <g key={zone.id} pointerEvents="none">
@@ -118,7 +122,7 @@ export default function ChartStaticIndicatorLayer({
               <text
                 x={Math.max(8, Math.min(zone.x + 5, overlaySize.width - 118))}
                 y={Math.max(12, zone.y + 11)}
-                className="fill-slate-500 text-[10px] font-semibold tabular-nums"
+                className="fill-omi-text-muted text-[10px] font-semibold tabular-nums"
                 opacity={0.82}
               >
                 {zone.label}
@@ -129,7 +133,7 @@ export default function ChartStaticIndicatorLayer({
       })}
 
       {supportResistance.map((level) => {
-        const color = level.tone === "resistance" ? "#dc2626" : "#059669";
+        const color = level.tone === "resistance" ? chartColors.marketUp : chartColors.marketDown;
         const prefix = level.tone === "resistance" ? "R" : "S";
         const label = `${prefix} ${level.priceLabel} x${level.strength}`;
         const labelX = Math.max(62, overlaySize.width - 164);
@@ -152,7 +156,7 @@ export default function ChartStaticIndicatorLayer({
               width={98}
               height={15}
               rx={2}
-              fill="white"
+              fill={chartColors.surface}
               opacity={0.86}
             />
             <text
@@ -175,7 +179,7 @@ export default function ChartStaticIndicatorLayer({
             y={bin.y}
             width={bin.width}
             height={bin.height}
-            fill="#0f172a"
+            fill={chartColors.text}
             opacity={bin.poc ? 0.08 : 0.035}
           />
           <rect
@@ -183,7 +187,7 @@ export default function ChartStaticIndicatorLayer({
             y={bin.y}
             width={bin.sellWidth}
             height={bin.height}
-            fill="#059669"
+            fill={chartColors.marketDown}
             opacity={bin.poc ? 0.34 : 0.22}
           />
           <rect
@@ -191,7 +195,7 @@ export default function ChartStaticIndicatorLayer({
             y={bin.y}
             width={bin.buyWidth}
             height={bin.height}
-            fill="#dc2626"
+            fill={chartColors.marketUp}
             opacity={bin.poc ? 0.34 : 0.22}
           />
           {bin.poc ? (
@@ -201,7 +205,7 @@ export default function ChartStaticIndicatorLayer({
                 y1={bin.y + bin.height / 2}
                 x2={bin.x + bin.width}
                 y2={bin.y + bin.height / 2}
-                stroke="#0f172a"
+                stroke={chartColors.text}
                 strokeDasharray="4 4"
                 strokeWidth={1}
                 opacity={0.38}
@@ -209,7 +213,7 @@ export default function ChartStaticIndicatorLayer({
               <text
                 x={Math.max(62, bin.x - 68)}
                 y={Math.max(12, bin.y + bin.height / 2 - 4)}
-                className="fill-slate-700 text-[10px] font-bold tabular-nums"
+                className="fill-omi-text text-[10px] font-bold tabular-nums"
                 opacity={0.86}
               >
                 POC {bin.priceLabel}
@@ -220,7 +224,7 @@ export default function ChartStaticIndicatorLayer({
       ))}
 
       {technicalSignals.map((signal) => {
-        const color = signalColor(signal.tone);
+        const color = signalColor(signal.tone, chartColors);
         const labelWidth = Math.max(58, signal.label.length * 11 + 14);
         const preferLeft = signal.x + labelWidth + 14 > overlaySize.width - 68;
         const labelX = preferLeft ? Math.max(6, signal.x - labelWidth - 10) : signal.x + 10;
@@ -247,7 +251,7 @@ export default function ChartStaticIndicatorLayer({
               y1={signal.anchorY}
               x2={connectorX}
               y2={labelY + 9}
-              stroke="#94a3b8"
+              stroke={chartColors.crosshair}
               strokeDasharray="3 3"
               strokeWidth={1}
               opacity={0.56}
@@ -257,7 +261,7 @@ export default function ChartStaticIndicatorLayer({
               cy={signal.anchorY}
               r={3.2}
               fill={color}
-              stroke="white"
+              stroke={chartColors.surface}
               strokeWidth={1.1}
               opacity={0.92}
             />
@@ -274,7 +278,7 @@ export default function ChartStaticIndicatorLayer({
               x={labelX + labelWidth / 2}
               y={labelY + 12.5}
               textAnchor="middle"
-              className="fill-white text-[10px] font-bold"
+              className="fill-omi-surface text-[10px] font-bold"
             >
               {signal.label}
             </text>

@@ -3,34 +3,13 @@ from datetime import date
 from sqlalchemy.orm import Session
 
 from app.market.service import list_stock_daily_history
+from app.market.technical_parameters import (
+    TechnicalAnalysisParameters,
+    get_technical_analysis_parameters,
+)
 
 
-def _parse_windows(value: str, default: list[int]) -> list[int]:
-    if not value or value.strip() == "":
-        return default
-
-    windows: list[int] = []
-
-    for item in value.split(","):
-        item = item.strip()
-
-        if not item:
-            continue
-
-        try:
-            window = int(item)
-        except ValueError as exc:
-            raise ValueError(f"Invalid window value: '{item}'.") from exc
-
-        if window <= 0:
-            raise ValueError("Window value must be greater than 0.")
-
-        if window > 1000:
-            raise ValueError("Window value must be less than or equal to 1000.")
-
-        windows.append(window)
-
-    return sorted(set(windows))
+_DEFAULT_MAX_GAP_DAYS = object()
 
 
 def _moving_average(
@@ -123,7 +102,7 @@ def _ema_series(values: list[float | None], period: int) -> list[float | None]:
     return results
 
 
-def _rsi_series(closes: list[float | None], period: int = 14) -> list[float | None]:
+def _rsi_series(closes: list[float | None], period: int) -> list[float | None]:
     results: list[float | None] = []
 
     for index, close in enumerate(closes):
@@ -170,9 +149,9 @@ def _rsi_series(closes: list[float | None], period: int = 14) -> list[float | No
 
 def _macd_series(
     closes: list[float | None],
-    fast_period: int = 12,
-    slow_period: int = 26,
-    signal_period: int = 9,
+    fast_period: int,
+    slow_period: int,
+    signal_period: int,
 ) -> tuple[list[float | None], list[float | None], list[float | None]]:
     fast_ema = _ema_series(closes, fast_period)
     slow_ema = _ema_series(closes, slow_period)
@@ -252,7 +231,7 @@ def _atr_series(
     highs: list[float | None],
     lows: list[float | None],
     closes: list[float | None],
-    period: int = 14,
+    period: int,
 ) -> list[float | None]:
     return _wilder_average_series(_true_ranges(highs, lows, closes), period)
 
@@ -261,7 +240,7 @@ def _dmi_series(
     highs: list[float | None],
     lows: list[float | None],
     closes: list[float | None],
-    period: int = 14,
+    period: int,
 ) -> tuple[list[float | None], list[float | None], list[float | None]]:
     true_ranges = _true_ranges(highs, lows, closes)
     plus_dm: list[float | None] = [None]
@@ -310,7 +289,7 @@ def _dmi_series(
     return plus_di, minus_di, adx
 
 
-def _roc_series(closes: list[float | None], period: int = 12) -> list[float | None]:
+def _roc_series(closes: list[float | None], period: int) -> list[float | None]:
     results: list[float | None] = []
 
     for index, close in enumerate(closes):
@@ -340,7 +319,7 @@ def _mfi_series(
     lows: list[float | None],
     closes: list[float | None],
     volumes: list[float | None],
-    period: int = 14,
+    period: int,
 ) -> list[float | None]:
     typical_prices = [
         _typical_price(high, low, close)
@@ -394,7 +373,7 @@ def _mfi_series(
 def _donchian_series(
     highs: list[float | None],
     lows: list[float | None],
-    period: int = 20,
+    period: int,
 ) -> tuple[list[float | None], list[float | None]]:
     upper: list[float | None] = []
     lower: list[float | None] = []
@@ -430,8 +409,8 @@ def _standard_deviation(values: list[float]) -> float | None:
 
 def _bollinger_series(
     closes: list[float | None],
-    period: int = 20,
-    std_dev: float = 2.0,
+    period: int,
+    std_dev: float,
 ) -> tuple[list[float | None], list[float | None], list[float | None], list[float | None]]:
     upper: list[float | None] = []
     middle: list[float | None] = []
@@ -498,8 +477,8 @@ def _kd_series(
     highs: list[float | None],
     lows: list[float | None],
     closes: list[float | None],
-    period: int = 9,
-    smooth_period: int = 3,
+    period: int,
+    smooth_period: int,
 ) -> tuple[list[float | None], list[float | None]]:
     rsv_values: list[float | None] = []
 
@@ -538,7 +517,7 @@ def _kd_series(
 def _support_resistance_series(
     highs: list[float | None],
     lows: list[float | None],
-    period: int = 20,
+    period: int,
 ) -> tuple[list[float | None], list[float | None]]:
     support: list[float | None] = []
     resistance: list[float | None] = []
@@ -565,40 +544,90 @@ def _support_resistance_series(
     return support, resistance
 
 
+def _with_legacy_alias(key: str, legacy_key: str, value: float | None) -> dict[str, float | None]:
+    values = {key: value}
+    if key != legacy_key:
+        values[legacy_key] = value
+    return values
+
+
 def calculate_indicator_points_from_ohlc_points(
     points: list[dict],
-    ma_windows: str = "5,20,60",
-    volume_ma_windows: str = "5,20",
+    ma_windows: str | None = None,
+    volume_ma_windows: str | None = None,
     *,
-    max_gap_days: int | None = 10,
+    max_gap_days: int | None | object = _DEFAULT_MAX_GAP_DAYS,
+    parameters: TechnicalAnalysisParameters | None = None,
 ) -> list[dict]:
-    ma_window_list = _parse_windows(ma_windows, default=[5, 20, 60])
-    volume_ma_window_list = _parse_windows(volume_ma_windows, default=[5, 20])
+    technical_parameters = parameters or get_technical_analysis_parameters(
+        ma_windows=ma_windows,
+        volume_ma_windows=volume_ma_windows,
+    )
+    ma_window_list = technical_parameters.ma_windows
+    volume_ma_window_list = technical_parameters.volume_ma_windows
+    effective_max_gap_days = (
+        technical_parameters.max_gap_days
+        if max_gap_days is _DEFAULT_MAX_GAP_DAYS
+        else max_gap_days
+    )
 
     closes: list[float | None] = [point.get("close") for point in points]
     highs: list[float | None] = [point.get("high") for point in points]
     lows: list[float | None] = [point.get("low") for point in points]
     point_dates: list[date] | None = None
-    if max_gap_days is not None and all(isinstance(point.get("time"), date) for point in points):
+    if effective_max_gap_days is not None and all(isinstance(point.get("time"), date) for point in points):
         point_dates = [point["time"] for point in points]
     volumes: list[float | None] = [
         float(point["volume"]) if point.get("volume") is not None else None
         for point in points
     ]
-    ema12 = _ema_series(closes, 12)
-    ema26 = _ema_series(closes, 26)
-    macd, macd_signal, macd_histogram = _macd_series(closes)
-    rsi14 = _rsi_series(closes)
-    atr14 = _atr_series(highs, lows, closes)
-    plus_di14, minus_di14, adx14 = _dmi_series(highs, lows, closes)
-    roc12 = _roc_series(closes)
-    mfi14 = _mfi_series(highs, lows, closes, volumes)
-    donchian_upper20, donchian_lower20 = _donchian_series(highs, lows)
-    bollinger_upper20, bollinger_middle20, bollinger_lower20, bollinger_bandwidth20_pct = _bollinger_series(closes)
-    kd_k9, kd_d9 = _kd_series(highs, lows, closes)
-    support20, resistance20 = _support_resistance_series(highs, lows)
+    ema_fast = _ema_series(closes, technical_parameters.macd_fast_period)
+    ema_slow = _ema_series(closes, technical_parameters.macd_slow_period)
+    macd, macd_signal, macd_histogram = _macd_series(
+        closes,
+        fast_period=technical_parameters.macd_fast_period,
+        slow_period=technical_parameters.macd_slow_period,
+        signal_period=technical_parameters.macd_signal_period,
+    )
+    rsi = _rsi_series(closes, period=technical_parameters.rsi_period)
+    atr = _atr_series(highs, lows, closes, period=technical_parameters.atr_period)
+    plus_di, minus_di, adx = _dmi_series(highs, lows, closes, period=technical_parameters.adx_period)
+    roc = _roc_series(closes, period=technical_parameters.roc_period)
+    mfi = _mfi_series(highs, lows, closes, volumes, period=technical_parameters.mfi_period)
+    donchian_upper, donchian_lower = _donchian_series(
+        highs,
+        lows,
+        period=technical_parameters.donchian_period,
+    )
+    (
+        bollinger_upper,
+        bollinger_middle,
+        bollinger_lower,
+        bollinger_bandwidth_pct,
+    ) = _bollinger_series(
+        closes,
+        period=technical_parameters.bollinger_period,
+        std_dev=technical_parameters.bollinger_std_dev,
+    )
+    kd_k, kd_d = _kd_series(
+        highs,
+        lows,
+        closes,
+        period=technical_parameters.kd_period,
+        smooth_period=technical_parameters.kd_smooth_period,
+    )
+    support, resistance = _support_resistance_series(
+        highs,
+        lows,
+        period=technical_parameters.support_resistance_period,
+    )
 
     results: list[dict] = []
+    gap_days_for_ma = (
+        effective_max_gap_days
+        if isinstance(effective_max_gap_days, int)
+        else technical_parameters.max_gap_days
+    )
 
     for index, point in enumerate(points):
         previous_close = closes[index - 1] if index > 0 else None
@@ -616,7 +645,7 @@ def calculate_indicator_points_from_ohlc_points(
                 index,
                 window,
                 point_dates,
-                max_gap_days=max_gap_days or 10,
+                max_gap_days=gap_days_for_ma,
             )
             for window in ma_window_list
         }
@@ -627,7 +656,7 @@ def calculate_indicator_points_from_ohlc_points(
                 index,
                 window,
                 point_dates,
-                max_gap_days=max_gap_days or 10,
+                max_gap_days=gap_days_for_ma,
             )
             for window in volume_ma_window_list
         }
@@ -642,48 +671,72 @@ def calculate_indicator_points_from_ohlc_points(
                 "ma": ma_values,
                 "volume_ma": volume_ma_values,
                 "ema": {
-                    "ema12": ema12[index],
-                    "ema26": ema26[index],
+                    **_with_legacy_alias(technical_parameters.ema_fast_key, "ema12", ema_fast[index]),
+                    **_with_legacy_alias(technical_parameters.ema_slow_key, "ema26", ema_slow[index]),
                 },
                 "macd": {
                     "macd": macd[index],
                     "signal": macd_signal[index],
                     "histogram": macd_histogram[index],
                 },
-                "rsi": {
-                    "rsi14": rsi14[index],
-                },
-                "atr": {
-                    "atr14": atr14[index],
-                },
+                "rsi": _with_legacy_alias(technical_parameters.rsi_key, "rsi14", rsi[index]),
+                "atr": _with_legacy_alias(technical_parameters.atr_key, "atr14", atr[index]),
                 "adx": {
-                    "plus_di14": plus_di14[index],
-                    "minus_di14": minus_di14[index],
-                    "adx14": adx14[index],
+                    **_with_legacy_alias(technical_parameters.plus_di_key, "plus_di14", plus_di[index]),
+                    **_with_legacy_alias(technical_parameters.minus_di_key, "minus_di14", minus_di[index]),
+                    **_with_legacy_alias(technical_parameters.adx_key, "adx14", adx[index]),
                 },
-                "roc": {
-                    "roc12": roc12[index],
-                },
-                "mfi": {
-                    "mfi14": mfi14[index],
-                },
+                "roc": _with_legacy_alias(technical_parameters.roc_key, "roc12", roc[index]),
+                "mfi": _with_legacy_alias(technical_parameters.mfi_key, "mfi14", mfi[index]),
                 "donchian": {
-                    "upper20": donchian_upper20[index],
-                    "lower20": donchian_lower20[index],
+                    **_with_legacy_alias(
+                        technical_parameters.donchian_upper_key,
+                        "upper20",
+                        donchian_upper[index],
+                    ),
+                    **_with_legacy_alias(
+                        technical_parameters.donchian_lower_key,
+                        "lower20",
+                        donchian_lower[index],
+                    ),
                 },
                 "bollinger": {
-                    "upper20": bollinger_upper20[index],
-                    "middle20": bollinger_middle20[index],
-                    "lower20": bollinger_lower20[index],
-                    "bandwidth20_pct": bollinger_bandwidth20_pct[index],
+                    **_with_legacy_alias(
+                        technical_parameters.bollinger_upper_key,
+                        "upper20",
+                        bollinger_upper[index],
+                    ),
+                    **_with_legacy_alias(
+                        technical_parameters.bollinger_middle_key,
+                        "middle20",
+                        bollinger_middle[index],
+                    ),
+                    **_with_legacy_alias(
+                        technical_parameters.bollinger_lower_key,
+                        "lower20",
+                        bollinger_lower[index],
+                    ),
+                    **_with_legacy_alias(
+                        technical_parameters.bollinger_bandwidth_key,
+                        "bandwidth20_pct",
+                        bollinger_bandwidth_pct[index],
+                    ),
                 },
                 "kd": {
-                    "k9": kd_k9[index],
-                    "d9": kd_d9[index],
+                    **_with_legacy_alias(technical_parameters.kd_k_key, "k9", kd_k[index]),
+                    **_with_legacy_alias(technical_parameters.kd_d_key, "d9", kd_d[index]),
                 },
                 "support_resistance": {
-                    "support20": support20[index],
-                    "resistance20": resistance20[index],
+                    **_with_legacy_alias(
+                        technical_parameters.support_key,
+                        "support20",
+                        support[index],
+                    ),
+                    **_with_legacy_alias(
+                        technical_parameters.resistance_key,
+                        "resistance20",
+                        resistance[index],
+                    ),
                 },
             }
         )
@@ -697,9 +750,14 @@ def calculate_daily_indicators(
     from_date: date | None = None,
     to_date: date | None = None,
     limit: int = 250,
-    ma_windows: str = "5,20,60",
-    volume_ma_windows: str = "5,20",
+    ma_windows: str | None = None,
+    volume_ma_windows: str | None = None,
+    parameters: TechnicalAnalysisParameters | None = None,
 ) -> list[dict]:
+    technical_parameters = parameters or get_technical_analysis_parameters(
+        ma_windows=ma_windows,
+        volume_ma_windows=volume_ma_windows,
+    )
     rows = list_stock_daily_history(
         db=db,
         stock_id=stock_id,
@@ -723,29 +781,50 @@ def calculate_daily_indicators(
     ]
     return calculate_indicator_points_from_ohlc_points(
         points,
-        ma_windows=ma_windows,
-        volume_ma_windows=volume_ma_windows,
-        max_gap_days=10,
+        ma_windows=technical_parameters.ma_windows_text,
+        volume_ma_windows=technical_parameters.volume_ma_windows_text,
+        max_gap_days=technical_parameters.max_gap_days,
+        parameters=technical_parameters,
     )
 
 
 def calculate_latest_daily_indicator(
     db: Session,
     stock_id: str,
-    ma_windows: str = "5,20,60",
-    volume_ma_windows: str = "5,20",
+    ma_windows: str | None = None,
+    volume_ma_windows: str | None = None,
+    parameters: TechnicalAnalysisParameters | None = None,
 ) -> dict | None:
-    ma_window_list = _parse_windows(ma_windows, default=[5, 20, 60])
-    volume_ma_window_list = _parse_windows(volume_ma_windows, default=[5, 20])
+    technical_parameters = parameters or get_technical_analysis_parameters(
+        ma_windows=ma_windows,
+        volume_ma_windows=volume_ma_windows,
+    )
 
-    required_lookback = max(ma_window_list + volume_ma_window_list + [2])
+    required_lookback = max(
+        list(technical_parameters.ma_windows)
+        + list(technical_parameters.volume_ma_windows)
+        + [
+            technical_parameters.macd_slow_period,
+            technical_parameters.rsi_period,
+            technical_parameters.atr_period,
+            technical_parameters.adx_period,
+            technical_parameters.roc_period,
+            technical_parameters.mfi_period,
+            technical_parameters.donchian_period,
+            technical_parameters.bollinger_period,
+            technical_parameters.kd_period + (technical_parameters.kd_smooth_period * 2),
+            technical_parameters.support_resistance_period + 1,
+            2,
+        ]
+    )
 
     results = calculate_daily_indicators(
         db=db,
         stock_id=stock_id,
         limit=max(required_lookback, 250),
-        ma_windows=ma_windows,
-        volume_ma_windows=volume_ma_windows,
+        ma_windows=technical_parameters.ma_windows_text,
+        volume_ma_windows=technical_parameters.volume_ma_windows_text,
+        parameters=technical_parameters,
     )
 
     if not results:
