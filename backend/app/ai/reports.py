@@ -973,6 +973,7 @@ def build_stock_brief(
     branch_days: int = 5,
     include_intraday: bool = False,
     analysis_horizon: str = "swing",
+    response_preferences: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     context = tools.read_stock_context(
         db=db,
@@ -993,8 +994,12 @@ def build_stock_brief(
         **context,
         "kind": "stock_brief",
         "strategy_profile": profile.key,
+        "response_preferences": response_preferences or {},
         "prompt": {
-            "system": prompts.build_system_prompt(profile.key),
+            "system": prompts.build_system_prompt(
+                profile.key,
+                response_preferences=response_preferences,
+            ),
             "profile": {
                 "key": profile.key,
                 "label": profile.label,
@@ -1015,6 +1020,7 @@ def build_us_stock_brief(
     strategy_profile: str = "short_term_momentum",
     analysis_horizon: str = "swing",
     tool_runs: list[dict[str, Any]] | None = None,
+    response_preferences: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     context = agentic_tools.read_us_stock_context(
         db=db,
@@ -1037,8 +1043,12 @@ def build_us_stock_brief(
         "kind": "us_stock_brief",
         "data": data,
         "strategy_profile": profile.key,
+        "response_preferences": response_preferences or {},
         "prompt": {
-            "system": prompts.build_system_prompt(profile.key),
+            "system": prompts.build_system_prompt(
+                profile.key,
+                response_preferences=response_preferences,
+            ),
             "profile": {
                 "key": profile.key,
                 "label": profile.label,
@@ -1060,6 +1070,7 @@ def build_watchlist_brief(
     rank_by: str = "score",
     sort_order: str = "desc",
     radar_mode: str = "action",
+    response_preferences: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     context = tools.read_watchlist_context(
         db=db,
@@ -1091,8 +1102,12 @@ def build_watchlist_brief(
         "data": scan_data,
         "warnings": warnings,
         "strategy_profile": profile.key,
+        "response_preferences": response_preferences or {},
         "prompt": {
-            "system": prompts.build_system_prompt(profile.key),
+            "system": prompts.build_system_prompt(
+                profile.key,
+                response_preferences=response_preferences,
+            ),
             "profile": {
                 "key": profile.key,
                 "label": profile.label,

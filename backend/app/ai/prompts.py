@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -125,10 +126,32 @@ def list_strategy_profiles() -> list[dict]:
     ]
 
 
-def build_system_prompt(profile_key: str | None) -> str:
+def _language_instruction(response_preferences: dict[str, Any] | None) -> str:
+    if not isinstance(response_preferences, dict):
+        return "Write every report string value in Traditional Chinese."
+
+    instruction = response_preferences.get("language_instruction")
+    if isinstance(instruction, str) and instruction.strip():
+        return instruction.strip()
+
+    effective_locale = response_preferences.get("effective_locale")
+    if effective_locale == "en-US":
+        return "Write every report string value in English."
+    if effective_locale == "ja-JP":
+        return "Write every report string value in Japanese."
+
+    return "Write every report string value in Traditional Chinese."
+
+
+def build_system_prompt(
+    profile_key: str | None,
+    *,
+    response_preferences: dict[str, Any] | None = None,
+) -> str:
     profile = get_strategy_profile(profile_key)
     focus = "\n".join(f"- {item}" for item in profile.focus_points)
     risks = "\n".join(f"- {item}" for item in profile.risk_notes)
+    language_instruction = _language_instruction(response_preferences)
 
     return (
         "You are an Open Market Intelligence research assistant.\n"
@@ -136,7 +159,7 @@ def build_system_prompt(profile_key: str | None) -> str:
         "Always separate facts, interpretation, missing data, and next checks.\n"
         "Always mention the relevant as_of dates when making a claim.\n\n"
         "Output language and style:\n"
-        "- Write every report string value in Traditional Chinese.\n"
+        f"- {language_instruction}\n"
         "- Keep stock ids, field names, source names, and indicator keys unchanged when needed.\n"
         "- Be concise and decision-oriented; avoid generic market commentary.\n\n"
         f"Strategy profile: {profile.label}\n"

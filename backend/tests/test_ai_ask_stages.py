@@ -48,6 +48,40 @@ class AiAskStagesTests(unittest.TestCase):
         self.assertIn("question_understanding", stage.policy)
         self.assertEqual(events[0]["stage"], "question_understanding")
 
+    def test_build_question_stage_attaches_response_preferences(self) -> None:
+        progress = pipeline_progress.OmiPipelineProgress(lambda event: None)
+        payload = AiAskRequest(
+            question="2330 怎麼看？",
+            target={"type": "tw_stock", "id": "2330"},
+            conversation_context={
+                "ui_context": {
+                    "settings": {
+                        "response_locale": "en-US",
+                        "response_language": "English",
+                        "theme": "dark",
+                        "technical_analysis_parameters": "server_persisted",
+                    }
+                }
+            },
+        )
+
+        stage = ask_stages.build_question_stage(
+            payload=payload,
+            scope_type="stock",
+            server_policy=object(),
+            progress=progress,
+            build_policy=lambda request, server_policy: {},
+            infer_mode=lambda request, scope_type, policy: "brief",
+            normalize_analysis_horizon=lambda value: value,
+        )
+
+        preferences = stage.policy["response_preferences"]
+        self.assertEqual(preferences["requested_locale"], "en-US")
+        self.assertEqual(preferences["effective_locale"], "en-US")
+        self.assertEqual(preferences["language"], "English")
+        self.assertEqual(preferences["theme"], "dark")
+        self.assertIn("English", preferences["language_instruction"])
+
     def test_execute_tool_stages_runs_tw_stock_refresh_and_preserves_warnings(self) -> None:
         events = []
         progress = pipeline_progress.OmiPipelineProgress(events.append)
@@ -124,6 +158,7 @@ class AiAskStagesTests(unittest.TestCase):
 
     def test_assemble_response_analysis_combines_answer_context(self) -> None:
         events = []
+        captured_human_answer_kwargs = {}
         progress = pipeline_progress.OmiPipelineProgress(events.append)
         question_understanding = SimpleNamespace(
             as_policy_payload=lambda: {"intent": "entry_decision"}
@@ -135,7 +170,7 @@ class AiAskStagesTests(unittest.TestCase):
             warnings=["base warning"],
             resolution=SimpleNamespace(),
             effective_mode="brief",
-            policy={},
+            policy={"response_preferences": {"effective_locale": "en-US", "language": "English"}},
             requested_mode="brief",
             question_understanding=question_understanding,
             question_intent="entry_decision",
@@ -149,7 +184,9 @@ class AiAskStagesTests(unittest.TestCase):
             build_next_actions=lambda **kwargs: [],
             build_position_decision=lambda **kwargs: {},
             try_attach_position_decision_llm=lambda **kwargs: {},
-            build_consumer_human_answer=lambda **kwargs: {"text": "結論：觀察。"},
+            build_consumer_human_answer=lambda **kwargs: (
+                captured_human_answer_kwargs.update(kwargs) or {"text": "結論：觀察。"}
+            ),
             build_reasoning_steps=lambda **kwargs: [
                 {"stage": "decision_synthesis", "message": "已組合回答。"}
             ],
@@ -165,6 +202,11 @@ class AiAskStagesTests(unittest.TestCase):
             ["base warning", "freshness warning", "result warning"],
         )
         self.assertEqual(assembled.response_analysis["human_answer"]["text"], "結論：觀察。")
+        self.assertEqual(assembled.response_analysis["response_preferences"]["effective_locale"], "en-US")
+        self.assertEqual(
+            captured_human_answer_kwargs["response_preferences"]["effective_locale"],
+            "en-US",
+        )
         self.assertEqual(assembled.reasoning_steps[0]["stage"], "decision_synthesis")
         self.assertIn("decision_synthesis", [event["stage"] for event in events])
 

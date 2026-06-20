@@ -6,6 +6,14 @@ import {
   US_INTRADAY_REFRESH_MS,
   getUsMarketRefreshState,
 } from "@/lib/usMarketTime";
+import {
+  rankByLabel,
+  rowStatusLabel,
+  trendDirectionLabel,
+  usAssetTypeLabel,
+  useT,
+  type TranslationFunction,
+} from "@/i18n";
 import type {
   USWatchlistRankingItemRead,
   USWatchlistRankingRead,
@@ -58,11 +66,8 @@ function valueTone(value: number | null | undefined) {
   return "text-omi-text";
 }
 
-function trendLabel(value: number | null | undefined) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "-";
-  if (value > 0) return "上漲";
-  if (value < 0) return "下跌";
-  return "持平";
+function trendLabel(t: TranslationFunction, value: number | null | undefined) {
+  return trendDirectionLabel(t, value);
 }
 
 function trendClass(value: number | null | undefined) {
@@ -74,20 +79,14 @@ function trendClass(value: number | null | undefined) {
   return "bg-omi-surface-muted text-omi-text-muted";
 }
 
-function statusLabel(status: string) {
-  if (status === "intraday") return "盤中";
-  if (status === "ready") return "Ready";
-  if (status === "no_data") return "尚無資料";
-  if (status === "error") return "錯誤";
-  return status || "-";
+function statusLabel(t: TranslationFunction, status: string) {
+  if (status === "intraday") return t("statusLabels.intraday");
+  if (status === "ready") return t("statusLabels.ready");
+  return rowStatusLabel(t, status);
 }
 
-function rankLabel(rankBy: string) {
-  if (rankBy === "none") return "正常排序";
-  if (rankBy === "change_pct") return "漲跌幅";
-  if (rankBy === "volume") return "成交量";
-  if (rankBy === "close") return "收盤價";
-  return rankBy;
+function rankLabel(t: TranslationFunction, rankBy: string) {
+  return rankByLabel(t, rankBy);
 }
 
 export default function USWatchlistRankingPanel({
@@ -97,6 +96,7 @@ export default function USWatchlistRankingPanel({
   reloadKey,
   onSelectSymbol,
 }: Props) {
+  const t = useT();
   const [rankBy, setRankBy] = useState<USRankBy>("none");
   const [ranking, setRanking] = useState<USWatchlistRankingRead | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("idle");
@@ -152,9 +152,9 @@ export default function USWatchlistRankingPanel({
     } catch (error) {
       setRanking(null);
       setLoadState("error");
-      setErrorMessage(error instanceof Error ? error.message : "讀取美股自選排行失敗");
+      setErrorMessage(error instanceof Error ? error.message : t("dashboard.ranking.usReadError"));
     }
-  }, [rankBy, selectedGroupId, sortOrder]);
+  }, [rankBy, selectedGroupId, sortOrder, t]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -215,13 +215,17 @@ export default function USWatchlistRankingPanel({
             {row.symbol} {row.security_name ?? ""}
           </span>
           <span className={selected ? "block truncate text-xs text-omi-text-inverse-muted" : "block truncate text-xs text-omi-text-muted"}>
-            {[row.time ? formatDate(row.time) : null, row.exchange, row.asset_type]
+            {[
+              row.time ? formatDate(row.time) : null,
+              row.exchange,
+              row.asset_type ? usAssetTypeLabel(t, row.asset_type) : null,
+            ]
               .filter(Boolean)
-              .join(" · ") || statusLabel(row.status)}
+              .join(" · ") || statusLabel(t, row.status)}
           </span>
         </span>
         <span className={selected ? "text-omi-text-inverse-muted" : "text-omi-text-muted"}>
-          {row.time ? "盤中" : formatDate(row.trade_date)}
+          {row.time ? t("statusLabels.intraday") : formatDate(row.trade_date)}
         </span>
         <span className="text-right font-semibold">
           <PriceUpdatePulse
@@ -260,7 +264,7 @@ export default function USWatchlistRankingPanel({
               selected ? "bg-omi-surface text-omi-text" : trendClass(row.change_pct),
             ].join(" ")}
           >
-            {trendLabel(row.change_pct)}
+            {trendLabel(t, row.change_pct)}
           </span>
         </span>
       </button>
@@ -273,13 +277,15 @@ export default function USWatchlistRankingPanel({
         <div className="flex flex-wrap items-start justify-between gap-4 px-5 py-4">
           <div>
             <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
-              Selected Group
+              {t("dashboard.ranking.selectedGroup")}
             </div>
             <h2 className="mt-1 text-2xl font-bold text-omi-text-strong">
-              {selectedGroupName ?? "美股自選"}
+              {selectedGroupName ?? t("watchlist.usHeader")}
             </h2>
             <div className="mt-1 text-sm text-omi-text-muted">
-              {lastUpdatedAt ? `更新時間 ${lastUpdatedAt}` : "尚未更新"}
+              {lastUpdatedAt
+                ? t("dashboard.ranking.updateTime", { time: lastUpdatedAt })
+                : t("dashboard.ranking.groupDataNotLoaded")}
             </div>
           </div>
 
@@ -289,10 +295,10 @@ export default function USWatchlistRankingPanel({
               onChange={(event) => setRankBy(event.target.value as USRankBy)}
               className="h-9 border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text-muted outline-none focus:border-omi-accent"
             >
-              <option value="none">正常排序</option>
-              <option value="change_pct">漲跌幅</option>
-              <option value="volume">成交量</option>
-              <option value="close">收盤價</option>
+              <option value="none">{t("rank.none")}</option>
+              <option value="change_pct">{t("rank.changePct")}</option>
+              <option value="volume">{t("rank.volume")}</option>
+              <option value="close">{t("rank.close")}</option>
             </select>
             <button
               type="button"
@@ -300,7 +306,7 @@ export default function USWatchlistRankingPanel({
               className="h-9 bg-omi-control px-4 text-sm font-semibold text-omi-text-inverse hover:bg-omi-control-border disabled:bg-omi-surface-strong"
               disabled={loadState === "loading"}
             >
-              Reload
+              {t("common.reload")}
             </button>
           </div>
         </div>
@@ -313,48 +319,51 @@ export default function USWatchlistRankingPanel({
 
         <div className="grid grid-cols-2 border-t border-omi-border-subtle md:grid-cols-4">
           <div className="px-5 py-3">
-            <div className="text-xs text-omi-text-muted">股票數</div>
+            <div className="text-xs text-omi-text-muted">{t("dashboard.ranking.stockCount")}</div>
             <div className="mt-1 text-xl font-bold">{summary.stockCount}</div>
           </div>
           <div className="border-l border-omi-border-subtle px-5 py-3">
-            <div className="text-xs text-omi-text-muted">上漲</div>
+            <div className="text-xs text-omi-text-muted">{t("dashboard.ranking.upCount")}</div>
             <div className="mt-1 text-xl font-bold text-omi-market-up">{summary.upCount}</div>
           </div>
           <div className="border-l border-omi-border-subtle px-5 py-3">
-            <div className="text-xs text-omi-text-muted">下跌</div>
+            <div className="text-xs text-omi-text-muted">{t("dashboard.ranking.downCount")}</div>
             <div className="mt-1 text-xl font-bold text-omi-market-down">{summary.downCount}</div>
           </div>
           <div className="border-l border-omi-border-subtle px-5 py-3">
-            <div className="text-xs text-omi-text-muted">排序</div>
-            <div className="mt-1 text-xl font-bold">{rankLabel(ranking?.rank_by ?? rankBy)}</div>
+            <div className="text-xs text-omi-text-muted">{t("dashboard.ranking.sort")}</div>
+            <div className="mt-1 text-xl font-bold">{rankLabel(t, ranking?.rank_by ?? rankBy)}</div>
           </div>
         </div>
       </section>
 
       <section className="border border-omi-border-subtle bg-omi-surface">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-omi-border-subtle px-5 py-3">
-          <h3 className="text-sm font-bold text-omi-text-strong">自選股列表</h3>
+          <h3 className="text-sm font-bold text-omi-text-strong">{t("dashboard.ranking.listTitle")}</h3>
           <span className="text-xs text-omi-text-muted">
             {loadState === "loading"
-              ? "Loading"
-              : `${rows.length} 檔 · ${summary.noDataCount} 檔尚無資料`}
+              ? t("common.loading")
+              : t("dashboard.ranking.usSummaryWithNoData", {
+                  count: rows.length,
+                  noDataCount: summary.noDataCount,
+                })}
           </span>
         </div>
 
         <div className="grid grid-cols-[46px_minmax(160px,1fr)_94px_86px_86px_104px_78px] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
-          <span>名次</span>
-          <span>股票</span>
-          <span>日期</span>
-          <span className="text-right">收盤</span>
-          <span className="text-right">漲幅</span>
-          <span className="text-right">成交量</span>
-          <span className="text-right">狀態</span>
+          <span>{t("dashboard.ranking.rank")}</span>
+          <span>{t("dashboard.ranking.stock")}</span>
+          <span>{t("dashboard.ranking.date")}</span>
+          <span className="text-right">{t("dashboard.ranking.close")}</span>
+          <span className="text-right">{t("dashboard.ranking.changePct")}</span>
+          <span className="text-right">{t("dashboard.ranking.volume")}</span>
+          <span className="text-right">{t("dashboard.ranking.status")}</span>
         </div>
         {rows.length > 0 ? (
           rows.map(renderRow)
         ) : (
           <div className="border-t border-omi-border-subtle px-5 py-10 text-center text-sm text-omi-text-muted">
-            {loadState === "loading" ? "Loading" : "尚無美股自選排行"}
+            {loadState === "loading" ? t("common.loading") : t("dashboard.ranking.usEmpty")}
           </div>
         )}
       </section>

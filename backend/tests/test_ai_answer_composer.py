@@ -418,6 +418,276 @@ class AiAnswerComposerTests(unittest.TestCase):
         self.assertEqual([row["stock_id"] for row in risk_rows], ["3661", "3008"])
         self.assertEqual([row["stock_id"] for row in entry_rows], ["3008", "2454"])
 
+    def test_consumer_text_uses_english_response_preferences(self) -> None:
+        answer = {
+            "headline": "Watch the breakout first",
+            "stance_label": "Bullish",
+            "confidence_label": "High",
+            "summary": ["Price is above MA20"],
+            "action_plan": [{"label": "Now", "text": "Wait for volume confirmation."}],
+            "data_limits": ["There is 1 missing data item."],
+        }
+
+        text = answer_composer.consumer_text(
+            answer,
+            response_preferences={"effective_locale": "en-US"},
+        )
+
+        self.assertIn("Conclusion: Watch the breakout first", text)
+        self.assertIn("Direction: Bullish / Confidence: High", text)
+        self.assertIn("Key points:", text)
+        self.assertIn("What to do:", text)
+        self.assertIn("Data limits:", text)
+        self.assertNotIn("結論：", text)
+
+    def test_question_aware_answer_uses_english_response_preferences(self) -> None:
+        answer = answer_composer.build_question_aware_consumer_answer(
+            question_intent="entry_decision",
+            target={"label": "2327 Yageo"},
+            analysis_digest={
+                "selected_score": 4,
+                "selected_confidence": "high",
+                "display": "Swing structure is bullish",
+                "scores": {"swing": 4, "short": 2},
+            },
+            missing=[],
+            warnings=[],
+            response_preferences={"effective_locale": "en-US"},
+        )
+
+        self.assertEqual(answer["stance_label"], "Bullish")
+        self.assertEqual(answer["confidence_label"], "High")
+        self.assertIn("bullish watchlist", answer["headline"])
+        self.assertEqual(
+            [item["label"] for item in answer["action_plan"]],
+            ["Now", "Entry condition", "Risk control"],
+        )
+        self.assertIn("Score: Swing +4, Short term +2", answer["summary"])
+        self.assertIn("Conclusion:", answer["text"])
+        self.assertIn("Direction: Bullish", answer["text"])
+        self.assertNotIn("怎麼做：", answer["text"])
+
+    def test_question_aware_answer_uses_japanese_response_preferences(self) -> None:
+        answer = answer_composer.build_question_aware_consumer_answer(
+            question_intent="entry_decision",
+            target={"label": "2327 Yageo"},
+            analysis_digest={
+                "selected_score": 4,
+                "selected_confidence": "high",
+                "display": "Swing structure is bullish",
+                "scores": {"swing": 4, "short": 2},
+            },
+            missing=[],
+            warnings=[],
+            response_preferences={"effective_locale": "ja-JP"},
+        )
+
+        self.assertEqual(answer["stance_label"], "強気寄り")
+        self.assertEqual(answer["confidence_label"], "高")
+        self.assertIn("強気候補", answer["headline"])
+        self.assertEqual(
+            [item["label"] for item in answer["action_plan"]],
+            ["今", "エントリー条件", "リスク管理"],
+        )
+        self.assertIn("スコア：スイング +4、短期 +2", answer["summary"])
+        self.assertIn("結論：", answer["text"])
+        self.assertIn("方向：強気寄り", answer["text"])
+        self.assertIn("対応：", answer["text"])
+        self.assertNotIn("What to do:", answer["text"])
+
+    def test_decision_evidence_uses_english_response_preferences(self) -> None:
+        preferences = {"effective_locale": "en-US"}
+        evidence = {
+            "market_session": {
+                "is_trading_day": False,
+                "date": "2026-06-14",
+                "latest_daily_date": "2026-06-12",
+                "next_trading_day": "2026-06-15",
+                "summary": "2026-06-14 台股休市，最新日線截至 2026-06-12。",
+            },
+            "data_quality": {
+                "price": {"source": "market_daily_price.close_price", "as_of": "2026-06-12"},
+                "volume": {"source": "market_daily_price.trade_volume", "display_value": "393.6 張"},
+            },
+            "recent_volatility": {
+                "label": "high",
+                "lookback_days": 5,
+                "max_abs_change_pct": 6.8,
+                "range_pct": 13.2,
+                "large_move_days": 2,
+            },
+            "indicator_quality": {
+                "macd": {"is_consistent": False},
+            },
+            "fundamentals": {
+                "monthly_revenue": {
+                    "period": "2026-05",
+                    "year_over_year_pct": 12.5,
+                    "month_over_month_pct": 3.2,
+                }
+            },
+            "confidence_factors": {
+                "data_limits": ["institutional_trade_daily 尚缺或不完整。"],
+            },
+        }
+
+        summary = answer_composer.decision_evidence_summary_lines(
+            evidence,
+            response_preferences=preferences,
+        )
+        risks = answer_composer.decision_evidence_risk_lines(
+            evidence,
+            response_preferences=preferences,
+        )
+        data_limits = answer_composer.decision_evidence_data_lines(
+            evidence,
+            response_preferences=preferences,
+        )
+
+        self.assertIn("2026-06-14 is not a Taiwan trading day", summary[0])
+        self.assertIn("Recent 5 days show high volatility", summary[1])
+        self.assertIn("reduce size before chasing", risks[0])
+        self.assertIn("MACD histogram does not match", risks[1])
+        self.assertIn("Price source market_daily_price.close_price, as of 2026-06-12.", data_limits)
+        self.assertIn("Volume source market_daily_price.trade_volume, displayed as about 393.6 張.", data_limits)
+        data_gap_lines = answer_composer.decision_evidence_data_lines(
+            {"confidence_factors": {"data_limits": ["institutional_trade_daily 尚缺或不完整。"]}},
+            response_preferences=preferences,
+        )
+        self.assertIn("institutional trade is missing or incomplete.", data_gap_lines)
+
+    def test_watchlist_radar_answer_uses_english_response_preferences(self) -> None:
+        digest = {
+            "kind": "watchlist_sector_digest",
+            "group_name": "Tech watchlist",
+            "stance": "結構偏多",
+            "confidence": "high",
+            "display": "Tech watchlist has 2 radar hits.",
+            "radar": {
+                "mode": "action",
+                "matched_count": 2,
+                "radar_count": 2,
+                "is_current": False,
+                "buckets": [
+                    {"key": "breakout", "label": "突破動能", "count": 1},
+                    {"key": "risk", "label": "風險優先", "count": 1},
+                ],
+            },
+            "radar_rows": [
+                {
+                    "stock_id": "2330",
+                    "label": "2330 TSMC",
+                    "bucket": "breakout",
+                    "bucket_label": "突破動能",
+                    "urgency": "high",
+                    "action_label": "追蹤突破延續",
+                    "change_pct_text": "+1.50%",
+                    "primary_signal_key": "donchian_breakout",
+                    "primary_signal_label": "突破 20 日高",
+                },
+                {
+                    "stock_id": "2454",
+                    "label": "2454 MediaTek",
+                    "bucket": "risk",
+                    "bucket_label": "風險優先",
+                    "urgency": "medium",
+                    "action_label": "優先檢查風控",
+                    "change_pct_text": "-2.93%",
+                    "primary_signal_key": "macd_negative",
+                    "primary_signal_label": "動能轉弱",
+                },
+            ],
+        }
+
+        answer = answer_composer.build_consumer_human_answer(
+            question_intent="entry_decision",
+            target={"type": "tw_watchlist", "label": "Tech watchlist"},
+            analysis_digest=digest,
+            missing=[],
+            warnings=[],
+            response_preferences={"effective_locale": "en-US"},
+        )
+
+        self.assertEqual(answer["source"], "watchlist_radar")
+        self.assertEqual(answer["stance_label"], "Structurally bullish")
+        self.assertIn("do not chase the whole basket", answer["headline"])
+        self.assertIn("Radar matched 2 names: Breakout 1, Risk 1.", answer["summary"][0])
+        self.assertIn("Candidate list: 2330 TSMC", answer["summary"][1])
+        self.assertIn("20-day high breakout", answer["summary"][1])
+        self.assertEqual(
+            [item["label"] for item in answer["action_plan"]],
+            ["Watch first", "Confirm", "Exclude"],
+        )
+        self.assertIn("Radar includes stale daily data", answer["data_limits"][0])
+        self.assertIn("What to do:", answer["text"])
+        self.assertNotIn("雷達", answer["text"])
+
+    def test_watchlist_radar_answer_uses_japanese_response_preferences(self) -> None:
+        digest = {
+            "kind": "watchlist_sector_digest",
+            "group_name": "Tech watchlist",
+            "stance": "結構偏多",
+            "confidence": "high",
+            "display": "Tech watchlist has 2 radar hits.",
+            "radar": {
+                "mode": "action",
+                "matched_count": 2,
+                "radar_count": 2,
+                "is_current": False,
+                "buckets": [
+                    {"key": "breakout", "label": "突破動能", "count": 1},
+                    {"key": "risk", "label": "風險優先", "count": 1},
+                ],
+            },
+            "radar_rows": [
+                {
+                    "stock_id": "2330",
+                    "label": "2330 TSMC",
+                    "bucket": "breakout",
+                    "bucket_label": "突破動能",
+                    "urgency": "high",
+                    "action_label": "追蹤突破延續",
+                    "change_pct_text": "+1.50%",
+                    "primary_signal_key": "donchian_breakout",
+                    "primary_signal_label": "突破 20 日高",
+                },
+                {
+                    "stock_id": "2454",
+                    "label": "2454 MediaTek",
+                    "bucket": "risk",
+                    "bucket_label": "風險優先",
+                    "urgency": "medium",
+                    "action_label": "優先檢查風控",
+                    "change_pct_text": "-2.93%",
+                    "primary_signal_key": "macd_negative",
+                    "primary_signal_label": "動能轉弱",
+                },
+            ],
+        }
+
+        answer = answer_composer.build_consumer_human_answer(
+            question_intent="entry_decision",
+            target={"type": "tw_watchlist", "label": "Tech watchlist"},
+            analysis_digest=digest,
+            missing=[],
+            warnings=[],
+            response_preferences={"effective_locale": "ja-JP"},
+        )
+
+        self.assertEqual(answer["source"], "watchlist_radar")
+        self.assertEqual(answer["stance_label"], "構造は強気寄り")
+        self.assertIn("追いかけ買いしない", answer["headline"])
+        self.assertIn("レーダーで 2 銘柄が一致：ブレイク 1、リスク 1。", answer["summary"][0])
+        self.assertIn("候補リスト：2330 TSMC", answer["summary"][1])
+        self.assertIn("20日高値ブレイク", answer["summary"][1])
+        self.assertEqual(
+            [item["label"] for item in answer["action_plan"]],
+            ["先に確認", "確認", "除外"],
+        )
+        self.assertIn("レーダーには遅延した日足データ", answer["data_limits"][0])
+        self.assertIn("対応：", answer["text"])
+        self.assertNotIn("What to do:", answer["text"])
+
     def test_ask_wrappers_delegate_to_answer_composer(self) -> None:
         answer = {
             "headline": "測試",

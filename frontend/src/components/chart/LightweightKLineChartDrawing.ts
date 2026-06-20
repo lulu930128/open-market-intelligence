@@ -1,6 +1,7 @@
 import type { IndicatorParameters, IndicatorSettings } from "@/components/StockKLineChart";
 import { omiChartColors } from "@/lib/themeColors";
 import type { ChartPoint, StockIndicatorPoint } from "@/types/market";
+import type { TranslationFunction, TranslationValues } from "@/i18n";
 import {
   type CandlestickData,
   type HistogramData,
@@ -10,6 +11,50 @@ import {
   type UTCTimestamp,
   type WhitespaceData,
 } from "lightweight-charts";
+
+export type DrawingAnalysisI18n = {
+  locale?: string;
+  t?: TranslationFunction;
+};
+
+function interpolateDrawingFallback(message: string, values: TranslationValues | undefined) {
+  if (!values) return message;
+
+  return message.replace(/\{(\w+)\}/g, (match, key) => {
+    const value = values[key];
+    return value === null || value === undefined ? match : String(value);
+  });
+}
+
+function translateDrawing(
+  i18n: DrawingAnalysisI18n | undefined,
+  key: string,
+  fallback: string,
+  values?: TranslationValues
+) {
+  const messageKey = `chart.drawingAnalysis.${key}`;
+  const translated = i18n?.t?.(messageKey, values);
+
+  if (translated && translated !== messageKey) return translated;
+
+  return interpolateDrawingFallback(fallback, values);
+}
+
+function drawingNumberLocale(i18n?: DrawingAnalysisI18n) {
+  return i18n?.locale ?? "zh-TW";
+}
+
+function formatDrawingUnitCount(
+  count: number,
+  key: "times" | "bars",
+  fallbackUnit: string,
+  i18n?: DrawingAnalysisI18n
+) {
+  return translateDrawing(i18n, `units.${key}`, `{count} ${fallbackUnit}`, {
+    count: count.toLocaleString(drawingNumberLocale(i18n)),
+  });
+}
+
 export type ChartTimeMode = "date" | "intraday";
 export type ChartDisplayStyle = "candlestick" | "line";
 export type BusinessDayTime = Extract<Time, { year: number; month: number; day: number }>;
@@ -823,34 +868,56 @@ export function parseDrawingTimeMs(value: string) {
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
-export function formatDurationLabel(days: number | null, minutes: number | null) {
+export function formatDurationLabel(
+  days: number | null,
+  minutes: number | null,
+  i18n?: DrawingAnalysisI18n
+) {
   if (finiteNumber(days) && days >= 1) {
-    return `${days.toLocaleString("zh-TW", { maximumFractionDigits: 1 })} 天`;
+    return translateDrawing(i18n, "duration.days", "{value} 天", {
+      value: days.toLocaleString(drawingNumberLocale(i18n), { maximumFractionDigits: 1 }),
+    });
   }
 
   if (finiteNumber(minutes)) {
     if (minutes >= 60) {
-      return `${(minutes / 60).toLocaleString("zh-TW", { maximumFractionDigits: 1 })} 小時`;
+      return translateDrawing(i18n, "duration.hours", "{value} 小時", {
+        value: (minutes / 60).toLocaleString(drawingNumberLocale(i18n), {
+          maximumFractionDigits: 1,
+        }),
+      });
     }
 
-    return `${minutes.toLocaleString("zh-TW", { maximumFractionDigits: 0 })} 分`;
+    return translateDrawing(i18n, "duration.minutes", "{value} 分", {
+      value: minutes.toLocaleString(drawingNumberLocale(i18n), { maximumFractionDigits: 0 }),
+    });
   }
 
   return null;
 }
 
-export function formatCompactVolume(value: number) {
+export function formatCompactVolume(value: number, i18n?: DrawingAnalysisI18n) {
   const absValue = Math.abs(value);
 
   if (absValue >= 100_000_000) {
-    return `${(value / 100_000_000).toFixed(2)}億`;
+    return translateDrawing(i18n, "compactVolume.hundredMillion", "{value}億", {
+      value: (value / 100_000_000).toLocaleString(drawingNumberLocale(i18n), {
+        maximumFractionDigits: 2,
+        minimumFractionDigits: 2,
+      }),
+    });
   }
 
   if (absValue >= 10_000) {
-    return `${(value / 10_000).toFixed(1)}萬`;
+    return translateDrawing(i18n, "compactVolume.tenThousand", "{value}萬", {
+      value: (value / 10_000).toLocaleString(drawingNumberLocale(i18n), {
+        maximumFractionDigits: 1,
+        minimumFractionDigits: 1,
+      }),
+    });
   }
 
-  return value.toLocaleString("zh-TW", {
+  return value.toLocaleString(drawingNumberLocale(i18n), {
     maximumFractionDigits: 0,
   });
 }
@@ -884,7 +951,8 @@ export function candleParts(point: ChartPoint) {
 
 export function detectCandlestickPattern(
   point: ChartPoint,
-  previous: ChartPoint | undefined
+  previous: ChartPoint | undefined,
+  i18n?: DrawingAnalysisI18n
 ): { label: string; tone: ProjectedTechnicalSignal["tone"]; price: number } | null {
   const currentParts = candleParts(point);
 
@@ -901,7 +969,11 @@ export function detectCandlestickPattern(
       point.open <= previous.close &&
       point.close >= previous.open
     ) {
-      return { label: "多方吞噬", tone: "bullish", price: point.low };
+      return {
+        label: translateDrawing(i18n, "candlestick.bullishEngulfing", "多方吞噬"),
+        tone: "bullish",
+        price: point.low,
+      };
     }
 
     if (
@@ -912,7 +984,11 @@ export function detectCandlestickPattern(
       point.open >= previous.close &&
       point.close <= previous.open
     ) {
-      return { label: "空方吞噬", tone: "bearish", price: point.high };
+      return {
+        label: translateDrawing(i18n, "candlestick.bearishEngulfing", "空方吞噬"),
+        tone: "bearish",
+        price: point.high,
+      };
     }
   }
 
@@ -921,7 +997,13 @@ export function detectCandlestickPattern(
     currentParts.lowerWick >= Math.max(currentParts.body * 2, currentParts.range * 0.38) &&
     currentParts.upperWick <= Math.max(currentParts.body * 1.2, currentParts.range * 0.18)
   ) {
-    return { label: currentParts.bullish ? "錘子" : "下影反轉", tone: "bullish", price: point.low };
+    return {
+      label: currentParts.bullish
+        ? translateDrawing(i18n, "candlestick.hammer", "錘子")
+        : translateDrawing(i18n, "candlestick.lowerShadowReversal", "下影反轉"),
+      tone: "bullish",
+      price: point.low,
+    };
   }
 
   if (
@@ -929,11 +1011,21 @@ export function detectCandlestickPattern(
     currentParts.upperWick >= Math.max(currentParts.body * 2, currentParts.range * 0.38) &&
     currentParts.lowerWick <= Math.max(currentParts.body * 1.2, currentParts.range * 0.18)
   ) {
-    return { label: currentParts.bearish ? "流星" : "上影壓力", tone: "bearish", price: point.high };
+    return {
+      label: currentParts.bearish
+        ? translateDrawing(i18n, "candlestick.shootingStar", "流星")
+        : translateDrawing(i18n, "candlestick.upperShadowPressure", "上影壓力"),
+      tone: "bearish",
+      price: point.high,
+    };
   }
 
   if (bodyRatio <= 0.08) {
-    return { label: "十字", tone: "neutral", price: finiteNumber(point.close) ? point.close : point.high };
+    return {
+      label: translateDrawing(i18n, "candlestick.doji", "十字"),
+      tone: "neutral",
+      price: finiteNumber(point.close) ? point.close : point.high,
+    };
   }
 
   return null;
@@ -991,26 +1083,26 @@ export function drawingDefaultColor(type: ChartDrawing["type"]) {
   return omiChartColors.text;
 }
 
-export function drawingToolModeLabel(tool: ChartDrawingTool) {
+export function drawingToolModeLabel(tool: ChartDrawingTool, i18n?: DrawingAnalysisI18n) {
   switch (tool) {
     case "horizontal":
-      return "水平線模式";
+      return translateDrawing(i18n, "toolModes.horizontal", "水平線模式");
     case "trend":
-      return "趨勢線模式";
+      return translateDrawing(i18n, "toolModes.trend", "趨勢線模式");
     case "ray":
-      return "射線模式";
+      return translateDrawing(i18n, "toolModes.ray", "射線模式");
     case "rectangle":
-      return "區間框模式";
+      return translateDrawing(i18n, "toolModes.rectangle", "區間框模式");
     case "fibonacci":
-      return "Fib 回撤模式";
+      return translateDrawing(i18n, "toolModes.fibonacci", "Fib 回撤模式");
     case "anchorVwap":
-      return "錨定VWAP模式";
+      return translateDrawing(i18n, "toolModes.anchorVwap", "錨定VWAP模式");
     case "volumeProfileRange":
-      return "量價分布模式";
+      return translateDrawing(i18n, "toolModes.volumeProfileRange", "量價分布模式");
     case "measure":
-      return "量測模式";
+      return translateDrawing(i18n, "toolModes.measure", "量測模式");
     case "priceRange":
-      return "價幅%模式";
+      return translateDrawing(i18n, "toolModes.priceRange", "價幅%模式");
     default:
       return "";
   }
@@ -1107,37 +1199,43 @@ export function lineAnalysisRole(distance: number | null, tolerance: number | nu
   return distance > 0 ? "support" : "resistance";
 }
 
-export function lineAnalysisStatusLabel(status: ChartDrawingLineAnalysis["status"]) {
+export function lineAnalysisStatusLabel(
+  status: ChartDrawingLineAnalysis["status"],
+  i18n?: DrawingAnalysisI18n
+) {
   switch (status) {
     case "testing":
-      return "測試線位";
+      return translateDrawing(i18n, "lineStatus.testing", "測試線位");
     case "above":
-      return "站在線上";
+      return translateDrawing(i18n, "lineStatus.above", "站在線上");
     case "below":
-      return "跌在線下";
+      return translateDrawing(i18n, "lineStatus.below", "跌在線下");
     case "breakout":
-      return "突破";
+      return translateDrawing(i18n, "lineStatus.breakout", "突破");
     case "breakdown":
-      return "跌破";
+      return translateDrawing(i18n, "lineStatus.breakdown", "跌破");
     case "retest_support":
-      return "回踩支撐";
+      return translateDrawing(i18n, "lineStatus.retestSupport", "回踩支撐");
     case "retest_resistance":
-      return "反壓回測";
+      return translateDrawing(i18n, "lineStatus.retestResistance", "反壓回測");
     default:
-      return "資料不足";
+      return translateDrawing(i18n, "lineStatus.unknown", "資料不足");
   }
 }
 
-export function lineAnalysisRoleLabel(role: ChartDrawingLineAnalysis["role"]) {
+export function lineAnalysisRoleLabel(
+  role: ChartDrawingLineAnalysis["role"],
+  i18n?: DrawingAnalysisI18n
+) {
   switch (role) {
     case "support":
-      return "支撐";
+      return translateDrawing(i18n, "lineRole.support", "支撐");
     case "resistance":
-      return "壓力";
+      return translateDrawing(i18n, "lineRole.resistance", "壓力");
     case "neutral":
-      return "測試中";
+      return translateDrawing(i18n, "lineRole.neutral", "測試中");
     default:
-      return "未判定";
+      return translateDrawing(i18n, "lineRole.unknown", "未判定");
   }
 }
 
@@ -1145,7 +1243,8 @@ export function buildLineAnalysis(
   type: ChartDrawing["type"],
   points: ChartDrawingPoint[],
   timeIndex: Map<string, number>,
-  chartData: ChartPoint[] | undefined
+  chartData: ChartPoint[] | undefined,
+  i18n?: DrawingAnalysisI18n
 ): ChartDrawingLineAnalysis | null {
   if (type !== "horizontal" && type !== "trend" && type !== "ray") return null;
   if (!chartData || chartData.length === 0) return null;
@@ -1286,62 +1385,71 @@ export function buildLineAnalysis(
     lastTouchTime,
     lastCrossTime,
     labels: {
-      role: lineAnalysisRoleLabel(role),
-      status: lineAnalysisStatusLabel(status),
+      role: lineAnalysisRoleLabel(role, i18n),
+      status: lineAnalysisStatusLabel(status, i18n),
       level: formatDrawingPrice(projectedPrice),
       distance: formatSignedDrawingPrice(distance),
       distancePct: formatDrawingRatioPercent(distancePct),
       tolerance: `±${formatDrawingPrice(tolerance)}`,
-      touchCount: `${touchCount.toLocaleString("zh-TW")} 次`,
+      touchCount: formatDrawingUnitCount(touchCount, "times", "次", i18n),
       lastTouch: lastTouchTime ?? "-",
     },
   };
 }
 
-export function zoneAnalysisRoleLabel(role: ChartDrawingZoneAnalysis["role"]) {
+export function zoneAnalysisRoleLabel(
+  role: ChartDrawingZoneAnalysis["role"],
+  i18n?: DrawingAnalysisI18n
+) {
   switch (role) {
     case "support_zone":
-      return "支撐帶";
+      return translateDrawing(i18n, "zoneRole.supportZone", "支撐帶");
     case "resistance_zone":
-      return "壓力帶";
+      return translateDrawing(i18n, "zoneRole.resistanceZone", "壓力帶");
     case "range":
-      return "區間內";
+      return translateDrawing(i18n, "zoneRole.range", "區間內");
     default:
-      return "未判定";
+      return translateDrawing(i18n, "zoneRole.unknown", "未判定");
   }
 }
 
-export function zoneAnalysisStatusLabel(status: ChartDrawingZoneAnalysis["status"]) {
+export function zoneAnalysisStatusLabel(
+  status: ChartDrawingZoneAnalysis["status"],
+  i18n?: DrawingAnalysisI18n
+) {
   switch (status) {
     case "inside_zone":
-      return "區間內";
+      return translateDrawing(i18n, "zoneStatus.insideZone", "區間內");
     case "above_zone":
-      return "站上區間";
+      return translateDrawing(i18n, "zoneStatus.aboveZone", "站上區間");
     case "below_zone":
-      return "跌破區間";
+      return translateDrawing(i18n, "zoneStatus.belowZone", "跌破區間");
     case "breakout_up":
-      return "向上突破";
+      return translateDrawing(i18n, "zoneStatus.breakoutUp", "向上突破");
     case "breakdown_down":
-      return "向下跌破";
+      return translateDrawing(i18n, "zoneStatus.breakdownDown", "向下跌破");
     case "testing_upper":
-      return "測試上緣";
+      return translateDrawing(i18n, "zoneStatus.testingUpper", "測試上緣");
     case "testing_lower":
-      return "測試下緣";
+      return translateDrawing(i18n, "zoneStatus.testingLower", "測試下緣");
     default:
-      return "資料不足";
+      return translateDrawing(i18n, "zoneStatus.unknown", "資料不足");
   }
 }
 
-export function zoneCompressionLabel(state: ChartDrawingZoneAnalysis["compressionState"]) {
+export function zoneCompressionLabel(
+  state: ChartDrawingZoneAnalysis["compressionState"],
+  i18n?: DrawingAnalysisI18n
+) {
   switch (state) {
     case "compressing":
-      return "壓縮";
+      return translateDrawing(i18n, "zoneCompression.compressing", "壓縮");
     case "expanding":
-      return "擴張";
+      return translateDrawing(i18n, "zoneCompression.expanding", "擴張");
     case "neutral":
-      return "一般";
+      return translateDrawing(i18n, "zoneCompression.neutral", "一般");
     default:
-      return "不足";
+      return translateDrawing(i18n, "zoneCompression.unknown", "不足");
   }
 }
 
@@ -1376,7 +1484,8 @@ export function buildZoneAnalysis(
   type: ChartDrawing["type"],
   points: ChartDrawingPoint[],
   timeIndex: Map<string, number>,
-  chartData: ChartPoint[] | undefined
+  chartData: ChartPoint[] | undefined,
+  i18n?: DrawingAnalysisI18n
 ): ChartDrawingZoneAnalysis | null {
   if (type !== "rectangle" && type !== "priceRange") return null;
   if (!chartData || chartData.length === 0) return null;
@@ -1478,8 +1587,8 @@ export function buildZoneAnalysis(
     compressionRatio,
     compressionState,
     labels: {
-      role: zoneAnalysisRoleLabel(role),
-      status: zoneAnalysisStatusLabel(status),
+      role: zoneAnalysisRoleLabel(role, i18n),
+      status: zoneAnalysisStatusLabel(status, i18n),
       upper: formatDrawingPrice(upperPrice),
       lower: formatDrawingPrice(lowerPrice),
       mid: formatDrawingPrice(midPrice),
@@ -1489,40 +1598,49 @@ export function buildZoneAnalysis(
       distanceToUpper: formatSignedDrawingPrice(distanceToUpper),
       distanceToLower: formatSignedDrawingPrice(distanceToLower),
       tolerance: `±${formatDrawingPrice(tolerance)}`,
-      upperTouches: `${upperTouches.count.toLocaleString("zh-TW")} 次`,
-      lowerTouches: `${lowerTouches.count.toLocaleString("zh-TW")} 次`,
+      upperTouches: formatDrawingUnitCount(upperTouches.count, "times", "次", i18n),
+      lowerTouches: formatDrawingUnitCount(lowerTouches.count, "times", "次", i18n),
       compression: finiteNumber(compressionRatio)
-        ? `${zoneCompressionLabel(compressionState)} ${formatDrawingPercent(compressionRatio * 100)}`
-        : zoneCompressionLabel(compressionState),
+        ? translateDrawing(i18n, "zoneCompression.withPercent", "{label} {percent}", {
+            label: zoneCompressionLabel(compressionState, i18n),
+            percent: formatDrawingPercent(compressionRatio * 100),
+          })
+        : zoneCompressionLabel(compressionState, i18n),
     },
   };
 }
 
-export function fibonacciTrendLabel(trend: ChartDrawingFibonacciAnalysis["trend"]) {
+export function fibonacciTrendLabel(
+  trend: ChartDrawingFibonacciAnalysis["trend"],
+  i18n?: DrawingAnalysisI18n
+) {
   switch (trend) {
     case "upswing":
-      return "上升波";
+      return translateDrawing(i18n, "fibonacciTrend.upswing", "上升波");
     case "downswing":
-      return "下降波";
+      return translateDrawing(i18n, "fibonacciTrend.downswing", "下降波");
     case "flat":
-      return "橫向";
+      return translateDrawing(i18n, "fibonacciTrend.flat", "橫向");
     default:
-      return "未判定";
+      return translateDrawing(i18n, "fibonacciTrend.unknown", "未判定");
   }
 }
 
-export function fibonacciStatusLabel(status: ChartDrawingFibonacciAnalysis["status"]) {
+export function fibonacciStatusLabel(
+  status: ChartDrawingFibonacciAnalysis["status"],
+  i18n?: DrawingAnalysisI18n
+) {
   switch (status) {
     case "inside_range":
-      return "錨點區間內";
+      return translateDrawing(i18n, "fibonacciStatus.insideRange", "錨點區間內");
     case "above_anchor":
-      return "站上錨點";
+      return translateDrawing(i18n, "fibonacciStatus.aboveAnchor", "站上錨點");
     case "below_anchor":
-      return "跌破錨點";
+      return translateDrawing(i18n, "fibonacciStatus.belowAnchor", "跌破錨點");
     case "near_level":
-      return "貼近位階";
+      return translateDrawing(i18n, "fibonacciStatus.nearLevel", "貼近位階");
     default:
-      return "資料不足";
+      return translateDrawing(i18n, "fibonacciStatus.unknown", "資料不足");
   }
 }
 
@@ -1536,7 +1654,8 @@ export function fibonacciLevelKind(ratio: number): ChartDrawingFibonacciLevel["k
 export function buildFibonacciAnalysis(
   type: ChartDrawing["type"],
   points: ChartDrawingPoint[],
-  chartData: ChartPoint[] | undefined
+  chartData: ChartPoint[] | undefined,
+  i18n?: DrawingAnalysisI18n
 ): ChartDrawingFibonacciAnalysis | null {
   if (type !== "fibonacci") return null;
   if (!chartData || chartData.length === 0) return null;
@@ -1629,8 +1748,8 @@ export function buildFibonacciAnalysis(
     tolerance,
     levels,
     labels: {
-      trend: fibonacciTrendLabel(trend),
-      status: fibonacciStatusLabel(status),
+      trend: fibonacciTrendLabel(trend, i18n),
+      status: fibonacciStatusLabel(status, i18n),
       range: formatDrawingPrice(range),
       position: formatDrawingRatioPercent(positionPct),
       rangePosition: formatDrawingRatioPercent(rangePositionPct),
@@ -1658,16 +1777,19 @@ export function chartPointVolume(point: ChartPoint) {
   return null;
 }
 
-export function anchoredVwapStatusLabel(status: ChartDrawingAnchoredVwapAnalysis["status"]) {
+export function anchoredVwapStatusLabel(
+  status: ChartDrawingAnchoredVwapAnalysis["status"],
+  i18n?: DrawingAnalysisI18n
+) {
   switch (status) {
     case "above_vwap":
-      return "站上 VWAP";
+      return translateDrawing(i18n, "anchoredVwapStatus.aboveVwap", "站上 VWAP");
     case "below_vwap":
-      return "跌破 VWAP";
+      return translateDrawing(i18n, "anchoredVwapStatus.belowVwap", "跌破 VWAP");
     case "testing_vwap":
-      return "測試 VWAP";
+      return translateDrawing(i18n, "anchoredVwapStatus.testingVwap", "測試 VWAP");
     default:
-      return "資料不足";
+      return translateDrawing(i18n, "anchoredVwapStatus.unknown", "資料不足");
   }
 }
 
@@ -1675,7 +1797,8 @@ export function buildAnchoredVwapAnalysis(
   type: ChartDrawing["type"],
   points: ChartDrawingPoint[],
   timeIndex: Map<string, number>,
-  chartData: ChartPoint[] | undefined
+  chartData: ChartPoint[] | undefined,
+  i18n?: DrawingAnalysisI18n
 ): ChartDrawingAnchoredVwapAnalysis | null {
   if (type !== "anchorVwap") return null;
   if (!chartData || chartData.length === 0) return null;
@@ -1747,30 +1870,31 @@ export function buildAnchoredVwapAnalysis(
     cumulativeTypicalValue,
     status,
     labels: {
-      status: anchoredVwapStatusLabel(status),
+      status: anchoredVwapStatusLabel(status, i18n),
       vwap: formatDrawingPrice(latestVwap),
       distance: formatSignedDrawingPrice(distance),
       distancePct: formatDrawingRatioPercent(distancePct),
       vwapChange: finiteNumber(vwapChange) ? formatSignedDrawingPrice(vwapChange) : "-",
       vwapChangePct: formatDrawingRatioPercent(vwapChangePct),
-      barCount: `${validBars.toLocaleString("zh-TW")} 根`,
-      cumulativeVolume: formatCompactVolume(cumulativeVolume),
+      barCount: formatDrawingUnitCount(validBars, "bars", "根", i18n),
+      cumulativeVolume: formatCompactVolume(cumulativeVolume, i18n),
     },
   };
 }
 
 export function volumeProfilePositionLabel(
-  position: ChartDrawingVolumeProfileAnalysis["latestPosition"]
+  position: ChartDrawingVolumeProfileAnalysis["latestPosition"],
+  i18n?: DrawingAnalysisI18n
 ) {
   switch (position) {
     case "above_value_area":
-      return "價值區上方";
+      return translateDrawing(i18n, "volumeProfilePosition.aboveValueArea", "價值區上方");
     case "inside_value_area":
-      return "價值區內";
+      return translateDrawing(i18n, "volumeProfilePosition.insideValueArea", "價值區內");
     case "below_value_area":
-      return "價值區下方";
+      return translateDrawing(i18n, "volumeProfilePosition.belowValueArea", "價值區下方");
     default:
-      return "資料不足";
+      return translateDrawing(i18n, "volumeProfilePosition.unknown", "資料不足");
   }
 }
 
@@ -1778,7 +1902,8 @@ export function buildVolumeProfileAnalysis(
   type: ChartDrawing["type"],
   points: ChartDrawingPoint[],
   timeIndex: Map<string, number>,
-  chartData: ChartPoint[] | undefined
+  chartData: ChartPoint[] | undefined,
+  i18n?: DrawingAnalysisI18n
 ): ChartDrawingVolumeProfileAnalysis | null {
   if (type !== "volumeProfileRange") return null;
   if (!chartData || chartData.length === 0) return null;
@@ -1908,7 +2033,7 @@ export function buildVolumeProfileAnalysis(
       inValueArea: bin.index >= valueAreaLowIndex && bin.index <= valueAreaHighIndex,
       isPoc: bin.index === pocBin.index,
       label: formatDrawingPrice(centerPrice),
-      volumeLabel: formatCompactVolume(bin.totalVolume),
+      volumeLabel: formatCompactVolume(bin.totalVolume, i18n),
     };
   });
 
@@ -1932,11 +2057,11 @@ export function buildVolumeProfileAnalysis(
     imbalancePct,
     levels,
     labels: {
-      totalVolume: formatCompactVolume(totalVolume),
-      poc: `${formatDrawingPrice(pocPrice)} / ${formatCompactVolume(pocBin.totalVolume)}`,
+      totalVolume: formatCompactVolume(totalVolume, i18n),
+      poc: `${formatDrawingPrice(pocPrice)} / ${formatCompactVolume(pocBin.totalVolume, i18n)}`,
       valueArea: `${formatDrawingPrice(valueAreaLow)} - ${formatDrawingPrice(valueAreaHigh)}`,
       valueAreaVolumePct: formatDrawingRatioPercent(valueAreaVolumePct),
-      latestPosition: volumeProfilePositionLabel(latestPosition),
+      latestPosition: volumeProfilePositionLabel(latestPosition, i18n),
       imbalance: formatDrawingRatioPercent(imbalancePct),
     },
   };
@@ -1946,7 +2071,8 @@ export function buildDrawingDerivedMetrics(
   type: ChartDrawing["type"],
   points: ChartDrawingPoint[],
   timeIndex: Map<string, number>,
-  chartData?: ChartPoint[]
+  chartData?: ChartPoint[],
+  i18n?: DrawingAnalysisI18n
 ): ChartDrawingDerivedMetrics {
   const first = points[0] ?? null;
   const second = points[1] ?? first;
@@ -2011,12 +2137,12 @@ export function buildDrawingDerivedMetrics(
       : null;
   const direction =
     !finiteNumber(priceDiff) ? "unknown" : priceDiff > 0 ? "up" : priceDiff < 0 ? "down" : "flat";
-  const durationLabel = formatDurationLabel(durationDays, durationMinutes);
-  const lineAnalysis = buildLineAnalysis(type, points, timeIndex, chartData);
-  const zoneAnalysis = buildZoneAnalysis(type, points, timeIndex, chartData);
-  const fibonacciAnalysis = buildFibonacciAnalysis(type, points, chartData);
-  const anchoredVwapAnalysis = buildAnchoredVwapAnalysis(type, points, timeIndex, chartData);
-  const volumeProfileAnalysis = buildVolumeProfileAnalysis(type, points, timeIndex, chartData);
+  const durationLabel = formatDurationLabel(durationDays, durationMinutes, i18n);
+  const lineAnalysis = buildLineAnalysis(type, points, timeIndex, chartData, i18n);
+  const zoneAnalysis = buildZoneAnalysis(type, points, timeIndex, chartData, i18n);
+  const fibonacciAnalysis = buildFibonacciAnalysis(type, points, chartData, i18n);
+  const anchoredVwapAnalysis = buildAnchoredVwapAnalysis(type, points, timeIndex, chartData, i18n);
+  const volumeProfileAnalysis = buildVolumeProfileAnalysis(type, points, timeIndex, chartData, i18n);
 
   return {
     version: 1,
@@ -2047,29 +2173,32 @@ export function buildDrawingDerivedMetrics(
       priceDiff: finiteNumber(priceDiff) ? formatSignedDrawingPrice(priceDiff) : "-",
       percentChange: formatDrawingRatioPercent(percentChange),
       rangePct: formatDrawingRatioPercent(rangePct),
-      bars: barCount === null ? null : `${barCount.toLocaleString("zh-TW")} 根`,
+      bars: barCount === null ? null : formatDrawingUnitCount(barCount, "bars", "根", i18n),
       duration: durationLabel,
       high: finiteNumber(highPrice) ? formatDrawingPrice(highPrice) : "-",
       low: finiteNumber(lowPrice) ? formatDrawingPrice(lowPrice) : "-",
       mid: finiteNumber(midPrice) ? formatDrawingPrice(midPrice) : "-",
       slope:
         finiteNumber(slopePerBar) && finiteNumber(slopePctPerBar)
-          ? `${formatSignedDrawingPrice(slopePerBar)} / 根 (${formatDrawingPercent(slopePctPerBar)} / 根)`
+          ? translateDrawing(i18n, "units.slopePerBar", "{price} / 根 ({percent} / 根)", {
+              price: formatSignedDrawingPrice(slopePerBar),
+              percent: formatDrawingPercent(slopePctPerBar),
+            })
           : null,
     },
   };
 }
 
-export function drawingTypeLabel(type: ChartDrawing["type"]) {
+export function drawingTypeLabel(type: ChartDrawing["type"], i18n?: DrawingAnalysisI18n) {
   switch (type) {
     case "horizontal":
-      return "水平線";
+      return translateDrawing(i18n, "drawingTypes.horizontal", "水平線");
     case "trend":
-      return "趨勢線";
+      return translateDrawing(i18n, "drawingTypes.trend", "趨勢線");
     case "ray":
-      return "射線";
+      return translateDrawing(i18n, "drawingTypes.ray", "射線");
     case "rectangle":
-      return "區間框";
+      return translateDrawing(i18n, "drawingTypes.rectangle", "區間框");
     case "fibonacci":
       return "Fib";
     case "anchorVwap":
@@ -2077,21 +2206,26 @@ export function drawingTypeLabel(type: ChartDrawing["type"]) {
     case "volumeProfileRange":
       return "VP Range";
     case "measure":
-      return "量測";
+      return translateDrawing(i18n, "drawingTypes.measure", "量測");
     case "priceRange":
-      return "價幅";
+      return translateDrawing(i18n, "drawingTypes.priceRange", "價幅");
     default:
-      return "畫線";
+      return translateDrawing(i18n, "drawingTypes.default", "畫線");
   }
 }
 
 export function buildDrawingOmiSummary(
   drawing: Pick<ChartDrawing, "type" | "points">,
   metrics: ChartDrawingDerivedMetrics,
-  context: ChartDrawingContext
+  context: ChartDrawingContext,
+  i18n?: DrawingAnalysisI18n
 ): ChartDrawingOmiSummary {
-  const typeLabel = drawingTypeLabel(drawing.type);
-  const subject = context.symbol ? `${context.symbol}` : context.label ?? "目前標的";
+  const typeLabel = drawingTypeLabel(drawing.type, i18n);
+  const subject =
+    context.symbol
+      ? `${context.symbol}`
+      : context.label ?? translateDrawing(i18n, "summary.defaultSubject", "目前標的");
+  const separator = translateDrawing(i18n, "summary.separator", "，");
   const tags = [drawing.type, metrics.direction, context.timeframe ?? null].filter(
     (value): value is string => Boolean(value)
   );
@@ -2125,7 +2259,10 @@ export function buildDrawingOmiSummary(
   const textParts = [
     `${subject} ${typeLabel}`,
     metrics.startTime && metrics.endTime && metrics.startTime !== metrics.endTime
-      ? `${metrics.startTime} 到 ${metrics.endTime}`
+      ? translateDrawing(i18n, "summary.range", "{start} 到 {end}", {
+          start: metrics.startTime,
+          end: metrics.endTime,
+        })
       : metrics.startTime ?? null,
     finiteNumber(metrics.priceDiff)
       ? `${metrics.labels.priceDiff} / ${metrics.labels.percentChange}`
@@ -2133,25 +2270,70 @@ export function buildDrawingOmiSummary(
     metrics.labels.bars,
     metrics.labels.duration,
     metrics.lineAnalysis
-      ? `${metrics.lineAnalysis.labels.role}，${metrics.lineAnalysis.labels.status}，距線 ${metrics.lineAnalysis.labels.distancePct}`
+      ? translateDrawing(i18n, "summary.lineDetail", "{role}，{status}，距線 {distancePct}", {
+          role: metrics.lineAnalysis.labels.role,
+          status: metrics.lineAnalysis.labels.status,
+          distancePct: metrics.lineAnalysis.labels.distancePct,
+        })
       : null,
     metrics.zoneAnalysis
-      ? `${metrics.zoneAnalysis.labels.role}，${metrics.zoneAnalysis.labels.status}，區間位置 ${metrics.zoneAnalysis.labels.position}`
+      ? translateDrawing(i18n, "summary.zoneDetail", "{role}，{status}，區間位置 {position}", {
+          role: metrics.zoneAnalysis.labels.role,
+          status: metrics.zoneAnalysis.labels.status,
+          position: metrics.zoneAnalysis.labels.position,
+        })
       : null,
     metrics.fibonacciAnalysis
-      ? `${metrics.fibonacciAnalysis.labels.trend}，${metrics.fibonacciAnalysis.labels.status}，最近 ${metrics.fibonacciAnalysis.labels.nearest}，距離 ${metrics.fibonacciAnalysis.labels.nearestDistancePct}`
+      ? translateDrawing(
+          i18n,
+          "summary.fibonacciDetail",
+          "{trend}，{status}，最近 {nearest}，距離 {distancePct}",
+          {
+            trend: metrics.fibonacciAnalysis.labels.trend,
+            status: metrics.fibonacciAnalysis.labels.status,
+            nearest: metrics.fibonacciAnalysis.labels.nearest,
+            distancePct: metrics.fibonacciAnalysis.labels.nearestDistancePct,
+          }
+        )
       : null,
     metrics.anchoredVwapAnalysis
-      ? `${metrics.anchoredVwapAnalysis.labels.status}，VWAP ${metrics.anchoredVwapAnalysis.labels.vwap}，距離 ${metrics.anchoredVwapAnalysis.labels.distancePct}`
+      ? translateDrawing(
+          i18n,
+          "summary.anchoredVwapDetail",
+          "{status}，VWAP {vwap}，距離 {distancePct}",
+          {
+            status: metrics.anchoredVwapAnalysis.labels.status,
+            vwap: metrics.anchoredVwapAnalysis.labels.vwap,
+            distancePct: metrics.anchoredVwapAnalysis.labels.distancePct,
+          }
+        )
       : null,
     metrics.volumeProfileAnalysis
-      ? `POC ${metrics.volumeProfileAnalysis.labels.poc}，VA ${metrics.volumeProfileAnalysis.labels.valueArea}，現價 ${metrics.volumeProfileAnalysis.labels.latestPosition}`
+      ? translateDrawing(
+          i18n,
+          "summary.volumeProfileDetail",
+          "POC {poc}，VA {valueArea}，現價 {position}",
+          {
+            poc: metrics.volumeProfileAnalysis.labels.poc,
+            valueArea: metrics.volumeProfileAnalysis.labels.valueArea,
+            position: metrics.volumeProfileAnalysis.labels.latestPosition,
+          }
+        )
       : null,
   ].filter((value): value is string => Boolean(value));
+  const directionLabel =
+    metrics.direction === "up"
+      ? translateDrawing(i18n, "summary.directionUp", "上行")
+      : metrics.direction === "down"
+        ? translateDrawing(i18n, "summary.directionDown", "下行")
+        : translateDrawing(i18n, "summary.directionData", "資料");
 
   return {
-    title: `${typeLabel} ${metrics.direction === "up" ? "上行" : metrics.direction === "down" ? "下行" : "資料"}`,
-    text: textParts.join("，"),
+    title: translateDrawing(i18n, "summary.title", "{type} {direction}", {
+      type: typeLabel,
+      direction: directionLabel,
+    }),
+    text: textParts.join(separator),
     tags,
     facts: {
       symbol: context.symbol ?? null,
@@ -2255,13 +2437,15 @@ export function attachDrawingAnalytics(
   drawing: ChartDrawing,
   timeIndex: Map<string, number>,
   context: ChartDrawingContext,
-  chartData?: ChartPoint[]
+  chartData?: ChartPoint[],
+  i18n?: DrawingAnalysisI18n
 ): ChartDrawing {
   const derivedMetrics = buildDrawingDerivedMetrics(
     drawing.type,
     drawing.points,
     timeIndex,
-    chartData
+    chartData,
+    i18n
   );
   const nextContext: ChartDrawingContext = {
     ...drawing.context,
@@ -2273,7 +2457,7 @@ export function attachDrawingAnalytics(
     ...drawing,
     context: nextContext,
     derivedMetrics,
-    omiSummary: buildDrawingOmiSummary(drawing, derivedMetrics, nextContext),
+    omiSummary: buildDrawingOmiSummary(drawing, derivedMetrics, nextContext, i18n),
   };
 }
 
@@ -2292,10 +2476,11 @@ export function measurementStatsFromMetrics(metrics: ChartDrawingDerivedMetrics)
 export function buildMeasurementStats(
   first: ChartDrawingPoint,
   second: ChartDrawingPoint,
-  timeIndex: Map<string, number>
+  timeIndex: Map<string, number>,
+  i18n?: DrawingAnalysisI18n
 ): ProjectedMeasurementStats {
   return measurementStatsFromMetrics(
-    buildDrawingDerivedMetrics("measure", [first, second], timeIndex)
+    buildDrawingDerivedMetrics("measure", [first, second], timeIndex, undefined, i18n)
   );
 }
 

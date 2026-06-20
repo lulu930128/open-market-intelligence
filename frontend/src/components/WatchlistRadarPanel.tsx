@@ -5,6 +5,24 @@ import type {
   WatchlistRadarItemRead,
   WatchlistRadarMode,
 } from "@/types/market";
+import {
+  radarActionLabel,
+  radarBucketDescription,
+  radarBucketLabel,
+  radarContextDescription,
+  radarContextSignalLabel,
+  radarContextSourceLabel,
+  radarPriceLevelLabel,
+  radarRiskLabel,
+  radarSetupLabel,
+  radarSignalLabel,
+  radarSignalLabelFromText,
+  radarTechnicalGradeDescription,
+  radarTechnicalGradeLabel,
+  radarTimingLabel,
+  useT,
+  type TranslationFunction,
+} from "@/i18n";
 
 type LoadState = "idle" | "loading" | "success" | "error";
 
@@ -21,22 +39,16 @@ type WatchlistRadarPanelProps = {
   onSelectStock: (stockId: string, stockName: string | null) => void;
 };
 
-const RADAR_MODE_OPTIONS: Array<{ value: WatchlistRadarMode; label: string }> = [
-  { value: "action", label: "重點" },
-  { value: "surge", label: "急漲" },
-  { value: "breakout", label: "突破" },
-  { value: "volume", label: "量能" },
-  { value: "overheat", label: "過熱" },
-  { value: "weakness", label: "弱勢" },
-  { value: "risk", label: "風險" },
-  { value: "momentum", label: "動能" },
+const RADAR_MODE_OPTIONS: Array<{ value: WatchlistRadarMode; labelKey: string }> = [
+  { value: "action", labelKey: "radar.modes.action" },
+  { value: "surge", labelKey: "radar.modes.surge" },
+  { value: "breakout", labelKey: "radar.modes.breakout" },
+  { value: "volume", labelKey: "radar.modes.volume" },
+  { value: "overheat", labelKey: "radar.modes.overheat" },
+  { value: "weakness", labelKey: "radar.modes.weakness" },
+  { value: "risk", labelKey: "radar.modes.risk" },
+  { value: "momentum", labelKey: "radar.modes.momentum" },
 ];
-
-const URGENCY_LABELS: Record<string, string> = {
-  high: "高",
-  medium: "中",
-  low: "低",
-};
 
 function formatRadarDate(value: string | null | undefined) {
   if (!value) return "-";
@@ -141,27 +153,43 @@ function bucketClass(bucket: string) {
   return "omi-signal-chip-neutral";
 }
 
-function itemMeta(item: WatchlistRadarItemRead) {
+function itemMeta(item: WatchlistRadarItemRead, t: TranslationFunction) {
+  const bucketLabel = radarBucketLabel(t, item.bucket, item.bucket_label);
+  const signalKeys = Array.from(
+    new Set(
+      [
+        ...item.matched_signal_keys,
+        item.primary_signal_key,
+        ...item.signal_keys,
+      ].filter((key): key is string => Boolean(key))
+    )
+  );
   const technicalLabels = [
-    ...item.technical_notes,
-    ...item.matched_signal_labels,
-    item.primary_signal_label,
-    ...item.signal_labels,
+    ...signalKeys.map((key) => radarSignalLabel(t, key, key)),
+    ...item.technical_notes.map((label) => radarSignalLabelFromText(t, label)),
+    ...item.matched_signal_labels.map((label) =>
+      radarSignalLabelFromText(t, label)
+    ),
+    item.primary_signal_label
+      ? radarSignalLabelFromText(t, item.primary_signal_label)
+      : null,
+    ...item.signal_labels.map((label) => radarSignalLabelFromText(t, label)),
   ].filter(
-    (label): label is string => Boolean(label) && label !== item.bucket_label
+    (label): label is string =>
+      Boolean(label) && label !== bucketLabel && label !== item.bucket_label
   );
   const uniqueTechnicalLabels = Array.from(new Set(technicalLabels)).slice(0, 3);
 
   return [
-    item.bucket_label,
+    bucketLabel,
     ...uniqueTechnicalLabels,
-    item.stale ? "資料待更新" : null,
+    item.stale ? t("radar.staleItem") : null,
   ]
     .filter(Boolean)
     .join(" · ");
 }
 
-function keyLevelText(item: WatchlistRadarItemRead) {
+function keyLevelText(item: WatchlistRadarItemRead, t: TranslationFunction) {
   const label = item.price_levels.key_level_label;
   const value = item.price_levels.key_level;
 
@@ -169,15 +197,19 @@ function keyLevelText(item: WatchlistRadarItemRead) {
     return null;
   }
 
-  return `${label} ${formatRadarPrice(value)}`;
+  return `${radarPriceLevelLabel(t, label, label)} ${formatRadarPrice(value)}`;
 }
 
-function scanLine(item: WatchlistRadarItemRead) {
+function scanLine(item: WatchlistRadarItemRead, t: TranslationFunction) {
+  const bucketLabel = radarBucketLabel(t, item.bucket, item.bucket_label);
+
   return [
-    item.setup_label || item.bucket_label,
-    item.timing_label,
-    item.risk_label,
-    keyLevelText(item),
+    item.setup_label
+      ? radarSetupLabel(t, item.bucket, item.setup_label)
+      : bucketLabel,
+    item.timing_label ? radarTimingLabel(t, item.bucket, item.timing_label) : null,
+    item.risk_label ? radarRiskLabel(t, item.bucket, item.risk_label) : null,
+    keyLevelText(item, t),
   ]
     .filter(Boolean)
     .join(" · ");
@@ -185,6 +217,12 @@ function scanLine(item: WatchlistRadarItemRead) {
 
 function contextSignals(item: WatchlistRadarItemRead) {
   return (item.context_signals ?? []).slice(0, 3);
+}
+
+function urgencyLabel(t: TranslationFunction, urgency: string) {
+  const key = `radar.urgency.${urgency}`;
+  const label = t(key);
+  return label === key ? urgency : label;
 }
 
 function signalBadge(
@@ -239,21 +277,22 @@ export default function WatchlistRadarPanel({
   onReload,
   onSelectStock,
 }: WatchlistRadarPanelProps) {
+  const t = useT();
   const isLoading = loadState === "loading" && radar === null;
   const hasResults = (radar?.results.length ?? 0) > 0;
   const activeBuckets = radar?.buckets.filter((bucket) => bucket.count > 0) ?? [];
   const radarDateLabel = radar?.trade_date
-    ? `資料日 ${formatRadarDate(radar.trade_date)}`
-    : "尚未載入";
+    ? t("radar.dateLabel", { date: formatRadarDate(radar.trade_date) })
+    : t("radar.notLoaded");
 
   return (
     <section className="border border-omi-border-subtle bg-omi-surface" data-testid="watchlist-radar-panel">
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-omi-border-subtle px-5 py-4">
         <div>
           <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
-            Watchlist Radar
+            {t("radar.eyebrow")}
           </div>
-          <h3 className="mt-1 text-lg font-bold text-omi-text-strong">今日雷達</h3>
+          <h3 className="mt-1 text-lg font-bold text-omi-text-strong">{t("radar.title")}</h3>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -283,7 +322,7 @@ export default function WatchlistRadarPanel({
                     : "text-omi-text-muted hover:bg-omi-surface-subtle",
                 ].join(" ")}
               >
-                {option.label}
+                {t(option.labelKey)}
               </a>
             ))}
           </div>
@@ -293,7 +332,7 @@ export default function WatchlistRadarPanel({
             disabled={disabled || loadState === "loading"}
             className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text-muted hover:border-omi-accent hover:text-omi-accent disabled:border-omi-border-subtle disabled:text-omi-text-subtle"
           >
-            Reload
+            {t("radar.reload")}
           </button>
         </div>
       </div>
@@ -306,8 +345,10 @@ export default function WatchlistRadarPanel({
 
       {radar?.is_current === false ? (
         <div className="border-b border-omi-warning-border bg-omi-warning-soft px-5 py-3 text-sm text-omi-warning">
-          自選股資料尚未完全同步，{radar.stale_stock_count} 檔落後目標日{" "}
-          {formatRadarDate(radar.target_trade_date)}。
+          {t("radar.staleWarning", {
+            count: radar.stale_stock_count,
+            targetDate: formatRadarDate(radar.target_trade_date),
+          })}
         </div>
       ) : null}
 
@@ -316,12 +357,13 @@ export default function WatchlistRadarPanel({
           {activeBuckets.map((bucket) => (
             <span
               key={bucket.key}
+              title={radarBucketDescription(t, bucket.key, bucket.description)}
               className={[
                 "omi-signal-chip inline-flex items-center gap-1 border px-2 py-1 text-xs font-semibold",
                 bucketClass(bucket.key),
               ].join(" ")}
             >
-              {bucket.label}
+              {radarBucketLabel(t, bucket.key, bucket.label)}
               <span className="tabular-nums">{bucket.count}</span>
             </span>
           ))}
@@ -334,11 +376,35 @@ export default function WatchlistRadarPanel({
         <div
           className="max-h-[36rem] space-y-1 overflow-y-auto overscroll-contain bg-omi-surface-subtle p-2"
           tabIndex={0}
-          aria-label="Watchlist radar results"
+          aria-label={t("radar.resultsAria")}
         >
           {radar?.results.map((item) => {
             const selected = item.stock_id === selectedStockId;
             const visibleContextSignals = contextSignals(item);
+            const bucketLabel = radarBucketLabel(t, item.bucket, item.bucket_label);
+            const bucketDescription = radarBucketDescription(
+              t,
+              item.bucket,
+              item.bucket_label
+            );
+            const technicalGradeLabel = radarTechnicalGradeLabel(
+              t,
+              item.technical_grade,
+              item.technical_grade_label
+            );
+            const technicalGradeDescription = radarTechnicalGradeDescription(
+              t,
+              item.technical_grade,
+              item.technical_grade_description
+            );
+            const radarScanLine = scanLine(item, t);
+            const radarMeta = itemMeta(item, t);
+            const actionLabel = radarActionLabel(
+              t,
+              item.bucket,
+              item.action_label,
+              item.stale
+            );
 
             return (
               <button
@@ -364,46 +430,62 @@ export default function WatchlistRadarPanel({
                       {item.stock_id} {item.stock_name ?? ""}
                     </span>
                     {signalBadge(
-                      "分類",
-                      item.bucket_label,
-                      bucketClass(item.bucket)
+                      t("radar.badges.category"),
+                      bucketLabel,
+                      bucketClass(item.bucket),
+                      bucketDescription
                     )}
                     {signalBadge(
-                      "急迫",
-                      URGENCY_LABELS[item.urgency] ?? item.urgency,
+                      t("radar.badges.urgency"),
+                      urgencyLabel(t, item.urgency),
                       urgencyClass(item.urgency)
                     )}
                     {signalBadge(
-                      "強度",
-                      item.technical_grade_label,
+                      t("radar.badges.strength"),
+                      technicalGradeLabel,
                       technicalGradeClass(item.technical_grade),
-                      item.technical_grade_description
+                      technicalGradeDescription
                     )}
-                    {visibleContextSignals.map((signal) => (
-                      <span
-                        key={`${signal.key}-${signal.label}`}
-                        className={[
-                          "omi-signal-chip inline-flex shrink-0 items-center gap-1 border px-1.5 py-0.5 text-[11px] font-semibold",
-                          contextSignalClass(signal.tone, signal.stance),
-                        ].join(" ")}
-                        title={signal.description}
-                      >
-                        <span className="text-[10px] opacity-75">{signal.source}：</span>
-                        <span className="truncate">{signal.label}</span>
-                      </span>
-                    ))}
+                    {visibleContextSignals.map((signal) => {
+                      const sourceLabel = radarContextSourceLabel(
+                        t,
+                        signal.key,
+                        signal.source
+                      );
+                      const signalLabel = radarContextSignalLabel(t, signal.label);
+                      const signalDescription = radarContextDescription(
+                        t,
+                        signal.key,
+                        signal.description,
+                        signal.value_label
+                      );
+
+                      return (
+                        <span
+                          key={`${signal.key}-${signal.label}`}
+                          className={[
+                            "omi-signal-chip inline-flex shrink-0 items-center gap-1 border px-1.5 py-0.5 text-[11px] font-semibold",
+                            contextSignalClass(signal.tone, signal.stance),
+                          ].join(" ")}
+                          title={signalDescription}
+                        >
+                          <span className="text-[10px] opacity-75">{sourceLabel}：</span>
+                          <span className="truncate">{signalLabel}</span>
+                        </span>
+                      );
+                    })}
                   </span>
                   <span
                     className={selected ? "mt-1 block truncate text-xs font-medium text-omi-text" : "mt-1 block truncate text-xs font-medium text-omi-text-muted"}
-                    title={scanLine(item)}
+                    title={radarScanLine}
                   >
-                    {scanLine(item)}
+                    {radarScanLine}
                   </span>
                   <span
                     className="mt-1 block truncate text-xs text-omi-text-muted"
-                    title={item.reason}
+                    title={`${actionLabel} · ${radarMeta}`}
                   >
-                    {item.action_label} · {itemMeta(item)}
+                    {actionLabel} · {radarMeta}
                   </span>
                 </span>
                 <span className="text-right">
@@ -420,7 +502,7 @@ export default function WatchlistRadarPanel({
         </div>
       ) : (
         <div className="px-5 py-8 text-center text-sm text-omi-text-muted">
-          {radar ? "目前沒有符合條件的雷達項目" : "選擇分組後顯示今日雷達"}
+          {radar ? t("radar.emptyWithRadar") : t("radar.emptyNoGroup")}
         </div>
       )}
     </section>

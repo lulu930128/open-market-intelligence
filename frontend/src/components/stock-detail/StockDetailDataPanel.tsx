@@ -58,6 +58,7 @@ import type {
   ShareholdingDistributionWeeklyRead,
   StockChipCoverageRead,
 } from "@/types/market";
+import { useT } from "@/i18n";
 import type { Dispatch, SetStateAction } from "react";
 
 type StockDetailDataPanelProps = {
@@ -133,7 +134,9 @@ export default function StockDetailDataPanel({
   smallHolderLots,
   stockId,
 }: StockDetailDataPanelProps) {
+  const t = useT();
   const selectedStockId = stockId;
+  const lotUnit = t("stockDetail.dataPanel.units.lots");
 
   function hasRowsFromOtherStock<T extends { stock_id: string }>(rows: T[]) {
     return rows.some((row) => row.stock_id !== selectedStockId);
@@ -221,30 +224,32 @@ export default function StockDetailDataPanel({
     const currentChipCoverage = chipCoverage?.stock_id === stockId ? chipCoverage : null;
 
     if (!hasShareholding && !hasMargin) {
-      return <EmptyDataState message="尚無籌碼或融資融券資料" />;
+      return <EmptyDataState message={t("stockDetail.dataPanel.empty.chips")} />;
     }
 
     return (
       <div className="space-y-5">
         {currentChipCoverage ? (
           <div className="text-xs leading-5 text-omi-text-muted">
-            集保最新 {formatDate(currentChipCoverage.shareholding_latest_date)}，
-            共 {currentChipCoverage.shareholding_week_count} 週；融資融券最新{" "}
-            {formatDate(currentChipCoverage.margin_latest_trade_date)}，
-            共 {currentChipCoverage.margin_row_count} 筆
+            {t("stockDetail.dataPanel.chipCoverage", {
+              shareholdingDate: formatDate(currentChipCoverage.shareholding_latest_date),
+              weekCount: currentChipCoverage.shareholding_week_count,
+              marginDate: formatDate(currentChipCoverage.margin_latest_trade_date),
+              marginRows: currentChipCoverage.margin_row_count,
+            })}
           </div>
         ) : null}
 
         <div className="space-y-2">
           <SegmentedNumberButtons
-            label="大股東張數 >"
+            label={t("stockDetail.dataPanel.largeHolderLotsGt")}
             suffix=""
             options={largeHolderLotOptions}
             value={largeHolderLots}
             onChange={setLargeHolderLots}
           />
           <SegmentedNumberButtons
-            label="小股東張數 <"
+            label={t("stockDetail.dataPanel.smallHolderLotsLt")}
             suffix=""
             options={smallHolderLotOptions}
             value={smallHolderLots}
@@ -257,11 +262,11 @@ export default function StockDetailDataPanel({
 
         <div className="overflow-hidden border border-omi-border-subtle">
           <div className="grid grid-cols-[1.1fr_1fr_1fr_1fr_1fr] bg-omi-surface-subtle text-center text-xs font-semibold text-omi-text-muted">
-            <div className="px-2 py-2 text-left">日期</div>
-            <div className="border-l border-omi-border-subtle px-2 py-2">大股東持股比例(%)</div>
-            <div className="border-l border-omi-border-subtle px-2 py-2">大股東持股變動(%)</div>
-            <div className="border-l border-omi-border-subtle px-2 py-2">大股東持股人數</div>
-            <div className="border-l border-omi-border-subtle px-2 py-2">小股東持股比例(%)</div>
+            <div className="px-2 py-2 text-left">{t("stockDetail.dataPanel.columns.date")}</div>
+            <div className="border-l border-omi-border-subtle px-2 py-2">{t("stockDetail.dataPanel.columns.largeHolderRatio")}</div>
+            <div className="border-l border-omi-border-subtle px-2 py-2">{t("stockDetail.dataPanel.columns.largeHolderChange")}</div>
+            <div className="border-l border-omi-border-subtle px-2 py-2">{t("stockDetail.dataPanel.columns.largeHolderCount")}</div>
+            <div className="border-l border-omi-border-subtle px-2 py-2">{t("stockDetail.dataPanel.columns.smallHolderRatio")}</div>
           </div>
           {shareholdingSeries
             .slice()
@@ -292,12 +297,12 @@ export default function StockDetailDataPanel({
         </div>
 
         {margin ? (
-          <ChipMetricBlock title="融資融券">
-            <MetricRow label="融資餘額" value={formatNumber(margin.margin_today_balance)} />
-            <MetricRow label="融券餘額" value={formatNumber(margin.short_today_balance)} />
-            <MetricRow label="資券相抵" value={formatNumber(margin.offset)} />
+          <ChipMetricBlock title={t("stockDetail.dataPanel.marginShort")}>
+            <MetricRow label={t("stockDetail.dataPanel.marginBalance")} value={formatNumber(margin.margin_today_balance)} />
+            <MetricRow label={t("stockDetail.dataPanel.shortBalance")} value={formatNumber(margin.short_today_balance)} />
+            <MetricRow label={t("stockDetail.dataPanel.offset")} value={formatNumber(margin.offset)} />
             <MetricRow
-              label="融資買 / 賣"
+              label={t("stockDetail.dataPanel.marginBuySell")}
               value={`${formatNumber(margin.margin_buy)} / ${formatNumber(margin.margin_sell)}`}
             />
           </ChipMetricBlock>
@@ -308,7 +313,7 @@ export default function StockDetailDataPanel({
 
   function renderInstitutionalTab() {
     if (!institutionalSeries.length) {
-      return <EmptyDataState message="尚無法人買賣超資料" />;
+      return <EmptyDataState message={t("stockDetail.dataPanel.empty.institutional")} />;
     }
 
     const latestPoint = institutionalSeries[institutionalSeries.length - 1];
@@ -347,25 +352,25 @@ export default function StockDetailDataPanel({
 
         <div className="grid grid-cols-3 gap-2 text-center text-xs">
           {[
-            { label: "外資", value: displayLatestPoint.foreignCumulative },
-            { label: "投信", value: displayLatestPoint.investmentTrustCumulative },
-            { label: "自營商", value: displayLatestPoint.dealerCumulative },
+            { label: t("stockDetail.dataPanel.investors.foreign"), value: displayLatestPoint.foreignCumulative },
+            { label: t("stockDetail.dataPanel.investors.investmentTrust"), value: displayLatestPoint.investmentTrustCumulative },
+            { label: t("stockDetail.dataPanel.investors.dealer"), value: displayLatestPoint.dealerCumulative },
           ].map((item) => (
             <div key={item.label} className="border border-omi-border-subtle px-3 py-3">
               <div className="font-semibold text-omi-text">{item.label}</div>
               <div className={`mt-2 text-base font-bold ${valueTone(item.value)}`}>
-                {formatSignedLots(item.value)}張
+                {formatSignedLots(item.value)}{lotUnit}
               </div>
-              <div className="mt-1 text-[11px] text-omi-text-muted">近3個月累計</div>
+              <div className="mt-1 text-[11px] text-omi-text-muted">{t("stockDetail.dataPanel.recentThreeMonthsCumulative")}</div>
             </div>
           ))}
         </div>
 
         <div className="border border-omi-border-subtle bg-omi-surface px-4 py-3">
-          <div className="mb-2 text-sm font-bold text-omi-text-strong">三大法人動向</div>
+          <div className="mb-2 text-sm font-bold text-omi-text-strong">{t("stockDetail.dataPanel.institutionalTrend")}</div>
           <InstitutionalFlowChart
             points={recentPoints}
-            title="外資"
+            title={t("stockDetail.dataPanel.investors.foreign")}
             netKey="foreignNet"
             cumulativeKey="foreignCumulative"
             activeDate={institutionalHoverDate}
@@ -373,7 +378,7 @@ export default function StockDetailDataPanel({
           />
           <InstitutionalFlowChart
             points={recentPoints}
-            title="投信"
+            title={t("stockDetail.dataPanel.investors.investmentTrust")}
             netKey="investmentTrustNet"
             cumulativeKey="investmentTrustCumulative"
             activeDate={institutionalHoverDate}
@@ -381,7 +386,7 @@ export default function StockDetailDataPanel({
           />
           <InstitutionalFlowChart
             points={recentPoints}
-            title="自營商"
+            title={t("stockDetail.dataPanel.investors.dealer")}
             netKey="dealerNet"
             cumulativeKey="dealerCumulative"
             activeDate={institutionalHoverDate}
@@ -393,9 +398,9 @@ export default function StockDetailDataPanel({
         <div className="border border-omi-border-subtle bg-omi-surface px-4 py-3">
           <div className="mb-3 flex items-center justify-between gap-4">
             <div>
-              <div className="text-sm font-bold text-omi-text-strong">法人持有比例</div>
+              <div className="text-sm font-bold text-omi-text-strong">{t("stockDetail.dataPanel.institutionalHoldingRatio")}</div>
               <div className="mt-1 text-[11px] text-omi-text-muted">
-                實際持股比例
+                {t("stockDetail.dataPanel.actualHoldingRatio")}
               </div>
             </div>
             <div className="text-sm font-bold text-omi-text">
@@ -406,15 +411,15 @@ export default function StockDetailDataPanel({
           <div className="grid grid-cols-3 gap-2 text-center text-xs">
             {[
               {
-                label: "外資",
+                label: t("stockDetail.dataPanel.investors.foreign"),
                 value: activeHoldingRatio?.foreign_investor_ratio ?? null,
               },
               {
-                label: "投信",
+                label: t("stockDetail.dataPanel.investors.investmentTrust"),
                 value: activeHoldingRatio?.investment_trust_ratio ?? null,
               },
               {
-                label: "自營商",
+                label: t("stockDetail.dataPanel.investors.dealer"),
                 value: activeHoldingRatio?.dealer_ratio ?? null,
               },
             ].map((item) => (
@@ -423,7 +428,7 @@ export default function StockDetailDataPanel({
                 <div className="mt-2 text-base font-bold text-omi-text-strong">
                   {formatRatioPct(item.value)}
                 </div>
-                <div className="mt-1 text-[11px] text-omi-text-muted">持股比例</div>
+                <div className="mt-1 text-[11px] text-omi-text-muted">{t("stockDetail.dataPanel.holdingRatio")}</div>
               </div>
             ))}
           </div>
@@ -431,14 +436,14 @@ export default function StockDetailDataPanel({
 
         <div className="overflow-hidden border border-omi-border-subtle">
           <div className="border-b border-omi-border-subtle bg-omi-surface-subtle px-3 py-2 text-center text-sm font-bold text-omi-text">
-            近3個月三大法人買賣超明細
+            {t("stockDetail.dataPanel.institutionalDetailTitle")}
           </div>
           <div className="grid grid-cols-[0.9fr_1fr_1fr_1fr_1fr] border-b border-omi-border-subtle bg-omi-surface text-center text-xs font-semibold text-omi-text-muted">
-            <div className="px-2 py-2">日期</div>
-            <div className="px-2 py-2">外資(張)</div>
-            <div className="px-2 py-2">投信(張)</div>
-            <div className="px-2 py-2">自營商(張)</div>
-            <div className="px-2 py-2">合計(張)</div>
+            <div className="px-2 py-2">{t("stockDetail.dataPanel.columns.date")}</div>
+            <div className="px-2 py-2">{t("stockDetail.dataPanel.columns.foreignLots")}</div>
+            <div className="px-2 py-2">{t("stockDetail.dataPanel.columns.investmentTrustLots")}</div>
+            <div className="px-2 py-2">{t("stockDetail.dataPanel.columns.dealerLots")}</div>
+            <div className="px-2 py-2">{t("stockDetail.dataPanel.columns.totalLots")}</div>
           </div>
           {tableRows.map((row) => (
             <div
@@ -467,7 +472,7 @@ export default function StockDetailDataPanel({
 
   function renderBranchTab() {
     if (!brokerBranchSummary || brokerBranchSummary.row_count === 0) {
-      return <EmptyDataState message="尚無分點 Top15 資料" />;
+      return <EmptyDataState message={t("stockDetail.dataPanel.empty.branch")} />;
     }
 
     const buyTotal = brokerBranchSummary.buy_top.reduce(
@@ -503,10 +508,16 @@ export default function StockDetailDataPanel({
         : brokerBranchSummary.sell_top;
     const detailTotal =
       branchTableSide === "buy" ? buyTotal : sellTotal;
-    const detailNetLabel = branchTableSide === "buy" ? "買超(張)" : "賣超(張)";
-    const detailNameLabel = branchTableSide === "buy" ? "買超Top15" : "賣超Top15";
+    const detailNetLabel = branchTableSide === "buy"
+      ? t("stockDetail.dataPanel.columns.buyNetLots")
+      : t("stockDetail.dataPanel.columns.sellNetLots");
+    const detailNameLabel = branchTableSide === "buy"
+      ? t("stockDetail.dataPanel.buyTop15")
+      : t("stockDetail.dataPanel.sellTop15");
     const detailTotalLabel =
-      branchTableSide === "buy" ? "Top15總買超" : "Top15總賣超";
+      branchTableSide === "buy"
+        ? t("stockDetail.dataPanel.totalBuyTop15")
+        : t("stockDetail.dataPanel.totalSellTop15");
     const detailTone =
       branchTableSide === "buy" ? "text-omi-market-up" : "text-omi-market-down";
 
@@ -526,16 +537,21 @@ export default function StockDetailDataPanel({
     const branchCoverageText =
       brokerBranchSummary.requested_days > 1
         ? brokerBranchSummary.is_partial
-          ? `目前僅有 ${brokerBranchSummary.available_days} / ${brokerBranchSummary.requested_days} 日已存分點資料`
-          : `目前顯示最近 ${brokerBranchSummary.available_days} 日分點資料`
-        : "目前顯示一日分點資料";
+          ? t("stockDetail.dataPanel.branchCoveragePartial", {
+              available: brokerBranchSummary.available_days,
+              requested: brokerBranchSummary.requested_days,
+            })
+          : t("stockDetail.dataPanel.branchCoverageFull", {
+              available: brokerBranchSummary.available_days,
+            })
+        : t("stockDetail.dataPanel.branchCoverageOneDay");
 
     return (
       <div className="space-y-6">
         <div className="flex items-center justify-between gap-4">
-          <div className="text-lg font-bold text-omi-text-strong">分點</div>
+          <div className="text-lg font-bold text-omi-text-strong">{t("stockDetail.dataPanel.branch")}</div>
           <div className="text-right text-[11px] text-omi-text-muted">
-            <div>資料日期：{branchDateRange}</div>
+            <div>{t("stockDetail.dataPanel.branchDate", { date: branchDateRange })}</div>
             <a
               href={brokerBranchSummary.source_url}
               target="_blank"
@@ -548,7 +564,7 @@ export default function StockDetailDataPanel({
         </div>
 
         <div className="flex items-center justify-center gap-3 text-xs">
-          <span className="font-semibold text-omi-text-muted">天數</span>
+          <span className="font-semibold text-omi-text-muted">{t("stockDetail.dataPanel.days")}</span>
           <div className="grid grid-cols-8 overflow-hidden border border-omi-control">
             {branchDayOptions.map((option) => {
               const disabled = option.days === null;
@@ -571,7 +587,7 @@ export default function StockDetailDataPanel({
                         : "bg-omi-surface text-omi-text hover:bg-omi-surface-subtle",
                   ].join(" ")}
                 >
-                  {option.label}
+                  {option.days === null ? t("stockDetail.dataPanel.more") : option.label}
                 </button>
               );
             })}
@@ -580,10 +596,10 @@ export default function StockDetailDataPanel({
 
         <div className="space-y-2">
           <div className="grid grid-cols-[1.2fr_1fr_1fr_1.2fr] text-xs font-semibold text-omi-text-muted">
-            <div>買超Top15</div>
-            <div className="text-right">買超(張)</div>
-            <div className="text-left">賣超(張)</div>
-            <div className="text-right">賣超Top15</div>
+            <div>{t("stockDetail.dataPanel.buyTop15")}</div>
+            <div className="text-right">{t("stockDetail.dataPanel.columns.buyNetLots")}</div>
+            <div className="text-left">{t("stockDetail.dataPanel.columns.sellNetLots")}</div>
+            <div className="text-right">{t("stockDetail.dataPanel.sellTop15")}</div>
           </div>
 
           <div className="space-y-1">
@@ -622,8 +638,8 @@ export default function StockDetailDataPanel({
 
           <div className="border-t border-omi-border-subtle pt-2">
             <div className="mb-1 flex items-center justify-between text-xs font-semibold text-omi-text">
-              <span>Top15總買超</span>
-              <span>Top15總賣超</span>
+              <span>{t("stockDetail.dataPanel.totalBuyTop15")}</span>
+              <span>{t("stockDetail.dataPanel.totalSellTop15")}</span>
             </div>
             <div className="grid grid-cols-2 overflow-hidden text-xs">
               <div className="bg-omi-danger-soft px-1 py-1 text-left font-semibold text-omi-market-up">
@@ -638,7 +654,7 @@ export default function StockDetailDataPanel({
 
         <div className="space-y-3 border-t border-omi-border-subtle pt-5">
           <div className="text-center text-sm font-bold text-omi-text-strong">
-            Top15券商分點買賣超
+            {t("stockDetail.dataPanel.brokerTop15Title")}
           </div>
 
           <div className="flex items-center justify-center text-sm font-semibold">
@@ -655,7 +671,7 @@ export default function StockDetailDataPanel({
                       : "bg-omi-surface text-omi-text hover:bg-omi-surface-subtle",
                   ].join(" ")}
                 >
-                  {item.label}
+                  {t(`stockDetail.dataPanel.branchSide.${item.key}`)}
                 </button>
               ))}
             </div>
@@ -667,10 +683,10 @@ export default function StockDetailDataPanel({
             >
               <div className="px-1 py-2">{detailNameLabel}</div>
               <div className="px-1 py-2 text-right">{detailNetLabel}</div>
-              <div className="px-1 py-2 text-right">買張</div>
-              <div className="px-1 py-2 text-right">賣張</div>
-              <div className="px-1 py-2 text-right">買均價</div>
-              <div className="px-1 py-2 text-right">賣均價</div>
+              <div className="px-1 py-2 text-right">{t("stockDetail.dataPanel.columns.buyLots")}</div>
+              <div className="px-1 py-2 text-right">{t("stockDetail.dataPanel.columns.sellLots")}</div>
+              <div className="px-1 py-2 text-right">{t("stockDetail.dataPanel.columns.buyAvgPrice")}</div>
+              <div className="px-1 py-2 text-right">{t("stockDetail.dataPanel.columns.sellAvgPrice")}</div>
             </div>
             {detailRows.map((row) => (
               <div
@@ -712,7 +728,7 @@ export default function StockDetailDataPanel({
           </div>
 
           <div className="text-right text-[11px] text-omi-text-muted">
-            {branchCoverageText}；多日為已存每日 Top15 快照加總。
+            {branchCoverageText}{t("stockDetail.dataPanel.branchSnapshotNote")}
           </div>
         </div>
       </div>
@@ -728,7 +744,7 @@ export default function StockDetailDataPanel({
     const latestRevenue = monthlyRevenueHistory[monthlyRevenueHistory.length - 1] ?? monthlyRevenue;
 
     if (!activeRows.length || !latestRevenue) {
-      return <EmptyDataState message="尚無營收資料" />;
+      return <EmptyDataState message={t("stockDetail.dataPanel.empty.revenue")} />;
     }
 
     const latestYear = Number(latestRevenue.period.slice(0, 4));
@@ -763,9 +779,9 @@ export default function StockDetailDataPanel({
           </span>
           <div className="flex overflow-hidden border border-omi-control text-sm font-semibold">
             {[
-              { key: "monthly", label: "月" },
-              { key: "quarterly", label: "季" },
-              { key: "yearly", label: "年" },
+              { key: "monthly", label: t("stockDetail.dataPanel.views.monthly") },
+              { key: "quarterly", label: t("stockDetail.dataPanel.views.quarterly") },
+              { key: "yearly", label: t("stockDetail.dataPanel.views.yearly") },
             ].map((item) => (
               <button
                 key={item.key}
@@ -794,7 +810,7 @@ export default function StockDetailDataPanel({
                   value={selectedRevenueYear}
                   onChange={(event) => setRevenueYear(Number(event.target.value))}
                   className="h-8 w-full bg-omi-surface px-2 text-center text-sm font-semibold text-omi-text outline outline-1 outline-slate-200"
-                  aria-label="選擇營收年度"
+                  aria-label={t("stockDetail.dataPanel.selectRevenueYear")}
                 >
                   {revenueYearOptions.map((year) => (
                     <option key={year} value={year}>
@@ -803,11 +819,11 @@ export default function StockDetailDataPanel({
                   ))}
                 </select>
               </div>
-              <div className="border-l border-omi-border-subtle px-2 py-2">營收(億)</div>
-              <div className="border-l border-omi-border-subtle px-2 py-2">年增</div>
-              <div className="border-l border-omi-border-subtle px-2 py-2">年累(億)</div>
-              <div className="border-l border-omi-border-subtle px-2 py-2">累積年增</div>
-              <div className="border-l border-omi-border-subtle px-2 py-2">去年營收(億)</div>
+              <div className="border-l border-omi-border-subtle px-2 py-2">{t("stockDetail.dataPanel.columns.revenueYi")}</div>
+              <div className="border-l border-omi-border-subtle px-2 py-2">{t("stockDetail.dataPanel.columns.yoy")}</div>
+              <div className="border-l border-omi-border-subtle px-2 py-2">{t("stockDetail.dataPanel.columns.cumulativeRevenueYi")}</div>
+              <div className="border-l border-omi-border-subtle px-2 py-2">{t("stockDetail.dataPanel.columns.cumulativeYoy")}</div>
+              <div className="border-l border-omi-border-subtle px-2 py-2">{t("stockDetail.dataPanel.columns.previousYearRevenueYi")}</div>
             </div>
             {Array.from({ length: 12 }, (_, index) => 12 - index).map((month) => {
               const row = monthlyRowsByMonth.get(month);
@@ -818,7 +834,7 @@ export default function StockDetailDataPanel({
                   className="grid grid-cols-[0.7fr_1fr_1fr_1fr_1fr_1fr] border-b border-omi-border-subtle text-center text-xs last:border-b-0"
                 >
                   <div className="bg-omi-surface-subtle px-2 py-2 font-semibold text-omi-text">
-                    {month}月
+                    {t("stockDetail.dataPanel.monthLabel", { month })}
                   </div>
                   <div className="border-l border-omi-border-subtle px-2 py-2 text-omi-text-strong">
                     {formatRevenueYiValue(toRevenueYi(row?.monthly_revenue))}
@@ -842,11 +858,11 @@ export default function StockDetailDataPanel({
         ) : (
           <div className="overflow-hidden border border-omi-border-subtle">
             <div className="grid grid-cols-[1fr_1fr_1fr_1fr_0.7fr] border-b border-omi-border-subtle bg-omi-surface-subtle text-center text-xs font-semibold text-omi-text-muted">
-              <div className="px-2 py-2 text-left">期間</div>
-              <div className="border-l border-omi-border-subtle px-2 py-2">營收(億)</div>
-              <div className="border-l border-omi-border-subtle px-2 py-2">年增</div>
-              <div className="border-l border-omi-border-subtle px-2 py-2">去年同期(億)</div>
-              <div className="border-l border-omi-border-subtle px-2 py-2">月數</div>
+              <div className="px-2 py-2 text-left">{t("stockDetail.dataPanel.columns.period")}</div>
+              <div className="border-l border-omi-border-subtle px-2 py-2">{t("stockDetail.dataPanel.columns.revenueYi")}</div>
+              <div className="border-l border-omi-border-subtle px-2 py-2">{t("stockDetail.dataPanel.columns.yoy")}</div>
+              <div className="border-l border-omi-border-subtle px-2 py-2">{t("stockDetail.dataPanel.columns.previousPeriodRevenueYi")}</div>
+              <div className="border-l border-omi-border-subtle px-2 py-2">{t("stockDetail.dataPanel.columns.monthCount")}</div>
             </div>
             {latestRows.map((row) => (
               <div
@@ -884,7 +900,7 @@ export default function StockDetailDataPanel({
         : [];
 
     if (!activeRows.length) {
-      return <EmptyDataState message="尚無季度盈餘資料" />;
+      return <EmptyDataState message={t("stockDetail.dataPanel.empty.earnings")} />;
     }
 
     const latestRows = activeRows.slice().reverse().slice(0, earningsView === "quarterly" ? 16 : 10);
@@ -897,8 +913,8 @@ export default function StockDetailDataPanel({
           </span>
           <div className="flex overflow-hidden border border-omi-control text-sm font-semibold">
             {[
-              { key: "quarterly", label: "季" },
-              { key: "yearly", label: "年" },
+              { key: "quarterly", label: t("stockDetail.dataPanel.views.quarterly") },
+              { key: "yearly", label: t("stockDetail.dataPanel.views.yearly") },
             ].map((item) => (
               <button
                 key={item.key}
@@ -921,9 +937,9 @@ export default function StockDetailDataPanel({
 
         <div className="overflow-hidden border border-omi-border-subtle">
           <div className="grid grid-cols-[1fr_1fr_1fr_1fr_1fr] border-b border-omi-border-subtle bg-omi-surface-subtle text-center text-xs font-semibold text-omi-text-muted">
-            <div className="px-2 py-2 text-left">期間</div>
-            <div className="border-l border-omi-border-subtle px-2 py-2">EPS(元)</div>
-            <div className="border-l border-omi-border-subtle px-2 py-2">年增率</div>
+            <div className="px-2 py-2 text-left">{t("stockDetail.dataPanel.columns.period")}</div>
+            <div className="border-l border-omi-border-subtle px-2 py-2">{t("stockDetail.dataPanel.columns.epsNtd")}</div>
+            <div className="border-l border-omi-border-subtle px-2 py-2">{t("stockDetail.dataPanel.columns.yoyGrowth")}</div>
             <div className="border-l border-omi-border-subtle px-2 py-2">ROE</div>
             <div className="border-l border-omi-border-subtle px-2 py-2">ROA</div>
           </div>
@@ -959,11 +975,11 @@ export default function StockDetailDataPanel({
     const hasRenderableData = activeDataTabHasRenderableData();
 
     if (activeDataTabHasStaleData()) {
-      return <DataPanelLoadingState message="補齊資料中..." />;
+      return <DataPanelLoadingState message={t("stockDetail.dataPanel.backfilling")} />;
     }
 
     if (loadingActiveTab && !hasRenderableData) {
-      return <DataPanelLoadingState message={dataPanelMessage ?? "補齊資料中..."} />;
+      return <DataPanelLoadingState message={dataPanelMessage ?? t("stockDetail.dataPanel.backfilling")} />;
     }
 
     const content =

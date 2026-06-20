@@ -2,55 +2,15 @@
 
 import { fetchJson, requestJson } from "@/lib/api";
 import { formatJobStatus } from "@/lib/jobs";
+import { useT, type TranslationFunction } from "@/i18n";
 import type { JobRunRead } from "@/types/market";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const ACTIVE_STATUSES = new Set(["queued", "running"]);
 
-const JOB_TYPE_LABELS: Record<string, string> = {
-  "market.stock_selection_refresh": "自選股資料更新",
-  "watchlist.group_daily_price_refresh_latest": "自選股日線補齊",
-  "watchlist.group_daily_price_backfill": "自選股歷史日線",
-  "market.daily_metrics_backfill": "法人 / 融資融券",
-  "scheduler.market_daily_refresh": "排程法人 / 融資融券",
-  "market.market_chip_daily_refresh": "大盤籌碼日報",
-  "scheduler.market_chip_daily_refresh": "排程大盤籌碼日報",
-  "market.tw_futures_quote_refresh": "台指期報價更新",
-  "market.stock_daily_metrics_history_backfill": "個股籌碼歷史",
-  "market.stock_shareholding_history_backfill": "股權分散歷史",
-  "market.stock_monthly_revenue_history_backfill": "營收歷史",
-  "market.stock_financial_metrics_history_backfill": "盈餘歷史",
-  "market.stock_fundamental_metrics_backfill": "個股基本資料",
-  "market.fundamental_metrics_backfill": "市場基本資料",
-  "market.twse_daily_price_backfill": "上市日線補齊",
-  "market.tpex_daily_price_backfill": "上櫃日線補齊",
-  "us_market.watchlist_daily_refresh": "美股自選日線補齊",
-  "scheduler.us_market_daily_refresh": "排程美股日線補齊",
-  "us_market.watchlist_resource_refresh": "美股自選資料補齊",
-  "us_market.daily_price_quality_repair": "美股日線品質修復",
-};
-
 type JobMarketFilter = "all" | "tw" | "us";
 
 const NON_RETRYABLE_JOB_TYPES = new Set(["market.tw_futures_quote_refresh"]);
-
-const JOB_PANEL_TEXT: Record<
-  JobMarketFilter,
-  { subtitle: string; empty: string }
-> = {
-  all: {
-    subtitle: "顯示最近 20 筆補資料與排程工作",
-    empty: "尚無背景工作",
-  },
-  tw: {
-    subtitle: "顯示最近 20 筆台股補資料與排程工作",
-    empty: "尚無台股背景工作",
-  },
-  us: {
-    subtitle: "顯示最近 20 筆美股補資料與排程工作",
-    empty: "尚無美股背景工作",
-  },
-};
 
 function getJobMarket(jobType: string): "tw" | "us" | "other" {
   if (jobType.startsWith("us_market.") || jobType === "scheduler.us_market_daily_refresh") {
@@ -69,8 +29,10 @@ function getJobMarket(jobType: string): "tw" | "us" | "other" {
   return "other";
 }
 
-function getJobTypeLabel(jobType: string) {
-  return JOB_TYPE_LABELS[jobType] ?? jobType;
+function getJobTypeLabel(t: TranslationFunction, jobType: string) {
+  const key = `jobs.types.${jobType}`;
+  const label = t(key);
+  return label === key ? jobType : label;
 }
 
 function isActiveJob(job: JobRunRead) {
@@ -197,24 +159,28 @@ function canRetry(job: JobRunRead) {
   );
 }
 
-function buildStatusSummary(activeCount: number, failedCount: number) {
+function buildStatusSummary(
+  t: TranslationFunction,
+  activeCount: number,
+  failedCount: number
+) {
   if (activeCount > 0) {
     return {
       className: "omi-job-status-pill-active",
-      label: `同步中 ${activeCount}`,
+      label: t("jobs.summary.active", { count: activeCount }),
     };
   }
 
   if (failedCount > 0) {
     return {
       className: "omi-job-status-pill-attention",
-      label: `待確認 ${failedCount}`,
+      label: t("jobs.summary.attention", { count: failedCount }),
     };
   }
 
   return {
     className: "omi-job-status-pill-idle",
-    label: "正常",
+    label: t("jobs.summary.idle"),
   };
 }
 
@@ -224,7 +190,7 @@ function formatShortText(value: string | null, maxLength = 220) {
   return value.length > maxLength ? `${value.slice(0, maxLength).trimEnd()}...` : value;
 }
 
-function formatResultSummary(job: JobRunRead) {
+function formatResultSummary(job: JobRunRead, t: TranslationFunction) {
   const requestedCount = getFirstResultNumber(job, [
     "requested_count",
     "requested_stock_count",
@@ -247,24 +213,44 @@ function formatResultSummary(job: JobRunRead) {
   const parts: string[] = [];
 
   if (requestedCount !== null && errorCount !== null) {
-    parts.push(`完成 ${Math.max(requestedCount - errorCount, 0)}/${requestedCount}`);
+    parts.push(
+      t("jobs.result.completed", {
+        current: Math.max(requestedCount - errorCount, 0),
+        total: requestedCount,
+      })
+    );
   } else if (requestedCount !== null && successCount !== null) {
-    parts.push(`完成 ${successCount}/${requestedCount}`);
+    parts.push(
+      t("jobs.result.completed", {
+        current: successCount,
+        total: requestedCount,
+      })
+    );
   }
 
-  if (insertedCount !== null && insertedCount > 0) parts.push(`新增 ${insertedCount}`);
-  if (updatedCount !== null && updatedCount > 0) parts.push(`更新 ${updatedCount}`);
-  if (fetchedCount !== null && fetchedCount > 0) parts.push(`取得 ${fetchedCount}`);
-  if (skippedExistingCount !== null && skippedExistingCount > 0) {
-    parts.push(`已存在 ${skippedExistingCount}`);
+  if (insertedCount !== null && insertedCount > 0) {
+    parts.push(t("jobs.result.inserted", { count: insertedCount }));
   }
-  if (warningCount !== null && warningCount > 0) parts.push(`警告 ${warningCount}`);
-  if (errorCount !== null && errorCount > 0) parts.push(`失敗 ${errorCount}`);
+  if (updatedCount !== null && updatedCount > 0) {
+    parts.push(t("jobs.result.updated", { count: updatedCount }));
+  }
+  if (fetchedCount !== null && fetchedCount > 0) {
+    parts.push(t("jobs.result.fetched", { count: fetchedCount }));
+  }
+  if (skippedExistingCount !== null && skippedExistingCount > 0) {
+    parts.push(t("jobs.result.skippedExisting", { count: skippedExistingCount }));
+  }
+  if (warningCount !== null && warningCount > 0) {
+    parts.push(t("jobs.result.warnings", { count: warningCount }));
+  }
+  if (errorCount !== null && errorCount > 0) {
+    parts.push(t("jobs.result.failed", { count: errorCount }));
+  }
 
   return parts;
 }
 
-function formatResultItemTitle(row: Record<string, unknown>) {
+function formatResultItemTitle(row: Record<string, unknown>, t: TranslationFunction) {
   const stockId = getResultString(row.stock_id);
   const stockName = getResultString(row.stock_name);
   const symbol = getResultString(row.symbol);
@@ -277,17 +263,17 @@ function formatResultItemTitle(row: Record<string, unknown>) {
       ? `${stockId}${stockName ? ` ${stockName}` : ""}`
       : symbol !== null
         ? `${symbol}${resource ? ` · ${resource}` : ""}`
-      : sourceName ?? category ?? "項目";
+      : sourceName ?? category ?? t("jobs.itemFallback");
 
   return tradeDate ? `${title} · ${tradeDate}` : title;
 }
 
-function formatResultItemMessage(row: Record<string, unknown>) {
+function formatResultItemMessage(row: Record<string, unknown>, t: TranslationFunction) {
   return (
     getResultString(row.error_message) ??
     getResultString(row.message) ??
     getResultString(row.status) ??
-    "補資料未完成"
+    t("jobs.unfinished")
   );
 }
 
@@ -295,12 +281,14 @@ function JobRow({
   job,
   retryingJobId,
   onRetry,
+  t,
 }: {
   job: JobRunRead;
   retryingJobId: number | null;
   onRetry: (job: JobRunRead) => void;
+  t: TranslationFunction;
 }) {
-  const summaryParts = formatResultSummary(job);
+  const summaryParts = formatResultSummary(job, t);
   const failedItems = getFailedResultItems(job);
   const visibleFailedItems = failedItems.slice(0, 4);
   const errorMessage = formatShortText(job.error_message);
@@ -310,10 +298,10 @@ function JobRow({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="truncate text-sm font-bold text-omi-text">
-            {getJobTypeLabel(job.job_type)}
+            {getJobTypeLabel(t, job.job_type)}
             {job.target ? <span className="ml-1 text-omi-text-muted">#{job.target}</span> : null}
           </div>
-          <div className="mt-1 text-xs text-omi-text-muted">{formatJobStatus(job)}</div>
+          <div className="mt-1 text-xs text-omi-text-muted">{formatJobStatus(job, t)}</div>
         </div>
         <span className={`shrink-0 border px-2 py-1 text-[11px] font-bold ${statusTone(job)}`}>
           {getEffectiveStatus(job)}
@@ -321,7 +309,7 @@ function JobRow({
       </div>
 
       <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-omi-text-muted">
-        <span>更新 {formatDateTime(job.updated_at)}</span>
+        <span>{t("jobs.updatedAt", { time: formatDateTime(job.updated_at) })}</span>
       </div>
 
       {summaryParts.length ? (
@@ -337,16 +325,18 @@ function JobRow({
       {visibleFailedItems.length ? (
         <div className="mt-2 space-y-1">
           {visibleFailedItems.map((row, index) => (
-            <div key={`${formatResultItemTitle(row)}-${index}`} className="border border-omi-danger-border bg-omi-danger-soft px-2 py-1 text-xs text-omi-danger">
-              <div className="font-bold">{formatResultItemTitle(row)}</div>
+            <div key={`${formatResultItemTitle(row, t)}-${index}`} className="border border-omi-danger-border bg-omi-danger-soft px-2 py-1 text-xs text-omi-danger">
+              <div className="font-bold">{formatResultItemTitle(row, t)}</div>
               <div className="mt-0.5 break-words text-[11px]">
-                {formatShortText(formatResultItemMessage(row))}
+                {formatShortText(formatResultItemMessage(row, t))}
               </div>
             </div>
           ))}
           {failedItems.length > visibleFailedItems.length ? (
             <div className="text-[11px] text-omi-text-muted">
-              還有 {failedItems.length - visibleFailedItems.length} 筆失敗項目
+              {t("jobs.moreFailedItems", {
+                count: failedItems.length - visibleFailedItems.length,
+              })}
             </div>
           ) : null}
         </div>
@@ -365,7 +355,7 @@ function JobRow({
           disabled={retryingJobId === job.id}
           onClick={() => onRetry(job)}
         >
-          {retryingJobId === job.id ? "重新排程中" : "重新排程"}
+          {retryingJobId === job.id ? t("jobs.retrying") : t("jobs.retry")}
         </button>
       ) : null}
     </div>
@@ -381,6 +371,7 @@ export default function JobStatusCenter({
   placement = "fixed",
   market = "all",
 }: JobStatusCenterProps) {
+  const t = useT();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [open, setOpen] = useState(false);
   const [jobs, setJobs] = useState<JobRunRead[]>([]);
@@ -402,9 +393,9 @@ export default function JobStatusCenter({
       setJobs(marketRows.slice(0, 20));
       setErrorMessage(null);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "工作狀態讀取失敗");
+      setErrorMessage(error instanceof Error ? error.message : t("jobs.loadError"));
     }
-  }, [market]);
+  }, [market, t]);
 
   useEffect(() => {
     const initialTimer = window.setTimeout(() => {
@@ -440,7 +431,13 @@ export default function JobStatusCenter({
   }, [open]);
 
   const activeCount = useMemo(() => jobs.filter(isActiveJob).length, [jobs]);
-  const panelText = JOB_PANEL_TEXT[market];
+  const panelText = useMemo(
+    () => ({
+      subtitle: t(`jobs.panel.${market}Subtitle`),
+      empty: t(`jobs.panel.${market}Empty`),
+    }),
+    [market, t]
+  );
   const failedCount = useMemo(
     () =>
       jobs.filter((job) => {
@@ -450,8 +447,8 @@ export default function JobStatusCenter({
     [jobs]
   );
   const statusSummary = useMemo(
-    () => buildStatusSummary(activeCount, failedCount),
-    [activeCount, failedCount]
+    () => buildStatusSummary(t, activeCount, failedCount),
+    [activeCount, failedCount, t]
   );
 
   async function handleRetry(job: JobRunRead) {
@@ -461,7 +458,7 @@ export default function JobStatusCenter({
       await requestJson<JobRunRead>(`/api/jobs/${job.id}/retry`, { method: "POST" });
       await loadJobs();
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "重新排程失敗");
+      setErrorMessage(error instanceof Error ? error.message : t("jobs.retryError"));
     } finally {
       setRetryingJobId(null);
     }
@@ -478,7 +475,7 @@ export default function JobStatusCenter({
         ].join(" ")}
         onClick={() => setOpen((value) => !value)}
       >
-        <span>更新狀態</span>
+        <span>{t("jobs.button")}</span>
         <span className={`omi-job-status-pill ${statusSummary.className}`}>
           {statusSummary.label}
         </span>
@@ -493,7 +490,7 @@ export default function JobStatusCenter({
         >
           <div className="flex items-start justify-between gap-2 border-b border-omi-border-subtle px-3 py-2">
             <div className="min-w-0">
-              <h2 className="text-sm font-black text-omi-text-strong">背景工作</h2>
+              <h2 className="text-sm font-black text-omi-text-strong">{t("jobs.panelTitle")}</h2>
               <p className="text-xs text-omi-text-muted">{panelText.subtitle}</p>
             </div>
             <button
@@ -501,7 +498,7 @@ export default function JobStatusCenter({
               className="h-7 shrink-0 whitespace-nowrap border border-omi-border px-2 text-[11px] font-bold text-omi-text hover:border-omi-border-strong"
               onClick={() => void loadJobs()}
             >
-              重整
+              {t("jobs.refresh")}
             </button>
           </div>
 
@@ -514,7 +511,7 @@ export default function JobStatusCenter({
           <div className={inline ? "max-h-72 overflow-y-auto" : "max-h-[520px] overflow-y-auto"}>
             {jobs.length ? (
               jobs.map((job) => (
-                <JobRow key={job.id} job={job} retryingJobId={retryingJobId} onRetry={handleRetry} />
+                <JobRow key={job.id} job={job} retryingJobId={retryingJobId} onRetry={handleRetry} t={t} />
               ))
             ) : (
               <div className="px-3 py-8 text-center text-sm text-omi-text-muted">

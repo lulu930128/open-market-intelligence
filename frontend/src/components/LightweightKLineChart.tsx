@@ -81,7 +81,6 @@ import {
   isTwoPointDrawingTool,
   isTwoPointDrawingType,
   lockCoordinateToNearestAngle,
-  measurementStatsFromMetrics,
   measurementToneColor,
   pad2,
   preserveEmptyProjection,
@@ -102,6 +101,7 @@ import {
   mergeIndicators,
   movingAverage,
 } from "@/components/chart/LightweightKLineChartIndicators";
+import { useI18n } from "@/i18n";
 import { getOmiChartColors, type OmiTheme } from "@/lib/themeColors";
 export type {
   ChartDrawing,
@@ -140,7 +140,7 @@ export default function LightweightKLineChart({
   indicatorParameters,
   benchmarkData,
   benchmarkLabel,
-  volumePanelLabel = "成交量(張)",
+  volumePanelLabel,
   volumeValueKey = "volume",
   drawingTool = "cursor",
   drawings = emptyDrawings,
@@ -150,6 +150,9 @@ export default function LightweightKLineChart({
   onDrawingStateChange,
   onSelectedDrawingChange,
 }: LightweightKLineChartProps) {
+  const { locale, t } = useI18n();
+  const drawingI18n = useMemo(() => ({ locale, t }), [locale, t]);
+  const resolvedVolumePanelLabel = volumePanelLabel ?? t("chart.kline.volumeLots");
   const containerRef = useRef<HTMLDivElement | null>(null);
   const overlaySvgRef = useRef<SVGSVGElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -248,8 +251,14 @@ export default function LightweightKLineChart({
   );
   const attachActiveDrawingAnalytics = useCallback(
     (drawing: ChartDrawing) =>
-      attachDrawingAnalytics(drawing, chartDataTimeIndex, activeDrawingContext, chartData),
-    [activeDrawingContext, chartData, chartDataTimeIndex]
+      attachDrawingAnalytics(
+        drawing,
+        chartDataTimeIndex,
+        activeDrawingContext,
+        chartData,
+        drawingI18n
+      ),
+    [activeDrawingContext, chartData, chartDataTimeIndex, drawingI18n]
   );
   const attachActiveDrawingsAnalytics = useCallback(
     (nextDrawings: ChartDrawing[]) => nextDrawings.map(attachActiveDrawingAnalytics),
@@ -520,7 +529,7 @@ export default function LightweightKLineChart({
           buyWidth,
           sellWidth,
           priceLabel: formatDrawingPrice(centerPrice),
-          volumeLabel: formatCompactVolume(bin.total),
+          volumeLabel: formatCompactVolume(bin.total, drawingI18n),
           poc: bin.total === maxTotal,
         },
       ];
@@ -528,6 +537,7 @@ export default function LightweightKLineChart({
   }, [
     overlaySize.height,
     overlaySize.width,
+    drawingI18n,
     params.volumeProfileRows,
     visibleChartPointEntries,
     volumeValueKey,
@@ -772,7 +782,13 @@ export default function LightweightKLineChart({
           previousEmaFast <= previousEmaSlow &&
           currentEmaFast > currentEmaSlow
         ) {
-          projectSignal(`signal-${point.time}-ema-up`, point, bullishPrice, "EMA金叉", "bullish");
+          projectSignal(
+            `signal-${point.time}-ema-up`,
+            point,
+            bullishPrice,
+            t("chart.technicalSignals.emaBullishCross"),
+            "bullish"
+          );
         }
 
         if (
@@ -788,7 +804,7 @@ export default function LightweightKLineChart({
             `signal-${point.time}-ema-down`,
             point,
             bearishPrice,
-            "EMA死叉",
+            t("chart.technicalSignals.emaBearishCross"),
             "bearish"
           );
         }
@@ -806,7 +822,7 @@ export default function LightweightKLineChart({
             `signal-${point.time}-macd-up`,
             point,
             bullishPrice,
-            "MACD翻紅",
+            t("chart.technicalSignals.macdBullish"),
             "bullish"
           );
         }
@@ -824,7 +840,7 @@ export default function LightweightKLineChart({
             `signal-${point.time}-macd-down`,
             point,
             bearishPrice,
-            "MACD翻黑",
+            t("chart.technicalSignals.macdBearish"),
             "bearish"
           );
         }
@@ -839,7 +855,7 @@ export default function LightweightKLineChart({
             `signal-${point.time}-donch-up`,
             point,
             bullishPrice,
-            "通道突破",
+            t("chart.technicalSignals.channelBreakout"),
             "bullish"
           );
         }
@@ -854,7 +870,7 @@ export default function LightweightKLineChart({
             `signal-${point.time}-donch-down`,
             point,
             bearishPrice,
-            "通道跌破",
+            t("chart.technicalSignals.channelBreakdown"),
             "bearish"
           );
         }
@@ -880,7 +896,7 @@ export default function LightweightKLineChart({
             `signal-${point.time}-volume-up`,
             point,
             bullishPrice,
-            "放量上攻",
+            t("chart.technicalSignals.volumeBreakout"),
             "bullish"
           );
         }
@@ -896,7 +912,7 @@ export default function LightweightKLineChart({
             `signal-${point.time}-adx-trend`,
             point,
             point.close,
-            "趨勢成形",
+            t("chart.technicalSignals.trendForming"),
             "neutral"
           );
         }
@@ -905,7 +921,7 @@ export default function LightweightKLineChart({
 
     if (activeIndicators.candlestickPatterns) {
       entries.forEach(({ point, index }) => {
-        const pattern = detectCandlestickPattern(point, chartData[index - 1]);
+        const pattern = detectCandlestickPattern(point, chartData[index - 1], drawingI18n);
 
         if (!pattern) return;
 
@@ -1011,7 +1027,11 @@ export default function LightweightKLineChart({
             `divergence-bull-${point.time}`,
             point,
             point.low,
-            rsiBullish && macdBullish ? "RSI/MACD底背" : rsiBullish ? "RSI底背" : "MACD底背",
+            rsiBullish && macdBullish
+              ? t("chart.technicalSignals.rsiMacdBullishDivergence")
+              : rsiBullish
+                ? t("chart.technicalSignals.rsiBullishDivergence")
+                : t("chart.technicalSignals.macdBullishDivergence"),
             "bullish",
             start && end ? [start, end] : undefined
           );
@@ -1052,7 +1072,11 @@ export default function LightweightKLineChart({
             `divergence-bear-${point.time}`,
             point,
             point.high,
-            rsiBearish && macdBearish ? "RSI/MACD頂背" : rsiBearish ? "RSI頂背" : "MACD頂背",
+            rsiBearish && macdBearish
+              ? t("chart.technicalSignals.rsiMacdBearishDivergence")
+              : rsiBearish
+                ? t("chart.technicalSignals.rsiBearishDivergence")
+                : t("chart.technicalSignals.macdBearishDivergence"),
             "bearish",
             start && end ? [start, end] : undefined
           );
@@ -1067,6 +1091,7 @@ export default function LightweightKLineChart({
     activeIndicators.divergence,
     activeIndicators.signals,
     chartData,
+    drawingI18n,
     overlaySize.height,
     overlaySize.width,
     params.adxPeriod,
@@ -1078,6 +1103,7 @@ export default function LightweightKLineChart({
     params.macdSlow,
     params.rsiPeriod,
     params.volumeMa,
+    t,
     timeMode,
     visibleChartPointEntries,
     volumeValueKey,
@@ -1955,16 +1981,15 @@ export default function LightweightKLineChart({
           return [
             {
               drawing,
-              label: "量測",
+              label: t("chart.drawingTools.measure"),
               points: [first, second],
               anchorPoints: [first, second],
-              measurementStats: drawing.derivedMetrics
-                ? measurementStatsFromMetrics(drawing.derivedMetrics)
-                : buildMeasurementStats(
-                    drawing.points[0],
-                    drawing.points[1],
-                    chartDataTimeIndex
-                  ),
+              measurementStats: buildMeasurementStats(
+                drawing.points[0],
+                drawing.points[1],
+                chartDataTimeIndex,
+                drawingI18n
+              ),
             },
           ];
         }
@@ -2032,7 +2057,7 @@ export default function LightweightKLineChart({
                   : undefined,
               measurementStats:
                 draftDrawingType === "measure" || draftDrawingType === "priceRange"
-                  ? buildMeasurementStats(draftAnchor, hoverAnchor, chartDataTimeIndex)
+                  ? buildMeasurementStats(draftAnchor, hoverAnchor, chartDataTimeIndex, drawingI18n)
                   : undefined,
             };
       }
@@ -2058,11 +2083,13 @@ export default function LightweightKLineChart({
     buildIchimokuCloudPolygons,
     buildVolumeProfileRangeProjection,
     draftAnchor,
+    drawingI18n,
     drawingTool,
     hoverAnchor,
     overlayRevision,
     overlaySize.height,
     overlaySize.width,
+    t,
     timeMode,
   ]);
 
@@ -2233,7 +2260,7 @@ export default function LightweightKLineChart({
 
     if (activeIndicators.volume) {
       const volumeSeries = chart.addSeries(HistogramSeries, {
-        title: volumePanelLabel,
+        title: resolvedVolumePanelLabel,
         priceScaleId: "",
         priceFormat: {
           type: "volume",
@@ -2709,7 +2736,7 @@ export default function LightweightKLineChart({
     seriesData,
     timeMode,
     upColor,
-    volumePanelLabel,
+    resolvedVolumePanelLabel,
   ]);
 
   useEffect(() => {
@@ -2737,7 +2764,7 @@ export default function LightweightKLineChart({
   if (seriesData.candles.length === 0) {
     return (
       <div className="flex h-[520px] items-center justify-center border-t border-omi-border-subtle bg-omi-surface text-sm text-omi-text-muted">
-        尚無可繪製的 K 線資料
+        {t("chart.kline.empty")}
       </div>
     );
   }
@@ -2757,21 +2784,21 @@ export default function LightweightKLineChart({
       ? null
       : projectedDrawings.find((item) => item.drawing.id === selectedDrawingId) ?? null;
   const selectedDrawingMetrics = selectedProjectedDrawing
-    ? selectedProjectedDrawing.drawing.derivedMetrics ??
-      buildDrawingDerivedMetrics(
+    ? buildDrawingDerivedMetrics(
         selectedProjectedDrawing.drawing.type,
         selectedProjectedDrawing.drawing.points,
         chartDataTimeIndex,
-        chartData
+        chartData,
+        drawingI18n
       )
     : null;
   const selectedDrawingSummary =
     selectedProjectedDrawing && selectedDrawingMetrics
-      ? selectedProjectedDrawing.drawing.omiSummary ??
-        buildDrawingOmiSummary(
+      ? buildDrawingOmiSummary(
           selectedProjectedDrawing.drawing,
           selectedDrawingMetrics,
-          activeDrawingContext
+          activeDrawingContext,
+          drawingI18n
         )
       : null;
 
@@ -2787,7 +2814,7 @@ export default function LightweightKLineChart({
           maMiddle={params.maMiddle}
           maShort={params.maShort}
           volumeEnabled={activeIndicators.volume}
-          volumePanelLabel={volumePanelLabel}
+          volumePanelLabel={resolvedVolumePanelLabel}
         />
       ) : null}
 
@@ -2835,7 +2862,7 @@ export default function LightweightKLineChart({
         <div ref={containerRef} tabIndex={0} className="absolute inset-0 outline-none" />
         {selectedProjectedDrawing && selectedDrawingMetrics ? (
           <SelectedDrawingMetricsCard
-            drawingType={drawingTypeLabel(selectedProjectedDrawing.drawing.type)}
+            drawingType={drawingTypeLabel(selectedProjectedDrawing.drawing.type, drawingI18n)}
             metrics={selectedDrawingMetrics}
             summaryText={selectedDrawingSummary?.text ?? null}
           />
@@ -2951,7 +2978,7 @@ export default function LightweightKLineChart({
                       AVWAP {anchoredVwapAnalysis?.labels.vwap ?? drawingLabel}
                     </text>
                     <text x={10} y={25} className="fill-omi-text-muted text-[10px] font-semibold tabular-nums">
-                      {anchoredVwapAnalysis?.labels.status ?? "錨定 VWAP"}
+                      {anchoredVwapAnalysis?.labels.status ?? t("chart.selectedDrawing.anchoredVwap")}
                     </text>
                   </g>
                 </g>
@@ -3032,10 +3059,10 @@ export default function LightweightKLineChart({
                   <g transform={`translate(${labelX}, ${labelY})`} pointerEvents="none">
                     <rect width={labelWidth} height={38} rx={3} fill={omiChartColors.surface} stroke={actionStroke} opacity={0.96} />
                     <text x={10} y={15} className="fill-omi-text text-[10px] font-bold tabular-nums">
-                      價差 {measurementStats.priceDiffLabel} ({measurementStats.percentLabel})
+                      {t("chart.selectedDrawing.priceDiff")} {measurementStats.priceDiffLabel} ({measurementStats.percentLabel})
                     </text>
                     <text x={10} y={30} className="fill-omi-text-muted text-[10px] font-semibold tabular-nums">
-                      {measurementStats.barsLabel ?? "跨距 -"} · 高 {measurementStats.highLabel} / 低 {measurementStats.lowLabel}
+                      {measurementStats.barsLabel ?? t("chart.selectedDrawing.spanEmpty")} · {t("chart.selectedDrawing.high")} {measurementStats.highLabel} / {t("chart.selectedDrawing.low")} {measurementStats.lowLabel}
                     </text>
                   </g>
                 </g>
@@ -3158,11 +3185,11 @@ export default function LightweightKLineChart({
                       {measurementStats.priceDiffLabel} ({measurementStats.percentLabel})
                     </text>
                     <text x={10} y={30} className="fill-omi-text-muted text-[10px] font-semibold tabular-nums">
-                      高 {measurementStats.highLabel} / 低 {measurementStats.lowLabel}
+                      {t("chart.selectedDrawing.high")} {measurementStats.highLabel} / {t("chart.selectedDrawing.low")} {measurementStats.lowLabel}
                     </text>
                     {zoneAnalysis ? (
                       <text x={10} y={45} className="fill-omi-text-muted text-[10px] font-semibold tabular-nums">
-                        {zoneAnalysis.labels.status} · 位置 {zoneAnalysis.labels.position}
+                        {zoneAnalysis.labels.status} · {t("chart.selectedDrawing.position")} {zoneAnalysis.labels.position}
                       </text>
                     ) : null}
                   </g>
@@ -3295,7 +3322,7 @@ export default function LightweightKLineChart({
                       VA {volumeProfileAnalysis?.labels.valueArea ?? "-"}
                     </text>
                     <text x={10} y={41} className="fill-omi-text-muted text-[10px] font-semibold tabular-nums">
-                      {volumeProfileAnalysis?.labels.latestPosition ?? "成交量分布"}
+                      {volumeProfileAnalysis?.labels.latestPosition ?? t("chart.drawingTools.volumeProfileRange")}
                     </text>
                   </g>
                 </g>
@@ -3720,7 +3747,7 @@ export default function LightweightKLineChart({
             <g transform="translate(12, 12)" pointerEvents="none">
               <rect width={drawingModeBadgeWidth(drawingTool)} height={24} rx={3} fill={omiChartColors.text} opacity={0.92} />
               <text x={12} y={16} className="fill-omi-surface text-[11px] font-bold">
-                {drawingToolModeLabel(drawingTool)}
+                {drawingToolModeLabel(drawingTool, drawingI18n)}
               </text>
             </g>
           ) : null}

@@ -86,6 +86,11 @@ def assemble_response_analysis(
         missing=combined_missing,
         warnings=combined_warnings,
         position_decision=position_decision,
+        response_preferences=(
+            policy.get("response_preferences")
+            if isinstance(policy.get("response_preferences"), dict)
+            else {}
+        ),
     )
     reasoning_steps = build_reasoning_steps(
         question_intent=question_intent,
@@ -96,6 +101,9 @@ def assemble_response_analysis(
     response_analysis = dict(analysis_digest)
     response_analysis["question_intent"] = question_intent
     response_analysis["question_understanding"] = question_understanding.as_policy_payload()
+    response_preferences = policy.get("response_preferences")
+    if isinstance(response_preferences, dict):
+        response_analysis["response_preferences"] = response_preferences
     if position_context.get("has_position_context"):
         response_analysis["position_context"] = position_context
     if position_decision:

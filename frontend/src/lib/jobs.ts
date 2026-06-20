@@ -1,4 +1,5 @@
 import { fetchJson, requestJson } from "@/lib/api";
+import type { TranslationFunction } from "@/i18n";
 import type { JobRunRead } from "@/types/market";
 
 const TERMINAL_STATUSES = new Set(["success", "error"]);
@@ -27,7 +28,23 @@ export function getJobResultStatus(job: JobRunRead) {
   return typeof status === "string" ? status : null;
 }
 
-function getJobResultMessage(job: JobRunRead) {
+function fallbackInterpolate(message: string, values: Record<string, string | number>) {
+  return message.replace(/\{(\w+)\}/g, (match, key) => {
+    const value = values[key];
+    return value === undefined ? match : String(value);
+  });
+}
+
+function text(
+  t: TranslationFunction | undefined,
+  key: string,
+  fallback: string,
+  values: Record<string, string | number> = {}
+) {
+  return t ? t(key, values) : fallbackInterpolate(fallback, values);
+}
+
+function getJobResultMessage(job: JobRunRead, t?: TranslationFunction) {
   const result = getJobResultObject(job);
   const message = result?.message;
 
@@ -38,27 +55,31 @@ function getJobResultMessage(job: JobRunRead) {
   const errorCount = result?.error_count;
 
   if (typeof errorCount === "number" && errorCount > 0) {
-    return `${errorCount} 筆來源失敗`;
+    return text(t, "jobs.result.failedSources", "{count} sources failed", {
+      count: errorCount,
+    });
   }
 
   return null;
 }
 
-export function formatJobStatus(job: JobRunRead) {
-  const labels: Record<string, string> = {
-    queued: "已排程",
-    running: "補資料中",
-    success: "補資料完成",
-    partial_success: "部分完成",
-    skipped: "無需補齊",
-    error: "補資料失敗",
-  };
+export function formatJobStatus(job: JobRunRead, t?: TranslationFunction) {
   const total = Math.max(job.progress_total || 1, 1);
   const current = Math.min(Math.max(job.progress_current || 0, 0), total);
   const resultStatus = getJobResultStatus(job);
   const effectiveStatus = job.status === "success" && resultStatus ? resultStatus : job.status;
-  const label = labels[effectiveStatus] ?? effectiveStatus;
-  const message = job.error_message || getJobResultMessage(job) || job.message;
+  const label =
+    t?.(`jobs.status.${effectiveStatus}`) ??
+    {
+      queued: "Queued",
+      running: "Backfilling",
+      success: "Backfill complete",
+      partial_success: "Partially complete",
+      skipped: "No backfill needed",
+      error: "Backfill failed",
+    }[effectiveStatus] ??
+    effectiveStatus;
+  const message = job.error_message || getJobResultMessage(job, t) || job.message;
 
   return `${label} (${current}/${total})${message ? `：${message}` : ""}`;
 }

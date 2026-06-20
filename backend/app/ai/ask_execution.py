@@ -4,7 +4,16 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.ai import agentic_tools, decision_core, freshness, orchestrator, reports, scope_resolution, tools
+from app.ai import (
+    agentic_tools,
+    decision_core,
+    freshness,
+    orchestrator,
+    reports,
+    response_preferences,
+    scope_resolution,
+    tools,
+)
 from app.ai import ask_policy
 from app.ai.schemas import AiAskRequest
 
@@ -30,6 +39,10 @@ def _watchlist_radar_mode(question_intent: str) -> str:
     if question_intent == "entry_decision":
         return "momentum"
     return "action"
+
+
+def _response_preferences(payload: AiAskRequest) -> dict[str, Any]:
+    return response_preferences.build_response_preferences(payload.conversation_context)
 
 
 def _read_data_only(
@@ -117,6 +130,7 @@ def _build_brief(
             branch_days=payload.branch_days,
             include_intraday=_include_tw_intraday(payload),
             analysis_horizon=payload.analysis_horizon,
+            response_preferences=_response_preferences(payload),
         )
 
     if scope_type == "watchlist":
@@ -128,6 +142,7 @@ def _build_brief(
             rank_by=payload.rank_by,
             sort_order=payload.sort_order,
             radar_mode=_watchlist_radar_mode(question_intent),
+            response_preferences=_response_preferences(payload),
         )
 
     if scope_type == "us_stock":
@@ -138,6 +153,7 @@ def _build_brief(
             strategy_profile=payload.strategy_profile,
             analysis_horizon=payload.analysis_horizon,
             tool_runs=tool_runs,
+            response_preferences=_response_preferences(payload),
         )
 
     return _read_data_only(db, payload, scope_type, tool_runs=tool_runs)
@@ -160,6 +176,7 @@ def _generate_report(
             branch_days=payload.branch_days,
             include_intraday=_include_tw_intraday(payload),
             analysis_horizon=payload.analysis_horizon,
+            response_preferences=_response_preferences(payload),
         )
 
     if scope_type == "watchlist":
@@ -171,6 +188,7 @@ def _generate_report(
             rank_by=payload.rank_by,
             sort_order=payload.sort_order,
             radar_mode=_watchlist_radar_mode(question_intent),
+            response_preferences=_response_preferences(payload),
         )
 
     if scope_type == "us_stock":
@@ -181,6 +199,7 @@ def _generate_report(
             strategy_profile=payload.strategy_profile,
             analysis_horizon=payload.analysis_horizon,
             tool_runs=tool_runs,
+            response_preferences=_response_preferences(payload),
         )
 
     return _read_data_only(db, payload, scope_type, tool_runs=tool_runs)
@@ -203,6 +222,7 @@ def _generate_analysis(
             branch_days=payload.branch_days,
             include_intraday=_include_tw_intraday(payload),
             analysis_horizon=payload.analysis_horizon,
+            response_preferences=_response_preferences(payload),
         )
 
     if scope_type == "watchlist":
@@ -214,6 +234,7 @@ def _generate_analysis(
             rank_by=payload.rank_by,
             sort_order=payload.sort_order,
             radar_mode=_watchlist_radar_mode(question_intent),
+            response_preferences=_response_preferences(payload),
         )
 
     if scope_type == "us_stock":
@@ -224,6 +245,7 @@ def _generate_analysis(
             strategy_profile=payload.strategy_profile,
             analysis_horizon=payload.analysis_horizon,
             tool_runs=tool_runs,
+            response_preferences=_response_preferences(payload),
         )
 
     return _read_data_only(db, payload, scope_type, tool_runs=tool_runs)

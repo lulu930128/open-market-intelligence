@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useOmiAskStream, type OmiSseMessage } from "@/hooks/useOmiAskStream";
+import { useI18n, useT, type AppLocale, type TranslationFunction } from "@/i18n";
 
 export type OmiAskTarget = {
   type:
@@ -28,11 +29,11 @@ export type OmiAskDockContext = {
 };
 
 type QuickQuestion = {
-  label: string;
+  labelKey: string;
+  promptKey: string;
   intent: string;
   analysisHorizon: string;
   strategyProfile: string;
-  question: string;
 };
 
 type SignalTone = "running" | "data" | "tool" | "done" | "error";
@@ -60,68 +61,78 @@ type SignalInput = {
 
 type StatusTone = "idle" | "asking" | "done" | "error";
 type UnknownRecord = Record<string, unknown>;
+type PriceLevelKey =
+  | "latest"
+  | "pullback"
+  | "breakout"
+  | "chaseLimit"
+  | "shortStop"
+  | "invalidation";
+type PriceLevelItem = {
+  key: PriceLevelKey;
+  label: string;
+  value: string;
+  tone: string;
+};
 
 const API_PROXY_PATH =
   process.env.NEXT_PUBLIC_API_PROXY_PATH?.trim() || "/omi-data";
+const SETTINGS_COLOR_STORAGE_KEY = "omi:settings:color";
 
 const QUICK_QUESTIONS: QuickQuestion[] = [
   {
-    label: "當沖",
+    labelKey: "intraday",
+    promptKey: "intraday",
     intent: "intraday",
     analysisHorizon: "intraday",
     strategyProfile: "short_term_momentum",
-    question:
-      "用當沖和盤中角度分析目前標的。請優先使用 OMI 可用的即時、今日、1分/5分、量價、技術指標、法人與市場資料；先給結論，再列出可觀察價位、進出風險與失效條件。若即時資料不足，直接用可用資料回答並標明限制。",
   },
   {
-    label: "中線",
+    labelKey: "swing",
+    promptKey: "swing",
     intent: "swing",
     analysisHorizon: "swing",
     strategyProfile: "technical_swing",
-    question:
-      "用中線波段角度分析目前標的。請使用日K/週K、均線、動能、量能、籌碼、營收與相對市場資料；先給結論，再列出趨勢、支撐壓力、觀察條件與主要風險。",
   },
   {
-    label: "長線",
+    labelKey: "long",
+    promptKey: "long",
     intent: "long",
     analysisHorizon: "long",
     strategyProfile: "fundamentals_growth",
-    question:
-      "用長線投資角度分析目前標的。請優先使用月K/週K、長期趨勢、營收、財務、產業脈絡、美股或台股市場影響與估值風險；先給結論，再說適合追蹤的長線條件與主要風險。",
   },
   {
-    label: "風險",
+    labelKey: "risk",
+    promptKey: "risk",
     intent: "risk",
     analysisHorizon: "short",
     strategyProfile: "technical_swing",
-    question:
-      "用空方與避險角度分析目前標的。請優先檢查短線轉弱、跌破關鍵均線或支撐、量能失衡、反彈失敗、籌碼轉弱與市場逆風；先給風險結論，再列出可能的做空觀察條件、回補或停損條件，以及資料不足時不能判斷的部分。",
   },
 ];
 
-const STAGE_LABELS: Record<string, string> = {
-  queued: "準備送出",
-  accepted: "收到問題",
-  resolving: "確認目標",
-  question_understanding: "理解問題",
-  evidence_read: "讀取資料",
-  score_model: "五因子評分",
-  price_levels: "推導價位",
-  intent: "辨識問題",
-  market_session: "交易日判斷",
-  risk_levels: "風控價位",
-  decision_sources: "資料來源",
-  position_math: "部位試算",
-  decision_synthesis: "組合回答",
-  answer_ready: "回答就緒",
-  evidence: "資料護照",
-  tool_run: "工具執行",
-  delta: "回應串流",
-  final: "渲染答案",
-  done: "完成",
-  stopped: "已停止",
-  error: "錯誤",
-};
+const STAGE_LABEL_KEYS = new Set([
+  "queued",
+  "accepted",
+  "resolving",
+  "question_understanding",
+  "evidence_read",
+  "score_model",
+  "price_levels",
+  "intent",
+  "market_session",
+  "risk_levels",
+  "decision_sources",
+  "position_math",
+  "decision_synthesis",
+  "answer_ready",
+  "evidence",
+  "tool_run",
+  "delta",
+  "final",
+  "done",
+  "stopped",
+  "error",
+]);
 
 function asRecord(value: unknown): UnknownRecord {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -162,6 +173,24 @@ function textItems(value: unknown, limit?: number) {
   return items;
 }
 
+function currentThemePreference() {
+  if (typeof document !== "undefined") {
+    const theme = document.documentElement.dataset.theme;
+    if (theme === "light" || theme === "dark") return theme;
+  }
+
+  if (typeof window !== "undefined") {
+    try {
+      const theme = window.localStorage.getItem(SETTINGS_COLOR_STORAGE_KEY);
+      if (theme === "light" || theme === "dark") return theme;
+    } catch {
+      // Local preference access can fail in restricted browser contexts.
+    }
+  }
+
+  return null;
+}
+
 function formatPrice(value: unknown) {
   const number = numberValue(value);
   if (number === null) return null;
@@ -184,39 +213,41 @@ function priceText(value: unknown) {
   return formatPrice(record.price) || formatPrice(value);
 }
 
-function intentLabel(intent: unknown) {
-  return (
-    {
-      entry_decision: "買入 / 回檔判斷",
-      exit_decision: "續抱 / 出場判斷",
-      risk_check: "風險檢查",
-      position_risk_decision: "部位風控",
-      trend_view: "走勢觀察",
-    }[stringValue(intent) || ""] ||
-    stringValue(intent) ||
-    "一般分析"
-  );
+function intentLabel(intent: unknown, t: TranslationFunction) {
+  const cleanIntent = stringValue(intent);
+  if (
+    cleanIntent === "entry_decision" ||
+    cleanIntent === "exit_decision" ||
+    cleanIntent === "risk_check" ||
+    cleanIntent === "position_risk_decision" ||
+    cleanIntent === "trend_view"
+  ) {
+    return t(`ask.intents.${cleanIntent}`);
+  }
+
+  return cleanIntent || t("ask.intents.general");
 }
 
-function sourceLabel(source: unknown) {
-  return (
-    {
-      question_intent: "專業判斷",
-      analysis_digest: "技術摘要",
-      llm_report: "AI 報告",
-    }[stringValue(source) || ""] ||
-    stringValue(source) ||
-    null
-  );
+function sourceLabel(source: unknown, t: TranslationFunction) {
+  const cleanSource = stringValue(source);
+  if (
+    cleanSource === "question_intent" ||
+    cleanSource === "analysis_digest" ||
+    cleanSource === "llm_report"
+  ) {
+    return t(`ask.sources.${cleanSource}`);
+  }
+
+  return cleanSource || null;
 }
 
-function stageLabel(stage: unknown, fallback?: unknown) {
+function stageLabel(stage: unknown, t: TranslationFunction, fallback?: unknown) {
   const cleanStage = stringValue(stage);
   return (
     stringValue(fallback) ||
-    (cleanStage ? STAGE_LABELS[cleanStage] : null) ||
+    (cleanStage && STAGE_LABEL_KEYS.has(cleanStage) ? t(`ask.stages.${cleanStage}`) : null) ||
     cleanStage ||
-    "處理中"
+    t("ask.status.processing")
   );
 }
 
@@ -235,7 +266,7 @@ function statusDotClass(tone: StatusTone) {
   return "bg-omi-text-muted";
 }
 
-function consumerAnswer(response: UnknownRecord) {
+function consumerAnswer(response: UnknownRecord, t: TranslationFunction) {
   const analysis = asRecord(response.analysis);
   const direct = asRecord(analysis.human_answer);
   if (stringValue(direct.kind) === "consumer_market_answer" || stringValue(direct.headline)) {
@@ -252,9 +283,9 @@ function consumerAnswer(response: UnknownRecord) {
       headline:
         stringValue(overview.display) ||
         stringValue(overviewHuman.text) ||
-        "OMI 已完成整理",
-      stance_label: stringValue(overview.stance) || "未定",
-      confidence_label: stringValue(overview.confidence) || "未定",
+        t("ask.fallback.organized"),
+      stance_label: stringValue(overview.stance) || t("ask.fallback.undecided"),
+      confidence_label: stringValue(overview.confidence) || t("ask.fallback.undecided"),
       summary: textItems(overviewHuman.lines, 3),
       detail: stringValue(overviewHuman.text) || textItems(overviewHuman.lines).join("\n"),
     };
@@ -284,24 +315,24 @@ function technicalLevels(response: UnknownRecord) {
   return asRecord(asRecord(response.analysis).technical_levels);
 }
 
-function priceLevelItems(response: UnknownRecord) {
+function priceLevelItems(response: UnknownRecord, t: TranslationFunction) {
   const technical = technicalLevels(response);
   const levels = asRecord(technical.levels);
   const entry = asRecord(technical.entry);
   const risk = asRecord(technical.risk);
-  const items: Array<{ label: string; value: string; tone: string }> = [];
+  const items: PriceLevelItem[] = [];
 
-  function add(label: string, value: string | null, tone: string) {
+  function add(key: PriceLevelKey, value: string | null, tone: string) {
     if (!value) return;
-    items.push({ label, value, tone });
+    items.push({ key, label: t(`ask.priceLevels.${key}`), value, tone });
   }
 
-  add("現價", formatPrice(technical.latest_price) || formatPrice(levels.latest), "neutral");
-  add("回檔觀察", zoneText(entry.preferred_zone), "entry");
-  add("突破確認", priceText(entry.breakout_confirm_above), "breakout");
-  add("追價上限", priceText(entry.do_not_chase_above), "warning");
-  add("短線停損", priceText(risk.short_stop), "risk");
-  add("技術失效", priceText(risk.technical_invalidation), "risk");
+  add("latest", formatPrice(technical.latest_price) || formatPrice(levels.latest), "neutral");
+  add("pullback", zoneText(entry.preferred_zone), "entry");
+  add("breakout", priceText(entry.breakout_confirm_above), "breakout");
+  add("chaseLimit", priceText(entry.do_not_chase_above), "warning");
+  add("shortStop", priceText(risk.short_stop), "risk");
+  add("invalidation", priceText(risk.technical_invalidation), "risk");
 
   return items;
 }
@@ -348,7 +379,7 @@ function sourceCount(evidence: UnknownRecord | null) {
   return arrayValue(evidence.datasets).length;
 }
 
-function fallbackAnswer(response: UnknownRecord) {
+function fallbackAnswer(response: UnknownRecord, t: TranslationFunction) {
   const analysis = asRecord(response.analysis);
   const result = asRecord(response.result);
   const summary = asRecord(result.summary);
@@ -367,7 +398,7 @@ function fallbackAnswer(response: UnknownRecord) {
     .filter(Boolean);
   if (highlights.length > 0) return highlights.join("\n");
 
-  return "OMI 已完成資料檢查。";
+  return t("ask.fallback.completed");
 }
 
 function priceToneClass(tone: string) {
@@ -410,13 +441,14 @@ function TextList({ title, items }: { title: string; items: string[] }) {
 }
 
 function PriceLevels({ response }: { response: UnknownRecord }) {
-  const items = priceLevelItems(response);
+  const t = useT();
+  const items = priceLevelItems(response, t);
   if (items.length === 0) return null;
 
   return (
     <section className="space-y-1">
       <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-omi-text-subtle">
-        關鍵價位
+        {t("ask.priceLevels.title")}
       </div>
       <div className="grid grid-cols-2 gap-1.5">
         {items.map((item) => (
@@ -437,11 +469,12 @@ function ActionPlan({
   actions: unknown;
   title: string;
 }) {
+  const t = useT();
   const cleanActions = arrayValue(actions)
     .map((item) => {
       const record = asRecord(item);
       return {
-        label: stringValue(record.label) || "觀察",
+        label: stringValue(record.label) || t("ask.structured.observe"),
         text: stringValue(record.text) || textFromItem(item),
       };
     })
@@ -468,9 +501,10 @@ function ActionPlan({
 }
 
 function StructuredAnswer({ response }: { response: UnknownRecord | null }) {
+  const t = useT();
   if (!response) return null;
 
-  const consumer = consumerAnswer(response);
+  const consumer = consumerAnswer(response, t);
   const headline = stringValue(consumer.headline);
   if (!headline) return null;
 
@@ -483,37 +517,37 @@ function StructuredAnswer({ response }: { response: UnknownRecord | null }) {
     <div className="space-y-3">
       <div className="border-l-4 border-omi-market-up bg-omi-surface-subtle px-3 py-2">
         <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-omi-text-subtle">
-          {isEntryDecision ? "買入判斷" : "結論"}
+          {isEntryDecision ? t("ask.structured.buyDecision") : t("ask.structured.conclusion")}
         </div>
         <div className="mt-1 text-base font-black leading-6 text-omi-text-strong">
           {headline}
         </div>
         <div className="mt-2 flex flex-wrap gap-1.5">
-          <Pill label="類型" value={intentLabel(intent)} />
-          <Pill label="方向" value={stringValue(consumer.stance_label)} />
-          <Pill label="信心" value={stringValue(consumer.confidence_label)} />
-          <Pill label="來源" value={sourceLabel(source)} />
+          <Pill label={t("ask.structured.type")} value={intentLabel(intent, t)} />
+          <Pill label={t("ask.structured.direction")} value={stringValue(consumer.stance_label)} />
+          <Pill label={t("ask.structured.confidence")} value={stringValue(consumer.confidence_label)} />
+          <Pill label={t("ask.structured.source")} value={sourceLabel(source, t)} />
         </div>
       </div>
 
       {isEntryDecision ? <PriceLevels response={response} /> : null}
       <TextList
-        title={isEntryDecision ? "判斷依據" : "三個重點"}
+        title={isEntryDecision ? t("ask.structured.evidence") : t("ask.structured.topPoints")}
         items={textItems(consumer.summary, 4)}
       />
       <ActionPlan
-        title={isEntryDecision ? "操作條件" : "怎麼做"}
+        title={isEntryDecision ? t("ask.structured.conditions") : t("ask.structured.whatToDo")}
         actions={consumer.action_plan}
       />
-      <ActionPlan title="情境劇本" actions={consumer.scenarios} />
-      <TextList title="反證條件" items={textItems(consumer.counter_evidence, 2)} />
-      <TextList title="風險" items={textItems(consumer.risks, 2)} />
-      <TextList title="資料限制" items={textItems(consumer.data_limits, 3)} />
+      <ActionPlan title={t("ask.structured.scenarios")} actions={consumer.scenarios} />
+      <TextList title={t("ask.structured.counterEvidence")} items={textItems(consumer.counter_evidence, 2)} />
+      <TextList title={t("ask.structured.risks")} items={textItems(consumer.risks, 2)} />
+      <TextList title={t("ask.structured.dataLimits")} items={textItems(consumer.data_limits, 3)} />
 
       {detail ? (
         <details className="border border-omi-border-subtle bg-omi-surface px-3 py-2 text-sm leading-6 text-omi-text">
           <summary className="cursor-pointer text-xs font-bold text-omi-text-muted">
-            展開完整解讀
+            {t("ask.structured.expand")}
           </summary>
           <div className="mt-2 whitespace-pre-wrap text-omi-text">{detail}</div>
         </details>
@@ -529,7 +563,8 @@ function AnswerPanel({
   answerText: string;
   finalResponse: UnknownRecord | null;
 }) {
-  const consumer = finalResponse ? consumerAnswer(finalResponse) : {};
+  const t = useT();
+  const consumer = finalResponse ? consumerAnswer(finalResponse, t) : {};
   if (finalResponse && stringValue(consumer.headline)) {
     return <StructuredAnswer response={finalResponse} />;
   }
@@ -538,7 +573,7 @@ function AnswerPanel({
 
   return (
     <div className="border border-dashed border-omi-border bg-omi-surface-subtle px-3 py-4 text-sm leading-6 text-omi-text-muted">
-      直接問 OMI 目前畫面上的標的或群組。系統會使用現有行情、技術、籌碼與基本面資料回答，這裡只保留短期上下文。
+      {t("ask.fallback.empty")}
     </div>
   );
 }
@@ -556,9 +591,9 @@ function signalPriority(raw: SignalInput) {
   return 0;
 }
 
-function buildSignal(raw: SignalInput) {
+function buildSignal(raw: SignalInput, t: TranslationFunction) {
   const stage = stringValue(raw.stage) || "status";
-  const label = stringValue(raw.label) || stageLabel(stage, raw.stage_label);
+  const label = stringValue(raw.label) || stageLabel(stage, t, raw.stage_label);
   const message = stringValue(raw.message) || label;
   const tone = raw.tone || "running";
   const key =
@@ -572,13 +607,19 @@ function buildSignal(raw: SignalInput) {
 function buildRequest({
   context,
   lastResolution,
+  locale,
   options,
   question,
+  responseLanguage,
+  theme,
 }: {
   context: OmiAskDockContext;
   lastResolution: UnknownRecord | null;
+  locale: AppLocale;
   options: Partial<QuickQuestion>;
   question: string;
+  responseLanguage: string;
+  theme: string | null;
 }) {
   const target = asRecord(context.target);
   const targetType = stringValue(target.type) || "auto";
@@ -614,6 +655,15 @@ function buildRequest({
         ask_intent: intent,
         analysis_horizon: analysisHorizon,
         strategy_profile: strategyProfile,
+        response_locale: locale,
+        response_language: responseLanguage,
+        settings: {
+          locale,
+          response_locale: locale,
+          response_language: responseLanguage,
+          theme,
+          technical_analysis_parameters: "server_persisted",
+        },
       },
     },
   };
@@ -625,6 +675,8 @@ function dataCountFromResponse(finalResponse: UnknownRecord | null, evidence: Un
 }
 
 export default function OmiAskDock({ context }: { context: OmiAskDockContext }) {
+  const t = useT();
+  const { locale } = useI18n();
   const [open, setOpen] = useState(false);
   const [question, setQuestion] = useState("");
   const [askedQuestion, setAskedQuestion] = useState("");
@@ -633,7 +685,7 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
   const [evidence, setEvidence] = useState<UnknownRecord | null>(null);
   const [toolRuns, setToolRuns] = useState(0);
   const [signals, setSignals] = useState<DockSignal[]>([]);
-  const [statusLabel, setStatusLabel] = useState("待命");
+  const [statusLabel, setStatusLabel] = useState(() => t("ask.status.idle"));
   const [statusTone, setStatusTone] = useState<StatusTone>("idle");
   const [signalsOpen, setSignalsOpen] = useState(false);
   const [lastResolution, setLastResolution] = useState<UnknownRecord | null>(null);
@@ -647,9 +699,13 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
     [context.label, context.market, context.target.id, context.target.type]
   );
   const dataCount = dataCountFromResponse(finalResponse, evidence);
+  const displayStatusLabel =
+    !isStreaming && !askedQuestion && statusTone === "idle"
+      ? t("ask.status.idle")
+      : statusLabel;
 
   const appendSignal = useCallback((signalInput: SignalInput) => {
-    const signal = buildSignal(signalInput);
+    const signal = buildSignal(signalInput, t);
     setSignals((current) => {
       const existingIndex = current.findIndex((item) => item.key === signal.key);
       if (existingIndex >= 0) {
@@ -663,23 +719,23 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
       if (last?.key === signal.key) return current;
       return [...current, signal].slice(-10);
     });
-  }, []);
+  }, [t]);
 
   const appendDecisionSignals = useCallback(
     (response: UnknownRecord) => {
-      const consumer = consumerAnswer(response);
+      const consumer = consumerAnswer(response, t);
       const intent = consumerIntent(consumer, response);
       const evidenceRecord = decisionEvidence(consumer, response);
       const marketSession = asRecord(evidenceRecord.market_session);
-      const levels = priceLevelItems(response);
+      const levels = priceLevelItems(response, t);
       const sourceCountValue = responseSourceCount(response);
       const moduleCount = decisionModuleCount(response);
 
       if (intent && intent !== "general") {
         appendSignal({
           stage: "intent",
-          label: "辨識問題",
-          message: `已辨識為「${intentLabel(intent)}」，使用價位與風控版型回答。`,
+          label: t("ask.stages.intent"),
+          message: t("ask.signals.intentRecognized", { intent: intentLabel(intent, t) }),
           tone: "data",
         });
       }
@@ -687,44 +743,44 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
       if (marketSession.is_trading_day === false) {
         appendSignal({
           stage: "market_session",
-          label: "交易日判斷",
+          label: t("ask.stages.market_session"),
           message:
             stringValue(marketSession.summary) ||
-            "目前不是台股交易日，改用最新日線資料判斷。",
+            t("ask.signals.notTradingDay"),
           tone: "data",
         });
       }
 
-      const entryLevel = levels.find((item) => item.label === "回檔觀察");
-      const breakoutLevel = levels.find((item) => item.label === "突破確認");
-      const chaseLevel = levels.find((item) => item.label === "追價上限");
+      const entryLevel = levels.find((item) => item.key === "pullback");
+      const breakoutLevel = levels.find((item) => item.key === "breakout");
+      const chaseLevel = levels.find((item) => item.key === "chaseLimit");
       const priceParts = [
-        entryLevel ? `回檔 ${entryLevel.value}` : null,
-        breakoutLevel ? `突破 ${breakoutLevel.value}` : null,
-        chaseLevel ? `追價上限 ${chaseLevel.value}` : null,
+        entryLevel ? t("ask.signals.pullback", { value: entryLevel.value }) : null,
+        breakoutLevel ? t("ask.signals.breakout", { value: breakoutLevel.value }) : null,
+        chaseLevel ? t("ask.signals.chaseLimit", { value: chaseLevel.value }) : null,
       ].filter((value): value is string => Boolean(value));
 
       if (priceParts.length > 0) {
         appendSignal({
           stage: "price_levels",
-          label: "推導價位",
-          message: `${priceParts.join("；")}。`,
+          label: t("ask.stages.price_levels"),
+          message: `${priceParts.join(t("ask.signals.listSeparator"))}${t("ask.signals.sentenceSuffix")}`,
           tone: "tool",
         });
       }
 
-      const stopLevel = levels.find((item) => item.label === "短線停損");
-      const invalidationLevel = levels.find((item) => item.label === "技術失效");
+      const stopLevel = levels.find((item) => item.key === "shortStop");
+      const invalidationLevel = levels.find((item) => item.key === "invalidation");
       const riskParts = [
-        stopLevel ? `停損 ${stopLevel.value}` : null,
-        invalidationLevel ? `失效 ${invalidationLevel.value}` : null,
+        stopLevel ? t("ask.signals.stop", { value: stopLevel.value }) : null,
+        invalidationLevel ? t("ask.signals.invalidation", { value: invalidationLevel.value }) : null,
       ].filter((value): value is string => Boolean(value));
 
       if (riskParts.length > 0) {
         appendSignal({
           stage: "risk_levels",
-          label: "風控價位",
-          message: `${riskParts.join("；")}。`,
+          label: t("ask.stages.risk_levels"),
+          message: `${riskParts.join(t("ask.signals.listSeparator"))}${t("ask.signals.sentenceSuffix")}`,
           tone: "tool",
         });
       }
@@ -732,13 +788,16 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
       if (sourceCountValue || moduleCount) {
         appendSignal({
           stage: "decision_sources",
-          label: "資料來源",
-          message: `已使用 ${sourceCountValue} 個資料來源與 ${moduleCount} 個判斷模組。`,
+          label: t("ask.stages.decision_sources"),
+          message: t("ask.signals.usedSources", {
+            sourceCount: sourceCountValue,
+            moduleCount,
+          }),
           tone: "data",
         });
       }
     },
-    [appendSignal]
+    [appendSignal, t]
   );
 
   const resetForAsk = useCallback((nextQuestion: string) => {
@@ -750,17 +809,17 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
     setEvidence(null);
     setToolRuns(0);
     setSignals([]);
-    setStatusLabel("準備中");
+    setStatusLabel(t("ask.status.preparing"));
     setStatusTone("asking");
     setSignalsOpen(false);
-  }, []);
+  }, [t]);
 
   const handleMessage = useCallback(
     (message: OmiSseMessage) => {
       const data = asRecord(message.data);
 
       if (message.event === "status") {
-        const label = stageLabel(data.stage, data.stage_label);
+        const label = stageLabel(data.stage, t, data.stage_label);
         setStatusLabel(label);
         setStatusTone("asking");
         appendSignal({
@@ -779,23 +838,26 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
         setEvidence(data);
         appendSignal({
           stage: "evidence",
-          label: "資料護照",
-          message: `已取得 ${sourceCount(data)} 個資料來源，可信度 ${stringValue(data.trust_level) || "未標示"}。`,
+          label: t("ask.stages.evidence"),
+          message: t("ask.signals.evidenceReceived", {
+            count: sourceCount(data),
+            trustLevel: stringValue(data.trust_level) || t("ask.fallback.trustUnknown"),
+          }),
           tone: "data",
         });
         return;
       }
 
       if (message.event === "tool_run") {
-        const toolName = stringValue(data.tool) || stringValue(data.name) || "工具";
+        const toolName = stringValue(data.tool) || stringValue(data.name) || t("ask.fallback.tool");
         const toolScope = stringValue(data.tool_scope) || "default";
         const toolLabel = stringValue(data.tool_label) || toolName;
-        const status = stringValue(data.status) || "已回傳";
+        const status = stringValue(data.status) || t("ask.fallback.returned");
         setToolRuns((value) => value + 1);
         appendSignal({
           stage: "tool_run",
-          label: "工具執行",
-          message: stringValue(data.message) || `${toolLabel}：${status}`,
+          label: t("ask.stages.tool_run"),
+          message: stringValue(data.message) || `${toolLabel}${t("ask.signals.statusSeparator")}${status}`,
           tone: "tool",
           key: data.signal_key || `tool:${toolName}:${toolScope}`,
           status: data.status,
@@ -809,14 +871,14 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
         if (!responseSignalAddedRef.current) {
           appendSignal({
             stage: "delta",
-            label: "回應串流",
-            message: "開始輸出回答內容。",
+            label: t("ask.stages.delta"),
+            message: t("ask.signals.responseStarted"),
             tone: "running",
           });
           responseSignalAddedRef.current = true;
         }
         setAnswerText((value) => value + (stringValue(data.text) || ""));
-        setStatusLabel("回應中");
+        setStatusLabel(t("ask.status.responding"));
         setStatusTone("asking");
         return;
       }
@@ -830,13 +892,13 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
 
         setFinalResponse(data);
         if (!stringValue(asRecord(asRecord(data.analysis).human_answer).headline) && !hasDeltaRef.current) {
-          setAnswerText(fallbackAnswer(data));
+          setAnswerText(fallbackAnswer(data, t));
         }
         appendDecisionSignals(data);
         appendSignal({
           stage: "final",
-          label: "渲染答案",
-          message: "已收到完整回答資料並更新面板。",
+          label: t("ask.stages.final"),
+          message: t("ask.signals.finalReceived"),
           tone: "done",
         });
         return;
@@ -844,10 +906,10 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
 
       if (message.event === "error") {
         const errorMessage =
-          stringValue(data.error) || stringValue(data.message) || "OMI request failed.";
+          stringValue(data.error) || stringValue(data.message) || t("ask.fallback.requestFailed");
         appendSignal({
           stage: "error",
-          label: "錯誤",
+          label: t("ask.stages.error"),
           message: errorMessage,
           tone: "error",
         });
@@ -856,17 +918,17 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
 
       if (message.event === "done") {
         const ok = data.ok !== false;
-        setStatusLabel(ok ? "完成" : "未完成");
+        setStatusLabel(ok ? t("ask.status.completed") : t("ask.status.incomplete"));
         setStatusTone(ok ? "done" : "error");
         appendSignal({
           stage: "done",
-          label: ok ? "完成" : "未完成",
-          message: ok ? "OMI 串流已完成。" : "OMI 串流未完成。",
+          label: ok ? t("ask.status.completed") : t("ask.status.incomplete"),
+          message: ok ? t("ask.signals.streamCompleted") : t("ask.signals.streamIncomplete"),
           tone: ok ? "done" : "error",
         });
       }
     },
-    [appendDecisionSignals, appendSignal]
+    [appendDecisionSignals, appendSignal, t]
   );
 
   const submitQuestion = useCallback(
@@ -878,39 +940,42 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
       const request = buildRequest({
         context,
         lastResolution: lastResolutionRef.current,
+        locale,
         options,
         question: nextQuestion,
+        responseLanguage: t(`locales.${locale}`),
+        theme: currentThemePreference(),
       });
 
       void ask(request, {
         onMessage: handleMessage,
         onError: (error) => {
-          setStatusLabel("發生錯誤");
+          setStatusLabel(t("ask.status.error"));
           setStatusTone("error");
           setAnswerText(error.message);
           appendSignal({
             stage: "error",
-            label: "錯誤",
+            label: t("ask.stages.error"),
             message: error.message,
             tone: "error",
           });
         },
       });
     },
-    [appendSignal, ask, context, handleMessage, resetForAsk]
+    [appendSignal, ask, context, handleMessage, locale, resetForAsk, t]
   );
 
   const stopAsk = useCallback(() => {
     stop();
-    setStatusLabel("已停止");
+    setStatusLabel(t("ask.status.stopped"));
     setStatusTone("idle");
     appendSignal({
       stage: "stopped",
-      label: "已停止",
-      message: "使用者已停止這次 OMI 串流。",
+      label: t("ask.status.stopped"),
+      message: t("ask.signals.userStopped"),
       tone: "error",
     });
-  }, [appendSignal, stop]);
+  }, [appendSignal, stop, t]);
 
   useEffect(() => {
     lastResolutionRef.current = lastResolution;
@@ -922,11 +987,11 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
         <button
           type="button"
           className="inline-flex h-11 items-center gap-2 border border-omi-control bg-omi-control px-3 text-sm font-black text-omi-text-inverse shadow-lg transition hover:bg-omi-accent"
-          aria-label="開啟 OMI 即時問答"
+          aria-label={t("ask.ui.open")}
           onClick={() => setOpen(true)}
         >
           <span className="h-2 w-2 rounded-full bg-omi-market-up-flash" />
-          <span>OMI 問答</span>
+          <span>{t("ask.ui.compactTitle")}</span>
         </button>
       ) : (
         <aside className="flex max-h-[calc(100vh-2rem)] w-[390px] max-w-[calc(100vw-2rem)] flex-col border border-omi-border bg-omi-surface shadow-2xl">
@@ -935,23 +1000,23 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
               <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-omi-market-up-flash">
                 OMI
               </div>
-              <div className="text-sm font-bold">即時問答</div>
+              <div className="text-sm font-bold">{t("ask.ui.title")}</div>
             </div>
             <div className="flex items-center gap-2">
               <div className="relative">
                 <button
                   type="button"
                   className="inline-flex max-w-[170px] items-center gap-1.5 text-xs text-omi-text-inverse-muted transition hover:text-omi-text-inverse"
-                  aria-label="查看 OMI 處理訊號"
+                  aria-label={t("ask.ui.viewSignals")}
                   onClick={() => setSignalsOpen((value) => !value)}
                 >
                   <span className={`h-2 w-2 flex-none rounded-full ${statusDotClass(statusTone)}`} />
-                  <span className="truncate">{statusLabel}</span>
+                  <span className="truncate">{displayStatusLabel}</span>
                 </button>
                 {signalsOpen ? (
                   <div className="absolute right-0 top-7 z-10 w-72 max-w-[calc(100vw-2rem)] border border-omi-control-border bg-omi-control p-2 text-xs text-omi-text-inverse-muted shadow-2xl">
                     <div className="mb-1 text-[10px] font-bold uppercase tracking-[0.18em] text-omi-text-muted">
-                      Signals
+                      {t("ask.ui.signals")}
                     </div>
                     <div className="space-y-1.5">
                       {signals.length > 0 ? (
@@ -965,7 +1030,7 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
                           </div>
                         ))
                       ) : (
-                        <div className="text-omi-text-muted">尚無處理訊號。</div>
+                        <div className="text-omi-text-muted">{t("ask.fallback.noSignals")}</div>
                       )}
                     </div>
                   </div>
@@ -974,7 +1039,7 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
               <button
                 type="button"
                 className="grid h-7 w-7 place-items-center border border-omi-control-border text-sm font-bold text-omi-text-inverse-muted hover:border-omi-surface hover:text-omi-text-inverse"
-                aria-label="收起 OMI 即時問答"
+                aria-label={t("ask.ui.collapse")}
                 onClick={() => {
                   setSignalsOpen(false);
                   setOpen(false);
@@ -987,10 +1052,10 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
 
           <div className="border-b border-omi-border-subtle bg-omi-surface-subtle px-3 py-2">
             <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
-              目前標的
+              {t("ask.ui.currentTarget")}
             </div>
             <div className="mt-0.5 truncate text-sm font-bold text-omi-text-strong">
-              {context.label || "目前標的"}
+              {context.label || t("ask.fallback.currentTarget")}
             </div>
           </div>
 
@@ -998,7 +1063,7 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
             {askedQuestion ? (
               <section className="mb-3">
                 <div className="mb-1 text-[11px] font-bold uppercase tracking-[0.18em] text-omi-text-subtle">
-                  Question
+                  {t("ask.ui.question")}
                 </div>
                 <div className="border border-omi-border-subtle bg-omi-surface-subtle px-3 py-2 text-sm font-bold leading-6 text-omi-text">
                   {askedQuestion}
@@ -1007,7 +1072,7 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
             ) : null}
             <section>
               <div className="mb-1 text-[11px] font-bold uppercase tracking-[0.18em] text-omi-text-subtle">
-                Answer
+                {t("ask.ui.answer")}
               </div>
               <div className="border border-omi-border-subtle bg-omi-surface p-2 text-sm leading-6 text-omi-text">
                 <AnswerPanel answerText={answerText} finalResponse={finalResponse} />
@@ -1016,20 +1081,25 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
           </div>
 
           <div className="border-t border-omi-border-subtle bg-omi-surface-subtle px-3 py-2 text-xs text-omi-text-muted">
-            資料 {dataCount} / 工具 {toolRuns}
+            {t("ask.ui.dataTools", { dataCount, toolRuns })}
           </div>
 
           <div className="border-t border-omi-border-subtle bg-omi-surface-subtle px-3 py-3">
             <div className="mb-2 flex flex-wrap gap-1.5">
               {QUICK_QUESTIONS.map((item) => (
                 <button
-                  key={item.label}
+                  key={item.labelKey}
                   type="button"
                   disabled={isStreaming}
                   className="border border-omi-border bg-omi-surface px-3 py-1.5 text-sm font-semibold text-omi-text hover:border-omi-control disabled:cursor-not-allowed disabled:opacity-50"
-                  onClick={() => submitQuestion(item.question, item)}
+                  onClick={() =>
+                    submitQuestion(
+                      t(`ask.quickQuestionPrompts.${item.promptKey}`),
+                      item
+                    )
+                  }
                 >
-                  {item.label}
+                  {t(`ask.quickQuestions.${item.labelKey}`)}
                 </button>
               ))}
             </div>
@@ -1044,7 +1114,7 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
                 rows={2}
                 value={question}
                 disabled={isStreaming}
-                placeholder="輸入問題..."
+                placeholder={t("ask.ui.placeholder")}
                 className="min-h-[44px] flex-1 resize-none border border-omi-border bg-omi-surface px-3 py-2 text-sm text-omi-text-strong outline-none transition placeholder:text-omi-text-subtle focus:border-omi-control disabled:bg-omi-surface-muted"
                 onChange={(event) => setQuestion(event.target.value)}
                 onKeyDown={(event) => {
@@ -1059,7 +1129,7 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
                   className="h-11 border border-omi-control bg-omi-surface px-4 text-sm font-bold text-omi-text-strong hover:bg-omi-surface-muted"
                   onClick={stopAsk}
                 >
-                  Stop
+                  {t("ask.ui.stop")}
                 </button>
               ) : null}
               <button
@@ -1067,7 +1137,7 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
                 disabled={isStreaming || !question.trim()}
                 className="h-11 bg-omi-accent px-4 text-sm font-bold text-omi-text-inverse hover:bg-omi-control disabled:bg-omi-border"
               >
-                送出
+                {t("ask.ui.send")}
               </button>
             </form>
           </div>

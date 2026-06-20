@@ -8,6 +8,9 @@ import ProfessionalChartPanel, {
 import StockKLineChart, {
   defaultIndicatorParameters,
   defaultIndicators,
+  indicatorCategoryDescription,
+  indicatorCategoryLabel,
+  indicatorOptionDescription,
   professionalIndicatorCategoryGroups,
   type IndicatorCategoryGroup,
   type IndicatorKey,
@@ -29,6 +32,7 @@ import {
   type ChartDrawingStorageState,
 } from "@/components/professionalChartDrawing";
 import { fetchJson, requestJson } from "@/lib/api";
+import { timeframeLabel, useT, type TranslationFunction } from "@/i18n";
 import type {
   ChartDrawingSnapshotRead,
   ChartPoint,
@@ -50,31 +54,7 @@ type Props = {
 type FuturesTimeframe = "today" | "daily" | "weekly" | "monthly";
 
 const FUTURES_ORDER = ["TXF", "MXF", "TMF"] as const;
-const FUTURES_LABELS: Record<string, string> = {
-  TXF: "大台",
-  MXF: "小台",
-  TMF: "微台",
-};
 const FUTURES_TIMEFRAMES: FuturesTimeframe[] = ["today", "daily", "weekly", "monthly"];
-const FUTURES_TIMEFRAME_LABELS: Record<FuturesTimeframe, string> = {
-  today: "今日",
-  daily: "日K",
-  weekly: "週K",
-  monthly: "月K",
-};
-const FUTURES_SESSION_LABELS: Record<string, string> = {
-  regular: "日盤",
-  after_hours: "夜盤",
-};
-const FUTURES_PROFESSIONAL_TIMEFRAME_OPTIONS: Array<{
-  key: FuturesTimeframe;
-  label: string;
-}> = [
-  { key: "today", label: "今日" },
-  { key: "daily", label: "日" },
-  { key: "weekly", label: "週" },
-  { key: "monthly", label: "月" },
-];
 const FUTURES_INTRADAY_REFRESH_MS = 30_000;
 
 function chartDrawingStorageKey(symbol: string | null, timeframe: FuturesTimeframe) {
@@ -150,9 +130,23 @@ function formatDate(value: string | null | undefined) {
   }).format(date);
 }
 
-function formatSessionLabel(value: string | null | undefined) {
-  if (!value) return "未知時段";
-  return FUTURES_SESSION_LABELS[value] ?? value;
+function futuresProductLabel(
+  t: TranslationFunction,
+  symbol: string | null | undefined,
+  fallback?: string | null
+) {
+  if (!symbol) return fallback ?? "";
+
+  const key = `futures.products.${symbol}`;
+  const value = t(key);
+  return value === key ? fallback ?? symbol : value;
+}
+
+function formatSessionLabel(t: TranslationFunction, value: string | null | undefined) {
+  if (!value) return t("futures.sessions.unknown");
+  if (value === "regular") return t("futures.sessions.regular");
+  if (value === "after_hours") return t("futures.sessions.afterHours");
+  return value;
 }
 
 function valueToneClass(value: number | null | undefined) {
@@ -192,12 +186,12 @@ function quoteFreshnessBannerClass(status: string | null | undefined) {
   return "border-b border-omi-border-subtle bg-omi-surface-subtle px-5 py-3 text-sm text-omi-text-muted";
 }
 
-function quoteFreshnessLabel(status: string | null | undefined) {
-  if (status === "live") return "已同步";
-  if (status === "cached") return "使用快取";
-  if (status === "session_mismatch") return "時段不符";
-  if (status === "stale") return "資料過舊";
-  return "尚無資料";
+function quoteFreshnessLabel(t: TranslationFunction, status: string | null | undefined) {
+  if (status === "live") return t("futures.freshness.live");
+  if (status === "cached") return t("futures.freshness.cached");
+  if (status === "session_mismatch") return t("futures.freshness.sessionMismatch");
+  if (status === "stale") return t("futures.freshness.stale");
+  return t("futures.freshness.none");
 }
 
 async function fetchLatestQuotes(symbols: readonly string[]) {
@@ -332,6 +326,8 @@ function FuturesProfessionalIndicatorMenu({
   indicators: IndicatorSettings;
   onToggleIndicator: (key: IndicatorKey) => void;
 }) {
+  const t = useT();
+
   return (
     <div className="absolute right-0 z-30 mt-2 max-h-[560px] w-[25rem] overflow-y-auto border border-omi-border-subtle bg-omi-surface p-3 text-left shadow-xl">
       <div className="mb-3 flex items-center justify-between border-b border-omi-border-subtle pb-2">
@@ -339,17 +335,21 @@ function FuturesProfessionalIndicatorMenu({
           <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-omi-text-muted">
             Indicators
           </div>
-          <div className="mt-0.5 text-sm font-bold text-omi-text-strong">技術指標</div>
+          <div className="mt-0.5 text-sm font-bold text-omi-text-strong">{t("chart.indicators")}</div>
         </div>
-        <div className="text-[11px] font-semibold text-omi-text-subtle">台指期</div>
+        <div className="text-[11px] font-semibold text-omi-text-subtle">{t("futures.productTitle")}</div>
       </div>
 
       <div className="space-y-3">
         {groups.map((group) => (
           <div key={group.key} className="border border-omi-border-subtle">
             <div className="border-b border-omi-border-subtle bg-omi-surface-subtle px-3 py-2">
-              <div className="text-xs font-bold text-omi-text">{group.label}</div>
-              <div className="mt-0.5 text-[11px] text-omi-text-muted">{group.description}</div>
+              <div className="text-xs font-bold text-omi-text">
+                {indicatorCategoryLabel(t, group)}
+              </div>
+              <div className="mt-0.5 text-[11px] text-omi-text-muted">
+                {indicatorCategoryDescription(t, group)}
+              </div>
             </div>
             <div className="grid grid-cols-1 gap-px bg-omi-surface-muted">
               {group.options.map((option) => {
@@ -361,10 +361,10 @@ function FuturesProfessionalIndicatorMenu({
                     >
                       <span>
                         <span className="block font-semibold">{option.label}</span>
-                        <span className="block">{option.description}</span>
+                        <span className="block">{indicatorOptionDescription(t, option)}</span>
                       </span>
                       <span className="shrink-0 border border-omi-border-subtle px-1.5 py-0.5 text-[10px] font-bold">
-                        待補
+                        {t("indicators.pending")}
                       </span>
                     </div>
                   );
@@ -385,7 +385,9 @@ function FuturesProfessionalIndicatorMenu({
                       <span className="block font-semibold text-omi-text">
                         {option.label}
                       </span>
-                      <span className="block text-omi-text-muted">{option.description}</span>
+                      <span className="block text-omi-text-muted">
+                        {indicatorOptionDescription(t, option)}
+                      </span>
                     </span>
                   </label>
                 );
@@ -403,22 +405,26 @@ function FuturesKLineVisual({
   indicators,
   loading,
   revealKey,
+  t,
   timeframe,
 }: {
   chartData: ChartPoint[];
   indicators: IndicatorSettings;
   loading: boolean;
   revealKey: string;
+  t: TranslationFunction;
   timeframe: FuturesTimeframe;
 }) {
+  const label = timeframeLabel(t, timeframe);
+
   if (chartData.length < 1) {
     return (
       <EmptyChartState
         loading={loading}
         message={
           loading
-            ? `${FUTURES_TIMEFRAME_LABELS[timeframe]}資料讀取中`
-            : `${FUTURES_TIMEFRAME_LABELS[timeframe]}資料不足`
+            ? t("futures.loadingFrame", { label })
+            : t("futures.insufficientFrame", { label })
         }
       />
     );
@@ -427,12 +433,20 @@ function FuturesKLineVisual({
   return (
     <StockKLineChart
       chartData={chartData}
-      label={FUTURES_TIMEFRAME_LABELS[timeframe]}
+      label={label}
       indicators={indicators}
       indicatorParameters={defaultIndicatorParameters}
       revealKey={revealKey}
-      volumePanelLabel={timeframe === "today" ? "累積量(口)" : "成交量(口)"}
-      volumeTooltipLabel={timeframe === "today" ? "累積量(口)" : "成交量(口)"}
+      volumePanelLabel={
+        timeframe === "today"
+          ? t("futures.cumulativeVolumeContracts")
+          : t("futures.volumeContracts")
+      }
+      volumeTooltipLabel={
+        timeframe === "today"
+          ? t("futures.cumulativeVolumeContracts")
+          : t("futures.volumeContracts")
+      }
       volumeValueFormatter={formatFuturesVolume}
     />
   );
@@ -443,6 +457,8 @@ export default function TaiwanFuturesDetailPanel({
   onChartFocusModeChange,
   symbol,
 }: Props) {
+  const t = useT();
+  const tRef = useRef(t);
   const [quotes, setQuotes] = useState<TaiwanFuturesQuote[]>([]);
   const [dailyBars, setDailyBars] = useState<TaiwanFuturesDailyBar[]>([]);
   const [bars, setBars] = useState<TaiwanFuturesIntradayBar[]>([]);
@@ -477,6 +493,10 @@ export default function TaiwanFuturesDetailPanel({
   const chartDrawingSyncTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
+    tRef.current = t;
+  }, [t]);
+
+  useEffect(() => {
     onChartFocusModeChange?.(chartExpanded);
   }, [chartExpanded, onChartFocusModeChange]);
 
@@ -492,7 +512,11 @@ export default function TaiwanFuturesDetailPanel({
   }, [quotes]);
   const quote = normalizedSymbol ? quotesBySymbol.get(normalizedSymbol) ?? null : null;
   const displayProductName = normalizedSymbol
-    ? `${normalizedSymbol} ${FUTURES_LABELS[normalizedSymbol] ?? quote?.product_name ?? "代表商品"}`
+    ? `${normalizedSymbol} ${futuresProductLabel(
+        t,
+        normalizedSymbol,
+        quote?.product_name ?? t("futures.products.representative")
+      )}`
     : "TXF / MXF / TMF";
   const chartDrawingKey = chartDrawingStorageKey(normalizedSymbol, chartTimeframe);
   const storedChartDrawings = useMemo(
@@ -607,7 +631,11 @@ export default function TaiwanFuturesDetailPanel({
         }
 
         setDailyState("error");
-        setErrorMessage(error instanceof Error ? error.message : "台指期日 K 回補失敗");
+        setErrorMessage(
+          error instanceof Error
+            ? error.message
+            : tRef.current("futures.errors.dailyBackfillFailed")
+        );
       }
     }
 
@@ -666,8 +694,9 @@ export default function TaiwanFuturesDetailPanel({
     quoteState === "loading" ? "loading" : quoteFreshness?.status ?? null;
   const quoteFreshnessMessage =
     quoteState === "loading"
-      ? "正在重新讀取即時來源。"
-      : quoteFreshness?.message ?? (quote ? "尚未取得資料狀態。" : "尚無台指期報價。");
+      ? t("futures.freshness.reloading")
+      : quoteFreshness?.message ??
+        (quote ? t("futures.freshness.pending") : t("futures.freshness.noQuote"));
   const quoteFreshnessTone =
     quoteState === "loading" ? "text-omi-info" : quoteFreshnessToneClass(quoteFreshnessStatus);
   const quoteFreshnessBanner =
@@ -704,7 +733,7 @@ export default function TaiwanFuturesDetailPanel({
               : "text-omi-text-muted hover:bg-omi-surface hover:text-omi-text-strong",
           ].join(" ")}
         >
-          {FUTURES_TIMEFRAME_LABELS[item]}
+          {timeframeLabel(t, item)}
         </button>
       ))}
     </div>
@@ -962,7 +991,7 @@ export default function TaiwanFuturesDetailPanel({
 
   function clearChartDrawings() {
     if (chartDrawings.length === 0) return;
-    if (!window.confirm("清除目前週期的所有畫線？")) return;
+    if (!window.confirm(t("futures.confirm.clearDrawings"))) return;
 
     updateChartDrawings([]);
     setSelectedChartDrawingId(null);
@@ -1010,7 +1039,7 @@ export default function TaiwanFuturesDetailPanel({
   if (!normalizedSymbol) {
     return (
       <section className="border border-omi-border-subtle bg-omi-surface px-5 py-10 text-center text-sm text-omi-text-muted">
-        請從左側選擇台指期商品
+        {t("futures.selectProduct")}
       </section>
     );
   }
@@ -1027,7 +1056,7 @@ export default function TaiwanFuturesDetailPanel({
       <div className={["min-w-0 self-start", chartExpanded ? "space-y-0" : "space-y-4"].join(" ")}>
         {chartExpanded ? (
           <ProfessionalChartPanel
-            title={`${normalizedSymbol} 台指期`}
+            title={`${normalizedSymbol} ${t("futures.productTitle")}`}
             priceSummary={
               <div
                 className={["flex items-baseline gap-2", valueToneClass(quoteDirection)].join(" ")}
@@ -1048,7 +1077,10 @@ export default function TaiwanFuturesDetailPanel({
                 </span>
               </div>
             }
-            timeframeOptions={FUTURES_PROFESSIONAL_TIMEFRAME_OPTIONS}
+            timeframeOptions={FUTURES_TIMEFRAMES.map((option) => ({
+              key: option,
+              label: timeframeLabel(t, option),
+            }))}
             timeframe={chartTimeframe}
             onTimeframeChange={(nextTimeframe) => {
               setIndicatorMenuOpen(false);
@@ -1083,18 +1115,26 @@ export default function TaiwanFuturesDetailPanel({
                 loading={chartLoading}
                 message={
                   chartLoading
-                    ? `${FUTURES_TIMEFRAME_LABELS[chartTimeframe]}資料讀取中`
-                    : `${FUTURES_TIMEFRAME_LABELS[chartTimeframe]}資料不足`
+                    ? t("futures.loadingFrame", {
+                        label: timeframeLabel(t, chartTimeframe),
+                      })
+                    : t("futures.insufficientFrame", {
+                        label: timeframeLabel(t, chartTimeframe),
+                      })
                 }
               />
             }
             chartData={futuresChartData}
-            label={FUTURES_TIMEFRAME_LABELS[chartTimeframe]}
+            label={timeframeLabel(t, chartTimeframe)}
             timeMode={chartDrawingTimeMode(chartTimeframe)}
             showMovingAverages={professionalIndicators.ma}
             indicators={professionalIndicators}
             indicatorParameters={defaultIndicatorParameters}
-            volumePanelLabel={chartTimeframe === "today" ? "累積量(口)" : "成交量(口)"}
+            volumePanelLabel={
+              chartTimeframe === "today"
+                ? t("futures.cumulativeVolumeContracts")
+                : t("futures.volumeContracts")
+            }
             volumeValueKey="volume"
             drawingTool={chartDrawingTool}
             drawings={chartDrawings}
@@ -1122,11 +1162,11 @@ export default function TaiwanFuturesDetailPanel({
                 <div className="text-xs font-semibold uppercase tracking-[0.22em] text-omi-text-muted">
                   FUTURES
                 </div>
-                <h2 className="mt-2 text-2xl font-black text-omi-text-strong">台指期</h2>
+                <h2 className="mt-2 text-2xl font-black text-omi-text-strong">{t("futures.productTitle")}</h2>
                 <div className="mt-2 text-sm text-omi-text-muted">
                   TAIFEX · {displayProductName} ·{" "}
-                  {formatSessionLabel(quote?.session)} ·{" "}
-                  {quote?.contract_month ?? latestDailyBar?.contract_month ?? "近月契約"}
+                  {formatSessionLabel(t, quote?.session)} ·{" "}
+                  {quote?.contract_month ?? latestDailyBar?.contract_month ?? t("futures.frontMonth")}
                 </div>
               </div>
 
@@ -1142,7 +1182,7 @@ export default function TaiwanFuturesDetailPanel({
                     ].join(" ")}
                   >
                     {quoteState === "loading" && latestPrice === null ? (
-                      <LoadingDots label="台指期報價讀取中" />
+                      <LoadingDots label={t("futures.quoteLoading")} />
                     ) : (
                       formatNumber(latestPrice)
                     )}
@@ -1170,7 +1210,7 @@ export default function TaiwanFuturesDetailPanel({
                           : "border-omi-control bg-omi-surface text-omi-text hover:border-omi-accent hover:text-omi-danger",
                       ].join(" ")}
                     >
-                      指標
+                      {t("futures.indicators")}
                     </button>
                     <button
                       type="button"
@@ -1182,7 +1222,7 @@ export default function TaiwanFuturesDetailPanel({
                           : "border-omi-border bg-omi-surface text-omi-text hover:border-omi-control hover:text-omi-text-strong",
                       ].join(" ")}
                     >
-                      {chartExpanded ? "總覽" : "放大"}
+                      {chartExpanded ? t("stockDetail.overview") : t("stockDetail.expand")}
                     </button>
                   </div>
                 </div>
@@ -1191,30 +1231,32 @@ export default function TaiwanFuturesDetailPanel({
 
             <div className="grid border-b border-omi-border-subtle sm:grid-cols-2 xl:grid-cols-4">
               <div className="border-b border-r border-omi-border-subtle px-5 py-4 xl:border-b-0">
-                <div className="text-xs font-semibold text-omi-text-muted">交易日</div>
+                <div className="text-xs font-semibold text-omi-text-muted">{t("futures.tradeDate")}</div>
                 <div className="mt-1 font-black text-omi-text-strong">
                   {formatDate(quote?.trade_date ?? latestDailyBar?.trade_date)}
                 </div>
               </div>
               <div className="border-b border-r border-omi-border-subtle px-5 py-4 xl:border-b-0">
-                <div className="text-xs font-semibold text-omi-text-muted">報價時間</div>
+                <div className="text-xs font-semibold text-omi-text-muted">{t("futures.quoteTime")}</div>
                 <div className="mt-1 font-black text-omi-text-strong">
                   {formatDateTime(quote?.quote_time ?? latestDailyBar?.fetched_at)}
                 </div>
               </div>
               <div className="border-b border-r border-omi-border-subtle px-5 py-4 sm:border-b-0">
-                <div className="text-xs font-semibold text-omi-text-muted">資料狀態</div>
+                <div className="text-xs font-semibold text-omi-text-muted">{t("futures.dataStatus")}</div>
                 <div className={["mt-1 font-black", quoteFreshnessTone].join(" ")}>
                   {quoteState === "loading"
-                    ? "更新中"
-                    : quoteFreshnessLabel(quoteFreshnessStatus)}
+                    ? t("common.updating")
+                    : quoteFreshnessLabel(t, quoteFreshnessStatus)}
                 </div>
                 <div className="mt-1 text-xs text-omi-text-muted">{quoteFreshnessMessage}</div>
               </div>
               <div className="px-5 py-4">
-                <div className="text-xs font-semibold text-omi-text-muted">日 K 資料</div>
+                <div className="text-xs font-semibold text-omi-text-muted">{t("futures.dailyK")}</div>
                 <div className="mt-1 font-black text-omi-text-strong">
-                  {dailyState === "loading" ? "補資料中" : `${dailyBars.length} 根`}
+                  {dailyState === "loading"
+                    ? t("futures.backfilling")
+                    : t("futures.bars", { count: dailyBars.length })}
                 </div>
               </div>
             </div>
@@ -1239,6 +1281,7 @@ export default function TaiwanFuturesDetailPanel({
             indicators={futuresChartIndicators}
             loading={chartLoading}
             revealKey={`${normalizedSymbol}:${chartTimeframe}`}
+            t={t}
             timeframe={chartTimeframe}
           />
         </div>
@@ -1250,44 +1293,44 @@ export default function TaiwanFuturesDetailPanel({
             <div className="text-xs font-semibold uppercase tracking-[0.22em] text-omi-text-muted">
               SIGNAL
             </div>
-            <h3 className="mt-1 text-lg font-black text-omi-text-strong">期貨重點</h3>
+            <h3 className="mt-1 text-lg font-black text-omi-text-strong">{t("futures.signalTitle")}</h3>
           </div>
           <div className="grid gap-2 p-4 md:grid-cols-2 xl:grid-cols-3">
             <StatCell
-              label="開盤"
+              label={t("futures.open")}
               value={formatNumber(quote?.open_price ?? latestDailyBar?.open_price)}
             />
             <StatCell
-              label="最高"
+              label={t("futures.high")}
               value={formatNumber(quote?.high_price ?? latestDailyBar?.high_price)}
               toneValue={1}
             />
             <StatCell
-              label="最低"
+              label={t("futures.low")}
               value={formatNumber(quote?.low_price ?? latestDailyBar?.low_price)}
               toneValue={-1}
             />
             <StatCell
-              label="參考 / 結算"
+              label={t("futures.referenceSettlement")}
               value={formatNumber(quote?.reference_price ?? latestDailyBar?.settlement_price)}
             />
             <StatCell
-              label="期現價差"
-              note="TXF 對加權收盤"
+              label={t("futures.basis")}
+              note={t("futures.basisNote")}
               toneValue={basis}
               value={formatSigned(basis)}
             />
-            <StatCell label="振幅" value={formatPct(quote?.amplitude_pct)} />
+            <StatCell label={t("futures.amplitude")} value={formatPct(quote?.amplitude_pct)} />
             <StatCell
-              label="成交量"
+              label={t("dashboard.ranking.volume")}
               value={formatInteger(quote?.total_volume ?? latestDailyBar?.total_volume)}
             />
             <StatCell
-              label="未平倉"
+              label={t("futures.openInterest")}
               value={formatInteger(quote?.open_interest ?? latestDailyBar?.open_interest)}
             />
             <StatCell
-              label="買價 / 賣價"
+              label={t("futures.bidAsk")}
               value={`${formatNumber(quote?.bid_price)} / ${formatNumber(quote?.ask_price)}`}
             />
           </div>
@@ -1303,7 +1346,7 @@ export default function TaiwanFuturesDetailPanel({
                 <div className="text-xs font-semibold uppercase tracking-[0.22em] text-omi-text-muted">
                   CONTRACTS
                 </div>
-                <h3 className="mt-1 text-lg font-black text-omi-text-strong">台指期商品比較</h3>
+                <h3 className="mt-1 text-lg font-black text-omi-text-strong">{t("futures.contractsTitle")}</h3>
               </div>
               <div className="text-xs text-omi-text-muted">TXF / MXF / TMF</div>
             </div>
@@ -1323,7 +1366,7 @@ export default function TaiwanFuturesDetailPanel({
                           {contractSymbol}
                         </div>
                         <div className="mt-1 text-xl font-black">
-                          {FUTURES_LABELS[contractSymbol]}
+                          {futuresProductLabel(t, contractSymbol)}
                         </div>
                       </div>
                       <div
@@ -1355,25 +1398,25 @@ export default function TaiwanFuturesDetailPanel({
 
                     <div className="mt-5 grid grid-cols-2 gap-3 text-sm">
                       <div>
-                        <div className="text-omi-text-muted">量</div>
+                        <div className="text-omi-text-muted">{t("dashboard.ranking.volume")}</div>
                         <div className="font-bold tabular-nums">
                           {formatInteger(row?.total_volume)}
                         </div>
                       </div>
                       <div>
-                        <div className="text-omi-text-muted">未平倉</div>
+                        <div className="text-omi-text-muted">{t("futures.openInterest")}</div>
                         <div className="font-bold tabular-nums">
                           {formatInteger(row?.open_interest)}
                         </div>
                       </div>
                       <div>
-                        <div className="text-omi-text-muted">最高</div>
+                        <div className="text-omi-text-muted">{t("futures.high")}</div>
                         <div className="font-bold tabular-nums">
                           {formatNumber(row?.high_price)}
                         </div>
                       </div>
                       <div>
-                        <div className="text-omi-text-muted">最低</div>
+                        <div className="text-omi-text-muted">{t("futures.low")}</div>
                         <div className="font-bold tabular-nums">
                           {formatNumber(row?.low_price)}
                         </div>
@@ -1391,9 +1434,9 @@ export default function TaiwanFuturesDetailPanel({
                 <div className="text-xs font-semibold uppercase tracking-[0.22em] text-omi-text-muted">
                   DATA
                 </div>
-                <h3 className="mt-1 text-lg font-black text-omi-text-strong">近期 1 分鐘資料</h3>
+                <h3 className="mt-1 text-lg font-black text-omi-text-strong">{t("futures.recentMinuteTitle")}</h3>
               </div>
-              <div className="text-right text-xs text-omi-text-muted">最近 6 根</div>
+              <div className="text-right text-xs text-omi-text-muted">{t("futures.recentSixBars")}</div>
             </div>
 
             {recentBars.length > 0 ? (
@@ -1401,12 +1444,12 @@ export default function TaiwanFuturesDetailPanel({
                 <table className="min-w-full text-sm">
                   <thead className="bg-omi-surface-subtle text-xs text-omi-text-muted">
                     <tr>
-                      <th className="px-5 py-2 text-left font-semibold">時間</th>
-                      <th className="px-5 py-2 text-right font-semibold">開</th>
-                      <th className="px-5 py-2 text-right font-semibold">高</th>
-                      <th className="px-5 py-2 text-right font-semibold">低</th>
-                      <th className="px-5 py-2 text-right font-semibold">收</th>
-                      <th className="px-5 py-2 text-right font-semibold">累積量</th>
+                      <th className="px-5 py-2 text-left font-semibold">{t("futures.time")}</th>
+                      <th className="px-5 py-2 text-right font-semibold">{t("futures.open")}</th>
+                      <th className="px-5 py-2 text-right font-semibold">{t("futures.high")}</th>
+                      <th className="px-5 py-2 text-right font-semibold">{t("futures.low")}</th>
+                      <th className="px-5 py-2 text-right font-semibold">{t("futures.close")}</th>
+                      <th className="px-5 py-2 text-right font-semibold">{t("futures.cumulativeVolume")}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1438,9 +1481,9 @@ export default function TaiwanFuturesDetailPanel({
             ) : (
               <div className="px-5 py-10 text-center text-sm text-omi-text-muted">
                 {barsState === "loading" ? (
-                  <LoadingDots label="1 分鐘資料讀取中" />
+                  <LoadingDots label={t("futures.minuteLoading")} />
                 ) : (
-                  "尚無 1 分鐘資料，刷新報價後會逐步累積"
+                  t("futures.noMinuteData")
                 )}
               </div>
             )}

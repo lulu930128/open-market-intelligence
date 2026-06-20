@@ -171,12 +171,31 @@ def _json_default(value: Any) -> str:
     return str(value)
 
 
+def _language_instruction(response_preferences: dict[str, Any] | None) -> str:
+    if isinstance(response_preferences, dict):
+        instruction = response_preferences.get("language_instruction")
+        if isinstance(instruction, str) and instruction.strip():
+            return instruction.strip()
+        if response_preferences.get("effective_locale") == "en-US":
+            return "Write all human-readable output strings in English."
+        if response_preferences.get("effective_locale") == "ja-JP":
+            return "Write all human-readable output strings in Japanese."
+
+    return "Write all human-readable output strings in Traditional Chinese."
+
+
 def _build_user_prompt(envelope: dict[str, Any]) -> str:
+    response_preferences = (
+        envelope.get("response_preferences")
+        if isinstance(envelope.get("response_preferences"), dict)
+        else {}
+    )
     evidence = {
         "kind": envelope.get("kind"),
         "as_of": envelope.get("as_of"),
         "scope": envelope.get("scope") or {},
         "strategy_profile": envelope.get("strategy_profile"),
+        "response_preferences": response_preferences,
         "profile": (envelope.get("prompt") or {}).get("profile") or {},
         "memories": (envelope.get("prompt") or {}).get("memories") or [],
         "summary": envelope.get("summary") or {},
@@ -197,7 +216,7 @@ def _build_user_prompt(envelope: dict[str, Any]) -> str:
         "- If evidence is stale, partial, or insufficient, lower confidence and say so.\n"
         "- Put items in missing_data only when the evidence pack explicitly reports missing, stale, "
         "or unavailable datasets. Put future price/intraday confirmations in next_checks, not missing_data.\n"
-        "- Write all human-readable output strings in Traditional Chinese.\n"
+        f"- {_language_instruction(response_preferences)}\n"
         "- Keep the report concise and focused on actionable next checks.\n"
         "- The output must be JSON that matches the provided schema.\n\n"
         f"Evidence JSON:\n{evidence_json}"
@@ -277,6 +296,11 @@ def build_tool_plan_payload(planner_input: dict[str, Any]) -> dict[str, Any]:
 
 def build_decision_payload(decision_input: dict[str, Any]) -> dict[str, Any]:
     decision_json = json.dumps(decision_input, ensure_ascii=False, default=_json_default)
+    response_preferences = (
+        decision_input.get("response_preferences")
+        if isinstance(decision_input.get("response_preferences"), dict)
+        else {}
+    )
     system_prompt = (
         "You are OMI's position-risk decision synthesizer. "
         "Use only the supplied evidence and calculations. "
@@ -285,7 +309,7 @@ def build_decision_payload(decision_input: dict[str, Any]) -> dict[str, Any]:
     user_prompt = (
         "Answer the user's position-risk question from this JSON decision pack.\n"
         "Rules:\n"
-        "- Write all human-readable output strings in Traditional Chinese.\n"
+        f"- {_language_instruction(response_preferences)}\n"
         "- Start with the direct answer to the user's question.\n"
         "- Use the provided entry price, latest price, unrealized P/L, technical digest, and data limits.\n"
         "- Do not invent live prices, support levels, events, or missing personal risk tolerance.\n"

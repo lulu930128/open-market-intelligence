@@ -1,11 +1,11 @@
 import type { BranchTableSide, DataPanelTab } from "@/components/stock-detail/StockDetailDataViews";
 
 export const dataPanelTabs: Array<{ key: DataPanelTab; label: string }> = [
-  { key: "chips", label: "籌碼" },
-  { key: "institutional", label: "法人" },
-  { key: "branch", label: "分點" },
-  { key: "revenue", label: "營收" },
-  { key: "earnings", label: "盈餘" },
+  { key: "chips", label: "Chip flow" },
+  { key: "institutional", label: "Institutions" },
+  { key: "branch", label: "Branches" },
+  { key: "revenue", label: "Revenue" },
+  { key: "earnings", label: "Earnings" },
 ];
 
 export const branchDayOptions: Array<{ label: string; days: number | null }> = [
@@ -16,12 +16,12 @@ export const branchDayOptions: Array<{ label: string; days: number | null }> = [
   { label: "20", days: 20 },
   { label: "60", days: 60 },
   { label: "120", days: 120 },
-  { label: "更多", days: null },
+  { label: "More", days: null },
 ];
 
 export const branchTableSideOptions: Array<{ key: BranchTableSide; label: string }> = [
-  { key: "buy", label: "買方" },
-  { key: "sell", label: "賣方" },
+  { key: "buy", label: "Buy" },
+  { key: "sell", label: "Sell" },
 ];
 
 export const largeHolderLotOptions = [100, 200, 400, 600, 800, 1000];

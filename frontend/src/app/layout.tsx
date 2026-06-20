@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { I18nProvider } from "@/i18n";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -6,11 +7,22 @@ export const metadata: Metadata = {
   description: "Local-first public market intelligence dashboard.",
 };
 
-const themeInitScript = `
+const preferenceInitScript = `
 try {
   var omiTheme = window.localStorage.getItem("omi:settings:color");
   if (omiTheme === "light" || omiTheme === "dark") {
     document.documentElement.dataset.theme = omiTheme;
+  }
+
+  var omiLocale = window.localStorage.getItem("omi:settings:language");
+  var htmlLang = {
+    "zh-TW": "zh-Hant",
+    "en-US": "en",
+    "ja-JP": "ja"
+  }[omiLocale];
+  if (htmlLang) {
+    document.documentElement.lang = htmlLang;
+    document.documentElement.dataset.locale = omiLocale;
   }
 } catch (error) {}
 `;
@@ -23,9 +35,11 @@ export default function RootLayout({
   return (
     <html lang="zh-Hant" className="h-full antialiased" suppressHydrationWarning>
       <head>
-        <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
+        <script dangerouslySetInnerHTML={{ __html: preferenceInitScript }} />
       </head>
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        <I18nProvider>{children}</I18nProvider>
+      </body>
     </html>
   );
 }

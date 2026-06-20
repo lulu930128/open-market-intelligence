@@ -2,6 +2,7 @@
 
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { IntradayTrendPoint } from "@/types/market";
+import { useT, type TranslationFunction } from "@/i18n";
 import {
   TAIWAN_SESSION_END_MINUTES,
   TAIWAN_SESSION_START_MINUTES,
@@ -87,14 +88,38 @@ export const taiwanIntradaySession: IntradaySessionConfig = {
 export const intradayIndicatorOptions: Array<{
   key: IntradayIndicatorKey;
   label: string;
-  description: string;
+  descriptionKey: string;
 }> = [
-  { key: "volume", label: "VOL", description: "盤中成交量" },
-  { key: "vwap", label: "VWAP", description: "量價均價" },
-  { key: "twap", label: "TWAP", description: "時間均價" },
-  { key: "ema", label: "EMA", description: "EMA5 / EMA20" },
-  { key: "rsi", label: "RSI", description: "RSI 14" },
-  { key: "macd", label: "MACD", description: "12 / 26 / 9" },
+  {
+    key: "volume",
+    label: "VOL",
+    descriptionKey: "stockDetail.intraday.indicators.volume",
+  },
+  {
+    key: "vwap",
+    label: "VWAP",
+    descriptionKey: "stockDetail.intraday.indicators.vwap",
+  },
+  {
+    key: "twap",
+    label: "TWAP",
+    descriptionKey: "stockDetail.intraday.indicators.twap",
+  },
+  {
+    key: "ema",
+    label: "EMA",
+    descriptionKey: "stockDetail.intraday.indicators.ema",
+  },
+  {
+    key: "rsi",
+    label: "RSI",
+    descriptionKey: "stockDetail.intraday.indicators.rsi",
+  },
+  {
+    key: "macd",
+    label: "MACD",
+    descriptionKey: "stockDetail.intraday.indicators.macd",
+  },
 ];
 
 const playedIntradayRevealKeys = new Set<string>();
@@ -109,13 +134,23 @@ function formatPrice(value: number | null | undefined) {
   });
 }
 
-function formatSource(value: string) {
-  if (value === "nstock_minute_stock_data_twse_mis_volume") return "分K走勢 + 交易所量";
-  if (value === "nstock_minute_stock_data") return "分K走勢";
-  if (value === "yahoo_finance_chart_twse_mis_volume") return "1 分鐘走勢 + 交易所量";
-  if (value === "yahoo_finance_chart") return "1 分鐘走勢";
-  if (value === "twse_mis_snapshot") return "即時快照";
-  return "走勢資料";
+function formatSource(t: TranslationFunction, value: string) {
+  if (value === "nstock_minute_stock_data_twse_mis_volume") {
+    return t("stockDetail.intraday.sources.nstockMinuteWithVolume");
+  }
+  if (value === "nstock_minute_stock_data") {
+    return t("stockDetail.intraday.sources.nstockMinute");
+  }
+  if (value === "yahoo_finance_chart_twse_mis_volume") {
+    return t("stockDetail.intraday.sources.yahooWithVolume");
+  }
+  if (value === "yahoo_finance_chart") {
+    return t("stockDetail.intraday.sources.yahoo");
+  }
+  if (value === "twse_mis_snapshot") {
+    return t("stockDetail.intraday.sources.twseSnapshot");
+  }
+  return t("stockDetail.intraday.sources.fallback");
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -624,6 +659,7 @@ export default function IntradayTrendChart({
   priceLimitEnabled = true,
 }: Props) {
   const chartId = useId();
+  const t = useT();
   const safeChartId = chartId.replace(/[^a-zA-Z0-9_-]/g, "");
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const [hoverPriceGuide, setHoverPriceGuide] = useState<HoverPriceGuideState | null>(null);
@@ -693,7 +729,7 @@ export default function IntradayTrendChart({
   if (data.length < 2) {
     return (
       <div className="flex h-[420px] items-center justify-center border border-omi-border-subtle bg-omi-surface text-sm text-omi-text-muted">
-        今日走勢資料不足
+        {t("stockDetail.intraday.insufficient")}
       </div>
     );
   }
@@ -947,14 +983,24 @@ export default function IntradayTrendChart({
     <div className="border border-omi-border-subtle bg-omi-surface">
       <div className="flex min-h-16 items-start justify-between gap-4 border-b border-omi-border-subtle px-4 py-3">
         <div>
-          <div className="text-sm font-semibold text-omi-text">今日走勢 / 成交量</div>
+          <div className="text-sm font-semibold text-omi-text">
+            {t("stockDetail.intraday.title")}
+          </div>
           <div className="mt-1 text-xs text-omi-text-muted">
-            {label} · {formatSource(source)} · {data.length} 點
+            {label} · {formatSource(t, source)} ·{" "}
+            {t("stockDetail.intraday.pointCount", { count: data.length })}
           </div>
           {refreshIntervalMs ? (
             <div className="mt-1 text-xs text-omi-text-muted">
-              盤中每 {Math.round(refreshIntervalMs / 1000)} 秒更新
-              {updatedAt ? `，最後更新 ${updatedAt}` : ""}
+              {t(
+                updatedAt
+                  ? "stockDetail.intraday.refreshEveryUpdated"
+                  : "stockDetail.intraday.refreshEvery",
+                {
+                  seconds: Math.round(refreshIntervalMs / 1000),
+                  updatedAt,
+                }
+              )}
             </div>
           ) : null}
           <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -984,25 +1030,33 @@ export default function IntradayTrendChart({
 
         <div className="grid shrink-0 grid-cols-2 gap-x-8 gap-y-2 text-right sm:grid-cols-4">
           <div>
-            <span className="text-xs text-omi-text-subtle">昨收</span>
+            <span className="text-xs text-omi-text-subtle">
+              {t("stockDetail.intraday.previousClose")}
+            </span>
             <div className="mt-1 text-base font-bold text-omi-text">
               {formatPrice(previousClose)}
             </div>
           </div>
           <div>
-            <span className="text-xs text-omi-text-subtle">最低</span>
+            <span className="text-xs text-omi-text-subtle">
+              {t("stockDetail.intraday.low")}
+            </span>
             <div className="mt-1 text-base font-bold text-omi-market-down">
               {formatPrice(rangeLow?.value)}
             </div>
           </div>
           <div>
-            <span className="text-xs text-omi-text-subtle">最高</span>
+            <span className="text-xs text-omi-text-subtle">
+              {t("stockDetail.intraday.high")}
+            </span>
             <div className="mt-1 text-base font-bold text-omi-market-up">
               {formatPrice(rangeHigh?.value)}
             </div>
           </div>
           <div>
-            <span className="text-xs text-omi-text-subtle">成交量(張)</span>
+            <span className="text-xs text-omi-text-subtle">
+              {t("stockDetail.intraday.volumeLots")}
+            </span>
             <div className="mt-1 text-base font-bold text-omi-text">
               {formatVolumeValue(displayedVolume)}
             </div>
@@ -1118,7 +1172,9 @@ export default function IntradayTrendChart({
               textAnchor="start"
               className="fill-omi-chart-blue text-[11px]"
             >
-              昨收 {formatPrice(previousClose)}
+              {t("stockDetail.intraday.previousCloseMarker", {
+                value: formatPrice(previousClose),
+              })}
             </text>
           </g>
         ) : null}
@@ -1254,7 +1310,9 @@ export default function IntradayTrendChart({
                     textAnchor={label.anchor}
                     className="fill-omi-market-up text-[11px] font-semibold"
                   >
-                    最高 {formatPrice(rangeHigh.value)}
+                    {t("stockDetail.intraday.highMarker", {
+                      value: formatPrice(rangeHigh.value),
+                    })}
                   </text>
                 </>
               );
@@ -1287,7 +1345,9 @@ export default function IntradayTrendChart({
                     textAnchor={label.anchor}
                     className="fill-omi-market-down text-[11px] font-semibold"
                   >
-                    最低 {formatPrice(rangeLow.value)}
+                    {t("stockDetail.intraday.lowMarker", {
+                      value: formatPrice(rangeLow.value),
+                    })}
                   </text>
                 </>
               );
@@ -1530,7 +1590,7 @@ export default function IntradayTrendChart({
                 : "border-omi-border bg-omi-surface text-omi-text hover:border-omi-accent hover:text-omi-danger",
             ].join(" ")}
           >
-            顯示漲跌停
+            {t("stockDetail.intraday.showPriceLimit")}
           </button>
         </div>
       ) : null}

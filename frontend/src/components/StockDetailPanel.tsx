@@ -64,6 +64,7 @@ import {
   formatTradeValueYi,
   isProfessionalIntradayTimeframe,
   latestLargeHolderSummary,
+  localizeTechnicalReport,
   mapBackendTechnicalReport,
   marketRegimeLabel,
   priceLimitBoxClass,
@@ -109,6 +110,7 @@ import {
 } from "@/components/professionalChartDrawing";
 import { fetchJson, requestJson } from "@/lib/api";
 import { getJobResultStatus, requestBackfillJob } from "@/lib/jobs";
+import { timeframeLabel, useT, type TranslationFunction } from "@/i18n";
 import {
   TAIWAN_INTRADAY_REFRESH_MS,
   TAIWAN_SESSION_START_MINUTES,
@@ -117,7 +119,6 @@ import {
 } from "@/lib/taiwanMarketTime";
 import {
   getTaiwanChartHistoryRequirement,
-  getTaiwanDataPanelRefreshLabel,
   getTaiwanDataPanelRefreshProfile,
   taiwanDailyPriceBackfillPath,
   taiwanSelectionRefreshPath,
@@ -176,25 +177,17 @@ const institutionalLookbackDays = 100;
 const institutionalHistoryLimit = 120;
 const revenueHistoryLimit = 120;
 const financialHistoryLimit = 40;
-const timeframeLabels: Record<Timeframe, string> = {
-  today: "今日",
-  daily: "日K",
-  weekly: "週K",
-  monthly: "月K",
-};
-const professionalTimeframeOptions: Array<{
-  key: ProfessionalTimeframe;
-  label: string;
-}> = [
-  { key: "1m", label: "1分" },
-  { key: "5m", label: "5分" },
-  { key: "15m", label: "15分" },
-  { key: "30m", label: "30分" },
-  { key: "1h", label: "1小時" },
-  { key: "4h", label: "4小時" },
-  { key: "daily", label: "天" },
-  { key: "weekly", label: "週" },
-  { key: "monthly", label: "月" },
+const allTimeframes: Timeframe[] = ["today", "daily", "weekly", "monthly"];
+const professionalTimeframeOptions: ProfessionalTimeframe[] = [
+  "1m",
+  "5m",
+  "15m",
+  "30m",
+  "1h",
+  "4h",
+  "daily",
+  "weekly",
+  "monthly",
 ];
 const chartBarsByTimeframe: Record<ChartTimeframe, number> = {
   daily: 2600,
@@ -204,7 +197,6 @@ const chartBarsByTimeframe: Record<ChartTimeframe, number> = {
 const dailyIndicatorLimit = 220;
 const openingObservationMinutes = 5;
 const openingObservationMinPoints = 5;
-const allTimeframes = Object.keys(timeframeLabels) as Timeframe[];
 const indexTimeframes: Timeframe[] = ["today", "daily", "weekly", "monthly"];
 const indexProducts = new Map([
   [
@@ -270,6 +262,10 @@ function findTechnicalRow(report: TechnicalReport, title: string) {
   return report.rows.find((row) => row.title.includes(title)) ?? null;
 }
 
+function findTechnicalRowByKey(report: TechnicalReport, key: string) {
+  return report.rows.find((row) => row.key === key) ?? null;
+}
+
 function findTechnicalBadge(report: TechnicalReport, patterns: string[]) {
   return (
     report.badges.find((badge) =>
@@ -279,7 +275,15 @@ function findTechnicalBadge(report: TechnicalReport, patterns: string[]) {
 }
 
 function stockSignalToneFromBadgeLabel(label: string): StockSignalTone {
-  if (label.includes("過熱") || label.includes("放量") || label.includes("高位")) {
+  const normalized = label.toLowerCase();
+  if (
+    label.includes("過熱") ||
+    label.includes("放量") ||
+    label.includes("高位") ||
+    normalized.includes("overheated") ||
+    normalized.includes("surge") ||
+    normalized.includes("high")
+  ) {
     return "warning";
   }
 
@@ -287,7 +291,11 @@ function stockSignalToneFromBadgeLabel(label: string): StockSignalTone {
     label.includes("跌破") ||
     label.includes("偏弱") ||
     label.includes("衰退") ||
-    label.includes("減少")
+    label.includes("減少") ||
+    normalized.includes("below") ||
+    normalized.includes("weak") ||
+    normalized.includes("decline") ||
+    normalized.includes("decrease")
   ) {
     return "negative";
   }
@@ -297,7 +305,12 @@ function stockSignalToneFromBadgeLabel(label: string): StockSignalTone {
     label.includes("偏多") ||
     label.includes("成長") ||
     label.includes("增加") ||
-    label.includes("走升")
+    label.includes("走升") ||
+    normalized.includes("above") ||
+    normalized.includes("bullish") ||
+    normalized.includes("growth") ||
+    normalized.includes("increase") ||
+    normalized.includes("rising")
   ) {
     return "positive";
   }
@@ -323,6 +336,27 @@ function signedLabelFromValue(valueText: string, positiveLabel: string, negative
   return neutralLabel;
 }
 
+function stockTechnicalText(
+  t: TranslationFunction,
+  key: string,
+  values?: Record<string, string | number | null | undefined>
+) {
+  return t(`stockDetail.dataViews.technical.${key}`, values);
+}
+
+function stockTechnicalTerm(t: TranslationFunction, key: string) {
+  return stockTechnicalText(t, `terms.${key}`);
+}
+
+function withLotsUnit(value: string, t: TranslationFunction) {
+  if (value === "-") return value;
+  return `${value}${t("stockDetail.dataPanel.units.lots")}`;
+}
+
+function formatSignedLotsWithUnit(value: number | null | undefined, t: TranslationFunction) {
+  return withLotsUnit(formatSignedLots(value), t);
+}
+
 function extractSignedNumberAfter(text: string | null | undefined, keyword: string) {
   if (!text) return null;
 
@@ -344,6 +378,7 @@ function buildStockSignalChips({
   overnightImpact,
   relativeToPrimaryIndex,
   primaryMarketLabel,
+  t,
 }: {
   technicalReport: TechnicalReport;
   institutional: InstitutionalTradeDailyRead | null;
@@ -352,20 +387,37 @@ function buildStockSignalChips({
   overnightImpact: OvernightImpactRead | null;
   relativeToPrimaryIndex: number | null;
   primaryMarketLabel: string;
+  t: TranslationFunction;
 }) {
   const chips: StockSignalChip[] = [];
-  const trendBadge = findTechnicalBadge(technicalReport, ["MA20", "月線", "週線"]);
-  const momentumBadge = findTechnicalBadge(technicalReport, ["MACD", "RSI", "動能"]);
-  const volumeBadge = findTechnicalBadge(technicalReport, ["放量", "量能"]);
-  const trendRow = findTechnicalRow(technicalReport, "趨勢") ?? findTechnicalRow(technicalReport, "背景");
-  const momentumRow = findTechnicalRow(technicalReport, "動能");
-  const volumeRow = findTechnicalRow(technicalReport, "量價") ?? findTechnicalRow(technicalReport, "量能");
-  const institutionalRow = findTechnicalRow(technicalReport, "法人");
+  const trendBadge = findTechnicalBadge(technicalReport, ["MA20", "Trend", "trend", "月線", "週線"]);
+  const momentumBadge = findTechnicalBadge(technicalReport, ["MACD", "RSI", "Momentum", "動能"]);
+  const volumeBadge = findTechnicalBadge(technicalReport, ["Volume", "volume", "放量", "量能"]);
+  const trendRow =
+    findTechnicalRowByKey(technicalReport, "trend_structure") ??
+    findTechnicalRowByKey(technicalReport, "daily_background") ??
+    findTechnicalRow(technicalReport, "趨勢") ??
+    findTechnicalRow(technicalReport, "Trend") ??
+    findTechnicalRow(technicalReport, "Background");
+  const momentumRow =
+    findTechnicalRowByKey(technicalReport, "momentum") ??
+    findTechnicalRow(technicalReport, "動能") ??
+    findTechnicalRow(technicalReport, "Momentum");
+  const volumeRow =
+    findTechnicalRowByKey(technicalReport, "volume_flow") ??
+    findTechnicalRowByKey(technicalReport, "volume_pace") ??
+    findTechnicalRow(technicalReport, "量價") ??
+    findTechnicalRow(technicalReport, "量能") ??
+    findTechnicalRow(technicalReport, "Volume");
+  const institutionalRow =
+    findTechnicalRowByKey(technicalReport, "institutional_flow") ??
+    findTechnicalRow(technicalReport, "法人") ??
+    findTechnicalRow(technicalReport, "Institutional");
   const institutionalRowValue = usableTechnicalRowValue(institutionalRow);
   const rowMarginBalanceChange = extractSignedNumberAfter(
     institutionalRow?.description,
     "融資餘額"
-  );
+  ) ?? extractSignedNumberAfter(institutionalRow?.description, "margin balance");
   const marginTodayBalance = margin?.margin_today_balance ?? null;
   const marginPreviousBalance = margin?.margin_previous_balance ?? null;
   const marginBalanceChange =
@@ -378,7 +430,7 @@ function buildStockSignalChips({
 
   addStockSignalChip(chips, {
     key: "classification",
-    source: "分類",
+    source: stockTechnicalText(t, "chips.sources.classification"),
     label: technicalReport.title,
     tone: stockSignalToneFromNumber(technicalReport.value),
     title: technicalReport.summary,
@@ -386,7 +438,7 @@ function buildStockSignalChips({
 
   addStockSignalChip(chips, {
     key: "trend",
-    source: "趨勢",
+    source: stockTechnicalText(t, "chips.sources.trend"),
     label:
       trendBadge?.label ??
       (trendRow?.value && trendRow.value !== "-" ? `${trendRow.title} ${trendRow.value}` : ""),
@@ -398,13 +450,13 @@ function buildStockSignalChips({
 
   addStockSignalChip(chips, {
     key: "momentum",
-    source: "動能",
+    source: stockTechnicalText(t, "chips.sources.momentum"),
     label:
       momentumBadge?.label ??
       (momentumRow?.direction !== null && momentumRow?.direction !== undefined
         ? momentumRow.direction >= 0
-          ? "MACD 偏多"
-          : "MACD 偏弱"
+          ? stockTechnicalTerm(t, "macdBullish")
+          : stockTechnicalTerm(t, "macdWeak")
         : ""),
     tone: momentumBadge
       ? stockSignalToneFromBadgeLabel(momentumBadge.label)
@@ -414,10 +466,12 @@ function buildStockSignalChips({
 
   addStockSignalChip(chips, {
     key: "volume",
-    source: "量價",
+    source: stockTechnicalText(t, "chips.sources.volume"),
     label:
       volumeBadge?.label ??
-      (volumeRow?.value && volumeRow.value !== "-" ? `量能 ${volumeRow.value}` : ""),
+      (volumeRow?.value && volumeRow.value !== "-"
+        ? stockTechnicalText(t, "chips.volumeValue", { value: volumeRow.value })
+        : ""),
     tone: volumeBadge
       ? stockSignalToneFromBadgeLabel(volumeBadge.label)
       : stockSignalToneFromTechnical(volumeRow?.tone),
@@ -427,26 +481,28 @@ function buildStockSignalChips({
   if (finiteNumber(institutionalNet) || institutionalRowValue) {
     addStockSignalChip(chips, {
       key: "institutional",
-      source: "籌碼",
+      source: stockTechnicalText(t, "chips.sources.chip"),
       label: finiteNumber(institutionalNet)
         ? `${
             institutionalNet > 0
-              ? "法人買超"
+              ? stockTechnicalTerm(t, "institutionalBuy")
               : institutionalNet < 0
-                ? "法人賣超"
-                : "法人持平"
-          } ${formatSignedLots(institutionalNet)}張`
+                ? stockTechnicalTerm(t, "institutionalSell")
+                : stockTechnicalTerm(t, "institutionalFlat")
+          } ${formatSignedLotsWithUnit(institutionalNet, t)}`
         : `${signedLabelFromValue(
             institutionalRowValue ?? "",
-            "法人買超",
-            "法人賣超",
-            "法人持平"
+            stockTechnicalTerm(t, "institutionalBuy"),
+            stockTechnicalTerm(t, "institutionalSell"),
+            stockTechnicalTerm(t, "institutionalFlat")
           )} ${institutionalRowValue}`,
       tone: finiteNumber(institutionalNet)
         ? stockSignalToneFromNumber(institutionalNet)
         : signedTextTone(institutionalRowValue),
       title: finiteNumber(institutionalNet)
-        ? `最新三大法人合計 ${formatSignedLots(institutionalNet)}張`
+        ? stockTechnicalText(t, "chips.latestInstitutionalTotal", {
+            value: formatSignedLotsWithUnit(institutionalNet, t),
+          })
         : institutionalRow?.description,
     });
   }
@@ -454,60 +510,78 @@ function buildStockSignalChips({
   if (finiteNumber(marginBalanceChange)) {
     addStockSignalChip(chips, {
       key: "margin",
-      source: "融資",
+      source: stockTechnicalText(t, "chips.sources.margin"),
       label:
         marginBalanceChange > 0
-          ? `融資增加 ${formatSignedNumber(marginBalanceChange)}`
+          ? stockTechnicalText(t, "chips.marginIncrease", {
+              value: formatSignedNumber(marginBalanceChange),
+            })
           : marginBalanceChange < 0
-            ? `融資下降 ${formatSignedNumber(marginBalanceChange)}`
-            : "融資持平",
+            ? stockTechnicalText(t, "chips.marginDecrease", {
+                value: formatSignedNumber(marginBalanceChange),
+              })
+            : stockTechnicalTerm(t, "marginFlat"),
       tone: marginBalanceChange > 0 ? "warning" : stockSignalToneFromNumber(-marginBalanceChange),
-      title: `融資餘額變化 ${formatSignedNumber(marginBalanceChange)}`,
+      title: stockTechnicalText(t, "chips.marginBalanceChange", {
+        value: formatSignedNumber(marginBalanceChange),
+      }),
     });
   }
 
   if (finiteNumber(revenueGrowth)) {
     addStockSignalChip(chips, {
       key: "revenue",
-      source: "營收",
+      source: stockTechnicalText(t, "chips.sources.revenue"),
       label:
         revenueGrowth > 0
-          ? `營收成長 ${formatPct(revenueGrowth)}`
+          ? stockTechnicalText(t, "chips.revenueGrowth", { value: formatPct(revenueGrowth) })
           : revenueGrowth < 0
-            ? `營收衰退 ${formatPct(revenueGrowth)}`
-            : "營收持平",
+            ? stockTechnicalText(t, "chips.revenueDecline", { value: formatPct(revenueGrowth) })
+            : stockTechnicalTerm(t, "revenueFlat"),
       tone: stockSignalToneFromNumber(revenueGrowth),
-      title: `月營收 YoY ${formatPct(revenueGrowth)}`,
+      title: stockTechnicalText(t, "chips.monthlyRevenueYoy", {
+        value: formatPct(revenueGrowth),
+      }),
     });
   }
 
   if (finiteNumber(overnightChange)) {
     addStockSignalChip(chips, {
       key: "overnight",
-      source: "隔夜",
+      source: stockTechnicalText(t, "chips.sources.overnight"),
       label:
         overnightChange > 0
-          ? `美股偏多 ${formatPct(overnightChange)}`
+          ? stockTechnicalText(t, "chips.usBullish", { value: formatPct(overnightChange) })
           : overnightChange < 0
-            ? `美股偏空 ${formatPct(overnightChange)}`
-            : "隔夜中性",
+            ? stockTechnicalText(t, "chips.usBearish", { value: formatPct(overnightChange) })
+            : stockTechnicalTerm(t, "overnightNeutral"),
       tone: stockSignalToneFromNumber(overnightChange),
-      title: `${overnightImpact?.title ?? "美股隔夜映射"} ${formatPct(overnightChange)}`,
+      title: stockTechnicalText(t, "chips.overnightImpact", {
+        label: stockTechnicalTerm(t, "usOvernightMapping"),
+        value: formatPct(overnightChange),
+      }),
     });
   }
 
   if (finiteNumber(relativeToPrimaryIndex)) {
     addStockSignalChip(chips, {
       key: "market-relative",
-      source: "市場",
+      source: stockTechnicalText(t, "chips.sources.market"),
       label:
         relativeToPrimaryIndex > 0
-          ? `強於大盤 ${formatPct(relativeToPrimaryIndex)}`
+          ? stockTechnicalText(t, "chips.strongerThanMarket", {
+              value: formatPct(relativeToPrimaryIndex),
+            })
           : relativeToPrimaryIndex < 0
-            ? `弱於大盤 ${formatPct(relativeToPrimaryIndex)}`
-            : "同步大盤",
+            ? stockTechnicalText(t, "chips.weakerThanMarket", {
+                value: formatPct(relativeToPrimaryIndex),
+              })
+            : stockTechnicalTerm(t, "marketInLine"),
       tone: stockSignalToneFromNumber(relativeToPrimaryIndex),
-      title: `相對${primaryMarketLabel} ${formatPct(relativeToPrimaryIndex)}`,
+      title: stockTechnicalText(t, "chips.relativeToMarket", {
+        market: primaryMarketLabel,
+        value: formatPct(relativeToPrimaryIndex),
+      }),
     });
   }
 
@@ -531,6 +605,8 @@ export default function StockDetailPanel({
   marketIndexSummary,
   onChartFocusModeChange,
 }: Props) {
+  const t = useT();
+  const tRef = useRef(t);
   const [timeframe, setTimeframe] = useState<Timeframe>("daily");
   const [indicatorMenuOpen, setIndicatorMenuOpen] = useState(false);
   const [chartFocusMode, setChartFocusMode] = useState(false);
@@ -659,6 +735,10 @@ export default function StockDetailPanel({
     onChartFocusModeChange?.(chartFocusMode);
   }, [chartFocusMode, onChartFocusModeChange]);
   const indexId = indexProduct?.indexId ?? null;
+
+  useEffect(() => {
+    tRef.current = t;
+  }, [t]);
 
   useEffect(() => {
     activeStockIdRef.current = stockId;
@@ -1128,7 +1208,7 @@ export default function StockDetailPanel({
 
   function clearChartDrawings() {
     if (chartDrawings.length === 0) return;
-    if (!window.confirm("清除目前週期的所有畫線？")) return;
+    if (!window.confirm(t("stockDetail.confirm.clearDrawings"))) return;
 
     updateChartDrawings([]);
     setSelectedChartDrawingId(null);
@@ -1353,7 +1433,7 @@ export default function StockDetailPanel({
       } catch (error) {
         if (cancelled) return;
         setLoadState("error");
-        setErrorMessage(error instanceof Error ? error.message : "資料讀取失敗");
+        setErrorMessage(error instanceof Error ? error.message : tRef.current("stockDetail.errors.dataLoad"));
       } finally {
         intradayRequestInFlight = false;
       }
@@ -1387,7 +1467,7 @@ export default function StockDetailPanel({
           if (cancelled || activeStockIdRef.current !== effectStockId) return;
 
           setProfessionalIntradayFallbackActive(true);
-          setErrorMessage("歷史分鐘線暫無資料，先以今日盤中資料顯示");
+          setErrorMessage(tRef.current("stockDetail.errors.intradayHistoryFallbackNoData"));
           return;
         }
 
@@ -1410,8 +1490,10 @@ export default function StockDetailPanel({
         setProfessionalIntradayFallbackActive(true);
         setErrorMessage(
           error instanceof Error
-            ? `歷史分鐘線讀取失敗，暫以今日盤中資料顯示：${error.message}`
-            : "歷史分鐘線讀取失敗，暫以今日盤中資料顯示"
+            ? tRef.current("stockDetail.errors.intradayHistoryFallbackFailedWithMessage", {
+                message: error.message,
+              })
+            : tRef.current("stockDetail.errors.intradayHistoryFallbackFailed")
         );
       }
     }
@@ -1465,6 +1547,7 @@ export default function StockDetailPanel({
       ohlc: OhlcChartResponse
     ) {
       const requirement = getTaiwanChartHistoryRequirement(requestedTimeframe);
+      const requirementLabel = timeframeLabel(tRef.current, requestedTimeframe);
 
       if (ohlc.point_count >= requirement.minPoints) {
         setChartHistoryMessage(null);
@@ -1477,7 +1560,10 @@ export default function StockDetailPanel({
       if (!backfillPath) {
         if (!cancelled && activeStockIdRef.current === targetStockId) {
           setChartHistoryMessage(
-            `${requirement.label}資料深度不足，目前市場 ${market ?? "-"} 尚未支援自動補齊`
+            tRef.current("stockDetail.chartHistory.depthUnsupported", {
+              label: requirementLabel,
+              market: market ?? "-",
+            })
           );
         }
         return;
@@ -1493,7 +1579,10 @@ export default function StockDetailPanel({
 
       if (!cancelled && activeStockIdRef.current === targetStockId) {
         setChartHistoryMessage(
-          `${requirement.label}目前只有 ${ohlc.point_count} 根，背景補歷史資料中`
+          tRef.current("stockDetail.chartHistory.backgroundBackfill", {
+            label: requirementLabel,
+            count: ohlc.point_count,
+          })
         );
       }
 
@@ -1512,7 +1601,9 @@ export default function StockDetailPanel({
             timeoutMs: 900000,
             onUpdate: (job) => {
               if (!cancelled && activeStockIdRef.current === targetStockId) {
-                setChartHistoryMessage(formatPanelJobProgress(requirement.label, job));
+                setChartHistoryMessage(
+                  formatPanelJobProgress(requirementLabel, job, tRef.current)
+                );
               }
             },
           }
@@ -1543,13 +1634,18 @@ export default function StockDetailPanel({
         setChartTimeframe(requestedTimeframe);
         setChartHistoryMessage(
           refreshedOhlc.point_count >= requirement.minPoints
-            ? `${requirement.label}歷史資料已補齊`
-            : `${requirement.label}歷史資料已補齊，目前可用 ${refreshedOhlc.point_count} 根`
+            ? tRef.current("stockDetail.chartHistory.complete", { label: requirementLabel })
+            : tRef.current("stockDetail.chartHistory.completeWithCount", {
+                label: requirementLabel,
+                count: refreshedOhlc.point_count,
+              })
         );
       } catch {
         if (cancelled || activeStockIdRef.current !== targetStockId) return;
 
-        setChartHistoryMessage(`${requirement.label}歷史資料背景補齊失敗，詳見左側更新狀態`);
+        setChartHistoryMessage(
+          tRef.current("stockDetail.chartHistory.failed", { label: requirementLabel })
+        );
       }
     }
 
@@ -1618,7 +1714,7 @@ export default function StockDetailPanel({
       } catch (error) {
         if (cancelled) return;
         setLoadState("error");
-        setErrorMessage(error instanceof Error ? error.message : "資料讀取失敗");
+        setErrorMessage(error instanceof Error ? error.message : tRef.current("stockDetail.errors.dataLoad"));
       }
     }
 
@@ -1782,9 +1878,7 @@ export default function StockDetailPanel({
     chartFocusMode &&
     professionalChartData.length > 0 &&
     (professionalIsIntraday || currentChartReady);
-  const professionalTimeframeLabel =
-    professionalTimeframeOptions.find((option) => option.key === professionalTimeframe)?.label ??
-    timeframeLabels.daily;
+  const professionalTimeframeLabel = t(`timeframes.${professionalTimeframe}`);
   const latestProfessionalChart = professionalChartData[professionalChartData.length - 1] ?? null;
   const latestClose =
     effectiveTimeframe === "today"
@@ -1959,7 +2053,7 @@ export default function StockDetailPanel({
         title: loadState === "loading" ? "資料讀取中" : "資料不足",
         summary: loadState === "loading" ? "正在整理技術訊號" : "尚無足夠資料產生報告",
         value: null,
-        valueLabel: timeframeLabels[effectiveTimeframe],
+        valueLabel: timeframeLabel(t, effectiveTimeframe),
         score: 0,
         rows: [
           {
@@ -2311,7 +2405,7 @@ export default function StockDetailPanel({
         },
         {
           title: "市場背景",
-          description: `${primaryMarketIndex?.short_label ?? "大盤"} ${marketRegimeLabel(primaryMarketIndex)}`,
+          description: `${primaryMarketIndex?.short_label ?? t("stockDetail.marketFallback")} ${marketRegimeLabel(primaryMarketIndex, t)}`,
           value: formatPct(primaryMarketIndex?.change_pct),
           pulseValue: primaryMarketIndex?.change_pct,
           direction: primaryMarketIndex?.change_pct,
@@ -2449,6 +2543,7 @@ export default function StockDetailPanel({
     priceVsMa20,
     relativeToPrimaryIndex,
     shareholding,
+    t,
     todayStats.high,
     todayStats.low,
     todayStats.open,
@@ -2460,6 +2555,10 @@ export default function StockDetailPanel({
     volumeRatio,
     volumeRatioPct,
   ]);
+  const localizedFallbackTechnicalReport = useMemo(
+    () => localizeTechnicalReport(fallbackTechnicalReport, t),
+    [fallbackTechnicalReport, t]
+  );
   const backendTechnicalReportView = useMemo(() => {
     if (
       !backendTechnicalReport ||
@@ -2469,9 +2568,9 @@ export default function StockDetailPanel({
       return null;
     }
 
-    return mapBackendTechnicalReport(backendTechnicalReport);
-  }, [backendTechnicalReport, effectiveTimeframe, stockId]);
-  const technicalReport = backendTechnicalReportView ?? fallbackTechnicalReport;
+    return mapBackendTechnicalReport(backendTechnicalReport, t);
+  }, [backendTechnicalReport, effectiveTimeframe, stockId, t]);
+  const technicalReport = backendTechnicalReportView ?? localizedFallbackTechnicalReport;
   const technicalStatus = technicalReport.title;
   const technicalSummaryText = technicalReport.summary;
   const displayOvernightImpact = !stockId || isIndexProduct ? null : overnightImpact;
@@ -2486,7 +2585,8 @@ export default function StockDetailPanel({
         monthlyRevenue,
         overnightImpact: displayOvernightImpact,
         relativeToPrimaryIndex,
-        primaryMarketLabel: primaryMarketIndex?.short_label ?? "大盤",
+        primaryMarketLabel: primaryMarketIndex?.short_label ?? stockTechnicalTerm(t, "market"),
+        t,
       }),
     [
       displayOvernightImpact,
@@ -2495,6 +2595,7 @@ export default function StockDetailPanel({
       monthlyRevenue,
       primaryMarketIndex?.short_label,
       relativeToPrimaryIndex,
+      t,
       technicalReport,
     ]
   );
@@ -2714,7 +2815,7 @@ export default function StockDetailPanel({
     setDataPanelMessage(null);
 
     const panelRefreshProfile = getTaiwanDataPanelRefreshProfile(tab);
-    const panelRefreshLabel = getTaiwanDataPanelRefreshLabel(tab);
+    const panelRefreshLabel = t(`stockDetail.tabs.${tab}`);
 
     const runPanelRefresh = async (
       profile: TaiwanRefreshProfile,
@@ -2729,14 +2830,14 @@ export default function StockDetailPanel({
           timeoutMs: 600000,
           onUpdate: (job) => {
             if (activeStockIdRef.current === targetStockId) {
-              setDataPanelMessage(formatPanelJobProgress(label, job));
+              setDataPanelMessage(formatPanelJobProgress(label, job, t));
             }
           },
         }
       );
 
       if (getJobResultStatus(job) === "error") {
-        throw new Error(formatBackfillOutcome(job, label));
+        throw new Error(formatBackfillOutcome(job, label, t));
       }
 
       return job;
@@ -2784,30 +2885,44 @@ export default function StockDetailPanel({
       setShareholding(nextShareholding);
       setMargin(nextMargin);
 
-      const coverageText = nextCoverage
-        ? `集保 ${nextCoverage.shareholding_week_count} 週${
-            nextCoverage.shareholding_latest_date
-              ? `，最新 ${formatDate(nextCoverage.shareholding_latest_date)}`
-              : ""
-          }；融資融券 ${nextCoverage.margin_row_count} 筆${
-            nextCoverage.margin_latest_trade_date
-              ? `，最新 ${formatDate(nextCoverage.margin_latest_trade_date)}`
-              : ""
-          }`
-        : `集保 ${fallbackShareholdingWeekCount} 週；融資融券 ${
-            nextMarginRows.length || (nextMargin ? 1 : 0)
-          } 筆`;
+      const shareholdingLatest =
+        nextCoverage?.shareholding_latest_date
+          ? t("stockDetail.dataPanel.cache.latestDate", {
+              date: formatDate(nextCoverage.shareholding_latest_date),
+            })
+          : "";
+      const marginLatest =
+        nextCoverage?.margin_latest_trade_date
+          ? t("stockDetail.dataPanel.cache.latestDate", {
+              date: formatDate(nextCoverage.margin_latest_trade_date),
+            })
+          : "";
+      const marginRows = nextCoverage
+        ? nextCoverage.margin_row_count
+        : nextMarginRows.length || (nextMargin ? 1 : 0);
+      const coverageText = t("stockDetail.dataPanel.cache.coverageSummary", {
+        weekCount: nextCoverage?.shareholding_week_count ?? fallbackShareholdingWeekCount,
+        shareholdingLatest,
+        marginRows,
+        marginLatest,
+      });
 
       const failures = [
-        coverageResult.status === "rejected" ? "快取狀態" : null,
-        shareholdingResult.status === "rejected" ? "集保股權分散" : null,
-        marginResult.status === "rejected" ? "融資融券" : null,
+        coverageResult.status === "rejected" ? t("stockDetail.dataPanel.cache.status") : null,
+        shareholdingResult.status === "rejected"
+          ? t("stockDetail.dataPanel.cache.shareholding")
+          : null,
+        marginResult.status === "rejected" ? t("stockDetail.dataPanel.cache.marginShort") : null,
       ].filter(Boolean);
 
       const panelNotes = [
         statusNote,
         coverageText,
-        failures.length ? `部分快取讀取失敗：${failures.join("、")}` : null,
+        failures.length
+          ? t("stockDetail.dataPanel.cache.readPartialFailed", {
+              items: failures.join(t("stockDetail.jobs.outcome.detailSeparator")),
+            })
+          : null,
       ].filter(Boolean);
 
       setDataPanelMessage(panelNotes.join("；"));
@@ -2838,14 +2953,17 @@ export default function StockDetailPanel({
         setBrokerBranchSummary(branchSummary);
         setDataPanelMessage(
           branchSummary.trade_date
-            ? `${formatBackfillOutcome(refreshJob, panelRefreshLabel)}；分點 Top15 已讀取至 ${formatDate(branchSummary.trade_date)}`
-            : "尚無分點 Top15 資料"
+            ? t("stockDetail.dataPanel.branchLoadedThrough", {
+                outcome: formatBackfillOutcome(refreshJob, panelRefreshLabel, t),
+                date: formatDate(branchSummary.trade_date),
+              })
+            : t("stockDetail.dataPanel.empty.branch")
         );
         return;
       }
 
       if (tab === "chips") {
-        const initialCache = await loadCachedChips("已先顯示本機快取");
+        const initialCache = await loadCachedChips(t("stockDetail.dataPanel.cache.localShown"));
         let hasBackfillIssue = false;
 
         if (initialCache.hasShareholding || initialCache.hasMargin) {
@@ -2862,7 +2980,9 @@ export default function StockDetailPanel({
         }
 
         const finalCache = await loadCachedChips(
-          hasBackfillIssue ? "部分補齊未完成，詳見左側更新狀態" : "籌碼資料已重新讀取"
+          hasBackfillIssue
+            ? t("stockDetail.dataPanel.cache.partialBackfill")
+            : t("stockDetail.dataPanel.cache.chipsReloaded")
         );
 
         if (activeStockIdRef.current !== targetStockId) return;
@@ -2890,7 +3010,7 @@ export default function StockDetailPanel({
         dataPanelResolvedKeysRef.current.add(requestKey);
         setInstitutional(institutionalRows[institutionalRows.length - 1] ?? null);
         setInstitutionalHistory(institutionalRows);
-        setDataPanelMessage(formatBackfillOutcome(refreshJob, panelRefreshLabel));
+        setDataPanelMessage(formatBackfillOutcome(refreshJob, panelRefreshLabel, t));
         return;
       }
 
@@ -2910,7 +3030,7 @@ export default function StockDetailPanel({
         dataPanelResolvedKeysRef.current.add(requestKey);
         setMonthlyRevenue(revenueRows[revenueRows.length - 1] ?? null);
         setMonthlyRevenueHistory(revenueRows);
-        setDataPanelMessage(formatBackfillOutcome(refreshJob, panelRefreshLabel));
+        setDataPanelMessage(formatBackfillOutcome(refreshJob, panelRefreshLabel, t));
         return;
       }
 
@@ -2930,12 +3050,12 @@ export default function StockDetailPanel({
         dataPanelResolvedKeysRef.current.add(requestKey);
         setFinancialMetric(financialRows[financialRows.length - 1] ?? null);
         setFinancialMetricHistory(financialRows);
-        setDataPanelMessage(formatBackfillOutcome(refreshJob, panelRefreshLabel));
+        setDataPanelMessage(formatBackfillOutcome(refreshJob, panelRefreshLabel, t));
       }
     } catch {
       if (activeStockIdRef.current !== targetStockId) return;
 
-      setDataPanelMessage("補資料失敗，詳見左側更新狀態或稍後重試");
+      setDataPanelMessage(t("stockDetail.dataPanel.backfillFailedRetry"));
     } finally {
       if (dataPanelRequestKeyRef.current === requestKey) {
         dataPanelRequestKeyRef.current = null;
@@ -2959,7 +3079,14 @@ export default function StockDetailPanel({
           timeoutMs: 600000,
           onUpdate: (job) => {
             if (!cancelled && activeStockIdRef.current === targetStockId) {
-              setDataPanelMessage(formatPanelJobProgress("自選股基礎資料自動更新", job));
+              const translate = tRef.current;
+              setDataPanelMessage(
+                formatPanelJobProgress(
+                  translate("stockDetail.jobs.fallbackLabels.basicAutoRefresh"),
+                  job,
+                  translate
+                )
+              );
             }
           },
         }
@@ -2968,18 +3095,21 @@ export default function StockDetailPanel({
           if (cancelled || activeStockIdRef.current !== targetStockId) return;
 
           const resultStatus = getJobResultStatus(job);
+          const translate = tRef.current;
           setDataPanelMessage(
             resultStatus === "partial_success"
-              ? "自選股基礎資料自動更新部分完成，部分來源暫時不可用"
+              ? translate("stockDetail.dataPanel.basicAutoRefresh.partial")
               : resultStatus === "error"
-                ? "自選股基礎資料自動更新失敗"
-                : "自選股基礎資料自動更新完成"
+                ? translate("stockDetail.dataPanel.basicAutoRefresh.error")
+                : translate("stockDetail.dataPanel.basicAutoRefresh.success")
           );
         })
         .catch(() => {
           if (cancelled || activeStockIdRef.current !== targetStockId) return;
 
-          setDataPanelMessage("自選股基礎資料自動更新失敗，詳見左側更新狀態");
+          setDataPanelMessage(
+            tRef.current("stockDetail.dataPanel.basicAutoRefresh.failedWithStatus")
+          );
         });
     }, 0);
 
@@ -3010,7 +3140,7 @@ export default function StockDetailPanel({
 
         setBrokerBranchSummary(cachedBranchSummary);
         setDataPanelLoading((current) => (current === activeDataTab ? null : current));
-        setDataPanelMessage("使用暫存資料");
+        setDataPanelMessage(tRef.current("stockDetail.dataPanel.cache.cachedData"));
       }, 0);
 
       return () => window.clearTimeout(timer);
@@ -3021,7 +3151,9 @@ export default function StockDetailPanel({
         if (dataPanelRequestKeyRef.current === requestKey) return;
 
         setDataPanelLoading((current) => (current === activeDataTab ? null : current));
-        setDataPanelMessage(hasCachedResult ? "使用暫存資料" : null);
+        setDataPanelMessage(
+          hasCachedResult ? tRef.current("stockDetail.dataPanel.cache.cachedData") : null
+        );
       }, 0);
 
       return () => window.clearTimeout(timer);
@@ -3058,7 +3190,9 @@ export default function StockDetailPanel({
           <div className="flex flex-wrap items-start justify-between gap-4 border-b border-omi-border-subtle px-5 py-4">
             <div>
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
-                {isIndexProduct ? "Index" : "Stock"}
+                {isIndexProduct
+                  ? t("stockDetail.entity.index")
+                  : t("stockDetail.entity.stock")}
               </div>
               <h2 className="mt-1 text-2xl font-bold text-omi-text-strong">
                 {stockId} {indexProduct?.stockName ?? stockName ?? stockInfo?.stock_name ?? ""}
@@ -3066,7 +3200,9 @@ export default function StockDetailPanel({
               <div className="mt-1 text-sm text-omi-text-muted">
                 {indexProduct
                   ? `${indexProduct.market} · 指數 · ${indexProduct.symbol}`
-                  : `${stockInfo?.market ?? "-"} · ${stockInfo?.industry ?? "未分類"}`}{" "}
+                  : `${stockInfo?.market ?? "-"} · ${
+                      stockInfo?.industry ?? t("stockDetail.uncategorized")
+                    }`}{" "}
                 ·{" "}
                 {displayTime}
               </div>
@@ -3120,7 +3256,7 @@ export default function StockDetailPanel({
                           : "text-omi-text-muted hover:bg-omi-surface",
                       ].join(" ")}
                     >
-                      {timeframeLabels[item]}
+                      {t(`timeframes.${item}`)}
                     </button>
                   ))}
                 </div>
@@ -3132,11 +3268,11 @@ export default function StockDetailPanel({
                       onClick={() => setIndicatorMenuOpen((value) => !value)}
                       className="h-8 border border-omi-control bg-omi-surface px-3 text-sm font-semibold text-omi-text hover:border-omi-accent hover:text-omi-danger"
                     >
-                      指標
+                      {t("stockDetail.indicators")}
                     </button>
                     {indicatorMenuOpen ? (
                       <div className="absolute right-0 z-20 mt-2 w-56 border border-omi-border-subtle bg-omi-surface p-3 text-left shadow-lg">
-                        <div className="mb-2 text-xs font-bold text-omi-text-muted">顯示項目</div>
+                        <div className="mb-2 text-xs font-bold text-omi-text-muted">{t("stockDetail.displayItems")}</div>
                         {intradayIndicatorOptions.map((option) => (
                           <label
                             key={option.key}
@@ -3153,7 +3289,7 @@ export default function StockDetailPanel({
                                 {option.label}
                               </span>
                               <span className="block text-omi-text-muted">
-                                {option.description}
+                                {t(option.descriptionKey)}
                               </span>
                             </span>
                           </label>
@@ -3169,7 +3305,7 @@ export default function StockDetailPanel({
                         onClick={() => setIndicatorMenuOpen((value) => !value)}
                         className="h-8 border border-omi-control bg-omi-surface px-3 text-sm font-semibold text-omi-text hover:border-omi-accent hover:text-omi-danger"
                       >
-                        指標
+                        {t("stockDetail.indicators")}
                       </button>
                       {indicatorMenuOpen ? (
                         <TechnicalIndicatorMenu
@@ -3204,7 +3340,7 @@ export default function StockDetailPanel({
                         .filter(Boolean)
                         .join(" ")}
                     >
-                      {chartFocusMode ? "總覽" : "放大"}
+                      {chartFocusMode ? t("stockDetail.overview") : t("stockDetail.expand")}
                     </button>
                   </div>
                 )}
@@ -3259,7 +3395,10 @@ export default function StockDetailPanel({
                   ) : null}
                 </div>
               }
-              timeframeOptions={professionalTimeframeOptions}
+              timeframeOptions={professionalTimeframeOptions.map((option) => ({
+                key: option,
+                label: timeframeLabel(t, option),
+              }))}
               timeframe={professionalTimeframe}
               onTimeframeChange={handleProfessionalTimeframeChange}
               chartStyle={professionalChartStyle}
@@ -3297,7 +3436,13 @@ export default function StockDetailPanel({
                 ) : null
               }
               chartReady={professionalChartReady}
-              emptyState={<EmptyDataState message={`讀取${professionalTimeframeLabel}資料中...`} />}
+              emptyState={
+                <EmptyDataState
+                  message={t("stockDetail.loadingFrame", {
+                    label: professionalTimeframeLabel,
+                  })}
+                />
+              }
               chartData={professionalChartData}
               indicatorData={
                 professionalIsIntraday ? emptyProfessionalIndicatorData : indicatorForTimeframe
@@ -3311,7 +3456,7 @@ export default function StockDetailPanel({
                 professionalIsIntraday ? emptyProfessionalBenchmarkData : benchmarkDataForChart
               }
               benchmarkLabel={benchmarkLabel}
-              volumePanelLabel={isIndexProduct ? "成交金額(億)" : "成交量(張)"}
+              volumePanelLabel={isIndexProduct ? t("chart.kline.tradeValueYi") : undefined}
               volumeValueKey={isIndexProduct ? "trade_value" : "volume"}
               drawingTool={chartDrawingTool}
               drawings={chartDrawings}
@@ -3336,7 +3481,7 @@ export default function StockDetailPanel({
             <IntradayTrendChart
               points={todayTrend}
               previousClose={todayPreviousClose}
-              label={timeframeLabels[effectiveTimeframe]}
+              label={timeframeLabel(t, effectiveTimeframe)}
               source={todaySource}
               indicators={intradayIndicators}
               revealKey={`${stockId}:${effectiveTimeframe}`}
@@ -3347,19 +3492,23 @@ export default function StockDetailPanel({
             <StockKLineChart
               chartData={chartData}
               indicatorData={indicatorForTimeframe}
-              label={timeframeLabels[effectiveTimeframe]}
+              label={timeframeLabel(t, effectiveTimeframe)}
               indicators={chartIndicators}
               indicatorParameters={indicatorParameters}
               benchmarkData={benchmarkDataForChart}
               benchmarkLabel={benchmarkLabel}
               revealKey={`${stockId}:${effectiveTimeframe}`}
-              volumePanelLabel={isIndexProduct ? "成交金額(億)" : undefined}
-              volumeTooltipLabel={isIndexProduct ? "成交金額(億)" : undefined}
+              volumePanelLabel={isIndexProduct ? t("chart.kline.tradeValueYi") : undefined}
+              volumeTooltipLabel={isIndexProduct ? t("chart.kline.tradeValueYi") : undefined}
               volumeValueKey={isIndexProduct ? "trade_value" : "volume"}
               volumeValueFormatter={isIndexProduct ? formatTradeValueYi : undefined}
             />
           ) : (
-            <EmptyDataState message={`讀取${timeframeLabels[effectiveTimeframe]}資料中...`} />
+            <EmptyDataState
+              message={t("stockDetail.loadingFrame", {
+                label: timeframeLabel(t, effectiveTimeframe),
+              })}
+            />
           )}
         </div>
 
@@ -3388,7 +3537,11 @@ export default function StockDetailPanel({
           <IndexListPanel
             items={indexList}
             loadState={indexListLoadState}
-            marketLabel={indexProduct?.market === "TPEX" ? "上櫃" : "上市"}
+            marketLabel={
+              indexProduct?.market === "TPEX"
+                ? t("stockDetail.marketLabels.otc")
+                : t("stockDetail.marketLabels.listed")
+            }
           />
         ) : showTechnicalLoading ? (
           <TechnicalLoadingPanel />
@@ -3396,7 +3549,7 @@ export default function StockDetailPanel({
           <>
             <div className="omi-technical-summary border-b border-omi-border-subtle px-5 py-3">
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
-                Technical
+                {stockTechnicalText(t, "eyebrow")}
               </div>
               <div className="mt-1.5 flex items-start justify-between gap-4">
                 <div className="min-w-0">
@@ -3418,7 +3571,7 @@ export default function StockDetailPanel({
               {stockSignalChips.length ? (
                 <div
                   className="mt-3 flex flex-wrap gap-1.5"
-                  aria-label="個股技術訊號"
+                  aria-label={t("stockDetail.chipMetrics.technicalSignalsAria")}
                 >
                   {stockSignalChips.map((signal) => (
                     <span
@@ -3461,12 +3614,12 @@ export default function StockDetailPanel({
                 <div className="omi-technical-market flex items-start justify-between gap-4 text-xs">
                   <div>
                     <div className="font-bold uppercase tracking-[0.14em] text-omi-text-muted">
-                      Market
+                      {t("dashboard.marketIndex.market")}
                     </div>
                     <div className="mt-0.5 text-sm font-bold text-omi-text-strong">
-                      {primaryMarketIndex?.short_label ?? "大盤"}
+                      {primaryMarketIndex?.short_label ?? t("stockDetail.marketFallback")}
                     </div>
-                    <div className="mt-0.5 text-omi-text-muted">{marketRegimeLabel(primaryMarketIndex)}</div>
+                    <div className="mt-0.5 text-omi-text-muted">{marketRegimeLabel(primaryMarketIndex, t)}</div>
                   </div>
                   <div className="text-right">
                     <div className="font-bold text-omi-text-strong">{formatPrice(primaryMarketIndex?.close)}</div>
@@ -3491,7 +3644,7 @@ export default function StockDetailPanel({
               {dataPanelTabs.map((tab) => (
                 <DataTabButton
                   key={tab.key}
-                  tab={tab}
+                  tab={{ ...tab, label: t(`stockDetail.tabs.${tab.key}`) }}
                   active={activeDataTab === tab.key}
                   onClick={() => handleDataTabClick(tab.key)}
                 />
@@ -3500,13 +3653,12 @@ export default function StockDetailPanel({
 
             <div className="px-5 py-4">
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
-                Data
+                {t("stockDetail.data")}
               </div>
               <div className="mt-1 flex items-end justify-between gap-4">
                 <div>
                   <div className="text-lg font-bold text-omi-text-strong">
-                    {dataPanelTabs.find((tab) => tab.key === activeDataTab)?.label ?? "資料"}
-                    資料
+                    {t(`stockDetail.tabs.${activeDataTab}`)} {t("stockDetail.data")}
                   </div>
                 </div>
               </div>
@@ -3559,8 +3711,8 @@ export default function StockDetailPanel({
             </div>
             <div className="mt-1 flex items-end justify-between gap-4">
               <div>
-                <div className="text-lg font-bold text-omi-text-strong">籌碼資料</div>
-                <div className="mt-1 text-xs text-omi-text-muted">依資料日期分類</div>
+                <div className="text-lg font-bold text-omi-text-strong">{t("stockDetail.chipData")}</div>
+                <div className="mt-1 text-xs text-omi-text-muted">{t("stockDetail.byDataDate")}</div>
               </div>
             </div>
 
@@ -3578,44 +3730,44 @@ export default function StockDetailPanel({
                     </div>
 
                     <div className="grid grid-cols-1 gap-3 2xl:grid-cols-2">
-                      <ChipMetricBlock title="三大法人">
+                      <ChipMetricBlock title={t("stockDetail.chipMetrics.institutionalTitle")}>
                         <MetricRow
-                          label="外資買賣超"
+                          label={t("stockDetail.chipMetrics.foreignNet")}
                           value={formatSignedNumber(group.institutional?.foreign_investor_net)}
                           tone={valueTone(group.institutional?.foreign_investor_net)}
                         />
                         <MetricRow
-                          label="投信買賣超"
+                          label={t("stockDetail.chipMetrics.investmentTrustNet")}
                           value={formatSignedNumber(group.institutional?.investment_trust_net)}
                           tone={valueTone(group.institutional?.investment_trust_net)}
                         />
                         <MetricRow
-                          label="自營商買賣超"
+                          label={t("stockDetail.chipMetrics.dealerNet")}
                           value={formatSignedNumber(group.institutional?.dealer_net)}
                           tone={valueTone(group.institutional?.dealer_net)}
                         />
                         <MetricRow
-                          label="三大法人合計"
+                          label={t("stockDetail.chipMetrics.totalInstitutionalNet")}
                           value={formatSignedNumber(group.institutional?.total_institutional_net)}
                           tone={valueTone(group.institutional?.total_institutional_net)}
                         />
                       </ChipMetricBlock>
 
-                      <ChipMetricBlock title="融資融券">
+                      <ChipMetricBlock title={t("stockDetail.chipMetrics.marginShortTitle")}>
                         <MetricRow
-                          label="融資餘額"
+                          label={t("stockDetail.chipMetrics.marginBalance")}
                           value={formatNumber(group.margin?.margin_today_balance)}
                         />
                         <MetricRow
-                          label="融券餘額"
+                          label={t("stockDetail.chipMetrics.shortBalance")}
                           value={formatNumber(group.margin?.short_today_balance)}
                         />
                         <MetricRow
-                          label="資券相抵"
+                          label={t("stockDetail.chipMetrics.offset")}
                           value={formatNumber(group.margin?.offset)}
                         />
                         <MetricRow
-                          label="融資買 / 賣"
+                          label={t("stockDetail.chipMetrics.marginBuySell")}
                           value={`${formatNumber(group.margin?.margin_buy)} / ${formatNumber(
                             group.margin?.margin_sell
                           )}`}
@@ -3626,7 +3778,7 @@ export default function StockDetailPanel({
                 ))
               ) : (
                 <div className="border border-dashed border-omi-border-subtle px-4 py-6 text-center text-sm text-omi-text-muted">
-                  尚無三大法人或融資融券資料
+                  {t("stockDetail.chipMetrics.empty")}
                 </div>
               )}
             </div>

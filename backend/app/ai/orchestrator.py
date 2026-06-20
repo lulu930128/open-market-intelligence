@@ -90,6 +90,7 @@ def generate_stock_llm_analysis(
     branch_days: int = 5,
     include_intraday: bool = False,
     analysis_horizon: str = "swing",
+    response_preferences: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     envelope = reports.build_stock_brief(
         db=db,
@@ -98,6 +99,7 @@ def generate_stock_llm_analysis(
         branch_days=branch_days,
         include_intraday=include_intraday,
         analysis_horizon=analysis_horizon,
+        response_preferences=response_preferences,
     )
     return _build_non_persistent_analysis(envelope, kind="stock_llm_analysis")
 
@@ -109,6 +111,7 @@ def generate_us_stock_llm_analysis(
     strategy_profile: str = "short_term_momentum",
     analysis_horizon: str = "swing",
     tool_runs: list[dict[str, Any]] | None = None,
+    response_preferences: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     envelope = reports.build_us_stock_brief(
         db=db,
@@ -116,6 +119,7 @@ def generate_us_stock_llm_analysis(
         strategy_profile=strategy_profile,
         analysis_horizon=analysis_horizon,
         tool_runs=tool_runs,
+        response_preferences=response_preferences,
     )
     return _build_non_persistent_analysis(envelope, kind="us_stock_llm_analysis")
 
@@ -128,6 +132,7 @@ def generate_watchlist_llm_analysis(
     rank_by: str = "score",
     sort_order: str = "desc",
     radar_mode: str = "action",
+    response_preferences: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     envelope = reports.build_watchlist_brief(
         db=db,
@@ -136,6 +141,7 @@ def generate_watchlist_llm_analysis(
         rank_by=rank_by,
         sort_order=sort_order,
         radar_mode=radar_mode,
+        response_preferences=response_preferences,
     )
     return _build_non_persistent_analysis(envelope, kind="watchlist_llm_analysis")
 
@@ -148,6 +154,7 @@ def generate_stock_llm_report(
     branch_days: int = 5,
     include_intraday: bool = False,
     analysis_horizon: str = "swing",
+    response_preferences: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     envelope = reports.build_stock_brief(
         db=db,
@@ -156,6 +163,7 @@ def generate_stock_llm_report(
         branch_days=branch_days,
         include_intraday=include_intraday,
         analysis_horizon=analysis_horizon,
+        response_preferences=response_preferences,
     )
 
     started_at = _now()
@@ -210,6 +218,7 @@ def generate_us_stock_llm_report(
     strategy_profile: str = "short_term_momentum",
     analysis_horizon: str = "swing",
     tool_runs: list[dict[str, Any]] | None = None,
+    response_preferences: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     envelope = reports.build_us_stock_brief(
         db=db,
@@ -217,6 +226,7 @@ def generate_us_stock_llm_report(
         strategy_profile=strategy_profile,
         analysis_horizon=analysis_horizon,
         tool_runs=tool_runs,
+        response_preferences=response_preferences,
     )
 
     started_at = _now()
@@ -272,6 +282,7 @@ def generate_watchlist_llm_report(
     rank_by: str = "score",
     sort_order: str = "desc",
     radar_mode: str = "action",
+    response_preferences: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     envelope = reports.build_watchlist_brief(
         db=db,
@@ -280,6 +291,7 @@ def generate_watchlist_llm_report(
         rank_by=rank_by,
         sort_order=sort_order,
         radar_mode=radar_mode,
+        response_preferences=response_preferences,
     )
 
     started_at = _now()

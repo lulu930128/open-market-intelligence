@@ -29,17 +29,22 @@ export const chartDrawingSyncDelayMs = 700;
 export const professionalChartDrawingToolOptions: Array<{
   key: ChartDrawingTool;
   label: string;
+  labelKey: string;
 }> = [
-  { key: "cursor", label: "游標" },
-  { key: "horizontal", label: "水平" },
-  { key: "trend", label: "趨勢" },
-  { key: "ray", label: "射線" },
-  { key: "rectangle", label: "區間" },
-  { key: "fibonacci", label: "Fib" },
-  { key: "anchorVwap", label: "AVWAP" },
-  { key: "volumeProfileRange", label: "量價分布" },
-  { key: "measure", label: "量測" },
-  { key: "priceRange", label: "價幅%" },
+  { key: "cursor", label: "Cursor", labelKey: "chart.drawingTools.cursor" },
+  { key: "horizontal", label: "Horizontal", labelKey: "chart.drawingTools.horizontal" },
+  { key: "trend", label: "Trend", labelKey: "chart.drawingTools.trend" },
+  { key: "ray", label: "Ray", labelKey: "chart.drawingTools.ray" },
+  { key: "rectangle", label: "Range", labelKey: "chart.drawingTools.rectangle" },
+  { key: "fibonacci", label: "Fib", labelKey: "chart.drawingTools.fibonacci" },
+  { key: "anchorVwap", label: "AVWAP", labelKey: "chart.drawingTools.anchorVwap" },
+  {
+    key: "volumeProfileRange",
+    label: "Volume profile",
+    labelKey: "chart.drawingTools.volumeProfileRange",
+  },
+  { key: "measure", label: "Measure", labelKey: "chart.drawingTools.measure" },
+  { key: "priceRange", label: "Price range %", labelKey: "chart.drawingTools.priceRange" },
 ];
 
 export const professionalChartDrawingToolOptionMap = new Map(

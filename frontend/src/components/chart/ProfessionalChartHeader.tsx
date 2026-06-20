@@ -1,5 +1,7 @@
 "use client";
 
+import { useT } from "@/i18n";
+
 type ProfessionalChartHeaderProps = {
   candleCount: number;
   label: string;
@@ -36,12 +38,17 @@ export default function ProfessionalChartHeader({
   volumeEnabled,
   volumePanelLabel,
 }: ProfessionalChartHeaderProps) {
+  const t = useT();
+
   return (
     <div className="flex min-h-9 flex-wrap items-center justify-between gap-x-4 gap-y-1 border-b border-omi-border-subtle px-4 py-1.5">
       <div className="flex min-w-0 items-baseline gap-2">
-        <span className="shrink-0 text-xs font-bold text-omi-text-strong">專業 K 線</span>
+        <span className="shrink-0 text-xs font-bold text-omi-text-strong">{t("chart.professionalKline")}</span>
         <span className="truncate text-[11px] font-medium text-omi-text-muted">
-          {label} · {candleCount.toLocaleString("zh-TW")} 根 · 可拖移縮放
+          {t("chart.draggableZoomable", {
+            label,
+            count: candleCount.toLocaleString("zh-TW"),
+          })}
         </span>
       </div>
       <div className="flex shrink-0 flex-wrap items-center justify-end gap-3 text-[11px] font-semibold text-omi-text-muted">

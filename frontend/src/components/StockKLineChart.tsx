@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { useT, type TranslationFunction } from "@/i18n";
 import type { ChartPoint, StockIndicatorPoint } from "@/types/market";
 
 type Props = {
@@ -256,38 +257,38 @@ type HoverPriceGuideState = {
 export const indicatorCategoryDefinitions: Array<Omit<IndicatorCategoryGroup, "options">> = [
   {
     key: "trend",
-    label: "趨勢 / 均線類",
-    description: "判斷方向、均線排列、趨勢強度與轉向。",
+    label: "Trend / Moving Average",
+    description: "Direction, MA alignment, trend strength, and reversals.",
   },
   {
     key: "volatility",
-    label: "通道 / 波動類",
-    description: "觀察價格區間、波動擴張與風險位置。",
+    label: "Channel / Volatility",
+    description: "Price ranges, volatility expansion, and risk position.",
   },
   {
     key: "momentum",
-    label: "動能 / 震盪類",
-    description: "判斷強弱、超買超賣與短線轉折。",
+    label: "Momentum / Oscillator",
+    description: "Strength, overbought/oversold zones, and short-term turns.",
   },
   {
     key: "volume",
-    label: "量價 / 資金流類",
-    description: "觀察成交量、量價背離與資金流向。",
+    label: "Volume / Money Flow",
+    description: "Volume, volume-price divergence, and money flow.",
   },
   {
     key: "structure",
-    label: "價格結構 / 關鍵位",
-    description: "前高前低、支撐壓力、缺口與樞紐位。",
+    label: "Price Structure / Levels",
+    description: "Prior highs/lows, support/resistance, gaps, and pivots.",
   },
   {
     key: "relative",
-    label: "相對 / 市場類",
-    description: "相對大盤、族群與外部市場的強弱比較。",
+    label: "Relative / Market",
+    description: "Relative strength versus the index, group, and external markets.",
   },
   {
     key: "signals",
-    label: "訊號 / 標記類",
-    description: "交叉、突破、背離與型態提示。",
+    label: "Signals / Markers",
+    description: "Crossovers, breakouts, divergences, and pattern markers.",
   },
 ];
 
@@ -296,51 +297,51 @@ export const indicatorOptions: AvailableIndicatorOption[] = [
   { status: "available", key: "ema", label: "EMA", description: "EMA12 / EMA26", category: "trend", plot: "overlay" },
   { status: "available", key: "adx", label: "ADX", description: "ADX / +DI / -DI", category: "trend", plot: "pane" },
   { status: "available", key: "psar", label: "SAR", description: "Parabolic SAR", category: "trend", plot: "overlay" },
-  { status: "available", key: "supertrend", label: "Supertrend", description: "ATR 趨勢帶", category: "trend", plot: "overlay" },
-  { status: "available", key: "ichimoku", label: "Ichimoku", description: "一目均衡表 9 / 26 / 52", category: "trend", plot: "overlay" },
+  { status: "available", key: "supertrend", label: "Supertrend", description: "ATR trend band", category: "trend", plot: "overlay" },
+  { status: "available", key: "ichimoku", label: "Ichimoku", description: "Ichimoku 9 / 26 / 52", category: "trend", plot: "overlay" },
   { status: "available", key: "bollinger", label: "BOLL", description: "20MA +/- 2SD", category: "volatility", plot: "overlay" },
-  { status: "available", key: "donchian", label: "DONCH", description: "20 日通道", category: "volatility", plot: "overlay" },
-  { status: "available", key: "keltner", label: "Keltner", description: "EMA + ATR 通道", category: "volatility", plot: "overlay" },
+  { status: "available", key: "donchian", label: "DONCH", description: "20-day channel", category: "volatility", plot: "overlay" },
+  { status: "available", key: "keltner", label: "Keltner", description: "EMA + ATR channel", category: "volatility", plot: "overlay" },
   { status: "available", key: "atr", label: "ATR", description: "ATR 14", category: "volatility", plot: "pane" },
   { status: "available", key: "rsi", label: "RSI", description: "RSI 14", category: "momentum", plot: "pane" },
   { status: "available", key: "macd", label: "MACD", description: "12 / 26 / 9", category: "momentum", plot: "pane" },
   { status: "available", key: "kd", label: "KD", description: "KD 9 / 3", category: "momentum", plot: "pane" },
-  { status: "available", key: "aroon", label: "Aroon", description: "趨勢新高 / 新低強度", category: "momentum", plot: "pane" },
+  { status: "available", key: "aroon", label: "Aroon", description: "New-high / new-low trend strength", category: "momentum", plot: "pane" },
   { status: "available", key: "cci", label: "CCI", description: "CCI 20", category: "momentum", plot: "pane" },
   { status: "available", key: "williamsR", label: "W%R", description: "Williams %R 14", category: "momentum", plot: "pane" },
   { status: "available", key: "roc", label: "ROC", description: "ROC 12", category: "momentum", plot: "pane" },
-  { status: "available", key: "stochRsi", label: "StochRSI", description: "RSI 隨機指標", category: "momentum", plot: "pane" },
-  { status: "available", key: "trix", label: "TRIX", description: "三重平滑動能", category: "momentum", plot: "pane" },
-  { status: "available", key: "volume", label: "VOL", description: "成交量", category: "volume", plot: "pane" },
-  { status: "available", key: "vwap", label: "VWAP", description: "量價均價", category: "volume", plot: "overlay" },
-  { status: "available", key: "obv", label: "OBV", description: "能量潮", category: "volume", plot: "pane" },
+  { status: "available", key: "stochRsi", label: "StochRSI", description: "RSI stochastic indicator", category: "momentum", plot: "pane" },
+  { status: "available", key: "trix", label: "TRIX", description: "Triple-smoothed momentum", category: "momentum", plot: "pane" },
+  { status: "available", key: "volume", label: "VOL", description: "Volume", category: "volume", plot: "pane" },
+  { status: "available", key: "vwap", label: "VWAP", description: "Volume-weighted average price", category: "volume", plot: "overlay" },
+  { status: "available", key: "obv", label: "OBV", description: "On-balance volume", category: "volume", plot: "pane" },
   { status: "available", key: "mfi", label: "MFI", description: "Money Flow 14", category: "volume", plot: "pane" },
-  { status: "available", key: "signals", label: "SIGNAL", description: "交叉 / 突破標記", category: "signals", plot: "signal" },
+  { status: "available", key: "signals", label: "SIGNAL", description: "Crossover / breakout markers", category: "signals", plot: "signal" },
 ];
 
 export const professionalIndicatorOptions: AvailableIndicatorOption[] = [
-  { status: "available", key: "wma", label: "WMA", description: "加權移動平均", category: "trend", plot: "overlay" },
+  { status: "available", key: "wma", label: "WMA", description: "Weighted moving average", category: "trend", plot: "overlay" },
   { status: "available", key: "hma", label: "HMA", description: "Hull Moving Average", category: "trend", plot: "overlay" },
-  { status: "available", key: "vwma", label: "VWMA", description: "成交量加權均線", category: "trend", plot: "overlay" },
-  { status: "available", key: "bbWidth", label: "BB Width", description: "布林通道寬度", category: "volatility", plot: "pane" },
-  { status: "available", key: "stdDev", label: "StdDev", description: "標準差波動", category: "volatility", plot: "pane" },
-  { status: "available", key: "choppiness", label: "CHOP", description: "盤整 / 趨勢程度", category: "volatility", plot: "pane" },
-  { status: "available", key: "momentum", label: "Momentum", description: "價格動量", category: "momentum", plot: "pane" },
+  { status: "available", key: "vwma", label: "VWMA", description: "Volume-weighted moving average", category: "trend", plot: "overlay" },
+  { status: "available", key: "bbWidth", label: "BB Width", description: "Bollinger band width", category: "volatility", plot: "pane" },
+  { status: "available", key: "stdDev", label: "StdDev", description: "Standard deviation volatility", category: "volatility", plot: "pane" },
+  { status: "available", key: "choppiness", label: "CHOP", description: "Chop / trend degree", category: "volatility", plot: "pane" },
+  { status: "available", key: "momentum", label: "Momentum", description: "Price momentum", category: "momentum", plot: "pane" },
   { status: "available", key: "tsi", label: "TSI", description: "True Strength Index", category: "momentum", plot: "pane" },
   { status: "available", key: "awesomeOscillator", label: "AO", description: "Awesome Oscillator", category: "momentum", plot: "pane" },
   { status: "available", key: "ultimateOscillator", label: "UO", description: "Ultimate Oscillator", category: "momentum", plot: "pane" },
   { status: "available", key: "cmf", label: "CMF", description: "Chaikin Money Flow", category: "volume", plot: "pane" },
   { status: "available", key: "adLine", label: "A/D", description: "Accumulation / Distribution", category: "volume", plot: "pane" },
   { status: "available", key: "pvt", label: "PVT", description: "Price Volume Trend", category: "volume", plot: "pane" },
-  { status: "available", key: "volumeProfile", label: "VPVR", description: "可視區成交量分布近似", category: "volume", plot: "context" },
-  { status: "available", key: "pivotPoints", label: "Pivot", description: "前一根 K 的樞紐位", category: "structure", plot: "overlay" },
-  { status: "available", key: "supportResistance", label: "S/R", description: "區間支撐壓力", category: "structure", plot: "overlay" },
-  { status: "available", key: "gap", label: "Gap", description: "跳空缺口標記", category: "structure", plot: "overlay" },
-  { status: "available", key: "divergence", label: "Divergence", description: "RSI / MACD 價格背離", category: "signals", plot: "signal" },
-  { status: "available", key: "candlestickPatterns", label: "Pattern", description: "K 線型態辨識", category: "signals", plot: "signal" },
-  { status: "available", key: "relativeStrength", label: "RS", description: "相對大盤強弱", category: "relative", plot: "pane" },
-  { status: "available", key: "beta", label: "Beta", description: "相對大盤敏感度", category: "relative", plot: "pane" },
-  { status: "available", key: "correlation", label: "Corr", description: "與大盤報酬相關性", category: "relative", plot: "pane" },
+  { status: "available", key: "volumeProfile", label: "VPVR", description: "Approximate visible-range volume profile", category: "volume", plot: "context" },
+  { status: "available", key: "pivotPoints", label: "Pivot", description: "Prior-candle pivot levels", category: "structure", plot: "overlay" },
+  { status: "available", key: "supportResistance", label: "S/R", description: "Range support/resistance", category: "structure", plot: "overlay" },
+  { status: "available", key: "gap", label: "Gap", description: "Gap markers", category: "structure", plot: "overlay" },
+  { status: "available", key: "divergence", label: "Divergence", description: "RSI / MACD price divergence", category: "signals", plot: "signal" },
+  { status: "available", key: "candlestickPatterns", label: "Pattern", description: "Candlestick pattern recognition", category: "signals", plot: "signal" },
+  { status: "available", key: "relativeStrength", label: "RS", description: "Relative strength versus the index", category: "relative", plot: "pane" },
+  { status: "available", key: "beta", label: "Beta", description: "Sensitivity versus the index", category: "relative", plot: "pane" },
+  { status: "available", key: "correlation", label: "Corr", description: "Return correlation with the index", category: "relative", plot: "pane" },
 ];
 
 export const plannedIndicatorOptions: PlannedIndicatorOption[] = [];
@@ -362,6 +363,40 @@ export const professionalIndicatorCategoryGroups: IndicatorCategoryGroup[] =
       ...plannedIndicatorOptions,
     ].filter((option) => option.category === category.key),
   }));
+
+function translatedOrFallback(
+  t: TranslationFunction,
+  key: string,
+  fallback: string
+) {
+  const translated = t(key);
+  return translated === key ? fallback : translated;
+}
+
+export function indicatorCategoryLabel(
+  t: TranslationFunction,
+  group: IndicatorCategoryGroup
+) {
+  return translatedOrFallback(t, `indicators.categories.${group.key}.label`, group.label);
+}
+
+export function indicatorCategoryDescription(
+  t: TranslationFunction,
+  group: IndicatorCategoryGroup
+) {
+  return translatedOrFallback(
+    t,
+    `indicators.categories.${group.key}.description`,
+    group.description
+  );
+}
+
+export function indicatorOptionDescription(
+  t: TranslationFunction,
+  option: ChartIndicatorOption
+) {
+  return translatedOrFallback(t, `indicators.options.${option.key}`, option.description);
+}
 
 export const defaultIndicators: IndicatorSettings = {
   signals: false,
@@ -1510,11 +1545,14 @@ export default function StockKLineChart({
   benchmarkData = [],
   benchmarkLabel,
   revealKey,
-  volumePanelLabel = "成交量(張)",
-  volumeTooltipLabel = "成交量(張)",
+  volumePanelLabel,
+  volumeTooltipLabel,
   volumeValueKey = "volume",
   volumeValueFormatter = formatLots,
 }: Props) {
+  const t = useT();
+  const resolvedVolumePanelLabel = volumePanelLabel ?? t("chart.kline.volumeLots");
+  const resolvedVolumeTooltipLabel = volumeTooltipLabel ?? resolvedVolumePanelLabel;
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const [hoverPriceGuide, setHoverPriceGuide] = useState<HoverPriceGuideState | null>(null);
   const [visibleRange, setVisibleRange] = useState<VisibleRangeState>({
@@ -1820,7 +1858,7 @@ export default function StockKLineChart({
   if (data.length < 1) {
     return (
       <div className="flex h-[420px] items-center justify-center border border-omi-border-subtle bg-omi-surface text-sm text-omi-text-muted">
-        K 線資料不足
+        {t("chart.kline.insufficient")}
       </div>
     );
   }
@@ -1850,7 +1888,7 @@ export default function StockKLineChart({
     nextPanelTop += panelHeight + panelGap;
   }
 
-  addPanel(indicators.volume, "volume", volumePanelLabel);
+  addPanel(indicators.volume, "volume", resolvedVolumePanelLabel);
   addPanel(indicators.rsi, "rsi", `RSI ${params.rsiPeriod}`);
   addPanel(indicators.macd, "macd", `MACD ${params.macdFast}/${params.macdSlow}/${params.macdSignal}`);
   addPanel(indicators.kd, "kd", `KD ${params.kdPeriod}`);
@@ -2128,9 +2166,9 @@ export default function StockKLineChart({
   const hoverPriceGuideLabel =
     hoverPriceGuideValue !== null
       ? hoverPriceGuideSnap === "high"
-        ? `高 ${formatPrice(hoverPriceGuideValue)}`
+        ? t("chart.kline.highGuide", { value: formatPrice(hoverPriceGuideValue) })
         : hoverPriceGuideSnap === "low"
-          ? `低 ${formatPrice(hoverPriceGuideValue)}`
+          ? t("chart.kline.lowGuide", { value: formatPrice(hoverPriceGuideValue) })
           : formatPrice(hoverPriceGuideValue)
       : null;
   const hoverPriceGuideStrokeClass =
@@ -2151,9 +2189,9 @@ export default function StockKLineChart({
     <div className="border border-omi-border-subtle bg-omi-surface">
       <div className="flex min-h-16 items-start justify-between gap-4 border-b border-omi-border-subtle px-4 py-3">
         <div>
-          <div className="text-sm font-semibold text-omi-text">K 線 / 技術指標</div>
+          <div className="text-sm font-semibold text-omi-text">{t("chart.kline.title")}</div>
           <div className="mt-1 text-xs text-omi-text-muted">
-            {label} · {data.length} 根 K 線
+            {label} · {t("chart.kline.barCount", { count: data.length })}
           </div>
         </div>
 
@@ -2161,30 +2199,30 @@ export default function StockKLineChart({
           {hoveredPoint ? (
             <div className="grid min-h-[4.75rem] max-w-full grid-cols-[repeat(4,minmax(10.5rem,max-content))] gap-x-5 gap-y-1 overflow-x-auto pb-1 text-right text-xs [&>div>div]:whitespace-nowrap [&>div>div]:tabular-nums [&>div>span]:whitespace-nowrap [&>div]:min-w-[10.5rem] [&>div]:whitespace-nowrap">
               <div>
-                <span className="text-omi-text-subtle">日期</span>
+                <span className="text-omi-text-subtle">{t("chart.kline.date")}</span>
                 <div className="font-semibold text-omi-text">{hoveredPoint.time}</div>
               </div>
               <div>
-                <span className="text-omi-text-subtle">收盤</span>
+                <span className="text-omi-text-subtle">{t("chart.kline.close")}</span>
                 <div className="font-semibold text-omi-text">
                   {formatPrice(hoveredPoint.close)}
                 </div>
               </div>
               <div>
-                <span className="text-omi-text-subtle">漲跌</span>
+                <span className="text-omi-text-subtle">{t("chart.kline.change")}</span>
                 <div className={`font-semibold ${valueTone(hoveredPoint.changePct)}`}>
                   {formatPct(hoveredPoint.changePct)}
                 </div>
               </div>
               <div>
-                <span className="text-omi-text-subtle">{volumeTooltipLabel}</span>
+                <span className="text-omi-text-subtle">{resolvedVolumeTooltipLabel}</span>
                 <div className="font-semibold text-omi-text">
                   {volumeValueFormatter(getVolumeMetric(hoveredPoint))}
                 </div>
               </div>
               {volumeValueKey !== "trade_value" ? (
                 <div>
-                  <span className="text-omi-text-subtle">成交金額</span>
+                  <span className="text-omi-text-subtle">{t("chart.kline.tradeValue")}</span>
                   <div className="font-semibold text-omi-text">
                     {formatTradeValue(hoveredPoint.trade_value)}
                   </div>
@@ -2262,7 +2300,7 @@ export default function StockKLineChart({
               ) : null}
               {indicators.obv ? (
                 <div>
-                  <span className="text-omi-text-subtle">OBV(張)</span>
+                  <span className="text-omi-text-subtle">{t("chart.kline.obvLots")}</span>
                   <div className={`font-semibold ${valueTone(hoveredPoint.obv)}`}>
                     {formatLots(hoveredPoint.obv)}
                   </div>
@@ -2351,8 +2389,8 @@ export default function StockKLineChart({
             </span>
             <button
               type="button"
-              aria-label="往左回看"
-              title="往左回看"
+              aria-label={t("chart.kline.panLeft")}
+              title={t("chart.kline.panLeft")}
               onClick={() => panVisibleBars(-visibleStep)}
               disabled={!canMoveRange || visibleStart <= 0}
               className="h-7 w-7 border border-omi-border bg-omi-surface font-semibold text-omi-text hover:border-omi-border-strong disabled:cursor-not-allowed disabled:text-omi-text-inverse-muted"
@@ -2361,8 +2399,8 @@ export default function StockKLineChart({
             </button>
             <button
               type="button"
-              aria-label="往右移動"
-              title="往右移動"
+              aria-label={t("chart.kline.panRight")}
+              title={t("chart.kline.panRight")}
               onClick={() => panVisibleBars(visibleStep)}
               disabled={!canMoveRange || visibleStart >= maxVisibleStart}
               className="h-7 w-7 border border-omi-border bg-omi-surface font-semibold text-omi-text hover:border-omi-border-strong disabled:cursor-not-allowed disabled:text-omi-text-inverse-muted"
@@ -2371,8 +2409,8 @@ export default function StockKLineChart({
             </button>
             <button
               type="button"
-              aria-label="放大 K 線"
-              title="放大 K 線"
+              aria-label={t("chart.kline.zoomIn")}
+              title={t("chart.kline.zoomIn")}
               onClick={() => updateVisibleCount(visibleBarCount * 0.72)}
               disabled={visibleBarCount <= minVisibleBars}
               className="h-7 w-7 border border-omi-border bg-omi-surface font-semibold text-omi-text hover:border-omi-border-strong disabled:cursor-not-allowed disabled:text-omi-text-inverse-muted"
@@ -2381,8 +2419,8 @@ export default function StockKLineChart({
             </button>
             <button
               type="button"
-              aria-label="縮小 K 線"
-              title="縮小 K 線"
+              aria-label={t("chart.kline.zoomOut")}
+              title={t("chart.kline.zoomOut")}
               onClick={() => updateVisibleCount(visibleBarCount * 1.38)}
               disabled={visibleBarCount >= maxVisibleBars}
               className="h-7 w-7 border border-omi-border bg-omi-surface font-semibold text-omi-text hover:border-omi-border-strong disabled:cursor-not-allowed disabled:text-omi-text-inverse-muted"
@@ -2391,13 +2429,13 @@ export default function StockKLineChart({
             </button>
             <button
               type="button"
-              aria-label="跳到最新 K 線"
-              title="跳到最新 K 線"
+              aria-label={t("chart.kline.jumpLatest")}
+              title={t("chart.kline.jumpLatest")}
               onClick={jumpToLatest}
               disabled={!canMoveRange || visibleStart >= maxVisibleStart}
               className="h-7 border border-omi-border bg-omi-surface px-2 font-semibold text-omi-text hover:border-omi-border-strong disabled:cursor-not-allowed disabled:text-omi-text-inverse-muted"
             >
-              最新
+              {t("chart.kline.latest")}
             </button>
             <button
               type="button"
@@ -2405,7 +2443,7 @@ export default function StockKLineChart({
               disabled={visibleBarCount >= maxVisibleBars}
               className="h-7 border border-omi-border bg-omi-surface px-2 font-semibold text-omi-text hover:border-omi-border-strong disabled:cursor-not-allowed disabled:text-omi-text-inverse-muted"
             >
-              全部
+              {t("chart.kline.all")}
             </button>
             <input
               type="range"
@@ -2413,7 +2451,7 @@ export default function StockKLineChart({
               max={maxVisibleStart}
               step={1}
               value={visibleStart}
-              aria-label="K 線顯示區間"
+              aria-label={t("chart.kline.visibleRange")}
               disabled={!canMoveRange}
               onChange={(event) => {
                 const nextStart = Number(event.target.value);
@@ -2640,7 +2678,9 @@ export default function StockKLineChart({
                     textAnchor={label.anchor}
                     className="fill-omi-market-up text-[11px] font-semibold"
                   >
-                    最高 {formatPrice(rangeHigh.value)}
+                    {t("chart.kline.highMarker", {
+                      value: formatPrice(rangeHigh.value),
+                    })}
                   </text>
                 </>
               );
@@ -2673,7 +2713,9 @@ export default function StockKLineChart({
                     textAnchor={label.anchor}
                     className="fill-omi-market-down text-[11px] font-semibold"
                   >
-                    最低 {formatPrice(rangeLow.value)}
+                    {t("chart.kline.lowMarker", {
+                      value: formatPrice(rangeLow.value),
+                    })}
                   </text>
                 </>
               );

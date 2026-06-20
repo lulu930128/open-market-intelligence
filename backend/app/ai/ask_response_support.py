@@ -106,17 +106,27 @@ def _consumer_detail_from_llm_report(
     )
 
 
-def _consumer_text(answer: dict[str, Any]) -> str:
+def _consumer_text(
+    answer: dict[str, Any],
+    response_preferences: dict[str, Any] | None = None,
+) -> str:
     return answer_composer.consumer_text(
         answer,
         summary_limit=CONSUMER_SUMMARY_LIMIT,
+        response_preferences=response_preferences,
     )
 
 
-def _generic_data_limits(*, missing: list[Any], warnings: list[Any]) -> list[str]:
+def _generic_data_limits(
+    *,
+    missing: list[Any],
+    warnings: list[Any],
+    response_preferences: dict[str, Any] | None = None,
+) -> list[str]:
     return answer_composer.generic_data_limits(
         missing=missing,
         warnings=warnings,
+        response_preferences=response_preferences,
     )
 
 
@@ -288,6 +298,9 @@ def _try_attach_position_decision_llm(
         "analysis_digest": analysis_digest,
         "missing": missing,
         "warnings": warnings,
+        "response_preferences": policy.get("response_preferences")
+        if isinstance(policy.get("response_preferences"), dict)
+        else {},
         "rules": [
             "Answer the user's position-risk question directly.",
             "Use only the supplied evidence and calculations.",
@@ -314,12 +327,14 @@ def _build_position_decision_consumer_answer(
     position_decision: dict[str, Any],
     missing: list[Any],
     warnings: list[Any],
+    response_preferences: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return answer_composer.build_position_decision_consumer_answer(
         position_decision=position_decision,
         missing=missing,
         warnings=warnings,
         summary_limit=CONSUMER_SUMMARY_LIMIT,
+        response_preferences=response_preferences,
     )
 
 
@@ -478,16 +493,34 @@ def _digest_summary_lines(analysis_digest: dict[str, Any]) -> list[str]:
     )
 
 
-def _decision_evidence_summary_lines(decision_evidence: dict[str, Any]) -> list[str]:
-    return answer_composer.decision_evidence_summary_lines(decision_evidence)
+def _decision_evidence_summary_lines(
+    decision_evidence: dict[str, Any],
+    response_preferences: dict[str, Any] | None = None,
+) -> list[str]:
+    return answer_composer.decision_evidence_summary_lines(
+        decision_evidence,
+        response_preferences=response_preferences,
+    )
 
 
-def _decision_evidence_risk_lines(decision_evidence: dict[str, Any]) -> list[str]:
-    return answer_composer.decision_evidence_risk_lines(decision_evidence)
+def _decision_evidence_risk_lines(
+    decision_evidence: dict[str, Any],
+    response_preferences: dict[str, Any] | None = None,
+) -> list[str]:
+    return answer_composer.decision_evidence_risk_lines(
+        decision_evidence,
+        response_preferences=response_preferences,
+    )
 
 
-def _decision_evidence_data_lines(decision_evidence: dict[str, Any]) -> list[str]:
-    return answer_composer.decision_evidence_data_lines(decision_evidence)
+def _decision_evidence_data_lines(
+    decision_evidence: dict[str, Any],
+    response_preferences: dict[str, Any] | None = None,
+) -> list[str]:
+    return answer_composer.decision_evidence_data_lines(
+        decision_evidence,
+        response_preferences=response_preferences,
+    )
 
 
 def _build_question_aware_consumer_answer(
@@ -497,6 +530,7 @@ def _build_question_aware_consumer_answer(
     analysis_digest: dict[str, Any],
     missing: list[Any],
     warnings: list[Any],
+    response_preferences: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return answer_composer.build_question_aware_consumer_answer(
         question_intent=question_intent,
@@ -505,6 +539,7 @@ def _build_question_aware_consumer_answer(
         missing=missing,
         warnings=warnings,
         summary_limit=CONSUMER_SUMMARY_LIMIT,
+        response_preferences=response_preferences,
     )
 
 
@@ -515,6 +550,7 @@ def _build_llm_consumer_answer(
     analysis_digest: dict[str, Any],
     missing: list[Any],
     warnings: list[Any],
+    response_preferences: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return answer_composer.build_llm_consumer_answer(
         report=report,
@@ -523,6 +559,7 @@ def _build_llm_consumer_answer(
         missing=missing,
         warnings=warnings,
         summary_limit=CONSUMER_SUMMARY_LIMIT,
+        response_preferences=response_preferences,
     )
 
 
@@ -532,6 +569,7 @@ def _build_watchlist_consumer_answer(
     overview: dict[str, Any],
     missing: list[Any],
     warnings: list[Any],
+    response_preferences: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return answer_composer.build_watchlist_consumer_answer(
         human_answer=human_answer,
@@ -539,6 +577,7 @@ def _build_watchlist_consumer_answer(
         missing=missing,
         warnings=warnings,
         summary_limit=CONSUMER_SUMMARY_LIMIT,
+        response_preferences=response_preferences,
     )
 
 
@@ -548,6 +587,7 @@ def _build_digest_consumer_answer(
     analysis_digest: dict[str, Any],
     missing: list[Any],
     warnings: list[Any],
+    response_preferences: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return answer_composer.build_digest_consumer_answer(
         target=target,
@@ -555,6 +595,7 @@ def _build_digest_consumer_answer(
         missing=missing,
         warnings=warnings,
         summary_limit=CONSUMER_SUMMARY_LIMIT,
+        response_preferences=response_preferences,
     )
 
 
@@ -567,6 +608,7 @@ def _build_consumer_human_answer(
     missing: list[Any],
     warnings: list[Any],
     position_decision: dict[str, Any] | None = None,
+    response_preferences: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return answer_composer.build_consumer_human_answer(
         question_intent=question_intent,
@@ -577,6 +619,7 @@ def _build_consumer_human_answer(
         position_decision=position_decision,
         llm_report=_llm_report_from_result(result),
         summary_limit=CONSUMER_SUMMARY_LIMIT,
+        response_preferences=response_preferences,
     )
 
 

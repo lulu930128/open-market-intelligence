@@ -2,12 +2,16 @@
 
 import {
   defaultIndicators,
+  indicatorCategoryDescription,
   indicatorCategoryGroups,
+  indicatorCategoryLabel,
+  indicatorOptionDescription,
   type IndicatorCategoryGroup,
   type IndicatorKey,
   type IndicatorParameters,
   type IndicatorSettings,
 } from "@/components/StockKLineChart";
+import { useT, type TranslationFunction } from "@/i18n";
 export type IndicatorTemplateKey = "basic" | "short" | "trend" | "swing" | "flow";
 
 export const indicatorTemplates: Array<{
@@ -18,12 +22,12 @@ export const indicatorTemplates: Array<{
 }> = [
   {
     key: "basic",
-    label: "基本",
+    label: "Basic",
     indicators: defaultIndicators,
   },
   {
     key: "short",
-    label: "短線",
+    label: "Short term",
     indicators: {
       ...defaultIndicators,
       ma: false,
@@ -49,7 +53,7 @@ export const indicatorTemplates: Array<{
   },
   {
     key: "trend",
-    label: "趨勢",
+    label: "Trend",
     indicators: {
       ...defaultIndicators,
       ema: true,
@@ -85,7 +89,7 @@ export const indicatorTemplates: Array<{
   },
   {
     key: "swing",
-    label: "波段",
+    label: "Swing",
     indicators: {
       ...defaultIndicators,
       bollinger: true,
@@ -134,7 +138,7 @@ export const indicatorTemplates: Array<{
   },
   {
     key: "flow",
-    label: "量價",
+    label: "Volume/price",
     indicators: {
       ...defaultIndicators,
       ma: false,
@@ -155,6 +159,16 @@ export const indicatorTemplates: Array<{
     },
   },
 ];
+
+function templateLabel(t: TranslationFunction, key: IndicatorTemplateKey, fallback: string) {
+  const label = t(`indicators.templates.${key}`);
+  return label === `indicators.templates.${key}` ? fallback : label;
+}
+
+function parameterLabel(t: TranslationFunction, key: keyof IndicatorParameters, fallback: string) {
+  const label = t(`indicators.params.${String(key)}`);
+  return label === `indicators.params.${String(key)}` ? fallback : label;
+}
 
 export default function TechnicalIndicatorMenu({
   indicators,
@@ -182,6 +196,8 @@ export default function TechnicalIndicatorMenu({
   ) => void;
   className?: string;
 }) {
+  const t = useT();
+
   return (
     <div
       className={[
@@ -190,7 +206,7 @@ export default function TechnicalIndicatorMenu({
       ].join(" ")}
     >
       <div className="border-b border-omi-border-subtle pb-3">
-        <div className="mb-2 text-xs font-bold text-omi-text-muted">快速組合</div>
+        <div className="mb-2 text-xs font-bold text-omi-text-muted">{t("indicators.quickTemplates")}</div>
         <div className="grid grid-cols-5 gap-1">
           {indicatorTemplates.map((template) => (
             <button
@@ -204,7 +220,7 @@ export default function TechnicalIndicatorMenu({
                   : "border-omi-border bg-omi-surface text-omi-text hover:border-omi-control",
               ].join(" ")}
             >
-              {template.label}
+              {templateLabel(t, template.key, template.label)}
             </button>
           ))}
         </div>
@@ -214,8 +230,12 @@ export default function TechnicalIndicatorMenu({
         {groups.map((group) => (
           <div key={group.key}>
             <div className="mb-1">
-              <div className="text-xs font-bold text-omi-text">{group.label}</div>
-              <div className="text-[11px] leading-4 text-omi-text-subtle">{group.description}</div>
+              <div className="text-xs font-bold text-omi-text">
+                {indicatorCategoryLabel(t, group)}
+              </div>
+              <div className="text-[11px] leading-4 text-omi-text-subtle">
+                {indicatorCategoryDescription(t, group)}
+              </div>
             </div>
             <div className="space-y-0.5">
               {group.options.map((option) =>
@@ -237,7 +257,9 @@ export default function TechnicalIndicatorMenu({
                           {option.plot}
                         </span>
                       </span>
-                      <span className="block text-omi-text-muted">{option.description}</span>
+                      <span className="block text-omi-text-muted">
+                        {indicatorOptionDescription(t, option)}
+                      </span>
                     </span>
                   </label>
                 ) : (
@@ -252,10 +274,12 @@ export default function TechnicalIndicatorMenu({
                           {option.plot}
                         </span>
                       </span>
-                      <span className="block text-omi-text-muted">{option.description}</span>
+                      <span className="block text-omi-text-muted">
+                        {indicatorOptionDescription(t, option)}
+                      </span>
                     </span>
                     <span className="shrink-0 bg-omi-surface-muted px-1.5 py-0.5 text-[10px] font-bold text-omi-text-muted">
-                      待補
+                      {t("indicators.pending")}
                     </span>
                   </div>
                 )
@@ -267,49 +291,49 @@ export default function TechnicalIndicatorMenu({
 
       {includeParameters && parameters && onUpdateParameter ? (
         <div className="pt-3">
-          <div className="mb-2 text-xs font-bold text-omi-text-muted">參數</div>
+          <div className="mb-2 text-xs font-bold text-omi-text-muted">{t("indicators.parameters")}</div>
           <div className="grid grid-cols-2 gap-2">
             {[
-              { label: "MA短", key: "maShort", min: 1, max: 300 },
-              { label: "MA中", key: "maMiddle", min: 1, max: 400 },
-              { label: "MA長", key: "maLong", min: 1, max: 600 },
-              { label: "EMA快", key: "emaFast", min: 1, max: 200 },
-              { label: "EMA慢", key: "emaSlow", min: 2, max: 400 },
+              { label: "MA short", key: "maShort", min: 1, max: 300 },
+              { label: "MA mid", key: "maMiddle", min: 1, max: 400 },
+              { label: "MA long", key: "maLong", min: 1, max: 600 },
+              { label: "EMA fast", key: "emaFast", min: 1, max: 200 },
+              { label: "EMA slow", key: "emaSlow", min: 2, max: 400 },
               { label: "WMA", key: "wmaPeriod", min: 1, max: 300 },
               { label: "HMA", key: "hmaPeriod", min: 2, max: 300 },
               { label: "VWMA", key: "vwmaPeriod", min: 1, max: 300 },
-              { label: "BOLL週期", key: "bollingerPeriod", min: 2, max: 300 },
-              { label: "BOLL倍數", key: "bollingerStdDev", min: 0.5, max: 5, step: 0.1 },
-              { label: "BB寬度", key: "bbWidthPeriod", min: 2, max: 300 },
+              { label: "BOLL period", key: "bollingerPeriod", min: 2, max: 300 },
+              { label: "BOLL dev", key: "bollingerStdDev", min: 0.5, max: 5, step: 0.1 },
+              { label: "BB width", key: "bbWidthPeriod", min: 2, max: 300 },
               { label: "StdDev", key: "stdDevPeriod", min: 2, max: 300 },
               { label: "CHOP", key: "choppinessPeriod", min: 2, max: 100 },
-              { label: "量均", key: "volumeMa", min: 1, max: 300 },
+              { label: "Volume MA", key: "volumeMa", min: 1, max: 300 },
               { label: "RSI", key: "rsiPeriod", min: 2, max: 100 },
-              { label: "MACD快", key: "macdFast", min: 1, max: 100 },
-              { label: "MACD慢", key: "macdSlow", min: 2, max: 200 },
+              { label: "MACD fast", key: "macdFast", min: 1, max: 100 },
+              { label: "MACD slow", key: "macdSlow", min: 2, max: 200 },
               { label: "MACD Sig", key: "macdSignal", min: 1, max: 100 },
               { label: "KD", key: "kdPeriod", min: 2, max: 100 },
               { label: "Momentum", key: "momentumPeriod", min: 1, max: 200 },
-              { label: "TSI短", key: "tsiShortPeriod", min: 1, max: 100 },
-              { label: "TSI長", key: "tsiLongPeriod", min: 2, max: 200 },
+              { label: "TSI short", key: "tsiShortPeriod", min: 1, max: 100 },
+              { label: "TSI long", key: "tsiLongPeriod", min: 2, max: 200 },
               { label: "TSI Sig", key: "tsiSignalPeriod", min: 1, max: 100 },
-              { label: "AO快", key: "awesomeFastPeriod", min: 1, max: 100 },
-              { label: "AO慢", key: "awesomeSlowPeriod", min: 2, max: 200 },
-              { label: "UO短", key: "ultimateShortPeriod", min: 1, max: 100 },
-              { label: "UO中", key: "ultimateMiddlePeriod", min: 2, max: 150 },
-              { label: "UO長", key: "ultimateLongPeriod", min: 3, max: 240 },
+              { label: "AO fast", key: "awesomeFastPeriod", min: 1, max: 100 },
+              { label: "AO slow", key: "awesomeSlowPeriod", min: 2, max: 200 },
+              { label: "UO short", key: "ultimateShortPeriod", min: 1, max: 100 },
+              { label: "UO mid", key: "ultimateMiddlePeriod", min: 2, max: 150 },
+              { label: "UO long", key: "ultimateLongPeriod", min: 3, max: 240 },
               { label: "ATR", key: "atrPeriod", min: 2, max: 100 },
               { label: "ADX", key: "adxPeriod", min: 2, max: 100 },
               { label: "DONCH", key: "donchianPeriod", min: 2, max: 300 },
-              { label: "一目轉換", key: "ichimokuConversionPeriod", min: 2, max: 120 },
-              { label: "一目基準", key: "ichimokuBasePeriod", min: 2, max: 240 },
-              { label: "一目SpanB", key: "ichimokuSpanBPeriod", min: 2, max: 360 },
-              { label: "一目位移", key: "ichimokuDisplacement", min: 0, max: 120 },
+              { label: "Ichimoku conv", key: "ichimokuConversionPeriod", min: 2, max: 120 },
+              { label: "Ichimoku base", key: "ichimokuBasePeriod", min: 2, max: 240 },
+              { label: "Ichimoku Span B", key: "ichimokuSpanBPeriod", min: 2, max: 360 },
+              { label: "Ichimoku shift", key: "ichimokuDisplacement", min: 0, max: 120 },
               { label: "ST ATR", key: "supertrendAtrPeriod", min: 2, max: 100 },
-              { label: "ST倍數", key: "supertrendMultiplier", min: 0.5, max: 10, step: 0.1 },
-              { label: "KC週期", key: "keltnerPeriod", min: 2, max: 300 },
+              { label: "ST multiple", key: "supertrendMultiplier", min: 0.5, max: 10, step: 0.1 },
+              { label: "KC period", key: "keltnerPeriod", min: 2, max: 300 },
               { label: "KC ATR", key: "keltnerAtrPeriod", min: 2, max: 100 },
-              { label: "KC倍數", key: "keltnerMultiplier", min: 0.5, max: 10, step: 0.1 },
+              { label: "KC multiple", key: "keltnerMultiplier", min: 0.5, max: 10, step: 0.1 },
               { label: "Aroon", key: "aroonPeriod", min: 2, max: 200 },
               { label: "OBV MA", key: "obvMa", min: 1, max: 200 },
               { label: "MFI", key: "mfiPeriod", min: 2, max: 100 },
@@ -322,16 +346,18 @@ export default function TechnicalIndicatorMenu({
               { label: "Stoch D", key: "stochRsiSmoothD", min: 1, max: 20 },
               { label: "TRIX", key: "trixPeriod", min: 2, max: 100 },
               { label: "TRIX Sig", key: "trixSignal", min: 1, max: 50 },
-              { label: "VPVR列", key: "volumeProfileRows", min: 8, max: 80 },
-              { label: "Pivot回看", key: "pivotLookback", min: 1, max: 20 },
-              { label: "S/R回看", key: "supportResistanceLookback", min: 2, max: 300 },
+              { label: "VPVR rows", key: "volumeProfileRows", min: 8, max: 80 },
+              { label: "Pivot lookback", key: "pivotLookback", min: 1, max: 20 },
+              { label: "S/R lookback", key: "supportResistanceLookback", min: 2, max: 300 },
               { label: "Gap%", key: "gapMinPct", min: 0.1, max: 20, step: 0.1 },
-              { label: "RS回看", key: "relativeStrengthLookback", min: 2, max: 260 },
-              { label: "Beta週期", key: "betaPeriod", min: 8, max: 260 },
-              { label: "Corr週期", key: "correlationPeriod", min: 8, max: 260 },
+              { label: "RS lookback", key: "relativeStrengthLookback", min: 2, max: 260 },
+              { label: "Beta period", key: "betaPeriod", min: 8, max: 260 },
+              { label: "Corr period", key: "correlationPeriod", min: 8, max: 260 },
             ].map((field) => (
               <label key={field.key} className="text-xs">
-                <span className="mb-1 block font-semibold text-omi-text-muted">{field.label}</span>
+                <span className="mb-1 block font-semibold text-omi-text-muted">
+                  {parameterLabel(t, field.key as keyof IndicatorParameters, field.label)}
+                </span>
                 <input
                   type="number"
                   min={field.min}

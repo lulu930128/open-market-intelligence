@@ -32,6 +32,14 @@ import {
   getUsMarketIndexConfig,
   type USMarketIndexConfig,
 } from "@/lib/usMarketIndices";
+import {
+  rankByLabel,
+  rowStatusLabel,
+  trendDirectionLabel,
+  usAssetTypeLabel,
+  useT,
+  type TranslationFunction,
+} from "@/i18n";
 import type {
   ChartPoint,
   IntradayTrendResponse,
@@ -211,12 +219,15 @@ function isUsRankingItemPending(row: USWatchlistRankingItemRead) {
 }
 
 function formatWatchlistFreshnessLabel(
+  t: TranslationFunction,
   marketLabel: string,
   targetDate: string | null | undefined,
   staleCount: number | null | undefined,
   requestedCount: number | null | undefined
 ) {
-  const dateText = targetDate ? `等待 ${targetDate} ${marketLabel}` : `等待${marketLabel}`;
+  const dateText = targetDate
+    ? t("dashboard.freshness.waitingMarketDate", { targetDate, marketLabel })
+    : t("dashboard.freshness.waitingMarket", { marketLabel });
 
   if (
     staleCount !== null &&
@@ -225,7 +236,11 @@ function formatWatchlistFreshnessLabel(
     requestedCount !== undefined &&
     requestedCount > 0
   ) {
-    return `${dateText} · ${staleCount}/${requestedCount} 檔待補`;
+    return t("dashboard.freshness.pendingBackfill", {
+      dateText,
+      staleCount,
+      requestedCount,
+    });
   }
 
   return dateText;
@@ -281,34 +296,23 @@ function valueTone(value: number | null | undefined) {
   return "text-omi-text";
 }
 
-function statusLabel(status: string) {
+function statusLabel(t: TranslationFunction, status: string) {
   if (status === "pending") return "-";
-  if (status === "intraday") return "盤中";
-  if (status.includes("bullish")) return "偏多";
-  if (status.includes("bearish")) return "偏空";
-  if (status === "no_data") return "無資料";
-  if (status === "error") return "錯誤";
-  return "中性";
+  return rowStatusLabel(t, status);
 }
 
-function rankLabel(rankBy: string) {
-  if (rankBy === "none" || rankBy === "watchlist") return "正常排序";
-  if (rankBy === "change_pct") return "漲幅";
-  if (rankBy === "volume") return "成交量";
-  if (rankBy === "close") return "收盤價";
-  return "Score";
+function rankLabel(t: TranslationFunction, rankBy: string) {
+  return rankByLabel(t, rankBy);
 }
 
 function trendLabel(
+  t: TranslationFunction,
   value: number | null | undefined,
   limitStatus?: RankingItem["limit_status"]
 ) {
-  if (limitStatus === "limit_up") return "漲停";
-  if (limitStatus === "limit_down") return "跌停";
-  if (value === null || value === undefined || Number.isNaN(value)) return "-";
-  if (value > 0) return "上漲";
-  if (value < 0) return "下跌";
-  return "持平";
+  if (limitStatus === "limit_up") return t("statusLabels.limitUp");
+  if (limitStatus === "limit_down") return t("statusLabels.limitDown");
+  return trendDirectionLabel(t, value);
 }
 
 function trendClass(
@@ -469,6 +473,7 @@ function RankingSparkline({
   row: RankingItem;
   selected: boolean;
 }) {
+  const t = useT();
   const points = (row.intraday_points ?? []).filter((point) => {
     return (
       point.time &&
@@ -497,7 +502,7 @@ function RankingSparkline({
     <svg
       viewBox={`0 0 ${chart.width} ${chart.height}`}
       className="h-8 w-[92px]"
-      aria-label="當日走勢"
+      aria-label={t("dashboard.marketIndex.intradayTrend")}
     >
       <rect width={chart.width} height={chart.height} fill="transparent" />
       {chart.previousCloseY !== null ? (
@@ -547,6 +552,7 @@ function USRankingSparkline({
   row: USWatchlistRankingItemRead;
   selected: boolean;
 }) {
+  const t = useT();
   const points = (row.intraday_points ?? []).filter((point) => {
     return (
       point.time &&
@@ -560,7 +566,7 @@ function USRankingSparkline({
   if (points.length < 2) {
     return (
       <span className="text-center text-xs text-omi-text-subtle">
-        {row.time ? "盤中" : "-"}
+        {row.time ? t("statusLabels.intraday") : "-"}
       </span>
     );
   }
@@ -618,19 +624,19 @@ function USRankingSparkline({
   );
 }
 
-function marketRegimeLabel(index: MarketIndexSnapshot) {
-  if (index.close === null || index.close === undefined) return "資料不足";
+function marketRegimeLabel(t: TranslationFunction, index: MarketIndexSnapshot) {
+  if (index.close === null || index.close === undefined) return t("dashboard.marketIndex.insufficient");
   if (index.price_vs_ma20 !== null && index.price_vs_ma20 !== undefined) {
-    if (index.price_vs_ma20 > 1) return "站上 MA20";
-    if (index.price_vs_ma20 < -1) return "跌破 MA20";
+    if (index.price_vs_ma20 > 1) return t("dashboard.marketIndex.aboveMa20");
+    if (index.price_vs_ma20 < -1) return t("dashboard.marketIndex.belowMa20");
   }
 
   if (index.change_pct !== null && index.change_pct !== undefined) {
-    if (index.change_pct > 0) return "短線偏多";
-    if (index.change_pct < 0) return "短線偏弱";
+    if (index.change_pct > 0) return t("dashboard.marketIndex.bullishShort");
+    if (index.change_pct < 0) return t("dashboard.marketIndex.weakShort");
   }
 
-  return "中性震盪";
+  return t("dashboard.marketIndex.neutral");
 }
 
 function MarketTape({
@@ -640,6 +646,7 @@ function MarketTape({
   summary: MarketIndexSummary | null;
   loadState: LoadState;
 }) {
+  const t = useT();
   const indices = summary?.indices ?? [];
   const asOf = summary?.as_of ? formatDashboardTime(new Date(summary.as_of)) : null;
 
@@ -659,7 +666,7 @@ function MarketTape({
                 <div className="flex items-start justify-between gap-4">
                   <div>
                     <div className="text-xs font-semibold uppercase tracking-[0.16em] text-omi-text-muted">
-                      Market
+                      {t("app.market")}
                     </div>
                     <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
                       <span className="text-lg font-bold text-omi-text-strong">{index.label}</span>
@@ -672,7 +679,7 @@ function MarketTape({
                     </div>
                   </div>
                   <div className="text-right text-xs">
-                    <div className="font-semibold text-omi-text">{marketRegimeLabel(index)}</div>
+                    <div className="font-semibold text-omi-text">{marketRegimeLabel(t, index)}</div>
                     <div className={valueTone(index.price_vs_ma20)}>
                       {formatPct(index.price_vs_ma20)} vs MA20
                     </div>
@@ -681,13 +688,13 @@ function MarketTape({
 
                 <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
                   <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-                    <div className="text-omi-text-muted">成交金額(億)</div>
+                    <div className="text-omi-text-muted">{t("dashboard.marketIndex.tradeValueYi")}</div>
                     <div className="mt-1 font-semibold text-omi-text">
                       {formatTradeValueYi(index.trade_value)}
                     </div>
                   </div>
                   <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-                    <div className="text-omi-text-muted">上漲 / 下跌</div>
+                    <div className="text-omi-text-muted">{t("dashboard.marketIndex.advanceDecline")}</div>
                     <div className="mt-1 font-semibold">
                       <span className="text-omi-market-up">{breadth?.advance_count ?? "-"}</span>
                       <span className="px-1 text-omi-text-subtle">/</span>
@@ -695,9 +702,13 @@ function MarketTape({
                     </div>
                   </div>
                   <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-                    <div className="text-omi-text-muted">廣度</div>
+                    <div className="text-omi-text-muted">{t("dashboard.marketIndex.breadth")}</div>
                     <div className={`mt-1 font-semibold ${valueTone((advanceRatio ?? 50) - 50)}`}>
-                      {advanceRatio === null ? "-" : `${advanceRatio.toFixed(0)}% 上漲`}
+                      {advanceRatio === null
+                        ? "-"
+                        : t("dashboard.marketIndex.advancePct", {
+                            value: advanceRatio.toFixed(0),
+                          })}
                     </div>
                   </div>
                 </div>
@@ -706,12 +717,14 @@ function MarketTape({
           })
         ) : (
           <div className="bg-omi-surface px-4 py-3 text-sm text-omi-text-muted">
-            {loadState === "loading" ? "市場指數載入中..." : "市場指數暫無資料"}
+            {loadState === "loading" ? t("dashboard.marketIndex.loading") : t("dashboard.marketIndex.empty")}
           </div>
         )}
       </div>
       <div className="border-t border-omi-border-subtle px-4 py-2 text-xs text-omi-text-muted">
-        {asOf ? `市場環境更新 ${asOf}` : "市場環境等待更新"}
+        {asOf
+          ? t("dashboard.marketIndex.updated", { asOf })
+          : t("dashboard.marketIndex.waiting")}
       </div>
     </section>
   );
@@ -758,19 +771,19 @@ function sumUsIntradayVolume(points: IntradayTrendResponse["points"]) {
   return regularVolumes.reduce((total, value) => total + value, 0);
 }
 
-function usMarketRegimeLabel(snapshot: USMarketTapeSnapshot | null | undefined) {
-  if (!snapshot || snapshot.close === null) return "資料不足";
+function usMarketRegimeLabel(t: TranslationFunction, snapshot: USMarketTapeSnapshot | null | undefined) {
+  if (!snapshot || snapshot.close === null) return t("dashboard.marketIndex.insufficient");
   if (snapshot.priceVsMa20 !== null) {
-    if (snapshot.priceVsMa20 > 1) return "站上 MA20";
-    if (snapshot.priceVsMa20 < -1) return "跌破 MA20";
+    if (snapshot.priceVsMa20 > 1) return t("dashboard.marketIndex.aboveMa20");
+    if (snapshot.priceVsMa20 < -1) return t("dashboard.marketIndex.belowMa20");
   }
 
   if (snapshot.changePct !== null) {
-    if (snapshot.changePct > 0) return "短線偏多";
-    if (snapshot.changePct < 0) return "短線偏弱";
+    if (snapshot.changePct > 0) return t("dashboard.marketIndex.bullishShort");
+    if (snapshot.changePct < 0) return t("dashboard.marketIndex.weakShort");
   }
 
-  return "中性震盪";
+  return t("dashboard.marketIndex.neutral");
 }
 
 async function fetchUsMarketTapeSnapshot(config: USMarketIndexConfig) {
@@ -841,6 +854,8 @@ function USMarketTapeCard({
   snapshot: USMarketTapeSnapshot | null;
   loadState: LoadState;
 }) {
+  const t = useT();
+
   return (
     <div className="bg-omi-surface px-4 py-3">
       <div className="flex items-start justify-between gap-4">
@@ -850,7 +865,7 @@ function USMarketTapeCard({
           </div>
           <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
             <span className="text-lg font-bold text-omi-text-strong">
-              {snapshot ? snapshot.name : loadState === "loading" ? "Loading" : "-"}
+              {snapshot ? snapshot.name : loadState === "loading" ? t("common.loading") : "-"}
             </span>
             <span className="text-2xl font-black text-omi-text-strong">
               {formatPrice(snapshot?.close)}
@@ -862,14 +877,16 @@ function USMarketTapeCard({
           <div className="mt-1 text-xs text-omi-text-muted">
             {snapshot
               ? `${snapshot.displaySymbol} · ${snapshot.exchange} · ${
-                  snapshot.source === "intraday" ? "盤中" : "日線"
+                  snapshot.source === "intraday"
+                    ? t("statusLabels.intraday")
+                    : t("dashboard.marketIndex.daily")
                 }`
-              : "等待市場指數資料"}
+              : t("dashboard.marketIndex.waitingData")}
           </div>
         </div>
         <div className="text-right text-xs">
           <div className="font-semibold text-omi-text">
-            {usMarketRegimeLabel(snapshot)}
+            {usMarketRegimeLabel(t, snapshot)}
           </div>
           <div className={valueTone(snapshot?.priceVsMa20)}>
             {formatPct(snapshot?.priceVsMa20)} vs MA20
@@ -879,19 +896,19 @@ function USMarketTapeCard({
 
       <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
         <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-          <div className="text-omi-text-muted">成交量</div>
+          <div className="text-omi-text-muted">{t("dashboard.marketIndex.volume")}</div>
           <div className="mt-1 font-semibold text-omi-text">
             {formatWholeNumber(snapshot?.volume)}
           </div>
         </div>
         <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-          <div className="text-omi-text-muted">K 線筆數</div>
+          <div className="text-omi-text-muted">{t("dashboard.marketIndex.candleCount")}</div>
           <div className="mt-1 font-semibold text-omi-text">
             {snapshot?.pointCount ?? "-"}
           </div>
         </div>
         <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-          <div className="text-omi-text-muted">更新</div>
+          <div className="text-omi-text-muted">{t("common.update")}</div>
           <div className="mt-1 truncate font-semibold text-omi-text">
             {snapshot?.asOf ? formatRowTime(snapshot.asOf) ?? snapshot.asOf.slice(0, 10) : "-"}
           </div>
@@ -912,6 +929,7 @@ function USMarketTape({
   selectedGroupName: string | null;
   companyProfile: USCompanyProfileRead | null;
 }) {
+  const t = useT();
   const primaryIndex = useMemo(() => getUsPrimaryMarketIndexConfig(), []);
   const contextIndex = useMemo(
     () =>
@@ -975,7 +993,7 @@ function USMarketTape({
 
         setLoadState("error");
         setErrorMessage(
-          error instanceof Error ? error.message : "美股市場指數載入失敗"
+          error instanceof Error ? error.message : t("dashboard.marketIndex.usLoadError")
         );
       } finally {
         requestInFlight = false;
@@ -1001,7 +1019,7 @@ function USMarketTape({
       cancelled = true;
       clearTimer();
     };
-  }, [contextIndex, primaryIndex]);
+  }, [contextIndex, primaryIndex, t]);
 
   const asOf = [primarySnapshot?.asOf, contextSnapshot?.asOf]
     .filter((value): value is string => Boolean(value))
@@ -1012,12 +1030,12 @@ function USMarketTape({
     <section className="mb-3 border border-omi-border-subtle bg-omi-surface">
       <div className="grid gap-px bg-omi-surface-strong lg:grid-cols-2">
         <USMarketTapeCard
-          title="Market"
+          title={t("dashboard.marketIndex.market")}
           snapshot={primarySnapshot}
           loadState={loadState}
         />
         <USMarketTapeCard
-          title="Context"
+          title={t("dashboard.marketIndex.context")}
           snapshot={contextSnapshot}
           loadState={loadState}
         />
@@ -1026,8 +1044,10 @@ function USMarketTape({
         {errorMessage
           ? errorMessage
           : asOf
-            ? `美股市場環境更新 ${formatRowTime(asOf) ?? asOf.slice(0, 10)}`
-            : "美股市場環境等待更新"}
+            ? t("dashboard.marketIndex.usUpdated", {
+                asOf: formatRowTime(asOf) ?? asOf.slice(0, 10),
+              })
+            : t("dashboard.marketIndex.usWaiting")}
       </div>
     </section>
   );
@@ -1282,6 +1302,7 @@ function WatchlistRankingPanel({
   volumeHeader: string;
   emptyMessage: string;
 }) {
+  const t = useT();
   const hasRows = rows.length > 0;
   const hasLoadingRows = rows.some((row) => row.loading);
   const isLoadingRows = (loadState === "loading" && !hasRows) || hasLoadingRows;
@@ -1293,14 +1314,16 @@ function WatchlistRankingPanel({
         <div className="flex flex-wrap items-start justify-between gap-4 px-5 py-4">
           <div>
             <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
-              Selected Group
+              {t("dashboard.ranking.selectedGroup")}
             </div>
             <h2 className="mt-1 text-2xl font-bold text-omi-text-strong">
-              {groupName ?? "尚未選擇分組"}
+              {groupName ?? t("dashboard.ranking.selectedGroupPlaceholder")}
             </h2>
             <div className="mt-1 text-sm text-omi-text-muted">
               {statusLabel ??
-                (lastUpdatedAt ? `更新時間 ${lastUpdatedAt}` : "尚未載入分組資料")}
+                (lastUpdatedAt
+                  ? t("dashboard.ranking.updateTime", { time: lastUpdatedAt })
+                  : t("dashboard.ranking.groupDataNotLoaded"))}
             </div>
           </div>
 
@@ -1323,7 +1346,7 @@ function WatchlistRankingPanel({
               className="h-9 bg-omi-control px-4 text-sm font-semibold text-omi-text-inverse hover:bg-omi-control-border disabled:bg-omi-surface-strong"
               disabled={reloadDisabled}
             >
-              Reload
+              {t("common.reload")}
             </button>
           </div>
         </div>
@@ -1336,11 +1359,11 @@ function WatchlistRankingPanel({
 
         <div className="grid grid-cols-2 border-t border-omi-border-subtle md:grid-cols-4">
           <div className="px-5 py-3">
-            <div className="text-xs text-omi-text-muted">股票數</div>
+            <div className="text-xs text-omi-text-muted">{t("dashboard.ranking.stockCount")}</div>
             <div className="mt-1 text-xl font-bold">{summary.stockCount}</div>
           </div>
           <div className="border-l border-omi-border-subtle px-5 py-3">
-            <div className="text-xs text-omi-text-muted">上漲</div>
+            <div className="text-xs text-omi-text-muted">{t("dashboard.ranking.upCount")}</div>
             <div className="mt-1 text-xl font-bold text-omi-market-up">
               {isLoadingRows ? (
                 <span className="block h-6 w-8 animate-pulse bg-omi-surface-strong" />
@@ -1350,7 +1373,7 @@ function WatchlistRankingPanel({
             </div>
           </div>
           <div className="border-l border-omi-border-subtle px-5 py-3">
-            <div className="text-xs text-omi-text-muted">下跌</div>
+            <div className="text-xs text-omi-text-muted">{t("dashboard.ranking.downCount")}</div>
             <div className="mt-1 text-xl font-bold text-omi-market-down">
               {isLoadingRows ? (
                 <span className="block h-6 w-8 animate-pulse bg-omi-surface-strong" />
@@ -1360,36 +1383,39 @@ function WatchlistRankingPanel({
             </div>
           </div>
           <div className="border-l border-omi-border-subtle px-5 py-3">
-            <div className="text-xs text-omi-text-muted">排序</div>
-            <div className="mt-1 text-xl font-bold">{rankLabel(rankBy)}</div>
+            <div className="text-xs text-omi-text-muted">{t("dashboard.ranking.sort")}</div>
+            <div className="mt-1 text-xl font-bold">{rankLabel(t, rankBy)}</div>
           </div>
         </div>
       </section>
 
       <section className="border border-omi-border-subtle bg-omi-surface">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-omi-border-subtle px-5 py-3">
-          <h3 className="text-sm font-bold text-omi-text-strong">自選股列表</h3>
+          <h3 className="text-sm font-bold text-omi-text-strong">{t("dashboard.ranking.listTitle")}</h3>
           {showLoadingStatus ? (
             <span className="inline-flex items-center gap-2 text-xs text-omi-text-muted">
-              {loadingLabel ?? "載入中"}
-              <LoadingDots label="排行資料讀取中" />
+              {loadingLabel ?? t("common.loading")}
+              <LoadingDots label={t("dashboard.ranking.loadingRanking")} />
             </span>
           ) : (
             <span className="text-xs text-omi-text-muted">
               {rankBy === "none"
-                ? `${rows.length} 檔 · 正常排序`
-                : `${rows.length} 檔 · 依 ${rankLabel(rankBy)} 排序`}
+                ? t("dashboard.ranking.rowSummaryNormal", { count: rows.length })
+                : t("dashboard.ranking.rowSummaryRanked", {
+                    count: rows.length,
+                    rankLabel: rankLabel(t, rankBy),
+                  })}
             </span>
           )}
         </div>
 
         <div className="grid grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
-          <span>名次</span>
-          <span>股票</span>
-          <span className="text-center">走勢</span>
-          <span className="text-right">收盤</span>
-          <span className="text-right">漲幅</span>
-          <span className="text-right">狀態</span>
+          <span>{t("dashboard.ranking.rank")}</span>
+          <span>{t("dashboard.ranking.stock")}</span>
+          <span className="text-center">{t("dashboard.ranking.trend")}</span>
+          <span className="text-right">{t("dashboard.ranking.close")}</span>
+          <span className="text-right">{t("dashboard.ranking.changePct")}</span>
+          <span className="text-right">{t("dashboard.ranking.status")}</span>
           <span className="text-right">{volumeHeader}</span>
         </div>
         {rows.length > 0 ? (
@@ -1522,6 +1548,7 @@ export default function MarketDashboardClient({
   initialUsWatchlistTree,
   initialUsWatchlistItems,
 }: Props) {
+  const t = useT();
   const initialSelectedGroup = useMemo(() => {
     const groups = flattenGroups(initialTree);
     return (
@@ -1663,12 +1690,16 @@ export default function MarketDashboardClient({
   const loadedRankingCount = ranking?.results.length ?? 0;
   const rankingProgressLabel =
     rankingStatusLoading && baseRows.length > 0
-      ? `載入中 ${Math.min(loadedRankingCount, baseRows.length)}/${baseRows.length}`
-      : "載入中";
+      ? t("dashboard.ranking.loadingCount", {
+          loaded: Math.min(loadedRankingCount, baseRows.length),
+          total: baseRows.length,
+        })
+      : t("common.loading");
   const rankingPendingLabel =
     rankingFreshnessPending
       ? formatWatchlistFreshnessLabel(
-          "自選股資料",
+          t,
+          t("dashboard.ranking.twData"),
           ranking?.target_trade_date,
           ranking?.stale_stock_count,
           ranking?.requested_stock_count
@@ -1705,12 +1736,13 @@ export default function MarketDashboardClient({
   const usRankingPendingLabel =
     usRankingFreshnessPending
       ? formatWatchlistFreshnessLabel(
-          "美股自選資料",
+          t,
+          t("dashboard.ranking.usData"),
           usRanking?.target_trade_date,
           usRanking?.stale_symbol_count,
           usRanking?.requested_symbol_count
         )
-      : "載入中";
+      : t("common.loading");
   const usSummary = useMemo(() => {
     const upCount = usVisibleRows.filter((row) => {
       return row.change_pct !== null && row.change_pct !== undefined && row.change_pct > 0;
@@ -1777,7 +1809,7 @@ export default function MarketDashboardClient({
         setRadar(null);
       }
       setRadarLoadState("error");
-      setRadarErrorMessage(apiErrorMessage(error, "雷達資料讀取失敗"));
+      setRadarErrorMessage(apiErrorMessage(error, t("radar.loadError")));
     }
   }
 
@@ -1824,7 +1856,7 @@ export default function MarketDashboardClient({
               setRadar(null);
             }
             setRadarLoadState("error");
-            setRadarErrorMessage(apiErrorMessage(error, "雷達資料讀取失敗"));
+            setRadarErrorMessage(apiErrorMessage(error, t("radar.loadError")));
           });
 
         return radarPromise;
@@ -1914,7 +1946,7 @@ export default function MarketDashboardClient({
       if (dashboardRequestSeq.current !== requestSeq) return;
 
       setLoadState("error");
-      setErrorMessage(apiErrorMessage(error, "資料讀取失敗"));
+      setErrorMessage(apiErrorMessage(error, t("dashboard.ranking.readError")));
     }
   }
 
@@ -1956,7 +1988,7 @@ export default function MarketDashboardClient({
       if (usDashboardRequestSeq.current !== requestSeq) return null;
 
       setUsLoadState("error");
-      setUsErrorMessage(error instanceof Error ? error.message : "US ranking load failed");
+      setUsErrorMessage(error instanceof Error ? error.message : t("dashboard.ranking.usReadError"));
       return null;
     }
   }
@@ -2084,7 +2116,7 @@ export default function MarketDashboardClient({
       }
     } catch (error) {
       setTwWatchlistBackfillState("error");
-      setErrorMessage(error instanceof Error ? error.message : "台股補資料失敗");
+      setErrorMessage(error instanceof Error ? error.message : t("dashboard.ranking.backfillError"));
     }
   }
 
@@ -2605,7 +2637,7 @@ export default function MarketDashboardClient({
             {loading ? (
               <RankingCellSkeleton className="h-2.5 w-16" />
             ) : (
-              formatRowTime(row.time) ?? row.primary_signal_label ?? statusLabel(row.status)
+              formatRowTime(row.time) ?? row.primary_signal_label ?? statusLabel(t, row.status)
             )}
           </span>
         </span>
@@ -2656,7 +2688,7 @@ export default function MarketDashboardClient({
                   : trendClass(row.change_pct, row.limit_status),
               ].join(" ")}
             >
-              {trendLabel(row.change_pct, row.limit_status)}
+              {trendLabel(t, row.change_pct, row.limit_status)}
             </span>
           )}
         </span>
@@ -2683,10 +2715,10 @@ export default function MarketDashboardClient({
       <div className="flex flex-wrap items-start justify-between gap-4 px-5 py-4">
         <div>
           <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
-            Selected Group
+            {t("dashboard.ranking.selectedGroup")}
           </div>
           <h2 className="mt-1 text-2xl font-bold text-omi-text-strong">
-            {selectedGroup?.group_name ?? "尚未選擇分組"}
+            {selectedGroup?.group_name ?? t("dashboard.ranking.selectedGroupPlaceholder")}
           </h2>
           <div className="mt-1 text-sm text-omi-text-muted">
             {rankingStatusLoading
@@ -2694,10 +2726,10 @@ export default function MarketDashboardClient({
               : ranking?.is_current === false
               ? rankingPendingLabel
               : lastUpdatedAt
-                ? `更新時間 ${lastUpdatedAt}`
+                ? t("dashboard.ranking.updateTime", { time: lastUpdatedAt })
                 : ranking?.trade_date
-                  ? `資料日期 ${ranking.trade_date}`
-                  : "選擇左側分組後載入資料"}
+                  ? t("dashboard.ranking.dataDate", { date: ranking.trade_date })
+                  : t("dashboard.ranking.selectGroupToLoad")}
           </div>
         </div>
 
@@ -2707,10 +2739,10 @@ export default function MarketDashboardClient({
             onChange={(event) => handleRankByChange(event.target.value as RankBy)}
             className="h-9 border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text-muted outline-none focus:border-omi-accent"
           >
-            <option value="none">正常排序</option>
-            <option value="change_pct">漲幅</option>
-            <option value="score">Score</option>
-            <option value="volume">成交量</option>
+            <option value="none">{t("rank.none")}</option>
+            <option value="change_pct">{t("rank.changePct")}</option>
+            <option value="score">{t("rank.score")}</option>
+            <option value="volume">{t("rank.volume")}</option>
           </select>
           <button
             type="button"
@@ -2720,7 +2752,9 @@ export default function MarketDashboardClient({
               activeGroupId === null || twWatchlistBackfillState === "loading"
             }
           >
-            {twWatchlistBackfillState === "loading" ? "Backfilling" : "Backfill"}
+            {twWatchlistBackfillState === "loading"
+              ? t("common.backfilling")
+              : t("common.backfill")}
           </button>
           <button
             type="button"
@@ -2731,7 +2765,7 @@ export default function MarketDashboardClient({
             className="h-9 bg-omi-control px-4 text-sm font-semibold text-omi-text-inverse hover:bg-omi-control-border disabled:bg-omi-surface-strong"
             disabled={activeGroupId === null || loadState === "loading"}
           >
-            Reload
+            {t("common.reload")}
           </button>
         </div>
       </div>
@@ -2744,11 +2778,11 @@ export default function MarketDashboardClient({
 
       <div className="grid grid-cols-2 border-t border-omi-border-subtle md:grid-cols-4">
         <div className="px-5 py-3">
-          <div className="text-xs text-omi-text-muted">股票數</div>
+          <div className="text-xs text-omi-text-muted">{t("dashboard.ranking.stockCount")}</div>
           <div className="mt-1 text-xl font-bold">{summary.stockCount}</div>
         </div>
         <div className="border-l border-omi-border-subtle px-5 py-3">
-          <div className="text-xs text-omi-text-muted">上漲</div>
+          <div className="text-xs text-omi-text-muted">{t("dashboard.ranking.upCount")}</div>
           <div className="mt-1 text-xl font-bold text-omi-market-up">
             {rankingListLoading ? (
               <span className="block h-6 w-8 animate-pulse bg-omi-surface-strong" />
@@ -2758,7 +2792,7 @@ export default function MarketDashboardClient({
           </div>
         </div>
         <div className="border-l border-omi-border-subtle px-5 py-3">
-          <div className="text-xs text-omi-text-muted">下跌</div>
+          <div className="text-xs text-omi-text-muted">{t("dashboard.ranking.downCount")}</div>
           <div className="mt-1 text-xl font-bold text-omi-market-down">
             {rankingListLoading ? (
               <span className="block h-6 w-8 animate-pulse bg-omi-surface-strong" />
@@ -2768,9 +2802,9 @@ export default function MarketDashboardClient({
           </div>
         </div>
         <div className="border-l border-omi-border-subtle px-5 py-3">
-          <div className="text-xs text-omi-text-muted">排序</div>
+          <div className="text-xs text-omi-text-muted">{t("dashboard.ranking.sort")}</div>
           <div className="mt-1 text-xl font-bold">
-            {rankLabel(ranking?.rank_by ?? rankBy)}
+            {rankLabel(t, ranking?.rank_by ?? rankBy)}
           </div>
         </div>
       </div>
@@ -2805,29 +2839,32 @@ export default function MarketDashboardClient({
       />
       <section className="border border-omi-border-subtle bg-omi-surface">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-omi-border-subtle px-5 py-3">
-          <h3 className="text-sm font-bold text-omi-text-strong">自選股列表</h3>
+          <h3 className="text-sm font-bold text-omi-text-strong">{t("dashboard.ranking.listTitle")}</h3>
           {rankingStatusLoading ? (
             <span className="inline-flex items-center gap-2 text-xs text-omi-text-muted">
               {rankingPendingLabel}
-              <LoadingDots label="自選股排行資料讀取中" />
+              <LoadingDots label={t("dashboard.ranking.loadingWatchlistRanking")} />
             </span>
           ) : (
             <span className="text-xs text-omi-text-muted">
               {rankBy === "none"
-                ? `${displayRows.length} 檔 · 正常排序`
-                : `${displayRows.length} 檔 · 依 ${rankLabel(ranking?.rank_by ?? rankBy)} 排序`}
+                ? t("dashboard.ranking.rowSummaryNormal", { count: displayRows.length })
+                : t("dashboard.ranking.rowSummaryRanked", {
+                    count: displayRows.length,
+                    rankLabel: rankLabel(t, ranking?.rank_by ?? rankBy),
+                  })}
             </span>
           )}
         </div>
 
         <div className="grid grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
-          <span>名次</span>
-          <span>股票</span>
-          <span className="text-center">走勢</span>
-          <span className="text-right">收盤</span>
-          <span className="text-right">漲幅</span>
-          <span className="text-right">狀態</span>
-          <span className="text-right">成交量(張)</span>
+          <span>{t("dashboard.ranking.rank")}</span>
+          <span>{t("dashboard.ranking.stock")}</span>
+          <span className="text-center">{t("dashboard.ranking.trend")}</span>
+          <span className="text-right">{t("dashboard.ranking.close")}</span>
+          <span className="text-right">{t("dashboard.ranking.changePct")}</span>
+          <span className="text-right">{t("dashboard.ranking.status")}</span>
+          <span className="text-right">{t("dashboard.ranking.volumeLots")}</span>
         </div>
         {displayRows.length > 0 ? (
           displayRows.map(renderRankingRow)
@@ -2835,7 +2872,7 @@ export default function MarketDashboardClient({
           <RankingLoadingRows />
         ) : (
           <div className="border-t border-omi-border-subtle px-5 py-10 text-center text-sm text-omi-text-muted">
-            尚無排行資料
+            {t("dashboard.ranking.empty")}
           </div>
         )}
       </section>
@@ -2854,10 +2891,10 @@ export default function MarketDashboardClient({
       meta: [
         row.time ? formatRowTime(row.time) : row.trade_date?.slice(0, 10),
         row.exchange,
-        row.asset_type,
+        row.asset_type ? usAssetTypeLabel(t, row.asset_type) : null,
       ]
         .filter(Boolean)
-        .join(" · ") || statusLabel(row.status),
+        .join(" · ") || statusLabel(t, row.status),
       visual: (
         <USRankingSparkline row={row} selected={selected} />
       ),
@@ -2865,7 +2902,7 @@ export default function MarketDashboardClient({
       closeValue: row.close,
       change: formatPct(row.change_pct),
       changePct: row.change_pct,
-      trend: trendLabel(row.change_pct),
+      trend: trendLabel(t, row.change_pct),
       volume: formatWholeNumber(row.volume),
       volumeValue: row.volume,
       selected,
@@ -2888,10 +2925,10 @@ export default function MarketDashboardClient({
       }
       rankBy={usRanking?.rank_by ?? usRankBy}
       rankOptions={[
-        { value: "none", label: "正常排序" },
-        { value: "change_pct", label: "漲幅" },
-        { value: "volume", label: "成交量" },
-        { value: "close", label: "收盤價" },
+        { value: "none", label: t("rank.none") },
+        { value: "change_pct", label: t("rank.changePct") },
+        { value: "volume", label: t("rank.volume") },
+        { value: "close", label: t("rank.close") },
       ]}
       onRankByChange={handleUsRankByChange}
       onReload={() => {
@@ -2907,7 +2944,9 @@ export default function MarketDashboardClient({
             selectedUsGroupId === null || usUniverseRefreshState === "loading"
           }
         >
-          {usUniverseRefreshState === "loading" ? "Backfilling" : "Backfill"}
+          {usUniverseRefreshState === "loading"
+            ? t("common.backfilling")
+            : t("common.backfill")}
         </button>
       }
       loadState={usRankingLoadState}
@@ -2915,8 +2954,8 @@ export default function MarketDashboardClient({
       errorMessage={usErrorMessage}
       rows={usDisplayRows}
       summary={usSummary}
-      volumeHeader="成交量"
-      emptyMessage="尚無美股自選資料"
+      volumeHeader={t("dashboard.ranking.volume")}
+      emptyMessage={t("dashboard.ranking.usEmpty")}
     />
   );
 
@@ -2944,11 +2983,13 @@ export default function MarketDashboardClient({
 
       return {
         market: "us",
-        label: selectedUsGroupName ? `美股 · ${selectedUsGroupName}` : "美股市場",
+        label: selectedUsGroupName
+          ? t("dashboard.ranking.usLabel", { groupName: selectedUsGroupName })
+          : t("dashboard.ranking.usMarket"),
         target: {
           type: "auto",
           market: "US",
-          label: selectedUsGroupName ?? "美股市場",
+          label: selectedUsGroupName ?? t("dashboard.ranking.usMarket"),
         },
         uiContext: {
           market: "us",
@@ -2959,7 +3000,7 @@ export default function MarketDashboardClient({
     }
 
     if (selectedFuturesSymbol) {
-      const futuresLabel = `${selectedFuturesSymbol} 台指期`;
+      const futuresLabel = `${selectedFuturesSymbol} ${t("futures.productTitle")}`;
 
       return {
         market: "tw",
@@ -3005,7 +3046,7 @@ export default function MarketDashboardClient({
 
       return {
         market: "tw",
-        label: `台股 · ${groupLabel}`,
+        label: t("dashboard.ranking.twLabel", { groupName: groupLabel }),
         target: {
           type: "tw_watchlist",
           id: String(activeGroupId),
@@ -3022,7 +3063,12 @@ export default function MarketDashboardClient({
 
     return {
       market: activeMarket,
-      label: activeMarket === "tw" ? "台股市場" : `${activeMarket.toUpperCase()} 市場`,
+      label:
+        activeMarket === "tw"
+          ? t("dashboard.ranking.twMarket")
+          : t("dashboard.ranking.genericMarket", {
+              market: activeMarket.toUpperCase(),
+            }),
       target: {
         type: "auto",
         market: activeMarket.toUpperCase(),
@@ -3042,6 +3088,7 @@ export default function MarketDashboardClient({
     selectedUsGroupName,
     selectedUsSecurityName,
     selectedUsSymbol,
+    t,
   ]);
 
   return (
@@ -3197,7 +3244,7 @@ export default function MarketDashboardClient({
               </>
             ) : (
               <section className="border border-omi-border-subtle bg-omi-surface px-5 py-10 text-sm text-omi-text-muted">
-                尚未啟用
+                {t("dashboard.ranking.notEnabled")}
               </section>
             )}
           </section>

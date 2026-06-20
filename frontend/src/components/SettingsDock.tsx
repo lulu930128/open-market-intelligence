@@ -1,11 +1,17 @@
 "use client";
 
+import {
+  LOCALE_OPTIONS,
+  type AppLocale,
+  type TranslationFunction,
+  useI18n,
+  useT,
+} from "@/i18n";
 import { fetchJson, requestJson } from "@/lib/api";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
 type SaveState = "idle" | "saving" | "success" | "error";
-type LanguageSetting = "zh-TW" | "en-US";
 type ColorSetting = "light" | "dark";
 type ParameterSectionKey = "moving" | "trend" | "momentum" | "volatility" | "flow";
 type SettingsDockPlacement = "fixed" | "inline";
@@ -98,6 +104,8 @@ type ParameterField = {
   step?: number;
 };
 
+type ParameterFieldTemplate = Omit<ParameterField, "label" | "hint">;
+
 type ParameterSection = {
   key: ParameterSectionKey;
   label: string;
@@ -106,41 +114,27 @@ type ParameterSection = {
   fields: ParameterField[];
 };
 
-const languageLabels: Record<LanguageSetting, string> = {
-  "zh-TW": "繁中",
-  "en-US": "English",
-};
-
-const colorLabels: Record<ColorSetting, string> = {
-  dark: "暗色",
-  light: "白色",
+type ParameterSectionTemplate = {
+  key: ParameterSectionKey;
+  fields: ParameterFieldTemplate[];
 };
 
 const colorSettingChoices: ColorSetting[] = ["light", "dark"];
 
-const parameterSections: ParameterSection[] = [
+const parameterSectionTemplates: ParameterSectionTemplate[] = [
   {
     key: "moving",
-    label: "均線與量能",
-    eyebrow: "Moving Average",
-    description: "全域 MA、量均線與量能放大判斷。",
     fields: [
       {
         key: "maWindows",
-        label: "MA 週期",
-        hint: "以逗號分隔，例如 5,20,60",
         inputMode: "text",
       },
       {
         key: "volumeMaWindows",
-        label: "量均線週期",
-        hint: "以逗號分隔，例如 5,20",
         inputMode: "text",
       },
       {
         key: "volumeRatio",
-        label: "量能放大門檻",
-        hint: "成交量相對均量倍數",
         inputMode: "decimal",
         min: 0,
         step: 0.1,
@@ -150,20 +144,15 @@ const parameterSections: ParameterSection[] = [
   },
   {
     key: "trend",
-    label: "趨勢",
-    eyebrow: "Trend",
-    description: "MACD、ADX、通道突破與支撐壓力週期。",
     fields: [
-      { key: "macdFast", label: "MACD fast", hint: "快速 EMA 週期", inputMode: "numeric", min: 1, step: 1 },
-      { key: "macdSlow", label: "MACD slow", hint: "慢速 EMA 週期", inputMode: "numeric", min: 1, step: 1 },
-      { key: "macdSignal", label: "MACD signal", hint: "訊號線週期", inputMode: "numeric", min: 1, step: 1 },
-      { key: "adxPeriod", label: "ADX 週期", hint: "趨勢強度計算天數", inputMode: "numeric", min: 1, step: 1 },
-      { key: "adxTrend", label: "ADX 趨勢門檻", hint: "高於此值視為趨勢成立", inputMode: "decimal", min: 0, step: 0.5 },
-      { key: "donchianPeriod", label: "Donchian 週期", hint: "高低通道回看天數", inputMode: "numeric", min: 1, step: 1 },
+      { key: "macdFast", inputMode: "numeric", min: 1, step: 1 },
+      { key: "macdSlow", inputMode: "numeric", min: 1, step: 1 },
+      { key: "macdSignal", inputMode: "numeric", min: 1, step: 1 },
+      { key: "adxPeriod", inputMode: "numeric", min: 1, step: 1 },
+      { key: "adxTrend", inputMode: "decimal", min: 0, step: 0.5 },
+      { key: "donchianPeriod", inputMode: "numeric", min: 1, step: 1 },
       {
         key: "supportResistance",
-        label: "支撐壓力週期",
-        hint: "前高前低與關鍵位回看天數",
         inputMode: "numeric",
         min: 1,
         step: 1,
@@ -172,35 +161,27 @@ const parameterSections: ParameterSection[] = [
   },
   {
     key: "momentum",
-    label: "動能震盪",
-    eyebrow: "Momentum",
-    description: "RSI、KD、ROC 與超買超賣判斷。",
     fields: [
-      { key: "rsiPeriod", label: "RSI 週期", hint: "RSI 計算天數", inputMode: "numeric", min: 1, step: 1 },
-      { key: "rsiBullMin", label: "RSI 偏多下緣", hint: "偏多區間最小值", inputMode: "decimal", min: 0, step: 0.5 },
-      { key: "rsiBullMax", label: "RSI 偏多上緣", hint: "偏多區間最大值", inputMode: "decimal", min: 0, step: 0.5 },
-      { key: "rsiWeakBelow", label: "RSI 轉弱門檻", hint: "低於此值視為轉弱", inputMode: "decimal", min: 0, step: 0.5 },
-      { key: "rsiOverheated", label: "RSI 過熱門檻", hint: "高於此值視為過熱", inputMode: "decimal", min: 0, step: 0.5 },
-      { key: "kdPeriod", label: "KD 週期", hint: "KD RSV 回看天數", inputMode: "numeric", min: 1, step: 1 },
-      { key: "kdSmooth", label: "KD 平滑", hint: "K / D 平滑週期", inputMode: "numeric", min: 1, step: 1 },
-      { key: "kdOverboughtK", label: "K 超買", hint: "K 值超買門檻", inputMode: "decimal", min: 0, step: 0.5 },
-      { key: "kdOverboughtD", label: "D 超買", hint: "D 值超買門檻", inputMode: "decimal", min: 0, step: 0.5 },
-      { key: "kdOversoldK", label: "K 超賣", hint: "K 值超賣門檻", inputMode: "decimal", min: 0, step: 0.5 },
-      { key: "kdOversoldD", label: "D 超賣", hint: "D 值超賣門檻", inputMode: "decimal", min: 0, step: 0.5 },
-      { key: "rocPeriod", label: "ROC 週期", hint: "變動率計算天數", inputMode: "numeric", min: 1, step: 1 },
+      { key: "rsiPeriod", inputMode: "numeric", min: 1, step: 1 },
+      { key: "rsiBullMin", inputMode: "decimal", min: 0, step: 0.5 },
+      { key: "rsiBullMax", inputMode: "decimal", min: 0, step: 0.5 },
+      { key: "rsiWeakBelow", inputMode: "decimal", min: 0, step: 0.5 },
+      { key: "rsiOverheated", inputMode: "decimal", min: 0, step: 0.5 },
+      { key: "kdPeriod", inputMode: "numeric", min: 1, step: 1 },
+      { key: "kdSmooth", inputMode: "numeric", min: 1, step: 1 },
+      { key: "kdOverboughtK", inputMode: "decimal", min: 0, step: 0.5 },
+      { key: "kdOverboughtD", inputMode: "decimal", min: 0, step: 0.5 },
+      { key: "kdOversoldK", inputMode: "decimal", min: 0, step: 0.5 },
+      { key: "kdOversoldD", inputMode: "decimal", min: 0, step: 0.5 },
+      { key: "rocPeriod", inputMode: "numeric", min: 1, step: 1 },
     ],
   },
   {
     key: "volatility",
-    label: "波動通道",
-    eyebrow: "Volatility",
-    description: "ATR、Bollinger 與接近關鍵價位的門檻。",
     fields: [
-      { key: "atrPeriod", label: "ATR 週期", hint: "真實波幅計算天數", inputMode: "numeric", min: 1, step: 1 },
+      { key: "atrPeriod", inputMode: "numeric", min: 1, step: 1 },
       {
         key: "atrHighPct",
-        label: "ATR 高波動門檻",
-        hint: "ATR 佔價格百分比",
         inputMode: "decimal",
         min: 0,
         step: 0.1,
@@ -208,8 +189,6 @@ const parameterSections: ParameterSection[] = [
       },
       {
         key: "atrExpansion",
-        label: "ATR 擴張倍數",
-        hint: "相對前期放大的倍數",
         inputMode: "decimal",
         min: 0,
         step: 0.1,
@@ -217,8 +196,6 @@ const parameterSections: ParameterSection[] = [
       },
       {
         key: "atrExpansionMinPct",
-        label: "ATR 擴張下限",
-        hint: "擴張判斷的最低 ATR%",
         inputMode: "decimal",
         min: 0,
         step: 0.1,
@@ -226,24 +203,18 @@ const parameterSections: ParameterSection[] = [
       },
       {
         key: "bollingerPeriod",
-        label: "Bollinger 週期",
-        hint: "布林通道均線週期",
         inputMode: "numeric",
         min: 1,
         step: 1,
       },
       {
         key: "bollingerStdDev",
-        label: "Bollinger 標準差",
-        hint: "上下軌標準差倍數",
         inputMode: "decimal",
         min: 0,
         step: 0.1,
       },
       {
         key: "bollingerSqueeze",
-        label: "Bollinger 收斂門檻",
-        hint: "帶寬百分比低於此值視為收斂",
         inputMode: "decimal",
         min: 0,
         step: 0.1,
@@ -251,8 +222,6 @@ const parameterSections: ParameterSection[] = [
       },
       {
         key: "nearLevelPct",
-        label: "接近關鍵位",
-        hint: "距離支撐壓力的百分比",
         inputMode: "decimal",
         min: 0,
         step: 0.1,
@@ -260,28 +229,38 @@ const parameterSections: ParameterSection[] = [
       },
       {
         key: "maxGapDays",
-        label: "最大資料間隔",
-        hint: "允許 OHLC 缺口天數",
         inputMode: "numeric",
         min: 1,
         step: 1,
-        unit: "天",
+        unit: "days",
       },
     ],
   },
   {
     key: "flow",
-    label: "資金流",
-    eyebrow: "Money Flow",
-    description: "MFI 與資金流入流出判斷。",
     fields: [
-      { key: "mfiPeriod", label: "MFI 週期", hint: "Money Flow 計算天數", inputMode: "numeric", min: 1, step: 1 },
-      { key: "mfiInflowMin", label: "MFI 流入下緣", hint: "資金流入區間最小值", inputMode: "decimal", min: 0, step: 0.5 },
-      { key: "mfiInflowMax", label: "MFI 流入上緣", hint: "資金流入區間最大值", inputMode: "decimal", min: 0, step: 0.5 },
-      { key: "mfiOutflowBelow", label: "MFI 流出門檻", hint: "低於此值視為資金流出", inputMode: "decimal", min: 0, step: 0.5 },
+      { key: "mfiPeriod", inputMode: "numeric", min: 1, step: 1 },
+      { key: "mfiInflowMin", inputMode: "decimal", min: 0, step: 0.5 },
+      { key: "mfiInflowMax", inputMode: "decimal", min: 0, step: 0.5 },
+      { key: "mfiOutflowBelow", inputMode: "decimal", min: 0, step: 0.5 },
     ],
   },
 ];
+
+function localizeParameterSections(t: TranslationFunction): ParameterSection[] {
+  return parameterSectionTemplates.map((section) => ({
+    ...section,
+    label: t(`settings.technical.sections.${section.key}.label`),
+    eyebrow: t(`settings.technical.sections.${section.key}.eyebrow`),
+    description: t(`settings.technical.sections.${section.key}.description`),
+    fields: section.fields.map((field) => ({
+      ...field,
+      label: t(`settings.technical.fields.${field.key}.label`),
+      hint: t(`settings.technical.fields.${field.key}.hint`),
+      unit: field.unit === "days" ? t("settings.technical.units.days") : field.unit,
+    })),
+  }));
+}
 
 function readStoredChoice<T extends string>(
   key: string,
@@ -356,7 +335,11 @@ function buildParameterDraft(settings: TechnicalAnalysisSettingsRead): Parameter
   };
 }
 
-function parseWindowList(value: string | undefined, label: string) {
+function parseWindowList(
+  value: string | undefined,
+  label: string,
+  t: TranslationFunction
+) {
   const windows = (value ?? "")
     .split(",")
     .map((item) => item.trim())
@@ -364,12 +347,12 @@ function parseWindowList(value: string | undefined, label: string) {
     .map((item) => Number(item));
 
   if (!windows.length) {
-    throw new Error(`${label} 至少需要一個週期。`);
+    throw new Error(t("settings.validation.windowRequired", { label }));
   }
 
   for (const window of windows) {
     if (!Number.isInteger(window) || window <= 0) {
-      throw new Error(`${label} 只能包含正整數，並以逗號分隔。`);
+      throw new Error(t("settings.validation.positiveIntegers", { label }));
     }
   }
 
@@ -380,101 +363,107 @@ function parseNumberValue(
   draft: ParameterDraft,
   key: string,
   label: string,
+  t: TranslationFunction,
   options: { integer?: boolean } = {}
 ) {
   const rawValue = draft[key]?.trim();
   if (!rawValue) {
-    throw new Error(`${label} 不能空白。`);
+    throw new Error(t("settings.validation.required", { label }));
   }
 
   const value = Number(rawValue);
   if (!Number.isFinite(value)) {
-    throw new Error(`${label} 必須是數字。`);
+    throw new Error(t("settings.validation.number", { label }));
   }
 
   if (options.integer && !Number.isInteger(value)) {
-    throw new Error(`${label} 必須是整數。`);
+    throw new Error(t("settings.validation.integer", { label }));
   }
 
   if (value <= 0) {
-    throw new Error(`${label} 必須大於 0。`);
+    throw new Error(t("settings.validation.positive", { label }));
   }
 
   return value;
 }
 
 function buildTechnicalSettingsWritePayload(
-  draft: ParameterDraft
+  draft: ParameterDraft,
+  t: TranslationFunction
 ): TechnicalAnalysisSettingsWrite {
+  const fieldLabel = (key: string) => t(`settings.technical.fields.${key}.label`);
+
   return {
     windows: {
-      ma: parseWindowList(draft.maWindows, "MA 週期"),
-      volume_ma: parseWindowList(draft.volumeMaWindows, "量均線週期"),
-      max_gap_days: parseNumberValue(draft, "maxGapDays", "最大資料間隔", {
+      ma: parseWindowList(draft.maWindows, fieldLabel("maWindows"), t),
+      volume_ma: parseWindowList(draft.volumeMaWindows, fieldLabel("volumeMaWindows"), t),
+      max_gap_days: parseNumberValue(draft, "maxGapDays", fieldLabel("maxGapDays"), t, {
         integer: true,
       }),
     },
     periods: {
       macd: {
-        fast: parseNumberValue(draft, "macdFast", "MACD fast", { integer: true }),
-        slow: parseNumberValue(draft, "macdSlow", "MACD slow", { integer: true }),
-        signal: parseNumberValue(draft, "macdSignal", "MACD signal", { integer: true }),
+        fast: parseNumberValue(draft, "macdFast", fieldLabel("macdFast"), t, { integer: true }),
+        slow: parseNumberValue(draft, "macdSlow", fieldLabel("macdSlow"), t, { integer: true }),
+        signal: parseNumberValue(draft, "macdSignal", fieldLabel("macdSignal"), t, { integer: true }),
       },
-      rsi: parseNumberValue(draft, "rsiPeriod", "RSI 週期", { integer: true }),
-      atr: parseNumberValue(draft, "atrPeriod", "ATR 週期", { integer: true }),
-      adx: parseNumberValue(draft, "adxPeriod", "ADX 週期", { integer: true }),
-      roc: parseNumberValue(draft, "rocPeriod", "ROC 週期", { integer: true }),
-      mfi: parseNumberValue(draft, "mfiPeriod", "MFI 週期", { integer: true }),
-      donchian: parseNumberValue(draft, "donchianPeriod", "Donchian 週期", {
+      rsi: parseNumberValue(draft, "rsiPeriod", fieldLabel("rsiPeriod"), t, { integer: true }),
+      atr: parseNumberValue(draft, "atrPeriod", fieldLabel("atrPeriod"), t, { integer: true }),
+      adx: parseNumberValue(draft, "adxPeriod", fieldLabel("adxPeriod"), t, { integer: true }),
+      roc: parseNumberValue(draft, "rocPeriod", fieldLabel("rocPeriod"), t, { integer: true }),
+      mfi: parseNumberValue(draft, "mfiPeriod", fieldLabel("mfiPeriod"), t, { integer: true }),
+      donchian: parseNumberValue(draft, "donchianPeriod", fieldLabel("donchianPeriod"), t, {
         integer: true,
       }),
       bollinger: {
-        period: parseNumberValue(draft, "bollingerPeriod", "Bollinger 週期", {
+        period: parseNumberValue(draft, "bollingerPeriod", fieldLabel("bollingerPeriod"), t, {
           integer: true,
         }),
-        std_dev: parseNumberValue(draft, "bollingerStdDev", "Bollinger 標準差"),
+        std_dev: parseNumberValue(draft, "bollingerStdDev", fieldLabel("bollingerStdDev"), t),
       },
       kd: {
-        period: parseNumberValue(draft, "kdPeriod", "KD 週期", { integer: true }),
-        smooth: parseNumberValue(draft, "kdSmooth", "KD 平滑", { integer: true }),
+        period: parseNumberValue(draft, "kdPeriod", fieldLabel("kdPeriod"), t, { integer: true }),
+        smooth: parseNumberValue(draft, "kdSmooth", fieldLabel("kdSmooth"), t, { integer: true }),
       },
       support_resistance: parseNumberValue(
         draft,
         "supportResistance",
-        "支撐壓力週期",
+        fieldLabel("supportResistance"),
+        t,
         { integer: true }
       ),
     },
     thresholds: {
-      volume_ratio: parseNumberValue(draft, "volumeRatio", "量能放大門檻"),
-      near_level_pct: parseNumberValue(draft, "nearLevelPct", "接近關鍵位"),
-      adx_trend: parseNumberValue(draft, "adxTrend", "ADX 趨勢門檻"),
+      volume_ratio: parseNumberValue(draft, "volumeRatio", fieldLabel("volumeRatio"), t),
+      near_level_pct: parseNumberValue(draft, "nearLevelPct", fieldLabel("nearLevelPct"), t),
+      adx_trend: parseNumberValue(draft, "adxTrend", fieldLabel("adxTrend"), t),
       rsi: {
-        bull_min: parseNumberValue(draft, "rsiBullMin", "RSI 偏多下緣"),
-        bull_max: parseNumberValue(draft, "rsiBullMax", "RSI 偏多上緣"),
-        weak_below: parseNumberValue(draft, "rsiWeakBelow", "RSI 轉弱門檻"),
-        overheated_at: parseNumberValue(draft, "rsiOverheated", "RSI 過熱門檻"),
+        bull_min: parseNumberValue(draft, "rsiBullMin", fieldLabel("rsiBullMin"), t),
+        bull_max: parseNumberValue(draft, "rsiBullMax", fieldLabel("rsiBullMax"), t),
+        weak_below: parseNumberValue(draft, "rsiWeakBelow", fieldLabel("rsiWeakBelow"), t),
+        overheated_at: parseNumberValue(draft, "rsiOverheated", fieldLabel("rsiOverheated"), t),
       },
       mfi: {
-        inflow_min: parseNumberValue(draft, "mfiInflowMin", "MFI 流入下緣"),
-        inflow_max: parseNumberValue(draft, "mfiInflowMax", "MFI 流入上緣"),
-        outflow_below: parseNumberValue(draft, "mfiOutflowBelow", "MFI 流出門檻"),
+        inflow_min: parseNumberValue(draft, "mfiInflowMin", fieldLabel("mfiInflowMin"), t),
+        inflow_max: parseNumberValue(draft, "mfiInflowMax", fieldLabel("mfiInflowMax"), t),
+        outflow_below: parseNumberValue(draft, "mfiOutflowBelow", fieldLabel("mfiOutflowBelow"), t),
       },
       kd: {
-        overbought_k: parseNumberValue(draft, "kdOverboughtK", "K 超買"),
-        overbought_d: parseNumberValue(draft, "kdOverboughtD", "D 超買"),
-        oversold_k: parseNumberValue(draft, "kdOversoldK", "K 超賣"),
-        oversold_d: parseNumberValue(draft, "kdOversoldD", "D 超賣"),
+        overbought_k: parseNumberValue(draft, "kdOverboughtK", fieldLabel("kdOverboughtK"), t),
+        overbought_d: parseNumberValue(draft, "kdOverboughtD", fieldLabel("kdOverboughtD"), t),
+        oversold_k: parseNumberValue(draft, "kdOversoldK", fieldLabel("kdOversoldK"), t),
+        oversold_d: parseNumberValue(draft, "kdOversoldD", fieldLabel("kdOversoldD"), t),
       },
       atr: {
-        high_volatility_pct: parseNumberValue(draft, "atrHighPct", "ATR 高波動門檻"),
-        expansion_multiplier: parseNumberValue(draft, "atrExpansion", "ATR 擴張倍數"),
-        expansion_min_pct: parseNumberValue(draft, "atrExpansionMinPct", "ATR 擴張下限"),
+        high_volatility_pct: parseNumberValue(draft, "atrHighPct", fieldLabel("atrHighPct"), t),
+        expansion_multiplier: parseNumberValue(draft, "atrExpansion", fieldLabel("atrExpansion"), t),
+        expansion_min_pct: parseNumberValue(draft, "atrExpansionMinPct", fieldLabel("atrExpansionMinPct"), t),
       },
       bollinger_squeeze_bandwidth_pct: parseNumberValue(
         draft,
         "bollingerSqueeze",
-        "Bollinger 收斂門檻"
+        fieldLabel("bollingerSqueeze"),
+        t
       ),
     },
   };
@@ -522,7 +511,7 @@ function PreferenceSelect<T extends string>({
 }: {
   label: string;
   value: T;
-  options: Array<{ value: T; label: string }>;
+  options: Array<{ value: T; label: string; disabled?: boolean }>;
   onChange: (value: T) => void;
 }) {
   return (
@@ -534,7 +523,7 @@ function PreferenceSelect<T extends string>({
         className="h-8 max-w-[128px] border border-omi-border bg-omi-surface px-2 text-xs font-semibold text-omi-text-muted outline-none hover:border-omi-border-strong focus:border-omi-accent"
       >
         {options.map((option) => (
-          <option key={option.value} value={option.value}>
+          <option key={option.value} value={option.value} disabled={option.disabled}>
             {option.label}
           </option>
         ))}
@@ -594,6 +583,8 @@ function SourceLabel({ settings }: { settings: TechnicalAnalysisSettingsRead | n
 }
 
 export default function SettingsDock({ placement = "fixed" }: SettingsDockProps) {
+  const t = useT();
+  const { locale, setLocale } = useI18n();
   const [menuOpen, setMenuOpen] = useState(false);
   const [parametersOpen, setParametersOpen] = useState(false);
   const [loadState, setLoadState] = useState<LoadState>("idle");
@@ -603,19 +594,18 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
   const [settings, setSettings] = useState<TechnicalAnalysisSettingsRead | null>(null);
   const [draft, setDraft] = useState<ParameterDraft>({});
   const [activeSectionKey, setActiveSectionKey] = useState<ParameterSectionKey>("moving");
-  const [language, setLanguage] = useState<LanguageSetting>(() =>
-    readStoredChoice<LanguageSetting>("omi:settings:language", "zh-TW", ["zh-TW", "en-US"])
-  );
   const [color, setColor] = useState<ColorSetting>(() =>
     readStoredChoice<ColorSetting>("omi:settings:color", "light", colorSettingChoices)
   );
   const rootRef = useRef<HTMLDivElement | null>(null);
 
+  const parameterSections = useMemo(() => localizeParameterSections(t), [t]);
+
   const activeSection = useMemo(
     () =>
       parameterSections.find((section) => section.key === activeSectionKey) ??
       parameterSections[0],
-    [activeSectionKey]
+    [activeSectionKey, parameterSections]
   );
 
   const loadSettings = useCallback(async () => {
@@ -633,13 +623,9 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
       setSaveState("idle");
     } catch (error) {
       setLoadState("error");
-      setErrorMessage(error instanceof Error ? error.message : "設定讀取失敗");
+      setErrorMessage(error instanceof Error ? error.message : t("settings.loadError"));
     }
-  }, []);
-
-  useEffect(() => {
-    storePreference("omi:settings:language", language);
-  }, [language]);
+  }, [t]);
 
   useEffect(() => {
     storePreference("omi:settings:color", color);
@@ -701,7 +687,7 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
     setSaveMessage(null);
 
     try {
-      const payload = buildTechnicalSettingsWritePayload(draft);
+      const payload = buildTechnicalSettingsWritePayload(draft, t);
       const response = await requestJson<TechnicalAnalysisSettingsRead>(
         "/api/settings/technical-analysis",
         {
@@ -714,10 +700,10 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
       setDraft(buildParameterDraft(response));
       setLoadState("success");
       setSaveState("success");
-      setSaveMessage("已儲存，全域技術分析會使用新的參數。");
+      setSaveMessage(t("settings.saveSuccess"));
     } catch (error) {
       setSaveState("error");
-      setSaveMessage(error instanceof Error ? error.message : "設定儲存失敗");
+      setSaveMessage(error instanceof Error ? error.message : t("settings.saveError"));
     }
   }
 
@@ -741,24 +727,27 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
         {menuOpen ? (
           <section className={menuClassName}>
             <div className="border-b border-omi-border-subtle bg-omi-control px-3 py-2 text-sm font-bold text-omi-text-inverse">
-              設定
+              {t("settings.title")}
             </div>
             <div className="divide-y divide-omi-border-subtle">
-              <PreferenceSelect<LanguageSetting>
-                label="語言"
-                value={language}
-                options={[
-                  { value: "zh-TW", label: "繁體中文" },
-                  { value: "en-US", label: "English" },
-                ]}
-                onChange={setLanguage}
+              <PreferenceSelect<AppLocale>
+                label={t("settings.language")}
+                value={locale}
+                options={LOCALE_OPTIONS.map((option) => ({
+                  value: option.value,
+                  label: option.enabled
+                    ? t(`locales.${option.value}`)
+                    : `${t(`locales.${option.value}`)} (${t("common.reserved")})`,
+                  disabled: !option.enabled,
+                }))}
+                onChange={setLocale}
               />
               <PreferenceSelect<ColorSetting>
-                label="顏色"
+                label={t("settings.color")}
                 value={color}
                 options={[
-                  { value: "light", label: "白色" },
-                  { value: "dark", label: "暗色" },
+                  { value: "light", label: t("settings.colors.light") },
+                  { value: "dark", label: t("settings.colors.dark") },
                 ]}
                 onChange={setColor}
               />
@@ -768,8 +757,12 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
                 onClick={openParameterDialog}
               >
                 <span>
-                  <span className="block font-semibold text-omi-text">參數調整</span>
-                  <span className="block text-xs text-omi-text-muted">技術分析</span>
+                  <span className="block font-semibold text-omi-text">
+                    {t("settings.technicalParams")}
+                  </span>
+                  <span className="block text-xs text-omi-text-muted">
+                    {t("settings.technicalAnalysis")}
+                  </span>
                 </span>
                 <ChevronIcon />
               </button>
@@ -780,12 +773,12 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
         <button
           type="button"
           aria-expanded={menuOpen}
-          aria-label="開啟設定"
+          aria-label={t("settings.open")}
           className={buttonClassName}
           onClick={() => setMenuOpen((value) => !value)}
         >
           <GearIcon />
-          <span>設定</span>
+          <span>{t("settings.title")}</span>
         </button>
       </div>
 
@@ -803,7 +796,7 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
                   Settings
                 </div>
                 <h2 id="technical-settings-title" className="mt-1 text-xl font-black text-omi-text-strong">
-                  參數調整
+                  {t("settings.technicalParams")}
                 </h2>
                 <div className="mt-2">
                   <SourceLabel settings={settings} />
@@ -811,7 +804,7 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
               </div>
               <button
                 type="button"
-                aria-label="關閉參數調整"
+                aria-label={t("settings.closeTechnicalParams")}
                 className="grid h-8 w-8 shrink-0 place-items-center border border-omi-border text-omi-text-muted hover:border-omi-control hover:text-omi-text-strong"
                 onClick={() => setParametersOpen(false)}
               >
@@ -876,14 +869,14 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
                   </div>
                 ) : errorMessage ? (
                   <div className="m-5 border border-omi-danger-border bg-omi-danger-soft px-4 py-3 text-sm text-omi-danger">
-                    <div className="font-bold">設定讀取失敗</div>
+                    <div className="font-bold">{t("settings.loadError")}</div>
                     <div className="mt-1 break-words text-xs leading-5">{errorMessage}</div>
                     <button
                       type="button"
                       className="mt-3 h-8 border border-omi-accent-border bg-omi-surface px-3 text-xs font-bold text-omi-danger hover:border-omi-danger"
                       onClick={() => void loadSettings()}
                     >
-                      重試
+                      {t("settings.retry")}
                     </button>
                   </div>
                 ) : (
@@ -904,7 +897,9 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
             <footer className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-omi-border-subtle bg-omi-surface-subtle px-5 py-3">
               <div className="min-w-0">
                 <div className="text-xs font-semibold text-omi-text-muted">
-                  {settings ? `${settings.kind} / ${languageLabels[language]} / ${colorLabels[color]}` : "technical_analysis_settings"}
+                  {settings
+                    ? `${settings.kind} / ${t(`locales.${locale}`)} / ${t(`settings.colors.${color}`)}`
+                    : "technical_analysis_settings"}
                 </div>
                 {saveMessage ? (
                   <div
@@ -924,7 +919,7 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
                   onClick={resetDraft}
                   disabled={!settings}
                 >
-                  重設
+                  {t("settings.reset")}
                 </button>
                 <button
                   type="button"
@@ -937,7 +932,7 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
                   disabled={!settings || loadState === "loading" || saveState === "saving"}
                   onClick={() => void saveTechnicalSettings()}
                 >
-                  {saveState === "saving" ? "儲存中" : "儲存"}
+                  {saveState === "saving" ? t("settings.saving") : t("settings.save")}
                 </button>
               </div>
             </footer>

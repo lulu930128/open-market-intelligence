@@ -1,5 +1,7 @@
 "use client";
 
+import { useT } from "@/i18n";
+
 type DrawingMetricDirection = "up" | "down" | "flat" | "unknown";
 
 type DrawingMetricLabels = {
@@ -54,6 +56,7 @@ export default function SelectedDrawingMetricsCard({
   metrics,
   summaryText,
 }: SelectedDrawingMetricsCardProps) {
+  const t = useT();
   const labels = metrics.labels;
 
   return (
@@ -65,63 +68,63 @@ export default function SelectedDrawingMetricsCard({
         </span>
       </div>
       <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-omi-text-muted">
-        <MetricRow label="價差" value={labels.priceDiff} />
-        <MetricRow label="區間" value={`${labels.low} - ${labels.high}`} />
+        <MetricRow label={t("chart.selectedDrawing.priceDiff")} value={labels.priceDiff} />
+        <MetricRow label={t("chart.selectedDrawing.range")} value={`${labels.low} - ${labels.high}`} />
         <MetricRow
-          label="K棒 / 時間"
+          label={t("chart.selectedDrawing.barsTime")}
           value={[labels.bars, labels.duration].filter(Boolean).join(" / ") || "-"}
         />
-        <MetricRow label="斜率" value={labels.slope ?? "-"} />
+        <MetricRow label={t("chart.selectedDrawing.slope")} value={labels.slope ?? "-"} />
 
         {metrics.lineAnalysis ? (
           <>
             <MetricRow
-              label="線位狀態"
+              label={t("chart.selectedDrawing.lineStatus")}
               value={`${metrics.lineAnalysis.labels.role} · ${metrics.lineAnalysis.labels.status}`}
             />
             <MetricRow
-              label="距線"
+              label={t("chart.selectedDrawing.distanceToLine")}
               value={`${metrics.lineAnalysis.labels.distance} / ${metrics.lineAnalysis.labels.distancePct}`}
             />
-            <MetricRow label="觸碰" value={metrics.lineAnalysis.labels.touchCount} />
+            <MetricRow label={t("chart.selectedDrawing.touches")} value={metrics.lineAnalysis.labels.touchCount} />
           </>
         ) : null}
 
         {metrics.zoneAnalysis ? (
           <>
             <MetricRow
-              label="區間狀態"
+              label={t("chart.selectedDrawing.zoneStatus")}
               value={`${metrics.zoneAnalysis.labels.role} · ${metrics.zoneAnalysis.labels.status}`}
             />
             <MetricRow
-              label="上 / 中 / 下"
+              label={t("chart.selectedDrawing.upperMidLower")}
               value={`${metrics.zoneAnalysis.labels.upper} / ${metrics.zoneAnalysis.labels.mid} / ${metrics.zoneAnalysis.labels.lower}`}
             />
             <MetricRow
-              label="位置 / 寬度"
+              label={t("chart.selectedDrawing.positionWidth")}
               value={`${metrics.zoneAnalysis.labels.position} / ${metrics.zoneAnalysis.labels.widthPct}`}
             />
             <MetricRow
-              label="上 / 下觸碰"
+              label={t("chart.selectedDrawing.upperLowerTouches")}
               value={`${metrics.zoneAnalysis.labels.upperTouches} / ${metrics.zoneAnalysis.labels.lowerTouches}`}
             />
-            <MetricRow label="區間波動" value={metrics.zoneAnalysis.labels.compression} />
+            <MetricRow label={t("chart.selectedDrawing.zoneCompression")} value={metrics.zoneAnalysis.labels.compression} />
           </>
         ) : null}
 
         {metrics.fibonacciAnalysis ? (
           <>
             <MetricRow
-              label="Fib 狀態"
+              label={t("chart.selectedDrawing.fibStatus")}
               value={`${metrics.fibonacciAnalysis.labels.trend} · ${metrics.fibonacciAnalysis.labels.status}`}
             />
-            <MetricRow label="最近位階" value={metrics.fibonacciAnalysis.labels.nearest} />
+            <MetricRow label={t("chart.selectedDrawing.nearestLevel")} value={metrics.fibonacciAnalysis.labels.nearest} />
             <MetricRow
-              label="距位階"
+              label={t("chart.selectedDrawing.levelDistance")}
               value={`${metrics.fibonacciAnalysis.labels.nearestDistance} / ${metrics.fibonacciAnalysis.labels.nearestDistancePct}`}
             />
             <MetricRow
-              label="位置 / 延伸"
+              label={t("chart.selectedDrawing.positionExtension")}
               value={`${metrics.fibonacciAnalysis.labels.rangePosition} / ${metrics.fibonacciAnalysis.labels.extension}`}
             />
           </>
@@ -129,14 +132,14 @@ export default function SelectedDrawingMetricsCard({
 
         {metrics.anchoredVwapAnalysis ? (
           <>
-            <MetricRow label="錨定 VWAP" value={metrics.anchoredVwapAnalysis.labels.vwap} />
-            <MetricRow label="VWAP 狀態" value={metrics.anchoredVwapAnalysis.labels.status} />
+            <MetricRow label={t("chart.selectedDrawing.anchoredVwap")} value={metrics.anchoredVwapAnalysis.labels.vwap} />
+            <MetricRow label={t("chart.selectedDrawing.vwapStatus")} value={metrics.anchoredVwapAnalysis.labels.status} />
             <MetricRow
-              label="距 VWAP"
+              label={t("chart.selectedDrawing.distanceToVwap")}
               value={`${metrics.anchoredVwapAnalysis.labels.distance} / ${metrics.anchoredVwapAnalysis.labels.distancePct}`}
             />
             <MetricRow
-              label="累積量 / K棒"
+              label={t("chart.selectedDrawing.volumeBars")}
               value={`${metrics.anchoredVwapAnalysis.labels.cumulativeVolume} / ${metrics.anchoredVwapAnalysis.labels.barCount}`}
             />
           </>
@@ -145,9 +148,9 @@ export default function SelectedDrawingMetricsCard({
         {metrics.volumeProfileAnalysis ? (
           <>
             <MetricRow label="POC" value={metrics.volumeProfileAnalysis.labels.poc} />
-            <MetricRow label="價值區間" value={metrics.volumeProfileAnalysis.labels.valueArea} />
-            <MetricRow label="現價位置" value={metrics.volumeProfileAnalysis.labels.latestPosition} />
-            <MetricRow label="買賣差" value={metrics.volumeProfileAnalysis.labels.imbalance} />
+            <MetricRow label={t("chart.selectedDrawing.valueArea")} value={metrics.volumeProfileAnalysis.labels.valueArea} />
+            <MetricRow label={t("chart.selectedDrawing.latestPosition")} value={metrics.volumeProfileAnalysis.labels.latestPosition} />
+            <MetricRow label={t("chart.selectedDrawing.imbalance")} value={metrics.volumeProfileAnalysis.labels.imbalance} />
           </>
         ) : null}
       </div>

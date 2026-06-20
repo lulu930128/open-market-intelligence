@@ -14,6 +14,9 @@ import ProfessionalChartPanel, {
 import StockKLineChart, {
   defaultIndicatorParameters,
   defaultIndicators,
+  indicatorCategoryDescription,
+  indicatorCategoryLabel,
+  indicatorOptionDescription,
   professionalIndicatorCategoryGroups,
   type IndicatorCategoryGroup,
   type IndicatorKey,
@@ -36,6 +39,12 @@ import {
   type ChartDrawingStorageState,
 } from "@/components/professionalChartDrawing";
 import { fetchJson, requestJson } from "@/lib/api";
+import {
+  timeframeLabel,
+  usAssetTypeLabel,
+  useT,
+  type TranslationFunction,
+} from "@/i18n";
 import {
   US_INTRADAY_REFRESH_MS,
   US_SESSION_END_MINUTES,
@@ -90,26 +99,18 @@ type Props = {
   onChartFocusModeChange?: (active: boolean) => void;
 };
 
-const timeframeOptions: Array<{ value: USChartTimeframe; label: string }> = [
-  { value: "today", label: "今日" },
-  { value: "daily", label: "日K" },
-  { value: "weekly", label: "週K" },
-  { value: "monthly", label: "月K" },
-];
+const timeframeOptions: USChartTimeframe[] = ["today", "daily", "weekly", "monthly"];
 
-const usProfessionalTimeframeOptions: Array<{
-  key: USProfessionalTimeframe;
-  label: string;
-}> = [
-  { key: "1m", label: "1分" },
-  { key: "5m", label: "5分" },
-  { key: "15m", label: "15分" },
-  { key: "30m", label: "30分" },
-  { key: "1h", label: "1小時" },
-  { key: "4h", label: "4小時" },
-  { key: "daily", label: "日" },
-  { key: "weekly", label: "週" },
-  { key: "monthly", label: "月" },
+const usProfessionalTimeframeOptions: USProfessionalTimeframe[] = [
+  "1m",
+  "5m",
+  "15m",
+  "30m",
+  "1h",
+  "4h",
+  "daily",
+  "weekly",
+  "monthly",
 ];
 
 const usProfessionalIntradayMinutes: Record<USProfessionalIntradayTimeframe, number> = {
@@ -121,53 +122,28 @@ const usProfessionalIntradayMinutes: Record<USProfessionalIntradayTimeframe, num
   "4h": 240,
 };
 
-const usDataPanelTabs: Array<{
-  key: USDataPanelTab;
-  label: string;
-  title: string;
-  description: string;
-}> = [
-  {
-    key: "ownership",
-    label: "持倉",
-    title: "持倉資料",
-    description: "SEC 13F、主檔與估值欄位",
-  },
-  {
-    key: "insider",
-    label: "內部人",
-    title: "內部人交易",
-    description: "SEC Form 4 交易申報",
-  },
-  {
-    key: "short",
-    label: "空方",
-    title: "空方資料",
-    description: "FINRA short volume 與 short interest",
-  },
-  {
-    key: "filings",
-    label: "申報",
-    title: "公司申報",
-    description: "SEC facts、股利與拆股事件",
-  },
+const usDataPanelTabs: Array<{ key: USDataPanelTab }> = [
+  { key: "ownership" },
+  { key: "insider" },
+  { key: "short" },
+  { key: "filings" },
 ];
 
-const secFundamentalCards: Array<{ label: string; metric: string }> = [
-  { label: "Revenue", metric: "revenue" },
-  { label: "Gross Profit", metric: "gross_profit" },
-  { label: "Operating Income", metric: "operating_income" },
-  { label: "Net Income", metric: "net_income" },
-  { label: "EPS Diluted", metric: "eps_diluted" },
-  { label: "EPS Basic", metric: "eps_basic" },
-  { label: "Assets", metric: "assets" },
-  { label: "Liabilities", metric: "liabilities" },
-  { label: "Equity", metric: "equity" },
-  { label: "Cash", metric: "cash" },
-  { label: "Debt Total", metric: "debt_total" },
-  { label: "Operating CF", metric: "operating_cash_flow" },
-  { label: "Capex", metric: "capex" },
-  { label: "Shares", metric: "shares_outstanding" },
+const secFundamentalCards: Array<{ metric: string }> = [
+  { metric: "revenue" },
+  { metric: "gross_profit" },
+  { metric: "operating_income" },
+  { metric: "net_income" },
+  { metric: "eps_diluted" },
+  { metric: "eps_basic" },
+  { metric: "assets" },
+  { metric: "liabilities" },
+  { metric: "equity" },
+  { metric: "cash" },
+  { metric: "debt_total" },
+  { metric: "operating_cash_flow" },
+  { metric: "capex" },
+  { metric: "shares_outstanding" },
 ];
 
 const barsByTimeframe: Record<USHistoricalTimeframe, number> = {
@@ -381,11 +357,9 @@ function valueTone(value: number | null | undefined) {
   return "text-omi-text";
 }
 
-function assetTypeLabel(stock: USStockMasterRead | null) {
+function assetTypeLabel(t: TranslationFunction, stock: USStockMasterRead | null) {
   if (!stock) return "-";
-  if (stock.asset_type === "ETF") return "ETF";
-  if (stock.asset_type === "stock") return "Stock";
-  return stock.asset_type || "-";
+  return usAssetTypeLabel(t, stock.asset_type);
 }
 
 function stockName(stock: USStockMasterRead | null, fallback: string | null) {
@@ -594,17 +568,6 @@ function coverageClass(status: CoverageStatus) {
   return classes[status];
 }
 
-function coverageLabel(status: CoverageStatus) {
-  const labels: Record<CoverageStatus, string> = {
-    ready: "Ready",
-    missing: "Missing",
-    loading: "Loading",
-    stale: "Stale",
-  };
-
-  return labels[status];
-}
-
 function DataCoverageChip({
   label,
   status,
@@ -614,11 +577,15 @@ function DataCoverageChip({
   status: CoverageStatus;
   detail: string;
 }) {
+  const t = useT();
+
   return (
     <div className={`border px-3 py-2 ${coverageClass(status)}`}>
       <div className="flex items-center justify-between gap-2">
         <span className="text-xs font-bold uppercase tracking-wide">{label}</span>
-        <span className="text-[11px] font-black">{coverageLabel(status)}</span>
+        <span className="text-[11px] font-black">
+          {t(`usStockDetail.coverage.status.${status}`)}
+        </span>
       </div>
       <div className="mt-1 truncate text-[11px] font-medium opacity-80">{detail}</div>
     </div>
@@ -778,24 +745,30 @@ function USProfessionalIndicatorMenu({
   onToggleIndicator: (key: IndicatorKey) => void;
   groups?: IndicatorCategoryGroup[];
 }) {
+  const t = useT();
+
   return (
     <div className="absolute right-0 z-30 mt-2 max-h-[560px] w-[25rem] overflow-y-auto border border-omi-border-subtle bg-omi-surface p-3 text-left shadow-xl">
       <div className="mb-3 flex items-center justify-between border-b border-omi-border-subtle pb-2">
         <div>
           <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-omi-text-muted">
-            Indicators
+            {t("chart.indicators")}
           </div>
-          <div className="mt-0.5 text-sm font-bold text-omi-text-strong">技術指標</div>
+          <div className="mt-0.5 text-sm font-bold text-omi-text-strong">{t("chart.indicators")}</div>
         </div>
-        <div className="text-[11px] font-semibold text-omi-text-subtle">美股日/週/月</div>
+        <div className="text-[11px] font-semibold text-omi-text-subtle">{t("usStockDetail.usDailyWeeklyMonthly")}</div>
       </div>
 
       <div className="space-y-3">
         {groups.map((group) => (
           <div key={group.key} className="border border-omi-border-subtle">
             <div className="border-b border-omi-border-subtle bg-omi-surface-subtle px-3 py-2">
-              <div className="text-xs font-bold text-omi-text">{group.label}</div>
-              <div className="mt-0.5 text-[11px] text-omi-text-muted">{group.description}</div>
+              <div className="text-xs font-bold text-omi-text">
+                {indicatorCategoryLabel(t, group)}
+              </div>
+              <div className="mt-0.5 text-[11px] text-omi-text-muted">
+                {indicatorCategoryDescription(t, group)}
+              </div>
             </div>
             <div className="grid grid-cols-1 gap-px bg-omi-surface-muted">
               {group.options.map((option) => {
@@ -807,10 +780,10 @@ function USProfessionalIndicatorMenu({
                     >
                       <span>
                         <span className="block font-semibold">{option.label}</span>
-                        <span className="block">{option.description}</span>
+                        <span className="block">{indicatorOptionDescription(t, option)}</span>
                       </span>
                       <span className="shrink-0 border border-omi-border-subtle px-1.5 py-0.5 text-[10px] font-bold">
-                        待補
+                        {t("indicators.pending")}
                       </span>
                     </div>
                   );
@@ -831,7 +804,9 @@ function USProfessionalIndicatorMenu({
                       <span className="block font-semibold text-omi-text">
                         {option.label}
                       </span>
-                      <span className="block text-omi-text-muted">{option.description}</span>
+                      <span className="block text-omi-text-muted">
+                        {indicatorOptionDescription(t, option)}
+                      </span>
                     </span>
                   </label>
                 );
@@ -851,6 +826,8 @@ export default function USStockDetailPanel({
   onCompanyProfileChange,
   onChartFocusModeChange,
 }: Props) {
+  const t = useT();
+  const tRef = useRef(t);
   const [timeframe, setTimeframe] = useState<USChartTimeframe>("daily");
   const [indicatorMenuOpen, setIndicatorMenuOpen] = useState(false);
   const [chartFocusMode, setChartFocusMode] = useState(false);
@@ -899,6 +876,11 @@ export default function USStockDetailPanel({
   const requestSeq = useRef(0);
   const finalIntradayRefreshDate = useRef<string | null>(null);
   const chartDrawingSyncTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    tRef.current = t;
+  }, [t]);
+
   const chartDrawingKey = chartDrawingStorageKey(selectedSymbol, professionalTimeframe);
   const storedChartDrawings = useMemo(
     () => loadChartDrawings(chartDrawingKey),
@@ -970,12 +952,12 @@ export default function USStockDetailPanel({
       : null;
   const technicalTitle =
     latestClose === null || ma20 === null
-      ? "資料不足"
+      ? t("usStockDetail.technicalStates.insufficient")
       : latestClose > ma20 && ma5 !== null && ma5 >= ma20
-        ? "多方排列"
+        ? t("usStockDetail.technicalStates.bullishStack")
         : latestClose < ma20
-          ? "弱於 MA20"
-          : "均線整理";
+          ? t("usStockDetail.technicalStates.belowMa20")
+          : t("usStockDetail.technicalStates.maConsolidation");
   const latestShortVolume = shortVolumeRows[0] ?? null;
   const latestFactFiledDate = latestDate(factRows.map((fact) => fact.filed_date));
   const latestActionDate = latestDate(corporateActions.map((action) => action.event_date));
@@ -1011,41 +993,39 @@ export default function USStockDetailPanel({
   const selectedDisplayName =
     selectedIndexConfig?.name ?? stockName(selectedStock, selectedSecurityName);
   const selectedSubtitle = selectedIndexConfig
-    ? `${selectedIndexConfig.exchange} · Index · ${formatDate(displayDate)}`
+    ? `${selectedIndexConfig.exchange} · ${usAssetTypeLabel(t, "index")} · ${formatDate(displayDate)}`
     : selectedStock
-      ? `${selectedStock.exchange ?? "-"} · ${assetTypeLabel(selectedStock)} · ${formatDate(displayDate)}`
+      ? `${selectedStock.exchange ?? "-"} · ${assetTypeLabel(t, selectedStock)} · ${formatDate(displayDate)}`
       : selectedSymbol
-        ? "讀取美股主檔中"
-        : "請從左側自選或上方搜尋選擇股票";
+        ? t("usStockDetail.loadingMaster")
+        : t("usStockDetail.selectStockPrompt");
   const headerMetrics =
     timeframe === "today"
       ? [
-          { label: "日期", value: formatDate(displayDate) },
-          { label: "今日成交量", value: formatVolume(todayStats.volume) },
+          { label: t("usStockDetail.metrics.date"), value: formatDate(displayDate) },
+          { label: t("usStockDetail.metrics.todayVolume"), value: formatVolume(todayStats.volume) },
           {
-            label: "最高 / 最低",
+            label: t("usStockDetail.metrics.highLow"),
             value: `${formatNumber(todayStats.high)} / ${formatNumber(todayStats.low)}`,
           },
           {
-            label: "更新 / 筆數",
+            label: t("usStockDetail.metrics.updatedPoints"),
             value: `${todayUpdatedAt ?? "-"} / ${displayedPointCount}`,
           },
         ]
       : [
-          { label: "日期", value: formatDate(displayDate) },
-          { label: "成交量", value: formatVolume(latestVolume) },
+          { label: t("usStockDetail.metrics.date"), value: formatDate(displayDate) },
+          { label: t("usStockDetail.metrics.volume"), value: formatVolume(latestVolume) },
           {
             label: "MA5 / 20 / 60",
             value: `${formatNumber(ma5)} / ${formatNumber(ma20)} / ${formatNumber(ma60)}`,
           },
           {
-            label: "資料筆數",
-            value: loadState === "loading" ? "Loading" : String(displayedPointCount),
+            label: t("usStockDetail.metrics.pointCount"),
+            value: loadState === "loading" ? t("common.loading") : String(displayedPointCount),
           },
         ];
-  const professionalTimeframeLabel =
-    usProfessionalTimeframeOptions.find((option) => option.key === professionalTimeframe)?.label ??
-    "日";
+  const professionalTimeframeLabel = timeframeLabel(t, professionalTimeframe);
   const professionalChartReady =
     chartFocusMode &&
     professionalChartData.length > 0 &&
@@ -1082,41 +1062,50 @@ export default function USStockDetailPanel({
           status: coverageStatus(chartData.length > 0, loadState, latestPoint?.time, 10),
           detail:
             chartData.length > 0
-              ? `${chartData.length} bars / ${formatDate(latestPoint?.time)}`
-              : "No index bars",
+              ? t("usStockDetail.coverage.details.bars", {
+                  count: chartData.length,
+                  date: formatDate(latestPoint?.time),
+                })
+              : t("usStockDetail.coverage.details.noIndexBars"),
         },
         {
-          label: "Intraday",
+          label: t("usStockDetail.coverage.labels.intraday"),
           status:
             timeframe === "today"
               ? coverageStatus(todayTrend.length > 0, loadState, latestToday?.time, 2)
               : "ready",
           detail:
             timeframe === "today"
-              ? `${todayTrend.length} points / ${todayUpdatedAt ?? "-"}`
-              : "Available on Today tab",
+              ? t("usStockDetail.coverage.details.points", {
+                  count: todayTrend.length,
+                  time: todayUpdatedAt ?? "-",
+                })
+              : t("usStockDetail.coverage.details.availableToday"),
         },
         {
-          label: "Source",
+          label: t("usStockDetail.coverage.labels.source"),
           status: "ready",
-          detail: "Yahoo chart index",
+          detail: t("usStockDetail.coverage.details.yahooChartIndex"),
         },
       ]
     : [
         {
-          label: "Price",
+          label: t("usStockDetail.coverage.labels.price"),
           status: coverageStatus(chartData.length > 0, loadState, latestPoint?.time, 10),
           detail:
             chartData.length > 0
-              ? `${chartData.length} bars / ${formatDate(latestPoint?.time)}`
-              : "No OHLC rows",
+              ? t("usStockDetail.coverage.details.bars", {
+                  count: chartData.length,
+                  date: formatDate(latestPoint?.time),
+                })
+              : t("usStockDetail.coverage.details.noOhlcRows"),
         },
         {
-          label: "Profile",
+          label: t("usStockDetail.coverage.labels.profile"),
           status: coverageStatus(Boolean(companyProfile), loadState, companyProfile?.fetched_at, 45),
           detail: companyProfile
             ? `${companyProfile.provider} / ${formatDate(companyProfile.fetched_at)}`
-            : "Alpha Vantage overview",
+            : t("usStockDetail.coverage.details.alphaVantageOverview"),
         },
         {
           label: "SEC",
@@ -1128,18 +1117,25 @@ export default function USStockDetailPanel({
           ),
           detail:
             factRows.length > 0 || fundamentalMetrics.length > 0
-              ? `${fundamentalMetrics.length} metrics / ${
-                  latestFundamentalFiledDate !== "-" ? latestFundamentalFiledDate : latestFactFiledDate
-                }`
-              : "No SEC facts",
+              ? t("usStockDetail.coverage.details.secMetrics", {
+                  count: fundamentalMetrics.length,
+                  date:
+                    latestFundamentalFiledDate !== "-"
+                      ? latestFundamentalFiledDate
+                      : latestFactFiledDate,
+                })
+              : t("usStockDetail.coverage.details.noSecFacts"),
         },
         {
-          label: "Actions",
+          label: t("usStockDetail.coverage.labels.actions"),
           status: coverageStatus(corporateActions.length > 0, loadState),
           detail:
             corporateActions.length > 0
-              ? `${corporateActions.length} events / ${latestActionDate}`
-              : "No dividend/split rows",
+              ? t("usStockDetail.coverage.details.events", {
+                  count: corporateActions.length,
+                  date: latestActionDate,
+                })
+              : t("usStockDetail.coverage.details.noDividendSplitRows"),
         },
         {
           label: "Short",
@@ -1151,7 +1147,7 @@ export default function USStockDetailPanel({
           ),
           detail: latestShortVolume
             ? `${formatRatioAsPct(latestShortVolume.short_ratio)} / ${formatDate(latestShortVolume.trade_date)}`
-            : "No FINRA rows",
+            : t("usStockDetail.coverage.details.noFinraRows"),
         },
       ];
   const readyCoverageCount = dataCoverageItems.filter(
@@ -1381,7 +1377,7 @@ export default function USStockDetailPanel({
         setFactLoadState("error");
         setMessage({
           type: "error",
-          text: error instanceof Error ? error.message : "讀取美股資料失敗",
+          text: error instanceof Error ? error.message : tRef.current("usStockDetail.errors.loadFailed"),
         });
       }
     },
@@ -1455,7 +1451,7 @@ export default function USStockDetailPanel({
         setLoadState("error");
         setMessage({
           type: "error",
-          text: error instanceof Error ? error.message : "更新美股盤中資料失敗",
+          text: error instanceof Error ? error.message : tRef.current("usStockDetail.errors.intradayRefreshFailed"),
         });
       } finally {
         intradayRequestInFlight = false;
@@ -1804,7 +1800,7 @@ export default function USStockDetailPanel({
 
   function clearChartDrawings() {
     if (chartDrawings.length === 0) return;
-    if (!window.confirm("清除目前週期的所有畫線？")) return;
+    if (!window.confirm(t("usStockDetail.confirm.clearDrawings"))) return;
 
     updateChartDrawings([]);
     setSelectedChartDrawingId(null);
@@ -1832,13 +1828,18 @@ export default function USStockDetailPanel({
 
       setMessage({
         type: "success",
-        text: `已更新 ${result.symbol} 日線 ${result.fetched_count} 筆，新增 ${result.inserted_count}，更新 ${result.updated_count}`,
+        text: t("usStockDetail.messages.dailyRefreshSuccess", {
+          symbol: result.symbol,
+          fetched: result.fetched_count,
+          inserted: result.inserted_count,
+          updated: result.updated_count,
+        }),
       });
       await loadSymbolData(selectedSymbol, timeframe);
     } catch (error) {
       setMessage({
         type: "error",
-        text: error instanceof Error ? error.message : "更新美股日線失敗",
+        text: error instanceof Error ? error.message : t("usStockDetail.errors.dailyRefreshFailed"),
       });
     } finally {
       setRefreshingDaily(false);
@@ -1859,13 +1860,16 @@ export default function USStockDetailPanel({
 
       setMessage({
         type: "success",
-        text: `已更新 ${result.symbol} SEC facts ${result.fetched_count} 筆`,
+        text: t("usStockDetail.messages.secFactsRefreshSuccess", {
+          symbol: result.symbol,
+          fetched: result.fetched_count,
+        }),
       });
       await loadSymbolData(selectedSymbol, timeframe);
     } catch (error) {
       setMessage({
         type: "error",
-        text: error instanceof Error ? error.message : "更新 SEC facts 失敗",
+        text: error instanceof Error ? error.message : t("usStockDetail.errors.secFactsRefreshFailed"),
       });
     } finally {
       setRefreshingFacts(false);
@@ -1886,13 +1890,16 @@ export default function USStockDetailPanel({
 
       setMessage({
         type: "success",
-        text: `已更新 ${result.symbol ?? selectedSymbol} Profile ${result.fetched_count} 筆`,
+        text: t("usStockDetail.messages.profileRefreshSuccess", {
+          symbol: result.symbol ?? selectedSymbol,
+          fetched: result.fetched_count,
+        }),
       });
       await loadSymbolData(selectedSymbol, timeframe);
     } catch (error) {
       setMessage({
         type: "error",
-        text: error instanceof Error ? error.message : "更新 Profile 失敗",
+        text: error instanceof Error ? error.message : t("usStockDetail.errors.profileRefreshFailed"),
       });
     } finally {
       setRefreshingProfile(false);
@@ -1913,13 +1920,16 @@ export default function USStockDetailPanel({
 
       setMessage({
         type: "success",
-        text: `已更新 ${result.symbol ?? selectedSymbol} Actions ${result.fetched_count} 筆`,
+        text: t("usStockDetail.messages.actionsRefreshSuccess", {
+          symbol: result.symbol ?? selectedSymbol,
+          fetched: result.fetched_count,
+        }),
       });
       await loadSymbolData(selectedSymbol, timeframe);
     } catch (error) {
       setMessage({
         type: "error",
-        text: error instanceof Error ? error.message : "更新 Actions 失敗",
+        text: error instanceof Error ? error.message : t("usStockDetail.errors.actionsRefreshFailed"),
       });
     } finally {
       setRefreshingActions(false);
@@ -1935,7 +1945,7 @@ export default function USStockDetailPanel({
           className="h-8 bg-omi-control px-3 text-xs font-semibold text-omi-text-inverse hover:bg-omi-control-border disabled:bg-omi-border"
           disabled={!selectedSymbol || refreshingProfile}
         >
-          {refreshingProfile ? "Updating" : "Profile"}
+          {refreshingProfile ? t("common.updating") : t("usStockDetail.actions.profile")}
         </button>
       );
     }
@@ -1949,7 +1959,7 @@ export default function USStockDetailPanel({
             className="h-8 bg-omi-control px-3 text-xs font-semibold text-omi-text-inverse hover:bg-omi-control-border disabled:bg-omi-border"
             disabled={!selectedSymbol || refreshingFacts}
           >
-            {refreshingFacts ? "Updating" : "SEC Facts"}
+            {refreshingFacts ? t("common.updating") : t("usStockDetail.actions.secFacts")}
           </button>
           <button
             type="button"
@@ -1957,7 +1967,7 @@ export default function USStockDetailPanel({
             className="h-8 border border-omi-control bg-omi-surface px-3 text-xs font-semibold text-omi-text hover:border-omi-accent hover:text-omi-danger disabled:border-omi-border-subtle disabled:text-omi-text-subtle"
             disabled={!selectedSymbol || refreshingActions}
           >
-            {refreshingActions ? "Updating" : "Actions"}
+            {refreshingActions ? t("common.updating") : t("usStockDetail.actions.actions")}
           </button>
         </div>
       );
@@ -1973,7 +1983,7 @@ export default function USStockDetailPanel({
 
     return (
       <div className="border border-omi-border-subtle px-3 py-2 text-xs font-semibold text-omi-text-muted">
-        Form 4
+        {t("usStockDetail.actions.form4")}
       </div>
     );
   }
@@ -1983,21 +1993,21 @@ export default function USStockDetailPanel({
       <div className="space-y-4">
         <div className="overflow-hidden border border-omi-border-subtle">
           <div className="grid grid-cols-2 gap-px bg-omi-surface-strong text-sm">
-            <MetricCell label="Exchange" value={selectedStock?.exchange ?? "-"} />
-            <MetricCell label="Type" value={assetTypeLabel(selectedStock)} />
-            <MetricCell label="CIK" value={selectedStock?.cik ?? "-"} />
+            <MetricCell label={t("usStockDetail.metrics.exchange")} value={selectedStock?.exchange ?? "-"} />
+            <MetricCell label={t("usStockDetail.metrics.type")} value={assetTypeLabel(t, selectedStock)} />
+            <MetricCell label={t("usStockDetail.metrics.cik")} value={selectedStock?.cik ?? "-"} />
             <MetricCell
               label={
                 companyProfile?.market_cap !== null && companyProfile?.market_cap !== undefined
-                  ? "Market Cap"
-                  : "Mkt Cap Est."
+                  ? t("usStockDetail.metrics.marketCap")
+                  : t("usStockDetail.metrics.marketCapEstimate")
               }
               value={formatCompactCurrency(companyProfile?.market_cap ?? estimatedMarketCap)}
             />
-            <MetricCell label="Shares" value={formatFundamentalValue(sharesOutstandingMetric)} />
-            <MetricCell label="P/E" value={formatNumber(companyProfile?.pe_ratio)} />
+            <MetricCell label={t("usStockDetail.metrics.shares")} value={formatFundamentalValue(sharesOutstandingMetric)} />
+            <MetricCell label={t("usStockDetail.metrics.pe")} value={formatNumber(companyProfile?.pe_ratio)} />
             <MetricCell
-              label="EPS"
+              label={t("usStockDetail.metrics.eps")}
               value={
                 companyProfile?.eps !== null && companyProfile?.eps !== undefined
                   ? formatNumber(companyProfile.eps)
@@ -2007,8 +2017,8 @@ export default function USStockDetailPanel({
             <MetricCell
               label={
                 companyProfile?.revenue_ttm !== null && companyProfile?.revenue_ttm !== undefined
-                  ? "Revenue TTM"
-                  : "SEC Revenue"
+                  ? t("usStockDetail.metrics.revenueTtm")
+                  : t("usStockDetail.metrics.secRevenue")
               }
               value={
                 companyProfile?.revenue_ttm !== null && companyProfile?.revenue_ttm !== undefined
@@ -2020,8 +2030,8 @@ export default function USStockDetailPanel({
               label={
                 companyProfile?.profit_margin !== null &&
                 companyProfile?.profit_margin !== undefined
-                  ? "Profit Margin"
-                  : "Net Margin"
+                  ? t("usStockDetail.metrics.profitMargin")
+                  : t("usStockDetail.metrics.netMargin")
               }
               value={
                 companyProfile?.profit_margin !== null &&
@@ -2030,8 +2040,8 @@ export default function USStockDetailPanel({
                   : formatRatioAsPct(netMargin)
               }
             />
-            <MetricCell label="SEC Period" value={latestFundamentalPeriodEnd} />
-            <MetricCell label="Latest Filed" value={latestFundamentalFiledDate} />
+            <MetricCell label={t("usStockDetail.metrics.secPeriod")} value={latestFundamentalPeriodEnd} />
+            <MetricCell label={t("usStockDetail.metrics.latestFiled")} value={latestFundamentalFiledDate} />
           </div>
         </div>
 
@@ -2043,7 +2053,9 @@ export default function USStockDetailPanel({
               </span>
               {" / "}
               {companyProfile.industry ?? "-"}
-              {" · Latest Quarter "}
+              {" · "}
+              {t("usStockDetail.metrics.latestQuarter")}
+              {" "}
               {formatDate(companyProfile.latest_quarter)}
               {" · "}
               {companyProfile.provider}
@@ -2054,25 +2066,26 @@ export default function USStockDetailPanel({
                 <span className="font-semibold text-omi-text">
                   {fundamentalSummary.entity_name ?? selectedStock?.sec_company_name ?? "-"}
                 </span>
-                {" · SEC fundamentals "}
-                {fundamentalSummary.metric_count}
-                {" metrics · "}
-                {latestFundamentalFiledDate}
+                {" · "}
+                {t("usStockDetail.messages.secFundamentalsSummary", {
+                  count: fundamentalSummary.metric_count,
+                  date: latestFundamentalFiledDate,
+                })}
               </>
             ) : (
-              "尚無 Company Profile；若已更新 SEC facts，會改用 SEC fundamentals 補基本欄位。"
+              t("usStockDetail.empty.noCompanyProfile")
             )
           )}
         </div>
 
         <div className="overflow-hidden border border-omi-border-subtle">
           <div className="grid grid-cols-[1fr_96px_96px] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
-            <span>13F Holder</span>
-            <span className="text-right">Shares</span>
-            <span className="text-right">QoQ</span>
+            <span>{t("usStockDetail.tableHeaders.holder13f")}</span>
+            <span className="text-right">{t("usStockDetail.tableHeaders.shares")}</span>
+            <span className="text-right">{t("usStockDetail.tableHeaders.qoq")}</span>
           </div>
           <div className="border-t border-omi-border-subtle p-4">
-            <EmptyDataState message="尚未接入 SEC 13F 機構持倉資料" />
+            <EmptyDataState message={t("usStockDetail.empty.no13f")} />
           </div>
         </div>
       </div>
@@ -2084,21 +2097,21 @@ export default function USStockDetailPanel({
       <div className="space-y-4">
         <div className="overflow-hidden border border-omi-border-subtle">
           <div className="grid grid-cols-3 gap-px bg-omi-surface-strong text-center text-sm">
-            <MetricCell label="Latest Filing" value="-" />
-            <MetricCell label="Transactions" value="-" />
-            <MetricCell label="Net Shares" value="-" />
+            <MetricCell label={t("usStockDetail.metrics.latestFiling")} value="-" />
+            <MetricCell label={t("usStockDetail.metrics.transactions")} value="-" />
+            <MetricCell label={t("usStockDetail.metrics.netShares")} value="-" />
           </div>
         </div>
 
         <div className="overflow-hidden border border-omi-border-subtle">
           <div className="grid grid-cols-[88px_1fr_88px_92px] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
-            <span>Date</span>
-            <span>Insider</span>
-            <span className="text-right">Type</span>
-            <span className="text-right">Shares</span>
+            <span>{t("usStockDetail.tableHeaders.date")}</span>
+            <span>{t("usStockDetail.tableHeaders.insider")}</span>
+            <span className="text-right">{t("usStockDetail.tableHeaders.type")}</span>
+            <span className="text-right">{t("usStockDetail.tableHeaders.shares")}</span>
           </div>
           <div className="border-t border-omi-border-subtle p-4">
-            <EmptyDataState message="尚未接入 SEC Form 4 內部人交易資料" />
+            <EmptyDataState message={t("usStockDetail.empty.noForm4")} />
           </div>
         </div>
       </div>
@@ -2110,22 +2123,22 @@ export default function USStockDetailPanel({
       <div className="space-y-4">
         <div className="overflow-hidden border border-omi-border-subtle">
           <div className="grid grid-cols-2 gap-px bg-omi-surface-strong text-sm md:grid-cols-4">
-            <MetricCell label="Date" value={formatDate(latestShortVolume?.trade_date)} />
-            <MetricCell label="Short Ratio" value={formatRatioAsPct(latestShortVolume?.short_ratio)} />
-            <MetricCell label="Short Volume" value={formatVolume(latestShortVolume?.short_volume)} />
-            <MetricCell label="Total Volume" value={formatVolume(latestShortVolume?.total_volume)} />
+            <MetricCell label={t("usStockDetail.metrics.date")} value={formatDate(latestShortVolume?.trade_date)} />
+            <MetricCell label={t("usStockDetail.metrics.shortRatio")} value={formatRatioAsPct(latestShortVolume?.short_ratio)} />
+            <MetricCell label={t("usStockDetail.metrics.shortVolume")} value={formatVolume(latestShortVolume?.short_volume)} />
+            <MetricCell label={t("usStockDetail.metrics.totalVolume")} value={formatVolume(latestShortVolume?.total_volume)} />
           </div>
         </div>
 
         <div className="border border-omi-warning-border bg-omi-warning-soft px-4 py-3 text-xs leading-5 text-omi-warning-strong">
-          目前為 FINRA daily short sale volume，非 short interest 部位資料。
+          {t("usStockDetail.notes.finraShortVolumeOnly")}
         </div>
 
         <div className="overflow-hidden border border-omi-border-subtle">
           <div className="grid grid-cols-[88px_1fr_92px] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
-            <span>Date</span>
-            <span>Short / Total</span>
-            <span className="text-right">Ratio</span>
+            <span>{t("usStockDetail.tableHeaders.date")}</span>
+            <span>{t("usStockDetail.tableHeaders.shortTotal")}</span>
+            <span className="text-right">{t("usStockDetail.tableHeaders.ratio")}</span>
           </div>
           <div className="max-h-64 overflow-y-auto">
             {shortVolumeRows.length > 0 ? (
@@ -2150,7 +2163,7 @@ export default function USStockDetailPanel({
               ))
             ) : (
               <div className="border-t border-omi-border-subtle px-5 py-8 text-center text-sm text-omi-text-muted">
-                尚無 short volume 資料
+                {t("usStockDetail.empty.noShortVolume")}
               </div>
             )}
           </div>
@@ -2164,39 +2177,39 @@ export default function USStockDetailPanel({
       <div className="space-y-4">
         <div className="overflow-hidden border border-omi-border-subtle">
           <div className="grid grid-cols-2 gap-px bg-omi-surface-strong text-sm md:grid-cols-3">
-            <MetricCell label="CIK" value={selectedStock?.cik ?? "-"} />
-            <MetricCell label="SEC Facts" value={factRows.length} />
-            <MetricCell label="Fundamentals" value={fundamentalSummary?.metric_count ?? 0} />
+            <MetricCell label={t("usStockDetail.metrics.cik")} value={selectedStock?.cik ?? "-"} />
+            <MetricCell label={t("usStockDetail.metrics.secFacts")} value={factRows.length} />
+            <MetricCell label={t("usStockDetail.metrics.fundamentals")} value={fundamentalSummary?.metric_count ?? 0} />
             <MetricCell
-              label="Latest Filed"
+              label={t("usStockDetail.metrics.latestFiled")}
               value={
                 latestFundamentalFiledDate !== "-"
                   ? latestFundamentalFiledDate
                   : latestFactFiledDate
               }
             />
-            <MetricCell label="Period End" value={latestFundamentalPeriodEnd} />
-            <MetricCell label="Actions" value={corporateActions.length} />
-            <MetricCell label="Latest Action" value={latestActionDate} />
+            <MetricCell label={t("usStockDetail.metrics.periodEnd")} value={latestFundamentalPeriodEnd} />
+            <MetricCell label={t("usStockDetail.metrics.actions")} value={corporateActions.length} />
+            <MetricCell label={t("usStockDetail.metrics.latestAction")} value={latestActionDate} />
           </div>
         </div>
 
         <div className="overflow-hidden border border-omi-border-subtle">
           <div className="border-b border-omi-border-subtle bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
-            SEC Fundamentals
+            {t("usStockDetail.sections.secFundamentals")}
           </div>
           {fundamentalMetrics.length > 0 ? (
             <>
               <div className="grid grid-cols-2 gap-px bg-omi-surface-strong text-sm md:grid-cols-3">
-                <MetricCell label="Gross Margin" value={formatRatioAsPct(grossMargin)} />
-                <MetricCell label="Net Margin" value={formatRatioAsPct(netMargin)} />
-                <MetricCell label="Debt / Equity" value={formatNumber(debtToEquity, 2)} />
+                <MetricCell label={t("usStockDetail.metrics.grossMargin")} value={formatRatioAsPct(grossMargin)} />
+                <MetricCell label={t("usStockDetail.metrics.netMargin")} value={formatRatioAsPct(netMargin)} />
+                <MetricCell label={t("usStockDetail.metrics.debtToEquity")} value={formatNumber(debtToEquity, 2)} />
               </div>
               <div className="grid grid-cols-2 gap-px bg-omi-surface-strong text-sm md:grid-cols-3">
                 {secFundamentalCards.map((card) => (
                   <FundamentalMetricCell
                     key={card.metric}
-                    label={card.label}
+                    label={t(`usStockDetail.fundamentals.${card.metric}`)}
                     metric={fundamentalMetricMap.get(card.metric)}
                   />
                 ))}
@@ -2204,17 +2217,17 @@ export default function USStockDetailPanel({
             </>
           ) : (
             <div className="p-4">
-              <EmptyDataState message="尚無 SEC fundamentals 摘要，可先更新 SEC facts。" />
+              <EmptyDataState message={t("usStockDetail.empty.noSecFundamentals")} />
             </div>
           )}
         </div>
 
         <div className="overflow-hidden border border-omi-border-subtle">
           <div className="grid grid-cols-[minmax(120px,1fr)_56px_88px_minmax(86px,0.8fr)] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
-            <span>Tag</span>
-            <span>FY</span>
-            <span>End</span>
-            <span className="text-right">Value</span>
+            <span>{t("usStockDetail.tableHeaders.tag")}</span>
+            <span>{t("usStockDetail.tableHeaders.fiscalYear")}</span>
+            <span>{t("usStockDetail.tableHeaders.end")}</span>
+            <span className="text-right">{t("usStockDetail.tableHeaders.value")}</span>
           </div>
           <div className="max-h-72 overflow-y-auto">
             {factRows.length > 0 ? (
@@ -2234,7 +2247,7 @@ export default function USStockDetailPanel({
               ))
             ) : (
               <div className="border-t border-omi-border-subtle px-5 py-8 text-center text-sm text-omi-text-muted">
-                {factLoadState === "loading" ? "Loading" : "尚無 SEC facts"}
+                {factLoadState === "loading" ? t("common.loading") : t("usStockDetail.empty.noSecFacts")}
               </div>
             )}
           </div>
@@ -2242,9 +2255,9 @@ export default function USStockDetailPanel({
 
         <div className="overflow-hidden border border-omi-border-subtle">
           <div className="grid grid-cols-[88px_1fr_88px] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
-            <span>Date</span>
-            <span>Action</span>
-            <span className="text-right">Value</span>
+            <span>{t("usStockDetail.tableHeaders.date")}</span>
+            <span>{t("usStockDetail.tableHeaders.action")}</span>
+            <span className="text-right">{t("usStockDetail.tableHeaders.value")}</span>
           </div>
           <div className="max-h-52 overflow-y-auto">
             {corporateActions.length > 0 ? (
@@ -2255,7 +2268,9 @@ export default function USStockDetailPanel({
                 >
                   <span className="text-omi-text-muted">{formatDate(action.event_date)}</span>
                   <span className="font-semibold text-omi-text">
-                    {action.action_type === "dividend" ? "Dividend" : "Split"}
+                    {action.action_type === "dividend"
+                      ? t("usStockDetail.actionTypes.dividend")
+                      : t("usStockDetail.actionTypes.split")}
                   </span>
                   <span className="text-right font-bold text-omi-text-strong">
                     {formatActionValue(action)}
@@ -2264,7 +2279,7 @@ export default function USStockDetailPanel({
               ))
             ) : (
               <div className="border-t border-omi-border-subtle px-5 py-8 text-center text-sm text-omi-text-muted">
-                尚無股利 / 拆股資料
+                {t("usStockDetail.empty.noCorporateActions")}
               </div>
             )}
           </div>
@@ -2285,7 +2300,7 @@ export default function USStockDetailPanel({
       <section className="min-w-0">{watchlistRankingPanel}</section>
     ) : (
       <section className="border border-omi-border-subtle bg-omi-surface px-5 py-10 text-sm text-omi-text-muted">
-        尚未選擇股票
+        {t("usStockDetail.noStockSelected")}
       </section>
     );
   }
@@ -2321,7 +2336,10 @@ export default function USStockDetailPanel({
                 </span>
               </div>
             }
-            timeframeOptions={usProfessionalTimeframeOptions}
+            timeframeOptions={usProfessionalTimeframeOptions.map((option) => ({
+              key: option,
+              label: timeframeLabel(t, option),
+            }))}
             timeframe={professionalTimeframe}
             onTimeframeChange={handleProfessionalTimeframeChange}
             chartStyle={professionalChartStyle}
@@ -2350,7 +2368,7 @@ export default function USStockDetailPanel({
             chartReady={professionalChartReady}
             emptyState={
               <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle text-sm text-omi-text-muted">
-                讀取{professionalTimeframeLabel} K 線中...
+                {t("usStockDetail.loadingKline", { label: professionalTimeframeLabel })}
               </div>
             }
             chartData={professionalChartData}
@@ -2359,7 +2377,7 @@ export default function USStockDetailPanel({
             showMovingAverages={chartIndicators.ma}
             indicators={chartIndicators}
             indicatorParameters={indicatorParameters}
-            volumePanelLabel="Volume"
+            volumePanelLabel={t("usStockDetail.metrics.volume")}
             drawingTool={chartDrawingTool}
             drawings={chartDrawings}
             selectedDrawingId={activeSelectedChartDrawingId}
@@ -2385,7 +2403,7 @@ export default function USStockDetailPanel({
           <div className="flex flex-wrap items-start justify-between gap-4 px-5 py-4">
             <div>
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
-                {selectedIndexConfig ? "Index" : "Stock"}
+                {selectedIndexConfig ? t("usStockDetail.entity.index") : t("usStockDetail.entity.stock")}
               </div>
               <h2 className="mt-1 text-2xl font-bold text-omi-text-strong">
                 {selectedDisplaySymbol} {selectedDisplayName}
@@ -2410,17 +2428,17 @@ export default function USStockDetailPanel({
               <div className="mt-3 flex flex-wrap justify-end gap-2">
                 {timeframeOptions.map((option) => (
                   <button
-                    key={option.value}
+                    key={option}
                     type="button"
-                    onClick={() => setTimeframe(option.value)}
+                    onClick={() => setTimeframe(option)}
                     className={[
                       "h-8 border px-3 text-sm font-semibold",
-                      timeframe === option.value
+                      timeframe === option
                         ? "border-omi-accent bg-omi-accent text-omi-text-inverse"
                         : "border-omi-border-subtle bg-omi-surface text-omi-text hover:bg-omi-surface-subtle",
                     ].join(" ")}
                   >
-                    {option.label}
+                    {timeframeLabel(t, option)}
                   </button>
                 ))}
               </div>
@@ -2454,9 +2472,9 @@ export default function USStockDetailPanel({
         <section className="border border-omi-border-subtle bg-omi-surface">
           <div className="flex items-center justify-between border-b border-omi-border-subtle px-5 py-3">
             <div>
-              <h3 className="text-sm font-bold text-omi-text-strong">K 線 / 技術指標</h3>
+              <h3 className="text-sm font-bold text-omi-text-strong">{t("stockDetail.chartIndicators")}</h3>
               <div className="mt-1 text-xs text-omi-text-muted">
-                {timeframeOptions.find((option) => option.value === timeframe)?.label} · {displayedPointCount} 筆資料
+                {timeframeLabel(t, timeframe)} · {displayedPointCount} {t("stockDetail.points")}
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -2465,7 +2483,7 @@ export default function USStockDetailPanel({
                 onClick={enterChartFocusMode}
                 className="h-8 border border-omi-control bg-omi-surface px-3 text-xs font-semibold text-omi-text hover:border-omi-accent hover:text-omi-danger"
               >
-                放大
+                {t("stockDetail.expand")}
               </button>
               {timeframe === "today" ? (
                 <div className="relative">
@@ -2474,11 +2492,11 @@ export default function USStockDetailPanel({
                     onClick={() => setIndicatorMenuOpen((value) => !value)}
                     className="h-8 border border-omi-control bg-omi-surface px-3 text-xs font-semibold text-omi-text hover:border-omi-accent hover:text-omi-danger"
                   >
-                    指標
+                    {t("stockDetail.indicators")}
                   </button>
                   {indicatorMenuOpen ? (
                     <div className="absolute right-0 z-20 mt-2 w-56 border border-omi-border-subtle bg-omi-surface p-3 text-left shadow-lg">
-                      <div className="mb-2 text-xs font-bold text-omi-text-muted">顯示項目</div>
+                      <div className="mb-2 text-xs font-bold text-omi-text-muted">{t("stockDetail.displayItems")}</div>
                       {intradayIndicatorOptions.map((option) => (
                         <label
                           key={option.key}
@@ -2495,7 +2513,7 @@ export default function USStockDetailPanel({
                               {option.label}
                             </span>
                             <span className="block text-omi-text-muted">
-                              {option.description}
+                              {t(option.descriptionKey)}
                             </span>
                           </span>
                         </label>
@@ -2525,11 +2543,11 @@ export default function USStockDetailPanel({
               >
                 {timeframe === "today"
                   ? loadState === "loading"
-                    ? "Loading"
-                    : "Reload"
+                    ? t("common.loading")
+                    : t("common.reload")
                   : refreshingDaily
-                    ? "Updating"
-                    : "更新"}
+                    ? t("common.updating")
+                    : t("common.update")}
               </button>
             </div>
           </div>
@@ -2540,8 +2558,8 @@ export default function USStockDetailPanel({
               previousClose={todayPreviousClose}
               label={
                 selectedIndexConfig
-                  ? `${selectedDisplaySymbol} 今日`
-                  : timeframeOptions.find((option) => option.value === timeframe)?.label ?? "今日"
+                  ? `${selectedDisplaySymbol} ${timeframeLabel(t, "today")}`
+                  : timeframeLabel(t, timeframe)
               }
               source={todaySource}
               indicators={intradayIndicators}
@@ -2558,19 +2576,19 @@ export default function USStockDetailPanel({
               indicators={chartIndicators}
               indicatorParameters={indicatorParameters}
               revealKey={`${selectedSymbol ?? "empty"}-${timeframe}-${chartData.length}`}
-              volumePanelLabel="Volume"
-              volumeTooltipLabel="Volume"
+              volumePanelLabel={t("usStockDetail.metrics.volume")}
+              volumeTooltipLabel={t("usStockDetail.metrics.volume")}
               volumeValueFormatter={formatVolume}
             />
           ) : (
             <div className="flex h-[460px] items-center justify-center border-t border-omi-border-subtle text-sm text-omi-text-muted">
               {loadState === "loading"
-                ? "讀取 K 線中"
+                ? t("usStockDetail.loadingKlineShort")
                 : selectedSymbol
                   ? selectedIndexConfig
-                    ? "尚無指數 K 線資料，請先按 Reload 或更新。"
-                    : "尚無 K 線資料，請先更新日線。"
-                  : "尚未選擇股票"}
+                    ? t("usStockDetail.noIndexKline")
+                    : t("usStockDetail.noKline")
+                  : t("usStockDetail.noStockSelected")}
             </div>
           )}
         </section>
@@ -2588,10 +2606,10 @@ export default function USStockDetailPanel({
           <div className="flex items-start justify-between gap-4 border-b border-omi-border-subtle px-5 py-4">
             <div>
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
-                Technical
+                {t("usStockDetail.sections.technical")}
               </div>
               <h3 className="mt-1 text-xl font-bold text-omi-text-strong">{technicalTitle}</h3>
-              <div className="mt-1 text-sm text-omi-text-muted">均線、量能、價格相對位置</div>
+              <div className="mt-1 text-sm text-omi-text-muted">{t("usStockDetail.technicalSubtitle")}</div>
             </div>
             <div className={`text-right text-lg font-black ${valueTone(priceVsMa20)}`}>
               <PriceUpdatePulse
@@ -2609,7 +2627,7 @@ export default function USStockDetailPanel({
           <div className="space-y-3 px-5 py-4 text-sm">
             <div>
               <div className="mb-1 flex justify-between text-xs text-omi-text-muted">
-                <span>價格相對 MA20</span>
+                <span>{t("usStockDetail.technicalMetrics.priceVsMa20")}</span>
                 <span className={valueTone(priceVsMa20)}>
                   <PriceUpdatePulse
                     value={priceVsMa20}
@@ -2630,7 +2648,7 @@ export default function USStockDetailPanel({
             </div>
             <div>
               <div className="mb-1 flex justify-between text-xs text-omi-text-muted">
-                <span>量能相對 20 日均量</span>
+                <span>{t("usStockDetail.technicalMetrics.volumeVsMa20")}</span>
                 <span className={valueTone(volumeVsMa20)}>
                   <PriceUpdatePulse
                     value={volumeVsMa20}
@@ -2651,7 +2669,7 @@ export default function USStockDetailPanel({
             </div>
             <div>
               <div className="mb-1 flex justify-between text-xs text-omi-text-muted">
-                <span>日漲跌幅</span>
+                <span>{t("usStockDetail.technicalMetrics.dayChangePct")}</span>
                 <span className={valueTone(changePct)}>
                   <PriceUpdatePulse
                     value={changePct}
@@ -2692,14 +2710,17 @@ export default function USStockDetailPanel({
           <div className="mb-3 flex items-center justify-between gap-3">
             <div>
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
-                Coverage
+                {t("usStockDetail.sections.coverage")}
               </div>
               <div className="mt-1 text-sm font-bold text-omi-text-strong">
-                Right-side data readiness
+                {t("usStockDetail.coverage.readiness")}
               </div>
             </div>
             <div className="text-right text-[11px] font-semibold text-omi-text-muted">
-              {readyCoverageCount}/{dataCoverageItems.length} ready
+              {t("usStockDetail.coverage.readyCount", {
+                ready: readyCoverageCount,
+                total: dataCoverageItems.length,
+              })}
             </div>
           </div>
           <div className="grid grid-cols-2 gap-2">
@@ -2717,19 +2738,19 @@ export default function USStockDetailPanel({
         {selectedIndexConfig ? (
           <section className="border-t border-omi-border-subtle px-5 py-4">
             <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
-              Data
+              {t("usStockDetail.sections.data")}
             </div>
             <h3 className="mt-1 text-lg font-bold text-omi-text-strong">
               {selectedDisplayName}
             </h3>
             <div className="mt-1 text-sm leading-6 text-omi-text-muted">
-              目前接入 Yahoo chart 的日K、週K、月K與盤中 1 分 K。成分股廣度、權重貢獻與產業分解待下一版補上。
+              {t("usStockDetail.indexDataDescription")}
             </div>
             <div className="mt-4 grid grid-cols-2 gap-px bg-omi-surface-strong text-sm">
-              <MetricCell label="Symbol" value={selectedIndexConfig.symbol} />
-              <MetricCell label="Display" value={selectedIndexConfig.displaySymbol} />
-              <MetricCell label="Exchange" value={selectedIndexConfig.exchange} />
-              <MetricCell label="Source" value="Yahoo chart" />
+              <MetricCell label={t("usStockDetail.metrics.symbol")} value={selectedIndexConfig.symbol} />
+              <MetricCell label={t("usStockDetail.metrics.display")} value={selectedIndexConfig.displaySymbol} />
+              <MetricCell label={t("usStockDetail.metrics.exchange")} value={selectedIndexConfig.exchange} />
+              <MetricCell label={t("usStockDetail.metrics.source")} value="Yahoo chart" />
             </div>
           </section>
         ) : (
@@ -2738,7 +2759,7 @@ export default function USStockDetailPanel({
               {usDataPanelTabs.map((tab) => (
                 <USDataTabButton
                   key={tab.key}
-                  tab={tab}
+                  tab={{ ...tab, label: t(`usStockDetail.tabs.${tab.key}.label`) }}
                   active={activeDataTab === tab.key}
                   onClick={() => setActiveDataTab(tab.key)}
                 />
@@ -2749,13 +2770,13 @@ export default function USStockDetailPanel({
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
-                    Data
+                    {t("usStockDetail.sections.data")}
                   </div>
                   <h3 className="mt-1 text-lg font-bold text-omi-text-strong">
-                    {activeDataTabMeta.title}
+                    {t(`usStockDetail.tabs.${activeDataTabMeta.key}.title`)}
                   </h3>
                   <div className="mt-1 text-xs text-omi-text-muted">
-                    {activeDataTabMeta.description}
+                    {t(`usStockDetail.tabs.${activeDataTabMeta.key}.description`)}
                   </div>
                 </div>
                 {renderDataPanelAction()}

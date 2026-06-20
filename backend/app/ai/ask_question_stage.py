@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from app.ai import decision_core, pipeline_progress
+from app.ai import decision_core, pipeline_progress, response_preferences
 from app.ai.ask_stage_models import QuestionStage
 from app.ai.schemas import AiAskRequest
 
@@ -44,6 +44,9 @@ def build_question_stage(
     effective_horizon = question_understanding.analysis_horizon
     normalized_payload = payload.model_copy(update={"analysis_horizon": effective_horizon})
     policy = build_policy(normalized_payload, server_policy)
+    response_preference_payload = response_preferences.build_response_preferences(
+        normalized_payload.conversation_context
+    )
     position_context = question_understanding.position_context.as_dict()
     question_intent = question_understanding.intent
     progress.question_understood(
@@ -53,6 +56,7 @@ def build_question_stage(
 
     policy["question_intent"] = question_intent
     policy["question_understanding"] = question_understanding.as_policy_payload()
+    policy["response_preferences"] = response_preference_payload
     if position_context.get("has_position_context"):
         policy["position_context"] = position_context
     policy["analysis_horizon"] = {

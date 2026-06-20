@@ -12,18 +12,25 @@ import type {
   ChartTimeMode,
 } from "@/components/LightweightKLineChart";
 import type { ChartPoint, StockIndicatorPoint } from "@/types/market";
+import { useT } from "@/i18n";
 import dynamic from "next/dynamic";
 import type { ReactNode } from "react";
+
+function ChartEngineLoading() {
+  const t = useT();
+
+  return (
+    <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle bg-omi-surface text-sm text-omi-text-muted">
+      {t("chart.engineLoading")}
+    </div>
+  );
+}
 
 const LightweightKLineChart = dynamic(
   () => import("@/components/LightweightKLineChart"),
   {
     ssr: false,
-    loading: () => (
-      <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle bg-omi-surface text-sm text-omi-text-muted">
-        K 線引擎載入中...
-      </div>
-    ),
+    loading: () => <ChartEngineLoading />,
   }
 );
 
@@ -124,6 +131,8 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
   volumePanelLabel,
   volumeValueKey,
 }: Props<TTimeframe>) {
+  const t = useT();
+
   return (
     <section className="border border-omi-border-subtle bg-omi-surface">
       <div className="border-b border-omi-border-subtle px-4 py-2">
@@ -155,8 +164,8 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
 
               <div className="flex border border-omi-border-subtle bg-omi-surface-subtle p-0.5">
                 {[
-                  ["candlestick", "K線"],
-                  ["line", "折線"],
+                  ["candlestick", t("chart.candlestick")],
+                  ["line", t("chart.line")],
                 ].map(([key, labelText]) => (
                   <button
                     key={key}
@@ -181,7 +190,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
                 onClick={onToggleIndicatorMenu}
                 className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text hover:border-omi-control hover:text-omi-text-strong"
               >
-                技術指標
+                {t("chart.indicators")}
               </button>
             </div>
 
@@ -190,7 +199,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
               onClick={onClose}
               className="h-8 border border-omi-control bg-omi-control px-3 text-xs font-semibold text-omi-text-inverse hover:bg-omi-control-muted"
             >
-              總覽
+              {t("common.backToOverview")}
             </button>
           </div>
         </div>
@@ -227,7 +236,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
                           : "text-omi-text-muted hover:bg-omi-surface hover:text-omi-text-strong",
                       ].join(" ")}
                     >
-                      {option.label}
+                      {t(option.labelKey)}
                     </button>
                   );
                 })}
@@ -273,7 +282,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
                     : "cursor-not-allowed text-omi-text-inverse-muted",
                 ].join(" ")}
               >
-                刪除
+                {t("chart.delete")}
               </button>
               <button
                 type="button"
@@ -286,7 +295,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
                     : "cursor-not-allowed text-omi-text-inverse-muted",
                 ].join(" ")}
               >
-                畫線 {drawings.length}
+                {t("chart.drawingCount", { count: drawings.length })}
               </button>
               {historyCounts ? (
                 <span className="hidden h-7 items-center border-l border-omi-border-subtle px-2 text-[11px] font-semibold tabular-nums text-omi-text-subtle min-[1500px]:inline-flex">
@@ -332,7 +341,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
       ) : (
         emptyState ?? (
           <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle text-sm text-omi-text-muted">
-            讀取{label} K 線中...
+            {t("chart.loadingKline", { label })}
           </div>
         )
       )}

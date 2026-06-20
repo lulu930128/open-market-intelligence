@@ -3,6 +3,7 @@
 import JobStatusCenter from "@/components/JobStatusCenter";
 import SettingsDock from "@/components/SettingsDock";
 import type { MarketRegion } from "@/components/SidebarWatchlistExplorer";
+import { marketLabel, usAssetTypeLabel, useT } from "@/i18n";
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
 import {
   US_MARKET_INDEX_GROUP_NAME,
@@ -34,15 +35,14 @@ type Props = {
 };
 
 const marketOptions: Array<{
-  label: string;
   value: MarketRegion;
   enabled: boolean;
 }> = [
-  { label: "台股", value: "tw", enabled: true },
-  { label: "美股", value: "us", enabled: true },
-  { label: "日股", value: "jp", enabled: false },
-  { label: "韓股", value: "kr", enabled: false },
-  { label: "港股", value: "hk", enabled: false },
+  { value: "tw", enabled: true },
+  { value: "us", enabled: true },
+  { value: "jp", enabled: false },
+  { value: "kr", enabled: false },
+  { value: "hk", enabled: false },
 ];
 
 function flattenGroups(nodes: USWatchlistGroupNode[]): USWatchlistGroupNode[] {
@@ -105,6 +105,7 @@ export default function USWatchlistSidebar({
   onExplorerDataChanged,
   onChanged,
 }: Props) {
+  const t = useT();
   const initialGroup = flattenGroups(initialTree)[0] ?? null;
   const [tree, setTree] = useState<USWatchlistGroupNode[]>(initialTree);
   const [items, setItems] = useState<USWatchlistItemRead[]>(initialItems);
@@ -197,7 +198,7 @@ export default function USWatchlistSidebar({
     } catch (error) {
       setMessage({
         type: "error",
-        text: error instanceof Error ? error.message : "操作失敗",
+        text: error instanceof Error ? error.message : t("watchlist.messages.actionError"),
       });
     } finally {
       setLoading(false);
@@ -214,7 +215,7 @@ export default function USWatchlistSidebar({
     } catch (error) {
       setMessage({
         type: "error",
-        text: error instanceof Error ? error.message : "??憭望?",
+        text: error instanceof Error ? error.message : t("watchlist.messages.reloadError"),
       });
     } finally {
       setLoading(false);
@@ -239,7 +240,7 @@ export default function USWatchlistSidebar({
         });
         setFolderName("");
       },
-      "已新增美股 Root 分組",
+      t("watchlist.messages.usCreatedRoot"),
       { keepSelection: false }
     );
   }
@@ -262,7 +263,7 @@ export default function USWatchlistSidebar({
         });
         setFolderName("");
       },
-      "已新增美股 Child 分組"
+      t("watchlist.messages.usCreatedChild")
     );
   }
 
@@ -280,14 +281,14 @@ export default function USWatchlistSidebar({
           }
         );
       },
-      "已重新命名美股分組"
+      t("watchlist.messages.usRenamedGroup")
     );
   }
 
   async function deleteSelectedFolder() {
     if (selectedGroupId === null) return;
 
-    const confirmed = window.confirm("刪除此美股分組與底下所有子分組、自選股？");
+    const confirmed = window.confirm(t("watchlist.messages.confirmDeleteUsGroup"));
     if (!confirmed) return;
 
     await runAction(
@@ -298,7 +299,7 @@ export default function USWatchlistSidebar({
           recursive: true,
         });
       },
-      "已刪除美股分組",
+      t("watchlist.messages.usDeletedGroup"),
       { keepSelection: false }
     );
   }
@@ -369,19 +370,21 @@ export default function USWatchlistSidebar({
         setStockSuggestions([]);
         onSelectSymbol(item.symbol, item.security_name);
       },
-      "已新增美股自選股"
+      t("watchlist.messages.usAddedStock")
     );
   }
 
   async function deleteStockItem(item: USWatchlistItemRead) {
-    const confirmed = window.confirm(`刪除 ${item.symbol}？`);
+    const confirmed = window.confirm(
+      t("watchlist.messages.confirmDeleteUsStock", { symbol: item.symbol })
+    );
     if (!confirmed) return;
 
     await runAction(
       async () => {
         await deleteRequest(`/api/us-market/watchlists/items/${item.id}`);
       },
-      "已刪除美股自選股"
+      t("watchlist.messages.usDeletedStock")
     );
   }
 
@@ -396,7 +399,7 @@ export default function USWatchlistSidebar({
           }
         );
       },
-      item.enabled ? "已停用美股自選股" : "已啟用美股自選股"
+      item.enabled ? t("watchlist.messages.usDisabledStock") : t("watchlist.messages.usEnabledStock")
     );
   }
 
@@ -442,7 +445,7 @@ export default function USWatchlistSidebar({
               "h-6 w-4 text-xs",
               selected ? "text-omi-accent" : "text-omi-text-muted",
             ].join(" ")}
-            aria-label="切換美股指數資料夾"
+            aria-label={t("watchlist.toggleUsIndexFolder")}
           >
             {indexGroupExpanded ? "v" : ">"}
           </button>
@@ -484,7 +487,7 @@ export default function USWatchlistSidebar({
                       {item.displaySymbol} {item.name}
                     </div>
                     <div className={itemSelected ? "truncate text-omi-text-muted" : "truncate text-omi-text-subtle"}>
-                      {item.exchange} · index · {item.note}
+                      {item.exchange} · {usAssetTypeLabel(t, "index")} · {item.note}
                     </div>
                   </div>
                 </button>
@@ -563,7 +566,13 @@ export default function USWatchlistSidebar({
                       {item.symbol} {item.security_name ?? ""}
                     </div>
                     <div className={itemSelected ? "truncate text-omi-text-muted" : "truncate text-omi-text-subtle"}>
-                      {[item.exchange, item.asset_type, item.note].filter(Boolean).join(" · ")}
+                      {[
+                        item.exchange,
+                        item.asset_type ? usAssetTypeLabel(t, item.asset_type) : null,
+                        item.note,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
                     </div>
                   </button>
                   <button
@@ -600,7 +609,7 @@ export default function USWatchlistSidebar({
         <div className="text-xs font-semibold uppercase tracking-[0.22em] text-omi-accent">
           Open Market Intelligence
         </div>
-        <h1 className="mt-2 text-xl font-bold text-omi-text-strong">Market Dashboard</h1>
+        <h1 className="mt-2 text-xl font-bold text-omi-text-strong">{t("app.dashboardTitle")}</h1>
         <div className="mt-3 grid grid-cols-5 border border-omi-border-subtle bg-omi-surface-subtle p-1">
           {marketOptions.map((option) => (
             <a
@@ -625,7 +634,7 @@ export default function USWatchlistSidebar({
                     : "cursor-not-allowed text-omi-text-subtle",
               ].join(" ")}
             >
-              {option.label}
+              {marketLabel(t, option.value)}
             </a>
           ))}
         </div>
@@ -633,9 +642,9 @@ export default function USWatchlistSidebar({
 
       <div className="flex items-center justify-between border-b border-omi-border-subtle px-4 py-3">
         <div>
-          <div className="text-xs font-semibold text-omi-text-muted">美股自選</div>
+          <div className="text-xs font-semibold text-omi-text-muted">{t("watchlist.usHeader")}</div>
           <div className="text-sm font-bold text-omi-text-strong">
-            {selectedGroup?.group_name ?? "尚未建立分組"}
+            {selectedGroup?.group_name ?? t("watchlist.noGroupCreated")}
           </div>
         </div>
         <button
@@ -644,7 +653,7 @@ export default function USWatchlistSidebar({
           onClick={() => void reloadSidebarData()}
           disabled={loading}
         >
-          Reload
+          {t("common.reload")}
         </button>
       </div>
 
@@ -653,7 +662,7 @@ export default function USWatchlistSidebar({
         {tree.length > 0 ? (
           tree.map((node) => renderGroupNode(node))
         ) : (
-          <div className="px-4 py-6 text-sm text-omi-text-muted">尚未建立美股分組</div>
+          <div className="px-4 py-6 text-sm text-omi-text-muted">{t("watchlist.noUsGroupCreated")}</div>
         )}
       </div>
 
@@ -680,11 +689,11 @@ export default function USWatchlistSidebar({
           method="post"
           onSubmit={handleFolderSubmit}
         >
-          <div className="mb-2 text-xs font-bold text-omi-text-muted">分組管理</div>
+          <div className="mb-2 text-xs font-bold text-omi-text-muted">{t("watchlist.groupManagement")}</div>
           <input
             className={inputClass()}
             name="group_name"
-            placeholder="新增分組名稱"
+            placeholder={t("watchlist.addGroupPlaceholder")}
             value={folderName}
             onChange={(event) => setFolderName(event.target.value)}
           />
@@ -696,7 +705,7 @@ export default function USWatchlistSidebar({
               className={buttonClass("ghost")}
               disabled={loading}
             >
-              + Root
+              {t("common.addRoot")}
             </button>
             <button
               type="submit"
@@ -705,7 +714,7 @@ export default function USWatchlistSidebar({
               className={buttonClass("primary")}
               disabled={loading || selectedGroupId === null}
             >
-              + Child
+              {t("common.addChild")}
             </button>
           </div>
         </form>
@@ -719,7 +728,7 @@ export default function USWatchlistSidebar({
           <input
             className={inputClass()}
             name="group_name"
-            placeholder="重新命名目前分組"
+            placeholder={t("watchlist.renameGroupPlaceholder")}
             value={renameValue}
             onChange={(event) => setRenameValue(event.target.value)}
           />
@@ -731,7 +740,7 @@ export default function USWatchlistSidebar({
               className={buttonClass("primary")}
               disabled={loading || selectedGroupId === null}
             >
-              Rename
+              {t("common.rename")}
             </button>
             <button
               type="submit"
@@ -740,7 +749,7 @@ export default function USWatchlistSidebar({
               className={buttonClass("danger")}
               disabled={loading || selectedGroupId === null}
             >
-              Delete
+              {t("common.delete")}
             </button>
           </div>
         </form>
@@ -753,7 +762,7 @@ export default function USWatchlistSidebar({
             onSubmit={handleStockSubmit}
             className="space-y-2"
           >
-            <div className="text-xs font-bold text-omi-text-muted">加入股票</div>
+            <div className="text-xs font-bold text-omi-text-muted">{t("watchlist.addStock")}</div>
             <div className="flex gap-2">
               <input
                 className={inputClass()}
@@ -768,7 +777,7 @@ export default function USWatchlistSidebar({
                 onClick={() => void findStockSuggestions()}
                 disabled={loading}
               >
-                Find
+                {t("common.find")}
               </button>
             </div>
             {stockSuggestions.length > 0 ? (
@@ -791,14 +800,14 @@ export default function USWatchlistSidebar({
             <input
               className={inputClass()}
               name="note"
-              placeholder="備註"
+              placeholder={t("watchlist.notePlaceholder")}
               value={stockNote}
               onChange={(event) => setStockNote(event.target.value)}
             />
             <input
               className={inputClass()}
               name="tags"
-              placeholder="標籤，例如 ETF,core"
+              placeholder={t("watchlist.tagsPlaceholder")}
               value={stockTags}
               onChange={(event) => setStockTags(event.target.value)}
             />
@@ -810,7 +819,7 @@ export default function USWatchlistSidebar({
               className={buttonClass("primary")}
               disabled={loading || selectedGroupId === null}
             >
-              + Stock
+              {t("common.addStock")}
             </button>
             <SettingsDock placement="inline" />
           </div>

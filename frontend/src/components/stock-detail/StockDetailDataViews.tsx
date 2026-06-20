@@ -2,6 +2,11 @@
 
 import { LoadingDots } from "@/components/LoadingPlaceholders";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
+import {
+  useT,
+  type TranslationFunction,
+  type TranslationValues,
+} from "@/i18n";
 import { fetchJson } from "@/lib/api";
 import { getJobResultStatus } from "@/lib/jobs";
 import { omiChartColors } from "@/lib/themeColors";
@@ -158,10 +163,10 @@ export function formatSignedTradeValueYi(value: number | null | undefined) {
   return `${sign}${formatTradeValueYi(value)}`;
 }
 
-export function formatSignedContracts(value: number | null | undefined) {
+export function formatSignedContracts(value: number | null | undefined, unit = "口") {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
   const sign = value > 0 ? "+" : "";
-  return `${sign}${formatNumber(value)}口`;
+  return `${sign}${formatNumber(value)}${unit}`;
 }
 
 export function formatContributionPoint(value: number | null | undefined) {
@@ -261,27 +266,71 @@ export function readBackfillCount(result: unknown, key: string) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-export function formatPanelJobProgress(label: string, job: JobRunRead) {
+function optionalTranslation(
+  t: TranslationFunction | undefined,
+  key: string,
+  fallback: string,
+  values?: TranslationValues
+) {
+  if (t) return t(key, values);
+
+  if (!values) return fallback;
+
+  return fallback.replace(/\{(\w+)\}/g, (match, valueKey) => {
+    const value = values[valueKey];
+    return value === null || value === undefined ? match : String(value);
+  });
+}
+
+export function formatPanelJobProgress(
+  label: string,
+  job: JobRunRead,
+  t?: TranslationFunction
+) {
   const total = Math.max(job.progress_total || 1, 1);
   const current = Math.min(Math.max(job.progress_current || 0, 0), total);
   const status = getJobResultStatus(job) ?? job.status;
 
   if (status === "error") {
-    return `${label}：補齊失敗，詳見左側更新狀態`;
+    return optionalTranslation(
+      t,
+      "stockDetail.jobs.progress.error",
+      "{label}: backfill failed; see Update status on the left",
+      { label }
+    );
   }
 
   if (status === "partial_success") {
-    return `${label}：部分完成，詳見左側更新狀態`;
+    return optionalTranslation(
+      t,
+      "stockDetail.jobs.progress.partial",
+      "{label}: partially complete; see Update status on the left",
+      { label }
+    );
   }
 
   if (status === "success") {
-    return `${label}：補齊完成，詳見左側更新狀態`;
+    return optionalTranslation(
+      t,
+      "stockDetail.jobs.progress.success",
+      "{label}: backfill complete; see Update status on the left",
+      { label }
+    );
   }
 
-  return `${label}：補齊中，進度 ${current}/${total}，詳見左側更新狀態`;
+  return optionalTranslation(
+    t,
+    "stockDetail.jobs.progress.running",
+    "{label}: backfilling {current}/{total}; see Update status on the left",
+    { label, current, total }
+  );
 }
 
-export function formatBackfillOutcome(job: JobRunRead, label: string) {
+export function formatBackfillOutcome(
+  job: JobRunRead,
+  label: string,
+  t?: TranslationFunction
+) {
   const status = getJobResultStatus(job);
   const insertedCount =
     readBackfillCount(job.result, "inserted_count") ??
@@ -291,20 +340,65 @@ export function formatBackfillOutcome(job: JobRunRead, label: string) {
     readBackfillCount(job.result, "skipped_count");
   const errorCount = readBackfillCount(job.result, "error_count");
   const details = [
-    insertedCount !== null && insertedCount > 0 ? `更新 ${insertedCount}` : null,
-    skippedCount !== null && skippedCount > 0 ? `已存在 ${skippedCount}` : null,
-    errorCount !== null && errorCount > 0 ? `失敗 ${errorCount}` : null,
+    insertedCount !== null && insertedCount > 0
+      ? optionalTranslation(
+          t,
+          "stockDetail.jobs.outcomeDetails.updated",
+          "Updated {count}",
+          { count: insertedCount }
+        )
+      : null,
+    skippedCount !== null && skippedCount > 0
+      ? optionalTranslation(
+          t,
+          "stockDetail.jobs.outcomeDetails.existing",
+          "Existing {count}",
+          { count: skippedCount }
+        )
+      : null,
+    errorCount !== null && errorCount > 0
+      ? optionalTranslation(
+          t,
+          "stockDetail.jobs.outcomeDetails.failed",
+          "Failed {count}",
+          { count: errorCount }
+        )
+      : null,
   ].filter(Boolean);
   const suffix =
     status === "partial_success"
-      ? "部分完成"
+      ? optionalTranslation(t, "stockDetail.jobs.outcome.partial", "Partially complete")
       : status === "skipped"
-        ? "無需補齊"
+        ? optionalTranslation(t, "stockDetail.jobs.outcome.skipped", "No backfill needed")
         : status === "error"
-          ? "失敗"
-          : "補齊完成";
+          ? optionalTranslation(t, "stockDetail.jobs.outcome.error", "Failed")
+          : optionalTranslation(t, "stockDetail.jobs.outcome.success", "Backfill complete");
 
-  return `${label}${suffix}${details.length ? `（${details.join("、")}）` : ""}`;
+  return optionalTranslation(
+    t,
+    "stockDetail.jobs.outcome.message",
+    "{label}{suffix}{details}",
+    {
+      label,
+      suffix,
+      details: details.length
+        ? optionalTranslation(
+            t,
+            "stockDetail.jobs.outcome.detailWrap",
+            " ({details})",
+            {
+              details: details.join(
+                optionalTranslation(
+                  t,
+                  "stockDetail.jobs.outcome.detailSeparator",
+                  ", "
+                )
+              ),
+            }
+          )
+        : "",
+    }
+  );
 }
 
 export function formatMonth(value: string | null | undefined) {
@@ -650,6 +744,7 @@ export function summarizeIntradayPoints(points: IntradayTrendPoint[]) {
 export type TechnicalTone = "positive" | "negative" | "neutral" | "warning";
 
 export type TechnicalReportRow = {
+  key?: string;
   title: string;
   description: string;
   value: string;
@@ -672,6 +767,203 @@ export type TechnicalReport = {
   rows: TechnicalReportRow[];
   badges: TechnicalReportBadge[];
 };
+
+function translatedValue(
+  t: TranslationFunction | undefined,
+  key: string,
+  fallback: string,
+  values?: TranslationValues
+) {
+  if (!t) return fallback;
+  const translated = t(key, values);
+  return translated === key ? fallback : translated;
+}
+
+const technicalTextKeyMap: Record<string, string> = {
+  資料讀取中: "loading",
+  資料不足: "insufficient",
+  等待盤中資料: "waitingIntraday",
+  開盤偏強: "openingStrong",
+  開盤觀察: "openingWatch",
+  開盤偏弱: "openingWeak",
+  盤中偏多: "intradayBullish",
+  盤中觀察: "intradayWatch",
+  盤中偏弱: "intradayWeak",
+  短線偏多: "dailyBullish",
+  短線整理: "dailyNeutral",
+  短線偏弱: "dailyWeak",
+  波段偏多: "weeklyBullish",
+  波段整理: "weeklyNeutral",
+  波段偏弱: "weeklyWeak",
+  中線轉強: "swingBullish",
+  中線整理: "swingNeutral",
+  中線偏弱: "swingWeak",
+  長線偏多: "longBullish",
+  長線整理: "longNeutral",
+  長線觀察: "longWatch",
+  長線偏弱: "longWeak",
+  資料狀態: "dataStatus",
+  參考基準: "referenceBase",
+  即時價格: "livePrice",
+  開盤結構: "openingStructure",
+  量能速度: "volumePace",
+  日線背景: "dailyBackground",
+  法人籌碼: "institutionalFlow",
+  相對市場: "relativeMarket",
+  趨勢結構: "trendStructure",
+  動能指標: "momentum",
+  量價資金: "volumeFlow",
+  波動風險: "volatilityRisk",
+  中線趨勢: "swingTrend",
+  區間位置: "rangePosition",
+  週量節奏: "weeklyVolume",
+  法人累積: "institutionalAccumulation",
+  市場背景: "marketBackground",
+  長線趨勢: "longTrend",
+  長期區間: "longRange",
+  營收動能: "revenueMomentum",
+  獲利品質: "earningsQuality",
+  長期籌碼: "longChipFlow",
+  "站上 MA20": "aboveMa20",
+  "跌破 MA20": "belowMa20",
+  "MACD 偏多": "macdBullish",
+  "MACD 偏弱": "macdWeak",
+  "RSI 過熱": "rsiOverheated",
+  放量: "volumeSurge",
+  走升: "rising",
+  走弱: "weakening",
+  等待盤中: "waitingIntradayShort",
+  開盤資料少: "openingSparse",
+  開高: "gapUp",
+  開低: "gapDown",
+  "日線站上 MA20": "dailyAboveMa20",
+  "日線跌破 MA20": "dailyBelowMa20",
+  "日線 RSI 過熱": "dailyRsiOverheated",
+  週線偏多: "weeklyBullishLine",
+  週線偏弱: "weeklyWeakLine",
+  "接近26週高位": "near26WeekHigh",
+  週量放大: "weeklyVolumeSurge",
+  月線偏多: "monthlyBullishLine",
+  月線偏弱: "monthlyWeakLine",
+  營收成長: "revenueGrowth",
+  營收衰退: "revenueDecline",
+  大戶增加: "largeHoldersIncreasing",
+  大戶減少: "largeHoldersDecreasing",
+  籌碼待讀取: "chipFlowPending",
+  營收待讀取: "revenuePending",
+  法人累積買超: "institutionalAccumulationBuy",
+  法人累積賣超: "institutionalAccumulationSell",
+  位於區間上緣: "nearRangeHigh",
+  位於區間下緣: "nearRangeLow",
+  區間中段: "rangeMiddle",
+  現價高於昨收: "priceAbovePreviousClose",
+  現價低於昨收: "priceBelowPreviousClose",
+  漲跌資料不足: "changeInsufficient",
+  開盤資料不足: "openingInsufficient",
+  日線指標僅作背景: "dailyIndicatorsAsBackground",
+  盤中資料已進入觀察期: "intradayObservationReady",
+  "接近12月高位": "near12MonthHigh",
+  價格結構不足: "priceStructureInsufficient",
+  動能資料不足: "momentumInsufficient",
+  量能一般: "volumeNormal",
+  量能資料不足: "volumeInsufficient",
+  訊號資料不足: "signalInsufficient",
+  尚無足夠資料產生報告: "notEnoughForReport",
+  尚無足夠日K資料產生技術報告: "notEnoughDailyReport",
+  尚無足夠週K資料產生技術報告: "notEnoughWeeklyReport",
+  尚無足夠月K資料產生技術報告: "notEnoughMonthlyReport",
+  正在整理技術訊號: "organizingSignals",
+  觀察中: "observing",
+};
+
+export function technicalReportPhrase(
+  value: string,
+  t?: TranslationFunction
+) {
+  const key = technicalTextKeyMap[value];
+  return key
+    ? translatedValue(t, `stockDetail.dataViews.technical.terms.${key}`, value)
+    : value;
+}
+
+function translatedTechnicalDisplayValue(value: string, t?: TranslationFunction) {
+  if (!t) return value;
+  if (value === "觀察中") return technicalReportPhrase(value, t);
+  if (/^\d+筆$/.test(value)) {
+    return translatedValue(t, "stockDetail.dataViews.technical.units.points", value, {
+      count: value.replace("筆", ""),
+    });
+  }
+  if (value.endsWith("張")) {
+    return `${value.slice(0, -1)}${t("stockDetail.dataPanel.units.lots")}`;
+  }
+  return value;
+}
+
+function replaceKnownTechnicalTerms(text: string, t?: TranslationFunction) {
+  if (!t) return text;
+
+  let output = text;
+  Object.keys(technicalTextKeyMap)
+    .sort((left, right) => right.length - left.length)
+    .forEach((term) => {
+      output = output.replaceAll(term, technicalReportPhrase(term, t));
+    });
+
+  return output
+    .replaceAll("，", ", ")
+    .replaceAll("日K", translatedValue(t, "stockDetail.dataViews.technical.terms.dailyK", "Daily"))
+    .replaceAll("週K", translatedValue(t, "stockDetail.dataViews.technical.terms.weeklyK", "Weekly"))
+    .replaceAll("月K", translatedValue(t, "stockDetail.dataViews.technical.terms.monthlyK", "Monthly"))
+    .replaceAll("20日均量", translatedValue(t, "stockDetail.dataViews.technical.terms.twentyDayAverage", "20-day average"))
+    .replaceAll("20期均量", translatedValue(t, "stockDetail.dataViews.technical.terms.twentyPeriodAverage", "20-period average"))
+    .replaceAll("融資餘額", translatedValue(t, "stockDetail.dataViews.technical.terms.marginBalance", "margin balance"))
+    .replaceAll("最新三大法人合計", translatedValue(t, "stockDetail.dataViews.technical.terms.latestInstitutionalTotal", "Latest institutional total"))
+    .replaceAll("最新已公布三大法人", translatedValue(t, "stockDetail.dataViews.technical.terms.latestInstitutionalPublished", "Latest published institutional data"))
+    .replaceAll("目前累計量", translatedValue(t, "stockDetail.dataViews.technical.terms.currentCumulativeVolume", "Current cumulative volume"))
+    .replaceAll("今日漲跌幅將以上一交易日收盤價計算", translatedValue(t, "stockDetail.dataViews.technical.terms.todayReferenceClose", "Today's change is calculated from the previous close"))
+    .replaceAll("尚未取得今日第一筆成交或即時快照", translatedValue(t, "stockDetail.dataViews.technical.terms.noIntradaySnapshot", "No first intraday trade or realtime snapshot yet"))
+    .replaceAll("相對昨收", translatedValue(t, "stockDetail.dataViews.technical.terms.vsPreviousClose", "vs previous close"))
+    .replaceAll("均價", translatedValue(t, "stockDetail.dataViews.technical.terms.averagePrice", "average price"))
+    .replaceAll("高低", translatedValue(t, "stockDetail.dataViews.technical.terms.highLow", "high/low"))
+    .replaceAll("持股比", translatedValue(t, "stockDetail.dataViews.technical.terms.holdingRatio", "holding ratio"))
+    .replaceAll("最新", translatedValue(t, "stockDetail.dataViews.technical.terms.latest", "latest"))
+    .replace(/(\d+)\s*筆盤中資料/g, (_, count: string) =>
+      translatedValue(t, "stockDetail.dataViews.technical.units.intradayPoints", `${count} intraday points`, {
+        count,
+      })
+    )
+    .replace(/(\d+)週/g, (_, count: string) =>
+      translatedValue(t, "stockDetail.dataViews.technical.units.weeks", `${count}W`, { count })
+    )
+    .replace(/(\d+)月/g, (_, count: string) =>
+      translatedValue(t, "stockDetail.dataViews.technical.units.months", `${count}M`, { count })
+    )
+    .replace(/(\d+)筆/g, (_, count: string) =>
+      translatedValue(t, "stockDetail.dataViews.technical.units.points", `${count} points`, {
+        count,
+      })
+    )
+    .replace(/([+-]?[0-9,]+(?:\.\d+)?)張/g, (_, count: string) =>
+      `${count}${t("stockDetail.dataPanel.units.lots")}`
+    );
+}
+
+function technicalValueLabel(value: string, t?: TranslationFunction) {
+  if (value === "vs 昨收") {
+    return translatedValue(t, "stockDetail.dataViews.technical.valueLabels.vsPreviousClose", value);
+  }
+  if (value === "近13週") {
+    return translatedValue(t, "stockDetail.dataViews.technical.valueLabels.last13Weeks", value);
+  }
+  if (value === "近6月") {
+    return translatedValue(t, "stockDetail.dataViews.technical.valueLabels.last6Months", value);
+  }
+  if (value === "近12月") {
+    return translatedValue(t, "stockDetail.dataViews.technical.valueLabels.last12Months", value);
+  }
+  return value;
+}
 
 export function technicalToneClass(tone: TechnicalTone) {
   if (tone === "positive") return "text-omi-market-up";
@@ -696,24 +988,52 @@ export function numberValue(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-export function mapBackendTechnicalReport(report: StockTechnicalReportRead): TechnicalReport {
+export function mapBackendTechnicalReport(
+  report: StockTechnicalReportRead,
+  t?: TranslationFunction
+): TechnicalReport {
   return {
-    title: report.title,
-    summary: report.summary,
+    title: technicalReportPhrase(report.title, t),
+    summary: replaceKnownTechnicalTerms(report.summary, t),
     value: report.value,
-    valueLabel: report.value_label,
+    valueLabel: technicalValueLabel(report.value_label, t),
     score: report.score,
     rows: report.rows.map((row) => ({
-      title: row.label,
-      description: row.description,
-      value: row.display_value,
+      key: row.key,
+      title: technicalReportPhrase(row.label, t),
+      description: replaceKnownTechnicalTerms(row.description, t),
+      value: translatedTechnicalDisplayValue(row.display_value, t),
       pulseValue: numberValue(row.value),
       direction: row.direction,
       tone: semanticTechnicalTone(row.tone),
     })),
     badges: report.badges.map((badge) => ({
-      label: badge.label,
+      label: technicalReportPhrase(badge.label, t),
       tone: semanticBadgeToneClass(badge.tone),
+    })),
+  };
+}
+
+export function localizeTechnicalReport(
+  report: TechnicalReport,
+  t?: TranslationFunction
+): TechnicalReport {
+  if (!t) return report;
+
+  return {
+    ...report,
+    title: technicalReportPhrase(report.title, t),
+    summary: replaceKnownTechnicalTerms(report.summary, t),
+    valueLabel: technicalValueLabel(report.valueLabel, t),
+    rows: report.rows.map((row) => ({
+      ...row,
+      title: technicalReportPhrase(row.title, t),
+      description: replaceKnownTechnicalTerms(row.description, t),
+      value: translatedTechnicalDisplayValue(row.value, t),
+    })),
+    badges: report.badges.map((badge) => ({
+      ...badge,
+      label: technicalReportPhrase(badge.label, t),
     })),
   };
 }
@@ -754,6 +1074,8 @@ export function TechnicalSignalRow({
 }
 
 export function TechnicalLoadingPanel() {
+  const t = useT();
+
   return (
     <>
       <div className="omi-technical-summary border-b border-omi-border-subtle px-5 py-3">
@@ -761,7 +1083,7 @@ export function TechnicalLoadingPanel() {
           <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
             Technical
           </div>
-          <LoadingDots label="Technical 分析讀取中" />
+          <LoadingDots label={t("stockDetail.dataViews.technicalLoading")} />
         </div>
         <div className="mt-3 flex items-start justify-between gap-4">
           <div className="min-w-0 flex-1 space-y-2">
@@ -819,11 +1141,116 @@ export function TechnicalLoadingPanel() {
   );
 }
 
-export function overnightConfidenceLabel(value: string | null | undefined) {
-  if (value === "high") return "資料完整";
-  if (value === "medium") return "部分參考";
-  if (value === "low") return "低完整度";
-  return "完整度待確認";
+export function overnightConfidenceLabel(
+  value: string | null | undefined,
+  t?: TranslationFunction
+) {
+  if (value === "high") {
+    return t?.("stockDetail.dataViews.overnight.confidence.high") ?? "Complete data";
+  }
+  if (value === "medium") {
+    return t?.("stockDetail.dataViews.overnight.confidence.medium") ?? "Partial reference";
+  }
+  if (value === "low") {
+    return t?.("stockDetail.dataViews.overnight.confidence.low") ?? "Low completeness";
+  }
+  return t?.("stockDetail.dataViews.overnight.confidence.unknown") ?? "Completeness pending";
+}
+
+function overnightProfileLabel(report: OvernightImpactRead, t: TranslationFunction) {
+  const profiles = new Set(report.tw_mapping?.profiles ?? []);
+
+  if (profiles.has("memory")) return t("stockDetail.dataViews.overnight.profiles.memory");
+  if (profiles.has("semiconductor")) {
+    return t("stockDetail.dataViews.overnight.profiles.semiconductor");
+  }
+  if (profiles.has("technology")) return t("stockDetail.dataViews.overnight.profiles.technology");
+
+  return t("stockDetail.dataViews.overnight.profiles.taiwan");
+}
+
+function overnightStanceLabel(stance: string, t: TranslationFunction) {
+  if (stance === "strong_risk_on") return t("stockDetail.dataViews.overnight.stance.strongRiskOn");
+  if (stance === "risk_on") return t("stockDetail.dataViews.overnight.stance.riskOn");
+  if (stance === "strong_risk_off") {
+    return t("stockDetail.dataViews.overnight.stance.strongRiskOff");
+  }
+  if (stance === "risk_off") return t("stockDetail.dataViews.overnight.stance.riskOff");
+  if (stance === "neutral") return t("stockDetail.dataViews.overnight.stance.neutral");
+
+  return t("stockDetail.dataViews.overnight.stance.unknown");
+}
+
+function overnightTitle(report: OvernightImpactRead, t: TranslationFunction) {
+  const profile = overnightProfileLabel(report, t);
+  const key =
+    report.stance === "strong_risk_on"
+      ? "strongRiskOnTitle"
+      : report.stance === "risk_on"
+        ? "riskOnTitle"
+        : report.stance === "strong_risk_off"
+          ? "strongRiskOffTitle"
+          : report.stance === "risk_off"
+            ? "riskOffTitle"
+            : report.stance === "neutral"
+              ? "neutralTitle"
+              : "insufficientTitle";
+
+  return t(`stockDetail.dataViews.overnight.${key}`, { profile });
+}
+
+function overnightTopDriver(report: OvernightImpactRead) {
+  const rows = [
+    ...report.factors.map((factor) => ({
+      label: factor.label,
+      contribution: factor.weighted_contribution,
+    })),
+    ...report.baskets.map((basket) => ({
+      label: basket.group_name,
+      contribution: basket.weighted_contribution,
+    })),
+  ].filter((item) => item.contribution !== null && item.contribution !== undefined);
+
+  return rows.length
+    ? rows.toSorted((left, right) => Math.abs(right.contribution ?? 0) - Math.abs(left.contribution ?? 0))[0]
+        .label
+    : null;
+}
+
+function overnightSummary(report: OvernightImpactRead, t: TranslationFunction) {
+  if (report.weighted_change_pct === null || report.weighted_change_pct === undefined) {
+    return t("stockDetail.dataViews.overnight.summaryInsufficient");
+  }
+
+  const lead = overnightTopDriver(report);
+
+  return t(
+    lead
+      ? "stockDetail.dataViews.overnight.summaryWithLead"
+      : "stockDetail.dataViews.overnight.summary",
+    {
+      date: report.as_of ? formatDate(report.as_of) : t("common.noData"),
+      direction: overnightStanceLabel(report.stance, t),
+      change: formatPct(report.weighted_change_pct),
+      lead: lead ?? "",
+    }
+  );
+}
+
+function overnightWarningLabel(message: string, t: TranslationFunction) {
+  if (message === "美股因素日期不一致；分數以各因素最新可用資料計算。") {
+    return t("stockDetail.dataViews.overnight.warningDateMismatch");
+  }
+
+  const staleMatch = message.match(/美股日線最新日期 ([\d-]+)，落後預期 ([\d-]+)。/);
+  if (staleMatch) {
+    return t("stockDetail.dataViews.overnight.warningStaleDate", {
+      date: staleMatch[1],
+      expectedDate: staleMatch[2],
+    });
+  }
+
+  return message;
 }
 
 export function OvernightImpactPanel({
@@ -833,6 +1260,8 @@ export function OvernightImpactPanel({
   report: OvernightImpactRead | null;
   loadState: LoadState;
 }) {
+  const t = useT();
+
   if (loadState === "idle") return null;
 
   if (loadState === "loading") {
@@ -841,11 +1270,13 @@ export function OvernightImpactPanel({
         <div className="flex items-center justify-between gap-3 text-xs">
           <div>
             <div className="font-bold uppercase tracking-[0.14em] text-omi-text-muted">
-              Overnight
+              {t("stockDetail.dataViews.overnight.eyebrow")}
             </div>
-            <div className="mt-1 text-omi-text-muted">美股隔夜影響讀取中</div>
+            <div className="mt-1 text-omi-text-muted">
+              {t("stockDetail.dataViews.overnight.loading")}
+            </div>
           </div>
-          <LoadingDots label="讀取中" />
+          <LoadingDots label={t("stockDetail.dataViews.overnight.loadingShort")} />
         </div>
       </div>
     );
@@ -857,10 +1288,14 @@ export function OvernightImpactPanel({
         <div className="flex items-start justify-between gap-4 text-xs">
           <div>
             <div className="font-bold uppercase tracking-[0.14em] text-omi-text-muted">
-              Overnight
+              {t("stockDetail.dataViews.overnight.eyebrow")}
             </div>
-            <div className="mt-1 text-sm font-bold text-omi-text-strong">美股隔夜資料不足</div>
-            <div className="mt-0.5 text-omi-text-muted">暫不納入台股映射判斷</div>
+            <div className="mt-1 text-sm font-bold text-omi-text-strong">
+              {t("stockDetail.dataViews.overnight.insufficientTitle")}
+            </div>
+            <div className="mt-0.5 text-omi-text-muted">
+              {t("stockDetail.dataViews.overnight.insufficientDescription")}
+            </div>
           </div>
           <div className="text-right font-bold text-omi-text-subtle">-</div>
         </div>
@@ -892,10 +1327,14 @@ export function OvernightImpactPanel({
       <div className="omi-overnight-impact flex items-start justify-between gap-4 text-xs">
         <div className="min-w-0">
           <div className="font-bold uppercase tracking-[0.14em] text-omi-text-muted">
-            Overnight
+            {t("stockDetail.dataViews.overnight.eyebrow")}
           </div>
-          <div className="mt-0.5 text-sm font-bold text-omi-text-strong">{report.title}</div>
-          <div className="mt-0.5 max-h-8 overflow-hidden leading-4 text-omi-text-muted">{report.summary}</div>
+          <div className="mt-0.5 text-sm font-bold text-omi-text-strong">
+            {overnightTitle(report, t)}
+          </div>
+          <div className="mt-0.5 max-h-8 overflow-hidden leading-4 text-omi-text-muted">
+            {overnightSummary(report, t)}
+          </div>
         </div>
         <div className={`shrink-0 text-right text-sm font-bold ${valueTone(report.weighted_change_pct)}`}>
           <PriceUpdatePulse
@@ -906,7 +1345,9 @@ export function OvernightImpactPanel({
           >
             {formatPct(report.weighted_change_pct)}
           </PriceUpdatePulse>
-          <div className="text-xs font-medium text-omi-text-muted">{overnightConfidenceLabel(report.confidence)}</div>
+          <div className="text-xs font-medium text-omi-text-muted">
+            {overnightConfidenceLabel(report.confidence, t)}
+          </div>
         </div>
       </div>
 
@@ -926,28 +1367,100 @@ export function OvernightImpactPanel({
 
       {hasWarning ? (
         <div className="mt-2 text-[11px] leading-4 text-omi-warning">
-          {report.as_of ? `資料日期 ${formatDate(report.as_of)}，` : ""}
-          {report.warnings[0] ?? "資料完整度偏低，僅作參考"}
+          {report.as_of
+            ? t("stockDetail.dataViews.overnight.dataDatePrefix", {
+                date: formatDate(report.as_of),
+              })
+            : ""}
+          {report.warnings[0]
+            ? overnightWarningLabel(report.warnings[0], t)
+            : t("stockDetail.dataViews.overnight.warningFallback")}
         </div>
       ) : null}
     </div>
   );
 }
 
-export function marketRegimeLabel(index: MarketIndexSnapshot | null | undefined) {
-  if (!index || index.close === null || index.close === undefined) return "資料不足";
+export function marketRegimeLabel(
+  index: MarketIndexSnapshot | null | undefined,
+  t?: TranslationFunction
+) {
+  if (!index || index.close === null || index.close === undefined) {
+    return t?.("dashboard.marketIndex.insufficient") ?? "Insufficient data";
+  }
 
   if (index.price_vs_ma20 !== null && index.price_vs_ma20 !== undefined) {
-    if (index.price_vs_ma20 > 1) return "站上 MA20";
-    if (index.price_vs_ma20 < -1) return "跌破 MA20";
+    if (index.price_vs_ma20 > 1) return t?.("dashboard.marketIndex.aboveMa20") ?? "Above MA20";
+    if (index.price_vs_ma20 < -1) return t?.("dashboard.marketIndex.belowMa20") ?? "Below MA20";
   }
 
   if (index.change_pct !== null && index.change_pct !== undefined) {
-    if (index.change_pct > 0) return "短線偏多";
-    if (index.change_pct < 0) return "短線偏弱";
+    if (index.change_pct > 0) return t?.("dashboard.marketIndex.bullishShort") ?? "Short-term bullish";
+    if (index.change_pct < 0) return t?.("dashboard.marketIndex.weakShort") ?? "Short-term weak";
   }
 
-  return "中性震盪";
+  return t?.("dashboard.marketIndex.neutral") ?? "Rangebound";
+}
+
+const marketIndexListNameKeys: Record<string, string> = {
+  加權指數: "taiex",
+  櫃買指數: "tpex",
+  水泥窯製: "cementKiln",
+  水泥: "cement",
+  食品: "food",
+  塑膠化工: "plasticsChemicals",
+  塑膠: "plastics",
+  紡織纖維: "textiles",
+  機電: "electricalMachinery",
+  電機機械: "electricMachinery",
+  電器電纜: "electricalCable",
+  化學生技醫療: "chemicalBiotechMedical",
+  化學: "chemical",
+  生技醫療: "biotechMedical",
+  玻璃陶瓷: "glassCeramics",
+  造紙: "paper",
+  鋼鐵: "steel",
+  橡膠: "rubber",
+  汽車: "automobile",
+  半導體: "semiconductor",
+  電腦及週邊設備: "computerPeripheral",
+  光電: "optoelectronics",
+  通信網路: "communicationsInternet",
+  電子零組件: "electronicParts",
+  電子通路: "electronicDistribution",
+  資訊服務: "informationService",
+  其他電子: "otherElectronics",
+  建材營造: "buildingMaterialConstruction",
+  航運: "shipping",
+  航運業: "shipping",
+  觀光: "tourism",
+  觀光餐旅: "tourismHospitality",
+  金融保險: "financialInsurance",
+  貿易百貨: "tradingConsumersGoods",
+  油電燃氣: "oilGasElectricity",
+  存託憑證: "depositaryReceipts",
+  電子: "electronics",
+  金融: "financial",
+  非金電: "nonFinanceNonElectronics",
+  其他: "other",
+};
+
+function normalizeMarketIndexListName(name: string) {
+  const trimmedName = name.trim();
+
+  if (trimmedName === "發行量加權股價指數") return "加權指數";
+  if (trimmedName.endsWith("類指數")) return trimmedName.slice(0, -"類指數".length);
+
+  return trimmedName;
+}
+
+function marketIndexListDisplayName(name: string, t: TranslationFunction) {
+  const normalizedName = normalizeMarketIndexListName(name);
+  const key = marketIndexListNameKeys[normalizedName];
+
+  if (!key) return normalizedName || name;
+
+  return t(`stockDetail.dataViews.indexList.names.${key}`);
 }
 
 export function IndexListPanel({
@@ -959,6 +1472,8 @@ export function IndexListPanel({
   loadState: LoadState;
   marketLabel: string;
 }) {
+  const t = useT();
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="border-b border-omi-border-subtle px-5 py-4">
@@ -967,14 +1482,22 @@ export function IndexListPanel({
         </div>
         <div className="mt-2 flex items-end justify-between gap-4">
           <div>
-            <div className="text-xl font-bold text-omi-text-strong">{marketLabel}指數列表</div>
+            <div className="text-xl font-bold text-omi-text-strong">
+              {t("stockDetail.dataViews.indexList.title", { marketLabel })}
+            </div>
             {loadState === "loading" ? (
               <div className="mt-1 inline-flex items-center gap-2 text-xs text-omi-text-muted">
-                讀取中
-                <LoadingDots label={`${marketLabel}指數列表讀取中`} />
+                {t("stockDetail.dataViews.indexList.loading")}
+                <LoadingDots
+                  label={t("stockDetail.dataViews.indexList.loadingLabel", {
+                    marketLabel,
+                  })}
+                />
               </div>
             ) : (
-              <div className="mt-1 text-xs text-omi-text-muted">{`${items.length} 檔指數`}</div>
+              <div className="mt-1 text-xs text-omi-text-muted">
+                {t("stockDetail.dataViews.indexList.count", { count: items.length })}
+              </div>
             )}
           </div>
           <div className="text-right text-xs font-semibold text-omi-text-muted">
@@ -992,7 +1515,7 @@ export function IndexListPanel({
             >
               <div className="min-w-0">
                 <div className="truncate font-semibold text-omi-text">
-                  {item.rank}. {item.name}
+                  {item.rank}. {marketIndexListDisplayName(item.name, t)}
                 </div>
                 <div className="mt-0.5 text-xs text-omi-text-muted">
                   {item.trade_date ?? "-"}
@@ -1025,7 +1548,7 @@ export function IndexListPanel({
           </div>
         ) : (
           <div className="py-10 text-center text-sm text-omi-text-muted">
-            尚無指數列表資料
+            {t("stockDetail.dataViews.indexList.empty")}
           </div>
         )}
       </div>
@@ -1054,8 +1577,10 @@ export function IndexDetailDataPanel({
   contributions: MarketIndexContributionResponse | null;
   contributionLoadState: LoadState;
 }) {
+  const t = useT();
   const isToday = timeframe === "today";
   const breadth = index?.breadth ?? null;
+  const contractsUnit = t("stockDetail.dataViews.indexDetail.contractsUnit");
   const open = isToday
     ? todayStats.open ?? index?.open ?? latestChart?.open ?? null
     : latestChart?.open ?? index?.open ?? null;
@@ -1074,52 +1599,60 @@ export function IndexDetailDataPanel({
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-omi-border-subtle px-5 py-4">
         <div>
           <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
-            Index Data
+            {t("stockDetail.dataViews.indexDetail.eyebrow")}
           </div>
-          <div className="mt-1 text-lg font-bold text-omi-text-strong">指數詳細數據</div>
+          <div className="mt-1 text-lg font-bold text-omi-text-strong">
+            {t("stockDetail.dataViews.indexDetail.title")}
+          </div>
         </div>
         <div className="text-right text-xs text-omi-text-muted">
-          更新 {formatDateTime(index?.as_of)}
+          {t("stockDetail.dataViews.indexDetail.updated", {
+            time: formatDateTime(index?.as_of),
+          })}
         </div>
       </div>
 
       <div className="grid gap-2 border-b border-omi-border-subtle p-5 sm:grid-cols-2 xl:grid-cols-4">
         <IndexMetricCard
-          label="開盤"
+          label={t("stockDetail.dataViews.indexDetail.open")}
           value={formatPrice(open)}
           tone={valueTone(open !== null && reference !== null ? open - reference : null)}
         />
         <IndexMetricCard
-          label="最高"
+          label={t("stockDetail.dataViews.indexDetail.high")}
           value={formatPrice(high)}
           tone={valueTone(high !== null && reference !== null ? high - reference : null)}
         />
         <IndexMetricCard
-          label="最低"
+          label={t("stockDetail.dataViews.indexDetail.low")}
           value={formatPrice(low)}
           tone={valueTone(low !== null && reference !== null ? low - reference : null)}
         />
-        <IndexMetricCard label="參考" value={formatPrice(reference)} />
-        <IndexMetricCard label="成交金額(億)" value={formatTradeValueYi(tradeValue)} />
-        <IndexMetricCard label="估計金額(億)" value={formatTradeValueYi(estimatedTradeValue)} />
-        <IndexMetricCard label="上漲家" value={formatNumber(breadth?.advance_count)} tone="text-omi-market-up" />
-        <IndexMetricCard label="下跌家" value={formatNumber(breadth?.decline_count)} tone="text-omi-market-down" />
-        <IndexMetricCard label="漲停家" value={formatNumber(breadth?.limit_up_count)} tone="text-omi-market-up" />
-        <IndexMetricCard label="跌停家" value={formatNumber(breadth?.limit_down_count)} tone="text-omi-market-down" />
-        <IndexMetricCard label="平盤家" value={formatNumber(breadth?.unchanged_count)} />
-        <IndexMetricCard label="總家數" value={formatNumber(breadth?.total_count)} />
+        <IndexMetricCard label={t("stockDetail.dataViews.indexDetail.reference")} value={formatPrice(reference)} />
+        <IndexMetricCard label={t("stockDetail.dataViews.indexDetail.tradeValueYi")} value={formatTradeValueYi(tradeValue)} />
+        <IndexMetricCard label={t("stockDetail.dataViews.indexDetail.estimatedTradeValueYi")} value={formatTradeValueYi(estimatedTradeValue)} />
+        <IndexMetricCard label={t("stockDetail.dataViews.indexDetail.advances")} value={formatNumber(breadth?.advance_count)} tone="text-omi-market-up" />
+        <IndexMetricCard label={t("stockDetail.dataViews.indexDetail.declines")} value={formatNumber(breadth?.decline_count)} tone="text-omi-market-down" />
+        <IndexMetricCard label={t("stockDetail.dataViews.indexDetail.limitUp")} value={formatNumber(breadth?.limit_up_count)} tone="text-omi-market-up" />
+        <IndexMetricCard label={t("stockDetail.dataViews.indexDetail.limitDown")} value={formatNumber(breadth?.limit_down_count)} tone="text-omi-market-down" />
+        <IndexMetricCard label={t("stockDetail.dataViews.indexDetail.unchanged")} value={formatNumber(breadth?.unchanged_count)} />
+        <IndexMetricCard label={t("stockDetail.dataViews.indexDetail.total")} value={formatNumber(breadth?.total_count)} />
       </div>
 
       <div className="border-b border-omi-border-subtle px-5 py-4">
         <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
           <div>
-            <div className="text-xs font-bold text-omi-text-strong">籌碼日報</div>
+            <div className="text-xs font-bold text-omi-text-strong">
+              {t("stockDetail.dataViews.indexDetail.chipTitle")}
+            </div>
             <div className="mt-0.5 text-xs text-omi-text-muted">
-              大盤期貨未平倉、法人買賣超與信用交易摘要
+              {t("stockDetail.dataViews.indexDetail.chipDescription")}
             </div>
           </div>
           <div className="text-xs text-omi-text-muted">
-            資料日 {marketChip?.trade_date ? formatDate(marketChip.trade_date) : "-"}
+            {t("stockDetail.dataViews.indexDetail.tradeDate", {
+              date: marketChip?.trade_date ? formatDate(marketChip.trade_date) : "-",
+            })}
           </div>
         </div>
         {marketChipLoadState === "loading" ? (
@@ -1134,62 +1667,68 @@ export function IndexDetailDataPanel({
         ) : (
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
             <IndexMetricCard
-              label="外資淨未平倉"
-              value={formatSignedContracts(marketChip?.foreign_futures_net_oi)}
+              label={t("stockDetail.dataViews.indexDetail.foreignNetOi")}
+              value={formatSignedContracts(marketChip?.foreign_futures_net_oi, contractsUnit)}
               tone={valueTone(marketChip?.foreign_futures_net_oi)}
             />
             <IndexMetricCard
-              label="外資未平倉加減"
-              value={formatSignedContracts(marketChip?.foreign_futures_net_oi_change)}
+              label={t("stockDetail.dataViews.indexDetail.foreignNetOiChange")}
+              value={formatSignedContracts(
+                marketChip?.foreign_futures_net_oi_change,
+                contractsUnit
+              )}
               tone={valueTone(marketChip?.foreign_futures_net_oi_change)}
             />
             <IndexMetricCard
-              label="散戶淨未平倉"
-              value={formatSignedContracts(marketChip?.retail_futures_net_oi)}
+              label={t("stockDetail.dataViews.indexDetail.retailNetOi")}
+              value={formatSignedContracts(marketChip?.retail_futures_net_oi, contractsUnit)}
               tone={valueTone(marketChip?.retail_futures_net_oi)}
             />
             <IndexMetricCard
-              label="散戶未平倉加減"
-              value={formatSignedContracts(marketChip?.retail_futures_net_oi_change)}
+              label={t("stockDetail.dataViews.indexDetail.retailNetOiChange")}
+              value={formatSignedContracts(
+                marketChip?.retail_futures_net_oi_change,
+                contractsUnit
+              )}
               tone={valueTone(marketChip?.retail_futures_net_oi_change)}
             />
             <IndexMetricCard
-              label="三大法人買賣超(億)"
+              label={t("stockDetail.dataViews.indexDetail.totalInstitutionalNetValue")}
               value={formatSignedTradeValueYi(marketChip?.total_institutional_net_value)}
               tone={valueTone(marketChip?.total_institutional_net_value)}
             />
             <IndexMetricCard
-              label="外資買賣超(億)"
+              label={t("stockDetail.dataViews.indexDetail.foreignNetValue")}
               value={formatSignedTradeValueYi(marketChip?.foreign_investor_net_value)}
               tone={valueTone(marketChip?.foreign_investor_net_value)}
             />
             <IndexMetricCard
-              label="投信買賣超(億)"
+              label={t("stockDetail.dataViews.indexDetail.investmentTrustNetValue")}
               value={formatSignedTradeValueYi(marketChip?.investment_trust_net_value)}
               tone={valueTone(marketChip?.investment_trust_net_value)}
             />
             <IndexMetricCard
-              label="自營商買賣超(億)"
+              label={t("stockDetail.dataViews.indexDetail.dealerNetValue")}
               value={formatSignedTradeValueYi(marketChip?.dealer_net_value)}
               tone={valueTone(marketChip?.dealer_net_value)}
             />
             <IndexMetricCard
-              label="官股買賣超(億)"
+              label={t("stockDetail.dataViews.indexDetail.governmentBankNetValue")}
               value={formatSignedTradeValueYi(marketChip?.government_bank_net_value)}
               tone={valueTone(marketChip?.government_bank_net_value)}
             />
             <IndexMetricCard
-              label="融資變動(億)"
+              label={t("stockDetail.dataViews.indexDetail.marginChangeValue")}
               value={formatSignedTradeValueYi(marketChip?.margin_balance_change_value)}
               tone={valueTone(marketChip?.margin_balance_change_value)}
             />
             <IndexMetricCard
-              label="融資變動(張)"
+              label={t("stockDetail.dataViews.indexDetail.marginChangeShares")}
               value={formatSignedLots(marketChip?.margin_balance_change_shares)}
               tone={valueTone(marketChip?.margin_balance_change_shares)}
             />
             <IndexMetricCard
-              label="融券變動(張)"
+              label={t("stockDetail.dataViews.indexDetail.shortChangeShares")}
               value={formatSignedLots(marketChip?.short_balance_change_shares)}
               tone={valueTone(marketChip?.short_balance_change_shares)}
             />
@@ -1204,8 +1743,10 @@ export function IndexDetailDataPanel({
 
       <div className="px-5 py-3 text-xs text-omi-text-muted">
         {breadth?.source
-          ? `市場廣度來源 ${breadth.source}；貢獻排行為估算值`
-          : "市場廣度待資料更新"}
+          ? t("stockDetail.dataViews.indexDetail.breadthSource", {
+              source: breadth.source,
+            })
+          : t("stockDetail.dataViews.indexDetail.breadthPending")}
       </div>
     </section>
   );
@@ -1237,6 +1778,8 @@ export function ContributionColumn({
   items: MarketIndexContributionItem[];
   tone: string;
 }) {
+  const t = useT();
+
   return (
     <div className="min-w-0">
       <div className="mb-2 text-xs font-bold uppercase tracking-[0.14em] text-omi-text-muted">
@@ -1267,7 +1810,9 @@ export function ContributionColumn({
             </div>
           ))
         ) : (
-          <div className="px-3 py-8 text-center text-sm text-omi-text-muted">尚無資料</div>
+          <div className="px-3 py-8 text-center text-sm text-omi-text-muted">
+            {t("stockDetail.dataViews.contribution.empty")}
+          </div>
         )}
       </div>
     </div>
@@ -1281,32 +1826,38 @@ export function IndexContributionRanking({
   contributions: MarketIndexContributionResponse | null;
   loadState: LoadState;
 }) {
+  const t = useT();
+
   return (
     <div className="border-b border-omi-border-subtle px-5 py-4">
       <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
         <div>
           <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
-            Contribution
+            {t("stockDetail.dataViews.contribution.eyebrow")}
           </div>
-          <div className="mt-1 text-base font-bold text-omi-text-strong">個股貢獻排行</div>
+          <div className="mt-1 text-base font-bold text-omi-text-strong">
+            {t("stockDetail.dataViews.contribution.title")}
+          </div>
         </div>
         <div className="text-right text-xs text-omi-text-muted">
           {loadState === "loading"
-            ? "讀取中"
+            ? t("stockDetail.dataViews.contribution.loading")
             : contributions?.trade_date
-              ? `${contributions.trade_date} · 點數估算`
-              : "點數估算"}
+              ? t("stockDetail.dataViews.contribution.tradeDatePoints", {
+                  date: contributions.trade_date,
+                })
+              : t("stockDetail.dataViews.contribution.pointsEstimated")}
         </div>
       </div>
 
       <div className="grid gap-4 xl:grid-cols-2">
         <ContributionColumn
-          title="正貢獻"
+          title={t("stockDetail.dataViews.contribution.positive")}
           items={contributions?.positive ?? []}
           tone="text-omi-market-up"
         />
         <ContributionColumn
-          title="負貢獻"
+          title={t("stockDetail.dataViews.contribution.negative")}
           items={contributions?.negative ?? []}
           tone="text-omi-market-down"
         />
@@ -1813,6 +2364,7 @@ export function RevenueTrendChart({
   view: RevenueView;
 }) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const t = useT();
   const chartPoints = points.slice(-36);
   const viewWidth = 860;
   const viewHeight = 360;
@@ -1823,9 +2375,15 @@ export function RevenueTrendChart({
   const width = viewWidth - left - right;
   const revenueScale = minMax(chartPoints.map((point) => point.revenue));
   const growthScale = minMax(chartPoints.map((point) => point.growthPct));
+  const revenueLabel =
+    view === "monthly"
+      ? t("stockDetail.dataPanel.chart.monthlyRevenueYi")
+      : view === "quarterly"
+        ? t("stockDetail.dataPanel.chart.quarterlyRevenueYi")
+        : t("stockDetail.dataPanel.chart.yearlyRevenueYi");
 
   if (!chartPoints.length || revenueScale === null) {
-    return <EmptyDataState message="尚無營收圖表資料" />;
+    return <EmptyDataState message={t("stockDetail.dataPanel.empty.revenueChart")} />;
   }
 
   const lineScale = growthScale ?? { min: -1, max: 1 };
@@ -1860,11 +2418,11 @@ export function RevenueTrendChart({
       <div className="mb-3 flex items-center justify-center gap-4 text-xs">
         <span className="inline-flex items-center gap-1 text-omi-text-muted">
           <span className="h-3 w-5 rounded-sm bg-omi-heat-border" />
-          {view === "monthly" ? "單月營收(億)" : view === "quarterly" ? "單季營收(億)" : "年度營收(億)"}
+          {revenueLabel}
         </span>
         <span className="inline-flex items-center gap-1 text-omi-text-muted">
           <span className="h-2 w-2 rounded-full border-2 border-omi-market-up-border" />
-          年增(%)
+          {t("stockDetail.dataPanel.chart.yoyPct")}
         </span>
       </div>
 
@@ -1882,10 +2440,10 @@ export function RevenueTrendChart({
           return <line key={tick} x1={left} x2={left + width} y1={y} y2={y} stroke={omiChartColors.grid} />;
         })}
         <text x={left} y={20} className="fill-omi-text-muted text-[10px]">
-          營收(億)
+          {t("stockDetail.dataPanel.chart.revenueYi")}
         </text>
         <text x={left + width + right} y={20} textAnchor="end" className="fill-omi-text-muted text-[10px]">
-          年增(%)
+          {t("stockDetail.dataPanel.chart.yoyPct")}
         </text>
         {chartPoints.map((point, index) => {
           const value = point.revenue ?? revenueScale.min;
@@ -1952,20 +2510,22 @@ export function RevenueTrendChart({
               </text>
               <rect x={12} y={34} width={10} height={10} fill={omiChartColors.heatMuted} />
               <text x={30} y={43} className="fill-omi-text-muted text-[12px]">
-                營收(億)
+                {t("stockDetail.dataPanel.chart.revenueYi")}
               </text>
               <text x={hoverTipWidth - 12} y={43} textAnchor="end" className="fill-omi-text text-[12px] font-semibold">
                 {formatRevenueYiValue(hoverPoint.revenue)}
               </text>
               <circle cx={17} cy={62} r={4} fill={omiChartColors.growth} />
               <text x={30} y={66} className="fill-omi-text-muted text-[12px]">
-                年增
+                {t("stockDetail.dataPanel.columns.yoy")}
               </text>
               <text x={hoverTipWidth - 12} y={66} textAnchor="end" className={`text-[12px] font-semibold ${valueTone(hoverPoint.growthPct).replace("text-", "fill-")}`}>
                 {formatPct(hoverPoint.growthPct)}
               </text>
               <text x={30} y={86} className="fill-omi-text-muted text-[11px]">
-                月數 {hoverPoint.monthCount}
+                {t("stockDetail.dataPanel.chart.monthCount", {
+                  count: hoverPoint.monthCount,
+                })}
               </text>
             </g>
           </g>
@@ -1984,6 +2544,7 @@ export function EarningsTrendChart({
   view: EarningsView;
 }) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const t = useT();
   const chartPoints = points.slice(-36);
   const viewWidth = 860;
   const viewHeight = 360;
@@ -1994,9 +2555,13 @@ export function EarningsTrendChart({
   const width = viewWidth - left - right;
   const epsScale = minMax(chartPoints.map((point) => point.eps));
   const growthScale = minMax(chartPoints.map((point) => point.growthPct));
+  const earningsLabel =
+    view === "quarterly"
+      ? t("stockDetail.dataPanel.chart.quarterlyEps")
+      : t("stockDetail.dataPanel.chart.annualEps");
 
   if (!chartPoints.length || epsScale === null) {
-    return <EmptyDataState message="尚無盈餘圖表資料" />;
+    return <EmptyDataState message={t("stockDetail.dataPanel.empty.earningsChart")} />;
   }
 
   const lineScale = growthScale ?? { min: -1, max: 1 };
@@ -2031,11 +2596,11 @@ export function EarningsTrendChart({
       <div className="mb-3 flex items-center justify-center gap-4 text-xs">
         <span className="inline-flex items-center gap-1 text-omi-text-muted">
           <span className="h-3 w-5 rounded-sm bg-omi-heat-border" />
-          {view === "quarterly" ? "每股盈餘" : "年度EPS"}
+          {earningsLabel}
         </span>
         <span className="inline-flex items-center gap-1 text-omi-text-muted">
           <span className="h-2 w-2 rounded-full border-2 border-omi-market-up-border" />
-          年增(%)
+          {t("stockDetail.dataPanel.chart.yoyPct")}
         </span>
       </div>
 
@@ -2053,10 +2618,10 @@ export function EarningsTrendChart({
           return <line key={tick} x1={left} x2={left + width} y1={y} y2={y} stroke={omiChartColors.grid} />;
         })}
         <text x={left} y={20} className="fill-omi-text-muted text-[10px]">
-          EPS(元)
+          {t("stockDetail.dataPanel.columns.epsNtd")}
         </text>
         <text x={left + width + right} y={20} textAnchor="end" className="fill-omi-text-muted text-[10px]">
-          年增(%)
+          {t("stockDetail.dataPanel.chart.yoyPct")}
         </text>
         {chartPoints.map((point, index) => {
           const value = point.eps ?? epsScale.min;
@@ -2130,7 +2695,7 @@ export function EarningsTrendChart({
               </text>
               <circle cx={17} cy={62} r={4} fill={omiChartColors.growth} />
               <text x={30} y={66} className="fill-omi-text-muted text-[12px]">
-                年增
+                {t("stockDetail.dataPanel.columns.yoy")}
               </text>
               <text x={hoverTipWidth - 12} y={66} textAnchor="end" className={`text-[12px] font-semibold ${valueTone(hoverPoint.growthPct).replace("text-", "fill-")}`}>
                 {formatPct(hoverPoint.growthPct)}
@@ -2152,6 +2717,7 @@ export function EarningsTrendChart({
 
 export function ShareholdingMixedChart({ points }: { points: ShareholdingSeriesPoint[] }) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const t = useT();
   const viewWidth = 860;
   const viewHeight = 330;
   const left = 64;
@@ -2164,7 +2730,7 @@ export function ShareholdingMixedChart({ points }: { points: ShareholdingSeriesP
   const showClose = closeScale !== null && points.some((point) => point.close !== null);
 
   if (points.length === 0 || largeScale === null) {
-    return <EmptyDataState message="尚無股權分散趨勢資料" />;
+    return <EmptyDataState message={t("stockDetail.dataPanel.empty.shareholdingTrend")} />;
   }
 
   const closePath =
@@ -2194,11 +2760,11 @@ export function ShareholdingMixedChart({ points }: { points: ShareholdingSeriesP
       <div className="mb-3 flex items-center justify-center gap-4 text-xs">
         <span className="inline-flex items-center gap-1 text-omi-text-muted">
           <span className="h-3 w-5 rounded-sm bg-omi-heat-border" />
-          大股東持股(%)
+          {t("stockDetail.dataPanel.chart.largeHolderPct")}
         </span>
         <span className="inline-flex items-center gap-1 text-omi-text-muted">
           <span className="h-2 w-2 rounded-full border-2 border-omi-market-up-border" />
-          收盤價
+          {t("stockDetail.dataPanel.chart.closePrice")}
         </span>
       </div>
       <svg
@@ -2215,10 +2781,10 @@ export function ShareholdingMixedChart({ points }: { points: ShareholdingSeriesP
           return <line key={tick} x1={left} x2={left + width} y1={y} y2={y} stroke={omiChartColors.grid} />;
         })}
         <text x={left} y={18} className="fill-omi-text-muted text-[10px]">
-          大股東持股(%)
+          {t("stockDetail.dataPanel.chart.largeHolderPct")}
         </text>
         <text x={left + width + right} y={18} textAnchor="end" className="fill-omi-text-muted text-[10px]">
-          收盤價
+          {t("stockDetail.dataPanel.chart.closePrice")}
         </text>
         {points.map((point, index) => {
           const value = point.largeRatio ?? largeScale.min;
@@ -2328,14 +2894,14 @@ export function ShareholdingMixedChart({ points }: { points: ShareholdingSeriesP
               </text>
               <circle cx={16} cy={40} r={4} fill={omiChartColors.heatMuted} />
               <text x={28} y={44} className="fill-omi-text-muted text-[12px]">
-                大股東持股(%)
+                {t("stockDetail.dataPanel.chart.largeHolderPct")}
               </text>
               <text x={hoverTipWidth - 12} y={44} textAnchor="end" className="fill-omi-text text-[12px] font-semibold">
                 {formatPrice(hoverPoint.largeRatio)}
               </text>
               <circle cx={16} cy={62} r={4} fill={omiChartColors.growth} />
               <text x={28} y={66} className="fill-omi-text-muted text-[12px]">
-                收盤價
+                {t("stockDetail.dataPanel.chart.closePrice")}
               </text>
               <text x={hoverTipWidth - 12} y={66} textAnchor="end" className="fill-omi-text text-[12px] font-semibold">
                 {formatPrice(hoverPoint.close)}
@@ -2358,6 +2924,7 @@ export function ShareholdingMixedChart({ points }: { points: ShareholdingSeriesP
 
 export function ShareholdingRatioChart({ points }: { points: ShareholdingSeriesPoint[] }) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const t = useT();
   const viewWidth = 860;
   const viewHeight = 300;
   const left = 64;
@@ -2369,7 +2936,7 @@ export function ShareholdingRatioChart({ points }: { points: ShareholdingSeriesP
   const smallScale = minMax(points.map((point) => point.smallRatio));
 
   if (points.length === 0 || largeScale === null || smallScale === null) {
-    return <EmptyDataState message="尚無大戶/小股東持股比例資料" />;
+    return <EmptyDataState message={t("stockDetail.dataPanel.empty.shareholdingRatio")} />;
   }
 
   const largePath = buildLinePath(points, "largeRatio", largeScale, left, top, width, height);
@@ -2396,11 +2963,11 @@ export function ShareholdingRatioChart({ points }: { points: ShareholdingSeriesP
       <div className="mb-3 flex items-center justify-center gap-4 text-xs">
         <span className="inline-flex items-center gap-1 text-omi-text-muted">
           <span className="h-2 w-2 rounded-full border-2 border-omi-heat-border" />
-          大股東持股(%)
+          {t("stockDetail.dataPanel.chart.largeHolderPct")}
         </span>
         <span className="inline-flex items-center gap-1 text-omi-text-muted">
           <span className="h-2 w-2 rounded-full border-2 border-omi-market-up-border" />
-          小股東持股(%)
+          {t("stockDetail.dataPanel.chart.smallHolderPct")}
         </span>
       </div>
       <svg
@@ -2419,10 +2986,10 @@ export function ShareholdingRatioChart({ points }: { points: ShareholdingSeriesP
         <path d={largePath} fill="none" stroke={omiChartColors.heatMuted} strokeWidth="2" strokeLinecap="round" />
         <path d={smallPath} fill="none" stroke={omiChartColors.growth} strokeWidth="2" strokeLinecap="round" />
         <text x={left} y={18} className="fill-omi-text-muted text-[10px]">
-          大股東持股(%)
+          {t("stockDetail.dataPanel.chart.largeHolderPct")}
         </text>
         <text x={left + width + right} y={18} textAnchor="end" className="fill-omi-text-muted text-[10px]">
-          小股東持股(%)
+          {t("stockDetail.dataPanel.chart.smallHolderPct")}
         </text>
         <text x={left - 4} y={top + 4} textAnchor="end" className="fill-omi-text-muted text-[10px]">
           {largeScale.max.toFixed(2)}
@@ -2509,14 +3076,14 @@ export function ShareholdingRatioChart({ points }: { points: ShareholdingSeriesP
               </text>
               <circle cx={16} cy={40} r={4} fill={omiChartColors.heatMuted} />
               <text x={28} y={44} className="fill-omi-text-muted text-[12px]">
-                大股東持股(%)
+                {t("stockDetail.dataPanel.chart.largeHolderPct")}
               </text>
               <text x={hoverTipWidth - 12} y={44} textAnchor="end" className="fill-omi-text text-[12px] font-semibold">
                 {formatPrice(hoverPoint.largeRatio)}
               </text>
               <circle cx={16} cy={62} r={4} fill={omiChartColors.growth} />
               <text x={28} y={66} className="fill-omi-text-muted text-[12px]">
-                小股東持股(%)
+                {t("stockDetail.dataPanel.chart.smallHolderPct")}
               </text>
               <text x={hoverTipWidth - 12} y={66} textAnchor="end" className="fill-omi-text text-[12px] font-semibold">
                 {formatPrice(hoverPoint.smallRatio)}
@@ -2555,6 +3122,7 @@ export function InstitutionalFlowChart({
   onHoverPointChange?: (point: InstitutionalSeriesPoint | null) => void;
 }) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const t = useT();
   const chartPoints = points;
   const viewWidth = 860;
   const viewHeight = showXAxisLabels ? 150 : 126;
@@ -2607,7 +3175,11 @@ export function InstitutionalFlowChart({
   const hoverTipY = tooltipY(hoverCumY ?? hoverNetY ?? top + height / 2, hoverTipHeight, top, height);
 
   if (!chartPoints.length) {
-    return <EmptyDataState message={`${title} 尚無歷史資料`} />;
+    return (
+      <EmptyDataState
+        message={t("stockDetail.dataPanel.empty.historyFor", { title })}
+      />
+    );
   }
 
   return (
@@ -2616,13 +3188,15 @@ export function InstitutionalFlowChart({
         <div className="font-semibold text-omi-text">
           {title}
           <span className={`ml-2 ${valueTone(latestPoint?.[cumulativeKey])}`}>
-            累計 {formatSignedLots(latestPoint?.[cumulativeKey])}張
+            {t("stockDetail.dataPanel.chart.cumulativeLots", {
+              value: formatSignedLots(latestPoint?.[cumulativeKey]),
+            })}
           </span>
         </div>
         <div>
-          <span className="text-omi-text-muted">買賣超：</span>
+          <span className="text-omi-text-muted">{t("stockDetail.dataPanel.chart.netBuySell")}</span>
           <span className={valueTone(latestPoint?.[netKey])}>
-            {formatSignedLots(latestPoint?.[netKey])}張
+            {formatSignedLots(latestPoint?.[netKey])}{t("stockDetail.dataPanel.units.lots")}
           </span>
         </div>
       </div>
@@ -2731,14 +3305,14 @@ export function InstitutionalFlowChart({
               </text>
               <rect x={12} y={34} width={8} height={8} fill={(hoverPoint[netKey] ?? 0) >= 0 ? omiChartColors.marketUpFlash : omiChartColors.marketDownFlash} />
               <text x={28} y={43} className="fill-omi-text-muted text-[12px]">
-                買賣超(張)
+                {t("stockDetail.dataPanel.chart.netBuySellLots")}
               </text>
               <text x={hoverTipWidth - 12} y={43} textAnchor="end" className="fill-omi-text text-[12px] font-semibold">
                 {formatSignedLots(hoverPoint[netKey])}
               </text>
               <circle cx={16} cy={62} r={4} fill={omiChartColors.cumulative} />
               <text x={28} y={66} className="fill-omi-text-muted text-[12px]">
-                累計(張)
+                {t("stockDetail.dataPanel.chart.cumulativeLotsColumn")}
               </text>
               <text x={hoverTipWidth - 12} y={66} textAnchor="end" className="fill-omi-text text-[12px] font-semibold">
                 {formatSignedLots(hoverPoint[cumulativeKey])}
