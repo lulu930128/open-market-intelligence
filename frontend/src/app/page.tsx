@@ -2,6 +2,8 @@ import MarketDashboardClient from "@/components/MarketDashboardClient";
 import { getApiProxyTarget } from "@/lib/serverApiConfig";
 import type {
   ChartPoint,
+  JPWatchlistGroupNode,
+  JPWatchlistItemRead,
   MarketIndexSummary,
   OhlcChartResponse,
   StockIndicatorPoint,
@@ -92,6 +94,8 @@ export default async function Page({
     initialMarketIndexSummary,
     initialUsWatchlistTree,
     initialUsWatchlistItems,
+    initialJpWatchlistTree,
+    initialJpWatchlistItems,
   ] = await Promise.all([
     fetchBackendJson<WatchlistGroupNode[]>("/api/watchlists/tree", []),
     fetchBackendJson<WatchlistItemRead[]>("/api/watchlists/items?limit=5000&offset=0", []),
@@ -101,6 +105,11 @@ export default async function Page({
       "/api/us-market/watchlists/items?limit=5000&offset=0",
       []
     ),
+    fetchBackendJson<JPWatchlistGroupNode[]>("/api/jp-market/watchlists/tree", []),
+    fetchBackendJson<JPWatchlistItemRead[]>(
+      "/api/jp-market/watchlists/items?limit=5000&offset=0",
+      []
+    ),
   ]);
 
   const marketParam = firstSearchParam(resolvedSearchParams, "market");
@@ -108,6 +117,7 @@ export default async function Page({
     firstSearchParam(resolvedSearchParams, "stock_id") ??
     firstSearchParam(resolvedSearchParams, "stock");
   const symbolParam = firstSearchParam(resolvedSearchParams, "symbol");
+  const jpSymbolParam = firstSearchParam(resolvedSearchParams, "jp_symbol");
   const futuresParam =
     firstSearchParam(resolvedSearchParams, "futures") ??
     firstSearchParam(resolvedSearchParams, "futures_symbol");
@@ -123,8 +133,18 @@ export default async function Page({
       : null;
   const initialSelectedStockId =
     initialSelectedFuturesSymbol === null ? stockIdParam?.trim() || null : null;
-  const initialSelectedUsSymbol = symbolParam?.trim().toUpperCase() || null;
-  const initialMarket = marketParam === "us" || initialSelectedUsSymbol ? "us" : "tw";
+  const initialSelectedJpSymbol =
+    (jpSymbolParam ?? (marketParam === "jp" ? symbolParam : undefined))
+      ?.trim()
+      .toUpperCase() || null;
+  const initialSelectedUsSymbol =
+    marketParam === "jp" ? null : symbolParam?.trim().toUpperCase() || null;
+  const initialMarket =
+    marketParam === "jp" || initialSelectedJpSymbol
+      ? "jp"
+      : marketParam === "us" || initialSelectedUsSymbol
+        ? "us"
+        : "tw";
   const selectedStockItem =
     initialSelectedStockId === null
       ? null
@@ -192,6 +212,7 @@ export default async function Page({
       initialSelectedFuturesSymbol={initialSelectedFuturesSymbol}
       initialSelectedUsSymbol={initialSelectedUsSymbol}
       initialSelectedUsSecurityName={selectedUsItem?.security_name ?? null}
+      initialSelectedJpSymbol={initialSelectedJpSymbol}
       initialChartData={initialChartData}
       initialIndicatorData={initialIndicatorData}
       initialRankingData={null}
@@ -200,6 +221,8 @@ export default async function Page({
       initialMarketIndexSummary={initialMarketIndexSummary}
       initialUsWatchlistTree={initialUsWatchlistTree}
       initialUsWatchlistItems={initialUsWatchlistItems}
+      initialJpWatchlistTree={initialJpWatchlistTree}
+      initialJpWatchlistItems={initialJpWatchlistItems}
     />
   );
 }

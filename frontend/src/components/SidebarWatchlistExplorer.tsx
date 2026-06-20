@@ -66,7 +66,7 @@ type SidebarMarketOption = {
 const sidebarMarketOptions: SidebarMarketOption[] = [
   { value: "tw", enabled: true },
   { value: "us", enabled: true },
-  { value: "jp", enabled: false },
+  { value: "jp", enabled: true },
   { value: "kr", enabled: false },
   { value: "hk", enabled: false },
 ];

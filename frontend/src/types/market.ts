@@ -768,6 +768,144 @@ export type USStockMasterRead = {
   updated_at: string;
 };
 
+export type JPStockMasterRead = {
+  id: number;
+  symbol: string;
+  local_code: string | null;
+  security_name: string | null;
+  exchange: string | null;
+  market_segment: string | null;
+  sector_33_code: string | null;
+  sector_33_name: string | null;
+  sector_17_code: string | null;
+  sector_17_name: string | null;
+  size_code: string | null;
+  size_name: string | null;
+  asset_type: string;
+  listing_source: string;
+  currency: string;
+  exchange_timezone_name: string | null;
+  is_active: boolean;
+  first_seen_at: string;
+  last_seen_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type JPWatchlistGroupNode = {
+  id: number;
+  parent_id: number | null;
+  group_name: string;
+  description: string | null;
+  sort_order: number;
+  is_active: boolean;
+  children: JPWatchlistGroupNode[];
+};
+
+export type JPWatchlistGroupRead = {
+  id: number;
+  parent_id: number | null;
+  group_name: string;
+  description: string | null;
+  sort_order: number;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type JPWatchlistItemRead = {
+  id: number;
+  group_id: number;
+  symbol: string;
+  local_code: string | null;
+  security_name: string | null;
+  exchange: string | null;
+  market_segment: string | null;
+  sector_33_name: string | null;
+  asset_type: string | null;
+  note: string | null;
+  priority: number;
+  tags: string | null;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type JPStockMasterSyncResultRead = {
+  status: string;
+  provider: string;
+  source_url: string;
+  scanned_count: number;
+  created_count: number;
+  updated_count: number;
+  deactivated_count: number;
+  message: string;
+};
+
+export type JPDailyPriceRead = {
+  id: number;
+  provider: string;
+  symbol: string;
+  trade_date: string;
+  currency: string;
+  open_price: number | null;
+  high_price: number | null;
+  low_price: number | null;
+  close_price: number | null;
+  adjusted_close: number | null;
+  trade_volume: number | null;
+  source_url: string | null;
+  raw_payload_hash: string | null;
+  fetched_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type JPDailyPriceRefreshResultRead = {
+  status: string;
+  provider: string;
+  symbol: string;
+  fetched_count: number;
+  inserted_count: number;
+  updated_count: number;
+  message: string;
+};
+
+export type JPOhlcPointRead = {
+  time: string;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  close: number | null;
+  volume: number | null;
+};
+
+export type JPOhlcChartRead = {
+  symbol: string;
+  timeframe: string;
+  bars: number;
+  lookback_days: number;
+  from_date: string;
+  to_date: string;
+  point_count: number;
+  points: JPOhlcPointRead[];
+  backfill: Record<string, unknown> | null;
+};
+
+export type JPResourceSlotRead = {
+  key: string;
+  status: "available" | "empty" | "planned" | string;
+  available: boolean;
+  source: string | null;
+  latest_date: string | null;
+  row_count: number;
+};
+
+export type JPResourceSummaryRead = {
+  symbol: string;
+  slots: JPResourceSlotRead[];
+};
+
 export type USSymbolSyncResultRead = {
   status: string;
   scanned_count: number;

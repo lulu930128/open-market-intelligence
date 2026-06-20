@@ -121,6 +121,7 @@ class Settings(BaseSettings):
     kgi_api_base_url: str | None = None
     us_sec_user_agent: str = "Open Market Intelligence local research; set US_SEC_USER_AGENT"
     us_market_http_timeout_seconds: int = 30
+    jp_market_http_timeout_seconds: int = 30
     omi_http_trust_env: bool = False
     openai_api_key: str | None = None
     openai_llm_api_key: str | None = None

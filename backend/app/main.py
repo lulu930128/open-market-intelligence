@@ -21,6 +21,7 @@ from app.jobs import scheduler as job_scheduler, service as job_service
 from app.routers import (
     ai,
     indicators,
+    jp_market,
     jobs,
     market,
     raw_results,
@@ -129,6 +130,7 @@ app.include_router(market.router, prefix="/api/market", tags=["market"])
 app.include_router(indicators.router, prefix="/api/market/indicators", tags=["market-indicators"])
 app.include_router(stocks.router, prefix="/api/stocks", tags=["stocks"])
 app.include_router(us_market.router, prefix="/api/us-market", tags=["us-market"])
+app.include_router(jp_market.router, prefix="/api/jp-market", tags=["jp-market"])
 app.include_router(watchlists.router, prefix="/api/watchlists", tags=["watchlists"])
 app.include_router(reports.router, prefix="/api/reports", tags=["reports"])
 

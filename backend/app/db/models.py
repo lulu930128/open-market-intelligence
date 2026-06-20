@@ -1168,6 +1168,130 @@ class USDailyPrice(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class JPStockMaster(Base):
+    __tablename__ = "jp_stock_master"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "symbol",
+            name="uq_jp_stock_master_symbol",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    symbol: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    local_code: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    security_name: Mapped[str | None] = mapped_column(String(240), nullable=True)
+
+    exchange: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    market_segment: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    sector_33_code: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    sector_33_name: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    sector_17_code: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    sector_17_name: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    size_code: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    size_name: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    asset_type: Mapped[str] = mapped_column(String(40), default="unknown", index=True)
+    listing_source: Mapped[str] = mapped_column(String(40), default="discovered_yahoo_chart", index=True)
+    currency: Mapped[str] = mapped_column(String(10), default="JPY", index=True)
+    exchange_timezone_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class JPDailyPrice(Base):
+    __tablename__ = "jp_daily_price"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "symbol",
+            "trade_date",
+            name="uq_jp_daily_price_provider_symbol_date",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+    currency: Mapped[str] = mapped_column(String(10), default="JPY", index=True)
+
+    open_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    close_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    adjusted_close: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    trade_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_hash: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class JPWatchlistGroup(Base):
+    __tablename__ = "jp_watchlist_group"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    parent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("jp_watchlist_group.id"),
+        nullable=True,
+        index=True,
+    )
+
+    group_name: Mapped[str] = mapped_column(String(120), index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    sort_order: Mapped[int] = mapped_column(Integer, default=100, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class JPWatchlistItem(Base):
+    __tablename__ = "jp_watchlist_item"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "group_id",
+            "symbol",
+            name="uq_jp_watchlist_item_group_symbol",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    group_id: Mapped[int] = mapped_column(
+        ForeignKey("jp_watchlist_group.id"),
+        nullable=False,
+        index=True,
+    )
+
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    priority: Mapped[int] = mapped_column(Integer, default=100, index=True)
+
+    tags: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class USSecCompanyFact(Base):
     __tablename__ = "us_sec_company_fact"
 

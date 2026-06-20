@@ -65,6 +65,18 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("provider_event", table_names)
             self.assertIn("source_health_snapshot", table_names)
             self.assertIn("app_setting", table_names)
+            self.assertIn("jp_stock_master", table_names)
+            self.assertIn("jp_daily_price", table_names)
+            self.assertIn("jp_watchlist_group", table_names)
+            self.assertIn("jp_watchlist_item", table_names)
+            jp_master_columns = {
+                column["name"]
+                for column in inspect(engine).get_columns("jp_stock_master")
+            }
+            self.assertIn("market_segment", jp_master_columns)
+            self.assertIn("sector_33_name", jp_master_columns)
+            self.assertIn("sector_17_name", jp_master_columns)
+            self.assertIn("size_name", jp_master_columns)
             self.assertEqual(get_database_revision(database_url), get_head_revision())
 
     def test_upgrade_legacy_create_all_database_preserves_rows(self) -> None:
@@ -96,6 +108,59 @@ class DatabaseMigrationTests(unittest.TestCase):
                 engine.dispose()
 
             self.assertEqual(stock_name, "台積電")
+            self.assertEqual(get_database_revision(database_url), get_head_revision())
+
+
+    def test_repair_partial_jp_master_table_at_0016(self) -> None:
+        with migration_test_directory() as directory:
+            database_url = sqlite_url(directory / "partial_jp.db")
+            engine = create_engine(database_url)
+
+            try:
+                with engine.begin() as connection:
+                    connection.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+                    connection.execute(text("INSERT INTO alembic_version (version_num) VALUES ('20260620_0016')"))
+                    connection.execute(
+                        text(
+                            """
+                            CREATE TABLE jp_stock_master (
+                                id INTEGER NOT NULL,
+                                symbol VARCHAR(32) NOT NULL,
+                                local_code VARCHAR(20),
+                                security_name VARCHAR(240),
+                                exchange VARCHAR(80),
+                                asset_type VARCHAR(40) NOT NULL,
+                                listing_source VARCHAR(40) NOT NULL,
+                                currency VARCHAR(10) NOT NULL,
+                                exchange_timezone_name VARCHAR(80),
+                                is_active BOOLEAN NOT NULL,
+                                first_seen_at DATETIME NOT NULL,
+                                last_seen_at DATETIME NOT NULL,
+                                created_at DATETIME NOT NULL,
+                                updated_at DATETIME NOT NULL,
+                                PRIMARY KEY (id),
+                                CONSTRAINT uq_jp_stock_master_symbol UNIQUE (symbol)
+                            )
+                            """
+                        )
+                    )
+
+                run_database_migrations(database_url)
+
+                jp_master_columns = {
+                    column["name"]
+                    for column in inspect(engine).get_columns("jp_stock_master")
+                }
+            finally:
+                engine.dispose()
+
+            self.assertIn("market_segment", jp_master_columns)
+            self.assertIn("sector_33_code", jp_master_columns)
+            self.assertIn("sector_33_name", jp_master_columns)
+            self.assertIn("sector_17_code", jp_master_columns)
+            self.assertIn("sector_17_name", jp_master_columns)
+            self.assertIn("size_code", jp_master_columns)
+            self.assertIn("size_name", jp_master_columns)
             self.assertEqual(get_database_revision(database_url), get_head_revision())
 
 

@@ -2,6 +2,8 @@
 
 import SidebarWatchlistExplorer from "@/components/SidebarWatchlistExplorer";
 import type { MarketRegion } from "@/components/SidebarWatchlistExplorer";
+import JPMarketPanel from "@/components/JPMarketPanel";
+import JPMarketSidebar from "@/components/JPMarketSidebar";
 import { LoadingDots } from "@/components/LoadingPlaceholders";
 import OmiAskDock, { type OmiAskDockContext } from "@/components/OmiAskDock";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
@@ -43,6 +45,9 @@ import {
 import type {
   ChartPoint,
   IntradayTrendResponse,
+  JPStockMasterRead,
+  JPWatchlistGroupNode,
+  JPWatchlistItemRead,
   MarketIndexSnapshot,
   MarketIndexSummary,
   RankingBatchResponse,
@@ -133,6 +138,7 @@ function buildDashboardHref(params: {
   stockId?: string | null;
   futuresSymbol?: string | null;
   symbol?: string | null;
+  jpSymbol?: string | null;
   radarMode?: WatchlistRadarMode | null;
 }) {
   const searchParams = new URLSearchParams();
@@ -144,6 +150,7 @@ function buildDashboardHref(params: {
   if (params.stockId) searchParams.set("stock_id", params.stockId);
   if (params.futuresSymbol) searchParams.set("futures", params.futuresSymbol);
   if (params.symbol) searchParams.set("symbol", params.symbol);
+  if (params.jpSymbol) searchParams.set("jp_symbol", params.jpSymbol);
   if (params.radarMode) searchParams.set("radar_mode", params.radarMode);
 
   const query = searchParams.toString();
@@ -161,6 +168,7 @@ type Props = {
   initialSelectedFuturesSymbol: string | null;
   initialSelectedUsSymbol: string | null;
   initialSelectedUsSecurityName: string | null;
+  initialSelectedJpSymbol: string | null;
   initialChartData: ChartPoint[];
   initialIndicatorData: StockIndicatorPoint[];
   initialRankingData: RankingResponse | null;
@@ -169,6 +177,8 @@ type Props = {
   initialMarketIndexSummary: MarketIndexSummary | null;
   initialUsWatchlistTree: USWatchlistGroupNode[];
   initialUsWatchlistItems: USWatchlistItemRead[];
+  initialJpWatchlistTree: JPWatchlistGroupNode[];
+  initialJpWatchlistItems: JPWatchlistItemRead[];
 };
 
 function RankingLoadingRows({ rows = 5 }: { rows?: number }) {
@@ -1061,6 +1071,10 @@ function flattenUsGroups(nodes: USWatchlistGroupNode[]): USWatchlistGroupNode[] 
   return nodes.flatMap((node) => [node, ...flattenUsGroups(node.children)]);
 }
 
+function flattenJpGroups(nodes: JPWatchlistGroupNode[]): JPWatchlistGroupNode[] {
+  return nodes.flatMap((node) => [node, ...flattenJpGroups(node.children)]);
+}
+
 function buildWatchlistRows(
   group: WatchlistGroupNode | null,
   items: WatchlistItemRead[]
@@ -1539,6 +1553,7 @@ export default function MarketDashboardClient({
   initialSelectedFuturesSymbol,
   initialSelectedUsSymbol,
   initialSelectedUsSecurityName,
+  initialSelectedJpSymbol,
   initialChartData,
   initialIndicatorData,
   initialRankingData,
@@ -1547,6 +1562,8 @@ export default function MarketDashboardClient({
   initialMarketIndexSummary,
   initialUsWatchlistTree,
   initialUsWatchlistItems,
+  initialJpWatchlistTree,
+  initialJpWatchlistItems,
 }: Props) {
   const t = useT();
   const initialSelectedGroup = useMemo(() => {
@@ -1560,6 +1577,9 @@ export default function MarketDashboardClient({
   const initialSelectedUsGroup = useMemo(() => {
     return flattenUsGroups(initialUsWatchlistTree)[0] ?? null;
   }, [initialUsWatchlistTree]);
+  const initialSelectedJpGroup = useMemo(() => {
+    return flattenJpGroups(initialJpWatchlistTree)[0] ?? null;
+  }, [initialJpWatchlistTree]);
   const [selectedGroupId, setSelectedGroupId] = useState<number | null>(
     initialSelectedGroup?.id ?? null
   );
@@ -1588,6 +1608,25 @@ export default function MarketDashboardClient({
   );
   const [selectedUsCompanyProfile, setSelectedUsCompanyProfile] =
     useState<USCompanyProfileRead | null>(null);
+  const [selectedJpSymbol, setSelectedJpSymbol] = useState<string | null>(
+    initialSelectedJpSymbol
+  );
+  const [selectedJpStock, setSelectedJpStock] = useState<JPStockMasterRead | null>(
+    null
+  );
+  const [selectedJpGroupId, setSelectedJpGroupId] = useState<number | null>(
+    initialSelectedJpGroup?.id ?? null
+  );
+  const [selectedJpGroup, setSelectedJpGroup] = useState<JPWatchlistGroupNode | null>(
+    initialSelectedJpGroup
+  );
+  const [selectedJpGroupName, setSelectedJpGroupName] = useState<string | null>(
+    initialSelectedJpGroup?.group_name ?? null
+  );
+  const [jpWatchlistTree, setJpWatchlistTree] =
+    useState<JPWatchlistGroupNode[]>(initialJpWatchlistTree);
+  const [jpWatchlistItems, setJpWatchlistItems] =
+    useState<JPWatchlistItemRead[]>(initialJpWatchlistItems);
   const [selectedUsGroupId, setSelectedUsGroupId] = useState<number | null>(
     initialSelectedUsGroup?.id ?? null
   );
@@ -2525,6 +2564,68 @@ export default function MarketDashboardClient({
     setUsErrorMessage(null);
   }
 
+  function handleSelectJpGroup(group: JPWatchlistGroupNode | null) {
+    setSelectedJpGroupId(group?.id ?? null);
+    setSelectedJpGroup(group);
+    setSelectedJpGroupName(group?.group_name ?? null);
+  }
+
+  function handleSelectJpSymbol(symbol: string, securityName: string | null) {
+    const normalizedSymbol = symbol.trim().toUpperCase();
+    if (!normalizedSymbol) return;
+
+    setSelectedJpSymbol(normalizedSymbol);
+    setSelectedJpStock((current) =>
+      current?.symbol === normalizedSymbol
+        ? current
+        : ({
+            id: 0,
+            symbol: normalizedSymbol,
+            local_code: null,
+            security_name: securityName,
+            exchange: null,
+            market_segment: null,
+            sector_33_code: null,
+            sector_33_name: null,
+            sector_17_code: null,
+            sector_17_name: null,
+            size_code: null,
+            size_name: null,
+            asset_type: "stock",
+            listing_source: "watchlist",
+            currency: "JPY",
+            exchange_timezone_name: null,
+            is_active: true,
+            first_seen_at: "",
+            last_seen_at: "",
+            created_at: "",
+            updated_at: "",
+          } satisfies JPStockMasterRead)
+    );
+    pushDashboardUrl({ market: "jp", jpSymbol: normalizedSymbol });
+  }
+
+  function handleSelectJpStock(stock: JPStockMasterRead | null) {
+    setSelectedJpStock(stock);
+    setSelectedJpSymbol(stock?.symbol ?? null);
+
+    if (stock) {
+      pushDashboardUrl({ market: "jp", jpSymbol: stock.symbol });
+    } else {
+      pushDashboardUrl({ market: "jp" });
+    }
+  }
+
+  function ensureSelectedJpGroup() {
+    const fallbackGroup = selectedJpGroup ?? flattenJpGroups(jpWatchlistTree)[0] ?? null;
+
+    if (fallbackGroup !== selectedJpGroup) {
+      setSelectedJpGroup(fallbackGroup);
+      setSelectedJpGroupId(fallbackGroup?.id ?? null);
+      setSelectedJpGroupName(fallbackGroup?.group_name ?? null);
+    }
+  }
+
   function ensureSelectedUsGroup() {
     const fallbackGroup = selectedUsGroup ?? flattenUsGroups(usWatchlistTree)[0] ?? null;
 
@@ -2999,6 +3100,47 @@ export default function MarketDashboardClient({
       };
     }
 
+    if (activeMarket === "jp") {
+      if (selectedJpSymbol) {
+        return {
+          market: "jp",
+          label: `${selectedJpSymbol}${
+            selectedJpStock?.security_name ? ` ${selectedJpStock.security_name}` : ""
+          }`,
+          target: {
+            type: "jp_stock",
+            id: selectedJpSymbol,
+            label: selectedJpStock?.security_name ?? selectedJpSymbol,
+            market: "JP",
+          },
+          uiContext: {
+            market: "jp",
+            selected_symbol: selectedJpSymbol,
+            selected_security_name: selectedJpStock?.security_name ?? null,
+            selected_market_segment: selectedJpStock?.market_segment ?? null,
+            selected_sector: selectedJpStock?.sector_33_name ?? null,
+            selected_group_id: selectedJpGroupId,
+            selected_group_name: selectedJpGroupName,
+          },
+        };
+      }
+
+      return {
+        market: "jp",
+        label: t("jpMarket.askMarketLabel"),
+        target: {
+          type: "market",
+          market: "JP",
+          label: t("jpMarket.askMarketLabel"),
+        },
+        uiContext: {
+          market: "jp",
+          selected_group_id: selectedJpGroupId,
+          selected_group_name: selectedJpGroupName,
+        },
+      };
+    }
+
     if (selectedFuturesSymbol) {
       const futuresLabel = `${selectedFuturesSymbol} ${t("futures.productTitle")}`;
 
@@ -3082,6 +3224,10 @@ export default function MarketDashboardClient({
     activeMarket,
     selectedGroup?.group_name,
     selectedFuturesSymbol,
+    selectedJpGroupId,
+    selectedJpGroupName,
+    selectedJpStock,
+    selectedJpSymbol,
     selectedStockId,
     selectedStockName,
     selectedUsGroupId,
@@ -3109,6 +3255,9 @@ export default function MarketDashboardClient({
                 setTwChartFocusMode(false);
                 if (market === "us") {
                   ensureSelectedUsGroup();
+                }
+                if (market === "jp") {
+                  ensureSelectedJpGroup();
                 }
               }}
               onSelectGroup={handleSelectUsGroup}
@@ -3151,6 +3300,59 @@ export default function MarketDashboardClient({
               }}
               onChanged={() => setUsWatchlistVersion((version) => version + 1)}
             />
+          ) : activeMarket === "jp" ? (
+            <JPMarketSidebar
+              initialTree={jpWatchlistTree}
+              initialItems={jpWatchlistItems}
+              selectedMarket={activeMarket}
+              selectedGroupId={selectedJpGroupId}
+              selectedSymbol={selectedJpSymbol}
+              selectedStock={selectedJpStock}
+              onMarketChange={(market) => {
+                setActiveMarket(market);
+                setSelectedFuturesSymbol(null);
+                setErrorMessage(null);
+                setUsErrorMessage(null);
+                setTwChartFocusMode(false);
+                setUsChartFocusMode(false);
+                if (market === "us") {
+                  ensureSelectedUsGroup();
+                }
+                if (market === "jp") {
+                  ensureSelectedJpGroup();
+                }
+              }}
+              onSelectGroup={handleSelectJpGroup}
+              onSelectSymbol={handleSelectJpSymbol}
+              onExplorerDataChanged={(nextTree, nextItems) => {
+                setJpWatchlistTree(nextTree);
+                setJpWatchlistItems(nextItems);
+
+                const nextSelectedGroup =
+                  flattenJpGroups(nextTree).find((group) => group.id === selectedJpGroupId) ??
+                  flattenJpGroups(nextTree)[0] ??
+                  null;
+                const selectedSymbolKey = selectedJpSymbol?.toUpperCase() ?? null;
+                const nextSelectedRow =
+                  selectedSymbolKey === null
+                    ? null
+                    : nextItems.find((item) => item.symbol === selectedSymbolKey) ?? null;
+
+                setSelectedJpGroup(nextSelectedGroup);
+                setSelectedJpGroupId(nextSelectedGroup?.id ?? null);
+                setSelectedJpGroupName(nextSelectedGroup?.group_name ?? null);
+
+                if (selectedSymbolKey !== null && nextSelectedRow === null) {
+                  setSelectedJpSymbol(null);
+                  setSelectedJpStock(null);
+                } else if (
+                  nextSelectedRow !== null &&
+                  nextSelectedRow.security_name !== selectedJpStock?.security_name
+                ) {
+                  handleSelectJpSymbol(nextSelectedRow.symbol, nextSelectedRow.security_name);
+                }
+              }}
+            />
           ) : (
             <SidebarWatchlistExplorer
               initialTree={watchlistTree}
@@ -3171,6 +3373,9 @@ export default function MarketDashboardClient({
                 }
                 if (market === "us") {
                   ensureSelectedUsGroup();
+                }
+                if (market === "jp") {
+                  ensureSelectedJpGroup();
                 }
               }}
               onExplorerDataChanged={(nextTree, nextItems) => {
@@ -3242,6 +3447,11 @@ export default function MarketDashboardClient({
                   onChartFocusModeChange={setUsChartFocusMode}
                 />
               </>
+            ) : activeMarket === "jp" ? (
+              <JPMarketPanel
+                initialSymbol={selectedJpSymbol}
+                onSelectStock={handleSelectJpStock}
+              />
             ) : (
               <section className="border border-omi-border-subtle bg-omi-surface px-5 py-10 text-sm text-omi-text-muted">
                 {t("dashboard.ranking.notEnabled")}
