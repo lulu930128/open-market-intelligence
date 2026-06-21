@@ -871,6 +871,128 @@ export type JPDailyPriceRefreshResultRead = {
   message: string;
 };
 
+export type JPResourceRefreshResultRead = {
+  status: string;
+  provider: string;
+  symbol: string;
+  fetched_count: number;
+  inserted_count: number;
+  updated_count: number;
+  message: string;
+};
+
+export type JPCompanyFundamentalRead = {
+  id: number;
+  provider: string;
+  symbol: string;
+  company_name: string | null;
+  exchange: string | null;
+  sector: string | null;
+  industry: string | null;
+  currency: string | null;
+  market_cap: number | null;
+  enterprise_value: number | null;
+  trailing_pe: number | null;
+  forward_pe: number | null;
+  price_to_book: number | null;
+  dividend_yield: number | null;
+  beta: number | null;
+  disclosed_date: string | null;
+  fiscal_period: string | null;
+  fiscal_year_end: string | null;
+  document_type: string | null;
+  eps_ttm: number | null;
+  forward_eps: number | null;
+  revenue_ttm: number | null;
+  net_sales: number | null;
+  operating_profit: number | null;
+  ordinary_profit: number | null;
+  profit: number | null;
+  forecast_net_sales: number | null;
+  forecast_operating_profit: number | null;
+  forecast_ordinary_profit: number | null;
+  forecast_profit: number | null;
+  gross_margin: number | null;
+  operating_margin: number | null;
+  profit_margin: number | null;
+  return_on_equity: number | null;
+  return_on_assets: number | null;
+  revenue_growth: number | null;
+  earnings_growth: number | null;
+  total_assets: number | null;
+  equity: number | null;
+  equity_to_asset_ratio: number | null;
+  total_cash: number | null;
+  total_debt: number | null;
+  operating_cash_flow: number | null;
+  investing_cash_flow: number | null;
+  financing_cash_flow: number | null;
+  debt_to_equity: number | null;
+  current_ratio: number | null;
+  quick_ratio: number | null;
+  shares_outstanding: number | null;
+  book_value: number | null;
+  earnings_date: string | null;
+  ex_dividend_date: string | null;
+  source_url: string | null;
+  raw_payload_hash: string | null;
+  fetched_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type JPWatchlistResourceRefreshResultRead = {
+  status: string;
+  group_id: number | null;
+  symbol_count: number;
+  success_count: number;
+  partial_success_count: number;
+  skipped_count: number;
+  error_count: number;
+  symbol_error_count: number;
+  fetched_count: number;
+  inserted_count: number;
+  updated_count: number;
+  message: string | null;
+};
+
+export type JPWatchlistRankingItemRead = {
+  rank: number;
+  symbol: string;
+  security_name: string | null;
+  exchange: string | null;
+  market_segment: string | null;
+  sector_33_name: string | null;
+  asset_type: string | null;
+  group_id: number;
+  trade_date: string | null;
+  close: number | null;
+  previous_close: number | null;
+  change: number | null;
+  change_pct: number | null;
+  volume: number | null;
+  status: string;
+  source: string | null;
+  error_message: string | null;
+};
+
+export type JPWatchlistRankingRead = {
+  group_id: number | null;
+  include_children: boolean;
+  rank_by: string;
+  sort_order: string;
+  requested_symbol_count: number;
+  ranked_count: number;
+  no_data_count: number;
+  error_count: number;
+  trade_date: string | null;
+  target_trade_date: string | null;
+  is_current: boolean;
+  current_symbol_count: number;
+  stale_symbol_count: number;
+  results: JPWatchlistRankingItemRead[];
+};
+
 export type JPOhlcPointRead = {
   time: string;
   open: number | null;

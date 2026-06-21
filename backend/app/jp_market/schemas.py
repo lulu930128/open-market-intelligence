@@ -70,6 +70,86 @@ class JPDailyPriceRefreshResultRead(BaseModel):
     message: str
 
 
+class JPResourceRefreshResultRead(BaseModel):
+    status: str
+    provider: str
+    symbol: str
+    fetched_count: int
+    inserted_count: int
+    updated_count: int
+    message: str
+
+
+class JPCompanyFundamentalRead(BaseModel):
+    id: int
+
+    provider: str
+    symbol: str
+    company_name: str | None = None
+    exchange: str | None = None
+    sector: str | None = None
+    industry: str | None = None
+    currency: str | None = None
+
+    market_cap: int | None = None
+    enterprise_value: int | None = None
+    trailing_pe: float | None = None
+    forward_pe: float | None = None
+    price_to_book: float | None = None
+    dividend_yield: float | None = None
+    beta: float | None = None
+
+    disclosed_date: date | None = None
+    fiscal_period: str | None = None
+    fiscal_year_end: date | None = None
+    document_type: str | None = None
+
+    eps_ttm: float | None = None
+    forward_eps: float | None = None
+    revenue_ttm: int | None = None
+    net_sales: int | None = None
+    operating_profit: int | None = None
+    ordinary_profit: int | None = None
+    profit: int | None = None
+    forecast_net_sales: int | None = None
+    forecast_operating_profit: int | None = None
+    forecast_ordinary_profit: int | None = None
+    forecast_profit: int | None = None
+    gross_margin: float | None = None
+    operating_margin: float | None = None
+    profit_margin: float | None = None
+    return_on_equity: float | None = None
+    return_on_assets: float | None = None
+    revenue_growth: float | None = None
+    earnings_growth: float | None = None
+
+    total_assets: int | None = None
+    equity: int | None = None
+    equity_to_asset_ratio: float | None = None
+    total_cash: int | None = None
+    total_debt: int | None = None
+    operating_cash_flow: int | None = None
+    investing_cash_flow: int | None = None
+    financing_cash_flow: int | None = None
+    debt_to_equity: float | None = None
+    current_ratio: float | None = None
+    quick_ratio: float | None = None
+    shares_outstanding: int | None = None
+    book_value: float | None = None
+
+    earnings_date: date | None = None
+    ex_dividend_date: date | None = None
+
+    source_url: str | None = None
+    raw_payload_hash: str | None = None
+    fetched_at: datetime
+
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class JPStockMasterSyncResultRead(BaseModel):
     status: str
     provider: str
@@ -195,3 +275,40 @@ class JPWatchlistItemRead(BaseModel):
     enabled: bool
     created_at: datetime
     updated_at: datetime
+
+
+class JPWatchlistRankingItemRead(BaseModel):
+    rank: int
+    symbol: str
+    security_name: str | None = None
+    exchange: str | None = None
+    market_segment: str | None = None
+    sector_33_name: str | None = None
+    asset_type: str | None = None
+    group_id: int
+    trade_date: date | None = None
+    close: float | None = None
+    previous_close: float | None = None
+    change: float | None = None
+    change_pct: float | None = None
+    volume: int | None = None
+    status: str
+    source: str | None = None
+    error_message: str | None = None
+
+
+class JPWatchlistRankingRead(BaseModel):
+    group_id: int | None = None
+    include_children: bool
+    rank_by: str
+    sort_order: str
+    requested_symbol_count: int
+    ranked_count: int
+    no_data_count: int
+    error_count: int
+    trade_date: date | None = None
+    target_trade_date: date | None = None
+    is_current: bool = True
+    current_symbol_count: int = 0
+    stale_symbol_count: int = 0
+    results: list[JPWatchlistRankingItemRead]

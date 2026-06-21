@@ -155,10 +155,14 @@ export default async function Page({
       : initialUsWatchlistItems.find(
           (item) => item.symbol.toUpperCase() === initialSelectedUsSymbol
         ) ?? null;
-  const defaultSelectedGroup = flattenGroups(initialTree)[0] ?? null;
-  const initialSelectedGroupId = Number.isFinite(requestedGroupId)
+  const hasRequestedGroupId = Number.isFinite(requestedGroupId);
+  const defaultSelectedGroup =
+    initialMarket === "tw" ? flattenGroups(initialTree)[0] ?? null : null;
+  const initialSelectedGroupId = hasRequestedGroupId
     ? requestedGroupId
-    : selectedStockItem?.group_id ?? defaultSelectedGroup?.id ?? null;
+    : initialMarket === "tw"
+      ? selectedStockItem?.group_id ?? defaultSelectedGroup?.id ?? null
+      : null;
   const isIndexProduct =
     initialSelectedStockId !== null && indexProductIds.has(initialSelectedStockId);
   const initialRadarPromise =

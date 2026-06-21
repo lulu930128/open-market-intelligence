@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from collections import OrderedDict
 from datetime import date, datetime, timedelta, timezone
+import time
 
 import requests
 from sqlalchemy.exc import IntegrityError
@@ -9,7 +11,14 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db.models import JPDailyPrice, JPStockMaster, JPWatchlistGroup, JPWatchlistItem, utc_now
+from app.db.models import (
+    JPCompanyFundamental,
+    JPDailyPrice,
+    JPStockMaster,
+    JPWatchlistGroup,
+    JPWatchlistItem,
+    utc_now,
+)
 from app.jp_market.schemas import (
     JPWatchlistGroupCreate,
     JPWatchlistGroupUpdate,
@@ -17,13 +26,20 @@ from app.jp_market.schemas import (
     JPWatchlistItemUpdate,
 )
 from app.jp_market.sources import (
+    JPCompanyFundamentalRecord,
     JPDailyPriceRecord,
     JPMarketDataFetchError,
     JPStockRecord,
+    fetch_jquants_id_token,
+    fetch_jquants_refresh_token,
+    fetch_jquants_statements_payload,
     fetch_jpx_listed_issues_workbook,
     fetch_yahoo_chart_payload,
+    fetch_yahoo_quote_summary_payload,
     normalize_jp_symbol,
     parse_jpx_listed_issues_workbook,
+    parse_jquants_company_fundamental,
+    parse_yahoo_company_fundamental,
     parse_yahoo_daily_prices,
     parse_yahoo_stock_record,
 )
@@ -58,10 +74,11 @@ JP_CHART_LOOKBACK_MULTIPLIER = {
     "weekly": 8,
     "monthly": 31,
 }
-JP_PLANNED_RESOURCE_KEYS = ("chips", "institutional", "branch", "revenue", "earnings")
+JP_PLANNED_RESOURCE_KEYS = ("demand", "investors", "disclosures")
 MAX_JP_CHART_BARS = 5000
 YAHOO_CHART_COMPACT_RANGE = "1y"
 YAHOO_CHART_FULL_RANGE = "10y"
+ProgressCallback = Callable[[int | None, int | None, str | None], None]
 
 
 def _valid_symbol(symbol: str) -> str:
@@ -646,6 +663,200 @@ def list_jp_watchlist_symbols(
     return symbols
 
 
+def _jp_close_value(row: JPDailyPrice | None) -> float | None:
+    if row is None:
+        return None
+
+    return row.adjusted_close if row.adjusted_close is not None else row.close_price
+
+
+def _latest_distinct_jp_daily_rows(
+    db: Session,
+    *,
+    symbol: str,
+    limit: int = 2,
+) -> list[JPDailyPrice]:
+    rows = (
+        db.query(JPDailyPrice)
+        .filter(JPDailyPrice.symbol == symbol)
+        .order_by(
+            JPDailyPrice.trade_date.desc(),
+            JPDailyPrice.fetched_at.desc(),
+            JPDailyPrice.id.desc(),
+        )
+        .limit(max(limit * 4, limit))
+        .all()
+    )
+    selected_rows: list[JPDailyPrice] = []
+    seen_dates: set[date] = set()
+
+    for row in rows:
+        if row.trade_date in seen_dates:
+            continue
+
+        selected_rows.append(row)
+        seen_dates.add(row.trade_date)
+
+        if len(selected_rows) >= limit:
+            break
+
+    return selected_rows
+
+
+def _jp_ranking_freshness(rows: list[dict], requested_symbol_count: int) -> dict:
+    row_dates = [
+        row.get("trade_date")
+        for row in rows
+        if isinstance(row.get("trade_date"), date)
+    ]
+    latest_trade_date = max(row_dates, default=None)
+    current_symbol_count = sum(
+        1 for row_date in row_dates if row_date == latest_trade_date
+    )
+    stale_symbol_count = max(requested_symbol_count - current_symbol_count, 0)
+
+    return {
+        "trade_date": latest_trade_date,
+        "target_trade_date": latest_trade_date,
+        "is_current": requested_symbol_count == 0 or stale_symbol_count == 0,
+        "current_symbol_count": current_symbol_count,
+        "stale_symbol_count": stale_symbol_count,
+    }
+
+
+def get_jp_watchlist_ranking(
+    db: Session,
+    *,
+    group_id: int | None = None,
+    include_children: bool = True,
+    enabled_only: bool = True,
+    rank_by: str = "none",
+    sort_order: str = "asc",
+) -> dict:
+    if rank_by not in {"none", "change_pct", "volume", "close"}:
+        raise ValueError("rank_by must be one of: none, change_pct, volume, close.")
+
+    if sort_order not in {"asc", "desc"}:
+        raise ValueError("sort_order must be one of: asc, desc.")
+
+    query = db.query(JPWatchlistItem)
+
+    if group_id is not None:
+        get_jp_watchlist_group(db, group_id)
+        group_ids = (
+            _get_jp_descendant_group_ids(db, group_id)
+            if include_children
+            else [group_id]
+        )
+        query = query.filter(JPWatchlistItem.group_id.in_(group_ids))
+
+    if enabled_only:
+        query = query.filter(JPWatchlistItem.enabled.is_(True))
+
+    items = (
+        query.order_by(
+            JPWatchlistItem.priority.asc(),
+            JPWatchlistItem.id.asc(),
+        )
+        .all()
+    )
+    unique_items: list[JPWatchlistItem] = []
+    seen_symbols: set[str] = set()
+
+    for item in items:
+        symbol = normalize_jp_symbol(item.symbol)
+        if not symbol or symbol in seen_symbols:
+            continue
+
+        unique_items.append(item)
+        seen_symbols.add(symbol)
+
+    symbols = [normalize_jp_symbol(item.symbol) for item in unique_items]
+    stocks_by_symbol = {
+        stock.symbol: stock
+        for stock in db.query(JPStockMaster)
+        .filter(JPStockMaster.symbol.in_(symbols))
+        .all()
+    } if symbols else {}
+    rows: list[dict] = []
+
+    for item in unique_items:
+        symbol = normalize_jp_symbol(item.symbol)
+        stock = stocks_by_symbol.get(symbol)
+        price_rows = _latest_distinct_jp_daily_rows(
+            db=db,
+            symbol=symbol,
+            limit=2,
+        )
+        latest = price_rows[0] if price_rows else None
+        previous = price_rows[1] if len(price_rows) > 1 else None
+        close = _jp_close_value(latest)
+        previous_close = _jp_close_value(previous)
+        change = (
+            close - previous_close
+            if close is not None and previous_close is not None
+            else None
+        )
+        change_pct = (
+            (change / previous_close) * 100
+            if change is not None and previous_close not in {None, 0}
+            else None
+        )
+
+        rows.append(
+            {
+                "rank": 0,
+                "symbol": symbol,
+                "security_name": stock.security_name if stock is not None else None,
+                "exchange": stock.exchange if stock is not None else None,
+                "market_segment": stock.market_segment if stock is not None else None,
+                "sector_33_name": stock.sector_33_name if stock is not None else None,
+                "asset_type": stock.asset_type if stock is not None else None,
+                "group_id": item.group_id,
+                "trade_date": latest.trade_date if latest is not None else None,
+                "close": close,
+                "previous_close": previous_close,
+                "change": change,
+                "change_pct": change_pct,
+                "volume": latest.trade_volume if latest is not None else None,
+                "status": "ready" if close is not None else "no_data",
+                "source": latest.provider if latest is not None else None,
+                "error_message": None,
+            }
+        )
+
+    if rank_by != "none":
+        ranked_rows = [row for row in rows if row.get(rank_by) is not None]
+        no_value_rows = [row for row in rows if row.get(rank_by) is None]
+        ranked_rows.sort(
+            key=lambda row: row[rank_by],
+            reverse=sort_order == "desc",
+        )
+        rows = ranked_rows + no_value_rows
+
+    for index, row in enumerate(rows, start=1):
+        row["rank"] = index
+
+    no_data_count = sum(1 for row in rows if row["status"] == "no_data")
+    freshness = _jp_ranking_freshness(
+        rows=rows,
+        requested_symbol_count=len(unique_items),
+    )
+
+    return {
+        "group_id": group_id,
+        "include_children": include_children,
+        "rank_by": rank_by,
+        "sort_order": sort_order,
+        "requested_symbol_count": len(rows),
+        "ranked_count": len(rows) - no_data_count,
+        "no_data_count": no_data_count,
+        "error_count": 0,
+        **freshness,
+        "results": rows,
+    }
+
+
 def upsert_jp_daily_price_records(
     db: Session,
     records: list[JPDailyPriceRecord],
@@ -767,6 +978,525 @@ def refresh_jp_daily_prices(
     )
 
 
+def upsert_jp_company_fundamental_records(
+    db: Session,
+    records: list[JPCompanyFundamentalRecord],
+) -> dict:
+    inserted_count = 0
+    updated_count = 0
+
+    for record in records:
+        existing = (
+            db.query(JPCompanyFundamental)
+            .filter(JPCompanyFundamental.provider == record.provider)
+            .filter(JPCompanyFundamental.symbol == record.symbol)
+            .first()
+        )
+
+        if existing is None:
+            db.add(
+                JPCompanyFundamental(
+                    provider=record.provider,
+                    symbol=record.symbol,
+                    company_name=record.company_name,
+                    exchange=record.exchange,
+                    sector=record.sector,
+                    industry=record.industry,
+                    currency=record.currency,
+                    market_cap=record.market_cap,
+                    enterprise_value=record.enterprise_value,
+                    trailing_pe=record.trailing_pe,
+                    forward_pe=record.forward_pe,
+                    price_to_book=record.price_to_book,
+                    dividend_yield=record.dividend_yield,
+                    beta=record.beta,
+                    disclosed_date=record.disclosed_date,
+                    fiscal_period=record.fiscal_period,
+                    fiscal_year_end=record.fiscal_year_end,
+                    document_type=record.document_type,
+                    eps_ttm=record.eps_ttm,
+                    forward_eps=record.forward_eps,
+                    revenue_ttm=record.revenue_ttm,
+                    net_sales=record.net_sales,
+                    operating_profit=record.operating_profit,
+                    ordinary_profit=record.ordinary_profit,
+                    profit=record.profit,
+                    forecast_net_sales=record.forecast_net_sales,
+                    forecast_operating_profit=record.forecast_operating_profit,
+                    forecast_ordinary_profit=record.forecast_ordinary_profit,
+                    forecast_profit=record.forecast_profit,
+                    gross_margin=record.gross_margin,
+                    operating_margin=record.operating_margin,
+                    profit_margin=record.profit_margin,
+                    return_on_equity=record.return_on_equity,
+                    return_on_assets=record.return_on_assets,
+                    revenue_growth=record.revenue_growth,
+                    earnings_growth=record.earnings_growth,
+                    total_assets=record.total_assets,
+                    equity=record.equity,
+                    equity_to_asset_ratio=record.equity_to_asset_ratio,
+                    total_cash=record.total_cash,
+                    total_debt=record.total_debt,
+                    operating_cash_flow=record.operating_cash_flow,
+                    investing_cash_flow=record.investing_cash_flow,
+                    financing_cash_flow=record.financing_cash_flow,
+                    debt_to_equity=record.debt_to_equity,
+                    current_ratio=record.current_ratio,
+                    quick_ratio=record.quick_ratio,
+                    shares_outstanding=record.shares_outstanding,
+                    book_value=record.book_value,
+                    earnings_date=record.earnings_date,
+                    ex_dividend_date=record.ex_dividend_date,
+                    source_url=record.source_url,
+                    raw_payload_hash=record.raw_payload_hash,
+                    fetched_at=utc_now(),
+                )
+            )
+            inserted_count += 1
+            continue
+
+        existing.company_name = record.company_name
+        existing.exchange = record.exchange
+        existing.sector = record.sector
+        existing.industry = record.industry
+        existing.currency = record.currency
+        existing.market_cap = record.market_cap
+        existing.enterprise_value = record.enterprise_value
+        existing.trailing_pe = record.trailing_pe
+        existing.forward_pe = record.forward_pe
+        existing.price_to_book = record.price_to_book
+        existing.dividend_yield = record.dividend_yield
+        existing.beta = record.beta
+        existing.disclosed_date = record.disclosed_date
+        existing.fiscal_period = record.fiscal_period
+        existing.fiscal_year_end = record.fiscal_year_end
+        existing.document_type = record.document_type
+        existing.eps_ttm = record.eps_ttm
+        existing.forward_eps = record.forward_eps
+        existing.revenue_ttm = record.revenue_ttm
+        existing.net_sales = record.net_sales
+        existing.operating_profit = record.operating_profit
+        existing.ordinary_profit = record.ordinary_profit
+        existing.profit = record.profit
+        existing.forecast_net_sales = record.forecast_net_sales
+        existing.forecast_operating_profit = record.forecast_operating_profit
+        existing.forecast_ordinary_profit = record.forecast_ordinary_profit
+        existing.forecast_profit = record.forecast_profit
+        existing.gross_margin = record.gross_margin
+        existing.operating_margin = record.operating_margin
+        existing.profit_margin = record.profit_margin
+        existing.return_on_equity = record.return_on_equity
+        existing.return_on_assets = record.return_on_assets
+        existing.revenue_growth = record.revenue_growth
+        existing.earnings_growth = record.earnings_growth
+        existing.total_assets = record.total_assets
+        existing.equity = record.equity
+        existing.equity_to_asset_ratio = record.equity_to_asset_ratio
+        existing.total_cash = record.total_cash
+        existing.total_debt = record.total_debt
+        existing.operating_cash_flow = record.operating_cash_flow
+        existing.investing_cash_flow = record.investing_cash_flow
+        existing.financing_cash_flow = record.financing_cash_flow
+        existing.debt_to_equity = record.debt_to_equity
+        existing.current_ratio = record.current_ratio
+        existing.quick_ratio = record.quick_ratio
+        existing.shares_outstanding = record.shares_outstanding
+        existing.book_value = record.book_value
+        existing.earnings_date = record.earnings_date
+        existing.ex_dividend_date = record.ex_dividend_date
+        existing.source_url = record.source_url
+        existing.raw_payload_hash = record.raw_payload_hash
+        existing.fetched_at = utc_now()
+        existing.updated_at = utc_now()
+        updated_count += 1
+
+    db.commit()
+
+    return {
+        "inserted_count": inserted_count,
+        "updated_count": updated_count,
+    }
+
+
+def refresh_jp_company_fundamental_from_yahoo_quote_summary(
+    db: Session,
+    *,
+    symbol: str,
+) -> dict:
+    normalized_symbol = _valid_symbol(symbol)
+    payload, source_url = fetch_yahoo_quote_summary_payload(
+        symbol=normalized_symbol,
+        timeout_seconds=settings.jp_market_http_timeout_seconds,
+    )
+    record = parse_yahoo_company_fundamental(
+        payload,
+        symbol=normalized_symbol,
+        source_url=source_url,
+    )
+    result = upsert_jp_company_fundamental_records(db, [record])
+
+    return {
+        "status": "success",
+        "provider": "yahoo_quote_summary",
+        "symbol": record.symbol,
+        "fetched_count": 1,
+        "inserted_count": result["inserted_count"],
+        "updated_count": result["updated_count"],
+        "message": "JP company fundamentals refreshed from Yahoo quote summary.",
+    }
+
+
+def _configured_jquants_id_token() -> str | None:
+    configured_id_token = (settings.jquants_id_token or "").strip()
+    if configured_id_token:
+        return configured_id_token
+
+    configured_refresh_token = (settings.jquants_refresh_token or "").strip()
+    if not configured_refresh_token:
+        mail_address = (settings.jquants_mail_address or "").strip()
+        password = (settings.jquants_password or "").strip()
+        if not mail_address or not password:
+            return None
+
+        configured_refresh_token = fetch_jquants_refresh_token(
+            base_url=settings.jquants_api_base_url,
+            mail_address=mail_address,
+            password=password,
+            timeout_seconds=settings.jp_market_http_timeout_seconds,
+        )
+
+    return fetch_jquants_id_token(
+        base_url=settings.jquants_api_base_url,
+        refresh_token=configured_refresh_token,
+        timeout_seconds=settings.jp_market_http_timeout_seconds,
+    )
+
+
+def _jquants_statement_count(payload: dict) -> int:
+    rows = payload.get("statements")
+    if rows is None:
+        rows = payload.get("data")
+
+    return len(rows) if isinstance(rows, list) else 0
+
+
+def refresh_jp_company_fundamental_from_jquants_statements(
+    db: Session,
+    *,
+    symbol: str,
+) -> dict:
+    normalized_symbol = _valid_symbol(symbol)
+    id_token = _configured_jquants_id_token()
+    if id_token is None:
+        return {
+            "status": "skipped",
+            "provider": "jquants_statements",
+            "symbol": normalized_symbol,
+            "fetched_count": 0,
+            "inserted_count": 0,
+            "updated_count": 0,
+            "message": "J-Quants credentials are not configured.",
+        }
+
+    stock = (
+        db.query(JPStockMaster)
+        .filter(JPStockMaster.symbol == normalized_symbol)
+        .first()
+    )
+    payload, source_url = fetch_jquants_statements_payload(
+        base_url=settings.jquants_api_base_url,
+        id_token=id_token,
+        local_code=normalized_symbol.split(".", maxsplit=1)[0],
+        timeout_seconds=settings.jp_market_http_timeout_seconds,
+    )
+    record = parse_jquants_company_fundamental(
+        payload,
+        symbol=normalized_symbol,
+        source_url=source_url,
+        company_name=stock.security_name if stock else None,
+        exchange=stock.exchange if stock else None,
+        sector=stock.sector_33_name if stock else None,
+        industry=stock.sector_17_name if stock else None,
+    )
+    if record is None:
+        return {
+            "status": "empty",
+            "provider": "jquants_statements",
+            "symbol": normalized_symbol,
+            "fetched_count": _jquants_statement_count(payload),
+            "inserted_count": 0,
+            "updated_count": 0,
+            "message": "J-Quants statements returned no financial statement rows.",
+        }
+
+    result = upsert_jp_company_fundamental_records(db, [record])
+
+    return {
+        "status": "success",
+        "provider": "jquants_statements",
+        "symbol": record.symbol,
+        "fetched_count": _jquants_statement_count(payload),
+        "inserted_count": result["inserted_count"],
+        "updated_count": result["updated_count"],
+        "message": "JP company fundamentals refreshed from J-Quants statements.",
+    }
+
+
+def refresh_jp_company_fundamental(
+    db: Session,
+    *,
+    symbol: str,
+    provider: str = "auto",
+) -> dict:
+    normalized_symbol = _valid_symbol(symbol)
+    normalized_provider = provider.strip().lower()
+    if normalized_provider not in {"auto", "jquants_statements", "yahoo_quote_summary"}:
+        raise ValueError("provider must be one of: auto, jquants_statements, yahoo_quote_summary.")
+
+    if normalized_provider in {"auto", "jquants_statements"}:
+        return refresh_jp_company_fundamental_from_jquants_statements(
+            db=db,
+            symbol=normalized_symbol,
+        )
+
+    return refresh_jp_company_fundamental_from_yahoo_quote_summary(
+        db=db,
+        symbol=normalized_symbol,
+    )
+
+
+def get_jp_company_fundamental(
+    db: Session,
+    *,
+    symbol: str,
+    provider: str | None = None,
+) -> JPCompanyFundamental | None:
+    normalized_symbol = _valid_symbol(symbol)
+    query = db.query(JPCompanyFundamental).filter(JPCompanyFundamental.symbol == normalized_symbol)
+
+    if provider is not None:
+        query = query.filter(JPCompanyFundamental.provider == provider)
+
+    return query.order_by(
+        JPCompanyFundamental.fetched_at.desc(),
+        JPCompanyFundamental.id.desc(),
+    ).first()
+
+
+def list_jp_company_fundamentals(
+    db: Session,
+    *,
+    provider: str | None = None,
+    sector: str | None = None,
+    industry: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[JPCompanyFundamental]:
+    query = db.query(JPCompanyFundamental)
+
+    if provider is not None:
+        query = query.filter(JPCompanyFundamental.provider == provider)
+
+    if sector is not None:
+        query = query.filter(JPCompanyFundamental.sector == sector)
+
+    if industry is not None:
+        query = query.filter(JPCompanyFundamental.industry == industry)
+
+    return (
+        query.order_by(JPCompanyFundamental.symbol.asc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+
+def _compact_jp_resource_result(result: dict) -> dict:
+    return {
+        "status": result.get("status", "success"),
+        "fetched_count": int(result.get("fetched_count") or 0),
+        "inserted_count": int(result.get("inserted_count") or 0),
+        "updated_count": int(result.get("updated_count") or 0),
+        "message": result.get("message"),
+    }
+
+
+def _refresh_jp_symbol_resources(
+    db: Session,
+    *,
+    symbol: str,
+    include_daily: bool,
+    include_fundamentals: bool,
+    outputsize: str,
+    provider: str,
+) -> dict:
+    normalized_symbol = _valid_symbol(symbol)
+    resources: dict[str, dict] = {}
+    errors: list[dict[str, str]] = []
+
+    def run_resource(resource: str, callback: Callable[[], dict]) -> None:
+        try:
+            resources[resource] = _compact_jp_resource_result(callback())
+        except Exception as exc:
+            db.rollback()
+            message = str(exc)
+            resources[resource] = {
+                "status": "error",
+                "fetched_count": 0,
+                "inserted_count": 0,
+                "updated_count": 0,
+                "message": message,
+            }
+            errors.append(
+                {
+                    "symbol": normalized_symbol,
+                    "resource": resource,
+                    "message": message,
+                }
+            )
+
+    if include_daily:
+        run_resource(
+            "daily",
+            lambda: refresh_jp_daily_prices(
+                db=db,
+                symbol=normalized_symbol,
+                outputsize=outputsize,
+                provider=provider,
+            ),
+        )
+
+    if include_fundamentals:
+        run_resource(
+            "fundamentals",
+            lambda: refresh_jp_company_fundamental(
+                db=db,
+                symbol=normalized_symbol,
+                provider="auto",
+            ),
+        )
+
+    success_count = sum(1 for item in resources.values() if item["status"] == "success")
+    skipped_count = sum(1 for item in resources.values() if item["status"] == "skipped")
+
+    if errors:
+        symbol_status = "error" if success_count == 0 else "partial_success"
+    elif not resources or skipped_count == len(resources):
+        symbol_status = "skipped"
+    else:
+        symbol_status = "success"
+
+    return {
+        "symbol": normalized_symbol,
+        "status": symbol_status,
+        "resource_count": len(resources),
+        "success_count": success_count,
+        "skipped_count": skipped_count,
+        "error_count": len(errors),
+        "fetched_count": sum(item["fetched_count"] for item in resources.values()),
+        "inserted_count": sum(item["inserted_count"] for item in resources.values()),
+        "updated_count": sum(item["updated_count"] for item in resources.values()),
+        "resources": resources,
+        "errors": errors,
+    }
+
+
+def refresh_jp_watchlist_resources(
+    db: Session,
+    *,
+    group_id: int | None = None,
+    include_children: bool = True,
+    enabled_only: bool = True,
+    include_daily: bool = True,
+    include_fundamentals: bool = False,
+    outputsize: str = "compact",
+    provider: str = "auto",
+    sleep_seconds: float = 1.0,
+    progress_callback: ProgressCallback | None = None,
+) -> dict:
+    if not include_daily and not include_fundamentals:
+        raise ValueError("At least one JP resource must be selected.")
+
+    symbols = list_jp_watchlist_symbols(
+        db=db,
+        group_id=group_id,
+        include_children=include_children,
+        enabled_only=enabled_only,
+    )
+    total = len(symbols)
+
+    if progress_callback is not None:
+        progress_callback(0, max(total, 1), "Refreshing JP watchlist resources.")
+
+    if not symbols:
+        return {
+            "status": "empty",
+            "group_id": group_id,
+            "symbol_count": 0,
+            "success_count": 0,
+            "partial_success_count": 0,
+            "skipped_count": 0,
+            "error_count": 0,
+            "symbol_error_count": 0,
+            "fetched_count": 0,
+            "inserted_count": 0,
+            "updated_count": 0,
+            "results": [],
+            "errors": [],
+            "message": "No JP watchlist symbols to refresh.",
+        }
+
+    results: list[dict] = []
+    errors: list[dict[str, str]] = []
+
+    for index, symbol in enumerate(symbols, start=1):
+        result = _refresh_jp_symbol_resources(
+            db=db,
+            symbol=symbol,
+            include_daily=include_daily,
+            include_fundamentals=include_fundamentals,
+            outputsize=outputsize,
+            provider=provider,
+        )
+        results.append(result)
+        errors.extend(result["errors"])
+
+        if progress_callback is not None:
+            progress_callback(index, total, f"Refreshed {index}/{total} JP symbols.")
+
+        if index < total and sleep_seconds > 0:
+            time.sleep(sleep_seconds)
+
+    success_count = sum(1 for result in results if result["status"] == "success")
+    partial_success_count = sum(1 for result in results if result["status"] == "partial_success")
+    skipped_count = sum(1 for result in results if result["status"] == "skipped")
+    symbol_error_count = sum(1 for result in results if result["status"] == "error")
+
+    if symbol_error_count and success_count == 0 and partial_success_count == 0:
+        status_value = "error"
+    elif errors:
+        status_value = "partial_success"
+    else:
+        status_value = "success"
+
+    return {
+        "status": status_value,
+        "group_id": group_id,
+        "symbol_count": total,
+        "success_count": success_count,
+        "partial_success_count": partial_success_count,
+        "skipped_count": skipped_count,
+        "error_count": len(errors),
+        "symbol_error_count": symbol_error_count,
+        "fetched_count": sum(result["fetched_count"] for result in results),
+        "inserted_count": sum(result["inserted_count"] for result in results),
+        "updated_count": sum(result["updated_count"] for result in results),
+        "results": results,
+        "errors": errors,
+        "message": f"JP watchlist resources refreshed for {total} symbols.",
+    }
+
+
 def list_jp_daily_prices(
     db: Session,
     *,
@@ -812,6 +1542,37 @@ def _jp_daily_price_resource_slot(db: Session, symbol: str) -> dict:
     }
 
 
+def _has_any_jp_fundamental_value(
+    row: JPCompanyFundamental | None,
+    fields: tuple[str, ...],
+) -> bool:
+    if row is None:
+        return False
+
+    return any(getattr(row, field) is not None for field in fields)
+
+
+def _jp_fundamental_resource_slot(
+    fundamental: JPCompanyFundamental | None,
+    *,
+    key: str,
+    fields: tuple[str, ...],
+) -> dict:
+    available = _has_any_jp_fundamental_value(fundamental, fields)
+    latest_date = None
+    if fundamental is not None:
+        latest_date = fundamental.fetched_at.date()
+
+    return {
+        "key": key,
+        "status": "available" if available else "empty",
+        "available": available,
+        "source": fundamental.provider if fundamental else None,
+        "latest_date": latest_date,
+        "row_count": 1 if available else 0,
+    }
+
+
 def _jp_planned_resource_slot(key: str) -> dict:
     return {
         "key": key,
@@ -825,12 +1586,51 @@ def _jp_planned_resource_slot(key: str) -> dict:
 
 def get_jp_resource_summary(db: Session, *, symbol: str) -> dict:
     normalized_symbol = _valid_symbol(symbol)
+    fundamental = get_jp_company_fundamental(db=db, symbol=normalized_symbol)
 
     return {
         "symbol": normalized_symbol,
         "slots": [
             _jp_daily_price_resource_slot(db, normalized_symbol),
             *[_jp_planned_resource_slot(key) for key in JP_PLANNED_RESOURCE_KEYS],
+            _jp_fundamental_resource_slot(
+                fundamental,
+                key="performance",
+                fields=(
+                    "net_sales",
+                    "operating_profit",
+                    "ordinary_profit",
+                    "profit",
+                    "forecast_net_sales",
+                    "forecast_operating_profit",
+                    "forecast_profit",
+                    "revenue_growth",
+                    "operating_margin",
+                    "earnings_growth",
+                    "disclosed_date",
+                    "earnings_date",
+                ),
+            ),
+            _jp_fundamental_resource_slot(
+                fundamental,
+                key="financials",
+                fields=(
+                    "eps_ttm",
+                    "forward_eps",
+                    "trailing_pe",
+                    "price_to_book",
+                    "dividend_yield",
+                    "return_on_equity",
+                    "return_on_assets",
+                    "profit_margin",
+                    "total_assets",
+                    "equity",
+                    "equity_to_asset_ratio",
+                    "debt_to_equity",
+                    "current_ratio",
+                    "book_value",
+                ),
+            ),
         ],
     }
 

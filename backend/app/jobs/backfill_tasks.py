@@ -3,6 +3,7 @@ from datetime import date
 from sqlalchemy.orm import Session
 
 from app.jobs.service import ProgressCallback, run_tracked_job
+from app.jp_market import service as jp_market_service
 from app.market.backfill import backfill_tpex_trading_stock, backfill_twse_stock_day
 from app.market.daily_metrics_backfill import (
     ensure_daily_metrics,
@@ -431,6 +432,35 @@ def run_us_watchlist_resource_refresh_job(
             include_actions=include_actions,
             outputsize=outputsize,
             adjusted=adjusted,
+            sleep_seconds=sleep_seconds,
+            progress_callback=progress,
+        )
+
+    run_tracked_job(job_id, worker)
+
+
+def run_jp_watchlist_resource_refresh_job(
+    job_id: int,
+    group_id: int | None,
+    include_children: bool,
+    enabled_only: bool,
+    include_daily: bool,
+    include_fundamentals: bool,
+    outputsize: str,
+    provider: str,
+    sleep_seconds: float,
+) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        progress(0, 1, "Refreshing JP watchlist resources.")
+        return jp_market_service.refresh_jp_watchlist_resources(
+            db=db,
+            group_id=group_id,
+            include_children=include_children,
+            enabled_only=enabled_only,
+            include_daily=include_daily,
+            include_fundamentals=include_fundamentals,
+            outputsize=outputsize,
+            provider=provider,
             sleep_seconds=sleep_seconds,
             progress_callback=progress,
         )

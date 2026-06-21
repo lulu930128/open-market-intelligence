@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import (
     Base,
+    JPCompanyFundamental,
     JPDailyPrice,
     JPStockMaster,
     JPWatchlistGroup,
@@ -24,17 +25,25 @@ from app.jp_market.service import (
     create_jp_watchlist_group,
     create_jp_watchlist_item,
     get_jp_resource_summary,
+    get_jp_watchlist_ranking,
     list_jp_ohlc_chart_data,
     list_jp_watchlist_items,
     list_jp_watchlist_symbols,
+    refresh_jp_company_fundamental,
+    refresh_jp_company_fundamental_from_yahoo_quote_summary,
     refresh_jp_daily_prices_from_yahoo_chart,
+    refresh_jp_watchlist_resources,
     search_jp_stocks,
     sync_jp_symbol_master,
+    upsert_jp_company_fundamental_records,
     upsert_jp_daily_price_records,
 )
 from app.jp_market.sources import (
+    JPCompanyFundamentalRecord,
     JPDailyPriceRecord,
     normalize_jp_symbol,
+    parse_jquants_company_fundamental,
+    parse_yahoo_company_fundamental,
     parse_jpx_listed_issue_rows,
     parse_yahoo_daily_prices,
     parse_yahoo_stock_record,
@@ -82,6 +91,128 @@ YAHOO_JP_CHART_SAMPLE = {
         ],
         "error": None,
     }
+}
+
+
+YAHOO_JP_QUOTE_SUMMARY_SAMPLE = {
+    "quoteSummary": {
+        "result": [
+            {
+                "price": {
+                    "symbol": "7203.T",
+                    "longName": "Toyota Motor Corporation",
+                    "fullExchangeName": "Tokyo Stock Exchange",
+                    "currency": "JPY",
+                    "marketCap": {"raw": 41000000000000, "fmt": "41T"},
+                },
+                "assetProfile": {
+                    "sector": "Consumer Cyclical",
+                    "industry": "Auto Manufacturers",
+                },
+                "summaryDetail": {
+                    "trailingPE": {"raw": 9.8, "fmt": "9.80"},
+                    "forwardPE": {"raw": 8.9, "fmt": "8.90"},
+                    "dividendYield": {"raw": 0.026, "fmt": "2.60%"},
+                    "beta": {"raw": 1.05, "fmt": "1.05"},
+                },
+                "defaultKeyStatistics": {
+                    "enterpriseValue": {"raw": 52000000000000, "fmt": "52T"},
+                    "trailingEps": {"raw": 320.12, "fmt": "320.12"},
+                    "forwardEps": {"raw": 345.67, "fmt": "345.67"},
+                    "priceToBook": {"raw": 1.15, "fmt": "1.15"},
+                    "bookValue": {"raw": 2300.5, "fmt": "2,300.5"},
+                    "sharesOutstanding": {"raw": 13200000000, "fmt": "13.2B"},
+                },
+                "financialData": {
+                    "financialCurrency": "JPY",
+                    "totalRevenue": {"raw": 48000000000000, "fmt": "48T"},
+                    "grossMargins": {"raw": 0.205, "fmt": "20.50%"},
+                    "operatingMargins": {"raw": 0.112, "fmt": "11.20%"},
+                    "profitMargins": {"raw": 0.092, "fmt": "9.20%"},
+                    "returnOnEquity": {"raw": 0.138, "fmt": "13.80%"},
+                    "returnOnAssets": {"raw": 0.053, "fmt": "5.30%"},
+                    "revenueGrowth": {"raw": 0.061, "fmt": "6.10%"},
+                    "earningsGrowth": {"raw": 0.074, "fmt": "7.40%"},
+                    "totalCash": {"raw": 9000000000000, "fmt": "9T"},
+                    "totalDebt": {"raw": 33000000000000, "fmt": "33T"},
+                    "debtToEquity": {"raw": 98.2, "fmt": "98.2"},
+                    "currentRatio": {"raw": 1.12, "fmt": "1.12"},
+                    "quickRatio": {"raw": 0.91, "fmt": "0.91"},
+                },
+                "calendarEvents": {
+                    "earnings": {
+                        "earningsDate": [{"raw": 1788480000, "fmt": "2026-09-04"}],
+                    },
+                    "exDividendDate": {"raw": 1777334400, "fmt": "2026-04-28"},
+                },
+            }
+        ],
+        "error": None,
+    }
+}
+
+
+JQUANTS_STATEMENTS_SAMPLE = {
+    "statements": [
+        {
+            "DisclosedDate": "2025-05-08",
+            "DisclosedTime": "15:00:00",
+            "LocalCode": "7203",
+            "DisclosureNumber": "20250508555555",
+            "TypeOfDocument": "FYFinancialStatements_Consolidated_IFRS",
+            "TypeOfCurrentPeriod": "FY",
+            "CurrentFiscalYearStartDate": "2024-04-01",
+            "CurrentFiscalYearEndDate": "2025-03-31",
+            "NetSales": "45000000000000",
+            "OperatingProfit": "5100000000000",
+            "OrdinaryProfit": "5600000000000",
+            "Profit": "4900000000000",
+            "EarningsPerShare": "300.12",
+            "TotalAssets": "89000000000000",
+            "Equity": "35000000000000",
+            "EquityToAssetRatio": "0.393",
+            "BookValuePerShare": "2200.5",
+            "CashFlowsFromOperatingActivities": "4200000000000",
+            "CashFlowsFromInvestingActivities": "-2100000000000",
+            "CashFlowsFromFinancingActivities": "-1300000000000",
+            "CashAndEquivalents": "8200000000000",
+            "ForecastNetSales": "47000000000000",
+            "ForecastOperatingProfit": "5300000000000",
+            "ForecastOrdinaryProfit": "5700000000000",
+            "ForecastProfit": "5000000000000",
+            "ForecastEarningsPerShare": "320.30",
+            "NumberOfIssuedAndOutstandingSharesAtTheEndOfFiscalYearIncludingTreasuryStock": "13200000000",
+        },
+        {
+            "DisclosedDate": "2026-05-08",
+            "DisclosedTime": "15:00:00",
+            "LocalCode": "7203",
+            "DisclosureNumber": "20260508123456",
+            "TypeOfDocument": "FYFinancialStatements_Consolidated_IFRS",
+            "TypeOfCurrentPeriod": "FY",
+            "CurrentFiscalYearStartDate": "2025-04-01",
+            "CurrentFiscalYearEndDate": "2026-03-31",
+            "NetSales": "48000000000000",
+            "OperatingProfit": "5400000000000",
+            "OrdinaryProfit": "5900000000000",
+            "Profit": "5300000000000",
+            "EarningsPerShare": "320.12",
+            "TotalAssets": "91000000000000",
+            "Equity": "37000000000000",
+            "EquityToAssetRatio": "0.407",
+            "BookValuePerShare": "2300.5",
+            "CashFlowsFromOperatingActivities": "4500000000000",
+            "CashFlowsFromInvestingActivities": "-2300000000000",
+            "CashFlowsFromFinancingActivities": "-1500000000000",
+            "CashAndEquivalents": "9000000000000",
+            "ForecastNetSales": "50000000000000",
+            "ForecastOperatingProfit": "5600000000000",
+            "ForecastOrdinaryProfit": "6000000000000",
+            "ForecastProfit": "5500000000000",
+            "ForecastEarningsPerShare": "345.67",
+            "NumberOfIssuedAndOutstandingSharesAtTheEndOfFiscalYearIncludingTreasuryStock": "13200000000",
+        },
+    ]
 }
 
 
@@ -146,6 +277,52 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertEqual(records[-1].symbol, "7203.T")
         self.assertEqual(records[-1].close_price, 3080.0)
         self.assertEqual(records[-1].trade_volume, 15000000)
+
+    def test_parse_yahoo_company_fundamental(self) -> None:
+        record = parse_yahoo_company_fundamental(
+            YAHOO_JP_QUOTE_SUMMARY_SAMPLE,
+            symbol="7203",
+            source_url="https://query1.finance.yahoo.com/v10/finance/quoteSummary/7203.T",
+        )
+
+        self.assertEqual(record.provider, "yahoo_quote_summary")
+        self.assertEqual(record.symbol, "7203.T")
+        self.assertEqual(record.company_name, "Toyota Motor Corporation")
+        self.assertEqual(record.sector, "Consumer Cyclical")
+        self.assertEqual(record.industry, "Auto Manufacturers")
+        self.assertEqual(record.currency, "JPY")
+        self.assertEqual(record.market_cap, 41000000000000)
+        self.assertEqual(record.revenue_ttm, 48000000000000)
+        self.assertEqual(record.eps_ttm, 320.12)
+        self.assertEqual(record.profit_margin, 0.092)
+        self.assertEqual(record.earnings_date, datetime(2026, 9, 4).date())
+
+    def test_parse_jquants_company_fundamental(self) -> None:
+        record = parse_jquants_company_fundamental(
+            JQUANTS_STATEMENTS_SAMPLE,
+            symbol="7203",
+            source_url="https://api.jquants.com/v1/fins/statements?code=7203",
+            company_name="Toyota Motor Corporation",
+            sector="Transportation Equipment",
+            industry="Automobiles & Transportation Equipment",
+        )
+
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertEqual(record.provider, "jquants_statements")
+        self.assertEqual(record.symbol, "7203.T")
+        self.assertEqual(record.disclosed_date, datetime(2026, 5, 8).date())
+        self.assertEqual(record.fiscal_period, "FY")
+        self.assertEqual(record.fiscal_year_end, datetime(2026, 3, 31).date())
+        self.assertEqual(record.net_sales, 48000000000000)
+        self.assertEqual(record.operating_profit, 5400000000000)
+        self.assertEqual(record.profit, 5300000000000)
+        self.assertEqual(record.forward_eps, 345.67)
+        self.assertAlmostEqual(record.operating_margin or 0, 0.1125)
+        self.assertAlmostEqual(record.profit_margin or 0, 0.11041666666666666)
+        self.assertAlmostEqual(record.revenue_growth or 0, 0.06666666666666667)
+        self.assertAlmostEqual(record.earnings_growth or 0, 0.08163265306122448)
+        self.assertEqual(record.equity_to_asset_ratio, 0.407)
 
     def test_parse_jpx_listed_issue_rows_maps_master_fields(self) -> None:
         records = parse_jpx_listed_issue_rows(JPX_LISTED_ROWS_SAMPLE)
@@ -263,6 +440,113 @@ class JPMarketDataTests(unittest.TestCase):
                 JPWatchlistItemCreate(group_id=group.id, symbol="7203.T"),
             )
 
+    def test_get_jp_watchlist_ranking_uses_latest_daily_prices(self) -> None:
+        with (
+            patch(
+                "app.jp_market.service.fetch_jpx_listed_issues_workbook",
+                return_value=(b"workbook", "https://www.jpx.co.jp/data_e.xls"),
+            ),
+            patch(
+                "app.jp_market.service.parse_jpx_listed_issues_workbook",
+                return_value=parse_jpx_listed_issue_rows(JPX_LISTED_ROWS_SAMPLE),
+            ),
+        ):
+            sync_jp_symbol_master(db=self.db)
+
+        group = create_jp_watchlist_group(
+            self.db,
+            JPWatchlistGroupCreate(group_name="Japan Core"),
+        )
+        create_jp_watchlist_item(
+            self.db,
+            JPWatchlistItemCreate(group_id=group.id, symbol="7203"),
+        )
+        create_jp_watchlist_item(
+            self.db,
+            JPWatchlistItemCreate(group_id=group.id, symbol="1343"),
+        )
+        upsert_jp_daily_price_records(
+            self.db,
+            [
+                JPDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="7203.T",
+                    trade_date=datetime(2026, 6, 17).date(),
+                    currency="JPY",
+                    open_price=3000.0,
+                    high_price=3060.0,
+                    low_price=2990.0,
+                    close_price=3000.0,
+                    adjusted_close=3000.0,
+                    trade_volume=12000000,
+                    source_url="source",
+                    raw_payload_hash="hash-1",
+                ),
+                JPDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="7203.T",
+                    trade_date=datetime(2026, 6, 18).date(),
+                    currency="JPY",
+                    open_price=3010.0,
+                    high_price=3120.0,
+                    low_price=3000.0,
+                    close_price=3060.0,
+                    adjusted_close=3060.0,
+                    trade_volume=15000000,
+                    source_url="source",
+                    raw_payload_hash="hash-2",
+                ),
+                JPDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="1343.T",
+                    trade_date=datetime(2026, 6, 17).date(),
+                    currency="JPY",
+                    open_price=2000.0,
+                    high_price=2040.0,
+                    low_price=1980.0,
+                    close_price=2000.0,
+                    adjusted_close=2000.0,
+                    trade_volume=900000,
+                    source_url="source",
+                    raw_payload_hash="hash-3",
+                ),
+                JPDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="1343.T",
+                    trade_date=datetime(2026, 6, 18).date(),
+                    currency="JPY",
+                    open_price=2010.0,
+                    high_price=2030.0,
+                    low_price=1940.0,
+                    close_price=1960.0,
+                    adjusted_close=1960.0,
+                    trade_volume=1100000,
+                    source_url="source",
+                    raw_payload_hash="hash-4",
+                ),
+            ],
+        )
+
+        ranking = get_jp_watchlist_ranking(
+            self.db,
+            group_id=group.id,
+            rank_by="change_pct",
+            sort_order="desc",
+        )
+
+        self.assertEqual(ranking["group_id"], group.id)
+        self.assertEqual(ranking["requested_symbol_count"], 2)
+        self.assertEqual(ranking["ranked_count"], 2)
+        self.assertEqual(ranking["no_data_count"], 0)
+        self.assertTrue(ranking["is_current"])
+        self.assertEqual(ranking["trade_date"], datetime(2026, 6, 18).date())
+        self.assertEqual(ranking["results"][0]["symbol"], "7203.T")
+        self.assertEqual(ranking["results"][0]["close"], 3060.0)
+        self.assertEqual(ranking["results"][0]["change"], 60.0)
+        self.assertAlmostEqual(ranking["results"][0]["change_pct"], 2.0)
+        self.assertEqual(ranking["results"][1]["symbol"], "1343.T")
+        self.assertAlmostEqual(ranking["results"][1]["change_pct"], -2.0)
+
     def test_refresh_jp_daily_prices_from_yahoo_chart_upserts_stock_and_prices(self) -> None:
         with patch(
             "app.jp_market.service.fetch_yahoo_chart_payload",
@@ -328,6 +612,63 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertEqual(row.close_price, 3060.0)
         self.assertEqual(row.raw_payload_hash, "hash-2")
 
+    def test_refresh_jp_company_fundamental_from_yahoo_quote_summary_upserts_row(self) -> None:
+        with patch(
+            "app.jp_market.service.fetch_yahoo_quote_summary_payload",
+            return_value=(
+                YAHOO_JP_QUOTE_SUMMARY_SAMPLE,
+                "https://query1.finance.yahoo.com/v10/finance/quoteSummary/7203.T",
+            ),
+        ) as fetch_mock:
+            result = refresh_jp_company_fundamental_from_yahoo_quote_summary(
+                db=self.db,
+                symbol="7203",
+            )
+
+        fetch_mock.assert_called_once()
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["provider"], "yahoo_quote_summary")
+        self.assertEqual(result["symbol"], "7203.T")
+        self.assertEqual(result["fetched_count"], 1)
+        self.assertEqual(result["inserted_count"], 1)
+        self.assertEqual(self.db.query(JPCompanyFundamental).count(), 1)
+
+        row = self.db.query(JPCompanyFundamental).one()
+        self.assertEqual(row.company_name, "Toyota Motor Corporation")
+        self.assertEqual(row.market_cap, 41000000000000)
+        self.assertEqual(row.revenue_ttm, 48000000000000)
+
+    def test_refresh_jp_company_fundamental_auto_uses_jquants_statements(self) -> None:
+        with (
+            patch("app.jp_market.service.settings.jquants_id_token", "test-id-token"),
+            patch(
+                "app.jp_market.service.fetch_jquants_statements_payload",
+                return_value=(
+                    JQUANTS_STATEMENTS_SAMPLE,
+                    "https://api.jquants.com/v1/fins/statements?code=7203",
+                ),
+            ) as fetch_mock,
+        ):
+            result = refresh_jp_company_fundamental(
+                db=self.db,
+                symbol="7203",
+                provider="auto",
+            )
+
+        fetch_mock.assert_called_once()
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["provider"], "jquants_statements")
+        self.assertEqual(result["symbol"], "7203.T")
+        self.assertEqual(result["fetched_count"], 2)
+        self.assertEqual(result["inserted_count"], 1)
+
+        row = self.db.query(JPCompanyFundamental).one()
+        self.assertEqual(row.provider, "jquants_statements")
+        self.assertEqual(row.net_sales, 48000000000000)
+        self.assertEqual(row.operating_profit, 5400000000000)
+        self.assertEqual(row.profit, 5300000000000)
+        self.assertEqual(row.fiscal_period, "FY")
+
     def test_jp_ohlc_chart_uses_lazy_backfill_when_requested(self) -> None:
         with patch(
             "app.jp_market.service.refresh_jp_daily_prices",
@@ -353,6 +694,114 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertEqual(result["symbol"], "7203.T")
         self.assertEqual(result["point_count"], 0)
         self.assertEqual(result["backfill"]["status"], "success")
+
+    def test_refresh_jp_watchlist_resources_refreshes_group_symbols(self) -> None:
+        with (
+            patch(
+                "app.jp_market.service.fetch_jpx_listed_issues_workbook",
+                return_value=(b"workbook", "https://www.jpx.co.jp/data_e.xls"),
+            ),
+            patch(
+                "app.jp_market.service.parse_jpx_listed_issues_workbook",
+                return_value=parse_jpx_listed_issue_rows(JPX_LISTED_ROWS_SAMPLE),
+            ),
+        ):
+            sync_jp_symbol_master(db=self.db)
+
+        group = create_jp_watchlist_group(
+            self.db,
+            JPWatchlistGroupCreate(group_name="Japan Core"),
+        )
+        create_jp_watchlist_item(
+            self.db,
+            JPWatchlistItemCreate(group_id=group.id, symbol="7203"),
+        )
+        create_jp_watchlist_item(
+            self.db,
+            JPWatchlistItemCreate(group_id=group.id, symbol="1343"),
+        )
+
+        def fake_refresh(**kwargs):
+            return {
+                "status": "success",
+                "provider": "yahoo_chart",
+                "symbol": kwargs["symbol"],
+                "fetched_count": 2,
+                "inserted_count": 1,
+                "updated_count": 1,
+                "message": "mocked",
+            }
+
+        with patch("app.jp_market.service.refresh_jp_daily_prices", side_effect=fake_refresh):
+            result = refresh_jp_watchlist_resources(
+                db=self.db,
+                group_id=group.id,
+                sleep_seconds=0,
+            )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["symbol_count"], 2)
+        self.assertEqual(result["success_count"], 2)
+        self.assertEqual(result["error_count"], 0)
+        self.assertEqual(result["fetched_count"], 4)
+        self.assertEqual(result["inserted_count"], 2)
+        self.assertEqual(result["updated_count"], 2)
+
+    def test_refresh_jp_watchlist_resources_isolates_symbol_failures(self) -> None:
+        with (
+            patch(
+                "app.jp_market.service.fetch_jpx_listed_issues_workbook",
+                return_value=(b"workbook", "https://www.jpx.co.jp/data_e.xls"),
+            ),
+            patch(
+                "app.jp_market.service.parse_jpx_listed_issues_workbook",
+                return_value=parse_jpx_listed_issue_rows(JPX_LISTED_ROWS_SAMPLE),
+            ),
+        ):
+            sync_jp_symbol_master(db=self.db)
+
+        group = create_jp_watchlist_group(
+            self.db,
+            JPWatchlistGroupCreate(group_name="Japan Core"),
+        )
+        create_jp_watchlist_item(
+            self.db,
+            JPWatchlistItemCreate(group_id=group.id, symbol="7203"),
+        )
+        create_jp_watchlist_item(
+            self.db,
+            JPWatchlistItemCreate(group_id=group.id, symbol="1343"),
+        )
+
+        def fake_refresh(**kwargs):
+            if kwargs["symbol"] == "1343.T":
+                raise RuntimeError("provider failed")
+
+            return {
+                "status": "success",
+                "provider": "yahoo_chart",
+                "symbol": kwargs["symbol"],
+                "fetched_count": 2,
+                "inserted_count": 1,
+                "updated_count": 1,
+                "message": "mocked",
+            }
+
+        with patch("app.jp_market.service.refresh_jp_daily_prices", side_effect=fake_refresh):
+            result = refresh_jp_watchlist_resources(
+                db=self.db,
+                group_id=group.id,
+                include_fundamentals=False,
+                sleep_seconds=0,
+            )
+
+        self.assertEqual(result["status"], "partial_success")
+        self.assertEqual(result["symbol_count"], 2)
+        self.assertEqual(result["success_count"], 1)
+        self.assertEqual(result["symbol_error_count"], 1)
+        self.assertEqual(result["error_count"], 1)
+        self.assertEqual(result["errors"][0]["symbol"], "1343.T")
+        self.assertEqual(result["errors"][0]["resource"], "daily")
 
     def test_jp_resource_summary_reports_daily_price_and_planned_slots(self) -> None:
         upsert_jp_daily_price_records(
@@ -383,9 +832,110 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertTrue(slots["daily_price"]["available"])
         self.assertEqual(slots["daily_price"]["latest_date"], datetime(2026, 6, 18).date())
         self.assertEqual(slots["daily_price"]["row_count"], 1)
-        self.assertEqual(slots["chips"]["status"], "planned")
-        self.assertFalse(slots["chips"]["available"])
-        self.assertEqual(slots["earnings"]["row_count"], 0)
+        self.assertEqual(slots["demand"]["status"], "planned")
+        self.assertFalse(slots["demand"]["available"])
+        self.assertEqual(slots["performance"]["status"], "empty")
+        self.assertEqual(slots["financials"]["row_count"], 0)
+
+    def test_jp_resource_summary_reports_fundamental_slots(self) -> None:
+        upsert_jp_company_fundamental_records(
+            self.db,
+            [
+                JPCompanyFundamentalRecord(
+                    provider="yahoo_quote_summary",
+                    symbol="7203.T",
+                    company_name="Toyota Motor Corporation",
+                    exchange="Tokyo Stock Exchange",
+                    sector="Consumer Cyclical",
+                    industry="Auto Manufacturers",
+                    currency="JPY",
+                    market_cap=41000000000000,
+                    enterprise_value=52000000000000,
+                    trailing_pe=9.8,
+                    forward_pe=8.9,
+                    price_to_book=1.15,
+                    dividend_yield=0.026,
+                    beta=1.05,
+                    disclosed_date=datetime(2026, 5, 8).date(),
+                    fiscal_period="FY",
+                    fiscal_year_end=datetime(2026, 3, 31).date(),
+                    document_type="FYFinancialStatements_Consolidated_IFRS",
+                    eps_ttm=320.12,
+                    forward_eps=345.67,
+                    revenue_ttm=48000000000000,
+                    net_sales=48000000000000,
+                    operating_profit=5400000000000,
+                    ordinary_profit=5900000000000,
+                    profit=5300000000000,
+                    forecast_net_sales=50000000000000,
+                    forecast_operating_profit=5600000000000,
+                    forecast_ordinary_profit=6000000000000,
+                    forecast_profit=5500000000000,
+                    gross_margin=0.205,
+                    operating_margin=0.112,
+                    profit_margin=0.092,
+                    return_on_equity=0.138,
+                    return_on_assets=0.053,
+                    revenue_growth=0.061,
+                    earnings_growth=0.074,
+                    total_assets=91000000000000,
+                    equity=37000000000000,
+                    equity_to_asset_ratio=0.407,
+                    total_cash=9000000000000,
+                    total_debt=33000000000000,
+                    operating_cash_flow=4500000000000,
+                    investing_cash_flow=-2300000000000,
+                    financing_cash_flow=-1500000000000,
+                    debt_to_equity=98.2,
+                    current_ratio=1.12,
+                    quick_ratio=0.91,
+                    shares_outstanding=13200000000,
+                    book_value=2300.5,
+                    earnings_date=datetime(2026, 9, 4).date(),
+                    ex_dividend_date=datetime(2026, 4, 28).date(),
+                    source_url="source",
+                    raw_payload_hash="hash",
+                ),
+            ],
+        )
+
+        summary = get_jp_resource_summary(db=self.db, symbol="7203")
+        slots = {slot["key"]: slot for slot in summary["slots"]}
+
+        self.assertEqual(slots["performance"]["status"], "available")
+        self.assertTrue(slots["performance"]["available"])
+        self.assertEqual(slots["performance"]["source"], "yahoo_quote_summary")
+        self.assertEqual(slots["performance"]["row_count"], 1)
+        self.assertEqual(slots["financials"]["status"], "available")
+        self.assertTrue(slots["financials"]["available"])
+
+    def test_refresh_jp_company_fundamental_auto_is_skipped_without_jquants_credentials(self) -> None:
+        with (
+            patch("app.jp_market.service.settings.jquants_id_token", None),
+            patch("app.jp_market.service.settings.jquants_refresh_token", None),
+            patch("app.jp_market.service.settings.jquants_mail_address", None),
+            patch("app.jp_market.service.settings.jquants_password", None),
+        ):
+            result = refresh_jp_company_fundamental(db=self.db, symbol="7203", provider="auto")
+
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["provider"], "jquants_statements")
+        self.assertEqual(result["symbol"], "7203.T")
+        self.assertEqual(result["fetched_count"], 0)
+
+    def test_jp_watchlist_daily_refresh_routes_are_registered(self) -> None:
+        from app.main import app
+
+        routes = {
+            getattr(route, "path", ""): set(getattr(route, "methods", set()) or set())
+            for route in app.routes
+        }
+
+        self.assertIn("POST", routes["/api/jp-market/watchlists/daily/refresh"])
+        self.assertIn(
+            "POST",
+            routes["/api/jp-market/watchlists/groups/{group_id}/refresh-daily"],
+        )
 
 
 if __name__ == "__main__":

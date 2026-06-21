@@ -6,6 +6,10 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.jobs import backfill_tasks, service
+from app.jobs.job_types import (
+    JP_SCHEDULED_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
+    JP_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
+)
 from app.jobs.schemas import JobRunRead
 
 
@@ -261,6 +265,26 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
                 str(request.get("outputsize") or "compact"),
                 bool(request.get("adjusted", False)),
                 float(request.get("sleep_seconds", 12.0)),
+            ),
+            request,
+        )
+
+    if job_type in {
+        JP_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
+        JP_SCHEDULED_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
+    }:
+        group_id = request.get("group_id")
+        return (
+            backfill_tasks.run_jp_watchlist_resource_refresh_job,
+            (
+                int(group_id) if group_id is not None else None,
+                bool(request.get("include_children", True)),
+                bool(request.get("enabled_only", True)),
+                bool(request.get("include_daily", True)),
+                bool(request.get("include_fundamentals", False)),
+                str(request.get("outputsize") or "compact"),
+                str(request.get("provider") or "auto"),
+                float(request.get("sleep_seconds", 1.0)),
             ),
             request,
         )

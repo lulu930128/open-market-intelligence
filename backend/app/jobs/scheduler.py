@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from app.config import settings
 from app.db.session import SessionLocal
 from app.jobs import backfill_tasks, service as job_service
+from app.jobs.job_types import JP_SCHEDULED_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE
 from app.market.calendar_status import (
     build_taiwan_calendar_status,
     build_us_calendar_status,
@@ -327,6 +328,51 @@ def enqueue_us_market_daily_refresh() -> None:
         db.close()
 
 
+def enqueue_jp_market_watchlist_resource_refresh() -> None:
+    now = datetime.now(_timezone())
+    request = {
+        "schedule": "jp_market_watchlist_resource_refresh",
+        "run_date": now.date().isoformat(),
+        "group_id": None,
+        "include_children": True,
+        "enabled_only": True,
+        "include_daily": True,
+        "include_fundamentals": settings.scheduler_jp_market_refresh_include_fundamentals,
+        "outputsize": settings.scheduler_jp_market_refresh_outputsize,
+        "provider": settings.scheduler_jp_market_refresh_provider,
+        "sleep_seconds": settings.scheduler_jp_market_refresh_sleep_seconds,
+    }
+    db = SessionLocal()
+
+    try:
+        job, created = job_service.enqueue_job(
+            db=db,
+            job_type=JP_SCHEDULED_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
+            target="all",
+            request=request,
+            progress_total=1,
+            message="Queued by scheduler.",
+            task=backfill_tasks.run_jp_watchlist_resource_refresh_job,
+            task_args=(
+                None,
+                True,
+                True,
+                True,
+                settings.scheduler_jp_market_refresh_include_fundamentals,
+                settings.scheduler_jp_market_refresh_outputsize,
+                settings.scheduler_jp_market_refresh_provider,
+                settings.scheduler_jp_market_refresh_sleep_seconds,
+            ),
+        )
+        logger.info(
+            "Scheduled JP market watchlist resource refresh %s job_id=%s",
+            "queued" if created else "deduped",
+            job.id,
+        )
+    finally:
+        db.close()
+
+
 def collect_taiwan_futures_quotes() -> None:
     now = datetime.now(_timezone())
 
@@ -410,6 +456,25 @@ def _add_taiwan_futures_collector_job(scheduler: Any) -> bool:
     return True
 
 
+def _add_jp_market_refresh_job(scheduler: Any) -> bool:
+    if not settings.enable_scheduler or not settings.enable_jp_market_scheduler:
+        return False
+
+    hour, minute = _parse_hour_minute(settings.scheduler_jp_market_refresh_time)
+    scheduler.add_job(
+        enqueue_jp_market_watchlist_resource_refresh,
+        trigger="cron",
+        day_of_week=settings.scheduler_jp_market_refresh_day_of_week,
+        hour=hour,
+        minute=minute,
+        id="jp_market_watchlist_resource_refresh",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+    return True
+
+
 def start_scheduler() -> Any | None:
     if not settings.enable_scheduler and not settings.enable_taiwan_futures_scheduler:
         logger.info("Job scheduler disabled.")
@@ -464,10 +529,11 @@ def start_scheduler() -> Any | None:
             coalesce=True,
             max_instances=1,
         )
+    jp_market_refresh_enabled = _add_jp_market_refresh_job(scheduler)
     taiwan_futures_collector_enabled = _add_taiwan_futures_collector_job(scheduler)
     scheduler.start()
     logger.info(
-        "Job scheduler started. core_scheduler_enabled=%s; market_daily_refresh=%s %s weekdays; market_chip_daily_refresh=%s %s weekdays; us_market_daily_refresh=%s %s %s enabled=%s; taiwan_futures_quote_collector interval=%ss enabled=%s.",
+        "Job scheduler started. core_scheduler_enabled=%s; market_daily_refresh=%s %s weekdays; market_chip_daily_refresh=%s %s weekdays; us_market_daily_refresh=%s %s %s enabled=%s; jp_market_watchlist_resource_refresh=%s %s %s enabled=%s; taiwan_futures_quote_collector interval=%ss enabled=%s.",
         settings.enable_scheduler,
         settings.scheduler_market_refresh_time,
         settings.timezone,
@@ -477,6 +543,10 @@ def start_scheduler() -> Any | None:
         settings.scheduler_us_market_refresh_day_of_week,
         settings.timezone,
         settings.enable_us_market_scheduler,
+        settings.scheduler_jp_market_refresh_time,
+        settings.scheduler_jp_market_refresh_day_of_week,
+        settings.timezone,
+        jp_market_refresh_enabled,
         max(int(settings.scheduler_taiwan_futures_interval_seconds), 10),
         taiwan_futures_collector_enabled,
     )

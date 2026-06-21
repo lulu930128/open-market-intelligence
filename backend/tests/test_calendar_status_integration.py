@@ -99,6 +99,43 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
 
         enqueue.assert_not_called()
 
+    def test_scheduler_jp_watchlist_resource_refresh_queues_job(self) -> None:
+        fake_db = SimpleNamespace(close=Mock())
+
+        with (
+            patch.object(scheduler.settings, "scheduler_jp_market_refresh_outputsize", "compact"),
+            patch.object(scheduler.settings, "scheduler_jp_market_refresh_provider", "auto"),
+            patch.object(
+                scheduler.settings,
+                "scheduler_jp_market_refresh_include_fundamentals",
+                True,
+            ),
+            patch.object(scheduler.settings, "scheduler_jp_market_refresh_sleep_seconds", 1.5),
+            patch.object(scheduler, "SessionLocal", return_value=fake_db),
+            patch.object(
+                scheduler.job_service,
+                "enqueue_job",
+                return_value=(SimpleNamespace(id=19), True),
+            ) as enqueue,
+        ):
+            scheduler.enqueue_jp_market_watchlist_resource_refresh()
+
+        kwargs = enqueue.call_args.kwargs
+        request = kwargs["request"]
+        task_args = kwargs["task_args"]
+        self.assertEqual(kwargs["job_type"], "jp_market.scheduler.watchlist_resource_refresh")
+        self.assertEqual(kwargs["target"], "all")
+        self.assertEqual(request["schedule"], "jp_market_watchlist_resource_refresh")
+        self.assertIsNone(request["group_id"])
+        self.assertTrue(request["include_children"])
+        self.assertTrue(request["enabled_only"])
+        self.assertTrue(request["include_daily"])
+        self.assertTrue(request["include_fundamentals"])
+        self.assertEqual(request["outputsize"], "compact")
+        self.assertEqual(request["provider"], "auto")
+        self.assertEqual(task_args, (None, True, True, True, True, "compact", "auto", 1.5))
+        fake_db.close.assert_called_once()
+
     def test_taiwan_futures_live_window_matches_regular_and_after_hours_sessions(self) -> None:
         timezone = ZoneInfo("Asia/Taipei")
 
@@ -183,6 +220,30 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
         self.assertEqual(kwargs["trigger"], "interval")
         self.assertEqual(kwargs["seconds"], 30)
         self.assertEqual(kwargs["id"], "taiwan_futures_quote_collector")
+
+    def test_jp_market_refresh_job_is_registered_as_cron_job(self) -> None:
+        fake_scheduler = SimpleNamespace(add_job=Mock())
+
+        with (
+            patch.object(scheduler.settings, "enable_scheduler", True),
+            patch.object(scheduler.settings, "enable_jp_market_scheduler", True),
+            patch.object(scheduler.settings, "scheduler_jp_market_refresh_time", "16:10"),
+            patch.object(scheduler.settings, "scheduler_jp_market_refresh_day_of_week", "mon-fri"),
+        ):
+            added = scheduler._add_jp_market_refresh_job(fake_scheduler)
+
+        self.assertTrue(added)
+        fake_scheduler.add_job.assert_called_once()
+        kwargs = fake_scheduler.add_job.call_args.kwargs
+        self.assertIs(
+            fake_scheduler.add_job.call_args.args[0],
+            scheduler.enqueue_jp_market_watchlist_resource_refresh,
+        )
+        self.assertEqual(kwargs["trigger"], "cron")
+        self.assertEqual(kwargs["day_of_week"], "mon-fri")
+        self.assertEqual(kwargs["hour"], 16)
+        self.assertEqual(kwargs["minute"], 10)
+        self.assertEqual(kwargs["id"], "jp_market_watchlist_resource_refresh")
 
 
 if __name__ == "__main__":

@@ -7,11 +7,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.jobs import backfill_tasks, service as job_service
+from app.jobs.job_types import JP_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE
+from app.jobs.schemas import JobRunRead
 from app.jp_market.schemas import (
+    JPCompanyFundamentalRead,
     JPDailyPriceRead,
     JPDailyPriceRefreshResultRead,
     JPOhlcChartRead,
     JPResourceSummaryRead,
+    JPResourceRefreshResultRead,
     JPStockMasterRead,
     JPStockMasterSyncResultRead,
     JPWatchlistGroupCreate,
@@ -22,6 +27,7 @@ from app.jp_market.schemas import (
     JPWatchlistItemCreate,
     JPWatchlistItemRead,
     JPWatchlistItemUpdate,
+    JPWatchlistRankingRead,
 )
 from app.jp_market.service import (
     JPWatchlistDuplicateItemError,
@@ -34,14 +40,19 @@ from app.jp_market.service import (
     create_jp_watchlist_item,
     delete_jp_watchlist_group,
     delete_jp_watchlist_item,
+    get_jp_company_fundamental,
     get_jp_watchlist_tree,
+    get_jp_watchlist_group,
+    get_jp_watchlist_ranking,
     get_jp_stock,
     get_jp_resource_summary,
     list_jp_daily_prices,
+    list_jp_company_fundamentals,
     list_jp_ohlc_chart_data,
     list_jp_stocks,
     list_jp_watchlist_groups,
     list_jp_watchlist_items,
+    refresh_jp_company_fundamental as refresh_jp_company_fundamental_service,
     refresh_jp_daily_prices as refresh_jp_daily_prices_service,
     search_jp_stocks,
     sync_jp_symbol_master,
@@ -79,6 +90,51 @@ def _item_error(exc: Exception) -> HTTPException:
         return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
 
     return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
+def _enqueue_jp_watchlist_resource_refresh(
+    *,
+    db: Session,
+    group_id: int | None,
+    include_children: bool,
+    enabled_only: bool,
+    include_daily: bool,
+    include_fundamentals: bool,
+    outputsize: str,
+    provider: str,
+    sleep_seconds: float,
+) -> dict:
+    target = f"group:{group_id}" if group_id is not None else "all"
+    request = {
+        "group_id": group_id,
+        "include_children": include_children,
+        "enabled_only": enabled_only,
+        "include_daily": include_daily,
+        "include_fundamentals": include_fundamentals,
+        "outputsize": outputsize,
+        "provider": provider,
+        "sleep_seconds": sleep_seconds,
+    }
+    job, _created = job_service.enqueue_job(
+        db=db,
+        job_type=JP_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
+        target=target,
+        request=request,
+        progress_total=1,
+        message="Queued JP watchlist resource refresh.",
+        task=backfill_tasks.run_jp_watchlist_resource_refresh_job,
+        task_args=(
+            group_id,
+            include_children,
+            enabled_only,
+            include_daily,
+            include_fundamentals,
+            outputsize,
+            provider,
+            sleep_seconds,
+        ),
+    )
+    return job_service.serialize_job(job)
 
 
 @router.post("/stocks/sync-symbols", response_model=JPStockMasterSyncResultRead)
@@ -154,6 +210,71 @@ def get_jp_resource_summary_api(symbol: str, db: Session = Depends(get_db)):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
+
+
+@router.post("/fundamentals/{symbol}/refresh", response_model=JPResourceRefreshResultRead)
+def refresh_jp_company_fundamental(
+    symbol: str,
+    provider: str = Query(default="auto", pattern="^(auto|jquants_statements|yahoo_quote_summary)$"),
+    db: Session = Depends(get_db),
+):
+    try:
+        return refresh_jp_company_fundamental_service(
+            db=db,
+            symbol=symbol,
+            provider=provider,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except requests.RequestException as exc:
+        raise _fetch_error(exc) from exc
+    except JPMarketDataFetchError as exc:
+        raise _fetch_error(exc) from exc
+
+
+@router.get("/fundamentals", response_model=list[JPCompanyFundamentalRead])
+def list_jp_fundamentals(
+    provider: str | None = None,
+    sector: str | None = None,
+    industry: str | None = None,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    return list_jp_company_fundamentals(
+        db=db,
+        provider=provider,
+        sector=sector,
+        industry=industry,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/fundamentals/{symbol}", response_model=JPCompanyFundamentalRead)
+def get_jp_fundamental(
+    symbol: str,
+    provider: str | None = None,
+    db: Session = Depends(get_db),
+):
+    try:
+        fundamental = get_jp_company_fundamental(db=db, symbol=symbol, provider=provider)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    if fundamental is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"JP company fundamental for symbol='{symbol}' not found.",
+        )
+
+    return fundamental
 
 
 @router.post("/daily/{symbol}/refresh", response_model=JPDailyPriceRefreshResultRead)
@@ -303,6 +424,151 @@ def list_jp_watchlist_items_api(
         )
     except Exception as exc:
         raise _item_error(exc) from exc
+
+
+@router.get("/watchlists/ranking", response_model=JPWatchlistRankingRead)
+def get_jp_watchlist_ranking_api(
+    group_id: int | None = None,
+    include_children: bool = True,
+    enabled_only: bool = True,
+    rank_by: str = Query(default="none", pattern="^(none|change_pct|volume|close)$"),
+    sort_order: str = Query(default="asc", pattern="^(asc|desc)$"),
+    db: Session = Depends(get_db),
+):
+    try:
+        return get_jp_watchlist_ranking(
+            db=db,
+            group_id=group_id,
+            include_children=include_children,
+            enabled_only=enabled_only,
+            rank_by=rank_by,
+            sort_order=sort_order,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise _group_error(exc) from exc
+
+
+@router.post(
+    "/watchlists/daily/refresh",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def refresh_all_jp_watchlist_daily_prices_api(
+    include_children: bool = True,
+    enabled_only: bool = True,
+    outputsize: str = Query(default="compact", pattern="^(compact|full)$"),
+    provider: str = Query(default="auto", pattern="^(auto|yahoo_chart)$"),
+    sleep_seconds: float = Query(default=1.0, ge=0, le=60),
+    db: Session = Depends(get_db),
+):
+    return _enqueue_jp_watchlist_resource_refresh(
+        db=db,
+        group_id=None,
+        include_children=include_children,
+        enabled_only=enabled_only,
+        include_daily=True,
+        include_fundamentals=False,
+        outputsize=outputsize,
+        provider=provider,
+        sleep_seconds=sleep_seconds,
+    )
+
+
+@router.post(
+    "/watchlists/groups/{group_id}/refresh-daily",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def refresh_jp_watchlist_group_daily_prices_api(
+    group_id: int,
+    include_children: bool = True,
+    enabled_only: bool = True,
+    outputsize: str = Query(default="compact", pattern="^(compact|full)$"),
+    provider: str = Query(default="auto", pattern="^(auto|yahoo_chart)$"),
+    sleep_seconds: float = Query(default=1.0, ge=0, le=60),
+    db: Session = Depends(get_db),
+):
+    try:
+        get_jp_watchlist_group(db=db, group_id=group_id)
+        return _enqueue_jp_watchlist_resource_refresh(
+            db=db,
+            group_id=group_id,
+            include_children=include_children,
+            enabled_only=enabled_only,
+            include_daily=True,
+            include_fundamentals=False,
+            outputsize=outputsize,
+            provider=provider,
+            sleep_seconds=sleep_seconds,
+        )
+    except Exception as exc:
+        raise _group_error(exc) from exc
+
+
+@router.post(
+    "/watchlists/resources/refresh",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def refresh_all_jp_watchlist_resources_api(
+    include_children: bool = True,
+    enabled_only: bool = True,
+    include_daily: bool = True,
+    include_fundamentals: bool = False,
+    outputsize: str = Query(default="compact", pattern="^(compact|full)$"),
+    provider: str = Query(default="auto", pattern="^(auto|yahoo_chart)$"),
+    sleep_seconds: float = Query(default=1.0, ge=0, le=60),
+    db: Session = Depends(get_db),
+):
+    return _enqueue_jp_watchlist_resource_refresh(
+        db=db,
+        group_id=None,
+        include_children=include_children,
+        enabled_only=enabled_only,
+        include_daily=include_daily,
+        include_fundamentals=include_fundamentals,
+        outputsize=outputsize,
+        provider=provider,
+        sleep_seconds=sleep_seconds,
+    )
+
+
+@router.post(
+    "/watchlists/groups/{group_id}/refresh-resources",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def refresh_jp_watchlist_group_resources_api(
+    group_id: int,
+    include_children: bool = True,
+    enabled_only: bool = True,
+    include_daily: bool = True,
+    include_fundamentals: bool = False,
+    outputsize: str = Query(default="compact", pattern="^(compact|full)$"),
+    provider: str = Query(default="auto", pattern="^(auto|yahoo_chart)$"),
+    sleep_seconds: float = Query(default=1.0, ge=0, le=60),
+    db: Session = Depends(get_db),
+):
+    try:
+        get_jp_watchlist_group(db=db, group_id=group_id)
+        return _enqueue_jp_watchlist_resource_refresh(
+            db=db,
+            group_id=group_id,
+            include_children=include_children,
+            enabled_only=enabled_only,
+            include_daily=include_daily,
+            include_fundamentals=include_fundamentals,
+            outputsize=outputsize,
+            provider=provider,
+            sleep_seconds=sleep_seconds,
+        )
+    except Exception as exc:
+        raise _group_error(exc) from exc
 
 
 @router.patch("/watchlists/items/{item_id}", response_model=JPWatchlistItemRead)

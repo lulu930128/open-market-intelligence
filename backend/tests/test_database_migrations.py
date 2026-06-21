@@ -67,6 +67,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("app_setting", table_names)
             self.assertIn("jp_stock_master", table_names)
             self.assertIn("jp_daily_price", table_names)
+            self.assertIn("jp_company_fundamental", table_names)
             self.assertIn("jp_watchlist_group", table_names)
             self.assertIn("jp_watchlist_item", table_names)
             jp_master_columns = {

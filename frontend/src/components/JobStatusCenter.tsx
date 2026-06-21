@@ -8,13 +8,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const ACTIVE_STATUSES = new Set(["queued", "running"]);
 
-type JobMarketFilter = "all" | "tw" | "us";
+type JobMarketFilter = "all" | "tw" | "us" | "jp";
 
 const NON_RETRYABLE_JOB_TYPES = new Set(["market.tw_futures_quote_refresh"]);
 
-function getJobMarket(jobType: string): "tw" | "us" | "other" {
+function getJobMarket(jobType: string): "tw" | "us" | "jp" | "other" {
   if (jobType.startsWith("us_market.") || jobType === "scheduler.us_market_daily_refresh") {
     return "us";
+  }
+
+  if (jobType.startsWith("jp_market.")) {
+    return "jp";
   }
 
   if (

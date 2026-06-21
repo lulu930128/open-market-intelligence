@@ -121,7 +121,7 @@ export default function USWatchlistSidebar({
   const [stockNote, setStockNote] = useState("");
   const [stockTags, setStockTags] = useState("");
   const [stockSuggestions, setStockSuggestions] = useState<USStockMasterRead[]>([]);
-  const [indexGroupExpanded, setIndexGroupExpanded] = useState(true);
+  const [indexGroupExpanded, setIndexGroupExpanded] = useState(false);
 
   const allGroups = useMemo(() => flattenGroups(tree), [tree]);
   const selectedGroup = useMemo(() => {

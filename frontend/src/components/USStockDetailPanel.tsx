@@ -62,7 +62,6 @@ import type {
   IntradayTrendResponse,
   USCompanyProfileRead,
   USCorporateActionRead,
-  USDailyPriceRefreshResultRead,
   USOhlcChartRead,
   USResourceRefreshResultRead,
   USSecCompanyFactRead,
@@ -868,7 +867,6 @@ export default function USStockDetailPanel({
     useState<USSecFundamentalSummaryRead | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [factLoadState, setFactLoadState] = useState<LoadState>("idle");
-  const [refreshingDaily, setRefreshingDaily] = useState(false);
   const [refreshingFacts, setRefreshingFacts] = useState(false);
   const [refreshingProfile, setRefreshingProfile] = useState(false);
   const [refreshingActions, setRefreshingActions] = useState(false);
@@ -927,7 +925,6 @@ export default function USStockDetailPanel({
     timeframe === "today" ? todayStats.volume ?? latestPoint?.volume ?? null : latestPoint?.volume ?? null;
   const previousClose =
     timeframe === "today" ? todayPreviousClose ?? previousPoint?.close ?? null : previousPoint?.close ?? null;
-  const displayedPointCount = timeframe === "today" ? todayTrend.length : chart?.point_count ?? 0;
   const change =
     latestClose !== null && previousClose !== null
       ? latestClose - previousClose
@@ -999,32 +996,6 @@ export default function USStockDetailPanel({
       : selectedSymbol
         ? t("usStockDetail.loadingMaster")
         : t("usStockDetail.selectStockPrompt");
-  const headerMetrics =
-    timeframe === "today"
-      ? [
-          { label: t("usStockDetail.metrics.date"), value: formatDate(displayDate) },
-          { label: t("usStockDetail.metrics.todayVolume"), value: formatVolume(todayStats.volume) },
-          {
-            label: t("usStockDetail.metrics.highLow"),
-            value: `${formatNumber(todayStats.high)} / ${formatNumber(todayStats.low)}`,
-          },
-          {
-            label: t("usStockDetail.metrics.updatedPoints"),
-            value: `${todayUpdatedAt ?? "-"} / ${displayedPointCount}`,
-          },
-        ]
-      : [
-          { label: t("usStockDetail.metrics.date"), value: formatDate(displayDate) },
-          { label: t("usStockDetail.metrics.volume"), value: formatVolume(latestVolume) },
-          {
-            label: "MA5 / 20 / 60",
-            value: `${formatNumber(ma5)} / ${formatNumber(ma20)} / ${formatNumber(ma60)}`,
-          },
-          {
-            label: t("usStockDetail.metrics.pointCount"),
-            value: loadState === "loading" ? t("common.loading") : String(displayedPointCount),
-          },
-        ];
   const professionalTimeframeLabel = timeframeLabel(t, professionalTimeframe);
   const professionalChartReady =
     chartFocusMode &&
@@ -1806,46 +1777,6 @@ export default function USStockDetailPanel({
     setSelectedChartDrawingId(null);
   }
 
-  async function refreshDailyRows() {
-    if (!selectedSymbol) return;
-
-    const indexConfig = getUsMarketIndexConfig(selectedSymbol);
-    const outputsize = indexConfig ? "full" : "compact";
-
-    setRefreshingDaily(true);
-    setMessage(null);
-
-    try {
-      const result = await requestJson<USDailyPriceRefreshResultRead>(
-        `/api/us-market/daily/${encodeURIComponent(selectedSymbol)}/refresh`,
-        { method: "POST" },
-        {
-          outputsize,
-          adjusted: false,
-          provider: indexConfig ? "yahoo_chart" : "auto",
-        }
-      );
-
-      setMessage({
-        type: "success",
-        text: t("usStockDetail.messages.dailyRefreshSuccess", {
-          symbol: result.symbol,
-          fetched: result.fetched_count,
-          inserted: result.inserted_count,
-          updated: result.updated_count,
-        }),
-      });
-      await loadSymbolData(selectedSymbol, timeframe);
-    } catch (error) {
-      setMessage({
-        type: "error",
-        text: error instanceof Error ? error.message : t("usStockDetail.errors.dailyRefreshFailed"),
-      });
-    } finally {
-      setRefreshingDaily(false);
-    }
-  }
-
   async function refreshFacts() {
     if (!selectedSymbol) return;
 
@@ -2400,8 +2331,8 @@ export default function USStockDetailPanel({
         ) : (
           <>
         <section className="border border-omi-border-subtle bg-omi-surface">
-          <div className="flex flex-wrap items-start justify-between gap-4 px-5 py-4">
-            <div>
+          <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-4 px-5 py-4">
+            <div className="min-w-0">
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
                 {selectedIndexConfig ? t("usStockDetail.entity.index") : t("usStockDetail.entity.stock")}
               </div>
@@ -2413,7 +2344,7 @@ export default function USStockDetailPanel({
               </div>
             </div>
 
-            <div className="text-right">
+            <div className="shrink-0 text-right">
               <PriceUpdatePulse
                 value={latestClose}
                 direction={change}
@@ -2425,22 +2356,86 @@ export default function USStockDetailPanel({
               <div className={`text-sm font-bold ${valueTone(changePct)}`}>
                 {formatNumber(change)} / {formatPct(changePct)}
               </div>
-              <div className="mt-3 flex flex-wrap justify-end gap-2">
+              <div className="mt-3 inline-flex border border-omi-border-subtle bg-omi-surface-subtle p-1">
                 {timeframeOptions.map((option) => (
                   <button
                     key={option}
                     type="button"
                     onClick={() => setTimeframe(option)}
                     className={[
-                      "h-8 border px-3 text-sm font-semibold",
+                      "h-8 min-w-12 px-3 text-sm font-semibold transition",
                       timeframe === option
-                        ? "border-omi-accent bg-omi-accent text-omi-text-inverse"
-                        : "border-omi-border-subtle bg-omi-surface text-omi-text hover:bg-omi-surface-subtle",
+                        ? "omi-timeframe-tab-active"
+                        : "text-omi-text-muted hover:bg-omi-surface",
                     ].join(" ")}
                   >
                     {timeframeLabel(t, option)}
                   </button>
                 ))}
+              </div>
+              <div className="mt-2 flex items-start justify-end gap-2">
+                {timeframe === "today" ? (
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setIndicatorMenuOpen((value) => !value)}
+                      className="h-8 border border-omi-control bg-omi-surface px-3 text-sm font-semibold text-omi-text hover:border-omi-accent hover:text-omi-danger"
+                    >
+                      {t("stockDetail.indicators")}
+                    </button>
+                    {indicatorMenuOpen ? (
+                      <div className="absolute right-0 z-20 mt-2 w-56 border border-omi-border-subtle bg-omi-surface p-3 text-left shadow-lg">
+                        <div className="mb-2 text-xs font-bold text-omi-text-muted">
+                          {t("stockDetail.displayItems")}
+                        </div>
+                        {intradayIndicatorOptions.map((option) => (
+                          <label
+                            key={option.key}
+                            className="flex cursor-pointer items-start gap-2 px-2 py-2 text-xs hover:bg-omi-surface-subtle"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={intradayIndicators[option.key]}
+                              onChange={() => toggleIntradayIndicator(option.key)}
+                              className="mt-0.5"
+                            />
+                            <span>
+                              <span className="block font-semibold text-omi-text">
+                                {option.label}
+                              </span>
+                              <span className="block text-omi-text-muted">
+                                {t(option.descriptionKey)}
+                              </span>
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setIndicatorMenuOpen((value) => !value)}
+                      className="h-8 border border-omi-control bg-omi-surface px-3 text-sm font-semibold text-omi-text hover:border-omi-accent hover:text-omi-danger"
+                    >
+                      {t("stockDetail.indicators")}
+                    </button>
+                    {indicatorMenuOpen ? (
+                      <USProfessionalIndicatorMenu
+                        indicators={chartIndicators}
+                        onToggleIndicator={toggleChartIndicator}
+                      />
+                    ) : null}
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onClick={enterChartFocusMode}
+                  className="h-8 border border-omi-control bg-omi-surface px-3 text-sm font-semibold text-omi-text hover:border-omi-accent hover:text-omi-danger"
+                >
+                  {t("stockDetail.expand")}
+                </button>
               </div>
             </div>
           </div>
@@ -2450,107 +2445,6 @@ export default function USStockDetailPanel({
               {message.text}
             </div>
           ) : null}
-
-          <div className="grid grid-cols-2 border-t border-omi-border-subtle md:grid-cols-4">
-            {headerMetrics.map((item, index) => (
-              <div
-                key={item.label}
-                className={[
-                  "px-5 py-3",
-                  index % 2 === 1 ? "border-l border-omi-border-subtle" : "",
-                  index >= 2 ? "border-t border-omi-border-subtle md:border-t-0" : "",
-                  index > 0 ? "md:border-l md:border-omi-border-subtle" : "",
-                ].join(" ")}
-              >
-                <div className="text-xs text-omi-text-muted">{item.label}</div>
-                <div className="mt-1 break-words text-sm font-bold">{item.value}</div>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <section className="border border-omi-border-subtle bg-omi-surface">
-          <div className="flex items-center justify-between border-b border-omi-border-subtle px-5 py-3">
-            <div>
-              <h3 className="text-sm font-bold text-omi-text-strong">{t("stockDetail.chartIndicators")}</h3>
-              <div className="mt-1 text-xs text-omi-text-muted">
-                {timeframeLabel(t, timeframe)} · {displayedPointCount} {t("stockDetail.points")}
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={enterChartFocusMode}
-                className="h-8 border border-omi-control bg-omi-surface px-3 text-xs font-semibold text-omi-text hover:border-omi-accent hover:text-omi-danger"
-              >
-                {t("stockDetail.expand")}
-              </button>
-              {timeframe === "today" ? (
-                <div className="relative">
-                  <button
-                    type="button"
-                    onClick={() => setIndicatorMenuOpen((value) => !value)}
-                    className="h-8 border border-omi-control bg-omi-surface px-3 text-xs font-semibold text-omi-text hover:border-omi-accent hover:text-omi-danger"
-                  >
-                    {t("stockDetail.indicators")}
-                  </button>
-                  {indicatorMenuOpen ? (
-                    <div className="absolute right-0 z-20 mt-2 w-56 border border-omi-border-subtle bg-omi-surface p-3 text-left shadow-lg">
-                      <div className="mb-2 text-xs font-bold text-omi-text-muted">{t("stockDetail.displayItems")}</div>
-                      {intradayIndicatorOptions.map((option) => (
-                        <label
-                          key={option.key}
-                          className="flex cursor-pointer items-start gap-2 px-2 py-2 text-xs hover:bg-omi-surface-subtle"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={intradayIndicators[option.key]}
-                            onChange={() => toggleIntradayIndicator(option.key)}
-                            className="mt-0.5"
-                          />
-                          <span>
-                            <span className="block font-semibold text-omi-text">
-                              {option.label}
-                            </span>
-                            <span className="block text-omi-text-muted">
-                              {t(option.descriptionKey)}
-                            </span>
-                          </span>
-                        </label>
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
-              <button
-                type="button"
-                onClick={() => {
-                  if (!selectedSymbol) return;
-
-                  if (timeframe === "today") {
-                    void loadSymbolData(selectedSymbol, timeframe);
-                    return;
-                  }
-
-                  void refreshDailyRows();
-                }}
-                className="h-8 bg-omi-control px-3 text-xs font-semibold text-omi-text-inverse hover:bg-omi-control-border disabled:bg-omi-border"
-                disabled={
-                  !selectedSymbol ||
-                  refreshingDaily ||
-                  (timeframe === "today" && loadState === "loading")
-                }
-              >
-                {timeframe === "today"
-                  ? loadState === "loading"
-                    ? t("common.loading")
-                    : t("common.reload")
-                  : refreshingDaily
-                    ? t("common.updating")
-                    : t("common.update")}
-              </button>
-            </div>
-          </div>
 
           {timeframe === "today" ? (
             <IntradayTrendChart

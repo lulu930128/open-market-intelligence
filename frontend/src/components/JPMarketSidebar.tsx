@@ -1,8 +1,13 @@
 "use client";
 
+import JobStatusCenter from "@/components/JobStatusCenter";
 import type { MarketRegion } from "@/components/SidebarWatchlistExplorer";
 import { marketLabel, useT } from "@/i18n";
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
+import {
+  JP_MARKET_INDEX_GROUP_NAME,
+  JP_MARKET_INDEX_ITEMS,
+} from "@/lib/jpMarketIndices";
 import type {
   JPStockMasterRead,
   JPWatchlistGroupNode,
@@ -108,9 +113,7 @@ export default function JPMarketSidebar({
     null;
   const [tree, setTree] = useState<JPWatchlistGroupNode[]>(initialTree);
   const [items, setItems] = useState<JPWatchlistItemRead[]>(initialItems);
-  const [expandedIds, setExpandedIds] = useState<Set<number>>(
-    () => new Set(initialGroup ? [initialGroup.id] : [])
-  );
+  const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
   const [currentGroupId, setCurrentGroupId] = useState<number | null>(
     initialGroup?.id ?? null
   );
@@ -122,6 +125,7 @@ export default function JPMarketSidebar({
   const [stockNote, setStockNote] = useState("");
   const [stockTags, setStockTags] = useState("");
   const [stockSuggestions, setStockSuggestions] = useState<JPStockMasterRead[]>([]);
+  const [indexGroupExpanded, setIndexGroupExpanded] = useState(false);
 
   const allGroups = useMemo(() => flattenGroups(tree), [tree]);
   const selectedGroup = useMemo(() => {
@@ -425,6 +429,83 @@ export default function JPMarketSidebar({
     void createStockItem();
   }
 
+  function renderPinnedIndexGroup() {
+    const selected = JP_MARKET_INDEX_ITEMS.some((item) => item.symbol === selectedSymbol);
+
+    return (
+      <div>
+        <div
+          className={[
+            "relative flex cursor-pointer items-center gap-1 py-1 pr-1 text-sm",
+            selected
+              ? "omi-sidebar-selected text-omi-text-strong"
+              : "text-omi-text-muted hover:bg-omi-surface-muted",
+          ].join(" ")}
+          style={{ paddingLeft: "4px" }}
+          onClick={() => setIndexGroupExpanded((previous) => !previous)}
+        >
+          <button
+            type="button"
+            className={[
+              "h-6 w-4 text-xs",
+              selected ? "text-omi-accent" : "text-omi-text-muted",
+            ].join(" ")}
+            onClick={(event) => {
+              event.stopPropagation();
+              setIndexGroupExpanded((previous) => !previous);
+            }}
+            aria-label={t("jpMarket.watchlist.toggleIndexFolder")}
+          >
+            {indexGroupExpanded ? "v" : ">"}
+          </button>
+          <div className="min-w-0 flex-1 truncate font-semibold">
+            {JP_MARKET_INDEX_GROUP_NAME}
+          </div>
+          <span className={selected ? "pr-2 text-xs text-omi-accent" : "pr-2 text-xs text-omi-text-subtle"}>
+            {JP_MARKET_INDEX_ITEMS.length}
+          </span>
+        </div>
+
+        {indexGroupExpanded ? (
+          <div>
+            {JP_MARKET_INDEX_ITEMS.map((item) => {
+              const itemSelected = item.symbol === selectedSymbol;
+
+              return (
+                <button
+                  key={item.symbol}
+                  type="button"
+                  className={[
+                    "group relative flex w-full cursor-pointer items-center gap-1 py-1.5 pr-2 text-left text-xs",
+                    itemSelected
+                      ? "omi-sidebar-selected text-omi-text-strong"
+                      : "text-omi-text-muted hover:bg-omi-surface-muted",
+                  ].join(" ")}
+                  style={{ paddingLeft: "24px" }}
+                  onMouseDown={(event) =>
+                    selectOnPrimaryMouseDown(event, () =>
+                      onSelectSymbol(item.symbol, item.name)
+                    )
+                  }
+                  onClick={() => onSelectSymbol(item.symbol, item.name)}
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate font-semibold">
+                      {item.displaySymbol} {item.name}
+                    </div>
+                    <div className={itemSelected ? "truncate text-omi-text-muted" : "truncate text-omi-text-subtle"}>
+                      {item.exchange} / index / {item.note}
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
   function renderGroupNode(node: JPWatchlistGroupNode, depth = 0) {
     const selected = node.id === currentGroupId;
     const expanded = expandedIds.has(node.id);
@@ -580,17 +661,20 @@ export default function JPMarketSidebar({
             {selectedLabel}
           </div>
         </div>
-        <button
-          type="button"
-          className={buttonClass("ghost")}
-          onClick={() => void reloadSidebarData()}
-          disabled={loading}
-        >
-          {t("common.reload")}
-        </button>
+        <div className="ml-3 flex shrink-0 flex-col gap-2">
+          <button
+            type="button"
+            className={buttonClass("ghost")}
+            onClick={() => void reloadSidebarData()}
+            disabled={loading}
+          >
+            {t("common.reload")}
+          </button>
+        </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto py-2">
+        {renderPinnedIndexGroup()}
         {tree.length > 0 ? (
           tree.map((node) => renderGroupNode(node))
         ) : (
@@ -612,6 +696,10 @@ export default function JPMarketSidebar({
           {message.text}
         </div>
       ) : null}
+
+      <div className="border-b border-omi-border-subtle px-4 py-4">
+        <JobStatusCenter placement="inline" market="jp" />
+      </div>
 
       <div className="space-y-4 p-4">
         <form action="/" method="post" onSubmit={handleFolderSubmit}>

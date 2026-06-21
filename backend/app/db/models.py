@@ -1240,6 +1240,84 @@ class JPDailyPrice(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class JPCompanyFundamental(Base):
+    __tablename__ = "jp_company_fundamental"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "symbol",
+            name="uq_jp_company_fundamental_provider_symbol",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    company_name: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    exchange: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    sector: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    industry: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
+    currency: Mapped[str | None] = mapped_column(String(10), nullable=True, index=True)
+
+    market_cap: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    enterprise_value: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    trailing_pe: Mapped[float | None] = mapped_column(Float, nullable=True)
+    forward_pe: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_to_book: Mapped[float | None] = mapped_column(Float, nullable=True)
+    dividend_yield: Mapped[float | None] = mapped_column(Float, nullable=True)
+    beta: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    disclosed_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    fiscal_period: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    fiscal_year_end: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    document_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+    eps_ttm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    forward_eps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    revenue_ttm: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    net_sales: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    operating_profit: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    ordinary_profit: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    profit: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    forecast_net_sales: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    forecast_operating_profit: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    forecast_ordinary_profit: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    forecast_profit: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    gross_margin: Mapped[float | None] = mapped_column(Float, nullable=True)
+    operating_margin: Mapped[float | None] = mapped_column(Float, nullable=True)
+    profit_margin: Mapped[float | None] = mapped_column(Float, nullable=True)
+    return_on_equity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    return_on_assets: Mapped[float | None] = mapped_column(Float, nullable=True)
+    revenue_growth: Mapped[float | None] = mapped_column(Float, nullable=True)
+    earnings_growth: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    total_assets: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    equity: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    equity_to_asset_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_cash: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    total_debt: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    operating_cash_flow: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    investing_cash_flow: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    financing_cash_flow: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    debt_to_equity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    current_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quick_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    shares_outstanding: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    book_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    earnings_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    ex_dividend_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_hash: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class JPWatchlistGroup(Base):
     __tablename__ = "jp_watchlist_group"
 
