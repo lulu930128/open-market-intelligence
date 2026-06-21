@@ -4,6 +4,7 @@ from collections.abc import Callable
 from collections import OrderedDict
 from datetime import date, datetime, timedelta, timezone
 import time
+from types import SimpleNamespace
 
 import requests
 from sqlalchemy.exc import IntegrityError
@@ -14,6 +15,8 @@ from app.config import settings
 from app.db.models import (
     JPCompanyFundamental,
     JPDailyPrice,
+    JPInvestorType,
+    JPMarginInterest,
     JPStockMaster,
     JPWatchlistGroup,
     JPWatchlistItem,
@@ -28,17 +31,25 @@ from app.jp_market.schemas import (
 from app.jp_market.sources import (
     JPCompanyFundamentalRecord,
     JPDailyPriceRecord,
+    JPInvestorTypeRecord,
+    JPMarginInterestRecord,
     JPMarketDataFetchError,
     JPStockRecord,
     fetch_jquants_id_token,
+    fetch_jquants_investor_types_payload,
+    fetch_jquants_margin_interest_payload,
     fetch_jquants_refresh_token,
     fetch_jquants_statements_payload,
+    fetch_jquants_summary_payload,
     fetch_jpx_listed_issues_workbook,
     fetch_yahoo_chart_payload,
     fetch_yahoo_quote_summary_payload,
+    local_code_from_symbol,
     normalize_jp_symbol,
     parse_jpx_listed_issues_workbook,
     parse_jquants_company_fundamental,
+    parse_jquants_investor_type_records,
+    parse_jquants_margin_interest_records,
     parse_yahoo_company_fundamental,
     parse_yahoo_daily_prices,
     parse_yahoo_stock_record,
@@ -74,7 +85,20 @@ JP_CHART_LOOKBACK_MULTIPLIER = {
     "weekly": 8,
     "monthly": 31,
 }
-JP_PLANNED_RESOURCE_KEYS = ("demand", "investors", "disclosures")
+JP_PLANNED_RESOURCE_KEYS = ("disclosures",)
+JP_FUNDAMENTAL_PRIMARY_PROVIDER = "jquants_statements"
+JP_FUNDAMENTAL_SUPPLEMENTAL_PROVIDER = "yahoo_quote_summary"
+JP_MARGIN_INTEREST_PROVIDER = "jquants_margin_interest"
+JP_INVESTOR_TYPES_PROVIDER = "jquants_investor_types"
+JP_FUNDAMENTAL_PROVIDER_PRIORITY = (
+    JP_FUNDAMENTAL_PRIMARY_PROVIDER,
+    JP_FUNDAMENTAL_SUPPLEMENTAL_PROVIDER,
+)
+JP_FUNDAMENTAL_PROVIDER_SET = {"auto", *JP_FUNDAMENTAL_PROVIDER_PRIORITY}
+JP_COMPANY_FUNDAMENTAL_FIELDS = tuple(
+    column.name for column in JPCompanyFundamental.__table__.columns
+)
+_jquants_id_token_cache: dict[str, str | float] | None = None
 MAX_JP_CHART_BARS = 5000
 YAHOO_CHART_COMPACT_RANGE = "1y"
 YAHOO_CHART_FULL_RANGE = "10y"
@@ -1118,6 +1142,144 @@ def upsert_jp_company_fundamental_records(
     }
 
 
+def upsert_jp_margin_interest_records(
+    db: Session,
+    records: list[JPMarginInterestRecord],
+) -> dict:
+    inserted_count = 0
+    updated_count = 0
+
+    for record in records:
+        existing = (
+            db.query(JPMarginInterest)
+            .filter(JPMarginInterest.provider == record.provider)
+            .filter(JPMarginInterest.symbol == record.symbol)
+            .filter(JPMarginInterest.report_date == record.report_date)
+            .first()
+        )
+
+        if existing is None:
+            db.add(
+                JPMarginInterest(
+                    provider=record.provider,
+                    symbol=record.symbol,
+                    report_date=record.report_date,
+                    short_volume=record.short_volume,
+                    long_volume=record.long_volume,
+                    short_negotiable_volume=record.short_negotiable_volume,
+                    long_negotiable_volume=record.long_negotiable_volume,
+                    short_standardized_volume=record.short_standardized_volume,
+                    long_standardized_volume=record.long_standardized_volume,
+                    issue_type=record.issue_type,
+                    source_url=record.source_url,
+                    raw_payload_hash=record.raw_payload_hash,
+                    fetched_at=utc_now(),
+                )
+            )
+            inserted_count += 1
+            continue
+
+        existing.short_volume = record.short_volume
+        existing.long_volume = record.long_volume
+        existing.short_negotiable_volume = record.short_negotiable_volume
+        existing.long_negotiable_volume = record.long_negotiable_volume
+        existing.short_standardized_volume = record.short_standardized_volume
+        existing.long_standardized_volume = record.long_standardized_volume
+        existing.issue_type = record.issue_type
+        existing.source_url = record.source_url
+        existing.raw_payload_hash = record.raw_payload_hash
+        existing.fetched_at = utc_now()
+        existing.updated_at = utc_now()
+        updated_count += 1
+
+    db.commit()
+
+    return {
+        "inserted_count": inserted_count,
+        "updated_count": updated_count,
+    }
+
+
+def upsert_jp_investor_type_records(
+    db: Session,
+    records: list[JPInvestorTypeRecord],
+) -> dict:
+    inserted_count = 0
+    updated_count = 0
+
+    for record in records:
+        existing = (
+            db.query(JPInvestorType)
+            .filter(JPInvestorType.provider == record.provider)
+            .filter(JPInvestorType.section == record.section)
+            .filter(JPInvestorType.published_date == record.published_date)
+            .filter(JPInvestorType.start_date == record.start_date)
+            .filter(JPInvestorType.end_date == record.end_date)
+            .first()
+        )
+
+        values = {
+            "proprietary_sell": record.proprietary_sell,
+            "proprietary_buy": record.proprietary_buy,
+            "proprietary_total": record.proprietary_total,
+            "proprietary_balance": record.proprietary_balance,
+            "broker_sell": record.broker_sell,
+            "broker_buy": record.broker_buy,
+            "broker_total": record.broker_total,
+            "broker_balance": record.broker_balance,
+            "total_sell": record.total_sell,
+            "total_buy": record.total_buy,
+            "total_traded": record.total_traded,
+            "total_balance": record.total_balance,
+            "individual_sell": record.individual_sell,
+            "individual_buy": record.individual_buy,
+            "individual_total": record.individual_total,
+            "individual_balance": record.individual_balance,
+            "foreign_sell": record.foreign_sell,
+            "foreign_buy": record.foreign_buy,
+            "foreign_total": record.foreign_total,
+            "foreign_balance": record.foreign_balance,
+            "investment_trust_sell": record.investment_trust_sell,
+            "investment_trust_buy": record.investment_trust_buy,
+            "investment_trust_total": record.investment_trust_total,
+            "investment_trust_balance": record.investment_trust_balance,
+            "trust_bank_sell": record.trust_bank_sell,
+            "trust_bank_buy": record.trust_bank_buy,
+            "trust_bank_total": record.trust_bank_total,
+            "trust_bank_balance": record.trust_bank_balance,
+            "source_url": record.source_url,
+            "raw_payload_hash": record.raw_payload_hash,
+        }
+
+        if existing is None:
+            db.add(
+                JPInvestorType(
+                    provider=record.provider,
+                    section=record.section,
+                    published_date=record.published_date,
+                    start_date=record.start_date,
+                    end_date=record.end_date,
+                    fetched_at=utc_now(),
+                    **values,
+                )
+            )
+            inserted_count += 1
+            continue
+
+        for field, value in values.items():
+            setattr(existing, field, value)
+        existing.fetched_at = utc_now()
+        existing.updated_at = utc_now()
+        updated_count += 1
+
+    db.commit()
+
+    return {
+        "inserted_count": inserted_count,
+        "updated_count": updated_count,
+    }
+
+
 def refresh_jp_company_fundamental_from_yahoo_quote_summary(
     db: Session,
     *,
@@ -1146,6 +1308,39 @@ def refresh_jp_company_fundamental_from_yahoo_quote_summary(
     }
 
 
+def _cached_jquants_id_token(*, refresh_token: str) -> str:
+    global _jquants_id_token_cache
+
+    now = time.monotonic()
+    cache = _jquants_id_token_cache
+    if (
+        cache
+        and cache.get("refresh_token") == refresh_token
+        and isinstance(cache.get("expires_at"), float)
+        and now < float(cache["expires_at"])
+    ):
+        cached_token = str(cache.get("id_token") or "")
+        if cached_token:
+            return cached_token
+
+    id_token = fetch_jquants_id_token(
+        base_url=settings.jquants_api_base_url,
+        refresh_token=refresh_token,
+        timeout_seconds=settings.jp_market_http_timeout_seconds,
+    )
+    ttl_seconds = max(int(settings.jquants_id_token_cache_seconds or 0), 0)
+    if ttl_seconds > 0:
+        _jquants_id_token_cache = {
+            "refresh_token": refresh_token,
+            "id_token": id_token,
+            "expires_at": now + ttl_seconds,
+        }
+    else:
+        _jquants_id_token_cache = None
+
+    return id_token
+
+
 def _configured_jquants_id_token() -> str | None:
     configured_id_token = (settings.jquants_id_token or "").strip()
     if configured_id_token:
@@ -1165,11 +1360,247 @@ def _configured_jquants_id_token() -> str | None:
             timeout_seconds=settings.jp_market_http_timeout_seconds,
         )
 
-    return fetch_jquants_id_token(
-        base_url=settings.jquants_api_base_url,
-        refresh_token=configured_refresh_token,
-        timeout_seconds=settings.jp_market_http_timeout_seconds,
+    return _cached_jquants_id_token(refresh_token=configured_refresh_token)
+
+
+def _configured_jquants_api_key() -> str | None:
+    configured_api_key = (settings.jquants_api_key or "").strip()
+    if configured_api_key:
+        return configured_api_key
+
+    if settings.jquants_api_base_url.rstrip("/").endswith("/v2"):
+        legacy_refresh_token_slot = (settings.jquants_refresh_token or "").strip()
+        if legacy_refresh_token_slot:
+            return legacy_refresh_token_slot
+
+    return None
+
+
+def _jquants_data_count(payload: dict) -> int:
+    rows = payload.get("data")
+    return len(rows) if isinstance(rows, list) else 0
+
+
+def _jquants_resource_error_result(
+    *,
+    exc: JPMarketDataFetchError,
+    provider: str,
+    symbol: str,
+) -> dict | None:
+    message = str(exc)
+    if "HTTP 429" in message:
+        return {
+            "status": "rate_limited",
+            "provider": provider,
+            "symbol": symbol,
+            "fetched_count": 0,
+            "inserted_count": 0,
+            "updated_count": 0,
+            "message": "J-Quants API rate limit reached. Please wait before updating again.",
+        }
+
+    if "HTTP 403" in message:
+        return {
+            "status": "skipped",
+            "provider": provider,
+            "symbol": symbol,
+            "fetched_count": 0,
+            "inserted_count": 0,
+            "updated_count": 0,
+            "message": "J-Quants plan or API key does not allow this Japan market resource.",
+        }
+
+    return None
+
+
+def _jp_investor_section_for_stock(stock: JPStockMaster | None) -> str | None:
+    segment = (stock.market_segment or "").lower() if stock is not None else ""
+    if "prime" in segment:
+        return "TSEPrime"
+    if "standard" in segment:
+        return "TSEStandard"
+    if "growth" in segment or "mothers" in segment:
+        return "TSEGrowth"
+
+    return None
+
+
+def refresh_jp_margin_interest_from_jquants(
+    db: Session,
+    *,
+    symbol: str,
+) -> dict:
+    normalized_symbol = _valid_symbol(symbol)
+    api_key = _configured_jquants_api_key()
+    if api_key is None:
+        return {
+            "status": "skipped",
+            "provider": JP_MARGIN_INTEREST_PROVIDER,
+            "symbol": normalized_symbol,
+            "fetched_count": 0,
+            "inserted_count": 0,
+            "updated_count": 0,
+            "message": "J-Quants API key is not configured.",
+        }
+
+    to_date = utc_now().date()
+    from_date = to_date - timedelta(days=180)
+    try:
+        payload, source_url = fetch_jquants_margin_interest_payload(
+            base_url=settings.jquants_api_base_url,
+            api_key=api_key,
+            local_code=local_code_from_symbol(normalized_symbol),
+            from_date=from_date,
+            to_date=to_date,
+            timeout_seconds=settings.jp_market_http_timeout_seconds,
+        )
+    except JPMarketDataFetchError as exc:
+        result = _jquants_resource_error_result(
+            exc=exc,
+            provider=JP_MARGIN_INTEREST_PROVIDER,
+            symbol=normalized_symbol,
+        )
+        if result is not None:
+            return result
+        raise
+
+    records = parse_jquants_margin_interest_records(
+        payload,
+        symbol=normalized_symbol,
+        source_url=source_url,
     )
+    if not records:
+        return {
+            "status": "empty",
+            "provider": JP_MARGIN_INTEREST_PROVIDER,
+            "symbol": normalized_symbol,
+            "fetched_count": _jquants_data_count(payload),
+            "inserted_count": 0,
+            "updated_count": 0,
+            "message": "J-Quants margin-interest returned no rows for this symbol.",
+        }
+
+    result = upsert_jp_margin_interest_records(db, records)
+    return {
+        "status": "success",
+        "provider": JP_MARGIN_INTEREST_PROVIDER,
+        "symbol": normalized_symbol,
+        "fetched_count": len(records),
+        "inserted_count": result["inserted_count"],
+        "updated_count": result["updated_count"],
+        "message": "JP margin interest refreshed from J-Quants.",
+    }
+
+
+def refresh_jp_investor_types_from_jquants(
+    db: Session,
+    *,
+    symbol: str,
+) -> dict:
+    normalized_symbol = _valid_symbol(symbol)
+    api_key = _configured_jquants_api_key()
+    if api_key is None:
+        return {
+            "status": "skipped",
+            "provider": JP_INVESTOR_TYPES_PROVIDER,
+            "symbol": normalized_symbol,
+            "fetched_count": 0,
+            "inserted_count": 0,
+            "updated_count": 0,
+            "message": "J-Quants API key is not configured.",
+        }
+
+    stock = (
+        db.query(JPStockMaster)
+        .filter(JPStockMaster.symbol == normalized_symbol)
+        .first()
+    )
+    section = _jp_investor_section_for_stock(stock)
+    if section is None:
+        return {
+            "status": "skipped",
+            "provider": JP_INVESTOR_TYPES_PROVIDER,
+            "symbol": normalized_symbol,
+            "fetched_count": 0,
+            "inserted_count": 0,
+            "updated_count": 0,
+            "message": "JP investor-types requires a known market segment for the selected symbol.",
+        }
+
+    to_date = utc_now().date()
+    from_date = to_date - timedelta(days=180)
+    try:
+        payload, source_url = fetch_jquants_investor_types_payload(
+            base_url=settings.jquants_api_base_url,
+            api_key=api_key,
+            section=section,
+            from_date=from_date,
+            to_date=to_date,
+            timeout_seconds=settings.jp_market_http_timeout_seconds,
+        )
+    except JPMarketDataFetchError as exc:
+        result = _jquants_resource_error_result(
+            exc=exc,
+            provider=JP_INVESTOR_TYPES_PROVIDER,
+            symbol=normalized_symbol,
+        )
+        if result is not None:
+            return result
+        raise
+
+    records = parse_jquants_investor_type_records(
+        payload,
+        source_url=source_url,
+    )
+    if not records:
+        return {
+            "status": "empty",
+            "provider": JP_INVESTOR_TYPES_PROVIDER,
+            "symbol": normalized_symbol,
+            "fetched_count": _jquants_data_count(payload),
+            "inserted_count": 0,
+            "updated_count": 0,
+            "message": "J-Quants investor-types returned no rows for this section.",
+        }
+
+    result = upsert_jp_investor_type_records(db, records)
+    return {
+        "status": "success",
+        "provider": JP_INVESTOR_TYPES_PROVIDER,
+        "symbol": normalized_symbol,
+        "fetched_count": len(records),
+        "inserted_count": result["inserted_count"],
+        "updated_count": result["updated_count"],
+        "message": "JP investor types refreshed from J-Quants.",
+    }
+
+
+def refresh_jp_market_resource(
+    db: Session,
+    *,
+    symbol: str,
+    resource: str,
+) -> dict:
+    normalized_resource = resource.strip().lower()
+    if normalized_resource == "demand":
+        return refresh_jp_margin_interest_from_jquants(db=db, symbol=symbol)
+    if normalized_resource == "investors":
+        return refresh_jp_investor_types_from_jquants(db=db, symbol=symbol)
+    if normalized_resource == "performance" or normalized_resource == "financials":
+        return refresh_jp_company_fundamental(db=db, symbol=symbol, provider="auto")
+    if normalized_resource == "disclosures":
+        normalized_symbol = _valid_symbol(symbol)
+        return {
+            "status": "skipped",
+            "provider": "jquants_tdnet",
+            "symbol": normalized_symbol,
+            "fetched_count": 0,
+            "inserted_count": 0,
+            "updated_count": 0,
+            "message": "TDnet disclosures require a J-Quants add-on plan and are not refreshed in the base pipeline.",
+        }
+
+    raise ValueError("resource must be one of: demand, investors, disclosures, performance, financials.")
 
 
 def _jquants_statement_count(payload: dict) -> int:
@@ -1186,8 +1617,9 @@ def refresh_jp_company_fundamental_from_jquants_statements(
     symbol: str,
 ) -> dict:
     normalized_symbol = _valid_symbol(symbol)
-    id_token = _configured_jquants_id_token()
-    if id_token is None:
+    api_key = _configured_jquants_api_key()
+    id_token = None if api_key else _configured_jquants_id_token()
+    if api_key is None and id_token is None:
         return {
             "status": "skipped",
             "provider": "jquants_statements",
@@ -1203,12 +1635,22 @@ def refresh_jp_company_fundamental_from_jquants_statements(
         .filter(JPStockMaster.symbol == normalized_symbol)
         .first()
     )
-    payload, source_url = fetch_jquants_statements_payload(
-        base_url=settings.jquants_api_base_url,
-        id_token=id_token,
-        local_code=normalized_symbol.split(".", maxsplit=1)[0],
-        timeout_seconds=settings.jp_market_http_timeout_seconds,
-    )
+    local_code = normalized_symbol.split(".", maxsplit=1)[0]
+    if api_key:
+        payload, source_url = fetch_jquants_summary_payload(
+            base_url=settings.jquants_api_base_url,
+            api_key=api_key,
+            local_code=local_code,
+            timeout_seconds=settings.jp_market_http_timeout_seconds,
+        )
+    else:
+        assert id_token is not None
+        payload, source_url = fetch_jquants_statements_payload(
+            base_url=settings.jquants_api_base_url,
+            id_token=id_token,
+            local_code=local_code,
+            timeout_seconds=settings.jp_market_http_timeout_seconds,
+        )
     record = parse_jquants_company_fundamental(
         payload,
         symbol=normalized_symbol,
@@ -1238,8 +1680,66 @@ def refresh_jp_company_fundamental_from_jquants_statements(
         "fetched_count": _jquants_statement_count(payload),
         "inserted_count": result["inserted_count"],
         "updated_count": result["updated_count"],
-        "message": "JP company fundamentals refreshed from J-Quants statements.",
+        "message": "JP company fundamentals refreshed from J-Quants summary.",
     }
+
+
+def _combine_jp_fundamental_refresh_results(
+    *,
+    symbol: str,
+    results: list[dict],
+    failures: list[tuple[str, str]],
+) -> dict:
+    successful_results = [result for result in results if result.get("status") == "success"]
+    non_success_results = [result for result in results if result.get("status") != "success"]
+    provider_values = [
+        str(result.get("provider"))
+        for result in successful_results or results
+        if result.get("provider")
+    ]
+    provider = "+".join(dict.fromkeys(provider_values)) or "auto"
+
+    if successful_results and failures:
+        status_value = "partial_success"
+    elif successful_results and non_success_results:
+        status_value = "partial_success"
+    elif successful_results:
+        status_value = "success"
+    elif failures:
+        status_value = "error"
+    elif any(result.get("status") == "empty" for result in results):
+        status_value = "empty"
+    else:
+        status_value = "skipped"
+
+    message_parts = [
+        str(result.get("message"))
+        for result in results
+        if result.get("message")
+    ]
+    message_parts.extend(
+        f"{provider_name} failed: {message}"
+        for provider_name, message in failures
+    )
+
+    return {
+        "status": status_value,
+        "provider": provider,
+        "symbol": symbol,
+        "fetched_count": sum(int(result.get("fetched_count") or 0) for result in results),
+        "inserted_count": sum(int(result.get("inserted_count") or 0) for result in results),
+        "updated_count": sum(int(result.get("updated_count") or 0) for result in results),
+        "message": " ".join(message_parts) or "JP company fundamental refresh completed.",
+    }
+
+
+def _run_jp_fundamental_provider_refresh(
+    callback: Callable[[], dict],
+) -> tuple[dict | None, str | None]:
+    try:
+        return callback(), None
+    except (JPMarketDataFetchError, requests.RequestException) as exc:
+        return None, str(exc)
 
 
 def refresh_jp_company_fundamental(
@@ -1250,19 +1750,117 @@ def refresh_jp_company_fundamental(
 ) -> dict:
     normalized_symbol = _valid_symbol(symbol)
     normalized_provider = provider.strip().lower()
-    if normalized_provider not in {"auto", "jquants_statements", "yahoo_quote_summary"}:
+    if normalized_provider not in JP_FUNDAMENTAL_PROVIDER_SET:
         raise ValueError("provider must be one of: auto, jquants_statements, yahoo_quote_summary.")
 
-    if normalized_provider in {"auto", "jquants_statements"}:
+    if normalized_provider == JP_FUNDAMENTAL_PRIMARY_PROVIDER:
         return refresh_jp_company_fundamental_from_jquants_statements(
             db=db,
             symbol=normalized_symbol,
         )
 
-    return refresh_jp_company_fundamental_from_yahoo_quote_summary(
-        db=db,
-        symbol=normalized_symbol,
+    if normalized_provider == JP_FUNDAMENTAL_SUPPLEMENTAL_PROVIDER:
+        return refresh_jp_company_fundamental_from_yahoo_quote_summary(
+            db=db,
+            symbol=normalized_symbol,
+        )
+
+    results: list[dict] = []
+    failures: list[tuple[str, str]] = []
+
+    jquants_result, jquants_error = _run_jp_fundamental_provider_refresh(
+        lambda: refresh_jp_company_fundamental_from_jquants_statements(
+            db=db,
+            symbol=normalized_symbol,
+        )
     )
+    if jquants_result is not None:
+        results.append(jquants_result)
+    if jquants_error:
+        db.rollback()
+        failures.append((JP_FUNDAMENTAL_PRIMARY_PROVIDER, jquants_error))
+
+    if jquants_result is None or jquants_result.get("status") != "success":
+        yahoo_result, yahoo_error = _run_jp_fundamental_provider_refresh(
+            lambda: refresh_jp_company_fundamental_from_yahoo_quote_summary(
+                db=db,
+                symbol=normalized_symbol,
+            )
+        )
+        if yahoo_result is not None:
+            results.append(yahoo_result)
+        if yahoo_error:
+            db.rollback()
+            failures.append((JP_FUNDAMENTAL_SUPPLEMENTAL_PROVIDER, yahoo_error))
+
+    return _combine_jp_fundamental_refresh_results(
+        symbol=normalized_symbol,
+        results=results,
+        failures=failures,
+    )
+
+
+def _jp_fundamental_provider_rank(provider: str | None) -> int:
+    if provider in JP_FUNDAMENTAL_PROVIDER_PRIORITY:
+        return JP_FUNDAMENTAL_PROVIDER_PRIORITY.index(provider)
+    return len(JP_FUNDAMENTAL_PROVIDER_PRIORITY)
+
+
+def _datetime_score(value: object) -> float:
+    if isinstance(value, datetime):
+        return value.timestamp()
+    return -1
+
+
+def _jp_fundamental_sort_key(row: JPCompanyFundamental) -> tuple[int, float, int]:
+    return (
+        _jp_fundamental_provider_rank(row.provider),
+        -_datetime_score(row.fetched_at),
+        -(row.id or 0),
+    )
+
+
+def _first_non_null_attr(rows: list[JPCompanyFundamental], field: str):
+    for row in rows:
+        value = getattr(row, field)
+        if value is not None:
+            return value
+    return None
+
+
+def _latest_datetime_attr(rows: list[JPCompanyFundamental], field: str):
+    candidates = [
+        (score, getattr(row, field))
+        for row in rows
+        if (score := _datetime_score(getattr(row, field))) >= 0
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def _merge_jp_company_fundamental_rows(
+    rows: list[JPCompanyFundamental],
+) -> JPCompanyFundamental | SimpleNamespace | None:
+    if not rows:
+        return None
+    if len(rows) == 1:
+        return rows[0]
+
+    ordered_rows = sorted(rows, key=_jp_fundamental_sort_key)
+    provider_label = "+".join(dict.fromkeys(row.provider for row in ordered_rows if row.provider))
+    values = {}
+    for field in JP_COMPANY_FUNDAMENTAL_FIELDS:
+        if field == "provider":
+            values[field] = provider_label
+        elif field == "id":
+            values[field] = ordered_rows[0].id
+        elif field in {"fetched_at", "created_at", "updated_at"}:
+            values[field] = _latest_datetime_attr(ordered_rows, field)
+        else:
+            values[field] = _first_non_null_attr(ordered_rows, field)
+
+    return SimpleNamespace(**values)
 
 
 def get_jp_company_fundamental(
@@ -1270,17 +1868,22 @@ def get_jp_company_fundamental(
     *,
     symbol: str,
     provider: str | None = None,
-) -> JPCompanyFundamental | None:
+) -> JPCompanyFundamental | SimpleNamespace | None:
     normalized_symbol = _valid_symbol(symbol)
     query = db.query(JPCompanyFundamental).filter(JPCompanyFundamental.symbol == normalized_symbol)
 
     if provider is not None:
         query = query.filter(JPCompanyFundamental.provider == provider)
+        return query.order_by(
+            JPCompanyFundamental.fetched_at.desc(),
+            JPCompanyFundamental.id.desc(),
+        ).first()
 
-    return query.order_by(
+    rows = query.order_by(
         JPCompanyFundamental.fetched_at.desc(),
         JPCompanyFundamental.id.desc(),
-    ).first()
+    ).all()
+    return _merge_jp_company_fundamental_rows(rows)
 
 
 def list_jp_company_fundamentals(
@@ -1336,7 +1939,16 @@ def _refresh_jp_symbol_resources(
 
     def run_resource(resource: str, callback: Callable[[], dict]) -> None:
         try:
-            resources[resource] = _compact_jp_resource_result(callback())
+            resource_result = _compact_jp_resource_result(callback())
+            resources[resource] = resource_result
+            if resource_result["status"] == "error":
+                errors.append(
+                    {
+                        "symbol": normalized_symbol,
+                        "resource": resource,
+                        "message": str(resource_result.get("message") or "Resource refresh failed."),
+                    }
+                )
         except Exception as exc:
             db.rollback()
             message = str(exc)
@@ -1377,10 +1989,14 @@ def _refresh_jp_symbol_resources(
         )
 
     success_count = sum(1 for item in resources.values() if item["status"] == "success")
+    partial_success_count = sum(1 for item in resources.values() if item["status"] == "partial_success")
     skipped_count = sum(1 for item in resources.values() if item["status"] == "skipped")
+    resource_error_count = sum(1 for item in resources.values() if item["status"] == "error")
 
-    if errors:
-        symbol_status = "error" if success_count == 0 else "partial_success"
+    if resource_error_count:
+        symbol_status = "error" if success_count == 0 and partial_success_count == 0 else "partial_success"
+    elif partial_success_count:
+        symbol_status = "partial_success"
     elif not resources or skipped_count == len(resources):
         symbol_status = "skipped"
     else:
@@ -1391,6 +2007,7 @@ def _refresh_jp_symbol_resources(
         "status": symbol_status,
         "resource_count": len(resources),
         "success_count": success_count,
+        "partial_success_count": partial_success_count,
         "skipped_count": skipped_count,
         "error_count": len(errors),
         "fetched_count": sum(item["fetched_count"] for item in resources.values()),
@@ -1411,7 +2028,7 @@ def refresh_jp_watchlist_resources(
     include_fundamentals: bool = False,
     outputsize: str = "compact",
     provider: str = "auto",
-    sleep_seconds: float = 1.0,
+    sleep_seconds: float = 15.0,
     progress_callback: ProgressCallback | None = None,
 ) -> dict:
     if not include_daily and not include_fundamentals:
@@ -1476,6 +2093,12 @@ def refresh_jp_watchlist_resources(
         status_value = "error"
     elif errors:
         status_value = "partial_success"
+    elif partial_success_count:
+        status_value = "partial_success"
+    elif skipped_count == total:
+        status_value = "skipped"
+    elif skipped_count:
+        status_value = "partial_success"
     else:
         status_value = "success"
 
@@ -1539,11 +2162,93 @@ def _jp_daily_price_resource_slot(db: Session, symbol: str) -> dict:
         "source": latest_row.provider if latest_row else "yahoo_chart",
         "latest_date": latest_row.trade_date if latest_row else None,
         "row_count": row_count,
+        "metrics": {},
+    }
+
+
+def _jp_margin_interest_resource_slot(db: Session, symbol: str) -> dict:
+    query = db.query(JPMarginInterest).filter(JPMarginInterest.symbol == symbol)
+    row_count = query.count()
+    latest_row = query.order_by(JPMarginInterest.report_date.desc()).first()
+
+    metrics: dict[str, int | str | None] = {}
+    if latest_row is not None:
+        long_volume = latest_row.long_volume
+        short_volume = latest_row.short_volume
+        metrics = {
+            "margin_long_balance": long_volume,
+            "margin_short_balance": short_volume,
+            "margin_net_balance": (
+                long_volume - short_volume
+                if long_volume is not None and short_volume is not None
+                else None
+            ),
+            "margin_long_standardized": latest_row.long_standardized_volume,
+            "margin_short_standardized": latest_row.short_standardized_volume,
+            "margin_issue_type": latest_row.issue_type,
+        }
+
+    return {
+        "key": "demand",
+        "status": "available" if row_count > 0 else "empty",
+        "available": row_count > 0,
+        "source": latest_row.provider if latest_row else JP_MARGIN_INTEREST_PROVIDER,
+        "latest_date": latest_row.report_date if latest_row else None,
+        "row_count": row_count,
+        "metrics": metrics,
+    }
+
+
+def _jp_investor_type_resource_slot(db: Session, symbol: str) -> dict:
+    stock = (
+        db.query(JPStockMaster)
+        .filter(JPStockMaster.symbol == symbol)
+        .first()
+    )
+    section = _jp_investor_section_for_stock(stock)
+    query = db.query(JPInvestorType)
+    if section is not None:
+        query = query.filter(JPInvestorType.section == section)
+
+    row_count = query.count()
+    latest_row = (
+        query.order_by(
+            JPInvestorType.published_date.desc(),
+            JPInvestorType.end_date.desc(),
+            JPInvestorType.start_date.desc(),
+        )
+        .first()
+    )
+
+    latest_date = None
+    metrics: dict[str, int | str | None] = {}
+    if latest_row is not None:
+        latest_date = latest_row.published_date or latest_row.end_date or latest_row.start_date
+        metrics = {
+            "investor_section": latest_row.section,
+            "foreign_balance": latest_row.foreign_balance,
+            "trust_bank_balance": latest_row.trust_bank_balance,
+            "individual_balance": latest_row.individual_balance,
+            "proprietary_balance": latest_row.proprietary_balance,
+            "investment_trust_balance": latest_row.investment_trust_balance,
+            "total_balance": latest_row.total_balance,
+        }
+    elif section is not None:
+        metrics = {"investor_section": section}
+
+    return {
+        "key": "investors",
+        "status": "available" if row_count > 0 else "empty",
+        "available": row_count > 0,
+        "source": latest_row.provider if latest_row else JP_INVESTOR_TYPES_PROVIDER,
+        "latest_date": latest_date,
+        "row_count": row_count,
+        "metrics": metrics,
     }
 
 
 def _has_any_jp_fundamental_value(
-    row: JPCompanyFundamental | None,
+    row: JPCompanyFundamental | SimpleNamespace | None,
     fields: tuple[str, ...],
 ) -> bool:
     if row is None:
@@ -1553,7 +2258,7 @@ def _has_any_jp_fundamental_value(
 
 
 def _jp_fundamental_resource_slot(
-    fundamental: JPCompanyFundamental | None,
+    fundamental: JPCompanyFundamental | SimpleNamespace | None,
     *,
     key: str,
     fields: tuple[str, ...],
@@ -1570,6 +2275,7 @@ def _jp_fundamental_resource_slot(
         "source": fundamental.provider if fundamental else None,
         "latest_date": latest_date,
         "row_count": 1 if available else 0,
+        "metrics": {},
     }
 
 
@@ -1581,6 +2287,7 @@ def _jp_planned_resource_slot(key: str) -> dict:
         "source": None,
         "latest_date": None,
         "row_count": 0,
+        "metrics": {},
     }
 
 
@@ -1592,6 +2299,8 @@ def get_jp_resource_summary(db: Session, *, symbol: str) -> dict:
         "symbol": normalized_symbol,
         "slots": [
             _jp_daily_price_resource_slot(db, normalized_symbol),
+            _jp_margin_interest_resource_slot(db, normalized_symbol),
+            _jp_investor_type_resource_slot(db, normalized_symbol),
             *[_jp_planned_resource_slot(key) for key in JP_PLANNED_RESOURCE_KEYS],
             _jp_fundamental_resource_slot(
                 fundamental,

@@ -52,6 +52,7 @@ from app.jp_market.service import (
     list_jp_stocks,
     list_jp_watchlist_groups,
     list_jp_watchlist_items,
+    refresh_jp_market_resource,
     refresh_jp_company_fundamental as refresh_jp_company_fundamental_service,
     refresh_jp_daily_prices as refresh_jp_daily_prices_service,
     search_jp_stocks,
@@ -210,6 +211,32 @@ def get_jp_resource_summary_api(symbol: str, db: Session = Depends(get_db)):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
+
+
+@router.post("/resources/{symbol}/refresh", response_model=JPResourceRefreshResultRead)
+def refresh_jp_market_resource_api(
+    symbol: str,
+    resource: str = Query(
+        default="demand",
+        pattern="^(demand|investors|disclosures|performance|financials)$",
+    ),
+    db: Session = Depends(get_db),
+):
+    try:
+        return refresh_jp_market_resource(
+            db=db,
+            symbol=symbol,
+            resource=resource,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except requests.RequestException as exc:
+        raise _fetch_error(exc) from exc
+    except JPMarketDataFetchError as exc:
+        raise _fetch_error(exc) from exc
 
 
 @router.post("/fundamentals/{symbol}/refresh", response_model=JPResourceRefreshResultRead)
@@ -519,10 +546,10 @@ def refresh_all_jp_watchlist_resources_api(
     include_children: bool = True,
     enabled_only: bool = True,
     include_daily: bool = True,
-    include_fundamentals: bool = False,
+    include_fundamentals: bool = True,
     outputsize: str = Query(default="compact", pattern="^(compact|full)$"),
     provider: str = Query(default="auto", pattern="^(auto|yahoo_chart)$"),
-    sleep_seconds: float = Query(default=1.0, ge=0, le=60),
+    sleep_seconds: float = Query(default=15.0, ge=0, le=60),
     db: Session = Depends(get_db),
 ):
     return _enqueue_jp_watchlist_resource_refresh(
@@ -548,10 +575,10 @@ def refresh_jp_watchlist_group_resources_api(
     include_children: bool = True,
     enabled_only: bool = True,
     include_daily: bool = True,
-    include_fundamentals: bool = False,
+    include_fundamentals: bool = True,
     outputsize: str = Query(default="compact", pattern="^(compact|full)$"),
     provider: str = Query(default="auto", pattern="^(auto|yahoo_chart)$"),
-    sleep_seconds: float = Query(default=1.0, ge=0, le=60),
+    sleep_seconds: float = Query(default=15.0, ge=0, le=60),
     db: Session = Depends(get_db),
 ):
     try:

@@ -25,6 +25,9 @@ YAHOO_QUOTE_SUMMARY_MODULES = (
 JQUANTS_AUTH_USER_PATH = "/token/auth_user"
 JQUANTS_AUTH_REFRESH_PATH = "/token/auth_refresh"
 JQUANTS_STATEMENTS_PATH = "/fins/statements"
+JQUANTS_SUMMARY_PATH = "/fins/summary"
+JQUANTS_MARGIN_INTEREST_PATH = "/markets/margin-interest"
+JQUANTS_INVESTOR_TYPES_PATH = "/equities/investor-types"
 JPX_LISTED_ISSUES_URL = "https://www.jpx.co.jp/english/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_e.xls"
 JP_SYMBOL_TOKEN_PATTERN = re.compile(r"^[0-9A-Z][0-9A-Z.\-]{0,31}")
 YAHOO_INSTRUMENT_TYPES = {
@@ -128,6 +131,61 @@ class JPCompanyFundamentalRecord:
     book_value: float | None
     earnings_date: date | None
     ex_dividend_date: date | None
+    source_url: str | None
+    raw_payload_hash: str | None
+
+
+@dataclass(frozen=True)
+class JPMarginInterestRecord:
+    provider: str
+    symbol: str
+    report_date: date
+    short_volume: int | None
+    long_volume: int | None
+    short_negotiable_volume: int | None
+    long_negotiable_volume: int | None
+    short_standardized_volume: int | None
+    long_standardized_volume: int | None
+    issue_type: str | None
+    source_url: str | None
+    raw_payload_hash: str | None
+
+
+@dataclass(frozen=True)
+class JPInvestorTypeRecord:
+    provider: str
+    section: str
+    published_date: date | None
+    start_date: date | None
+    end_date: date | None
+    proprietary_sell: int | None
+    proprietary_buy: int | None
+    proprietary_total: int | None
+    proprietary_balance: int | None
+    broker_sell: int | None
+    broker_buy: int | None
+    broker_total: int | None
+    broker_balance: int | None
+    total_sell: int | None
+    total_buy: int | None
+    total_traded: int | None
+    total_balance: int | None
+    individual_sell: int | None
+    individual_buy: int | None
+    individual_total: int | None
+    individual_balance: int | None
+    foreign_sell: int | None
+    foreign_buy: int | None
+    foreign_total: int | None
+    foreign_balance: int | None
+    investment_trust_sell: int | None
+    investment_trust_buy: int | None
+    investment_trust_total: int | None
+    investment_trust_balance: int | None
+    trust_bank_sell: int | None
+    trust_bank_buy: int | None
+    trust_bank_total: int | None
+    trust_bank_balance: int | None
     source_url: str | None
     raw_payload_hash: str | None
 
@@ -382,6 +440,90 @@ def fetch_jquants_statements_payload(
     return response.json(), response.url
 
 
+def fetch_jquants_summary_payload(
+    *,
+    base_url: str,
+    api_key: str,
+    local_code: str,
+    timeout_seconds: int = 30,
+) -> tuple[dict[str, Any], str]:
+    url = _jquants_url(base_url, JQUANTS_SUMMARY_PATH)
+    response = http_get(
+        url,
+        params={"code": local_code},
+        headers={"x-api-key": api_key},
+        timeout=timeout_seconds,
+    )
+    if response.status_code >= 400:
+        raise JPMarketDataFetchError(
+            f"J-Quants summary failed: HTTP {response.status_code}."
+        )
+
+    return response.json(), response.url
+
+
+def fetch_jquants_margin_interest_payload(
+    *,
+    base_url: str,
+    api_key: str,
+    local_code: str,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    timeout_seconds: int = 30,
+) -> tuple[dict[str, Any], str]:
+    params: dict[str, str] = {"code": local_code}
+    if from_date is not None:
+        params["from"] = from_date.isoformat()
+    if to_date is not None:
+        params["to"] = to_date.isoformat()
+
+    url = _jquants_url(base_url, JQUANTS_MARGIN_INTEREST_PATH)
+    response = http_get(
+        url,
+        params=params,
+        headers={"x-api-key": api_key},
+        timeout=timeout_seconds,
+    )
+    if response.status_code >= 400:
+        raise JPMarketDataFetchError(
+            f"J-Quants margin-interest failed: HTTP {response.status_code}."
+        )
+
+    return response.json(), response.url
+
+
+def fetch_jquants_investor_types_payload(
+    *,
+    base_url: str,
+    api_key: str,
+    section: str | None = None,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    timeout_seconds: int = 30,
+) -> tuple[dict[str, Any], str]:
+    params: dict[str, str] = {}
+    if section:
+        params["section"] = section
+    if from_date is not None:
+        params["from"] = from_date.isoformat()
+    if to_date is not None:
+        params["to"] = to_date.isoformat()
+
+    url = _jquants_url(base_url, JQUANTS_INVESTOR_TYPES_PATH)
+    response = http_get(
+        url,
+        params=params,
+        headers={"x-api-key": api_key},
+        timeout=timeout_seconds,
+    )
+    if response.status_code >= 400:
+        raise JPMarketDataFetchError(
+            f"J-Quants investor-types failed: HTTP {response.status_code}."
+        )
+
+    return response.json(), response.url
+
+
 def _jquants_statement_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     rows = payload.get("statements")
     if rows is None:
@@ -398,9 +540,9 @@ def _jquants_statement_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _statement_sort_key(row: dict[str, Any]) -> tuple[str, str, str]:
     return (
-        str(_row_value(row, "DisclosedDate", "disclosedDate") or ""),
-        str(_row_value(row, "DisclosedTime", "disclosedTime") or ""),
-        str(_row_value(row, "DisclosureNumber", "disclosureNumber") or ""),
+        str(_row_value(row, "DisclosedDate", "disclosedDate", "DiscDate") or ""),
+        str(_row_value(row, "DisclosedTime", "disclosedTime", "DiscTime") or ""),
+        str(_row_value(row, "DisclosureNumber", "disclosureNumber", "DiscNo") or ""),
     )
 
 
@@ -802,7 +944,11 @@ def parse_yahoo_company_fundamental(
 
 
 def _jquants_local_code(row: dict[str, Any]) -> str | None:
-    return _clean_code(_row_value(row, "LocalCode", "Code", "localCode", "code"))
+    code = _clean_code(_row_value(row, "LocalCode", "Code", "localCode", "code"))
+    if code and re.fullmatch(r"[0-9A-Z]{4}0", code):
+        return code[:4]
+
+    return code
 
 
 def _jquants_int(row: dict[str, Any], *names: str) -> int | None:
@@ -821,10 +967,137 @@ def _jquants_date(row: dict[str, Any], *names: str) -> date | None:
     return _parse_date_value(_row_value(row, *names))
 
 
+def _jquants_data_rows(payload: dict[str, Any], *, resource_name: str) -> list[dict[str, Any]]:
+    rows = payload.get("data")
+    if rows is None:
+        rows = payload.get(resource_name)
+
+    if rows is None:
+        return []
+
+    if not isinstance(rows, list):
+        raise JPMarketDataFetchError(f"J-Quants {resource_name} payload is not a list.")
+
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def parse_jquants_margin_interest_records(
+    payload: dict[str, Any],
+    *,
+    symbol: str,
+    source_url: str | None = None,
+    provider: str = "jquants_margin_interest",
+) -> list[JPMarginInterestRecord]:
+    normalized_symbol = normalize_jp_symbol(symbol)
+    payload_hash = _payload_hash(payload)
+    records: list[JPMarginInterestRecord] = []
+
+    for row in _jquants_data_rows(payload, resource_name="margin_interest"):
+        report_date = _jquants_date(row, "Date", "date")
+        if report_date is None:
+            continue
+
+        records.append(
+            JPMarginInterestRecord(
+                provider=provider,
+                symbol=normalized_symbol,
+                report_date=report_date,
+                short_volume=_jquants_int(row, "ShrtVol", "shortVolume", "short_volume"),
+                long_volume=_jquants_int(row, "LongVol", "longVolume", "long_volume"),
+                short_negotiable_volume=_jquants_int(
+                    row,
+                    "ShrtNegVol",
+                    "shortNegotiableVolume",
+                    "short_negotiable_volume",
+                ),
+                long_negotiable_volume=_jquants_int(
+                    row,
+                    "LongNegVol",
+                    "longNegotiableVolume",
+                    "long_negotiable_volume",
+                ),
+                short_standardized_volume=_jquants_int(
+                    row,
+                    "ShrtStdVol",
+                    "shortStandardizedVolume",
+                    "short_standardized_volume",
+                ),
+                long_standardized_volume=_jquants_int(
+                    row,
+                    "LongStdVol",
+                    "longStandardizedVolume",
+                    "long_standardized_volume",
+                ),
+                issue_type=_jquants_text(row, "IssType", "issueType", "issue_type"),
+                source_url=source_url,
+                raw_payload_hash=payload_hash,
+            )
+        )
+
+    return records
+
+
+def parse_jquants_investor_type_records(
+    payload: dict[str, Any],
+    *,
+    source_url: str | None = None,
+    provider: str = "jquants_investor_types",
+) -> list[JPInvestorTypeRecord]:
+    payload_hash = _payload_hash(payload)
+    records: list[JPInvestorTypeRecord] = []
+
+    for row in _jquants_data_rows(payload, resource_name="investor_types"):
+        section = _jquants_text(row, "Section", "section")
+        if section is None:
+            continue
+
+        records.append(
+            JPInvestorTypeRecord(
+                provider=provider,
+                section=section,
+                published_date=_jquants_date(row, "PubDate", "PublishedDate", "publishedDate"),
+                start_date=_jquants_date(row, "StDate", "StartDate", "startDate"),
+                end_date=_jquants_date(row, "EnDate", "EndDate", "endDate"),
+                proprietary_sell=_jquants_int(row, "PropSell", "proprietarySell"),
+                proprietary_buy=_jquants_int(row, "PropBuy", "proprietaryBuy"),
+                proprietary_total=_jquants_int(row, "PropTot", "proprietaryTotal"),
+                proprietary_balance=_jquants_int(row, "PropBal", "proprietaryBalance"),
+                broker_sell=_jquants_int(row, "BrkSell", "brokerSell"),
+                broker_buy=_jquants_int(row, "BrkBuy", "brokerBuy"),
+                broker_total=_jquants_int(row, "BrkTot", "brokerTotal"),
+                broker_balance=_jquants_int(row, "BrkBal", "brokerBalance"),
+                total_sell=_jquants_int(row, "TotSell", "totalSell"),
+                total_buy=_jquants_int(row, "TotBuy", "totalBuy"),
+                total_traded=_jquants_int(row, "TotTot", "totalTraded"),
+                total_balance=_jquants_int(row, "TotBal", "totalBalance"),
+                individual_sell=_jquants_int(row, "IndSell", "individualSell"),
+                individual_buy=_jquants_int(row, "IndBuy", "individualBuy"),
+                individual_total=_jquants_int(row, "IndTot", "individualTotal"),
+                individual_balance=_jquants_int(row, "IndBal", "individualBalance"),
+                foreign_sell=_jquants_int(row, "FrgnSell", "foreignSell"),
+                foreign_buy=_jquants_int(row, "FrgnBuy", "foreignBuy"),
+                foreign_total=_jquants_int(row, "FrgnTot", "foreignTotal"),
+                foreign_balance=_jquants_int(row, "FrgnBal", "foreignBalance"),
+                investment_trust_sell=_jquants_int(row, "InvTrSell", "investmentTrustSell"),
+                investment_trust_buy=_jquants_int(row, "InvTrBuy", "investmentTrustBuy"),
+                investment_trust_total=_jquants_int(row, "InvTrTot", "investmentTrustTotal"),
+                investment_trust_balance=_jquants_int(row, "InvTrBal", "investmentTrustBalance"),
+                trust_bank_sell=_jquants_int(row, "TrstBnkSell", "trustBankSell"),
+                trust_bank_buy=_jquants_int(row, "TrstBnkBuy", "trustBankBuy"),
+                trust_bank_total=_jquants_int(row, "TrstBnkTot", "trustBankTotal"),
+                trust_bank_balance=_jquants_int(row, "TrstBnkBal", "trustBankBalance"),
+                source_url=source_url,
+                raw_payload_hash=payload_hash,
+            )
+        )
+
+    return records
+
+
 def _period_end_for_growth(row: dict[str, Any]) -> date | None:
     return (
-        _jquants_date(row, "CurrentPeriodEndDate", "currentPeriodEndDate")
-        or _jquants_date(row, "CurrentFiscalYearEndDate", "currentFiscalYearEndDate")
+        _jquants_date(row, "CurrentPeriodEndDate", "currentPeriodEndDate", "CurPerEn")
+        or _jquants_date(row, "CurrentFiscalYearEndDate", "currentFiscalYearEndDate", "CurFYEn")
     )
 
 
@@ -833,7 +1106,7 @@ def _find_previous_jquants_statement(
     latest: dict[str, Any],
 ) -> dict[str, Any] | None:
     latest_code = _jquants_local_code(latest)
-    latest_period = _jquants_text(latest, "TypeOfCurrentPeriod", "typeOfCurrentPeriod")
+    latest_period = _jquants_text(latest, "TypeOfCurrentPeriod", "typeOfCurrentPeriod", "CurPerType")
     latest_end = _period_end_for_growth(latest)
     if latest_code is None or latest_end is None:
         return None
@@ -844,7 +1117,7 @@ def _find_previous_jquants_statement(
             continue
         if _jquants_local_code(row) != latest_code:
             continue
-        if latest_period and _jquants_text(row, "TypeOfCurrentPeriod", "typeOfCurrentPeriod") != latest_period:
+        if latest_period and _jquants_text(row, "TypeOfCurrentPeriod", "typeOfCurrentPeriod", "CurPerType") != latest_period:
             continue
 
         row_end = _period_end_for_growth(row)
@@ -889,23 +1162,25 @@ def parse_jquants_company_fundamental(
         )
 
     previous = _find_previous_jquants_statement(rows, latest)
-    net_sales = _jquants_int(latest, "NetSales", "netSales")
-    operating_profit = _jquants_int(latest, "OperatingProfit", "operatingProfit")
-    ordinary_profit = _jquants_int(latest, "OrdinaryProfit", "ordinaryProfit")
-    profit = _jquants_int(latest, "Profit", "profit")
-    total_assets = _jquants_int(latest, "TotalAssets", "totalAssets")
-    equity = _jquants_int(latest, "Equity", "equity")
-    total_cash = _jquants_int(latest, "CashAndEquivalents", "cashAndEquivalents")
+    net_sales = _jquants_int(latest, "NetSales", "netSales", "Sales", "NCSales")
+    operating_profit = _jquants_int(latest, "OperatingProfit", "operatingProfit", "OP", "NCOP")
+    ordinary_profit = _jquants_int(latest, "OrdinaryProfit", "ordinaryProfit", "OdP", "NCOdP")
+    profit = _jquants_int(latest, "Profit", "profit", "NP", "NCNP")
+    total_assets = _jquants_int(latest, "TotalAssets", "totalAssets", "TA", "NCTA")
+    equity = _jquants_int(latest, "Equity", "equity", "Eq", "NCEq")
+    total_cash = _jquants_int(latest, "CashAndEquivalents", "cashAndEquivalents", "CashEq")
     total_debt = _jquants_int(latest, "InterestBearingDebt", "interestBearingDebt")
     shares_outstanding = _jquants_int(
         latest,
         "NumberOfIssuedAndOutstandingSharesAtTheEndOfFiscalYearIncludingTreasuryStock",
         "numberOfIssuedAndOutstandingSharesAtTheEndOfFiscalYearIncludingTreasuryStock",
+        "ShOutFY",
         "AverageNumberOfShares",
         "averageNumberOfShares",
+        "AvgSh",
     )
-    previous_net_sales = _jquants_int(previous or {}, "NetSales", "netSales")
-    previous_profit = _jquants_int(previous or {}, "Profit", "profit")
+    previous_net_sales = _jquants_int(previous or {}, "NetSales", "netSales", "Sales", "NCSales")
+    previous_profit = _jquants_int(previous or {}, "Profit", "profit", "NP", "NCNP")
 
     return JPCompanyFundamentalRecord(
         provider=provider,
@@ -922,29 +1197,33 @@ def parse_jquants_company_fundamental(
         price_to_book=None,
         dividend_yield=None,
         beta=None,
-        disclosed_date=_jquants_date(latest, "DisclosedDate", "disclosedDate"),
-        fiscal_period=_jquants_text(latest, "TypeOfCurrentPeriod", "typeOfCurrentPeriod"),
-        fiscal_year_end=_jquants_date(latest, "CurrentFiscalYearEndDate", "currentFiscalYearEndDate"),
-        document_type=_jquants_text(latest, "TypeOfDocument", "typeOfDocument"),
-        eps_ttm=_jquants_float(latest, "EarningsPerShare", "earningsPerShare"),
-        forward_eps=_jquants_float(latest, "ForecastEarningsPerShare", "forecastEarningsPerShare"),
+        disclosed_date=_jquants_date(latest, "DisclosedDate", "disclosedDate", "DiscDate"),
+        fiscal_period=_jquants_text(latest, "TypeOfCurrentPeriod", "typeOfCurrentPeriod", "CurPerType"),
+        fiscal_year_end=_jquants_date(latest, "CurrentFiscalYearEndDate", "currentFiscalYearEndDate", "CurFYEn"),
+        document_type=_jquants_text(latest, "TypeOfDocument", "typeOfDocument", "DocType"),
+        eps_ttm=_jquants_float(latest, "EarningsPerShare", "earningsPerShare", "EPS", "NCEPS"),
+        forward_eps=_jquants_float(latest, "ForecastEarningsPerShare", "forecastEarningsPerShare", "FEPS", "FNCEPS"),
         revenue_ttm=net_sales,
         net_sales=net_sales,
         operating_profit=operating_profit,
         ordinary_profit=ordinary_profit,
         profit=profit,
-        forecast_net_sales=_jquants_int(latest, "ForecastNetSales", "forecastNetSales"),
+        forecast_net_sales=_jquants_int(latest, "ForecastNetSales", "forecastNetSales", "FSales", "FNCSales"),
         forecast_operating_profit=_jquants_int(
             latest,
             "ForecastOperatingProfit",
             "forecastOperatingProfit",
+            "FOP",
+            "FNCOP",
         ),
         forecast_ordinary_profit=_jquants_int(
             latest,
             "ForecastOrdinaryProfit",
             "forecastOrdinaryProfit",
+            "FOdP",
+            "FNCOdP",
         ),
-        forecast_profit=_jquants_int(latest, "ForecastProfit", "forecastProfit"),
+        forecast_profit=_jquants_int(latest, "ForecastProfit", "forecastProfit", "FNP", "FNCNP"),
         gross_margin=None,
         operating_margin=_ratio(operating_profit, net_sales),
         profit_margin=_ratio(profit, net_sales),
@@ -958,6 +1237,8 @@ def parse_jquants_company_fundamental(
             latest,
             "EquityToAssetRatio",
             "equityToAssetRatio",
+            "EqAR",
+            "NCEqAR",
         ),
         total_cash=total_cash,
         total_debt=total_debt,
@@ -965,23 +1246,26 @@ def parse_jquants_company_fundamental(
             latest,
             "CashFlowsFromOperatingActivities",
             "cashFlowsFromOperatingActivities",
+            "CFO",
         ),
         investing_cash_flow=_jquants_int(
             latest,
             "CashFlowsFromInvestingActivities",
             "cashFlowsFromInvestingActivities",
+            "CFI",
         ),
         financing_cash_flow=_jquants_int(
             latest,
             "CashFlowsFromFinancingActivities",
             "cashFlowsFromFinancingActivities",
+            "CFF",
         ),
         debt_to_equity=_ratio(total_debt, equity),
         current_ratio=None,
         quick_ratio=None,
         shares_outstanding=shares_outstanding,
-        book_value=_jquants_float(latest, "BookValuePerShare", "bookValuePerShare"),
-        earnings_date=_jquants_date(latest, "DisclosedDate", "disclosedDate"),
+        book_value=_jquants_float(latest, "BookValuePerShare", "bookValuePerShare", "BPS", "NCBPS"),
+        earnings_date=_jquants_date(latest, "DisclosedDate", "disclosedDate", "DiscDate"),
         ex_dividend_date=None,
         source_url=source_url,
         raw_payload_hash=_payload_hash(payload),

@@ -1,6 +1,7 @@
 "use client";
 
 import JobStatusCenter from "@/components/JobStatusCenter";
+import SettingsDock from "@/components/SettingsDock";
 import type { MarketRegion } from "@/components/SidebarWatchlistExplorer";
 import { marketLabel, useT } from "@/i18n";
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
@@ -16,7 +17,7 @@ import type {
 } from "@/types/market";
 import { FormEvent, type MouseEvent as ReactMouseEvent, useMemo, useState } from "react";
 
-type Message = { type: "success" | "error"; text: string } | null;
+type Message = { type: "success" | "warning" | "error"; text: string } | null;
 
 type Props = {
   initialTree: JPWatchlistGroupNode[];
@@ -25,6 +26,7 @@ type Props = {
   selectedGroupId: number | null;
   selectedSymbol: string | null;
   selectedStock: JPStockMasterRead | null;
+  externalStatusMessage?: Message;
   onMarketChange: (market: MarketRegion) => void;
   onSelectGroup?: (group: JPWatchlistGroupNode | null) => void;
   onSelectSymbol: (symbol: string, securityName: string | null) => void;
@@ -101,6 +103,7 @@ export default function JPMarketSidebar({
   selectedGroupId,
   selectedSymbol,
   selectedStock,
+  externalStatusMessage,
   onMarketChange,
   onSelectGroup,
   onSelectSymbol,
@@ -145,6 +148,7 @@ export default function JPMarketSidebar({
   const selectedLabel = selectedStock
     ? `${selectedStock.symbol} ${selectedStock.security_name ?? ""}`.trim()
     : selectedSymbol ?? t("jpMarket.sidebar.noSelection");
+  const statusMessage = externalStatusMessage ?? message;
 
   function countGroupItems(node: JPWatchlistGroupNode): number {
     const directCount = itemsByGroupId.get(node.id)?.length ?? 0;
@@ -684,21 +688,22 @@ export default function JPMarketSidebar({
         )}
       </div>
 
-      {message ? (
-        <div
-          className={[
-            "mx-4 mb-3 border px-3 py-2 text-xs",
-            message.type === "success"
-              ? "border-omi-market-down-border bg-omi-market-down-soft text-omi-market-down"
-              : "border-omi-danger-border bg-omi-danger-soft text-omi-danger",
-          ].join(" ")}
-        >
-          {message.text}
-        </div>
-      ) : null}
-
-      <div className="border-b border-omi-border-subtle px-4 py-4">
+      <div className="space-y-2 border-b border-omi-border-subtle px-4 py-4">
         <JobStatusCenter placement="inline" market="jp" />
+        {statusMessage ? (
+          <div
+            className={[
+              "border px-3 py-2 text-xs",
+              statusMessage.type === "success"
+                ? "border-omi-market-down-border bg-omi-market-down-soft text-omi-market-down"
+                : statusMessage.type === "warning"
+                  ? "border-omi-warning-border bg-omi-warning-soft text-omi-warning"
+                  : "border-omi-danger-border bg-omi-danger-soft text-omi-danger",
+            ].join(" ")}
+          >
+            {statusMessage.text}
+          </div>
+        ) : null}
       </div>
 
       <div className="space-y-4 p-4">
@@ -770,72 +775,78 @@ export default function JPMarketSidebar({
           </div>
         </form>
 
-        <form
-          id="jp-watchlist-stock-form"
-          action="/"
-          method="post"
-          onSubmit={handleStockSubmit}
-          className="space-y-2"
-        >
-          <div className="text-xs font-bold text-omi-text-muted">
-            {t("jpMarket.watchlist.addStock")}
-          </div>
-          <div className="flex gap-2">
+        <div className="space-y-2">
+          <form
+            id="jp-watchlist-stock-form"
+            action="/"
+            method="post"
+            onSubmit={handleStockSubmit}
+            className="space-y-2"
+          >
+            <div className="text-xs font-bold text-omi-text-muted">
+              {t("jpMarket.watchlist.addStock")}
+            </div>
+            <div className="flex gap-2">
+              <input
+                className={inputClass()}
+                name="symbol"
+                placeholder={t("jpMarket.watchlist.symbolPlaceholder")}
+                value={symbolInput}
+                onChange={(event) => setSymbolInput(event.target.value)}
+              />
+              <button
+                type="button"
+                className={buttonClass("ghost")}
+                onClick={() => void findStockSuggestions()}
+                disabled={loading}
+              >
+                {t("common.find")}
+              </button>
+            </div>
+            {stockSuggestions.length > 0 ? (
+              <div className="max-h-28 overflow-y-auto border border-omi-border-subtle bg-omi-surface">
+                {stockSuggestions.map((stock) => (
+                  <button
+                    key={stock.symbol}
+                    type="button"
+                    className="block w-full px-3 py-1.5 text-left text-xs text-omi-text-muted hover:bg-omi-surface-muted"
+                    onClick={() => {
+                      setSymbolInput(stock.symbol);
+                      setStockSuggestions([]);
+                    }}
+                  >
+                    {stock.symbol} {stock.security_name ?? ""} / {stock.market_segment ?? "-"}
+                  </button>
+                ))}
+              </div>
+            ) : null}
             <input
               className={inputClass()}
-              name="symbol"
-              placeholder={t("jpMarket.watchlist.symbolPlaceholder")}
-              value={symbolInput}
-              onChange={(event) => setSymbolInput(event.target.value)}
+              name="note"
+              placeholder={t("jpMarket.watchlist.notePlaceholder")}
+              value={stockNote}
+              onChange={(event) => setStockNote(event.target.value)}
             />
+            <input
+              className={inputClass()}
+              name="tags"
+              placeholder={t("jpMarket.watchlist.tagsPlaceholder")}
+              value={stockTags}
+              onChange={(event) => setStockTags(event.target.value)}
+            />
+          </form>
+          <div className="flex items-center justify-between gap-2">
             <button
-              type="button"
-              className={buttonClass("ghost")}
-              onClick={() => void findStockSuggestions()}
-              disabled={loading}
+              type="submit"
+              form="jp-watchlist-stock-form"
+              className={buttonClass("primary")}
+              disabled={loading || currentGroupId === null}
             >
-              {t("common.find")}
+              {t("common.addStock")}
             </button>
+            <SettingsDock placement="inline" />
           </div>
-          {stockSuggestions.length > 0 ? (
-            <div className="max-h-28 overflow-y-auto border border-omi-border-subtle bg-omi-surface">
-              {stockSuggestions.map((stock) => (
-                <button
-                  key={stock.symbol}
-                  type="button"
-                  className="block w-full px-3 py-1.5 text-left text-xs text-omi-text-muted hover:bg-omi-surface-muted"
-                  onClick={() => {
-                    setSymbolInput(stock.symbol);
-                    setStockSuggestions([]);
-                  }}
-                >
-                  {stock.symbol} {stock.security_name ?? ""} / {stock.market_segment ?? "-"}
-                </button>
-              ))}
-            </div>
-          ) : null}
-          <input
-            className={inputClass()}
-            name="note"
-            placeholder={t("jpMarket.watchlist.notePlaceholder")}
-            value={stockNote}
-            onChange={(event) => setStockNote(event.target.value)}
-          />
-          <input
-            className={inputClass()}
-            name="tags"
-            placeholder={t("jpMarket.watchlist.tagsPlaceholder")}
-            value={stockTags}
-            onChange={(event) => setStockTags(event.target.value)}
-          />
-          <button
-            type="submit"
-            className={buttonClass("primary")}
-            disabled={loading || currentGroupId === null}
-          >
-            {t("common.addStock")}
-          </button>
-        </form>
+        </div>
       </div>
     </aside>
   );

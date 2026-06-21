@@ -1717,11 +1717,16 @@ export const zhTW = {
       largeShareholding: "大量保有",
       disclosedDate: "開示日",
       fiscalPeriod: "期別",
+      fiscalYearEnd: "決算期末",
+      documentType: "資料類型",
+      fetchedAt: "取得",
       netSales: "売上高",
       operatingProfit: "営業利益",
       ordinaryProfit: "経常利益",
       profit: "純利益",
       forecastNetSales: "予想売上高",
+      forecastOperatingProfit: "予想営業利益",
+      forecastOrdinaryProfit: "予想経常利益",
       forecastProfit: "予想純利益",
       revenueTtm: "近四季売上高",
       revenueGrowth: "売上成長率",
@@ -1736,8 +1741,10 @@ export const zhTW = {
       epsTtm: "近四季 EPS",
       forwardEps: "予想 EPS",
       pe: "PER",
+      forwardPe: "予想 PER",
       pb: "PBR",
       bookValue: "BPS",
+      sharesOutstanding: "発行済株式数",
       cashAndEquivalents: "現金同等物",
       dividendYield: "配当利回り",
       roe: "ROE",
@@ -1745,6 +1752,8 @@ export const zhTW = {
       profitMargin: "淨利率",
       debtToEquity: "D/E",
       currentRatio: "流動比率",
+      operatingCashFlow: "営業 CF",
+      freeCashFlow: "自由 CF",
     },
     fundamentals: {
       eyebrow: "基本面",
@@ -1766,6 +1775,15 @@ export const zhTW = {
         "{symbol} 基本面已更新：取得 {fetched}，新增 {inserted}，更新 {updated}",
       fundamentalRefreshPending:
         "尚未設定 J-Quants 憑證，業績與財務插槽已保留。",
+      resourceRefreshSuccess:
+        "{symbol} {resource}已更新：取得 {fetched}，新增 {inserted}，更新 {updated}",
+      resourceRefreshEmpty:
+        "{symbol} {resource}目前沒有可用資料，稍後可再更新。",
+      resourceRefreshUnavailable:
+        "{resource}目前的 J-Quants 方案或 API key 尚未開通，已保留插槽。",
+      resourceRefreshRateLimited:
+        "{resource}更新已達 J-Quants 速率上限，請稍候再更新。",
+      resourceRefreshFailed: "更新{resource}失敗",
     },
     errors: {
       listLoadFailed: "讀取日股清單失敗",

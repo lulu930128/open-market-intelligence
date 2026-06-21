@@ -29,7 +29,7 @@ import {
   type ChartDrawingStorageState,
 } from "@/components/professionalChartDrawing";
 import { timeframeLabel, useT } from "@/i18n";
-import { fetchJson } from "@/lib/api";
+import { fetchJson, requestJson } from "@/lib/api";
 import { getJpMarketIndexConfig } from "@/lib/jpMarketIndices";
 import type {
   ChartPoint,
@@ -37,12 +37,13 @@ import type {
   JPOhlcChartRead,
   JPOhlcPointRead,
   JPResourceSummaryRead,
+  JPResourceRefreshResultRead,
   JPStockMasterRead,
 } from "@/types/market";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
-type Message = { type: "success" | "error"; text: string } | null;
+type Message = { type: "success" | "warning" | "error"; text: string } | null;
 type JPChartTimeframe = "today" | "daily" | "weekly" | "monthly";
 type JPProfessionalTimeframe = Exclude<JPChartTimeframe, "today">;
 type JPDataSlot = "demand" | "investors" | "disclosures" | "performance" | "financials";
@@ -53,6 +54,7 @@ type Props = {
   watchlistRankingPanel?: ReactNode;
   onChartFocusModeChange?: (enabled: boolean) => void;
   onSelectStock: (stock: JPStockMasterRead | null) => void;
+  onStatusMessage?: (message: Message) => void;
 };
 
 const timeframeOptions: JPChartTimeframe[] = ["today", "daily", "weekly", "monthly"];
@@ -106,6 +108,10 @@ function apiErrorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
 }
 
+function isRefreshSuccess(status: string | null | undefined) {
+  return status === "success" || status === "partial_success";
+}
+
 function normalizeSymbolInput(value: string) {
   const input = value.trim().toUpperCase();
   if (!input) return "";
@@ -152,6 +158,12 @@ function formatSignedNumber(value: number | null | undefined) {
   return `${sign}${formatNumber(value, 2)}`;
 }
 
+function formatSignedVolume(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "-";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${formatVolume(value)}`;
+}
+
 function formatSignedPct(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
   return `${formatSignedNumber(value)}%`;
@@ -162,6 +174,23 @@ function formatRatioAsPct(value: number | null | undefined) {
 
   const normalized = Math.abs(value) <= 1 ? value * 100 : value;
   return `${formatNumber(normalized, 2)}%`;
+}
+
+function isFiniteNumber(value: number | null | undefined): value is number {
+  return value !== null && value !== undefined && Number.isFinite(value);
+}
+
+function positiveRatio(numerator: number | null | undefined, denominator: number | null | undefined) {
+  if (!isFiniteNumber(numerator) || !isFiniteNumber(denominator) || denominator <= 0) {
+    return null;
+  }
+
+  return numerator / denominator;
+}
+
+function formatPlainRatio(value: number | null | undefined) {
+  if (!isFiniteNumber(value)) return "-";
+  return formatNumber(value, 2);
 }
 
 function priceToneClass(value: number | null | undefined) {
@@ -187,6 +216,18 @@ function resourceStatusLabelKey(status: string | null | undefined) {
   if (status === "stale") return "jpMarket.dataSlots.statusLabels.stale";
   if (status === "loading") return "jpMarket.dataSlots.statusLabels.loading";
   return "jpMarket.dataSlots.statusLabels.planned";
+}
+
+function formatFundamentalProvider(provider: string | null | undefined) {
+  if (!provider) return "-";
+  return provider
+    .split("+")
+    .map((item) => {
+      if (item === "jquants_statements") return "J-Quants";
+      if (item === "yahoo_quote_summary") return "Yahoo";
+      return item;
+    })
+    .join(" + ");
 }
 
 function toChartPoint(point: JPOhlcPointRead): ChartPoint {
@@ -255,13 +296,6 @@ function MetricCell({ label, value }: { label: string; value: string }) {
   );
 }
 
-function messageClass(message: Message) {
-  if (!message) return "";
-  return message.type === "success"
-    ? "border-omi-market-down-border bg-omi-market-down-soft text-omi-market-down"
-    : "border-omi-danger-border bg-omi-danger-soft text-omi-danger";
-}
-
 async function fetchOptionalJson<T>(
   path: string,
   params?: Record<string, string | number | boolean>
@@ -283,9 +317,13 @@ export default function JPMarketPanel({
   watchlistRankingPanel,
   onChartFocusModeChange,
   onSelectStock,
+  onStatusMessage,
 }: Props) {
   const t = useT();
   const onSelectStockRef = useRef(onSelectStock);
+  const onStatusMessageRef = useRef(onStatusMessage);
+  const fundamentalAutoRefreshAttemptedRef = useRef<Set<string>>(new Set());
+  const resourceAutoRefreshAttemptedRef = useRef<Set<string>>(new Set());
   const [selectedStock, setSelectedStock] = useState<JPStockMasterRead | null>(null);
   const [chart, setChart] = useState<JPOhlcChartRead | null>(null);
   const [resourceSummary, setResourceSummary] = useState<JPResourceSummaryRead | null>(null);
@@ -318,13 +356,13 @@ export default function JPMarketPanel({
   const [activeDataSlot, setActiveDataSlot] = useState<JPDataSlot>("demand");
   const [stockState, setStockState] = useState<LoadState>("idle");
   const [dataState, setDataState] = useState<LoadState>("idle");
-  const [message, setMessage] = useState<Message>(null);
 
   const chartData = useMemo<ChartPoint[]>(
     () => chart?.points.map(toChartPoint) ?? [],
     [chart]
   );
   const latest = latestPoint(chartData);
+  const latestClose = latest?.close ?? null;
   const change = changeValue(chartData);
   const pct = changePct(chartData);
   const ma20 = useMemo(() => movingAverage(chartData, "close", 20), [chartData]);
@@ -389,20 +427,56 @@ export default function JPMarketPanel({
       }),
     [dataState, resourceSummary, t]
   );
+  const activeResourceSlot = useMemo(
+    () => resourceSummary?.slots.find((item) => item.key === activeDataSlot) ?? null,
+    [activeDataSlot, resourceSummary]
+  );
   const activeSlotDetail = useMemo(() => {
     const hasFundamentalSlot = activeDataSlot === "performance" || activeDataSlot === "financials";
+    const provider = formatFundamentalProvider(fundamental?.provider);
+    const disclosedDate = formatDate(fundamental?.disclosed_date);
+    const fetchedAt = formatDate(fundamental?.fetched_at);
 
     return {
       eyebrow: t("jpMarket.slotDetails.eyebrow"),
       title: t(`jpMarket.slotDetails.${activeDataSlot}.title`),
       subtitle:
         hasFundamentalSlot && fundamental
-          ? `${fundamental.provider} · ${formatDate(fundamental.fetched_at)}`
+          ? `${provider} · ${disclosedDate} · ${fundamental.fiscal_period ?? "-"} · ${t(
+              "jpMarket.slotMetrics.fetchedAt"
+            )} ${fetchedAt}`
           : t(`jpMarket.slotDetails.${activeDataSlot}.empty`),
     };
   }, [activeDataSlot, fundamental, t]);
 
   const activeSlotMetrics = useMemo(() => {
+    const slotMetrics = activeResourceSlot?.metrics ?? {};
+    const metricNumber = (key: string) => {
+      const value = slotMetrics[key];
+      return typeof value === "number" && Number.isFinite(value) ? value : null;
+    };
+    const metricText = (key: string) => {
+      const value = slotMetrics[key];
+      if (typeof value === "string" && value.trim()) return value;
+      if (typeof value === "number" && Number.isFinite(value)) return formatNumber(value, 0);
+      return "-";
+    };
+    const derivedMarketCap =
+      fundamental?.market_cap ??
+      (isFiniteNumber(latestClose) && isFiniteNumber(fundamental?.shares_outstanding)
+        ? latestClose * fundamental.shares_outstanding
+        : null);
+    const trailingPe =
+      fundamental?.trailing_pe ?? positiveRatio(latestClose, fundamental?.eps_ttm);
+    const forwardPe =
+      fundamental?.forward_pe ?? positiveRatio(latestClose, fundamental?.forward_eps);
+    const priceToBook =
+      fundamental?.price_to_book ?? positiveRatio(latestClose, fundamental?.book_value);
+    const freeCashFlow =
+      isFiniteNumber(fundamental?.operating_cash_flow) && isFiniteNumber(fundamental?.investing_cash_flow)
+        ? fundamental.operating_cash_flow + fundamental.investing_cash_flow
+        : null;
+
     if (activeDataSlot === "performance") {
       return [
         {
@@ -412,6 +486,14 @@ export default function JPMarketPanel({
         {
           label: t("jpMarket.slotMetrics.fiscalPeriod"),
           value: fundamental?.fiscal_period ?? "-",
+        },
+        {
+          label: t("jpMarket.slotMetrics.fiscalYearEnd"),
+          value: formatDate(fundamental?.fiscal_year_end),
+        },
+        {
+          label: t("jpMarket.slotMetrics.documentType"),
+          value: fundamental?.document_type ?? "-",
         },
         {
           label: t("jpMarket.slotMetrics.netSales"),
@@ -435,6 +517,14 @@ export default function JPMarketPanel({
         {
           label: t("jpMarket.slotMetrics.forecastNetSales"),
           value: formatCompactMoney(fundamental?.forecast_net_sales, fundamental?.currency),
+        },
+        {
+          label: t("jpMarket.slotMetrics.forecastOperatingProfit"),
+          value: formatCompactMoney(fundamental?.forecast_operating_profit, fundamental?.currency),
+        },
+        {
+          label: t("jpMarket.slotMetrics.forecastOrdinaryProfit"),
+          value: formatCompactMoney(fundamental?.forecast_ordinary_profit, fundamental?.currency),
         },
         {
           label: t("jpMarket.slotMetrics.forecastProfit"),
@@ -466,12 +556,20 @@ export default function JPMarketPanel({
           value: formatCompactMoney(fundamental?.total_assets, fundamental?.currency),
         },
         {
-          label: t("jpMarket.slotMetrics.equity"),
-          value: formatCompactMoney(fundamental?.equity, fundamental?.currency),
+          label: t("jpMarket.slotMetrics.marketCap"),
+          value: formatCompactMoney(derivedMarketCap, fundamental?.currency),
         },
         {
-          label: t("jpMarket.slotMetrics.equityRatio"),
-          value: formatRatioAsPct(fundamental?.equity_to_asset_ratio),
+          label: t("jpMarket.slotMetrics.pe"),
+          value: formatPlainRatio(trailingPe),
+        },
+        {
+          label: t("jpMarket.slotMetrics.forwardPe"),
+          value: formatPlainRatio(forwardPe),
+        },
+        {
+          label: t("jpMarket.slotMetrics.pb"),
+          value: formatPlainRatio(priceToBook),
         },
         {
           label: t("jpMarket.slotMetrics.epsTtm"),
@@ -484,6 +582,18 @@ export default function JPMarketPanel({
         {
           label: t("jpMarket.slotMetrics.bookValue"),
           value: formatNumber(fundamental?.book_value, 2),
+        },
+        {
+          label: t("jpMarket.slotMetrics.equity"),
+          value: formatCompactMoney(fundamental?.equity, fundamental?.currency),
+        },
+        {
+          label: t("jpMarket.slotMetrics.equityRatio"),
+          value: formatRatioAsPct(fundamental?.equity_to_asset_ratio),
+        },
+        {
+          label: t("jpMarket.slotMetrics.sharesOutstanding"),
+          value: formatVolume(fundamental?.shares_outstanding),
         },
         {
           label: t("jpMarket.slotMetrics.cashAndEquivalents"),
@@ -502,27 +612,55 @@ export default function JPMarketPanel({
           value: formatRatioAsPct(fundamental?.debt_to_equity),
         },
         {
-          label: t("jpMarket.slotMetrics.marketCap"),
-          value: formatCompactMoney(fundamental?.market_cap, fundamental?.currency),
+          label: t("jpMarket.slotMetrics.operatingCashFlow"),
+          value: formatCompactMoney(fundamental?.operating_cash_flow, fundamental?.currency),
+        },
+        {
+          label: t("jpMarket.slotMetrics.freeCashFlow"),
+          value: formatCompactMoney(freeCashFlow, fundamental?.currency),
         },
       ];
     }
 
     if (activeDataSlot === "demand") {
       return [
-        { label: t("jpMarket.slotMetrics.marginBalance"), value: "-" },
-        { label: t("jpMarket.slotMetrics.shortSelling"), value: "-" },
-        { label: t("jpMarket.slotMetrics.lendingBalance"), value: "-" },
-        { label: t("jpMarket.slotMetrics.ownershipDistribution"), value: "-" },
+        {
+          label: t("jpMarket.slotMetrics.marginBalance"),
+          value: formatVolume(metricNumber("margin_long_balance")),
+        },
+        {
+          label: t("jpMarket.slotMetrics.shortSelling"),
+          value: formatVolume(metricNumber("margin_short_balance")),
+        },
+        {
+          label: t("jpMarket.slotMetrics.lendingBalance"),
+          value: formatSignedVolume(metricNumber("margin_net_balance")),
+        },
+        {
+          label: t("jpMarket.slotMetrics.ownershipDistribution"),
+          value: metricText("margin_issue_type"),
+        },
       ];
     }
 
     if (activeDataSlot === "investors") {
       return [
-        { label: t("jpMarket.slotMetrics.foreignInvestors"), value: "-" },
-        { label: t("jpMarket.slotMetrics.trustBanks"), value: "-" },
-        { label: t("jpMarket.slotMetrics.individuals"), value: "-" },
-        { label: t("jpMarket.slotMetrics.proprietary"), value: "-" },
+        {
+          label: t("jpMarket.slotMetrics.foreignInvestors"),
+          value: formatSignedVolume(metricNumber("foreign_balance")),
+        },
+        {
+          label: t("jpMarket.slotMetrics.trustBanks"),
+          value: formatSignedVolume(metricNumber("trust_bank_balance")),
+        },
+        {
+          label: t("jpMarket.slotMetrics.individuals"),
+          value: formatSignedVolume(metricNumber("individual_balance")),
+        },
+        {
+          label: t("jpMarket.slotMetrics.proprietary"),
+          value: formatSignedVolume(metricNumber("proprietary_balance")),
+        },
       ];
     }
 
@@ -532,11 +670,15 @@ export default function JPMarketPanel({
       { label: t("jpMarket.slotMetrics.forecastRevision"), value: "-" },
       { label: t("jpMarket.slotMetrics.largeShareholding"), value: "-" },
     ];
-  }, [activeDataSlot, fundamental, t]);
+  }, [activeDataSlot, activeResourceSlot, fundamental, latestClose, t]);
 
   useEffect(() => {
     onSelectStockRef.current = onSelectStock;
   }, [onSelectStock]);
+
+  useEffect(() => {
+    onStatusMessageRef.current = onStatusMessage;
+  }, [onStatusMessage]);
 
   useEffect(() => {
     onChartFocusModeChange?.(chartFocusMode);
@@ -638,6 +780,10 @@ export default function JPMarketPanel({
     }),
     [professionalTimeframe, selectedChartSymbol]
   );
+
+  const publishStatus = useCallback((nextMessage: Message) => {
+    onStatusMessageRef.current?.(nextMessage);
+  }, []);
 
   function handleTimeframeChange(nextTimeframe: JPChartTimeframe) {
     setTimeframe(nextTimeframe);
@@ -840,22 +986,88 @@ export default function JPMarketPanel({
           throw chartResult.reason;
         }
 
+        let nextResourceSummary =
+          resourceResult.status === "fulfilled" ? resourceResult.value : null;
+        let nextFundamental =
+          fundamentalResult.status === "fulfilled" ? fundamentalResult.value : null;
+        let nextMessage: Message = null;
+
+        if (
+          !isIndexSymbol &&
+          nextFundamental === null &&
+          !fundamentalAutoRefreshAttemptedRef.current.has(symbol)
+        ) {
+          fundamentalAutoRefreshAttemptedRef.current.add(symbol);
+
+          try {
+            const refreshResult = await requestJson<JPResourceRefreshResultRead>(
+              `/api/jp-market/fundamentals/${encodeURIComponent(symbol)}/refresh`,
+              { method: "POST" }
+            );
+
+            if (isRefreshSuccess(refreshResult.status)) {
+              const [refreshedResourceResult, refreshedFundamentalResult] =
+                await Promise.allSettled([
+                  fetchJson<JPResourceSummaryRead>(
+                    `/api/jp-market/resources/${encodeURIComponent(symbol)}/summary`
+                  ),
+                  fetchOptionalJson<JPCompanyFundamentalRead>(
+                    `/api/jp-market/fundamentals/${encodeURIComponent(symbol)}`
+                  ),
+                ]);
+
+              if (refreshedResourceResult.status === "fulfilled") {
+                nextResourceSummary = refreshedResourceResult.value;
+              }
+              if (refreshedFundamentalResult.status === "fulfilled") {
+                nextFundamental = refreshedFundamentalResult.value;
+              }
+
+              nextMessage = {
+                type: "success",
+                text: t("jpMarket.messages.fundamentalRefreshSuccess", {
+                  symbol: refreshResult.symbol,
+                  fetched: refreshResult.fetched_count,
+                  inserted: refreshResult.inserted_count,
+                  updated: refreshResult.updated_count,
+                }),
+              };
+            } else if (refreshResult.status === "skipped") {
+              nextMessage = {
+                type: "error",
+                text: t("jpMarket.messages.fundamentalRefreshPending"),
+              };
+            }
+          } catch (refreshError) {
+            nextMessage = {
+              type: "error",
+              text: `${t("jpMarket.messages.fundamentalRefreshFailed")}: ${apiErrorMessage(
+                refreshError,
+                t("jpMarket.errors.dataLoadFailed")
+              )}`,
+            };
+          }
+        }
+
         setChart(chartResult.value);
-        setResourceSummary(resourceResult.status === "fulfilled" ? resourceResult.value : null);
-        setFundamental(fundamentalResult.status === "fulfilled" ? fundamentalResult.value : null);
+        setResourceSummary(nextResourceSummary);
+        setFundamental(nextFundamental);
         setDataState("success");
+        if (nextMessage) {
+          publishStatus(nextMessage);
+        }
       } catch (error) {
         setChart(null);
         setResourceSummary(null);
         setFundamental(null);
         setDataState("error");
-        setMessage({
+        publishStatus({
           type: "error",
           text: apiErrorMessage(error, t("jpMarket.errors.dataLoadFailed")),
         });
       }
     },
-    [t]
+    [publishStatus, t]
   );
 
   const loadStockBySymbol = useCallback(
@@ -864,7 +1076,7 @@ export default function JPMarketPanel({
       if (!normalizedSymbol) return;
 
       setStockState("loading");
-      setMessage(null);
+      publishStatus(null);
 
       try {
         let stock: JPStockMasterRead;
@@ -916,14 +1128,116 @@ export default function JPMarketPanel({
         setStockState("error");
         setDataState("idle");
         onSelectStockRef.current(null);
-        setMessage({
+        publishStatus({
           type: "error",
           text: apiErrorMessage(error, t("jpMarket.errors.masterLoadFailed")),
         });
       }
     },
-    [loadStockData, t]
+    [loadStockData, publishStatus, t]
   );
+
+  const refreshActiveResourceSlot = useCallback(
+    async (symbol: string, slotKey: JPDataSlot) => {
+      const resourceLabel = t(`jpMarket.dataSlots.${slotKey}.label`);
+
+      try {
+        const refreshResult = await requestJson<JPResourceRefreshResultRead>(
+          `/api/jp-market/resources/${encodeURIComponent(symbol)}/refresh`,
+          { method: "POST" },
+          { resource: slotKey }
+        );
+
+        if (isRefreshSuccess(refreshResult.status) || refreshResult.status === "empty") {
+          const refreshedResourceSummary = await fetchJson<JPResourceSummaryRead>(
+            `/api/jp-market/resources/${encodeURIComponent(symbol)}/summary`
+          );
+          setResourceSummary(refreshedResourceSummary);
+        }
+
+        if (isRefreshSuccess(refreshResult.status)) {
+          publishStatus({
+            type: "success",
+            text: t("jpMarket.messages.resourceRefreshSuccess", {
+              resource: resourceLabel,
+              symbol: refreshResult.symbol,
+              fetched: refreshResult.fetched_count,
+              inserted: refreshResult.inserted_count,
+              updated: refreshResult.updated_count,
+            }),
+          });
+          return;
+        }
+
+        if (refreshResult.status === "rate_limited") {
+          publishStatus({
+            type: "warning",
+            text: t("jpMarket.messages.resourceRefreshRateLimited", {
+              resource: resourceLabel,
+            }),
+          });
+          return;
+        }
+
+        if (refreshResult.status === "skipped") {
+          publishStatus({
+            type: "warning",
+            text: t("jpMarket.messages.resourceRefreshUnavailable", {
+              resource: resourceLabel,
+            }),
+          });
+          return;
+        }
+
+        if (refreshResult.status === "empty") {
+          publishStatus({
+            type: "warning",
+            text: t("jpMarket.messages.resourceRefreshEmpty", {
+              resource: resourceLabel,
+              symbol: refreshResult.symbol,
+            }),
+          });
+          return;
+        }
+
+        publishStatus({
+          type: "error",
+          text: `${t("jpMarket.messages.resourceRefreshFailed", {
+            resource: resourceLabel,
+          })}: ${refreshResult.message}`,
+        });
+      } catch (error) {
+        publishStatus({
+          type: "error",
+          text: `${t("jpMarket.messages.resourceRefreshFailed", {
+            resource: resourceLabel,
+          })}: ${apiErrorMessage(error, t("jpMarket.errors.dataLoadFailed"))}`,
+        });
+      }
+    },
+    [publishStatus, t]
+  );
+
+  useEffect(() => {
+    if (!selectedStock || !resourceSummary) return;
+    if (stockState === "loading" || dataState === "loading") return;
+    if (activeDataSlot !== "demand" && activeDataSlot !== "investors") return;
+    if (!activeResourceSlot || activeResourceSlot.status !== "empty") return;
+
+    const refreshKey = `${selectedStock.symbol}:${activeDataSlot}`;
+    if (resourceAutoRefreshAttemptedRef.current.has(refreshKey)) return;
+
+    resourceAutoRefreshAttemptedRef.current.add(refreshKey);
+    void refreshActiveResourceSlot(selectedStock.symbol, activeDataSlot);
+  }, [
+    activeDataSlot,
+    activeResourceSlot,
+    dataState,
+    refreshActiveResourceSlot,
+    resourceSummary,
+    selectedStock,
+    stockState,
+  ]);
 
   useEffect(() => {
     if (!initialSymbol) {
@@ -947,16 +1261,10 @@ export default function JPMarketPanel({
           <h2 className="mt-2 text-2xl font-bold text-omi-text-strong">
             {t("jpMarket.empty.noStockSelected")}
           </h2>
-          <p className="mt-2 text-sm text-omi-text-muted">
-            {t("jpMarket.empty.selectStockPrompt")}
-          </p>
-        </div>
-
-        {message ? (
-          <div className={`mt-5 border px-3 py-2 text-xs ${messageClass(message)}`}>
-            {message.text}
-          </div>
-        ) : null}
+        <p className="mt-2 text-sm text-omi-text-muted">
+          {t("jpMarket.empty.selectStockPrompt")}
+        </p>
+      </div>
       </section>
     );
   }
@@ -1019,13 +1327,7 @@ export default function JPMarketPanel({
               setChartDrawingTool("cursor");
               setChartFocusMode(false);
             }}
-            message={
-              message ? (
-                <div className={`border-b px-5 py-3 text-sm ${messageClass(message)}`}>
-                  {message.text}
-                </div>
-              ) : null
-            }
+            message={null}
             chartReady={professionalChartReady}
             emptyState={
               <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle text-sm text-omi-text-muted">
@@ -1137,12 +1439,6 @@ export default function JPMarketPanel({
             </div>
           </div>
 
-          {message ? (
-            <div className={`border-t px-5 py-3 text-sm ${messageClass(message)}`}>
-              {message.text}
-            </div>
-          ) : null}
-
           {chartData.length > 0 ? (
             <StockKLineChart
               chartData={chartData}
@@ -1204,39 +1500,43 @@ export default function JPMarketPanel({
           </div>
         </section>
 
-        <ResourceSlotTabs
-          activeKey={activeDataSlot}
-          labels={resourceSlotLabels}
-          onActiveKeyChange={setActiveDataSlot}
-          slots={resourceSlotItems}
-          statusLabel={(status) => t(resourceStatusLabelKey(status))}
-          statusToneClass={resourceStatusClass}
-          footer={
-            <>
-              <div className="border-b border-omi-border-subtle px-5 py-4 text-sm">
-                <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
-                  {activeSlotDetail.eyebrow}
+        <div className="h-2 border-y border-omi-border-subtle bg-omi-surface-muted" aria-hidden="true" />
+
+        <div className="bg-omi-surface">
+          <ResourceSlotTabs
+            activeKey={activeDataSlot}
+            labels={resourceSlotLabels}
+            onActiveKeyChange={setActiveDataSlot}
+            slots={resourceSlotItems}
+            statusLabel={(status) => t(resourceStatusLabelKey(status))}
+            statusToneClass={resourceStatusClass}
+            footer={
+              <>
+                <div className="border-b border-omi-border-subtle px-5 py-4 text-sm">
+                  <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
+                    {activeSlotDetail.eyebrow}
+                  </div>
+                  <h3 className="mt-1 text-lg font-bold text-omi-text-strong">
+                    {activeSlotDetail.title}
+                  </h3>
+                  <div className="mt-1 text-xs text-omi-text-muted">
+                    {activeSlotDetail.subtitle}
+                  </div>
                 </div>
-                <h3 className="mt-1 text-lg font-bold text-omi-text-strong">
-                  {activeSlotDetail.title}
-                </h3>
-                <div className="mt-1 text-xs text-omi-text-muted">
-                  {activeSlotDetail.subtitle}
+                <div className="grid grid-cols-2 gap-px bg-omi-border-subtle">
+                  {activeSlotMetrics.map((item) => (
+                    <MetricCell key={item.label} label={item.label} value={item.value} />
+                  ))}
                 </div>
-              </div>
-              <div className="grid grid-cols-2 gap-px bg-omi-border-subtle">
-                {activeSlotMetrics.map((item) => (
-                  <MetricCell key={item.label} label={item.label} value={item.value} />
-                ))}
-              </div>
-              <div className="grid grid-cols-2 gap-px bg-omi-border-subtle">
-                {headerMetrics.map((item) => (
-                  <MetricCell key={item.label} label={item.label} value={item.value} />
-                ))}
-              </div>
-            </>
-          }
-        />
+                <div className="grid grid-cols-2 gap-px bg-omi-border-subtle">
+                  {headerMetrics.map((item) => (
+                    <MetricCell key={item.label} label={item.label} value={item.value} />
+                  ))}
+                </div>
+              </>
+            }
+          />
+        </div>
       </aside>
       ) : null}
     </section>

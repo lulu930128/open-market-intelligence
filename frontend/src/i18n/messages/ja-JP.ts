@@ -1096,11 +1096,16 @@ export const jaJP = {
       largeShareholding: "大量保有",
       disclosedDate: "開示日",
       fiscalPeriod: "期別",
+      fiscalYearEnd: "決算期末",
+      documentType: "資料種別",
+      fetchedAt: "取得",
       netSales: "売上高",
       operatingProfit: "営業利益",
       ordinaryProfit: "経常利益",
       profit: "純利益",
       forecastNetSales: "予想売上高",
+      forecastOperatingProfit: "予想営業利益",
+      forecastOrdinaryProfit: "予想経常利益",
       forecastProfit: "予想純利益",
       revenueTtm: "直近12か月売上高",
       revenueGrowth: "売上成長率",
@@ -1115,8 +1120,10 @@ export const jaJP = {
       epsTtm: "直近12か月 EPS",
       forwardEps: "予想 EPS",
       pe: "PER",
+      forwardPe: "予想 PER",
       pb: "PBR",
       bookValue: "BPS",
+      sharesOutstanding: "発行済株式数",
       cashAndEquivalents: "現金同等物",
       dividendYield: "配当利回り",
       roe: "ROE",
@@ -1124,6 +1131,8 @@ export const jaJP = {
       profitMargin: "純利益率",
       debtToEquity: "D/E",
       currentRatio: "流動比率",
+      operatingCashFlow: "営業 CF",
+      freeCashFlow: "フリー CF",
     },
     fundamentals: {
       eyebrow: "基本情報",
@@ -1145,6 +1154,15 @@ export const jaJP = {
         "{symbol} 基本情報更新完了: 取得 {fetched}、新規 {inserted}、更新 {updated}",
       fundamentalRefreshPending:
         "J-Quants 認証情報が未設定です。業績と財務の枠は予約済みです。",
+      resourceRefreshSuccess:
+        "{symbol} {resource}更新完了: 取得 {fetched}、新規 {inserted}、更新 {updated}",
+      resourceRefreshEmpty:
+        "{symbol} の {resource} データはまだありません。時間をおいて再更新してください。",
+      resourceRefreshUnavailable:
+        "{resource} は現在の J-Quants プランまたは API key では利用できません。枠は予約済みです。",
+      resourceRefreshRateLimited:
+        "{resource} は J-Quants のレート上限に達しました。時間をおいて再更新してください。",
+      resourceRefreshFailed: "{resource} の更新に失敗しました",
     },
     errors: {
       listLoadFailed: "日本株リストの読み込みに失敗しました",

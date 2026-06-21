@@ -6,7 +6,7 @@ By default it exposes one public OMI tool and forwards calls to the local
 FastAPI backend:
 
 ```text
-MCP client -> agents/omi_mcp_server/server.py -> http://127.0.0.1:8300/api/ai/...
+MCP client -> agents/omi_mcp_server/server.py -> http://127.0.0.1:8400/api/ai/...
 ```
 
 Run it after the OMI backend is running:
@@ -18,7 +18,7 @@ python agents/omi_mcp_server/server.py
 Optional environment variable:
 
 ```powershell
-$env:OMI_API_BASE_URL = "http://127.0.0.1:8300"
+$env:OMI_API_BASE_URL = "http://127.0.0.1:8400"
 $env:OMI_API_TIMEOUT_SECONDS = "180"
 $env:OMI_MCP_EXPOSE_INTERNAL_TOOLS = "false"
 $env:OMI_MCP_AI_TRUST_TOKEN = ""
@@ -36,15 +36,20 @@ watchlist, market, or freshness context and chooses `data_only`, `brief`, `analy
 so it requires a backend server-side trusted request and `allow_llm=true`.
 Report mode calls OpenAI and persists an AI report, so it additionally requires
 `allow_write=true`.
+OMI can autonomously refresh external market data through configured external APIs
+when trusted callers set `allow_external_fetch=true` with a bounded `tool_budget`.
+The MCP client does not call market APIs directly; it sends the request to OMI,
+and the backend chooses from allowlisted market-data tools, enforces the budget,
+executes the tools, updates the local evidence cache when allowed by refresh
+policy, and returns `tool_plan` / `tool_runs` evidence.
+
 For US/ADR targets, trusted MCP calls default to a small external-fetch budget
 when the request clearly looks like a US stock question, such as `target.type=us_stock`,
 `target.id=MU`, `$MU`, `NASDAQ:MU`, or a question containing US market hints.
 Set `allow_external_fetch=false` per request or
 `OMI_MCP_TRUSTED_DEFAULT_EXTERNAL_FETCH=false` for the MCP process to disable
-that default. OMI's backend may then ask its LLM planner or fallback planner to
-choose from allowlisted market-data tools, enforce the budget, execute the tools,
-and return `tool_plan` / `tool_runs` evidence. The MCP client does not call those
-APIs directly.
+that default.
+
 For Taiwan stock targets, `refresh_policy.mode=stale_first` with
 `before_answer=true` makes OMI check local freshness first and, when trusted
 external fetch is allowed, run the backend `tw.refresh_stock_evidence` tool

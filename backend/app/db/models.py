@@ -1318,6 +1318,105 @@ class JPCompanyFundamental(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class JPMarginInterest(Base):
+    __tablename__ = "jp_margin_interest"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "symbol",
+            "report_date",
+            name="uq_jp_margin_interest_provider_symbol_date",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    report_date: Mapped[date] = mapped_column(Date, index=True)
+
+    short_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    long_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    short_negotiable_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    long_negotiable_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    short_standardized_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    long_standardized_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    issue_type: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_hash: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class JPInvestorType(Base):
+    __tablename__ = "jp_investor_type"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "section",
+            "published_date",
+            "start_date",
+            "end_date",
+            name="uq_jp_investor_type_provider_section_period",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    section: Mapped[str] = mapped_column(String(80), index=True)
+    published_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    start_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    end_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+
+    proprietary_sell: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    proprietary_buy: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    proprietary_total: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    proprietary_balance: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    broker_sell: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    broker_buy: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    broker_total: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    broker_balance: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    total_sell: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    total_buy: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    total_traded: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    total_balance: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    individual_sell: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    individual_buy: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    individual_total: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    individual_balance: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    foreign_sell: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    foreign_buy: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    foreign_total: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    foreign_balance: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    investment_trust_sell: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    investment_trust_buy: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    investment_trust_total: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    investment_trust_balance: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    trust_bank_sell: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    trust_bank_buy: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    trust_bank_total: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    trust_bank_balance: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_hash: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class JPWatchlistGroup(Base):
     __tablename__ = "jp_watchlist_group"
 

@@ -1729,11 +1729,16 @@ export const enUS = {
       largeShareholding: "Large shareholding",
       disclosedDate: "Disclosed date",
       fiscalPeriod: "Period",
+      fiscalYearEnd: "Fiscal year end",
+      documentType: "Document type",
+      fetchedAt: "Fetched",
       netSales: "Net sales",
       operatingProfit: "Operating profit",
       ordinaryProfit: "Ordinary profit",
       profit: "Profit",
       forecastNetSales: "Forecast sales",
+      forecastOperatingProfit: "Forecast operating profit",
+      forecastOrdinaryProfit: "Forecast ordinary profit",
       forecastProfit: "Forecast profit",
       revenueTtm: "Sales TTM",
       revenueGrowth: "Sales growth",
@@ -1748,8 +1753,10 @@ export const enUS = {
       epsTtm: "EPS TTM",
       forwardEps: "Forecast EPS",
       pe: "PER",
+      forwardPe: "Forecast PER",
       pb: "PBR",
       bookValue: "BPS",
+      sharesOutstanding: "Shares outstanding",
       cashAndEquivalents: "Cash and equivalents",
       dividendYield: "Dividend yield",
       roe: "ROE",
@@ -1757,6 +1764,8 @@ export const enUS = {
       profitMargin: "Profit margin",
       debtToEquity: "D/E",
       currentRatio: "Current ratio",
+      operatingCashFlow: "Operating CF",
+      freeCashFlow: "Free CF",
     },
     fundamentals: {
       eyebrow: "Fundamentals",
@@ -1778,6 +1787,15 @@ export const enUS = {
         "Updated {symbol} fundamentals: fetched {fetched}, inserted {inserted}, updated {updated}",
       fundamentalRefreshPending:
         "J-Quants credentials are not configured. Performance and financial slots are reserved.",
+      resourceRefreshSuccess:
+        "Updated {symbol} {resource}: fetched {fetched}, inserted {inserted}, updated {updated}",
+      resourceRefreshEmpty:
+        "{symbol} has no available {resource} data yet. Try updating again later.",
+      resourceRefreshUnavailable:
+        "{resource} is not enabled for the current J-Quants plan or API key. The slot is reserved.",
+      resourceRefreshRateLimited:
+        "{resource} reached the J-Quants rate limit. Please wait before updating again.",
+      resourceRefreshFailed: "Failed to update {resource}",
     },
     errors: {
       listLoadFailed: "Failed to load JP stock list",

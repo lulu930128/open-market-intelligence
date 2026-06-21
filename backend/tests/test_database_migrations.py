@@ -164,6 +164,106 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("size_name", jp_master_columns)
             self.assertEqual(get_database_revision(database_url), get_head_revision())
 
+    def test_repair_partial_jp_company_fundamental_table_at_0019(self) -> None:
+        with migration_test_directory() as directory:
+            database_url = sqlite_url(directory / "partial_jp_fundamental.db")
+            engine = create_engine(database_url)
+
+            try:
+                with engine.begin() as connection:
+                    connection.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+                    connection.execute(text("INSERT INTO alembic_version (version_num) VALUES ('20260620_0019')"))
+                    connection.execute(
+                        text(
+                            """
+                            CREATE TABLE jp_company_fundamental (
+                                id INTEGER NOT NULL,
+                                provider VARCHAR(40) NOT NULL,
+                                symbol VARCHAR(32) NOT NULL,
+                                company_name VARCHAR(240),
+                                exchange VARCHAR(80),
+                                sector VARCHAR(120),
+                                industry VARCHAR(160),
+                                currency VARCHAR(10),
+                                market_cap BIGINT,
+                                enterprise_value BIGINT,
+                                trailing_pe FLOAT,
+                                forward_pe FLOAT,
+                                price_to_book FLOAT,
+                                dividend_yield FLOAT,
+                                beta FLOAT,
+                                eps_ttm FLOAT,
+                                forward_eps FLOAT,
+                                revenue_ttm BIGINT,
+                                gross_margin FLOAT,
+                                operating_margin FLOAT,
+                                profit_margin FLOAT,
+                                return_on_equity FLOAT,
+                                return_on_assets FLOAT,
+                                revenue_growth FLOAT,
+                                earnings_growth FLOAT,
+                                total_cash BIGINT,
+                                total_debt BIGINT,
+                                debt_to_equity FLOAT,
+                                current_ratio FLOAT,
+                                quick_ratio FLOAT,
+                                shares_outstanding BIGINT,
+                                book_value FLOAT,
+                                earnings_date DATE,
+                                ex_dividend_date DATE,
+                                source_url TEXT,
+                                raw_payload_hash VARCHAR(128),
+                                fetched_at DATETIME NOT NULL,
+                                created_at DATETIME NOT NULL,
+                                updated_at DATETIME NOT NULL,
+                                PRIMARY KEY (id),
+                                CONSTRAINT uq_jp_company_fundamental_provider_symbol UNIQUE (provider, symbol)
+                            )
+                            """
+                        )
+                    )
+                    connection.execute(
+                        text(
+                            """
+                            INSERT INTO jp_company_fundamental (
+                                id, provider, symbol, company_name, currency, market_cap,
+                                fetched_at, created_at, updated_at
+                            )
+                            VALUES (
+                                1, 'yahoo_quote_summary', '7203.T', 'Toyota Motor Corporation',
+                                'JPY', 41000000000000, '2026-06-20 00:00:00',
+                                '2026-06-20 00:00:00', '2026-06-20 00:00:00'
+                            )
+                            """
+                        )
+                    )
+
+                run_database_migrations(database_url)
+
+                jp_fundamental_columns = {
+                    column["name"]
+                    for column in inspect(engine).get_columns("jp_company_fundamental")
+                }
+                with engine.connect() as connection:
+                    row_count = connection.execute(
+                        text("SELECT COUNT(*) FROM jp_company_fundamental")
+                    ).scalar_one()
+                    market_cap = connection.execute(
+                        text("SELECT market_cap FROM jp_company_fundamental WHERE symbol = '7203.T'")
+                    ).scalar_one()
+            finally:
+                engine.dispose()
+
+            self.assertIn("disclosed_date", jp_fundamental_columns)
+            self.assertIn("fiscal_period", jp_fundamental_columns)
+            self.assertIn("net_sales", jp_fundamental_columns)
+            self.assertIn("operating_profit", jp_fundamental_columns)
+            self.assertIn("total_assets", jp_fundamental_columns)
+            self.assertIn("operating_cash_flow", jp_fundamental_columns)
+            self.assertEqual(row_count, 1)
+            self.assertEqual(market_cap, 41000000000000)
+            self.assertEqual(get_database_revision(database_url), get_head_revision())
+
 
 if __name__ == "__main__":
     unittest.main()

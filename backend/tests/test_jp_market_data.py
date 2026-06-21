@@ -11,6 +11,8 @@ from app.db.models import (
     Base,
     JPCompanyFundamental,
     JPDailyPrice,
+    JPInvestorType,
+    JPMarginInterest,
     JPStockMaster,
     JPWatchlistGroup,
     JPWatchlistItem,
@@ -24,6 +26,7 @@ from app.jp_market.service import (
     JPWatchlistDuplicateItemError,
     create_jp_watchlist_group,
     create_jp_watchlist_item,
+    get_jp_company_fundamental,
     get_jp_resource_summary,
     get_jp_watchlist_ranking,
     list_jp_ohlc_chart_data,
@@ -32,17 +35,25 @@ from app.jp_market.service import (
     refresh_jp_company_fundamental,
     refresh_jp_company_fundamental_from_yahoo_quote_summary,
     refresh_jp_daily_prices_from_yahoo_chart,
+    refresh_jp_market_resource,
     refresh_jp_watchlist_resources,
     search_jp_stocks,
     sync_jp_symbol_master,
     upsert_jp_company_fundamental_records,
     upsert_jp_daily_price_records,
+    upsert_jp_investor_type_records,
+    upsert_jp_margin_interest_records,
 )
 from app.jp_market.sources import (
     JPCompanyFundamentalRecord,
     JPDailyPriceRecord,
+    JPInvestorTypeRecord,
+    JPMarginInterestRecord,
+    JPMarketDataFetchError,
     normalize_jp_symbol,
     parse_jquants_company_fundamental,
+    parse_jquants_investor_type_records,
+    parse_jquants_margin_interest_records,
     parse_yahoo_company_fundamental,
     parse_jpx_listed_issue_rows,
     parse_yahoo_daily_prices,
@@ -216,6 +227,129 @@ JQUANTS_STATEMENTS_SAMPLE = {
 }
 
 
+JQUANTS_SUMMARY_SAMPLE = {
+    "data": [
+        {
+            "DiscDate": "2025-05-08",
+            "DiscTime": "15:00:00",
+            "Code": "72030",
+            "DiscNo": "20250508555555",
+            "DocType": "FYFinancialStatements_Consolidated_IFRS",
+            "CurPerType": "FY",
+            "CurPerSt": "2024-04-01",
+            "CurPerEn": "2025-03-31",
+            "CurFYEn": "2025-03-31",
+            "Sales": "45000000000000",
+            "OP": "5100000000000",
+            "OdP": "5600000000000",
+            "NP": "4900000000000",
+            "EPS": "300.12",
+            "TA": "89000000000000",
+            "Eq": "35000000000000",
+            "EqAR": "0.393",
+            "BPS": "2200.5",
+            "CFO": "4200000000000",
+            "CFI": "-2100000000000",
+            "CFF": "-1300000000000",
+            "CashEq": "8200000000000",
+            "FSales": "47000000000000",
+            "FOP": "5300000000000",
+            "FOdP": "5700000000000",
+            "FNP": "5000000000000",
+            "FEPS": "320.30",
+            "ShOutFY": "13200000000",
+        },
+        {
+            "DiscDate": "2026-05-08",
+            "DiscTime": "15:00:00",
+            "Code": "72030",
+            "DiscNo": "20260508123456",
+            "DocType": "FYFinancialStatements_Consolidated_IFRS",
+            "CurPerType": "FY",
+            "CurPerSt": "2025-04-01",
+            "CurPerEn": "2026-03-31",
+            "CurFYEn": "2026-03-31",
+            "Sales": "48000000000000",
+            "OP": "5400000000000",
+            "OdP": "5900000000000",
+            "NP": "5300000000000",
+            "EPS": "320.12",
+            "TA": "91000000000000",
+            "Eq": "37000000000000",
+            "EqAR": "0.407",
+            "BPS": "2300.5",
+            "CFO": "4500000000000",
+            "CFI": "-2300000000000",
+            "CFF": "-1500000000000",
+            "CashEq": "9000000000000",
+            "FSales": "50000000000000",
+            "FOP": "5600000000000",
+            "FOdP": "6000000000000",
+            "FNP": "5500000000000",
+            "FEPS": "345.67",
+            "ShOutFY": "13200000000",
+        },
+    ]
+}
+
+
+JQUANTS_MARGIN_INTEREST_SAMPLE = {
+    "data": [
+        {
+            "Date": "2026-06-12",
+            "Code": "72030",
+            "ShrtVol": "100000",
+            "LongVol": "3400000",
+            "ShrtNegVol": "30000",
+            "LongNegVol": "1200000",
+            "ShrtStdVol": "70000",
+            "LongStdVol": "2200000",
+            "IssType": "2",
+        }
+    ]
+}
+
+
+JQUANTS_INVESTOR_TYPES_SAMPLE = {
+    "data": [
+        {
+            "PubDate": "2026-06-19",
+            "StDate": "2026-06-08",
+            "EnDate": "2026-06-12",
+            "Section": "TSEPrime",
+            "PropSell": "1000",
+            "PropBuy": "1250",
+            "PropTot": "2250",
+            "PropBal": "250",
+            "BrkSell": "9000",
+            "BrkBuy": "8500",
+            "BrkTot": "17500",
+            "BrkBal": "-500",
+            "TotSell": "10000",
+            "TotBuy": "9750",
+            "TotTot": "19750",
+            "TotBal": "-250",
+            "IndSell": "3200",
+            "IndBuy": "2800",
+            "IndTot": "6000",
+            "IndBal": "-400",
+            "FrgnSell": "4200",
+            "FrgnBuy": "5000",
+            "FrgnTot": "9200",
+            "FrgnBal": "800",
+            "InvTrSell": "700",
+            "InvTrBuy": "650",
+            "InvTrTot": "1350",
+            "InvTrBal": "-50",
+            "TrstBnkSell": "1100",
+            "TrstBnkBuy": "900",
+            "TrstBnkTot": "2000",
+            "TrstBnkBal": "-200",
+        }
+    ]
+}
+
+
 JPX_LISTED_ROWS_SAMPLE = [
     {
         "Effective Date": "20260530",
@@ -323,6 +457,58 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertAlmostEqual(record.revenue_growth or 0, 0.06666666666666667)
         self.assertAlmostEqual(record.earnings_growth or 0, 0.08163265306122448)
         self.assertEqual(record.equity_to_asset_ratio, 0.407)
+
+    def test_parse_jquants_company_fundamental_v2_summary(self) -> None:
+        record = parse_jquants_company_fundamental(
+            JQUANTS_SUMMARY_SAMPLE,
+            symbol="7203",
+            source_url="https://api.jquants.com/v2/fins/summary?code=7203",
+            company_name="Toyota Motor Corporation",
+        )
+
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertEqual(record.provider, "jquants_statements")
+        self.assertEqual(record.symbol, "7203.T")
+        self.assertEqual(record.disclosed_date, datetime(2026, 5, 8).date())
+        self.assertEqual(record.fiscal_period, "FY")
+        self.assertEqual(record.fiscal_year_end, datetime(2026, 3, 31).date())
+        self.assertEqual(record.net_sales, 48000000000000)
+        self.assertEqual(record.operating_profit, 5400000000000)
+        self.assertEqual(record.profit, 5300000000000)
+        self.assertEqual(record.forward_eps, 345.67)
+        self.assertEqual(record.shares_outstanding, 13200000000)
+        self.assertAlmostEqual(record.revenue_growth or 0, 0.06666666666666667)
+        self.assertEqual(record.equity_to_asset_ratio, 0.407)
+
+    def test_parse_jquants_margin_interest_records(self) -> None:
+        records = parse_jquants_margin_interest_records(
+            JQUANTS_MARGIN_INTEREST_SAMPLE,
+            symbol="7203",
+            source_url="https://api.jquants.com/v2/markets/margin-interest?code=7203",
+        )
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].provider, "jquants_margin_interest")
+        self.assertEqual(records[0].symbol, "7203.T")
+        self.assertEqual(records[0].report_date, datetime(2026, 6, 12).date())
+        self.assertEqual(records[0].long_volume, 3400000)
+        self.assertEqual(records[0].short_volume, 100000)
+        self.assertEqual(records[0].issue_type, "2")
+
+    def test_parse_jquants_investor_type_records(self) -> None:
+        records = parse_jquants_investor_type_records(
+            JQUANTS_INVESTOR_TYPES_SAMPLE,
+            source_url="https://api.jquants.com/v2/equities/investor-types?section=TSEPrime",
+        )
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].provider, "jquants_investor_types")
+        self.assertEqual(records[0].section, "TSEPrime")
+        self.assertEqual(records[0].published_date, datetime(2026, 6, 19).date())
+        self.assertEqual(records[0].foreign_balance, 800)
+        self.assertEqual(records[0].trust_bank_balance, -200)
+        self.assertEqual(records[0].individual_balance, -400)
 
     def test_parse_jpx_listed_issue_rows_maps_master_fields(self) -> None:
         records = parse_jpx_listed_issue_rows(JPX_LISTED_ROWS_SAMPLE)
@@ -640,12 +826,12 @@ class JPMarketDataTests(unittest.TestCase):
 
     def test_refresh_jp_company_fundamental_auto_uses_jquants_statements(self) -> None:
         with (
-            patch("app.jp_market.service.settings.jquants_id_token", "test-id-token"),
+            patch("app.jp_market.service.settings.jquants_api_key", "test-api-key"),
             patch(
-                "app.jp_market.service.fetch_jquants_statements_payload",
+                "app.jp_market.service.fetch_jquants_summary_payload",
                 return_value=(
-                    JQUANTS_STATEMENTS_SAMPLE,
-                    "https://api.jquants.com/v1/fins/statements?code=7203",
+                    JQUANTS_SUMMARY_SAMPLE,
+                    "https://api.jquants.com/v2/fins/summary?code=7203",
                 ),
             ) as fetch_mock,
         ):
@@ -662,12 +848,113 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertEqual(result["fetched_count"], 2)
         self.assertEqual(result["inserted_count"], 1)
 
-        row = self.db.query(JPCompanyFundamental).one()
+        row = (
+            self.db.query(JPCompanyFundamental)
+            .filter(JPCompanyFundamental.provider == "jquants_statements")
+            .one()
+        )
         self.assertEqual(row.provider, "jquants_statements")
         self.assertEqual(row.net_sales, 48000000000000)
         self.assertEqual(row.operating_profit, 5400000000000)
         self.assertEqual(row.profit, 5300000000000)
         self.assertEqual(row.fiscal_period, "FY")
+
+    def test_refresh_jp_company_fundamental_reuses_refresh_token_id_token(self) -> None:
+        with (
+            patch("app.jp_market.service.settings.jquants_api_base_url", "https://api.jquants.com/v1"),
+            patch("app.jp_market.service.settings.jquants_api_key", None),
+            patch("app.jp_market.service.settings.jquants_id_token", None),
+            patch("app.jp_market.service.settings.jquants_refresh_token", "test-refresh-token"),
+            patch("app.jp_market.service.settings.jquants_mail_address", None),
+            patch("app.jp_market.service.settings.jquants_password", None),
+            patch("app.jp_market.service.settings.jquants_id_token_cache_seconds", 3600),
+            patch("app.jp_market.service._jquants_id_token_cache", None),
+            patch(
+                "app.jp_market.service.fetch_jquants_id_token",
+                return_value="test-id-token",
+            ) as id_token_mock,
+            patch(
+                "app.jp_market.service.fetch_jquants_statements_payload",
+                return_value=(
+                    JQUANTS_STATEMENTS_SAMPLE,
+                    "https://api.jquants.com/v1/fins/statements?code=7203",
+                ),
+            ) as statements_mock,
+        ):
+            first_result = refresh_jp_company_fundamental(
+                db=self.db,
+                symbol="7203",
+                provider="jquants_statements",
+            )
+            second_result = refresh_jp_company_fundamental(
+                db=self.db,
+                symbol="7203",
+                provider="jquants_statements",
+            )
+
+        id_token_mock.assert_called_once()
+        self.assertEqual(statements_mock.call_count, 2)
+        self.assertEqual(first_result["status"], "success")
+        self.assertEqual(second_result["status"], "success")
+        self.assertEqual(self.db.query(JPCompanyFundamental).count(), 1)
+
+    def test_refresh_jp_company_fundamental_auto_falls_back_to_yahoo(self) -> None:
+        with (
+            patch("app.jp_market.service.settings.jquants_api_key", None),
+            patch("app.jp_market.service.settings.jquants_id_token", None),
+            patch("app.jp_market.service.settings.jquants_refresh_token", None),
+            patch("app.jp_market.service.settings.jquants_mail_address", None),
+            patch("app.jp_market.service.settings.jquants_password", None),
+            patch(
+                "app.jp_market.service.fetch_yahoo_quote_summary_payload",
+                return_value=(
+                    YAHOO_JP_QUOTE_SUMMARY_SAMPLE,
+                    "https://query1.finance.yahoo.com/v10/finance/quoteSummary/7203.T",
+                ),
+            ) as yahoo_fetch_mock,
+        ):
+            result = refresh_jp_company_fundamental(
+                db=self.db,
+                symbol="7203",
+                provider="auto",
+            )
+
+        yahoo_fetch_mock.assert_called_once()
+        self.assertEqual(result["status"], "partial_success")
+        self.assertEqual(result["provider"], "yahoo_quote_summary")
+        self.assertEqual(result["symbol"], "7203.T")
+        self.assertEqual(result["fetched_count"], 1)
+        self.assertEqual(result["inserted_count"], 1)
+
+        row = self.db.query(JPCompanyFundamental).one()
+        self.assertEqual(row.provider, "yahoo_quote_summary")
+        self.assertEqual(row.market_cap, 41000000000000)
+
+    def test_get_jp_company_fundamental_merges_primary_and_supplemental_rows(self) -> None:
+        jquants_record = parse_jquants_company_fundamental(
+            JQUANTS_STATEMENTS_SAMPLE,
+            symbol="7203",
+            source_url="https://api.jquants.com/v1/fins/statements?code=7203",
+            company_name="Toyota Motor Corporation",
+        )
+        yahoo_record = parse_yahoo_company_fundamental(
+            YAHOO_JP_QUOTE_SUMMARY_SAMPLE,
+            symbol="7203.T",
+            source_url="https://query1.finance.yahoo.com/v10/finance/quoteSummary/7203.T",
+        )
+        assert jquants_record is not None
+        upsert_jp_company_fundamental_records(self.db, [jquants_record, yahoo_record])
+
+        row = get_jp_company_fundamental(db=self.db, symbol="7203")
+
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(row.provider, "jquants_statements+yahoo_quote_summary")
+        self.assertEqual(row.net_sales, 48000000000000)
+        self.assertEqual(row.operating_profit, 5400000000000)
+        self.assertEqual(row.total_assets, 91000000000000)
+        self.assertEqual(row.market_cap, 41000000000000)
+        self.assertEqual(row.trailing_pe, 9.8)
 
     def test_jp_ohlc_chart_uses_lazy_backfill_when_requested(self) -> None:
         with patch(
@@ -832,8 +1119,11 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertTrue(slots["daily_price"]["available"])
         self.assertEqual(slots["daily_price"]["latest_date"], datetime(2026, 6, 18).date())
         self.assertEqual(slots["daily_price"]["row_count"], 1)
-        self.assertEqual(slots["demand"]["status"], "planned")
+        self.assertEqual(slots["demand"]["status"], "empty")
         self.assertFalse(slots["demand"]["available"])
+        self.assertEqual(slots["investors"]["status"], "empty")
+        self.assertFalse(slots["investors"]["available"])
+        self.assertEqual(slots["disclosures"]["status"], "planned")
         self.assertEqual(slots["performance"]["status"], "empty")
         self.assertEqual(slots["financials"]["row_count"], 0)
 
@@ -909,19 +1199,152 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertEqual(slots["financials"]["status"], "available")
         self.assertTrue(slots["financials"]["available"])
 
-    def test_refresh_jp_company_fundamental_auto_is_skipped_without_jquants_credentials(self) -> None:
+    def test_jp_resource_summary_reports_market_resource_metrics(self) -> None:
+        self.db.add(
+            JPStockMaster(
+                symbol="7203.T",
+                local_code="7203",
+                security_name="Toyota Motor Corporation",
+                exchange="Tokyo Stock Exchange",
+                market_segment="Prime Market (Domestic)",
+                sector_33_name="Transportation Equipment",
+                asset_type="stock",
+                listing_source="jpx_listed_issues",
+                currency="JPY",
+                is_active=True,
+            )
+        )
+        self.db.commit()
+
+        upsert_jp_margin_interest_records(
+            self.db,
+            [
+                JPMarginInterestRecord(
+                    provider="jquants_margin_interest",
+                    symbol="7203.T",
+                    report_date=datetime(2026, 6, 12).date(),
+                    short_volume=100000,
+                    long_volume=3400000,
+                    short_negotiable_volume=30000,
+                    long_negotiable_volume=1200000,
+                    short_standardized_volume=70000,
+                    long_standardized_volume=2200000,
+                    issue_type="2",
+                    source_url="source",
+                    raw_payload_hash="hash",
+                )
+            ],
+        )
+        upsert_jp_investor_type_records(
+            self.db,
+            [
+                JPInvestorTypeRecord(
+                    provider="jquants_investor_types",
+                    section="TSEPrime",
+                    published_date=datetime(2026, 6, 19).date(),
+                    start_date=datetime(2026, 6, 8).date(),
+                    end_date=datetime(2026, 6, 12).date(),
+                    proprietary_sell=1000,
+                    proprietary_buy=1250,
+                    proprietary_total=2250,
+                    proprietary_balance=250,
+                    broker_sell=9000,
+                    broker_buy=8500,
+                    broker_total=17500,
+                    broker_balance=-500,
+                    total_sell=10000,
+                    total_buy=9750,
+                    total_traded=19750,
+                    total_balance=-250,
+                    individual_sell=3200,
+                    individual_buy=2800,
+                    individual_total=6000,
+                    individual_balance=-400,
+                    foreign_sell=4200,
+                    foreign_buy=5000,
+                    foreign_total=9200,
+                    foreign_balance=800,
+                    investment_trust_sell=700,
+                    investment_trust_buy=650,
+                    investment_trust_total=1350,
+                    investment_trust_balance=-50,
+                    trust_bank_sell=1100,
+                    trust_bank_buy=900,
+                    trust_bank_total=2000,
+                    trust_bank_balance=-200,
+                    source_url="source",
+                    raw_payload_hash="hash",
+                )
+            ],
+        )
+
+        summary = get_jp_resource_summary(db=self.db, symbol="7203")
+        slots = {slot["key"]: slot for slot in summary["slots"]}
+
+        self.assertEqual(slots["demand"]["status"], "available")
+        self.assertEqual(slots["demand"]["latest_date"], datetime(2026, 6, 12).date())
+        self.assertEqual(slots["demand"]["metrics"]["margin_long_balance"], 3400000)
+        self.assertEqual(slots["demand"]["metrics"]["margin_net_balance"], 3300000)
+        self.assertEqual(slots["investors"]["status"], "available")
+        self.assertEqual(slots["investors"]["latest_date"], datetime(2026, 6, 19).date())
+        self.assertEqual(slots["investors"]["metrics"]["investor_section"], "TSEPrime")
+        self.assertEqual(slots["investors"]["metrics"]["foreign_balance"], 800)
+        self.assertEqual(slots["investors"]["metrics"]["trust_bank_balance"], -200)
+
+    def test_refresh_jp_company_fundamental_jquants_is_skipped_without_credentials(self) -> None:
         with (
+            patch("app.jp_market.service.settings.jquants_api_key", None),
             patch("app.jp_market.service.settings.jquants_id_token", None),
             patch("app.jp_market.service.settings.jquants_refresh_token", None),
             patch("app.jp_market.service.settings.jquants_mail_address", None),
             patch("app.jp_market.service.settings.jquants_password", None),
         ):
-            result = refresh_jp_company_fundamental(db=self.db, symbol="7203", provider="auto")
+            result = refresh_jp_company_fundamental(
+                db=self.db,
+                symbol="7203",
+                provider="jquants_statements",
+            )
 
         self.assertEqual(result["status"], "skipped")
         self.assertEqual(result["provider"], "jquants_statements")
         self.assertEqual(result["symbol"], "7203.T")
         self.assertEqual(result["fetched_count"], 0)
+
+    def test_refresh_jp_market_resource_returns_structured_provider_limit(self) -> None:
+        with (
+            patch("app.jp_market.service.settings.jquants_api_key", "test-api-key"),
+            patch(
+                "app.jp_market.service.fetch_jquants_margin_interest_payload",
+                side_effect=JPMarketDataFetchError("J-Quants margin-interest failed: HTTP 403."),
+            ),
+        ):
+            result = refresh_jp_market_resource(
+                db=self.db,
+                symbol="7203",
+                resource="demand",
+            )
+
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["provider"], "jquants_margin_interest")
+        self.assertIn("does not allow", result["message"])
+
+    def test_refresh_jp_market_resource_returns_structured_rate_limit(self) -> None:
+        with (
+            patch("app.jp_market.service.settings.jquants_api_key", "test-api-key"),
+            patch(
+                "app.jp_market.service.fetch_jquants_margin_interest_payload",
+                side_effect=JPMarketDataFetchError("J-Quants margin-interest failed: HTTP 429."),
+            ),
+        ):
+            result = refresh_jp_market_resource(
+                db=self.db,
+                symbol="7203",
+                resource="demand",
+            )
+
+        self.assertEqual(result["status"], "rate_limited")
+        self.assertEqual(result["provider"], "jquants_margin_interest")
+        self.assertIn("rate limit", result["message"])
 
     def test_jp_watchlist_daily_refresh_routes_are_registered(self) -> None:
         from app.main import app
@@ -932,6 +1355,7 @@ class JPMarketDataTests(unittest.TestCase):
         }
 
         self.assertIn("POST", routes["/api/jp-market/watchlists/daily/refresh"])
+        self.assertIn("POST", routes["/api/jp-market/resources/{symbol}/refresh"])
         self.assertIn(
             "POST",
             routes["/api/jp-market/watchlists/groups/{group_id}/refresh-daily"],

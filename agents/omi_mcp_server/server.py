@@ -33,7 +33,7 @@ _configure_stdio()
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_NAME = "omi-mcp-server"
 SERVER_VERSION = "0.1.0"
-API_BASE_URL = os.environ.get("OMI_API_BASE_URL", "http://127.0.0.1:8300").rstrip("/")
+API_BASE_URL = os.environ.get("OMI_API_BASE_URL", "http://127.0.0.1:8400").rstrip("/")
 
 
 def _env_int(name: str, default: int) -> int:
@@ -176,7 +176,7 @@ ASK_TOOL: dict[str, Any] = {
                 "default": False,
                 "description": (
                     "Allow trusted OMI backend to call configured external market APIs and update local evidence cache. "
-                    "If omitted, trusted MCP calls default this to true only for clear US stock questions."
+                    "If omitted, trusted MCP calls default this to true only for clear US stock questions; callers may set it explicitly for bounded OMI-managed refresh."
                 ),
             },
             "tool_budget": {

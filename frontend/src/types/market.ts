@@ -1021,6 +1021,7 @@ export type JPResourceSlotRead = {
   source: string | null;
   latest_date: string | null;
   row_count: number;
+  metrics?: Record<string, string | number | null>;
 };
 
 export type JPResourceSummaryRead = {

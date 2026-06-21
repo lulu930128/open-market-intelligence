@@ -115,8 +115,8 @@ class Settings(BaseSettings):
     scheduler_jp_market_refresh_day_of_week: str = "mon-fri"
     scheduler_jp_market_refresh_outputsize: str = "compact"
     scheduler_jp_market_refresh_provider: str = "auto"
-    scheduler_jp_market_refresh_include_fundamentals: bool = False
-    scheduler_jp_market_refresh_sleep_seconds: float = 1.0
+    scheduler_jp_market_refresh_include_fundamentals: bool = True
+    scheduler_jp_market_refresh_sleep_seconds: float = 15.0
 
     finmind_token: str | None = None
     alphavantage_api_key: str | None = None
@@ -129,11 +129,13 @@ class Settings(BaseSettings):
     us_sec_user_agent: str = "Open Market Intelligence local research; set US_SEC_USER_AGENT"
     us_market_http_timeout_seconds: int = 30
     jp_market_http_timeout_seconds: int = 30
-    jquants_api_base_url: str = "https://api.jquants.com/v1"
+    jquants_api_base_url: str = "https://api.jquants.com/v2"
+    jquants_api_key: str | None = None
     jquants_id_token: str | None = None
     jquants_refresh_token: str | None = None
     jquants_mail_address: str | None = None
     jquants_password: str | None = None
+    jquants_id_token_cache_seconds: int = 82800
     omi_http_trust_env: bool = False
     openai_api_key: str | None = None
     openai_llm_api_key: str | None = None

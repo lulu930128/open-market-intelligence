@@ -77,6 +77,7 @@ import type {
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
+type JPStatusMessage = { type: "success" | "warning" | "error"; text: string } | null;
 type RankBy = "none" | "change_pct" | "score" | "volume";
 type USRankBy = "none" | "change_pct" | "volume" | "close";
 type JPRankBy = "none" | "change_pct" | "volume" | "close";
@@ -1980,6 +1981,7 @@ export default function MarketDashboardClient({
   const [, setJpUniverseRefreshState] =
     useState<LoadState>("idle");
   const [jpErrorMessage, setJpErrorMessage] = useState<string | null>(null);
+  const [jpStatusMessage, setJpStatusMessage] = useState<JPStatusMessage>(null);
   const [jpLastUpdatedAt, setJpLastUpdatedAt] = useState<string | null>(null);
   const [selectedUsGroupId, setSelectedUsGroupId] = useState<number | null>(
     initialSelectedUsGroup?.id ?? null
@@ -3063,6 +3065,7 @@ export default function MarketDashboardClient({
     setJpLoadState("idle");
     setJpErrorMessage(null);
     setJpChartFocusMode(false);
+    setJpStatusMessage(null);
     pushDashboardUrl({ market: "jp", groupId: group?.id ?? null });
   }
 
@@ -3072,6 +3075,7 @@ export default function MarketDashboardClient({
 
     const indexConfig = getJpMarketIndexConfig(normalizedSymbol);
     setJpChartFocusMode(false);
+    setJpStatusMessage(null);
     setSelectedJpSymbol(normalizedSymbol);
     setSelectedJpStock((current) =>
       current?.symbol === normalizedSymbol
@@ -3111,6 +3115,7 @@ export default function MarketDashboardClient({
     setSelectedJpStock(stock);
     setSelectedJpSymbol(stock?.symbol ?? null);
     setJpChartFocusMode(false);
+    setJpStatusMessage(null);
 
     if (stock) {
       pushDashboardUrl({ market: "jp", groupId: selectedJpGroupId, jpSymbol: stock.symbol });
@@ -3777,6 +3782,7 @@ export default function MarketDashboardClient({
                 setTwChartFocusMode(false);
                 setUsChartFocusMode(false);
                 setJpChartFocusMode(false);
+                setJpStatusMessage(null);
                 if (market === "us") {
                   ensureSelectedUsGroup();
                 }
@@ -3833,6 +3839,7 @@ export default function MarketDashboardClient({
               selectedGroupId={selectedJpGroupId}
               selectedSymbol={selectedJpSymbol}
               selectedStock={selectedJpStock}
+              externalStatusMessage={jpStatusMessage}
               onMarketChange={(market) => {
                 setActiveMarket(market);
                 setSelectedFuturesSymbol(null);
@@ -3841,6 +3848,7 @@ export default function MarketDashboardClient({
                 setTwChartFocusMode(false);
                 setUsChartFocusMode(false);
                 setJpChartFocusMode(false);
+                setJpStatusMessage(null);
                 if (market === "us") {
                   ensureSelectedUsGroup();
                 }
@@ -3897,6 +3905,7 @@ export default function MarketDashboardClient({
                 setTwChartFocusMode(false);
                 setUsChartFocusMode(false);
                 setJpChartFocusMode(false);
+                setJpStatusMessage(null);
                 if (market !== "tw") {
                   setSelectedFuturesSymbol(null);
                 }
@@ -3991,6 +4000,7 @@ export default function MarketDashboardClient({
                   watchlistRankingPanel={jpRankingPanel}
                   onChartFocusModeChange={setJpChartFocusMode}
                   onSelectStock={handleSelectJpStock}
+                  onStatusMessage={setJpStatusMessage}
                 />
               </>
             ) : (

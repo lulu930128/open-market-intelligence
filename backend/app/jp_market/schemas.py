@@ -189,6 +189,7 @@ class JPResourceSlotRead(BaseModel):
     source: str | None = None
     latest_date: date | None = None
     row_count: int = 0
+    metrics: dict[str, int | float | str | None] = Field(default_factory=dict)
 
 
 class JPResourceSummaryRead(BaseModel):
