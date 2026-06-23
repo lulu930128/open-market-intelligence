@@ -20,6 +20,7 @@ from app.errors import (
 from app.jobs import scheduler as job_scheduler, service as job_service
 from app.routers import (
     ai,
+    dispatch,
     indicators,
     jp_market,
     jobs,
@@ -126,6 +127,7 @@ app.include_router(raw_results.router, prefix="/api/raw-results", tags=["raw-res
 app.include_router(jobs.router, prefix="/api/jobs", tags=["jobs"])
 app.include_router(settings_router.router, prefix="/api/settings", tags=["settings"])
 app.include_router(ai.router, prefix="/api/ai", tags=["ai"])
+app.include_router(dispatch.router, prefix="/api/dispatch", tags=["dispatch"])
 app.include_router(market.router, prefix="/api/market", tags=["market"])
 app.include_router(indicators.router, prefix="/api/market/indicators", tags=["market-indicators"])
 app.include_router(stocks.router, prefix="/api/stocks", tags=["stocks"])

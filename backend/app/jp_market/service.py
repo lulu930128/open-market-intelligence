@@ -54,6 +54,10 @@ from app.jp_market.sources import (
     parse_yahoo_daily_prices,
     parse_yahoo_stock_record,
 )
+from app.market.technical_radar import (
+    TechnicalRadarBar,
+    build_technical_watchlist_radar,
+)
 
 
 class JPStockNotFoundError(Exception):
@@ -879,6 +883,61 @@ def get_jp_watchlist_ranking(
         **freshness,
         "results": rows,
     }
+
+
+def get_jp_watchlist_technical_radar(
+    db: Session,
+    *,
+    group_id: int,
+    include_children: bool = True,
+    enabled_only: bool = True,
+    mode: str = "action",
+    max_results: int = 30,
+    calculation_limit: int = 100,
+) -> dict:
+    ranking = get_jp_watchlist_ranking(
+        db=db,
+        group_id=group_id,
+        include_children=include_children,
+        enabled_only=enabled_only,
+        rank_by="none",
+        sort_order="asc",
+    )
+    symbols = [
+        normalize_jp_symbol(row.get("symbol"))
+        for row in ranking.get("results", [])
+        if normalize_jp_symbol(row.get("symbol"))
+    ]
+    histories: dict[str, list[TechnicalRadarBar]] = {}
+
+    for symbol in symbols:
+        daily_rows = _latest_distinct_jp_daily_rows(
+            db=db,
+            symbol=symbol,
+            limit=calculation_limit,
+        )
+        histories[symbol] = [
+            TechnicalRadarBar(
+                trade_date=row.trade_date,
+                open=row.open_price,
+                high=row.high_price,
+                low=row.low_price,
+                close=_jp_close_value(row),
+                volume=row.trade_volume,
+            )
+            for row in daily_rows
+        ]
+
+    radar = build_technical_watchlist_radar(
+        ranking=ranking,
+        histories=histories,
+        market="JP",
+        include_children=include_children,
+        mode=mode,
+        max_results=max_results,
+    )
+    radar["group_id"] = radar.get("group_id") or group_id
+    return radar
 
 
 def upsert_jp_daily_price_records(

@@ -26,6 +26,40 @@ class AiAskRefactorModuleTests(unittest.TestCase):
             {"type": "tw_futures", "id": "TXF", "label": None, "market": "TW"},
         )
 
+    def test_scope_resolution_resolves_explicit_jp_targets(self) -> None:
+        stock_payload = AiAskRequest(
+            question="Toyota Japan context",
+            target={"type": "jp_stock", "id": "7203", "label": "Toyota"},
+        )
+        index_payload = AiAskRequest(
+            question="Nikkei context",
+            target={"type": "jp_index", "id": "^N225", "label": "Nikkei 225"},
+        )
+
+        stock_resolution = scope_resolution._resolve_scope(db=None, payload=stock_payload)
+        index_resolution = scope_resolution._resolve_scope(db=None, payload=index_payload)
+
+        self.assertEqual(stock_resolution.selected_scope_type, "jp_stock")
+        self.assertEqual(stock_resolution.selected_scope_id, "7203.T")
+        self.assertEqual(
+            scope_resolution._resolution_target(stock_resolution),
+            {"type": "jp_stock", "id": "7203.T", "label": "Toyota", "market": "JP"},
+        )
+        self.assertEqual(index_resolution.selected_scope_type, "jp_index")
+        self.assertEqual(index_resolution.selected_scope_id, "^N225")
+        self.assertEqual(
+            scope_resolution._resolution_target(index_resolution),
+            {"type": "jp_index", "id": "^N225", "label": "Nikkei 225", "market": "JP"},
+        )
+
+    def test_scope_resolution_does_not_treat_jp_year_as_symbol(self) -> None:
+        payload = AiAskRequest(question="Japan 2026 market outlook")
+
+        resolution = scope_resolution._resolve_scope(db=None, payload=payload)
+
+        self.assertNotEqual(resolution.selected_scope_type, "jp_stock")
+        self.assertNotEqual(resolution.selected_scope_id, "2026.T")
+
     def test_policy_validation_and_trust_gating(self) -> None:
         payload = AiAskRequest(
             question="2330 目前可以買嗎？",
@@ -55,6 +89,19 @@ class AiAskRefactorModuleTests(unittest.TestCase):
             ask_policy._validate_request(
                 AiAskRequest(question="test", target={"type": "unsupported"})
             )
+
+    def test_policy_keeps_jp_analysis_data_context_only(self) -> None:
+        warnings: list[str] = []
+
+        mode = ask_policy._effective_mode(
+            "analysis",
+            "jp_stock",
+            {"can_generate_analysis": True, "can_generate_report": False},
+            warnings,
+        )
+
+        self.assertEqual(mode, "data_only")
+        self.assertIn("no dedicated AI analysis/report path", warnings[0])
 
     def test_clarification_response_contract_uses_evidence_passport(self) -> None:
         payload = AiAskRequest(question="這檔現在怎麼看？")

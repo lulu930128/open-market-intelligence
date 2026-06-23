@@ -22,6 +22,7 @@ from app.db.models import (
     MarginTradingDaily,
     MarketDailyPrice,
     MonthlyRevenue,
+    JPStockMaster,
     RawFetchResult,
     ShareholdingDistributionWeekly,
     SourceRegistry,
@@ -62,6 +63,24 @@ def add_us_stock(db: Session, symbol: str = "TSM") -> None:
             cik="0001046179",
             sec_company_name="TAIWAN SEMICONDUCTOR MANUFACTURING CO LTD",
             is_test_issue=False,
+            is_active=True,
+        )
+    )
+    db.commit()
+
+
+def add_jp_stock(db: Session, symbol: str = "7203.T") -> None:
+    db.add(
+        JPStockMaster(
+            symbol=symbol,
+            local_code=symbol.split(".", maxsplit=1)[0],
+            security_name="Toyota Motor Corporation",
+            exchange="Tokyo Stock Exchange",
+            market_segment="Prime Market (Domestic)",
+            sector_33_name="Transportation Equipment",
+            asset_type="stock",
+            listing_source="test",
+            currency="JPY",
             is_active=True,
         )
     )
@@ -1850,6 +1869,73 @@ class AiFreshnessGuardTests(unittest.TestCase):
             self.assertEqual(response["target"]["id"], "SPCX")
             self.assertEqual(response["action"], "omi.generate_us_stock_brief")
             self.assertEqual(response["resolution"]["source"], "explicit_scope_id")
+        finally:
+            db.close()
+
+    def test_ask_uses_jp_stock_context_reader_for_explicit_target(self) -> None:
+        db = make_session()
+        try:
+            add_jp_stock(db)
+            payload = AiAskRequest(
+                question="Toyota Japan context",
+                target={"type": "jp_stock", "id": "7203", "label": "Toyota"},
+                mode="auto",
+                allow_llm=False,
+                allow_write=False,
+            )
+            context = {
+                "kind": "jp_stock_context",
+                "as_of": "2026-06-18",
+                "summary": {"latest_close": 3080.0},
+                "data": {"stock": {"symbol": "7203.T"}},
+                "missing": ["jp_company_fundamental"],
+                "warnings": ["local-cache only"],
+                "source_refs": [{"type": "table", "name": "jp_daily_price"}],
+            }
+
+            with patch.object(ai_ask.agentic_tools, "read_jp_stock_context", return_value=context) as reader:
+                response = ai_ask.ask(db=db, payload=payload)
+
+            reader.assert_called_once()
+            self.assertEqual(reader.call_args.kwargs["symbol"], "7203.T")
+            self.assertFalse(reader.call_args.kwargs["is_index"])
+            self.assertEqual(response["target"]["type"], "jp_stock")
+            self.assertEqual(response["target"]["id"], "7203.T")
+            self.assertEqual(response["action"], "omi.read_jp_stock_context")
+            self.assertEqual(response["result"]["kind"], "jp_stock_context")
+        finally:
+            db.close()
+
+    def test_ask_uses_jp_index_context_reader_for_explicit_target(self) -> None:
+        db = make_session()
+        try:
+            payload = AiAskRequest(
+                question="Nikkei context",
+                target={"type": "jp_index", "id": "^N225", "label": "Nikkei 225"},
+                mode="auto",
+                allow_llm=False,
+                allow_write=False,
+            )
+            context = {
+                "kind": "jp_index_context",
+                "as_of": "2026-06-18",
+                "summary": {"latest_close": 38500.0},
+                "data": {"chart": {"point_count": 2}},
+                "missing": [],
+                "warnings": ["OHLC-only"],
+                "source_refs": [{"type": "table", "name": "jp_daily_price"}],
+            }
+
+            with patch.object(ai_ask.agentic_tools, "read_jp_stock_context", return_value=context) as reader:
+                response = ai_ask.ask(db=db, payload=payload)
+
+            reader.assert_called_once()
+            self.assertEqual(reader.call_args.kwargs["symbol"], "^N225")
+            self.assertTrue(reader.call_args.kwargs["is_index"])
+            self.assertEqual(response["target"]["type"], "jp_index")
+            self.assertEqual(response["target"]["id"], "^N225")
+            self.assertEqual(response["action"], "omi.read_jp_index_context")
+            self.assertEqual(response["result"]["kind"], "jp_index_context")
         finally:
             db.close()
 

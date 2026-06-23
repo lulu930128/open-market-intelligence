@@ -29,6 +29,10 @@ from app.db.models import JobRun, utc_now
 from app.db.session import get_db
 from app.jobs import backfill_tasks, service as job_service
 from app.jobs.schemas import JobRunRead
+from app.settings.refresh_execution import (
+    resolve_market_refresh_interval_seconds,
+    resolve_subresource_refresh_interval_seconds,
+)
 from app.market.institutional_holding_ratios import (
     InstitutionalHoldingRatioFetchError,
     fetch_institutional_holding_ratios,
@@ -49,7 +53,10 @@ from app.market.market_chips import (
     market_chip_daily_to_dict,
     normalize_market_chip_index_ids,
 )
-from app.market.overnight_impact import build_us_overnight_impact_report
+from app.market.overnight_impact import (
+    build_us_overnight_impact_report,
+    ensure_current_us_overnight_impact_report,
+)
 from app.market.technical_report import build_stock_technical_report
 from app.market.tw_futures import (
     KGI_PROVIDER,
@@ -474,11 +481,16 @@ def refresh_selected_stock_data_api(
     background_tasks: BackgroundTasks,
     include_today: bool | None = None,
     profile: str = Query(default="full", pattern=TAIWAN_REFRESH_PROFILE_PATTERN),
-    sleep_seconds: float = Query(default=0.05, ge=0, le=3),
+    sleep_seconds: float | None = Query(default=None, ge=0, le=3),
     db: Session = Depends(get_db),
 ):
     refresh_profile = normalize_refresh_profile(profile)
     progress_total = refresh_profile_step_count(refresh_profile)
+    resolved_sleep_seconds = resolve_subresource_refresh_interval_seconds(
+        db=db,
+        market="tw",
+        explicit_sleep_seconds=sleep_seconds,
+    )
 
     return _queue_backfill_job(
         db=db,
@@ -489,11 +501,11 @@ def refresh_selected_stock_data_api(
             "stock_id": stock_id,
             "include_today": include_today,
             "profile": refresh_profile,
-            "sleep_seconds": sleep_seconds,
+            "sleep_seconds": resolved_sleep_seconds,
         },
         progress_total=progress_total,
         task=backfill_tasks.run_stock_selection_refresh_job,
-        task_args=(stock_id, include_today, sleep_seconds, refresh_profile),
+        task_args=(stock_id, include_today, resolved_sleep_seconds, refresh_profile),
     )
 
 
@@ -589,7 +601,7 @@ def backfill_market_daily_metrics(
     categories: str = Query(default="institutional_trade,margin_trading"),
     lookback_days: int = Query(default=30, ge=1, le=1000),
     include_today: bool | None = None,
-    sleep_seconds: float = Query(default=0.2, ge=0, le=3),
+    sleep_seconds: float | None = Query(default=None, ge=0, le=3),
     skip_existing: bool = True,
     db: Session = Depends(get_db),
 ):
@@ -597,6 +609,11 @@ def backfill_market_daily_metrics(
     resolved_include_today = _resolve_daily_metric_include_today(
         categories=category_list,
         include_today=include_today,
+    )
+    resolved_sleep_seconds = resolve_market_refresh_interval_seconds(
+        db=db,
+        market="tw",
+        explicit_sleep_seconds=sleep_seconds,
     )
     return _queue_backfill_job(
         db=db,
@@ -609,7 +626,7 @@ def backfill_market_daily_metrics(
             "categories": category_list,
             "lookback_days": lookback_days,
             "include_today": resolved_include_today,
-            "sleep_seconds": sleep_seconds,
+            "sleep_seconds": resolved_sleep_seconds,
             "skip_existing": skip_existing,
         },
         task=backfill_tasks.run_market_daily_metrics_job,
@@ -619,7 +636,7 @@ def backfill_market_daily_metrics(
             category_list,
             lookback_days,
             resolved_include_today,
-            sleep_seconds,
+            resolved_sleep_seconds,
             skip_existing,
         ),
     )
@@ -638,7 +655,7 @@ def backfill_stock_daily_metrics_history(
     categories: str = Query(default="institutional_trade,margin_trading"),
     lookback_days: int = Query(default=365, ge=1, le=5000),
     include_today: bool | None = None,
-    sleep_seconds: float = Query(default=0.2, ge=0, le=3),
+    sleep_seconds: float | None = Query(default=None, ge=0, le=3),
     skip_existing: bool = True,
     db: Session = Depends(get_db),
 ):
@@ -653,6 +670,11 @@ def backfill_stock_daily_metrics_history(
         lookback_days=lookback_days,
         include_today=resolved_include_today,
     )
+    resolved_sleep_seconds = resolve_subresource_refresh_interval_seconds(
+        db=db,
+        market="tw",
+        explicit_sleep_seconds=sleep_seconds,
+    )
     return _queue_backfill_job(
         db=db,
         background_tasks=background_tasks,
@@ -664,7 +686,7 @@ def backfill_stock_daily_metrics_history(
             "end_date": end_date,
             "categories": category_list,
             "include_today": resolved_include_today,
-            "sleep_seconds": sleep_seconds,
+            "sleep_seconds": resolved_sleep_seconds,
             "skip_existing": skip_existing,
         },
         task=backfill_tasks.run_stock_daily_metrics_history_job,
@@ -673,7 +695,7 @@ def backfill_stock_daily_metrics_history(
             start_date,
             end_date,
             category_list,
-            sleep_seconds,
+            resolved_sleep_seconds,
             skip_existing,
         ),
     )
@@ -690,10 +712,15 @@ def backfill_market_fundamental_metrics(
         default="shareholding_distribution,monthly_revenue,financial_metrics"
     ),
     force: bool = False,
-    sleep_seconds: float = Query(default=0.2, ge=0, le=3),
+    sleep_seconds: float | None = Query(default=None, ge=0, le=3),
     db: Session = Depends(get_db),
 ):
     category_list = _split_categories(categories)
+    resolved_sleep_seconds = resolve_market_refresh_interval_seconds(
+        db=db,
+        market="tw",
+        explicit_sleep_seconds=sleep_seconds,
+    )
     return _queue_backfill_job(
         db=db,
         background_tasks=background_tasks,
@@ -702,10 +729,10 @@ def backfill_market_fundamental_metrics(
         request={
             "categories": category_list,
             "force": force,
-            "sleep_seconds": sleep_seconds,
+            "sleep_seconds": resolved_sleep_seconds,
         },
         task=backfill_tasks.run_market_fundamental_metrics_job,
-        task_args=(category_list, force, sleep_seconds),
+        task_args=(category_list, force, resolved_sleep_seconds),
     )
 
 
@@ -721,10 +748,15 @@ def backfill_stock_fundamental_metrics(
         default="shareholding_distribution,monthly_revenue,financial_metrics"
     ),
     force: bool = False,
-    sleep_seconds: float = Query(default=0.2, ge=0, le=3),
+    sleep_seconds: float | None = Query(default=None, ge=0, le=3),
     db: Session = Depends(get_db),
 ):
     category_list = _split_categories(categories)
+    resolved_sleep_seconds = resolve_subresource_refresh_interval_seconds(
+        db=db,
+        market="tw",
+        explicit_sleep_seconds=sleep_seconds,
+    )
     return _queue_backfill_job(
         db=db,
         background_tasks=background_tasks,
@@ -734,10 +766,10 @@ def backfill_stock_fundamental_metrics(
             "stock_id": stock_id,
             "categories": category_list,
             "force": force,
-            "sleep_seconds": sleep_seconds,
+            "sleep_seconds": resolved_sleep_seconds,
         },
         task=backfill_tasks.run_stock_fundamental_metrics_job,
-        task_args=(stock_id, category_list, force, sleep_seconds),
+        task_args=(stock_id, category_list, force, resolved_sleep_seconds),
     )
 
 
@@ -752,10 +784,15 @@ def backfill_stock_shareholding_history(
     from_date: date | None = None,
     to_date: date | None = None,
     lookback_weeks: int = Query(default=52, ge=1, le=60),
-    sleep_seconds: float = Query(default=0.1, ge=0, le=3),
+    sleep_seconds: float | None = Query(default=None, ge=0, le=3),
     skip_existing: bool = True,
     db: Session = Depends(get_db),
 ):
+    resolved_sleep_seconds = resolve_subresource_refresh_interval_seconds(
+        db=db,
+        market="tw",
+        explicit_sleep_seconds=sleep_seconds,
+    )
     return _queue_backfill_job(
         db=db,
         background_tasks=background_tasks,
@@ -766,7 +803,7 @@ def backfill_stock_shareholding_history(
             "from_date": from_date,
             "to_date": to_date,
             "lookback_weeks": lookback_weeks,
-            "sleep_seconds": sleep_seconds,
+            "sleep_seconds": resolved_sleep_seconds,
             "skip_existing": skip_existing,
         },
         task=backfill_tasks.run_stock_shareholding_history_job,
@@ -775,7 +812,7 @@ def backfill_stock_shareholding_history(
             from_date,
             to_date,
             lookback_weeks,
-            sleep_seconds,
+            resolved_sleep_seconds,
             skip_existing,
         ),
     )
@@ -792,10 +829,15 @@ def backfill_stock_monthly_revenue_history(
     from_period: date | None = None,
     to_period: date | None = None,
     lookback_months: int = Query(default=120, ge=1, le=120),
-    sleep_seconds: float = Query(default=0.05, ge=0, le=3),
+    sleep_seconds: float | None = Query(default=None, ge=0, le=3),
     skip_existing: bool = True,
     db: Session = Depends(get_db),
 ):
+    resolved_sleep_seconds = resolve_subresource_refresh_interval_seconds(
+        db=db,
+        market="tw",
+        explicit_sleep_seconds=sleep_seconds,
+    )
     return _queue_backfill_job(
         db=db,
         background_tasks=background_tasks,
@@ -806,7 +848,7 @@ def backfill_stock_monthly_revenue_history(
             "from_period": from_period,
             "to_period": to_period,
             "lookback_months": lookback_months,
-            "sleep_seconds": sleep_seconds,
+            "sleep_seconds": resolved_sleep_seconds,
             "skip_existing": skip_existing,
         },
         task=backfill_tasks.run_stock_monthly_revenue_history_job,
@@ -815,7 +857,7 @@ def backfill_stock_monthly_revenue_history(
             from_period,
             to_period,
             lookback_months,
-            sleep_seconds,
+            resolved_sleep_seconds,
             skip_existing,
         ),
     )
@@ -834,10 +876,15 @@ def backfill_stock_financial_metrics_history(
     to_fiscal_year: int | None = Query(default=None, ge=1900, le=2100),
     to_quarter: int | None = Query(default=None, ge=1, le=4),
     lookback_quarters: int = Query(default=40, ge=1, le=80),
-    sleep_seconds: float = Query(default=0.05, ge=0, le=3),
+    sleep_seconds: float | None = Query(default=None, ge=0, le=3),
     skip_existing: bool = True,
     db: Session = Depends(get_db),
 ):
+    resolved_sleep_seconds = resolve_subresource_refresh_interval_seconds(
+        db=db,
+        market="tw",
+        explicit_sleep_seconds=sleep_seconds,
+    )
     return _queue_backfill_job(
         db=db,
         background_tasks=background_tasks,
@@ -850,7 +897,7 @@ def backfill_stock_financial_metrics_history(
             "to_fiscal_year": to_fiscal_year,
             "to_quarter": to_quarter,
             "lookback_quarters": lookback_quarters,
-            "sleep_seconds": sleep_seconds,
+            "sleep_seconds": resolved_sleep_seconds,
             "skip_existing": skip_existing,
         },
         task=backfill_tasks.run_stock_financial_metrics_history_job,
@@ -861,7 +908,7 @@ def backfill_stock_financial_metrics_history(
             to_fiscal_year,
             to_quarter,
             lookback_quarters,
-            sleep_seconds,
+            resolved_sleep_seconds,
             skip_existing,
         ),
     )
@@ -949,12 +996,22 @@ def get_stock_technical_report(
 @router.get("/overnight-impact/{stock_id}", response_model=OvernightImpactRead)
 def get_stock_overnight_impact(
     stock_id: str,
+    refresh: bool = True,
+    max_refresh_symbols: int = Query(default=8, ge=1, le=8),
     db: Session = Depends(get_db),
 ):
     try:
-        return build_us_overnight_impact_report(
+        if not refresh:
+            return build_us_overnight_impact_report(
+                db=db,
+                stock_id=stock_id,
+                suppress_stale_signal=True,
+            )
+
+        return ensure_current_us_overnight_impact_report(
             db=db,
             stock_id=stock_id,
+            max_refresh_symbols=max_refresh_symbols,
         )
     except ValueError as exc:
         raise HTTPException(

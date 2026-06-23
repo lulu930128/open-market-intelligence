@@ -41,6 +41,11 @@ TABLE_SOURCE_GRADES = {
     "us_sec_company_fact": "official",
     "us_corporate_action": "third_party",
     "us_short_volume_daily": "third_party",
+    "jp_stock_master": "official",
+    "jp_daily_price": "third_party",
+    "jp_company_fundamental": "third_party",
+    "jp_margin_interest": "third_party",
+    "jp_investor_type": "third_party",
 }
 CRITICAL_MISSING_KEYS = {
     "stock_master",

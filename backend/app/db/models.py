@@ -150,6 +150,64 @@ class JobRun(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class DispatchRecipientGroup(Base):
+    __tablename__ = "dispatch_recipient_group"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    emails_json: Mapped[str] = mapped_column(Text)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+    deliveries: Mapped[list["DispatchDelivery"]] = relationship(
+        back_populates="recipient_group",
+    )
+
+
+class DispatchDelivery(Base):
+    __tablename__ = "dispatch_delivery"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    job_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("job_run.id"),
+        nullable=True,
+        index=True,
+    )
+    recipient_group_id: Mapped[int | None] = mapped_column(
+        ForeignKey("dispatch_recipient_group.id"),
+        nullable=True,
+        index=True,
+    )
+
+    template_key: Mapped[str] = mapped_column(String(80), index=True)
+    scope_type: Mapped[str] = mapped_column(String(50), index=True)
+    scope_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+
+    subject: Mapped[str] = mapped_column(String(240))
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    recipient_count: Mapped[int] = mapped_column(Integer, default=0)
+    recipients_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    body_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    body_html: Mapped[str | None] = mapped_column(Text, nullable=True)
+    preview_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    request_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+    recipient_group: Mapped[DispatchRecipientGroup | None] = relationship(
+        back_populates="deliveries",
+    )
+
+
 class AiMemory(Base):
     __tablename__ = "ai_memory"
 

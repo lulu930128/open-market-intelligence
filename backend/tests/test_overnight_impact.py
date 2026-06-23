@@ -21,6 +21,7 @@ from app.db.models import (
 )
 from app.market.overnight_impact import (
     build_us_overnight_impact_report,
+    ensure_current_us_overnight_impact_report,
     scan_us_overnight_impact_gaps,
 )
 
@@ -227,6 +228,75 @@ class OvernightImpactTests(unittest.TestCase):
         self.assertGreater(report["weighted_change_pct"], 0)
         self.assertIn(report["stance"], {"risk_on", "strong_risk_on"})
         self.assertNotIn("^SOX", {factor["symbol"] for factor in report["factors"]})
+
+    def test_stale_overnight_report_suppresses_directional_signal(self) -> None:
+        add_stock(self.db, stock_id="1101", stock_name="台泥", industry="水泥工業")
+        for symbol, change_pct in {
+            "^GSPC": 0.8,
+            "^DJI": 0.6,
+            "^IXIC": 0.4,
+            "QQQ": 0.5,
+        }.items():
+            add_us_move(self.db, symbol, change_pct=change_pct, latest_date=date(2026, 6, 5))
+
+        with patch(
+            "app.market.overnight_impact.expected_us_daily_price_date",
+            return_value=date(2026, 6, 8),
+        ):
+            report = build_us_overnight_impact_report(
+                db=self.db,
+                stock_id="1101",
+                suppress_stale_signal=True,
+            )
+
+        self.assertFalse(report["freshness"]["is_current"])
+        self.assertEqual(report["stance"], "unknown")
+        self.assertEqual(report["score"], 0)
+        self.assertIsNone(report["weighted_change_pct"])
+        self.assertIn("us_overnight_tw_impact_stale", report["missing"])
+        self.assertTrue(any("落後預期 2026-06-08" in item for item in report["warnings"]))
+
+    def test_ensure_current_overnight_report_refreshes_stale_us_factors(self) -> None:
+        add_stock(self.db, stock_id="1101", stock_name="台泥", industry="水泥工業")
+        expected_date = date(2026, 6, 8)
+        for symbol, change_pct in {
+            "^GSPC": 0.8,
+            "^DJI": 0.6,
+            "^IXIC": 0.4,
+            "QQQ": 0.5,
+        }.items():
+            add_us_move(self.db, symbol, change_pct=change_pct, latest_date=date(2026, 6, 5))
+
+        def refresh_daily(*, db: Session, symbol: str, **_: object) -> dict:
+            add_us_move(db, symbol, change_pct=1.0, latest_date=expected_date)
+            return {
+                "status": "success",
+                "provider": "yahoo_chart",
+                "symbol": symbol,
+                "fetched_count": 2,
+                "inserted_count": 2,
+                "updated_count": 0,
+            }
+
+        with patch(
+            "app.market.overnight_impact.expected_us_daily_price_date",
+            return_value=expected_date,
+        ), patch(
+            "app.market.overnight_impact.us_market_service.refresh_us_daily_prices",
+            side_effect=refresh_daily,
+        ) as refresh_mock:
+            report = ensure_current_us_overnight_impact_report(
+                db=self.db,
+                stock_id="1101",
+                max_refresh_symbols=4,
+                provider="yahoo_chart",
+            )
+
+        self.assertEqual(refresh_mock.call_count, 4)
+        self.assertTrue(report["freshness"]["is_current"])
+        self.assertEqual(report["freshness"]["refresh"]["is_current_after_refresh"], True)
+        self.assertNotEqual(report["stance"], "unknown")
+        self.assertIsNotNone(report["weighted_change_pct"])
 
     def test_stock_context_exposes_overnight_impact_for_ai(self) -> None:
         add_stock(self.db, stock_id="2330", stock_name="台積電", industry="24")

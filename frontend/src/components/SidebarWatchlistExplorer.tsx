@@ -39,7 +39,7 @@ type Props = {
 };
 
 type Message = { type: "success" | "error"; text: string } | null;
-export type MarketRegion = "tw" | "us" | "jp" | "kr" | "hk";
+export type MarketRegion = "tw" | "us" | "jp" | "kr" | "crypto";
 type DragPayload =
   | { type: "group"; groupId: number }
   | { type: "stock"; itemId: number; groupId: number; stockId: string };
@@ -68,7 +68,7 @@ const sidebarMarketOptions: SidebarMarketOption[] = [
   { value: "us", enabled: true },
   { value: "jp", enabled: true },
   { value: "kr", enabled: false },
-  { value: "hk", enabled: false },
+  { value: "crypto", enabled: false },
 ];
 
 function flattenGroups(nodes: WatchlistGroupNode[]): WatchlistGroupNode[] {

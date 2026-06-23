@@ -28,6 +28,8 @@ SCOPE_LABELS = {
     "stock": "台股",
     "watchlist": "自選群組",
     "us_stock": "美股",
+    "jp_stock": "日股",
+    "jp_index": "日股指數",
     "tw_index": "台股指數",
     "tw_futures": "台指期",
     "market": "市場",

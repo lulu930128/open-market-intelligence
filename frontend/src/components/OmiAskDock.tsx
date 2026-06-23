@@ -15,6 +15,8 @@ export type OmiAskTarget = {
     | "tw_index"
     | "tw_futures"
     | "us_stock"
+    | "jp_stock"
+    | "jp_index"
     | string;
   id?: string | null;
   label?: string | null;
@@ -177,12 +179,14 @@ function currentThemePreference() {
   if (typeof document !== "undefined") {
     const theme = document.documentElement.dataset.theme;
     if (theme === "light" || theme === "dark") return theme;
+    if (theme === "high-contrast") return "dark";
   }
 
   if (typeof window !== "undefined") {
     try {
       const theme = window.localStorage.getItem(SETTINGS_COLOR_STORAGE_KEY);
       if (theme === "light" || theme === "dark") return theme;
+      if (theme === "high-contrast") return "dark";
     } catch {
       // Local preference access can fail in restricted browser contexts.
     }

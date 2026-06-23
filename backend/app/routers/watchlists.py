@@ -6,6 +6,7 @@ from app.watchlists import indicator_service, radar_service, ranking_service, se
 from app.db.session import get_db
 from app.jobs import backfill_tasks, service as job_service
 from app.jobs.schemas import JobRunRead
+from app.settings.refresh_execution import resolve_observed_stock_refresh_interval_seconds
 from app.watchlists.schemas import (
     WatchlistGroupCreate,
     WatchlistGroupDeleteResultRead,
@@ -290,10 +291,15 @@ def backfill_watchlist_group(
     tpex_source_id: int | None = None,
     include_children: bool = True,
     enabled_only: bool = True,
-    sleep_seconds: float = Query(default=0.8, ge=0.2, le=10.0),
+    sleep_seconds: float | None = Query(default=None, ge=0.2, le=10.0),
     skip_existing_months: bool = True,
     db: Session = Depends(get_db),
 ):
+    resolved_sleep_seconds = resolve_observed_stock_refresh_interval_seconds(
+        db=db,
+        market="tw",
+        explicit_sleep_seconds=sleep_seconds,
+    )
     return _queue_group_backfill_job(
         db=db,
         background_tasks=background_tasks,
@@ -304,7 +310,7 @@ def backfill_watchlist_group(
         tpex_source_id=tpex_source_id,
         include_children=include_children,
         enabled_only=enabled_only,
-        sleep_seconds=sleep_seconds,
+        sleep_seconds=resolved_sleep_seconds,
         skip_existing_months=skip_existing_months,
     )
 
@@ -323,10 +329,15 @@ def backfill_watchlist_group_twse(
     tpex_source_id: int | None = None,
     include_children: bool = True,
     enabled_only: bool = True,
-    sleep_seconds: float = Query(default=0.8, ge=0.2, le=10.0),
+    sleep_seconds: float | None = Query(default=None, ge=0.2, le=10.0),
     skip_existing_months: bool = True,
     db: Session = Depends(get_db),
 ):
+    resolved_sleep_seconds = resolve_observed_stock_refresh_interval_seconds(
+        db=db,
+        market="tw",
+        explicit_sleep_seconds=sleep_seconds,
+    )
     return _queue_group_backfill_job(
         db=db,
         background_tasks=background_tasks,
@@ -337,7 +348,7 @@ def backfill_watchlist_group_twse(
         tpex_source_id=tpex_source_id,
         include_children=include_children,
         enabled_only=enabled_only,
-        sleep_seconds=sleep_seconds,
+        sleep_seconds=resolved_sleep_seconds,
         skip_existing_months=skip_existing_months,
     )
 
@@ -357,10 +368,15 @@ def refresh_watchlist_group_latest_prices(
     tpex_source_id: int | None = None,
     include_children: bool = True,
     enabled_only: bool = True,
-    sleep_seconds: float = Query(default=0.8, ge=0.2, le=10.0),
+    sleep_seconds: float | None = Query(default=None, ge=0.2, le=10.0),
     skip_existing_months: bool = True,
     db: Session = Depends(get_db),
 ):
+    resolved_sleep_seconds = resolve_observed_stock_refresh_interval_seconds(
+        db=db,
+        market="tw",
+        explicit_sleep_seconds=sleep_seconds,
+    )
     return _queue_group_refresh_latest_job(
         db=db,
         background_tasks=background_tasks,
@@ -372,7 +388,7 @@ def refresh_watchlist_group_latest_prices(
         tpex_source_id=tpex_source_id,
         include_children=include_children,
         enabled_only=enabled_only,
-        sleep_seconds=sleep_seconds,
+        sleep_seconds=resolved_sleep_seconds,
         skip_existing_months=skip_existing_months,
     )
 

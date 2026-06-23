@@ -239,6 +239,8 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                                         "tw_index",
                                         "tw_futures",
                                         "us_stock",
+                                        "jp_stock",
+                                        "jp_index",
                                     ],
                                     "default": "auto",
                                 },
@@ -389,6 +391,30 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                     "type": "object",
                     "properties": {
                         "symbol": {"type": "string"},
+                    },
+                    "required": ["symbol"],
+                },
+            },
+            {
+                "name": "omi.read_jp_stock_context",
+                "title": "Read Japan Stock Context",
+                "description": "Read an evidence pack for one Japan stock from local OMI data.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": {"type": "string"},
+                    },
+                    "required": ["symbol"],
+                },
+            },
+            {
+                "name": "omi.read_jp_index_context",
+                "title": "Read Japan Index Context",
+                "description": "Read an OHLC-only evidence pack for one Japan index or index proxy.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": {"type": "string", "enum": ["^N225", "1306.T"]},
                     },
                     "required": ["symbol"],
                 },
@@ -968,6 +994,12 @@ def read_market_overview(db: Session, limit: int = 10) -> dict[str, Any]:
         trade_date=latest_trade_date,
         limit=10000,
     )
+    stock_ids = sorted({row.stock_id for row in rows if row.stock_id})
+    stock_industries: dict[str, str | None] = {}
+    for index in range(0, len(stock_ids), 500):
+        chunk = stock_ids[index : index + 500]
+        for stock in db.query(StockMaster).filter(StockMaster.stock_id.in_(chunk)).all():
+            stock_industries[stock.stock_id] = stock.industry or stock.category
     ranked = [
         {
             "stock_id": row.stock_id,
@@ -983,17 +1015,108 @@ def read_market_overview(db: Session, limit: int = 10) -> dict[str, Any]:
             ),
             "trade_volume": row.trade_volume,
             "trade_value": row.trade_value,
+            "transaction_count": row.transaction_count,
+            "industry": stock_industries.get(row.stock_id),
         }
         for row in rows
     ]
     ranked_with_change = [row for row in ranked if row["change_pct"] is not None]
     top_gainers = sorted(ranked_with_change, key=lambda row: row["change_pct"], reverse=True)[:limit]
     top_losers = sorted(ranked_with_change, key=lambda row: row["change_pct"])[:limit]
+    value_leaders = sorted(
+        [row for row in ranked if row["trade_value"] is not None],
+        key=lambda row: row["trade_value"] or 0,
+        reverse=True,
+    )[:limit]
 
     advance_count = sum(1 for row in rows if (row.price_change or 0) > 0)
     decline_count = sum(1 for row in rows if (row.price_change or 0) < 0)
     unchanged_count = sum(1 for row in rows if (row.price_change or 0) == 0)
     total_trade_value = sum(row.trade_value or 0 for row in rows) or None
+    total_count = len(rows)
+    average_change_pct = (
+        sum(row["change_pct"] for row in ranked_with_change) / len(ranked_with_change)
+        if ranked_with_change
+        else None
+    )
+    positive_ratio = advance_count / len(ranked_with_change) if ranked_with_change else None
+    advance_decline_ratio = advance_count / decline_count if decline_count else None
+    top_value_sum = sum(row["trade_value"] or 0 for row in value_leaders)
+    top_value_share = (
+        top_value_sum / total_trade_value
+        if total_trade_value and value_leaders
+        else None
+    )
+    distribution = {
+        "limit_up_count": sum(
+            1 for row in ranked_with_change if (row["change_pct"] or 0) >= 9.5
+        ),
+        "strong_up_count": sum(
+            1 for row in ranked_with_change if 5 <= (row["change_pct"] or 0) < 9.5
+        ),
+        "mild_up_count": sum(
+            1 for row in ranked_with_change if 0 < (row["change_pct"] or 0) < 5
+        ),
+        "flat_count": unchanged_count,
+        "mild_down_count": sum(
+            1 for row in ranked_with_change if -5 < (row["change_pct"] or 0) < 0
+        ),
+        "strong_down_count": sum(
+            1 for row in ranked_with_change if -9.5 < (row["change_pct"] or 0) <= -5
+        ),
+        "limit_down_count": sum(
+            1 for row in ranked_with_change if (row["change_pct"] or 0) <= -9.5
+        ),
+    }
+    industry_groups: dict[str, list[dict[str, Any]]] = {}
+    for row in ranked_with_change:
+        industry = str(row.get("industry") or "未分類").strip() or "未分類"
+        industry_groups.setdefault(industry, []).append(row)
+
+    industry_summary = []
+    for industry, group_rows in industry_groups.items():
+        changes = [
+            row["change_pct"]
+            for row in group_rows
+            if isinstance(row.get("change_pct"), (int, float))
+        ]
+        if not changes:
+            continue
+        trade_value = sum(row.get("trade_value") or 0 for row in group_rows) or None
+        top_row = max(
+            group_rows,
+            key=lambda row: (
+                row.get("trade_value") or 0,
+                row.get("change_pct") or 0,
+            ),
+        )
+        industry_summary.append(
+            {
+                "industry": industry,
+                "count": len(group_rows),
+                "advance_count": sum(1 for value in changes if value > 0),
+                "decline_count": sum(1 for value in changes if value < 0),
+                "average_change_pct": sum(changes) / len(changes),
+                "trade_value": trade_value,
+                "top_stock_id": top_row.get("stock_id"),
+                "top_stock_name": top_row.get("stock_name"),
+            }
+        )
+    top_industries = sorted(
+        [row for row in industry_summary if row["industry"] != "未分類" and row["count"] >= 2],
+        key=lambda row: (
+            row["average_change_pct"],
+            row.get("trade_value") or 0,
+        ),
+        reverse=True,
+    )[:6]
+    weak_industries = sorted(
+        [row for row in industry_summary if row["industry"] != "未分類" and row["count"] >= 2],
+        key=lambda row: (
+            row["average_change_pct"],
+            -(row.get("trade_value") or 0),
+        ),
+    )[:6]
 
     if not ranked_with_change:
         missing.append("market_daily_price.change_pct")
@@ -1009,11 +1132,19 @@ def read_market_overview(db: Session, limit: int = 10) -> dict[str, Any]:
                 "advance_count": advance_count,
                 "decline_count": decline_count,
                 "unchanged_count": unchanged_count,
-                "total_count": len(rows),
+                "total_count": total_count,
                 "trade_value": total_trade_value,
+                "average_change_pct": average_change_pct,
+                "positive_ratio": positive_ratio,
+                "advance_decline_ratio": advance_decline_ratio,
+                "top_value_share": top_value_share,
             },
+            "distribution": distribution,
             "top_gainers": top_gainers,
             "top_losers": top_losers,
+            "value_leaders": value_leaders,
+            "top_industries": top_industries,
+            "weak_industries": weak_industries,
         },
         "missing": missing,
         "warnings": [

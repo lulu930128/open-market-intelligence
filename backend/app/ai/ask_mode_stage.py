@@ -21,7 +21,7 @@ def effective_mode_after_freshness(
         )
         return (
             "brief"
-            if scope_type in {"stock", "watchlist", "us_stock", "tw_index", "tw_futures"}
+            if scope_type in {"stock", "watchlist", "us_stock", "jp_stock", "jp_index", "tw_index", "tw_futures"}
             else "data_only"
         )
     return effective_mode

@@ -10,8 +10,19 @@ export const metadata: Metadata = {
 const preferenceInitScript = `
 try {
   var omiTheme = window.localStorage.getItem("omi:settings:color");
-  if (omiTheme === "light" || omiTheme === "dark") {
+  var omiHighContrast = window.localStorage.getItem("omi:settings:high-contrast");
+  if (omiTheme === "high-contrast") {
+    document.documentElement.dataset.theme = "dark";
+    if (omiHighContrast !== "false") {
+      document.documentElement.dataset.contrast = "high";
+    }
+  } else if (omiTheme === "light" || omiTheme === "dark") {
     document.documentElement.dataset.theme = omiTheme;
+  }
+  if (omiHighContrast === "true") {
+    document.documentElement.dataset.contrast = "high";
+  } else if (omiHighContrast === "false") {
+    delete document.documentElement.dataset.contrast;
   }
 
   var omiLocale = window.localStorage.getItem("omi:settings:language");

@@ -42,7 +42,7 @@ const marketOptions: Array<{
   { value: "us", enabled: true },
   { value: "jp", enabled: true },
   { value: "kr", enabled: false },
-  { value: "hk", enabled: false },
+  { value: "crypto", enabled: false },
 ];
 
 function flattenGroups(nodes: USWatchlistGroupNode[]): USWatchlistGroupNode[] {

@@ -2,7 +2,7 @@
 
 Open Market Intelligence（OMI）是一套本機優先的市場情報與看盤研究工作台。它把自選股、盤勢脈絡、盤中監控、K 線分析、籌碼資料、基本面資料、美股隔夜訊號，以及 AI/Agent evidence 介面整合在同一個專案中。
 
-目前產品主軸是台股。美股模組已可作為台股研究的領先訊號層，特別適合觀察半導體、AI 基建、雲端、記憶體、ETF 與大型科技股對台股供應鏈的影響。日股、韓股、港股入口先保留，後續再擴充。
+目前產品主軸是台股。美股模組已可作為台股研究的領先訊號層，特別適合觀察半導體、AI 基建、雲端、記憶體、ETF 與大型科技股對台股供應鏈的影響。日股是早期 context layer；韓股與虛擬貨幣入口先保留，後續再擴充。
 
 ## 產品畫面
 
@@ -177,6 +177,12 @@ OMI dock 以本機 evidence 為預設，直接回傳買入判斷、關鍵價位�
 - SEC EDGAR 需要描述清楚的 `US_SEC_USER_AGENT`。
 - FINRA short volume 是每日 short sale volume，不是 short interest position。
 
+### 日股與預留市場入口
+
+日股定位和美股相同，是台股研究的外部 context layer。現階段以自選股、OHLC、技術雷達與資源補齊流程為主，資料源以 Yahoo chart 與 J-Quants 設定槽為核心。
+
+韓股與虛擬貨幣目前只保留 UI 入口，不會產生假資料或把其他市場資料套用成 crypto context。接上交易所、鏈上或 provider API 前，相關入口應維持 disabled/placeholder 狀態。
+
 ## 資料來源信任模型
 
 OMI 把每個來源都當作帶有 provenance 與 freshness 的 evidence，而不是單一無條件真相。
@@ -195,6 +201,7 @@ OMI 把每個來源都當作帶有 provenance 與 freshness 的 evidence，而�
 | 美股基本面 | SEC EDGAR company facts | 公司申報官方來源；ETF 或非公司資產可能沒有 facts。 |
 | 美股 profile/actions | Alpha Vantage | 補充資料，API-key dependent。 |
 | 美股 short volume | FINRA CNMS daily short volume | 官方每日 short sale volume，不是 short interest。 |
+| 日股 OHLC/基本面 | Yahoo chart、J-Quants 設定槽 | 早期 context layer；J-Quants 需 key，缺資料時要顯示 missing/partial。 |
 | Macro | FRED | 官方 FRED API，需 key。 |
 
 設計規則：如果來源 stale、partial 或 unavailable，UI 與 AI response 要透過 `warnings`、`missing`、status chip、loading state 顯示出來。
@@ -263,7 +270,9 @@ flowchart LR
 | `/api/sources` | Source registry、fetch runs、logs |
 | `/api/raw-results` | Raw payload inspection 與 quality checks |
 | `/api/jobs` | Background job status |
+| `/api/settings` | 技術分析、高對比與刷新節奏等設定 |
 | `/api/ai` | `omi.ask`、tools、strategy profiles、reports |
+| `/api/dispatch` | 派報收件群組、預覽、SMTP 發送與派報記錄 |
 | `/api/stocks` | 台股 search、master、profile |
 | `/api/watchlists` | 台股 watchlists、groups、ranking、Radar、backfills |
 | `/api/market/ohlc` | 台股日/週/月 OHLC |
@@ -279,6 +288,7 @@ flowchart LR
 | `/api/market/backfill` | 台股 backfill jobs |
 | `/api/market/tw-futures` | 台指期 TXF/MXF/TMF 報價、日內與日 K 資料 |
 | `/api/us-market` | 美股 symbols、watchlists、OHLC、intraday、SEC facts、profile、actions、macro |
+| `/api/jp-market` | 日股 symbols、watchlists、OHLC、resource refresh 與 context |
 
 ## AI And Agent Contract
 
@@ -582,7 +592,25 @@ KGI_CERT_PATH=
 KGI_API_BASE_URL=
 US_SEC_USER_AGENT=Open Market Intelligence local research; contact=you@example.com
 US_MARKET_HTTP_TIMEOUT_SECONDS=30
+JP_MARKET_HTTP_TIMEOUT_SECONDS=30
+JQUANTS_API_BASE_URL=https://api.jquants.com/v2
+JQUANTS_API_KEY=
+JQUANTS_ID_TOKEN=
+JQUANTS_REFRESH_TOKEN=
+JQUANTS_MAIL_ADDRESS=
+JQUANTS_PASSWORD=
+JQUANTS_ID_TOKEN_CACHE_SECONDS=82800
 OMI_HTTP_TRUST_ENV=false
+
+DISPATCH_SMTP_HOST=
+DISPATCH_SMTP_PORT=587
+DISPATCH_SMTP_USERNAME=
+DISPATCH_SMTP_PASSWORD=
+DISPATCH_SMTP_FROM_EMAIL=
+DISPATCH_SMTP_FROM_NAME=Open Market Intelligence
+DISPATCH_SMTP_USE_TLS=true
+DISPATCH_SMTP_USE_SSL=false
+DISPATCH_SMTP_TIMEOUT_SECONDS=30
 
 OPENAI_API_KEY=
 OPENAI_LLM_API_KEY=
@@ -627,6 +655,12 @@ SCHEDULER_TAIWAN_FUTURES_SUCCESS_EVENT_INTERVAL_SECONDS=300
 ENABLE_US_MARKET_SCHEDULER=false
 SCHEDULER_US_MARKET_REFRESH_TIME=06:30
 SCHEDULER_US_MARKET_REFRESH_DAY_OF_WEEK=tue-sat
+SCHEDULER_US_MARKET_REFRESH_SLEEP_SECONDS=12.0
+ENABLE_JP_MARKET_SCHEDULER=false
+SCHEDULER_JP_MARKET_REFRESH_TIME=16:10
+SCHEDULER_JP_MARKET_REFRESH_DAY_OF_WEEK=mon-fri
+SCHEDULER_JP_MARKET_REFRESH_PROVIDER=auto
+SCHEDULER_JP_MARKET_REFRESH_SLEEP_SECONDS=15.0
 ```
 
 大盤籌碼日報有發布窗口，排程應晚於 TWSE/TPEx 來源發布時間。
@@ -716,7 +750,8 @@ git diff --check
 
 - 台股是目前主要 production path；美股可用但仍是 universe-first 且 API-key dependent。
 - US-TW supply-chain mapping 還不是完整 semantic layer，先作為 peer、sector、overnight context 使用。
-- 日股、韓股、港股目前仍是入口 placeholder。
+- 日股仍是早期 context layer；韓股與虛擬貨幣目前仍是入口 placeholder。
+- 派報第一版支援固定模板預覽與手動 SMTP 發送；定時派報與大漲/大跌觸發派報仍是後續版本。
 - 券商分點多日分析取決於已存 daily Top15 snapshots；如果 DB 只有一天，就只能回傳 partial coverage。
 - 盤中資料取決於外部來源可用性，必要時會退回 snapshot-only 行為。
 - 凱基台指期 API 目前是設定與 provider slot，尚未實作 response adapter；正式接上前仍以 TAIFEX MIS 與本地快取為主。

@@ -7,7 +7,16 @@ import {
   useI18n,
   useT,
 } from "@/i18n";
+import DispatchSettingsDialog from "@/components/settings/DispatchSettingsDialog";
 import { fetchJson, requestJson } from "@/lib/api";
+import {
+  loadRefreshExecutionSettings,
+  setCachedRefreshExecutionSettings,
+  type RefreshExecutionField,
+  type RefreshExecutionMarket,
+  type RefreshExecutionSettingsRead,
+  type RefreshExecutionSettingsWrite,
+} from "@/lib/refreshExecutionSettings";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
@@ -93,6 +102,7 @@ type TechnicalAnalysisSettingsWrite = Pick<
 >;
 
 type ParameterDraft = Record<string, string>;
+type RefreshDraft = Record<string, string>;
 
 type ParameterField = {
   key: string;
@@ -119,7 +129,108 @@ type ParameterSectionTemplate = {
   fields: ParameterFieldTemplate[];
 };
 
+type RefreshMarketSection = {
+  key: RefreshExecutionMarket;
+  label: string;
+  eyebrow: string;
+  description: string;
+  fields: ParameterField[];
+};
+
+type RefreshFieldTemplate = Omit<ParameterFieldTemplate, "key"> & {
+  key: RefreshExecutionField;
+};
+
+type RefreshMarketSectionTemplate = {
+  key: RefreshExecutionMarket;
+  fields: RefreshFieldTemplate[];
+};
+
+const SETTINGS_COLOR_STORAGE_KEY = "omi:settings:color";
+const SETTINGS_HIGH_CONTRAST_STORAGE_KEY = "omi:settings:high-contrast";
+
 const colorSettingChoices: ColorSetting[] = ["light", "dark"];
+
+const refreshMarketSectionTemplates: RefreshMarketSectionTemplate[] = [
+  {
+    key: "tw",
+    fields: [
+      {
+        key: "subresource_refresh_interval_seconds",
+        inputMode: "decimal",
+        min: 0.1,
+        step: 0.1,
+        unit: "seconds",
+      },
+      {
+        key: "observed_stock_refresh_interval_seconds",
+        inputMode: "decimal",
+        min: 0.1,
+        step: 0.1,
+        unit: "seconds",
+      },
+      {
+        key: "market_refresh_interval_seconds",
+        inputMode: "decimal",
+        min: 0.1,
+        step: 0.1,
+        unit: "seconds",
+      },
+    ],
+  },
+  {
+    key: "us",
+    fields: [
+      {
+        key: "subresource_refresh_interval_seconds",
+        inputMode: "decimal",
+        min: 0.1,
+        step: 0.5,
+        unit: "seconds",
+      },
+      {
+        key: "observed_stock_refresh_interval_seconds",
+        inputMode: "decimal",
+        min: 0.1,
+        step: 0.5,
+        unit: "seconds",
+      },
+      {
+        key: "market_refresh_interval_seconds",
+        inputMode: "decimal",
+        min: 0.1,
+        step: 0.5,
+        unit: "seconds",
+      },
+    ],
+  },
+  {
+    key: "jp",
+    fields: [
+      {
+        key: "subresource_refresh_interval_seconds",
+        inputMode: "decimal",
+        min: 0.1,
+        step: 0.5,
+        unit: "seconds",
+      },
+      {
+        key: "observed_stock_refresh_interval_seconds",
+        inputMode: "decimal",
+        min: 0.1,
+        step: 0.5,
+        unit: "seconds",
+      },
+      {
+        key: "market_refresh_interval_seconds",
+        inputMode: "decimal",
+        min: 0.1,
+        step: 0.5,
+        unit: "seconds",
+      },
+    ],
+  },
+];
 
 const parameterSectionTemplates: ParameterSectionTemplate[] = [
   {
@@ -262,18 +373,45 @@ function localizeParameterSections(t: TranslationFunction): ParameterSection[] {
   }));
 }
 
-function readStoredChoice<T extends string>(
-  key: string,
-  fallback: T,
-  choices: readonly T[]
-): T {
-  if (typeof window === "undefined") return fallback;
+function localizeRefreshMarketSections(t: TranslationFunction): RefreshMarketSection[] {
+  return refreshMarketSectionTemplates.map((section) => ({
+    ...section,
+    label: t(`settings.refresh.markets.${section.key}.label`),
+    eyebrow: t(`settings.refresh.markets.${section.key}.eyebrow`),
+    description: t(`settings.refresh.markets.${section.key}.description`),
+    fields: section.fields.map((field) => ({
+      ...field,
+      label: t(`settings.refresh.fields.${field.key}.label`),
+      hint: t(`settings.refresh.fields.${field.key}.hint`),
+      unit: field.unit === "seconds" ? t("settings.refresh.units.seconds") : field.unit,
+    })),
+  }));
+}
+
+function readStoredColorSetting(): ColorSetting {
+  if (typeof window === "undefined") return "light";
 
   try {
-    const value = window.localStorage.getItem(key);
-    return choices.includes(value as T) ? (value as T) : fallback;
+    const value = window.localStorage.getItem(SETTINGS_COLOR_STORAGE_KEY);
+    if (value === "high-contrast") return "dark";
+    return colorSettingChoices.includes(value as ColorSetting)
+      ? (value as ColorSetting)
+      : "light";
   } catch {
-    return fallback;
+    return "light";
+  }
+}
+
+function readStoredHighContrastSetting() {
+  if (typeof window === "undefined") return false;
+
+  try {
+    const explicit = window.localStorage.getItem(SETTINGS_HIGH_CONTRAST_STORAGE_KEY);
+    if (explicit === "true") return true;
+    if (explicit === "false") return false;
+    return window.localStorage.getItem(SETTINGS_COLOR_STORAGE_KEY) === "high-contrast";
+  } catch {
+    return false;
   }
 }
 
@@ -285,9 +423,31 @@ function storePreference(key: string, value: string) {
   }
 }
 
+function storeBooleanPreference(key: string, value: boolean) {
+  storePreference(key, value ? "true" : "false");
+}
+
 function applyColorTheme(value: ColorSetting) {
   if (typeof document === "undefined") return;
   document.documentElement.dataset.theme = value;
+}
+
+function applyHighContrastTheme(value: boolean) {
+  if (typeof document === "undefined") return;
+  if (value) {
+    document.documentElement.dataset.contrast = "high";
+  } else {
+    delete document.documentElement.dataset.contrast;
+  }
+}
+
+function themePreferenceLabel(
+  color: ColorSetting,
+  highContrast: boolean,
+  t: TranslationFunction
+) {
+  const base = t(`settings.colors.${color}`);
+  return highContrast ? `${base} / ${t("settings.highContrast")}` : base;
 }
 
 function stringValue(value: number | string | null | undefined) {
@@ -332,6 +492,45 @@ function buildParameterDraft(settings: TechnicalAnalysisSettingsRead): Parameter
     mfiInflowMin: stringValue(settings.thresholds.mfi.inflow_min),
     mfiInflowMax: stringValue(settings.thresholds.mfi.inflow_max),
     mfiOutflowBelow: stringValue(settings.thresholds.mfi.outflow_below),
+  };
+}
+
+function refreshDraftKey(
+  market: RefreshExecutionMarket,
+  field: RefreshExecutionField
+) {
+  return `${market}.${field}`;
+}
+
+function buildRefreshDraft(settings: RefreshExecutionSettingsRead): RefreshDraft {
+  return {
+    [refreshDraftKey("tw", "observed_stock_refresh_interval_seconds")]: stringValue(
+      settings.markets.tw.observed_stock_refresh_interval_seconds
+    ),
+    [refreshDraftKey("tw", "subresource_refresh_interval_seconds")]: stringValue(
+      settings.markets.tw.subresource_refresh_interval_seconds
+    ),
+    [refreshDraftKey("tw", "market_refresh_interval_seconds")]: stringValue(
+      settings.markets.tw.market_refresh_interval_seconds
+    ),
+    [refreshDraftKey("us", "observed_stock_refresh_interval_seconds")]: stringValue(
+      settings.markets.us.observed_stock_refresh_interval_seconds
+    ),
+    [refreshDraftKey("us", "subresource_refresh_interval_seconds")]: stringValue(
+      settings.markets.us.subresource_refresh_interval_seconds
+    ),
+    [refreshDraftKey("us", "market_refresh_interval_seconds")]: stringValue(
+      settings.markets.us.market_refresh_interval_seconds
+    ),
+    [refreshDraftKey("jp", "observed_stock_refresh_interval_seconds")]: stringValue(
+      settings.markets.jp.observed_stock_refresh_interval_seconds
+    ),
+    [refreshDraftKey("jp", "subresource_refresh_interval_seconds")]: stringValue(
+      settings.markets.jp.subresource_refresh_interval_seconds
+    ),
+    [refreshDraftKey("jp", "market_refresh_interval_seconds")]: stringValue(
+      settings.markets.jp.market_refresh_interval_seconds
+    ),
   };
 }
 
@@ -469,6 +668,56 @@ function buildTechnicalSettingsWritePayload(
   };
 }
 
+function refreshFieldLabel(
+  market: RefreshExecutionMarket,
+  field: RefreshExecutionField,
+  t: TranslationFunction
+) {
+  return `${t(`settings.refresh.markets.${market}.label`)} ${t(
+    `settings.refresh.fields.${field}.label`
+  )}`;
+}
+
+function buildRefreshMarketPolicyPayload(
+  draft: RefreshDraft,
+  market: RefreshExecutionMarket,
+  t: TranslationFunction
+) {
+  return {
+    observed_stock_refresh_interval_seconds: parseNumberValue(
+      draft,
+      refreshDraftKey(market, "observed_stock_refresh_interval_seconds"),
+      refreshFieldLabel(market, "observed_stock_refresh_interval_seconds", t),
+      t
+    ),
+    subresource_refresh_interval_seconds: parseNumberValue(
+      draft,
+      refreshDraftKey(market, "subresource_refresh_interval_seconds"),
+      refreshFieldLabel(market, "subresource_refresh_interval_seconds", t),
+      t
+    ),
+    market_refresh_interval_seconds: parseNumberValue(
+      draft,
+      refreshDraftKey(market, "market_refresh_interval_seconds"),
+      refreshFieldLabel(market, "market_refresh_interval_seconds", t),
+      t
+    ),
+  };
+}
+
+function buildRefreshSettingsWritePayload(
+  draft: RefreshDraft,
+  t: TranslationFunction
+): RefreshExecutionSettingsWrite {
+  return {
+    markets: {
+      tw: buildRefreshMarketPolicyPayload(draft, "tw", t),
+      us: buildRefreshMarketPolicyPayload(draft, "us", t),
+      jp: buildRefreshMarketPolicyPayload(draft, "jp", t),
+    },
+  };
+}
+
 function GearIcon() {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none">
@@ -532,6 +781,46 @@ function PreferenceSelect<T extends string>({
   );
 }
 
+function PreferenceSwitch({
+  checked,
+  label,
+  onChange,
+}: {
+  checked: boolean;
+  label: string;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-omi-surface-subtle focus:outline-none focus-visible:ring-2 focus-visible:ring-omi-accent"
+      onClick={() => onChange(!checked)}
+    >
+      <span className="font-semibold text-omi-text">{label}</span>
+      <span
+        aria-hidden="true"
+        className={[
+          "relative h-5 w-9 shrink-0 rounded-full border transition-colors",
+          checked
+            ? "border-omi-accent bg-omi-accent"
+            : "border-omi-border bg-omi-surface-strong",
+        ].join(" ")}
+      >
+        <span
+          className={[
+            "absolute top-1/2 h-3.5 w-3.5 -translate-y-1/2 rounded-full transition-transform",
+            checked
+              ? "translate-x-[18px] bg-omi-text-inverse"
+              : "translate-x-0.5 bg-omi-text-muted",
+          ].join(" ")}
+        />
+      </span>
+    </button>
+  );
+}
+
 function ParameterInput({
   field,
   value,
@@ -569,7 +858,11 @@ function ParameterInput({
   );
 }
 
-function SourceLabel({ settings }: { settings: TechnicalAnalysisSettingsRead | null }) {
+function SourceLabel({
+  settings,
+}: {
+  settings: { source: string; version: string } | null;
+}) {
   if (!settings) return null;
 
   return (
@@ -587,25 +880,43 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
   const { locale, setLocale } = useI18n();
   const [menuOpen, setMenuOpen] = useState(false);
   const [parametersOpen, setParametersOpen] = useState(false);
+  const [refreshOpen, setRefreshOpen] = useState(false);
+  const [dispatchOpen, setDispatchOpen] = useState(false);
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [refreshLoadState, setRefreshLoadState] = useState<LoadState>("idle");
+  const [refreshSaveState, setRefreshSaveState] = useState<SaveState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [refreshErrorMessage, setRefreshErrorMessage] = useState<string | null>(null);
+  const [refreshSaveMessage, setRefreshSaveMessage] = useState<string | null>(null);
   const [settings, setSettings] = useState<TechnicalAnalysisSettingsRead | null>(null);
+  const [refreshSettings, setRefreshSettings] =
+    useState<RefreshExecutionSettingsRead | null>(null);
   const [draft, setDraft] = useState<ParameterDraft>({});
+  const [refreshDraft, setRefreshDraft] = useState<RefreshDraft>({});
   const [activeSectionKey, setActiveSectionKey] = useState<ParameterSectionKey>("moving");
-  const [color, setColor] = useState<ColorSetting>(() =>
-    readStoredChoice<ColorSetting>("omi:settings:color", "light", colorSettingChoices)
-  );
+  const [activeRefreshMarket, setActiveRefreshMarket] =
+    useState<RefreshExecutionMarket>("tw");
+  const [color, setColor] = useState<ColorSetting>(() => readStoredColorSetting());
+  const [highContrast, setHighContrast] = useState(() => readStoredHighContrastSetting());
   const rootRef = useRef<HTMLDivElement | null>(null);
 
   const parameterSections = useMemo(() => localizeParameterSections(t), [t]);
+  const refreshMarketSections = useMemo(() => localizeRefreshMarketSections(t), [t]);
 
   const activeSection = useMemo(
     () =>
       parameterSections.find((section) => section.key === activeSectionKey) ??
       parameterSections[0],
     [activeSectionKey, parameterSections]
+  );
+
+  const activeRefreshSection = useMemo(
+    () =>
+      refreshMarketSections.find((section) => section.key === activeRefreshMarket) ??
+      refreshMarketSections[0],
+    [activeRefreshMarket, refreshMarketSections]
   );
 
   const loadSettings = useCallback(async () => {
@@ -627,10 +938,34 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
     }
   }, [t]);
 
+  const loadRefreshSettings = useCallback(async () => {
+    setRefreshLoadState("loading");
+    setRefreshErrorMessage(null);
+    setRefreshSaveMessage(null);
+
+    try {
+      const payload = await loadRefreshExecutionSettings();
+      setRefreshSettings(payload);
+      setRefreshDraft(buildRefreshDraft(payload));
+      setRefreshLoadState("success");
+      setRefreshSaveState("idle");
+    } catch (error) {
+      setRefreshLoadState("error");
+      setRefreshErrorMessage(
+        error instanceof Error ? error.message : t("settings.loadError")
+      );
+    }
+  }, [t]);
+
   useEffect(() => {
-    storePreference("omi:settings:color", color);
+    storePreference(SETTINGS_COLOR_STORAGE_KEY, color);
     applyColorTheme(color);
   }, [color]);
+
+  useEffect(() => {
+    storeBooleanPreference(SETTINGS_HIGH_CONTRAST_STORAGE_KEY, highContrast);
+    applyHighContrastTheme(highContrast);
+  }, [highContrast]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -647,15 +982,18 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
   }, [menuOpen]);
 
   useEffect(() => {
-    if (!parametersOpen) return;
+    if (!parametersOpen && !refreshOpen && !dispatchOpen) return;
 
     function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") setParametersOpen(false);
+      if (event.key !== "Escape") return;
+      setParametersOpen(false);
+      setRefreshOpen(false);
+      setDispatchOpen(false);
     }
 
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [parametersOpen]);
+  }, [parametersOpen, refreshOpen, dispatchOpen]);
 
   function openParameterDialog() {
     setMenuOpen(false);
@@ -663,6 +1001,22 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
     if (loadState === "idle" || (loadState === "error" && settings === null)) {
       void loadSettings();
     }
+  }
+
+  function openRefreshDialog() {
+    setMenuOpen(false);
+    setRefreshOpen(true);
+    if (
+      refreshLoadState === "idle" ||
+      (refreshLoadState === "error" && refreshSettings === null)
+    ) {
+      void loadRefreshSettings();
+    }
+  }
+
+  function openDispatchDialog() {
+    setMenuOpen(false);
+    setDispatchOpen(true);
   }
 
   function updateDraftValue(key: string, value: string) {
@@ -674,11 +1028,28 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
     }));
   }
 
+  function updateRefreshDraftValue(key: string, value: string) {
+    setRefreshSaveState("idle");
+    setRefreshSaveMessage(null);
+    setRefreshDraft((current) => ({
+      ...current,
+      [key]: value,
+    }));
+  }
+
   function resetDraft() {
     if (settings) {
       setDraft(buildParameterDraft(settings));
       setSaveState("idle");
       setSaveMessage(null);
+    }
+  }
+
+  function resetRefreshDraft() {
+    if (refreshSettings) {
+      setRefreshDraft(buildRefreshDraft(refreshSettings));
+      setRefreshSaveState("idle");
+      setRefreshSaveMessage(null);
     }
   }
 
@@ -704,6 +1075,34 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
     } catch (error) {
       setSaveState("error");
       setSaveMessage(error instanceof Error ? error.message : t("settings.saveError"));
+    }
+  }
+
+  async function saveRefreshSettings() {
+    setRefreshSaveState("saving");
+    setRefreshSaveMessage(null);
+
+    try {
+      const payload = buildRefreshSettingsWritePayload(refreshDraft, t);
+      const response = await requestJson<RefreshExecutionSettingsRead>(
+        "/api/settings/refresh-execution",
+        {
+          method: "PUT",
+          body: JSON.stringify(payload),
+        }
+      );
+
+      setCachedRefreshExecutionSettings(response);
+      setRefreshSettings(response);
+      setRefreshDraft(buildRefreshDraft(response));
+      setRefreshLoadState("success");
+      setRefreshSaveState("success");
+      setRefreshSaveMessage(t("settings.refresh.saveSuccess"));
+    } catch (error) {
+      setRefreshSaveState("error");
+      setRefreshSaveMessage(
+        error instanceof Error ? error.message : t("settings.saveError")
+      );
     }
   }
 
@@ -751,6 +1150,11 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
                 ]}
                 onChange={setColor}
               />
+              <PreferenceSwitch
+                label={t("settings.highContrast")}
+                checked={highContrast}
+                onChange={setHighContrast}
+              />
               <button
                 type="button"
                 className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-omi-surface-subtle"
@@ -762,6 +1166,36 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
                   </span>
                   <span className="block text-xs text-omi-text-muted">
                     {t("settings.technicalAnalysis")}
+                  </span>
+                </span>
+                <ChevronIcon />
+              </button>
+              <button
+                type="button"
+                className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-omi-surface-subtle"
+                onClick={openRefreshDialog}
+              >
+                <span>
+                  <span className="block font-semibold text-omi-text">
+                    {t("settings.refreshExecution")}
+                  </span>
+                  <span className="block text-xs text-omi-text-muted">
+                    {t("settings.refreshExecutionHint")}
+                  </span>
+                </span>
+                <ChevronIcon />
+              </button>
+              <button
+                type="button"
+                className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-omi-surface-subtle"
+                onClick={openDispatchDialog}
+              >
+                <span>
+                  <span className="block font-semibold text-omi-text">
+                    {t("settings.dispatch.title")}
+                  </span>
+                  <span className="block text-xs text-omi-text-muted">
+                    {t("settings.dispatch.menuHint")}
                   </span>
                 </span>
                 <ChevronIcon />
@@ -898,7 +1332,11 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
               <div className="min-w-0">
                 <div className="text-xs font-semibold text-omi-text-muted">
                   {settings
-                    ? `${settings.kind} / ${t(`locales.${locale}`)} / ${t(`settings.colors.${color}`)}`
+                    ? `${settings.kind} / ${t(`locales.${locale}`)} / ${themePreferenceLabel(
+                        color,
+                        highContrast,
+                        t
+                      )}`
                     : "technical_analysis_settings"}
                 </div>
                 {saveMessage ? (
@@ -939,6 +1377,184 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
           </section>
         </div>
       ) : null}
+
+      {refreshOpen ? (
+        <div className="fixed inset-0 z-[2147483646] flex items-center justify-center bg-omi-overlay p-4">
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="refresh-settings-title"
+            className="flex h-[560px] max-h-[calc(100vh-2rem)] w-[820px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden border border-omi-control-border bg-omi-surface shadow-2xl"
+          >
+            <header className="flex shrink-0 items-start justify-between gap-4 border-b border-omi-border-subtle px-5 py-4">
+              <div className="min-w-0">
+                <div className="text-xs font-bold uppercase tracking-[0.22em] text-omi-accent">
+                  Settings
+                </div>
+                <h2 id="refresh-settings-title" className="mt-1 text-xl font-black text-omi-text-strong">
+                  {t("settings.refreshExecution")}
+                </h2>
+                <div className="mt-2">
+                  <SourceLabel settings={refreshSettings} />
+                </div>
+              </div>
+              <button
+                type="button"
+                aria-label={t("settings.closeRefreshExecution")}
+                className="grid h-8 w-8 shrink-0 place-items-center border border-omi-border text-omi-text-muted hover:border-omi-control hover:text-omi-text-strong"
+                onClick={() => setRefreshOpen(false)}
+              >
+                <CloseIcon />
+              </button>
+            </header>
+
+            <div className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[220px_minmax(0,1fr)]">
+              <nav className="min-h-0 overflow-y-auto border-b border-omi-border-subtle bg-omi-surface-subtle p-3 md:border-b-0 md:border-r">
+                <div className="grid gap-1">
+                  {refreshMarketSections.map((section) => (
+                    <button
+                      key={section.key}
+                      type="button"
+                      className={[
+                        "w-full px-3 py-2 text-left transition",
+                        activeRefreshSection.key === section.key
+                          ? "bg-omi-control text-omi-text-inverse"
+                          : "text-omi-text-muted hover:bg-omi-surface hover:text-omi-text-strong",
+                      ].join(" ")}
+                      onClick={() => setActiveRefreshMarket(section.key)}
+                    >
+                      <span className="block text-sm font-bold">{section.label}</span>
+                      <span
+                        className={
+                          activeRefreshSection.key === section.key
+                            ? "block text-[11px] text-omi-border"
+                            : "block text-[11px] text-omi-text-muted"
+                        }
+                      >
+                        {section.eyebrow}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </nav>
+
+              <div className="min-h-0 overflow-y-auto overscroll-contain">
+                <div className="border-b border-omi-border-subtle px-5 py-4">
+                  <div className="text-xs font-bold uppercase tracking-[0.18em] text-omi-text-muted">
+                    {activeRefreshSection.eyebrow}
+                  </div>
+                  <h3 className="mt-1 text-lg font-black text-omi-text-strong">
+                    {activeRefreshSection.label}
+                  </h3>
+                  <p className="mt-1 text-sm leading-6 text-omi-text-muted">
+                    {activeRefreshSection.description}
+                  </p>
+                </div>
+
+                {refreshLoadState === "loading" ? (
+                  <div className="space-y-3 p-5" aria-live="polite">
+                    {Array.from({ length: 3 }).map((_, index) => (
+                      <div key={index} className="grid gap-3 sm:grid-cols-[180px_minmax(0,1fr)]">
+                        <div>
+                          <div className="omi-skeleton h-4 w-24" />
+                          <div className="mt-2 omi-skeleton h-3 w-36" />
+                        </div>
+                        <div className="omi-skeleton h-9 w-full" />
+                      </div>
+                    ))}
+                  </div>
+                ) : refreshErrorMessage ? (
+                  <div className="m-5 border border-omi-danger-border bg-omi-danger-soft px-4 py-3 text-sm text-omi-danger">
+                    <div className="font-bold">{t("settings.loadError")}</div>
+                    <div className="mt-1 break-words text-xs leading-5">{refreshErrorMessage}</div>
+                    <button
+                      type="button"
+                      className="mt-3 h-8 border border-omi-accent-border bg-omi-surface px-3 text-xs font-bold text-omi-danger hover:border-omi-danger"
+                      onClick={() => void loadRefreshSettings()}
+                    >
+                      {t("settings.retry")}
+                    </button>
+                  </div>
+                ) : (
+                  <div>
+                    {activeRefreshSection.fields.map((field) => (
+                      <ParameterInput
+                        key={field.key}
+                        field={{
+                          ...field,
+                          key: refreshDraftKey(activeRefreshSection.key, field.key as RefreshExecutionField),
+                        }}
+                        value={
+                          refreshDraft[
+                            refreshDraftKey(activeRefreshSection.key, field.key as RefreshExecutionField)
+                          ] ?? ""
+                        }
+                        onChange={updateRefreshDraftValue}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <footer className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-omi-border-subtle bg-omi-surface-subtle px-5 py-3">
+              <div className="min-w-0">
+                <div className="text-xs font-semibold text-omi-text-muted">
+                  {refreshSettings
+                    ? `${refreshSettings.kind} / ${t(`locales.${locale}`)} / ${themePreferenceLabel(
+                        color,
+                        highContrast,
+                        t
+                      )}`
+                    : "refresh_execution_settings"}
+                </div>
+                {refreshSaveMessage ? (
+                  <div
+                    className={[
+                      "mt-1 max-w-[520px] truncate text-xs font-semibold",
+                      refreshSaveState === "error" ? "text-omi-danger" : "text-omi-success",
+                    ].join(" ")}
+                  >
+                    {refreshSaveMessage}
+                  </div>
+                ) : null}
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  className="h-9 border border-omi-border bg-omi-surface px-3 text-sm font-bold text-omi-text-muted hover:border-omi-control"
+                  onClick={resetRefreshDraft}
+                  disabled={!refreshSettings}
+                >
+                  {t("settings.reset")}
+                </button>
+                <button
+                  type="button"
+                  className={[
+                    "h-9 border px-3 text-sm font-bold",
+                    refreshSettings && refreshLoadState !== "loading" && refreshSaveState !== "saving"
+                      ? "border-omi-accent bg-omi-accent text-omi-text-inverse hover:bg-omi-control"
+                      : "cursor-not-allowed border-omi-border bg-omi-surface-strong text-omi-text-muted",
+                  ].join(" ")}
+                  disabled={
+                    !refreshSettings ||
+                    refreshLoadState === "loading" ||
+                    refreshSaveState === "saving"
+                  }
+                  onClick={() => void saveRefreshSettings()}
+                >
+                  {refreshSaveState === "saving" ? t("settings.saving") : t("settings.save")}
+                </button>
+              </div>
+            </footer>
+          </section>
+        </div>
+      ) : null}
+
+      <DispatchSettingsDialog
+        open={dispatchOpen}
+        onClose={() => setDispatchOpen(false)}
+      />
     </>
   );
 }

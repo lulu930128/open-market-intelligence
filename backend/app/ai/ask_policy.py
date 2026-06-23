@@ -134,8 +134,15 @@ def _effective_mode(
     policy: dict[str, Any],
     warnings: list[str],
 ) -> str:
-    answer_capable_scopes = {"stock", "watchlist", "us_stock", "tw_index", "tw_futures"}
+    answer_capable_scopes = {"stock", "watchlist", "us_stock", "jp_stock", "jp_index", "tw_index", "tw_futures"}
     report_capable_scopes = {"stock", "watchlist", "us_stock"}
+    data_context_only_scopes = {"jp_stock", "jp_index"}
+
+    if requested_mode in {"analysis", "report"} and scope_type in data_context_only_scopes:
+        warnings.append(
+            f"{scope_type} has a local evidence context reader but no dedicated AI analysis/report path yet; returned data_only."
+        )
+        return "data_only"
 
     if requested_mode == "report" and not policy["can_generate_report"]:
         if policy["can_generate_analysis"] and scope_type in report_capable_scopes:

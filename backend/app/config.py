@@ -118,6 +118,16 @@ class Settings(BaseSettings):
     scheduler_jp_market_refresh_include_fundamentals: bool = True
     scheduler_jp_market_refresh_sleep_seconds: float = 15.0
 
+    dispatch_smtp_host: str | None = None
+    dispatch_smtp_port: int = 587
+    dispatch_smtp_username: str | None = None
+    dispatch_smtp_password: str | None = None
+    dispatch_smtp_from_email: str | None = None
+    dispatch_smtp_from_name: str = "Open Market Intelligence"
+    dispatch_smtp_use_tls: bool = True
+    dispatch_smtp_use_ssl: bool = False
+    dispatch_smtp_timeout_seconds: int = 30
+
     finmind_token: str | None = None
     alphavantage_api_key: str | None = None
     fred_api_key: str | None = None

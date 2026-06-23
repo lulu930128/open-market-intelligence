@@ -51,6 +51,7 @@ build/
 # Misc
 .cache/
 .pytest_cache/
+pytest-cache-files-*/
 backend/pytest-cache-files-*/
 coverage/
 

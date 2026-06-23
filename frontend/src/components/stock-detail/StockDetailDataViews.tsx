@@ -1303,23 +1303,27 @@ export function OvernightImpactPanel({
     );
   }
 
-  const driverRows = [
-    ...report.factors.map((factor) => ({
-      key: `factor:${factor.symbol}`,
-      label: factor.label,
-      value: factor.change_pct,
-      contribution: factor.weighted_contribution,
-    })),
-    ...report.baskets.map((basket) => ({
-      key: `basket:${basket.group_id}`,
-      label: basket.group_name,
-      value: basket.average_change_pct,
-      contribution: basket.weighted_contribution,
-    })),
-  ]
-    .filter((item) => item.contribution !== null && item.contribution !== undefined)
-    .sort((a, b) => Math.abs(b.contribution ?? 0) - Math.abs(a.contribution ?? 0))
-    .slice(0, 3);
+  const canShowDrivers =
+    report.weighted_change_pct !== null && report.weighted_change_pct !== undefined;
+  const driverRows = canShowDrivers
+    ? [
+        ...report.factors.map((factor) => ({
+          key: `factor:${factor.symbol}`,
+          label: factor.label,
+          value: factor.change_pct,
+          contribution: factor.weighted_contribution,
+        })),
+        ...report.baskets.map((basket) => ({
+          key: `basket:${basket.group_id}`,
+          label: basket.group_name,
+          value: basket.average_change_pct,
+          contribution: basket.weighted_contribution,
+        })),
+      ]
+        .filter((item) => item.contribution !== null && item.contribution !== undefined)
+        .sort((a, b) => Math.abs(b.contribution ?? 0) - Math.abs(a.contribution ?? 0))
+        .slice(0, 3)
+    : [];
   const hasWarning = report.warnings.length > 0 || report.confidence === "low";
 
   return (

@@ -240,6 +240,9 @@ export function radarPriceLevelLabel(
     回收壓力: "reclaimResistance",
     突破壓力: "breakoutResistance",
     失效支撐: "invalidationSupport",
+    reclaimResistance: "reclaimResistance",
+    breakoutResistance: "breakoutResistance",
+    invalidationSupport: "invalidationSupport",
   } satisfies Record<string, string>)[label];
 
   return key ? translatedValue(t, `radar.priceLevels.${key}`, fallback) : fallback;

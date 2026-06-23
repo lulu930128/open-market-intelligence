@@ -9,6 +9,10 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.jobs import backfill_tasks, service as job_service
 from app.jobs.schemas import JobRunRead
+from app.settings.refresh_execution import (
+    resolve_observed_stock_refresh_interval_seconds,
+    resolve_subresource_refresh_interval_seconds,
+)
 from app.us_market.schemas import (
     MacroSeriesObservationRead,
     USDailyPriceRead,
@@ -36,6 +40,7 @@ from app.us_market.schemas import (
     USWatchlistItemUpdate,
     USWatchlistRankingRead,
 )
+from app.watchlists.schemas import WatchlistGroupRadarRead
 from app.us_market.service import (
     USMarketConfigurationError,
     USMarketDataFetchError,
@@ -56,6 +61,7 @@ from app.us_market.service import (
     get_us_stock,
     get_us_watchlist_group,
     get_us_watchlist_ranking,
+    get_us_watchlist_technical_radar,
     get_us_watchlist_tree,
     list_macro_series_observations,
     list_us_company_profiles,
@@ -374,6 +380,45 @@ def get_us_watchlist_ranking_api(
         raise _group_error(exc) from exc
 
 
+@router.get(
+    "/watchlists/groups/{group_id}/radar",
+    response_model=WatchlistGroupRadarRead,
+)
+def get_us_watchlist_radar_api(
+    group_id: int,
+    include_children: bool = True,
+    enabled_only: bool = True,
+    mode: str = Query(
+        default="action",
+        pattern="^(action|surge|breakout|volume|overheat|weakness|risk|momentum|all)$",
+    ),
+    max_results: int = Query(default=30, ge=1, le=200),
+    calculation_limit: int = Query(default=100, ge=20, le=500),
+    use_intraday: bool = False,
+    intraday_limit: int = Query(default=30, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    try:
+        return get_us_watchlist_technical_radar(
+            db=db,
+            group_id=group_id,
+            include_children=include_children,
+            enabled_only=enabled_only,
+            mode=mode,
+            max_results=max_results,
+            calculation_limit=calculation_limit,
+            use_intraday=use_intraday,
+            intraday_limit=intraday_limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise _group_error(exc) from exc
+
+
 @router.patch("/watchlists/items/{item_id}", response_model=USWatchlistItemRead)
 def update_us_watchlist_item_api(
     item_id: int,
@@ -408,9 +453,14 @@ def refresh_all_us_watchlist_daily_prices_api(
     enabled_only: bool = True,
     outputsize: str = Query(default="compact", pattern="^(compact|full)$"),
     adjusted: bool = False,
-    sleep_seconds: float = Query(default=12.0, ge=0, le=120),
+    sleep_seconds: float | None = Query(default=None, ge=0, le=120),
     db: Session = Depends(get_db),
 ):
+    resolved_sleep_seconds = resolve_observed_stock_refresh_interval_seconds(
+        db=db,
+        market="us",
+        explicit_sleep_seconds=sleep_seconds,
+    )
     return _enqueue_us_watchlist_daily_refresh(
         db=db,
         group_id=None,
@@ -418,7 +468,7 @@ def refresh_all_us_watchlist_daily_prices_api(
         enabled_only=enabled_only,
         outputsize=outputsize,
         adjusted=adjusted,
-        sleep_seconds=sleep_seconds,
+        sleep_seconds=resolved_sleep_seconds,
     )
 
 
@@ -433,11 +483,16 @@ def refresh_us_watchlist_group_daily_prices_api(
     enabled_only: bool = True,
     outputsize: str = Query(default="compact", pattern="^(compact|full)$"),
     adjusted: bool = False,
-    sleep_seconds: float = Query(default=12.0, ge=0, le=120),
+    sleep_seconds: float | None = Query(default=None, ge=0, le=120),
     db: Session = Depends(get_db),
 ):
     try:
         get_us_watchlist_group(db=db, group_id=group_id)
+        resolved_sleep_seconds = resolve_observed_stock_refresh_interval_seconds(
+            db=db,
+            market="us",
+            explicit_sleep_seconds=sleep_seconds,
+        )
         return _enqueue_us_watchlist_daily_refresh(
             db=db,
             group_id=group_id,
@@ -445,7 +500,7 @@ def refresh_us_watchlist_group_daily_prices_api(
             enabled_only=enabled_only,
             outputsize=outputsize,
             adjusted=adjusted,
-            sleep_seconds=sleep_seconds,
+            sleep_seconds=resolved_sleep_seconds,
         )
     except Exception as exc:
         raise _group_error(exc) from exc
@@ -465,9 +520,14 @@ def refresh_all_us_watchlist_resources_api(
     include_actions: bool = False,
     outputsize: str = Query(default="compact", pattern="^(compact|full)$"),
     adjusted: bool = False,
-    sleep_seconds: float = Query(default=12.0, ge=0, le=120),
+    sleep_seconds: float | None = Query(default=None, ge=0, le=120),
     db: Session = Depends(get_db),
 ):
+    resolved_sleep_seconds = resolve_subresource_refresh_interval_seconds(
+        db=db,
+        market="us",
+        explicit_sleep_seconds=sleep_seconds,
+    )
     return _enqueue_us_watchlist_resource_refresh(
         db=db,
         group_id=None,
@@ -479,7 +539,7 @@ def refresh_all_us_watchlist_resources_api(
         include_actions=include_actions,
         outputsize=outputsize,
         adjusted=adjusted,
-        sleep_seconds=sleep_seconds,
+        sleep_seconds=resolved_sleep_seconds,
     )
 
 
@@ -498,11 +558,16 @@ def refresh_us_watchlist_group_resources_api(
     include_actions: bool = False,
     outputsize: str = Query(default="compact", pattern="^(compact|full)$"),
     adjusted: bool = False,
-    sleep_seconds: float = Query(default=12.0, ge=0, le=120),
+    sleep_seconds: float | None = Query(default=None, ge=0, le=120),
     db: Session = Depends(get_db),
 ):
     try:
         get_us_watchlist_group(db=db, group_id=group_id)
+        resolved_sleep_seconds = resolve_subresource_refresh_interval_seconds(
+            db=db,
+            market="us",
+            explicit_sleep_seconds=sleep_seconds,
+        )
         return _enqueue_us_watchlist_resource_refresh(
             db=db,
             group_id=group_id,
@@ -514,7 +579,7 @@ def refresh_us_watchlist_group_resources_api(
             include_actions=include_actions,
             outputsize=outputsize,
             adjusted=adjusted,
-            sleep_seconds=sleep_seconds,
+            sleep_seconds=resolved_sleep_seconds,
         )
     except Exception as exc:
         raise _group_error(exc) from exc

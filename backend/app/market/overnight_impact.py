@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.ai.evidence_passport import build_evidence_passport
 from app.db.models import StockMaster, USDailyPrice, USWatchlistGroup, USWatchlistItem
 from app.market.calendar_status import expected_us_trade_date
+from app.us_market import service as us_market_service
 
 
 def expected_us_daily_price_date() -> date:
@@ -590,6 +591,20 @@ def _summary(
     return f"{date_text} 美股隔夜映射為{direction}，加權變動 {weighted_change_pct:+.2f}%{lead_text}"
 
 
+def _stale_summary(
+    *,
+    as_of: date | None,
+    expected_trade_date: date,
+    refresh_attempted: bool,
+) -> str:
+    date_text = as_of.isoformat() if as_of else "未知日期"
+    prefix = "已嘗試刷新，但" if refresh_attempted else ""
+    return (
+        f"{prefix}美股日線最新日期 {date_text}，落後預期 {expected_trade_date.isoformat()}；"
+        "暫不產生隔夜多空判斷。"
+    )
+
+
 def _confidence(
     *,
     weighted_change_pct: float | None,
@@ -617,6 +632,9 @@ def _dedupe(values: list[str]) -> list[str]:
 def build_us_overnight_impact_report(
     db: Session,
     stock_id: str,
+    *,
+    suppress_stale_signal: bool = False,
+    refresh_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized_stock_id = stock_id.strip()
     stock = db.query(StockMaster).filter(StockMaster.stock_id == normalized_stock_id).first()
@@ -684,9 +702,14 @@ def build_us_overnight_impact_report(
     ]
     as_of = max(as_of_values) if as_of_values else None
     expected_trade_date = expected_us_daily_price_date()
-    if as_of and as_of < expected_trade_date:
+    stale_dates = [
+        value
+        for value in as_of_values
+        if isinstance(value, date) and value < expected_trade_date
+    ]
+    if stale_dates:
         warnings.append(
-            f"美股日線最新日期 {as_of.isoformat()}，落後預期 {expected_trade_date.isoformat()}。"
+            f"美股日線最新日期 {max(stale_dates).isoformat()}，落後預期 {expected_trade_date.isoformat()}。"
         )
     if as_of_values:
         date_counts = Counter(as_of_values)
@@ -714,12 +737,41 @@ def build_us_overnight_impact_report(
         {"type": "table", "name": "us_watchlist_item"},
         {"type": "derived", "name": "app.market.overnight_impact"},
     ]
+    is_current = bool(as_of_values) and not stale_dates and not missing
     freshness = {
         "expected_trade_date": expected_trade_date.isoformat(),
         "latest_trade_date": as_of.isoformat() if as_of else None,
-        "is_current": bool(as_of and as_of >= expected_trade_date),
+        "is_current": is_current,
         "valid_weight": _round(valid_weight),
     }
+    if refresh_metadata:
+        freshness["refresh"] = refresh_metadata
+
+    reported_stance = stance
+    reported_score = score
+    reported_weighted_change_pct = weighted_change_pct
+    reported_confidence = confidence
+    reported_title = _title_from_stance(stance, mapping)
+    reported_summary = _summary(
+        stance=stance,
+        weighted_change_pct=weighted_change_pct,
+        top_item=top_item,
+        as_of=as_of,
+    )
+    reported_missing = _dedupe(missing)
+
+    if suppress_stale_signal and not is_current:
+        reported_stance = "unknown"
+        reported_score = 0
+        reported_weighted_change_pct = None
+        reported_confidence = "low"
+        reported_title = "美股隔夜資料需更新"
+        reported_summary = _stale_summary(
+            as_of=as_of,
+            expected_trade_date=expected_trade_date,
+            refresh_attempted=bool(refresh_metadata and refresh_metadata.get("attempted")),
+        )
+        reported_missing = _dedupe([*missing, "us_overnight_tw_impact_stale"])
 
     report = {
         "kind": "us_overnight_tw_impact",
@@ -727,21 +779,16 @@ def build_us_overnight_impact_report(
         "stock_name": stock.stock_name,
         "as_of": as_of,
         "generated_at": _now(),
-        "stance": stance,
-        "title": _title_from_stance(stance, mapping),
-        "summary": _summary(
-            stance=stance,
-            weighted_change_pct=weighted_change_pct,
-            top_item=top_item,
-            as_of=as_of,
-        ),
-        "score": score,
-        "weighted_change_pct": _round(weighted_change_pct),
-        "confidence": confidence,
+        "stance": reported_stance,
+        "title": reported_title,
+        "summary": reported_summary,
+        "score": reported_score,
+        "weighted_change_pct": _round(reported_weighted_change_pct),
+        "confidence": reported_confidence,
         "tw_mapping": mapping,
         "factors": factors,
         "baskets": baskets,
-        "missing": _dedupe(missing),
+        "missing": reported_missing,
         "warnings": _dedupe(warnings),
         "source_refs": source_refs,
         "freshness": freshness,
@@ -754,12 +801,12 @@ def build_us_overnight_impact_report(
         warnings=report["warnings"],
         freshness=freshness,
         analysis={
-            "stance": stance,
-            "score": score,
-            "weighted_change_pct": weighted_change_pct,
+            "stance": reported_stance,
+            "score": reported_score,
+            "weighted_change_pct": reported_weighted_change_pct,
             "mapping_profiles": mapping.get("profiles"),
         },
-        confidence=confidence,
+        confidence=reported_confidence,
     )
     report["as_of"] = _json_value(report["as_of"])
     report["generated_at"] = _json_value(report["generated_at"])
@@ -767,3 +814,68 @@ def build_us_overnight_impact_report(
         item["trade_date"] = _json_value(item.get("trade_date"))
 
     return report
+
+
+def ensure_current_us_overnight_impact_report(
+    db: Session,
+    stock_id: str,
+    *,
+    max_refresh_symbols: int = 8,
+    provider: str = "auto",
+    outputsize: str = "compact",
+) -> dict[str, Any]:
+    max_symbols = max(1, min(max_refresh_symbols, 8))
+    initial_gaps = scan_us_overnight_impact_gaps(
+        db=db,
+        stock_id=stock_id,
+        max_symbols=max_symbols,
+    )
+    refresh_symbols = list(initial_gaps.get("refresh_symbols") or [])[:max_symbols]
+    refresh_metadata: dict[str, Any] = {
+        "attempted": bool(refresh_symbols),
+        "symbols": refresh_symbols,
+        "results": [],
+        "errors": [],
+    }
+
+    for symbol in refresh_symbols:
+        try:
+            result = us_market_service.refresh_us_daily_prices(
+                db=db,
+                symbol=symbol,
+                outputsize=outputsize,
+                adjusted=False,
+                provider=provider,
+            )
+            refresh_metadata["results"].append(
+                {
+                    "symbol": symbol,
+                    "status": result.get("status"),
+                    "provider": result.get("provider"),
+                    "fetched_count": result.get("fetched_count"),
+                    "inserted_count": result.get("inserted_count"),
+                    "updated_count": result.get("updated_count"),
+                }
+            )
+        except Exception as exc:  # pragma: no cover - exercised through route-level behavior.
+            refresh_metadata["errors"].append(
+                {
+                    "symbol": symbol,
+                    "message": str(exc),
+                }
+            )
+
+    refreshed_gaps = scan_us_overnight_impact_gaps(
+        db=db,
+        stock_id=stock_id,
+        max_symbols=max_symbols,
+    )
+    refresh_metadata["remaining_symbols"] = list(refreshed_gaps.get("refresh_symbols") or [])
+    refresh_metadata["is_current_after_refresh"] = bool(refreshed_gaps.get("is_current"))
+
+    return build_us_overnight_impact_report(
+        db=db,
+        stock_id=stock_id,
+        suppress_stale_signal=True,
+        refresh_metadata=refresh_metadata,
+    )

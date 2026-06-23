@@ -68,6 +68,10 @@ from app.us_market.sources import (
 )
 from app.us_market.source_health import build_us_source_health
 from app.market.calendar_status import expected_us_trade_date
+from app.market.technical_radar import (
+    TechnicalRadarBar,
+    build_technical_watchlist_radar,
+)
 
 
 def expected_us_daily_price_date() -> date:
@@ -2720,6 +2724,65 @@ def get_us_watchlist_ranking(
     }
 
 
+def get_us_watchlist_technical_radar(
+    db: Session,
+    *,
+    group_id: int,
+    include_children: bool = True,
+    enabled_only: bool = True,
+    mode: str = "action",
+    max_results: int = 30,
+    calculation_limit: int = 100,
+    use_intraday: bool = False,
+    intraday_limit: int = 30,
+) -> dict:
+    ranking = get_us_watchlist_ranking(
+        db=db,
+        group_id=group_id,
+        include_children=include_children,
+        enabled_only=enabled_only,
+        rank_by="none",
+        sort_order="asc",
+        use_intraday=use_intraday,
+        intraday_limit=intraday_limit,
+    )
+    symbols = [
+        normalize_us_symbol(row.get("symbol"))
+        for row in ranking.get("results", [])
+        if normalize_us_symbol(row.get("symbol"))
+    ]
+    histories: dict[str, list[TechnicalRadarBar]] = {}
+
+    for symbol in symbols:
+        daily_rows = _latest_distinct_us_daily_rows(
+            db=db,
+            symbol=symbol,
+            limit=calculation_limit,
+        )
+        histories[symbol] = [
+            TechnicalRadarBar(
+                trade_date=row.trade_date,
+                open=row.open_price,
+                high=row.high_price,
+                low=row.low_price,
+                close=_close_value(row),
+                volume=row.trade_volume,
+            )
+            for row in daily_rows
+        ]
+
+    radar = build_technical_watchlist_radar(
+        ranking=ranking,
+        histories=histories,
+        market="US",
+        include_children=include_children,
+        mode=mode,
+        max_results=max_results,
+    )
+    radar["group_id"] = radar.get("group_id") or group_id
+    return radar
+
+
 def refresh_us_watchlist_daily_prices(
     db: Session,
     *,
@@ -3068,6 +3131,7 @@ __all__ = [
     "get_us_stock",
     "get_us_watchlist_group",
     "get_us_watchlist_item",
+    "get_us_watchlist_technical_radar",
     "get_us_watchlist_tree",
     "get_us_watchlist_ranking",
     "list_macro_series_observations",

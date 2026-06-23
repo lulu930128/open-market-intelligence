@@ -31,6 +31,7 @@ from app.us_market.service import (
     create_us_watchlist_item,
     get_us_sec_fundamental_summary,
     get_us_watchlist_ranking,
+    get_us_watchlist_technical_radar,
     get_us_intraday_trend,
     list_us_ohlc_chart_data,
     list_us_watchlist_items,
@@ -898,6 +899,75 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self.assertEqual(ranking["results"][0]["change_pct"], 10.0)
         self.assertEqual(ranking["results"][1]["symbol"], "IBM")
         self.assertEqual(self.db.query(MarketDailyPrice).count(), 0)
+
+    def test_us_watchlist_technical_radar_flags_ohlcv_breakout(self) -> None:
+        symbol_records = parse_symbol_directories(
+            nasdaq_listed_text=NASDAQ_LISTED_SAMPLE,
+            other_listed_text=OTHER_LISTED_SAMPLE,
+            sec_company_payload=SEC_TICKERS_SAMPLE,
+        )
+        upsert_us_symbol_records(self.db, symbol_records)
+        group = create_us_watchlist_group(
+            self.db,
+            USWatchlistGroupCreate(group_name="Mega Cap"),
+        )
+        create_us_watchlist_item(
+            self.db,
+            USWatchlistItemCreate(group_id=group.id, symbol="AAPL"),
+        )
+        records: list[USDailyPriceRecord] = []
+        for index in range(21):
+            close = 100.0 + index
+            records.append(
+                USDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="AAPL",
+                    trade_date=date(2026, 5, 1 + index),
+                    open_price=close - 0.5,
+                    high_price=close + 1.0,
+                    low_price=close - 1.0,
+                    close_price=close,
+                    adjusted_close=None,
+                    trade_volume=1000,
+                    dividend_amount=None,
+                    split_coefficient=None,
+                    source_url=None,
+                    raw_payload_hash=f"aapl-{index}",
+                )
+            )
+        records.append(
+            USDailyPriceRecord(
+                provider="yahoo_chart",
+                symbol="AAPL",
+                trade_date=date(2026, 5, 22),
+                open_price=121.0,
+                high_price=132.0,
+                low_price=120.0,
+                close_price=130.0,
+                adjusted_close=None,
+                trade_volume=4000,
+                dividend_amount=None,
+                split_coefficient=None,
+                source_url=None,
+                raw_payload_hash="aapl-breakout",
+            )
+        )
+        upsert_us_daily_price_records(self.db, records)
+
+        radar = get_us_watchlist_technical_radar(
+            self.db,
+            group_id=group.id,
+            mode="breakout",
+            max_results=5,
+            calculation_limit=80,
+        )
+
+        self.assertEqual(radar["market"], "US")
+        self.assertEqual(radar["radar_count"], 1)
+        self.assertEqual(radar["results"][0]["stock_id"], "AAPL")
+        self.assertEqual(radar["results"][0]["bucket"], "breakout_high")
+        self.assertIn("donchian_breakout", radar["results"][0]["signal_keys"])
+        self.assertIn("OHLCV technical radar only", radar["data_limitations"][0])
 
     def test_us_watchlist_ranking_marks_old_rows_stale_after_daily_release(self) -> None:
         symbol_records = parse_symbol_directories(

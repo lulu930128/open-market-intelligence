@@ -110,6 +110,15 @@ import {
 } from "@/components/professionalChartDrawing";
 import { fetchJson, requestJson } from "@/lib/api";
 import { getJobResultStatus, requestBackfillJob } from "@/lib/jobs";
+import {
+  getMarketCalendarStatusSnapshot,
+  refreshMarketCalendarStatus,
+  type MarketCalendarMarketStatus,
+} from "@/lib/marketCalendarStatus";
+import {
+  getRefreshExecutionSeconds,
+  useRefreshExecutionSettings,
+} from "@/lib/refreshExecutionSettings";
 import { timeframeLabel, useT, type TranslationFunction } from "@/i18n";
 import {
   TAIWAN_INTRADAY_REFRESH_MS,
@@ -169,8 +178,64 @@ type Props = {
   onChartFocusModeChange?: (active: boolean) => void;
 };
 
+const TAIWAN_DATASET_INSTITUTIONAL_TRADE = "institutional_trade_daily";
+const TAIWAN_DATASET_MARGIN_TRADING = "margin_trading_daily";
+const TAIWAN_DATASET_BROKER_BRANCH = "broker_branch_trade_daily";
+
 function dataPanelCacheKey(stockId: string, tab: DataPanelTab, branchDays = 1) {
   return tab === "branch" ? `${stockId}:${tab}:${branchDays}` : `${stockId}:${tab}`;
+}
+
+function normalizeIsoDate(value: string | null | undefined) {
+  return value ? value.slice(0, 10) : null;
+}
+
+function isIsoDateOnOrAfter(
+  value: string | null | undefined,
+  expected: string | null | undefined
+) {
+  const normalizedValue = normalizeIsoDate(value);
+  const normalizedExpected = normalizeIsoDate(expected);
+
+  if (!normalizedExpected) return true;
+  if (!normalizedValue) return false;
+
+  return normalizedValue >= normalizedExpected;
+}
+
+function maxIsoDate(values: Array<string | null | undefined>) {
+  let latest: string | null = null;
+
+  for (const value of values) {
+    const normalized = normalizeIsoDate(value);
+    if (normalized && (!latest || normalized > latest)) {
+      latest = normalized;
+    }
+  }
+
+  return latest;
+}
+
+function expectedTaiwanDatasetDate(
+  calendarStatus: MarketCalendarMarketStatus | null,
+  datasetKey: string
+) {
+  return normalizeIsoDate(
+    calendarStatus?.release_windows?.[datasetKey]?.expected_trade_date ?? null
+  );
+}
+
+function taiwanCalendarStatusRefreshKey(
+  calendarStatus: MarketCalendarMarketStatus | null
+) {
+  if (!calendarStatus) return "none";
+
+  return [
+    calendarStatus.date,
+    expectedTaiwanDatasetDate(calendarStatus, TAIWAN_DATASET_INSTITUTIONAL_TRADE),
+    expectedTaiwanDatasetDate(calendarStatus, TAIWAN_DATASET_MARGIN_TRADING),
+    expectedTaiwanDatasetDate(calendarStatus, TAIWAN_DATASET_BROKER_BRANCH),
+  ].join("|");
 }
 
 const institutionalLookbackDays = 100;
@@ -606,6 +671,13 @@ export default function StockDetailPanel({
   onChartFocusModeChange,
 }: Props) {
   const t = useT();
+  const refreshExecutionSettings = useRefreshExecutionSettings();
+  const taiwanSubresourceRefreshSeconds = getRefreshExecutionSeconds(
+    refreshExecutionSettings,
+    "tw",
+    "subresource_refresh_interval_seconds",
+    0.05
+  );
   const tRef = useRef(t);
   const [timeframe, setTimeframe] = useState<Timeframe>("daily");
   const [indicatorMenuOpen, setIndicatorMenuOpen] = useState(false);
@@ -704,6 +776,10 @@ export default function StockDetailPanel({
   const [chartHistoryMessage, setChartHistoryMessage] = useState<string | null>(null);
   const [backendTechnicalReport, setBackendTechnicalReport] =
     useState<StockTechnicalReportRead | null>(null);
+  const [taiwanCalendarStatus, setTaiwanCalendarStatus] =
+    useState<MarketCalendarMarketStatus | null>(() =>
+      getMarketCalendarStatusSnapshot("tw")
+    );
   const [overnightImpact, setOvernightImpact] =
     useState<OvernightImpactRead | null>(null);
   const [overnightImpactLoadState, setOvernightImpactLoadState] =
@@ -717,6 +793,7 @@ export default function StockDetailPanel({
   const [marketChip, setMarketChip] = useState<MarketChipDaily | null>(null);
   const [marketChipLoadState, setMarketChipLoadState] = useState<LoadState>("idle");
   const finalIntradayRefreshDate = useRef<string | null>(null);
+  const taiwanSubresourceRefreshSecondsRef = useRef(taiwanSubresourceRefreshSeconds);
   const activeStockIdRef = useRef<string | null>(stockId);
   const activeDataTabRef = useRef<DataPanelTab>(activeDataTab);
   const branchDaysRef = useRef(branchDays);
@@ -739,6 +816,59 @@ export default function StockDetailPanel({
   useEffect(() => {
     tRef.current = t;
   }, [t]);
+
+  useEffect(() => {
+    taiwanSubresourceRefreshSecondsRef.current = taiwanSubresourceRefreshSeconds;
+  }, [taiwanSubresourceRefreshSeconds]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let refreshTimer: number | undefined;
+
+    function setCalendarStatusIfChanged(
+      nextStatus: MarketCalendarMarketStatus | null
+    ) {
+      if (cancelled) return;
+
+      setTaiwanCalendarStatus((currentStatus) =>
+        taiwanCalendarStatusRefreshKey(currentStatus) ===
+        taiwanCalendarStatusRefreshKey(nextStatus)
+          ? currentStatus
+          : nextStatus
+      );
+    }
+
+    async function loadTaiwanCalendarStatus() {
+      const cachedStatus = getMarketCalendarStatusSnapshot("tw");
+      if (!cancelled && cachedStatus) {
+        setCalendarStatusIfChanged(cachedStatus);
+      }
+
+      try {
+        const envelope = await refreshMarketCalendarStatus("tw");
+        const nextStatus =
+          envelope.markets.tw ?? getMarketCalendarStatusSnapshot("tw");
+        setCalendarStatusIfChanged(nextStatus ?? null);
+      } catch {
+        if (!cancelled && !cachedStatus) {
+          setCalendarStatusIfChanged(null);
+        }
+      } finally {
+        if (!cancelled) {
+          refreshTimer = window.setTimeout(loadTaiwanCalendarStatus, 60_000);
+        }
+      }
+    }
+
+    void loadTaiwanCalendarStatus();
+
+    return () => {
+      cancelled = true;
+      if (refreshTimer !== undefined) {
+        window.clearTimeout(refreshTimer);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     activeStockIdRef.current = stockId;
@@ -1593,7 +1723,7 @@ export default function StockDetailPanel({
           {
             start_date: startDate,
             end_date: endDate,
-            sleep_seconds: 0.05,
+            sleep_seconds: taiwanSubresourceRefreshSecondsRef.current,
             skip_existing_months: true,
           },
           {
@@ -2761,21 +2891,62 @@ export default function StockDetailPanel({
     if (!targetStockId) return false;
 
     if (tab === "chips") {
+      const expectedMarginDate = expectedTaiwanDatasetDate(
+        taiwanCalendarStatus,
+        TAIWAN_DATASET_MARGIN_TRADING
+      );
+      const latestMarginDate =
+        chipCoverage?.stock_id === targetStockId
+          ? chipCoverage.margin_latest_trade_date
+          : margin?.stock_id === targetStockId
+            ? margin.trade_date
+            : null;
+
+      if (
+        expectedMarginDate &&
+        !isIsoDateOnOrAfter(latestMarginDate, expectedMarginDate)
+      ) {
+        return false;
+      }
+
       return (
-        (margin !== null && margin.stock_id === targetStockId) ||
+        latestMarginDate !== null ||
         shareholding.some((row) => row.stock_id === targetStockId)
       );
     }
 
     if (tab === "institutional") {
-      return institutionalHistory.some((row) => row.stock_id === targetStockId);
+      const latestInstitutionalDate = maxIsoDate(
+        institutionalHistory
+          .filter((row) => row.stock_id === targetStockId)
+          .map((row) => row.trade_date)
+      );
+      const expectedInstitutionalDate = expectedTaiwanDatasetDate(
+        taiwanCalendarStatus,
+        TAIWAN_DATASET_INSTITUTIONAL_TRADE
+      );
+
+      if (expectedInstitutionalDate) {
+        return isIsoDateOnOrAfter(
+          latestInstitutionalDate,
+          expectedInstitutionalDate
+        );
+      }
+
+      return latestInstitutionalDate !== null;
     }
 
     if (tab === "branch") {
+      const expectedBranchDate = expectedTaiwanDatasetDate(
+        taiwanCalendarStatus,
+        TAIWAN_DATASET_BROKER_BRANCH
+      );
+
       return (
         brokerBranchSummary !== null &&
         brokerBranchSummary.stock_id === targetStockId &&
         brokerBranchSummary.requested_days === branchDays &&
+        isIsoDateOnOrAfter(brokerBranchSummary.trade_date, expectedBranchDate) &&
         dataPanelResolvedKeysRef.current.has(
           dataPanelCacheKey(targetStockId, "branch", branchDays)
         )
@@ -2824,7 +2995,7 @@ export default function StockDetailPanel({
       const job = await requestBackfillJob(
         taiwanSelectionRefreshPath(targetStockId),
         { method: "POST" },
-        { profile, sleep_seconds: 0.05 },
+        { profile, sleep_seconds: taiwanSubresourceRefreshSecondsRef.current },
         {
           intervalMs: 1500,
           timeoutMs: 600000,
@@ -3073,7 +3244,7 @@ export default function StockDetailPanel({
       void requestBackfillJob(
         taiwanSelectionRefreshPath(targetStockId),
         { method: "POST" },
-        { profile: "basic", sleep_seconds: 0.05 },
+        { profile: "basic", sleep_seconds: taiwanSubresourceRefreshSecondsRef.current },
         {
           intervalMs: 1500,
           timeoutMs: 600000,
@@ -3130,11 +3301,21 @@ export default function StockDetailPanel({
 
     const requestKey = dataPanelCacheKey(stockId, activeDataTab, branchDays);
     const cachedBranchSummary =
-      activeDataTab === "branch" ? branchSummaryCacheRef.current.get(requestKey) : null;
+      activeDataTab === "branch"
+        ? branchSummaryCacheRef.current.get(requestKey) ?? null
+        : null;
+    const cachedBranchSummaryIsCurrent =
+      cachedBranchSummary !== null &&
+      cachedBranchSummary.stock_id === stockId &&
+      cachedBranchSummary.requested_days === branchDays &&
+      isIsoDateOnOrAfter(
+        cachedBranchSummary.trade_date,
+        expectedTaiwanDatasetDate(taiwanCalendarStatus, TAIWAN_DATASET_BROKER_BRANCH)
+      );
     const hasCachedResult = dataPanelResolvedKeysRef.current.has(requestKey);
     const hasCurrentData = dataTabHasCurrentData(activeDataTab);
 
-    if (cachedBranchSummary) {
+    if (cachedBranchSummary && cachedBranchSummaryIsCurrent) {
       const timer = window.setTimeout(() => {
         if (dataPanelRequestKeyRef.current === requestKey) return;
 
@@ -3146,7 +3327,7 @@ export default function StockDetailPanel({
       return () => window.clearTimeout(timer);
     }
 
-    if (hasCachedResult || hasCurrentData) {
+    if (hasCurrentData) {
       const timer = window.setTimeout(() => {
         if (dataPanelRequestKeyRef.current === requestKey) return;
 
@@ -3166,7 +3347,7 @@ export default function StockDetailPanel({
     return () => window.clearTimeout(timer);
     // Populate the visible right-panel tab whenever the selected stock or tab changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeDataTab, branchDays, isIndexProduct, stockId]);
+  }, [activeDataTab, branchDays, isIndexProduct, stockId, taiwanCalendarStatus]);
 
   if (!stockId) {
     return watchlistRankingPanel ? (

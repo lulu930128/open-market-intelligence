@@ -121,3 +121,26 @@ class TechnicalAnalysisSettingsWrite(BaseModel):
     windows: TechnicalAnalysisWindowsRead
     periods: TechnicalAnalysisPeriodsRead
     thresholds: TechnicalAnalysisThresholdsRead
+
+
+class RefreshExecutionMarketPolicyRead(BaseModel):
+    observed_stock_refresh_interval_seconds: float = Field(ge=0.1, le=3600)
+    subresource_refresh_interval_seconds: float = Field(ge=0, le=3600)
+    market_refresh_interval_seconds: float = Field(ge=0, le=3600)
+
+
+class RefreshExecutionMarketsRead(BaseModel):
+    tw: RefreshExecutionMarketPolicyRead
+    us: RefreshExecutionMarketPolicyRead
+    jp: RefreshExecutionMarketPolicyRead
+
+
+class RefreshExecutionSettingsRead(BaseModel):
+    kind: str
+    version: str
+    source: str
+    markets: RefreshExecutionMarketsRead
+
+
+class RefreshExecutionSettingsWrite(BaseModel):
+    markets: RefreshExecutionMarketsRead

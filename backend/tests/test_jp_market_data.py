@@ -7,6 +7,7 @@ from unittest.mock import patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from app.ai.agentic_tools import read_jp_stock_context
 from app.db.models import (
     Base,
     JPCompanyFundamental,
@@ -29,6 +30,7 @@ from app.jp_market.service import (
     get_jp_company_fundamental,
     get_jp_resource_summary,
     get_jp_watchlist_ranking,
+    get_jp_watchlist_technical_radar,
     list_jp_ohlc_chart_data,
     list_jp_watchlist_items,
     list_jp_watchlist_symbols,
@@ -733,6 +735,79 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertEqual(ranking["results"][1]["symbol"], "1343.T")
         self.assertAlmostEqual(ranking["results"][1]["change_pct"], -2.0)
 
+    def test_jp_watchlist_technical_radar_flags_support_break(self) -> None:
+        with (
+            patch(
+                "app.jp_market.service.fetch_jpx_listed_issues_workbook",
+                return_value=(b"workbook", "https://www.jpx.co.jp/data_e.xls"),
+            ),
+            patch(
+                "app.jp_market.service.parse_jpx_listed_issues_workbook",
+                return_value=parse_jpx_listed_issue_rows(JPX_LISTED_ROWS_SAMPLE),
+            ),
+        ):
+            sync_jp_symbol_master(db=self.db)
+
+        group = create_jp_watchlist_group(
+            self.db,
+            JPWatchlistGroupCreate(group_name="Japan Core"),
+        )
+        create_jp_watchlist_item(
+            self.db,
+            JPWatchlistItemCreate(group_id=group.id, symbol="7203"),
+        )
+        records: list[JPDailyPriceRecord] = []
+        for index in range(21):
+            close = 3000.0 + index
+            records.append(
+                JPDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="7203.T",
+                    trade_date=datetime(2026, 5, 1 + index).date(),
+                    currency="JPY",
+                    open_price=close + 5.0,
+                    high_price=close + 20.0,
+                    low_price=close - 20.0,
+                    close_price=close,
+                    adjusted_close=close,
+                    trade_volume=1000000,
+                    source_url="source",
+                    raw_payload_hash=f"jp-7203-{index}",
+                )
+            )
+        records.append(
+            JPDailyPriceRecord(
+                provider="yahoo_chart",
+                symbol="7203.T",
+                trade_date=datetime(2026, 5, 22).date(),
+                currency="JPY",
+                open_price=2980.0,
+                high_price=2990.0,
+                low_price=2760.0,
+                close_price=2800.0,
+                adjusted_close=2800.0,
+                trade_volume=3500000,
+                source_url="source",
+                raw_payload_hash="jp-7203-break",
+            )
+        )
+        upsert_jp_daily_price_records(self.db, records)
+
+        radar = get_jp_watchlist_technical_radar(
+            self.db,
+            group_id=group.id,
+            mode="risk",
+            max_results=5,
+            calculation_limit=80,
+        )
+
+        self.assertEqual(radar["market"], "JP")
+        self.assertEqual(radar["radar_count"], 1)
+        self.assertEqual(radar["results"][0]["stock_id"], "7203.T")
+        self.assertEqual(radar["results"][0]["bucket"], "support_break")
+        self.assertIn("structure_support_break", radar["results"][0]["signal_keys"])
+        self.assertIn("OHLCV technical radar only", radar["data_limitations"][0])
+
     def test_refresh_jp_daily_prices_from_yahoo_chart_upserts_stock_and_prices(self) -> None:
         with patch(
             "app.jp_market.service.fetch_yahoo_chart_payload",
@@ -1126,6 +1201,72 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertEqual(slots["disclosures"]["status"], "planned")
         self.assertEqual(slots["performance"]["status"], "empty")
         self.assertEqual(slots["financials"]["row_count"], 0)
+
+    def test_read_jp_stock_context_returns_local_evidence_pack(self) -> None:
+        self.db.add(
+            JPStockMaster(
+                symbol="7203.T",
+                local_code="7203",
+                security_name="Toyota Motor Corporation",
+                exchange="Tokyo Stock Exchange",
+                market_segment="Prime Market (Domestic)",
+                sector_33_name="Transportation Equipment",
+                asset_type="stock",
+                listing_source="test",
+                currency="JPY",
+                is_active=True,
+            )
+        )
+        self.db.commit()
+        upsert_jp_daily_price_records(
+            self.db,
+            [
+                JPDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="7203.T",
+                    trade_date=datetime(2026, 6, 17).date(),
+                    currency="JPY",
+                    open_price=3000.0,
+                    high_price=3060.0,
+                    low_price=2990.0,
+                    close_price=3050.0,
+                    adjusted_close=3050.0,
+                    trade_volume=12000000,
+                    source_url="source-1",
+                    raw_payload_hash="hash-1",
+                ),
+                JPDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="7203.T",
+                    trade_date=datetime(2026, 6, 18).date(),
+                    currency="JPY",
+                    open_price=3060.0,
+                    high_price=3090.0,
+                    low_price=3030.0,
+                    close_price=3080.0,
+                    adjusted_close=3080.0,
+                    trade_volume=15000000,
+                    source_url="source-2",
+                    raw_payload_hash="hash-2",
+                ),
+            ],
+        )
+
+        context = read_jp_stock_context(db=self.db, symbol="7203")
+
+        self.assertEqual(context["kind"], "jp_stock_context")
+        self.assertEqual(context["scope"]["target"]["type"], "jp_stock")
+        self.assertEqual(context["scope"]["target"]["id"], "7203.T")
+        self.assertEqual(context["summary"]["latest_close"], 3080.0)
+        self.assertEqual(context["summary"]["latest_trade_date"], "2026-06-18")
+        self.assertEqual(context["data"]["stock"]["security_name"], "Toyota Motor Corporation")
+        self.assertEqual(context["data"]["daily_prices"][0]["trade_date"], "2026-06-18")
+        self.assertEqual(context["data"]["chart"]["point_count"], 2)
+        self.assertIn("jp_company_fundamental", context["missing"])
+        self.assertTrue(
+            any(ref.get("kind") == "jp_daily_price" for ref in context["source_refs"])
+        )
+        self.assertEqual(context["evidence_passport"]["target_kind"], "jp_stock_context")
 
     def test_jp_resource_summary_reports_fundamental_slots(self) -> None:
         upsert_jp_company_fundamental_records(

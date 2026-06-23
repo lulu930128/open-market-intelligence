@@ -33,6 +33,8 @@ type WatchlistRadarPanelProps = {
   mode: WatchlistRadarMode;
   selectedStockId: string | null;
   disabled?: boolean;
+  scopeLabel?: string | null;
+  notice?: string | null;
   getModeHref?: (mode: WatchlistRadarMode) => string;
   onModeChange: (mode: WatchlistRadarMode) => void;
   onReload: () => void;
@@ -103,25 +105,28 @@ function contextSignalClass(tone: string, stance: string) {
 }
 
 function bucketClass(bucket: string) {
-  if (bucket === "limit_up_lock" || bucket === "surge_up" || bucket === "limit_up_move") {
+  if (
+    bucket === "limit_up_lock" ||
+    bucket === "surge_up" ||
+    bucket === "limit_up_move" ||
+    bucket === "breakout_high" ||
+    bucket === "trend_reclaim" ||
+    bucket === "volume_up" ||
+    bucket === "momentum"
+  ) {
     return "omi-signal-chip-positive";
   }
 
   if (
+    bucket === "risk" ||
     bucket === "limit_down_liquidity" ||
     bucket === "selloff_risk" ||
-    bucket === "limit_down_move"
-  ) {
-    return "omi-signal-chip-negative";
-  }
-
-  if (
-    bucket === "risk" ||
+    bucket === "limit_down_move" ||
     bucket === "support_break" ||
     bucket === "volume_down" ||
     bucket === "bearish_momentum"
   ) {
-    return "omi-signal-chip-danger";
+    return "omi-signal-chip-negative";
   }
 
   if (bucket === "overheated") {
@@ -134,19 +139,13 @@ function bucketClass(bucket: string) {
 
   if (
     bucket === "breakout" ||
-    bucket === "breakout_high" ||
-    bucket === "trend_reclaim" ||
-    bucket === "momentum"
+    bucket === "pullback" ||
+    bucket === "compression_watch"
   ) {
     return "omi-signal-chip-info";
   }
 
-  if (
-    bucket === "volume" ||
-    bucket === "volume_up" ||
-    bucket === "pullback" ||
-    bucket === "compression_watch"
-  ) {
+  if (bucket === "volume") {
     return "omi-signal-chip-warning";
   }
 
@@ -272,6 +271,8 @@ export default function WatchlistRadarPanel({
   mode,
   selectedStockId,
   disabled = false,
+  scopeLabel,
+  notice,
   getModeHref,
   onModeChange,
   onReload,
@@ -293,6 +294,11 @@ export default function WatchlistRadarPanel({
             {t("radar.eyebrow")}
           </div>
           <h3 className="mt-1 text-lg font-bold text-omi-text-strong">{t("radar.title")}</h3>
+          {scopeLabel ? (
+            <p className="mt-1 text-xs font-medium text-omi-text-muted">
+              {scopeLabel}
+            </p>
+          ) : null}
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -343,12 +349,9 @@ export default function WatchlistRadarPanel({
         </div>
       ) : null}
 
-      {radar?.is_current === false ? (
-        <div className="border-b border-omi-warning-border bg-omi-warning-soft px-5 py-3 text-sm text-omi-warning">
-          {t("radar.staleWarning", {
-            count: radar.stale_stock_count,
-            targetDate: formatRadarDate(radar.target_trade_date),
-          })}
+      {notice ? (
+        <div className="border-b border-omi-info-border bg-omi-info-soft px-5 py-3 text-sm text-omi-info-strong">
+          {notice}
         </div>
       ) : null}
 

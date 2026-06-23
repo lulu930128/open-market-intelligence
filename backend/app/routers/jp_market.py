@@ -10,6 +10,10 @@ from app.db.session import get_db
 from app.jobs import backfill_tasks, service as job_service
 from app.jobs.job_types import JP_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE
 from app.jobs.schemas import JobRunRead
+from app.settings.refresh_execution import (
+    resolve_observed_stock_refresh_interval_seconds,
+    resolve_subresource_refresh_interval_seconds,
+)
 from app.jp_market.schemas import (
     JPCompanyFundamentalRead,
     JPDailyPriceRead,
@@ -29,6 +33,7 @@ from app.jp_market.schemas import (
     JPWatchlistItemUpdate,
     JPWatchlistRankingRead,
 )
+from app.watchlists.schemas import WatchlistGroupRadarRead
 from app.jp_market.service import (
     JPWatchlistDuplicateItemError,
     JPWatchlistGroupNotEmptyError,
@@ -44,6 +49,7 @@ from app.jp_market.service import (
     get_jp_watchlist_tree,
     get_jp_watchlist_group,
     get_jp_watchlist_ranking,
+    get_jp_watchlist_technical_radar,
     get_jp_stock,
     get_jp_resource_summary,
     list_jp_daily_prices,
@@ -480,6 +486,41 @@ def get_jp_watchlist_ranking_api(
         raise _group_error(exc) from exc
 
 
+@router.get(
+    "/watchlists/groups/{group_id}/radar",
+    response_model=WatchlistGroupRadarRead,
+)
+def get_jp_watchlist_radar_api(
+    group_id: int,
+    include_children: bool = True,
+    enabled_only: bool = True,
+    mode: str = Query(
+        default="action",
+        pattern="^(action|surge|breakout|volume|overheat|weakness|risk|momentum|all)$",
+    ),
+    max_results: int = Query(default=30, ge=1, le=200),
+    calculation_limit: int = Query(default=100, ge=20, le=500),
+    db: Session = Depends(get_db),
+):
+    try:
+        return get_jp_watchlist_technical_radar(
+            db=db,
+            group_id=group_id,
+            include_children=include_children,
+            enabled_only=enabled_only,
+            mode=mode,
+            max_results=max_results,
+            calculation_limit=calculation_limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise _group_error(exc) from exc
+
+
 @router.post(
     "/watchlists/daily/refresh",
     response_model=JobRunRead,
@@ -490,9 +531,14 @@ def refresh_all_jp_watchlist_daily_prices_api(
     enabled_only: bool = True,
     outputsize: str = Query(default="compact", pattern="^(compact|full)$"),
     provider: str = Query(default="auto", pattern="^(auto|yahoo_chart)$"),
-    sleep_seconds: float = Query(default=1.0, ge=0, le=60),
+    sleep_seconds: float | None = Query(default=None, ge=0, le=60),
     db: Session = Depends(get_db),
 ):
+    resolved_sleep_seconds = resolve_observed_stock_refresh_interval_seconds(
+        db=db,
+        market="jp",
+        explicit_sleep_seconds=sleep_seconds,
+    )
     return _enqueue_jp_watchlist_resource_refresh(
         db=db,
         group_id=None,
@@ -502,7 +548,7 @@ def refresh_all_jp_watchlist_daily_prices_api(
         include_fundamentals=False,
         outputsize=outputsize,
         provider=provider,
-        sleep_seconds=sleep_seconds,
+        sleep_seconds=resolved_sleep_seconds,
     )
 
 
@@ -517,11 +563,16 @@ def refresh_jp_watchlist_group_daily_prices_api(
     enabled_only: bool = True,
     outputsize: str = Query(default="compact", pattern="^(compact|full)$"),
     provider: str = Query(default="auto", pattern="^(auto|yahoo_chart)$"),
-    sleep_seconds: float = Query(default=1.0, ge=0, le=60),
+    sleep_seconds: float | None = Query(default=None, ge=0, le=60),
     db: Session = Depends(get_db),
 ):
     try:
         get_jp_watchlist_group(db=db, group_id=group_id)
+        resolved_sleep_seconds = resolve_observed_stock_refresh_interval_seconds(
+            db=db,
+            market="jp",
+            explicit_sleep_seconds=sleep_seconds,
+        )
         return _enqueue_jp_watchlist_resource_refresh(
             db=db,
             group_id=group_id,
@@ -531,7 +582,7 @@ def refresh_jp_watchlist_group_daily_prices_api(
             include_fundamentals=False,
             outputsize=outputsize,
             provider=provider,
-            sleep_seconds=sleep_seconds,
+            sleep_seconds=resolved_sleep_seconds,
         )
     except Exception as exc:
         raise _group_error(exc) from exc
@@ -549,9 +600,14 @@ def refresh_all_jp_watchlist_resources_api(
     include_fundamentals: bool = True,
     outputsize: str = Query(default="compact", pattern="^(compact|full)$"),
     provider: str = Query(default="auto", pattern="^(auto|yahoo_chart)$"),
-    sleep_seconds: float = Query(default=15.0, ge=0, le=60),
+    sleep_seconds: float | None = Query(default=None, ge=0, le=60),
     db: Session = Depends(get_db),
 ):
+    resolved_sleep_seconds = resolve_subresource_refresh_interval_seconds(
+        db=db,
+        market="jp",
+        explicit_sleep_seconds=sleep_seconds,
+    )
     return _enqueue_jp_watchlist_resource_refresh(
         db=db,
         group_id=None,
@@ -561,7 +617,7 @@ def refresh_all_jp_watchlist_resources_api(
         include_fundamentals=include_fundamentals,
         outputsize=outputsize,
         provider=provider,
-        sleep_seconds=sleep_seconds,
+        sleep_seconds=resolved_sleep_seconds,
     )
 
 
@@ -578,11 +634,16 @@ def refresh_jp_watchlist_group_resources_api(
     include_fundamentals: bool = True,
     outputsize: str = Query(default="compact", pattern="^(compact|full)$"),
     provider: str = Query(default="auto", pattern="^(auto|yahoo_chart)$"),
-    sleep_seconds: float = Query(default=15.0, ge=0, le=60),
+    sleep_seconds: float | None = Query(default=None, ge=0, le=60),
     db: Session = Depends(get_db),
 ):
     try:
         get_jp_watchlist_group(db=db, group_id=group_id)
+        resolved_sleep_seconds = resolve_subresource_refresh_interval_seconds(
+            db=db,
+            market="jp",
+            explicit_sleep_seconds=sleep_seconds,
+        )
         return _enqueue_jp_watchlist_resource_refresh(
             db=db,
             group_id=group_id,
@@ -592,7 +653,7 @@ def refresh_jp_watchlist_group_resources_api(
             include_fundamentals=include_fundamentals,
             outputsize=outputsize,
             provider=provider,
-            sleep_seconds=sleep_seconds,
+            sleep_seconds=resolved_sleep_seconds,
         )
     except Exception as exc:
         raise _group_error(exc) from exc

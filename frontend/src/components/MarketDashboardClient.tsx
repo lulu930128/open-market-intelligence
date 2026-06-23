@@ -16,6 +16,10 @@ import { fetchJson } from "@/lib/api";
 import { getJobResultStatus, requestBackfillJob } from "@/lib/jobs";
 import { refreshMarketCalendarStatus } from "@/lib/marketCalendarStatus";
 import {
+  getRefreshExecutionSeconds,
+  useRefreshExecutionSettings,
+} from "@/lib/refreshExecutionSettings";
+import {
   TAIWAN_INTRADAY_REFRESH_MS,
   getTaiwanIntradayXRatio,
   getTaiwanMarketChipRefreshState,
@@ -1533,8 +1537,9 @@ function mergeUsWatchlistRows(
 ) {
   if (!ranking) return baseRows;
 
+  const rankingResults = Array.isArray(ranking.results) ? ranking.results : [];
   const rankingBySymbol = new Map(
-    ranking.results.map((row) => [row.symbol, row])
+    rankingResults.map((row) => [row.symbol, row])
   );
 
   return baseRows.map((row, index) => ({
@@ -1602,8 +1607,9 @@ function mergeJpWatchlistRows(
 ) {
   if (!ranking) return baseRows;
 
+  const rankingResults = Array.isArray(ranking.results) ? ranking.results : [];
   const rankingBySymbol = new Map(
-    ranking.results.map((row) => [row.symbol, row])
+    rankingResults.map((row) => [row.symbol, row])
   );
 
   return baseRows.map((row, index) => ({
@@ -1902,6 +1908,7 @@ export default function MarketDashboardClient({
   initialJpWatchlistItems,
 }: Props) {
   const t = useT();
+  const refreshExecutionSettings = useRefreshExecutionSettings();
   const initialSelectedGroup = useMemo(() => {
     const groups = flattenGroups(initialTree);
     return (
@@ -2001,6 +2008,10 @@ export default function MarketDashboardClient({
   const [ranking, setRanking] = useState<RankingResponse | null>(initialRankingData);
   const [radarMode, setRadarMode] = useState<WatchlistRadarMode>(initialRadarMode);
   const [radar, setRadar] = useState<WatchlistGroupRadarRead | null>(initialRadarData);
+  const [usRadarMode, setUsRadarMode] = useState<WatchlistRadarMode>(initialRadarMode);
+  const [usRadar, setUsRadar] = useState<WatchlistGroupRadarRead | null>(null);
+  const [jpRadarMode, setJpRadarMode] = useState<WatchlistRadarMode>(initialRadarMode);
+  const [jpRadar, setJpRadar] = useState<WatchlistGroupRadarRead | null>(null);
   const [usRankBy, setUsRankBy] = useState<USRankBy>("none");
   const [usRanking, setUsRanking] = useState<USWatchlistRankingRead | null>(null);
   const [marketIndexSummary, setMarketIndexSummary] =
@@ -2013,17 +2024,25 @@ export default function MarketDashboardClient({
   const [radarLoadState, setRadarLoadState] = useState<LoadState>(
     initialRadarData ? "success" : "idle"
   );
+  const [usRadarLoadState, setUsRadarLoadState] = useState<LoadState>("idle");
+  const [jpRadarLoadState, setJpRadarLoadState] = useState<LoadState>("idle");
   const [usLoadState, setUsLoadState] = useState<LoadState>("idle");
   const [, setUsUniverseRefreshState] =
     useState<LoadState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [radarErrorMessage, setRadarErrorMessage] = useState<string | null>(null);
+  const [usRadarErrorMessage, setUsRadarErrorMessage] = useState<string | null>(null);
+  const [jpRadarErrorMessage, setJpRadarErrorMessage] = useState<string | null>(null);
   const [usErrorMessage, setUsErrorMessage] = useState<string | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
   const [usLastUpdatedAt, setUsLastUpdatedAt] = useState<string | null>(null);
   const dashboardRequestSeq = useRef(0);
   const radarRequestSeq = useRef(0);
+  const usRadarRequestSeq = useRef(0);
+  const jpRadarRequestSeq = useRef(0);
   const radarModeRef = useRef<WatchlistRadarMode>(radarMode);
+  const usRadarModeRef = useRef<WatchlistRadarMode>(usRadarMode);
+  const jpRadarModeRef = useRef<WatchlistRadarMode>(jpRadarMode);
   const usDashboardRequestSeq = useRef(0);
   const jpDashboardRequestSeq = useRef(0);
   const marketIndexRequestSeq = useRef(0);
@@ -2210,6 +2229,19 @@ export default function MarketDashboardClient({
     };
   }
 
+  function watchlistTechnicalRadarParams(
+    mode: WatchlistRadarMode,
+    useIntraday = false
+  ) {
+    return {
+      mode,
+      max_results: WATCHLIST_RADAR_MAX_RESULTS,
+      calculation_limit: 100,
+      use_intraday: useIntraday,
+      intraday_limit: WATCHLIST_INTRADAY_LIMIT,
+    };
+  }
+
   async function loadWatchlistRadar(
     groupId: number,
     options?: { mode?: WatchlistRadarMode; silent?: boolean }
@@ -2244,6 +2276,79 @@ export default function MarketDashboardClient({
       }
       setRadarLoadState("error");
       setRadarErrorMessage(apiErrorMessage(error, t("radar.loadError")));
+    }
+  }
+
+  async function loadUsWatchlistRadar(
+    groupId: number,
+    options?: { mode?: WatchlistRadarMode; silent?: boolean }
+  ) {
+    const requestSeq = usRadarRequestSeq.current + 1;
+    usRadarRequestSeq.current = requestSeq;
+    const currentMode = options?.mode ?? usRadarModeRef.current;
+
+    if (!options?.silent) {
+      setUsRadarLoadState("loading");
+      setUsRadarErrorMessage(null);
+      setUsRadar(null);
+    }
+
+    try {
+      const marketState = getUsMarketRefreshState();
+      const radarData = await fetchJson<WatchlistGroupRadarRead>(
+        `/api/us-market/watchlists/groups/${groupId}/radar`,
+        watchlistTechnicalRadarParams(currentMode, marketState.isPollingWindow)
+      );
+
+      if (usRadarRequestSeq.current !== requestSeq) return;
+
+      setUsRadar(radarData);
+      setUsRadarLoadState("success");
+      setUsRadarErrorMessage(null);
+    } catch (error) {
+      if (usRadarRequestSeq.current !== requestSeq) return;
+
+      if (!options?.silent) {
+        setUsRadar(null);
+      }
+      setUsRadarLoadState("error");
+      setUsRadarErrorMessage(apiErrorMessage(error, t("radar.loadError")));
+    }
+  }
+
+  async function loadJpWatchlistRadar(
+    groupId: number,
+    options?: { mode?: WatchlistRadarMode; silent?: boolean }
+  ) {
+    const requestSeq = jpRadarRequestSeq.current + 1;
+    jpRadarRequestSeq.current = requestSeq;
+    const currentMode = options?.mode ?? jpRadarModeRef.current;
+
+    if (!options?.silent) {
+      setJpRadarLoadState("loading");
+      setJpRadarErrorMessage(null);
+      setJpRadar(null);
+    }
+
+    try {
+      const radarData = await fetchJson<WatchlistGroupRadarRead>(
+        `/api/jp-market/watchlists/groups/${groupId}/radar`,
+        watchlistTechnicalRadarParams(currentMode)
+      );
+
+      if (jpRadarRequestSeq.current !== requestSeq) return;
+
+      setJpRadar(radarData);
+      setJpRadarLoadState("success");
+      setJpRadarErrorMessage(null);
+    } catch (error) {
+      if (jpRadarRequestSeq.current !== requestSeq) return;
+
+      if (!options?.silent) {
+        setJpRadar(null);
+      }
+      setJpRadarLoadState("error");
+      setJpRadarErrorMessage(apiErrorMessage(error, t("radar.loadError")));
     }
   }
 
@@ -2397,6 +2502,8 @@ export default function MarketDashboardClient({
       setUsErrorMessage(null);
     }
 
+    void loadUsWatchlistRadar(groupId, { silent: options?.silent });
+
     try {
       const marketState = getUsMarketRefreshState();
       const rankingData = await fetchJson<USWatchlistRankingRead>(
@@ -2439,6 +2546,8 @@ export default function MarketDashboardClient({
       setJpLoadState("loading");
       setJpErrorMessage(null);
     }
+
+    void loadJpWatchlistRadar(groupId, { silent: options?.silent });
 
     try {
       const rankingData = await fetchJson<JPWatchlistRankingRead>(
@@ -2539,7 +2648,12 @@ export default function MarketDashboardClient({
           include_today: includeToday,
           include_children: true,
           enabled_only: true,
-          sleep_seconds: 0.3,
+          sleep_seconds: getRefreshExecutionSeconds(
+            refreshExecutionSettings,
+            "tw",
+            "observed_stock_refresh_interval_seconds",
+            0.3
+          ),
           skip_existing_months: true,
         },
         {
@@ -2578,7 +2692,12 @@ export default function MarketDashboardClient({
           enabled_only: true,
           outputsize: "compact",
           adjusted: false,
-          sleep_seconds: 12,
+          sleep_seconds: getRefreshExecutionSeconds(
+            refreshExecutionSettings,
+            "us",
+            "observed_stock_refresh_interval_seconds",
+            12
+          ),
         },
         {
           intervalMs: 1500,
@@ -2622,7 +2741,12 @@ export default function MarketDashboardClient({
           enabled_only: true,
           outputsize: "compact",
           provider: "auto",
-          sleep_seconds: 1,
+          sleep_seconds: getRefreshExecutionSeconds(
+            refreshExecutionSettings,
+            "jp",
+            "observed_stock_refresh_interval_seconds",
+            1
+          ),
         },
         {
           intervalMs: 1500,
@@ -2653,6 +2777,14 @@ export default function MarketDashboardClient({
   useEffect(() => {
     radarModeRef.current = radarMode;
   }, [radarMode]);
+
+  useEffect(() => {
+    usRadarModeRef.current = usRadarMode;
+  }, [usRadarMode]);
+
+  useEffect(() => {
+    jpRadarModeRef.current = jpRadarMode;
+  }, [jpRadarMode]);
 
   useEffect(() => {
     selectedUsGroupIdRef.current = selectedUsGroupId;
@@ -3049,10 +3181,24 @@ export default function MarketDashboardClient({
     setSelectedUsSymbol(null);
     setSelectedUsSecurityName(null);
     setUsRanking(null);
+    setUsRadar(null);
     setUsLoadState("idle");
+    setUsRadarLoadState("idle");
     setUsErrorMessage(null);
+    setUsRadarErrorMessage(null);
     setUsChartFocusMode(false);
     pushDashboardUrl({ market: "us", groupId: group?.id ?? null });
+  }
+
+  function handleSelectUsSymbol(symbol: string, securityName: string | null) {
+    const normalizedSymbol = symbol.trim().toUpperCase();
+    if (!normalizedSymbol) return;
+
+    setSelectedUsSymbol(normalizedSymbol);
+    setSelectedUsSecurityName(securityName);
+    setUsErrorMessage(null);
+    setUsChartFocusMode(false);
+    pushDashboardUrl({ market: "us", symbol: normalizedSymbol });
   }
 
   function handleSelectJpGroup(group: JPWatchlistGroupNode | null) {
@@ -3062,8 +3208,11 @@ export default function MarketDashboardClient({
     setSelectedJpSymbol(null);
     setSelectedJpStock(null);
     setJpRanking(null);
+    setJpRadar(null);
     setJpLoadState("idle");
+    setJpRadarLoadState("idle");
     setJpErrorMessage(null);
+    setJpRadarErrorMessage(null);
     setJpChartFocusMode(false);
     setJpStatusMessage(null);
     pushDashboardUrl({ market: "jp", groupId: group?.id ?? null });
@@ -3162,6 +3311,32 @@ export default function MarketDashboardClient({
     });
     if (activeGroupId !== null) {
       void loadWatchlistRadar(activeGroupId, { mode: value });
+    }
+  }
+
+  function handleUsRadarModeChange(value: WatchlistRadarMode) {
+    usRadarModeRef.current = value;
+    setUsRadarMode(value);
+    pushDashboardUrl({
+      market: "us",
+      groupId: selectedUsGroupId,
+      symbol: selectedUsSymbol,
+    });
+    if (selectedUsGroupId !== null) {
+      void loadUsWatchlistRadar(selectedUsGroupId, { mode: value });
+    }
+  }
+
+  function handleJpRadarModeChange(value: WatchlistRadarMode) {
+    jpRadarModeRef.current = value;
+    setJpRadarMode(value);
+    pushDashboardUrl({
+      market: "jp",
+      groupId: selectedJpGroupId,
+      jpSymbol: selectedJpSymbol,
+    });
+    if (selectedJpGroupId !== null) {
+      void loadJpWatchlistRadar(selectedJpGroupId, { mode: value });
     }
   }
 
@@ -3479,42 +3654,63 @@ export default function MarketDashboardClient({
       selected,
       loading,
       href: buildDashboardHref({ market: "us", symbol: row.symbol }),
-      onSelect: () => {
-        setSelectedUsSymbol(row.symbol);
-        setSelectedUsSecurityName(row.security_name);
-        setUsErrorMessage(null);
-        setUsChartFocusMode(false);
-        pushDashboardUrl({ market: "us", symbol: row.symbol });
-      },
+      onSelect: () => handleSelectUsSymbol(row.symbol, row.security_name),
     };
   });
   const usRankingPanel = (
-    <WatchlistRankingPanel
-      groupName={selectedUsGroupName}
-      lastUpdatedAt={usLastUpdatedAt}
-      statusLabel={
-        usRanking?.is_current === false ? usRankingPendingLabel : undefined
-      }
-      rankBy={usRanking?.rank_by ?? usRankBy}
-      rankOptions={[
-        { value: "none", label: t("rank.none") },
-        { value: "change_pct", label: t("rank.changePct") },
-        { value: "volume", label: t("rank.volume") },
-        { value: "close", label: t("rank.close") },
-      ]}
-      onRankByChange={handleUsRankByChange}
-      onReload={() => {
-        if (selectedUsGroupId !== null) void loadUsDashboard(selectedUsGroupId);
-      }}
-      reloadDisabled={selectedUsGroupId === null || usLoadState === "loading"}
-      loadState={usRankingLoadState}
-      loadingLabel={usRankingPendingLabel}
-      errorMessage={usErrorMessage}
-      rows={usDisplayRows}
-      summary={usSummary}
-      volumeHeader={t("dashboard.ranking.volume")}
-      emptyMessage={t("dashboard.ranking.usEmpty")}
-    />
+    <div className="space-y-4">
+      <WatchlistRadarPanel
+        radar={usRadar}
+        loadState={usRadarLoadState}
+        errorMessage={usRadarErrorMessage}
+        mode={usRadarMode}
+        selectedStockId={selectedUsSymbol}
+        disabled={selectedUsGroupId === null}
+        scopeLabel={t("radar.technicalOnly.usScope")}
+        notice={t("radar.technicalOnly.notice")}
+        getModeHref={(nextMode) =>
+          buildDashboardHref({
+            market: "us",
+            groupId: selectedUsGroupId,
+            symbol: selectedUsSymbol,
+            radarMode: nextMode,
+          })
+        }
+        onModeChange={handleUsRadarModeChange}
+        onReload={() => {
+          if (selectedUsGroupId !== null) {
+            void loadUsWatchlistRadar(selectedUsGroupId);
+          }
+        }}
+        onSelectStock={handleSelectUsSymbol}
+      />
+      <WatchlistRankingPanel
+        groupName={selectedUsGroupName}
+        lastUpdatedAt={usLastUpdatedAt}
+        statusLabel={
+          usRanking?.is_current === false ? usRankingPendingLabel : undefined
+        }
+        rankBy={usRanking?.rank_by ?? usRankBy}
+        rankOptions={[
+          { value: "none", label: t("rank.none") },
+          { value: "change_pct", label: t("rank.changePct") },
+          { value: "volume", label: t("rank.volume") },
+          { value: "close", label: t("rank.close") },
+        ]}
+        onRankByChange={handleUsRankByChange}
+        onReload={() => {
+          if (selectedUsGroupId !== null) void loadUsDashboard(selectedUsGroupId);
+        }}
+        reloadDisabled={selectedUsGroupId === null || usLoadState === "loading"}
+        loadState={usRankingLoadState}
+        loadingLabel={usRankingPendingLabel}
+        errorMessage={usErrorMessage}
+        rows={usDisplayRows}
+        summary={usSummary}
+        volumeHeader={t("dashboard.ranking.volume")}
+        emptyMessage={t("dashboard.ranking.usEmpty")}
+      />
+    </div>
   );
 
   const jpDisplayRows: RankingDisplayRow[] = jpVisibleRows.map((row) => {
@@ -3557,32 +3753,59 @@ export default function MarketDashboardClient({
     };
   });
   const jpRankingPanel = (
-    <WatchlistRankingPanel
-      groupName={selectedJpGroupName}
-      lastUpdatedAt={jpLastUpdatedAt}
-      statusLabel={
-        jpRanking?.is_current === false ? jpRankingPendingLabel : undefined
-      }
-      rankBy={jpRanking?.rank_by ?? jpRankBy}
-      rankOptions={[
-        { value: "none", label: t("rank.none") },
-        { value: "change_pct", label: t("rank.changePct") },
-        { value: "volume", label: t("rank.volume") },
-        { value: "close", label: t("rank.close") },
-      ]}
-      onRankByChange={handleJpRankByChange}
-      onReload={() => {
-        if (selectedJpGroupId !== null) void loadJpDashboard(selectedJpGroupId);
-      }}
-      reloadDisabled={selectedJpGroupId === null || jpLoadState === "loading"}
-      loadState={jpRankingLoadState}
-      loadingLabel={jpRankingPendingLabel}
-      errorMessage={jpErrorMessage}
-      rows={jpDisplayRows}
-      summary={jpSummary}
-      volumeHeader={t("dashboard.ranking.volume")}
-      emptyMessage={t("dashboard.ranking.jpEmpty")}
-    />
+    <div className="space-y-4">
+      <WatchlistRadarPanel
+        radar={jpRadar}
+        loadState={jpRadarLoadState}
+        errorMessage={jpRadarErrorMessage}
+        mode={jpRadarMode}
+        selectedStockId={selectedJpSymbol}
+        disabled={selectedJpGroupId === null}
+        scopeLabel={t("radar.technicalOnly.jpScope")}
+        notice={t("radar.technicalOnly.notice")}
+        getModeHref={(nextMode) =>
+          buildDashboardHref({
+            market: "jp",
+            groupId: selectedJpGroupId,
+            jpSymbol: selectedJpSymbol,
+            radarMode: nextMode,
+          })
+        }
+        onModeChange={handleJpRadarModeChange}
+        onReload={() => {
+          if (selectedJpGroupId !== null) {
+            void loadJpWatchlistRadar(selectedJpGroupId);
+          }
+        }}
+        onSelectStock={handleSelectJpSymbol}
+      />
+      <WatchlistRankingPanel
+        groupName={selectedJpGroupName}
+        lastUpdatedAt={jpLastUpdatedAt}
+        statusLabel={
+          jpRanking?.is_current === false ? jpRankingPendingLabel : undefined
+        }
+        rankBy={jpRanking?.rank_by ?? jpRankBy}
+        rankOptions={[
+          { value: "none", label: t("rank.none") },
+          { value: "change_pct", label: t("rank.changePct") },
+          { value: "volume", label: t("rank.volume") },
+          { value: "close", label: t("rank.close") },
+        ]}
+        onRankByChange={handleJpRankByChange}
+        onReload={() => {
+          if (selectedJpGroupId !== null) void loadJpDashboard(selectedJpGroupId);
+        }}
+        reloadDisabled={selectedJpGroupId === null || jpLoadState === "loading"}
+        loadState={jpRankingLoadState}
+        loadingLabel={jpRankingPendingLabel}
+        errorMessage={jpErrorMessage}
+        rows={jpDisplayRows}
+        summary={jpSummary}
+        volumeHeader={t("dashboard.ranking.volume")}
+        emptyMessage={t("dashboard.ranking.jpEmpty")}
+      />
+    </div>
   );
 
   const omiAskContext = useMemo<OmiAskDockContext>(() => {
@@ -3792,9 +4015,7 @@ export default function MarketDashboardClient({
               }}
               onSelectGroup={handleSelectUsGroup}
               onSelectSymbol={(symbol, securityName) => {
-                setSelectedUsSymbol(symbol);
-                setSelectedUsSecurityName(securityName);
-                setUsChartFocusMode(false);
+                handleSelectUsSymbol(symbol, securityName);
               }}
               onExplorerDataChanged={(nextTree, nextItems) => {
                 setUsWatchlistTree(nextTree);
@@ -3829,7 +4050,12 @@ export default function MarketDashboardClient({
                   setSelectedUsSecurityName(nextSelectedRow.security_name);
                 }
               }}
-              onChanged={() => setUsWatchlistVersion((version) => version + 1)}
+              onChanged={() => {
+                setUsRadar(null);
+                setUsRadarLoadState("idle");
+                setUsRadarErrorMessage(null);
+                setUsWatchlistVersion((version) => version + 1);
+              }}
             />
           ) : activeMarket === "jp" ? (
             <JPMarketSidebar
@@ -3861,6 +4087,9 @@ export default function MarketDashboardClient({
               onExplorerDataChanged={(nextTree, nextItems) => {
                 setJpWatchlistTree(nextTree);
                 setJpWatchlistItems(nextItems);
+                setJpRadar(null);
+                setJpRadarLoadState("idle");
+                setJpRadarErrorMessage(null);
                 setJpDataRefreshNonce((value) => value + 1);
 
                 const nextSelectedGroup =

@@ -105,6 +105,19 @@ function getFailedResultItems(job: JobRunRead) {
   return [...failedRows, ...getResultErrors(job)];
 }
 
+function getFailedUnitCount(job: JobRunRead) {
+  const failedItems = getFailedResultItems(job).length;
+  if (failedItems > 0) return failedItems;
+
+  const errorCount = getFirstResultNumber(job, ["error_count", "failed_count"]);
+  if (errorCount !== null && errorCount > 0) return errorCount;
+
+  const effectiveStatus = getEffectiveStatus(job);
+  if (effectiveStatus === "error" || effectiveStatus === "partial_success") return 1;
+
+  return 0;
+}
+
 function hasResultErrors(job: JobRunRead) {
   const errorCount = getFirstResultNumber(job, ["error_count", "failed_count"]);
   return (
@@ -125,6 +138,14 @@ function getEffectiveStatus(job: JobRunRead) {
   }
 
   return job.status;
+}
+
+function getEffectiveStatusLabel(job: JobRunRead, t: TranslationFunction) {
+  const effectiveStatus = getEffectiveStatus(job);
+  const key = `jobs.status.${effectiveStatus}`;
+  const label = t(key);
+
+  return label === key ? effectiveStatus : label;
 }
 
 function formatDateTime(value: string | null) {
@@ -163,11 +184,7 @@ function canRetry(job: JobRunRead) {
   );
 }
 
-function buildStatusSummary(
-  t: TranslationFunction,
-  activeCount: number,
-  failedCount: number
-) {
+function buildStatusSummary(t: TranslationFunction, activeCount: number, failedCount: number) {
   if (activeCount > 0) {
     return {
       className: "omi-job-status-pill-active",
@@ -308,7 +325,7 @@ function JobRow({
           <div className="mt-1 text-xs text-omi-text-muted">{formatJobStatus(job, t)}</div>
         </div>
         <span className={`shrink-0 border px-2 py-1 text-[11px] font-bold ${statusTone(job)}`}>
-          {getEffectiveStatus(job)}
+          {getEffectiveStatusLabel(job, t)}
         </span>
       </div>
 
@@ -443,11 +460,7 @@ export default function JobStatusCenter({
     [market, t]
   );
   const failedCount = useMemo(
-    () =>
-      jobs.filter((job) => {
-        const effectiveStatus = getEffectiveStatus(job);
-        return effectiveStatus === "error" || effectiveStatus === "partial_success";
-      }).length,
+    () => jobs.reduce((count, job) => count + getFailedUnitCount(job), 0),
     [jobs]
   );
   const statusSummary = useMemo(

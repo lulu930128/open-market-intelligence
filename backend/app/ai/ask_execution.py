@@ -100,6 +100,17 @@ def _read_data_only(
             tool_runs=tool_runs,
         )
 
+    if scope_type in {"jp_stock", "jp_index"}:
+        symbol = _require_scope_id(payload, scope_type)
+        return (
+            "omi.read_jp_index_context" if scope_type == "jp_index" else "omi.read_jp_stock_context"
+        ), agentic_tools.read_jp_stock_context(
+            db=db,
+            symbol=symbol,
+            is_index=scope_type == "jp_index",
+            tool_runs=tool_runs,
+        )
+
     group_id = _require_group_id(payload)
     return "omi.read_watchlist_context", tools.read_watchlist_context(
         db=db,

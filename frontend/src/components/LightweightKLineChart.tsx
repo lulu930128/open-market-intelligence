@@ -123,7 +123,12 @@ export type {
 function readOmiTheme(): OmiTheme {
   if (typeof document === "undefined") return "light";
 
-  return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+  const baseTheme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+  if (document.documentElement.dataset.contrast === "high") {
+    return baseTheme === "dark" ? "dark-high-contrast" : "light-high-contrast";
+  }
+
+  return baseTheme;
 }
 
 export default function LightweightKLineChart({
@@ -275,7 +280,7 @@ export default function LightweightKLineChart({
     const observer = new MutationObserver(updateTheme);
 
     updateTheme();
-    observer.observe(root, { attributes: true, attributeFilter: ["data-theme"] });
+    observer.observe(root, { attributes: true, attributeFilter: ["data-theme", "data-contrast"] });
     window.addEventListener("storage", updateTheme);
 
     return () => {

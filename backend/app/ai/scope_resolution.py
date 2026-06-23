@@ -8,7 +8,8 @@ from sqlalchemy.orm import Session
 
 from app.ai import decision_core
 from app.ai.schemas import AiAskRequest
-from app.db.models import StockMaster, USStockMaster, WatchlistGroup
+from app.db.models import JPStockMaster, StockMaster, USStockMaster, WatchlistGroup
+from app.jp_market.sources import normalize_jp_symbol
 from app.us_market.sources import normalize_us_symbol
 
 
@@ -21,9 +22,24 @@ VALID_TARGET_TYPES = {
     "tw_index",
     "tw_futures",
     "us_stock",
+    "jp_stock",
+    "jp_index",
 }
 TAIWAN_INDEX_TARGET_IDS = {"TAIEX", "TPEX"}
 TAIWAN_FUTURES_TARGET_IDS = {"TXF", "MXF", "TMF"}
+JP_INDEX_TARGET_IDS = {"^N225", "1306.T"}
+JP_MARKET_CONTEXT_HINTS = (
+    "\u65e5\u80a1",
+    "\u65e5\u672c",
+    "\u65e5\u7d93",
+    "\u65e5\u7d4c",
+    "japan",
+    "jp",
+    "jpy",
+    "nikkei",
+    "n225",
+    "topix",
+)
 INTERNAL_SCOPE_TO_TARGET_TYPE = {
     "market": "market",
     "data_freshness": "data_freshness",
@@ -32,6 +48,8 @@ INTERNAL_SCOPE_TO_TARGET_TYPE = {
     "tw_index": "tw_index",
     "tw_futures": "tw_futures",
     "us_stock": "us_stock",
+    "jp_stock": "jp_stock",
+    "jp_index": "jp_index",
 }
 TARGET_TYPE_TO_INTERNAL_SCOPE = {
     "market": "market",
@@ -41,6 +59,8 @@ TARGET_TYPE_TO_INTERNAL_SCOPE = {
     "tw_index": "tw_index",
     "tw_futures": "tw_futures",
     "us_stock": "us_stock",
+    "jp_stock": "jp_stock",
+    "jp_index": "jp_index",
 }
 REPORT_HINTS = decision_core.REPORT_HINTS
 ANALYSIS_HINTS = decision_core.ANALYSIS_HINTS
@@ -121,6 +141,8 @@ def _target_dict(
             market = "TW"
         elif target_type.startswith("us_"):
             market = "US"
+        elif target_type.startswith("jp_"):
+            market = "JP"
 
     return {
         "type": target_type,
@@ -151,6 +173,14 @@ def _looks_like_us_symbol(value: str | None) -> bool:
         return False
 
     return bool(re.fullmatch(r"[A-Z][A-Z0-9.$-]{0,15}", normalized))
+
+
+def _looks_like_jp_symbol(value: str | None) -> bool:
+    normalized = normalize_jp_symbol(value)
+    if not normalized:
+        return False
+
+    return bool(re.fullmatch(r"(?:\^[A-Z0-9]+|[0-9]{3}[0-9A-Z](?:\.[A-Z]{1,4})?|[0-9]{5}(?:\.[A-Z]{1,4})?)", normalized))
 
 
 def _resolution_candidate(
@@ -257,6 +287,154 @@ def _us_stock_label(stock: USStockMaster | None, symbol: str) -> str:
         if stock and stock.sec_company_name
         else symbol
     )
+
+
+def _jp_stock_display_name(db: Session | None, symbol: str | None, fallback: str | None = None) -> str | None:
+    if db is None or not symbol:
+        return fallback
+
+    normalized_symbol = normalize_jp_symbol(symbol)
+    if not normalized_symbol:
+        return fallback
+
+    stock = db.query(JPStockMaster).filter(JPStockMaster.symbol == normalized_symbol).first()
+    if stock is None:
+        return fallback
+
+    return stock.security_name or fallback
+
+
+def _get_jp_stock(db: Session | None, symbol: str | None) -> JPStockMaster | None:
+    if db is None or not symbol:
+        return None
+
+    normalized_symbol = normalize_jp_symbol(symbol)
+    if not normalized_symbol:
+        return None
+
+    return (
+        db.query(JPStockMaster)
+        .filter(JPStockMaster.symbol == normalized_symbol)
+        .filter(JPStockMaster.is_active.is_(True))
+        .first()
+    )
+
+
+def _jp_stock_label(stock: JPStockMaster | None, symbol: str) -> str:
+    return stock.security_name if stock and stock.security_name else symbol
+
+
+def _resolve_jp_stock_symbol(
+    db: Session | None,
+    symbol: str | None,
+    *,
+    source: str,
+    confidence: str = "high",
+    allow_unknown: bool = False,
+) -> ScopeResolution | None:
+    normalized_symbol = normalize_jp_symbol(symbol)
+    if not _looks_like_jp_symbol(normalized_symbol):
+        return None
+
+    stock = _get_jp_stock(db, normalized_symbol)
+    if stock is None and not allow_unknown:
+        return None
+
+    label = _jp_stock_label(stock, normalized_symbol)
+    return ScopeResolution(
+        selected_scope_type="jp_stock",
+        selected_scope_id=normalized_symbol,
+        display_name=label,
+        confidence=confidence if stock is not None else "medium",
+        assumption=None
+        if stock is not None
+        else "JP stock master is incomplete; using the normalized symbol and exposing data gaps.",
+        source=source if stock is not None else f"{source}_unverified_symbol",
+        candidates=(
+            _resolution_candidate(
+                scope_type="jp_stock",
+                scope_id=normalized_symbol,
+                label=label,
+                confidence=confidence if stock is not None else "medium",
+                source=source if stock is not None else f"{source}_unverified_symbol",
+            ),
+        ),
+    )
+
+
+def _question_has_jp_context(question: str) -> bool:
+    return _contains_hint(question, JP_MARKET_CONTEXT_HINTS)
+
+
+def _resolve_jp_index_from_question(question: str) -> ScopeResolution | None:
+    lowered = question.lower()
+    if "nikkei" in lowered or "n225" in lowered or "\u65e5\u7d93" in question or "\u65e5\u7d4c" in question:
+        return ScopeResolution(
+            selected_scope_type="jp_index",
+            selected_scope_id="^N225",
+            display_name="Nikkei 225",
+            confidence="high",
+            source="question_jp_index",
+            candidates=(
+                _resolution_candidate(
+                    scope_type="jp_index",
+                    scope_id="^N225",
+                    label="Nikkei 225",
+                    confidence="high",
+                    source="question_jp_index",
+                ),
+            ),
+        )
+
+    if "topix" in lowered:
+        return ScopeResolution(
+            selected_scope_type="jp_index",
+            selected_scope_id="1306.T",
+            display_name="TOPIX ETF",
+            confidence="medium",
+            assumption="TOPIX is represented by the local 1306.T ETF proxy in OMI.",
+            source="question_jp_index_proxy",
+            candidates=(
+                _resolution_candidate(
+                    scope_type="jp_index",
+                    scope_id="1306.T",
+                    label="TOPIX ETF",
+                    confidence="medium",
+                    source="question_jp_index_proxy",
+                ),
+            ),
+        )
+
+    return None
+
+
+def _resolve_jp_stock_symbol_from_question(db: Session | None, question: str) -> ScopeResolution | None:
+    if not _question_has_jp_context(question):
+        return None
+
+    index_resolution = _resolve_jp_index_from_question(question)
+    if index_resolution is not None:
+        return index_resolution
+
+    for match in re.finditer(r"(?<![0-9A-Z])([0-9]{3}[0-9A-Z](?:\.T)?|[0-9]{5}(?:\.T)?)(?![0-9A-Z])", question.upper()):
+        raw_symbol = match.group(1)
+        if (
+            not raw_symbol.endswith(".T")
+            and raw_symbol.isdigit()
+            and 1900 <= int(raw_symbol) <= 2099
+        ):
+            continue
+        resolution = _resolve_jp_stock_symbol(
+            db,
+            raw_symbol,
+            source="question_jp_symbol",
+            confidence="high",
+            allow_unknown=True,
+        )
+        if resolution is not None:
+            return resolution
+
+    return None
 
 
 def _resolve_us_stock_symbol(
@@ -607,7 +785,7 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
                 f"target.type is not supported yet: {requested_target_type}.",
             )
 
-        if scope_type in {"stock", "watchlist", "us_stock", "tw_index", "tw_futures"} and target_id is None:
+        if scope_type in {"stock", "watchlist", "us_stock", "jp_stock", "jp_index", "tw_index", "tw_futures"} and target_id is None:
             return _clarify_scope(
                 scope_type,
                 question,
@@ -631,14 +809,36 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
                     scope_type,
                     question,
                     f"Unsupported Taiwan futures target.id: {target_id}.",
-                )
+            )
             target_id = normalized_futures_symbol
+
+        if scope_type == "jp_stock":
+            normalized_jp_symbol = normalize_jp_symbol(target_id)
+            if not _looks_like_jp_symbol(normalized_jp_symbol):
+                return _clarify_scope(
+                    scope_type,
+                    question,
+                    f"Unsupported Japan stock target.id: {target_id}.",
+                )
+            target_id = normalized_jp_symbol
+
+        if scope_type == "jp_index":
+            normalized_jp_index = normalize_jp_symbol(target_id)
+            if normalized_jp_index not in JP_INDEX_TARGET_IDS:
+                return _clarify_scope(
+                    scope_type,
+                    question,
+                    f"Unsupported Japan index target.id: {target_id}.",
+                )
+            target_id = normalized_jp_index
 
         display_name = (
             _stock_display_name(db, target_id)
             if scope_type == "stock" and target_id
             else _us_stock_display_name(db, target_id, fallback=target_id)
             if scope_type == "us_stock" and target_id
+            else _jp_stock_display_name(db, target_id, fallback=requested_label or target_id)
+            if scope_type == "jp_stock" and target_id
             else requested_label
         )
         return ScopeResolution(
@@ -732,6 +932,36 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
                 candidates=(),
             )
 
+        if _question_has_jp_context(question):
+            if normalized_target_id in JP_INDEX_TARGET_IDS:
+                label = requested_label or normalized_target_id
+                return ScopeResolution(
+                    selected_scope_type="jp_index",
+                    selected_scope_id=normalized_target_id,
+                    display_name=label,
+                    confidence="high",
+                    source="explicit_scope_id",
+                    candidates=(
+                        _resolution_candidate(
+                            scope_type="jp_index",
+                            scope_id=normalized_target_id,
+                            label=label,
+                            confidence="high",
+                            source="explicit_scope_id",
+                        ),
+                    ),
+                )
+
+            jp_symbol_resolution = _resolve_jp_stock_symbol(
+                db,
+                target_id,
+                source="explicit_scope_id",
+                confidence="high",
+                allow_unknown=True,
+            )
+            if jp_symbol_resolution is not None:
+                return jp_symbol_resolution
+
         if _looks_like_stock_id(target_id):
             display_name = _stock_display_name(db, target_id)
             return ScopeResolution(
@@ -776,6 +1006,10 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
         )
         if us_symbol_resolution is not None:
             return us_symbol_resolution
+
+    jp_symbol_resolution = _resolve_jp_stock_symbol_from_question(db, question)
+    if jp_symbol_resolution is not None:
+        return jp_symbol_resolution
 
     if _contains_hint(question, FRESHNESS_HINTS):
         stock_id = _first_stock_id_in_text(question)

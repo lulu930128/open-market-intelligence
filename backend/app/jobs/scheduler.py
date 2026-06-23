@@ -27,6 +27,7 @@ from app.market.tw_futures import (
     resolve_taiwan_futures_quote_provider,
 )
 from app.observability.provider_health import record_provider_event
+from app.settings.refresh_execution import resolve_market_refresh_interval_seconds
 
 
 logger = logging.getLogger(__name__)
@@ -146,6 +147,7 @@ def enqueue_market_daily_refresh() -> None:
         )
         return
 
+    sleep_seconds = resolve_market_refresh_interval_seconds(market="tw")
     include_today = all(
         is_release_released_from_calendar(
             calendar_status,
@@ -166,7 +168,7 @@ def enqueue_market_daily_refresh() -> None:
             dataset_key: calendar_status.get("release_windows", {}).get(dataset_key)
             for dataset_key in TAIWAN_REFRESH_CATEGORY_DATASET_KEYS.values()
         },
-        "sleep_seconds": settings.scheduler_market_refresh_sleep_seconds,
+        "sleep_seconds": sleep_seconds,
         "skip_existing": True,
     }
     db = SessionLocal()
@@ -186,7 +188,7 @@ def enqueue_market_daily_refresh() -> None:
                 categories,
                 settings.scheduler_market_refresh_lookback_days,
                 include_today,
-                settings.scheduler_market_refresh_sleep_seconds,
+                sleep_seconds,
                 True,
             ),
         )
@@ -281,6 +283,7 @@ def enqueue_us_market_daily_refresh() -> None:
         )
         return
 
+    sleep_seconds = resolve_market_refresh_interval_seconds(market="us")
     request = {
         "schedule": "us_market_daily_refresh",
         "run_date": now.date().isoformat(),
@@ -297,7 +300,7 @@ def enqueue_us_market_daily_refresh() -> None:
         "enabled_only": True,
         "outputsize": settings.scheduler_us_market_refresh_outputsize,
         "adjusted": settings.scheduler_us_market_refresh_adjusted,
-        "sleep_seconds": settings.scheduler_us_market_refresh_sleep_seconds,
+        "sleep_seconds": sleep_seconds,
     }
     db = SessionLocal()
 
@@ -316,7 +319,7 @@ def enqueue_us_market_daily_refresh() -> None:
                 True,
                 settings.scheduler_us_market_refresh_outputsize,
                 settings.scheduler_us_market_refresh_adjusted,
-                settings.scheduler_us_market_refresh_sleep_seconds,
+                sleep_seconds,
             ),
         )
         logger.info(
@@ -330,6 +333,7 @@ def enqueue_us_market_daily_refresh() -> None:
 
 def enqueue_jp_market_watchlist_resource_refresh() -> None:
     now = datetime.now(_timezone())
+    sleep_seconds = resolve_market_refresh_interval_seconds(market="jp")
     request = {
         "schedule": "jp_market_watchlist_resource_refresh",
         "run_date": now.date().isoformat(),
@@ -340,7 +344,7 @@ def enqueue_jp_market_watchlist_resource_refresh() -> None:
         "include_fundamentals": settings.scheduler_jp_market_refresh_include_fundamentals,
         "outputsize": settings.scheduler_jp_market_refresh_outputsize,
         "provider": settings.scheduler_jp_market_refresh_provider,
-        "sleep_seconds": settings.scheduler_jp_market_refresh_sleep_seconds,
+        "sleep_seconds": sleep_seconds,
     }
     db = SessionLocal()
 
@@ -361,7 +365,7 @@ def enqueue_jp_market_watchlist_resource_refresh() -> None:
                 settings.scheduler_jp_market_refresh_include_fundamentals,
                 settings.scheduler_jp_market_refresh_outputsize,
                 settings.scheduler_jp_market_refresh_provider,
-                settings.scheduler_jp_market_refresh_sleep_seconds,
+                sleep_seconds,
             ),
         )
         logger.info(

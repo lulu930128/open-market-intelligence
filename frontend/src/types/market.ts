@@ -248,6 +248,9 @@ export type WatchlistGroupRadarRead = {
   include_children: boolean;
   mode: WatchlistRadarMode;
   max_results: number;
+  market?: string | null;
+  scope_label?: string | null;
+  data_limitations?: string[];
   requested_stock_count: number;
   ranked_count: number;
   matched_count: number;

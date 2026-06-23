@@ -343,6 +343,9 @@ class WatchlistGroupRadarRead(BaseModel):
 
     mode: str
     max_results: int
+    market: str | None = None
+    scope_label: str | None = None
+    data_limitations: list[str] = Field(default_factory=list)
 
     requested_stock_count: int
     ranked_count: int

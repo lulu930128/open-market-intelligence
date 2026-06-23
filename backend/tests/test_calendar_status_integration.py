@@ -110,7 +110,11 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
                 "scheduler_jp_market_refresh_include_fundamentals",
                 True,
             ),
-            patch.object(scheduler.settings, "scheduler_jp_market_refresh_sleep_seconds", 1.5),
+            patch.object(
+                scheduler,
+                "resolve_market_refresh_interval_seconds",
+                return_value=1.5,
+            ) as resolve_sleep,
             patch.object(scheduler, "SessionLocal", return_value=fake_db),
             patch.object(
                 scheduler.job_service,
@@ -134,6 +138,7 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
         self.assertEqual(request["outputsize"], "compact")
         self.assertEqual(request["provider"], "auto")
         self.assertEqual(task_args, (None, True, True, True, True, "compact", "auto", 1.5))
+        resolve_sleep.assert_called_once_with(market="jp")
         fake_db.close.assert_called_once()
 
     def test_taiwan_futures_live_window_matches_regular_and_after_hours_sessions(self) -> None:
