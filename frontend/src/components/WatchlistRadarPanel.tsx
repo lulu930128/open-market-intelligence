@@ -72,6 +72,33 @@ function formatRadarPct(value: number | null | undefined) {
   return `${sign}${value.toFixed(2)}%`;
 }
 
+function formatRadarNumber(value: number | null | undefined, digits = 2) {
+  if (value === null || value === undefined || Number.isNaN(value)) return null;
+  return value.toLocaleString("zh-TW", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: digits,
+  });
+}
+
+function formatSignedRadarNumber(value: number | null | undefined, digits = 1) {
+  if (value === null || value === undefined || Number.isNaN(value)) return null;
+  const formatted = value.toLocaleString("zh-TW", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: digits,
+  });
+  return value > 0 ? `+${formatted}` : formatted;
+}
+
+function priceLevelNumber(item: WatchlistRadarItemRead, key: string) {
+  const value = item.price_levels?.[key];
+  return typeof value === "number" && !Number.isNaN(value) ? value : null;
+}
+
+function indicatorNumber(item: WatchlistRadarItemRead, group: string, key: string) {
+  const value = item.indicator_snapshot?.[group]?.[key];
+  return typeof value === "number" && !Number.isNaN(value) ? value : null;
+}
+
 function radarValueTone(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) {
     return "text-omi-text-muted";
@@ -154,6 +181,17 @@ function bucketClass(bucket: string) {
 
 function itemMeta(item: WatchlistRadarItemRead, t: TranslationFunction) {
   const bucketLabel = radarBucketLabel(t, item.bucket, item.bucket_label);
+
+  return [
+    bucketLabel,
+    item.stale ? t("radar.staleItem") : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function technicalSignalDetails(item: WatchlistRadarItemRead, t: TranslationFunction) {
+  const bucketLabel = radarBucketLabel(t, item.bucket, item.bucket_label);
   const signalKeys = Array.from(
     new Set(
       [
@@ -177,15 +215,94 @@ function itemMeta(item: WatchlistRadarItemRead, t: TranslationFunction) {
     (label): label is string =>
       Boolean(label) && label !== bucketLabel && label !== item.bucket_label
   );
-  const uniqueTechnicalLabels = Array.from(new Set(technicalLabels)).slice(0, 3);
 
-  return [
-    bucketLabel,
-    ...uniqueTechnicalLabels,
-    item.stale ? t("radar.staleItem") : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  return Array.from(new Set(technicalLabels)).slice(0, 6);
+}
+
+function factorScoreDetails(item: WatchlistRadarItemRead, t: TranslationFunction) {
+  const entries: Array<[string, string]> = [
+    ["trend", t("radar.factors.trend")],
+    ["momentum", t("radar.factors.momentum")],
+    ["volume", t("radar.factors.volume")],
+    ["structure", t("radar.factors.structure")],
+    ["volatility", t("radar.factors.volatility")],
+  ];
+
+  return entries
+    .map(([key, label]) => {
+      const value = item.factor_scores?.[key];
+      const formatted = formatSignedRadarNumber(
+        typeof value === "number" && !Number.isNaN(value) ? value : null,
+        1
+      );
+      return formatted ? `${label} ${formatted}` : null;
+    })
+    .filter((value): value is string => Boolean(value));
+}
+
+function priceLevelDetails(item: WatchlistRadarItemRead, t: TranslationFunction) {
+  const details = [
+    [t("radar.detailFields.support"), formatRadarNumber(priceLevelNumber(item, "support"))],
+    [t("radar.detailFields.resistance"), formatRadarNumber(priceLevelNumber(item, "resistance"))],
+    [t("radar.detailFields.ma20"), formatRadarNumber(priceLevelNumber(item, "ma20"))],
+    [
+      t("radar.detailFields.atrPct"),
+      formatRadarPct(priceLevelNumber(item, "atr_pct")),
+    ],
+  ];
+
+  return details
+    .map(([label, value]) => (value && value !== "-" ? `${label} ${value}` : null))
+    .filter((value): value is string => Boolean(value));
+}
+
+function indicatorDetails(item: WatchlistRadarItemRead, t: TranslationFunction) {
+  const ma5 = formatRadarNumber(indicatorNumber(item, "ma", "ma5"));
+  const ma20 = formatRadarNumber(indicatorNumber(item, "ma", "ma20"));
+  const ma60 = formatRadarNumber(indicatorNumber(item, "ma", "ma60"));
+  const kdK = formatRadarNumber(indicatorNumber(item, "kd", "k9"), 1);
+  const kdD = formatRadarNumber(indicatorNumber(item, "kd", "d9"), 1);
+  const bollingerUpper = formatRadarNumber(indicatorNumber(item, "bollinger", "upper20"));
+  const bollingerLower = formatRadarNumber(indicatorNumber(item, "bollinger", "lower20"));
+
+  const details = [
+    ma5 || ma20 || ma60
+      ? `MA ${[ma5 ? `5 ${ma5}` : null, ma20 ? `20 ${ma20}` : null, ma60 ? `60 ${ma60}` : null]
+          .filter(Boolean)
+          .join(" / ")}`
+      : null,
+    (() => {
+      const value = formatSignedRadarNumber(indicatorNumber(item, "macd", "histogram"), 2);
+      return value ? `${t("radar.detailFields.macdHistogram")} ${value}` : null;
+    })(),
+    (() => {
+      const value = formatRadarNumber(indicatorNumber(item, "rsi", "rsi14"), 1);
+      return value ? `RSI14 ${value}` : null;
+    })(),
+    (() => {
+      const value = formatRadarNumber(indicatorNumber(item, "adx", "adx14"), 1);
+      return value ? `ADX14 ${value}` : null;
+    })(),
+    (() => {
+      const value = formatRadarNumber(indicatorNumber(item, "mfi", "mfi14"), 1);
+      return value ? `MFI14 ${value}` : null;
+    })(),
+    (() => {
+      const value = formatSignedRadarNumber(indicatorNumber(item, "roc", "roc12"), 2);
+      return value ? `ROC12 ${value}%` : null;
+    })(),
+    kdK || kdD ? `KD ${[kdK, kdD].filter(Boolean).join(" / ")}` : null,
+    bollingerUpper || bollingerLower
+      ? `${t("radar.detailFields.bollinger")} ${[
+          bollingerUpper ? `${t("radar.detailFields.upper")} ${bollingerUpper}` : null,
+          bollingerLower ? `${t("radar.detailFields.lower")} ${bollingerLower}` : null,
+        ]
+          .filter(Boolean)
+          .join(" / ")}`
+      : null,
+  ];
+
+  return details.filter((value): value is string => Boolean(value)).slice(0, 8);
 }
 
 function keyLevelText(item: WatchlistRadarItemRead, t: TranslationFunction) {
@@ -240,6 +357,25 @@ function signalBadge(
     >
       <span className="text-[10px] opacity-75">{label}：</span>
       <span className="truncate">{value}</span>
+    </span>
+  );
+}
+
+function detailLine(label: string, details: string[]) {
+  if (!details.length) return null;
+
+  return (
+    <span className="mt-1 flex min-w-0 flex-wrap gap-x-2 gap-y-1 text-xs text-omi-text-muted">
+      <span className="font-semibold text-omi-text">{label}</span>
+      {details.map((detail) => (
+        <span
+          key={`${label}-${detail}`}
+          className="inline-flex max-w-full items-center border border-omi-border-subtle bg-omi-surface px-1.5 py-0.5"
+          title={detail}
+        >
+          <span className="truncate">{detail}</span>
+        </span>
+      ))}
     </span>
   );
 }
@@ -402,6 +538,13 @@ export default function WatchlistRadarPanel({
             );
             const radarScanLine = scanLine(item, t);
             const radarMeta = itemMeta(item, t);
+            const signalDetails = technicalSignalDetails(item, t);
+            const scoreDetails = factorScoreDetails(item, t);
+            const levelDetails = priceLevelDetails(item, t);
+            const rawIndicatorDetails = indicatorDetails(item, t);
+            const indicatorDetailValues = rawIndicatorDetails.filter(
+              (detail) => !signalDetails.includes(detail)
+            );
             const actionLabel = radarActionLabel(
               t,
               item.bucket,
@@ -441,7 +584,8 @@ export default function WatchlistRadarPanel({
                     {signalBadge(
                       t("radar.badges.urgency"),
                       urgencyLabel(t, item.urgency),
-                      urgencyClass(item.urgency)
+                      urgencyClass(item.urgency),
+                      t("radar.badgeDescriptions.urgency")
                     )}
                     {signalBadge(
                       t("radar.badges.strength"),
@@ -479,17 +623,21 @@ export default function WatchlistRadarPanel({
                     })}
                   </span>
                   <span
-                    className={selected ? "mt-1 block truncate text-xs font-medium text-omi-text" : "mt-1 block truncate text-xs font-medium text-omi-text-muted"}
+                    className={selected ? "mt-1 block text-xs font-medium text-omi-text" : "mt-1 block text-xs font-medium text-omi-text-muted"}
                     title={radarScanLine}
                   >
                     {radarScanLine}
                   </span>
                   <span
-                    className="mt-1 block truncate text-xs text-omi-text-muted"
+                    className="mt-1 block text-xs text-omi-text-muted"
                     title={`${actionLabel} · ${radarMeta}`}
                   >
                     {actionLabel} · {radarMeta}
                   </span>
+                  {detailLine(t("radar.detailSections.signals"), signalDetails)}
+                  {detailLine(t("radar.detailSections.factors"), scoreDetails)}
+                  {detailLine(t("radar.detailSections.levels"), levelDetails)}
+                  {detailLine(t("radar.detailSections.indicators"), indicatorDetailValues)}
                 </span>
                 <span className="text-right">
                   <span className={`block font-semibold ${radarValueTone(item.change_pct)}`}>

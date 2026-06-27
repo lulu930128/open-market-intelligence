@@ -1,6 +1,11 @@
 "use client";
 
 import { fetchJson, requestJson } from "@/lib/api";
+import {
+  subscribeDataStatusEvents,
+  type DataStatusEvent,
+  type DataStatusLevel,
+} from "@/lib/dataStatusEvents";
 import { formatJobStatus } from "@/lib/jobs";
 import { useT, type TranslationFunction } from "@/i18n";
 import type { JobRunRead } from "@/types/market";
@@ -8,17 +13,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const ACTIVE_STATUSES = new Set(["queued", "running"]);
 
-type JobMarketFilter = "all" | "tw" | "us" | "jp";
+type JobMarketFilter = "all" | "tw" | "us" | "jp" | "crypto";
 
 const NON_RETRYABLE_JOB_TYPES = new Set(["market.tw_futures_quote_refresh"]);
 
-function getJobMarket(jobType: string): "tw" | "us" | "jp" | "other" {
+function getJobMarket(jobType: string): "tw" | "us" | "jp" | "crypto" | "other" {
   if (jobType.startsWith("us_market.") || jobType === "scheduler.us_market_daily_refresh") {
     return "us";
   }
 
   if (jobType.startsWith("jp_market.")) {
     return "jp";
+  }
+
+  if (jobType.startsWith("crypto_market.") || jobType.startsWith("resource_market.")) {
+    return "crypto";
   }
 
   if (
@@ -174,6 +183,20 @@ function statusTone(job: JobRunRead) {
   }
 
   return "border-omi-success-border bg-omi-success-soft text-omi-success";
+}
+
+function dataStatusTone(level: DataStatusLevel) {
+  if (level === "error") return "border-omi-danger-border bg-omi-danger-soft text-omi-danger";
+  if (level === "warning") return "border-omi-warning-border bg-omi-warning-soft text-omi-warning";
+  if (level === "success") return "border-omi-success-border bg-omi-success-soft text-omi-success";
+  return "border-omi-info-border bg-omi-info-soft text-omi-info";
+}
+
+function dataStatusLevelLabel(level: DataStatusLevel) {
+  if (level === "error") return "資料失敗";
+  if (level === "warning") return "資料警示";
+  if (level === "success") return "資料完成";
+  return "資料狀態";
 }
 
 function canRetry(job: JobRunRead) {
@@ -383,6 +406,25 @@ function JobRow({
   );
 }
 
+function DataStatusEventRow({ event }: { event: DataStatusEvent }) {
+  return (
+    <div className="border-t border-omi-border-subtle px-3 py-2">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="truncate text-sm font-bold text-omi-text">{event.title}</div>
+          <div className="mt-1 text-xs text-omi-text-muted">
+            {event.source} · {formatDateTime(event.createdAt)}
+          </div>
+        </div>
+        <span className={`shrink-0 border px-2 py-1 text-[11px] font-bold ${dataStatusTone(event.level)}`}>
+          {dataStatusLevelLabel(event.level)}
+        </span>
+      </div>
+      <div className="mt-2 break-words text-xs text-omi-text-muted">{event.message}</div>
+    </div>
+  );
+}
+
 type JobStatusCenterProps = {
   placement?: "fixed" | "inline";
   market?: JobMarketFilter;
@@ -396,6 +438,7 @@ export default function JobStatusCenter({
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [open, setOpen] = useState(false);
   const [jobs, setJobs] = useState<JobRunRead[]>([]);
+  const [dataStatusEvents, setDataStatusEvents] = useState<DataStatusEvent[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [retryingJobId, setRetryingJobId] = useState<number | null>(null);
   const inline = placement === "inline";
@@ -434,6 +477,10 @@ export default function JobStatusCenter({
   }, [loadJobs, open]);
 
   useEffect(() => {
+    return subscribeDataStatusEvents(market, setDataStatusEvents);
+  }, [market]);
+
+  useEffect(() => {
     if (!open) return;
 
     function handlePointerDown(event: PointerEvent) {
@@ -460,8 +507,11 @@ export default function JobStatusCenter({
     [market, t]
   );
   const failedCount = useMemo(
-    () => jobs.reduce((count, job) => count + getFailedUnitCount(job), 0),
-    [jobs]
+    () =>
+      jobs.reduce((count, job) => count + getFailedUnitCount(job), 0) +
+      dataStatusEvents.filter((event) => event.level === "error" || event.level === "warning")
+        .length,
+    [dataStatusEvents, jobs]
   );
   const statusSummary = useMemo(
     () => buildStatusSummary(t, activeCount, failedCount),
@@ -526,15 +576,21 @@ export default function JobStatusCenter({
           ) : null}
 
           <div className={inline ? "max-h-72 overflow-y-auto" : "max-h-[520px] overflow-y-auto"}>
+            {dataStatusEvents.length
+              ? dataStatusEvents
+                  .slice(0, 6)
+                  .map((event) => <DataStatusEventRow key={event.id} event={event} />)
+              : null}
             {jobs.length ? (
               jobs.map((job) => (
                 <JobRow key={job.id} job={job} retryingJobId={retryingJobId} onRetry={handleRetry} t={t} />
               ))
-            ) : (
+            ) : null}
+            {!jobs.length && !dataStatusEvents.length ? (
               <div className="px-3 py-8 text-center text-sm text-omi-text-muted">
                 {panelText.empty}
               </div>
-            )}
+            ) : null}
           </div>
         </section>
       ) : null}

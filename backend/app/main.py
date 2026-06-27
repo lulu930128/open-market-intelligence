@@ -10,6 +10,8 @@ from fastapi.responses import FileResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import PROJECT_ROOT
+from app.crypto_market.auto_refresh import start_crypto_auto_refresh, stop_crypto_auto_refresh
+from app.crypto_market.ws_runtime import start_crypto_realtime_collectors, stop_crypto_realtime_collectors
 from app.db.migrations import run_database_migrations
 from app.db.session import SessionLocal, init_db
 from app.errors import (
@@ -20,6 +22,7 @@ from app.errors import (
 from app.jobs import scheduler as job_scheduler, service as job_service
 from app.routers import (
     ai,
+    crypto_market,
     dispatch,
     indicators,
     jp_market,
@@ -27,6 +30,7 @@ from app.routers import (
     market,
     raw_results,
     reports,
+    resource_market,
     settings as settings_router,
     sources,
     stocks,
@@ -58,10 +62,14 @@ async def lifespan(app: FastAPI):
         db.close()
 
     scheduler = job_scheduler.start_scheduler()
+    await start_crypto_auto_refresh()
+    await start_crypto_realtime_collectors()
 
     try:
         yield
     finally:
+        await stop_crypto_realtime_collectors()
+        await stop_crypto_auto_refresh()
         job_scheduler.stop_scheduler(scheduler)
         job_service.shutdown_job_executor(wait=False)
 
@@ -127,6 +135,8 @@ app.include_router(raw_results.router, prefix="/api/raw-results", tags=["raw-res
 app.include_router(jobs.router, prefix="/api/jobs", tags=["jobs"])
 app.include_router(settings_router.router, prefix="/api/settings", tags=["settings"])
 app.include_router(ai.router, prefix="/api/ai", tags=["ai"])
+app.include_router(crypto_market.router, prefix="/api/crypto-market", tags=["crypto-market"])
+app.include_router(resource_market.router, prefix="/api/resource-market", tags=["resource-market"])
 app.include_router(dispatch.router, prefix="/api/dispatch", tags=["dispatch"])
 app.include_router(market.router, prefix="/api/market", tags=["market"])
 app.include_router(indicators.router, prefix="/api/market/indicators", tags=["market-indicators"])

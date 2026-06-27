@@ -10,6 +10,14 @@ import {
 import DispatchSettingsDialog from "@/components/settings/DispatchSettingsDialog";
 import { fetchJson, requestJson } from "@/lib/api";
 import {
+  loadMarketDataSubscriptionSettings,
+  saveMarketDataSubscriptionSettings,
+  type MarketDataSubscriptionItem,
+  type MarketDataSubscriptionMode,
+  type MarketDataSubscriptionSettingsRead,
+  type MarketDataSubscriptionSettingsWrite,
+} from "@/lib/marketDataSubscriptions";
+import {
   loadRefreshExecutionSettings,
   setCachedRefreshExecutionSettings,
   type RefreshExecutionField,
@@ -103,6 +111,7 @@ type TechnicalAnalysisSettingsWrite = Pick<
 
 type ParameterDraft = Record<string, string>;
 type RefreshDraft = Record<string, string>;
+type SubscriptionDraft = Record<string, MarketDataSubscriptionMode>;
 
 type ParameterField = {
   key: string;
@@ -150,6 +159,12 @@ const SETTINGS_COLOR_STORAGE_KEY = "omi:settings:color";
 const SETTINGS_HIGH_CONTRAST_STORAGE_KEY = "omi:settings:high-contrast";
 
 const colorSettingChoices: ColorSetting[] = ["light", "dark"];
+const subscriptionModeChoices: MarketDataSubscriptionMode[] = [
+  "always_on",
+  "on_select",
+  "manual",
+  "disabled",
+];
 
 const refreshMarketSectionTemplates: RefreshMarketSectionTemplate[] = [
   {
@@ -718,6 +733,186 @@ function buildRefreshSettingsWritePayload(
   };
 }
 
+function buildSubscriptionDraft(
+  settings: MarketDataSubscriptionSettingsRead
+): SubscriptionDraft {
+  return settings.items.reduce<SubscriptionDraft>((draft, item) => {
+    draft[item.key] = item.mode;
+    return draft;
+  }, {});
+}
+
+function buildSubscriptionSettingsWritePayload(
+  settings: MarketDataSubscriptionSettingsRead,
+  draft: SubscriptionDraft
+): MarketDataSubscriptionSettingsWrite {
+  return {
+    items: settings.items.map((item) => ({
+      key: item.key,
+      mode: draft[item.key] ?? item.mode,
+      resources: item.resources,
+      intervals: item.intervals,
+    })),
+  };
+}
+
+function marketDataSubscriptionSaveMessage(
+  settings: MarketDataSubscriptionSettingsRead,
+  t: TranslationFunction
+) {
+  const realtimeReload = settings.runtime?.crypto_realtime_reload;
+  const autoRefreshReload = settings.runtime?.crypto_auto_refresh_reload;
+  const messageParts: string[] = [];
+
+  if (realtimeReload) {
+    if (realtimeReload.status === "error") {
+      messageParts.push(`realtime reload failed: ${realtimeReload.message || "unknown error"}`);
+    } else {
+      const streamCount = realtimeReload.enabled_stream_count ?? 0;
+      messageParts.push(`realtime reload ok (${streamCount} streams)`);
+    }
+  }
+
+  if (autoRefreshReload) {
+    if (autoRefreshReload.status === "error") {
+      messageParts.push(`auto refresh reload failed: ${autoRefreshReload.message || "unknown error"}`);
+    } else {
+      const resourceCount = autoRefreshReload.active_resource_count ?? 0;
+      messageParts.push(`auto refresh reload ok (${resourceCount} resources)`);
+    }
+  }
+
+  if (!messageParts.length) return t("settings.dataSubscriptions.saveSuccess");
+  return `${t("settings.dataSubscriptions.saveSuccess")} / ${messageParts.join(" / ")}`;
+}
+
+const USDT_SUBSCRIPTION_KEY = "crypto:USDT";
+const SUBSCRIPTION_GROUP_ORDER = new Map([
+  ["crypto", 0],
+  ["resource.metals", 1],
+  ["resource.energy", 2],
+  ["resource.currency", 3],
+]);
+
+function subscriptionGroupKey(item: MarketDataSubscriptionItem) {
+  if (item.key === USDT_SUBSCRIPTION_KEY) return "resource.currency";
+  if (item.market === "crypto") return "crypto";
+  return `${item.market}.${item.group}`;
+}
+
+function subscriptionGroupLabel(key: string, t: TranslationFunction) {
+  const translationKey = `settings.dataSubscriptions.groups.${key}`;
+  const label = t(translationKey);
+  return label === translationKey ? key : label;
+}
+
+function subscriptionResourceLabel(resourceKey: string, t: TranslationFunction) {
+  const translationKey = `settings.dataSubscriptions.resources.${resourceKey}`;
+  const label = t(translationKey);
+  return label === translationKey ? resourceKey.replaceAll("_", " ") : label;
+}
+
+function subscriptionItemLabel(item: MarketDataSubscriptionItem) {
+  if (item.key === USDT_SUBSCRIPTION_KEY) return "USDT-TWD";
+  return item.label;
+}
+
+function groupSubscriptionItems(
+  items: MarketDataSubscriptionItem[],
+  t: TranslationFunction
+) {
+  const groups = new Map<
+    string,
+    { key: string; label: string; items: MarketDataSubscriptionItem[] }
+  >();
+
+  for (const item of items) {
+    const key = subscriptionGroupKey(item);
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        label: subscriptionGroupLabel(key, t),
+        items: [],
+      });
+    }
+    groups.get(key)?.items.push(item);
+  }
+
+  return Array.from(groups.values()).sort((left, right) => {
+    const leftOrder = SUBSCRIPTION_GROUP_ORDER.get(left.key) ?? 100;
+    const rightOrder = SUBSCRIPTION_GROUP_ORDER.get(right.key) ?? 100;
+    if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+    return left.label.localeCompare(right.label);
+  });
+}
+
+function DataSubscriptionRow({
+  item,
+  mode,
+  t,
+  onModeChange,
+}: {
+  item: MarketDataSubscriptionItem;
+  mode: MarketDataSubscriptionMode;
+  t: TranslationFunction;
+  onModeChange: (key: string, mode: MarketDataSubscriptionMode) => void;
+}) {
+  const activeResources = Object.entries(item.resources)
+    .filter(([, enabled]) => enabled)
+    .map(([resource]) => resource);
+
+  return (
+    <article className="grid gap-3 border-t border-omi-border-subtle px-4 py-3 first:border-t-0 md:grid-cols-[minmax(0,1fr)_180px] md:items-center">
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <h4 className="text-sm font-black text-omi-text-strong">
+            {subscriptionItemLabel(item)}
+          </h4>
+          <span className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-0.5 text-[11px] font-semibold text-omi-text-muted">
+            {item.key}
+          </span>
+          {item.provider_status ? (
+            <span className="border border-omi-warning-border bg-omi-warning-soft px-2 py-0.5 text-[11px] font-semibold text-omi-warning">
+              {t("settings.dataSubscriptions.providerPending")}
+            </span>
+          ) : null}
+        </div>
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {activeResources.map((resource) => (
+            <span
+              key={resource}
+              className="border border-omi-border-subtle bg-omi-surface px-2 py-0.5 text-[11px] font-semibold text-omi-text-muted"
+            >
+              {subscriptionResourceLabel(resource, t)}
+            </span>
+          ))}
+        </div>
+        {item.note ? (
+          <p className="mt-2 text-xs leading-5 text-omi-text-muted">{item.note}</p>
+        ) : null}
+      </div>
+      <label className="grid gap-1">
+        <span className="text-[11px] font-bold uppercase tracking-[0.18em] text-omi-text-muted">
+          {t("settings.dataSubscriptions.mode")}
+        </span>
+        <select
+          value={mode}
+          onChange={(event) =>
+            onModeChange(item.key, event.target.value as MarketDataSubscriptionMode)
+          }
+          className="h-9 w-full border border-omi-border bg-omi-surface px-3 text-sm font-bold text-omi-text outline-none hover:border-omi-border-strong focus:border-omi-accent"
+        >
+          {subscriptionModeChoices.map((choice) => (
+            <option key={choice} value={choice}>
+              {t(`settings.dataSubscriptions.modes.${choice}`)}
+            </option>
+          ))}
+        </select>
+      </label>
+    </article>
+  );
+}
+
 function GearIcon() {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none">
@@ -881,20 +1076,32 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
   const [menuOpen, setMenuOpen] = useState(false);
   const [parametersOpen, setParametersOpen] = useState(false);
   const [refreshOpen, setRefreshOpen] = useState(false);
+  const [subscriptionsOpen, setSubscriptionsOpen] = useState(false);
   const [dispatchOpen, setDispatchOpen] = useState(false);
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [refreshLoadState, setRefreshLoadState] = useState<LoadState>("idle");
   const [refreshSaveState, setRefreshSaveState] = useState<SaveState>("idle");
+  const [subscriptionLoadState, setSubscriptionLoadState] =
+    useState<LoadState>("idle");
+  const [subscriptionSaveState, setSubscriptionSaveState] =
+    useState<SaveState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [refreshErrorMessage, setRefreshErrorMessage] = useState<string | null>(null);
   const [refreshSaveMessage, setRefreshSaveMessage] = useState<string | null>(null);
+  const [subscriptionErrorMessage, setSubscriptionErrorMessage] =
+    useState<string | null>(null);
+  const [subscriptionSaveMessage, setSubscriptionSaveMessage] =
+    useState<string | null>(null);
   const [settings, setSettings] = useState<TechnicalAnalysisSettingsRead | null>(null);
   const [refreshSettings, setRefreshSettings] =
     useState<RefreshExecutionSettingsRead | null>(null);
+  const [subscriptionSettings, setSubscriptionSettings] =
+    useState<MarketDataSubscriptionSettingsRead | null>(null);
   const [draft, setDraft] = useState<ParameterDraft>({});
   const [refreshDraft, setRefreshDraft] = useState<RefreshDraft>({});
+  const [subscriptionDraft, setSubscriptionDraft] = useState<SubscriptionDraft>({});
   const [activeSectionKey, setActiveSectionKey] = useState<ParameterSectionKey>("moving");
   const [activeRefreshMarket, setActiveRefreshMarket] =
     useState<RefreshExecutionMarket>("tw");
@@ -904,6 +1111,10 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
 
   const parameterSections = useMemo(() => localizeParameterSections(t), [t]);
   const refreshMarketSections = useMemo(() => localizeRefreshMarketSections(t), [t]);
+  const subscriptionGroups = useMemo(
+    () => groupSubscriptionItems(subscriptionSettings?.items ?? [], t),
+    [subscriptionSettings, t]
+  );
 
   const activeSection = useMemo(
     () =>
@@ -957,6 +1168,25 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
     }
   }, [t]);
 
+  const loadSubscriptionSettings = useCallback(async () => {
+    setSubscriptionLoadState("loading");
+    setSubscriptionErrorMessage(null);
+    setSubscriptionSaveMessage(null);
+
+    try {
+      const payload = await loadMarketDataSubscriptionSettings();
+      setSubscriptionSettings(payload);
+      setSubscriptionDraft(buildSubscriptionDraft(payload));
+      setSubscriptionLoadState("success");
+      setSubscriptionSaveState("idle");
+    } catch (error) {
+      setSubscriptionLoadState("error");
+      setSubscriptionErrorMessage(
+        error instanceof Error ? error.message : t("settings.loadError")
+      );
+    }
+  }, [t]);
+
   useEffect(() => {
     storePreference(SETTINGS_COLOR_STORAGE_KEY, color);
     applyColorTheme(color);
@@ -982,18 +1212,19 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
   }, [menuOpen]);
 
   useEffect(() => {
-    if (!parametersOpen && !refreshOpen && !dispatchOpen) return;
+    if (!parametersOpen && !refreshOpen && !subscriptionsOpen && !dispatchOpen) return;
 
     function closeOnEscape(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
       setParametersOpen(false);
       setRefreshOpen(false);
+      setSubscriptionsOpen(false);
       setDispatchOpen(false);
     }
 
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [parametersOpen, refreshOpen, dispatchOpen]);
+  }, [parametersOpen, refreshOpen, subscriptionsOpen, dispatchOpen]);
 
   function openParameterDialog() {
     setMenuOpen(false);
@@ -1011,6 +1242,17 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
       (refreshLoadState === "error" && refreshSettings === null)
     ) {
       void loadRefreshSettings();
+    }
+  }
+
+  function openSubscriptionDialog() {
+    setMenuOpen(false);
+    setSubscriptionsOpen(true);
+    if (
+      subscriptionLoadState === "idle" ||
+      (subscriptionLoadState === "error" && subscriptionSettings === null)
+    ) {
+      void loadSubscriptionSettings();
     }
   }
 
@@ -1037,6 +1279,18 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
     }));
   }
 
+  function updateSubscriptionDraftValue(
+    key: string,
+    value: MarketDataSubscriptionMode
+  ) {
+    setSubscriptionSaveState("idle");
+    setSubscriptionSaveMessage(null);
+    setSubscriptionDraft((current) => ({
+      ...current,
+      [key]: value,
+    }));
+  }
+
   function resetDraft() {
     if (settings) {
       setDraft(buildParameterDraft(settings));
@@ -1050,6 +1304,14 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
       setRefreshDraft(buildRefreshDraft(refreshSettings));
       setRefreshSaveState("idle");
       setRefreshSaveMessage(null);
+    }
+  }
+
+  function resetSubscriptionDraft() {
+    if (subscriptionSettings) {
+      setSubscriptionDraft(buildSubscriptionDraft(subscriptionSettings));
+      setSubscriptionSaveState("idle");
+      setSubscriptionSaveMessage(null);
     }
   }
 
@@ -1101,6 +1363,37 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
     } catch (error) {
       setRefreshSaveState("error");
       setRefreshSaveMessage(
+        error instanceof Error ? error.message : t("settings.saveError")
+      );
+    }
+  }
+
+  async function saveSubscriptionSettings() {
+    if (!subscriptionSettings) return;
+
+    setSubscriptionSaveState("saving");
+    setSubscriptionSaveMessage(null);
+
+    try {
+      const payload = buildSubscriptionSettingsWritePayload(
+        subscriptionSettings,
+        subscriptionDraft
+      );
+      const response = await saveMarketDataSubscriptionSettings(payload);
+
+      setSubscriptionSettings(response);
+      setSubscriptionDraft(buildSubscriptionDraft(response));
+      setSubscriptionLoadState("success");
+      setSubscriptionSaveState(
+        response.runtime?.crypto_realtime_reload?.status === "error" ||
+          response.runtime?.crypto_auto_refresh_reload?.status === "error"
+          ? "error"
+          : "success"
+      );
+      setSubscriptionSaveMessage(marketDataSubscriptionSaveMessage(response, t));
+    } catch (error) {
+      setSubscriptionSaveState("error");
+      setSubscriptionSaveMessage(
         error instanceof Error ? error.message : t("settings.saveError")
       );
     }
@@ -1181,6 +1474,21 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
                   </span>
                   <span className="block text-xs text-omi-text-muted">
                     {t("settings.refreshExecutionHint")}
+                  </span>
+                </span>
+                <ChevronIcon />
+              </button>
+              <button
+                type="button"
+                className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-omi-surface-subtle"
+                onClick={openSubscriptionDialog}
+              >
+                <span>
+                  <span className="block font-semibold text-omi-text">
+                    {t("settings.dataSubscriptions.title")}
+                  </span>
+                  <span className="block text-xs text-omi-text-muted">
+                    {t("settings.dataSubscriptions.menuHint")}
                   </span>
                 </span>
                 <ChevronIcon />
@@ -1544,6 +1852,171 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
                   onClick={() => void saveRefreshSettings()}
                 >
                   {refreshSaveState === "saving" ? t("settings.saving") : t("settings.save")}
+                </button>
+              </div>
+            </footer>
+          </section>
+        </div>
+      ) : null}
+
+      {subscriptionsOpen ? (
+        <div className="fixed inset-0 z-[2147483646] flex items-center justify-center bg-omi-overlay p-4">
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="subscription-settings-title"
+            className="flex h-[680px] max-h-[calc(100vh-2rem)] w-[880px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden border border-omi-control-border bg-omi-surface shadow-2xl"
+          >
+            <header className="flex shrink-0 items-start justify-between gap-4 border-b border-omi-border-subtle px-5 py-4">
+              <div className="min-w-0">
+                <div className="text-xs font-bold uppercase tracking-[0.22em] text-omi-accent">
+                  Settings
+                </div>
+                <h2
+                  id="subscription-settings-title"
+                  className="mt-1 text-xl font-black text-omi-text-strong"
+                >
+                  {t("settings.dataSubscriptions.title")}
+                </h2>
+                <p className="mt-2 max-w-[680px] text-sm leading-6 text-omi-text-muted">
+                  {t("settings.dataSubscriptions.hint")}
+                </p>
+                <div className="mt-2">
+                  <SourceLabel settings={subscriptionSettings} />
+                </div>
+              </div>
+              <button
+                type="button"
+                aria-label={t("settings.dataSubscriptions.close")}
+                className="grid h-8 w-8 shrink-0 place-items-center border border-omi-border text-omi-text-muted hover:border-omi-control hover:text-omi-text-strong"
+                onClick={() => setSubscriptionsOpen(false)}
+              >
+                <CloseIcon />
+              </button>
+            </header>
+
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+              {subscriptionLoadState === "loading" ? (
+                <div className="space-y-4 p-5" aria-live="polite">
+                  {Array.from({ length: 5 }).map((_, index) => (
+                    <div
+                      key={index}
+                      className="grid gap-3 border border-omi-border-subtle p-4 md:grid-cols-[minmax(0,1fr)_180px]"
+                    >
+                      <div>
+                        <div className="omi-skeleton h-4 w-24" />
+                        <div className="mt-2 omi-skeleton h-3 w-48" />
+                        <div className="mt-3 flex gap-2">
+                          <div className="omi-skeleton h-5 w-16" />
+                          <div className="omi-skeleton h-5 w-20" />
+                          <div className="omi-skeleton h-5 w-14" />
+                        </div>
+                      </div>
+                      <div className="omi-skeleton h-9 w-full" />
+                    </div>
+                  ))}
+                </div>
+              ) : subscriptionErrorMessage ? (
+                <div className="m-5 border border-omi-danger-border bg-omi-danger-soft px-4 py-3 text-sm text-omi-danger">
+                  <div className="font-bold">{t("settings.loadError")}</div>
+                  <div className="mt-1 break-words text-xs leading-5">
+                    {subscriptionErrorMessage}
+                  </div>
+                  <button
+                    type="button"
+                    className="mt-3 h-8 border border-omi-accent-border bg-omi-surface px-3 text-xs font-bold text-omi-danger hover:border-omi-danger"
+                    onClick={() => void loadSubscriptionSettings()}
+                  >
+                    {t("settings.retry")}
+                  </button>
+                </div>
+              ) : subscriptionGroups.length ? (
+                <div className="space-y-4 p-5">
+                  {subscriptionGroups.map((group) => (
+                    <section
+                      key={group.key}
+                      className="overflow-hidden border border-omi-border-subtle"
+                    >
+                      <header className="border-b border-omi-border-subtle bg-omi-surface-subtle px-4 py-3">
+                        <div className="text-xs font-bold uppercase tracking-[0.18em] text-omi-text-muted">
+                          {t("settings.dataSubscriptions.group")}
+                        </div>
+                        <h3 className="mt-1 text-base font-black text-omi-text-strong">
+                          {group.label}
+                        </h3>
+                      </header>
+                      <div>
+                        {group.items.map((item) => (
+                          <DataSubscriptionRow
+                            key={item.key}
+                            item={item}
+                            mode={subscriptionDraft[item.key] ?? item.mode}
+                            t={t}
+                            onModeChange={updateSubscriptionDraftValue}
+                          />
+                        ))}
+                      </div>
+                    </section>
+                  ))}
+                </div>
+              ) : (
+                <div className="m-5 border border-omi-border-subtle bg-omi-surface-subtle px-4 py-6 text-sm text-omi-text-muted">
+                  {t("settings.dataSubscriptions.empty")}
+                </div>
+              )}
+            </div>
+
+            <footer className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-omi-border-subtle bg-omi-surface-subtle px-5 py-3">
+              <div className="min-w-0">
+                <div className="text-xs font-semibold text-omi-text-muted">
+                  {subscriptionSettings
+                    ? `${subscriptionSettings.kind} / ${t(
+                        `locales.${locale}`
+                      )} / ${themePreferenceLabel(color, highContrast, t)}`
+                    : "market_data_subscription_settings"}
+                </div>
+                {subscriptionSaveMessage ? (
+                  <div
+                    className={[
+                      "mt-1 max-w-[520px] truncate text-xs font-semibold",
+                      subscriptionSaveState === "error"
+                        ? "text-omi-danger"
+                        : "text-omi-success",
+                    ].join(" ")}
+                  >
+                    {subscriptionSaveMessage}
+                  </div>
+                ) : null}
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  className="h-9 border border-omi-border bg-omi-surface px-3 text-sm font-bold text-omi-text-muted hover:border-omi-control"
+                  onClick={resetSubscriptionDraft}
+                  disabled={!subscriptionSettings}
+                >
+                  {t("settings.reset")}
+                </button>
+                <button
+                  type="button"
+                  className={[
+                    "h-9 border px-3 text-sm font-bold",
+                    subscriptionSettings &&
+                    subscriptionLoadState !== "loading" &&
+                    subscriptionSaveState !== "saving"
+                      ? "border-omi-accent bg-omi-accent text-omi-text-inverse hover:bg-omi-control"
+                      : "cursor-not-allowed border-omi-border bg-omi-surface-strong text-omi-text-muted",
+                  ].join(" ")}
+                  disabled={
+                    !subscriptionSettings ||
+                    subscriptionLoadState === "loading" ||
+                    subscriptionSaveState === "saving"
+                  }
+                  onClick={() => void saveSubscriptionSettings()}
+                >
+                  {subscriptionSaveState === "saving"
+                    ? t("settings.saving")
+                    : t("settings.save")}
                 </button>
               </div>
             </footer>

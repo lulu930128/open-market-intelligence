@@ -1,3 +1,5 @@
+from typing import Any, Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -144,3 +146,37 @@ class RefreshExecutionSettingsRead(BaseModel):
 
 class RefreshExecutionSettingsWrite(BaseModel):
     markets: RefreshExecutionMarketsRead
+
+
+MarketDataSubscriptionMode = Literal["always_on", "on_select", "manual", "disabled"]
+
+
+class MarketDataSubscriptionItemRead(BaseModel):
+    key: str
+    market: str
+    group: str
+    label: str
+    mode: MarketDataSubscriptionMode
+    resources: dict[str, bool] = Field(default_factory=dict)
+    intervals: dict[str, float] = Field(default_factory=dict)
+    provider_status: str | None = None
+    note: str | None = None
+
+
+class MarketDataSubscriptionSettingsRead(BaseModel):
+    kind: str
+    version: str
+    source: str
+    items: list[MarketDataSubscriptionItemRead] = Field(default_factory=list)
+    runtime: dict[str, Any] = Field(default_factory=dict)
+
+
+class MarketDataSubscriptionItemWrite(BaseModel):
+    key: str
+    mode: MarketDataSubscriptionMode
+    resources: dict[str, bool] = Field(default_factory=dict)
+    intervals: dict[str, float] = Field(default_factory=dict)
+
+
+class MarketDataSubscriptionSettingsWrite(BaseModel):
+    items: list[MarketDataSubscriptionItemWrite] = Field(default_factory=list)

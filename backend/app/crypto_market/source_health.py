@@ -1,0 +1,378 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any
+
+from sqlalchemy.orm import Session
+
+from app.config import settings
+from app.crypto_market.assets import SUBSCRIPTION_ALWAYS_ON, get_crypto_asset
+from app.crypto_market.contract import (
+    COINGECKO_PROVIDER,
+    PERPETUAL,
+    SPOT,
+    ProviderInstrument,
+    normalize_provider,
+    normalize_symbol,
+    list_provider_instruments,
+)
+from app.crypto_market.realtime import crypto_realtime_store
+from app.crypto_market.ws_runtime import (
+    crypto_realtime_collector_status,
+    crypto_realtime_enabled_stream_specs,
+)
+from app.db.models import (
+    CryptoDerivativesMetric,
+    CryptoMarketCapSnapshot,
+    CryptoOrderBookSnapshot,
+    CryptoOhlcvBar,
+    CryptoSpreadSnapshot,
+    CryptoTickerSnapshot,
+)
+from app.observability.provider_health import (
+    enrich_source_health_entries,
+    sync_source_health_snapshots,
+)
+
+
+@dataclass(frozen=True)
+class CryptoSourceHealthEntry:
+    resource: str
+    provider: str
+    target: str
+    status: str
+    ok: bool
+    row_count: int
+    required: bool = True
+    latest_fetched_at: datetime | None = None
+    latest_data_key: str | None = None
+    data_quality: str = "unknown"
+    reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "resource": self.resource,
+            "provider": self.provider,
+            "target": self.target,
+            "status": self.status,
+            "ok": self.ok,
+            "row_count": self.row_count,
+            "required": self.required,
+            "latest_fetched_at": self.latest_fetched_at.isoformat() if self.latest_fetched_at else None,
+            "latest_data_key": self.latest_data_key,
+            "data_quality": self.data_quality,
+            "reason": self.reason,
+        }
+
+
+def _generated_at() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _age_seconds(now: datetime, value: datetime | None) -> int | None:
+    if value is None:
+        return None
+    current = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    observed = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    return max(int((current - observed).total_seconds()), 0)
+
+
+def _status_for_latest(
+    *,
+    row_count: int,
+    latest_fetched_at: datetime | None,
+    now: datetime,
+    stale_seconds: int,
+) -> tuple[str, bool, str, str]:
+    if row_count <= 0:
+        return "empty", False, "empty", "No local crypto rows are available for this resource."
+    age = _age_seconds(now, latest_fetched_at)
+    if age is None:
+        return "stale", False, "stale", "Latest crypto row is missing fetched_at."
+    if age > stale_seconds:
+        return "stale", False, "stale", f"Latest crypto row is {age}s old; threshold is {stale_seconds}s."
+    return "live", True, "ok", "Latest crypto row is within the configured freshness threshold."
+
+
+def _latest_query_entry(
+    db: Session,
+    *,
+    model,
+    resource: str,
+    provider: str,
+    target: str,
+    now: datetime,
+    stale_seconds: int,
+    instrument_type: str | None = None,
+    required: bool = True,
+) -> CryptoSourceHealthEntry:
+    query = db.query(model)
+    if hasattr(model, "provider"):
+        query = query.filter(model.provider == provider)
+    if target != "all" and hasattr(model, "symbol"):
+        query = query.filter(model.symbol == target)
+    if instrument_type is not None and hasattr(model, "instrument_type"):
+        query = query.filter(model.instrument_type == instrument_type)
+    row_count = query.count()
+    latest = query.order_by(model.fetched_at.desc(), model.id.desc()).first()
+    latest_fetched_at = getattr(latest, "fetched_at", None) if latest else None
+    latest_data_key = getattr(latest, "provider_symbol", None) if latest else None
+    status, ok, data_quality, reason = _status_for_latest(
+        row_count=row_count,
+        latest_fetched_at=latest_fetched_at,
+        now=now,
+        stale_seconds=stale_seconds,
+    )
+    return CryptoSourceHealthEntry(
+        resource=resource,
+        provider=provider,
+        target=target,
+        status=status,
+        ok=ok,
+        row_count=row_count,
+        required=required,
+        latest_fetched_at=latest_fetched_at,
+        latest_data_key=latest_data_key,
+        data_quality=data_quality,
+        reason=reason,
+    )
+
+
+def _market_cap_entry(db: Session, *, now: datetime, stale_seconds: int) -> CryptoSourceHealthEntry:
+    query = db.query(CryptoMarketCapSnapshot).filter(CryptoMarketCapSnapshot.provider == COINGECKO_PROVIDER)
+    row_count = query.count()
+    latest = query.order_by(CryptoMarketCapSnapshot.fetched_at.desc(), CryptoMarketCapSnapshot.id.desc()).first()
+    latest_fetched_at = latest.fetched_at if latest else None
+    status, ok, data_quality, reason = _status_for_latest(
+        row_count=row_count,
+        latest_fetched_at=latest_fetched_at,
+        now=now,
+        stale_seconds=max(stale_seconds, 3600),
+    )
+    return CryptoSourceHealthEntry(
+        resource="crypto_market_cap",
+        provider=COINGECKO_PROVIDER,
+        target="all",
+        status=status,
+        ok=ok,
+        row_count=row_count,
+        latest_fetched_at=latest_fetched_at,
+        latest_data_key=latest.coin_id if latest else None,
+        data_quality=data_quality,
+        reason=reason,
+    )
+
+
+def _spread_entry(db: Session, *, base: str | None, now: datetime, stale_seconds: int) -> CryptoSourceHealthEntry:
+    target = base.strip().upper() if base else "all"
+    query = db.query(CryptoSpreadSnapshot)
+    if base:
+        query = query.filter(CryptoSpreadSnapshot.base_asset == target)
+    row_count = query.count()
+    latest = query.order_by(CryptoSpreadSnapshot.observed_at.desc(), CryptoSpreadSnapshot.id.desc()).first()
+    latest_observed = latest.observed_at if latest else None
+    status, ok, data_quality, reason = _status_for_latest(
+        row_count=row_count,
+        latest_fetched_at=latest_observed,
+        now=now,
+        stale_seconds=stale_seconds,
+    )
+    return CryptoSourceHealthEntry(
+        resource="crypto_spread",
+        provider="all",
+        target=target,
+        status=status,
+        ok=ok,
+        row_count=row_count,
+        latest_fetched_at=latest_observed,
+        latest_data_key=latest.global_provider if latest else None,
+        data_quality=data_quality,
+        reason=reason,
+    )
+
+
+def _entry_value(entry: CryptoSourceHealthEntry | dict[str, Any], key: str) -> Any:
+    if isinstance(entry, dict):
+        return entry.get(key)
+    return getattr(entry, key)
+
+
+def _summary(entries: list[CryptoSourceHealthEntry | dict[str, Any]]) -> dict[str, int]:
+    return {
+        "entry_count": len(entries),
+        "ok_count": sum(1 for entry in entries if bool(_entry_value(entry, "ok"))),
+        "empty_count": sum(1 for entry in entries if _entry_value(entry, "status") == "empty"),
+        "stale_count": sum(1 for entry in entries if _entry_value(entry, "status") == "stale"),
+        "error_count": sum(1 for entry in entries if _entry_value(entry, "status") == "error"),
+        "disabled_count": sum(1 for entry in entries if _entry_value(entry, "status") == "disabled"),
+    }
+
+
+def _instrument_required(instrument: ProviderInstrument) -> bool:
+    asset = get_crypto_asset(instrument.base_asset)
+    if asset is None:
+        return True
+    return asset.default_subscription_mode == SUBSCRIPTION_ALWAYS_ON
+
+
+def build_crypto_source_health(
+    db: Session,
+    *,
+    provider: str | None = None,
+    symbol: str | None = None,
+    base: str | None = None,
+    now: datetime | None = None,
+    sync_snapshots: bool = False,
+) -> dict[str, Any]:
+    generated_at = now or _generated_at()
+    stale_seconds = max(int(settings.crypto_market_ticker_stale_seconds), 1)
+    normalized_provider = normalize_provider(provider) if provider else None
+    normalized_symbol = normalize_symbol(symbol) if symbol else None
+    entries: list[CryptoSourceHealthEntry] = []
+    spot_instruments = list_provider_instruments(
+        provider=normalized_provider,
+        symbol=normalized_symbol,
+        instrument_type=SPOT,
+        resource="ticker",
+    )
+    for instrument in spot_instruments:
+        required = _instrument_required(instrument)
+        entries.append(
+            _latest_query_entry(
+                db,
+                model=CryptoTickerSnapshot,
+                resource="crypto_ticker",
+                provider=instrument.provider,
+                target=instrument.symbol,
+                now=generated_at,
+                stale_seconds=stale_seconds,
+                instrument_type=SPOT,
+                required=required,
+            )
+        )
+        entries.append(
+            _latest_query_entry(
+                db,
+                model=CryptoOrderBookSnapshot,
+                resource="crypto_order_book",
+                provider=instrument.provider,
+                target=instrument.symbol,
+                now=generated_at,
+                stale_seconds=stale_seconds,
+                instrument_type=SPOT,
+                required=required,
+            )
+        )
+        entries.append(
+            _latest_query_entry(
+                db,
+                model=CryptoOhlcvBar,
+                resource="crypto_ohlcv",
+                provider=instrument.provider,
+                target=instrument.symbol,
+                now=generated_at,
+                stale_seconds=max(stale_seconds, 300),
+                instrument_type=SPOT,
+                required=required,
+            )
+        )
+
+    derivative_instruments = list_provider_instruments(
+        provider=normalized_provider,
+        symbol=normalized_symbol,
+        instrument_type=PERPETUAL,
+        resource="derivatives",
+    )
+    for instrument in derivative_instruments:
+        entries.append(
+            _latest_query_entry(
+                db,
+                model=CryptoDerivativesMetric,
+                resource="crypto_derivatives",
+                provider=instrument.provider,
+                target=instrument.symbol,
+                now=generated_at,
+                stale_seconds=max(stale_seconds, 300),
+                instrument_type=PERPETUAL,
+                required=_instrument_required(instrument),
+            )
+        )
+    entries.append(_market_cap_entry(db, now=generated_at, stale_seconds=stale_seconds))
+    entries.append(_spread_entry(db, base=base, now=generated_at, stale_seconds=stale_seconds))
+    collector_status = crypto_realtime_collector_status()
+    entry_payloads = [entry.to_dict() for entry in entries]
+    entry_payloads.extend(
+        crypto_realtime_store.health_entries(
+            stream_specs=crypto_realtime_enabled_stream_specs(),
+            now=generated_at,
+            stale_seconds=max(stale_seconds, settings.crypto_market_ws_message_stale_seconds),
+            collector_enabled=bool(collector_status.get("enabled")),
+            provider=normalized_provider,
+            symbol=normalized_symbol,
+        )
+    )
+    persistence_status = collector_status.get("persistence")
+    if isinstance(persistence_status, dict):
+        persistence_enabled = bool(persistence_status.get("enabled"))
+        persistence_state = str(persistence_status.get("status") or "unknown")
+        pending_count = int(persistence_status.get("pending_count") or 0)
+        persisted_count = int(persistence_status.get("persisted_count") or 0)
+        dropped_count = int(persistence_status.get("dropped_count") or 0)
+        error_count = int(persistence_status.get("error_count") or 0)
+        if not persistence_enabled:
+            data_quality = "disabled"
+            reason = "Realtime persistence is disabled by configuration."
+        elif persistence_status.get("last_error"):
+            data_quality = "error"
+            reason = f"Realtime persistence error: {persistence_status.get('last_error')}"
+        elif dropped_count > 0:
+            data_quality = "partial"
+            reason = f"Realtime persistence is running but dropped {dropped_count} queued update(s)."
+        elif error_count > 0:
+            data_quality = "partial"
+            reason = f"Realtime persistence is running with {error_count} update error(s)."
+        elif persistence_status.get("running"):
+            data_quality = "ok"
+            reason = "Realtime persistence bridge is running."
+        else:
+            data_quality = "stopped"
+            reason = "Realtime persistence bridge is not running."
+        entry_payloads.append(
+            {
+                "resource": "crypto_realtime_persistence",
+                "provider": "all",
+                "target": "all",
+                "status": persistence_state,
+                "ok": bool(persistence_status.get("ok")),
+                "row_count": persisted_count,
+                "required": bool(collector_status.get("enabled")),
+                "latest_fetched_at": persistence_status.get("last_flush_completed_at"),
+                "latest_data_key": f"pending={pending_count}",
+                "data_quality": data_quality,
+                "reason": reason,
+            }
+        )
+    entry_dicts = enrich_source_health_entries(
+        db,
+        market="crypto",
+        entries=entry_payloads,
+    )
+    if sync_snapshots:
+        sync_source_health_snapshots(
+            db,
+            market="crypto",
+            entries=entry_dicts,
+            checked_at=generated_at,
+        )
+    return {
+        "kind": "crypto_source_health",
+        "generated_at": generated_at.isoformat(),
+        "filters": {
+            "provider": normalized_provider,
+            "symbol": normalized_symbol,
+            "base": base.strip().upper() if base else None,
+        },
+        "summary": _summary(entry_payloads),
+        "entries": entry_dicts,
+    }

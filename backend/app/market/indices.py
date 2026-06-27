@@ -19,6 +19,7 @@ from app.sources.defaults import (
 
 
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+TWSE_MIS_STOCK_INFO_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 TWSE_INDEX_LIST_URL = "https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX"
 TWSE_DAILY_QUOTES_URL = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
 TWSE_MARKET_DAILY_URL = "https://openapi.twse.com.tw/v1/exchangeReport/FMTQIK"
@@ -38,6 +39,7 @@ INDEX_CONFIGS = (
         "short_label": "加權",
         "market": "TWSE",
         "symbol": "^TWII",
+        "mis_channel": "tse_t00.tw",
     },
     {
         "index_id": "TPEX",
@@ -45,6 +47,7 @@ INDEX_CONFIGS = (
         "short_label": "櫃買",
         "market": "TPEX",
         "symbol": "^TWOII",
+        "mis_channel": "otc_o00.tw",
     },
 )
 INDEX_CONFIG_BY_ID = {str(config["index_id"]).upper(): config for config in INDEX_CONFIGS}
@@ -1351,6 +1354,173 @@ def _fetch_yahoo_index_intraday(config: dict) -> dict:
     }
 
 
+def _build_mis_snapshot_time(date_text: str | None, time_text: str | None) -> str | None:
+    if not date_text or not time_text:
+        return None
+
+    try:
+        if len(date_text) == 8 and date_text.isdigit():
+            snapshot_date = date(
+                int(date_text[:4]),
+                int(date_text[4:6]),
+                int(date_text[6:8]),
+            )
+        else:
+            parsed_date = _parse_trade_date(date_text)
+            if parsed_date is None:
+                return None
+            snapshot_date = parsed_date
+
+        parts = [int(part) for part in str(time_text).split(":")]
+        if len(parts) != 3:
+            return None
+        return datetime.combine(
+            snapshot_date,
+            time(parts[0], parts[1], parts[2]),
+            tzinfo=TAIPEI_TZ,
+        ).isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
+def _point_datetime(point: dict) -> datetime | None:
+    point_time = point.get("time")
+    if not point_time:
+        return None
+
+    try:
+        return datetime.fromisoformat(str(point_time))
+    except ValueError:
+        return None
+
+
+def _point_time_key(point: dict) -> tuple[str, str] | None:
+    parsed = _point_datetime(point)
+    if parsed is None:
+        return None
+
+    return parsed.strftime("%Y%m%d"), parsed.strftime("%H:%M:%S")
+
+
+def _fetch_mis_index_message(config: dict) -> dict | None:
+    channel = str(config.get("mis_channel") or "").strip()
+    if not channel:
+        return None
+
+    response = http_get(
+        TWSE_MIS_STOCK_INFO_URL,
+        params={
+            "ex_ch": channel,
+            "json": "1",
+            "delay": "0",
+        },
+        headers={
+            "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
+            "Accept": "application/json,text/plain,*/*",
+            "Referer": "https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw",
+        },
+        timeout=20,
+    )
+    response.raise_for_status()
+    response.encoding = "utf-8"
+    payload = response.json()
+    return (payload.get("msgArray") or [None])[0]
+
+
+def _fetch_mis_index_intraday(config: dict) -> dict:
+    message = _fetch_mis_index_message(config)
+    symbol = str(config["symbol"])
+
+    if not message:
+        return {
+            "stock_id": config["index_id"],
+            "symbol": symbol,
+            "source": "twse_mis_index_snapshot",
+            "previous_close": None,
+            "point_count": 0,
+            "points": [],
+        }
+
+    latest_time = _build_mis_snapshot_time(message.get("d"), message.get("t") or message.get("%"))
+    price = _as_float(message.get("z"))
+    if latest_time is None or price is None:
+        return {
+            "stock_id": config["index_id"],
+            "symbol": symbol,
+            "source": "twse_mis_index_snapshot",
+            "previous_close": _as_float(message.get("y")),
+            "point_count": 0,
+            "points": [],
+        }
+
+    point = {
+        "time": latest_time,
+        "price": price,
+        "volume": _as_int(message.get("v") or message.get("m")),
+        "open": _as_float(message.get("o")) or price,
+        "high": _as_float(message.get("h")) or price,
+        "low": _as_float(message.get("l")) or price,
+    }
+
+    return {
+        "stock_id": config["index_id"],
+        "symbol": symbol,
+        "source": "twse_mis_index_snapshot",
+        "previous_close": _as_float(message.get("y")),
+        "point_count": 1,
+        "points": [point],
+    }
+
+
+def _merge_index_intraday_snapshot(base: dict, snapshot: dict) -> dict:
+    snapshot_points = snapshot.get("points") or []
+    if not snapshot_points:
+        return base
+
+    merged = {
+        **base,
+        "previous_close": snapshot.get("previous_close") or base.get("previous_close"),
+        "points": [dict(point) for point in base.get("points") or []],
+    }
+    snapshot_point = dict(snapshot_points[-1])
+    snapshot_time = _point_datetime(snapshot_point)
+    base_times = [
+        point_time
+        for point in merged["points"]
+        for point_time in [_point_datetime(point)]
+        if point_time is not None
+    ]
+    latest_base_time = max(base_times, default=None)
+    if (
+        snapshot_time is not None
+        and latest_base_time is not None
+        and snapshot_time < latest_base_time
+    ):
+        return base
+
+    snapshot_key = _point_time_key(snapshot_point)
+    replaced = False
+
+    if snapshot_key is not None:
+        for index, point in enumerate(merged["points"]):
+            if _point_time_key(point) == snapshot_key:
+                merged["points"][index] = snapshot_point
+                replaced = True
+                break
+
+    if not replaced:
+        merged["points"].append(snapshot_point)
+        merged["points"].sort(key=lambda item: str(item.get("time") or ""))
+
+    merged["point_count"] = len(merged["points"])
+    merged["source"] = (
+        "yahoo_finance_chart_twse_mis_snapshot"
+        if base.get("source") == "yahoo_finance_chart"
+        else f"{base.get('source') or 'intraday'}_twse_mis_snapshot"
+    )
+    return merged
+
+
 def _index_intraday_fallback_from_list(config: dict) -> dict | None:
     if config["market"] == "TPEX":
         items = _fetch_tpex_index_list()
@@ -1567,16 +1737,32 @@ def get_market_index_intraday(index_id: str) -> dict:
         raise ValueError(f"index_id must be one of: {supported}.")
 
     yahoo_error: Exception | None = None
+    yahoo_payload: dict | None = None
 
     try:
-        payload = _fetch_yahoo_index_intraday(config)
-
-        if payload["point_count"] > 0:
-            return payload
+        yahoo_payload = _fetch_yahoo_index_intraday(config)
     except Exception as exc:
         yahoo_error = exc
 
-    fallback_payload = _index_intraday_fallback_from_list(config)
+    try:
+        mis_payload = _fetch_mis_index_intraday(config)
+        if mis_payload["point_count"] > 0:
+            if yahoo_payload is not None and yahoo_payload.get("point_count", 0) > 0:
+                return _merge_index_intraday_snapshot(yahoo_payload, mis_payload)
+            return mis_payload
+    except Exception as exc:
+        if yahoo_error is None:
+            yahoo_error = exc
+
+    if yahoo_payload is not None and yahoo_payload.get("point_count", 0) > 0:
+        return yahoo_payload
+
+    try:
+        fallback_payload = _index_intraday_fallback_from_list(config)
+    except Exception as exc:
+        if yahoo_error is not None:
+            raise yahoo_error from exc
+        raise
 
     if fallback_payload is not None:
         return fallback_payload

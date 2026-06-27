@@ -4,6 +4,23 @@ import JobStatusCenter from "@/components/JobStatusCenter";
 import SettingsDock from "@/components/SettingsDock";
 import { marketLabel, marketSummary, useT } from "@/i18n";
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
+import {
+  CRYPTO_BASE_OPTIONS,
+  CRYPTO_KLINE_INSTRUMENTS,
+  buildCryptoKlineInstruments,
+  cryptoBaseOptionsFromAssets,
+  cryptoInstrumentsForBase,
+  defaultCryptoInstrumentKeyForBase,
+  normalizeCryptoBaseAsset,
+  type CryptoBaseAsset,
+  type CryptoKLineInstrument,
+  type CryptoProviderContract,
+} from "@/types/cryptoMarket";
+import {
+  RESOURCE_COMMODITY_GROUPS,
+  RESOURCE_COMMODITY_INSTRUMENTS,
+  resourceInstrumentsForGroup,
+} from "@/types/resourceMarket";
 import type {
   StockMasterRead,
   TaiwanFuturesQuote,
@@ -27,9 +44,12 @@ type Props = {
   selectedStockId: string | null;
   selectedFuturesSymbol?: string | null;
   selectedMarket: MarketRegion;
+  selectedCryptoBase?: CryptoBaseAsset;
+  selectedCryptoInstrumentKey?: string | null;
   onSelectGroup: (group: WatchlistGroupNode | null) => void;
   onSelectStock: (stockId: string, stockName: string | null) => void;
   onSelectFutures?: (symbol: string) => void;
+  onSelectCryptoInstrument?: (base: CryptoBaseAsset, instrumentKey: string) => void;
   onMarketChange: (market: MarketRegion) => void;
   onExplorerDataChanged?: (
     tree: WatchlistGroupNode[],
@@ -57,6 +77,27 @@ type PointerDragState = {
   active: boolean;
   target: DropTarget | null;
 };
+type CryptoWatchlistGroupNode = {
+  id: number;
+  parent_id: number | null;
+  group_name: string;
+  description: string | null;
+  sort_order: number;
+  is_active: boolean;
+  children: CryptoWatchlistGroupNode[];
+};
+type CryptoWatchlistItemRead = {
+  id: number;
+  group_id: number;
+  asset: CryptoBaseAsset;
+  asset_name: string | null;
+  note: string | null;
+  priority: number;
+  tags: string | null;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+};
 
 type SidebarMarketOption = {
   value: MarketRegion;
@@ -68,7 +109,7 @@ const sidebarMarketOptions: SidebarMarketOption[] = [
   { value: "us", enabled: true },
   { value: "jp", enabled: true },
   { value: "kr", enabled: false },
-  { value: "crypto", enabled: false },
+  { value: "crypto", enabled: true },
 ];
 
 function flattenGroups(nodes: WatchlistGroupNode[]): WatchlistGroupNode[] {
@@ -89,6 +130,34 @@ function findGroupById(
   }
 
   return null;
+}
+
+function flattenCryptoGroups(nodes: CryptoWatchlistGroupNode[]): CryptoWatchlistGroupNode[] {
+  return nodes.flatMap((node) => [node, ...flattenCryptoGroups(node.children)]);
+}
+
+function findCryptoGroupById(
+  nodes: CryptoWatchlistGroupNode[],
+  groupId: number | null
+): CryptoWatchlistGroupNode | null {
+  if (groupId === null) return null;
+
+  for (const node of nodes) {
+    if (node.id === groupId) return node;
+
+    const child = findCryptoGroupById(node.children, groupId);
+    if (child) return child;
+  }
+
+  return null;
+}
+
+function isKnownCryptoBaseAsset(
+  value: string,
+  baseOptions: readonly CryptoBaseAsset[]
+): value is CryptoBaseAsset {
+  const normalized = normalizeCryptoBaseAsset(value);
+  return baseOptions.some((base) => normalizeCryptoBaseAsset(base) === normalized);
 }
 
 function isDescendantGroup(
@@ -174,6 +243,725 @@ function SidebarMarketSummary({ selectedMarket }: { selectedMarket: MarketRegion
   );
 }
 
+function SidebarCryptoControls({
+  selectedBase,
+  selectedInstrumentKey,
+  onSelectInstrument,
+}: {
+  selectedBase: CryptoBaseAsset;
+  selectedInstrumentKey?: string | null;
+  onSelectInstrument?: (base: CryptoBaseAsset, instrumentKey: string) => void;
+}) {
+  const t = useT();
+  const [expanded, setExpanded] = useState(true);
+  const [commodityExpanded, setCommodityExpanded] = useState(true);
+  const [expandedCommodityGroups, setExpandedCommodityGroups] = useState<Set<string>>(
+    () => new Set(RESOURCE_COMMODITY_GROUPS.map((group) => group.key))
+  );
+  const [currencyExpanded, setCurrencyExpanded] = useState(true);
+  const [cryptoTree, setCryptoTree] = useState<CryptoWatchlistGroupNode[]>([]);
+  const [cryptoItems, setCryptoItems] = useState<CryptoWatchlistItemRead[]>([]);
+  const [expandedCryptoGroupIds, setExpandedCryptoGroupIds] = useState<Set<number>>(new Set());
+  const [selectedCryptoGroupId, setSelectedCryptoGroupId] = useState<number | null>(null);
+  const [cryptoLoading, setCryptoLoading] = useState(false);
+  const [cryptoMessage, setCryptoMessage] = useState<Message>(null);
+  const [cryptoGroupName, setCryptoGroupName] = useState("");
+  const [cryptoRenameValue, setCryptoRenameValue] = useState("");
+  const [cryptoAssetInput, setCryptoAssetInput] = useState("");
+  const [cryptoNote, setCryptoNote] = useState("");
+  const [cryptoTags, setCryptoTags] = useState("");
+  const [cryptoAssetOptions, setCryptoAssetOptions] = useState<CryptoBaseAsset[]>(() =>
+    CRYPTO_BASE_OPTIONS.map((asset) => normalizeCryptoBaseAsset(asset))
+  );
+  const [cryptoKlineInstruments, setCryptoKlineInstruments] =
+    useState<CryptoKLineInstrument[]>(CRYPTO_KLINE_INSTRUMENTS);
+  const currencyInstruments = useMemo(
+    () => cryptoInstrumentsForBase("USDT", cryptoKlineInstruments),
+    [cryptoKlineInstruments]
+  );
+  const activeInstrumentKey =
+    selectedInstrumentKey ?? defaultCryptoInstrumentKeyForBase(selectedBase, cryptoKlineInstruments);
+  const activeInstrument = cryptoInstrumentsForBase(
+    selectedBase,
+    cryptoKlineInstruments
+  ).find(
+    (instrument) => instrument.key === activeInstrumentKey
+  );
+  const cryptoItemsByGroupId = useMemo(() => {
+    const map = new Map<number, CryptoWatchlistItemRead[]>();
+    cryptoItems.forEach((item) => {
+      const rows = map.get(item.group_id) ?? [];
+      rows.push(item);
+      map.set(item.group_id, rows);
+    });
+    return map;
+  }, [cryptoItems]);
+
+  function countCryptoGroupItems(node: CryptoWatchlistGroupNode): number {
+    const directCount = cryptoItemsByGroupId.get(node.id)?.length ?? 0;
+    return directCount + node.children.reduce((total, child) => total + countCryptoGroupItems(child), 0);
+  }
+
+  async function reloadCryptoWatchlist(nextSelectedGroupId?: number | null) {
+    setCryptoLoading(true);
+    try {
+      const [nextTree, nextItems, nextProviderContract] = await Promise.all([
+        fetchJson<CryptoWatchlistGroupNode[]>("/api/crypto-market/watchlists/tree"),
+        fetchJson<CryptoWatchlistItemRead[]>("/api/crypto-market/watchlists/items"),
+        fetchJson<CryptoProviderContract>("/api/crypto-market/provider-contract").catch(() => null),
+      ]);
+      setCryptoTree(nextTree);
+      setCryptoItems(nextItems);
+      if (nextProviderContract) {
+        const nextAssetOptions = cryptoBaseOptionsFromAssets(nextProviderContract.assets);
+        setCryptoAssetOptions(nextAssetOptions);
+        setCryptoKlineInstruments(
+          buildCryptoKlineInstruments(nextAssetOptions, nextProviderContract.assets)
+        );
+      }
+      const flattened = flattenCryptoGroups(nextTree);
+      const resolvedGroupId =
+        nextSelectedGroupId !== undefined
+          ? nextSelectedGroupId
+          : selectedCryptoGroupId && flattened.some((group) => group.id === selectedCryptoGroupId)
+            ? selectedCryptoGroupId
+            : flattened[0]?.id ?? null;
+      setSelectedCryptoGroupId(resolvedGroupId);
+      if (resolvedGroupId !== null) {
+        setExpandedCryptoGroupIds((previous) => new Set(previous).add(resolvedGroupId));
+      }
+      const selected = findCryptoGroupById(nextTree, resolvedGroupId);
+      setCryptoRenameValue(selected?.group_name ?? "");
+    } catch (error) {
+      setCryptoMessage({
+        type: "error",
+        text: error instanceof Error ? error.message : t("crypto.sidebar.watchlistLoadFailed"),
+      });
+    } finally {
+      setCryptoLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void reloadCryptoWatchlist();
+    }, 0);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function toggleCryptoGroup(groupId: number) {
+    setExpandedCryptoGroupIds((previous) => {
+      const next = new Set(previous);
+      if (next.has(groupId)) {
+        next.delete(groupId);
+      } else {
+        next.add(groupId);
+      }
+      return next;
+    });
+  }
+
+  function selectCryptoGroup(group: CryptoWatchlistGroupNode) {
+    setSelectedCryptoGroupId(group.id);
+    setCryptoRenameValue(group.group_name);
+    setExpandedCryptoGroupIds((previous) => new Set(previous).add(group.id));
+  }
+
+  function selectCryptoAsset(asset: CryptoBaseAsset) {
+    const instrumentKey = defaultCryptoInstrumentKeyForBase(asset, cryptoKlineInstruments);
+    onSelectInstrument?.(asset, instrumentKey);
+  }
+
+  const selectedCryptoGroup = findCryptoGroupById(cryptoTree, selectedCryptoGroupId);
+  const selectedAssetLabel = activeInstrument?.symbol ?? selectedBase;
+  const cryptoRootSelected = cryptoItems.some((item) => item.asset === selectedBase);
+
+  async function handleCryptoGroupSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const intent = submitterValue(event);
+    const groupName = cryptoGroupName.trim();
+    if (!groupName) return;
+    setCryptoLoading(true);
+    setCryptoMessage(null);
+    try {
+      const group = await requestJson<CryptoWatchlistGroupNode>(
+        "/api/crypto-market/watchlists/groups",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            group_name: groupName,
+            parent_id: intent === "create_child" ? selectedCryptoGroupId : null,
+          }),
+        }
+      );
+      setCryptoGroupName("");
+      await reloadCryptoWatchlist(group.id);
+      setCryptoMessage({ type: "success", text: t("crypto.sidebar.watchlistSaved") });
+    } catch (error) {
+      setCryptoMessage({
+        type: "error",
+        text: error instanceof Error ? error.message : t("crypto.sidebar.watchlistSaveFailed"),
+      });
+    } finally {
+      setCryptoLoading(false);
+    }
+  }
+
+  async function handleCryptoSelectedGroupSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (selectedCryptoGroupId === null) return;
+    const intent = submitterValue(event);
+    setCryptoLoading(true);
+    setCryptoMessage(null);
+    try {
+      if (intent === "delete") {
+        await deleteRequest(`/api/crypto-market/watchlists/groups/${selectedCryptoGroupId}`, {
+          recursive: true,
+        });
+        await reloadCryptoWatchlist(null);
+      } else {
+        const groupName = cryptoRenameValue.trim();
+        if (!groupName) return;
+        await requestJson<CryptoWatchlistGroupNode>(
+          `/api/crypto-market/watchlists/groups/${selectedCryptoGroupId}`,
+          {
+            method: "PATCH",
+            body: JSON.stringify({ group_name: groupName }),
+          }
+        );
+        await reloadCryptoWatchlist(selectedCryptoGroupId);
+      }
+      setCryptoMessage({ type: "success", text: t("crypto.sidebar.watchlistSaved") });
+    } catch (error) {
+      setCryptoMessage({
+        type: "error",
+        text: error instanceof Error ? error.message : t("crypto.sidebar.watchlistSaveFailed"),
+      });
+    } finally {
+      setCryptoLoading(false);
+    }
+  }
+
+  async function handleCryptoItemSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (selectedCryptoGroupId === null) return;
+    const asset = normalizeCryptoBaseAsset(cryptoAssetInput);
+    if (!isKnownCryptoBaseAsset(asset, cryptoAssetOptions)) {
+      setCryptoMessage({
+        type: "error",
+        text: t("crypto.sidebar.assetNotRegistered", { asset }),
+      });
+      return;
+    }
+    setCryptoLoading(true);
+    setCryptoMessage(null);
+    try {
+      await requestJson<CryptoWatchlistItemRead>(
+        "/api/crypto-market/watchlists/items",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            group_id: selectedCryptoGroupId,
+            asset,
+            note: cryptoNote.trim() || null,
+            tags: cryptoTags.trim() || null,
+          }),
+        }
+      );
+      setCryptoAssetInput("");
+      setCryptoNote("");
+      setCryptoTags("");
+      await reloadCryptoWatchlist(selectedCryptoGroupId);
+      selectCryptoAsset(asset);
+      setCryptoMessage({ type: "success", text: t("crypto.sidebar.watchlistSaved") });
+    } catch (error) {
+      setCryptoMessage({
+        type: "error",
+        text: error instanceof Error ? error.message : t("crypto.sidebar.watchlistSaveFailed"),
+      });
+    } finally {
+      setCryptoLoading(false);
+    }
+  }
+
+  async function deleteCryptoItem(item: CryptoWatchlistItemRead) {
+    setCryptoLoading(true);
+    setCryptoMessage(null);
+    try {
+      await deleteRequest(`/api/crypto-market/watchlists/items/${item.id}`);
+      await reloadCryptoWatchlist(selectedCryptoGroupId);
+    } catch (error) {
+      setCryptoMessage({
+        type: "error",
+        text: error instanceof Error ? error.message : t("crypto.sidebar.watchlistSaveFailed"),
+      });
+    } finally {
+      setCryptoLoading(false);
+    }
+  }
+
+  function renderCryptoGroupNode(node: CryptoWatchlistGroupNode, depth = 0) {
+    const selected = selectedCryptoGroupId === node.id;
+    const expandedNode = expandedCryptoGroupIds.has(node.id);
+    const groupItems = cryptoItemsByGroupId.get(node.id) ?? [];
+    const hasContent = node.children.length > 0 || groupItems.length > 0;
+    const totalItemCount = countCryptoGroupItems(node);
+
+    return (
+      <div key={node.id}>
+        <div
+          className={[
+            "relative flex cursor-pointer items-center gap-1 py-1 pr-1 text-sm",
+            selected
+              ? "omi-sidebar-selected text-omi-text-strong"
+              : "text-omi-text-muted hover:bg-omi-surface-muted",
+          ].join(" ")}
+          style={{ paddingLeft: `${4 + depth * 16}px` }}
+          onClick={() => selectCryptoGroup(node)}
+        >
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              toggleCryptoGroup(node.id);
+            }}
+            className={[
+              "h-6 w-4 text-xs",
+              selected ? "text-omi-accent" : "text-omi-text-muted",
+              !hasContent ? "opacity-40" : "",
+            ].join(" ")}
+          >
+            {hasContent ? (expandedNode ? "v" : ">") : "-"}
+          </button>
+          <div className="min-w-0 flex-1 text-left">
+            <div className="truncate font-semibold">{node.group_name}</div>
+          </div>
+          <span className={selected ? "pr-2 text-xs text-omi-accent" : "pr-2 text-xs text-omi-text-subtle"}>
+            {totalItemCount}
+          </span>
+        </div>
+
+        {expandedNode ? (
+          <div>
+            {groupItems.map((item) => {
+              const itemSelected = selectedBase === item.asset;
+              return (
+                <div
+                  key={item.id}
+                  className={[
+                    "group relative flex cursor-pointer items-center gap-1 py-1.5 pr-2 text-xs",
+                    itemSelected
+                      ? "omi-sidebar-selected text-omi-text-strong"
+                      : item.enabled
+                        ? "text-omi-text-muted hover:bg-omi-surface-muted"
+                        : "text-omi-text-subtle",
+                  ].join(" ")}
+                  style={{ paddingLeft: `${24 + depth * 16}px` }}
+                  onClick={() => selectCryptoAsset(item.asset)}
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate font-semibold">
+                      {item.asset}
+                      {item.asset_name ? ` ${item.asset_name}` : ""}
+                    </div>
+                    {item.tags || item.note ? (
+                      <div className={itemSelected ? "truncate text-omi-text-muted" : "truncate text-omi-text-subtle"}>
+                        {item.tags || item.note}
+                      </div>
+                    ) : null}
+                  </div>
+                  <button
+                    type="button"
+                    className="hidden bg-omi-danger-soft px-1.5 py-0.5 text-[10px] font-semibold text-omi-danger group-hover:block"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void deleteCryptoItem(item);
+                    }}
+                  >
+                    {t("common.deleteShort")}
+                  </button>
+                </div>
+              );
+            })}
+            {node.children.map((child) => renderCryptoGroupNode(child, depth + 1))}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  function toggleCommodityGroup(group: string) {
+    setExpandedCommodityGroups((previous) => {
+      const next = new Set(previous);
+      if (next.has(group)) {
+        next.delete(group);
+      } else {
+        next.add(group);
+      }
+      return next;
+    });
+  }
+
+  return (
+    <>
+      <div className="flex items-center justify-between border-b border-omi-border-subtle px-4 py-3">
+        <div className="min-w-0">
+          <div className="text-xs font-semibold text-omi-text-muted">
+            {t("crypto.sidebar.header")}
+          </div>
+          <div className="truncate text-sm font-bold text-omi-text-strong">
+            {selectedCryptoGroup?.group_name ?? t("crypto.sidebar.noWatchlistGroup")}
+          </div>
+          <div className="mt-1 truncate text-xs text-omi-text-muted">
+            {selectedAssetLabel || t("crypto.sidebar.noSelection")}
+          </div>
+        </div>
+        <div className="ml-3 flex shrink-0 flex-col gap-2">
+          <button
+            type="button"
+            className={buttonClass("ghost")}
+            onClick={() => void reloadCryptoWatchlist(selectedCryptoGroupId)}
+            disabled={cryptoLoading}
+          >
+            {t("common.reload")}
+          </button>
+        </div>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto py-2">
+        <div
+          className={[
+            "relative flex cursor-pointer items-center gap-1 py-1 pr-1 text-sm",
+            cryptoRootSelected
+              ? "omi-sidebar-selected text-omi-text-strong"
+              : "text-omi-text-muted hover:bg-omi-surface-muted",
+          ].join(" ")}
+          style={{ paddingLeft: "4px" }}
+          onClick={() => setExpanded((previous) => !previous)}
+        >
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              setExpanded((previous) => !previous);
+            }}
+            className={[
+              "h-6 w-4 text-xs",
+              cryptoRootSelected ? "text-omi-accent" : "text-omi-text-muted",
+            ].join(" ")}
+            aria-label={t("crypto.sidebar.aria.toggleCrypto")}
+          >
+            {expanded ? "v" : ">"}
+          </button>
+
+          <div className="min-w-0 flex-1 text-left">
+            <div className="truncate font-semibold">{t("crypto.sidebar.crypto")}</div>
+          </div>
+
+          <span className={cryptoRootSelected ? "pr-2 text-xs text-omi-accent" : "pr-2 text-xs text-omi-text-subtle"}>
+            {cryptoItems.length}
+          </span>
+        </div>
+
+        {expanded ? (
+          <div className="py-1">
+            {cryptoTree.length > 0 ? (
+              cryptoTree.map((node) => renderCryptoGroupNode(node))
+            ) : (
+              <div className="px-4 py-4 text-sm text-omi-text-muted">
+                {t("crypto.sidebar.noWatchlistGroup")}
+              </div>
+            )}
+          </div>
+        ) : null}
+
+        <div
+          className="relative mt-3 flex cursor-pointer items-center gap-1 py-1 pr-1 text-sm text-omi-text-strong hover:bg-omi-surface-muted"
+          style={{ paddingLeft: "4px" }}
+          onClick={() => setCommodityExpanded((previous) => !previous)}
+          data-testid="resource-sidebar-root-commodity"
+        >
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              setCommodityExpanded((previous) => !previous);
+            }}
+            className="h-6 w-4 text-xs text-omi-text-muted"
+            aria-label={t("crypto.sidebar.aria.toggleCommodity")}
+          >
+            {commodityExpanded ? "v" : ">"}
+          </button>
+
+          <div className="min-w-0 flex-1 text-left">
+            <div className="truncate font-semibold">{t("crypto.sidebar.commodity")}</div>
+            <div className="truncate text-xs text-omi-text-subtle">
+              {t("crypto.sidebar.commoditySubtitle")}
+            </div>
+          </div>
+
+          <span className="pr-2 text-xs text-omi-text-subtle">
+            {RESOURCE_COMMODITY_INSTRUMENTS.length + currencyInstruments.length}
+          </span>
+        </div>
+
+        {commodityExpanded ? (
+          <div>
+            {RESOURCE_COMMODITY_GROUPS.map((group) => {
+              const groupExpanded = expandedCommodityGroups.has(group.key);
+              const instruments = resourceInstrumentsForGroup(group.key);
+
+              return (
+                <div key={group.key}>
+                  <div
+                    className="group relative flex w-full cursor-pointer items-center gap-1 py-1.5 pr-2 text-left text-sm text-omi-text-muted hover:bg-omi-surface-muted"
+                    style={{ paddingLeft: "24px" }}
+                    data-testid={`resource-sidebar-group-${group.key}`}
+                    onClick={() => toggleCommodityGroup(group.key)}
+                  >
+                    <button
+                      type="button"
+                      className="h-5 w-4 text-xs text-omi-text-muted"
+                      aria-label={t("crypto.sidebar.aria.toggleCommodityGroup", { label: group.label })}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        toggleCommodityGroup(group.key);
+                      }}
+                    >
+                      {groupExpanded ? "v" : ">"}
+                    </button>
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate font-semibold">{group.label}</div>
+                    </div>
+                    <span className="text-xs text-omi-text-subtle">{instruments.length}</span>
+                  </div>
+
+                  {groupExpanded ? (
+                    <div>
+                      {instruments.map((instrument) => (
+                        <div
+                          key={instrument.key}
+                          className="group relative flex w-full items-center gap-1 py-1.5 pr-2 text-left text-xs text-omi-text-muted"
+                          style={{ paddingLeft: "48px" }}
+                          data-testid={`resource-sidebar-instrument-${instrument.symbol}`}
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate font-semibold text-omi-text-strong">
+                              {instrument.displayName} {instrument.symbol}
+                            </div>
+                            <div className="truncate text-omi-text-subtle">
+                              {instrument.exchange} / {instrument.quoteAsset} / {t("crypto.sidebar.providerPending")}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+
+            <div>
+              <div
+                className="group relative flex w-full cursor-pointer items-center gap-1 py-1.5 pr-2 text-left text-sm text-omi-text-muted hover:bg-omi-surface-muted"
+                style={{ paddingLeft: "24px" }}
+                data-testid="resource-sidebar-group-currency"
+                onClick={() => setCurrencyExpanded((previous) => !previous)}
+              >
+                <button
+                  type="button"
+                  className="h-5 w-4 text-xs text-omi-text-muted"
+                  aria-label={t("crypto.sidebar.aria.toggleCurrency")}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setCurrencyExpanded((previous) => !previous);
+                  }}
+                >
+                  {currencyExpanded ? "v" : ">"}
+                </button>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate font-semibold">{t("crypto.sidebar.currency")}</div>
+                </div>
+                <span className="text-xs text-omi-text-subtle">{currencyInstruments.length}</span>
+              </div>
+
+              {currencyExpanded ? (
+                <div>
+                  {currencyInstruments.map((instrument) => {
+                    const instrumentSelected =
+                      selectedBase === instrument.baseAsset && activeInstrumentKey === instrument.key;
+
+                    return (
+                      <button
+                        key={instrument.key}
+                        type="button"
+                        className={[
+                          "group relative flex w-full cursor-pointer items-center gap-1 py-1.5 pr-2 text-left text-xs",
+                          instrumentSelected
+                            ? "omi-sidebar-selected text-omi-text-strong"
+                            : "text-omi-text-muted hover:bg-omi-surface-muted",
+                        ].join(" ")}
+                        style={{ paddingLeft: "48px" }}
+                        data-testid={`currency-sidebar-instrument-${instrument.key}`}
+                        onClick={() => onSelectInstrument?.(instrument.baseAsset, instrument.key)}
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-xs font-semibold leading-4">{instrument.symbol}</div>
+                          <div
+                            className={
+                              instrumentSelected
+                                ? "truncate text-xs leading-4 text-omi-text-muted"
+                                : "truncate text-xs leading-4 text-omi-text-subtle"
+                            }
+                          >
+                            {instrument.exchange}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+
+      </div>
+
+      {cryptoMessage ? (
+        <div
+          className={[
+            "mx-4 mb-3 border px-3 py-2 text-xs",
+            cryptoMessage.type === "success"
+              ? "border-omi-market-down-border bg-omi-market-down-soft text-omi-market-down"
+              : "border-omi-danger-border bg-omi-danger-soft text-omi-danger",
+          ].join(" ")}
+        >
+          {cryptoMessage.text}
+        </div>
+      ) : null}
+
+      <div className="border-b border-omi-border-subtle px-4 py-4">
+        <JobStatusCenter placement="inline" market="crypto" />
+      </div>
+
+      <div className="space-y-4 p-4">
+        <form onSubmit={handleCryptoGroupSubmit}>
+          <div className="mb-2 text-xs font-bold text-omi-text-muted">{t("watchlist.groupManagement")}</div>
+          <input
+            className={inputClass()}
+            name="group_name"
+            placeholder={t("watchlist.addGroupPlaceholder")}
+            value={cryptoGroupName}
+            onChange={(event) => setCryptoGroupName(event.target.value)}
+          />
+          <div className="mt-2 flex gap-2">
+            <button
+              type="submit"
+              name="intent"
+              value="create_root"
+              className={buttonClass("ghost")}
+              disabled={cryptoLoading}
+            >
+              {t("common.addRoot")}
+            </button>
+            <button
+              type="submit"
+              name="intent"
+              value="create_child"
+              className={buttonClass("primary")}
+              disabled={cryptoLoading || selectedCryptoGroupId === null}
+            >
+              {t("common.addChild")}
+            </button>
+          </div>
+        </form>
+
+        <form onSubmit={handleCryptoSelectedGroupSubmit} className="space-y-2">
+          <input
+            className={inputClass()}
+            name="group_name"
+            placeholder={t("watchlist.renameGroupPlaceholder")}
+            value={cryptoRenameValue}
+            onChange={(event) => setCryptoRenameValue(event.target.value)}
+          />
+          <div className="flex gap-2">
+            <button
+              type="submit"
+              name="intent"
+              value="rename"
+              className={buttonClass("primary")}
+              disabled={cryptoLoading || selectedCryptoGroupId === null}
+            >
+              {t("common.rename")}
+            </button>
+            <button
+              type="submit"
+              name="intent"
+              value="delete"
+              className={buttonClass("danger")}
+              disabled={cryptoLoading || selectedCryptoGroupId === null}
+            >
+              {t("common.delete")}
+            </button>
+          </div>
+        </form>
+
+        <div className="space-y-2">
+          <form
+            id="crypto-watchlist-asset-form"
+            action="/"
+            method="post"
+            onSubmit={handleCryptoItemSubmit}
+            className="space-y-2"
+          >
+            <div className="text-xs font-bold text-omi-text-muted">{t("crypto.sidebar.addAsset")}</div>
+            <input
+              className={inputClass()}
+              name="asset"
+              placeholder={t("crypto.sidebar.assetInputPlaceholder")}
+              value={cryptoAssetInput}
+              onChange={(event) => setCryptoAssetInput(event.target.value.toUpperCase())}
+              list="crypto-watchlist-asset-options"
+            />
+            <datalist id="crypto-watchlist-asset-options">
+              {cryptoAssetOptions.map((asset) => (
+                <option key={asset} value={asset} />
+              ))}
+            </datalist>
+            <input
+              className={inputClass()}
+              name="note"
+              placeholder={t("watchlist.notePlaceholder")}
+              value={cryptoNote}
+              onChange={(event) => setCryptoNote(event.target.value)}
+            />
+            <input
+              className={inputClass()}
+              name="tags"
+              placeholder={t("watchlist.tagsPlaceholder")}
+              value={cryptoTags}
+              onChange={(event) => setCryptoTags(event.target.value)}
+            />
+          </form>
+          <div className="flex items-center justify-between gap-2">
+            <button
+              type="submit"
+              form="crypto-watchlist-asset-form"
+              className={buttonClass("primary")}
+              disabled={cryptoLoading || selectedCryptoGroupId === null}
+            >
+              {t("crypto.sidebar.addAssetButton")}
+            </button>
+            <SettingsDock placement="inline" />
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
 export default function SidebarWatchlistExplorer({
   initialTree,
   initialItems,
@@ -181,9 +969,12 @@ export default function SidebarWatchlistExplorer({
   selectedStockId,
   selectedFuturesSymbol = null,
   selectedMarket,
+  selectedCryptoBase = "BTC",
+  selectedCryptoInstrumentKey = null,
   onSelectGroup,
   onSelectStock,
   onSelectFutures,
+  onSelectCryptoInstrument,
   onMarketChange,
   onExplorerDataChanged,
   onChanged,
@@ -1457,6 +2248,12 @@ export default function SidebarWatchlistExplorer({
         </div>
       </div>
         </>
+      ) : selectedMarket === "crypto" ? (
+        <SidebarCryptoControls
+          selectedBase={selectedCryptoBase}
+          selectedInstrumentKey={selectedCryptoInstrumentKey}
+          onSelectInstrument={onSelectCryptoInstrument}
+        />
       ) : (
         <SidebarMarketSummary selectedMarket={selectedMarket} />
       )}

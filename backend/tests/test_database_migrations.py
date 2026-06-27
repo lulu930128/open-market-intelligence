@@ -39,6 +39,10 @@ class DatabaseMigrationTests(unittest.TestCase):
             engine = create_engine(database_url)
             try:
                 table_names = set(inspect(engine).get_table_names())
+                with engine.connect() as connection:
+                    resource_instrument_count = connection.execute(
+                        text("SELECT COUNT(*) FROM resource_market_instrument")
+                    ).scalar_one()
             finally:
                 engine.dispose()
 
@@ -65,6 +69,15 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("provider_event", table_names)
             self.assertIn("source_health_snapshot", table_names)
             self.assertIn("app_setting", table_names)
+            self.assertIn("crypto_ticker_snapshot", table_names)
+            self.assertIn("crypto_order_book_snapshot", table_names)
+            self.assertIn("crypto_ohlcv_bar", table_names)
+            self.assertIn("crypto_derivatives_metric", table_names)
+            self.assertIn("crypto_market_cap_snapshot", table_names)
+            self.assertIn("crypto_spread_snapshot", table_names)
+            self.assertIn("resource_market_instrument", table_names)
+            self.assertIn("resource_quote_snapshot", table_names)
+            self.assertIn("resource_ohlcv_bar", table_names)
             self.assertIn("jp_stock_master", table_names)
             self.assertIn("jp_daily_price", table_names)
             self.assertIn("jp_company_fundamental", table_names)
@@ -78,6 +91,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("sector_33_name", jp_master_columns)
             self.assertIn("sector_17_name", jp_master_columns)
             self.assertIn("size_name", jp_master_columns)
+            self.assertGreaterEqual(resource_instrument_count, 6)
             self.assertEqual(get_database_revision(database_url), get_head_revision())
 
     def test_upgrade_legacy_create_all_database_preserves_rows(self) -> None:

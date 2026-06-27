@@ -8,6 +8,7 @@ alembic
 apscheduler
 pandas
 requests
+websockets
 feedparser
 beautifulsoup4
 lxml

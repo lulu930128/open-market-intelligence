@@ -138,9 +138,13 @@ export default async function Page({
       ?.trim()
       .toUpperCase() || null;
   const initialSelectedUsSymbol =
-    marketParam === "jp" ? null : symbolParam?.trim().toUpperCase() || null;
+    marketParam === "jp" || marketParam === "crypto"
+      ? null
+      : symbolParam?.trim().toUpperCase() || null;
   const initialMarket =
-    marketParam === "jp" || initialSelectedJpSymbol
+    marketParam === "crypto"
+      ? "crypto"
+      : marketParam === "jp" || initialSelectedJpSymbol
       ? "jp"
       : marketParam === "us" || initialSelectedUsSymbol
         ? "us"

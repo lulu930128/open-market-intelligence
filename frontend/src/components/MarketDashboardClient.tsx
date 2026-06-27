@@ -2,6 +2,7 @@
 
 import SidebarWatchlistExplorer from "@/components/SidebarWatchlistExplorer";
 import type { MarketRegion } from "@/components/SidebarWatchlistExplorer";
+import CryptoMarketPanel from "@/components/CryptoMarketPanel";
 import JPMarketPanel from "@/components/JPMarketPanel";
 import JPMarketSidebar from "@/components/JPMarketSidebar";
 import { LoadingDots } from "@/components/LoadingPlaceholders";
@@ -14,7 +15,11 @@ import USWatchlistSidebar from "@/components/USWatchlistSidebar";
 import WatchlistRadarPanel from "@/components/WatchlistRadarPanel";
 import { fetchJson } from "@/lib/api";
 import { getJobResultStatus, requestBackfillJob } from "@/lib/jobs";
-import { refreshMarketCalendarStatus } from "@/lib/marketCalendarStatus";
+import {
+  getMarketCalendarStatusSnapshot,
+  msUntilIsoTime,
+  refreshMarketCalendarStatus,
+} from "@/lib/marketCalendarStatus";
 import {
   getRefreshExecutionSeconds,
   useRefreshExecutionSettings,
@@ -52,6 +57,7 @@ import {
   useT,
   type TranslationFunction,
 } from "@/i18n";
+import type { CryptoBaseAsset } from "@/types/cryptoMarket";
 import type {
   ChartPoint,
   IntradayTrendResponse,
@@ -88,6 +94,8 @@ type JPRankBy = "none" | "change_pct" | "volume" | "close";
 const WATCHLIST_INTRADAY_LIMIT = 30;
 const WATCHLIST_RADAR_MAX_RESULTS = 20;
 const WATCHLIST_RANKING_BATCH_SIZE = 3;
+const WATCHLIST_DAILY_RELEASE_CHECK_MIN_MS = 5_000;
+const WATCHLIST_DAILY_RELEASE_CHECK_MAX_MS = 300_000;
 const MARKET_CHIP_REFRESH_STORAGE_PREFIX = "omi:market-chip-refresh";
 const TAIWAN_INDEX_TARGET_IDS = new Set(["TAIEX", "TPEX"]);
 const WATCHLIST_ANALYSIS_PARAMS = {
@@ -116,6 +124,33 @@ type RankingDisplayRow = {
   href?: string;
   onSelect: () => void;
 };
+type TaiwanMarketRefreshState = ReturnType<typeof getTaiwanMarketRefreshState>;
+
+function shouldUseTaiwanWatchlistIntraday(marketState: TaiwanMarketRefreshState) {
+  return (
+    marketState.isPollingWindow ||
+    (marketState.isAfterClose && !marketState.isDailyPriceReleased)
+  );
+}
+
+function getTaiwanWatchlistDailyReleaseCheckDelay() {
+  const marketState = getTaiwanMarketRefreshState();
+  const dailyRelease =
+    getMarketCalendarStatusSnapshot("tw")?.release_windows.market_daily_price;
+  const releaseDelay = marketState.isDailyPriceReleased
+    ? msUntilIsoTime(dailyRelease?.next_release_at)
+    : msUntilIsoTime(dailyRelease?.release_at);
+  const fallbackDelay = marketState.isDailyPriceReleased
+    ? marketState.msUntilNextPollingStart
+    : 60_000;
+  const delay = releaseDelay ?? fallbackDelay;
+
+  return Math.min(
+    Math.max(delay, WATCHLIST_DAILY_RELEASE_CHECK_MIN_MS),
+    WATCHLIST_DAILY_RELEASE_CHECK_MAX_MS
+  );
+}
+
 function marketChipRefreshStorageKey(dateKey: string) {
   return `${MARKET_CHIP_REFRESH_STORAGE_PREFIX}:${dateKey}`;
 }
@@ -1951,6 +1986,8 @@ export default function MarketDashboardClient({
   const [watchlistTree, setWatchlistTree] = useState<WatchlistGroupNode[]>(initialTree);
   const [watchlistItems, setWatchlistItems] = useState<WatchlistItemRead[]>(initialItems);
   const [activeMarket, setActiveMarket] = useState<MarketRegion>(initialMarket);
+  const [selectedCryptoBase, setSelectedCryptoBase] = useState<CryptoBaseAsset>("BTC");
+  const [selectedCryptoInstrumentKey, setSelectedCryptoInstrumentKey] = useState<string | null>(null);
   const [twChartFocusMode, setTwChartFocusMode] = useState(false);
   const [usChartFocusMode, setUsChartFocusMode] = useState(false);
   const [jpChartFocusMode, setJpChartFocusMode] = useState(false);
@@ -2260,7 +2297,10 @@ export default function MarketDashboardClient({
       const marketState = getTaiwanMarketRefreshState();
       const radarData = await fetchJson<WatchlistGroupRadarRead>(
         `/api/watchlists/groups/${groupId}/radar`,
-        watchlistRadarParams(currentMode, marketState.isPollingWindow)
+        watchlistRadarParams(
+          currentMode,
+          shouldUseTaiwanWatchlistIntraday(marketState)
+        )
       );
 
       if (radarRequestSeq.current !== requestSeq) return;
@@ -2371,7 +2411,7 @@ export default function MarketDashboardClient({
 
     try {
       const marketState = getTaiwanMarketRefreshState();
-      const useIntraday = marketState.isPollingWindow;
+      const useIntraday = shouldUseTaiwanWatchlistIntraday(marketState);
       let radarPromise: Promise<void> | null = null;
 
       function queueRadarLoad() {
@@ -2971,6 +3011,58 @@ export default function MarketDashboardClient({
   useEffect(() => {
     if (activeMarket !== "tw") return;
     if (activeGroupId === null) return;
+
+    const groupId = activeGroupId;
+    let disposed = false;
+    let refreshTimer: number | undefined;
+
+    function clearRefreshTimer() {
+      if (refreshTimer !== undefined) {
+        window.clearTimeout(refreshTimer);
+        refreshTimer = undefined;
+      }
+    }
+
+    function scheduleReleaseCheck(delay = getTaiwanWatchlistDailyReleaseCheckDelay()) {
+      if (disposed) return;
+
+      refreshTimer = window.setTimeout(() => {
+        void checkDailyPriceRelease().finally(() => {
+          if (!disposed) {
+            scheduleReleaseCheck();
+          }
+        });
+      }, delay);
+    }
+
+    async function checkDailyPriceRelease() {
+      try {
+        await refreshMarketCalendarStatus("tw");
+      } catch (error) {
+        console.warn("Taiwan calendar status refresh failed.", error);
+      }
+
+      if (disposed) return;
+
+      const marketState = getTaiwanMarketRefreshState();
+
+      if (marketState.isDailyPriceReleased) {
+        await refreshWatchlistDailyPricesOnOpen(groupId, rankBy);
+      }
+    }
+
+    scheduleReleaseCheck(0);
+
+    return () => {
+      disposed = true;
+      clearRefreshTimer();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeGroupId, activeMarket, rankBy]);
+
+  useEffect(() => {
+    if (activeMarket !== "tw") return;
+    if (activeGroupId === null) return;
     if (!rankingFreshnessPending) return;
 
     const refreshTimer = window.setTimeout(() => {
@@ -3122,6 +3214,60 @@ export default function MarketDashboardClient({
     if (typeof window === "undefined") return;
 
     window.history.pushState(null, "", buildDashboardHref(params));
+  }
+
+  function handleMarketChange(market: MarketRegion) {
+    setActiveMarket(market);
+    setErrorMessage(null);
+    setUsErrorMessage(null);
+    setTwChartFocusMode(false);
+    setUsChartFocusMode(false);
+    setJpChartFocusMode(false);
+    setJpStatusMessage(null);
+
+    if (market !== "tw") {
+      setSelectedFuturesSymbol(null);
+    }
+
+    if (market === "tw") {
+      if (selectedFuturesSymbol) {
+        pushDashboardUrl({ market: "tw", futuresSymbol: selectedFuturesSymbol });
+      } else {
+        pushDashboardUrl({
+          market: "tw",
+          groupId: activeGroupId,
+          stockId: selectedStockId,
+          radarMode,
+        });
+      }
+      return;
+    }
+
+    if (market === "us") {
+      const fallbackGroup = selectedUsGroup ?? flattenUsGroups(usWatchlistTree)[0] ?? null;
+      ensureSelectedUsGroup();
+      pushDashboardUrl({
+        market: "us",
+        groupId: fallbackGroup?.id ?? null,
+        symbol: selectedUsSymbol,
+      });
+      return;
+    }
+
+    if (market === "jp") {
+      const fallbackGroup = selectedJpGroup ?? flattenJpGroups(jpWatchlistTree)[0] ?? null;
+      ensureSelectedJpGroup();
+      pushDashboardUrl({
+        market: "jp",
+        groupId: fallbackGroup?.id ?? null,
+        jpSymbol: selectedJpSymbol,
+      });
+      return;
+    }
+
+    if (market === "crypto") {
+      pushDashboardUrl({ market: "crypto" });
+    }
   }
 
   function handleSelectGroup(group: WatchlistGroupNode | null) {
@@ -3997,22 +4143,7 @@ export default function MarketDashboardClient({
               initialItems={usWatchlistItems}
               selectedMarket={activeMarket}
               selectedSymbol={selectedUsSymbol}
-              onMarketChange={(market) => {
-                setActiveMarket(market);
-                setSelectedFuturesSymbol(null);
-                setErrorMessage(null);
-                setUsErrorMessage(null);
-                setTwChartFocusMode(false);
-                setUsChartFocusMode(false);
-                setJpChartFocusMode(false);
-                setJpStatusMessage(null);
-                if (market === "us") {
-                  ensureSelectedUsGroup();
-                }
-                if (market === "jp") {
-                  ensureSelectedJpGroup();
-                }
-              }}
+              onMarketChange={handleMarketChange}
               onSelectGroup={handleSelectUsGroup}
               onSelectSymbol={(symbol, securityName) => {
                 handleSelectUsSymbol(symbol, securityName);
@@ -4066,22 +4197,7 @@ export default function MarketDashboardClient({
               selectedSymbol={selectedJpSymbol}
               selectedStock={selectedJpStock}
               externalStatusMessage={jpStatusMessage}
-              onMarketChange={(market) => {
-                setActiveMarket(market);
-                setSelectedFuturesSymbol(null);
-                setErrorMessage(null);
-                setUsErrorMessage(null);
-                setTwChartFocusMode(false);
-                setUsChartFocusMode(false);
-                setJpChartFocusMode(false);
-                setJpStatusMessage(null);
-                if (market === "us") {
-                  ensureSelectedUsGroup();
-                }
-                if (market === "jp") {
-                  ensureSelectedJpGroup();
-                }
-              }}
+              onMarketChange={handleMarketChange}
               onSelectGroup={handleSelectJpGroup}
               onSelectSymbol={handleSelectJpSymbol}
               onExplorerDataChanged={(nextTree, nextItems) => {
@@ -4121,30 +4237,31 @@ export default function MarketDashboardClient({
             <SidebarWatchlistExplorer
               initialTree={watchlistTree}
               initialItems={watchlistItems}
-              selectedGroupId={selectedFuturesSymbol ? null : activeGroupId}
-              selectedStockId={selectedStockId}
-              selectedFuturesSymbol={selectedFuturesSymbol}
+              selectedGroupId={
+                activeMarket === "tw" && !selectedFuturesSymbol ? activeGroupId : null
+              }
+              selectedStockId={activeMarket === "tw" ? selectedStockId : null}
+              selectedFuturesSymbol={activeMarket === "tw" ? selectedFuturesSymbol : null}
               selectedMarket={activeMarket}
-              onSelectGroup={handleSelectGroup}
-              onSelectStock={handleSelectStock}
-              onSelectFutures={handleSelectTaiwanFutures}
-              onMarketChange={(market) => {
-                setActiveMarket(market);
-                setErrorMessage(null);
-                setTwChartFocusMode(false);
-                setUsChartFocusMode(false);
-                setJpChartFocusMode(false);
-                setJpStatusMessage(null);
-                if (market !== "tw") {
-                  setSelectedFuturesSymbol(null);
-                }
-                if (market === "us") {
-                  ensureSelectedUsGroup();
-                }
-                if (market === "jp") {
-                  ensureSelectedJpGroup();
-                }
+              selectedCryptoBase={selectedCryptoBase}
+              selectedCryptoInstrumentKey={selectedCryptoInstrumentKey}
+              onSelectGroup={(group) => {
+                if (activeMarket !== "tw") return;
+                handleSelectGroup(group);
               }}
+              onSelectStock={(stockId, stockName) => {
+                if (activeMarket !== "tw") return;
+                handleSelectStock(stockId, stockName);
+              }}
+              onSelectFutures={(symbol) => {
+                if (activeMarket !== "tw") return;
+                handleSelectTaiwanFutures(symbol);
+              }}
+              onSelectCryptoInstrument={(base, instrumentKey) => {
+                setSelectedCryptoBase(base);
+                setSelectedCryptoInstrumentKey(instrumentKey);
+              }}
+              onMarketChange={handleMarketChange}
               onExplorerDataChanged={(nextTree, nextItems) => {
                 setWatchlistTree(nextTree);
                 setWatchlistItems(nextItems);
@@ -4152,11 +4269,13 @@ export default function MarketDashboardClient({
                 const nextSelectedGroup =
                   flattenGroups(nextTree).find((group) => group.id === activeGroupId) ?? null;
 
-                if (nextSelectedGroup) {
+                if (activeMarket === "tw" && nextSelectedGroup) {
                   setSelectedGroup(nextSelectedGroup);
                 }
               }}
               onChanged={(nextGroupId) => {
+                if (activeMarket !== "tw") return;
+
                 const groupId = nextGroupId === undefined ? activeGroupId : nextGroupId;
                 if (groupId !== null) {
                   void loadDashboard(groupId);
@@ -4232,6 +4351,11 @@ export default function MarketDashboardClient({
                   onStatusMessage={setJpStatusMessage}
                 />
               </>
+            ) : activeMarket === "crypto" ? (
+              <CryptoMarketPanel
+                selectedBase={selectedCryptoBase}
+                selectedInstrumentKey={selectedCryptoInstrumentKey}
+              />
             ) : (
               <section className="border border-omi-border-subtle bg-omi-surface px-5 py-10 text-sm text-omi-text-muted">
                 {t("dashboard.ranking.notEnabled")}
@@ -4240,7 +4364,7 @@ export default function MarketDashboardClient({
           </section>
         </div>
       </div>
-      <OmiAskDock context={omiAskContext} />
+      {activeMarket !== "crypto" ? <OmiAskDock context={omiAskContext} /> : null}
     </main>
   );
 }

@@ -13,6 +13,7 @@ from app.db.session import SessionLocal
 
 TECHNICAL_ANALYSIS_SETTING_KEY = "technical_analysis"
 REFRESH_EXECUTION_SETTING_KEY = "refresh_execution_policy"
+MARKET_DATA_SUBSCRIPTION_SETTING_KEY = "market_data_subscription_policy"
 
 
 def _load_setting_payload(db: Session, setting_key: str) -> dict[str, Any] | None:
@@ -123,4 +124,29 @@ def save_refresh_execution_setting_payload(
         payload,
         source="user",
         description="Per-market refresh execution cadence policy.",
+    )
+
+
+def get_market_data_subscription_setting_payload(
+    *,
+    db: Session | None = None,
+    fallback_on_error: bool = True,
+) -> dict[str, Any] | None:
+    return get_setting_payload(
+        MARKET_DATA_SUBSCRIPTION_SETTING_KEY,
+        db=db,
+        fallback_on_error=fallback_on_error,
+    )
+
+
+def save_market_data_subscription_setting_payload(
+    db: Session,
+    payload: Mapping[str, Any],
+) -> AppSetting:
+    return save_setting_payload(
+        db,
+        MARKET_DATA_SUBSCRIPTION_SETTING_KEY,
+        payload,
+        source="user",
+        description="Crypto and resource market data subscription policy.",
     )

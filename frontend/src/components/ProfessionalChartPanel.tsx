@@ -55,6 +55,7 @@ type Props<TTimeframe extends string> = {
   onCloseIndicatorMenu?: () => void;
   onClose: () => void;
   message?: ReactNode;
+  drawingToolbarStart?: ReactNode;
   chartReady: boolean;
   emptyState?: ReactNode;
   chartData: ChartPoint[];
@@ -98,6 +99,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
   chartStyle,
   drawingContext,
   drawingTool,
+  drawingToolbarStart,
   drawings,
   emptyState,
   historyCounts,
@@ -206,6 +208,11 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
 
         <div className="mt-2 flex flex-wrap items-center justify-end gap-1.5 border-t border-omi-border-subtle pt-2">
           <div className="flex max-w-full flex-wrap items-center justify-end gap-1 border border-omi-border-subtle bg-omi-surface-subtle p-0.5">
+            {drawingToolbarStart ? (
+              <div className="flex items-center gap-0.5 border-r border-omi-border-subtle pr-1">
+                {drawingToolbarStart}
+              </div>
+            ) : null}
             {professionalChartDrawingToolGroups.map((group, groupIndex) => (
               <div
                 key={group.key}

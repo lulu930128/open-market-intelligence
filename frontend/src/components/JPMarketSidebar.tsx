@@ -44,7 +44,7 @@ const marketOptions: Array<{
   { value: "us", enabled: true },
   { value: "jp", enabled: true },
   { value: "kr", enabled: false },
-  { value: "crypto", enabled: false },
+  { value: "crypto", enabled: true },
 ];
 
 function flattenGroups(nodes: JPWatchlistGroupNode[]): JPWatchlistGroupNode[] {

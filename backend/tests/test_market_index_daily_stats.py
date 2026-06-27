@@ -297,6 +297,140 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertEqual(payload["positive"][0]["stock_id"], "2330")
         self.assertEqual(payload["negative"][0]["stock_id"], "2383")
 
+    def test_index_intraday_overlays_mis_snapshot_on_yahoo_history(self) -> None:
+        yahoo_payload = {
+            "stock_id": "TAIEX",
+            "symbol": "^TWII",
+            "source": "yahoo_finance_chart",
+            "previous_close": 46255.26,
+            "point_count": 1,
+            "points": [
+                {
+                    "time": "2026-06-26T09:40:10+08:00",
+                    "price": 45605.52,
+                    "volume": None,
+                    "open": 46188.60,
+                    "high": 46188.60,
+                    "low": 45332.22,
+                }
+            ],
+        }
+        mis_message = {
+            "d": "20260626",
+            "t": "09:48:25",
+            "z": "45430.31",
+            "y": "46255.26",
+            "o": "46188.60",
+            "h": "46188.60",
+            "l": "45332.22",
+            "m": "4911549",
+        }
+
+        with (
+            patch.object(indices, "_fetch_yahoo_index_intraday", return_value=yahoo_payload),
+            patch.object(indices, "_fetch_mis_index_message", return_value=mis_message),
+        ):
+            payload = indices.get_market_index_intraday("TAIEX")
+
+        self.assertEqual(payload["source"], "yahoo_finance_chart_twse_mis_snapshot")
+        self.assertEqual(payload["previous_close"], 46255.26)
+        self.assertEqual(payload["point_count"], 2)
+        self.assertEqual(payload["points"][-1]["time"], "2026-06-26T09:48:25+08:00")
+        self.assertEqual(payload["points"][-1]["price"], 45430.31)
+        self.assertEqual(payload["points"][-1]["volume"], 4_911_549)
+
+    def test_index_intraday_returns_mis_snapshot_when_yahoo_has_no_points(self) -> None:
+        yahoo_payload = {
+            "stock_id": "TAIEX",
+            "symbol": "^TWII",
+            "source": "yahoo_finance_chart",
+            "previous_close": None,
+            "point_count": 0,
+            "points": [],
+        }
+        mis_message = {
+            "d": "20260626",
+            "t": "09:48:25",
+            "z": "45430.31",
+            "y": "46255.26",
+            "o": "46188.60",
+            "h": "46188.60",
+            "l": "45332.22",
+        }
+
+        with (
+            patch.object(indices, "_fetch_yahoo_index_intraday", return_value=yahoo_payload),
+            patch.object(indices, "_fetch_mis_index_message", return_value=mis_message),
+        ):
+            payload = indices.get_market_index_intraday("TAIEX")
+
+        self.assertEqual(payload["source"], "twse_mis_index_snapshot")
+        self.assertEqual(payload["point_count"], 1)
+        self.assertEqual(payload["points"][0]["price"], 45430.31)
+
+    def test_index_intraday_keeps_yahoo_payload_when_mis_is_unavailable(self) -> None:
+        yahoo_payload = {
+            "stock_id": "TAIEX",
+            "symbol": "^TWII",
+            "source": "yahoo_finance_chart",
+            "previous_close": 46255.26,
+            "point_count": 1,
+            "points": [
+                {
+                    "time": "2026-06-26T09:40:10+08:00",
+                    "price": 45605.52,
+                    "volume": None,
+                    "open": 46188.60,
+                    "high": 46188.60,
+                    "low": 45332.22,
+                }
+            ],
+        }
+
+        with (
+            patch.object(indices, "_fetch_yahoo_index_intraday", return_value=yahoo_payload),
+            patch.object(indices, "_fetch_mis_index_message", side_effect=ConnectionError("mis offline")),
+        ):
+            payload = indices.get_market_index_intraday("TAIEX")
+
+        self.assertEqual(payload, yahoo_payload)
+
+    def test_index_intraday_ignores_older_mis_snapshot(self) -> None:
+        yahoo_payload = {
+            "stock_id": "TAIEX",
+            "symbol": "^TWII",
+            "source": "yahoo_finance_chart",
+            "previous_close": 46255.26,
+            "point_count": 1,
+            "points": [
+                {
+                    "time": "2026-06-26T09:50:00+08:00",
+                    "price": 45500.0,
+                    "volume": None,
+                    "open": 46188.60,
+                    "high": 46188.60,
+                    "low": 45332.22,
+                }
+            ],
+        }
+        mis_message = {
+            "d": "20260626",
+            "t": "09:48:25",
+            "z": "45430.31",
+            "y": "46255.26",
+            "o": "46188.60",
+            "h": "46188.60",
+            "l": "45332.22",
+        }
+
+        with (
+            patch.object(indices, "_fetch_yahoo_index_intraday", return_value=yahoo_payload),
+            patch.object(indices, "_fetch_mis_index_message", return_value=mis_message),
+        ):
+            payload = indices.get_market_index_intraday("TAIEX")
+
+        self.assertEqual(payload, yahoo_payload)
+
 
 if __name__ == "__main__":
     unittest.main()

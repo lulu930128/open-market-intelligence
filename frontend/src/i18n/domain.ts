@@ -11,10 +11,12 @@ function translatedValue(
 }
 
 export function marketLabel(t: TranslationFunction, market: string) {
+  if (market === "crypto") return "Crypto";
   return t(`markets.${market}.label`);
 }
 
 export function marketSummary(t: TranslationFunction, market: string) {
+  if (market === "crypto") return "Quotes / depth / funding / Taiwan spread";
   return t(`markets.${market}.summary`);
 }
 

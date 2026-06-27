@@ -643,6 +643,550 @@ class TaiwanFuturesDailyBar(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class CryptoTickerSnapshot(Base):
+    __tablename__ = "crypto_ticker_snapshot"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "symbol",
+            "instrument_type",
+            name="uq_crypto_ticker_provider_symbol_instrument",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    exchange: Mapped[str] = mapped_column(String(80), index=True)
+    symbol: Mapped[str] = mapped_column(String(40), index=True)
+    provider_symbol: Mapped[str] = mapped_column(String(60), index=True)
+    base_asset: Mapped[str] = mapped_column(String(20), index=True)
+    quote_asset: Mapped[str] = mapped_column(String(20), index=True)
+    instrument_type: Mapped[str] = mapped_column(String(30), default="spot", index=True)
+
+    last_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bid_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bid_size: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ask_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ask_size: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high_24h: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low_24h: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_change_24h: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_change_pct_24h: Mapped[float | None] = mapped_column(Float, nullable=True)
+    base_volume_24h: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quote_volume_24h: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    event_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class CryptoOrderBookSnapshot(Base):
+    __tablename__ = "crypto_order_book_snapshot"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "symbol",
+            "instrument_type",
+            "depth_limit",
+            name="uq_crypto_order_book_provider_symbol_instrument_depth",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    exchange: Mapped[str] = mapped_column(String(80), index=True)
+    symbol: Mapped[str] = mapped_column(String(40), index=True)
+    provider_symbol: Mapped[str] = mapped_column(String(60), index=True)
+    base_asset: Mapped[str] = mapped_column(String(20), index=True)
+    quote_asset: Mapped[str] = mapped_column(String(20), index=True)
+    instrument_type: Mapped[str] = mapped_column(String(30), default="spot", index=True)
+    depth_limit: Mapped[int] = mapped_column(Integer, default=5, index=True)
+
+    best_bid_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    best_bid_size: Mapped[float | None] = mapped_column(Float, nullable=True)
+    best_ask_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    best_ask_size: Mapped[float | None] = mapped_column(Float, nullable=True)
+    spread: Mapped[float | None] = mapped_column(Float, nullable=True)
+    spread_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    bids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    asks_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    event_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class CryptoOhlcvBar(Base):
+    __tablename__ = "crypto_ohlcv_bar"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "symbol",
+            "instrument_type",
+            "interval",
+            "bar_time",
+            name="uq_crypto_ohlcv_provider_symbol_instrument_interval_time",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    exchange: Mapped[str] = mapped_column(String(80), index=True)
+    symbol: Mapped[str] = mapped_column(String(40), index=True)
+    provider_symbol: Mapped[str] = mapped_column(String(60), index=True)
+    base_asset: Mapped[str] = mapped_column(String(20), index=True)
+    quote_asset: Mapped[str] = mapped_column(String(20), index=True)
+    instrument_type: Mapped[str] = mapped_column(String(30), default="spot", index=True)
+    interval: Mapped[str] = mapped_column(String(10), index=True)
+    bar_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+    open_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    close_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    base_volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quote_volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class CryptoDerivativesMetric(Base):
+    __tablename__ = "crypto_derivatives_metric"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "symbol",
+            "instrument_type",
+            name="uq_crypto_derivatives_provider_symbol_instrument",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    exchange: Mapped[str] = mapped_column(String(80), index=True)
+    symbol: Mapped[str] = mapped_column(String(40), index=True)
+    provider_symbol: Mapped[str] = mapped_column(String(60), index=True)
+    base_asset: Mapped[str] = mapped_column(String(20), index=True)
+    quote_asset: Mapped[str] = mapped_column(String(20), index=True)
+    instrument_type: Mapped[str] = mapped_column(String(30), default="perpetual", index=True)
+
+    mark_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    index_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    funding_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    next_funding_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    open_interest: Mapped[float | None] = mapped_column(Float, nullable=True)
+    open_interest_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    event_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class CryptoMarketCapSnapshot(Base):
+    __tablename__ = "crypto_market_cap_snapshot"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "coin_id",
+            "vs_currency",
+            name="uq_crypto_market_cap_provider_coin_currency",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    coin_id: Mapped[str] = mapped_column(String(80), index=True)
+    symbol: Mapped[str] = mapped_column(String(20), index=True)
+    name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    vs_currency: Mapped[str] = mapped_column(String(10), default="usd", index=True)
+
+    current_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    market_cap: Mapped[float | None] = mapped_column(Float, nullable=True)
+    market_cap_rank: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    total_volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high_24h: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low_24h: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_change_pct_24h: Mapped[float | None] = mapped_column(Float, nullable=True)
+    circulating_supply: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_supply: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_supply: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    last_updated: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class CryptoSpreadSnapshot(Base):
+    __tablename__ = "crypto_spread_snapshot"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "base_asset",
+            "local_provider",
+            "global_provider",
+            "local_symbol",
+            "global_symbol",
+            "fx_symbol",
+            name="uq_crypto_spread_base_local_global_fx",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    base_asset: Mapped[str] = mapped_column(String(20), index=True)
+    quote_asset: Mapped[str] = mapped_column(String(20), default="TWD", index=True)
+    local_provider: Mapped[str] = mapped_column(String(40), index=True)
+    global_provider: Mapped[str] = mapped_column(String(40), index=True)
+    fx_provider: Mapped[str] = mapped_column(String(40), index=True)
+    local_symbol: Mapped[str] = mapped_column(String(40), index=True)
+    global_symbol: Mapped[str] = mapped_column(String(40), index=True)
+    fx_symbol: Mapped[str] = mapped_column(String(40), index=True)
+
+    local_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    global_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fx_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    implied_twd_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    spread: Mapped[float | None] = mapped_column(Float, nullable=True)
+    spread_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    source_state_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class CryptoTickerHistory(Base):
+    __tablename__ = "crypto_ticker_history"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "symbol",
+            "instrument_type",
+            "sampled_at",
+            name="uq_crypto_ticker_history_provider_symbol_instrument_sampled",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    exchange: Mapped[str] = mapped_column(String(80), index=True)
+    symbol: Mapped[str] = mapped_column(String(40), index=True)
+    provider_symbol: Mapped[str] = mapped_column(String(60), index=True)
+    base_asset: Mapped[str] = mapped_column(String(20), index=True)
+    quote_asset: Mapped[str] = mapped_column(String(20), index=True)
+    instrument_type: Mapped[str] = mapped_column(String(30), default="spot", index=True)
+
+    last_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bid_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bid_size: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ask_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ask_size: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high_24h: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low_24h: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_change_24h: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_change_pct_24h: Mapped[float | None] = mapped_column(Float, nullable=True)
+    base_volume_24h: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quote_volume_24h: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    event_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    sampled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class CryptoLiquidityHistory(Base):
+    __tablename__ = "crypto_liquidity_history"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "symbol",
+            "instrument_type",
+            "depth_limit",
+            "sampled_at",
+            name="uq_crypto_liquidity_history_provider_symbol_instrument_depth_sampled",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    exchange: Mapped[str] = mapped_column(String(80), index=True)
+    symbol: Mapped[str] = mapped_column(String(40), index=True)
+    provider_symbol: Mapped[str] = mapped_column(String(60), index=True)
+    base_asset: Mapped[str] = mapped_column(String(20), index=True)
+    quote_asset: Mapped[str] = mapped_column(String(20), index=True)
+    instrument_type: Mapped[str] = mapped_column(String(30), default="spot", index=True)
+    depth_limit: Mapped[int] = mapped_column(Integer, default=5, index=True)
+
+    best_bid_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    best_bid_size: Mapped[float | None] = mapped_column(Float, nullable=True)
+    best_ask_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    best_ask_size: Mapped[float | None] = mapped_column(Float, nullable=True)
+    spread: Mapped[float | None] = mapped_column(Float, nullable=True)
+    spread_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    bids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    asks_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    event_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    sampled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class CryptoDerivativesMetricHistory(Base):
+    __tablename__ = "crypto_derivatives_metric_history"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "symbol",
+            "instrument_type",
+            "sampled_at",
+            name="uq_crypto_derivatives_history_provider_symbol_instrument_sampled",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    exchange: Mapped[str] = mapped_column(String(80), index=True)
+    symbol: Mapped[str] = mapped_column(String(40), index=True)
+    provider_symbol: Mapped[str] = mapped_column(String(60), index=True)
+    base_asset: Mapped[str] = mapped_column(String(20), index=True)
+    quote_asset: Mapped[str] = mapped_column(String(20), index=True)
+    instrument_type: Mapped[str] = mapped_column(String(30), default="perpetual", index=True)
+
+    mark_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    index_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    funding_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    next_funding_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    open_interest: Mapped[float | None] = mapped_column(Float, nullable=True)
+    open_interest_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    event_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    sampled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class CryptoSpreadHistory(Base):
+    __tablename__ = "crypto_spread_history"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "base_asset",
+            "local_provider",
+            "global_provider",
+            "local_symbol",
+            "global_symbol",
+            "fx_symbol",
+            "sampled_at",
+            name="uq_crypto_spread_history_base_local_global_fx_sampled",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    base_asset: Mapped[str] = mapped_column(String(20), index=True)
+    quote_asset: Mapped[str] = mapped_column(String(20), default="TWD", index=True)
+    local_provider: Mapped[str] = mapped_column(String(40), index=True)
+    global_provider: Mapped[str] = mapped_column(String(40), index=True)
+    fx_provider: Mapped[str] = mapped_column(String(40), index=True)
+    local_symbol: Mapped[str] = mapped_column(String(40), index=True)
+    global_symbol: Mapped[str] = mapped_column(String(40), index=True)
+    fx_symbol: Mapped[str] = mapped_column(String(40), index=True)
+
+    local_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    global_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fx_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    implied_twd_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    spread: Mapped[float | None] = mapped_column(Float, nullable=True)
+    spread_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    sampled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    source_state_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class ResourceMarketInstrument(Base):
+    __tablename__ = "resource_market_instrument"
+
+    __table_args__ = (
+        UniqueConstraint("key", name="uq_resource_market_instrument_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    key: Mapped[str] = mapped_column(String(80), index=True)
+    root_folder: Mapped[str] = mapped_column(String(40), default="commodity", index=True)
+    group: Mapped[str] = mapped_column(String(40), index=True)
+    asset_class: Mapped[str] = mapped_column(String(40), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    display_name: Mapped[str] = mapped_column(String(120))
+    symbol: Mapped[str] = mapped_column(String(40), index=True)
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    exchange: Mapped[str] = mapped_column(String(80), index=True)
+    provider_symbol: Mapped[str] = mapped_column(String(80), index=True)
+    base_asset: Mapped[str] = mapped_column(String(30), index=True)
+    quote_asset: Mapped[str] = mapped_column(String(30), default="USD", index=True)
+    instrument_type: Mapped[str] = mapped_column(String(30), default="futures", index=True)
+    contract_type: Mapped[str] = mapped_column(String(40), default="front_month", index=True)
+    tradable: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    trade_candidate: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    resources_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    provider_status: Mapped[str] = mapped_column(String(40), default="provider_pending", index=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class ResourceQuoteSnapshot(Base):
+    __tablename__ = "resource_quote_snapshot"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "symbol",
+            "instrument_type",
+            "contract_key",
+            name="uq_resource_quote_provider_symbol_instrument_contract",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    exchange: Mapped[str] = mapped_column(String(80), index=True)
+    symbol: Mapped[str] = mapped_column(String(40), index=True)
+    provider_symbol: Mapped[str] = mapped_column(String(80), index=True)
+    name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    root_folder: Mapped[str] = mapped_column(String(40), default="commodity", index=True)
+    group: Mapped[str] = mapped_column(String(40), index=True)
+    asset_class: Mapped[str] = mapped_column(String(40), index=True)
+    base_asset: Mapped[str] = mapped_column(String(30), index=True)
+    quote_asset: Mapped[str] = mapped_column(String(30), default="USD", index=True)
+    instrument_type: Mapped[str] = mapped_column(String(30), default="futures", index=True)
+    contract_key: Mapped[str] = mapped_column(String(80), default="front_month", index=True)
+    contract_month: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+
+    last_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bid_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ask_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    open_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    previous_close: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_change: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_change_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+    open_interest: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    event_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class ResourceOhlcvBar(Base):
+    __tablename__ = "resource_ohlcv_bar"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "symbol",
+            "instrument_type",
+            "contract_key",
+            "interval",
+            "bar_time",
+            name="uq_resource_ohlcv_provider_symbol_instrument_contract_interval_time",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    exchange: Mapped[str] = mapped_column(String(80), index=True)
+    symbol: Mapped[str] = mapped_column(String(40), index=True)
+    provider_symbol: Mapped[str] = mapped_column(String(80), index=True)
+    name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    root_folder: Mapped[str] = mapped_column(String(40), default="commodity", index=True)
+    group: Mapped[str] = mapped_column(String(40), index=True)
+    asset_class: Mapped[str] = mapped_column(String(40), index=True)
+    base_asset: Mapped[str] = mapped_column(String(30), index=True)
+    quote_asset: Mapped[str] = mapped_column(String(30), default="USD", index=True)
+    instrument_type: Mapped[str] = mapped_column(String(30), default="futures", index=True)
+    contract_key: Mapped[str] = mapped_column(String(80), default="front_month", index=True)
+    contract_month: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    interval: Mapped[str] = mapped_column(String(10), index=True)
+    bar_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+    open_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    close_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+    open_interest: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class ChartDrawingSnapshot(Base):
     __tablename__ = "chart_drawing_snapshot"
 

@@ -32,6 +32,7 @@ $script:IsShuttingDown = $false
 $script:DashboardAutoOpened = $false
 $script:DefaultFrontendHost = "127.0.0.1"
 $script:DefaultFrontendPort = 3000
+$script:FrontendPortSearchSpan = 1000
 $script:DefaultBackendHost = "127.0.0.1"
 $script:DefaultBackendPort = 8400
 $script:DefaultApiProxyPath = "/omi-data"
@@ -559,33 +560,91 @@ function Get-ListeningProcessIdsOnPort {
     return ($processIds | Sort-Object -Unique)
 }
 
-function Test-TcpPortExcluded {
-    param(
-        [Parameter(Mandatory = $true)][int]$Port,
-        [string]$ServiceName = "service"
-    )
+function Get-TcpExcludedPortRanges {
+    param([switch]$Quiet)
 
     $netsh = Join-Path $env:SystemRoot "System32\netsh.exe"
     if (-not (Test-Path -LiteralPath $netsh)) {
-        Write-LauncherLog "netsh.exe was not found; skipping TCP excluded port range check." "WARN"
-        return $false
+        if (-not $Quiet) {
+            Write-LauncherLog "netsh.exe was not found; skipping TCP excluded port range check." "WARN"
+        }
+        return @()
     }
 
+    $ranges = @()
     foreach ($addressFamily in @("ipv4", "ipv6")) {
         $lines = & $netsh interface $addressFamily show excludedportrange protocol=tcp 2>$null
         foreach ($line in $lines) {
             if ($line -match "^\s*(\d+)\s+(\d+)\s*(?:\*)?\s*$") {
-                $startPort = [int]$Matches[1]
-                $endPort = [int]$Matches[2]
-                if ($Port -ge $startPort -and $Port -le $endPort) {
-                    Write-LauncherLog "$ServiceName port $Port is inside Windows $addressFamily TCP excluded range $startPort-$endPort." "WARN"
-                    return $true
+                $ranges += [pscustomobject]@{
+                    AddressFamily = $addressFamily
+                    StartPort = [int]$Matches[1]
+                    EndPort = [int]$Matches[2]
                 }
             }
         }
     }
 
+    return $ranges
+}
+
+function Test-TcpPortExcluded {
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [string]$ServiceName = "service",
+        [object[]]$Ranges = $null,
+        [switch]$Quiet
+    )
+
+    $excludedRanges = if ($null -ne $Ranges) { $Ranges } else { @(Get-TcpExcludedPortRanges -Quiet:$Quiet) }
+    foreach ($range in $excludedRanges) {
+        $startPort = [int]$range.StartPort
+        $endPort = [int]$range.EndPort
+        if ($Port -ge $startPort -and $Port -le $endPort) {
+            if (-not $Quiet) {
+                Write-LauncherLog "$ServiceName port $Port is inside Windows $($range.AddressFamily) TCP excluded range $startPort-$endPort." "WARN"
+            }
+            return $true
+        }
+    }
+
     return $false
+}
+
+function Test-TcpPortBindable {
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [string]$HostName = $script:FrontendHost,
+        [switch]$Quiet
+    )
+
+    $normalizedHost = $HostName.Trim("[", "]")
+    $address = $null
+    if (-not [System.Net.IPAddress]::TryParse($normalizedHost, [ref]$address)) {
+        $address = [System.Net.IPAddress]::Loopback
+    }
+
+    $listener = $null
+    try {
+        $listener = [System.Net.Sockets.TcpListener]::new($address, $Port)
+        $listener.Start()
+        return $true
+    }
+    catch {
+        if (-not $Quiet) {
+            $errorMessage = $_.Exception.Message
+            if ($null -ne $_.Exception.InnerException) {
+                $errorMessage = $_.Exception.InnerException.Message
+            }
+            Write-LauncherLog "Frontend port $Port cannot be bound on $HostName. error=$errorMessage" "WARN"
+        }
+        return $false
+    }
+    finally {
+        if ($null -ne $listener) {
+            $listener.Stop()
+        }
+    }
 }
 
 function Assert-BackendPortBindable {
@@ -597,14 +656,19 @@ function Assert-BackendPortBindable {
 function Find-AvailableFrontendPort {
     param([Parameter(Mandatory = $true)][int]$PreferredPort)
 
-    $maxPort = [Math]::Min($PreferredPort + 50, 65535)
+    $maxPort = [Math]::Min($PreferredPort + $script:FrontendPortSearchSpan, 65535)
+    $excludedRanges = @(Get-TcpExcludedPortRanges -Quiet)
     for ($port = $PreferredPort; $port -le $maxPort; $port++) {
+        if (Test-TcpPortExcluded -Port $port -ServiceName "Frontend" -Ranges $excludedRanges -Quiet) {
+            continue
+        }
+
         $processIds = @(Get-ListeningProcessIdsOnPort -Port $port)
         if ($processIds.Count -gt 0) {
             continue
         }
 
-        if (Test-TcpPortExcluded -Port $port -ServiceName "Frontend") {
+        if (-not (Test-TcpPortBindable -Port $port -HostName $script:FrontendHost -Quiet)) {
             continue
         }
 
@@ -612,6 +676,32 @@ function Find-AvailableFrontendPort {
     }
 
     throw "Could not find an available frontend port from $PreferredPort to $maxPort. Set OMI_FRONTEND_PORT to an available port and restart OMI."
+}
+
+function Select-AvailableFrontendPortForStart {
+    $reasons = @()
+    if (Test-TcpPortExcluded -Port $script:FrontendPort -ServiceName "Frontend") {
+        $reasons += "Windows TCP excluded range"
+    }
+
+    $processIds = @(Get-ListeningProcessIdsOnPort -Port $script:FrontendPort)
+    if ($processIds.Count -gt 0) {
+        $reasons += "listening process pid=$($processIds -join ',')"
+    }
+
+    if ($reasons.Count -eq 0 -and
+        (-not (Test-TcpPortBindable -Port $script:FrontendPort -HostName $script:FrontendHost))) {
+        $reasons += "bind probe failed"
+    }
+
+    if ($reasons.Count -eq 0) {
+        return
+    }
+
+    $previousUrl = $script:DashboardUrl
+    $script:FrontendPort = Find-AvailableFrontendPort -PreferredPort ($script:FrontendPort + 1)
+    Update-FrontendServiceUrls
+    Write-LauncherLog "Frontend port is not bindable ($($reasons -join '; ')). previous=$previousUrl selected=$($script:DashboardUrl)" "WARN"
 }
 
 function Stop-BackendPortOwners {
@@ -865,6 +955,8 @@ function Start-Frontend {
         Update-FrontendServiceUrls
         Write-LauncherLog "Frontend port already responds but is not the expected runtime. previous=$previousUrl selected=$($script:DashboardUrl)" "WARN"
     }
+
+    Select-AvailableFrontendPortForStart
 
     if ($script:IsPackagedRelease) {
         $serverScript = Join-Path $script:FrontendDir "server.js"
