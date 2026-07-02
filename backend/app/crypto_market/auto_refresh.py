@@ -14,6 +14,7 @@ from app.crypto_market.service import (
     refresh_crypto_market_caps,
     refresh_crypto_order_books,
     refresh_crypto_ohlcv,
+    refresh_crypto_ohlcv_bundle,
     refresh_crypto_spreads,
     refresh_crypto_tickers,
 )
@@ -31,6 +32,9 @@ from app.settings.schemas import (
 logger = logging.getLogger(__name__)
 
 DERIVATIVES_PROVIDERS = "binance,okx"
+DEFAULT_OHLCV_BUNDLE_INTERVAL_SECONDS = 900.0
+OHLCV_FAST_INTERVALS = ("1m",)
+OHLCV_BUNDLE_INTERVALS = ("1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1M")
 AUTO_REFRESH_RESOURCES = (
     "quote",
     "order_book",
@@ -165,9 +169,15 @@ class CryptoAutoRefreshPlan:
     symbols: tuple[str, ...] = ()
     assets: tuple[str, ...] = ()
     bases: tuple[str, ...] = ()
+    mode: str = "default"
+    ohlcv_intervals: tuple[str, ...] = ()
 
     def state_key(self) -> str:
         provider_part = (self.providers or "all").replace(",", "+")
+        if self.mode != "default" or self.ohlcv_intervals:
+            mode_part = self.mode or "default"
+            interval_part = "+".join(self.ohlcv_intervals) if self.ohlcv_intervals else "all"
+            return f"{self.resource}:{provider_part}:{mode_part}:{interval_part}"
         return f"{self.resource}:{provider_part}"
 
     def targets(self) -> tuple[str, ...]:
@@ -183,6 +193,8 @@ class CryptoAutoRefreshResourceState:
     key: str
     resource: str
     providers: str | None = None
+    mode: str = "default"
+    ohlcv_intervals: tuple[str, ...] = ()
     enabled: bool = False
     interval_seconds: float | None = None
     targets: tuple[str, ...] = ()
@@ -202,6 +214,8 @@ class CryptoAutoRefreshResourceState:
             "key": self.key,
             "resource": self.resource,
             "providers": self.providers,
+            "mode": self.mode,
+            "ohlcv_intervals": list(self.ohlcv_intervals),
             "enabled": self.enabled,
             "interval_seconds": self.interval_seconds,
             "targets": list(self.targets),
@@ -222,8 +236,13 @@ def build_crypto_auto_refresh_plans(
     subscription_settings: MarketDataSubscriptionSettingsRead,
     *,
     min_interval_seconds: float | None = None,
+    ohlcv_bundle_interval_seconds: float | None = None,
 ) -> list[CryptoAutoRefreshPlan]:
     min_interval = max(float(min_interval_seconds or 1.0), 1.0)
+    ohlcv_bundle_interval = max(
+        float(ohlcv_bundle_interval_seconds or DEFAULT_OHLCV_BUNDLE_INTERVAL_SECONDS),
+        min_interval,
+    )
     resource_assets: dict[str, list[str]] = {resource: [] for resource in AUTO_REFRESH_RESOURCES}
     resource_intervals: dict[str, float] = {}
 
@@ -252,7 +271,7 @@ def build_crypto_auto_refresh_plans(
             continue
         interval_seconds = max(resource_intervals.get(resource, min_interval), min_interval)
 
-        if resource in {"quote", "order_book", "ohlcv"}:
+        if resource in {"quote", "order_book"}:
             for provider, symbols in _spot_symbol_batches_for_assets(
                 assets,
                 resource=resource,
@@ -263,6 +282,31 @@ def build_crypto_auto_refresh_plans(
                         interval_seconds=interval_seconds,
                         providers=_provider_csv(provider),
                         symbols=symbols,
+                    )
+                )
+        elif resource == "ohlcv":
+            for provider, symbols in _spot_symbol_batches_for_assets(
+                assets,
+                resource=resource,
+            ):
+                plans.append(
+                    CryptoAutoRefreshPlan(
+                        resource=resource,
+                        interval_seconds=interval_seconds,
+                        providers=_provider_csv(provider),
+                        symbols=symbols,
+                        mode="fast",
+                        ohlcv_intervals=OHLCV_FAST_INTERVALS,
+                    )
+                )
+                plans.append(
+                    CryptoAutoRefreshPlan(
+                        resource=resource,
+                        interval_seconds=max(ohlcv_bundle_interval, interval_seconds),
+                        providers=_provider_csv(provider),
+                        symbols=symbols,
+                        mode="coverage",
+                        ohlcv_intervals=OHLCV_BUNDLE_INTERVALS,
                     )
                 )
         elif resource == "derivatives":
@@ -304,6 +348,7 @@ def _load_auto_refresh_plans() -> list[CryptoAutoRefreshPlan]:
     return build_crypto_auto_refresh_plans(
         subscription_settings,
         min_interval_seconds=settings.crypto_market_auto_refresh_min_interval_seconds,
+        ohlcv_bundle_interval_seconds=settings.crypto_market_auto_refresh_ohlcv_bundle_seconds,
     )
 
 
@@ -323,11 +368,18 @@ def _execute_auto_refresh_plan(plan: CryptoAutoRefreshPlan) -> dict[str, Any]:
                 depth_limit=settings.crypto_market_ws_order_book_depth,
             )
         if plan.resource == "ohlcv":
+            if plan.mode == "coverage":
+                return refresh_crypto_ohlcv_bundle(
+                    db,
+                    providers=plan.providers,
+                    symbols=",".join(plan.symbols),
+                    intervals=",".join(plan.ohlcv_intervals),
+                )
             return refresh_crypto_ohlcv(
                 db,
                 providers=plan.providers,
                 symbols=",".join(plan.symbols),
-                interval="1m",
+                interval=plan.ohlcv_intervals[0] if plan.ohlcv_intervals else "1m",
                 limit=settings.crypto_market_auto_refresh_ohlcv_limit,
             )
         if plan.resource == "derivatives":
@@ -429,6 +481,8 @@ class CryptoAutoRefreshManager:
                 state.interval_seconds = None
                 state.targets = ()
                 state.providers = None
+                state.mode = "default"
+                state.ohlcv_intervals = ()
                 state.next_due_at = None
 
         now = _now()
@@ -441,6 +495,8 @@ class CryptoAutoRefreshManager:
             state.enabled = True
             state.resource = plan.resource
             state.providers = plan.providers
+            state.mode = plan.mode
+            state.ohlcv_intervals = plan.ohlcv_intervals
             state.interval_seconds = plan.interval_seconds
             state.targets = plan.targets()
 

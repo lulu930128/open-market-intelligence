@@ -27,9 +27,14 @@ from app.parsers.twse_common import (
 
 
 TWSE_BFI82U_URL = "https://www.twse.com.tw/rwd/zh/fund/BFI82U"
+TWSE_MARGIN_TRADING_URL = "https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN"
 TAIFEX_FUT_CONTRACTS_DATE_URL = "https://www.taifex.com.tw/cht/3/futContractsDate"
 TPEX_3INSTI_SUMMARY_URL = "https://www.tpex.org.tw/openapi/v1/tpex_3insti_summary"
-MARKET_CHIP_RELEASE_TIME = time(hour=18, minute=30)
+TPEX_MARGIN_BALANCE_URL = "https://www.tpex.org.tw/www/zh-tw/margin/balance"
+MARKET_FUTURES_RELEASE_TIME = time(hour=15, minute=0)
+MARKET_INSTITUTIONAL_RELEASE_TIME = time(hour=15, minute=10)
+MARKET_CHIP_RELEASE_TIME = MARKET_INSTITUTIONAL_RELEASE_TIME
+MARKET_MARGIN_RELEASE_TIME = time(hour=21, minute=10)
 HTTP_TIMEOUT_SECONDS = 20
 REQUEST_HEADERS = {
     "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
@@ -58,6 +63,18 @@ def expected_market_chip_date(
 ) -> date:
     return latest_released_trading_day(
         release_time=MARKET_CHIP_RELEASE_TIME,
+        include_today=include_today,
+        now=now,
+    )
+
+
+def expected_market_margin_chip_date(
+    *,
+    include_today: bool | None = None,
+    now: datetime | None = None,
+) -> date:
+    return latest_released_trading_day(
+        release_time=MARKET_MARGIN_RELEASE_TIME,
         include_today=include_today,
         now=now,
     )
@@ -148,6 +165,10 @@ def _format_taifex_date(value: date) -> str:
     return value.strftime("%Y/%m/%d")
 
 
+def _format_roc_slash_date(value: date) -> str:
+    return f"{value.year - 1911:03d}/{value.month:02d}/{value.day:02d}"
+
+
 def _as_signed_int(value: int | None) -> int | None:
     return value if value is None else int(value)
 
@@ -215,6 +236,17 @@ def _net_value_from_row(row: dict[str, Any]) -> int | None:
     )
 
 
+def _delta_units(
+    *,
+    current: int | None,
+    previous: int | None,
+    multiplier: int = 1,
+) -> int | None:
+    if current is None or previous is None:
+        return None
+    return (current - previous) * multiplier
+
+
 def _payload_date(payload: Any, fallback: date) -> date:
     if isinstance(payload, dict):
         for key in ("date", "Date", "trade_date", "title", "stat"):
@@ -232,6 +264,41 @@ def _payload_date(payload: Any, fallback: date) -> date:
                     return parsed
 
     return fallback
+
+
+def _first_table_with_rows(payload: Any) -> dict[str, Any] | None:
+    if isinstance(payload, dict):
+        tables = payload.get("tables") or payload.get("Tables") or []
+        if isinstance(tables, list):
+            for table in tables:
+                if not isinstance(table, dict):
+                    continue
+                rows = table.get("data") or table.get("Data")
+                fields = table.get("fields") or table.get("Field")
+                if isinstance(rows, list) and rows and isinstance(fields, list):
+                    return table
+
+        rows = payload.get("data") or payload.get("Data")
+        fields = payload.get("fields") or payload.get("Field")
+        if isinstance(rows, list) and rows and isinstance(fields, list):
+            return payload
+
+    return None
+
+
+def _field_index(fields: list[Any], names: Iterable[str], fallback: int) -> int:
+    normalized_fields = [normalize_text(field) or str(field) for field in fields]
+    normalized_names = {normalize_text(name) or name for name in names}
+
+    for index, field in enumerate(normalized_fields):
+        if field in normalized_names:
+            return index
+
+    return fallback
+
+
+def _is_margin_released_for_trade_date(trade_date: date) -> bool:
+    return trade_date <= expected_market_margin_chip_date()
 
 
 def parse_institutional_amount_summary(payload: Any, *, fallback_trade_date: date) -> dict[str, Any]:
@@ -308,6 +375,110 @@ def parse_institutional_amount_summary(payload: Any, *, fallback_trade_date: dat
     return {
         "trade_date": _payload_date(payload, fallback_trade_date),
         **values,
+    }
+
+
+def parse_twse_margin_summary(payload: Any, *, fallback_trade_date: date) -> dict[str, Any]:
+    table = _first_table_with_rows(payload)
+    if table is None:
+        raise ValueError("TWSE margin summary payload does not contain a data table.")
+
+    rows = table.get("data") or table.get("Data") or []
+    values: dict[str, int | None] = {
+        "margin_balance_change_value": None,
+        "margin_balance_change_shares": None,
+        "short_balance_change_shares": None,
+    }
+
+    for row in rows:
+        if not isinstance(row, list) or len(row) < 6:
+            continue
+
+        label = normalize_text(row[0]) or ""
+        previous_balance = parse_int(row[4])
+        today_balance = parse_int(row[5])
+
+        if "融資" in label and "金額" in label:
+            values["margin_balance_change_value"] = _delta_units(
+                current=today_balance,
+                previous=previous_balance,
+                multiplier=1000,
+            )
+        elif "融資" in label:
+            values["margin_balance_change_shares"] = _delta_units(
+                current=today_balance,
+                previous=previous_balance,
+                multiplier=1000,
+            )
+        elif "融券" in label:
+            values["short_balance_change_shares"] = _delta_units(
+                current=today_balance,
+                previous=previous_balance,
+                multiplier=1000,
+            )
+
+    return {
+        "trade_date": _payload_date(payload, fallback_trade_date),
+        **values,
+    }
+
+
+def parse_tpex_margin_summary(payload: Any, *, fallback_trade_date: date) -> dict[str, Any]:
+    table = _first_table_with_rows(payload)
+    if table is None:
+        raise ValueError("TPEx margin payload does not contain a data table.")
+
+    rows = table.get("data") or table.get("Data") or []
+    fields = table.get("fields") or table.get("Field") or []
+    margin_previous_index = _field_index(fields, ("前資餘額(張)", "前資餘額"), 2)
+    margin_today_index = _field_index(fields, ("資餘額", "今日資餘額"), 6)
+    short_previous_index = _field_index(fields, ("前券餘額(張)", "前券餘額"), 10)
+    short_today_index = _field_index(fields, ("券餘額", "今日券餘額"), 14)
+    margin_previous_total = 0
+    margin_today_total = 0
+    short_previous_total = 0
+    short_today_total = 0
+    parsed_count = 0
+
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+
+        margin_previous = parse_int(
+            row[margin_previous_index] if margin_previous_index < len(row) else None
+        )
+        margin_today = parse_int(
+            row[margin_today_index] if margin_today_index < len(row) else None
+        )
+        short_previous = parse_int(
+            row[short_previous_index] if short_previous_index < len(row) else None
+        )
+        short_today = parse_int(
+            row[short_today_index] if short_today_index < len(row) else None
+        )
+
+        if (
+            margin_previous is None
+            or margin_today is None
+            or short_previous is None
+            or short_today is None
+        ):
+            continue
+
+        margin_previous_total += margin_previous
+        margin_today_total += margin_today
+        short_previous_total += short_previous
+        short_today_total += short_today
+        parsed_count += 1
+
+    if parsed_count == 0:
+        raise ValueError("TPEx margin payload did not contain usable balance rows.")
+
+    return {
+        "trade_date": _payload_date(payload, fallback_trade_date),
+        "margin_balance_change_value": None,
+        "margin_balance_change_shares": (margin_today_total - margin_previous_total) * 1000,
+        "short_balance_change_shares": (short_today_total - short_previous_total) * 1000,
     }
 
 
@@ -584,6 +755,48 @@ def _fetch_taiwan_market_chip_sources(
                     "message": str(exc),
                 }
             )
+
+        if _is_margin_released_for_trade_date(trade_date):
+            try:
+                margin_result = _fetch_json(
+                    TWSE_MARGIN_TRADING_URL,
+                    params={
+                        "response": "json",
+                        "date": _format_twse_date(trade_date),
+                        "selectType": "MS",
+                    },
+                )
+                margin_summary = parse_twse_margin_summary(
+                    margin_result.payload,
+                    fallback_trade_date=trade_date,
+                )
+                margin_trade_date = margin_summary.pop("trade_date", None)
+                if margin_trade_date is not None and margin_trade_date != trade_date:
+                    warnings.append(
+                        {
+                            "source": "TWSE MI_MARGN margin summary",
+                            "message": (
+                                f"TWSE returned trade_date={margin_trade_date}; "
+                                f"requested {trade_date}."
+                            ),
+                        }
+                    )
+                values.update(margin_summary)
+                sources.append(
+                    _source_ref(
+                        name="TWSE MI_MARGN margin summary",
+                        url=margin_result.url,
+                        status_code=margin_result.status_code,
+                        content_type=margin_result.content_type,
+                    )
+                )
+            except (MarketChipFetchError, ValueError) as exc:
+                warnings.append(
+                    {
+                        "source": "TWSE MI_MARGN margin summary",
+                        "message": str(exc),
+                    }
+                )
     elif index_id == "TPEX":
         tpex_result = _fetch_json(TPEX_3INSTI_SUMMARY_URL)
         institutional = parse_institutional_amount_summary(
@@ -622,6 +835,47 @@ def _fetch_taiwan_market_chip_sources(
                 content_type=tpex_result.content_type,
             )
         )
+
+        if _is_margin_released_for_trade_date(trade_date):
+            try:
+                margin_result = _fetch_json(
+                    TPEX_MARGIN_BALANCE_URL,
+                    params={
+                        "date": _format_roc_slash_date(trade_date),
+                        "response": "json",
+                    },
+                )
+                margin_summary = parse_tpex_margin_summary(
+                    margin_result.payload,
+                    fallback_trade_date=trade_date,
+                )
+                margin_trade_date = margin_summary.pop("trade_date", None)
+                if margin_trade_date is not None and margin_trade_date != trade_date:
+                    warnings.append(
+                        {
+                            "source": "TPEx margin balance",
+                            "message": (
+                                f"TPEx returned trade_date={margin_trade_date}; "
+                                f"requested {trade_date}."
+                            ),
+                        }
+                    )
+                values.update(margin_summary)
+                sources.append(
+                    _source_ref(
+                        name="TPEx margin balance",
+                        url=margin_result.url,
+                        status_code=margin_result.status_code,
+                        content_type=margin_result.content_type,
+                    )
+                )
+            except (MarketChipFetchError, ValueError) as exc:
+                warnings.append(
+                    {
+                        "source": "TPEx margin balance",
+                        "message": str(exc),
+                    }
+                )
     else:
         raise ValueError(f"Unsupported market chip index_id: {index_id}")
 
@@ -735,6 +989,24 @@ def fetch_market_chip_daily(
                     "method": "current retail_futures_net_oi minus previous stored trading day",
                     "reliability_level": "derived",
                 },
+                {
+                    "field": "margin_balance_change_value",
+                    "method": (
+                        "TWSE MI_MARGN margin amount current balance minus previous "
+                        "balance, converted from thousand TWD to TWD"
+                    ),
+                    "reliability_level": "official_derived",
+                },
+                {
+                    "field": "margin_balance_change_shares",
+                    "method": "official margin balance current units minus previous units, converted to shares",
+                    "reliability_level": "official_derived",
+                },
+                {
+                    "field": "short_balance_change_shares",
+                    "method": "official short balance current units minus previous units, converted to shares",
+                    "reliability_level": "official_derived",
+                },
             ],
         },
     }
@@ -822,6 +1094,27 @@ def upsert_market_chip_daily(
     return existing
 
 
+def _margin_fields_expected_for_index(index_id: str) -> tuple[str, ...]:
+    normalized_index_id = index_id.upper()
+    if normalized_index_id == "TPEX":
+        return ("margin_balance_change_shares", "short_balance_change_shares")
+    return (
+        "margin_balance_change_value",
+        "margin_balance_change_shares",
+        "short_balance_change_shares",
+    )
+
+
+def _has_missing_released_margin_fields(row: MarketChipDaily) -> bool:
+    if row.trade_date > expected_market_margin_chip_date():
+        return False
+
+    return any(
+        getattr(row, field) is None
+        for field in _margin_fields_expected_for_index(row.index_id)
+    )
+
+
 def ensure_market_chip_daily(
     db: Session,
     *,
@@ -841,7 +1134,11 @@ def ensure_market_chip_daily(
         .filter(MarketChipDaily.trade_date == target_trade_date)
         .first()
     )
-    if existing is not None and not force:
+    if (
+        existing is not None
+        and not force
+        and not _has_missing_released_margin_fields(existing)
+    ):
         return existing
 
     payload = fetch_market_chip_daily(

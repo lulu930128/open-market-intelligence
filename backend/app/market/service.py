@@ -1,4 +1,3 @@
-from collections import OrderedDict
 from datetime import date, timedelta
 
 from sqlalchemy import func
@@ -14,6 +13,8 @@ from app.db.models import (
     StockMaster,
 )
 from app.market.backfill import backfill_tpex_trading_stock, backfill_twse_stock_day
+from app.market.intraday import get_intraday_trend
+from app.market.ohlc_overlay import aggregate_ohlc_points, append_intraday_overlay
 
 
 CHART_LOOKBACK_MULTIPLIER = {
@@ -170,51 +171,11 @@ def _aggregate_market_rows(
     rows: list[MarketDailyPrice],
     timeframe: str,
 ) -> list[dict]:
-    if timeframe == "daily":
-        return [_chart_row(row) for row in rows]
-
-    groups: "OrderedDict[date, list[MarketDailyPrice]]" = OrderedDict()
-
-    for row in rows:
-        if timeframe == "weekly":
-            key = row.trade_date - timedelta(days=row.trade_date.weekday())
-        else:
-            key = date(row.trade_date.year, row.trade_date.month, 1)
-
-        groups.setdefault(key, []).append(row)
-
-    results: list[dict] = []
-
-    for key, grouped_rows in groups.items():
-        first = grouped_rows[0]
-        last = grouped_rows[-1]
-        highs = [
-            row.high_price
-            for row in grouped_rows
-            if row.high_price is not None
-        ]
-        lows = [
-            row.low_price
-            for row in grouped_rows
-            if row.low_price is not None
-        ]
-
-        results.append(
-            {
-                "time": key,
-                "open": first.open_price,
-                "high": max(highs) if highs else None,
-                "low": min(lows) if lows else None,
-                "close": last.close_price,
-                "volume": _sum_nullable([row.trade_volume for row in grouped_rows]),
-                "trade_value": _sum_nullable([row.trade_value for row in grouped_rows]),
-                "transaction_count": _sum_nullable(
-                    [row.transaction_count for row in grouped_rows]
-                ),
-            }
-        )
-
-    return results
+    return aggregate_ohlc_points(
+        points=[_chart_row(row) for row in rows],
+        timeframe=timeframe,
+        sum_fields=("volume", "trade_value", "transaction_count"),
+    )
 
 
 def _get_stock_market(db: Session, stock_id: str) -> str | None:
@@ -279,6 +240,7 @@ def list_stock_ohlc_chart_data(
     timeframe: str = "daily",
     bars: int = 90,
     ensure_history: bool = False,
+    include_intraday: bool = False,
     to_date: date | None = None,
     sleep_seconds: float = 0.1,
 ) -> dict:
@@ -314,7 +276,20 @@ def list_stock_ohlc_chart_data(
         limit=5000,
         ascending=True,
     )
-    points = _aggregate_market_rows(rows=rows, timeframe=timeframe)[-bars:]
+    daily_points = [_chart_row(row) for row in rows]
+    intraday_overlay = None
+    if include_intraday:
+        daily_points, intraday_overlay = append_intraday_overlay(
+            points=daily_points,
+            intraday=get_intraday_trend(db=db, stock_id=stock_id),
+            end_date=end_date,
+            null_fields=("trade_value", "transaction_count"),
+        )
+    points = aggregate_ohlc_points(
+        points=daily_points,
+        timeframe=timeframe,
+        sum_fields=("volume", "trade_value", "transaction_count"),
+    )[-bars:]
 
     return {
         "stock_id": stock_id,
@@ -326,6 +301,7 @@ def list_stock_ohlc_chart_data(
         "point_count": len(points),
         "points": points,
         "backfill": backfill_result,
+        "intraday_overlay": intraday_overlay,
     }
 
 

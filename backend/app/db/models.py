@@ -166,6 +166,9 @@ class DispatchRecipientGroup(Base):
     deliveries: Mapped[list["DispatchDelivery"]] = relationship(
         back_populates="recipient_group",
     )
+    schedules: Mapped[list["DispatchSchedule"]] = relationship(
+        back_populates="recipient_group",
+    )
 
 
 class DispatchDelivery(Base):
@@ -205,6 +208,54 @@ class DispatchDelivery(Base):
 
     recipient_group: Mapped[DispatchRecipientGroup | None] = relationship(
         back_populates="deliveries",
+    )
+
+
+class DispatchSchedule(Base):
+    __tablename__ = "dispatch_schedule"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    recipient_group_id: Mapped[int | None] = mapped_column(
+        ForeignKey("dispatch_recipient_group.id"),
+        nullable=True,
+        index=True,
+    )
+
+    name: Mapped[str] = mapped_column(String(120), index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+
+    send_time: Mapped[str] = mapped_column(String(5), index=True)
+    day_of_week: Mapped[str] = mapped_column(String(80), default="mon-fri", index=True)
+    timezone: Mapped[str] = mapped_column(String(80), default="Asia/Taipei", index=True)
+
+    template_key: Mapped[str] = mapped_column(String(80), index=True)
+    scope_type: Mapped[str] = mapped_column(String(50), index=True)
+    scope_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    request_json: Mapped[str] = mapped_column(Text)
+
+    last_run_key: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_delivery_id: Mapped[int | None] = mapped_column(
+        ForeignKey("dispatch_delivery.id"),
+        nullable=True,
+        index=True,
+    )
+    last_job_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("job_run.id"),
+        nullable=True,
+        index=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+    recipient_group: Mapped[DispatchRecipientGroup | None] = relationship(
+        back_populates="schedules",
     )
 
 
@@ -494,6 +545,58 @@ class MarketIntradayBar(Base):
 
     source: Mapped[str] = mapped_column(String(120), index=True)
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class TaiwanStockQuoteSnapshot(Base):
+    __tablename__ = "taiwan_stock_quote_snapshot"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "stock_id",
+            "quote_time",
+            name="uq_tw_stock_quote_provider_stock_time",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(60), index=True)
+    market: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    stock_id: Mapped[str] = mapped_column(String(20), index=True)
+    stock_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    exchange_channel: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    session_phase: Mapped[str] = mapped_column(String(40), index=True)
+    trade_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    quote_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+    open_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    previous_close: Mapped[float | None] = mapped_column(Float, nullable=True)
+    change: Mapped[float | None] = mapped_column(Float, nullable=True)
+    change_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    total_volume_lots: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    best_bid_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    best_bid_size_lots: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    best_ask_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    best_ask_size_lots: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    bid_total_size_lots: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    ask_total_size_lots: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    spread: Mapped[float | None] = mapped_column(Float, nullable=True)
+    spread_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    bid_levels_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ask_levels_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source: Mapped[str] = mapped_column(String(120), index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
@@ -1052,6 +1155,181 @@ class CryptoSpreadHistory(Base):
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     sampled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     source_state_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class CryptoLiquidationEvent(Base):
+    __tablename__ = "crypto_liquidation_event"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "symbol",
+            "instrument_type",
+            "event_time",
+            "liquidation_side",
+            "price",
+            "quantity",
+            name="uq_crypto_liquidation_event_identity",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    exchange: Mapped[str] = mapped_column(String(80), index=True)
+    symbol: Mapped[str] = mapped_column(String(40), index=True)
+    provider_symbol: Mapped[str] = mapped_column(String(60), index=True)
+    base_asset: Mapped[str] = mapped_column(String(20), index=True)
+    quote_asset: Mapped[str] = mapped_column(String(20), index=True)
+    instrument_type: Mapped[str] = mapped_column(String(30), default="perpetual", index=True)
+
+    liquidation_side: Mapped[str] = mapped_column(String(20), index=True)
+    order_side: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    average_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quantity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    notional: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    event_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class CryptoLiquidationHeatmapCell(Base):
+    __tablename__ = "crypto_liquidation_heatmap_cell"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "source_kind",
+            "method",
+            "symbol",
+            "instrument_type",
+            "time_bucket",
+            "bucket_seconds",
+            "price_bucket",
+            "liquidation_side",
+            name="uq_crypto_liquidation_heatmap_cell_identity",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    source_kind: Mapped[str] = mapped_column(String(40), index=True)
+    method: Mapped[str] = mapped_column(String(80), index=True)
+    exchange: Mapped[str] = mapped_column(String(80), index=True)
+    symbol: Mapped[str] = mapped_column(String(40), index=True)
+    provider_symbol: Mapped[str] = mapped_column(String(60), index=True)
+    base_asset: Mapped[str] = mapped_column(String(20), index=True)
+    quote_asset: Mapped[str] = mapped_column(String(20), index=True)
+    instrument_type: Mapped[str] = mapped_column(String(30), default="perpetual", index=True)
+
+    time_bucket: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    bucket_seconds: Mapped[int] = mapped_column(Integer, default=300, index=True)
+    price_bucket: Mapped[float] = mapped_column(Float, index=True)
+    price_bucket_size: Mapped[float | None] = mapped_column(Float, nullable=True)
+    liquidation_side: Mapped[str] = mapped_column(String(20), index=True)
+    liquidation_notional: Mapped[float | None] = mapped_column(Float, nullable=True)
+    liquidation_quantity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    event_count: Mapped[int] = mapped_column(Integer, default=0)
+    intensity: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class CryptoCvdHistory(Base):
+    __tablename__ = "crypto_cvd_history"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "symbol",
+            "instrument_type",
+            "bucket_seconds",
+            "sampled_at",
+            name="uq_crypto_cvd_history_provider_symbol_instrument_bucket_sampled",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    exchange: Mapped[str] = mapped_column(String(80), index=True)
+    symbol: Mapped[str] = mapped_column(String(40), index=True)
+    provider_symbol: Mapped[str] = mapped_column(String(60), index=True)
+    base_asset: Mapped[str] = mapped_column(String(20), index=True)
+    quote_asset: Mapped[str] = mapped_column(String(20), index=True)
+    instrument_type: Mapped[str] = mapped_column(String(30), default="spot", index=True)
+
+    bucket_seconds: Mapped[int] = mapped_column(Integer, default=60, index=True)
+    sampled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    buy_base_volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sell_base_volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+    buy_quote_volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sell_quote_volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_base_volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_quote_volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cumulative_base_delta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cumulative_quote_delta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    trade_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    event_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class CryptoLongShortRatioHistory(Base):
+    __tablename__ = "crypto_long_short_ratio_history"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "symbol",
+            "instrument_type",
+            "ratio_scope",
+            "sampled_at",
+            name="uq_crypto_long_short_ratio_provider_symbol_scope_sampled",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    exchange: Mapped[str] = mapped_column(String(80), index=True)
+    symbol: Mapped[str] = mapped_column(String(40), index=True)
+    provider_symbol: Mapped[str] = mapped_column(String(60), index=True)
+    base_asset: Mapped[str] = mapped_column(String(20), index=True)
+    quote_asset: Mapped[str] = mapped_column(String(20), index=True)
+    instrument_type: Mapped[str] = mapped_column(String(30), default="perpetual", index=True)
+    ratio_scope: Mapped[str] = mapped_column(String(60), default="global_account", index=True)
+
+    long_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    short_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    long_short_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    event_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    sampled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 

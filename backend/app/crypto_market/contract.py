@@ -15,9 +15,18 @@ BITOPRO_PROVIDER = "bitopro"
 BINANCE_PROVIDER = "binance"
 OKX_PROVIDER = "okx"
 COINGECKO_PROVIDER = "coingecko"
+COINGLASS_PROVIDER = "coinglass"
+BYBIT_PROVIDER = "bybit"
+OMI_LOCAL_PROVIDER = "omi_local"
 
 SPOT = "spot"
 PERPETUAL = "perpetual"
+
+OHLCV_INTERVALS_BY_PROVIDER: dict[str, tuple[str, ...]] = {
+    BITOPRO_PROVIDER: ("1m", "5m", "15m", "30m", "1h", "3h", "4h", "6h", "12h", "1d", "1w", "1M"),
+    BINANCE_PROVIDER: ("1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "1w", "1M"),
+    OKX_PROVIDER: ("1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1M"),
+}
 
 
 @dataclass(frozen=True)
@@ -108,7 +117,7 @@ def _build_supported_instruments() -> tuple[ProviderInstrument, ...]:
                     base_asset=asset.asset,
                     quote_asset="USDT",
                     instrument_type=PERPETUAL,
-                    resources=("derivatives",),
+                    resources=("derivatives", "liquidation_event", "long_short_ratio"),
                     role=f"Global {asset.asset} perpetual funding, mark/index price, and open interest.",
                 )
             )
@@ -214,6 +223,15 @@ def get_provider_instrument(
     return matches[0]
 
 
+def ohlcv_intervals_for_provider(provider: str) -> tuple[str, ...]:
+    return OHLCV_INTERVALS_BY_PROVIDER.get(normalize_provider(provider), ())
+
+
+def provider_supports_ohlcv_interval(provider: str, interval: str) -> bool:
+    normalized_interval = (interval or "").strip()
+    return normalized_interval in ohlcv_intervals_for_provider(provider)
+
+
 def split_symbol(symbol: str) -> tuple[str, str]:
     normalized = normalize_symbol(symbol)
     parts = normalized.split("-", maxsplit=1)
@@ -242,28 +260,60 @@ def provider_contract() -> dict[str, Any]:
             "GET endpoints read local cache only; POST refresh endpoints fetch market data and update cache.",
             "No order placement endpoint is part of this contract.",
             "CoinGecko is ranking and market-cap context only, not an execution price source.",
+            "Liquidation heatmap, CVD, and long/short ratio resources are backend-ready but disabled until their providers are connected.",
         ],
         "providers": {
             BITOPRO_PROVIDER: {
                 "role": "Taiwan-dollar spot prices and Taiwan exchange premium/discount observation.",
                 "resources": ["ticker", "order_book", "ohlcv", "spread", "fx"],
                 "canonical_symbols": _unique_instrument_symbols(BITOPRO_PROVIDER),
+                "ohlcv_intervals": list(ohlcv_intervals_for_provider(BITOPRO_PROVIDER)),
             },
             BINANCE_PROVIDER: {
                 "role": "Global high-liquidity spot and USD-M perpetual reference.",
-                "resources": ["ticker", "order_book", "ohlcv", "derivatives", "spread"],
+                "resources": [
+                    "ticker",
+                    "order_book",
+                    "ohlcv",
+                    "derivatives",
+                    "spread",
+                    "liquidation_event",
+                    "cvd",
+                    "long_short_ratio",
+                ],
                 "canonical_symbols": _unique_instrument_symbols(BINANCE_PROVIDER),
+                "ohlcv_intervals": list(ohlcv_intervals_for_provider(BINANCE_PROVIDER)),
             },
             OKX_PROVIDER: {
                 "role": "Secondary global spot and swap reference.",
                 "resources": ["ticker", "order_book", "ohlcv", "derivatives", "spread"],
                 "canonical_symbols": _unique_instrument_symbols(OKX_PROVIDER),
+                "ohlcv_intervals": list(ohlcv_intervals_for_provider(OKX_PROVIDER)),
             },
             COINGECKO_PROVIDER: {
                 "role": "Coin rank, market cap, and 24h leaderboard context.",
                 "resources": ["market_cap", "ranking"],
                 "canonical_assets": list(COINGECKO_COIN_IDS),
             },
+            COINGLASS_PROVIDER: {
+                "role": "Third-party processed liquidation heatmap context. Requires explicit provider setup.",
+                "resources": ["liquidation_heatmap"],
+                "status": "api_key_required",
+            },
+            OMI_LOCAL_PROVIDER: {
+                "role": "Local fallback for estimated liquidation heatmap buckets built from stored liquidation events.",
+                "resources": ["liquidation_heatmap"],
+                "status": "fallback",
+            },
+            BYBIT_PROVIDER: {
+                "role": "Optional derivatives confirmation source for account ratio and future liquidation/CVD coverage.",
+                "resources": ["long_short_ratio", "liquidation_event", "cvd"],
+                "status": "provider_pending",
+            },
+        },
+        "ohlcv_intervals": {
+            provider: list(intervals)
+            for provider, intervals in OHLCV_INTERVALS_BY_PROVIDER.items()
         },
         "assets": [asset.to_dict() for asset in list_crypto_assets()],
         "instruments": [instrument.to_dict() for instrument in SUPPORTED_INSTRUMENTS],

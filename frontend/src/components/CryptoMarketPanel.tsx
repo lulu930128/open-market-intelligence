@@ -2,6 +2,7 @@
 
 import { fetchJson, requestJson } from "@/lib/api";
 import { emitDataStatusEvent } from "@/lib/dataStatusEvents";
+import { omiChartColors } from "@/lib/themeColors";
 import {
   cryptoSubscriptionItem,
   cryptoSubscriptionResourceEnabled,
@@ -11,6 +12,7 @@ import {
 } from "@/lib/marketDataSubscriptions";
 import { useI18n, type TranslationFunction } from "@/i18n";
 import {
+  CRYPTO_BASE_OPTIONS,
   buildCryptoKlineInstruments,
   cryptoBaseOptionsFromAssets,
   cryptoInstrumentsForBase,
@@ -53,7 +55,15 @@ type CryptoOrderBook = {
   best_ask_size: number | null;
   spread: number | null;
   spread_pct: number | null;
+  bids?: OrderBookDepthLevel[];
+  asks?: OrderBookDepthLevel[];
   fetched_at: string;
+};
+
+type OrderBookDepthLevel = {
+  price: number | null;
+  size: number | null;
+  count?: number | null;
 };
 
 type CryptoDerivatives = {
@@ -93,6 +103,127 @@ type CryptoSpread = {
   observed_at: string;
 };
 
+type CryptoTickerHistory = CryptoTicker & {
+  sampled_at: string;
+  bid_size?: number | null;
+  ask_size?: number | null;
+};
+
+type CryptoLiquidityHistory = CryptoOrderBook & {
+  sampled_at: string;
+};
+
+type CryptoDerivativesHistory = CryptoDerivatives & {
+  sampled_at: string;
+};
+
+type CryptoSpreadHistory = CryptoSpread & {
+  sampled_at: string;
+};
+
+type CryptoLongShortRatioHistory = {
+  provider: string;
+  exchange: string;
+  symbol: string;
+  provider_symbol: string;
+  base_asset: string;
+  quote_asset: string;
+  instrument_type: string;
+  ratio_scope: string;
+  long_ratio: number | null;
+  short_ratio: number | null;
+  long_short_ratio: number | null;
+  event_time: string | null;
+  sampled_at: string;
+  fetched_at: string;
+};
+
+type CryptoLiquidationHeatmapCell = {
+  provider: string;
+  source_kind: string;
+  method: string;
+  exchange: string;
+  symbol: string;
+  provider_symbol: string;
+  base_asset: string;
+  quote_asset: string;
+  instrument_type: string;
+  time_bucket: string;
+  bucket_seconds: number;
+  price_bucket: number;
+  price_bucket_size: number | null;
+  liquidation_side: string;
+  liquidation_notional: number | null;
+  liquidation_quantity: number | null;
+  event_count: number;
+  intensity: number | null;
+  generated_at: string;
+  fetched_at: string;
+};
+
+type CryptoTrendHistory = {
+  quote: CryptoTickerHistory[];
+  liquidity: CryptoLiquidityHistory[];
+  derivatives: CryptoDerivativesHistory[];
+  spreads: CryptoSpreadHistory[];
+  longShortRatios: CryptoLongShortRatioHistory[];
+};
+
+type TrendPoint = {
+  time: string;
+  value: number;
+};
+
+type TrendSeries = {
+  key: string;
+  label: string;
+  color: string;
+  points: TrendPoint[];
+};
+
+type LiquidityHeatmapCell = {
+  key: string;
+  provider: string;
+  symbol: string;
+  side: "bid" | "ask";
+  time: string;
+  price: number;
+  size: number;
+  intensity: number;
+};
+
+type LiquidityHeatmap = {
+  cells: LiquidityHeatmapCell[];
+  minPrice: number;
+  maxPrice: number;
+  minTime: number;
+  maxTime: number;
+  latestMid: number | null;
+};
+
+type LiquidationHeatmapCell = {
+  key: string;
+  provider: string;
+  sourceKind: string;
+  side: string;
+  time: string;
+  price: number;
+  notional: number;
+  eventCount: number;
+  intensity: number;
+};
+
+type LiquidationHeatmap = {
+  cells: LiquidationHeatmapCell[];
+  minPrice: number;
+  maxPrice: number;
+  minTime: number;
+  maxTime: number;
+  totalNotional: number;
+  totalEvents: number;
+  providers: string[];
+};
+
 type CryptoRealtimeStatus = {
   enabled: boolean;
   running: boolean;
@@ -121,6 +252,8 @@ type CryptoAutoRefreshStatus = {
     key?: string;
     resource: string;
     providers?: string | null;
+    mode?: string;
+    ohlcv_intervals?: string[];
     enabled: boolean;
     interval_seconds: number | null;
     targets: string[];
@@ -173,81 +306,72 @@ type CryptoRefreshResult = {
   refreshed_count: number;
   error_count: number;
   skipped_count: number;
+  intervals?: Array<{
+    interval: string;
+    status: string;
+    requested_count: number;
+    refreshed_count: number;
+    error_count: number;
+    skipped_count: number;
+  }>;
 };
+
+function fallbackSubscriptionItem(base: CryptoBaseAsset): MarketDataSubscriptionItem {
+  const normalizedBase = base.toUpperCase();
+  const alwaysOn = normalizedBase === "BTC";
+  const usdtReference = normalizedBase === "USDT";
+  const resources: Record<string, boolean> = {
+    quote: true,
+    order_book: true,
+    ohlcv: true,
+    market_cap: true,
+  };
+
+  if (usdtReference) {
+    resources.twd_reference = true;
+  } else {
+    resources.derivatives = true;
+    resources.liquidation_event = true;
+    resources.long_short_ratio = true;
+  }
+
+  if (normalizedBase === "BTC" || normalizedBase === "ETH") {
+    resources.taiwan_spread = true;
+  }
+
+  return {
+    key: `crypto:${normalizedBase}`,
+    market: "crypto",
+    group: "crypto",
+    label: normalizedBase,
+    mode: alwaysOn ? "always_on" : "on_select",
+    resources,
+    intervals: {
+      quote_seconds: alwaysOn ? 5 : 15,
+      order_book_seconds: alwaysOn ? 5 : 30,
+      ohlcv_seconds: usdtReference ? 120 : alwaysOn ? 30 : 60,
+      derivatives_seconds: alwaysOn ? 120 : 300,
+      liquidation_event_seconds: alwaysOn ? 5 : 15,
+      long_short_ratio_seconds: alwaysOn ? 300 : 900,
+      market_cap_seconds: 900,
+    },
+    note: "Frontend fallback used only when the settings API is unavailable.",
+  };
+}
 
 const FALLBACK_MARKET_DATA_SUBSCRIPTION_SETTINGS: MarketDataSubscriptionSettingsRead = {
   kind: "market_data_subscription_settings",
   version: "frontend_fallback.v1",
   source: "frontend_fallback",
-  items: [
-    {
-      key: "crypto:BTC",
-      market: "crypto",
-      group: "crypto",
-      label: "BTC",
-      mode: "always_on",
-      resources: {
-        quote: true,
-        order_book: true,
-        ohlcv: true,
-        derivatives: true,
-        taiwan_spread: true,
-        market_cap: true,
-      },
-      intervals: {
-        quote_seconds: 5,
-        order_book_seconds: 5,
-        ohlcv_seconds: 30,
-        derivatives_seconds: 120,
-        market_cap_seconds: 900,
-      },
-      note: "Frontend fallback used only when the settings API is unavailable.",
-    },
-    {
-      key: "crypto:ETH",
-      market: "crypto",
-      group: "crypto",
-      label: "ETH",
-      mode: "on_select",
-      resources: {
-        quote: true,
-        order_book: true,
-        ohlcv: true,
-        derivatives: true,
-        taiwan_spread: true,
-        market_cap: true,
-      },
-      intervals: {
-        quote_seconds: 15,
-        order_book_seconds: 30,
-        ohlcv_seconds: 60,
-        derivatives_seconds: 300,
-        market_cap_seconds: 900,
-      },
-      note: "Frontend fallback used only when the settings API is unavailable.",
-    },
-    {
-      key: "crypto:USDT",
-      market: "crypto",
-      group: "crypto",
-      label: "USDT",
-      mode: "on_select",
-      resources: {
-        quote: true,
-        order_book: true,
-        ohlcv: true,
-        twd_reference: true,
-        market_cap: true,
-      },
-      intervals: {
-        quote_seconds: 15,
-        order_book_seconds: 30,
-        ohlcv_seconds: 120,
-        market_cap_seconds: 900,
-      },
-      note: "Frontend fallback used only when the settings API is unavailable.",
-    },
-  ],
+  items: CRYPTO_BASE_OPTIONS.map(fallbackSubscriptionItem),
+};
+
+const EMPTY_CRYPTO_TREND_HISTORY: CryptoTrendHistory = {
+  quote: [],
+  liquidity: [],
+  derivatives: [],
+  spreads: [],
+  longShortRatios: [],
 };
 
 function formatNumber(value: number | null | undefined, digits = 2) {
@@ -256,6 +380,15 @@ function formatNumber(value: number | null | undefined, digits = 2) {
   return value.toLocaleString("en-US", {
     maximumFractionDigits: digits,
   });
+}
+
+function formatCompactNumber(value: number | null | undefined, digits = 2) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "-";
+  const absValue = Math.abs(value);
+  if (absValue >= 1_000_000_000) return `${formatNumber(value / 1_000_000_000, digits)}B`;
+  if (absValue >= 1_000_000) return `${formatNumber(value / 1_000_000, digits)}M`;
+  if (absValue >= 1_000) return `${formatNumber(value / 1_000, digits)}K`;
+  return formatNumber(value, digits);
 }
 
 function formatPct(value: number | null | undefined, digits = 2) {
@@ -269,6 +402,19 @@ function formatTime(value: string | null | undefined, locale: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "-";
   return date.toLocaleTimeString(locale, { hour12: false });
+}
+
+function formatDateTimeShort(value: string | null | undefined, locale: string) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return date.toLocaleString(locale, {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
 }
 
 function formatAge(ms: number | null | undefined) {
@@ -320,6 +466,17 @@ async function loadMarketDataSubscriptionSettingsForPanel() {
     return await loadMarketDataSubscriptionSettings();
   } catch {
     return FALLBACK_MARKET_DATA_SUBSCRIPTION_SETTINGS;
+  }
+}
+
+async function fetchHistoryOrEmpty<T>(
+  path: string,
+  params: Record<string, string | number | boolean>
+) {
+  try {
+    return await fetchJson<T[]>(path, params);
+  } catch {
+    return [];
   }
 }
 
@@ -415,8 +572,218 @@ function derivativeProviderSymbolBatches(
   }));
 }
 
+function liquidationSymbolsForBases(
+  bases: CryptoBaseAsset[],
+  assets: readonly CryptoAssetDefinition[] | null | undefined
+) {
+  const symbols = new Set<string>();
+
+  bases.forEach((base) => {
+    if (base === "USDT") return;
+
+    const definition = assetDefinitionByBase(assets, base);
+    const supportsBinance = definition
+      ? definition.resources?.binance_perpetual === true
+      : true;
+    if (!supportsBinance) return;
+
+    symbols.add(`${base}-USDT`);
+  });
+
+  return Array.from(symbols);
+}
+
 function firstBySymbol(rows: CryptoTicker[], provider: string, symbol: string) {
   return rows.find((row) => row.provider === provider && row.symbol === symbol) ?? null;
+}
+
+function finiteNumber(value: number | null | undefined) {
+  return value !== null && value !== undefined && Number.isFinite(value) ? value : null;
+}
+
+function sumFiniteValues(...values: Array<number | null | undefined>) {
+  let hasValue = false;
+  const total = values.reduce<number>((sum, value) => {
+    const nextValue = finiteNumber(value);
+    if (nextValue === null) return sum;
+    hasValue = true;
+    return sum + nextValue;
+  }, 0);
+
+  return hasValue ? total : null;
+}
+
+function historySymbolsForBase(base: CryptoBaseAsset) {
+  if (base === "USDT") return "USDT-TWD";
+  return `${base}-USDT,${base}-TWD`;
+}
+
+function buildTrendSeries<T>(
+  rows: readonly T[],
+  options: {
+    getKey: (row: T) => string;
+    getLabel: (row: T) => string;
+    getTime: (row: T) => string | null | undefined;
+    getValue: (row: T) => number | null | undefined;
+    colors?: readonly string[];
+  }
+): TrendSeries[] {
+  const colors = options.colors ?? [
+    omiChartColors.info,
+    omiChartColors.warning,
+    omiChartColors.teal,
+    omiChartColors.purple,
+  ];
+  const seriesByKey = new Map<string, TrendSeries>();
+
+  rows.forEach((row) => {
+    const time = options.getTime(row);
+    const value = finiteNumber(options.getValue(row));
+    if (!time || value === null) return;
+
+    const key = options.getKey(row);
+    let series = seriesByKey.get(key);
+    if (!series) {
+      series = {
+        key,
+        label: options.getLabel(row),
+        color: colors[seriesByKey.size % colors.length] ?? omiChartColors.info,
+        points: [],
+      };
+      seriesByKey.set(key, series);
+    }
+    series.points.push({ time, value });
+  });
+
+  return Array.from(seriesByKey.values())
+    .map((series) => ({
+      ...series,
+      points: series.points.sort((a, b) => Date.parse(a.time) - Date.parse(b.time)),
+    }))
+    .filter((series) => series.points.length >= 2);
+}
+
+function depthLevelValue(value: number | null | undefined) {
+  return value !== null && value !== undefined && Number.isFinite(value) ? value : null;
+}
+
+function buildLiquidityHeatmap(rows: readonly CryptoLiquidityHistory[]): LiquidityHeatmap | null {
+  const recentRows = rows
+    .filter((row) => Number.isFinite(Date.parse(row.sampled_at)))
+    .slice()
+    .sort((a, b) => Date.parse(a.sampled_at) - Date.parse(b.sampled_at))
+    .slice(-140);
+  const rawCells: Array<Omit<LiquidityHeatmapCell, "intensity">> = [];
+
+  recentRows.forEach((row, rowIndex) => {
+    ([
+      ["bid", row.bids ?? []],
+      ["ask", row.asks ?? []],
+    ] as const).forEach(([side, levels]) => {
+      levels.slice(0, 12).forEach((level, levelIndex) => {
+        const price = depthLevelValue(level.price);
+        const size = depthLevelValue(level.size);
+        if (price === null || size === null || size <= 0) return;
+        rawCells.push({
+          key: `${row.provider}-${row.symbol}-${row.sampled_at}-${side}-${levelIndex}-${rowIndex}`,
+          provider: row.provider,
+          symbol: row.symbol,
+          side,
+          time: row.sampled_at,
+          price,
+          size,
+        });
+      });
+    });
+  });
+
+  if (!rawCells.length) return null;
+
+  const prices = rawCells.map((cell) => cell.price);
+  const times = rawCells.map((cell) => Date.parse(cell.time));
+  const sizes = rawCells.map((cell) => cell.size);
+  const maxSize = Math.max(...sizes, 1);
+  const minPrice = Math.min(...prices);
+  const maxPrice = Math.max(...prices);
+  const minTime = Math.min(...times);
+  const maxTime = Math.max(...times);
+  const latestRow = recentRows[recentRows.length - 1] ?? null;
+  const latestBid = depthLevelValue(latestRow?.best_bid_price);
+  const latestAsk = depthLevelValue(latestRow?.best_ask_price);
+
+  return {
+    cells: rawCells.map((cell) => ({
+      ...cell,
+      intensity: Math.sqrt(cell.size / maxSize),
+    })),
+    minPrice,
+    maxPrice,
+    minTime,
+    maxTime,
+    latestMid: latestBid !== null && latestAsk !== null ? (latestBid + latestAsk) / 2 : null,
+  };
+}
+
+function normalizedIntensity(value: number | null | undefined) {
+  const numberValue = finiteNumber(value);
+  if (numberValue === null) return null;
+  return Math.max(0, Math.min(numberValue, 1));
+}
+
+function buildLiquidationHeatmap(rows: readonly CryptoLiquidationHeatmapCell[]): LiquidationHeatmap | null {
+  const recentRows = rows
+    .filter((row) => Number.isFinite(Date.parse(row.time_bucket)))
+    .slice()
+    .sort((a, b) => Date.parse(a.time_bucket) - Date.parse(b.time_bucket))
+    .slice(-180);
+  const rawCells: Array<Omit<LiquidationHeatmapCell, "intensity"> & { rawIntensity: number | null }> = [];
+
+  recentRows.forEach((row, rowIndex) => {
+    const price = finiteNumber(row.price_bucket);
+    if (price === null) return;
+    const notional = finiteNumber(row.liquidation_notional) ?? 0;
+    rawCells.push({
+      key: `${row.provider}-${row.method}-${row.symbol}-${row.time_bucket}-${row.price_bucket}-${row.liquidation_side}-${rowIndex}`,
+      provider: row.provider,
+      sourceKind: row.source_kind,
+      side: row.liquidation_side || "unknown",
+      time: row.time_bucket,
+      price,
+      notional,
+      eventCount: Math.max(Number(row.event_count ?? 0), 0),
+      rawIntensity: normalizedIntensity(row.intensity),
+    });
+  });
+
+  if (!rawCells.length) return null;
+
+  const prices = rawCells.map((cell) => cell.price);
+  const times = rawCells.map((cell) => Date.parse(cell.time));
+  const notionals = rawCells.map((cell) => cell.notional);
+  const maxNotional = Math.max(...notionals, 1);
+  const providerSet = new Set<string>();
+  let totalNotional = 0;
+  let totalEvents = 0;
+
+  rawCells.forEach((cell) => {
+    providerSet.add(cell.provider);
+    totalNotional += cell.notional;
+    totalEvents += cell.eventCount;
+  });
+
+  return {
+    cells: rawCells.map(({ rawIntensity, ...cell }) => ({
+      ...cell,
+      intensity: rawIntensity ?? Math.sqrt(cell.notional / maxNotional),
+    })),
+    minPrice: Math.min(...prices),
+    maxPrice: Math.max(...prices),
+    minTime: Math.min(...times),
+    maxTime: Math.max(...times),
+    totalNotional,
+    totalEvents,
+    providers: Array.from(providerSet).sort(),
+  };
 }
 
 type Props = {
@@ -514,14 +881,19 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
   const [derivatives, setDerivatives] = useState<CryptoDerivatives[]>([]);
   const [marketCaps, setMarketCaps] = useState<CryptoMarketCap[]>([]);
   const [spreads, setSpreads] = useState<CryptoSpread[]>([]);
+  const [trendHistory, setTrendHistory] = useState<CryptoTrendHistory>(EMPTY_CRYPTO_TREND_HISTORY);
+  const [liquidationHeatmapRows, setLiquidationHeatmapRows] = useState<CryptoLiquidationHeatmapCell[]>([]);
   const [realtimeStatus, setRealtimeStatus] = useState<CryptoRealtimeStatus | null>(null);
   const [realtimeLatest, setRealtimeLatest] = useState<CryptoRealtimeLatest[]>([]);
   const [autoRefreshStatus, setAutoRefreshStatus] = useState<CryptoAutoRefreshStatus | null>(null);
   const [sourceHealth, setSourceHealth] = useState<CryptoSourceHealth | null>(null);
   const [providerAssets, setProviderAssets] = useState<CryptoAssetDefinition[] | null>(null);
+  const [providerOhlcvIntervals, setProviderOhlcvIntervals] =
+    useState<CryptoProviderContract["ohlcv_intervals"] | null>(null);
   const [subscriptionSettings, setSubscriptionSettings] =
     useState<MarketDataSubscriptionSettingsRead | null>(null);
   const [chartProfessionalMode, setChartProfessionalMode] = useState(false);
+  const [klineRefreshRevision, setKlineRefreshRevision] = useState(0);
   const onSelectRefreshKeyRef = useRef<string | null>(null);
   const lastAutoRefreshIssueRef = useRef<string | null>(null);
   const cryptoBaseOptions = useMemo(
@@ -529,8 +901,8 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
     [providerAssets]
   );
   const cryptoKlineInstruments = useMemo(
-    () => buildCryptoKlineInstruments(cryptoBaseOptions, providerAssets),
-    [cryptoBaseOptions, providerAssets]
+    () => buildCryptoKlineInstruments(cryptoBaseOptions, providerAssets, providerOhlcvIntervals),
+    [cryptoBaseOptions, providerAssets, providerOhlcvIntervals]
   );
 
   const loadRealtime = useCallback(async () => {
@@ -558,6 +930,12 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
         nextDerivatives,
         nextMarketCaps,
         nextSpreads,
+        nextQuoteHistory,
+        nextLiquidityHistory,
+        nextDerivativesHistory,
+        nextSpreadHistory,
+        nextLongShortRatioHistory,
+        nextLiquidationHeatmap,
         nextSourceHealth,
         nextProviderContract,
         nextSubscriptionSettings,
@@ -567,7 +945,47 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
         fetchJson<CryptoDerivatives[]>("/api/crypto-market/derivatives/latest", { limit: 50 }),
         fetchJson<CryptoMarketCap[]>("/api/crypto-market/market-caps/latest", { limit: 20 }),
         fetchJson<CryptoSpread[]>("/api/crypto-market/spreads", { limit: 20 }),
-        fetchJson<CryptoSourceHealth>("/api/crypto-market/source-health"),
+        fetchHistoryOrEmpty<CryptoTickerHistory>("/api/crypto-market/quotes/history", {
+          symbols: historySymbolsForBase(selectedBase),
+          limit: 500,
+          ascending: true,
+        }),
+        fetchHistoryOrEmpty<CryptoLiquidityHistory>("/api/crypto-market/order-books/history", {
+          symbols: historySymbolsForBase(selectedBase),
+          limit: 500,
+          ascending: true,
+        }),
+        selectedBase === "USDT"
+          ? Promise.resolve([] as CryptoDerivativesHistory[])
+          : fetchHistoryOrEmpty<CryptoDerivativesHistory>("/api/crypto-market/derivatives/history", {
+              symbols: `${selectedBase}-USDT`,
+              limit: 500,
+              ascending: true,
+            }),
+        fetchHistoryOrEmpty<CryptoSpreadHistory>("/api/crypto-market/spreads/history", {
+          base: selectedBase,
+          limit: 500,
+          ascending: true,
+        }),
+        selectedBase === "USDT"
+          ? Promise.resolve([] as CryptoLongShortRatioHistory[])
+          : fetchHistoryOrEmpty<CryptoLongShortRatioHistory>("/api/crypto-market/long-short-ratios/history", {
+              symbols: `${selectedBase}-USDT`,
+              limit: 500,
+              ascending: true,
+            }),
+        selectedBase === "USDT"
+          ? Promise.resolve([] as CryptoLiquidationHeatmapCell[])
+          : fetchHistoryOrEmpty<CryptoLiquidationHeatmapCell>("/api/crypto-market/liquidations/heatmap", {
+              symbols: `${selectedBase}-USDT`,
+              limit: 500,
+              ascending: true,
+            }),
+        fetchJson<CryptoSourceHealth>("/api/crypto-market/source-health", {
+          base: selectedBase,
+          include_events: false,
+          max_entries: 80,
+        }),
         fetchJson<CryptoProviderContract>("/api/crypto-market/provider-contract").catch(() => null),
         loadMarketDataSubscriptionSettingsForPanel(),
         loadRealtime(),
@@ -578,9 +996,18 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
       setDerivatives(nextDerivatives);
       setMarketCaps(nextMarketCaps);
       setSpreads(nextSpreads);
+      setTrendHistory({
+        quote: nextQuoteHistory,
+        liquidity: nextLiquidityHistory,
+        derivatives: nextDerivativesHistory,
+        spreads: nextSpreadHistory,
+        longShortRatios: nextLongShortRatioHistory,
+      });
+      setLiquidationHeatmapRows(nextLiquidationHeatmap);
       setSourceHealth(nextSourceHealth);
       if (nextProviderContract) {
         setProviderAssets(nextProviderContract.assets ?? null);
+        setProviderOhlcvIntervals(nextProviderContract.ohlcv_intervals ?? null);
       }
       setSubscriptionSettings(nextSubscriptionSettings);
       setLoadState("success");
@@ -596,7 +1023,7 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
         setLoadState("error");
       }
     }
-  }, [loadRealtime, t]);
+  }, [loadRealtime, selectedBase, t]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -680,6 +1107,14 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
         "taiwan_spread",
         cryptoBaseOptions
       ).filter((base) => supportsTaiwanSpread(base, providerAssets));
+      const liquidationSymbols = liquidationSymbolsForBases(
+        refreshBasesForResource(policy, selectedBase, "liquidation_event", cryptoBaseOptions),
+        providerAssets
+      );
+      const longShortSymbols = liquidationSymbolsForBases(
+        refreshBasesForResource(policy, selectedBase, "long_short_ratio", cryptoBaseOptions),
+        providerAssets
+      );
 
       for (const batch of quoteBatches) {
         if (!batch.symbols.length) continue;
@@ -705,13 +1140,11 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
         if (!batch.symbols.length) continue;
         results.push(
           await requestJson<CryptoRefreshResult>(
-            "/api/crypto-market/ohlcv/refresh",
+            "/api/crypto-market/ohlcv/refresh-bundle",
             { method: "POST" },
             {
               providers: batch.providers,
               symbols: batch.symbols.join(","),
-              interval: "1m",
-              limit: 10,
             }
           )
         );
@@ -744,6 +1177,29 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
           )
         );
       }
+      if (liquidationSymbols.length) {
+        results.push(
+          await requestJson<CryptoRefreshResult>(
+            "/api/crypto-market/liquidations/refresh",
+            { method: "POST" },
+            {
+              providers: "coinglass",
+              symbols: liquidationSymbols.join(","),
+              range: "24h",
+              allow_local_fallback: true,
+            }
+          )
+        );
+      }
+      if (longShortSymbols.length) {
+        results.push(
+          await requestJson<CryptoRefreshResult>(
+            "/api/crypto-market/long-short-ratios/refresh",
+            { method: "POST" },
+            { providers: "binance", symbols: longShortSymbols.join(",") }
+          )
+        );
+      }
 
       if (results.length === 0) {
         results.push({
@@ -759,6 +1215,9 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
         emitCryptoRefreshStatus(results, t);
       }
       await loadData({ silent: options?.emitStatus === false });
+      if (results.some((result) => result.resource === "ohlcv_bundle" && result.refreshed_count > 0)) {
+        setKlineRefreshRevision((value) => value + 1);
+      }
     } catch (error) {
       emitDataStatusEvent({
         market: "crypto",
@@ -820,6 +1279,87 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
     () => marketCaps.filter((row) => row.symbol.toUpperCase() === selectedBase),
     [marketCaps, selectedBase]
   );
+  const selectedTrendHistory = useMemo(() => ({
+    quote: trendHistory.quote.filter((row) =>
+      selectedBase === "USDT" ? row.symbol === "USDT-TWD" : row.symbol === `${selectedBase}-USDT`
+    ),
+    liquidity: trendHistory.liquidity.filter((row) =>
+      selectedBase === "USDT"
+        ? row.symbol === "USDT-TWD"
+        : row.symbol === `${selectedBase}-USDT` || row.symbol === `${selectedBase}-TWD`
+    ),
+    derivatives: trendHistory.derivatives.filter((row) => row.symbol === `${selectedBase}-USDT`),
+    spreads: trendHistory.spreads.filter((row) => row.base_asset === selectedBase),
+    longShortRatios: trendHistory.longShortRatios.filter((row) => row.symbol === `${selectedBase}-USDT`),
+  }), [selectedBase, trendHistory]);
+  const selectedLiquidityHeatmap = useMemo(
+    () => buildLiquidityHeatmap(selectedTrendHistory.liquidity),
+    [selectedTrendHistory.liquidity]
+  );
+  const selectedLiquidationHeatmapRows = useMemo(
+    () => liquidationHeatmapRows.filter((row) => row.symbol === `${selectedBase}-USDT`),
+    [liquidationHeatmapRows, selectedBase]
+  );
+  const selectedLiquidationHeatmap = useMemo(
+    () => buildLiquidationHeatmap(selectedLiquidationHeatmapRows),
+    [selectedLiquidationHeatmapRows]
+  );
+  const selectedTrendSeries = useMemo(() => {
+    return {
+      volume: buildTrendSeries(selectedTrendHistory.quote, {
+        getKey: (row) => `${row.provider}:${row.symbol}`,
+        getLabel: (row) => `${compactProvider(row.provider)} ${row.symbol}`,
+        getTime: (row) => row.sampled_at,
+        getValue: (row) => row.quote_volume_24h,
+        colors: [omiChartColors.neutralLine, omiChartColors.sky],
+      }),
+      funding: buildTrendSeries(selectedTrendHistory.derivatives, {
+        getKey: (row) => `${row.provider}:${row.symbol}`,
+        getLabel: (row) => compactProvider(row.provider),
+        getTime: (row) => row.sampled_at,
+        getValue: (row) => {
+          const value = finiteNumber(row.funding_rate);
+          return value === null ? null : value * 100;
+        },
+        colors: [omiChartColors.warning, omiChartColors.purple],
+      }),
+      openInterest: buildTrendSeries(selectedTrendHistory.derivatives, {
+        getKey: (row) => `${row.provider}:${row.symbol}`,
+        getLabel: (row) => compactProvider(row.provider),
+        getTime: (row) => row.sampled_at,
+        getValue: (row) => row.open_interest,
+        colors: [omiChartColors.info, omiChartColors.teal],
+      }),
+      taiwanSpread: buildTrendSeries(selectedTrendHistory.spreads, {
+        getKey: (row) => row.global_provider,
+        getLabel: (row) => compactProvider(row.global_provider),
+        getTime: (row) => row.sampled_at,
+        getValue: (row) => row.spread_pct,
+        colors: [omiChartColors.marketUp, omiChartColors.marketDown],
+      }),
+      liquiditySpread: buildTrendSeries(selectedTrendHistory.liquidity, {
+        getKey: (row) => `${row.provider}:${row.symbol}`,
+        getLabel: (row) => `${compactProvider(row.provider)} ${row.symbol}`,
+        getTime: (row) => row.sampled_at,
+        getValue: (row) => row.spread_pct,
+        colors: [omiChartColors.cyan, omiChartColors.pink, omiChartColors.lime],
+      }),
+      liquidityDepth: buildTrendSeries(selectedTrendHistory.liquidity, {
+        getKey: (row) => `${row.provider}:${row.symbol}`,
+        getLabel: (row) => `${compactProvider(row.provider)} ${row.symbol}`,
+        getTime: (row) => row.sampled_at,
+        getValue: (row) => sumFiniteValues(row.best_bid_size, row.best_ask_size),
+        colors: [omiChartColors.green, omiChartColors.heat, omiChartColors.indigo],
+      }),
+      longShortRatio: buildTrendSeries(selectedTrendHistory.longShortRatios, {
+        getKey: (row) => `${row.provider}:${row.symbol}:${row.ratio_scope}`,
+        getLabel: (row) => `${compactProvider(row.provider)} ${row.ratio_scope}`,
+        getTime: (row) => row.sampled_at,
+        getValue: (row) => row.long_short_ratio,
+        colors: [omiChartColors.lime, omiChartColors.purple],
+      }),
+    };
+  }, [selectedTrendHistory]);
   const selectedSubscription = useMemo(
     () => cryptoSubscriptionItem(subscriptionSettings, selectedBase),
     [selectedBase, subscriptionSettings]
@@ -905,6 +1445,7 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
             klineInstruments={cryptoKlineInstruments}
             professionalMode={chartProfessionalMode}
             onProfessionalModeChange={setChartProfessionalMode}
+            refreshRevision={klineRefreshRevision}
           />
         </div>
 
@@ -969,6 +1510,128 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
                     plans: autoRefreshStatus.active_plan_count ?? autoRefreshStatus.active_resource_count,
                   })}`
                 : ""}
+            </div>
+          </section>
+
+          <section className="border border-omi-border-subtle bg-omi-surface">
+            <PanelHeader
+              title={t("crypto.market.riskMap")}
+              subtitle={t("crypto.market.riskMapSubtitle", { asset: selectedBase })}
+            />
+            <div className="grid gap-3 p-3 2xl:grid-cols-[minmax(0,3fr)_minmax(280px,2fr)]">
+              <LiquidityHeatmapCard
+                title={t("crypto.market.liquidityHeatmap")}
+                subtitle={t("crypto.market.liquidityHeatmapSubtitle")}
+                heatmap={selectedLiquidityHeatmap}
+                emptyLabel={t("crypto.market.noHeatmapData")}
+                bidLabel={t("crypto.market.bidLiquidity")}
+                askLabel={t("crypto.market.askLiquidity")}
+                locale={locale}
+              />
+              <LiquidationHeatmapCard
+                title={t("crypto.market.liquidationHeatmap")}
+                subtitle={t("crypto.market.liquidationHeatmapSubtitle")}
+                heatmap={selectedLiquidationHeatmap}
+                emptyLabel={t("crypto.market.noLiquidationHeatmapData")}
+                emptyBody={t("crypto.market.liquidationHeatmapPending")}
+                tags={[
+                  "CoinGlass",
+                  "Binance forceOrder",
+                  selectedLiquidationHeatmap
+                    ? t("crypto.market.status.live")
+                    : t("crypto.market.status.pending"),
+                ]}
+                longLabel={t("crypto.market.longLiquidations")}
+                shortLabel={t("crypto.market.shortLiquidations")}
+                allLabel={t("crypto.market.allLiquidations")}
+                locale={locale}
+              />
+            </div>
+          </section>
+
+          <section className="border border-omi-border-subtle bg-omi-surface">
+            <PanelHeader
+              title={t("crypto.market.confirmationSignals")}
+              subtitle={t("crypto.market.confirmationSignalsSubtitle")}
+            />
+            <div className="grid gap-3 p-3 2xl:grid-cols-2">
+              <TrendChartCard
+                title={t("crypto.market.trendFunding")}
+                subtitle={t("crypto.market.trendFundingSubtitle")}
+                series={selectedTrendSeries.funding}
+                emptyLabel={t("crypto.market.noTrendData")}
+                yFormatter={(value) => formatPct(value, 4)}
+                locale={locale}
+              />
+              <TrendChartCard
+                title={t("crypto.market.trendOpenInterest")}
+                subtitle={t("crypto.market.trendOpenInterestSubtitle")}
+                series={selectedTrendSeries.openInterest}
+                emptyLabel={t("crypto.market.noTrendData")}
+                yFormatter={(value) => formatCompactNumber(value, 2)}
+                locale={locale}
+              />
+              <DataGapCard
+                title={t("crypto.market.spotCvd")}
+                subtitle={t("crypto.market.spotCvdSubtitle")}
+                body={t("crypto.market.cvdPending")}
+                tags={["Binance aggTrade", t("crypto.market.status.pending")]}
+              />
+              <DataGapCard
+                title={t("crypto.market.perpCvd")}
+                subtitle={t("crypto.market.perpCvdSubtitle")}
+                body={t("crypto.market.cvdPending")}
+                tags={["Futures aggTrade", t("crypto.market.status.pending")]}
+              />
+              <TrendChartCard
+                title={t("crypto.market.longShortRatio")}
+                subtitle={t("crypto.market.longShortRatioSubtitle")}
+                series={selectedTrendSeries.longShortRatio}
+                emptyLabel={t("crypto.market.longShortRatioPending")}
+                yFormatter={(value) => formatNumber(value, 3)}
+                locale={locale}
+              />
+            </div>
+          </section>
+
+          <section className="border border-omi-border-subtle bg-omi-surface">
+            <PanelHeader
+              title={t("crypto.market.microstructure")}
+              subtitle={t("crypto.market.microstructureSubtitle")}
+            />
+            <div className="grid gap-3 p-3 2xl:grid-cols-2">
+              <TrendChartCard
+                title={t("crypto.market.trendVolume")}
+                subtitle={t("crypto.market.trendQuoteVolume")}
+                series={selectedTrendSeries.volume}
+                emptyLabel={t("crypto.market.noTrendData")}
+                yFormatter={(value) => formatCompactNumber(value, 2)}
+                locale={locale}
+              />
+              <TrendChartCard
+                title={t("crypto.market.trendTaiwanSpread")}
+                subtitle={t("crypto.market.trendTaiwanSpreadSubtitle")}
+                series={selectedTrendSeries.taiwanSpread}
+                emptyLabel={t("crypto.market.noTrendData")}
+                yFormatter={(value) => formatPct(value, 4)}
+                locale={locale}
+              />
+              <TrendChartCard
+                title={t("crypto.market.trendLiquiditySpread")}
+                subtitle={t("crypto.market.trendLiquiditySpreadSubtitle")}
+                series={selectedTrendSeries.liquiditySpread}
+                emptyLabel={t("crypto.market.noTrendData")}
+                yFormatter={(value) => formatPct(value, 4)}
+                locale={locale}
+              />
+              <TrendChartCard
+                title={t("crypto.market.trendLiquidityDepth")}
+                subtitle={t("crypto.market.trendLiquidityDepthSubtitle")}
+                series={selectedTrendSeries.liquidityDepth}
+                emptyLabel={t("crypto.market.noTrendData")}
+                yFormatter={(value) => formatCompactNumber(value, 4)}
+                locale={locale}
+              />
             </div>
           </section>
 
@@ -1182,6 +1845,466 @@ function DataMetric({
       <div className="text-xs font-semibold uppercase text-omi-text-muted">{label}</div>
       <div className="mt-1 truncate text-xl font-bold tabular-nums text-omi-text-strong">{value}</div>
       {detail ? <div className="mt-1 truncate text-xs text-omi-text-muted">{detail}</div> : null}
+    </div>
+  );
+}
+
+function LiquidityHeatmapCard({
+  title,
+  subtitle,
+  heatmap,
+  emptyLabel,
+  bidLabel,
+  askLabel,
+  locale,
+}: {
+  title: string;
+  subtitle: string;
+  heatmap: LiquidityHeatmap | null;
+  emptyLabel: string;
+  bidLabel: string;
+  askLabel: string;
+  locale: string;
+}) {
+  const width = 640;
+  const height = 300;
+  const left = 64;
+  const right = 22;
+  const top = 28;
+  const bottom = 38;
+  const plotWidth = width - left - right;
+  const plotHeight = height - top - bottom;
+
+  if (!heatmap || !heatmap.cells.length) {
+    return (
+      <div className="border border-omi-border-subtle bg-omi-surface-subtle px-3 py-3">
+        <div className="text-sm font-bold text-omi-text-strong">{title}</div>
+        <div className="mt-0.5 text-xs text-omi-text-muted">{subtitle}</div>
+        <div className="mt-3 flex h-64 items-center justify-center border border-dashed border-omi-border-subtle text-xs text-omi-text-muted">
+          {emptyLabel}
+        </div>
+      </div>
+    );
+  }
+
+  const priceRange = heatmap.maxPrice - heatmap.minPrice || Math.max(heatmap.maxPrice * 0.01, 1);
+  const yMin = heatmap.minPrice - priceRange * 0.04;
+  const yMax = heatmap.maxPrice + priceRange * 0.04;
+  const yRange = yMax - yMin || 1;
+  const timeRange = heatmap.maxTime - heatmap.minTime || 1;
+  const uniqueTimes = new Set(heatmap.cells.map((cell) => cell.time)).size;
+  const cellWidth = Math.max(2.2, Math.min(10, (plotWidth / Math.max(uniqueTimes, 1)) * 0.82));
+  const cellHeight = Math.max(2.8, Math.min(12, plotHeight / 56));
+  const xFor = (time: string) => left + ((Date.parse(time) - heatmap.minTime) / timeRange) * plotWidth;
+  const yFor = (price: number) => top + ((yMax - price) / yRange) * plotHeight;
+  const latestMidY = heatmap.latestMid === null ? null : yFor(heatmap.latestMid);
+
+  return (
+    <div className="border border-omi-border-subtle bg-omi-surface-subtle px-3 py-3">
+      <div className="flex min-w-0 items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="truncate text-sm font-bold text-omi-text-strong">{title}</div>
+          <div className="mt-0.5 truncate text-xs text-omi-text-muted">{subtitle}</div>
+        </div>
+        <div className="shrink-0 text-right text-[11px] tabular-nums text-omi-text-muted">
+          <div>{heatmap.cells.length}</div>
+          <div>{heatmap.latestMid === null ? "-" : formatNumber(heatmap.latestMid, 2)}</div>
+        </div>
+      </div>
+      <svg viewBox={`0 0 ${width} ${height}`} className="mt-2 h-72 w-full" aria-label={title}>
+        {[0, 0.25, 0.5, 0.75, 1].map((tick) => {
+          const y = top + tick * plotHeight;
+          return (
+            <line
+              key={tick}
+              x1={left}
+              x2={left + plotWidth}
+              y1={y}
+              y2={y}
+              stroke={omiChartColors.grid}
+            />
+          );
+        })}
+        {heatmap.cells.map((cell) => (
+          <rect
+            key={cell.key}
+            x={xFor(cell.time) - cellWidth / 2}
+            y={yFor(cell.price) - cellHeight / 2}
+            width={cellWidth}
+            height={cellHeight}
+            fill={cell.side === "bid" ? omiChartColors.marketDown : omiChartColors.marketUp}
+            opacity={0.12 + cell.intensity * 0.78}
+          />
+        ))}
+        {latestMidY !== null ? (
+          <line
+            x1={left}
+            x2={left + plotWidth}
+            y1={latestMidY}
+            y2={latestMidY}
+            stroke={omiChartColors.crosshair}
+            strokeDasharray="4 4"
+          />
+        ) : null}
+        <text x={left - 8} y={top + 4} textAnchor="end" className="fill-omi-text-muted text-[10px]">
+          {formatNumber(yMax, 2)}
+        </text>
+        <text x={left - 8} y={top + plotHeight} textAnchor="end" className="fill-omi-text-muted text-[10px]">
+          {formatNumber(yMin, 2)}
+        </text>
+        <text x={left} y={height - 8} className="fill-omi-text-muted text-[10px]">
+          {formatDateTimeShort(new Date(heatmap.minTime).toISOString(), locale)}
+        </text>
+        <text x={left + plotWidth} y={height - 8} textAnchor="end" className="fill-omi-text-muted text-[10px]">
+          {formatDateTimeShort(new Date(heatmap.maxTime).toISOString(), locale)}
+        </text>
+      </svg>
+      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-omi-text-muted">
+        <span className="inline-flex items-center gap-1">
+          <span className="h-2 w-4" style={{ backgroundColor: omiChartColors.marketDown }} />
+          {bidLabel}
+        </span>
+        <span className="inline-flex items-center gap-1">
+          <span className="h-2 w-4" style={{ backgroundColor: omiChartColors.marketUp }} />
+          {askLabel}
+        </span>
+        <span>{formatNumber(yMin, 2)} - {formatNumber(yMax, 2)}</span>
+      </div>
+    </div>
+  );
+}
+
+function liquidationColor(side: string) {
+  const normalizedSide = side.toLowerCase();
+  if (normalizedSide === "long") return omiChartColors.marketDown;
+  if (normalizedSide === "short") return omiChartColors.marketUp;
+  if (normalizedSide === "all") return omiChartColors.warning;
+  return omiChartColors.info;
+}
+
+function LiquidationHeatmapCard({
+  title,
+  subtitle,
+  heatmap,
+  emptyLabel,
+  emptyBody,
+  tags,
+  longLabel,
+  shortLabel,
+  allLabel,
+  locale,
+}: {
+  title: string;
+  subtitle: string;
+  heatmap: LiquidationHeatmap | null;
+  emptyLabel: string;
+  emptyBody: string;
+  tags: string[];
+  longLabel: string;
+  shortLabel: string;
+  allLabel: string;
+  locale: string;
+}) {
+  const width = 640;
+  const height = 300;
+  const left = 64;
+  const right = 22;
+  const top = 28;
+  const bottom = 38;
+  const plotWidth = width - left - right;
+  const plotHeight = height - top - bottom;
+
+  if (!heatmap || !heatmap.cells.length) {
+    return (
+      <div className="border border-dashed border-omi-border bg-omi-surface-subtle px-3 py-3">
+        <div className="text-sm font-bold text-omi-text-strong">{title}</div>
+        <div className="mt-0.5 text-xs text-omi-text-muted">{subtitle}</div>
+        <div className="mt-3 flex h-48 flex-col items-center justify-center border border-dashed border-omi-border-subtle px-4 text-center">
+          <div className="text-xs font-semibold text-omi-text-muted">{emptyLabel}</div>
+          <p className="mt-2 max-w-sm text-xs leading-5 text-omi-text-muted">{emptyBody}</p>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {tags.map((tag) => (
+            <span key={tag} className="border border-omi-border-subtle px-2 py-1 text-[11px] font-semibold text-omi-text-muted">
+              {tag}
+            </span>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  const priceRange = heatmap.maxPrice - heatmap.minPrice || Math.max(heatmap.maxPrice * 0.01, 1);
+  const yMin = heatmap.minPrice - priceRange * 0.04;
+  const yMax = heatmap.maxPrice + priceRange * 0.04;
+  const yRange = yMax - yMin || 1;
+  const timeRange = heatmap.maxTime - heatmap.minTime || 1;
+  const uniqueTimes = new Set(heatmap.cells.map((cell) => cell.time)).size;
+  const cellWidth = Math.max(3, Math.min(12, (plotWidth / Math.max(uniqueTimes, 1)) * 0.82));
+  const cellHeight = Math.max(4, Math.min(14, plotHeight / 48));
+  const xFor = (time: string) => left + ((Date.parse(time) - heatmap.minTime) / timeRange) * plotWidth;
+  const yFor = (price: number) => top + ((yMax - price) / yRange) * plotHeight;
+
+  return (
+    <div className="border border-omi-border-subtle bg-omi-surface-subtle px-3 py-3">
+      <div className="flex min-w-0 items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="truncate text-sm font-bold text-omi-text-strong">{title}</div>
+          <div className="mt-0.5 truncate text-xs text-omi-text-muted">{subtitle}</div>
+        </div>
+        <div className="shrink-0 text-right text-[11px] tabular-nums text-omi-text-muted">
+          <div>{formatCompactNumber(heatmap.totalNotional, 2)}</div>
+          <div>{heatmap.totalEvents}</div>
+        </div>
+      </div>
+      <svg viewBox={`0 0 ${width} ${height}`} className="mt-2 h-72 w-full" aria-label={title}>
+        {[0, 0.25, 0.5, 0.75, 1].map((tick) => {
+          const y = top + tick * plotHeight;
+          return (
+            <line
+              key={tick}
+              x1={left}
+              x2={left + plotWidth}
+              y1={y}
+              y2={y}
+              stroke={omiChartColors.grid}
+            />
+          );
+        })}
+        {heatmap.cells.map((cell) => (
+          <rect
+            key={cell.key}
+            x={xFor(cell.time) - cellWidth / 2}
+            y={yFor(cell.price) - cellHeight / 2}
+            width={cellWidth}
+            height={cellHeight}
+            fill={liquidationColor(cell.side)}
+            opacity={0.14 + cell.intensity * 0.76}
+          />
+        ))}
+        <text x={left - 8} y={top + 4} textAnchor="end" className="fill-omi-text-muted text-[10px]">
+          {formatNumber(yMax, 2)}
+        </text>
+        <text x={left - 8} y={top + plotHeight} textAnchor="end" className="fill-omi-text-muted text-[10px]">
+          {formatNumber(yMin, 2)}
+        </text>
+        <text x={left} y={height - 8} className="fill-omi-text-muted text-[10px]">
+          {formatDateTimeShort(new Date(heatmap.minTime).toISOString(), locale)}
+        </text>
+        <text x={left + plotWidth} y={height - 8} textAnchor="end" className="fill-omi-text-muted text-[10px]">
+          {formatDateTimeShort(new Date(heatmap.maxTime).toISOString(), locale)}
+        </text>
+      </svg>
+      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-omi-text-muted">
+        <span className="inline-flex items-center gap-1">
+          <span className="h-2 w-4" style={{ backgroundColor: omiChartColors.marketDown }} />
+          {longLabel}
+        </span>
+        <span className="inline-flex items-center gap-1">
+          <span className="h-2 w-4" style={{ backgroundColor: omiChartColors.marketUp }} />
+          {shortLabel}
+        </span>
+        <span className="inline-flex items-center gap-1">
+          <span className="h-2 w-4" style={{ backgroundColor: omiChartColors.warning }} />
+          {allLabel}
+        </span>
+        <span>{heatmap.providers.map(compactProvider).join(" / ")}</span>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        {tags.map((tag) => (
+          <span key={tag} className="border border-omi-border-subtle px-2 py-1 text-[11px] font-semibold text-omi-text-muted">
+            {tag}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function DataGapCard({
+  title,
+  subtitle,
+  body,
+  tags,
+}: {
+  title: string;
+  subtitle: string;
+  body: string;
+  tags: string[];
+}) {
+  return (
+    <div className="border border-dashed border-omi-border bg-omi-surface-subtle px-3 py-3">
+      <div className="text-sm font-bold text-omi-text-strong">{title}</div>
+      <div className="mt-0.5 text-xs text-omi-text-muted">{subtitle}</div>
+      <p className="mt-3 text-xs leading-5 text-omi-text-muted">{body}</p>
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        {tags.map((tag) => (
+          <span key={tag} className="border border-omi-border-subtle px-2 py-1 text-[11px] font-semibold text-omi-text-muted">
+            {tag}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TrendChartCard({
+  title,
+  subtitle,
+  series,
+  emptyLabel,
+  yFormatter,
+  locale,
+}: {
+  title: string;
+  subtitle: string;
+  series: TrendSeries[];
+  emptyLabel: string;
+  yFormatter: (value: number) => string;
+  locale: string;
+}) {
+  const width = 420;
+  const height = 160;
+  const left = 48;
+  const right = 14;
+  const top = 18;
+  const bottom = 28;
+  const plotWidth = width - left - right;
+  const plotHeight = height - top - bottom;
+  const validSeries = series
+    .map((item) => ({
+      ...item,
+      points: item.points.filter((point) => Number.isFinite(Date.parse(point.time))),
+    }))
+    .filter((item) => item.points.length >= 2);
+  const allPoints = validSeries.flatMap((item) => item.points);
+  const pointCount = allPoints.length;
+
+  if (pointCount < 2) {
+    return (
+      <div className="border border-omi-border-subtle bg-omi-surface-subtle px-3 py-3">
+        <div className="flex min-w-0 items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="truncate text-sm font-bold text-omi-text-strong">{title}</div>
+            <div className="mt-0.5 truncate text-xs text-omi-text-muted">{subtitle}</div>
+          </div>
+        </div>
+        <div className="mt-3 flex h-32 items-center justify-center border border-dashed border-omi-border-subtle text-xs text-omi-text-muted">
+          {emptyLabel}
+        </div>
+      </div>
+    );
+  }
+
+  const values = allPoints.map((point) => point.value);
+  const times = allPoints.map((point) => Date.parse(point.time));
+  const minTime = Math.min(...times);
+  const maxTime = Math.max(...times);
+  const minValue = Math.min(...values);
+  const maxValue = Math.max(...values);
+  const rawRange = maxValue - minValue;
+  const padding = rawRange === 0 ? Math.max(Math.abs(maxValue) * 0.08, 1) : rawRange * 0.1;
+  const yMin = minValue - padding;
+  const yMax = maxValue + padding;
+  const yRange = yMax - yMin || 1;
+  const timeRange = maxTime - minTime || 1;
+  const xFor = (time: string) => left + ((Date.parse(time) - minTime) / timeRange) * plotWidth;
+  const yFor = (value: number) => top + ((yMax - value) / yRange) * plotHeight;
+  const zeroY = yMin < 0 && yMax > 0 ? yFor(0) : null;
+  const latestPoint = allPoints
+    .slice()
+    .sort((a, b) => Date.parse(b.time) - Date.parse(a.time))[0];
+
+  return (
+    <div className="border border-omi-border-subtle bg-omi-surface-subtle px-3 py-3">
+      <div className="flex min-w-0 items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="truncate text-sm font-bold text-omi-text-strong">{title}</div>
+          <div className="mt-0.5 truncate text-xs text-omi-text-muted">{subtitle}</div>
+        </div>
+        <div className="shrink-0 text-right text-[11px] tabular-nums text-omi-text-muted">
+          <div>{pointCount}</div>
+          <div>{latestPoint ? yFormatter(latestPoint.value) : "-"}</div>
+        </div>
+      </div>
+      <svg viewBox={`0 0 ${width} ${height}`} className="mt-2 h-40 w-full" aria-label={title}>
+        {[0, 0.5, 1].map((tick) => {
+          const y = top + tick * plotHeight;
+          return (
+            <line
+              key={tick}
+              x1={left}
+              x2={left + plotWidth}
+              y1={y}
+              y2={y}
+              stroke={omiChartColors.grid}
+            />
+          );
+        })}
+        {zeroY !== null ? (
+          <line
+            x1={left}
+            x2={left + plotWidth}
+            y1={zeroY}
+            y2={zeroY}
+            stroke={omiChartColors.crosshair}
+            strokeDasharray="4 4"
+          />
+        ) : null}
+        <text x={left - 6} y={top + 4} textAnchor="end" className="fill-omi-text-muted text-[10px]">
+          {yFormatter(yMax)}
+        </text>
+        <text x={left - 6} y={top + plotHeight} textAnchor="end" className="fill-omi-text-muted text-[10px]">
+          {yFormatter(yMin)}
+        </text>
+        {validSeries.map((item) => {
+          const path = item.points
+            .map((point, index) => {
+              const x = xFor(point.time);
+              const y = yFor(point.value);
+              return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+            })
+            .join(" ");
+          const lastPoint = item.points[item.points.length - 1];
+
+          return (
+            <g key={item.key}>
+              <path
+                d={path}
+                fill="none"
+                stroke={item.color}
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+              {lastPoint ? (
+                <circle
+                  cx={xFor(lastPoint.time)}
+                  cy={yFor(lastPoint.value)}
+                  r="3"
+                  fill={omiChartColors.surface}
+                  stroke={item.color}
+                  strokeWidth="2"
+                />
+              ) : null}
+            </g>
+          );
+        })}
+        <text x={left} y={height - 6} className="fill-omi-text-muted text-[10px]">
+          {formatDateTimeShort(new Date(minTime).toISOString(), locale)}
+        </text>
+        <text x={left + plotWidth} y={height - 6} textAnchor="end" className="fill-omi-text-muted text-[10px]">
+          {formatDateTimeShort(new Date(maxTime).toISOString(), locale)}
+        </text>
+      </svg>
+      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-omi-text-muted">
+        {validSeries.map((item) => (
+          <span key={item.key} className="inline-flex min-w-0 items-center gap-1">
+            <span className="h-2 w-4 shrink-0" style={{ backgroundColor: item.color }} />
+            <span className="truncate">{item.label}</span>
+          </span>
+        ))}
+      </div>
     </div>
   );
 }

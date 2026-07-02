@@ -18,6 +18,7 @@ import {
   chartDrawingSnapshotsEqual,
   chartDrawingSyncDelayMs,
   createChartDrawingSnapshot,
+  hasChartDrawingSnapshot,
   loadChartDrawings,
   normalizeChartDrawingSelection,
   normalizeStoredChartDrawings,
@@ -43,13 +44,14 @@ import {
   defaultCryptoInstrumentKeyForBase,
   type CryptoBaseAsset,
   type CryptoKLineInstrument,
+  type CryptoOhlcvInterval,
   type CryptoProvider,
 } from "@/types/cryptoMarket";
 import type { ChartDrawingSnapshotRead, ChartPoint } from "@/types/market";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
-type CryptoInterval = "1m" | "5m" | "15m" | "30m" | "1h" | "4h" | "1d" | "1w" | "1M";
+type CryptoInterval = CryptoOhlcvInterval;
 type CryptoOhlcvRefreshReason = "manual" | "auto_empty" | "auto_stale" | "auto_poll";
 type SummaryTimeframe = "today" | "daily" | "weekly" | "monthly";
 type VolumeMetric = "base" | "quote";
@@ -71,6 +73,18 @@ type CryptoOhlcvBar = {
   base_volume: number | null;
   quote_volume: number | null;
   fetched_at: string;
+};
+
+type CryptoOhlcvCoverage = {
+  provider: string;
+  exchange: string | null;
+  symbol: string;
+  instrument_type: string;
+  interval: string;
+  row_count: number;
+  first_bar_time: string | null;
+  last_bar_time: string | null;
+  latest_fetched_at: string | null;
 };
 
 type CryptoRealtimeLatest = {
@@ -549,9 +563,12 @@ function mergeLiveChartUpdate(
 
   const updateTimeMs = chartTimestampMs(update.time);
   if (updateTimeMs === null) return chartData;
+  const updateTimeKey = cryptoChartDisplayTimeKey(update.time, interval);
 
   const next = chartData.slice();
-  const matchingIndex = next.findIndex((point) => chartTimestampMs(point.time) === updateTimeMs);
+  const matchingIndex = next.findIndex(
+    (point) => cryptoChartDisplayTimeKey(point.time, interval) === updateTimeKey
+  );
 
   if (matchingIndex >= 0) {
     const current = next[matchingIndex];
@@ -575,8 +592,8 @@ function mergeLiveChartUpdate(
   }
 
   const last = next[next.length - 1];
-  const lastTimeMs = chartTimestampMs(last?.time);
-  if (lastTimeMs !== null && updateTimeMs <= lastTimeMs) return chartData;
+  const lastTimeKey = last ? cryptoChartDisplayTimeKey(last.time, interval) : null;
+  if (lastTimeKey !== null && updateTimeKey <= lastTimeKey) return chartData;
 
   const open = interval === "1m"
     ? update.open ?? last?.close ?? update.close
@@ -624,6 +641,31 @@ function chartTimeMode(interval: CryptoInterval) {
   return interval === "1d" || interval === "1w" || interval === "1M" ? "date" : "intraday";
 }
 
+function cryptoChartDisplayTimeKey(value: string, interval: CryptoInterval) {
+  const taipeiTime = normalizeChartTimestamp(toCryptoTaipeiChartTime(value)) ?? value;
+  return chartTimeMode(interval) === "date" ? taipeiTime.slice(0, 10) : taipeiTime;
+}
+
+function cryptoTimeMs(value: string | null | undefined) {
+  return parseCryptoUtcDateTime(value)?.getTime() ?? 0;
+}
+
+function compareCryptoBarsByDisplayTime(
+  left: CryptoOhlcvBar,
+  right: CryptoOhlcvBar,
+  interval: CryptoInterval
+) {
+  const timeOrder = cryptoChartDisplayTimeKey(left.bar_time, interval).localeCompare(
+    cryptoChartDisplayTimeKey(right.bar_time, interval)
+  );
+  if (timeOrder !== 0) return timeOrder;
+
+  const barTimeOrder = cryptoTimeMs(left.bar_time) - cryptoTimeMs(right.bar_time);
+  if (barTimeOrder !== 0) return barTimeOrder;
+
+  return cryptoTimeMs(left.fetched_at) - cryptoTimeMs(right.fetched_at);
+}
+
 function instrumentSourceProviders(instrument: CryptoKLineInstrument): CryptoProvider[] {
   return instrument.sourceProviders?.length ? instrument.sourceProviders : [instrument.provider];
 }
@@ -632,51 +674,77 @@ function instrumentPrimaryProvider(instrument: CryptoKLineInstrument): CryptoPro
   return instrument.primaryProvider ?? instrument.provider;
 }
 
+function instrumentProvidersForInterval(
+  instrument: CryptoKLineInstrument,
+  interval: CryptoInterval
+) {
+  return instrumentSourceProviders(instrument).filter((provider) => {
+    const providerIntervals = instrument.providerIntervals?.[provider];
+    if (providerIntervals?.length) return providerIntervals.includes(interval);
+    return intervalSupported(provider, interval);
+  });
+}
+
+function instrumentPrimaryProviderForInterval(
+  instrument: CryptoKLineInstrument,
+  interval: CryptoInterval
+) {
+  const providers = instrumentProvidersForInterval(instrument, interval);
+  const primaryProvider = instrumentPrimaryProvider(instrument);
+  return providers.includes(primaryProvider) ? primaryProvider : providers[0] ?? primaryProvider;
+}
+
 function instrumentSupportsInterval(instrument: CryptoKLineInstrument, interval: CryptoInterval) {
-  const providers = instrumentSourceProviders(instrument);
-  return providers.every((provider) => intervalSupported(provider, interval));
+  if (instrument.supportedIntervals?.length) return instrument.supportedIntervals.includes(interval);
+  return instrumentProvidersForInterval(instrument, interval).length > 0;
 }
 
 function mergeProviderBars(
   rows: CryptoOhlcvBar[],
   providers: CryptoProvider[],
   primaryProvider: CryptoProvider,
+  interval: CryptoInterval,
   limit: number
 ) {
-  if (providers.length <= 1) return rows.slice(0, limit);
-
   const providerRank = new Map(
     [primaryProvider, ...providers.filter((provider) => provider !== primaryProvider)].map(
       (provider, index) => [provider, index]
     )
   );
-  const byBarTime = new Map<string, CryptoOhlcvBar>();
+  const byDisplayTime = new Map<string, CryptoOhlcvBar>();
 
   rows.forEach((row) => {
-    const current = byBarTime.get(row.bar_time);
+    const displayTimeKey = cryptoChartDisplayTimeKey(row.bar_time, interval);
+    const current = byDisplayTime.get(displayTimeKey);
     if (!current) {
-      byBarTime.set(row.bar_time, row);
+      byDisplayTime.set(displayTimeKey, row);
       return;
     }
 
     const currentRank = providerRank.get(current.provider as CryptoProvider) ?? providers.length;
     const rowRank = providerRank.get(row.provider as CryptoProvider) ?? providers.length;
     if (rowRank < currentRank) {
-      byBarTime.set(row.bar_time, row);
+      byDisplayTime.set(displayTimeKey, row);
       return;
     }
 
     if (rowRank === currentRank) {
-      const currentFetchedAt = new Date(current.fetched_at).getTime();
-      const rowFetchedAt = new Date(row.fetched_at).getTime();
-      if (rowFetchedAt > currentFetchedAt) {
-        byBarTime.set(row.bar_time, row);
+      const currentFetchedAt = cryptoTimeMs(current.fetched_at);
+      const rowFetchedAt = cryptoTimeMs(row.fetched_at);
+      if (
+        rowFetchedAt > currentFetchedAt ||
+        (
+          rowFetchedAt === currentFetchedAt &&
+          cryptoTimeMs(row.bar_time) > cryptoTimeMs(current.bar_time)
+        )
+      ) {
+        byDisplayTime.set(displayTimeKey, row);
       }
     }
   });
 
-  return Array.from(byBarTime.values())
-    .sort((left, right) => new Date(right.bar_time).getTime() - new Date(left.bar_time).getTime())
+  return Array.from(byDisplayTime.values())
+    .sort((left, right) => compareCryptoBarsByDisplayTime(right, left, interval))
     .slice(0, limit);
 }
 
@@ -692,6 +760,20 @@ function latestFetchedAtForBars(rows: CryptoOhlcvBar[]) {
       ? bar.fetched_at
       : latestValue;
   }, null);
+}
+
+function latestFetchedAtForCoverage(rows: CryptoOhlcvCoverage[]) {
+  return rows.reduce<string | null>((latestValue, row) => {
+    if (!row.latest_fetched_at) return latestValue;
+    if (!latestValue) return row.latest_fetched_at;
+    return new Date(row.latest_fetched_at).getTime() > new Date(latestValue).getTime()
+      ? row.latest_fetched_at
+      : latestValue;
+  }, null);
+}
+
+function coverageKey(provider: string, interval: string) {
+  return `${provider}:${interval}`;
 }
 
 function autoRefreshReasonForBars(
@@ -728,6 +810,7 @@ type Props = {
   klineInstruments?: CryptoKLineInstrument[];
   professionalMode?: boolean;
   onProfessionalModeChange?: (value: boolean) => void;
+  refreshRevision?: number;
 };
 
 export default function CryptoKLinePanel({
@@ -737,6 +820,7 @@ export default function CryptoKLinePanel({
   klineInstruments,
   professionalMode = false,
   onProfessionalModeChange,
+  refreshRevision = 0,
 }: Props) {
   const { locale, t } = useI18n();
   const [interval, setInterval] = useState<CryptoInterval>("1m");
@@ -769,8 +853,11 @@ export default function CryptoKLinePanel({
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [refreshing, setRefreshing] = useState(false);
   const [bars, setBars] = useState<CryptoOhlcvBar[]>([]);
+  const [coverageRows, setCoverageRows] = useState<CryptoOhlcvCoverage[]>([]);
   const [liveChartUpdate, setLiveChartUpdate] = useState<LiveChartUpdate | null>(null);
   const chartDrawingSyncTimerRef = useRef<number | null>(null);
+  const chartDrawingLocalRevisionRef = useRef(0);
+  const barsRequestIdRef = useRef(0);
   const autoRefreshAttemptsRef = useRef<Record<string, number>>({});
   const autoRefreshInFlightRef = useRef<string | null>(null);
   const instrumentUniverse = klineInstruments?.length ? klineInstruments : CRYPTO_KLINE_INSTRUMENTS;
@@ -787,20 +874,31 @@ export default function CryptoKLinePanel({
     availableInstruments[0] ??
     instrumentUniverse[0] ??
     CRYPTO_KLINE_INSTRUMENTS[0];
-  const selectedSourceProviders = useMemo(
+  const fallbackSourceProviders = useMemo(
     () => instrumentSourceProviders(selectedInstrument),
     [selectedInstrument]
   );
-  const selectedPrimaryProvider = instrumentPrimaryProvider(selectedInstrument);
+  const effectiveInterval = instrumentSupportsInterval(selectedInstrument, interval)
+    ? interval
+    : "1d";
 
   const chartData = useMemo<ChartPoint[]>(() => {
     return [...bars]
-      .sort((left, right) => new Date(left.bar_time).getTime() - new Date(right.bar_time).getTime())
+      .sort((left, right) =>
+        compareCryptoBarsByDisplayTime(left, right, effectiveInterval)
+      )
       .map(barToChartPoint)
       .filter((point) => point.close !== null);
-  }, [bars]);
+  }, [bars, effectiveInterval]);
 
-  const effectiveInterval = instrumentSupportsInterval(selectedInstrument, interval) ? interval : "1d";
+  const selectedSourceProviders = useMemo(() => {
+    const intervalProviders = instrumentProvidersForInterval(selectedInstrument, effectiveInterval);
+    return intervalProviders.length ? intervalProviders : fallbackSourceProviders;
+  }, [effectiveInterval, fallbackSourceProviders, selectedInstrument]);
+  const selectedPrimaryProvider = useMemo(
+    () => instrumentPrimaryProviderForInterval(selectedInstrument, effectiveInterval),
+    [effectiveInterval, selectedInstrument]
+  );
   const chartLimit = chartLimitForInterval(effectiveInterval);
   const activeLiveChartUpdate =
     liveChartUpdate?.provider === selectedPrimaryProvider &&
@@ -881,6 +979,45 @@ export default function CryptoKLinePanel({
         })
       : t("crypto.kline.liveWaiting")
     : null;
+  const activeCoverageRows = useMemo(
+    () =>
+      coverageRows.filter(
+        (row) =>
+          row.symbol === selectedInstrument.symbol &&
+          row.instrument_type === selectedInstrument.instrumentType &&
+          selectedSourceProviders.includes(row.provider as CryptoProvider)
+      ),
+    [
+      coverageRows,
+      selectedInstrument.instrumentType,
+      selectedInstrument.symbol,
+      selectedSourceProviders,
+    ]
+  );
+  const coverageByProviderInterval = useMemo(() => {
+    const entries = new Map<string, CryptoOhlcvCoverage>();
+    activeCoverageRows.forEach((row) => {
+      entries.set(coverageKey(row.provider, row.interval), row);
+    });
+    return entries;
+  }, [activeCoverageRows]);
+  const currentIntervalCoverageRows = useMemo(
+    () =>
+      selectedSourceProviders
+        .map((provider) => coverageByProviderInterval.get(coverageKey(provider, effectiveInterval)))
+        .filter((row): row is CryptoOhlcvCoverage => Boolean(row)),
+    [coverageByProviderInterval, effectiveInterval, selectedSourceProviders]
+  );
+  const currentIntervalCoverageSummary = useMemo(() => {
+    const providerSummaries = selectedSourceProviders.map((provider) => {
+      const row = coverageByProviderInterval.get(coverageKey(provider, effectiveInterval));
+      return `${compactProviderLabel(provider)} ${row?.row_count ?? 0}`;
+    });
+    return providerSummaries.length
+      ? providerSummaries.join(" / ")
+      : t("crypto.kline.coverageEmpty");
+  }, [coverageByProviderInterval, effectiveInterval, selectedSourceProviders, t]);
+  const latestCoverageFetchedAt = latestFetchedAtForCoverage(currentIntervalCoverageRows);
 
   const fetchBars = useCallback(async () => {
     const providerRows = await Promise.all(
@@ -899,6 +1036,7 @@ export default function CryptoKLinePanel({
       providerRows.flat(),
       selectedSourceProviders,
       selectedPrimaryProvider,
+      effectiveInterval,
       chartLimit
     );
   }, [
@@ -907,6 +1045,20 @@ export default function CryptoKLinePanel({
     selectedInstrument.instrumentType,
     selectedInstrument.symbol,
     selectedPrimaryProvider,
+    selectedSourceProviders,
+  ]);
+
+  const fetchCoverageRows = useCallback(async () => {
+    const rows = await fetchJson<CryptoOhlcvCoverage[]>("/api/crypto-market/ohlcv/coverage", {
+      symbols: selectedInstrument.symbol,
+      instrument_type: selectedInstrument.instrumentType,
+    });
+    return rows.filter((row) =>
+      selectedSourceProviders.includes(row.provider as CryptoProvider)
+    );
+  }, [
+    selectedInstrument.instrumentType,
+    selectedInstrument.symbol,
     selectedSourceProviders,
   ]);
 
@@ -1008,8 +1160,13 @@ export default function CryptoKLinePanel({
       }
 
       if (options?.reloadAfter !== false) {
-        const rows = await fetchBars();
+        const requestId = ++barsRequestIdRef.current;
+        const [rows, nextCoverageRows] = await Promise.all([fetchBars(), fetchCoverageRows()]);
+
+        if (barsRequestIdRef.current !== requestId) return result;
+
         setBars(rows);
+        setCoverageRows(nextCoverageRows);
         setLoadState("success");
       }
       return result;
@@ -1033,6 +1190,7 @@ export default function CryptoKLinePanel({
     chartLimit,
     effectiveInterval,
     fetchBars,
+    fetchCoverageRows,
     ohlcvRefreshEnabled,
     selectedInstrument.baseAsset,
     selectedInstrument.symbol,
@@ -1042,13 +1200,18 @@ export default function CryptoKLinePanel({
 
   const loadBars = useCallback(async (options?: { silent?: boolean }) => {
     const silent = options?.silent ?? false;
+    const requestId = ++barsRequestIdRef.current;
     if (!silent) {
       setLoadState("loading");
     }
 
     try {
-      const rows = await fetchBars();
+      const [rows, nextCoverageRows] = await Promise.all([fetchBars(), fetchCoverageRows()]);
+
+      if (barsRequestIdRef.current !== requestId) return;
+
       setBars(rows);
+      setCoverageRows(nextCoverageRows);
       setLoadState("success");
 
       const staleRefreshReason = autoRefreshReasonForBars(rows, effectiveInterval);
@@ -1076,8 +1239,15 @@ export default function CryptoKLinePanel({
           updateRefreshing: autoRefreshReason !== "auto_poll",
         });
         if (result !== null) {
-          const refreshedRows = await fetchBars();
+          const [refreshedRows, refreshedCoverageRows] = await Promise.all([
+            fetchBars(),
+            fetchCoverageRows(),
+          ]);
+
+          if (barsRequestIdRef.current !== requestId) return;
+
           setBars(refreshedRows);
+          setCoverageRows(refreshedCoverageRows);
           setLoadState("success");
         }
       } finally {
@@ -1086,7 +1256,7 @@ export default function CryptoKLinePanel({
         }
       }
     } catch (error) {
-      if (!silent) {
+      if (!silent && barsRequestIdRef.current === requestId) {
         emitDataStatusEvent({
           market: "crypto",
           level: "error",
@@ -1101,10 +1271,20 @@ export default function CryptoKLinePanel({
     autoRefreshKey,
     effectiveInterval,
     fetchBars,
+    fetchCoverageRows,
     ohlcvRefreshEnabled,
     refreshBars,
     chartStatusSource,
     t,
+  ]);
+
+  useEffect(() => {
+    barsRequestIdRef.current += 1;
+  }, [
+    effectiveInterval,
+    selectedInstrument.instrumentType,
+    selectedInstrument.key,
+    selectedPrimaryProvider,
   ]);
 
   useEffect(() => {
@@ -1114,6 +1294,15 @@ export default function CryptoKLinePanel({
 
     return () => window.clearTimeout(timer);
   }, [loadBars]);
+
+  useEffect(() => {
+    if (refreshRevision <= 0) return;
+    const timer = window.setTimeout(() => {
+      void loadBars({ silent: true });
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, [loadBars, refreshRevision]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -1317,6 +1506,7 @@ export default function CryptoKLinePanel({
     drawingsToSave: ChartDrawing[],
     selectedDrawingIdToSave = activeSelectedChartDrawingId
   ) => {
+    chartDrawingLocalRevisionRef.current += 1;
     setChartDrawingState({
       key: chartDrawingKey,
       drawings: drawingsToSave,
@@ -1339,13 +1529,22 @@ export default function CryptoKLinePanel({
 
   useEffect(() => {
     if (!professionalMode) return;
+    if (chartDrawingState.key === chartDrawingKey) return;
 
     let cancelled = false;
+    const loadRevision = chartDrawingLocalRevisionRef.current;
+    const hasLocalSnapshot = hasChartDrawingSnapshot(chartDrawingKey);
     const localDrawings = loadChartDrawings(chartDrawingKey);
     const normalizedLocalSelection = normalizeChartDrawingSelection(
       localDrawings,
       activeSelectedChartDrawingId
     );
+
+    if (hasLocalSnapshot && localDrawings.length === 0) {
+      return () => {
+        cancelled = true;
+      };
+    }
 
     if (localDrawings.length > 0) {
       queueChartDrawingRemoteSave(localDrawings, normalizedLocalSelection);
@@ -1360,7 +1559,7 @@ export default function CryptoKLinePanel({
           chartDrawingApiPath("CRYPTO", selectedInstrument.key, effectiveInterval)
         );
 
-        if (cancelled) return;
+        if (cancelled || chartDrawingLocalRevisionRef.current !== loadRevision) return;
 
         const remoteDrawings = normalizeStoredChartDrawings(snapshot.drawings);
         if (remoteDrawings.length === 0) return;
@@ -1388,6 +1587,7 @@ export default function CryptoKLinePanel({
     };
   }, [
     activeSelectedChartDrawingId,
+    chartDrawingState.key,
     chartDrawingKey,
     effectiveInterval,
     professionalMode,
@@ -1744,6 +1944,23 @@ export default function CryptoKLinePanel({
               </span>
               <span>/</span>
               <span>{t("crypto.kline.bars", { count: displayChartData.length })}</span>
+              <span>/</span>
+              <span>
+                {t("crypto.kline.coverage", {
+                  interval: effectiveInterval,
+                  summary: currentIntervalCoverageSummary,
+                })}
+              </span>
+              {latestCoverageFetchedAt ? (
+                <>
+                  <span>/</span>
+                  <span>
+                    {t("crypto.kline.coverageUpdated", {
+                      time: formatDateTime(latestCoverageFetchedAt, locale),
+                    })}
+                  </span>
+                </>
+              ) : null}
               {liveStatusLabel ? (
                 <>
                   <span>/</span>

@@ -151,6 +151,12 @@ const barsByTimeframe: Record<USHistoricalTimeframe, number> = {
   monthly: 72,
 };
 
+function shouldIncludeUsOhlcIntraday() {
+  const marketState = getUsMarketRefreshState();
+
+  return marketState.isPollingWindow || marketState.isAfterClose;
+}
+
 const defaultUsChartIndicators: IndicatorSettings = {
   ...defaultIndicators,
   signals: false,
@@ -1188,6 +1194,7 @@ export default function USStockDetailPanel({
               timeframe: nextTimeframe,
               bars: barsByTimeframe[nextTimeframe],
               ensure_history: true,
+              ...(shouldIncludeUsOhlcIntraday() ? { include_intraday: true } : {}),
               outputsize: "full",
               provider: "yahoo_chart",
             }
@@ -1292,6 +1299,7 @@ export default function USStockDetailPanel({
               timeframe: nextTimeframe,
               bars: barsByTimeframe[nextTimeframe],
               ensure_history: true,
+              ...(shouldIncludeUsOhlcIntraday() ? { include_intraday: true } : {}),
               outputsize: nextTimeframe === "monthly" ? "full" : "compact",
             }
           ),

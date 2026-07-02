@@ -125,6 +125,56 @@ class AiAnswerComposerTests(unittest.TestCase):
             ],
         )
 
+    def test_generic_data_limits_translate_dataset_keys(self) -> None:
+        limits = answer_composer.generic_data_limits(
+            missing=[
+                "institutional_trade_daily",
+                "margin_trading_daily",
+                "broker_branch_trade_daily",
+                "us_overnight_tw_impact",
+            ],
+            warnings=[
+                "Local OMI data is incomplete for 1 stock(s); affected datasets: institutional_trade_daily, margin_trading_daily, broker_branch_trade_daily. Refresh OMI before relying on AI conclusions.",
+            ],
+        )
+
+        self.assertEqual(
+            limits[0],
+            "資料缺口或落後：法人買賣超、融資融券、券商分點、美股隔夜影響；結論需保留彈性。",
+        )
+        self.assertEqual(
+            limits[1],
+            "本地 OMI 資料尚未完整更新：法人買賣超、融資融券、券商分點；刷新後再依賴結論。",
+        )
+
+    def test_source_health_limits_are_prioritized_over_generic_missing(self) -> None:
+        answer = answer_composer.build_consumer_human_answer(
+            question_intent="trend_view",
+            target={"label": "2330 台積電"},
+            analysis_digest={
+                "display": "中短線評分 +2｜偏多",
+                "selected_score": 2,
+                "selected_confidence": "medium",
+                "source_health": {
+                    "entries": [
+                        {
+                            "resource": "institutional_trade_daily",
+                            "label": "Institutional trade",
+                            "status": "stale",
+                            "required": True,
+                            "latest_data_date": "2026-06-26",
+                            "expected_data_date": "2026-06-30",
+                        }
+                    ]
+                },
+            },
+            missing=["institutional_trade_daily"],
+            warnings=[],
+        )
+
+        self.assertIn("法人買賣超資料落後", answer["data_limits"][0])
+        self.assertIn("資料缺口或落後：法人買賣超", answer["data_limits"][1])
+
     def test_consumer_answer_includes_source_health_data_limits(self) -> None:
         answer = answer_composer.build_consumer_human_answer(
             question_intent="trend_view",

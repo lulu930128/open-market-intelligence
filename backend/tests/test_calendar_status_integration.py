@@ -10,6 +10,8 @@ from app.jobs import scheduler
 from app.market.taiwan_rules import (
     TAIWAN_DATASET_INSTITUTIONAL_TRADE,
     TAIWAN_DATASET_MARGIN_TRADING,
+    TAIWAN_REFRESH_INSTITUTIONAL_TRADE,
+    TAIWAN_REFRESH_MARGIN_TRADING,
 )
 
 
@@ -41,9 +43,42 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
 
         request = enqueue.call_args.kwargs["request"]
         task_args = enqueue.call_args.kwargs["task_args"]
-        self.assertFalse(request["include_today"])
-        self.assertFalse(task_args[4])
+        self.assertEqual(request["categories"], [TAIWAN_REFRESH_INSTITUTIONAL_TRADE])
+        self.assertTrue(request["include_today"])
+        self.assertTrue(task_args[4])
         self.assertEqual(request["calendar_phase"], "post_close")
+        fake_db.close.assert_called_once()
+
+    def test_scheduler_margin_refresh_uses_margin_release_window(self) -> None:
+        fake_db = SimpleNamespace(close=Mock())
+        calendar_status = {
+            "market": "tw",
+            "date": "2026-06-15",
+            "is_trading_day": True,
+            "phase": "post_close",
+            "reason": "trading_day",
+            "release_windows": {
+                TAIWAN_DATASET_MARGIN_TRADING: {"is_released": True},
+            },
+        }
+
+        with (
+            patch.object(scheduler, "build_taiwan_calendar_status", return_value=calendar_status),
+            patch.object(scheduler, "SessionLocal", return_value=fake_db),
+            patch.object(
+                scheduler.job_service,
+                "enqueue_job",
+                return_value=(SimpleNamespace(id=20), True),
+            ) as enqueue,
+        ):
+            scheduler.enqueue_market_margin_daily_refresh()
+
+        request = enqueue.call_args.kwargs["request"]
+        task_args = enqueue.call_args.kwargs["task_args"]
+        self.assertEqual(request["categories"], [TAIWAN_REFRESH_MARGIN_TRADING])
+        self.assertTrue(request["include_today"])
+        self.assertEqual(task_args[2], [TAIWAN_REFRESH_MARGIN_TRADING])
+        self.assertTrue(task_args[4])
         fake_db.close.assert_called_once()
 
     def test_scheduler_market_chip_refresh_uses_calendar_expected_trade_date(self) -> None:
@@ -80,6 +115,41 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
         self.assertFalse(request["include_today"])
         self.assertEqual(task_args[1], date(2026, 6, 12))
         self.assertFalse(task_args[2])
+
+    def test_scheduler_market_chip_margin_refresh_uses_margin_window(self) -> None:
+        fake_db = SimpleNamespace(close=Mock())
+        calendar_status = {
+            "market": "tw",
+            "date": "2026-06-15",
+            "is_trading_day": True,
+            "phase": "post_close",
+            "reason": "trading_day",
+            "release_windows": {
+                "market_chip_margin_daily": {
+                    "expected_trade_date": "2026-06-15",
+                    "is_released": True,
+                }
+            },
+        }
+
+        with (
+            patch.object(scheduler, "build_taiwan_calendar_status", return_value=calendar_status),
+            patch.object(scheduler, "normalize_market_chip_index_ids", return_value=["TAIEX"]),
+            patch.object(scheduler, "SessionLocal", return_value=fake_db),
+            patch.object(
+                scheduler.job_service,
+                "enqueue_job",
+                return_value=(SimpleNamespace(id=21), True),
+            ) as enqueue,
+        ):
+            scheduler.enqueue_market_chip_margin_daily_refresh()
+
+        request = enqueue.call_args.kwargs["request"]
+        task_args = enqueue.call_args.kwargs["task_args"]
+        self.assertEqual(request["trade_date"], date(2026, 6, 15))
+        self.assertTrue(request["include_today"])
+        self.assertEqual(task_args[1], date(2026, 6, 15))
+        self.assertTrue(task_args[2])
 
     def test_scheduler_skips_us_refresh_when_calendar_is_closed(self) -> None:
         calendar_status = {

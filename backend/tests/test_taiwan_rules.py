@@ -41,6 +41,13 @@ class TaiwanRulesTests(unittest.TestCase):
                 taiwan_rules.TAIWAN_DATASET_INSTITUTIONAL_TRADE,
                 now=now,
             ),
+            date(2026, 6, 5),
+        )
+        self.assertEqual(
+            taiwan_rules.expected_date_for_dataset(
+                taiwan_rules.TAIWAN_DATASET_MARGIN_TRADING,
+                now=now,
+            ),
             date(2026, 6, 4),
         )
         self.assertIsNone(taiwan_rules.expected_date_for_dataset("monthly_revenue", now=now))

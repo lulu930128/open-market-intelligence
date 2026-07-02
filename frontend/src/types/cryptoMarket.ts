@@ -14,6 +14,21 @@ export type CryptoBaseAsset = string;
 
 export type CryptoProvider = "bitopro" | "binance" | "okx";
 export type CryptoInstrumentType = "spot";
+export const CRYPTO_KLINE_INTERVALS = [
+  "1m",
+  "5m",
+  "15m",
+  "30m",
+  "1h",
+  "4h",
+  "1d",
+  "1w",
+  "1M",
+] as const;
+export type CryptoOhlcvInterval = (typeof CRYPTO_KLINE_INTERVALS)[number];
+export type CryptoProviderOhlcvIntervals = Partial<
+  Record<CryptoProvider, CryptoOhlcvInterval[]>
+>;
 
 export type CryptoAssetResources = {
   local_twd?: boolean;
@@ -40,6 +55,7 @@ export type CryptoProviderContract = {
   market?: string;
   assets?: CryptoAssetDefinition[];
   instruments?: Array<Record<string, unknown>>;
+  ohlcv_intervals?: Partial<Record<CryptoProvider, string[]>>;
 };
 
 export type CryptoKLineInstrument = {
@@ -53,10 +69,18 @@ export type CryptoKLineInstrument = {
   quoteAsset: string;
   instrumentType: CryptoInstrumentType;
   role: string;
+  supportedIntervals?: CryptoOhlcvInterval[];
+  providerIntervals?: CryptoProviderOhlcvIntervals;
   hidden?: boolean;
 };
 
 const FALLBACK_LOCAL_TWD_BASES = new Set<CryptoBaseAsset>(["BTC", "ETH", "USDT"]);
+const CRYPTO_KLINE_INTERVAL_SET = new Set<string>(CRYPTO_KLINE_INTERVALS);
+const FALLBACK_OHLCV_INTERVALS_BY_PROVIDER: CryptoProviderOhlcvIntervals = {
+  bitopro: ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1M"],
+  binance: ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1M"],
+  okx: ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1M"],
+};
 
 function providerLabel(provider: CryptoProvider) {
   if (provider === "bitopro") return "BitoPro";
@@ -118,9 +142,51 @@ function sourceProvidersForGlobalSpot(
   return normalizeCryptoBaseAsset(base) === "USDT" ? [] : ["binance", "okx"];
 }
 
+function normalizeOhlcvIntervals(intervals: readonly string[] | null | undefined) {
+  const seen = new Set<string>();
+  const normalized: CryptoOhlcvInterval[] = [];
+
+  intervals?.forEach((interval) => {
+    if (!CRYPTO_KLINE_INTERVAL_SET.has(interval) || seen.has(interval)) return;
+    seen.add(interval);
+    normalized.push(interval as CryptoOhlcvInterval);
+  });
+
+  return normalized;
+}
+
+function intervalsForProvider(
+  provider: CryptoProvider,
+  contractIntervals?: Partial<Record<CryptoProvider, string[]>> | null
+) {
+  const fromContract = normalizeOhlcvIntervals(contractIntervals?.[provider]);
+  if (fromContract.length) return fromContract;
+  return FALLBACK_OHLCV_INTERVALS_BY_PROVIDER[provider] ?? [...CRYPTO_KLINE_INTERVALS];
+}
+
+function providerIntervalsFor(
+  providers: readonly CryptoProvider[],
+  contractIntervals?: Partial<Record<CryptoProvider, string[]>> | null
+) {
+  const providerIntervals: CryptoProviderOhlcvIntervals = {};
+  providers.forEach((provider) => {
+    providerIntervals[provider] = intervalsForProvider(provider, contractIntervals);
+  });
+  return providerIntervals;
+}
+
+function unionProviderIntervals(providerIntervals: CryptoProviderOhlcvIntervals) {
+  const supported = new Set<CryptoOhlcvInterval>();
+  Object.values(providerIntervals).forEach((intervals) => {
+    intervals?.forEach((interval) => supported.add(interval));
+  });
+  return CRYPTO_KLINE_INTERVALS.filter((interval) => supported.has(interval));
+}
+
 export function buildCryptoKlineInstruments(
   baseOptions: readonly CryptoBaseAsset[] = cryptoBaseOptionsFromAssets(),
-  assets?: CryptoAssetDefinition[] | null
+  assets?: CryptoAssetDefinition[] | null,
+  ohlcvIntervals?: Partial<Record<CryptoProvider, string[]>> | null
 ) {
   const instruments: CryptoKLineInstrument[] = [];
 
@@ -129,6 +195,7 @@ export function buildCryptoKlineInstruments(
     const definition = assetDefinitionByBase(assets, base);
 
     if (supportsLocalTwd(base, definition)) {
+      const providerIntervals = providerIntervalsFor(["bitopro"], ohlcvIntervals);
       instruments.push({
         key: `bitopro:${base}-TWD:spot`,
         provider: "bitopro",
@@ -141,6 +208,8 @@ export function buildCryptoKlineInstruments(
           base === "USDT"
             ? "Taiwan USDT/TWD conversion reference"
             : "Taiwan TWD spot reference",
+        supportedIntervals: unionProviderIntervals(providerIntervals),
+        providerIntervals,
       });
     }
 
@@ -151,6 +220,7 @@ export function buildCryptoKlineInstruments(
       ? "binance"
       : sourceProviders[0];
     const exchangeLabel = sourceProviders.map(providerLabel).join(" / ");
+    const providerIntervals = providerIntervalsFor(sourceProviders, ohlcvIntervals);
 
     instruments.push({
       key: `global:${base}-USDT:spot`,
@@ -165,9 +235,12 @@ export function buildCryptoKlineInstruments(
       role: sourceProviders.length > 1
         ? "Global spot composite / primary provider with fallback"
         : "Global spot reference",
+      supportedIntervals: unionProviderIntervals(providerIntervals),
+      providerIntervals,
     });
 
     sourceProviders.forEach((provider) => {
+      const singleProviderIntervals = providerIntervalsFor([provider], ohlcvIntervals);
       instruments.push({
         key: `${provider}:${base}-USDT:spot`,
         provider,
@@ -177,6 +250,8 @@ export function buildCryptoKlineInstruments(
         quoteAsset: "USDT",
         instrumentType: "spot",
         role: provider === "binance" ? "Global high-liquidity spot" : "Secondary global spot",
+        supportedIntervals: unionProviderIntervals(singleProviderIntervals),
+        providerIntervals: singleProviderIntervals,
         hidden: true,
       });
     });

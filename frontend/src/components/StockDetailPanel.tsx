@@ -20,6 +20,7 @@ import StockKLineChart, {
 } from "@/components/StockKLineChart";
 import type { ChartDrawing, ChartDrawingTool } from "@/components/LightweightKLineChart";
 import StockDetailDataPanel from "@/components/stock-detail/StockDetailDataPanel";
+import QuoteDepthPanel from "@/components/stock-detail/QuoteDepthPanel";
 import {
   dataPanelTabs,
   minimumUsableFinancialRows,
@@ -158,6 +159,8 @@ import type {
   StockIndicatorPoint,
   StockMasterRead,
   StockTechnicalReportRead,
+  TaiwanStockQuoteDepthPreviewMode,
+  TaiwanStockQuoteDepthRead,
 } from "@/types/market";
 import {
   type ReactNode,
@@ -176,11 +179,19 @@ type Props = {
   watchlistRankingPanel?: ReactNode;
   marketIndexSummary?: MarketIndexSummary | null;
   onChartFocusModeChange?: (active: boolean) => void;
+  quoteDepthPreviewMode?: TaiwanStockQuoteDepthPreviewMode | null;
 };
 
 const TAIWAN_DATASET_INSTITUTIONAL_TRADE = "institutional_trade_daily";
 const TAIWAN_DATASET_MARGIN_TRADING = "margin_trading_daily";
 const TAIWAN_DATASET_BROKER_BRANCH = "broker_branch_trade_daily";
+const quoteDepthLivePhases = new Set(["preopen_auction", "regular_live", "closing_auction"]);
+
+function quoteDepthRefreshDelayMs(quoteDepth: TaiwanStockQuoteDepthRead | null) {
+  return quoteDepth && quoteDepthLivePhases.has(quoteDepth.session_phase)
+    ? TAIWAN_INTRADAY_REFRESH_MS
+    : 60_000;
+}
 
 function dataPanelCacheKey(stockId: string, tab: DataPanelTab, branchDays = 1) {
   return tab === "branch" ? `${stockId}:${tab}:${branchDays}` : `${stockId}:${tab}`;
@@ -262,6 +273,16 @@ const chartBarsByTimeframe: Record<ChartTimeframe, number> = {
 const dailyIndicatorLimit = 220;
 const openingObservationMinutes = 5;
 const openingObservationMinPoints = 5;
+
+function shouldIncludeTaiwanOhlcIntraday() {
+  const marketState = getTaiwanMarketRefreshState();
+
+  return (
+    marketState.isPollingWindow ||
+    (marketState.isAfterClose && !marketState.isDailyPriceReleased)
+  );
+}
+
 const indexTimeframes: Timeframe[] = ["today", "daily", "weekly", "monthly"];
 const indexProducts = new Map([
   [
@@ -669,6 +690,7 @@ export default function StockDetailPanel({
   watchlistRankingPanel,
   marketIndexSummary,
   onChartFocusModeChange,
+  quoteDepthPreviewMode = null,
 }: Props) {
   const t = useT();
   const refreshExecutionSettings = useRefreshExecutionSettings();
@@ -776,6 +798,8 @@ export default function StockDetailPanel({
   const [chartHistoryMessage, setChartHistoryMessage] = useState<string | null>(null);
   const [backendTechnicalReport, setBackendTechnicalReport] =
     useState<StockTechnicalReportRead | null>(null);
+  const [quoteDepth, setQuoteDepth] = useState<TaiwanStockQuoteDepthRead | null>(null);
+  const [quoteDepthLoadState, setQuoteDepthLoadState] = useState<LoadState>("idle");
   const [taiwanCalendarStatus, setTaiwanCalendarStatus] =
     useState<MarketCalendarMarketStatus | null>(() =>
       getMarketCalendarStatusSnapshot("tw")
@@ -1745,6 +1769,7 @@ export default function StockDetailPanel({
             timeframe: requestedTimeframe,
             bars: chartBarsByTimeframe[requestedTimeframe],
             ensure_history: false,
+            include_intraday: shouldIncludeTaiwanOhlcIntraday(),
           }
         );
         const refreshedIndicators = await fetchJson<StockIndicatorPoint[]>(
@@ -1808,6 +1833,8 @@ export default function StockDetailPanel({
         const requestedStockId = effectStockId;
         const requestedTimeframe = effectiveTimeframe as TaiwanChartTimeframe;
         const chartBars = chartBarsByTimeframe[requestedTimeframe];
+        const includeIntraday =
+          !isIndexProduct && shouldIncludeTaiwanOhlcIntraday();
         const ohlc = await fetchJson<OhlcChartResponse>(
           isIndexProduct
             ? `/api/market/indices/${requestedStockId}/ohlc`
@@ -1816,6 +1843,7 @@ export default function StockDetailPanel({
             timeframe: requestedTimeframe,
             bars: chartBars,
             ensure_history: false,
+            ...(includeIntraday ? { include_intraday: true } : {}),
           }
         );
         const indicators =
@@ -1939,6 +1967,74 @@ export default function StockDetailPanel({
       cancelled = true;
     };
   }, [effectiveTimeframe, isIndexProduct, stockId, todayUpdatedAt]);
+
+  useEffect(() => {
+    if (!stockId || isIndexProduct) {
+      return;
+    }
+
+    let cancelled = false;
+    let quoteDepthTimer: number | undefined;
+    let quoteDepthRequestInFlight = false;
+    let latestQuoteDepth: TaiwanStockQuoteDepthRead | null = null;
+    const requestedStockId = stockId;
+
+    function clearQuoteDepthTimer() {
+      if (quoteDepthTimer !== undefined) {
+        window.clearTimeout(quoteDepthTimer);
+        quoteDepthTimer = undefined;
+      }
+    }
+
+    async function loadQuoteDepth(showLoading: boolean) {
+      if (quoteDepthRequestInFlight) return latestQuoteDepth;
+      quoteDepthRequestInFlight = true;
+
+      if (showLoading) {
+        setQuoteDepth(null);
+        setQuoteDepthLoadState("loading");
+      }
+
+      try {
+        const depth = await fetchJson<TaiwanStockQuoteDepthRead>(
+          `/api/market/quote-depth/${requestedStockId}`,
+          { refresh: true }
+        );
+
+        if (cancelled || activeStockIdRef.current !== requestedStockId) return latestQuoteDepth;
+
+        latestQuoteDepth = depth;
+        setQuoteDepth(depth);
+        setQuoteDepthLoadState("success");
+        return depth;
+      } catch {
+        if (cancelled || activeStockIdRef.current !== requestedStockId) return latestQuoteDepth;
+
+        setQuoteDepthLoadState("error");
+        if (latestQuoteDepth === null) {
+          setQuoteDepth(null);
+        }
+        return latestQuoteDepth;
+      } finally {
+        quoteDepthRequestInFlight = false;
+      }
+    }
+
+    function scheduleQuoteDepthRefresh(depth: TaiwanStockQuoteDepthRead | null) {
+      if (cancelled) return;
+
+      quoteDepthTimer = window.setTimeout(() => {
+        void loadQuoteDepth(false).then(scheduleQuoteDepthRefresh);
+      }, quoteDepthRefreshDelayMs(depth));
+    }
+
+    void loadQuoteDepth(true).then(scheduleQuoteDepthRefresh);
+
+    return () => {
+      cancelled = true;
+      clearQuoteDepthTimer();
+    };
+  }, [isIndexProduct, stockId]);
 
   const indicatorForTimeframe = useMemo(() => {
     if (effectiveTimeframe === "daily") return indicatorData.slice(-180);
@@ -3728,6 +3824,12 @@ export default function StockDetailPanel({
           <TechnicalLoadingPanel />
         ) : (
           <>
+            <QuoteDepthPanel
+              quoteDepth={quoteDepth}
+              loadState={quoteDepthLoadState}
+              quoteDepthPreviewMode={quoteDepthPreviewMode}
+            />
+
             <div className="omi-technical-summary border-b border-omi-border-subtle px-5 py-3">
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
                 {stockTechnicalText(t, "eyebrow")}

@@ -2,19 +2,28 @@
 
 import { useT } from "@/i18n";
 import {
+  createDispatchSchedule,
   createDispatchRecipientGroup,
+  deleteDispatchSchedule,
   deleteDispatchRecipientGroup,
   listDispatchDeliveries,
   listDispatchRecipientGroups,
+  listDispatchSchedules,
   listDispatchWatchlistGroups,
   previewDispatch,
+  runDispatchSchedule,
   sendDispatch,
+  updateDispatchSchedule,
   updateDispatchRecipientGroup,
+  type DispatchContentDepth,
   type DispatchDeliveryRead,
   type DispatchMarket,
   type DispatchPreviewRead,
   type DispatchPreviewRequest,
+  type DispatchRadarMode,
   type DispatchRecipientGroupRead,
+  type DispatchScheduleRead,
+  type DispatchScheduleWrite,
   type DispatchTemplateKey,
   type WatchlistGroupOption,
 } from "@/lib/dispatchMail";
@@ -23,6 +32,18 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 type LoadState = "idle" | "loading" | "success" | "error";
 type ActionState = "idle" | "loading" | "error";
 type PreviewMode = "html" | "text";
+
+const DISPATCH_RADAR_MODES: DispatchRadarMode[] = [
+  "action",
+  "momentum",
+  "risk",
+  "breakout",
+  "surge",
+  "overheat",
+  "all",
+];
+
+const DISPATCH_RADAR_LIMITS = [6, 8, 12, 16, 24] as const;
 
 type Message = {
   type: "success" | "error";
@@ -62,6 +83,18 @@ function deliveryStatusClassName(status: DispatchDeliveryRead["status"]) {
   return "text-omi-text-muted";
 }
 
+function scheduleStatusClassName(schedule: DispatchScheduleRead) {
+  if (!schedule.enabled) return "text-omi-text-muted";
+  if (schedule.last_error_at) return "text-omi-danger";
+  if (schedule.last_success_at) return "text-omi-success";
+  return "text-omi-accent";
+}
+
+function numberOrNull(value: unknown) {
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) && numberValue > 0 ? numberValue : null;
+}
+
 function toTextAreaValue(emails: string[]) {
   return emails.join("\n");
 }
@@ -79,6 +112,7 @@ export default function DispatchSettingsDialog({
   );
   const [watchlistGroups, setWatchlistGroups] = useState<WatchlistGroupOption[]>([]);
   const [deliveries, setDeliveries] = useState<DispatchDeliveryRead[]>([]);
+  const [schedules, setSchedules] = useState<DispatchScheduleRead[]>([]);
   const [selectedRecipientGroupId, setSelectedRecipientGroupId] =
     useState<number | null>(null);
   const [editingGroupId, setEditingGroupId] = useState<number | null>(null);
@@ -89,11 +123,25 @@ export default function DispatchSettingsDialog({
   const [templateKey, setTemplateKey] =
     useState<DispatchTemplateKey>("market_overview");
   const [watchlistGroupId, setWatchlistGroupId] = useState<number | null>(null);
+  const [includeOverviewRadar, setIncludeOverviewRadar] = useState(false);
+  const [contentDepth, setContentDepth] =
+    useState<DispatchContentDepth>("standard");
+  const [radarMode, setRadarMode] = useState<DispatchRadarMode>("action");
+  const [radarLimit, setRadarLimit] = useState<number>(8);
   const [preview, setPreview] = useState<DispatchPreviewRead | null>(null);
   const [previewMode, setPreviewMode] = useState<PreviewMode>("html");
   const [savingGroup, setSavingGroup] = useState(false);
   const [deletingGroup, setDeletingGroup] = useState(false);
   const [sending, setSending] = useState(false);
+  const [editingScheduleId, setEditingScheduleId] = useState<number | null>(null);
+  const [scheduleName, setScheduleName] = useState("");
+  const [scheduleDescription, setScheduleDescription] = useState("");
+  const [scheduleTime, setScheduleTime] = useState("08:55");
+  const [scheduleDayOfWeek, setScheduleDayOfWeek] = useState("mon-fri");
+  const [scheduleEnabled, setScheduleEnabled] = useState(true);
+  const [savingSchedule, setSavingSchedule] = useState(false);
+  const [deletingScheduleId, setDeletingScheduleId] = useState<number | null>(null);
+  const [runningScheduleId, setRunningScheduleId] = useState<number | null>(null);
 
   const selectedRecipientGroup = useMemo(
     () =>
@@ -106,6 +154,11 @@ export default function DispatchSettingsDialog({
     [watchlistGroups]
   );
 
+  const showRadarControls =
+    market === "tw" &&
+    (templateKey === "watchlist_brief" ||
+      (templateKey === "market_overview" && includeOverviewRadar));
+
   const loadData = useCallback(async () => {
     await Promise.resolve();
     setLoadState("loading");
@@ -113,16 +166,23 @@ export default function DispatchSettingsDialog({
     setMessage(null);
 
     try {
-      const [nextRecipientGroups, nextDeliveries, nextWatchlistGroups] =
+      const [
+        nextRecipientGroups,
+        nextDeliveries,
+        nextWatchlistGroups,
+        nextSchedules,
+      ] =
         await Promise.all([
           listDispatchRecipientGroups(),
           listDispatchDeliveries(20),
           listDispatchWatchlistGroups(market),
+          listDispatchSchedules(),
         ]);
 
       setRecipientGroups(nextRecipientGroups);
       setDeliveries(nextDeliveries);
       setWatchlistGroups(nextWatchlistGroups);
+      setSchedules(nextSchedules);
       setSelectedRecipientGroupId(
         (current) => current ?? nextRecipientGroups[0]?.id ?? null
       );
@@ -166,6 +226,48 @@ export default function DispatchSettingsDialog({
     setMessage(null);
   }
 
+  function resetScheduleForm() {
+    setEditingScheduleId(null);
+    setScheduleName("");
+    setScheduleDescription("");
+    setScheduleTime("08:55");
+    setScheduleDayOfWeek("mon-fri");
+    setScheduleEnabled(true);
+    setMessage(null);
+  }
+
+  function editSchedule(schedule: DispatchScheduleRead) {
+    const request = schedule.request ?? {};
+    const scopeId = request.scope_id ?? schedule.scope_id;
+
+    setEditingScheduleId(schedule.id);
+    setScheduleName(schedule.name);
+    setScheduleDescription(schedule.description ?? "");
+    setScheduleTime(schedule.send_time);
+    setScheduleDayOfWeek(schedule.day_of_week);
+    setScheduleEnabled(schedule.enabled);
+    setSelectedRecipientGroupId(schedule.recipient_group_id);
+    setTemplateKey(schedule.template_key);
+    setContentDepth(request.content_depth ?? "standard");
+    setRadarMode(request.radar_mode ?? "action");
+    setRadarLimit(Number(request.radar_limit ?? 8));
+
+    if (schedule.template_key === "watchlist_brief") {
+      setMarket("tw");
+      setIncludeOverviewRadar(false);
+      setWatchlistGroupId(numberOrNull(scopeId));
+    } else {
+      const nextMarket = scopeId === "us" ? "us" : "tw";
+      const radarGroupId = numberOrNull(request.radar_group_id);
+      setMarket(nextMarket);
+      setIncludeOverviewRadar(nextMarket === "tw" && Boolean(request.include_radar));
+      setWatchlistGroupId(nextMarket === "tw" ? radarGroupId : null);
+    }
+
+    setPreview(null);
+    setMessage(null);
+  }
+
   function buildPreviewRequest(): DispatchPreviewRequest | null {
     if (templateKey === "watchlist_brief") {
       if (market !== "tw") {
@@ -188,13 +290,77 @@ export default function DispatchSettingsDialog({
         template_key: "watchlist_brief",
         scope_type: "watchlist",
         scope_id: String(watchlistGroupId),
+        strategy_profile: "short_term_momentum",
+        rank_by: "score",
+        sort_order: "desc",
+        radar_mode: radarMode,
+        content_depth: contentDepth,
+        radar_limit: radarLimit,
       };
+    }
+
+    if (market === "tw" && includeOverviewRadar && !watchlistGroupId) {
+      setMessage({
+        type: "error",
+        text: t("settings.dispatch.validationWatchlistGroup"),
+      });
+      return null;
     }
 
     return {
       template_key: "market_overview",
       scope_type: "market",
       scope_id: market,
+      include_radar: market === "tw" ? includeOverviewRadar : false,
+      radar_group_id:
+        market === "tw" && includeOverviewRadar ? watchlistGroupId : null,
+      strategy_profile: "short_term_momentum",
+      rank_by: "score",
+      sort_order: "desc",
+      radar_mode: radarMode,
+      content_depth: contentDepth,
+      radar_limit: radarLimit,
+    };
+  }
+
+  function buildSchedulePayload(): DispatchScheduleWrite | null {
+    const name = scheduleName.trim();
+    if (!name) {
+      setMessage({
+        type: "error",
+        text: t("settings.dispatch.validationScheduleName"),
+      });
+      return null;
+    }
+
+    if (!scheduleTime.trim()) {
+      setMessage({
+        type: "error",
+        text: t("settings.dispatch.validationScheduleTime"),
+      });
+      return null;
+    }
+
+    if (!selectedRecipientGroupId) {
+      setMessage({
+        type: "error",
+        text: t("settings.dispatch.validationRecipientGroup"),
+      });
+      return null;
+    }
+
+    const request = buildPreviewRequest();
+    if (!request) return null;
+
+    return {
+      ...request,
+      name,
+      description: scheduleDescription.trim() || null,
+      recipient_group_id: selectedRecipientGroupId,
+      enabled: scheduleEnabled,
+      send_time: scheduleTime.trim(),
+      day_of_week: scheduleDayOfWeek.trim() || "mon-fri",
+      timezone: "Asia/Taipei",
     };
   }
 
@@ -343,6 +509,88 @@ export default function DispatchSettingsDialog({
       });
     } finally {
       setSending(false);
+    }
+  }
+
+  async function saveSchedule() {
+    const payload = buildSchedulePayload();
+    if (!payload) return;
+
+    setSavingSchedule(true);
+    setMessage(null);
+
+    try {
+      const savedSchedule = editingScheduleId
+        ? await updateDispatchSchedule(editingScheduleId, payload)
+        : await createDispatchSchedule(payload);
+
+      setSchedules((current) => {
+        const exists = current.some((schedule) => schedule.id === savedSchedule.id);
+        if (!exists) return [savedSchedule, ...current];
+        return current.map((schedule) =>
+          schedule.id === savedSchedule.id ? savedSchedule : schedule
+        );
+      });
+      setEditingScheduleId(savedSchedule.id);
+      setScheduleName(savedSchedule.name);
+      setScheduleDescription(savedSchedule.description ?? "");
+      setScheduleTime(savedSchedule.send_time);
+      setScheduleDayOfWeek(savedSchedule.day_of_week);
+      setScheduleEnabled(savedSchedule.enabled);
+      setMessage({ type: "success", text: t("settings.dispatch.scheduleSaved") });
+    } catch (error) {
+      setMessage({
+        type: "error",
+        text: error instanceof Error ? error.message : t("settings.saveError"),
+      });
+    } finally {
+      setSavingSchedule(false);
+    }
+  }
+
+  async function deleteSchedule() {
+    if (!editingScheduleId) return;
+    if (!window.confirm(t("settings.dispatch.confirmDeleteSchedule"))) return;
+
+    setDeletingScheduleId(editingScheduleId);
+    setMessage(null);
+
+    try {
+      await deleteDispatchSchedule(editingScheduleId);
+      setSchedules((current) =>
+        current.filter((schedule) => schedule.id !== editingScheduleId)
+      );
+      resetScheduleForm();
+      setMessage({ type: "success", text: t("settings.dispatch.scheduleDeleted") });
+    } catch (error) {
+      setMessage({
+        type: "error",
+        text: error instanceof Error ? error.message : t("settings.saveError"),
+      });
+    } finally {
+      setDeletingScheduleId(null);
+    }
+  }
+
+  async function runScheduleNow(scheduleId: number) {
+    setRunningScheduleId(scheduleId);
+    setMessage(null);
+
+    try {
+      const result = await runDispatchSchedule(scheduleId);
+      setDeliveries((current) => [result.delivery, ...current].slice(0, 20));
+      setSchedules(await listDispatchSchedules());
+      setMessage({
+        type: "success",
+        text: t("settings.dispatch.scheduleRunQueued", { jobId: result.job.id }),
+      });
+    } catch (error) {
+      setMessage({
+        type: "error",
+        text: error instanceof Error ? error.message : t("settings.dispatch.sendError"),
+      });
+    } finally {
+      setRunningScheduleId(null);
     }
   }
 
@@ -532,6 +780,9 @@ export default function DispatchSettingsDialog({
                         if (nextMarket !== "tw" && templateKey === "watchlist_brief") {
                           setTemplateKey("market_overview");
                         }
+                        if (nextMarket !== "tw") {
+                          setIncludeOverviewRadar(false);
+                        }
                         setWatchlistGroupId(null);
                         setPreview(null);
                         setMessage(null);
@@ -548,6 +799,7 @@ export default function DispatchSettingsDialog({
                       value={templateKey}
                       onChange={(event) => {
                         setTemplateKey(event.target.value as DispatchTemplateKey);
+                        setIncludeOverviewRadar(false);
                         setPreview(null);
                       }}
                       className="h-9 border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text outline-none focus:border-omi-accent"
@@ -579,28 +831,103 @@ export default function DispatchSettingsDialog({
                       ))}
                     </select>
                   </label>
-                  {templateKey === "watchlist_brief" ? (
-                    <label className="grid gap-1 text-xs font-bold text-omi-text-muted sm:col-span-3">
-                      {t("settings.dispatch.watchlistGroup")}
-                      <select
-                        value={watchlistGroupId ?? ""}
-                        onChange={(event) =>
-                          setWatchlistGroupId(
-                            event.target.value ? Number(event.target.value) : null
-                          )
-                        }
-                        className="h-9 border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text outline-none focus:border-omi-accent"
-                      >
-                        <option value="">
-                          {t("settings.dispatch.validationWatchlistGroup")}
-                        </option>
-                        {activeWatchlistGroups.map((group) => (
-                          <option key={group.id} value={group.id}>
-                            {group.group_name}
-                          </option>
-                        ))}
-                      </select>
+                  {templateKey === "market_overview" && market === "tw" ? (
+                    <label className="flex min-h-9 items-center gap-2 border border-omi-border bg-omi-surface px-3 text-xs font-bold text-omi-text-muted sm:col-span-3">
+                      <input
+                        type="checkbox"
+                        checked={includeOverviewRadar}
+                        onChange={(event) => {
+                          setIncludeOverviewRadar(event.target.checked);
+                          setPreview(null);
+                        }}
+                        className="h-4 w-4 accent-omi-accent"
+                      />
+                      {t("settings.dispatch.overviewRadar")}
                     </label>
+                  ) : null}
+                  {showRadarControls ? (
+                    <>
+                      <label className="grid gap-1 text-xs font-bold text-omi-text-muted sm:col-span-3">
+                        {t("settings.dispatch.watchlistGroup")}
+                        <select
+                          value={watchlistGroupId ?? ""}
+                          onChange={(event) =>
+                            setWatchlistGroupId(
+                              event.target.value ? Number(event.target.value) : null
+                            )
+                          }
+                          className="h-9 border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text outline-none focus:border-omi-accent"
+                        >
+                          <option value="">
+                            {t("settings.dispatch.validationWatchlistGroup")}
+                          </option>
+                          {activeWatchlistGroups.map((group) => (
+                            <option key={group.id} value={group.id}>
+                              {group.group_name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="grid gap-1 text-xs font-bold text-omi-text-muted">
+                        {t("settings.dispatch.contentDepth")}
+                        <select
+                          value={contentDepth}
+                          onChange={(event) => {
+                            const nextDepth = event.target.value as DispatchContentDepth;
+                            setContentDepth(nextDepth);
+                            if (nextDepth === "deep" && radarLimit < 12) {
+                              setRadarLimit(16);
+                            }
+                            if (nextDepth === "standard" && radarLimit > 12) {
+                              setRadarLimit(8);
+                            }
+                            setPreview(null);
+                          }}
+                          className="h-9 border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text outline-none focus:border-omi-accent"
+                        >
+                          <option value="standard">
+                            {t("settings.dispatch.contentDepthOptions.standard")}
+                          </option>
+                          <option value="deep">
+                            {t("settings.dispatch.contentDepthOptions.deep")}
+                          </option>
+                        </select>
+                      </label>
+                      <label className="grid gap-1 text-xs font-bold text-omi-text-muted">
+                        {t("settings.dispatch.radarMode")}
+                        <select
+                          value={radarMode}
+                          onChange={(event) => {
+                            setRadarMode(event.target.value as DispatchRadarMode);
+                            setPreview(null);
+                          }}
+                          className="h-9 border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text outline-none focus:border-omi-accent"
+                        >
+                          {DISPATCH_RADAR_MODES.map((mode) => (
+                            <option key={mode} value={mode}>
+                              {t(`settings.dispatch.radarModes.${mode}`)}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="grid gap-1 text-xs font-bold text-omi-text-muted">
+                        {t("settings.dispatch.radarLimit")}
+                        <select
+                          value={radarLimit}
+                          onChange={(event) => {
+                            setRadarLimit(Number(event.target.value));
+                            setPreview(null);
+                          }}
+                          className="h-9 border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text outline-none focus:border-omi-accent"
+                        >
+                          {DISPATCH_RADAR_LIMITS.map((limit) => (
+                            <option key={limit} value={limit}>
+                              {limit}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </>
                   ) : null}
                 </div>
               </div>
@@ -699,7 +1026,171 @@ export default function DispatchSettingsDialog({
               </section>
 
               <section className="min-h-0 overflow-y-auto p-5">
-                <div className="flex items-center justify-between gap-3">
+                <div className="border-b border-omi-border-subtle pb-5">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-black text-omi-text-strong">
+                        {t("settings.dispatch.schedules")}
+                      </h3>
+                      <p className="mt-1 text-xs leading-5 text-omi-text-muted">
+                        {t("settings.dispatch.schedulesHint")}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      className="h-8 shrink-0 border border-omi-border bg-omi-surface px-3 text-xs font-bold text-omi-text-muted hover:border-omi-control"
+                      onClick={resetScheduleForm}
+                    >
+                      {t("settings.dispatch.newSchedule")}
+                    </button>
+                  </div>
+
+                  <div className="mt-4 grid gap-3">
+                    <label className="grid gap-1 text-xs font-bold text-omi-text-muted">
+                      {t("settings.dispatch.scheduleName")}
+                      <input
+                        value={scheduleName}
+                        onChange={(event) => setScheduleName(event.target.value)}
+                        className="h-9 border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text outline-none focus:border-omi-accent"
+                      />
+                    </label>
+                    <div className="grid gap-3 sm:grid-cols-[112px_minmax(0,1fr)]">
+                      <label className="grid gap-1 text-xs font-bold text-omi-text-muted">
+                        {t("settings.dispatch.scheduleTime")}
+                        <input
+                          type="time"
+                          value={scheduleTime}
+                          onChange={(event) => setScheduleTime(event.target.value)}
+                          className="h-9 border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text outline-none focus:border-omi-accent"
+                        />
+                      </label>
+                      <label className="grid gap-1 text-xs font-bold text-omi-text-muted">
+                        {t("settings.dispatch.scheduleDayOfWeek")}
+                        <input
+                          value={scheduleDayOfWeek}
+                          onChange={(event) => setScheduleDayOfWeek(event.target.value)}
+                          className="h-9 border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text outline-none focus:border-omi-accent"
+                        />
+                      </label>
+                    </div>
+                    <label className="grid gap-1 text-xs font-bold text-omi-text-muted">
+                      {t("settings.dispatch.scheduleDescription")}
+                      <input
+                        value={scheduleDescription}
+                        onChange={(event) => setScheduleDescription(event.target.value)}
+                        className="h-9 border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text outline-none focus:border-omi-accent"
+                      />
+                    </label>
+                    <label className="flex min-h-9 items-center gap-2 border border-omi-border bg-omi-surface px-3 text-xs font-bold text-omi-text-muted">
+                      <input
+                        type="checkbox"
+                        checked={scheduleEnabled}
+                        onChange={(event) => setScheduleEnabled(event.target.checked)}
+                        className="h-4 w-4 accent-omi-accent"
+                      />
+                      {t("settings.dispatch.scheduleEnabled")}
+                    </label>
+                    <p className="text-xs leading-5 text-omi-text-muted">
+                      {t("settings.dispatch.scheduleDayOfWeekHint")}
+                    </p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={savingSchedule || !selectedRecipientGroupId}
+                        className="h-9 border border-omi-accent bg-omi-accent px-3 text-sm font-bold text-omi-text-inverse hover:bg-omi-control disabled:cursor-not-allowed disabled:opacity-60"
+                        onClick={() => void saveSchedule()}
+                      >
+                        {savingSchedule
+                          ? t("settings.saving")
+                          : t("settings.dispatch.saveSchedule")}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={
+                          !editingScheduleId || deletingScheduleId === editingScheduleId
+                        }
+                        className="h-9 border border-omi-border bg-omi-surface px-3 text-sm font-bold text-omi-text-muted hover:border-omi-danger hover:text-omi-danger disabled:cursor-not-allowed disabled:opacity-50"
+                        onClick={() => void deleteSchedule()}
+                      >
+                        {t("settings.dispatch.deleteSchedule")}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 grid gap-2">
+                    {schedules.length === 0 ? (
+                      <div className="border border-omi-border-subtle bg-omi-surface-subtle px-3 py-3 text-xs text-omi-text-muted">
+                        {t("settings.dispatch.noSchedules")}
+                      </div>
+                    ) : (
+                      schedules.map((schedule) => (
+                        <div
+                          key={schedule.id}
+                          className={[
+                            "grid grid-cols-[minmax(0,1fr)_auto] border bg-omi-surface-subtle",
+                            editingScheduleId === schedule.id
+                              ? "border-omi-accent"
+                              : "border-omi-border-subtle",
+                          ].join(" ")}
+                        >
+                          <button
+                            type="button"
+                            className="min-w-0 px-3 py-2 text-left hover:bg-omi-surface"
+                            onClick={() => editSchedule(schedule)}
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <div className="truncate text-sm font-bold text-omi-text">
+                                  {schedule.name}
+                                </div>
+                                <div className="mt-1 truncate text-xs text-omi-text-muted">
+                                  {schedule.send_time} / {schedule.day_of_week} /{" "}
+                                  {schedule.recipient_group_name ?? "-"}
+                                </div>
+                              </div>
+                              <span
+                                className={[
+                                  "shrink-0 text-xs font-black uppercase",
+                                  scheduleStatusClassName(schedule),
+                                ].join(" ")}
+                              >
+                                {!schedule.enabled
+                                  ? t("settings.dispatch.scheduleDisabledLabel")
+                                  : schedule.last_error_at
+                                    ? t("settings.dispatch.status.error")
+                                    : t("settings.dispatch.scheduleEnabledLabel")}
+                              </span>
+                            </div>
+                            <div className="mt-2 text-xs leading-5 text-omi-text-muted">
+                              {schedule.last_success_at
+                                ? t("settings.dispatch.lastRun", {
+                                    time: formatDateTime(schedule.last_success_at),
+                                  })
+                                : t("settings.dispatch.neverRun")}
+                            </div>
+                            {schedule.last_error_message ? (
+                              <div className="mt-1 break-words text-xs leading-5 text-omi-danger">
+                                {schedule.last_error_message}
+                              </div>
+                            ) : null}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={runningScheduleId === schedule.id}
+                            className="m-2 h-8 self-start border border-omi-border bg-omi-surface px-2 text-xs font-bold text-omi-text-muted hover:border-omi-control disabled:cursor-not-allowed disabled:opacity-50"
+                            onClick={() => void runScheduleNow(schedule.id)}
+                          >
+                            {runningScheduleId === schedule.id
+                              ? t("settings.dispatch.sending")
+                              : t("settings.dispatch.runSchedule")}
+                          </button>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                <div className="mt-5 flex items-center justify-between gap-3">
                   <h3 className="text-sm font-black text-omi-text-strong">
                     {t("settings.dispatch.history")}
                   </h3>

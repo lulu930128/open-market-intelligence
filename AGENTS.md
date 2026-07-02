@@ -37,9 +37,9 @@ OMI 不是自動交易系統。它只能做研究、情境判斷、技術位階�
 
 - 目前 backend 預設是 `127.0.0.1:8400`，frontend 預設是 `3000`。
 - 不要沿用舊的 `8300` 假設；遇到 README、MCP 文件或 `.codex` 設定還寫 `8300` 時，要先用目前 launcher / README / env-driven config 驗證。
-- Backend port 由 `OMI_BACKEND_PORT` 或 `APP_PORT` 決定，預設 `8400`。
-- Frontend port 由 `OMI_FRONTEND_PORT` 或 `FRONTEND_PORT` 決定，預設 `3000`。
-- 若 localhost 行為看起來不一致，要先確認是不是 stale process、舊 checkout、Windows excluded port range 或前端環境未重啟。
+- Backend port 由 `OMI_BACKEND_PORT` 或 `APP_PORT` 決定，預設偏好值是 `8400`；Frontend port 由 `OMI_FRONTEND_PORT` 或 `FRONTEND_PORT` 決定，預設偏好值是 `3000`。
+- `8400` / `3000` 是偏好 port，不是保證會使用的 port。Launcher 會偵測 Windows TCP excluded range、既有 listener 與 bind failure，必要時自動選下一個可用 port，並把實際 backend URL 同步到 `APP_PORT`、`OMI_BACKEND_PORT`、`API_PROXY_TARGET` 與 frontend proxy env。
+- 若 localhost 行為看起來不一致，要先看 `logs/launcher/<date>/launcher.log` 的 `selected=` 記錄與 tray menu 的 Open API Health / Open Dashboard，不要先假設固定是 `8400` 或 `3000`。
 
 ## AI Decision Contract
 
@@ -95,6 +95,26 @@ OMI AI 的回答應優先輸出可行的技術決策結構，而不是單句建�
 
 依修改範圍執行最相關檢查。
 
+預設先用安全驗證工具，避免直接啟動長駐 backend runtime、Next dev server、Playwright browser 或 crypto WebSocket collector 導致 Codex 對話卡住：
+
+```powershell
+cd "C:\project\Open Market Intelligence"
+.\scripts\run-safe-validation.ps1 -Profile quick
+```
+
+常用 profile：
+
+```powershell
+.\scripts\run-safe-validation.ps1 -Profile backend
+.\scripts\run-safe-validation.ps1 -Profile backend -BackendPytestArgs backend\tests\test_crypto_market.py
+.\scripts\run-safe-validation.ps1 -Profile frontend
+.\scripts\run-safe-validation.ps1 -Profile full
+```
+
+`run-safe-validation.ps1` 會替每個步驟設定 timeout、集中 log 到 `.tmp\validation\<timestamp>`，並提示固定敏感 port（`3000`、`3100`、`8400`、`8427`）與 `.env` / `frontend/.env.local` 目前指定 port 是否已有 listener。`-IncludeE2E`、`-IncludeBuild`、`-StopPortOwners -Force` 都必須明確指定；不要把 e2e、build 或清 port owner 當成預設動作。只有在需要驗證真實 browser/runtime 行為時才加 `-IncludeE2E`，並保留短 timeout。
+
+以下分散命令作為 fallback 或精準除錯使用；不要在不知道 runtime 狀態時直接全量串起來跑。
+
 Backend：
 
 ```powershell
@@ -120,7 +140,7 @@ Invoke-RestMethod "http://127.0.0.1:8400/api/system/health"
 Invoke-RestMethod "http://127.0.0.1:8400/api/system/provider-events?limit=20"
 Invoke-RestMethod "http://127.0.0.1:8400/api/system/source-health-snapshots?market=tw"
 Invoke-RestMethod "http://127.0.0.1:8400/api/market/intraday/2330"
-Invoke-RestMethod "http://127.0.0.1:8400/api/market/technical-report/2330?timeframe=today"
+Invoke-RestMethod "http://127.0.0.1:8400/api/market/technical/2330?timeframe=today"
 Invoke-RestMethod "http://127.0.0.1:8400/api/watchlists/groups/1/radar?mode=action&max_results=8"
 Invoke-RestMethod "http://127.0.0.1:8400/api/market/tw-futures/latest?symbols=TXF&refresh=true&session=auto"
 ```

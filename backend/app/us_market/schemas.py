@@ -123,6 +123,7 @@ class USOhlcChartRead(BaseModel):
     point_count: int
     points: list[USOhlcPointRead]
     backfill: dict | None = None
+    intraday_overlay: dict | None = None
 
 
 class USIntradayTrendPointRead(BaseModel):

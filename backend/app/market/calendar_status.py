@@ -4,7 +4,12 @@ from datetime import date, datetime, time, timezone
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
-from app.market.market_chips import MARKET_CHIP_RELEASE_TIME, expected_market_chip_date
+from app.market.market_chips import (
+    MARKET_CHIP_RELEASE_TIME,
+    MARKET_MARGIN_RELEASE_TIME,
+    expected_market_chip_date,
+    expected_market_margin_chip_date,
+)
 from app.market.taiwan_rules import (
     TAIWAN_BROKER_BRANCH_RELEASE_TIME,
     TAIWAN_DAILY_PRICE_RELEASE_TIME,
@@ -226,6 +231,17 @@ def build_taiwan_calendar_status(now: datetime | None = None) -> dict[str, Any]:
         next_trading_day=next_trading_day,
         timezone_value=TAIWAN_TZ,
     )
+    release_windows["market_chip_margin_daily"] = _release_window(
+        key="market_chip_margin_daily",
+        label="Market chip margin daily",
+        release_time=MARKET_MARGIN_RELEASE_TIME,
+        expected_trade_date=expected_market_margin_chip_date(now=local_now),
+        local_now=local_now,
+        current_date=current_date,
+        is_trading_day=is_trading_day,
+        next_trading_day=next_trading_day,
+        timezone_value=TAIWAN_TZ,
+    )
 
     next_session_start_at = _next_session_start_at(
         current_date=current_date,
@@ -417,6 +433,11 @@ def expected_taiwan_trade_date(
     if include_today is not None:
         if key == "market_chip_daily":
             return expected_market_chip_date(include_today=include_today, now=now)
+        if key == "market_chip_margin_daily":
+            return expected_market_margin_chip_date(
+                include_today=include_today,
+                now=now,
+            )
         return expected_date_for_dataset(key, include_today=include_today, now=now)
 
     return expected_trade_date_from_calendar(

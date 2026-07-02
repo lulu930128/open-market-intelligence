@@ -967,7 +967,7 @@ export default function JPMarketPanel({
             {
               timeframe: requestTimeframe,
               bars: barsByTimeframe[nextTimeframe],
-              ensure_history: false,
+              ensure_history: !isIndexSymbol,
             }
           ),
           isIndexSymbol

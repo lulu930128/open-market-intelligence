@@ -346,6 +346,7 @@ export type OhlcChartResponse = {
   point_count: number;
   points: ChartPoint[];
   backfill: Record<string, unknown> | null;
+  intraday_overlay: Record<string, unknown> | null;
 };
 
 export type MarketBreadth = {
@@ -584,6 +585,59 @@ export type IntradayTrendResponse = {
   previous_close: number | null;
   point_count: number;
   points: IntradayTrendPoint[];
+};
+
+export type TaiwanStockQuoteDepthLevel = {
+  level: number;
+  price: number | null;
+  size_lots: number | null;
+};
+
+export type TaiwanStockQuoteDepthFreshness = {
+  status: string;
+  is_live: boolean;
+  is_stale: boolean;
+  age_seconds: number | null;
+  expected_trade_date: string | null;
+  message: string;
+  source_error: string | null;
+};
+
+export type TaiwanStockQuoteDepthPreviewMode = "preopen" | "live";
+
+export type TaiwanStockQuoteDepthRead = {
+  stock_id: string;
+  stock_name: string | null;
+  market: string | null;
+  provider: string;
+  source: string;
+  source_url: string | null;
+  exchange_channel: string | null;
+  session_phase: string;
+  phase_label: string;
+  trade_date: string | null;
+  quote_time: string | null;
+  fetched_at: string | null;
+  last_price: number | null;
+  previous_close: number | null;
+  open_price: number | null;
+  high_price: number | null;
+  low_price: number | null;
+  change: number | null;
+  change_pct: number | null;
+  total_volume_lots: number | null;
+  best_bid_price: number | null;
+  best_bid_size_lots: number | null;
+  best_ask_price: number | null;
+  best_ask_size_lots: number | null;
+  bid_total_size_lots: number | null;
+  ask_total_size_lots: number | null;
+  spread: number | null;
+  spread_pct: number | null;
+  bid_levels: TaiwanStockQuoteDepthLevel[];
+  ask_levels: TaiwanStockQuoteDepthLevel[];
+  depth_available: boolean;
+  freshness: TaiwanStockQuoteDepthFreshness;
 };
 
 export type IntradayHistoryResponse = {
@@ -1091,6 +1145,7 @@ export type USOhlcChartRead = {
   point_count: number;
   points: USOhlcPointRead[];
   backfill: Record<string, unknown> | null;
+  intraday_overlay: Record<string, unknown> | null;
 };
 
 export type USSecCompanyFactRead = {

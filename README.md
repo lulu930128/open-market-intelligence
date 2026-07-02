@@ -194,7 +194,7 @@ Crypto 是獨立市場資料域，不和台股、美股或商品共用交易邏�
 - 資產 registry：BTC、ETH、USDT、SOL、BNB、XRP、DOGE、TON、LINK。
 - 預設自選：主流幣群組包含 core/major assets；USDT 另放在 `商品 > 貨幣` 作為 TWD/USDT 參考。
 - 來源 contract：BitoPro 提供台灣 TWD spot reference；Binance 提供主要 USDT spot/perpetual reference；OKX 是 secondary global reference；CoinGecko 提供 ranking 與 market cap context。
-- 即時資料：WebSocket collector 預設啟用 BitoPro 與 Binance verified streams，寫入 in-memory latest store，並透過 bounded persistence 批次保存 OHLCV、ticker、order book、spread 與 derivatives snapshot。
+- 即時資料：WebSocket collector 預設啟用 BitoPro 與 Binance verified streams，寫入 in-memory latest store，並透過 bounded persistence 批次保存 OHLCV、ticker、order book、spread、derivatives snapshot 與 liquidation events。
 - REST auto-refresh：背景輪詢用於補齊 WebSocket 不涵蓋的資料與 bounded K 線視窗；subscription settings 決定哪些資產與資源 always-on 或 on-select。
 - 歷史資料：OHLCV 是主要 K 線歷史；ticker、order book、funding/open interest、spread 是 sampled history，用於趨勢觀察與資料品質追蹤，不是逐筆交易帳本。
 - 前端 K 線：一般 K 線與專業模式使用同一套視覺架構，支援 `1分`、`5分`、`15分`、`30分`、`1小時`、`4小時`、`日K`、`週K`、`月K`，Crypto 時間顯示會轉成台灣時間。
@@ -216,7 +216,7 @@ OMI 把每個來源都當作帶有 provenance 與 freshness 的 evidence，而�
 | 台股大盤/指數 | TWSE/TPEx market endpoints、部分 Yahoo fallback | 官方日資料優先；Yahoo 只補官方歷史覆蓋不足處。 |
 | 台指期即時報價 | TAIFEX MIS、KGI provider slot | 預設 TAIFEX MIS；KGI 目前只保留設定與錯誤邊界，adapter 實作前不會產生假即時資料。 |
 | 台指期日資料 | TAIFEX futures daily market report | 官方日資料，用於日/週/月 K 與非盤中 fallback。 |
-| 台股籌碼 | TWSE BFI82U、TPEx institutional summary、TDCC | 發布時間很重要，排程需晚於來源發布窗口。 |
+| 台股籌碼 | TWSE BFI82U、TPEx institutional summary、TAIFEX、TWSE/TPEx margin endpoints、TDCC | 法人/期貨籌碼約 15:10 後先更新；融資融券約 21:10 後補齊。 |
 | 台股基本面 | MOPS/MOPSOV | 官方來源族群；parser 需用 quality check 防格式變動。 |
 | 券商分點 | nStock branch Top15 | 便利型非官方來源；多日模式是已存 Top15 snapshot 加總，不是完整分點帳本。 |
 | 美股 OHLC/盤中 | Yahoo chart、Alpha Vantage daily | Yahoo best-effort；Alpha Vantage 受 key/rate limit 影響。 |
@@ -225,7 +225,7 @@ OMI 把每個來源都當作帶有 provenance 與 freshness 的 evidence，而�
 | 美股 short volume | FINRA CNMS daily short volume | 官方每日 short sale volume，不是 short interest。 |
 | 日股 OHLC/基本面 | Yahoo chart、J-Quants 設定槽 | 早期 context layer；J-Quants 需 key，缺資料時要顯示 missing/partial。 |
 | Crypto TWD spot | BitoPro REST/WebSocket | 台灣 TWD spot reference 與本地溢價觀察；不是全球成交量基準。 |
-| Crypto USDT spot/perpetual | Binance、OKX | Binance 是主要 verified realtime/reference；OKX 是 secondary source。來源失敗、stale 或 disabled 要顯示在 source health。 |
+| Crypto USDT spot/perpetual | Binance、OKX | Binance 是主要 verified realtime/reference，包含 USD-M force-order 清算事件；OKX 是 secondary source。來源失敗、stale 或 disabled 要顯示在 source health。 |
 | Crypto ranking/market cap | CoinGecko | 排名與市值 context；不是執行價格來源。 |
 | 商品 futures reference | Resource contract | 目前 provider pending、watch-only；接入 provider 前不得產生假 quote。 |
 | Macro | FRED | 官方 FRED API，需 key。 |
@@ -300,7 +300,7 @@ flowchart LR
 | `/api/jobs` | Background job status |
 | `/api/settings` | 技術分析、高對比與刷新節奏等設定 |
 | `/api/ai` | `omi.ask`、tools、strategy profiles、reports |
-| `/api/dispatch` | 派報收件群組、預覽、SMTP 發送與派報記錄 |
+| `/api/dispatch` | 派報收件群組、預覽、手動/定時 SMTP 發送與派報記錄 |
 | `/api/stocks` | 台股 search、master、profile |
 | `/api/watchlists` | 台股 watchlists、groups、ranking、Radar、backfills |
 | `/api/market/ohlc` | 台股日/週/月 OHLC |
@@ -597,7 +597,7 @@ cd "C:\project\Open Market Intelligence"
 
 Launcher 是本機 convenience wrapper。開發時後端與前端命令仍是 canonical path。
 
-開發模式下 launcher 預期使用 `.\.venv\Scripts\python.exe`。Backend port 由 `OMI_BACKEND_PORT` 或 `APP_PORT` 決定，預設 `8400`。Frontend port 由 `OMI_FRONTEND_PORT` 或 `FRONTEND_PORT` 決定，預設 `3000`。如果 frontend 預設 port 已被其他 process 佔用、被 Windows 保留或拒絕 bind，或不是目前 checkout 的 `/omi-ui-health`，launcher 會自動改用下一個可用 port 並開啟正確 Dashboard URL。如果 backend port 被其他 checkout 或其他 Python runtime 的舊 OMI backend 佔用，launcher 會嘗試清掉 stale OMI process 後再啟動目前 checkout；如果該 port 落在 Windows TCP excluded range，launcher 會要求改用可綁定的 port。
+開發模式下 launcher 預期使用 `.\.venv\Scripts\python.exe`。Backend port 由 `OMI_BACKEND_PORT` 或 `APP_PORT` 決定，預設偏好值是 `8400`。Frontend port 由 `OMI_FRONTEND_PORT` 或 `FRONTEND_PORT` 決定，預設偏好值是 `3000`。這些是 preferred ports，不是保證值；如果 backend 或 frontend preferred port 已被其他 process 佔用、被 Windows TCP excluded range 保留、拒絕 bind，或不是目前 checkout 的 health endpoint，launcher 會自動改用下一個可用 port。Backend fallback 會同步更新 `APP_PORT`、`OMI_BACKEND_PORT`、`API_PROXY_TARGET` 與 frontend proxy env，frontend fallback 會開啟實際 Dashboard URL。實際選到的 URL 以 `logs\launcher\<date>\launcher.log` 的 `selected=` 記錄、tray menu 的 Open API Health / Open Dashboard 為準。
 
 ## Environment
 
@@ -637,6 +637,7 @@ ENABLE_CRYPTO_MARKET_AUTO_REFRESH=true
 CRYPTO_MARKET_AUTO_REFRESH_LOOP_SECONDS=1.0
 CRYPTO_MARKET_AUTO_REFRESH_MIN_INTERVAL_SECONDS=5.0
 CRYPTO_MARKET_AUTO_REFRESH_OHLCV_LIMIT=10
+CRYPTO_MARKET_AUTO_REFRESH_OHLCV_BUNDLE_SECONDS=900.0
 ENABLE_CRYPTO_MARKET_WS_COLLECTOR=true
 CRYPTO_MARKET_WS_ENABLED_PROVIDERS=bitopro,binance
 CRYPTO_MARKET_WS_MESSAGE_STALE_SECONDS=10
@@ -655,11 +656,20 @@ BITOPRO_WS_BASE_URL=wss://stream.bitopro.com:443/ws
 BINANCE_SPOT_API_BASE_URL=https://api.binance.com
 BINANCE_SPOT_WS_BASE_URL=wss://stream.binance.com:9443
 BINANCE_FUTURES_API_BASE_URL=https://fapi.binance.com
+BINANCE_FUTURES_WS_BASE_URL=wss://fstream.binance.com
 OKX_API_BASE_URL=https://www.okx.com
 OKX_WS_PUBLIC_URL=wss://ws.okx.com:8443/ws/v5/public
 COINGECKO_API_BASE_URL=https://api.coingecko.com/api/v3
 COINGECKO_API_KEY=
 COINGECKO_API_KEY_HEADER=x-cg-demo-api-key
+COINGLASS_API_BASE_URL=https://open-api-v4.coinglass.com
+COINGLASS_API_KEY=
+CRYPTO_MARKET_LIQUIDATION_HEATMAP_RANGE=24h
+CRYPTO_MARKET_LIQUIDATION_FALLBACK_EXCHANGE=Binance
+CRYPTO_MARKET_LIQUIDATION_MIN_AMOUNT=10000
+ENABLE_CRYPTO_MARKET_LIQUIDATION_LOCAL_FALLBACK=true
+CRYPTO_MARKET_LONG_SHORT_RATIO_PERIOD=5m
+CRYPTO_MARKET_LONG_SHORT_RATIO_LIMIT=30
 OMI_HTTP_TRUST_ENV=false
 
 DISPATCH_SMTP_HOST=
@@ -671,6 +681,8 @@ DISPATCH_SMTP_FROM_NAME=Open Market Intelligence
 DISPATCH_SMTP_USE_TLS=true
 DISPATCH_SMTP_USE_SSL=false
 DISPATCH_SMTP_TIMEOUT_SECONDS=30
+ENABLE_DISPATCH_SCHEDULER=true
+SCHEDULER_DISPATCH_TICK_INTERVAL_SECONDS=60
 
 OPENAI_API_KEY=
 OPENAI_LLM_API_KEY=
@@ -706,7 +718,9 @@ OpenAI key resolution order：
 
 ```env
 SCHEDULER_MARKET_REFRESH_TIME=15:15
-SCHEDULER_MARKET_CHIP_REFRESH_TIME=18:35
+SCHEDULER_MARKET_MARGIN_REFRESH_TIME=21:10
+SCHEDULER_MARKET_CHIP_REFRESH_TIME=15:10
+SCHEDULER_MARKET_CHIP_MARGIN_REFRESH_TIME=21:10
 ENABLE_TAIWAN_FUTURES_SCHEDULER=true
 SCHEDULER_TAIWAN_FUTURES_SYMBOLS=TXF,MXF,TMF
 SCHEDULER_TAIWAN_FUTURES_SESSION=auto
@@ -721,11 +735,17 @@ SCHEDULER_JP_MARKET_REFRESH_TIME=16:10
 SCHEDULER_JP_MARKET_REFRESH_DAY_OF_WEEK=mon-fri
 SCHEDULER_JP_MARKET_REFRESH_PROVIDER=auto
 SCHEDULER_JP_MARKET_REFRESH_SLEEP_SECONDS=15.0
+ENABLE_DISPATCH_SCHEDULER=true
+SCHEDULER_DISPATCH_TICK_INTERVAL_SECONDS=60
 ```
 
 大盤籌碼日報有發布窗口，排程應晚於 TWSE/TPEx 來源發布時間。
 
-Crypto 即時資料不依賴傳統交易日 scheduler。Backend 啟動後會依 `ENABLE_CRYPTO_MARKET_AUTO_REFRESH` 與 `ENABLE_CRYPTO_MARKET_WS_COLLECTOR` 啟動 runtime loop；WebSocket latest state 會先進 in-memory store，再由 `ENABLE_CRYPTO_MARKET_WS_PERSISTENCE` 控制的 bounded persistence manager 批次寫入 SQLite。前端只負責訂閱 `/api/crypto-market/realtime/latest/stream` 或 fallback polling，不應自己成為資料真相來源。
+定時派報排程存在 SQLite 的 `dispatch_schedule` table，後端會依 `ENABLE_DISPATCH_SCHEDULER` 啟動輕量 tick，掃描使用者在 UI 建立的時間、日期、模板、收件群組與雷達設定。同一個排程同一分鐘只會派送一次；手動「立即試跑」不會消耗後續正式排程的 run key。
+
+Crypto 即時資料不依賴傳統交易日 scheduler。Backend 啟動後會依 `ENABLE_CRYPTO_MARKET_AUTO_REFRESH` 與 `ENABLE_CRYPTO_MARKET_WS_COLLECTOR` 啟動 runtime loop；WebSocket latest state 會先進 in-memory store，再由 `ENABLE_CRYPTO_MARKET_WS_PERSISTENCE` 控制的 bounded persistence manager 批次寫入 SQLite。Binance USD-M `@forceOrder` 清算事件會沿用同一條 persistence bridge 存入 `crypto_liquidation_event`。前端只負責訂閱 `/api/crypto-market/realtime/latest/stream` 或 fallback polling，不應自己成為資料真相來源。
+
+Crypto OHLCV auto-refresh 分成兩層：fast plan 依訂閱設定維持 `1m` 小量更新，coverage plan 依 `CRYPTO_MARKET_AUTO_REFRESH_OHLCV_BUNDLE_SECONDS` 週期 bounded 補齊 `1m` 到 `1M` 的 provider/symbol coverage，避免日/週/月 K 線只在手動刷新後才完整。
 
 ## Database And Migrations
 
@@ -775,7 +795,7 @@ Invoke-RestMethod "http://127.0.0.1:8400/api/system/provider-events?limit=20"
 Invoke-RestMethod "http://127.0.0.1:8400/api/system/source-health-snapshots?market=tw"
 Invoke-RestMethod "http://127.0.0.1:8400/api/market/intraday/2330"
 Invoke-RestMethod "http://127.0.0.1:8400/api/market/ohlc/2330?timeframe=daily&limit=120"
-Invoke-RestMethod "http://127.0.0.1:8400/api/market/technical-report/2330?timeframe=today"
+Invoke-RestMethod "http://127.0.0.1:8400/api/market/technical/2330?timeframe=today"
 Invoke-RestMethod "http://127.0.0.1:8400/api/market/broker-branches/2330/daily?days=3&ensure_daily=false"
 Invoke-RestMethod "http://127.0.0.1:8400/api/market/source-health?stock_id=2330"
 Invoke-RestMethod "http://127.0.0.1:8400/api/watchlists/groups/1/radar?mode=action&max_results=8"
@@ -809,6 +829,8 @@ git diff --check
 - Crypto provider contract 在 `backend/app/crypto_market/contract.py`，資產 universe 在 `backend/app/crypto_market/assets.py`。新增主流幣時先擴充 registry，再讓 subscription、watchlist、provider contract 與前端 sidebar 自動吃同一份定義。
 - Crypto 即時資料入口在 `backend/app/crypto_market/ws_runtime.py`、`backend/app/crypto_market/realtime.py` 與 `backend/app/crypto_market/realtime_persistence.py`。Frontend 只能讀 `/api/crypto-market/realtime/latest` 或 SSE stream，不應自行直連交易所或把瀏覽器狀態當資料庫。
 - Crypto source health 由 `backend/app/crypto_market/source_health.py` 彙整 REST cache、WebSocket latest store、auto-refresh 與 persistence 狀態；UI 應顯示 stale/empty/error，不應把 24/7 市場的 missing data 靜默隱藏。
+- Crypto 清算熱力圖 refresh 先走 CoinGlass `/api/futures/liquidation/aggregated-heatmap/model1`，需要 `COINGLASS_API_KEY` 且方案支援該 endpoint；失敗或無 key 時可用 `ENABLE_CRYPTO_MARKET_LIQUIDATION_LOCAL_FALLBACK` 退到本地 liquidation events 聚合。本地 events 可由 Binance USD-M public `@forceOrder` WebSocket persistence 或第三方 liquidation-order feed 寫入，不會從 order book 產生假清算資料。
+- Crypto 多空持倉人數比初版走 Binance USD-M `/futures/data/globalLongShortAccountRatio`，由 `CRYPTO_MARKET_LONG_SHORT_RATIO_PERIOD` 與 `CRYPTO_MARKET_LONG_SHORT_RATIO_LIMIT` 控制 bounded refresh；Bybit 保留為下一個 provider。
 - 商品/resource 市場目前由 `backend/app/resource_market/contract.py` 管理 static contract；provider 接入前，`provider_pending` 是正確狀態，不應在前端補假報價。
 - 台股 market time 與 trading-session helpers 放在 `frontend/src/lib/taiwanMarketTime.ts` 與 `frontend/src/lib/taiwanMarketRules.ts`；會優先使用 `frontend/src/lib/marketCalendarStatus.ts` 的後端 snapshot，沒有 snapshot 時才使用本地 fallback。
 - 美股 regular-session helpers 放在 `frontend/src/lib/usMarketTime.ts`；會優先使用 `frontend/src/lib/marketCalendarStatus.ts` 的後端 snapshot，沒有 snapshot 時才使用本地 fallback。
@@ -827,10 +849,10 @@ git diff --check
 - US-TW supply-chain mapping 還不是完整 semantic layer，先作為 peer、sector、overnight context 使用。
 - 日股仍是早期 context layer；韓股仍是入口 placeholder。
 - Crypto 已有 registry、provider contract、local cache、WebSocket/REST refresh、K 線與 sampled history，但交易所覆蓋仍是 bounded universe，不是完整 crypto market universe；新增資產仍需進 registry，不做無限制全市場抓取。
-- Crypto WebSocket 目前預設只啟用 BitoPro 與 Binance verified streams；OKX 是 secondary provider/source，正式即時 stream 還需要獨立驗證後再打開。
+- Crypto WebSocket 目前預設只啟用 BitoPro 與 Binance verified streams；Binance 包含 spot ticker/order book/OHLCV 與 USD-M force-order 清算事件。OKX 是 secondary provider/source，正式即時 stream 還需要獨立驗證後再打開。
 - Crypto ticker、order book、funding、OI、spread history 是 sampled snapshots；適合研究趨勢與資料品質，不等同完整 tick/order-book archive。
 - 商品市場目前 provider pending、watch-only；正式 quote/OHLCV 來源接入前，只能作為分類與 UI/reference contract。
-- 派報第一版支援固定模板預覽與手動 SMTP 發送；定時派報與大漲/大跌觸發派報仍是後續版本。
+- 派報支援固定模板預覽、手動 SMTP 發送與 UI 自訂定時派報；大漲/大跌觸發派報仍是後續版本。
 - 券商分點多日分析取決於已存 daily Top15 snapshots；如果 DB 只有一天，就只能回傳 partial coverage。
 - 盤中資料取決於外部來源可用性，必要時會退回 snapshot-only 行為。
 - 凱基台指期 API 目前是設定與 provider slot，尚未實作 response adapter；正式接上前仍以 TAIFEX MIS 與本地快取為主。

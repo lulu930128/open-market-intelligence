@@ -16,6 +16,7 @@ from app.settings.market_data_subscription import (
 from app.crypto_market.realtime import (
     CryptoRealtimeStreamSpec,
     OHLCV_RESOURCE,
+    LIQUIDATION_RESOURCE,
     ORDER_BOOK_RESOURCE,
     TICKER_RESOURCE,
     build_crypto_realtime_stream_specs,
@@ -40,6 +41,7 @@ REALTIME_SUBSCRIPTION_RESOURCES = {
     TICKER_RESOURCE: "quote",
     ORDER_BOOK_RESOURCE: "order_book",
     OHLCV_RESOURCE: "ohlcv",
+    LIQUIDATION_RESOURCE: "liquidation_event",
 }
 
 

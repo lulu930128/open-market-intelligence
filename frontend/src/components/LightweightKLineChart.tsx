@@ -13,6 +13,7 @@ import {
   createChart,
   type IChartApi,
   type LineData,
+  type Logical,
   type LogicalRange,
   type Time,
   type TickMarkType,
@@ -47,6 +48,8 @@ import type {
   ProjectedSupportResistanceLevel,
   ProjectedTechnicalSignal,
   ProjectedVolumeProfileBin,
+  BuiltSeriesData,
+  LineSeriesData,
 } from "@/components/chart/LightweightKLineChartDrawing";
 import {
   DEFAULT_LIGHTWEIGHT_VISIBLE_BARS,
@@ -56,6 +59,7 @@ import {
   buildDrawingOmiSummary,
   buildFibonacciLevels,
   buildMeasurementStats,
+  buildRiskRewardStats,
   chartPointTypicalPrice,
   chartPointVolume,
   chartTime,
@@ -63,7 +67,6 @@ import {
   createDrawingId,
   defaultLightweightParameters,
   detectCandlestickPattern,
-  drawingDefaultColor,
   drawingModeBadgeWidth,
   drawingSnapDistancePx,
   drawingTimeFromChartTime,
@@ -131,6 +134,64 @@ function readOmiTheme(): OmiTheme {
   return baseTheme;
 }
 
+type SeriesDataUpdater = (nextSeriesData: BuiltSeriesData) => void;
+
+const riskRewardMinimumWidthPx = 24;
+const riskRewardReadyDistancePx = 3;
+const riskRewardGhostHandleOffsetPx = 18;
+
+function parseHexColor(color: string): [number, number, number] | null {
+  const normalized = color.trim();
+  const match = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(normalized);
+
+  if (!match) return null;
+
+  const hex = match[1];
+  const expanded =
+    hex.length === 3
+      ? hex
+          .split("")
+          .map((character) => `${character}${character}`)
+          .join("")
+      : hex;
+
+  return [
+    Number.parseInt(expanded.slice(0, 2), 16),
+    Number.parseInt(expanded.slice(2, 4), 16),
+    Number.parseInt(expanded.slice(4, 6), 16),
+  ];
+}
+
+function colorChannelLuminance(channel: number) {
+  const value = channel / 255;
+
+  return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+}
+
+function colorLuminance(color: string) {
+  const rgb = parseHexColor(color);
+
+  if (!rgb) return null;
+
+  return (
+    colorChannelLuminance(rgb[0]) * 0.2126 +
+    colorChannelLuminance(rgb[1]) * 0.7152 +
+    colorChannelLuminance(rgb[2]) * 0.0722
+  );
+}
+
+function colorContrastRatio(foreground: string, background: string) {
+  const foregroundLuminance = colorLuminance(foreground);
+  const backgroundLuminance = colorLuminance(background);
+
+  if (foregroundLuminance === null || backgroundLuminance === null) return null;
+
+  const lighter = Math.max(foregroundLuminance, backgroundLuminance);
+  const darker = Math.min(foregroundLuminance, backgroundLuminance);
+
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
 export default function LightweightKLineChart({
   chartData,
   indicatorData = emptyIndicatorData,
@@ -162,6 +223,10 @@ export default function LightweightKLineChart({
   const overlaySvgRef = useRef<SVGSVGElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const mainSeriesRef = useRef<PriceCoordinateApi | null>(null);
+  const seriesDataUpdatersRef = useRef<SeriesDataUpdater[]>([]);
+  const chartInteractionActiveRef = useRef(false);
+  const pendingSeriesDataRef = useRef<BuiltSeriesData | null>(null);
+  const chartInteractionEndTimerRef = useRef<number | null>(null);
   const dragStateRef = useRef<DrawingDragState | null>(null);
   const visibleLogicalRangeRef = useRef<LogicalRange | null>(null);
   const visibleLogicalRangeKeyRef = useRef<string | null>(null);
@@ -170,6 +235,7 @@ export default function LightweightKLineChart({
   const [overlaySize, setOverlaySize] = useState({ width: 0, height: 0 });
   const [overlayRevision, setOverlayRevision] = useState(0);
   const [draftAnchor, setDraftAnchor] = useState<DrawingAnchor | null>(null);
+  const [riskRewardDraftPointerId, setRiskRewardDraftPointerId] = useState<number | null>(null);
   const [hoverAnchor, setHoverAnchor] = useState<DrawingAnchor | null>(null);
   const [snapCoordinate, setSnapCoordinate] = useState<DrawingCoordinate | null>(null);
   const [dragPreviewDrawings, setDragPreviewDrawings] = useState<ChartDrawing[] | null>(null);
@@ -200,7 +266,44 @@ export default function LightweightKLineChart({
   const selectedDrawingColor = omiChartColors.drawing.selected;
   const hoveredDrawingColor = omiChartColors.drawing.hovered;
   const drawingHandleBorderColor = omiChartColors.drawing.handleBorder;
-  const activeDrawings = dragPreviewDrawings ?? drawings;
+  const themeDrawingDefaultColor = useCallback(
+    (type: ChartDrawing["type"]) => {
+      if (type === "anchorVwap") return omiChartColors.drawing.anchorVwap;
+      if (type === "volumeProfileRange") return omiChartColors.drawing.volumeProfileRange;
+      if (type === "priceRange") return omiChartColors.drawing.priceRange;
+      if (type === "riskReward") return omiChartColors.warning;
+      if (type === "measure") return omiChartColors.drawing.measure;
+      if (type === "rectangle") return omiChartColors.drawing.rectangle;
+      if (type === "fibonacci") return omiChartColors.drawing.fibonacci;
+      if (type === "ray") return omiChartColors.drawing.ray;
+
+      return omiChartColors.drawing.default;
+    },
+    [omiChartColors]
+  );
+  const readableDrawingColor = useCallback(
+    (color: string, type: ChartDrawing["type"]) => {
+      const contrastRatio = colorContrastRatio(color, omiChartColors.surface);
+
+      if (contrastRatio !== null && contrastRatio < 2.4) {
+        return themeDrawingDefaultColor(type);
+      }
+
+      return color;
+    },
+    [omiChartColors.surface, themeDrawingDefaultColor]
+  );
+  const drawingIdSet = useMemo(
+    () => new Set(drawings.map((drawing) => drawing.id)),
+    [drawings]
+  );
+  const activeDrawings = useMemo(() => {
+    if (!dragPreviewDrawings) return drawings;
+
+    return dragPreviewDrawings.every((drawing) => drawingIdSet.has(drawing.id))
+      ? dragPreviewDrawings
+      : drawings;
+  }, [dragPreviewDrawings, drawingIdSet, drawings]);
   const activeIndicators = useMemo(
     () => mergeIndicators(indicators, showMovingAverages),
     [indicators, showMovingAverages]
@@ -216,19 +319,16 @@ export default function LightweightKLineChart({
     () => buildSeriesData(chartData, indicatorData, volumeValueKey, timeMode, params, benchmarkData),
     [benchmarkData, chartData, indicatorData, params, timeMode, volumeValueKey]
   );
+  const latestSeriesDataRef = useRef(seriesData);
   const chartSeriesKey = useMemo(() => {
-    const firstPoint = chartData[0];
-
     return [
       timeMode,
       drawingContext?.market ?? "",
       drawingContext?.symbol ?? label,
       drawingContext?.timeframe ?? label,
       volumeValueKey,
-      firstPoint?.time ?? "empty",
     ].join(":");
   }, [
-    chartData,
     drawingContext?.market,
     drawingContext?.symbol,
     drawingContext?.timeframe,
@@ -236,6 +336,11 @@ export default function LightweightKLineChart({
     timeMode,
     volumeValueKey,
   ]);
+
+  useEffect(() => {
+    latestSeriesDataRef.current = seriesData;
+  }, [seriesData]);
+
   const chartDataTimeIndex = useMemo(() => {
     const indexByTime = new Map<string, number>();
 
@@ -302,6 +407,36 @@ export default function LightweightKLineChart({
 
     return { x, y };
   }, [timeMode]);
+
+  const riskRewardPointToCoordinate = useCallback(
+    (point: ChartDrawingPoint, fallbackX?: number): DrawingCoordinate | null => {
+      const chart = chartRef.current;
+      const series = mainSeriesRef.current;
+
+      if (!chart || !series) return null;
+
+      const logicalX =
+        Number.isFinite(point.logical)
+          ? chart.timeScale().logicalToCoordinate(point.logical as Logical)
+          : null;
+      const timeX = chart.timeScale().timeToCoordinate(chartTime(point.time, timeMode));
+      const x = logicalX ?? timeX ?? fallbackX ?? null;
+      const y = series.priceToCoordinate(point.price);
+
+      if (x === null || y === null) return null;
+
+      return { x, y };
+    },
+    [timeMode]
+  );
+
+  const priceToCoordinateY = useCallback((price: number): number | null => {
+    const series = mainSeriesRef.current;
+
+    if (!series || !Number.isFinite(price)) return null;
+
+    return series.priceToCoordinate(price);
+  }, []);
 
   const linePointToCoordinate = useCallback((point: LineData<Time>): DrawingCoordinate | null => {
     const chart = chartRef.current;
@@ -1141,18 +1276,29 @@ export default function LightweightKLineChart({
     return chartData[nearestIndex]?.time ?? chartData[chartData.length - 1]?.time ?? null;
   }, [chartData, timeMode]);
 
+  const drawingLogicalFromCoordinateX = useCallback((coordinateX: number) => {
+    const chart = chartRef.current;
+
+    if (!chart) return null;
+
+    const logical = chart.timeScale().coordinateToLogical(coordinateX);
+
+    return logical !== null && Number.isFinite(Number(logical)) ? Number(logical) : null;
+  }, []);
+
   const coordinateToDrawingPoint = useCallback((coordinate: DrawingCoordinate): ChartDrawingPoint | null => {
     const series = mainSeriesRef.current;
 
     if (!series) return null;
 
     const time = drawingTimeFromCoordinateX(coordinate.x);
+    const logical = drawingLogicalFromCoordinateX(coordinate.x);
     const price = series.coordinateToPrice(coordinate.y);
 
     if (time === null || price === null || !Number.isFinite(price)) return null;
 
-    return { time, price };
-  }, [drawingTimeFromCoordinateX]);
+    return { time, price, logical: logical ?? undefined };
+  }, [drawingLogicalFromCoordinateX, drawingTimeFromCoordinateX]);
 
   function pointerCoordinateFromEvent(event: { clientX: number; clientY: number }): DrawingCoordinate | null {
     const target = overlaySvgRef.current;
@@ -1202,6 +1348,69 @@ export default function LightweightKLineChart({
       setOverlayRevision((value) => value + 1);
     });
   }, []);
+
+  const applySeriesDataToChart = useCallback((nextSeriesData: BuiltSeriesData) => {
+    const updaters = seriesDataUpdatersRef.current;
+
+    if (updaters.length === 0) return;
+
+    updaters.forEach((updater) => updater(nextSeriesData));
+    scheduleOverlayRevision();
+  }, [scheduleOverlayRevision]);
+
+  const flushPendingSeriesData = useCallback(() => {
+    const pendingSeriesData = pendingSeriesDataRef.current;
+
+    if (!pendingSeriesData) return;
+
+    pendingSeriesDataRef.current = null;
+    applySeriesDataToChart(pendingSeriesData);
+  }, [applySeriesDataToChart]);
+
+  const applyChartPointerInteractivity = useCallback((interactive: boolean) => {
+    const chart = chartRef.current;
+
+    if (!chart) return;
+
+    chart.applyOptions({
+      handleScroll: {
+        mouseWheel: interactive,
+        pressedMouseMove: interactive,
+        horzTouchDrag: interactive,
+        vertTouchDrag: false,
+      },
+      handleScale: {
+        mouseWheel: interactive,
+        pinch: interactive,
+        axisPressedMouseMove: interactive,
+      },
+    });
+  }, []);
+
+  const beginChartInteraction = useCallback(() => {
+    chartInteractionActiveRef.current = true;
+
+    if (chartInteractionEndTimerRef.current !== null) {
+      window.clearTimeout(chartInteractionEndTimerRef.current);
+      chartInteractionEndTimerRef.current = null;
+    }
+  }, []);
+
+  const endChartInteraction = useCallback(() => {
+    if (chartInteractionEndTimerRef.current !== null) {
+      window.clearTimeout(chartInteractionEndTimerRef.current);
+    }
+
+    chartInteractionEndTimerRef.current = window.setTimeout(() => {
+      chartInteractionActiveRef.current = false;
+      chartInteractionEndTimerRef.current = null;
+      flushPendingSeriesData();
+    }, 80);
+  }, [flushPendingSeriesData]);
+
+  const restoreChartPointerInteractivity = useCallback(() => {
+    applyChartPointerInteractivity(drawingTool === "cursor");
+  }, [applyChartPointerInteractivity, drawingTool]);
 
   const applyVisibleLogicalRange = useCallback((range: LogicalRange) => {
     const chart = chartRef.current;
@@ -1354,12 +1563,14 @@ export default function LightweightKLineChart({
 
     const price = series.coordinateToPrice(coordinate.y);
     const time = drawingTimeFromCoordinateX(coordinate.x);
+    const logical = drawingLogicalFromCoordinateX(coordinate.x);
 
     if (time === null || price === null || !Number.isFinite(price)) return null;
 
     const anchor = {
       time,
       price,
+      logical: logical ?? undefined,
     };
 
     if (options.snap === false) {
@@ -1371,6 +1582,32 @@ export default function LightweightKLineChart({
     }
 
     return snapAnchorToHighLow(anchor, coordinate.x, coordinate.y);
+  }
+
+  function riskRewardWidthAnchorFromPointer<T extends SVGElement>(
+    event: ReactPointerEvent<T>,
+    entryCoordinate: DrawingCoordinate | null | undefined,
+    options: { clampToMinimum?: boolean } = {}
+  ): PointerAnchor | null {
+    const coordinate = pointerCoordinateFromEvent(event);
+
+    if (!coordinate || !entryCoordinate) return null;
+
+    const minimumX = entryCoordinate.x + riskRewardMinimumWidthPx;
+    if (!options.clampToMinimum && coordinate.x < minimumX) return null;
+
+    const x = Math.max(coordinate.x, minimumX);
+    const y = entryCoordinate.y;
+    const point = coordinateToDrawingPoint({ x, y });
+
+    if (!point) return null;
+
+    return {
+      ...point,
+      x,
+      y,
+      snapped: false,
+    };
   }
 
   function constrainAnchorToAngle(
@@ -1410,12 +1647,35 @@ export default function LightweightKLineChart({
       id: createDrawingId(),
       type,
       points,
-      color: drawingDefaultColor(type),
+      color: themeDrawingDefaultColor(type),
       createdAt: new Date().toISOString(),
     });
 
     commitDrawingState([...drawings, nextDrawing], nextDrawing.id);
     restoreVisibleLogicalRange(visibleRange);
+  }
+
+  function buildDefaultRiskRewardPoints(
+    anchor: DrawingAnchor,
+    widthAnchor: DrawingAnchor
+  ): [ChartDrawingPoint, ChartDrawingPoint, ChartDrawingPoint] {
+    return [
+      {
+        time: anchor.time,
+        price: anchor.price,
+        logical: anchor.logical,
+      },
+      {
+        time: widthAnchor.time,
+        price: anchor.price,
+        logical: widthAnchor.logical,
+      },
+      {
+        time: widthAnchor.time,
+        price: anchor.price,
+        logical: widthAnchor.logical,
+      },
+    ];
   }
 
   const deleteDrawing = useCallback((drawingId: string) => {
@@ -1468,7 +1728,35 @@ export default function LightweightKLineChart({
     if (!originFirst || !originSecond) return sourceDrawings;
 
     return sourceDrawings.map((drawing) => {
-      if (drawing.id !== dragState.drawingId || !isTwoPointDrawingType(drawing.type)) return drawing;
+      if (drawing.id !== dragState.drawingId) return drawing;
+
+      if (drawing.type === "riskReward") {
+        const [originEntry, originTarget, originStop] = dragState.originCoordinates ?? [];
+
+        if (!originEntry || !originTarget || !originStop) return drawing;
+
+        const entry = coordinateToDrawingPoint({
+          x: originEntry.x + dx,
+          y: originEntry.y + dy,
+        });
+        const target = coordinateToDrawingPoint({
+          x: originTarget.x + dx,
+          y: originTarget.y + dy,
+        });
+        const stop = coordinateToDrawingPoint({
+          x: originStop.x + dx,
+          y: originStop.y + dy,
+        });
+
+        if (!entry || !target || !stop) return drawing;
+
+        return {
+          ...drawing,
+          points: [entry, target, stop],
+        };
+      }
+
+      if (!isTwoPointDrawingType(drawing.type)) return drawing;
 
       const first = coordinateToDrawingPoint({
         x: originFirst.x + dx,
@@ -1545,6 +1833,8 @@ export default function LightweightKLineChart({
   function handleDrawingPointerDown(event: ReactPointerEvent<SVGSVGElement>) {
     if (event.button !== 0) return;
 
+    beginChartInteraction();
+
     if (drawingTool === "cursor") {
       const pointerCoordinate = pointerCoordinateFromEvent(event);
       const hitDrawingId = pointerCoordinate ? findHoveredDrawingId(pointerCoordinate) : null;
@@ -1554,6 +1844,17 @@ export default function LightweightKLineChart({
         onSelectedDrawingChange?.(null);
       }
 
+      return;
+    }
+
+    if (drawingTool === "riskReward" && draftAnchor) {
+      const entryCoordinate = drawingPointToCoordinate(draftAnchor);
+      const widthAnchor = riskRewardWidthAnchorFromPointer(event, entryCoordinate);
+
+      event.currentTarget.setPointerCapture(event.pointerId);
+      setHoverAnchor(widthAnchor ?? draftAnchor);
+      setRiskRewardDraftPointerId(event.pointerId);
+      setSnapCoordinate(widthAnchor ? { x: widthAnchor.x, y: widthAnchor.y } : null);
       return;
     }
 
@@ -1581,6 +1882,14 @@ export default function LightweightKLineChart({
       return;
     }
 
+    if (drawingTool === "riskReward") {
+      event.currentTarget.setPointerCapture(event.pointerId);
+      setDraftAnchor(anchor);
+      setHoverAnchor(anchor);
+      setRiskRewardDraftPointerId(event.pointerId);
+      return;
+    }
+
     if (!isTwoPointDrawingTool(drawingTool)) return;
 
     if (!draftAnchor) {
@@ -1595,12 +1904,33 @@ export default function LightweightKLineChart({
   }
 
   function handleDrawingPointerMove(event: ReactPointerEvent<SVGSVGElement>) {
+    if (riskRewardDraftPointerId !== null && event.pointerId === riskRewardDraftPointerId && draftAnchor) {
+      const entryCoordinate = drawingPointToCoordinate(draftAnchor);
+      const widthAnchor = riskRewardWidthAnchorFromPointer(event, entryCoordinate);
+
+      if (widthAnchor) {
+        setHoverAnchor(widthAnchor);
+        setSnapCoordinate({ x: widthAnchor.x, y: widthAnchor.y });
+      } else {
+        setHoverAnchor(draftAnchor);
+        setSnapCoordinate(null);
+      }
+
+      return;
+    }
+
     const dragState = dragStateRef.current;
 
     if (dragState) {
       const pointerCoordinate = pointerCoordinateFromEvent(event);
       let anchor =
-        dragState.mode === "line" ? null : anchorFromPointer(event, { snap: !event.altKey });
+        dragState.mode === "line"
+          ? null
+          : dragState.mode === "riskRewardWidth"
+            ? riskRewardWidthAnchorFromPointer(event, dragState.oppositeCoordinate, {
+                clampToMinimum: true,
+              })
+            : anchorFromPointer(event, { snap: !event.altKey });
 
       if (dragState.mode !== "line" && !anchor) return;
 
@@ -1643,28 +1973,36 @@ export default function LightweightKLineChart({
     }
   }
 
+  function handleDrawingOverlayPointerLeave() {
+    if (riskRewardDraftPointerId === null) {
+      setHoverAnchor(null);
+      setSnapCoordinate(null);
+    }
+  }
+
   function startDrawingDrag(
     event: ReactPointerEvent<SVGElement>,
     drawing: ChartDrawing,
     mode: DrawingDragState["mode"],
-    pointIndex: 0 | 1 = 0
+    pointIndex: 0 | 1 | 2 = 0,
+    projectedPointCoordinates: DrawingCoordinate[] = []
   ) {
     if (event.button !== 0) return;
 
+    beginChartInteraction();
+    applyChartPointerInteractivity(false);
+    event.preventDefault();
     event.stopPropagation();
 
     const startCoordinate = pointerCoordinateFromEvent(event);
     const visibleRange = rememberVisibleLogicalRange();
-    const pointCoordinates = isTwoPointDrawingType(drawing.type)
-      ? drawing.points
-          .slice(0, 2)
-          .map((point) => drawingPointToCoordinate(point))
-          .filter((coordinate): coordinate is DrawingCoordinate => coordinate !== null)
-      : [];
+    const pointCoordinates = projectedPointCoordinates;
     const originCoordinates =
       mode === "line" ? pointCoordinates : undefined;
     const oppositeCoordinate =
-      mode === "point" && pointCoordinates.length >= 2
+      mode === "riskRewardWidth" && pointCoordinates.length >= 1
+        ? pointCoordinates[0]
+        : mode === "point" && pointCoordinates.length >= 2
         ? pointCoordinates[pointIndex === 0 ? 1 : 0]
         : undefined;
 
@@ -1690,13 +2028,42 @@ export default function LightweightKLineChart({
   }
 
   function finishDrawingDrag(event: ReactPointerEvent<SVGSVGElement>) {
+    if (riskRewardDraftPointerId !== null && event.pointerId === riskRewardDraftPointerId && draftAnchor) {
+      const entryCoordinate = drawingPointToCoordinate(draftAnchor);
+      const widthAnchor = riskRewardWidthAnchorFromPointer(event, entryCoordinate);
+
+      if (!widthAnchor) {
+      setHoverAnchor(draftAnchor);
+      setRiskRewardDraftPointerId(null);
+      setSnapCoordinate(null);
+      endChartInteraction();
+      restoreChartPointerInteractivity();
+      return;
+    }
+
+      commitDrawing("riskReward", buildDefaultRiskRewardPoints(draftAnchor, widthAnchor));
+      setDraftAnchor(null);
+      setHoverAnchor(null);
+      setRiskRewardDraftPointerId(null);
+      setSnapCoordinate(null);
+      endChartInteraction();
+      restoreChartPointerInteractivity();
+      return;
+    }
+
     const dragState = dragStateRef.current;
 
     if (!dragState) return;
 
     const pointerCoordinate = pointerCoordinateFromEvent(event);
     let anchor =
-      dragState.mode === "line" ? null : anchorFromPointer(event, { snap: !event.altKey });
+      dragState.mode === "line"
+        ? null
+        : dragState.mode === "riskRewardWidth"
+          ? riskRewardWidthAnchorFromPointer(event, dragState.oppositeCoordinate, {
+              clampToMinimum: true,
+            })
+          : anchorFromPointer(event, { snap: !event.altKey });
 
     if (anchor && event.shiftKey && dragState.mode === "point") {
       anchor = constrainAnchorToAngle(anchor, dragState.oppositeCoordinate);
@@ -1713,6 +2080,7 @@ export default function LightweightKLineChart({
     setDragPreviewDrawings(null);
     setSnapCoordinate(null);
     restoreVisibleLogicalRange(visibleRange);
+    restoreChartPointerInteractivity();
   }
 
   function selectDrawing(drawingId: string) {
@@ -1722,6 +2090,7 @@ export default function LightweightKLineChart({
   function clearDrawingDraft() {
     dragStateRef.current = null;
     setDraftAnchor(null);
+    setRiskRewardDraftPointerId(null);
     setHoverAnchor(null);
     setHoveredDrawingId(null);
     setSnapCoordinate(null);
@@ -1887,6 +2256,7 @@ export default function LightweightKLineChart({
     if (!isTwoPointDrawingTool(drawingTool)) {
       const timer = window.setTimeout(() => {
         setDraftAnchor(null);
+        setRiskRewardDraftPointerId(null);
         setHoverAnchor(null);
         setHoveredDrawingId(null);
       }, 0);
@@ -1902,17 +2272,17 @@ export default function LightweightKLineChart({
       const nextDrawings = activeDrawings.flatMap((drawing): ProjectedDrawing[] => {
         if (drawing.type === "horizontal") {
           const point = drawing.points[0];
-          const coordinate = point ? drawingPointToCoordinate(point) : null;
+          const y = point ? priceToCoordinateY(point.price) : null;
 
-          if (!point || !coordinate) return [];
+          if (!point || y === null) return [];
 
           return [
             {
               drawing,
               label: formatDrawingPrice(point.price),
               points: [
-                { x: 0, y: coordinate.y },
-                { x: overlaySize.width, y: coordinate.y },
+                { x: 0, y },
+                { x: overlaySize.width, y },
               ],
             },
           ];
@@ -1934,6 +2304,31 @@ export default function LightweightKLineChart({
               points: [coordinate, lineEnd],
               anchorPoints: [coordinate, coordinate],
               anchoredVwapLine,
+            },
+          ];
+        }
+
+        if (drawing.type === "riskReward") {
+          const entryPoint = drawing.points[0];
+          const targetPoint = drawing.points[1];
+          const stopPoint = drawing.points[2];
+          const entry = entryPoint ? drawingPointToCoordinate(entryPoint) : null;
+          const target = targetPoint
+            ? riskRewardPointToCoordinate(targetPoint, entry ? entry.x + 120 : undefined)
+            : null;
+          const stop = stopPoint
+            ? riskRewardPointToCoordinate(stopPoint, target?.x ?? (entry ? entry.x + 120 : undefined))
+            : null;
+
+          if (!entryPoint || !targetPoint || !stopPoint || !entry || !target || !stop) return [];
+
+          return [
+            {
+              drawing,
+              label: t("chart.drawingTools.riskReward"),
+              points: [entry, target, stop],
+              anchorPoints: [entry, target, stop],
+              riskRewardStats: buildRiskRewardStats(entryPoint, targetPoint, stopPoint),
             },
           ];
         }
@@ -2067,6 +2462,22 @@ export default function LightweightKLineChart({
             };
       }
 
+      if (drawingTool === "riskReward" && draftAnchor && hoverAnchor) {
+        const entryPoint = drawingPointToCoordinate(draftAnchor);
+        const widthPoint = riskRewardPointToCoordinate(
+          hoverAnchor,
+          entryPoint ? entryPoint.x + 120 : undefined
+        );
+
+        if (entryPoint && widthPoint) {
+          nextDraftDrawing = {
+            type: "riskReward",
+            points: [entryPoint, widthPoint],
+            anchorPoints: [entryPoint, widthPoint],
+          };
+        }
+      }
+
       setProjectedCloudPolygons((current) =>
         preserveEmptyProjection(current, nextCloudPolygons)
       );
@@ -2083,6 +2494,7 @@ export default function LightweightKLineChart({
     activeIndicators.ichimoku,
     chartDataTimeIndex,
     drawingPointToCoordinate,
+    riskRewardPointToCoordinate,
     activeDrawings,
     buildAnchoredVwapProjection,
     buildIchimokuCloudPolygons,
@@ -2094,6 +2506,7 @@ export default function LightweightKLineChart({
     overlayRevision,
     overlaySize.height,
     overlaySize.width,
+    priceToCoordinateY,
     t,
     timeMode,
   ]);
@@ -2145,7 +2558,7 @@ export default function LightweightKLineChart({
 
   useEffect(() => {
     const container = containerRef.current;
-    if (!container || seriesData.candles.length === 0) return;
+    if (!container || latestSeriesDataRef.current.candles.length === 0) return;
     const initialHeight = container.clientHeight || height;
 
     const chart = createChart(container, {
@@ -2228,6 +2641,13 @@ export default function LightweightKLineChart({
     });
 
     chartRef.current = chart;
+    const seriesDataUpdaters: SeriesDataUpdater[] = [];
+    const registerSeriesDataUpdater = (updater: SeriesDataUpdater) => {
+      seriesDataUpdaters.push(updater);
+      updater(latestSeriesDataRef.current);
+    };
+    const lineData = <TKey extends keyof LineSeriesData>(key: TKey) =>
+      (nextData: BuiltSeriesData): LineSeriesData[TKey] => nextData.lines[key];
 
     if (chartStyle === "line") {
       const mainLineSeries = chart.addSeries(LineSeries, {
@@ -2242,7 +2662,7 @@ export default function LightweightKLineChart({
           minMove: 0.01,
         },
       });
-      mainLineSeries.setData(seriesData.line);
+      registerSeriesDataUpdater((nextData) => mainLineSeries.setData(nextData.line));
       mainSeriesRef.current = mainLineSeries;
     } else {
       const candleSeries = chart.addSeries(CandlestickSeries, {
@@ -2259,7 +2679,7 @@ export default function LightweightKLineChart({
           minMove: 0.01,
         },
       });
-      candleSeries.setData(seriesData.candles);
+      registerSeriesDataUpdater((nextData) => candleSeries.setData(nextData.candles));
       mainSeriesRef.current = candleSeries;
     }
 
@@ -2272,7 +2692,7 @@ export default function LightweightKLineChart({
         },
         color: omiChartColors.volume,
       });
-      volumeSeries.setData(seriesData.volumes);
+      registerSeriesDataUpdater((nextData) => volumeSeries.setData(nextData.volumes));
       chart.priceScale("").applyOptions({
         scaleMargins: {
           top: 0.82,
@@ -2282,13 +2702,11 @@ export default function LightweightKLineChart({
     }
 
     function addMainLine(
-      data: PlotLineData[],
+      getData: (nextData: BuiltSeriesData) => PlotLineData[],
       title: string,
       color: string,
       options?: { lineWidth?: 1 | 2 | 3 | 4; dashed?: boolean; pointsOnly?: boolean }
     ) {
-      if (data.length === 0) return;
-
       const series = chart.addSeries(LineSeries, {
         title,
         color,
@@ -2300,18 +2718,16 @@ export default function LightweightKLineChart({
         lastValueVisible: false,
         lineStyle: options?.dashed ? 2 : 0,
       });
-      series.setData(data);
+      registerSeriesDataUpdater((nextData) => series.setData(getData(nextData)));
     }
 
     function addPaneLine(
       paneIndex: number,
-      data: LineData<Time>[],
+      getData: (nextData: BuiltSeriesData) => LineData<Time>[],
       title: string,
       color: string,
       options?: { lineWidth?: 1 | 2 | 3 | 4; dashed?: boolean }
     ) {
-      if (data.length === 0) return;
-
       const series = chart.addSeries(
         LineSeries,
         {
@@ -2324,7 +2740,7 @@ export default function LightweightKLineChart({
         },
         paneIndex
       );
-      series.setData(data);
+      registerSeriesDataUpdater((nextData) => series.setData(getData(nextData)));
     }
 
     function addIndicatorPane(heightPx = 92) {
@@ -2334,130 +2750,130 @@ export default function LightweightKLineChart({
     }
 
     if (activeIndicators.ma) {
-      addMainLine(seriesData.lines.maShort, `MA${params.maShort}`, maColors.maShort);
-      addMainLine(seriesData.lines.maMiddle, `MA${params.maMiddle}`, maColors.maMiddle);
-      addMainLine(seriesData.lines.maLong, `MA${params.maLong}`, maColors.maLong, {
+      addMainLine(lineData("maShort"), `MA${params.maShort}`, maColors.maShort);
+      addMainLine(lineData("maMiddle"), `MA${params.maMiddle}`, maColors.maMiddle);
+      addMainLine(lineData("maLong"), `MA${params.maLong}`, maColors.maLong, {
         lineWidth: 1,
       });
     }
 
     if (activeIndicators.ema) {
-      addMainLine(seriesData.lines.emaFast, `EMA${params.emaFast}`, omiChartColors.cyan);
-      addMainLine(seriesData.lines.emaSlow, `EMA${params.emaSlow}`, omiChartColors.rose);
+      addMainLine(lineData("emaFast"), `EMA${params.emaFast}`, omiChartColors.cyan);
+      addMainLine(lineData("emaSlow"), `EMA${params.emaSlow}`, omiChartColors.rose);
     }
 
     if (activeIndicators.wma) {
-      addMainLine(seriesData.lines.wma, `WMA${params.wmaPeriod}`, omiChartColors.sky);
+      addMainLine(lineData("wma"), `WMA${params.wmaPeriod}`, omiChartColors.sky);
     }
 
     if (activeIndicators.hma) {
-      addMainLine(seriesData.lines.hma, `HMA${params.hmaPeriod}`, omiChartColors.roseDark);
+      addMainLine(lineData("hma"), `HMA${params.hmaPeriod}`, omiChartColors.roseDark);
     }
 
     if (activeIndicators.vwma) {
-      addMainLine(seriesData.lines.vwma, `VWMA${params.vwmaPeriod}`, omiChartColors.green, {
+      addMainLine(lineData("vwma"), `VWMA${params.vwmaPeriod}`, omiChartColors.green, {
         dashed: true,
       });
     }
 
     if (activeIndicators.bollinger) {
-      addMainLine(seriesData.lines.bollingerUpper, "BOLL Upper", omiChartColors.indicator.bollinger, { lineWidth: 1 });
-      addMainLine(seriesData.lines.bollingerMiddle, "BOLL Mid", omiChartColors.indicator.bollingerMiddle, {
+      addMainLine(lineData("bollingerUpper"), "BOLL Upper", omiChartColors.indicator.bollinger, { lineWidth: 1 });
+      addMainLine(lineData("bollingerMiddle"), "BOLL Mid", omiChartColors.indicator.bollingerMiddle, {
         lineWidth: 1,
         dashed: true,
       });
-      addMainLine(seriesData.lines.bollingerLower, "BOLL Lower", omiChartColors.indicator.bollinger, { lineWidth: 1 });
+      addMainLine(lineData("bollingerLower"), "BOLL Lower", omiChartColors.indicator.bollinger, { lineWidth: 1 });
     }
 
     if (activeIndicators.vwap) {
-      addMainLine(seriesData.lines.vwap, "VWAP", omiChartColors.neutralLine, { dashed: true });
+      addMainLine(lineData("vwap"), "VWAP", omiChartColors.neutralLine, { dashed: true });
     }
 
     if (activeIndicators.psar) {
-      addMainLine(seriesData.lines.psar, "SAR", omiChartColors.purple, { pointsOnly: true, lineWidth: 1 });
+      addMainLine(lineData("psar"), "SAR", omiChartColors.purple, { pointsOnly: true, lineWidth: 1 });
     }
 
     if (activeIndicators.donchian) {
-      addMainLine(seriesData.lines.donchianUpper, `DONCH${params.donchianPeriod} U`, omiChartColors.lime, {
+      addMainLine(lineData("donchianUpper"), `DONCH${params.donchianPeriod} U`, omiChartColors.lime, {
         lineWidth: 1,
       });
-      addMainLine(seriesData.lines.donchianLower, `DONCH${params.donchianPeriod} L`, omiChartColors.lime, {
+      addMainLine(lineData("donchianLower"), `DONCH${params.donchianPeriod} L`, omiChartColors.lime, {
         lineWidth: 1,
       });
     }
 
     if (activeIndicators.ichimoku) {
       addMainLine(
-        seriesData.lines.ichimokuConversion,
+        lineData("ichimokuConversion"),
         `Tenkan${params.ichimokuConversionPeriod}`,
         omiChartColors.marketUp,
         { lineWidth: 1 }
       );
       addMainLine(
-        seriesData.lines.ichimokuBase,
+        lineData("ichimokuBase"),
         `Kijun${params.ichimokuBasePeriod}`,
         omiChartColors.info,
         { lineWidth: 1 }
       );
-      addMainLine(seriesData.lines.ichimokuSpanA, "Senkou A", omiChartColors.marketDown, {
+      addMainLine(lineData("ichimokuSpanA"), "Senkou A", omiChartColors.marketDown, {
         lineWidth: 1,
         dashed: true,
       });
-      addMainLine(seriesData.lines.ichimokuSpanB, "Senkou B", omiChartColors.amberDark, {
+      addMainLine(lineData("ichimokuSpanB"), "Senkou B", omiChartColors.amberDark, {
         lineWidth: 1,
         dashed: true,
       });
-      addMainLine(seriesData.lines.ichimokuLagging, "Chikou", omiChartColors.textMuted, {
+      addMainLine(lineData("ichimokuLagging"), "Chikou", omiChartColors.textMuted, {
         lineWidth: 1,
         dashed: true,
       });
     }
 
     if (activeIndicators.supertrend) {
-      addMainLine(seriesData.lines.supertrendUp, `ST${params.supertrendAtrPeriod}`, omiChartColors.marketDown, {
+      addMainLine(lineData("supertrendUp"), `ST${params.supertrendAtrPeriod}`, omiChartColors.marketDown, {
         lineWidth: 2,
       });
-      addMainLine(seriesData.lines.supertrendDown, `ST${params.supertrendAtrPeriod}`, omiChartColors.marketUp, {
+      addMainLine(lineData("supertrendDown"), `ST${params.supertrendAtrPeriod}`, omiChartColors.marketUp, {
         lineWidth: 2,
       });
     }
 
     if (activeIndicators.keltner) {
-      addMainLine(seriesData.lines.keltnerUpper, `KC${params.keltnerPeriod} U`, omiChartColors.teal, {
+      addMainLine(lineData("keltnerUpper"), `KC${params.keltnerPeriod} U`, omiChartColors.teal, {
         lineWidth: 1,
       });
-      addMainLine(seriesData.lines.keltnerMiddle, `KC${params.keltnerPeriod} M`, omiChartColors.tealBright, {
+      addMainLine(lineData("keltnerMiddle"), `KC${params.keltnerPeriod} M`, omiChartColors.tealBright, {
         lineWidth: 1,
         dashed: true,
       });
-      addMainLine(seriesData.lines.keltnerLower, `KC${params.keltnerPeriod} L`, omiChartColors.teal, {
+      addMainLine(lineData("keltnerLower"), `KC${params.keltnerPeriod} L`, omiChartColors.teal, {
         lineWidth: 1,
       });
     }
 
     if (activeIndicators.pivotPoints) {
-      addMainLine(seriesData.lines.pivot, "Pivot", omiChartColors.neutralMuted, { lineWidth: 1, dashed: true });
-      addMainLine(seriesData.lines.pivotR1, "R1", omiChartColors.marketUp, { lineWidth: 1, dashed: true });
-      addMainLine(seriesData.lines.pivotS1, "S1", omiChartColors.marketDown, { lineWidth: 1, dashed: true });
+      addMainLine(lineData("pivot"), "Pivot", omiChartColors.neutralMuted, { lineWidth: 1, dashed: true });
+      addMainLine(lineData("pivotR1"), "R1", omiChartColors.marketUp, { lineWidth: 1, dashed: true });
+      addMainLine(lineData("pivotS1"), "S1", omiChartColors.marketDown, { lineWidth: 1, dashed: true });
     }
 
     if (activeIndicators.supportResistance) {
-      addMainLine(seriesData.lines.resistance, `R${params.supportResistanceLookback}`, omiChartColors.marketUpFlash, {
+      addMainLine(lineData("resistance"), `R${params.supportResistanceLookback}`, omiChartColors.marketUpFlash, {
         lineWidth: 1,
         dashed: true,
       });
-      addMainLine(seriesData.lines.support, `S${params.supportResistanceLookback}`, omiChartColors.marketDownFlash, {
+      addMainLine(lineData("support"), `S${params.supportResistanceLookback}`, omiChartColors.marketDownFlash, {
         lineWidth: 1,
         dashed: true,
       });
     }
 
     if (activeIndicators.gap) {
-      addMainLine(seriesData.lines.gapUp, `Gap Up ${params.gapMinPct}%`, omiChartColors.marketUp, {
+      addMainLine(lineData("gapUp"), `Gap Up ${params.gapMinPct}%`, omiChartColors.marketUp, {
         pointsOnly: true,
         lineWidth: 1,
       });
-      addMainLine(seriesData.lines.gapDown, `Gap Down ${params.gapMinPct}%`, omiChartColors.marketDown, {
+      addMainLine(lineData("gapDown"), `Gap Down ${params.gapMinPct}%`, omiChartColors.marketDown, {
         pointsOnly: true,
         lineWidth: 1,
       });
@@ -2465,7 +2881,7 @@ export default function LightweightKLineChart({
 
     if (activeIndicators.rsi) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.rsi, `RSI${params.rsiPeriod}`, omiChartColors.fuchsia);
+      addPaneLine(paneIndex, lineData("rsi"), `RSI${params.rsiPeriod}`, omiChartColors.fuchsia);
     }
 
     if (activeIndicators.macd) {
@@ -2481,26 +2897,26 @@ export default function LightweightKLineChart({
         },
         paneIndex
       );
-      histogramSeries.setData(seriesData.macdHistogram);
-      addPaneLine(paneIndex, seriesData.lines.macd, "MACD", omiChartColors.info, { lineWidth: 1 });
-      addPaneLine(paneIndex, seriesData.lines.macdSignal, "Signal", omiChartColors.warning, { lineWidth: 1 });
+      registerSeriesDataUpdater((nextData) => histogramSeries.setData(nextData.macdHistogram));
+      addPaneLine(paneIndex, lineData("macd"), "MACD", omiChartColors.info, { lineWidth: 1 });
+      addPaneLine(paneIndex, lineData("macdSignal"), "Signal", omiChartColors.warning, { lineWidth: 1 });
     }
 
     if (activeIndicators.kd) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.kdK, `K${params.kdPeriod}`, omiChartColors.info);
-      addPaneLine(paneIndex, seriesData.lines.kdD, `D${params.kdPeriod}`, omiChartColors.warning);
+      addPaneLine(paneIndex, lineData("kdK"), `K${params.kdPeriod}`, omiChartColors.info);
+      addPaneLine(paneIndex, lineData("kdD"), `D${params.kdPeriod}`, omiChartColors.warning);
     }
 
     if (activeIndicators.momentum) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.momentum, `MOM${params.momentumPeriod}`, omiChartColors.indicator.momentum);
+      addPaneLine(paneIndex, lineData("momentum"), `MOM${params.momentumPeriod}`, omiChartColors.indicator.momentum);
     }
 
     if (activeIndicators.tsi) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.tsi, `TSI${params.tsiLongPeriod}/${params.tsiShortPeriod}`, omiChartColors.purple);
-      addPaneLine(paneIndex, seriesData.lines.tsiSignal, `TSI Sig${params.tsiSignalPeriod}`, omiChartColors.warning, {
+      addPaneLine(paneIndex, lineData("tsi"), `TSI${params.tsiLongPeriod}/${params.tsiShortPeriod}`, omiChartColors.purple);
+      addPaneLine(paneIndex, lineData("tsiSignal"), `TSI Sig${params.tsiSignalPeriod}`, omiChartColors.warning, {
         lineWidth: 1,
       });
     }
@@ -2509,7 +2925,7 @@ export default function LightweightKLineChart({
       const paneIndex = addIndicatorPane();
       addPaneLine(
         paneIndex,
-        seriesData.lines.awesomeOscillator,
+        lineData("awesomeOscillator"),
         `AO${params.awesomeFastPeriod}/${params.awesomeSlowPeriod}`,
         omiChartColors.pink
       );
@@ -2519,7 +2935,7 @@ export default function LightweightKLineChart({
       const paneIndex = addIndicatorPane();
       addPaneLine(
         paneIndex,
-        seriesData.lines.ultimateOscillator,
+        lineData("ultimateOscillator"),
         `UO${params.ultimateShortPeriod}/${params.ultimateMiddlePeriod}/${params.ultimateLongPeriod}`,
         omiChartColors.purpleAlt
       );
@@ -2527,70 +2943,70 @@ export default function LightweightKLineChart({
 
     if (activeIndicators.atr) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.atr, `ATR${params.atrPeriod}`, omiChartColors.heat);
+      addPaneLine(paneIndex, lineData("atr"), `ATR${params.atrPeriod}`, omiChartColors.heat);
     }
 
     if (activeIndicators.bbWidth) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.bbWidth, `BB Width${params.bbWidthPeriod}`, omiChartColors.indicator.bollinger);
+      addPaneLine(paneIndex, lineData("bbWidth"), `BB Width${params.bbWidthPeriod}`, omiChartColors.indicator.bollinger);
     }
 
     if (activeIndicators.stdDev) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.stdDev, `StdDev${params.stdDevPeriod}`, omiChartColors.neutralLine);
+      addPaneLine(paneIndex, lineData("stdDev"), `StdDev${params.stdDevPeriod}`, omiChartColors.neutralLine);
     }
 
     if (activeIndicators.choppiness) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.choppiness, `CHOP${params.choppinessPeriod}`, omiChartColors.brown);
+      addPaneLine(paneIndex, lineData("choppiness"), `CHOP${params.choppinessPeriod}`, omiChartColors.brown);
     }
 
     if (activeIndicators.adx) {
       const paneIndex = addIndicatorPane(104);
-      addPaneLine(paneIndex, seriesData.lines.adx, `ADX${params.adxPeriod}`, omiChartColors.purple);
-      addPaneLine(paneIndex, seriesData.lines.plusDi, "+DI", omiChartColors.marketUp, { lineWidth: 1 });
-      addPaneLine(paneIndex, seriesData.lines.minusDi, "-DI", omiChartColors.marketDown, { lineWidth: 1 });
+      addPaneLine(paneIndex, lineData("adx"), `ADX${params.adxPeriod}`, omiChartColors.purple);
+      addPaneLine(paneIndex, lineData("plusDi"), "+DI", omiChartColors.marketUp, { lineWidth: 1 });
+      addPaneLine(paneIndex, lineData("minusDi"), "-DI", omiChartColors.marketDown, { lineWidth: 1 });
     }
 
     if (activeIndicators.aroon) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.aroonUp, `Aroon Up${params.aroonPeriod}`, omiChartColors.marketUp);
-      addPaneLine(paneIndex, seriesData.lines.aroonDown, `Aroon Down${params.aroonPeriod}`, omiChartColors.marketDown);
+      addPaneLine(paneIndex, lineData("aroonUp"), `Aroon Up${params.aroonPeriod}`, omiChartColors.marketUp);
+      addPaneLine(paneIndex, lineData("aroonDown"), `Aroon Down${params.aroonPeriod}`, omiChartColors.marketDown);
     }
 
     if (activeIndicators.obv) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.obv, "OBV", omiChartColors.neutralLine);
-      addPaneLine(paneIndex, seriesData.lines.obvMa, `OBV MA${params.obvMa}`, omiChartColors.warning, {
+      addPaneLine(paneIndex, lineData("obv"), "OBV", omiChartColors.neutralLine);
+      addPaneLine(paneIndex, lineData("obvMa"), `OBV MA${params.obvMa}`, omiChartColors.warning, {
         lineWidth: 1,
       });
     }
 
     if (activeIndicators.mfi) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.mfi, `MFI${params.mfiPeriod}`, omiChartColors.teal);
+      addPaneLine(paneIndex, lineData("mfi"), `MFI${params.mfiPeriod}`, omiChartColors.teal);
     }
 
     if (activeIndicators.cmf) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.cmf, `CMF${params.cmfPeriod}`, omiChartColors.marketDown);
+      addPaneLine(paneIndex, lineData("cmf"), `CMF${params.cmfPeriod}`, omiChartColors.marketDown);
     }
 
     if (activeIndicators.adLine) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.adLine, "A/D", omiChartColors.neutralMuted);
+      addPaneLine(paneIndex, lineData("adLine"), "A/D", omiChartColors.neutralMuted);
     }
 
     if (activeIndicators.pvt) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.pvt, "PVT", omiChartColors.skyDark);
+      addPaneLine(paneIndex, lineData("pvt"), "PVT", omiChartColors.skyDark);
     }
 
     if (activeIndicators.relativeStrength) {
       const paneIndex = addIndicatorPane();
       addPaneLine(
         paneIndex,
-        seriesData.lines.relativeStrength,
+        lineData("relativeStrength"),
         `RS${params.relativeStrengthLookback}${benchmarkLabel ? ` vs ${benchmarkLabel}` : ""}`,
         omiChartColors.purple
       );
@@ -2600,7 +3016,7 @@ export default function LightweightKLineChart({
       const paneIndex = addIndicatorPane();
       addPaneLine(
         paneIndex,
-        seriesData.lines.beta,
+        lineData("beta"),
         `Beta${params.betaPeriod}${benchmarkLabel ? ` vs ${benchmarkLabel}` : ""}`,
         omiChartColors.teal
       );
@@ -2610,7 +3026,7 @@ export default function LightweightKLineChart({
       const paneIndex = addIndicatorPane();
       addPaneLine(
         paneIndex,
-        seriesData.lines.correlation,
+        lineData("correlation"),
         `Corr${params.correlationPeriod}${benchmarkLabel ? ` vs ${benchmarkLabel}` : ""}`,
         omiChartColors.skyDark
       );
@@ -2618,41 +3034,42 @@ export default function LightweightKLineChart({
 
     if (activeIndicators.cci) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.cci, `CCI${params.cciPeriod}`, omiChartColors.indigo);
+      addPaneLine(paneIndex, lineData("cci"), `CCI${params.cciPeriod}`, omiChartColors.indigo);
     }
 
     if (activeIndicators.williamsR) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.williamsR, `W%R${params.williamsRPeriod}`, omiChartColors.pink);
+      addPaneLine(paneIndex, lineData("williamsR"), `W%R${params.williamsRPeriod}`, omiChartColors.pink);
     }
 
     if (activeIndicators.roc) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.roc, `ROC${params.rocPeriod}`, omiChartColors.indicator.momentum);
+      addPaneLine(paneIndex, lineData("roc"), `ROC${params.rocPeriod}`, omiChartColors.indicator.momentum);
     }
 
     if (activeIndicators.stochRsi) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.stochRsiK, "StochRSI K", omiChartColors.info);
-      addPaneLine(paneIndex, seriesData.lines.stochRsiD, "StochRSI D", omiChartColors.warning);
+      addPaneLine(paneIndex, lineData("stochRsiK"), "StochRSI K", omiChartColors.info);
+      addPaneLine(paneIndex, lineData("stochRsiD"), "StochRSI D", omiChartColors.warning);
     }
 
     if (activeIndicators.trix) {
       const paneIndex = addIndicatorPane();
-      addPaneLine(paneIndex, seriesData.lines.trix, `TRIX${params.trixPeriod}`, omiChartColors.purple);
-      addPaneLine(paneIndex, seriesData.lines.trixSignal, `Signal${params.trixSignal}`, omiChartColors.warning, {
+      addPaneLine(paneIndex, lineData("trix"), `TRIX${params.trixPeriod}`, omiChartColors.purple);
+      addPaneLine(paneIndex, lineData("trixSignal"), `Signal${params.trixSignal}`, omiChartColors.warning, {
         lineWidth: 1,
       });
     }
 
     chart.panes()[0]?.setStretchFactor(4);
+    seriesDataUpdatersRef.current = seriesDataUpdaters;
 
     const savedLogicalRange =
       visibleLogicalRangeKeyRef.current === chartSeriesKey
         ? visibleLogicalRangeRef.current
         : null;
     const defaultLogicalRange = buildDefaultVisibleLogicalRange(
-      seriesData.candles.length,
+      latestSeriesDataRef.current.candles.length,
       timeMode
     );
 
@@ -2726,6 +3143,7 @@ export default function LightweightKLineChart({
       chart.remove();
       chartRef.current = null;
       mainSeriesRef.current = null;
+      seriesDataUpdatersRef.current = [];
     };
   }, [
     activeIndicators,
@@ -2738,33 +3156,43 @@ export default function LightweightKLineChart({
     omiChartColors,
     params,
     scheduleOverlayRevision,
-    seriesData,
     timeMode,
     upColor,
     resolvedVolumePanelLabel,
   ]);
 
   useEffect(() => {
-    const chart = chartRef.current;
+    if (chartInteractionActiveRef.current) {
+      pendingSeriesDataRef.current = seriesData;
+      return;
+    }
 
-    if (!chart) return;
+    applySeriesDataToChart(seriesData);
+  }, [applySeriesDataToChart, seriesData]);
 
-    const interactive = drawingTool === "cursor";
+  useEffect(() => {
+    window.addEventListener("pointerup", endChartInteraction);
+    window.addEventListener("pointercancel", endChartInteraction);
+    window.addEventListener("blur", endChartInteraction);
 
-    chart.applyOptions({
-      handleScroll: {
-        mouseWheel: interactive,
-        pressedMouseMove: interactive,
-        horzTouchDrag: interactive,
-        vertTouchDrag: false,
-      },
-      handleScale: {
-        mouseWheel: interactive,
-        pinch: interactive,
-        axisPressedMouseMove: interactive,
-      },
-    });
-  }, [drawingTool]);
+    return () => {
+      window.removeEventListener("pointerup", endChartInteraction);
+      window.removeEventListener("pointercancel", endChartInteraction);
+      window.removeEventListener("blur", endChartInteraction);
+
+      if (chartInteractionEndTimerRef.current !== null) {
+        window.clearTimeout(chartInteractionEndTimerRef.current);
+        chartInteractionEndTimerRef.current = null;
+      }
+
+      chartInteractionActiveRef.current = false;
+      pendingSeriesDataRef.current = null;
+    };
+  }, [endChartInteraction]);
+
+  useEffect(() => {
+    restoreChartPointerInteractivity();
+  }, [restoreChartPointerInteractivity]);
 
   if (seriesData.candles.length === 0) {
     return (
@@ -2832,6 +3260,7 @@ export default function LightweightKLineChart({
           shortcutActiveRef.current = false;
         }}
         onPointerDown={() => {
+          beginChartInteraction();
           containerRef.current?.focus({ preventScroll: true });
         }}
         onPointerDownCapture={(event) => {
@@ -2855,7 +3284,11 @@ export default function LightweightKLineChart({
             coordinate.y <= rect.height;
           const hitDrawingId = isInside ? findHoveredDrawingId(coordinate) : null;
 
-          if (hitDrawingId) return;
+          if (hitDrawingId) {
+            setHoveredDrawingId(hitDrawingId);
+            onSelectedDrawingChange?.(hitDrawingId);
+            return;
+          }
 
           setHoveredDrawingId(null);
           onSelectedDrawingChange?.(null);
@@ -2889,12 +3322,7 @@ export default function LightweightKLineChart({
           onPointerMove={handleDrawingPointerMove}
           onPointerUp={finishDrawingDrag}
           onPointerCancel={finishDrawingDrag}
-          onPointerLeave={() => {
-            if (!dragStateRef.current) {
-              setHoverAnchor(null);
-              setSnapCoordinate(null);
-            }
-          }}
+          onPointerLeave={handleDrawingOverlayPointerLeave}
         >
           <ChartStaticIndicatorLayer
             chartColors={omiChartColors}
@@ -2905,7 +3333,8 @@ export default function LightweightKLineChart({
             technicalSignals={projectedTechnicalSignals}
             volumeProfile={projectedVolumeProfile}
           />
-          {projectedDrawings.map(({ drawing, label: drawingLabel, points, anchorPoints, anchoredVwapLine, fibonacciLevels, volumeProfileBins, measurementStats }) => {
+          {/* eslint-disable-next-line react-hooks/refs -- Drawing pointer handlers touch refs only when events fire; this map only emits SVG nodes. */}
+          {projectedDrawings.map(({ drawing, label: drawingLabel, points, anchorPoints, anchoredVwapLine, fibonacciLevels, volumeProfileBins, measurementStats, riskRewardStats }) => {
             const selected = drawing.id === selectedDrawingId;
             const hovered = drawing.id === hoveredDrawingId;
             const active = selected || hovered;
@@ -2913,7 +3342,7 @@ export default function LightweightKLineChart({
               ? selectedDrawingColor
               : hovered
                 ? hoveredDrawingColor
-                : drawing.color;
+                : readableDrawingColor(drawing.color, drawing.type);
             const lineWidth = selected ? 2.5 : hovered ? 2.1 : 1.5;
             const handles = anchorPoints ?? points;
             const zoneAnalysis = drawing.derivedMetrics?.zoneAnalysis ?? null;
@@ -2966,7 +3395,7 @@ export default function LightweightKLineChart({
                     className="cursor-grab"
                     pointerEvents="all"
                     onContextMenu={(event) => handleDrawingContextMenu(event, drawing.id)}
-                    onPointerDown={(event) => startDrawingDrag(event, drawing, "point", 0)}
+                    onPointerDown={(event) => startDrawingDrag(event, drawing, "point", 0, handles)}
                   />
                   <circle
                     cx={points[0].x}
@@ -2986,6 +3415,244 @@ export default function LightweightKLineChart({
                       {anchoredVwapAnalysis?.labels.status ?? t("chart.selectedDrawing.anchoredVwap")}
                     </text>
                   </g>
+                </g>
+              );
+            }
+
+            if (drawing.type === "riskReward" && riskRewardStats && points.length >= 3) {
+              const entry = points[0];
+              const target = points[1];
+              const stop = points[2];
+
+              if (!stop) return null;
+
+              const left = entry.x;
+              const right = Math.max(target.x, stop.x, entry.x + 16);
+              const width = right - left;
+              const targetReady = Math.abs(target.y - entry.y) >= riskRewardReadyDistancePx;
+              const stopReady = Math.abs(stop.y - entry.y) >= riskRewardReadyDistancePx;
+              const hasVerticalRange = targetReady || stopReady;
+              const targetHandle = {
+                ...target,
+                x: right,
+                y: targetReady ? target.y : entry.y - riskRewardGhostHandleOffsetPx,
+              };
+              const stopHandle = {
+                ...stop,
+                x: right,
+                y: stopReady ? stop.y : entry.y + riskRewardGhostHandleOffsetPx,
+              };
+              const rewardTop = Math.min(entry.y, target.y);
+              const rewardHeight = Math.max(1, Math.abs(entry.y - target.y));
+              const riskTop = Math.min(entry.y, stop.y);
+              const riskHeight = Math.max(1, Math.abs(entry.y - stop.y));
+              const rangeTop = Math.min(target.y, stop.y, entry.y);
+              const rangeBottom = Math.max(target.y, stop.y, entry.y);
+              const interactionTop = hasVerticalRange
+                ? rangeTop
+                : entry.y - riskRewardGhostHandleOffsetPx - 8;
+              const interactionHeight = hasVerticalRange
+                ? Math.max(12, rangeBottom - rangeTop)
+                : riskRewardGhostHandleOffsetPx * 2 + 16;
+              const targetColor = omiChartColors.marketDown;
+              const stopColor = omiChartColors.marketUp;
+              const actionStroke = selected
+                ? selectedDrawingColor
+                : hovered
+                  ? hoveredDrawingColor
+                  : stroke;
+              const labelWidth = 116;
+              const ratioLabelWidth = 126;
+              const rewardLabelX = Math.max(
+                8,
+                Math.min(left + 8, overlaySize.width - labelWidth - 8)
+              );
+              const rewardLabelY = Math.max(
+                18,
+                Math.min(rewardTop + 8, overlaySize.height - 24)
+              );
+              const riskLabelX = Math.max(
+                8,
+                Math.min(left + 8, overlaySize.width - labelWidth - 8)
+              );
+              const riskLabelY = Math.max(
+                18,
+                Math.min(riskTop + riskHeight - 26, overlaySize.height - 24)
+              );
+              const ratioLabelX = Math.max(
+                8,
+                Math.min(entry.x - ratioLabelWidth / 2, overlaySize.width - ratioLabelWidth - 8)
+              );
+              const ratioLabelY = Math.max(18, Math.min(entry.y - 11, overlaySize.height - 24));
+
+              return (
+                <g
+                  key={drawing.id}
+                  onContextMenu={(event) => handleDrawingContextMenu(event, drawing.id)}
+                  onPointerEnter={() => handleDrawingPointerEnter(drawing.id)}
+                  onPointerLeave={() => handleDrawingPointerLeave(drawing.id)}
+                >
+                  {targetReady ? (
+                    <rect
+                      x={left}
+                      y={rewardTop}
+                      width={width}
+                      height={rewardHeight}
+                      fill={targetColor}
+                      opacity={active ? 0.22 : 0.16}
+                      pointerEvents="none"
+                    />
+                  ) : null}
+                  {stopReady ? (
+                    <rect
+                      x={left}
+                      y={riskTop}
+                      width={width}
+                      height={riskHeight}
+                      fill={stopColor}
+                      opacity={active ? 0.22 : 0.16}
+                      pointerEvents="none"
+                    />
+                  ) : null}
+                  <rect
+                    x={left}
+                    y={interactionTop}
+                    width={width}
+                    height={interactionHeight}
+                    fill="transparent"
+                    className="cursor-move"
+                    pointerEvents="all"
+                    onContextMenu={(event) => handleDrawingContextMenu(event, drawing.id)}
+                    onPointerOver={() => handleDrawingPointerEnter(drawing.id)}
+                    onPointerDown={(event) => startDrawingDrag(event, drawing, "line", 0, handles)}
+                  />
+                  {hasVerticalRange ? (
+                    <rect
+                      x={left}
+                      y={rangeTop}
+                      width={width}
+                      height={Math.max(1, rangeBottom - rangeTop)}
+                      fill="none"
+                      stroke={actionStroke}
+                      strokeWidth={lineWidth}
+                      strokeDasharray={selected ? undefined : "6 4"}
+                      pointerEvents="none"
+                    />
+                  ) : null}
+                  <line
+                    x1={left}
+                    y1={entry.y}
+                    x2={left + width}
+                    y2={entry.y}
+                    stroke={actionStroke}
+                    strokeWidth={lineWidth}
+                    strokeDasharray="4 4"
+                    pointerEvents="none"
+                  />
+                  {targetReady ? (
+                    <line
+                      x1={left}
+                      y1={target.y}
+                      x2={left + width}
+                      y2={target.y}
+                      stroke={targetColor}
+                      strokeWidth={1.2}
+                      pointerEvents="none"
+                    />
+                  ) : null}
+                  {stopReady ? (
+                    <line
+                      x1={left}
+                      y1={stop.y}
+                      x2={left + width}
+                      y2={stop.y}
+                      stroke={stopColor}
+                      strokeWidth={1.2}
+                      pointerEvents="none"
+                    />
+                  ) : null}
+                  {active
+                    ? [
+                        { handle: targetHandle, index: 1 as const, color: targetColor, ready: targetReady },
+                        { handle: stopHandle, index: 2 as const, color: stopColor, ready: stopReady },
+                      ].map(({ handle, index, color, ready }) => (
+                        <g key={`${drawing.id}-handle-${index}`}>
+                          <circle
+                            cx={handle.x}
+                            cy={handle.y}
+                            r={11}
+                            fill="transparent"
+                            className="cursor-ns-resize"
+                            pointerEvents="all"
+                            onContextMenu={(event) => handleDrawingContextMenu(event, drawing.id)}
+                            onPointerDown={(event) =>
+                              startDrawingDrag(event, drawing, "point", index, handles)
+                            }
+                          />
+                          <circle
+                            cx={handle.x}
+                            cy={handle.y}
+                            r={selected ? 4.6 : 4.2}
+                            fill={color}
+                            opacity={ready ? 1 : 0.72}
+                            stroke={drawingHandleBorderColor}
+                            strokeWidth={1.2}
+                            pointerEvents="none"
+                          />
+                        </g>
+                      ))
+                    : null}
+                  {active ? (
+                    <g key={`${drawing.id}-width-handle`}>
+                      <circle
+                        cx={left + width}
+                        cy={entry.y}
+                        r={11}
+                        fill="transparent"
+                        className="cursor-ew-resize"
+                        pointerEvents="all"
+                        onContextMenu={(event) => handleDrawingContextMenu(event, drawing.id)}
+                        onPointerDown={(event) =>
+                          startDrawingDrag(event, drawing, "riskRewardWidth", 1, handles)
+                        }
+                      />
+                      <rect
+                        x={left + width - 4}
+                        y={entry.y - 4}
+                        width={8}
+                        height={8}
+                        rx={2}
+                        fill={actionStroke}
+                        stroke={drawingHandleBorderColor}
+                        strokeWidth={1.2}
+                        pointerEvents="none"
+                      />
+                    </g>
+                  ) : null}
+                  {targetReady ? (
+                    <g transform={`translate(${rewardLabelX}, ${rewardLabelY})`} pointerEvents="none">
+                      <rect width={labelWidth} height={20} rx={3} fill={targetColor} opacity={0.9} />
+                      <text x={labelWidth / 2} y={13} textAnchor="middle" className="fill-white text-[10px] font-bold tabular-nums">
+                        {t("chart.drawingAnalysis.riskReward.target")} {riskRewardStats.rewardLabel}
+                      </text>
+                    </g>
+                  ) : null}
+                  {targetReady && stopReady ? (
+                    <g transform={`translate(${ratioLabelX}, ${ratioLabelY})`} pointerEvents="none">
+                      <rect width={ratioLabelWidth} height={20} rx={3} fill={omiChartColors.surface} stroke={actionStroke} opacity={0.95} />
+                      <text x={ratioLabelWidth / 2} y={13} textAnchor="middle" className="fill-omi-text text-[10px] font-bold tabular-nums">
+                        {t("chart.drawingAnalysis.riskReward.ratio")}: {riskRewardStats.ratioLabel}
+                      </text>
+                    </g>
+                  ) : null}
+                  {stopReady ? (
+                    <g transform={`translate(${riskLabelX}, ${riskLabelY})`} pointerEvents="none">
+                      <rect width={labelWidth} height={20} rx={3} fill={stopColor} opacity={0.9} />
+                      <text x={labelWidth / 2} y={13} textAnchor="middle" className="fill-white text-[10px] font-bold tabular-nums">
+                        {t("chart.drawingAnalysis.riskReward.stop")} {riskRewardStats.riskLabel}
+                      </text>
+                    </g>
+                  ) : null}
                 </g>
               );
             }
@@ -3022,7 +3689,7 @@ export default function LightweightKLineChart({
                     pointerEvents="stroke"
                     onContextMenu={(event) => handleDrawingContextMenu(event, drawing.id)}
                     onPointerOver={() => handleDrawingPointerEnter(drawing.id)}
-                    onPointerDown={(event) => startDrawingDrag(event, drawing, "line")}
+                    onPointerDown={(event) => startDrawingDrag(event, drawing, "line", 0, handles)}
                   />
                   <line
                     x1={points[0].x}
@@ -3046,7 +3713,7 @@ export default function LightweightKLineChart({
                             pointerEvents="all"
                             onContextMenu={(event) => handleDrawingContextMenu(event, drawing.id)}
                             onPointerDown={(event) =>
-                              startDrawingDrag(event, drawing, "point", index as 0 | 1)
+                              startDrawingDrag(event, drawing, "point", index as 0 | 1, handles)
                             }
                           />
                           <circle
@@ -3115,7 +3782,7 @@ export default function LightweightKLineChart({
                     pointerEvents="all"
                     onContextMenu={(event) => handleDrawingContextMenu(event, drawing.id)}
                     onPointerOver={() => handleDrawingPointerEnter(drawing.id)}
-                    onPointerDown={(event) => startDrawingDrag(event, drawing, "line")}
+                    onPointerDown={(event) => startDrawingDrag(event, drawing, "line", 0, handles)}
                   />
                   <rect
                     x={box.x}
@@ -3169,7 +3836,7 @@ export default function LightweightKLineChart({
                             pointerEvents="all"
                             onContextMenu={(event) => handleDrawingContextMenu(event, drawing.id)}
                             onPointerDown={(event) =>
-                              startDrawingDrag(event, drawing, "point", index as 0 | 1)
+                              startDrawingDrag(event, drawing, "point", index as 0 | 1, handles)
                             }
                           />
                           <circle
@@ -3238,7 +3905,7 @@ export default function LightweightKLineChart({
                     pointerEvents="all"
                     onContextMenu={(event) => handleDrawingContextMenu(event, drawing.id)}
                     onPointerOver={() => handleDrawingPointerEnter(drawing.id)}
-                    onPointerDown={(event) => startDrawingDrag(event, drawing, "line")}
+                    onPointerDown={(event) => startDrawingDrag(event, drawing, "line", 0, handles)}
                   />
                   <rect
                     x={box.x}
@@ -3303,7 +3970,7 @@ export default function LightweightKLineChart({
                             pointerEvents="all"
                             onContextMenu={(event) => handleDrawingContextMenu(event, drawing.id)}
                             onPointerDown={(event) =>
-                              startDrawingDrag(event, drawing, "point", index as 0 | 1)
+                              startDrawingDrag(event, drawing, "point", index as 0 | 1, handles)
                             }
                           />
                           <circle
@@ -3369,7 +4036,7 @@ export default function LightweightKLineChart({
                     pointerEvents="all"
                     onContextMenu={(event) => handleDrawingContextMenu(event, drawing.id)}
                     onPointerOver={() => handleDrawingPointerEnter(drawing.id)}
-                    onPointerDown={(event) => startDrawingDrag(event, drawing, "line")}
+                    onPointerDown={(event) => startDrawingDrag(event, drawing, "line", 0, handles)}
                   />
                   <rect
                     x={box.x}
@@ -3405,7 +4072,7 @@ export default function LightweightKLineChart({
                             pointerEvents="all"
                             onContextMenu={(event) => handleDrawingContextMenu(event, drawing.id)}
                             onPointerDown={(event) =>
-                              startDrawingDrag(event, drawing, "point", index as 0 | 1)
+                              startDrawingDrag(event, drawing, "point", index as 0 | 1, handles)
                             }
                           />
                           <circle
@@ -3478,7 +4145,7 @@ export default function LightweightKLineChart({
                     pointerEvents="all"
                     onContextMenu={(event) => handleDrawingContextMenu(event, drawing.id)}
                     onPointerOver={() => handleDrawingPointerEnter(drawing.id)}
-                    onPointerDown={(event) => startDrawingDrag(event, drawing, "line")}
+                    onPointerDown={(event) => startDrawingDrag(event, drawing, "line", 0, handles)}
                   />
                   {fibonacciLevels.map((level) => {
                     const nearest = fibonacciAnalysis?.nearestRatio === level.ratio;
@@ -3534,7 +4201,7 @@ export default function LightweightKLineChart({
                             pointerEvents="all"
                             onContextMenu={(event) => handleDrawingContextMenu(event, drawing.id)}
                             onPointerDown={(event) =>
-                              startDrawingDrag(event, drawing, "point", index as 0 | 1)
+                              startDrawingDrag(event, drawing, "point", index as 0 | 1, handles)
                             }
                           />
                           <circle
@@ -3573,9 +4240,9 @@ export default function LightweightKLineChart({
                   onPointerOver={() => handleDrawingPointerEnter(drawing.id)}
                   onPointerDown={(event) => {
                     if (drawing.type === "horizontal") {
-                      startDrawingDrag(event, drawing, "horizontal");
+                      startDrawingDrag(event, drawing, "horizontal", 0, handles);
                     } else {
-                      startDrawingDrag(event, drawing, "line");
+                      startDrawingDrag(event, drawing, "line", 0, handles);
                     }
                   }}
                 />
@@ -3606,7 +4273,8 @@ export default function LightweightKLineChart({
                               event,
                               drawing,
                               drawing.type === "horizontal" ? "horizontal" : "point",
-                              index as 0 | 1
+                              index as 0 | 1,
+                              handles
                             )
                           }
                         />
@@ -3638,7 +4306,52 @@ export default function LightweightKLineChart({
             );
           })}
           {projectedDraftDrawing ? (
-            draftRectangleBox ? (
+            projectedDraftDrawing.type === "riskReward" ? (
+              (() => {
+                const entry = projectedDraftDrawing.points[0];
+                const widthPoint = projectedDraftDrawing.points[1];
+
+                if (!entry || !widthPoint) return null;
+
+                const hasWidth = Math.abs(widthPoint.x - entry.x) >= 8;
+
+                return (
+                  <g pointerEvents="none">
+                    {hasWidth ? (
+                      <line
+                        x1={entry.x}
+                        y1={entry.y}
+                        x2={widthPoint.x}
+                        y2={entry.y}
+                        stroke={omiChartColors.textMuted}
+                        strokeWidth={1.5}
+                        strokeDasharray="4 4"
+                      />
+                    ) : null}
+                    <circle
+                      cx={entry.x}
+                      cy={entry.y}
+                      r={4.4}
+                      fill={omiChartColors.textMuted}
+                      stroke={omiChartColors.surface}
+                      strokeWidth={1.2}
+                    />
+                    {hasWidth ? (
+                      <rect
+                        x={widthPoint.x - 4}
+                        y={entry.y - 4}
+                        width={8}
+                        height={8}
+                        rx={2}
+                        fill={omiChartColors.textMuted}
+                        stroke={omiChartColors.surface}
+                        strokeWidth={1.2}
+                      />
+                    ) : null}
+                  </g>
+                );
+              })()
+            ) : draftRectangleBox ? (
               <rect
                 x={draftRectangleBox.x}
                 y={draftRectangleBox.y}

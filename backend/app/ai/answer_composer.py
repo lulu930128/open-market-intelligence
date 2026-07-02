@@ -136,6 +136,7 @@ SOURCE_HEALTH_STATUS_LABELS_JA = {
 SOURCE_HEALTH_RESOURCE_LABELS = {
     "stock_master": "股票主檔",
     "market_daily_price": "日收盤",
+    "market_daily_price.time": "日收盤時間",
     "institutional_trade_daily": "法人買賣超",
     "margin_trading_daily": "融資融券",
     "broker_branch_trade_daily": "券商分點",
@@ -143,10 +144,14 @@ SOURCE_HEALTH_RESOURCE_LABELS = {
     "monthly_revenue": "月營收",
     "financial_metric_quarterly": "季財務",
     "market_chip_daily": "大盤籌碼",
+    "intraday_trend": "盤中資料",
+    "us_daily_price": "美股日線",
+    "us_overnight_tw_impact": "美股隔夜影響",
 }
 SOURCE_HEALTH_RESOURCE_LABELS_EN = {
     "stock_master": "stock master",
     "market_daily_price": "daily price",
+    "market_daily_price.time": "daily price timestamp",
     "institutional_trade_daily": "institutional trade",
     "margin_trading_daily": "margin trading",
     "broker_branch_trade_daily": "broker branch trade",
@@ -154,10 +159,14 @@ SOURCE_HEALTH_RESOURCE_LABELS_EN = {
     "monthly_revenue": "monthly revenue",
     "financial_metric_quarterly": "quarterly financial metrics",
     "market_chip_daily": "market chip flow",
+    "intraday_trend": "intraday data",
+    "us_daily_price": "US daily price",
+    "us_overnight_tw_impact": "US overnight impact",
 }
 SOURCE_HEALTH_RESOURCE_LABELS_JA = {
     "stock_master": "銘柄マスター",
     "market_daily_price": "日足価格",
+    "market_daily_price.time": "日足価格の時刻",
     "institutional_trade_daily": "法人売買超",
     "margin_trading_daily": "信用取引",
     "broker_branch_trade_daily": "証券会社支店別売買",
@@ -165,6 +174,9 @@ SOURCE_HEALTH_RESOURCE_LABELS_JA = {
     "monthly_revenue": "月次売上",
     "financial_metric_quarterly": "四半期財務指標",
     "market_chip_daily": "市場需給",
+    "intraday_trend": "日中データ",
+    "us_daily_price": "米国日足価格",
+    "us_overnight_tw_impact": "米国市場の一晩影響",
 }
 CONSUMER_TEXT_LABELS = {
     "zh-TW": {
@@ -927,6 +939,102 @@ def warning_is_data_limit(value: Any) -> bool:
     return any(hint in lowered for hint in DATA_LIMIT_WARNING_HINTS)
 
 
+def source_health_resource_label(
+    value: Any,
+    *,
+    response_preferences: dict[str, Any] | None = None,
+) -> str:
+    key = text_value(value) or ""
+    base_key = key.split(".", 1)[0]
+    locale = response_locale(response_preferences)
+    labels = {
+        "en-US": SOURCE_HEALTH_RESOURCE_LABELS_EN,
+        "ja-JP": SOURCE_HEALTH_RESOURCE_LABELS_JA,
+    }.get(locale, SOURCE_HEALTH_RESOURCE_LABELS)
+    return labels.get(key) or labels.get(base_key) or key or (
+        "data source"
+        if locale == "en-US"
+        else "データソース"
+        if locale == "ja-JP"
+        else "資料來源"
+    )
+
+
+def human_missing_data_limit(
+    missing: list[Any],
+    *,
+    response_preferences: dict[str, Any] | None = None,
+) -> str | None:
+    labels = [
+        source_health_resource_label(item, response_preferences=response_preferences)
+        for item in missing
+        if text_value(item)
+    ]
+    labels = list(dict.fromkeys(labels))
+    if not labels:
+        return None
+
+    locale = response_locale(response_preferences)
+    shown = labels[:4]
+    remainder = len(labels) - len(shown)
+    if locale == "en-US":
+        detail = ", ".join(shown)
+        if remainder > 0:
+            detail += f", and {remainder} more"
+        return f"Missing or stale data: {detail}. Keep the conclusion flexible."
+    if locale == "ja-JP":
+        detail = "、".join(shown)
+        if remainder > 0:
+            detail += f" ほか {remainder} 件"
+        return f"不足または遅延データ：{detail}。結論は柔軟に扱ってください。"
+
+    detail = "、".join(shown)
+    if remainder > 0:
+        detail += f" 等 {remainder} 項"
+    return f"資料缺口或落後：{detail}；結論需保留彈性。"
+
+
+def localized_data_limit_warning(
+    value: Any,
+    *,
+    response_preferences: dict[str, Any] | None = None,
+) -> str | None:
+    text = text_value(value)
+    if not text or not warning_is_data_limit(text):
+        return None
+
+    affected_marker = "affected datasets:"
+    if text.startswith("Local OMI data is incomplete") and affected_marker in text:
+        dataset_text = text.split(affected_marker, 1)[1].split(".", 1)[0]
+        datasets = [item.strip() for item in dataset_text.split(",") if item.strip()]
+        labels = [
+            source_health_resource_label(item, response_preferences=response_preferences)
+            for item in datasets
+        ]
+        labels = list(dict.fromkeys(labels))
+        if labels:
+            locale = response_locale(response_preferences)
+            if locale == "en-US":
+                return (
+                    "Local OMI data is incomplete: "
+                    + ", ".join(labels)
+                    + ". Refresh before relying on the conclusion."
+                )
+            if locale == "ja-JP":
+                return (
+                    "ローカル OMI データが未更新です："
+                    + "、".join(labels)
+                    + "。結論に使う前に更新してください。"
+                )
+            return (
+                "本地 OMI 資料尚未完整更新："
+                + "、".join(labels)
+                + "；刷新後再依賴結論。"
+            )
+
+    return text
+
+
 def llm_text_is_soft_data_gap(value: Any) -> bool:
     text = text_value(value)
     if not text:
@@ -953,18 +1061,22 @@ def generic_data_limits(
 ) -> list[str]:
     limits: list[str] = []
     if missing:
-        if response_is_english(response_preferences):
-            noun = "item" if len(missing) == 1 else "items"
-            limits.append(
-                f"There are still {len(missing)} missing data {noun}, so keep the conclusion flexible."
-            )
-        elif response_is_japanese(response_preferences):
-            limits.append(f"まだ {len(missing)} 件のデータ不足があります。結論は柔軟に扱ってください。")
-        else:
-            limits.append(f"仍有 {len(missing)} 項資料缺口，結論需保留彈性。")
+        missing_limit = human_missing_data_limit(
+            missing,
+            response_preferences=response_preferences,
+        )
+        if missing_limit:
+            limits.append(missing_limit)
     append_unique_texts(
         limits,
-        [text for text in text_list(warnings, limit=4) if warning_is_data_limit(text)],
+        [
+            text
+            for warning in text_list(warnings, limit=4)
+            if (text := localized_data_limit_warning(
+                warning,
+                response_preferences=response_preferences,
+            ))
+        ],
         limit=3,
     )
     return limits
@@ -1213,7 +1325,7 @@ def append_source_health_data_limits(
 
     if source_limits:
         current_limits = text_list(next_answer.get("data_limits"))
-        combined_limits = list(dict.fromkeys(current_limits + source_limits[:limit]))
+        combined_limits = list(dict.fromkeys(source_limits[:limit] + current_limits))
         if combined_limits != current_limits:
             next_answer["data_limits"] = combined_limits
             next_answer["text"] = consumer_text(

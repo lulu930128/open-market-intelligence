@@ -22,6 +22,8 @@ YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 TWSE_MIS_STOCK_INFO_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 TWSE_INDEX_LIST_URL = "https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX"
 TWSE_DAILY_QUOTES_URL = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
+TWSE_RWD_MI_INDEX_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
+TWSE_INDEX_5S_URL = "https://www.twse.com.tw/exchangeReport/MI_5MINS_INDEX"
 TWSE_MARKET_DAILY_URL = "https://openapi.twse.com.tw/v1/exchangeReport/FMTQIK"
 TWSE_MARKET_DAILY_HISTORY_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK"
 TWSE_COMPANY_BASIC_URL = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
@@ -66,6 +68,10 @@ _QUOTE_STATS_CACHE: dict[str, dict[str, object]] = {}
 _INDEX_LIST_CACHE: dict[str, dict[str, object]] = {}
 _SHARES_CACHE: dict[str, dict[str, object]] = {}
 _CONTRIBUTION_CACHE: dict[str, dict[str, object]] = {}
+_TWSE_INDEX_5S_CACHE: dict[str, dict[str, object]] = {}
+TWSE_INDEX_5S_FIELD_BY_INDEX_ID = {
+    "TAIEX": "發行量加權股價指數",
+}
 
 
 def _as_float(value) -> float | None:
@@ -312,6 +318,107 @@ def _market_quote_breadth_from_rows(
     }
 
 
+def _count_with_limit(value) -> tuple[int | None, int | None]:
+    if value is None:
+        return None, None
+
+    text = str(value).strip()
+    base_text = text.split("(", 1)[0]
+    limit_text = (
+        text.split("(", 1)[1].split(")", 1)[0]
+        if "(" in text and ")" in text
+        else None
+    )
+    return _as_int(base_text), _as_int(limit_text)
+
+
+def _twse_rwd_mi_index_url(trade_date: date) -> str:
+    return (
+        f"{TWSE_RWD_MI_INDEX_URL}?date={trade_date:%Y%m%d}"
+        "&type=ALLBUT0999&response=json"
+    )
+
+
+def _find_twse_rwd_table(payload: dict, title_fragment: str) -> dict | None:
+    tables = payload.get("tables") if isinstance(payload, dict) else None
+    if not isinstance(tables, list):
+        return None
+
+    for table in tables:
+        if not isinstance(table, dict):
+            continue
+        title = str(table.get("title") or "")
+        if title_fragment in title:
+            return table
+
+    return None
+
+
+def _fetch_twse_rwd_market_quote_breadth(trade_date: date | None = None) -> dict | None:
+    requested_date = trade_date or datetime.now(TAIPEI_TZ).date()
+    payload = _fetch_json(_twse_rwd_mi_index_url(requested_date))
+
+    if not isinstance(payload, dict) or payload.get("stat") != "OK":
+        return None
+
+    payload_date = _parse_trade_date(payload.get("date")) or requested_date
+    breadth_table = _find_twse_rwd_table(payload, "漲跌證券數合計")
+    stats_table = _find_twse_rwd_table(payload, "大盤統計資訊")
+    advance_count = decline_count = unchanged_count = None
+    limit_up_count = limit_down_count = None
+    trade_value = None
+
+    if isinstance(breadth_table, dict):
+        fields = breadth_table.get("fields") or []
+        rows = breadth_table.get("data") or []
+        stock_column = fields.index("股票") if "股票" in fields else 2
+
+        for row in rows:
+            if not isinstance(row, list) or len(row) <= stock_column:
+                continue
+
+            label = str(row[0] or "")
+            count, limit_count = _count_with_limit(row[stock_column])
+            if "上漲" in label:
+                advance_count = count
+                limit_up_count = limit_count
+            elif "下跌" in label:
+                decline_count = count
+                limit_down_count = limit_count
+            elif "持平" in label:
+                unchanged_count = count
+
+    if isinstance(stats_table, dict):
+        for row in stats_table.get("data") or []:
+            if not isinstance(row, list) or len(row) < 2:
+                continue
+            if str(row[0]).startswith("總計"):
+                trade_value = _as_int(row[1])
+                break
+
+    if advance_count is None and decline_count is None and unchanged_count is None:
+        return None
+
+    total_count = sum(
+        value
+        for value in (advance_count, decline_count, unchanged_count)
+        if value is not None
+    )
+
+    return {
+        "market": "TWSE",
+        "trade_date": payload_date,
+        "advance_count": advance_count or 0,
+        "decline_count": decline_count or 0,
+        "unchanged_count": unchanged_count or 0,
+        "total_count": total_count,
+        "limit_up_count": limit_up_count,
+        "limit_down_count": limit_down_count,
+        "trade_value": trade_value,
+        "source": "twse_rwd_mi_index",
+    }
+
+
 def _fetch_market_quote_breadth(market: str) -> dict | None:
     cached = _QUOTE_STATS_CACHE.get(market)
 
@@ -335,18 +442,24 @@ def _fetch_market_quote_breadth(market: str) -> dict | None:
             source="tpex_openapi_mainboard_quotes",
         )
     else:
-        payload = _fetch_json(TWSE_DAILY_QUOTES_URL)
-        rows = payload if isinstance(payload, list) else []
-        result = _market_quote_breadth_from_rows(
-            market=market,
-            rows=rows,
-            code_key="Code",
-            close_key="ClosingPrice",
-            change_key="Change",
-            trade_value_key="TradeValue",
-            date_key="Date",
-            source="twse_openapi_stock_day_all",
-        )
+        try:
+            result = _fetch_twse_rwd_market_quote_breadth()
+        except Exception:
+            result = None
+
+        if result is None:
+            payload = _fetch_json(TWSE_DAILY_QUOTES_URL)
+            rows = payload if isinstance(payload, list) else []
+            result = _market_quote_breadth_from_rows(
+                market=market,
+                rows=rows,
+                code_key="Code",
+                close_key="ClosingPrice",
+                change_key="Change",
+                trade_value_key="TradeValue",
+                date_key="Date",
+                source="twse_openapi_stock_day_all",
+            )
 
     if result is not None:
         _QUOTE_STATS_CACHE[market] = {
@@ -357,16 +470,66 @@ def _fetch_market_quote_breadth(market: str) -> dict | None:
     return result
 
 
-def _resolve_market_breadth(db: Session, market: str) -> dict | None:
+def _breadth_trade_date(payload: dict | None) -> date | None:
+    if not isinstance(payload, dict):
+        return None
+
+    value = payload.get("trade_date")
+    return value if isinstance(value, date) else _parse_trade_date(value)
+
+
+def _is_plausible_market_breadth(payload: dict | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+
+    market = str(payload.get("market") or "")
+    minimum_count = 500 if market == "TWSE" else 250 if market == "TPEX" else 1
+    total_count = _as_int(payload.get("total_count"))
+    return total_count is not None and total_count >= minimum_count
+
+
+def _resolve_market_breadth(
+    db: Session,
+    market: str,
+    *,
+    target_trade_date: date | None = None,
+) -> dict | None:
+    quote_breadth: dict | None = None
+
     try:
         quote_breadth = _fetch_market_quote_breadth(market)
-
-        if quote_breadth is not None:
-            return quote_breadth
     except Exception:
         pass
 
-    return _latest_market_breadth(db=db, market=market)
+    if (
+        target_trade_date is not None
+        and _breadth_trade_date(quote_breadth) == target_trade_date
+        and _is_plausible_market_breadth(quote_breadth)
+    ):
+        return quote_breadth
+
+    local_breadth = _latest_market_breadth(db=db, market=market)
+
+    if target_trade_date is not None:
+        if (
+            _breadth_trade_date(local_breadth) == target_trade_date
+            and _is_plausible_market_breadth(local_breadth)
+        ):
+            return local_breadth
+        return None
+
+    quote_date = _breadth_trade_date(quote_breadth)
+    local_date = _breadth_trade_date(local_breadth)
+
+    if quote_date is not None and (
+        local_date is None or quote_date >= local_date
+    ) and _is_plausible_market_breadth(quote_breadth):
+        return quote_breadth
+
+    if _is_plausible_market_breadth(local_breadth):
+        return local_breadth
+
+    return None
 
 
 def _fetch_recent_index_trade_values(market: str) -> dict[date, int]:
@@ -623,6 +786,17 @@ def _ensure_market_index_daily_stat_coverage(
         to_date=to_date,
     )
     missing_months = [month for month in months if month not in existing_months]
+    fetch_months = list(missing_months)
+    current_month = _month_start(datetime.now(TAIPEI_TZ).date())
+    latest_requested_month = _month_start(to_date)
+    if (
+        index_id == "TAIEX"
+        and latest_requested_month == current_month
+        and latest_requested_month in months
+        and latest_requested_month not in fetch_months
+    ):
+        fetch_months.append(latest_requested_month)
+
     result = {
         "status": "success",
         "index_id": index_id,
@@ -630,18 +804,18 @@ def _ensure_market_index_daily_stat_coverage(
         "source": None,
         "requested_month_count": len(months),
         "fetched_month_count": 0,
-        "skipped_existing_month_count": len(months) - len(missing_months),
+        "skipped_existing_month_count": len(months) - len(fetch_months),
         "inserted_count": 0,
         "updated_count": 0,
         "errors": [],
     }
 
-    if index_id == "TAIEX" and missing_months:
+    if index_id == "TAIEX" and fetch_months:
         result["source"] = "twse_rwd_fmtqik"
         with ThreadPoolExecutor(max_workers=MAX_INDEX_STAT_FETCH_WORKERS) as executor:
             futures = {
                 executor.submit(_fetch_twse_market_daily_stats_for_month, month): month
-                for month in missing_months
+                for month in fetch_months
             }
 
             for future in as_completed(futures):
@@ -948,6 +1122,21 @@ def _apply_latest_official_market_index_stat(
 
     if point is None:
         return
+
+    try:
+        official_ohlc = _fetch_twse_index_5s_ohlc(config, latest_stat.trade_date)
+    except Exception:
+        official_ohlc = None
+
+    if official_ohlc is not None:
+        point.update(
+            {
+                "open": official_ohlc.get("open"),
+                "high": official_ohlc.get("high"),
+                "low": official_ohlc.get("low"),
+                "close": latest_stat.close_value or official_ohlc.get("close"),
+            }
+        )
 
     points = payload.get("points")
     if isinstance(points, list):
@@ -1354,6 +1543,130 @@ def _fetch_yahoo_index_intraday(config: dict) -> dict:
     }
 
 
+def _fetch_twse_index_5s_intraday(
+    config: dict,
+    *,
+    trade_date: date | None = None,
+) -> dict:
+    index_id = str(config["index_id"]).upper()
+    field_name = TWSE_INDEX_5S_FIELD_BY_INDEX_ID.get(index_id)
+
+    if not field_name:
+        raise ValueError(f"TWSE 5-second index series is not configured for {index_id}.")
+
+    requested_date = trade_date or datetime.now(TAIPEI_TZ).date()
+    cache_key = f"{index_id}:{requested_date.isoformat()}"
+    cached = _TWSE_INDEX_5S_CACHE.get(cache_key)
+
+    if cached and monotonic() < float(cached["expires_at"]):
+        payload = cached.get("payload")
+
+        if isinstance(payload, dict):
+            return payload
+
+    response = http_get(
+        TWSE_INDEX_5S_URL,
+        params={
+            "response": "json",
+            "date": requested_date.strftime("%Y%m%d"),
+        },
+        headers={
+            "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
+            "Accept": "application/json,text/plain,*/*",
+        },
+        timeout=20,
+    )
+    response.raise_for_status()
+    response.encoding = "utf-8"
+    raw_payload = response.json()
+
+    if not isinstance(raw_payload, dict) or raw_payload.get("stat") != "OK":
+        raise ValueError("TWSE 5-second index payload is unavailable.")
+
+    fields = raw_payload.get("fields") or []
+    rows = raw_payload.get("data") or []
+
+    if field_name not in fields:
+        raise ValueError(f"TWSE 5-second index field '{field_name}' not found.")
+
+    value_index = fields.index(field_name)
+    payload_date = _parse_trade_date(raw_payload.get("date")) or requested_date
+    points: list[dict] = []
+
+    for row in rows:
+        if not isinstance(row, list) or len(row) <= value_index:
+            continue
+
+        parts = str(row[0]).split(":")
+        if len(parts) != 3:
+            continue
+
+        try:
+            point_time = datetime.combine(
+                payload_date,
+                time(int(parts[0]), int(parts[1]), int(parts[2])),
+                tzinfo=TAIPEI_TZ,
+            )
+        except ValueError:
+            continue
+
+        price = _as_float(row[value_index])
+        if price is None:
+            continue
+
+        points.append(
+            {
+                "time": point_time.isoformat(),
+                "price": price,
+                "volume": None,
+                "open": price,
+                "high": price,
+                "low": price,
+            }
+        )
+
+    if not points:
+        raise ValueError("TWSE 5-second index payload has no usable points.")
+
+    payload = {
+        "stock_id": config["index_id"],
+        "symbol": config["symbol"],
+        "source": "twse_index_5s",
+        "previous_close": points[0]["price"],
+        "point_count": len(points),
+        "points": points,
+    }
+    _TWSE_INDEX_5S_CACHE[cache_key] = {
+        "expires_at": monotonic() + CACHE_TTL_SECONDS,
+        "payload": payload,
+    }
+    return payload
+
+
+def _fetch_twse_index_5s_ohlc(config: dict, trade_date: date) -> dict | None:
+    payload = _fetch_twse_index_5s_intraday(config, trade_date=trade_date)
+    points = payload.get("points") if isinstance(payload, dict) else None
+
+    if not isinstance(points, list) or not points:
+        return None
+
+    prices = [
+        _as_float(point.get("price"))
+        for point in points
+        if isinstance(point, dict) and point.get("price") is not None
+    ]
+
+    if not prices:
+        return None
+
+    return {
+        "open": prices[0],
+        "high": max(prices),
+        "low": min(prices),
+        "close": prices[-1],
+    }
+
+
 def _build_mis_snapshot_time(date_text: str | None, time_text: str | None) -> str | None:
     if not date_text or not time_text:
         return None
@@ -1735,6 +2048,20 @@ def get_market_index_intraday(index_id: str) -> dict:
     if config is None:
         supported = ", ".join(sorted(INDEX_CONFIG_BY_ID))
         raise ValueError(f"index_id must be one of: {supported}.")
+
+    try:
+        official_payload = _fetch_twse_index_5s_intraday(config)
+        if official_payload.get("point_count", 0) > 0:
+            try:
+                mis_payload = _fetch_mis_index_intraday(config)
+                if mis_payload["point_count"] > 0:
+                    return _merge_index_intraday_snapshot(official_payload, mis_payload)
+            except Exception:
+                pass
+
+            return official_payload
+    except Exception:
+        pass
 
     yahoo_error: Exception | None = None
     yahoo_payload: dict | None = None
@@ -2267,15 +2594,20 @@ def get_market_index_summary(db: Session, force_refresh: bool = False) -> dict:
         except Exception:
             db.rollback()
 
+        index_trade_date = index_payload.get("time")
+        index_trade_date = index_trade_date if isinstance(index_trade_date, date) else None
         market_breadth = _resolve_market_breadth(
             db=db,
             market=str(config["market"]),
+            target_trade_date=index_trade_date,
         )
-        trade_value = (
-            market_breadth.get("trade_value")
-            if isinstance(market_breadth, dict)
-            else None
-        )
+        trade_value = index_payload.get("trade_value")
+        if (
+            isinstance(market_breadth, dict)
+            and _breadth_trade_date(market_breadth) == index_trade_date
+            and market_breadth.get("trade_value") is not None
+        ):
+            trade_value = market_breadth.get("trade_value")
         try:
             official_trade_value = _fetch_recent_index_trade_values(str(config["market"])).get(
                 index_payload.get("time")

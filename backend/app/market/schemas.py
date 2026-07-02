@@ -197,6 +197,7 @@ class MarketOhlcChartRead(BaseModel):
     point_count: int
     points: list[MarketDailyChartRead]
     backfill: dict | None = None
+    intraday_overlay: dict[str, Any] | None = None
 
 
 class ChartDrawingSnapshotWrite(BaseModel):
@@ -368,6 +369,60 @@ class IntradayTrendRead(BaseModel):
     previous_close: float | None = None
     point_count: int
     points: list[IntradayTrendPointRead]
+
+
+class TaiwanStockQuoteDepthLevelRead(BaseModel):
+    level: int
+    price: float | None = None
+    size_lots: int | None = None
+
+
+class TaiwanStockQuoteDepthFreshnessRead(BaseModel):
+    status: str
+    is_live: bool
+    is_stale: bool
+    age_seconds: int | None = None
+    expected_trade_date: date | None = None
+    message: str
+    source_error: str | None = None
+
+
+class TaiwanStockQuoteDepthRead(BaseModel):
+    stock_id: str
+    stock_name: str | None = None
+    market: str | None = None
+    provider: str
+    source: str
+    source_url: str | None = None
+    exchange_channel: str | None = None
+    session_phase: str
+    phase_label: str
+    trade_date: date | None = None
+    quote_time: datetime | None = None
+    fetched_at: datetime | None = None
+
+    last_price: float | None = None
+    previous_close: float | None = None
+    open_price: float | None = None
+    high_price: float | None = None
+    low_price: float | None = None
+    change: float | None = None
+    change_pct: float | None = None
+    total_volume_lots: int | None = None
+
+    best_bid_price: float | None = None
+    best_bid_size_lots: int | None = None
+    best_ask_price: float | None = None
+    best_ask_size_lots: int | None = None
+    bid_total_size_lots: int | None = None
+    ask_total_size_lots: int | None = None
+    spread: float | None = None
+    spread_pct: float | None = None
+
+    bid_levels: list[TaiwanStockQuoteDepthLevelRead]
+    ask_levels: list[TaiwanStockQuoteDepthLevelRead]
+    depth_available: bool
+    freshness: TaiwanStockQuoteDepthFreshnessRead
 
 
 class MarketIntradayChartPointRead(BaseModel):

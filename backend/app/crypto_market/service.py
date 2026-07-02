@@ -5,6 +5,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -12,9 +13,12 @@ from app.crypto_market.assets import taiwan_spread_assets
 from app.crypto_market.contract import (
     BINANCE_PROVIDER,
     BITOPRO_PROVIDER,
+    BYBIT_PROVIDER,
+    COINGLASS_PROVIDER,
     COINGECKO_COIN_IDS,
     COINGECKO_PROVIDER,
     OKX_PROVIDER,
+    OMI_LOCAL_PROVIDER,
     PERPETUAL,
     SPOT,
     get_provider_instrument,
@@ -22,11 +26,17 @@ from app.crypto_market.contract import (
     normalize_instrument_type,
     normalize_provider,
     normalize_symbol,
+    ohlcv_intervals_for_provider,
+    provider_supports_ohlcv_interval,
     provider_contract,
 )
 from app.crypto_market import sources
 from app.crypto_market.sources import (
+    CryptoCvdBucketRecord,
     CryptoDerivativesMetricRecord,
+    CryptoLiquidationEventRecord,
+    CryptoLiquidationHeatmapCellRecord,
+    CryptoLongShortRatioRecord,
     CryptoMarketCapRecord,
     CryptoOrderBookRecord,
     CryptoOhlcvBarRecord,
@@ -34,15 +44,20 @@ from app.crypto_market.sources import (
     raw_payload_json,
 )
 from app.crypto_market.realtime import (
+    LIQUIDATION_RESOURCE,
     OHLCV_RESOURCE,
     ORDER_BOOK_RESOURCE,
     TICKER_RESOURCE,
     CryptoRealtimeUpdate,
 )
 from app.db.models import (
+    CryptoCvdHistory,
     CryptoDerivativesMetric,
     CryptoDerivativesMetricHistory,
+    CryptoLiquidationEvent,
+    CryptoLiquidationHeatmapCell,
     CryptoLiquidityHistory,
+    CryptoLongShortRatioHistory,
     CryptoMarketCapSnapshot,
     CryptoOrderBookSnapshot,
     CryptoOhlcvBar,
@@ -84,7 +99,25 @@ CRYPTO_DEFAULT_DERIVATIVES_SYMBOLS = _unique_instrument_symbols(
     resource="derivatives",
 )
 CRYPTO_DEFAULT_SPREAD_BASES = taiwan_spread_assets()
+CRYPTO_ADVANCED_METRIC_PROVIDERS = (
+    BINANCE_PROVIDER,
+    OKX_PROVIDER,
+    BYBIT_PROVIDER,
+    COINGLASS_PROVIDER,
+    OMI_LOCAL_PROVIDER,
+)
 CRYPTO_DEFAULT_OHLCV_LOOKBACK_HOURS = 6
+CRYPTO_OHLCV_BUNDLE_INTERVAL_LIMITS: dict[str, int] = {
+    "1m": 720,
+    "5m": 720,
+    "15m": 720,
+    "30m": 720,
+    "1h": 720,
+    "4h": 720,
+    "1d": 730,
+    "1w": 520,
+    "1M": 240,
+}
 
 
 class CryptoMarketError(Exception):
@@ -134,6 +167,22 @@ def normalize_providers(
         item = normalize_provider(provider)
         if item not in {BITOPRO_PROVIDER, BINANCE_PROVIDER, OKX_PROVIDER, COINGECKO_PROVIDER}:
             raise CryptoMarketUnsupportedError(f"Unsupported crypto provider: {provider}")
+        if item not in normalized:
+            normalized.append(item)
+    return normalized
+
+
+def normalize_advanced_metric_providers(
+    providers: str | list[str] | tuple[str, ...] | None,
+    *,
+    default: tuple[str, ...] = CRYPTO_ADVANCED_METRIC_PROVIDERS,
+) -> list[str]:
+    supported = set(CRYPTO_ADVANCED_METRIC_PROVIDERS)
+    normalized: list[str] = []
+    for provider in _split_csv(providers, default=default):
+        item = normalize_provider(provider)
+        if item not in supported:
+            raise CryptoMarketUnsupportedError(f"Unsupported crypto advanced-metric provider: {provider}")
         if item not in normalized:
             normalized.append(item)
     return normalized
@@ -426,6 +475,248 @@ def _upsert_spread_history(db: Session, snapshot: CryptoSpreadSnapshot) -> Crypt
     else:
         for key, value in values.items():
             setattr(row, key, value)
+    return row
+
+
+def upsert_crypto_liquidation_event(
+    db: Session,
+    record: CryptoLiquidationEventRecord,
+) -> CryptoLiquidationEvent:
+    provider = normalize_provider(record.provider)
+    symbol = normalize_symbol(record.symbol)
+    instrument_type = normalize_instrument_type(record.instrument_type)
+    liquidation_side = record.liquidation_side.strip().lower()
+    notional = record.notional
+    if notional is None and record.price is not None and record.quantity is not None:
+        notional = record.price * record.quantity
+
+    row = (
+        db.query(CryptoLiquidationEvent)
+        .filter(CryptoLiquidationEvent.provider == provider)
+        .filter(CryptoLiquidationEvent.symbol == symbol)
+        .filter(CryptoLiquidationEvent.instrument_type == instrument_type)
+        .filter(CryptoLiquidationEvent.event_time == record.event_time)
+        .filter(CryptoLiquidationEvent.liquidation_side == liquidation_side)
+        .filter(CryptoLiquidationEvent.price == record.price)
+        .filter(CryptoLiquidationEvent.quantity == record.quantity)
+        .one_or_none()
+    )
+    if row is None:
+        row = CryptoLiquidationEvent(
+            provider=provider,
+            exchange=record.exchange,
+            symbol=symbol,
+            provider_symbol=record.provider_symbol,
+            base_asset=record.base_asset.upper(),
+            quote_asset=record.quote_asset.upper(),
+            instrument_type=instrument_type,
+            liquidation_side=liquidation_side,
+            order_side=(record.order_side.strip().lower() if record.order_side else None),
+            price=record.price,
+            average_price=record.average_price,
+            quantity=record.quantity,
+            notional=notional,
+            event_time=record.event_time,
+            source_url=record.source_url,
+            raw_payload_json=raw_payload_json(record.raw_payload) if record.raw_payload is not None else None,
+            fetched_at=record.fetched_at,
+        )
+        db.add(row)
+    else:
+        row.exchange = record.exchange
+        row.provider_symbol = record.provider_symbol
+        row.base_asset = record.base_asset.upper()
+        row.quote_asset = record.quote_asset.upper()
+        row.order_side = record.order_side.strip().lower() if record.order_side else None
+        row.average_price = record.average_price
+        row.notional = notional
+        row.source_url = record.source_url
+        row.raw_payload_json = raw_payload_json(record.raw_payload) if record.raw_payload is not None else None
+        row.fetched_at = record.fetched_at
+    return row
+
+
+def upsert_crypto_liquidation_heatmap_cell(
+    db: Session,
+    record: CryptoLiquidationHeatmapCellRecord,
+) -> CryptoLiquidationHeatmapCell:
+    provider = normalize_provider(record.provider)
+    symbol = normalize_symbol(record.symbol)
+    instrument_type = normalize_instrument_type(record.instrument_type)
+    source_kind = record.source_kind.strip().lower()
+    method = record.method.strip().lower()
+    liquidation_side = record.liquidation_side.strip().lower()
+    bucket_seconds = max(int(record.bucket_seconds), 1)
+
+    row = (
+        db.query(CryptoLiquidationHeatmapCell)
+        .filter(CryptoLiquidationHeatmapCell.provider == provider)
+        .filter(CryptoLiquidationHeatmapCell.source_kind == source_kind)
+        .filter(CryptoLiquidationHeatmapCell.method == method)
+        .filter(CryptoLiquidationHeatmapCell.symbol == symbol)
+        .filter(CryptoLiquidationHeatmapCell.instrument_type == instrument_type)
+        .filter(CryptoLiquidationHeatmapCell.time_bucket == record.time_bucket)
+        .filter(CryptoLiquidationHeatmapCell.bucket_seconds == bucket_seconds)
+        .filter(CryptoLiquidationHeatmapCell.price_bucket == record.price_bucket)
+        .filter(CryptoLiquidationHeatmapCell.liquidation_side == liquidation_side)
+        .one_or_none()
+    )
+    if row is None:
+        row = CryptoLiquidationHeatmapCell(
+            provider=provider,
+            source_kind=source_kind,
+            method=method,
+            exchange=record.exchange,
+            symbol=symbol,
+            provider_symbol=record.provider_symbol,
+            base_asset=record.base_asset.upper(),
+            quote_asset=record.quote_asset.upper(),
+            instrument_type=instrument_type,
+            time_bucket=record.time_bucket,
+            bucket_seconds=bucket_seconds,
+            price_bucket=record.price_bucket,
+            price_bucket_size=record.price_bucket_size,
+            liquidation_side=liquidation_side,
+            liquidation_notional=record.liquidation_notional,
+            liquidation_quantity=record.liquidation_quantity,
+            event_count=max(int(record.event_count), 0),
+            intensity=record.intensity,
+            generated_at=record.generated_at,
+            source_url=record.source_url,
+            raw_payload_json=raw_payload_json(record.raw_payload) if record.raw_payload is not None else None,
+            fetched_at=record.fetched_at,
+        )
+        db.add(row)
+    else:
+        row.exchange = record.exchange
+        row.provider_symbol = record.provider_symbol
+        row.base_asset = record.base_asset.upper()
+        row.quote_asset = record.quote_asset.upper()
+        row.price_bucket_size = record.price_bucket_size
+        row.liquidation_notional = record.liquidation_notional
+        row.liquidation_quantity = record.liquidation_quantity
+        row.event_count = max(int(record.event_count), 0)
+        row.intensity = record.intensity
+        row.generated_at = record.generated_at
+        row.source_url = record.source_url
+        row.raw_payload_json = raw_payload_json(record.raw_payload) if record.raw_payload is not None else None
+        row.fetched_at = record.fetched_at
+    return row
+
+
+def upsert_crypto_cvd_history(
+    db: Session,
+    record: CryptoCvdBucketRecord,
+) -> CryptoCvdHistory:
+    provider = normalize_provider(record.provider)
+    symbol = normalize_symbol(record.symbol)
+    instrument_type = normalize_instrument_type(record.instrument_type)
+    bucket_seconds = max(int(record.bucket_seconds), 1)
+    row = (
+        db.query(CryptoCvdHistory)
+        .filter(CryptoCvdHistory.provider == provider)
+        .filter(CryptoCvdHistory.symbol == symbol)
+        .filter(CryptoCvdHistory.instrument_type == instrument_type)
+        .filter(CryptoCvdHistory.bucket_seconds == bucket_seconds)
+        .filter(CryptoCvdHistory.sampled_at == record.sampled_at)
+        .one_or_none()
+    )
+    if row is None:
+        row = CryptoCvdHistory(
+            provider=provider,
+            exchange=record.exchange,
+            symbol=symbol,
+            provider_symbol=record.provider_symbol,
+            base_asset=record.base_asset.upper(),
+            quote_asset=record.quote_asset.upper(),
+            instrument_type=instrument_type,
+            bucket_seconds=bucket_seconds,
+            sampled_at=record.sampled_at,
+            buy_base_volume=record.buy_base_volume,
+            sell_base_volume=record.sell_base_volume,
+            buy_quote_volume=record.buy_quote_volume,
+            sell_quote_volume=record.sell_quote_volume,
+            net_base_volume=record.net_base_volume,
+            net_quote_volume=record.net_quote_volume,
+            cumulative_base_delta=record.cumulative_base_delta,
+            cumulative_quote_delta=record.cumulative_quote_delta,
+            trade_count=max(int(record.trade_count), 0),
+            event_time=record.event_time,
+            source_url=record.source_url,
+            raw_payload_json=raw_payload_json(record.raw_payload) if record.raw_payload is not None else None,
+            fetched_at=record.fetched_at,
+        )
+        db.add(row)
+    else:
+        row.exchange = record.exchange
+        row.provider_symbol = record.provider_symbol
+        row.base_asset = record.base_asset.upper()
+        row.quote_asset = record.quote_asset.upper()
+        row.buy_base_volume = record.buy_base_volume
+        row.sell_base_volume = record.sell_base_volume
+        row.buy_quote_volume = record.buy_quote_volume
+        row.sell_quote_volume = record.sell_quote_volume
+        row.net_base_volume = record.net_base_volume
+        row.net_quote_volume = record.net_quote_volume
+        row.cumulative_base_delta = record.cumulative_base_delta
+        row.cumulative_quote_delta = record.cumulative_quote_delta
+        row.trade_count = max(int(record.trade_count), 0)
+        row.event_time = record.event_time
+        row.source_url = record.source_url
+        row.raw_payload_json = raw_payload_json(record.raw_payload) if record.raw_payload is not None else None
+        row.fetched_at = record.fetched_at
+    return row
+
+
+def upsert_crypto_long_short_ratio_history(
+    db: Session,
+    record: CryptoLongShortRatioRecord,
+) -> CryptoLongShortRatioHistory:
+    provider = normalize_provider(record.provider)
+    symbol = normalize_symbol(record.symbol)
+    instrument_type = normalize_instrument_type(record.instrument_type)
+    ratio_scope = record.ratio_scope.strip().lower()
+    row = (
+        db.query(CryptoLongShortRatioHistory)
+        .filter(CryptoLongShortRatioHistory.provider == provider)
+        .filter(CryptoLongShortRatioHistory.symbol == symbol)
+        .filter(CryptoLongShortRatioHistory.instrument_type == instrument_type)
+        .filter(CryptoLongShortRatioHistory.ratio_scope == ratio_scope)
+        .filter(CryptoLongShortRatioHistory.sampled_at == record.sampled_at)
+        .one_or_none()
+    )
+    if row is None:
+        row = CryptoLongShortRatioHistory(
+            provider=provider,
+            exchange=record.exchange,
+            symbol=symbol,
+            provider_symbol=record.provider_symbol,
+            base_asset=record.base_asset.upper(),
+            quote_asset=record.quote_asset.upper(),
+            instrument_type=instrument_type,
+            ratio_scope=ratio_scope,
+            long_ratio=record.long_ratio,
+            short_ratio=record.short_ratio,
+            long_short_ratio=record.long_short_ratio,
+            event_time=record.event_time,
+            sampled_at=record.sampled_at,
+            source_url=record.source_url,
+            raw_payload_json=raw_payload_json(record.raw_payload) if record.raw_payload is not None else None,
+            fetched_at=record.fetched_at,
+        )
+        db.add(row)
+    else:
+        row.exchange = record.exchange
+        row.provider_symbol = record.provider_symbol
+        row.base_asset = record.base_asset.upper()
+        row.quote_asset = record.quote_asset.upper()
+        row.long_ratio = record.long_ratio
+        row.short_ratio = record.short_ratio
+        row.long_short_ratio = record.long_short_ratio
+        row.event_time = record.event_time
+        row.source_url = record.source_url
+        row.raw_payload_json = raw_payload_json(record.raw_payload) if record.raw_payload is not None else None
+        row.fetched_at = record.fetched_at
     return row
 
 
@@ -881,6 +1172,32 @@ def _ohlcv_record_from_realtime(update: CryptoRealtimeUpdate) -> CryptoOhlcvBarR
     )
 
 
+def _liquidation_event_record_from_realtime(update: CryptoRealtimeUpdate) -> CryptoLiquidationEventRecord | None:
+    instrument = _realtime_instrument(update, resource=LIQUIDATION_RESOURCE)
+    if instrument is None:
+        return None
+    data = update.data
+    return CryptoLiquidationEventRecord(
+        provider=instrument.provider,
+        exchange=instrument.exchange,
+        symbol=instrument.symbol,
+        provider_symbol=instrument.provider_symbol,
+        base_asset=instrument.base_asset,
+        quote_asset=instrument.quote_asset,
+        instrument_type=instrument.instrument_type,
+        liquidation_side=str(data.get("liquidation_side") or "unknown"),
+        order_side=str(data.get("order_side")) if data.get("order_side") else None,
+        price=data.get("price"),
+        average_price=data.get("average_price"),
+        quantity=data.get("quantity"),
+        notional=data.get("notional"),
+        event_time=update.event_time or update.received_at,
+        source_url=_realtime_source_url(update),
+        raw_payload=update.raw_payload if isinstance(update.raw_payload, dict) else {"payload": update.raw_payload},
+        fetched_at=update.received_at,
+    )
+
+
 def persist_crypto_realtime_updates(
     db: Session,
     updates: list[CryptoRealtimeUpdate] | tuple[CryptoRealtimeUpdate, ...],
@@ -889,6 +1206,7 @@ def persist_crypto_realtime_updates(
         TICKER_RESOURCE: 0,
         ORDER_BOOK_RESOURCE: 0,
         OHLCV_RESOURCE: 0,
+        LIQUIDATION_RESOURCE: 0,
     }
     skipped: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
@@ -916,6 +1234,13 @@ def persist_crypto_realtime_updates(
                     continue
                 _upsert_ohlcv_bar(db, record)
                 persisted_by_resource[OHLCV_RESOURCE] += 1
+            elif update.resource == LIQUIDATION_RESOURCE:
+                record = _liquidation_event_record_from_realtime(update)
+                if record is None:
+                    skipped.append({"resource": update.resource, "provider": update.provider, "symbol": update.symbol})
+                    continue
+                upsert_crypto_liquidation_event(db, record)
+                persisted_by_resource[LIQUIDATION_RESOURCE] += 1
             else:
                 skipped.append({"resource": update.resource, "provider": update.provider, "symbol": update.symbol})
         except Exception as exc:
@@ -1054,6 +1379,17 @@ def refresh_crypto_ohlcv(
             continue
         for symbol in symbol_list:
             normalized_symbol = normalize_symbol(symbol)
+            if not provider_supports_ohlcv_interval(provider, normalized_interval):
+                skipped.append(
+                    {
+                        "provider": provider,
+                        "symbol": normalized_symbol,
+                        "instrument_type": SPOT,
+                        "interval": normalized_interval,
+                        "reason": "provider does not support ohlcv interval",
+                    }
+                )
+                continue
             if not list_provider_instruments(
                 provider=provider,
                 symbol=normalized_symbol,
@@ -1140,6 +1476,102 @@ def refresh_crypto_ohlcv(
         "errors": errors,
         "skipped": skipped,
         "rows": rows,
+    }
+
+
+def _normalize_ohlcv_bundle_intervals(
+    intervals: str | list[str] | tuple[str, ...] | None,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    raw_intervals = _split_csv(
+        intervals,
+        default=tuple(CRYPTO_OHLCV_BUNDLE_INTERVAL_LIMITS),
+    )
+    normalized: list[str] = []
+    skipped: list[dict[str, Any]] = []
+    for raw_interval in raw_intervals:
+        interval = str(raw_interval or "").strip()
+        if not interval:
+            continue
+        if interval not in CRYPTO_OHLCV_BUNDLE_INTERVAL_LIMITS:
+            skipped.append(
+                {
+                    "interval": interval,
+                    "reason": "unsupported ohlcv bundle interval",
+                    "supported_intervals": list(CRYPTO_OHLCV_BUNDLE_INTERVAL_LIMITS),
+                }
+            )
+            continue
+        if interval not in normalized:
+            normalized.append(interval)
+    return normalized, skipped
+
+
+def refresh_crypto_ohlcv_bundle(
+    db: Session,
+    *,
+    providers: str | list[str] | tuple[str, ...] | None = None,
+    symbols: str | list[str] | tuple[str, ...] | None = None,
+    intervals: str | list[str] | tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    provider_list = normalize_providers(providers, default=CRYPTO_DEFAULT_OHLCV_PROVIDERS)
+    interval_list, skipped = _normalize_ohlcv_bundle_intervals(intervals)
+    interval_results: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    requested_count = 0
+    refreshed_count = 0
+
+    for interval in interval_list:
+        limit = CRYPTO_OHLCV_BUNDLE_INTERVAL_LIMITS[interval]
+        supported_providers = [
+            provider
+            for provider in provider_list
+            if interval in ohlcv_intervals_for_provider(provider)
+        ]
+        result = refresh_crypto_ohlcv(
+            db,
+            providers=provider_list,
+            symbols=symbols,
+            interval=interval,
+            limit=limit,
+        )
+        requested_count += int(result.get("requested_count") or 0)
+        refreshed_count += int(result.get("refreshed_count") or 0)
+        errors.extend(
+            {"interval": interval, **error}
+            for error in result.get("errors", [])
+            if isinstance(error, dict)
+        )
+        skipped.extend(
+            {"interval": interval, **item}
+            for item in result.get("skipped", [])
+            if isinstance(item, dict)
+        )
+        interval_results.append(
+            {
+                "interval": interval,
+                "limit": limit,
+                "supported_providers": supported_providers,
+                "status": result.get("status", "empty"),
+                "resource": "ohlcv",
+                "requested_count": int(result.get("requested_count") or 0),
+                "refreshed_count": int(result.get("refreshed_count") or 0),
+                "error_count": int(result.get("error_count") or 0),
+                "skipped_count": int(result.get("skipped_count") or 0),
+                "errors": result.get("errors", []),
+                "skipped": result.get("skipped", []),
+            }
+        )
+
+    return {
+        "status": _status_for_counts(refreshed_count, len(errors)),
+        "resource": "ohlcv_bundle",
+        "requested_count": requested_count,
+        "refreshed_count": refreshed_count,
+        "error_count": len(errors),
+        "skipped_count": len(skipped),
+        "errors": errors,
+        "skipped": skipped,
+        "intervals": interval_results,
     }
 
 
@@ -1310,6 +1742,52 @@ def list_latest_crypto_ohlcv_bars(
     )
 
 
+def list_crypto_ohlcv_coverage(
+    db: Session,
+    *,
+    provider: str | None = None,
+    symbols: str | list[str] | tuple[str, ...] | None = None,
+    instrument_type: str | None = None,
+    interval: str | None = None,
+) -> list[dict[str, Any]]:
+    query = db.query(
+        CryptoOhlcvBar.provider.label("provider"),
+        func.max(CryptoOhlcvBar.exchange).label("exchange"),
+        CryptoOhlcvBar.symbol.label("symbol"),
+        CryptoOhlcvBar.instrument_type.label("instrument_type"),
+        CryptoOhlcvBar.interval.label("interval"),
+        func.count(CryptoOhlcvBar.id).label("row_count"),
+        func.min(CryptoOhlcvBar.bar_time).label("first_bar_time"),
+        func.max(CryptoOhlcvBar.bar_time).label("last_bar_time"),
+        func.max(CryptoOhlcvBar.fetched_at).label("latest_fetched_at"),
+    )
+    if provider:
+        query = query.filter(CryptoOhlcvBar.provider == normalize_provider(provider))
+    if symbols:
+        query = query.filter(CryptoOhlcvBar.symbol.in_(normalize_symbols(symbols)))
+    if instrument_type:
+        query = query.filter(CryptoOhlcvBar.instrument_type == normalize_instrument_type(instrument_type))
+    if interval:
+        query = query.filter(CryptoOhlcvBar.interval == interval.strip())
+
+    rows = (
+        query.group_by(
+            CryptoOhlcvBar.provider,
+            CryptoOhlcvBar.symbol,
+            CryptoOhlcvBar.instrument_type,
+            CryptoOhlcvBar.interval,
+        )
+        .order_by(
+            CryptoOhlcvBar.provider.asc(),
+            CryptoOhlcvBar.symbol.asc(),
+            CryptoOhlcvBar.instrument_type.asc(),
+            CryptoOhlcvBar.interval.asc(),
+        )
+        .all()
+    )
+    return [dict(row._mapping) for row in rows]
+
+
 def list_latest_crypto_derivatives(
     db: Session,
     *,
@@ -1341,8 +1819,21 @@ def _apply_time_range(query, model, *, start_time: datetime | None, end_time: da
     return query
 
 
+def _apply_column_time_range(query, column, *, start_time: datetime | None, end_time: datetime | None):
+    if start_time is not None:
+        query = query.filter(column >= start_time)
+    if end_time is not None:
+        query = query.filter(column <= end_time)
+    return query
+
+
 def _order_history_query(query, model, *, ascending: bool):
     order = model.sampled_at.asc() if ascending else model.sampled_at.desc()
+    return query.order_by(order, model.id.asc() if ascending else model.id.desc())
+
+
+def _order_by_column_query(query, model, column, *, ascending: bool):
+    order = column.asc() if ascending else column.desc()
     return query.order_by(order, model.id.asc() if ascending else model.id.desc())
 
 
@@ -1432,6 +1923,608 @@ def list_crypto_spread_history(
         query = query.filter(CryptoSpreadHistory.global_provider == normalize_provider(global_provider))
     query = _apply_time_range(query, CryptoSpreadHistory, start_time=start_time, end_time=end_time)
     return _order_history_query(query, CryptoSpreadHistory, ascending=ascending).limit(_bounded_history_limit(limit)).all()
+
+
+def list_crypto_liquidation_events(
+    db: Session,
+    *,
+    provider: str | None = None,
+    symbols: str | list[str] | tuple[str, ...] | None = None,
+    instrument_type: str | None = None,
+    liquidation_side: str | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    limit: int = 1000,
+    ascending: bool = True,
+) -> list[CryptoLiquidationEvent]:
+    query = db.query(CryptoLiquidationEvent)
+    if provider:
+        query = query.filter(CryptoLiquidationEvent.provider == normalize_provider(provider))
+    if symbols:
+        query = query.filter(CryptoLiquidationEvent.symbol.in_(normalize_symbols(symbols)))
+    if instrument_type:
+        query = query.filter(CryptoLiquidationEvent.instrument_type == normalize_instrument_type(instrument_type))
+    if liquidation_side:
+        query = query.filter(CryptoLiquidationEvent.liquidation_side == liquidation_side.strip().lower())
+    query = _apply_column_time_range(
+        query,
+        CryptoLiquidationEvent.event_time,
+        start_time=start_time,
+        end_time=end_time,
+    )
+    return (
+        _order_by_column_query(query, CryptoLiquidationEvent, CryptoLiquidationEvent.event_time, ascending=ascending)
+        .limit(_bounded_history_limit(limit))
+        .all()
+    )
+
+
+def list_crypto_liquidation_heatmap_cells(
+    db: Session,
+    *,
+    provider: str | None = None,
+    symbols: str | list[str] | tuple[str, ...] | None = None,
+    instrument_type: str | None = None,
+    source_kind: str | None = None,
+    method: str | None = None,
+    liquidation_side: str | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    limit: int = 5000,
+    ascending: bool = True,
+) -> list[CryptoLiquidationHeatmapCell]:
+    query = db.query(CryptoLiquidationHeatmapCell)
+    if provider:
+        query = query.filter(CryptoLiquidationHeatmapCell.provider == normalize_provider(provider))
+    if symbols:
+        query = query.filter(CryptoLiquidationHeatmapCell.symbol.in_(normalize_symbols(symbols)))
+    if instrument_type:
+        query = query.filter(CryptoLiquidationHeatmapCell.instrument_type == normalize_instrument_type(instrument_type))
+    if source_kind:
+        query = query.filter(CryptoLiquidationHeatmapCell.source_kind == source_kind.strip().lower())
+    if method:
+        query = query.filter(CryptoLiquidationHeatmapCell.method == method.strip().lower())
+    if liquidation_side:
+        query = query.filter(CryptoLiquidationHeatmapCell.liquidation_side == liquidation_side.strip().lower())
+    query = _apply_column_time_range(
+        query,
+        CryptoLiquidationHeatmapCell.time_bucket,
+        start_time=start_time,
+        end_time=end_time,
+    )
+    return (
+        _order_by_column_query(
+            query,
+            CryptoLiquidationHeatmapCell,
+            CryptoLiquidationHeatmapCell.time_bucket,
+            ascending=ascending,
+        )
+        .limit(_bounded_history_limit(limit))
+        .all()
+    )
+
+
+def list_crypto_cvd_history(
+    db: Session,
+    *,
+    provider: str | None = None,
+    symbols: str | list[str] | tuple[str, ...] | None = None,
+    instrument_type: str | None = None,
+    bucket_seconds: int | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    limit: int = 1000,
+    ascending: bool = True,
+) -> list[CryptoCvdHistory]:
+    query = db.query(CryptoCvdHistory)
+    if provider:
+        query = query.filter(CryptoCvdHistory.provider == normalize_provider(provider))
+    if symbols:
+        query = query.filter(CryptoCvdHistory.symbol.in_(normalize_symbols(symbols)))
+    if instrument_type:
+        query = query.filter(CryptoCvdHistory.instrument_type == normalize_instrument_type(instrument_type))
+    if bucket_seconds is not None:
+        query = query.filter(CryptoCvdHistory.bucket_seconds == max(int(bucket_seconds), 1))
+    query = _apply_time_range(query, CryptoCvdHistory, start_time=start_time, end_time=end_time)
+    return _order_history_query(query, CryptoCvdHistory, ascending=ascending).limit(_bounded_history_limit(limit)).all()
+
+
+def list_crypto_long_short_ratio_history(
+    db: Session,
+    *,
+    provider: str | None = None,
+    symbols: str | list[str] | tuple[str, ...] | None = None,
+    instrument_type: str | None = None,
+    ratio_scope: str | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    limit: int = 1000,
+    ascending: bool = True,
+) -> list[CryptoLongShortRatioHistory]:
+    query = db.query(CryptoLongShortRatioHistory)
+    if provider:
+        query = query.filter(CryptoLongShortRatioHistory.provider == normalize_provider(provider))
+    if symbols:
+        query = query.filter(CryptoLongShortRatioHistory.symbol.in_(normalize_symbols(symbols)))
+    if instrument_type:
+        query = query.filter(CryptoLongShortRatioHistory.instrument_type == normalize_instrument_type(instrument_type))
+    if ratio_scope:
+        query = query.filter(CryptoLongShortRatioHistory.ratio_scope == ratio_scope.strip().lower())
+    query = _apply_time_range(query, CryptoLongShortRatioHistory, start_time=start_time, end_time=end_time)
+    return (
+        _order_history_query(query, CryptoLongShortRatioHistory, ascending=ascending)
+        .limit(_bounded_history_limit(limit))
+        .all()
+    )
+
+
+def _range_start_time(range_value: str, *, now: datetime) -> datetime | None:
+    value = str(range_value or "").strip().lower()
+    if value.endswith("h"):
+        try:
+            hours = int(value[:-1])
+        except ValueError:
+            return None
+        return now - timedelta(hours=max(hours, 1))
+    if value.endswith("d"):
+        try:
+            days = int(value[:-1])
+        except ValueError:
+            return None
+        return now - timedelta(days=max(days, 1))
+    if value.endswith("y"):
+        try:
+            years = int(value[:-1])
+        except ValueError:
+            return None
+        return now - timedelta(days=max(years, 1) * 365)
+    return None
+
+
+def _liquidation_price_bucket(price: float | None) -> tuple[float, float] | None:
+    if price is None or price <= 0:
+        return None
+    bucket_size = max(round(price * 0.001, 2), 1.0)
+    return (round(price / bucket_size) * bucket_size, bucket_size)
+
+
+def build_local_liquidation_heatmap_from_events(
+    db: Session,
+    *,
+    symbols: str | list[str] | tuple[str, ...],
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    bucket_seconds: int = 300,
+) -> list[CryptoLiquidationHeatmapCellRecord]:
+    normalized_symbols = normalize_symbols(symbols, default=CRYPTO_DEFAULT_DERIVATIVES_SYMBOLS)
+    seconds = max(int(bucket_seconds), 1)
+    query = db.query(CryptoLiquidationEvent).filter(CryptoLiquidationEvent.symbol.in_(normalized_symbols))
+    if start_time is not None:
+        query = query.filter(CryptoLiquidationEvent.event_time >= start_time)
+    if end_time is not None:
+        query = query.filter(CryptoLiquidationEvent.event_time <= end_time)
+    events = query.order_by(CryptoLiquidationEvent.event_time.asc(), CryptoLiquidationEvent.id.asc()).all()
+    aggregates: dict[tuple[str, datetime, float, str], dict[str, Any]] = {}
+    for event in events:
+        bucket = _liquidation_price_bucket(event.price)
+        if bucket is None:
+            continue
+        price_bucket, price_bucket_size = bucket
+        time_bucket = _sampled_at(event.event_time, seconds)
+        side = (event.liquidation_side or "unknown").strip().lower()
+        key = (event.symbol, time_bucket, price_bucket, side)
+        row = aggregates.setdefault(
+            key,
+            {
+                "event": event,
+                "price_bucket_size": price_bucket_size,
+                "notional": 0.0,
+                "quantity": 0.0,
+                "event_count": 0,
+            },
+        )
+        row["notional"] += float(event.notional or 0)
+        row["quantity"] += float(event.quantity or 0)
+        row["event_count"] += 1
+    max_notional = max((row["notional"] for row in aggregates.values()), default=0.0)
+    generated_at = _now()
+    records: list[CryptoLiquidationHeatmapCellRecord] = []
+    for (symbol, time_bucket, price_bucket, side), row in sorted(aggregates.items(), key=lambda item: item[0]):
+        event = row["event"]
+        records.append(
+            CryptoLiquidationHeatmapCellRecord(
+                provider=OMI_LOCAL_PROVIDER,
+                source_kind="estimated",
+                method="local_liquidation_event_bucket",
+                exchange="OMI Local",
+                symbol=symbol,
+                provider_symbol=event.provider_symbol,
+                base_asset=event.base_asset,
+                quote_asset=event.quote_asset,
+                instrument_type=event.instrument_type,
+                time_bucket=time_bucket,
+                bucket_seconds=seconds,
+                price_bucket=price_bucket,
+                price_bucket_size=row["price_bucket_size"],
+                liquidation_side=side,
+                liquidation_notional=row["notional"],
+                liquidation_quantity=row["quantity"] if row["quantity"] else None,
+                event_count=int(row["event_count"]),
+                intensity=(row["notional"] / max_notional if max_notional > 0 else None),
+                generated_at=generated_at,
+                source_url="local:crypto_liquidation_event",
+                raw_payload={
+                    "event_count": int(row["event_count"]),
+                    "source": "crypto_liquidation_event",
+                },
+                fetched_at=generated_at,
+            )
+        )
+    return records
+
+
+def _pending_advanced_metric_refresh_result(
+    *,
+    resource: str,
+    providers: str | list[str] | tuple[str, ...] | None,
+    symbols: str | list[str] | tuple[str, ...] | None,
+    default_symbols: tuple[str, ...],
+    instrument_type: str,
+    provider_default: tuple[str, ...] = CRYPTO_ADVANCED_METRIC_PROVIDERS,
+) -> dict[str, Any]:
+    normalized_providers = normalize_advanced_metric_providers(providers, default=provider_default)
+    normalized_symbols = normalize_symbols(symbols, default=default_symbols)
+    normalized_instrument_type = normalize_instrument_type(instrument_type)
+    skipped = [
+        {
+            "provider": provider,
+            "symbol": symbol,
+            "instrument_type": normalized_instrument_type,
+            "reason": "provider_not_connected",
+        }
+        for provider in normalized_providers
+        for symbol in normalized_symbols
+    ]
+    return {
+        "status": "skipped" if skipped else "empty",
+        "resource": resource,
+        "requested_count": len(skipped),
+        "refreshed_count": 0,
+        "error_count": 0,
+        "skipped_count": len(skipped),
+        "errors": [],
+        "skipped": skipped,
+        "rows": [],
+    }
+
+
+def refresh_crypto_liquidation_heatmap(
+    db: Session,
+    *,
+    providers: str | list[str] | tuple[str, ...] | None = None,
+    symbols: str | list[str] | tuple[str, ...] | None = None,
+    range_value: str | None = None,
+    allow_local_fallback: bool | None = None,
+) -> dict[str, Any]:
+    normalized_providers = normalize_advanced_metric_providers(
+        providers,
+        default=(COINGLASS_PROVIDER,),
+    )
+    normalized_symbols = normalize_symbols(symbols, default=CRYPTO_DEFAULT_DERIVATIVES_SYMBOLS)
+    effective_range = str(range_value or settings.crypto_market_liquidation_heatmap_range or "24h").strip() or "24h"
+    fallback_enabled = (
+        bool(settings.enable_crypto_market_liquidation_local_fallback)
+        if allow_local_fallback is None
+        else bool(allow_local_fallback)
+    )
+    now = _now()
+    start_time = _range_start_time(effective_range, now=now)
+    errors: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    rows: list[CryptoLiquidationHeatmapCell] = []
+
+    def persist_heatmap_records(records: list[CryptoLiquidationHeatmapCellRecord]) -> list[CryptoLiquidationHeatmapCell]:
+        persisted = [upsert_crypto_liquidation_heatmap_cell(db, record) for record in records]
+        db.commit()
+        for row in persisted:
+            db.refresh(row)
+        return persisted
+
+    def try_local_fallback(symbol: str, *, reason: str) -> bool:
+        if not fallback_enabled:
+            skipped.append(
+                {
+                    "provider": OMI_LOCAL_PROVIDER,
+                    "symbol": symbol,
+                    "instrument_type": PERPETUAL,
+                    "reason": "local_fallback_disabled",
+                    "trigger": reason,
+                }
+            )
+            return False
+        try:
+            records = build_local_liquidation_heatmap_from_events(
+                db,
+                symbols=(symbol,),
+                start_time=start_time,
+                end_time=now,
+            )
+            if not records:
+                skipped.append(
+                    {
+                        "provider": OMI_LOCAL_PROVIDER,
+                        "symbol": symbol,
+                        "instrument_type": PERPETUAL,
+                        "reason": "local_estimate_no_events",
+                        "trigger": reason,
+                    }
+                )
+                return False
+            rows.extend(persist_heatmap_records(records))
+            _record_event(
+                db,
+                provider=OMI_LOCAL_PROVIDER,
+                resource="crypto_liquidation_heatmap",
+                target=symbol,
+                status="success",
+                message=f"Built local liquidation heatmap fallback for {symbol}.",
+                detail={"trigger": reason, "row_count": len(records)},
+            )
+            return True
+        except Exception as exc:
+            db.rollback()
+            errors.append(
+                {
+                    "provider": OMI_LOCAL_PROVIDER,
+                    "symbol": symbol,
+                    "error": str(exc),
+                    "trigger": reason,
+                }
+            )
+            _record_event(
+                db,
+                provider=OMI_LOCAL_PROVIDER,
+                resource="crypto_liquidation_heatmap",
+                target=symbol,
+                status="error",
+                error_message=str(exc),
+                detail={"trigger": reason},
+            )
+            return False
+
+    for provider in normalized_providers:
+        for symbol in normalized_symbols:
+            if provider == COINGLASS_PROVIDER:
+                try:
+                    records = sources.fetch_coinglass_liquidation_heatmap(
+                        symbol,
+                        range_value=effective_range,
+                    )
+                    if not records:
+                        skipped.append(
+                            {
+                                "provider": provider,
+                                "symbol": symbol,
+                                "instrument_type": PERPETUAL,
+                                "reason": "coinglass_empty",
+                            }
+                        )
+                        try_local_fallback(symbol, reason="coinglass_empty")
+                        continue
+                    rows.extend(persist_heatmap_records(records))
+                    _record_event(
+                        db,
+                        provider=provider,
+                        resource="crypto_liquidation_heatmap",
+                        target=symbol,
+                        status="success",
+                        message=f"Refreshed CoinGlass liquidation heatmap for {symbol}.",
+                        detail={"range": effective_range, "row_count": len(records)},
+                    )
+                    continue
+                except Exception as exc:
+                    db.rollback()
+                    message = str(exc)
+                    if "API key is not configured" in message:
+                        skipped.append(
+                            {
+                                "provider": provider,
+                                "symbol": symbol,
+                                "instrument_type": PERPETUAL,
+                                "reason": "coinglass_api_key_missing",
+                            }
+                        )
+                    else:
+                        errors.append({"provider": provider, "symbol": symbol, "error": message})
+                        _record_event(
+                            db,
+                            provider=provider,
+                            resource="crypto_liquidation_heatmap",
+                            target=symbol,
+                            status="error",
+                            error_message=message,
+                            detail={"range": effective_range},
+                        )
+
+                    try:
+                        order_records = sources.fetch_coinglass_liquidation_orders(
+                            symbol,
+                            exchange=settings.crypto_market_liquidation_fallback_exchange,
+                            min_liquidation_amount=settings.crypto_market_liquidation_min_amount,
+                            start_time=start_time,
+                            end_time=now,
+                        )
+                        for record in order_records:
+                            upsert_crypto_liquidation_event(db, record)
+                        if order_records:
+                            db.commit()
+                            _record_event(
+                                db,
+                                provider=provider,
+                                resource="crypto_liquidation_event",
+                                target=symbol,
+                                status="success",
+                                message=f"Refreshed CoinGlass liquidation orders for local heatmap fallback: {symbol}.",
+                                detail={"row_count": len(order_records)},
+                            )
+                    except Exception as order_exc:
+                        if "API key is not configured" not in str(order_exc):
+                            errors.append(
+                                {
+                                    "provider": provider,
+                                    "symbol": symbol,
+                                    "resource": "liquidation_order",
+                                    "error": str(order_exc),
+                                }
+                            )
+                    try_local_fallback(symbol, reason="coinglass_unavailable")
+                continue
+
+            if provider == OMI_LOCAL_PROVIDER:
+                try_local_fallback(symbol, reason="manual_local_provider")
+                continue
+
+            skipped.append(
+                {
+                    "provider": provider,
+                    "symbol": symbol,
+                    "instrument_type": PERPETUAL,
+                    "reason": "provider_not_connected",
+                }
+            )
+
+    db.commit()
+    status_value = _status_for_counts(len(rows), len(errors))
+    if not rows and not errors and skipped:
+        status_value = "skipped"
+    return {
+        "status": status_value,
+        "resource": "liquidation_heatmap",
+        "requested_count": len(normalized_providers) * len(normalized_symbols),
+        "refreshed_count": len(rows),
+        "error_count": len(errors),
+        "skipped_count": len(skipped),
+        "errors": errors,
+        "skipped": skipped,
+        "rows": rows,
+    }
+
+
+def refresh_crypto_cvd(
+    db: Session,
+    *,
+    providers: str | list[str] | tuple[str, ...] | None = None,
+    symbols: str | list[str] | tuple[str, ...] | None = None,
+    instrument_type: str = SPOT,
+) -> dict[str, Any]:
+    _ = db
+    normalized_instrument_type = normalize_instrument_type(instrument_type)
+    default_symbols = CRYPTO_DEFAULT_DERIVATIVES_SYMBOLS if normalized_instrument_type == PERPETUAL else CRYPTO_DEFAULT_SYMBOLS
+    provider_default = (BINANCE_PROVIDER, OKX_PROVIDER)
+    return _pending_advanced_metric_refresh_result(
+        resource="cvd",
+        providers=providers,
+        symbols=symbols,
+        default_symbols=default_symbols,
+        instrument_type=normalized_instrument_type,
+        provider_default=provider_default,
+    )
+
+
+def refresh_crypto_long_short_ratios(
+    db: Session,
+    *,
+    providers: str | list[str] | tuple[str, ...] | None = None,
+    symbols: str | list[str] | tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    normalized_providers = normalize_advanced_metric_providers(
+        providers,
+        default=(BINANCE_PROVIDER, BYBIT_PROVIDER),
+    )
+    normalized_symbols = normalize_symbols(symbols, default=CRYPTO_DEFAULT_DERIVATIVES_SYMBOLS)
+    rows: list[CryptoLongShortRatioHistory] = []
+    errors: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+
+    for provider in normalized_providers:
+        for symbol in normalized_symbols:
+            if provider == BINANCE_PROVIDER:
+                try:
+                    records = sources.fetch_binance_long_short_account_ratio(
+                        symbol,
+                        period=settings.crypto_market_long_short_ratio_period,
+                        limit=settings.crypto_market_long_short_ratio_limit,
+                    )
+                    if not records:
+                        skipped.append(
+                            {
+                                "provider": provider,
+                                "symbol": symbol,
+                                "instrument_type": PERPETUAL,
+                                "reason": "binance_long_short_ratio_empty",
+                            }
+                        )
+                        continue
+                    rows.extend(upsert_crypto_long_short_ratio_history(db, record) for record in records)
+                    db.commit()
+                    for row in rows[-len(records):]:
+                        db.refresh(row)
+                    _record_event(
+                        db,
+                        provider=provider,
+                        resource="crypto_long_short_ratio",
+                        target=symbol,
+                        status="success",
+                        message=f"Refreshed Binance long/short account ratio for {symbol}.",
+                        detail={
+                            "period": settings.crypto_market_long_short_ratio_period,
+                            "limit": settings.crypto_market_long_short_ratio_limit,
+                            "row_count": len(records),
+                        },
+                    )
+                    continue
+                except Exception as exc:
+                    db.rollback()
+                    message = str(exc)
+                    errors.append({"provider": provider, "symbol": symbol, "error": message})
+                    _record_event(
+                        db,
+                        provider=provider,
+                        resource="crypto_long_short_ratio",
+                        target=symbol,
+                        status="error",
+                        error_message=message,
+                        detail={
+                            "period": settings.crypto_market_long_short_ratio_period,
+                            "limit": settings.crypto_market_long_short_ratio_limit,
+                        },
+                    )
+                    continue
+
+            skipped.append(
+                {
+                    "provider": provider,
+                    "symbol": symbol,
+                    "instrument_type": PERPETUAL,
+                    "reason": "provider_not_connected",
+                }
+            )
+
+    db.commit()
+    status_value = _status_for_counts(len(rows), len(errors))
+    if not rows and not errors and skipped:
+        status_value = "skipped"
+    return {
+        "status": status_value,
+        "resource": "long_short_ratio",
+        "requested_count": len(normalized_providers) * len(normalized_symbols),
+        "refreshed_count": len(rows),
+        "error_count": len(errors),
+        "skipped_count": len(skipped),
+        "errors": errors,
+        "skipped": skipped,
+        "rows": rows,
+    }
 
 
 def list_latest_crypto_market_caps(

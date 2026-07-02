@@ -10,15 +10,24 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.crypto_market.schemas import (
+    CryptoCvdHistoryRead,
+    CryptoCvdRefreshResultRead,
     CryptoDerivativesMetricRead,
     CryptoDerivativesMetricHistoryRead,
     CryptoDerivativesRefreshResultRead,
+    CryptoLiquidationEventRead,
+    CryptoLiquidationHeatmapCellRead,
+    CryptoLiquidationHeatmapRefreshResultRead,
     CryptoLiquidityHistoryRead,
+    CryptoLongShortRatioHistoryRead,
+    CryptoLongShortRatioRefreshResultRead,
     CryptoMarketCapRead,
     CryptoMarketCapRefreshResultRead,
     CryptoOrderBookRead,
     CryptoOrderBookRefreshResultRead,
     CryptoOhlcvBarRead,
+    CryptoOhlcvBundleRefreshResultRead,
+    CryptoOhlcvCoverageRead,
     CryptoOhlcvRefreshResultRead,
     CryptoProviderContractRead,
     CryptoRealtimeLatestRead,
@@ -44,8 +53,12 @@ from app.crypto_market.service import (
     CryptoMarketError,
     CryptoMarketUnsupportedError,
     get_crypto_provider_contract,
+    list_crypto_cvd_history,
     list_crypto_derivatives_history,
+    list_crypto_liquidation_events,
+    list_crypto_liquidation_heatmap_cells,
     list_crypto_liquidity_history,
+    list_crypto_long_short_ratio_history,
     list_crypto_spread_history,
     list_crypto_ticker_history,
     list_latest_crypto_derivatives,
@@ -54,10 +67,15 @@ from app.crypto_market.service import (
     list_latest_crypto_ohlcv_bars,
     list_latest_crypto_spreads,
     list_latest_crypto_tickers,
+    list_crypto_ohlcv_coverage,
+    refresh_crypto_cvd,
     refresh_crypto_derivatives,
+    refresh_crypto_liquidation_heatmap,
+    refresh_crypto_long_short_ratios,
     refresh_crypto_market_caps,
     refresh_crypto_order_books,
     refresh_crypto_ohlcv,
+    refresh_crypto_ohlcv_bundle,
     refresh_crypto_spreads,
     refresh_crypto_tickers,
 )
@@ -147,6 +165,9 @@ def get_crypto_source_health(
     provider: str | None = None,
     symbol: str | None = None,
     base: str | None = None,
+    required_only: bool = Query(default=False),
+    include_events: bool = Query(default=False),
+    max_entries: int | None = Query(default=None, ge=1, le=500),
     db: Session = Depends(get_db),
 ):
     return build_crypto_source_health(
@@ -154,6 +175,9 @@ def get_crypto_source_health(
         provider=provider,
         symbol=symbol,
         base=base,
+        required_only=required_only,
+        include_events=include_events,
+        max_entries=max_entries,
     )
 
 
@@ -162,6 +186,9 @@ def sync_crypto_source_health_snapshot(
     provider: str | None = None,
     symbol: str | None = None,
     base: str | None = None,
+    required_only: bool = Query(default=False),
+    include_events: bool = Query(default=True),
+    max_entries: int | None = Query(default=None, ge=1, le=500),
     db: Session = Depends(get_db),
 ):
     return build_crypto_source_health(
@@ -169,6 +196,9 @@ def sync_crypto_source_health_snapshot(
         provider=provider,
         symbol=symbol,
         base=base,
+        required_only=required_only,
+        include_events=include_events,
+        max_entries=max_entries,
         sync_snapshots=True,
     )
 
@@ -490,6 +520,23 @@ def get_latest_crypto_ohlcv(
     )
 
 
+@router.get("/ohlcv/coverage", response_model=list[CryptoOhlcvCoverageRead])
+def get_crypto_ohlcv_coverage(
+    provider: str | None = None,
+    symbols: str | None = None,
+    instrument_type: str | None = None,
+    interval: str | None = None,
+    db: Session = Depends(get_db),
+):
+    return list_crypto_ohlcv_coverage(
+        db,
+        provider=provider,
+        symbols=symbols,
+        instrument_type=instrument_type,
+        interval=interval,
+    )
+
+
 @router.post("/ohlcv/refresh", response_model=CryptoOhlcvRefreshResultRead)
 def refresh_crypto_ohlcv_cache(
     providers: str | None = Query(default=None),
@@ -509,6 +556,24 @@ def refresh_crypto_ohlcv_cache(
             limit=limit,
             start_time=start_time,
             end_time=end_time,
+        )
+    except (CryptoMarketError, ValueError) as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.post("/ohlcv/refresh-bundle", response_model=CryptoOhlcvBundleRefreshResultRead)
+def refresh_crypto_ohlcv_bundle_cache(
+    providers: str | None = Query(default=None),
+    symbols: str | None = Query(default=None),
+    intervals: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    try:
+        return refresh_crypto_ohlcv_bundle(
+            db,
+            providers=providers,
+            symbols=symbols,
+            intervals=intervals,
         )
     except (CryptoMarketError, ValueError) as exc:
         raise _bad_request(exc) from exc
@@ -560,6 +625,160 @@ def refresh_crypto_derivatives_cache(
 ):
     try:
         return refresh_crypto_derivatives(db, providers=providers, symbols=symbols)
+    except CryptoMarketUnsupportedError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.get("/liquidations/events", response_model=list[CryptoLiquidationEventRead])
+def get_crypto_liquidation_events(
+    provider: str | None = None,
+    symbols: str | None = None,
+    instrument_type: str | None = None,
+    liquidation_side: str | None = None,
+    start_time: datetime | None = Query(default=None),
+    end_time: datetime | None = Query(default=None),
+    limit: int = Query(default=1000, ge=1, le=5000),
+    ascending: bool = Query(default=True),
+    db: Session = Depends(get_db),
+):
+    return list_crypto_liquidation_events(
+        db,
+        provider=provider,
+        symbols=symbols,
+        instrument_type=instrument_type,
+        liquidation_side=liquidation_side,
+        start_time=start_time,
+        end_time=end_time,
+        limit=limit,
+        ascending=ascending,
+    )
+
+
+@router.get("/liquidations/heatmap", response_model=list[CryptoLiquidationHeatmapCellRead])
+def get_crypto_liquidation_heatmap(
+    provider: str | None = None,
+    symbols: str | None = None,
+    instrument_type: str | None = None,
+    source_kind: str | None = None,
+    method: str | None = None,
+    liquidation_side: str | None = None,
+    start_time: datetime | None = Query(default=None),
+    end_time: datetime | None = Query(default=None),
+    limit: int = Query(default=5000, ge=1, le=5000),
+    ascending: bool = Query(default=True),
+    db: Session = Depends(get_db),
+):
+    return list_crypto_liquidation_heatmap_cells(
+        db,
+        provider=provider,
+        symbols=symbols,
+        instrument_type=instrument_type,
+        source_kind=source_kind,
+        method=method,
+        liquidation_side=liquidation_side,
+        start_time=start_time,
+        end_time=end_time,
+        limit=limit,
+        ascending=ascending,
+    )
+
+
+@router.post("/liquidations/refresh", response_model=CryptoLiquidationHeatmapRefreshResultRead)
+def refresh_crypto_liquidation_heatmap_cache(
+    providers: str | None = Query(default=None),
+    symbols: str | None = Query(default=None),
+    range_: str | None = Query(default=None, alias="range"),
+    allow_local_fallback: bool | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    try:
+        return refresh_crypto_liquidation_heatmap(
+            db,
+            providers=providers,
+            symbols=symbols,
+            range_value=range_,
+            allow_local_fallback=allow_local_fallback,
+        )
+    except CryptoMarketUnsupportedError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.get("/cvd/history", response_model=list[CryptoCvdHistoryRead])
+def get_crypto_cvd_history(
+    provider: str | None = None,
+    symbols: str | None = None,
+    instrument_type: str | None = None,
+    bucket_seconds: int | None = Query(default=None, ge=1, le=86400),
+    start_time: datetime | None = Query(default=None),
+    end_time: datetime | None = Query(default=None),
+    limit: int = Query(default=1000, ge=1, le=5000),
+    ascending: bool = Query(default=True),
+    db: Session = Depends(get_db),
+):
+    return list_crypto_cvd_history(
+        db,
+        provider=provider,
+        symbols=symbols,
+        instrument_type=instrument_type,
+        bucket_seconds=bucket_seconds,
+        start_time=start_time,
+        end_time=end_time,
+        limit=limit,
+        ascending=ascending,
+    )
+
+
+@router.post("/cvd/refresh", response_model=CryptoCvdRefreshResultRead)
+def refresh_crypto_cvd_cache(
+    providers: str | None = Query(default=None),
+    symbols: str | None = Query(default=None),
+    instrument_type: str = Query(default="spot"),
+    db: Session = Depends(get_db),
+):
+    try:
+        return refresh_crypto_cvd(
+            db,
+            providers=providers,
+            symbols=symbols,
+            instrument_type=instrument_type,
+        )
+    except CryptoMarketUnsupportedError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.get("/long-short-ratios/history", response_model=list[CryptoLongShortRatioHistoryRead])
+def get_crypto_long_short_ratio_history(
+    provider: str | None = None,
+    symbols: str | None = None,
+    instrument_type: str | None = None,
+    ratio_scope: str | None = None,
+    start_time: datetime | None = Query(default=None),
+    end_time: datetime | None = Query(default=None),
+    limit: int = Query(default=1000, ge=1, le=5000),
+    ascending: bool = Query(default=True),
+    db: Session = Depends(get_db),
+):
+    return list_crypto_long_short_ratio_history(
+        db,
+        provider=provider,
+        symbols=symbols,
+        instrument_type=instrument_type,
+        ratio_scope=ratio_scope,
+        start_time=start_time,
+        end_time=end_time,
+        limit=limit,
+        ascending=ascending,
+    )
+
+
+@router.post("/long-short-ratios/refresh", response_model=CryptoLongShortRatioRefreshResultRead)
+def refresh_crypto_long_short_ratios_cache(
+    providers: str | None = Query(default=None),
+    symbols: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    try:
+        return refresh_crypto_long_short_ratios(db, providers=providers, symbols=symbols)
     except CryptoMarketUnsupportedError as exc:
         raise _bad_request(exc) from exc
 

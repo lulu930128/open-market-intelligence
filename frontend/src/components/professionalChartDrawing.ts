@@ -45,6 +45,7 @@ export const professionalChartDrawingToolOptions: Array<{
   },
   { key: "measure", label: "Measure", labelKey: "chart.drawingTools.measure" },
   { key: "priceRange", label: "Price range %", labelKey: "chart.drawingTools.priceRange" },
+  { key: "riskReward", label: "Risk/reward", labelKey: "chart.drawingTools.riskReward" },
 ];
 
 export const professionalChartDrawingToolOptionMap = new Map(
@@ -58,7 +59,7 @@ export const professionalChartDrawingToolGroups: Array<{
   { key: "base", tools: ["cursor"] },
   { key: "line", tools: ["horizontal", "trend", "ray"] },
   { key: "area", tools: ["rectangle", "fibonacci", "anchorVwap", "volumeProfileRange"] },
-  { key: "measure", tools: ["measure", "priceRange"] },
+  { key: "measure", tools: ["measure", "priceRange", "riskReward"] },
 ];
 
 export function chartDrawingApiPath(market: string, symbol: string, timeframe: string) {
@@ -160,7 +161,8 @@ function isChartDrawingType(value: unknown): value is ChartDrawing["type"] {
     value === "anchorVwap" ||
     value === "volumeProfileRange" ||
     value === "measure" ||
-    value === "priceRange"
+    value === "priceRange" ||
+    value === "riskReward"
   );
 }
 
@@ -192,7 +194,8 @@ export function normalizeStoredChartDrawings(value: unknown): ChartDrawing[] {
         return [];
       }
 
-      const pointCount = type === "horizontal" || type === "anchorVwap" ? 1 : 2;
+      const pointCount =
+        type === "horizontal" || type === "anchorVwap" ? 1 : type === "riskReward" ? 3 : 2;
       if (points.length < pointCount) return [];
 
       const normalizedDrawing: ChartDrawing = {
@@ -237,6 +240,16 @@ export function loadChartDrawings(storageKey: string): ChartDrawing[] {
     return normalizeStoredChartDrawings(JSON.parse(raw));
   } catch {
     return [];
+  }
+}
+
+export function hasChartDrawingSnapshot(storageKey: string) {
+  if (typeof window === "undefined") return false;
+
+  try {
+    return window.localStorage.getItem(storageKey) !== null;
+  } catch {
+    return false;
   }
 }
 

@@ -101,13 +101,19 @@ export type ChartDrawingTool =
   | "anchorVwap"
   | "volumeProfileRange"
   | "measure"
-  | "priceRange";
+  | "priceRange"
+  | "riskReward";
 
 export type ChartDrawingType = Exclude<ChartDrawingTool, "cursor">;
+export type TwoPointChartDrawingType = Exclude<
+  ChartDrawingType,
+  "horizontal" | "anchorVwap" | "riskReward"
+>;
 
 export type ChartDrawingPoint = {
   time: string;
   price: number;
+  logical?: number;
 };
 
 export type ChartDrawingContext = {
@@ -388,6 +394,7 @@ export type PriceCoordinateApi = {
 export type DrawingAnchor = {
   time: string;
   price: number;
+  logical?: number;
 };
 
 export type DrawingCoordinate = {
@@ -398,20 +405,30 @@ export type DrawingCoordinate = {
 export type ProjectedDrawing = {
   drawing: ChartDrawing;
   label: string;
-  points: [DrawingCoordinate, DrawingCoordinate];
-  anchorPoints?: [DrawingCoordinate, DrawingCoordinate];
+  points:
+    | [DrawingCoordinate, DrawingCoordinate]
+    | [DrawingCoordinate, DrawingCoordinate, DrawingCoordinate];
+  anchorPoints?:
+    | [DrawingCoordinate, DrawingCoordinate]
+    | [DrawingCoordinate, DrawingCoordinate, DrawingCoordinate];
   anchoredVwapLine?: DrawingCoordinate[];
   fibonacciLevels?: ProjectedFibonacciLevel[];
   volumeProfileBins?: ProjectedRangeVolumeProfileBin[];
   measurementStats?: ProjectedMeasurementStats;
+  riskRewardStats?: ProjectedRiskRewardStats;
 };
 
 export type ProjectedDraftDrawing = {
   type: Exclude<ChartDrawingType, "horizontal">;
-  points: [DrawingCoordinate, DrawingCoordinate];
-  anchorPoints?: [DrawingCoordinate, DrawingCoordinate];
+  points:
+    | [DrawingCoordinate, DrawingCoordinate]
+    | [DrawingCoordinate, DrawingCoordinate, DrawingCoordinate];
+  anchorPoints?:
+    | [DrawingCoordinate, DrawingCoordinate]
+    | [DrawingCoordinate, DrawingCoordinate, DrawingCoordinate];
   fibonacciLevels?: ProjectedFibonacciLevel[];
   measurementStats?: ProjectedMeasurementStats;
+  riskRewardStats?: ProjectedRiskRewardStats;
 };
 
 export type ProjectedFibonacciLevel = {
@@ -444,10 +461,16 @@ export type ProjectedMeasurementStats = {
   lowLabel: string;
 };
 
+export type ProjectedRiskRewardStats = {
+  rewardLabel: string;
+  riskLabel: string;
+  ratioLabel: string;
+};
+
 export type DrawingDragState = {
   drawingId: string;
-  mode: "horizontal" | "point" | "line";
-  pointIndex: 0 | 1;
+  mode: "horizontal" | "point" | "line" | "riskRewardWidth";
+  pointIndex: 0 | 1 | 2;
   pointerId: number;
   startCoordinate?: DrawingCoordinate;
   originCoordinates?: DrawingCoordinate[];
@@ -859,6 +882,39 @@ export function formatDrawingRatioPercent(value: number | null) {
   return formatDrawingPercent(value);
 }
 
+export function formatRiskRewardRatio(value: number | null) {
+  if (!finiteNumber(value)) return "-";
+
+  return value.toLocaleString("zh-TW", {
+    maximumFractionDigits: 2,
+    minimumFractionDigits: 2,
+  });
+}
+
+export function buildRiskRewardStats(
+  entry: ChartDrawingPoint,
+  target: ChartDrawingPoint,
+  stop: ChartDrawingPoint
+): ProjectedRiskRewardStats {
+  const reward = target.price - entry.price;
+  const risk = stop.price - entry.price;
+  const rewardPct = entry.price !== 0 ? (reward / entry.price) * 100 : null;
+  const riskPct = entry.price !== 0 ? (risk / entry.price) * 100 : null;
+  const rewardAbs = Math.abs(reward);
+  const riskAbs = Math.abs(risk);
+  const ratio = riskAbs > 0 ? rewardAbs / riskAbs : null;
+
+  return {
+    rewardLabel: formatDrawingRatioPercent(rewardPct),
+    riskLabel: formatDrawingRatioPercent(riskPct),
+    ratioLabel: formatRiskRewardRatio(ratio),
+  };
+}
+
+function riskRewardMinimumPriceGap(entryPrice: number) {
+  return Math.max(Math.abs(entryPrice) * 0.0001, 0.01);
+}
+
 export function parseDrawingTimeMs(value: string) {
   const normalized = value.includes("T") ? value : `${value}T00:00:00`;
   const hasExplicitZone = /([zZ]|[+-]\d{2}:?\d{2})$/.test(normalized);
@@ -1045,7 +1101,7 @@ export function preserveEmptyProjection<T>(current: T[], next: T[]) {
 
 export function isTwoPointDrawingTool(
   value: ChartDrawingTool
-): value is Exclude<ChartDrawingType, "horizontal"> {
+): value is TwoPointChartDrawingType {
   return (
     value === "trend" ||
     value === "ray" ||
@@ -1059,7 +1115,7 @@ export function isTwoPointDrawingTool(
 
 export function isTwoPointDrawingType(
   value: ChartDrawing["type"]
-): value is Exclude<ChartDrawingType, "horizontal"> {
+): value is TwoPointChartDrawingType {
   return (
     value === "trend" ||
     value === "ray" ||
@@ -1071,10 +1127,15 @@ export function isTwoPointDrawingType(
   );
 }
 
+export function isRiskRewardDrawingTool(value: ChartDrawingTool): value is "riskReward" {
+  return value === "riskReward";
+}
+
 export function drawingDefaultColor(type: ChartDrawing["type"]) {
   if (type === "anchorVwap") return omiChartColors.cyan;
   if (type === "volumeProfileRange") return omiChartColors.neutralMuted;
   if (type === "priceRange") return omiChartColors.textMuted;
+  if (type === "riskReward") return omiChartColors.warning;
   if (type === "measure") return omiChartColors.neutralLine;
   if (type === "rectangle") return omiChartColors.info;
   if (type === "fibonacci") return omiChartColors.purple;
@@ -1103,6 +1164,8 @@ export function drawingToolModeLabel(tool: ChartDrawingTool, i18n?: DrawingAnaly
       return translateDrawing(i18n, "toolModes.measure", "量測模式");
     case "priceRange":
       return translateDrawing(i18n, "toolModes.priceRange", "價幅%模式");
+    case "riskReward":
+      return translateDrawing(i18n, "toolModes.riskReward", "上下限模式");
     default:
       return "";
   }
@@ -1118,6 +1181,8 @@ export function drawingModeBadgeWidth(tool: ChartDrawingTool) {
       return 106;
     case "priceRange":
       return 88;
+    case "riskReward":
+      return 104;
     case "rectangle":
       return 94;
     case "horizontal":
@@ -2079,6 +2144,8 @@ export function buildDrawingDerivedMetrics(
   const anchorCount =
     type === "horizontal" || type === "anchorVwap"
       ? Math.min(points.length, 1)
+      : type === "riskReward"
+        ? Math.min(points.length, 3)
       : Math.min(points.length, 2);
   const startPrice = first?.price ?? null;
   const endPrice = second?.price ?? null;
@@ -2209,6 +2276,8 @@ export function drawingTypeLabel(type: ChartDrawing["type"], i18n?: DrawingAnaly
       return translateDrawing(i18n, "drawingTypes.measure", "量測");
     case "priceRange":
       return translateDrawing(i18n, "drawingTypes.priceRange", "價幅");
+    case "riskReward":
+      return translateDrawing(i18n, "drawingTypes.riskReward", "上下限");
     default:
       return translateDrawing(i18n, "drawingTypes.default", "畫線");
   }
@@ -2509,14 +2578,21 @@ export function extendRayToViewport(
   ];
 }
 
-export function rectangleBounds(points: [DrawingCoordinate, DrawingCoordinate]) {
-  const [first, second] = points;
+export function rectangleBounds(
+  points: readonly [DrawingCoordinate, DrawingCoordinate, ...DrawingCoordinate[]]
+) {
+  const xValues = points.map((point) => point.x);
+  const yValues = points.map((point) => point.y);
+  const minX = Math.min(...xValues);
+  const maxX = Math.max(...xValues);
+  const minY = Math.min(...yValues);
+  const maxY = Math.max(...yValues);
 
   return {
-    x: Math.min(first.x, second.x),
-    y: Math.min(first.y, second.y),
-    width: Math.abs(second.x - first.x),
-    height: Math.abs(second.y - first.y),
+    x: minX,
+    y: minY,
+    width: Math.abs(maxX - minX),
+    height: Math.abs(maxY - minY),
   };
 }
 
@@ -2573,6 +2649,28 @@ export function isProjectedDrawingHit(
     projectedDrawing.drawing.type === "volumeProfileRange"
   ) {
     return expandedRectangleContains(point, rectangleBounds(points), padding);
+  }
+
+  if (projectedDrawing.drawing.type === "riskReward") {
+    const entry = points[0];
+    const target = points[1];
+    const stop = points[2];
+
+    if (!entry || !target || !stop) return false;
+
+    if (expandedRectangleContains(point, rectangleBounds(points), padding)) return true;
+
+    const left = Math.min(entry.x, target.x, stop.x);
+    const right = Math.max(entry.x, target.x, stop.x);
+    const insideWidth = point.x >= left - padding && point.x <= right + padding;
+
+    if (!insideWidth) return false;
+
+    return (
+      Math.abs(point.y - entry.y) <= padding ||
+      Math.abs(point.y - target.y) <= padding ||
+      Math.abs(point.y - stop.y) <= padding
+    );
   }
 
   if (projectedDrawing.drawing.type === "anchorVwap") {
@@ -2667,6 +2765,53 @@ export function applyDrawingDragToDrawings(
           },
         ],
       };
+    }
+
+    if (drawing.type === "riskReward") {
+      const points = drawing.points.slice(0, 3);
+      const pointIndex = dragState.pointIndex;
+
+      if (!points[0] || !points[1] || !points[2]) return drawing;
+
+      const nextPoint = { time: anchor.time, price: anchor.price, logical: anchor.logical };
+
+      if (dragState.mode === "riskRewardWidth") {
+        return {
+          ...drawing,
+          points: [
+            points[0],
+            { ...points[1], time: anchor.time, logical: anchor.logical },
+            { ...points[2], time: anchor.time, logical: anchor.logical },
+          ],
+        };
+      }
+
+      if (pointIndex === 0) {
+        return {
+          ...drawing,
+          points: [nextPoint, points[1], points[2]],
+        };
+      }
+
+      if (pointIndex === 1 || pointIndex === 2) {
+        const entryPrice = points[0].price;
+        const minGap = riskRewardMinimumPriceGap(entryPrice);
+        const nextPrice =
+          pointIndex === 1
+            ? Math.max(anchor.price, entryPrice + minGap)
+            : Math.min(anchor.price, entryPrice - minGap);
+        const nextPoints = [...points];
+
+        nextPoints[pointIndex] = {
+          ...points[pointIndex],
+          price: nextPrice,
+        };
+
+        return {
+          ...drawing,
+          points: nextPoints,
+        };
+      }
     }
 
     return {

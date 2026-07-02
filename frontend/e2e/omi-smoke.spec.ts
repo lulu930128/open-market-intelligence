@@ -209,7 +209,65 @@ async function mockOmiApi(page: Page) {
       return;
     }
 
-    if (path.includes("/market/technical-report/")) {
+    if (path.includes("/market/quote-depth/")) {
+      await fulfillJson(route, {
+        stock_id: "2330",
+        stock_name: "台積電",
+        market: "TWSE",
+        provider: "twse_mis",
+        source: "twse_mis_quote_depth",
+        source_url: "https://mis.twse.com.tw/stock/api/getStockInfo.jsp",
+        exchange_channel: "tse_2330.tw",
+        session_phase: "regular_live",
+        phase_label: "即時",
+        trade_date: "2026-06-15",
+        quote_time: "2026-06-15T09:30:00+08:00",
+        fetched_at: "2026-06-15T09:30:01+08:00",
+        last_price: 861,
+        previous_close: 849,
+        open_price: 852,
+        high_price: 864,
+        low_price: 850,
+        change: 12,
+        change_pct: 1.41,
+        total_volume_lots: 1280,
+        best_bid_price: 860,
+        best_bid_size_lots: 12,
+        best_ask_price: 861,
+        best_ask_size_lots: 8,
+        bid_total_size_lots: 63,
+        ask_total_size_lots: 54,
+        spread: 1,
+        spread_pct: 0.12,
+        bid_levels: [
+          { level: 1, price: 860, size_lots: 12 },
+          { level: 2, price: 859, size_lots: 14 },
+          { level: 3, price: 858, size_lots: 10 },
+          { level: 4, price: 857, size_lots: 16 },
+          { level: 5, price: 856, size_lots: 11 },
+        ],
+        ask_levels: [
+          { level: 1, price: 861, size_lots: 8 },
+          { level: 2, price: 862, size_lots: 9 },
+          { level: 3, price: 863, size_lots: 15 },
+          { level: 4, price: 864, size_lots: 13 },
+          { level: 5, price: 865, size_lots: 9 },
+        ],
+        depth_available: true,
+        freshness: {
+          status: "live",
+          is_live: true,
+          is_stale: false,
+          age_seconds: 1,
+          expected_trade_date: "2026-06-15",
+          message: "五檔即時更新中。",
+          source_error: null,
+        },
+      });
+      return;
+    }
+
+    if (path.includes("/market/technical/")) {
       await fulfillJson(route, {
         stock_id: "2330",
         timeframe: "daily",

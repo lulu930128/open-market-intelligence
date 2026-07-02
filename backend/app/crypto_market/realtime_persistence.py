@@ -9,7 +9,7 @@ from typing import Any, Callable
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.crypto_market.realtime import CryptoRealtimeUpdate, OHLCV_RESOURCE
+from app.crypto_market.realtime import CryptoRealtimeUpdate, LIQUIDATION_RESOURCE, OHLCV_RESOURCE
 from app.crypto_market.service import persist_crypto_realtime_updates
 from app.db.session import SessionLocal
 
@@ -91,6 +91,19 @@ class CryptoRealtimePersistenceManager:
                 update.instrument_type,
                 update.data.get("interval"),
                 update.data.get("bar_time"),
+            )
+        if update.resource == LIQUIDATION_RESOURCE:
+            return (
+                update.provider,
+                update.resource,
+                update.symbol,
+                update.instrument_type,
+                update.event_time,
+                update.data.get("liquidation_side"),
+                update.data.get("order_side"),
+                update.data.get("price"),
+                update.data.get("quantity"),
+                update.data.get("notional"),
             )
         return update.key()
 

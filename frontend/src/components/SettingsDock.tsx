@@ -166,6 +166,45 @@ const subscriptionModeChoices: MarketDataSubscriptionMode[] = [
   "disabled",
 ];
 
+const sourceDisclosureRowKeys = [
+  "twListedPrice",
+  "twIntraday",
+  "twMarketIndex",
+  "twFuturesRealtime",
+  "twFuturesDaily",
+  "twChip",
+  "twFundamentals",
+  "twBrokerBranch",
+  "usOhlcIntraday",
+  "usFundamentals",
+  "usProfileActions",
+  "usShortVolume",
+  "jpOhlcFundamentals",
+  "cryptoTwdSpot",
+  "cryptoUsdtSpotPerpetual",
+  "cryptoLiquidation",
+  "cryptoRankingMarketCap",
+  "commodityReference",
+  "macro",
+] as const;
+
+const sourceDisclosureReliabilityKeys = [
+  "provenance",
+  "freshness",
+  "officialPriority",
+  "bestEffort",
+  "boundedRefresh",
+  "sourceHealth",
+] as const;
+
+const sourceDisclosureLiabilityKeys = [
+  "notAdvice",
+  "verifyOriginal",
+  "userRisk",
+  "noWarranty",
+  "noAutoTrading",
+] as const;
+
 const refreshMarketSectionTemplates: RefreshMarketSectionTemplate[] = [
   {
     key: "tw",
@@ -1070,6 +1109,147 @@ function SourceLabel({
   );
 }
 
+function SourceDisclosureDialog({
+  t,
+  onClose,
+}: {
+  t: TranslationFunction;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-[2147483646] flex items-center justify-center bg-omi-overlay p-4">
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="source-disclosure-title"
+        className="flex h-[720px] max-h-[calc(100vh-2rem)] w-[980px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden border border-omi-control-border bg-omi-surface shadow-2xl"
+      >
+        <header className="flex shrink-0 items-start justify-between gap-4 border-b border-omi-border-subtle px-5 py-4">
+          <div className="min-w-0">
+            <div className="text-xs font-bold uppercase tracking-[0.22em] text-omi-accent">
+              Settings
+            </div>
+            <h2 id="source-disclosure-title" className="mt-1 text-xl font-black text-omi-text-strong">
+              {t("settings.sources.title")}
+            </h2>
+            <p className="mt-2 max-w-[760px] text-sm leading-6 text-omi-text-muted">
+              {t("settings.sources.hint")}
+            </p>
+          </div>
+          <button
+            type="button"
+            aria-label={t("settings.sources.close")}
+            className="grid h-8 w-8 shrink-0 place-items-center border border-omi-border text-omi-text-muted hover:border-omi-control hover:text-omi-text-strong"
+            onClick={onClose}
+          >
+            <CloseIcon />
+          </button>
+        </header>
+
+        <div className="min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain p-5">
+          <section className="border border-omi-warning-border bg-omi-warning-soft px-4 py-3 text-sm leading-6 text-omi-warning-strong">
+            <div className="text-xs font-bold uppercase tracking-[0.18em]">
+              {t("settings.sources.disclaimerEyebrow")}
+            </div>
+            <h3 className="mt-1 text-base font-black">
+              {t("settings.sources.disclaimerTitle")}
+            </h3>
+            <p className="mt-1">{t("settings.sources.disclaimerBody")}</p>
+          </section>
+
+          <section>
+            <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
+              <div>
+                <div className="text-xs font-bold uppercase tracking-[0.18em] text-omi-text-muted">
+                  {t("settings.sources.catalogEyebrow")}
+                </div>
+                <h3 className="mt-1 text-lg font-black text-omi-text-strong">
+                  {t("settings.sources.catalogTitle")}
+                </h3>
+              </div>
+              <div className="text-xs font-semibold text-omi-text-muted">
+                {t("settings.sources.documentSource")}
+              </div>
+            </div>
+            <div className="overflow-hidden border border-omi-border-subtle">
+              <div className="hidden grid-cols-[1fr_1.2fr_1.8fr] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-[0.16em] text-omi-text-muted md:grid">
+                <span>{t("settings.sources.table.area")}</span>
+                <span>{t("settings.sources.table.source")}</span>
+                <span>{t("settings.sources.table.reliability")}</span>
+              </div>
+              {sourceDisclosureRowKeys.map((key) => (
+                <article
+                  key={key}
+                  className="grid gap-2 border-t border-omi-border-subtle px-4 py-3 text-sm first:border-t-0 md:grid-cols-[1fr_1.2fr_1.8fr]"
+                >
+                  <div>
+                    <div className="md:hidden text-[11px] font-bold uppercase tracking-[0.16em] text-omi-text-muted">
+                      {t("settings.sources.table.area")}
+                    </div>
+                    <div className="font-bold text-omi-text-strong">
+                      {t(`settings.sources.catalog.${key}.area`)}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="md:hidden text-[11px] font-bold uppercase tracking-[0.16em] text-omi-text-muted">
+                      {t("settings.sources.table.source")}
+                    </div>
+                    <div className="text-omi-text">
+                      {t(`settings.sources.catalog.${key}.source`)}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="md:hidden text-[11px] font-bold uppercase tracking-[0.16em] text-omi-text-muted">
+                      {t("settings.sources.table.reliability")}
+                    </div>
+                    <div className="leading-6 text-omi-text-muted">
+                      {t(`settings.sources.catalog.${key}.reliability`)}
+                    </div>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          <section className="grid gap-4 md:grid-cols-2">
+            <div className="border border-omi-border-subtle bg-omi-surface-subtle px-4 py-3">
+              <h3 className="text-base font-black text-omi-text-strong">
+                {t("settings.sources.reliabilityTitle")}
+              </h3>
+              <ul className="mt-3 space-y-2 text-sm leading-6 text-omi-text-muted">
+                {sourceDisclosureReliabilityKeys.map((key) => (
+                  <li key={key} className="flex gap-2">
+                    <span aria-hidden="true" className="mt-2 h-1.5 w-1.5 shrink-0 bg-omi-accent" />
+                    <span>{t(`settings.sources.reliability.${key}`)}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            <div className="border border-omi-border-subtle bg-omi-surface-subtle px-4 py-3">
+              <h3 className="text-base font-black text-omi-text-strong">
+                {t("settings.sources.liabilityTitle")}
+              </h3>
+              <ul className="mt-3 space-y-2 text-sm leading-6 text-omi-text-muted">
+                {sourceDisclosureLiabilityKeys.map((key) => (
+                  <li key={key} className="flex gap-2">
+                    <span aria-hidden="true" className="mt-2 h-1.5 w-1.5 shrink-0 bg-omi-accent" />
+                    <span>{t(`settings.sources.liability.${key}`)}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </section>
+        </div>
+
+        <footer className="shrink-0 border-t border-omi-border-subtle bg-omi-surface-subtle px-5 py-3 text-xs leading-5 text-omi-text-muted">
+          {t("settings.sources.footer")}
+        </footer>
+      </section>
+    </div>
+  );
+}
+
 export default function SettingsDock({ placement = "fixed" }: SettingsDockProps) {
   const t = useT();
   const { locale, setLocale } = useI18n();
@@ -1078,6 +1258,7 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
   const [refreshOpen, setRefreshOpen] = useState(false);
   const [subscriptionsOpen, setSubscriptionsOpen] = useState(false);
   const [dispatchOpen, setDispatchOpen] = useState(false);
+  const [sourcesOpen, setSourcesOpen] = useState(false);
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [refreshLoadState, setRefreshLoadState] = useState<LoadState>("idle");
@@ -1212,7 +1393,9 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
   }, [menuOpen]);
 
   useEffect(() => {
-    if (!parametersOpen && !refreshOpen && !subscriptionsOpen && !dispatchOpen) return;
+    if (!parametersOpen && !refreshOpen && !subscriptionsOpen && !dispatchOpen && !sourcesOpen) {
+      return;
+    }
 
     function closeOnEscape(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
@@ -1220,11 +1403,12 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
       setRefreshOpen(false);
       setSubscriptionsOpen(false);
       setDispatchOpen(false);
+      setSourcesOpen(false);
     }
 
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [parametersOpen, refreshOpen, subscriptionsOpen, dispatchOpen]);
+  }, [parametersOpen, refreshOpen, subscriptionsOpen, dispatchOpen, sourcesOpen]);
 
   function openParameterDialog() {
     setMenuOpen(false);
@@ -1259,6 +1443,11 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
   function openDispatchDialog() {
     setMenuOpen(false);
     setDispatchOpen(true);
+  }
+
+  function openSourceDisclosureDialog() {
+    setMenuOpen(false);
+    setSourcesOpen(true);
   }
 
   function updateDraftValue(key: string, value: string) {
@@ -1504,6 +1693,21 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
                   </span>
                   <span className="block text-xs text-omi-text-muted">
                     {t("settings.dispatch.menuHint")}
+                  </span>
+                </span>
+                <ChevronIcon />
+              </button>
+              <button
+                type="button"
+                className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-omi-surface-subtle"
+                onClick={openSourceDisclosureDialog}
+              >
+                <span>
+                  <span className="block font-semibold text-omi-text">
+                    {t("settings.sources.menuTitle")}
+                  </span>
+                  <span className="block text-xs text-omi-text-muted">
+                    {t("settings.sources.menuHint")}
                   </span>
                 </span>
                 <ChevronIcon />
@@ -2028,6 +2232,13 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
         open={dispatchOpen}
         onClose={() => setDispatchOpen(false)}
       />
+
+      {sourcesOpen ? (
+        <SourceDisclosureDialog
+          t={t}
+          onClose={() => setSourcesOpen(false)}
+        />
+      ) : null}
     </>
   );
 }

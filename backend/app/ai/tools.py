@@ -38,6 +38,7 @@ from app.market.tw_futures import (
     taiwan_futures_intraday_bar_to_dict,
     taiwan_futures_quote_to_dict,
 )
+from app.market.taiwan_industries import normalize_tw_industry_label
 from app.stocks import service as stock_service
 from app.watchlists import radar_service, ranking_service
 from app.watchlists import service as watchlist_service
@@ -999,7 +1000,10 @@ def read_market_overview(db: Session, limit: int = 10) -> dict[str, Any]:
     for index in range(0, len(stock_ids), 500):
         chunk = stock_ids[index : index + 500]
         for stock in db.query(StockMaster).filter(StockMaster.stock_id.in_(chunk)).all():
-            stock_industries[stock.stock_id] = stock.industry or stock.category
+            stock_industries[stock.stock_id] = normalize_tw_industry_label(
+                stock.industry or stock.category,
+                fallback="未分類",
+            )
     ranked = [
         {
             "stock_id": row.stock_id,
@@ -1070,7 +1074,7 @@ def read_market_overview(db: Session, limit: int = 10) -> dict[str, Any]:
     }
     industry_groups: dict[str, list[dict[str, Any]]] = {}
     for row in ranked_with_change:
-        industry = str(row.get("industry") or "未分類").strip() or "未分類"
+        industry = normalize_tw_industry_label(row.get("industry"), fallback="未分類")
         industry_groups.setdefault(industry, []).append(row)
 
     industry_summary = []
@@ -1764,6 +1768,7 @@ def read_watchlist_context(
     sort_order: str = "desc",
     limit: int = 100,
     radar_mode: str = "action",
+    radar_limit: int = 12,
 ) -> dict[str, Any]:
     group = watchlist_service.get_group(db=db, group_id=group_id)
     ranking = ranking_service.get_watchlist_group_latest_ranking(
@@ -1780,7 +1785,7 @@ def read_watchlist_context(
         ranking=ranking,
         include_children=include_children,
         mode=radar_mode,
-        max_results=12,
+        max_results=max(1, min(int(radar_limit or 12), 200)),
     )
     radar["group_id"] = group_id
     results = ranking.get("results", [])

@@ -73,6 +73,7 @@ import type {
   RankingItem,
   RankingResponse,
   StockIndicatorPoint,
+  TaiwanStockQuoteDepthPreviewMode,
   USCompanyProfileRead,
   USOhlcChartRead,
   USWatchlistGroupNode,
@@ -188,6 +189,7 @@ function buildDashboardHref(params: {
   symbol?: string | null;
   jpSymbol?: string | null;
   radarMode?: WatchlistRadarMode | null;
+  quoteDepthPreviewMode?: TaiwanStockQuoteDepthPreviewMode | null;
 }) {
   const searchParams = new URLSearchParams();
 
@@ -200,6 +202,9 @@ function buildDashboardHref(params: {
   if (params.symbol) searchParams.set("symbol", params.symbol);
   if (params.jpSymbol) searchParams.set("jp_symbol", params.jpSymbol);
   if (params.radarMode) searchParams.set("radar_mode", params.radarMode);
+  if (params.quoteDepthPreviewMode) {
+    searchParams.set("quote_depth_preview", params.quoteDepthPreviewMode);
+  }
 
   const query = searchParams.toString();
 
@@ -227,6 +232,7 @@ type Props = {
   initialUsWatchlistItems: USWatchlistItemRead[];
   initialJpWatchlistTree: JPWatchlistGroupNode[];
   initialJpWatchlistItems: JPWatchlistItemRead[];
+  quoteDepthPreviewMode: TaiwanStockQuoteDepthPreviewMode | null;
 };
 
 function RankingLoadingRows({ rows = 5 }: { rows?: number }) {
@@ -1478,6 +1484,20 @@ function mergeRankingBatchRows(
   return Array.from(rowsByStockId.values()).sort((a, b) => a.rank - b.rank);
 }
 
+function deferRankingTrendData(row: RankingItem): RankingItem {
+  const intradayPoints = Array.isArray(row.intraday_points) ? row.intraday_points : [];
+
+  if (intradayPoints.length === 0 && row.intraday_previous_close === null) {
+    return row;
+  }
+
+  return {
+    ...row,
+    intraday_previous_close: null,
+    intraday_points: [],
+  };
+}
+
 function buildProgressiveRankingResponse({
   batch,
   rows,
@@ -1486,6 +1506,7 @@ function buildProgressiveRankingResponse({
   noDataCount,
   errorCount,
   complete,
+  deferTrendData,
 }: {
   batch: RankingBatchResponse;
   rows: RankingItem[];
@@ -1494,6 +1515,7 @@ function buildProgressiveRankingResponse({
   noDataCount: number;
   errorCount: number;
   complete: boolean;
+  deferTrendData?: boolean;
 }): RankingResponse {
   return {
     group_id: batch.group_id,
@@ -1509,7 +1531,7 @@ function buildProgressiveRankingResponse({
     is_current: complete ? staleStockCount === 0 : true,
     current_stock_count: currentStockCount,
     stale_stock_count: complete ? staleStockCount : 0,
-    results: rows,
+    results: deferTrendData ? rows.map(deferRankingTrendData) : rows,
   };
 }
 
@@ -1941,6 +1963,7 @@ export default function MarketDashboardClient({
   initialUsWatchlistItems,
   initialJpWatchlistTree,
   initialJpWatchlistItems,
+  quoteDepthPreviewMode,
 }: Props) {
   const t = useT();
   const refreshExecutionSettings = useRefreshExecutionSettings();
@@ -2058,6 +2081,7 @@ export default function MarketDashboardClient({
   const [loadState, setLoadState] = useState<LoadState>(
     initialRankingData ? "success" : "idle"
   );
+  const [rankingTrendPending, setRankingTrendPending] = useState(false);
   const [radarLoadState, setRadarLoadState] = useState<LoadState>(
     initialRadarData ? "success" : "idle"
   );
@@ -2083,6 +2107,7 @@ export default function MarketDashboardClient({
   const usDashboardRequestSeq = useRef(0);
   const jpDashboardRequestSeq = useRef(0);
   const marketIndexRequestSeq = useRef(0);
+  const rankingTrendTimer = useRef<number | undefined>(undefined);
   const finalDashboardRefreshDate = useRef<string | null>(null);
   const finalUsDashboardRefreshDate = useRef<string | null>(null);
   const initialUsWatchlistPreloadQueued = useRef(false);
@@ -2109,6 +2134,14 @@ export default function MarketDashboardClient({
       cancelled = true;
       if (timer !== undefined) {
         window.clearTimeout(timer);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (rankingTrendTimer.current !== undefined) {
+        window.clearTimeout(rankingTrendTimer.current);
       }
     };
   }, []);
@@ -2279,6 +2312,29 @@ export default function MarketDashboardClient({
     };
   }
 
+  function clearRankingTrendTimer() {
+    if (rankingTrendTimer.current === undefined) return;
+
+    window.clearTimeout(rankingTrendTimer.current);
+    rankingTrendTimer.current = undefined;
+  }
+
+  function scheduleRankingTrendData(
+    requestSeq: number,
+    rankingData: RankingResponse
+  ) {
+    clearRankingTrendTimer();
+
+    rankingTrendTimer.current = window.setTimeout(() => {
+      rankingTrendTimer.current = undefined;
+
+      if (dashboardRequestSeq.current !== requestSeq) return;
+
+      setRanking(rankingData);
+      setRankingTrendPending(false);
+    }, 0);
+  }
+
   async function loadWatchlistRadar(
     groupId: number,
     options?: { mode?: WatchlistRadarMode; silent?: boolean }
@@ -2412,7 +2468,11 @@ export default function MarketDashboardClient({
     try {
       const marketState = getTaiwanMarketRefreshState();
       const useIntraday = shouldUseTaiwanWatchlistIntraday(marketState);
+      const deferTrendData = !options?.silent && currentRankBy === "none" && useIntraday;
       let radarPromise: Promise<void> | null = null;
+
+      clearRankingTrendTimer();
+      setRankingTrendPending(deferTrendData);
 
       function queueRadarLoad() {
         if (radarPromise) return radarPromise;
@@ -2486,6 +2546,7 @@ export default function MarketDashboardClient({
             noDataCount,
             errorCount,
             complete: !batch.has_more,
+            deferTrendData,
           });
 
           setRanking(nextRanking);
@@ -2494,6 +2555,20 @@ export default function MarketDashboardClient({
           if (!batch.has_more || batch.requested_stock_count === 0) {
             setLastUpdatedAt(formatDashboardTime(new Date()));
             setLoadState("success");
+            if (deferTrendData) {
+              scheduleRankingTrendData(
+                requestSeq,
+                buildProgressiveRankingResponse({
+                  batch,
+                  rows: loadedRows,
+                  currentStockCount,
+                  staleStockCount,
+                  noDataCount,
+                  errorCount,
+                  complete: true,
+                })
+              );
+            }
             void radarPromise;
             return;
           }
@@ -2518,12 +2593,15 @@ export default function MarketDashboardClient({
       if (dashboardRequestSeq.current !== requestSeq) return;
 
       setRanking(rankingData);
+      setRankingTrendPending(false);
       setLastUpdatedAt(formatDashboardTime(new Date()));
       setLoadState("success");
       void queueRadarLoad();
     } catch (error) {
       if (dashboardRequestSeq.current !== requestSeq) return;
 
+      clearRankingTrendTimer();
+      setRankingTrendPending(false);
       setLoadState("error");
       setErrorMessage(apiErrorMessage(error, t("dashboard.ranking.readError")));
     }
@@ -3210,10 +3288,25 @@ export default function MarketDashboardClient({
     jpRanking?.target_trade_date,
   ]);
 
+  function addDashboardPreviewParam(params: Parameters<typeof buildDashboardHref>[0]) {
+    if (
+      quoteDepthPreviewMode &&
+      (params.market === "tw" || (!params.market && activeMarket === "tw"))
+    ) {
+      return { ...params, quoteDepthPreviewMode };
+    }
+
+    return params;
+  }
+
+  function dashboardHref(params: Parameters<typeof buildDashboardHref>[0]) {
+    return buildDashboardHref(addDashboardPreviewParam(params));
+  }
+
   function pushDashboardUrl(params: Parameters<typeof buildDashboardHref>[0]) {
     if (typeof window === "undefined") return;
 
-    window.history.pushState(null, "", buildDashboardHref(params));
+    window.history.pushState(null, "", dashboardHref(params));
   }
 
   function handleMarketChange(market: MarketRegion) {
@@ -3503,11 +3596,12 @@ export default function MarketDashboardClient({
   function renderRankingRow(row: RankingItem) {
     const selected = row.stock_id === selectedStockId;
     const loading = isRankingItemPending(row);
+    const trendLoading = loading || rankingTrendPending;
 
     return (
       <a
         key={row.stock_id}
-        href={buildDashboardHref({
+        href={dashboardHref({
           market: "tw",
           groupId: activeGroupId,
           stockId: row.stock_id,
@@ -3546,7 +3640,7 @@ export default function MarketDashboardClient({
           </span>
         </span>
         <span className="flex justify-center">
-          {loading ? (
+          {trendLoading ? (
             <RankingCellSkeleton className="h-5 w-16" />
           ) : (
             <RankingSparkline row={row} selected={selected} />
@@ -3714,7 +3808,7 @@ export default function MarketDashboardClient({
         selectedStockId={selectedStockId}
         disabled={activeGroupId === null}
         getModeHref={(nextMode) =>
-          buildDashboardHref({
+          dashboardHref({
             market: "tw",
             groupId: activeGroupId,
             stockId: selectedStockId,
@@ -3799,7 +3893,7 @@ export default function MarketDashboardClient({
       volumeValue: row.volume,
       selected,
       loading,
-      href: buildDashboardHref({ market: "us", symbol: row.symbol }),
+      href: dashboardHref({ market: "us", symbol: row.symbol }),
       onSelect: () => handleSelectUsSymbol(row.symbol, row.security_name),
     };
   });
@@ -3815,7 +3909,7 @@ export default function MarketDashboardClient({
         scopeLabel={t("radar.technicalOnly.usScope")}
         notice={t("radar.technicalOnly.notice")}
         getModeHref={(nextMode) =>
-          buildDashboardHref({
+          dashboardHref({
             market: "us",
             groupId: selectedUsGroupId,
             symbol: selectedUsSymbol,
@@ -3890,7 +3984,7 @@ export default function MarketDashboardClient({
       volumeValue: row.volume,
       selected,
       loading,
-      href: buildDashboardHref({
+      href: dashboardHref({
         market: "jp",
         groupId: selectedJpGroupId,
         jpSymbol: row.symbol,
@@ -3910,7 +4004,7 @@ export default function MarketDashboardClient({
         scopeLabel={t("radar.technicalOnly.jpScope")}
         notice={t("radar.technicalOnly.notice")}
         getModeHref={(nextMode) =>
-          buildDashboardHref({
+          dashboardHref({
             market: "jp",
             groupId: selectedJpGroupId,
             jpSymbol: selectedJpSymbol,
@@ -4311,6 +4405,7 @@ export default function MarketDashboardClient({
                     watchlistRankingPanel={rankingPanel}
                     marketIndexSummary={marketIndexSummary}
                     onChartFocusModeChange={setTwChartFocusMode}
+                    quoteDepthPreviewMode={quoteDepthPreviewMode}
                   />
                 )}
               </>

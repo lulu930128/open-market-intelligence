@@ -2,8 +2,8 @@
 
 ## Status
 
-- Current phase: crypto non-OHLCV snapshot data is being extended with bounded sampled history tables and read APIs.
-- Last updated: 2026-06-27 17:10 +08:00
+- Current phase: Binance long/short account ratio is connected as the next confirmed advanced crypto signal.
+- Last updated: 2026-06-29 17:49 +08:00
 
 ## Completed
 
@@ -354,6 +354,145 @@
 - From `backend`: `..\.venv\Scripts\python.exe -m unittest tests.test_crypto_market`: passed, 28 tests after adding sampled ticker/liquidity/derivatives/spread history coverage.
 - From `backend`: `..\.venv\Scripts\python.exe -m unittest tests.test_database_migrations`: passed, 4 tests after adding migration `20260627_0025`.
 - From repo root: `.\scripts\run-backend-tests.ps1`: passed, 374 tests after adding sampled crypto history tables and APIs.
+- Added a provider-level Crypto OHLCV interval contract and exposed it through `/api/crypto-market/provider-contract`; frontend K-line instruments now use that contract to enable/disable intervals and choose only providers that support the active interval.
+- Added OKX monthly K-line mapping (`1M`) and made unsupported provider/interval refresh attempts return `skipped` instead of provider errors.
+- Added `GET /api/crypto-market/ohlcv/coverage` so local DB K-line coverage can be inspected by provider/symbol/instrument/interval with row count, first/last bar time, and latest fetched time.
+- `.\.venv\Scripts\python.exe -m compileall backend\app`: passed after provider interval contract and coverage API updates.
+- From repo root with `PYTHONPATH=backend`: `.\.venv\Scripts\python.exe -m pytest backend\tests\test_crypto_market.py`: passed, 31 tests after OKX `1M`, unsupported-interval skip, and OHLCV coverage tests.
+- From repo root: `.\scripts\run-backend-tests.ps1`: passed, 377 tests after provider interval contract and coverage updates.
+- From `frontend`: `npm exec tsc -- --noEmit --incremental false`: passed after contract-driven Crypto K-line interval support.
+- From `frontend`: `npm run lint`: passed after contract-driven Crypto K-line interval support.
+- From `frontend`: `npm run build`: passed after contract-driven Crypto K-line interval support.
+- Added `POST /api/crypto-market/ohlcv/refresh-bundle` so Crypto OHLCV can bounded-refresh the full UI interval set (`1m` through `1M`) per selected provider/symbol batch instead of only refreshing the currently visible `1m` window.
+- Crypto core refresh now calls the OHLCV bundle endpoint and nudges the K-line panel to reload after successful OHLCV writes.
+- Crypto K-line panels now fetch `/api/crypto-market/ohlcv/coverage` and show compact provider/interval row-count coverage plus latest coverage fetch time in the chart header.
+- `.\.venv\Scripts\python.exe -m compileall backend\app`: passed after OHLCV bundle refresh updates.
+- From repo root with `PYTHONPATH=backend`: `.\.venv\Scripts\python.exe -m pytest backend\tests\test_crypto_market.py`: passed, 33 tests after OHLCV bundle orchestration tests.
+- From `frontend`: `npm exec tsc -- --noEmit --incremental false`: passed after OHLCV bundle and coverage UI updates.
+- From `frontend`: `npm run lint`: passed after OHLCV bundle and coverage UI updates.
+- From repo root: `.\scripts\run-backend-tests.ps1`: passed, 379 tests after OHLCV bundle and coverage UI updates.
+- From `frontend`: `npm run build`: passed after OHLCV bundle and coverage UI updates.
+- From repo root: `git diff --check`: passed with CRLF normalization warnings only.
+- Split crypto OHLCV background refresh into two auto-refresh plan modes:
+  - `fast`: keeps `1m` OHLCV updated at the subscription cadence with the small configured limit.
+  - `coverage`: bounded-refreshes the full UI interval set (`1m` through `1M`) on `CRYPTO_MARKET_AUTO_REFRESH_OHLCV_BUNDLE_SECONDS`, defaulting to 900 seconds.
+- Added auto-refresh status metadata for `mode` and `ohlcv_intervals`, so runtime status can distinguish fast K-line refresh from coverage maintenance.
+- Documented `CRYPTO_MARKET_AUTO_REFRESH_OHLCV_BUNDLE_SECONDS` and the two-layer OHLCV auto-refresh behavior in `README.md`.
+- `.\.venv\Scripts\python.exe -m compileall backend\app`: passed after two-layer OHLCV auto-refresh updates.
+- From repo root with `PYTHONPATH=backend`: `.\.venv\Scripts\python.exe -m pytest backend\tests\test_crypto_market.py`: passed, 34 tests after auto-refresh coverage routing tests.
+- From `frontend`: `npm exec tsc -- --noEmit --incremental false`: passed after auto-refresh status type updates.
+- From `frontend`: `npm run lint`: passed after auto-refresh status type updates.
+- From repo root: `.\scripts\run-backend-tests.ps1`: passed, 380 tests after two-layer OHLCV auto-refresh updates.
+- From `frontend`: `npm run build`: passed after two-layer OHLCV auto-refresh updates.
+- From repo root: `git diff --check`: passed with CRLF normalization warnings only.
+- Optimized crypto source-health read path for selected assets:
+  - `GET /api/crypto-market/source-health` now supports selected `base`, `required_only`, `include_events`, and `max_entries`.
+  - provider-event enrichment is opt-in for normal reads; snapshot sync keeps enrichment available for diagnostics.
+  - selected-base views no longer need the full cross-asset source-health table just to render the active crypto panel.
+- Expanded the frontend fallback crypto subscription list from BTC/ETH/USDT to all registered crypto base assets, so selected on-demand refresh still works when the settings API is temporarily unavailable.
+- Crypto panel now loads source health scoped to the selected base with `include_events=false` and `max_entries=80`.
+- Temporary current-checkout backend on `127.0.0.1:8421`:
+  - full crypto source-health read with `max_entries=500`: about 469 ms, 78 entries.
+  - selected SOL source-health read with `base=SOL&max_entries=80`: about 291 ms, 12 entries.
+  - selected SOL source-health with `include_events=true`: about 2289 ms, confirming event enrichment is the expensive diagnostic path.
+- Bounded live SOL refresh on the temporary backend:
+  - Binance/OKX quote: success, 2 refreshed, 0 errors.
+  - Binance/OKX order book: success, 2 refreshed, 0 errors.
+  - Binance/OKX derivatives: success, 2 refreshed, 0 errors.
+  - CoinGecko market cap: success, 1 refreshed, 0 errors.
+  - Binance OHLCV bundle for `1m,1d`: success, 1450 bars refreshed, 0 errors.
+  - post-refresh `base=SOL` source-health improved to 8 ok, 1 stale, 1 empty, 1 disabled, 0 errors across 12 entries.
+- `.\.venv\Scripts\python.exe -m compileall backend\app`: passed after scoped source-health changes.
+- From repo root with `PYTHONPATH=backend`: `.\.venv\Scripts\python.exe -m pytest backend\tests\test_crypto_market.py`: passed, 36 tests after selected source-health coverage tests.
+- From `frontend`: `npm exec tsc -- --noEmit --incremental false`: passed after selected source-health and fallback subscription updates.
+- From `frontend`: `npm run lint`: passed after selected source-health and fallback subscription updates.
+- Added a selected-base Crypto trend panel that reads the existing sampled history endpoints:
+  - `/api/crypto-market/quotes/history` for quote-volume trend.
+  - `/api/crypto-market/order-books/history` for top-of-book spread and depth trends.
+  - `/api/crypto-market/derivatives/history` for funding-rate and OI trends.
+  - `/api/crypto-market/spreads/history` for Taiwan premium/discount trend.
+- The trend panel is research-only UI: it shows sampled history, provider series, latest value, point count, and empty states. It does not add strategy, signal, paper trading, or live execution logic.
+- Reorganized the selected-base Crypto market panel around the agreed degraded indicator hierarchy:
+  - main axis: `流動性 / 清算風險地圖`
+  - confirmation layer: funding rate, OI, spot CVD, contract CVD, and long/short account ratio
+  - support layer: quote volume, Taiwan spread, order-book spread, and top-book depth
+- Added bounded order-book depth arrays to the crypto order-book response schema by parsing stored `bids_json` / `asks_json`.
+- Added a first self-built liquidity heatmap from sampled order-book depth history. It uses actual stored bid/ask depth only; no synthetic liquidation zones are generated.
+- Kept liquidation heatmap, spot CVD, contract CVD, and long/short account ratio as visible pending data-source cards so the UI shows the intended product direction without pretending unsupported data exists.
+- Built the backend advanced-indicator architecture for the pending crypto signals:
+  - `crypto_liquidation_event` for normalized force-order / liquidation event storage
+  - `crypto_liquidation_heatmap_cell` for processed liquidation heatmap buckets
+  - `crypto_cvd_history` for spot and perpetual CVD buckets
+  - `crypto_long_short_ratio_history` for derivatives account/position long-short ratios
+  - Alembic migration `20260629_0026_crypto_advanced_metric_tables`
+  - source dataclasses for future CoinGlass / Binance / Bybit adapters
+  - service upsert/list helpers for each advanced metric
+  - GET APIs for events, heatmap cells, CVD history, and long-short ratio history
+  - POST refresh APIs that currently return explicit `provider_not_connected` skipped results instead of fabricating data
+  - source-health entries for advanced metrics marked optional while providers remain pending
+  - provider contract now exposes planned CoinGlass and Bybit sources
+- Connected the first stable liquidation heatmap data path:
+  - CoinGlass official docs were checked for `CG-API-KEY` authentication and `/api/futures/liquidation/aggregated-heatmap/model1`.
+  - `COINGLASS_API_BASE_URL`, `COINGLASS_API_KEY`, `CRYPTO_MARKET_LIQUIDATION_HEATMAP_RANGE`, `CRYPTO_MARKET_LIQUIDATION_FALLBACK_EXCHANGE`, `CRYPTO_MARKET_LIQUIDATION_MIN_AMOUNT`, and `ENABLE_CRYPTO_MARKET_LIQUIDATION_LOCAL_FALLBACK` settings were added.
+  - `sources.fetch_coinglass_liquidation_heatmap()` parses CoinGlass `y_axis`, `liquidation_leverage_data`, and `price_candlesticks` into `crypto_liquidation_heatmap_cell` rows with `provider=coinglass`, `source_kind=third_party`, and `method=coinglass_aggregated_heatmap_model1`.
+  - CoinGlass heatmap refresh is API-key and plan gated; missing key returns `skipped/coinglass_api_key_missing`.
+  - If CoinGlass heatmap fails and fallback is enabled, OMI attempts CoinGlass liquidation orders and then aggregates stored `crypto_liquidation_event` rows into `provider=omi_local`, `source_kind=estimated`, `method=local_liquidation_event_bucket` cells.
+  - Source health now tracks liquidation heatmap rows under `coinglass` and `omi_local` instead of incorrectly tying heatmap cells to Binance/OKX derivatives providers.
+- Connected Binance public force-order liquidation events into the existing realtime pipeline:
+  - Binance official USD-M futures docs were checked for `<symbol>@forceOrder`, 1000ms updates, and the `forceOrder` payload shape.
+  - Added `BINANCE_FUTURES_WS_BASE_URL` so USD-M futures streams do not reuse the spot WebSocket base URL.
+  - Binance perpetual instruments now expose `liquidation_event` as a resource, and market-data subscriptions can gate it independently.
+  - `realtime.py` builds bounded Binance futures `@forceOrder` stream specs for subscribed symbols and parses SELL force orders as long liquidations, BUY force orders as short liquidations.
+  - Realtime persistence keeps liquidation events distinct by event side/time/price/quantity/notional instead of coalescing them like latest-state ticker/order-book updates.
+  - `persist_crypto_realtime_updates()` stores parsed liquidation events in `crypto_liquidation_event`, giving `omi_local` heatmap fallback a real event source.
+- Wired the frontend liquidation heatmap card:
+  - `CryptoMarketPanel` now reads `/api/crypto-market/liquidations/heatmap` for the selected `{asset}-USDT` symbol.
+  - The former pending card now renders real heatmap cells when present and keeps a clear empty/degraded state when CoinGlass/local fallback data is unavailable.
+  - Core crypto refresh now includes bounded `/api/crypto-market/liquidations/refresh` for subscribed `liquidation_event` resources, using CoinGlass first and backend local fallback second.
+  - Frontend fallback subscription settings now include `liquidation_event` for non-USDT crypto assets so the UI still behaves predictably if Settings API is temporarily unavailable.
+- Connected Binance global long/short account ratio:
+  - Binance perpetual instruments now expose `long_short_ratio` as a resource.
+  - `sources.fetch_binance_long_short_account_ratio()` calls `/futures/data/globalLongShortAccountRatio` with bounded `period` and `limit` settings.
+  - `refresh_crypto_long_short_ratios()` persists Binance `ratio_scope=global_account` rows into `crypto_long_short_ratio_history`; Bybit remains explicit `provider_not_connected`.
+  - `CryptoMarketPanel` now reads `/api/crypto-market/long-short-ratios/history`, includes bounded refresh in core crypto refresh, and displays the ratio as a trend chart instead of a pending card.
+- From `frontend`: `npm exec tsc -- --noEmit --incremental false`: passed after adding the selected-base Crypto trend panel.
+- From `frontend`: `npm run lint`: passed after adding the selected-base Crypto trend panel.
+- From `frontend`: `npm run build`: passed after adding the selected-base Crypto trend panel.
+- From repo root: `git diff --check -- frontend/src/components/CryptoMarketPanel.tsx frontend/src/i18n/messages/en-US.ts frontend/src/i18n/messages/ja-JP.ts frontend/src/i18n/messages/zh-TW.ts docs/agent-runs/crypto-market-realtime-trading/Progress.md`: passed with CRLF normalization warnings only.
+- `.\.venv\Scripts\python.exe -m compileall backend\app`: passed after adding bounded order-book depth arrays to crypto response schemas.
+- From repo root with `PYTHONPATH=backend`: `.\.venv\Scripts\python.exe -m pytest backend\tests\test_crypto_market.py`: passed, 36 tests after adding order-book depth schema coverage.
+- From repo root: `.\scripts\run-backend-tests.ps1`: passed, 382 tests after adding order-book depth schema coverage and the liquidity / liquidation risk-map UI.
+- From `frontend`: `npm exec tsc -- --noEmit --incremental false`: passed after adding the liquidity heatmap and degraded indicator panels.
+- From `frontend`: `npm run lint`: passed after adding the liquidity heatmap and degraded indicator panels.
+- From `frontend`: `npm run build`: passed after adding the liquidity heatmap and degraded indicator panels.
+- Temporary frontend production smoke on `127.0.0.1:43234`: `GET /?market=crypto` returned HTTP 200, response bytes `218847`, and the built bundle contained both `流動性 / 清算風險地圖` and `確認指標`; the temporary server was stopped after the check.
+- From repo root: `git diff --check -- backend/app/crypto_market/schemas.py backend/tests/test_crypto_market.py frontend/src/components/CryptoMarketPanel.tsx frontend/src/i18n/messages/en-US.ts frontend/src/i18n/messages/zh-TW.ts frontend/src/i18n/messages/ja-JP.ts`: passed with CRLF normalization warnings only.
+- `.\.venv\Scripts\python.exe -m compileall backend\app`: passed after adding advanced metric models, services, schemas, router endpoints, and source-health entries.
+- From repo root with `PYTHONPATH=backend`: `.\.venv\Scripts\python.exe -m pytest backend\tests\test_crypto_market.py`: passed, 38 tests after advanced metric upsert/list/schema/source-health/pending-refresh coverage.
+- From repo root with `PYTHONPATH=backend`: `.\.venv\Scripts\python.exe -m pytest backend\tests\test_database_migrations.py`: passed, 4 tests after adding migration `20260629_0026`.
+- From repo root: `.\scripts\run-backend-tests.ps1`: passed, 384 tests after the advanced indicator backend architecture changes.
+- Temporary backend API smoke on `127.0.0.1:8426` with a temporary SQLite DB and crypto auto-refresh / WS disabled: `/api/crypto-market/provider-contract` exposed CoinGlass and Bybit, `/liquidations/heatmap?symbols=BTC-USDT` returned 0 rows, `/liquidations/refresh?providers=coinglass&symbols=BTC-USDT` returned `skipped/provider_not_connected`, `/cvd/refresh?providers=binance&symbols=BTC-USDT&instrument_type=perpetual` returned `skipped` with `perpetual`, and `/long-short-ratios/history?symbols=BTC-USDT` returned 0 rows. Temporary process and DB were cleaned up.
+- `.\.venv\Scripts\python.exe -m compileall backend\app`: passed after adding CoinGlass liquidation heatmap adapter settings, parser, refresh path, and source-health provider correction.
+- From repo root with `PYTHONPATH=backend`: `.\.venv\Scripts\python.exe -m pytest backend\tests\test_crypto_market.py`: passed, 40 tests after adding CoinGlass heatmap success coverage and CoinGlass-order/local-fallback coverage.
+- From repo root: `.\scripts\run-backend-tests.ps1`: passed, 386 tests after adding the CoinGlass liquidation heatmap adapter and local fallback path.
+- Temporary backend API smoke on `127.0.0.1:8427` with a temporary SQLite DB, no `COINGLASS_API_KEY`, and crypto auto-refresh / WS disabled: provider contract returned `coinglass.status=api_key_required` and `omi_local.status=fallback`; `/api/crypto-market/liquidations/refresh?providers=coinglass&symbols=BTC-USDT&range=24h` returned `skipped/coinglass_api_key_missing` plus `omi_local/local_estimate_no_events`; source-health for `base=BTC` exposed heatmap providers `coinglass,omi_local`. Temporary process and DB were cleaned up.
+- `.\.venv\Scripts\python.exe -m compileall backend\app`: passed after adding Binance force-order stream specs, parser, subscription gating, and liquidation-event persistence.
+- From repo root with `PYTHONPATH=backend`: `.\.venv\Scripts\python.exe -m pytest backend\tests\test_crypto_market.py`: passed, 43 tests after adding Binance force-order stream/parser/persistence/source-health coverage.
+- From repo root: `.\scripts\run-backend-tests.ps1`: passed, 391 tests after adding Binance force-order liquidation-event support.
+- From `frontend`: `npm run lint`: passed after adding the Settings resource label for `liquidation_event`.
+- From `frontend`: `npm exec tsc -- --noEmit --incremental false`: passed after adding the Settings resource label for `liquidation_event`.
+- From repo root: `git diff --check`: passed with LF/CRLF normalization warnings only.
+- Local no-network spot check: `provider_contract()` exposes Binance `liquidation_event`, and `build_crypto_realtime_stream_specs()` for BTC liquidation events returns `wss://fstream.binance.com/stream?streams=btcusdt@forceOrder`.
+- From `frontend`: `npm exec tsc -- --noEmit --incremental false`: passed after wiring the liquidation heatmap card.
+- From `frontend`: `npm run lint`: passed after wiring the liquidation heatmap card.
+- From `frontend`: `npm run build`: passed after wiring the liquidation heatmap card.
+- From repo root with `PYTHONPATH=backend`: `.\.venv\Scripts\python.exe -m pytest backend\tests\test_crypto_market.py`: passed, 43 tests after frontend heatmap wiring.
+- Bounded Binance force-order live smoke: connected to `wss://fstream.binance.com/stream?streams=btcusdt@forceOrder/.../linkusdt@forceOrder` for registry symbols, but no force-order messages arrived during the 90-second window, so live event persistence was not triggered in that smoke.
+- Bounded Binance long/short REST live confirmation with in-memory SQLite: `/futures/data/globalLongShortAccountRatio` for `BTC-USDT` returned and persisted 30 rows; latest checked row had `long_ratio=0.6793`, `short_ratio=0.3207`, `long_short_ratio=2.1182`, `sampled_at=2026-06-29T07:20:00`.
+- `.\.venv\Scripts\python.exe -m compileall backend\app`: passed after adding Binance long/short ratio source/service wiring.
+- From repo root with `PYTHONPATH=backend`: `.\.venv\Scripts\python.exe -m pytest backend\tests\test_crypto_market.py`: passed, 44 tests after Binance long/short ratio refresh coverage.
+- From `frontend`: `npm exec tsc -- --noEmit --incremental false`: passed after wiring the long/short ratio chart.
+- From `frontend`: `npm run lint`: passed after wiring the long/short ratio chart.
 
 ## Decisions Made
 
@@ -388,4 +527,4 @@
 
 ## Next Step
 
-- Restart the local backend so migration `20260627_0025` creates the history tables, then let the collector/auto-refresh run long enough to accumulate samples. Next UI step can expose funding/OI/spread/liquidity trend charts. Keep strategy, paper trading, live execution, and automatic trading paused.
+- Next crypto data step: decide whether to add CVD trade-stream aggregation next or connect Bybit as the second provider for long/short account ratio. Keep strategy, paper trading, live execution, and automatic trading paused.

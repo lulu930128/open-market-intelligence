@@ -11,11 +11,14 @@ from sqlalchemy.orm import Session
 from app.db.models import Base
 from app.market.market_chips import (
     MarketChipFetchError,
+    ensure_market_chip_daily,
     extract_index_futures_position_summary,
     market_chip_daily_to_dict,
     normalize_market_chip_index_ids,
     parse_institutional_amount_summary,
     parse_taifex_futures_institutional_html,
+    parse_tpex_margin_summary,
+    parse_twse_margin_summary,
     refresh_market_chip_daily,
     upsert_market_chip_daily,
 )
@@ -108,6 +111,78 @@ class MarketChipParserTests(unittest.TestCase):
         self.assertEqual(result["foreign_futures_net_oi"], -61871)
         self.assertEqual(result["retail_futures_net_oi"], 10252)
 
+    def test_parse_twse_margin_summary(self) -> None:
+        payload = {
+            "date": "115年06月26日",
+            "tables": [
+                {
+                    "fields": [
+                        "項目",
+                        "買進",
+                        "賣出",
+                        "現金(券)償還",
+                        "前日餘額",
+                        "今日餘額",
+                    ],
+                    "data": [
+                        ["融資(交易單位)", "1", "1", "0", "9,512,446", "9,328,374"],
+                        ["融券(交易單位)", "1", "1", "0", "199,161", "203,932"],
+                        ["融資金額(仟元)", "1", "1", "0", "611,000,560", "590,925,882"],
+                    ],
+                }
+            ],
+        }
+
+        result = parse_twse_margin_summary(
+            payload,
+            fallback_trade_date=date(2026, 6, 26),
+        )
+
+        self.assertEqual(result["trade_date"], date(2026, 6, 26))
+        self.assertEqual(result["margin_balance_change_value"], -20_074_678_000)
+        self.assertEqual(result["margin_balance_change_shares"], -184_072_000)
+        self.assertEqual(result["short_balance_change_shares"], 4_771_000)
+
+    def test_parse_tpex_margin_summary_aggregates_share_rows(self) -> None:
+        payload = {
+            "date": "115/06/26",
+            "tables": [
+                {
+                    "fields": [
+                        "代號",
+                        "名稱",
+                        "前資餘額(張)",
+                        "資買",
+                        "資賣",
+                        "現償",
+                        "資餘額",
+                        "限額",
+                        "前券限額",
+                        "unused",
+                        "前券餘額(張)",
+                        "券賣",
+                        "券買",
+                        "券償",
+                        "券餘額",
+                    ],
+                    "data": [
+                        ["1111", "A", "10", "0", "0", "0", "15", "", "", "", "5", "0", "0", "0", "6"],
+                        ["2222", "B", "20", "0", "0", "0", "18", "", "", "", "7", "0", "0", "0", "5"],
+                    ],
+                }
+            ],
+        }
+
+        result = parse_tpex_margin_summary(
+            payload,
+            fallback_trade_date=date(2026, 6, 26),
+        )
+
+        self.assertEqual(result["trade_date"], date(2026, 6, 26))
+        self.assertIsNone(result["margin_balance_change_value"])
+        self.assertEqual(result["margin_balance_change_shares"], 3_000)
+        self.assertEqual(result["short_balance_change_shares"], -1_000)
+
 
 class MarketChipRefreshTests(unittest.TestCase):
     def test_normalize_market_chip_index_ids_deduplicates_and_validates(self) -> None:
@@ -196,6 +271,80 @@ class MarketChipPersistenceTests(unittest.TestCase):
         self.assertEqual(result["foreign_futures_net_oi_change"], 3630)
         self.assertEqual(result["retail_futures_net_oi_change"], 262)
         self.assertEqual(result["source_details"], {"sources": []})
+
+    def test_ensure_refreshes_existing_row_after_margin_release(self) -> None:
+        trade_date = date(2026, 6, 26)
+        upsert_market_chip_daily(
+            self.db,
+            payload={
+                "index_id": "TAIEX",
+                "market": "TWSE",
+                "trade_date": trade_date,
+                "total_institutional_net_value": 100,
+                "source_details": {"sources": []},
+            },
+        )
+
+        with (
+            patch(
+                "app.market.market_chips.expected_market_margin_chip_date",
+                return_value=trade_date,
+            ),
+            patch(
+                "app.market.market_chips.fetch_market_chip_daily",
+                return_value={
+                    "index_id": "TAIEX",
+                    "market": "TWSE",
+                    "trade_date": trade_date,
+                    "total_institutional_net_value": 100,
+                    "margin_balance_change_value": -20_074_678_000,
+                    "margin_balance_change_shares": -184_072_000,
+                    "short_balance_change_shares": 4_771_000,
+                    "source_details": {"sources": []},
+                },
+            ) as fetch,
+        ):
+            row = ensure_market_chip_daily(
+                self.db,
+                index_id="TAIEX",
+                trade_date=trade_date,
+            )
+
+        fetch.assert_called_once()
+        self.assertEqual(row.margin_balance_change_value, -20_074_678_000)
+        self.assertEqual(row.margin_balance_change_shares, -184_072_000)
+        self.assertEqual(row.short_balance_change_shares, 4_771_000)
+
+    def test_tpex_margin_value_is_not_required_after_release(self) -> None:
+        trade_date = date(2026, 6, 26)
+        existing = upsert_market_chip_daily(
+            self.db,
+            payload={
+                "index_id": "TPEX",
+                "market": "TPEX",
+                "trade_date": trade_date,
+                "total_institutional_net_value": 100,
+                "margin_balance_change_shares": 3_000,
+                "short_balance_change_shares": -1_000,
+                "source_details": {"sources": []},
+            },
+        )
+
+        with (
+            patch(
+                "app.market.market_chips.expected_market_margin_chip_date",
+                return_value=trade_date,
+            ),
+            patch("app.market.market_chips.fetch_market_chip_daily") as fetch,
+        ):
+            row = ensure_market_chip_daily(
+                self.db,
+                index_id="TPEX",
+                trade_date=trade_date,
+            )
+
+        fetch.assert_not_called()
+        self.assertEqual(row.id, existing.id)
 
 
 if __name__ == "__main__":

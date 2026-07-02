@@ -316,7 +316,11 @@ function SidebarCryptoControls({
         const nextAssetOptions = cryptoBaseOptionsFromAssets(nextProviderContract.assets);
         setCryptoAssetOptions(nextAssetOptions);
         setCryptoKlineInstruments(
-          buildCryptoKlineInstruments(nextAssetOptions, nextProviderContract.assets)
+          buildCryptoKlineInstruments(
+            nextAssetOptions,
+            nextProviderContract.assets,
+            nextProviderContract.ohlcv_intervals
+          )
         );
       }
       const flattened = flattenCryptoGroups(nextTree);

@@ -68,6 +68,7 @@ from app.us_market.sources import (
 )
 from app.us_market.source_health import build_us_source_health
 from app.market.calendar_status import expected_us_trade_date
+from app.market.ohlc_overlay import aggregate_ohlc_points, append_intraday_overlay
 from app.market.technical_radar import (
     TechnicalRadarBar,
     build_technical_watchlist_radar,
@@ -991,47 +992,10 @@ def _dedupe_us_daily_rows_by_trade_date(rows: list[USDailyPrice]) -> list[USDail
 
 
 def _aggregate_us_daily_rows(rows: list[USDailyPrice], timeframe: str) -> list[dict]:
-    if timeframe == "daily":
-        return [_us_ohlc_point(row) for row in rows]
-
-    groups: "OrderedDict[date, list[USDailyPrice]]" = OrderedDict()
-
-    for row in rows:
-        if timeframe == "weekly":
-            key = row.trade_date - timedelta(days=row.trade_date.weekday())
-        else:
-            key = date(row.trade_date.year, row.trade_date.month, 1)
-
-        groups.setdefault(key, []).append(row)
-
-    results: list[dict] = []
-
-    for key, grouped_rows in groups.items():
-        first = grouped_rows[0]
-        last = grouped_rows[-1]
-        highs = [
-            row.high_price
-            for row in grouped_rows
-            if row.high_price is not None
-        ]
-        lows = [
-            row.low_price
-            for row in grouped_rows
-            if row.low_price is not None
-        ]
-
-        results.append(
-            {
-                "time": key,
-                "open": first.open_price,
-                "high": max(highs) if highs else None,
-                "low": min(lows) if lows else None,
-                "close": last.close_price,
-                "volume": _sum_nullable([row.trade_volume for row in grouped_rows]),
-            }
-        )
-
-    return results
+    return aggregate_ohlc_points(
+        points=[_us_ohlc_point(row) for row in rows],
+        timeframe=timeframe,
+    )
 
 
 def _is_sparse_daily_ohlc_shape(points: list[dict]) -> bool:
@@ -1163,6 +1127,7 @@ def list_us_ohlc_chart_data(
     timeframe: str = "daily",
     bars: int = 90,
     ensure_history: bool = False,
+    include_intraday: bool = False,
     outputsize: str = "compact",
     adjusted: bool = False,
     provider: str = "auto",
@@ -1190,13 +1155,23 @@ def list_us_ohlc_chart_data(
         to_date=end_date,
     )
     rows = _filter_us_ohlc_source_rows(source_rows)
-    points = _aggregate_us_daily_rows(rows=rows, timeframe=timeframe)[-bars:]
+    daily_points = [_us_ohlc_point(row) for row in rows]
+    base_points = aggregate_ohlc_points(points=daily_points, timeframe=timeframe)[-bars:]
+    intraday_overlay = None
+    points = base_points
+    if include_intraday:
+        daily_points, intraday_overlay = append_intraday_overlay(
+            points=daily_points,
+            intraday=get_us_intraday_trend(symbol=normalized_symbol),
+            end_date=end_date,
+        )
+        points = aggregate_ohlc_points(points=daily_points, timeframe=timeframe)[-bars:]
     backfill_result = _refresh_us_ohlc_history_if_needed(
         db=db,
         symbol=normalized_symbol,
         timeframe=timeframe,
         bars=bars,
-        points=points,
+        points=base_points,
         ensure_history=ensure_history,
         outputsize=outputsize,
         adjusted=adjusted,
@@ -1215,7 +1190,17 @@ def list_us_ohlc_chart_data(
             to_date=end_date,
         )
         rows = _filter_us_ohlc_source_rows(source_rows)
-        points = _aggregate_us_daily_rows(rows=rows, timeframe=timeframe)[-bars:]
+        daily_points = [_us_ohlc_point(row) for row in rows]
+        base_points = aggregate_ohlc_points(points=daily_points, timeframe=timeframe)[-bars:]
+        intraday_overlay = None
+        points = base_points
+        if include_intraday:
+            daily_points, intraday_overlay = append_intraday_overlay(
+                points=daily_points,
+                intraday=get_us_intraday_trend(symbol=normalized_symbol),
+                end_date=end_date,
+            )
+            points = aggregate_ohlc_points(points=daily_points, timeframe=timeframe)[-bars:]
 
     return {
         "symbol": normalized_symbol,
@@ -1227,6 +1212,7 @@ def list_us_ohlc_chart_data(
         "point_count": len(points),
         "points": points,
         "backfill": backfill_result,
+        "intraday_overlay": intraday_overlay,
     }
 
 

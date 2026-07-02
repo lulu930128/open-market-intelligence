@@ -36,6 +36,18 @@ class FixedDateTime(datetime):
         return datetime(2026, 6, 15, 18, 0, tzinfo=tz or timezone.utc)
 
 
+class FakeResponse:
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+        self.encoding = "utf-8"
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict:
+        return self._payload
+
+
 class MarketIndexDailyStatTests(unittest.TestCase):
     def setUp(self) -> None:
         self.db = make_session()
@@ -205,6 +217,212 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertEqual(payload["points"][-1]["close"], 45396.99)
         self.assertEqual(payload["points"][-1]["trade_value"], 1_115_744_351_199)
 
+    def test_current_month_index_stat_refresh_updates_existing_same_day_row(self) -> None:
+        self.db.add(
+            MarketIndexDailyStat(
+                index_id="TAIEX",
+                market="TWSE",
+                trade_date=date(2026, 6, 15),
+                trade_volume=1,
+                trade_value=1,
+                transaction_count=1,
+                close_value=100.0,
+                price_change=1.0,
+                source="twse_rwd_fmtqik",
+            )
+        )
+        self.db.commit()
+
+        official_rows = [
+            {
+                "trade_date": date(2026, 6, 15),
+                "trade_volume": 12_695_045_659,
+                "trade_value": 1_115_744_351_199,
+                "transaction_count": 5_460_270,
+                "close_value": 45396.99,
+                "price_change": 1227.95,
+            }
+        ]
+
+        with (
+            patch.object(indices, "datetime", FixedDateTime),
+            patch.object(
+                indices,
+                "_fetch_twse_market_daily_stats_for_month",
+                return_value=(official_rows, "https://example.test/fmtqik"),
+            ),
+            patch.object(indices, "_fetch_recent_market_index_daily_stats", return_value=[]),
+        ):
+            result = indices.ensure_market_index_daily_stat_coverage(
+                db=self.db,
+                index_id="TAIEX",
+                market="TWSE",
+                from_date=date(2026, 6, 15),
+                to_date=date(2026, 6, 15),
+            )
+
+        row = self.db.query(MarketIndexDailyStat).filter_by(index_id="TAIEX").one()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["fetched_month_count"], 1)
+        self.assertEqual(result["updated_count"], 1)
+        self.assertEqual(row.trade_value, 1_115_744_351_199)
+        self.assertEqual(row.close_value, 45396.99)
+
+    def test_twse_rwd_market_breadth_parses_current_stock_counts_and_total_value(self) -> None:
+        payload = {
+            "stat": "OK",
+            "date": "20260629",
+            "tables": [
+                {
+                    "title": "115年06月29日 大盤統計資訊",
+                    "fields": ["成交統計", "成交金額(元)", "成交股數(股)", "成交筆數"],
+                    "data": [["總計(1~15)", "1,045,439,448,015", "11,210,546,174", "4,895,013"]],
+                },
+                {
+                    "title": "漲跌證券數合計",
+                    "fields": ["類型", "整體市場", "股票"],
+                    "data": [
+                        ["上漲(漲停)", "5,443(54)", "659(20)"],
+                        ["下跌(跌停)", "5,296(321)", "322(5)"],
+                        ["持平", "759", "74"],
+                    ],
+                },
+            ],
+        }
+
+        with patch.object(indices, "_fetch_json", return_value=payload):
+            breadth = indices._fetch_twse_rwd_market_quote_breadth(date(2026, 6, 29))
+
+        self.assertEqual(breadth["trade_date"], date(2026, 6, 29))
+        self.assertEqual(breadth["advance_count"], 659)
+        self.assertEqual(breadth["decline_count"], 322)
+        self.assertEqual(breadth["unchanged_count"], 74)
+        self.assertEqual(breadth["limit_up_count"], 20)
+        self.assertEqual(breadth["limit_down_count"], 5)
+        self.assertEqual(breadth["total_count"], 1055)
+        self.assertEqual(breadth["trade_value"], 1_045_439_448_015)
+
+    def test_market_breadth_does_not_use_stale_quote_for_current_index_date(self) -> None:
+        stale_breadth = {
+            "market": "TWSE",
+            "trade_date": date(2026, 6, 26),
+            "advance_count": 75,
+            "decline_count": 980,
+            "unchanged_count": 34,
+            "total_count": 1089,
+            "limit_up_count": 7,
+            "limit_down_count": 29,
+            "trade_value": 1_669_027_830_690,
+            "source": "twse_openapi_stock_day_all",
+        }
+
+        with patch.object(indices, "_fetch_market_quote_breadth", return_value=stale_breadth):
+            breadth = indices._resolve_market_breadth(
+                db=self.db,
+                market="TWSE",
+                target_trade_date=date(2026, 6, 29),
+            )
+
+        self.assertIsNone(breadth)
+
+    def test_market_index_summary_keeps_official_stat_value_when_breadth_is_stale(self) -> None:
+        self.db.add(
+            MarketIndexDailyStat(
+                index_id="TAIEX",
+                market="TWSE",
+                trade_date=date(2026, 6, 29),
+                trade_volume=11_210_546_174,
+                trade_value=1_045_439_448_015,
+                transaction_count=4_895_013,
+                close_value=44999.90,
+                price_change=428.14,
+                source="twse_rwd_fmtqik",
+            )
+        )
+        self.db.commit()
+
+        stale_breadth = {
+            "market": "TWSE",
+            "trade_date": date(2026, 6, 26),
+            "advance_count": 75,
+            "decline_count": 980,
+            "unchanged_count": 34,
+            "total_count": 1089,
+            "trade_value": 1_669_027_830_690,
+            "source": "twse_openapi_stock_day_all",
+        }
+
+        def fake_yahoo_index(config: dict) -> dict:
+            return {
+                "index_id": config["index_id"],
+                "label": config["label"],
+                "short_label": config["short_label"],
+                "market": config["market"],
+                "symbol": config["symbol"],
+                "source": "yahoo_finance_chart",
+                "as_of": datetime(2026, 6, 29, 13, 30, tzinfo=timezone(timedelta(hours=8))),
+                "time": date(2026, 6, 29),
+                "open": 44594.81,
+                "high": 45521.63,
+                "low": 44594.81,
+                "close": 44999.90,
+                "previous_close": 44571.76,
+                "change": 428.14,
+                "change_pct": 0.96,
+                "volume": None,
+                "estimated_volume": None,
+                "trade_value": None,
+                "estimated_trade_value": None,
+                "ma20": None,
+                "price_vs_ma20": None,
+                "point_count": 0,
+                "points": [],
+                "error_message": None,
+            }
+
+        with (
+            patch.object(indices, "_fetch_yahoo_index", side_effect=fake_yahoo_index),
+            patch.object(indices, "_ensure_market_index_daily_stat_coverage", return_value=None),
+            patch.object(indices, "_fetch_twse_index_5s_ohlc", return_value=None),
+            patch.object(indices, "_fetch_market_quote_breadth", return_value=stale_breadth),
+            patch.object(indices, "_fetch_recent_index_trade_values", return_value={}),
+        ):
+            payload = indices.get_market_index_summary(db=self.db, force_refresh=True)
+
+        taiex = next(item for item in payload["indices"] if item["index_id"] == "TAIEX")
+        self.assertIsNone(taiex["breadth"])
+        self.assertEqual(taiex["trade_value"], 1_045_439_448_015)
+        self.assertEqual(taiex["close"], 44999.90)
+
+    def test_twse_index_5s_intraday_parses_official_index_series(self) -> None:
+        indices._TWSE_INDEX_5S_CACHE.clear()
+        payload = {
+            "stat": "OK",
+            "date": "20260629",
+            "fields": ["時間", "發行量加權股價指數"],
+            "data": [
+                ["09:00:00", "44,571.76"],
+                ["09:00:05", "44,594.81"],
+                ["13:30:00", "44,999.90"],
+            ],
+        }
+
+        with patch.object(indices, "http_get", return_value=FakeResponse(payload)):
+            result = indices._fetch_twse_index_5s_intraday(
+                {
+                    "index_id": "TAIEX",
+                    "symbol": "^TWII",
+                },
+                trade_date=date(2026, 6, 29),
+            )
+
+        self.assertEqual(result["source"], "twse_index_5s")
+        self.assertEqual(result["previous_close"], 44571.76)
+        self.assertEqual(result["point_count"], 3)
+        self.assertEqual(result["points"][0]["time"], "2026-06-29T09:00:00+08:00")
+        self.assertEqual(result["points"][0]["price"], 44571.76)
+        self.assertEqual(result["points"][-1]["price"], 44999.90)
+
     def test_index_contributions_prefer_newer_local_daily_prices(self) -> None:
         source = SourceRegistry(
             source_name="TWSE OpenAPI Daily Trading",
@@ -327,6 +545,11 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         }
 
         with (
+            patch.object(
+                indices,
+                "_fetch_twse_index_5s_intraday",
+                side_effect=ValueError("official unavailable"),
+            ),
             patch.object(indices, "_fetch_yahoo_index_intraday", return_value=yahoo_payload),
             patch.object(indices, "_fetch_mis_index_message", return_value=mis_message),
         ):
@@ -359,6 +582,11 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         }
 
         with (
+            patch.object(
+                indices,
+                "_fetch_twse_index_5s_intraday",
+                side_effect=ValueError("official unavailable"),
+            ),
             patch.object(indices, "_fetch_yahoo_index_intraday", return_value=yahoo_payload),
             patch.object(indices, "_fetch_mis_index_message", return_value=mis_message),
         ):
@@ -388,6 +616,11 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         }
 
         with (
+            patch.object(
+                indices,
+                "_fetch_twse_index_5s_intraday",
+                side_effect=ValueError("official unavailable"),
+            ),
             patch.object(indices, "_fetch_yahoo_index_intraday", return_value=yahoo_payload),
             patch.object(indices, "_fetch_mis_index_message", side_effect=ConnectionError("mis offline")),
         ):
@@ -424,6 +657,11 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         }
 
         with (
+            patch.object(
+                indices,
+                "_fetch_twse_index_5s_intraday",
+                side_effect=ValueError("official unavailable"),
+            ),
             patch.object(indices, "_fetch_yahoo_index_intraday", return_value=yahoo_payload),
             patch.object(indices, "_fetch_mis_index_message", return_value=mis_message),
         ):

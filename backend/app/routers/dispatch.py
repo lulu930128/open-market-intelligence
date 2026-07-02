@@ -11,11 +11,12 @@ from app.dispatch.schemas import (
     DispatchRecipientGroupCreate,
     DispatchRecipientGroupRead,
     DispatchRecipientGroupUpdate,
+    DispatchScheduleCreate,
+    DispatchScheduleRead,
+    DispatchScheduleUpdate,
     DispatchSendRead,
     DispatchSendRequest,
 )
-from app.dispatch.tasks import run_dispatch_delivery_job
-from app.jobs import service as job_service
 from app.watchlists import service as watchlist_service
 
 
@@ -28,6 +29,7 @@ def _handle_dispatch_error(exc: Exception) -> HTTPException:
         (
             service.DispatchRecipientGroupNotFoundError,
             service.DispatchDeliveryNotFoundError,
+            service.DispatchScheduleNotFoundError,
             watchlist_service.WatchlistGroupNotFoundError,
         ),
     ):
@@ -100,33 +102,67 @@ def send_dispatch(
     db: Session = Depends(get_db),
 ):
     try:
-        recipient_group = service.get_recipient_group(db=db, group_id=payload.recipient_group_id)
-        preview = service.build_preview(db=db, payload=payload)
-        delivery = service.create_delivery(
-            db=db,
-            payload=payload,
-            preview=preview,
-            recipient_group=recipient_group,
-        )
-        job, _created = job_service.enqueue_job(
-            db=db,
-            job_type="dispatch.mail_delivery",
-            target=str(delivery.id),
-            request={"delivery_id": delivery.id, **payload.model_dump()},
-            progress_total=1,
-            message="Queued mail dispatch.",
-            task=run_dispatch_delivery_job,
-            task_args=(delivery.id,),
-            dedupe_active=False,
-        )
-        delivery_read = service.attach_job_to_delivery(
-            db=db,
-            delivery_id=delivery.id,
-            job_run_id=job.id,
-        )
+        return service.queue_delivery(db=db, payload=payload)
+    except Exception as exc:
+        raise _handle_dispatch_error(exc) from exc
+
+
+@router.get("/schedules", response_model=list[DispatchScheduleRead])
+def list_schedules(
+    enabled: bool | None = None,
+    db: Session = Depends(get_db),
+):
+    return service.list_schedules(db=db, enabled=enabled)
+
+
+@router.post(
+    "/schedules",
+    response_model=DispatchScheduleRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_schedule(
+    payload: DispatchScheduleCreate,
+    db: Session = Depends(get_db),
+):
+    try:
+        return service.create_schedule(db=db, payload=payload)
+    except Exception as exc:
+        raise _handle_dispatch_error(exc) from exc
+
+
+@router.patch("/schedules/{schedule_id}", response_model=DispatchScheduleRead)
+def update_schedule(
+    schedule_id: int,
+    payload: DispatchScheduleUpdate,
+    db: Session = Depends(get_db),
+):
+    try:
+        return service.update_schedule(db=db, schedule_id=schedule_id, payload=payload)
+    except Exception as exc:
+        raise _handle_dispatch_error(exc) from exc
+
+
+@router.delete("/schedules/{schedule_id}", response_model=DispatchDeleteResultRead)
+def delete_schedule(
+    schedule_id: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        return service.delete_schedule(db=db, schedule_id=schedule_id)
+    except Exception as exc:
+        raise _handle_dispatch_error(exc) from exc
+
+
+@router.post("/schedules/{schedule_id}/run", response_model=DispatchSendRead)
+def run_schedule_now(
+    schedule_id: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        result = service.run_schedule_now(db=db, schedule_id=schedule_id)
         return {
-            "job": job_service.serialize_job(job),
-            "delivery": delivery_read,
+            "job": result["job"],
+            "delivery": result["delivery"],
         }
     except Exception as exc:
         raise _handle_dispatch_error(exc) from exc

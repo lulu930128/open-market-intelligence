@@ -45,6 +45,7 @@ from app.market.indices import (
     get_market_index_summary,
 )
 from app.market.intraday import get_intraday_trend, get_market_intraday_history
+from app.market.quote_depth import get_taiwan_stock_quote_depth
 from app.market.market_chips import (
     MarketChipFetchError,
     ensure_market_chip_daily,
@@ -121,6 +122,7 @@ from app.market.schemas import (
     TaiwanFuturesDailyBarRead,
     TaiwanFuturesProductRead,
     TaiwanFuturesQuoteRead,
+    TaiwanStockQuoteDepthRead,
     TaiwanSourceHealthRead,
     TechnicalReportRead,
 )
@@ -920,6 +922,7 @@ def get_stock_ohlc_chart_data(
     timeframe: str = Query(default="daily", pattern="^(daily|weekly|monthly)$"),
     bars: int = Query(default=90, ge=1, le=5000),
     ensure_history: bool = False,
+    include_intraday: bool = False,
     to_date: date | None = None,
     sleep_seconds: float = Query(default=0.08, ge=0, le=2),
     db: Session = Depends(get_db),
@@ -931,6 +934,7 @@ def get_stock_ohlc_chart_data(
             timeframe=timeframe,
             bars=bars,
             ensure_history=ensure_history,
+            include_intraday=include_intraday,
             to_date=to_date,
             sleep_seconds=sleep_seconds,
         )
@@ -963,6 +967,25 @@ def get_stock_intraday_history(
             stock_id=stock_id,
             interval=interval,
             range_value=range_value,
+            refresh=refresh,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get("/quote-depth/{stock_id}", response_model=TaiwanStockQuoteDepthRead)
+def get_stock_quote_depth(
+    stock_id: str,
+    refresh: bool = True,
+    db: Session = Depends(get_db),
+):
+    try:
+        return get_taiwan_stock_quote_depth(
+            db=db,
+            stock_id=stock_id,
             refresh=refresh,
         )
     except ValueError as exc:

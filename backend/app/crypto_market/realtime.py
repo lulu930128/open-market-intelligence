@@ -11,6 +11,7 @@ from app.crypto_market.contract import (
     BINANCE_PROVIDER,
     BITOPRO_PROVIDER,
     OKX_PROVIDER,
+    PERPETUAL,
     SPOT,
     ProviderInstrument,
     list_provider_instruments,
@@ -22,6 +23,7 @@ from app.crypto_market.contract import (
 TICKER_RESOURCE = "ticker"
 ORDER_BOOK_RESOURCE = "order_book"
 OHLCV_RESOURCE = "ohlcv"
+LIQUIDATION_RESOURCE = "liquidation_event"
 COLLECTOR_RESOURCE = "collector"
 
 
@@ -41,7 +43,7 @@ class CryptoRealtimeStreamSpec:
         if self.message_resources:
             return self.message_resources
         if self.resource == "combined":
-            return (TICKER_RESOURCE, ORDER_BOOK_RESOURCE, OHLCV_RESOURCE)
+            return (TICKER_RESOURCE, ORDER_BOOK_RESOURCE, OHLCV_RESOURCE, LIQUIDATION_RESOURCE)
         return (self.resource,)
 
     def to_dict(self) -> dict[str, Any]:
@@ -330,6 +332,11 @@ def build_crypto_realtime_stream_specs(
             for resource in (TICKER_RESOURCE, ORDER_BOOK_RESOURCE, OHLCV_RESOURCE)
         )
     )
+    binance_perpetual = tuple(
+        instrument
+        for instrument in list_provider_instruments(provider=BINANCE_PROVIDER, instrument_type=PERPETUAL)
+        if _resource_enabled(resource_enabled, instrument, LIQUIDATION_RESOURCE)
+    )
     okx_spot = tuple(
         instrument
         for instrument in list_provider_instruments(provider=OKX_PROVIDER, instrument_type=SPOT)
@@ -390,6 +397,25 @@ def build_crypto_realtime_stream_specs(
                 url=f"{settings.binance_spot_ws_base_url.rstrip('/')}/stream?streams={'/'.join(binance_streams)}",
                 notes="Binance combined stream for mini ticker, bounded depth, and 1m kline.",
                 message_resources=tuple(binance_resources),
+            )
+        )
+    binance_futures_streams = [
+        f"{_binance_stream_symbol(instrument)}@forceOrder"
+        for instrument in binance_perpetual
+    ]
+    if binance_futures_streams:
+        specs.append(
+            CryptoRealtimeStreamSpec(
+                provider=BINANCE_PROVIDER,
+                resource="combined",
+                symbols=tuple(instrument.symbol for instrument in binance_perpetual),
+                url=(
+                    f"{settings.binance_futures_ws_base_url.rstrip('/')}/stream?streams="
+                    + "/".join(binance_futures_streams)
+                ),
+                instrument_type=PERPETUAL,
+                notes="Binance USD-M futures liquidation order stream for bounded symbols.",
+                message_resources=(LIQUIDATION_RESOURCE,),
             )
         )
     okx_args: list[dict[str, str]] = []
@@ -629,6 +655,57 @@ def _update_from_binance_kline(payload: dict[str, Any], *, received_at: datetime
     )
 
 
+def _update_from_binance_force_order(payload: dict[str, Any], *, received_at: datetime) -> CryptoRealtimeUpdate | None:
+    order = payload.get("o") if isinstance(payload.get("o"), dict) else None
+    if order is None:
+        return None
+    provider_symbol = str(order.get("s") or payload.get("s") or "").strip().upper()
+    if not provider_symbol:
+        return None
+    symbol = _binance_symbol_from_provider_symbol(provider_symbol) or provider_symbol
+    normalized_symbol = normalize_symbol(symbol)
+    if not normalized_symbol:
+        return None
+    event_time = _datetime_from_millis(order.get("T") or payload.get("E"))
+    order_side = str(order.get("S") or "").strip().lower() or None
+    liquidation_side = "unknown"
+    if order_side == "sell":
+        liquidation_side = "long"
+    elif order_side == "buy":
+        liquidation_side = "short"
+    price = _parse_float(order.get("p"))
+    average_price = _parse_float(order.get("ap"))
+    quantity = _parse_float(order.get("z")) or _parse_float(order.get("q"))
+    effective_price = average_price or price
+    notional = effective_price * quantity if effective_price is not None and quantity is not None else None
+    return CryptoRealtimeUpdate(
+        provider=BINANCE_PROVIDER,
+        resource=LIQUIDATION_RESOURCE,
+        symbol=normalized_symbol,
+        provider_symbol=provider_symbol,
+        instrument_type=PERPETUAL,
+        event_time=event_time,
+        received_at=received_at,
+        feed_lag_ms=_feed_lag_ms(event_time=event_time, received_at=received_at),
+        sequence=_parse_int(order.get("T") or payload.get("E")),
+        data={
+            "liquidation_side": liquidation_side,
+            "order_side": order_side,
+            "order_type": order.get("o"),
+            "time_in_force": order.get("f"),
+            "status": order.get("X"),
+            "price": price,
+            "average_price": average_price,
+            "quantity": quantity,
+            "original_quantity": _parse_float(order.get("q")),
+            "last_filled_quantity": _parse_float(order.get("l")),
+            "filled_accumulated_quantity": _parse_float(order.get("z")),
+            "notional": notional,
+        },
+        raw_payload=payload,
+    )
+
+
 def _update_from_okx_message(payload: dict[str, Any], *, received_at: datetime) -> list[CryptoRealtimeUpdate]:
     arg = payload.get("arg") if isinstance(payload.get("arg"), dict) else {}
     channel = str(arg.get("channel") or "").strip()
@@ -718,6 +795,9 @@ def parse_realtime_message(
         event = str(row.get("e") or "").strip()
         if event == "24hrMiniTicker":
             update = _update_from_binance_mini_ticker(row, received_at=current)
+            return [update] if update else []
+        if event == "forceOrder":
+            update = _update_from_binance_force_order(row, received_at=current)
             return [update] if update else []
         if event == "depthUpdate" or "bids" in row or "b" in row:
             update = _update_from_binance_order_book(row, received_at=current, stream_name=stream)

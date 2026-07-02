@@ -35,6 +35,7 @@ $script:DefaultFrontendPort = 3000
 $script:FrontendPortSearchSpan = 1000
 $script:DefaultBackendHost = "127.0.0.1"
 $script:DefaultBackendPort = 8400
+$script:BackendPortSearchSpan = 1000
 $script:DefaultApiProxyPath = "/omi-data"
 $script:FrontendHost = $script:DefaultFrontendHost
 $script:FrontendPort = $script:DefaultFrontendPort
@@ -243,6 +244,20 @@ function Update-FrontendServiceUrls {
     Set-ProcessEnvironmentValue -Name "OMI_FRONTEND_PORT" -Value ([string]$script:FrontendPort)
 }
 
+function Update-BackendServiceUrls {
+    $urlHost = Format-UrlHost -HostName $script:BackendHost
+    $script:BackendBaseUrl = "http://$urlHost`:$($script:BackendPort)"
+    $script:BackendHealthUrl = "$($script:BackendBaseUrl)/api/system/health"
+
+    Set-ProcessEnvironmentValue -Name "APP_HOST" -Value $script:BackendHost
+    Set-ProcessEnvironmentValue -Name "APP_PORT" -Value ([string]$script:BackendPort)
+    Set-ProcessEnvironmentValue -Name "OMI_BACKEND_HOST" -Value $script:BackendHost
+    Set-ProcessEnvironmentValue -Name "OMI_BACKEND_PORT" -Value ([string]$script:BackendPort)
+    Set-ProcessEnvironmentValue -Name "API_PROXY_TARGET" -Value $script:BackendBaseUrl
+    Set-ProcessEnvironmentValue -Name "API_PROXY_PATH" -Value $script:ApiProxyPath
+    Set-ProcessEnvironmentValue -Name "NEXT_PUBLIC_API_PROXY_PATH" -Value $script:ApiProxyPath
+}
+
 function Initialize-ServiceEnvironment {
     $script:FrontendHost = Get-ConfigurationValue `
         -Names @("OMI_FRONTEND_HOST", "FRONTEND_HOST", "HOSTNAME") `
@@ -261,18 +276,7 @@ function Initialize-ServiceEnvironment {
     }
 
     Update-FrontendServiceUrls
-
-    $urlHost = Format-UrlHost -HostName $script:BackendHost
-    $script:BackendBaseUrl = "http://$urlHost`:$($script:BackendPort)"
-    $script:BackendHealthUrl = "$($script:BackendBaseUrl)/api/system/health"
-
-    Set-ProcessEnvironmentValue -Name "APP_HOST" -Value $script:BackendHost
-    Set-ProcessEnvironmentValue -Name "APP_PORT" -Value ([string]$script:BackendPort)
-    Set-ProcessEnvironmentValue -Name "OMI_BACKEND_HOST" -Value $script:BackendHost
-    Set-ProcessEnvironmentValue -Name "OMI_BACKEND_PORT" -Value ([string]$script:BackendPort)
-    Set-ProcessEnvironmentValue -Name "API_PROXY_TARGET" -Value $script:BackendBaseUrl
-    Set-ProcessEnvironmentValue -Name "API_PROXY_PATH" -Value $script:ApiProxyPath
-    Set-ProcessEnvironmentValue -Name "NEXT_PUBLIC_API_PROXY_PATH" -Value $script:ApiProxyPath
+    Update-BackendServiceUrls
 
     if ([string]::IsNullOrWhiteSpace((Get-ProcessEnvironmentValue -Names @("NEXT_PUBLIC_API_BASE_URL")))) {
         Set-ProcessEnvironmentValue -Name "NEXT_PUBLIC_API_BASE_URL" -Value ""
@@ -615,6 +619,7 @@ function Test-TcpPortBindable {
     param(
         [Parameter(Mandatory = $true)][int]$Port,
         [string]$HostName = $script:FrontendHost,
+        [string]$ServiceName = "Service",
         [switch]$Quiet
     )
 
@@ -636,7 +641,7 @@ function Test-TcpPortBindable {
             if ($null -ne $_.Exception.InnerException) {
                 $errorMessage = $_.Exception.InnerException.Message
             }
-            Write-LauncherLog "Frontend port $Port cannot be bound on $HostName. error=$errorMessage" "WARN"
+            Write-LauncherLog "$ServiceName port $Port cannot be bound on $HostName. error=$errorMessage" "WARN"
         }
         return $false
     }
@@ -644,12 +649,6 @@ function Test-TcpPortBindable {
         if ($null -ne $listener) {
             $listener.Stop()
         }
-    }
-}
-
-function Assert-BackendPortBindable {
-    if (Test-TcpPortExcluded -Port $script:BackendPort -ServiceName "Backend") {
-        throw "Backend port $($script:BackendPort) is reserved by Windows TCP excluded port range. Set APP_PORT or OMI_BACKEND_PORT to an available port and restart OMI."
     }
 }
 
@@ -668,7 +667,7 @@ function Find-AvailableFrontendPort {
             continue
         }
 
-        if (-not (Test-TcpPortBindable -Port $port -HostName $script:FrontendHost -Quiet)) {
+        if (-not (Test-TcpPortBindable -Port $port -HostName $script:FrontendHost -ServiceName "Frontend" -Quiet)) {
             continue
         }
 
@@ -676,6 +675,31 @@ function Find-AvailableFrontendPort {
     }
 
     throw "Could not find an available frontend port from $PreferredPort to $maxPort. Set OMI_FRONTEND_PORT to an available port and restart OMI."
+}
+
+function Find-AvailableBackendPort {
+    param([Parameter(Mandatory = $true)][int]$PreferredPort)
+
+    $maxPort = [Math]::Min($PreferredPort + $script:BackendPortSearchSpan, 65535)
+    $excludedRanges = @(Get-TcpExcludedPortRanges -Quiet)
+    for ($port = $PreferredPort; $port -le $maxPort; $port++) {
+        if (Test-TcpPortExcluded -Port $port -ServiceName "Backend" -Ranges $excludedRanges -Quiet) {
+            continue
+        }
+
+        $processIds = @(Get-ListeningProcessIdsOnPort -Port $port)
+        if ($processIds.Count -gt 0) {
+            continue
+        }
+
+        if (-not (Test-TcpPortBindable -Port $port -HostName $script:BackendHost -ServiceName "Backend" -Quiet)) {
+            continue
+        }
+
+        return $port
+    }
+
+    throw "Could not find an available backend port from $PreferredPort to $maxPort. Set OMI_BACKEND_PORT or APP_PORT to an available port and restart OMI."
 }
 
 function Select-AvailableFrontendPortForStart {
@@ -690,7 +714,7 @@ function Select-AvailableFrontendPortForStart {
     }
 
     if ($reasons.Count -eq 0 -and
-        (-not (Test-TcpPortBindable -Port $script:FrontendPort -HostName $script:FrontendHost))) {
+        (-not (Test-TcpPortBindable -Port $script:FrontendPort -HostName $script:FrontendHost -ServiceName "Frontend"))) {
         $reasons += "bind probe failed"
     }
 
@@ -702,6 +726,63 @@ function Select-AvailableFrontendPortForStart {
     $script:FrontendPort = Find-AvailableFrontendPort -PreferredPort ($script:FrontendPort + 1)
     Update-FrontendServiceUrls
     Write-LauncherLog "Frontend port is not bindable ($($reasons -join '; ')). previous=$previousUrl selected=$($script:DashboardUrl)" "WARN"
+}
+
+function Select-AvailableBackendPortForStart {
+    param([Parameter(Mandatory = $true)][string]$ExpectedPythonPath)
+
+    $reasons = @()
+    if (Test-TcpPortExcluded -Port $script:BackendPort -ServiceName "Backend") {
+        $reasons += "Windows TCP excluded range"
+    }
+
+    if ($reasons.Count -eq 0) {
+        $backendHealth = Get-BackendHealth
+        if ($null -ne $backendHealth) {
+            if (Test-BackendHealthMatchesExpected -Health $backendHealth -ExpectedPythonPath $ExpectedPythonPath) {
+                Write-LauncherLog "Backend health endpoint already responds with the expected project/runtime; skipping backend start."
+                return $true
+            }
+
+            if ([string]$backendHealth.app_name -eq "Open Market Intelligence") {
+                Write-LauncherLog "Existing OMI backend did not match the expected project/runtime. Clearing stale backend before start." "WARN"
+                Stop-BackendPortOwners -Port $script:BackendPort -Reason "runtime mismatch"
+                Start-Sleep -Milliseconds 750
+
+                if (Test-HttpOk $script:BackendHealthUrl) {
+                    $reasons += "unexpected OMI runtime still responded after cleanup"
+                }
+            }
+            else {
+                $reasons += "HTTP service is not this OMI backend"
+            }
+        }
+        elseif (Test-HttpOk $script:BackendHealthUrl) {
+            $reasons += "unparseable backend health response"
+        }
+    }
+
+    if ($reasons.Count -eq 0) {
+        $processIds = @(Get-ListeningProcessIdsOnPort -Port $script:BackendPort)
+        if ($processIds.Count -gt 0) {
+            $reasons += "listening process pid=$($processIds -join ',')"
+        }
+    }
+
+    if ($reasons.Count -eq 0 -and
+        (-not (Test-TcpPortBindable -Port $script:BackendPort -HostName $script:BackendHost -ServiceName "Backend"))) {
+        $reasons += "bind probe failed"
+    }
+
+    if ($reasons.Count -eq 0) {
+        return $false
+    }
+
+    $previousUrl = $script:BackendBaseUrl
+    $script:BackendPort = Find-AvailableBackendPort -PreferredPort ($script:BackendPort + 1)
+    Update-BackendServiceUrls
+    Write-LauncherLog "Backend port is not bindable ($($reasons -join '; ')). previous=$previousUrl selected=$($script:BackendBaseUrl)" "WARN"
+    return $false
 }
 
 function Stop-BackendPortOwners {
@@ -889,30 +970,8 @@ function Start-Backend {
         throw "Missing backend directory: $($script:BackendDir)"
     }
 
-    Assert-BackendPortBindable
-
-    $backendHealth = Get-BackendHealth
-    if ($null -ne $backendHealth) {
-        if (Test-BackendHealthMatchesExpected -Health $backendHealth -ExpectedPythonPath $python) {
-            Write-LauncherLog "Backend health endpoint already responds with the expected project/runtime; skipping backend start."
-            return
-        }
-
-        if ([string]$backendHealth.app_name -eq "Open Market Intelligence") {
-            Write-LauncherLog "Existing OMI backend did not match the expected project/runtime. Clearing stale backend before start." "WARN"
-            Stop-BackendPortOwners -Port $script:BackendPort -Reason "runtime mismatch"
-            Start-Sleep -Milliseconds 750
-
-            if (Test-HttpOk $script:BackendHealthUrl) {
-                throw "Backend port $($script:BackendPort) is still occupied by an unexpected OMI runtime after cleanup."
-            }
-        }
-        else {
-            throw "Backend port $($script:BackendPort) already responds, but it is not this OMI runtime. Stop the process using port $($script:BackendPort) before starting OMI."
-        }
-    }
-    elseif (Test-HttpOk $script:BackendHealthUrl) {
-        throw "Backend health endpoint responded but could not be parsed. Stop the process using port $($script:BackendPort) before starting OMI."
+    if (Select-AvailableBackendPortForStart -ExpectedPythonPath $python) {
+        return
     }
 
     Invoke-BackendPythonRuntimeCheck -PythonPath $python
@@ -994,6 +1053,18 @@ function Start-Frontend {
 }
 
 function Start-Services {
+    if ((-not (Test-ProcessRunning $script:BackendProcess)) -and
+        (-not (Test-ProcessRunning $script:FrontendProcess))) {
+        try {
+            Initialize-ServiceEnvironment
+        }
+        catch {
+            Write-LauncherLog "Service environment initialization failed. error=$($_.Exception.Message)" "ERROR"
+            Show-Message "OMI service configuration is invalid. Check logs\launcher for details."
+            return
+        }
+    }
+
     try {
         Start-Backend
     }

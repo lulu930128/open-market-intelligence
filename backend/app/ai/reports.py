@@ -681,7 +681,11 @@ def _append_unique_watchlist_rows(
             return
 
 
-def _build_watchlist_scan_data(context: dict[str, Any]) -> dict[str, Any]:
+def _build_watchlist_scan_data(
+    context: dict[str, Any],
+    *,
+    radar_limit: int = 8,
+) -> dict[str, Any]:
     ranking = (context.get("data") or {}).get("ranking") or {}
     radar = (context.get("data") or {}).get("radar") or {}
     results = ranking.get("results") or []
@@ -743,7 +747,7 @@ def _build_watchlist_scan_data(context: dict[str, Any]) -> dict[str, Any]:
             "bottom_watchlist": bottom_watchlist,
             "attention_rows": attention_rows,
         },
-        "radar": _compact_watchlist_radar(radar),
+        "radar": _compact_watchlist_radar(radar, item_limit=max(1, radar_limit)),
     }
 
 
@@ -1070,16 +1074,22 @@ def build_watchlist_brief(
     rank_by: str = "score",
     sort_order: str = "desc",
     radar_mode: str = "action",
+    radar_limit: int = 8,
     response_preferences: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    normalized_radar_limit = max(1, min(int(radar_limit or 8), 24))
     context = tools.read_watchlist_context(
         db=db,
         group_id=group_id,
         rank_by=rank_by,
         sort_order=sort_order,
         radar_mode=radar_mode,
+        radar_limit=max(12, normalized_radar_limit),
     )
-    scan_data = _build_watchlist_scan_data(context)
+    scan_data = _build_watchlist_scan_data(
+        context,
+        radar_limit=normalized_radar_limit,
+    )
     overview = _build_watchlist_overview(context, scan_data)
     scan_data["overview"] = overview
     warnings = list(context.get("warnings") or [])

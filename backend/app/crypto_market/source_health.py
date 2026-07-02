@@ -10,6 +10,8 @@ from app.config import settings
 from app.crypto_market.assets import SUBSCRIPTION_ALWAYS_ON, get_crypto_asset
 from app.crypto_market.contract import (
     COINGECKO_PROVIDER,
+    COINGLASS_PROVIDER,
+    OMI_LOCAL_PROVIDER,
     PERPETUAL,
     SPOT,
     ProviderInstrument,
@@ -23,7 +25,11 @@ from app.crypto_market.ws_runtime import (
     crypto_realtime_enabled_stream_specs,
 )
 from app.db.models import (
+    CryptoCvdHistory,
     CryptoDerivativesMetric,
+    CryptoLiquidationEvent,
+    CryptoLiquidationHeatmapCell,
+    CryptoLongShortRatioHistory,
     CryptoMarketCapSnapshot,
     CryptoOrderBookSnapshot,
     CryptoOhlcvBar,
@@ -95,6 +101,39 @@ def _status_for_latest(
     return "live", True, "ok", "Latest crypto row is within the configured freshness threshold."
 
 
+def _normalize_base(value: str | None) -> str | None:
+    normalized = str(value or "").strip().upper()
+    return normalized or None
+
+
+def _target_matches_base(target: str, base: str | None) -> bool:
+    if base is None or target == "all":
+        return True
+    return normalize_symbol(target).split("-", maxsplit=1)[0] == base
+
+
+def _entry_matches_base(entry: dict[str, Any], base: str | None) -> bool:
+    if base is None:
+        return True
+    return _target_matches_base(str(entry.get("target") or ""), base)
+
+
+def _filter_instruments(
+    instruments: list[ProviderInstrument],
+    *,
+    base: str | None,
+    required_only: bool,
+) -> list[ProviderInstrument]:
+    rows: list[ProviderInstrument] = []
+    for instrument in instruments:
+        if base is not None and instrument.base_asset != base:
+            continue
+        if required_only and not _instrument_required(instrument):
+            continue
+        rows.append(instrument)
+    return rows
+
+
 def _latest_query_entry(
     db: Session,
     *,
@@ -139,8 +178,17 @@ def _latest_query_entry(
     )
 
 
-def _market_cap_entry(db: Session, *, now: datetime, stale_seconds: int) -> CryptoSourceHealthEntry:
+def _market_cap_entry(
+    db: Session,
+    *,
+    base: str | None,
+    now: datetime,
+    stale_seconds: int,
+) -> CryptoSourceHealthEntry:
     query = db.query(CryptoMarketCapSnapshot).filter(CryptoMarketCapSnapshot.provider == COINGECKO_PROVIDER)
+    target = base or "all"
+    if base:
+        query = query.filter(CryptoMarketCapSnapshot.symbol == base)
     row_count = query.count()
     latest = query.order_by(CryptoMarketCapSnapshot.fetched_at.desc(), CryptoMarketCapSnapshot.id.desc()).first()
     latest_fetched_at = latest.fetched_at if latest else None
@@ -153,7 +201,7 @@ def _market_cap_entry(db: Session, *, now: datetime, stale_seconds: int) -> Cryp
     return CryptoSourceHealthEntry(
         resource="crypto_market_cap",
         provider=COINGECKO_PROVIDER,
-        target="all",
+        target=target,
         status=status,
         ok=ok,
         row_count=row_count,
@@ -216,12 +264,22 @@ def _instrument_required(instrument: ProviderInstrument) -> bool:
     return asset.default_subscription_mode == SUBSCRIPTION_ALWAYS_ON
 
 
+def _base_required(base: str) -> bool:
+    asset = get_crypto_asset(base)
+    if asset is None:
+        return True
+    return asset.default_subscription_mode == SUBSCRIPTION_ALWAYS_ON
+
+
 def build_crypto_source_health(
     db: Session,
     *,
     provider: str | None = None,
     symbol: str | None = None,
     base: str | None = None,
+    required_only: bool = False,
+    include_events: bool = False,
+    max_entries: int | None = None,
     now: datetime | None = None,
     sync_snapshots: bool = False,
 ) -> dict[str, Any]:
@@ -229,12 +287,17 @@ def build_crypto_source_health(
     stale_seconds = max(int(settings.crypto_market_ticker_stale_seconds), 1)
     normalized_provider = normalize_provider(provider) if provider else None
     normalized_symbol = normalize_symbol(symbol) if symbol else None
+    normalized_base = _normalize_base(base)
     entries: list[CryptoSourceHealthEntry] = []
-    spot_instruments = list_provider_instruments(
-        provider=normalized_provider,
-        symbol=normalized_symbol,
-        instrument_type=SPOT,
-        resource="ticker",
+    spot_instruments = _filter_instruments(
+        list_provider_instruments(
+            provider=normalized_provider,
+            symbol=normalized_symbol,
+            instrument_type=SPOT,
+            resource="ticker",
+        ),
+        base=normalized_base,
+        required_only=required_only,
     )
     for instrument in spot_instruments:
         required = _instrument_required(instrument)
@@ -277,12 +340,29 @@ def build_crypto_source_health(
                 required=required,
             )
         )
+        entries.append(
+            _latest_query_entry(
+                db,
+                model=CryptoCvdHistory,
+                resource="crypto_cvd_spot",
+                provider=instrument.provider,
+                target=instrument.symbol,
+                now=generated_at,
+                stale_seconds=max(stale_seconds, 300),
+                instrument_type=SPOT,
+                required=False,
+            )
+        )
 
-    derivative_instruments = list_provider_instruments(
-        provider=normalized_provider,
-        symbol=normalized_symbol,
-        instrument_type=PERPETUAL,
-        resource="derivatives",
+    derivative_instruments = _filter_instruments(
+        list_provider_instruments(
+            provider=normalized_provider,
+            symbol=normalized_symbol,
+            instrument_type=PERPETUAL,
+            resource="derivatives",
+        ),
+        base=normalized_base,
+        required_only=required_only,
     )
     for instrument in derivative_instruments:
         entries.append(
@@ -298,20 +378,85 @@ def build_crypto_source_health(
                 required=_instrument_required(instrument),
             )
         )
-    entries.append(_market_cap_entry(db, now=generated_at, stale_seconds=stale_seconds))
-    entries.append(_spread_entry(db, base=base, now=generated_at, stale_seconds=stale_seconds))
+        entries.append(
+            _latest_query_entry(
+                db,
+                model=CryptoLiquidationEvent,
+                resource="crypto_liquidation_event",
+                provider=instrument.provider,
+                target=instrument.symbol,
+                now=generated_at,
+                stale_seconds=max(stale_seconds, 300),
+                instrument_type=PERPETUAL,
+                required=False,
+            )
+        )
+        for heatmap_provider in (COINGLASS_PROVIDER, OMI_LOCAL_PROVIDER):
+            entries.append(
+                _latest_query_entry(
+                    db,
+                    model=CryptoLiquidationHeatmapCell,
+                    resource="crypto_liquidation_heatmap",
+                    provider=heatmap_provider,
+                    target=instrument.symbol,
+                    now=generated_at,
+                    stale_seconds=max(stale_seconds, 300),
+                    instrument_type=PERPETUAL,
+                    required=False,
+                )
+            )
+        entries.append(
+            _latest_query_entry(
+                db,
+                model=CryptoCvdHistory,
+                resource="crypto_cvd_perpetual",
+                provider=instrument.provider,
+                target=instrument.symbol,
+                now=generated_at,
+                stale_seconds=max(stale_seconds, 300),
+                instrument_type=PERPETUAL,
+                required=False,
+            )
+        )
+        entries.append(
+            _latest_query_entry(
+                db,
+                model=CryptoLongShortRatioHistory,
+                resource="crypto_long_short_ratio",
+                provider=instrument.provider,
+                target=instrument.symbol,
+                now=generated_at,
+                stale_seconds=max(stale_seconds, 300),
+                instrument_type=PERPETUAL,
+                required=False,
+            )
+        )
+    if not required_only or normalized_base is None or _base_required(normalized_base):
+        entries.append(_market_cap_entry(db, base=normalized_base, now=generated_at, stale_seconds=stale_seconds))
+        entries.append(_spread_entry(db, base=normalized_base, now=generated_at, stale_seconds=stale_seconds))
     collector_status = crypto_realtime_collector_status()
     entry_payloads = [entry.to_dict() for entry in entries]
-    entry_payloads.extend(
-        crypto_realtime_store.health_entries(
-            stream_specs=crypto_realtime_enabled_stream_specs(),
-            now=generated_at,
-            stale_seconds=max(stale_seconds, settings.crypto_market_ws_message_stale_seconds),
-            collector_enabled=bool(collector_status.get("enabled")),
-            provider=normalized_provider,
-            symbol=normalized_symbol,
-        )
+    realtime_entries = crypto_realtime_store.health_entries(
+        stream_specs=crypto_realtime_enabled_stream_specs(),
+        now=generated_at,
+        stale_seconds=max(stale_seconds, settings.crypto_market_ws_message_stale_seconds),
+        collector_enabled=bool(collector_status.get("enabled")),
+        provider=normalized_provider,
+        symbol=normalized_symbol,
     )
+    if normalized_base is not None and normalized_symbol is None:
+        realtime_entries = [
+            entry
+            for entry in realtime_entries
+            if entry.get("resource") == "crypto_realtime_collector" or _entry_matches_base(entry, normalized_base)
+        ]
+    if required_only:
+        realtime_entries = [
+            entry
+            for entry in realtime_entries
+            if bool(entry.get("required")) or entry.get("resource") == "crypto_realtime_collector"
+        ]
+    entry_payloads.extend(realtime_entries)
     persistence_status = collector_status.get("persistence")
     if isinstance(persistence_status, dict):
         persistence_enabled = bool(persistence_status.get("enabled"))
@@ -353,11 +498,30 @@ def build_crypto_source_health(
                 "reason": reason,
             }
         )
-    entry_dicts = enrich_source_health_entries(
-        db,
-        market="crypto",
-        entries=entry_payloads,
-    )
+    if normalized_base is not None and normalized_symbol is None:
+        entry_payloads = [
+            entry
+            for entry in entry_payloads
+            if entry.get("resource") in {"crypto_realtime_collector", "crypto_realtime_persistence"}
+            or _entry_matches_base(entry, normalized_base)
+        ]
+    if required_only:
+        entry_payloads = [
+            entry
+            for entry in entry_payloads
+            if bool(entry.get("required", True))
+            or entry.get("resource") in {"crypto_realtime_collector", "crypto_realtime_persistence"}
+        ]
+    if max_entries is not None:
+        entry_payloads = entry_payloads[: max(1, int(max_entries))]
+    if sync_snapshots or include_events:
+        entry_dicts = enrich_source_health_entries(
+            db,
+            market="crypto",
+            entries=entry_payloads,
+        )
+    else:
+        entry_dicts = entry_payloads
     if sync_snapshots:
         sync_source_health_snapshots(
             db,
@@ -371,7 +535,9 @@ def build_crypto_source_health(
         "filters": {
             "provider": normalized_provider,
             "symbol": normalized_symbol,
-            "base": base.strip().upper() if base else None,
+            "base": normalized_base,
+            "required_only": required_only,
+            "include_events": include_events,
         },
         "summary": _summary(entry_payloads),
         "entries": entry_dicts,

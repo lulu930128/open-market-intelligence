@@ -42,6 +42,9 @@ def _crypto_resources(asset: CryptoAssetDefinition) -> dict[str, bool]:
     }
     if asset.binance_perpetual or asset.okx_perpetual:
         resources["derivatives"] = True
+    if asset.binance_perpetual:
+        resources["liquidation_event"] = True
+        resources["long_short_ratio"] = True
     if asset.taiwan_spread:
         resources["taiwan_spread"] = True
     if asset.asset == "USDT":
@@ -59,6 +62,9 @@ def _crypto_intervals(asset: CryptoAssetDefinition) -> dict[str, float]:
         }
         if asset.binance_perpetual or asset.okx_perpetual:
             intervals["derivatives_seconds"] = 120.0
+        if asset.binance_perpetual:
+            intervals["liquidation_event_seconds"] = 5.0
+            intervals["long_short_ratio_seconds"] = 300.0
         return intervals
 
     intervals = {
@@ -69,6 +75,9 @@ def _crypto_intervals(asset: CryptoAssetDefinition) -> dict[str, float]:
     }
     if asset.binance_perpetual or asset.okx_perpetual:
         intervals["derivatives_seconds"] = 300.0
+    if asset.binance_perpetual:
+        intervals["liquidation_event_seconds"] = 15.0
+        intervals["long_short_ratio_seconds"] = 900.0
     return intervals
 
 

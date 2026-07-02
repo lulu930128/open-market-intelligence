@@ -134,7 +134,7 @@ def _record_taiwan_futures_provider_event(
 
 
 def enqueue_market_daily_refresh() -> None:
-    categories = [TAIWAN_REFRESH_INSTITUTIONAL_TRADE, TAIWAN_REFRESH_MARGIN_TRADING]
+    categories = [TAIWAN_REFRESH_INSTITUTIONAL_TRADE]
     now = datetime.now(_timezone())
     calendar_status = build_taiwan_calendar_status(now=now)
 
@@ -194,6 +194,74 @@ def enqueue_market_daily_refresh() -> None:
         )
         logger.info(
             "Scheduled market daily refresh %s job_id=%s",
+            "queued" if created else "deduped",
+            job.id,
+        )
+    finally:
+        db.close()
+
+
+def enqueue_market_margin_daily_refresh() -> None:
+    categories = [TAIWAN_REFRESH_MARGIN_TRADING]
+    now = datetime.now(_timezone())
+    calendar_status = build_taiwan_calendar_status(now=now)
+
+    if not calendar_status.get("is_trading_day"):
+        logger.info(
+            "Skipped scheduled market margin daily refresh because %s is not a trading day phase=%s reason=%s.",
+            calendar_status.get("date"),
+            calendar_status.get("phase"),
+            calendar_status.get("reason"),
+        )
+        return
+
+    sleep_seconds = resolve_market_refresh_interval_seconds(market="tw")
+    include_today = all(
+        is_release_released_from_calendar(
+            calendar_status,
+            market="tw",
+            key=TAIWAN_REFRESH_CATEGORY_DATASET_KEYS[category],
+        )
+        for category in categories
+    )
+
+    request = {
+        "schedule": "market_margin_daily_refresh",
+        "run_date": now.date().isoformat(),
+        "categories": categories,
+        "lookback_days": settings.scheduler_market_refresh_lookback_days,
+        "include_today": include_today,
+        "calendar_phase": calendar_status.get("phase"),
+        "calendar_release_windows": {
+            dataset_key: calendar_status.get("release_windows", {}).get(dataset_key)
+            for dataset_key in TAIWAN_REFRESH_CATEGORY_DATASET_KEYS.values()
+        },
+        "sleep_seconds": sleep_seconds,
+        "skip_existing": True,
+    }
+    db = SessionLocal()
+
+    try:
+        job, created = job_service.enqueue_job(
+            db=db,
+            job_type="scheduler.market_margin_daily_refresh",
+            target="market",
+            request=request,
+            progress_total=1,
+            message="Queued by scheduler.",
+            task=backfill_tasks.run_market_daily_metrics_job,
+            task_args=(
+                None,
+                None,
+                categories,
+                settings.scheduler_market_refresh_lookback_days,
+                include_today,
+                sleep_seconds,
+                True,
+            ),
+        )
+        logger.info(
+            "Scheduled market margin daily refresh %s job_id=%s",
             "queued" if created else "deduped",
             job.id,
         )
@@ -263,6 +331,77 @@ def enqueue_market_chip_daily_refresh() -> None:
         )
         logger.info(
             "Scheduled market chip daily refresh %s job_id=%s",
+            "queued" if created else "deduped",
+            job.id,
+        )
+    finally:
+        db.close()
+
+
+def enqueue_market_chip_margin_daily_refresh() -> None:
+    now = datetime.now(_timezone())
+    calendar_status = build_taiwan_calendar_status(now=now)
+
+    if not calendar_status.get("is_trading_day"):
+        logger.info(
+            "Skipped scheduled market chip margin daily refresh because %s is not a trading day phase=%s reason=%s.",
+            calendar_status.get("date"),
+            calendar_status.get("phase"),
+            calendar_status.get("reason"),
+        )
+        return
+
+    try:
+        index_ids = normalize_market_chip_index_ids(
+            _split_csv(settings.scheduler_market_chip_refresh_index_ids)
+        )
+    except ValueError as exc:
+        logger.error("Skipped scheduled market chip margin daily refresh: %s", exc)
+        return
+
+    trade_date = expected_trade_date_from_calendar(
+        calendar_status,
+        market="tw",
+        key="market_chip_margin_daily",
+    ) or now.date()
+    include_today = is_release_released_from_calendar(
+        calendar_status,
+        market="tw",
+        key="market_chip_margin_daily",
+    )
+
+    request = {
+        "schedule": "market_chip_margin_daily_refresh",
+        "run_date": now.date().isoformat(),
+        "index_ids": index_ids,
+        "trade_date": trade_date,
+        "include_today": include_today,
+        "calendar_phase": calendar_status.get("phase"),
+        "calendar_release_window": calendar_status.get("release_windows", {}).get(
+            "market_chip_margin_daily"
+        ),
+        "force": settings.scheduler_market_chip_refresh_force,
+    }
+    db = SessionLocal()
+
+    try:
+        job, created = job_service.enqueue_job(
+            db=db,
+            job_type="scheduler.market_chip_margin_daily_refresh",
+            target="market-chips",
+            request=request,
+            progress_total=len(index_ids),
+            message="Queued by scheduler.",
+            task=backfill_tasks.run_market_chip_daily_refresh_job,
+            task_args=(
+                index_ids,
+                trade_date,
+                include_today,
+                settings.scheduler_market_chip_refresh_force,
+            ),
+        )
+        logger.info(
+            "Scheduled market chip margin daily refresh %s job_id=%s",
             "queued" if created else "deduped",
             job.id,
         )
@@ -479,8 +618,48 @@ def _add_jp_market_refresh_job(scheduler: Any) -> bool:
     return True
 
 
+def enqueue_due_dispatch_schedules() -> None:
+    from app.dispatch import service as dispatch_service
+
+    db = SessionLocal()
+
+    try:
+        result = dispatch_service.enqueue_due_schedules(db=db)
+        if result.get("queued_count") or result.get("error_count"):
+            logger.info(
+                "Dispatch schedule tick checked=%s queued=%s errors=%s.",
+                result.get("checked_count"),
+                result.get("queued_count"),
+                result.get("error_count"),
+            )
+    finally:
+        db.close()
+
+
+def _add_dispatch_schedule_tick_job(scheduler: Any) -> bool:
+    if not settings.enable_dispatch_scheduler:
+        return False
+
+    interval_seconds = max(int(settings.scheduler_dispatch_tick_interval_seconds), 10)
+    scheduler.add_job(
+        enqueue_due_dispatch_schedules,
+        trigger="interval",
+        seconds=interval_seconds,
+        id="dispatch_schedule_tick",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        next_run_time=datetime.now(_timezone()),
+    )
+    return True
+
+
 def start_scheduler() -> Any | None:
-    if not settings.enable_scheduler and not settings.enable_taiwan_futures_scheduler:
+    if (
+        not settings.enable_scheduler
+        and not settings.enable_taiwan_futures_scheduler
+        and not settings.enable_dispatch_scheduler
+    ):
         logger.info("Job scheduler disabled.")
         return None
 
@@ -494,8 +673,14 @@ def start_scheduler() -> Any | None:
 
     if settings.enable_scheduler:
         hour, minute = _parse_hour_minute(settings.scheduler_market_refresh_time)
+        margin_hour, margin_minute = _parse_hour_minute(
+            settings.scheduler_market_margin_refresh_time
+        )
         chip_hour, chip_minute = _parse_hour_minute(
             settings.scheduler_market_chip_refresh_time
+        )
+        chip_margin_hour, chip_margin_minute = _parse_hour_minute(
+            settings.scheduler_market_chip_margin_refresh_time
         )
         scheduler.add_job(
             enqueue_market_daily_refresh,
@@ -509,12 +694,34 @@ def start_scheduler() -> Any | None:
             max_instances=1,
         )
         scheduler.add_job(
+            enqueue_market_margin_daily_refresh,
+            trigger="cron",
+            day_of_week="mon-fri",
+            hour=margin_hour,
+            minute=margin_minute,
+            id="market_margin_daily_refresh",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+        scheduler.add_job(
             enqueue_market_chip_daily_refresh,
             trigger="cron",
             day_of_week="mon-fri",
             hour=chip_hour,
             minute=chip_minute,
             id="market_chip_daily_refresh",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+        scheduler.add_job(
+            enqueue_market_chip_margin_daily_refresh,
+            trigger="cron",
+            day_of_week="mon-fri",
+            hour=chip_margin_hour,
+            minute=chip_margin_minute,
+            id="market_chip_margin_daily_refresh",
             replace_existing=True,
             coalesce=True,
             max_instances=1,
@@ -535,13 +742,18 @@ def start_scheduler() -> Any | None:
         )
     jp_market_refresh_enabled = _add_jp_market_refresh_job(scheduler)
     taiwan_futures_collector_enabled = _add_taiwan_futures_collector_job(scheduler)
+    dispatch_schedule_tick_enabled = _add_dispatch_schedule_tick_job(scheduler)
     scheduler.start()
     logger.info(
-        "Job scheduler started. core_scheduler_enabled=%s; market_daily_refresh=%s %s weekdays; market_chip_daily_refresh=%s %s weekdays; us_market_daily_refresh=%s %s %s enabled=%s; jp_market_watchlist_resource_refresh=%s %s %s enabled=%s; taiwan_futures_quote_collector interval=%ss enabled=%s.",
+        "Job scheduler started. core_scheduler_enabled=%s; market_daily_refresh=%s %s weekdays; market_margin_daily_refresh=%s %s weekdays; market_chip_daily_refresh=%s %s weekdays; market_chip_margin_daily_refresh=%s %s weekdays; us_market_daily_refresh=%s %s %s enabled=%s; jp_market_watchlist_resource_refresh=%s %s %s enabled=%s; taiwan_futures_quote_collector interval=%ss enabled=%s; dispatch_schedule_tick interval=%ss enabled=%s.",
         settings.enable_scheduler,
         settings.scheduler_market_refresh_time,
         settings.timezone,
+        settings.scheduler_market_margin_refresh_time,
+        settings.timezone,
         settings.scheduler_market_chip_refresh_time,
+        settings.timezone,
+        settings.scheduler_market_chip_margin_refresh_time,
         settings.timezone,
         settings.scheduler_us_market_refresh_time,
         settings.scheduler_us_market_refresh_day_of_week,
@@ -553,6 +765,8 @@ def start_scheduler() -> Any | None:
         jp_market_refresh_enabled,
         max(int(settings.scheduler_taiwan_futures_interval_seconds), 10),
         taiwan_futures_collector_enabled,
+        max(int(settings.scheduler_dispatch_tick_interval_seconds), 10),
+        dispatch_schedule_tick_enabled,
     )
     return scheduler
 

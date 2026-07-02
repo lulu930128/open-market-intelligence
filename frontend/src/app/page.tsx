@@ -7,6 +7,7 @@ import type {
   MarketIndexSummary,
   OhlcChartResponse,
   StockIndicatorPoint,
+  TaiwanStockQuoteDepthPreviewMode,
   USWatchlistGroupNode,
   USWatchlistItemRead,
   WatchlistGroupRadarRead,
@@ -29,12 +30,13 @@ function firstSearchParam(
 }
 
 function normalizeRadarMode(value: string | undefined): WatchlistRadarMode {
+  if (value === "volume") return "momentum";
+  if (value === "weakness") return "risk";
+
   if (
     value === "surge" ||
     value === "breakout" ||
-    value === "volume" ||
     value === "overheat" ||
-    value === "weakness" ||
     value === "risk" ||
     value === "momentum"
   ) {
@@ -42,6 +44,14 @@ function normalizeRadarMode(value: string | undefined): WatchlistRadarMode {
   }
 
   return "action";
+}
+
+function normalizeQuoteDepthPreviewMode(
+  value: string | undefined
+): TaiwanStockQuoteDepthPreviewMode | null {
+  if (value === "preopen" || value === "live") return value;
+
+  return null;
 }
 
 function watchlistRadarPath(groupId: number, mode: WatchlistRadarMode) {
@@ -124,6 +134,9 @@ export default async function Page({
   const groupIdParam = firstSearchParam(resolvedSearchParams, "group_id");
   const initialRadarMode = normalizeRadarMode(
     firstSearchParam(resolvedSearchParams, "radar_mode")
+  );
+  const quoteDepthPreviewMode = normalizeQuoteDepthPreviewMode(
+    firstSearchParam(resolvedSearchParams, "quote_depth_preview")
   );
   const requestedGroupId = Number(groupIdParam);
   const requestedFuturesSymbol = futuresParam?.trim().toUpperCase() || null;
@@ -231,6 +244,7 @@ export default async function Page({
       initialUsWatchlistItems={initialUsWatchlistItems}
       initialJpWatchlistTree={initialJpWatchlistTree}
       initialJpWatchlistItems={initialJpWatchlistItems}
+      quoteDepthPreviewMode={quoteDepthPreviewMode}
     />
   );
 }

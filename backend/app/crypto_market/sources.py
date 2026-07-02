@@ -15,12 +15,14 @@ from app.crypto_market.contract import (
     BITOPRO_PROVIDER,
     COINGECKO_COIN_IDS,
     COINGECKO_PROVIDER,
+    COINGLASS_PROVIDER,
     OKX_PROVIDER,
     PERPETUAL,
     SPOT,
     ProviderInstrument,
     get_provider_instrument,
     normalize_symbol,
+    provider_supports_ohlcv_interval,
     split_symbol,
 )
 from app.http_client import get as http_get
@@ -151,6 +153,99 @@ class CryptoMarketCapRecord:
     fetched_at: datetime
 
 
+@dataclass(frozen=True)
+class CryptoLiquidationEventRecord:
+    provider: str
+    exchange: str
+    symbol: str
+    provider_symbol: str
+    base_asset: str
+    quote_asset: str
+    instrument_type: str
+    liquidation_side: str
+    order_side: str | None
+    price: float | None
+    average_price: float | None
+    quantity: float | None
+    notional: float | None
+    event_time: datetime
+    source_url: str | None
+    raw_payload: dict[str, Any] | list[Any] | None
+    fetched_at: datetime
+
+
+@dataclass(frozen=True)
+class CryptoLiquidationHeatmapCellRecord:
+    provider: str
+    source_kind: str
+    method: str
+    exchange: str
+    symbol: str
+    provider_symbol: str
+    base_asset: str
+    quote_asset: str
+    instrument_type: str
+    time_bucket: datetime
+    bucket_seconds: int
+    price_bucket: float
+    price_bucket_size: float | None
+    liquidation_side: str
+    liquidation_notional: float | None
+    liquidation_quantity: float | None
+    event_count: int
+    intensity: float | None
+    generated_at: datetime
+    source_url: str | None
+    raw_payload: dict[str, Any] | list[Any] | None
+    fetched_at: datetime
+
+
+@dataclass(frozen=True)
+class CryptoCvdBucketRecord:
+    provider: str
+    exchange: str
+    symbol: str
+    provider_symbol: str
+    base_asset: str
+    quote_asset: str
+    instrument_type: str
+    bucket_seconds: int
+    sampled_at: datetime
+    buy_base_volume: float | None
+    sell_base_volume: float | None
+    buy_quote_volume: float | None
+    sell_quote_volume: float | None
+    net_base_volume: float | None
+    net_quote_volume: float | None
+    cumulative_base_delta: float | None
+    cumulative_quote_delta: float | None
+    trade_count: int
+    event_time: datetime | None
+    source_url: str | None
+    raw_payload: dict[str, Any] | list[Any] | None
+    fetched_at: datetime
+
+
+@dataclass(frozen=True)
+class CryptoLongShortRatioRecord:
+    provider: str
+    exchange: str
+    symbol: str
+    provider_symbol: str
+    base_asset: str
+    quote_asset: str
+    instrument_type: str
+    ratio_scope: str
+    long_ratio: float | None
+    short_ratio: float | None
+    long_short_ratio: float | None
+    event_time: datetime | None
+    sampled_at: datetime
+    source_url: str | None
+    raw_payload: dict[str, Any] | list[Any] | None
+    fetched_at: datetime
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -216,6 +311,16 @@ def _datetime_from_iso(value: Any) -> datetime | None:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _coinglass_headers() -> dict[str, str]:
+    api_key = str(settings.coinglass_api_key or "").strip()
+    if not api_key:
+        raise CryptoMarketDataFetchError("CoinGlass API key is not configured.")
+    return {
+        "accept": "application/json",
+        "CG-API-KEY": api_key,
+    }
 
 
 def _request_json(url: str, *, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> Any:
@@ -624,19 +729,29 @@ def _bar_record(
 
 
 def _bitopro_resolution(interval: str) -> str:
-    if interval not in {"1m", "5m", "15m", "30m", "1h", "3h", "4h", "6h", "12h", "1d", "1w", "1M"}:
+    if not provider_supports_ohlcv_interval(BITOPRO_PROVIDER, interval):
         raise ValueError(f"Unsupported BitoPro OHLC interval: {interval}")
     return interval
 
 
 def _binance_interval(interval: str) -> str:
-    if interval not in {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "1w", "1M"}:
+    if not provider_supports_ohlcv_interval(BINANCE_PROVIDER, interval):
         raise ValueError(f"Unsupported Binance kline interval: {interval}")
     return interval
 
 
 def _okx_interval(interval: str) -> str:
-    mapping = {"1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m", "1h": "1H", "4h": "4H", "1d": "1D", "1w": "1W"}
+    mapping = {
+        "1m": "1m",
+        "5m": "5m",
+        "15m": "15m",
+        "30m": "30m",
+        "1h": "1H",
+        "4h": "4H",
+        "1d": "1D",
+        "1w": "1W",
+        "1M": "1M",
+    }
     if interval not in mapping:
         raise ValueError(f"Unsupported OKX candle interval: {interval}")
     return mapping[interval]
@@ -820,6 +935,65 @@ def fetch_binance_derivatives_metric(symbol: str) -> CryptoDerivativesMetricReco
     )
 
 
+def fetch_binance_long_short_account_ratio(
+    symbol: str,
+    *,
+    period: str = "5m",
+    limit: int = 30,
+) -> list[CryptoLongShortRatioRecord]:
+    instrument = get_provider_instrument(
+        provider=BINANCE_PROVIDER,
+        symbol=symbol,
+        instrument_type=PERPETUAL,
+        resource="long_short_ratio",
+    )
+    normalized_period = str(period or "5m").strip() or "5m"
+    normalized_limit = max(1, min(int(limit), 500))
+    params = {
+        "symbol": instrument.provider_symbol,
+        "period": normalized_period,
+        "limit": normalized_limit,
+    }
+    path = "/futures/data/globalLongShortAccountRatio"
+    url = _response_url(settings.binance_futures_api_base_url, path, params)
+    fetched_at = _now()
+    payload = _request_json(
+        f"{_clean_base_url(settings.binance_futures_api_base_url)}{path}",
+        params=params,
+    )
+    if not isinstance(payload, list):
+        raise CryptoMarketDataFetchError("Binance long/short ratio payload did not contain a list.")
+
+    records: list[CryptoLongShortRatioRecord] = []
+    for row in payload:
+        if not isinstance(row, dict):
+            continue
+        sampled_at = _datetime_from_millis(row.get("timestamp"))
+        if sampled_at is None:
+            continue
+        records.append(
+            CryptoLongShortRatioRecord(
+                provider=instrument.provider,
+                exchange=instrument.exchange,
+                symbol=instrument.symbol,
+                provider_symbol=instrument.provider_symbol,
+                base_asset=instrument.base_asset,
+                quote_asset=instrument.quote_asset,
+                instrument_type=instrument.instrument_type,
+                ratio_scope="global_account",
+                long_ratio=_parse_float(row.get("longAccount")),
+                short_ratio=_parse_float(row.get("shortAccount")),
+                long_short_ratio=_parse_float(row.get("longShortRatio")),
+                event_time=sampled_at,
+                sampled_at=sampled_at,
+                source_url=url,
+                raw_payload=row,
+                fetched_at=fetched_at,
+            )
+        )
+    return records
+
+
 def fetch_okx_derivatives_metric(symbol: str) -> CryptoDerivativesMetricRecord:
     instrument = get_provider_instrument(
         provider=OKX_PROVIDER,
@@ -869,6 +1043,203 @@ def fetch_okx_derivatives_metric(symbol: str) -> CryptoDerivativesMetricRecord:
         raw_payload=payload,
         fetched_at=fetched_at,
     )
+
+
+def _coinglass_coin_from_symbol(symbol: str) -> str:
+    return split_symbol(normalize_symbol(symbol))[0]
+
+
+def _coinglass_provider_symbol(symbol: str) -> str:
+    base, quote = split_symbol(normalize_symbol(symbol))
+    return f"{base}{quote}"
+
+
+def _coinglass_bucket_seconds(candles: list[Any], index: int) -> int:
+    current = _datetime_from_seconds(candles[index][0]) if 0 <= index < len(candles) and isinstance(candles[index], list) else None
+    next_value = (
+        _datetime_from_seconds(candles[index + 1][0])
+        if 0 <= index + 1 < len(candles) and isinstance(candles[index + 1], list)
+        else None
+    )
+    previous_value = (
+        _datetime_from_seconds(candles[index - 1][0])
+        if 0 <= index - 1 < len(candles) and isinstance(candles[index - 1], list)
+        else None
+    )
+    if current and next_value:
+        return max(int((next_value - current).total_seconds()), 1)
+    if current and previous_value:
+        return max(int((current - previous_value).total_seconds()), 1)
+    return 300
+
+
+def _coinglass_price_bucket_size(y_axis: list[Any], index: int) -> float | None:
+    current = _parse_float(y_axis[index]) if 0 <= index < len(y_axis) else None
+    next_value = _parse_float(y_axis[index + 1]) if 0 <= index + 1 < len(y_axis) else None
+    previous_value = _parse_float(y_axis[index - 1]) if 0 <= index - 1 < len(y_axis) else None
+    if current is None:
+        return None
+    if next_value is not None:
+        return abs(next_value - current)
+    if previous_value is not None:
+        return abs(current - previous_value)
+    return None
+
+
+def fetch_coinglass_liquidation_heatmap(
+    symbol: str,
+    *,
+    range_value: str = "24h",
+) -> list[CryptoLiquidationHeatmapCellRecord]:
+    normalized_symbol = normalize_symbol(symbol)
+    base, quote = split_symbol(normalized_symbol)
+    params = {
+        "symbol": base,
+        "range": str(range_value or "24h").strip() or "24h",
+    }
+    path = "/api/futures/liquidation/aggregated-heatmap/model1"
+    fetched_at = _now()
+    payload = _request_json(
+        f"{_clean_base_url(settings.coinglass_api_base_url)}{path}",
+        params=params,
+        headers=_coinglass_headers(),
+    )
+    if not isinstance(payload, dict) or str(payload.get("code")) != "0":
+        raise CryptoMarketDataFetchError(f"CoinGlass liquidation heatmap returned non-success response: {payload}")
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise CryptoMarketDataFetchError("CoinGlass liquidation heatmap payload did not contain a data object.")
+
+    y_axis = data.get("y_axis")
+    points = data.get("liquidation_leverage_data")
+    candles = data.get("price_candlesticks")
+    if not isinstance(y_axis, list) or not isinstance(points, list) or not isinstance(candles, list):
+        raise CryptoMarketDataFetchError("CoinGlass liquidation heatmap payload did not contain expected arrays.")
+
+    amounts = [
+        _parse_float(point[2])
+        for point in points
+        if isinstance(point, list) and len(point) >= 3 and _parse_float(point[2]) is not None
+    ]
+    max_amount = max(amounts) if amounts else None
+    records: list[CryptoLiquidationHeatmapCellRecord] = []
+    source_url = _response_url(settings.coinglass_api_base_url, path, params)
+    for point in points:
+        if not isinstance(point, list) or len(point) < 3:
+            continue
+        x_index = _parse_int(point[0])
+        y_index = _parse_int(point[1])
+        amount = _parse_float(point[2])
+        if x_index is None or y_index is None or amount is None:
+            continue
+        if x_index < 0 or x_index >= len(candles) or y_index < 0 or y_index >= len(y_axis):
+            continue
+        candle = candles[x_index]
+        if not isinstance(candle, list) or not candle:
+            continue
+        time_bucket = _datetime_from_seconds(candle[0])
+        price_bucket = _parse_float(y_axis[y_index])
+        if time_bucket is None or price_bucket is None:
+            continue
+        records.append(
+            CryptoLiquidationHeatmapCellRecord(
+                provider=COINGLASS_PROVIDER,
+                source_kind="third_party",
+                method="coinglass_aggregated_heatmap_model1",
+                exchange="CoinGlass",
+                symbol=normalized_symbol,
+                provider_symbol=base,
+                base_asset=base,
+                quote_asset=quote,
+                instrument_type=PERPETUAL,
+                time_bucket=time_bucket,
+                bucket_seconds=_coinglass_bucket_seconds(candles, x_index),
+                price_bucket=price_bucket,
+                price_bucket_size=_coinglass_price_bucket_size(y_axis, y_index),
+                liquidation_side="all",
+                liquidation_notional=amount,
+                liquidation_quantity=None,
+                event_count=0,
+                intensity=(amount / max_amount if max_amount else None),
+                generated_at=fetched_at,
+                source_url=source_url,
+                raw_payload={"point": point, "range": params["range"]},
+                fetched_at=fetched_at,
+            )
+        )
+    return records
+
+
+def fetch_coinglass_liquidation_orders(
+    symbol: str,
+    *,
+    exchange: str = "Binance",
+    min_liquidation_amount: float = 10000,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+) -> list[CryptoLiquidationEventRecord]:
+    normalized_symbol = normalize_symbol(symbol)
+    base, quote = split_symbol(normalized_symbol)
+    params: dict[str, Any] = {
+        "exchange": str(exchange or "Binance").strip() or "Binance",
+        "symbol": base,
+        "min_liquidation_amount": str(max(float(min_liquidation_amount), 0)),
+    }
+    if start_time is not None:
+        params["start_time"] = int(start_time.timestamp() * 1000)
+    if end_time is not None:
+        params["end_time"] = int(end_time.timestamp() * 1000)
+
+    path = "/api/futures/liquidation/order"
+    fetched_at = _now()
+    payload = _request_json(
+        f"{_clean_base_url(settings.coinglass_api_base_url)}{path}",
+        params=params,
+        headers=_coinglass_headers(),
+    )
+    if not isinstance(payload, dict) or str(payload.get("code")) != "0":
+        raise CryptoMarketDataFetchError(f"CoinGlass liquidation order returned non-success response: {payload}")
+    rows = payload.get("data")
+    if not isinstance(rows, list):
+        raise CryptoMarketDataFetchError("CoinGlass liquidation order payload did not contain a data list.")
+
+    records: list[CryptoLiquidationEventRecord] = []
+    source_url = _response_url(settings.coinglass_api_base_url, path, params)
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        event_time = _datetime_from_millis(row.get("time"))
+        price = _parse_float(row.get("price"))
+        notional = _parse_float(row.get("usd_value"))
+        side = _parse_int(row.get("side"))
+        if event_time is None:
+            continue
+        order_side = "buy" if side == 1 else "sell" if side == 2 else None
+        liquidation_side = "short" if order_side == "buy" else "long" if order_side == "sell" else "unknown"
+        quantity = notional / price if notional is not None and price not in (None, 0) else None
+        provider_symbol = str(row.get("symbol") or _coinglass_provider_symbol(normalized_symbol)).strip().upper()
+        records.append(
+            CryptoLiquidationEventRecord(
+                provider=COINGLASS_PROVIDER,
+                exchange=str(row.get("exchange_name") or params["exchange"]).strip() or params["exchange"],
+                symbol=normalized_symbol,
+                provider_symbol=provider_symbol,
+                base_asset=str(row.get("base_asset") or base).strip().upper(),
+                quote_asset=quote,
+                instrument_type=PERPETUAL,
+                liquidation_side=liquidation_side,
+                order_side=order_side,
+                price=price,
+                average_price=None,
+                quantity=quantity,
+                notional=notional,
+                event_time=event_time,
+                source_url=source_url,
+                raw_payload=row,
+                fetched_at=fetched_at,
+            )
+        )
+    return records
 
 
 def fetch_coingecko_market_caps(

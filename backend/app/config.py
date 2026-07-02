@@ -95,7 +95,9 @@ class Settings(BaseSettings):
     scheduler_market_refresh_time: str = "15:15"
     scheduler_market_refresh_lookback_days: int = 7
     scheduler_market_refresh_sleep_seconds: float = 0.2
-    scheduler_market_chip_refresh_time: str = "18:35"
+    scheduler_market_chip_refresh_time: str = "15:10"
+    scheduler_market_chip_margin_refresh_time: str = "21:10"
+    scheduler_market_margin_refresh_time: str = "21:10"
     scheduler_market_chip_refresh_index_ids: str = "TAIEX,TPEX"
     scheduler_market_chip_refresh_force: bool = False
     enable_taiwan_futures_scheduler: bool = True
@@ -127,6 +129,8 @@ class Settings(BaseSettings):
     dispatch_smtp_use_tls: bool = True
     dispatch_smtp_use_ssl: bool = False
     dispatch_smtp_timeout_seconds: int = 30
+    enable_dispatch_scheduler: bool = True
+    scheduler_dispatch_tick_interval_seconds: int = 60
 
     finmind_token: str | None = None
     alphavantage_api_key: str | None = None
@@ -152,6 +156,7 @@ class Settings(BaseSettings):
     crypto_market_auto_refresh_loop_seconds: float = 1.0
     crypto_market_auto_refresh_min_interval_seconds: float = 5.0
     crypto_market_auto_refresh_ohlcv_limit: int = 10
+    crypto_market_auto_refresh_ohlcv_bundle_seconds: float = 900.0
     enable_crypto_market_ws_collector: bool = True
     crypto_market_ws_enabled_providers: str = "bitopro,binance"
     crypto_market_ws_message_stale_seconds: int = 10
@@ -170,11 +175,20 @@ class Settings(BaseSettings):
     binance_spot_api_base_url: str = "https://api.binance.com"
     binance_spot_ws_base_url: str = "wss://stream.binance.com:9443"
     binance_futures_api_base_url: str = "https://fapi.binance.com"
+    binance_futures_ws_base_url: str = "wss://fstream.binance.com"
     okx_api_base_url: str = "https://www.okx.com"
     okx_ws_public_url: str = "wss://ws.okx.com:8443/ws/v5/public"
     coingecko_api_base_url: str = "https://api.coingecko.com/api/v3"
     coingecko_api_key: str | None = None
     coingecko_api_key_header: str = "x-cg-demo-api-key"
+    coinglass_api_base_url: str = "https://open-api-v4.coinglass.com"
+    coinglass_api_key: str | None = None
+    crypto_market_liquidation_heatmap_range: str = "24h"
+    crypto_market_liquidation_fallback_exchange: str = "Binance"
+    crypto_market_liquidation_min_amount: float = 10000.0
+    enable_crypto_market_liquidation_local_fallback: bool = True
+    crypto_market_long_short_ratio_period: str = "5m"
+    crypto_market_long_short_ratio_limit: int = 30
     omi_http_trust_env: bool = False
     openai_api_key: str | None = None
     openai_llm_api_key: str | None = None
