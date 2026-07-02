@@ -4,15 +4,25 @@ Open Market Intelligence（OMI）是一套本機優先的市場情報與看盤�
 
 目前產品主軸仍是台股。美股模組已可作為台股研究的領先訊號層，特別適合觀察半導體、AI 基建、雲端、記憶體、ETF 與大型科技股對台股供應鏈的影響。日股是早期 context layer；Crypto 與商品市場是獨立的輔助市場資料域，用來觀察 24/7 風險資產、USDT 計價脈絡與大宗商品 reference，不是自動交易或下單系統。
 
+OMI 適合的日常流程：
+
+- 盤前：看台股自選群組、隔夜美股脈絡、台指期與 Crypto 風險資產狀態，先建立今日觀察清單。
+- 盤中：用 Watchlist Radar、盤中 K 線、五檔與即時 source health 找出需要優先檢查的標的，而不是盲目掃全市場。
+- 收盤後：整理法人、融資融券、集保、分點、營收與基本面資料，搭配派報模板寄出市場總覽或自選股觀察報告。
+- 做決策前：讓 OMI dock 讀本機 evidence，輸出情境、關鍵價位、失效條件、資料限制與反證。
+- 做驗證時：每個資料來源都要保留 freshness、provider、warnings 與 missing 狀態；不把 stale cache 包裝成即時資料。
+
+OMI 的定位是研究與決策輔助，不提供自動下單、不代替使用者承擔投資判斷，也不把 AI 回答視為投資建議。
+
 ## 產品畫面
 
 ### 台股 Dashboard 與 Watchlist Radar
 
 <p align="center">
-  <img src="docs/assets/readme/omi-dashboard-overview.png" alt="Open Market Intelligence Taiwan dashboard with market cards, watchlist group summary, radar tabs and ranking table" width="1120">
+  <img src="docs/assets/readme/omi-dashboard-live-radar.png" alt="Open Market Intelligence Taiwan dashboard with live market cards, watchlist group summary, radar signal chips and ranked candidates" width="1120">
 </p>
 
-Dashboard 整合大盤卡片、自選股群組、Watchlist Radar 與排行表；固定的加權指數入口預設收起，讓主要空間留給自選股操作。
+Dashboard 整合大盤卡片、自選股群組、Watchlist Radar、訊號 chip 與排行表；固定的加權指數入口預設收起，讓主要空間留給自選股操作與今日優先級判斷。
 
 ### 個股研究工作台
 
@@ -62,6 +72,22 @@ OMI dock 以本機 evidence 為預設，直接回傳買入判斷、關鍵價位�
 
 美股模組提供指數、自選股、OHLC、盤中資料、SEC facts、Alpha Vantage actions、FINRA short volume 與 FRED macro，定位為台股供應鏈與隔夜市場脈絡。
 
+### Crypto 即時市場與風險資產 Context
+
+<p align="center">
+  <img src="docs/assets/readme/omi-crypto-realtime-workbench.png" alt="Open Market Intelligence crypto realtime workbench with BTC K-line, Binance and OKX quotes, Taiwan premium and liquidity context" width="1120">
+</p>
+
+Crypto 工作台整合 BTC/ETH 等主流幣自選、Binance/OKX/BitoPro 即時狀態、K 線、台灣價差、流動性與清算風險地圖；它是 24/7 風險資產 context，不是自動交易介面。
+
+### 來源透明與責任聲明
+
+<p align="center">
+  <img src="docs/assets/readme/omi-settings-source-disclosure.png" alt="Open Market Intelligence settings dialog showing data source catalog, reliability notes and research-only disclaimer" width="1120">
+</p>
+
+Settings 底部提供來源與責任聲明，把 TWSE/TPEx、TAIFEX、MOPS、SEC、Yahoo、Alpha Vantage、BitoPro、Binance、CoinGecko、CoinGlass、FRED 等來源的可靠性邊界集中列出，並明確標示 OMI 是研究輔助工具，不是投資建議或交易指令。
+
 ## 目前狀態
 
 這版是台股 v2 基線版，日常本機研究流程已具備可用穩定度：
@@ -75,6 +101,8 @@ OMI dock 以本機 evidence 為預設，直接回傳買入判斷、關鍵價位�
 - 專業 K 線模式：台股、美股、台指期與 Crypto 共用同一套全寬圖表 shell，支援壓縮 header、指標分類、VPVR、交叉/突破標記、畫線工具、量測工具、undo/redo、畫線快照保存。
 - 台股籌碼與基本面：法人、融資融券、集保、券商分點 Top15、營收、財報、盈餘。
 - 美股市場：主要指數、自選股、OHLC、盤中資料、SEC facts、Alpha Vantage profile/actions、FINRA short volume、FRED macro。
+- 派報：可設定收件群組、預覽模板、手動寄送與 UI 自訂定時派報；同一排程同一分鐘去重，避免重複寄送。
+- Settings 來源聲明：把資料來源、可靠性、stale/partial/missing 邊界與研究用途但書放在 UI 裡，和 README 的信任模型保持一致。
 - AI/Agent 入口：`POST /api/ai/ask` 與 MCP `omi.ask`，支援 evidence freshness、warnings、missing data、tool runs；前端 OMI dock 預設走本機 evidence-only brief answer，自選股問題會把 Watchlist Radar 納入回答與 action plan。
 
 ## 產品原則
