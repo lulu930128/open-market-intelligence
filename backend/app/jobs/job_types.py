@@ -4,3 +4,7 @@ JP_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE = "jp_market.watchlist_resource_refresh"
 JP_SCHEDULED_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE = (
     "jp_market.scheduler.watchlist_resource_refresh"
 )
+KR_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE = "kr_market.watchlist_resource_refresh"
+KR_SCHEDULED_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE = (
+    "kr_market.scheduler.watchlist_resource_refresh"
+)

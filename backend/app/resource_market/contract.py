@@ -7,7 +7,20 @@ from typing import Any
 RESOURCE_MARKET = "resource"
 COMMODITY_FOLDER = "commodity"
 PROVIDER_PENDING = "provider_pending"
+YAHOO_CHART_PROVIDER = "yahoo_chart"
+PROVIDER_BEST_EFFORT = "best_effort_delayed"
 FUTURES = "futures"
+SUPPORTED_RESOURCE_OHLCV_INTERVALS = ("1m", "5m", "15m", "30m", "1h", "1d", "1w", "1M")
+RESOURCE_CHART_PROFILES = {
+    "overview": {
+        "default_interval": "1m",
+        "intervals": ["1m", "1d", "1w", "1M"],
+    },
+    "professional": {
+        "default_interval": "1m",
+        "intervals": list(SUPPORTED_RESOURCE_OHLCV_INTERVALS),
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -65,18 +78,18 @@ SUPPORTED_RESOURCE_INSTRUMENTS: tuple[ResourceInstrument, ...] = (
         name="Gold Futures",
         display_name="黃金",
         symbol="GC",
-        provider=PROVIDER_PENDING,
+        provider=YAHOO_CHART_PROVIDER,
         exchange="COMEX",
-        provider_symbol="GC",
+        provider_symbol="GC=F",
         base_asset="GOLD",
-        quote_asset="USDT",
+        quote_asset="USD",
         instrument_type=FUTURES,
         contract_type="front_month",
         resources=("quote", "ohlcv"),
         tradable=False,
         trade_candidate=False,
-        provider_status="provider_pending",
-        role="Gold futures watch-only resource context.",
+        provider_status=PROVIDER_BEST_EFFORT,
+        role="Gold futures watch-only Yahoo chart context; delayed/best-effort.",
     ),
     ResourceInstrument(
         key="commodity:metals:SI",
@@ -86,18 +99,18 @@ SUPPORTED_RESOURCE_INSTRUMENTS: tuple[ResourceInstrument, ...] = (
         name="Silver Futures",
         display_name="白銀",
         symbol="SI",
-        provider=PROVIDER_PENDING,
+        provider=YAHOO_CHART_PROVIDER,
         exchange="COMEX",
-        provider_symbol="SI",
+        provider_symbol="SI=F",
         base_asset="SILVER",
-        quote_asset="USDT",
+        quote_asset="USD",
         instrument_type=FUTURES,
         contract_type="front_month",
         resources=("quote", "ohlcv"),
         tradable=False,
         trade_candidate=False,
-        provider_status="provider_pending",
-        role="Silver futures watch-only resource context.",
+        provider_status=PROVIDER_BEST_EFFORT,
+        role="Silver futures watch-only Yahoo chart context; delayed/best-effort.",
     ),
     ResourceInstrument(
         key="commodity:metals:HG",
@@ -107,18 +120,18 @@ SUPPORTED_RESOURCE_INSTRUMENTS: tuple[ResourceInstrument, ...] = (
         name="Copper Futures",
         display_name="銅",
         symbol="HG",
-        provider=PROVIDER_PENDING,
+        provider=YAHOO_CHART_PROVIDER,
         exchange="COMEX",
-        provider_symbol="HG",
+        provider_symbol="HG=F",
         base_asset="COPPER",
-        quote_asset="USDT",
+        quote_asset="USD",
         instrument_type=FUTURES,
         contract_type="front_month",
         resources=("quote", "ohlcv"),
         tradable=False,
         trade_candidate=False,
-        provider_status="provider_pending",
-        role="Copper futures watch-only resource context.",
+        provider_status=PROVIDER_BEST_EFFORT,
+        role="Copper futures watch-only Yahoo chart context; delayed/best-effort.",
     ),
     ResourceInstrument(
         key="commodity:energy:CL",
@@ -128,18 +141,18 @@ SUPPORTED_RESOURCE_INSTRUMENTS: tuple[ResourceInstrument, ...] = (
         name="WTI Crude Oil Futures",
         display_name="WTI 原油",
         symbol="CL",
-        provider=PROVIDER_PENDING,
+        provider=YAHOO_CHART_PROVIDER,
         exchange="NYMEX",
-        provider_symbol="CL",
+        provider_symbol="CL=F",
         base_asset="WTI_CRUDE",
-        quote_asset="USDT",
+        quote_asset="USD",
         instrument_type=FUTURES,
         contract_type="front_month",
         resources=("quote", "ohlcv"),
         tradable=False,
         trade_candidate=False,
-        provider_status="provider_pending",
-        role="WTI crude oil futures watch-only resource context.",
+        provider_status=PROVIDER_BEST_EFFORT,
+        role="WTI crude oil futures watch-only Yahoo chart context; delayed/best-effort.",
     ),
     ResourceInstrument(
         key="commodity:energy:BZ",
@@ -149,18 +162,18 @@ SUPPORTED_RESOURCE_INSTRUMENTS: tuple[ResourceInstrument, ...] = (
         name="Brent Crude Oil Futures",
         display_name="Brent 原油",
         symbol="BZ",
-        provider=PROVIDER_PENDING,
+        provider=YAHOO_CHART_PROVIDER,
         exchange="NYMEX",
-        provider_symbol="BZ",
+        provider_symbol="BZ=F",
         base_asset="BRENT_CRUDE",
-        quote_asset="USDT",
+        quote_asset="USD",
         instrument_type=FUTURES,
         contract_type="front_month",
         resources=("quote", "ohlcv"),
         tradable=False,
         trade_candidate=False,
-        provider_status="provider_pending",
-        role="Brent crude oil futures watch-only resource context.",
+        provider_status=PROVIDER_BEST_EFFORT,
+        role="Brent crude oil futures watch-only Yahoo chart context; delayed/best-effort.",
     ),
     ResourceInstrument(
         key="commodity:energy:NG",
@@ -170,18 +183,18 @@ SUPPORTED_RESOURCE_INSTRUMENTS: tuple[ResourceInstrument, ...] = (
         name="Henry Hub Natural Gas Futures",
         display_name="天然氣",
         symbol="NG",
-        provider=PROVIDER_PENDING,
+        provider=YAHOO_CHART_PROVIDER,
         exchange="NYMEX",
-        provider_symbol="NG",
+        provider_symbol="NG=F",
         base_asset="NATURAL_GAS",
-        quote_asset="USDT",
+        quote_asset="USD",
         instrument_type=FUTURES,
         contract_type="front_month",
         resources=("quote", "ohlcv"),
         tradable=False,
         trade_candidate=False,
-        provider_status="provider_pending",
-        role="Natural gas futures watch-only resource context.",
+        provider_status=PROVIDER_BEST_EFFORT,
+        role="Natural gas futures watch-only Yahoo chart context; delayed/best-effort.",
     ),
 )
 
@@ -222,7 +235,7 @@ def resource_provider_contract() -> dict[str, Any]:
         "notes": [
             "Resource/commodity data is watch-only and must not place orders.",
             "BTC is the only current future trade candidate and remains in the isolated crypto domain.",
-            "GET endpoints read the local cache or static contract only; provider refresh will be added behind explicit POST routes later.",
+            "GET endpoints read the local cache or static contract only; Yahoo chart refresh is behind explicit bounded POST routes.",
         ],
         "root_folders": [
             {
@@ -237,11 +250,16 @@ def resource_provider_contract() -> dict[str, Any]:
             },
         ],
         "providers": {
-            PROVIDER_PENDING: {
-                "role": "Provider slot is intentionally unconnected until the data vendor is selected.",
+            YAHOO_CHART_PROVIDER: {
+                "role": "Best-effort delayed commodity futures reference from Yahoo chart.",
                 "resources": ["quote", "ohlcv"],
-                "status": "pending",
+                "ohlcv_intervals": list(SUPPORTED_RESOURCE_OHLCV_INTERVALS),
+                "status": PROVIDER_BEST_EFFORT,
             },
         },
+        "ohlcv_intervals": {
+            YAHOO_CHART_PROVIDER: list(SUPPORTED_RESOURCE_OHLCV_INTERVALS),
+        },
+        "chart_profiles": RESOURCE_CHART_PROFILES,
         "instruments": [instrument.to_dict() for instrument in SUPPORTED_RESOURCE_INSTRUMENTS],
     }

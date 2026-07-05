@@ -119,6 +119,14 @@ class Settings(BaseSettings):
     scheduler_jp_market_refresh_provider: str = "auto"
     scheduler_jp_market_refresh_include_fundamentals: bool = True
     scheduler_jp_market_refresh_sleep_seconds: float = 15.0
+    enable_kr_market_scheduler: bool = False
+    scheduler_kr_market_refresh_time: str = "16:20"
+    scheduler_kr_market_refresh_day_of_week: str = "mon-fri"
+    scheduler_kr_market_refresh_outputsize: str = "compact"
+    scheduler_kr_market_refresh_provider: str = "auto"
+    scheduler_kr_market_refresh_include_investors: bool = True
+    scheduler_kr_market_refresh_include_fundamentals: bool = False
+    scheduler_kr_market_refresh_sleep_seconds: float = 15.0
 
     dispatch_smtp_host: str | None = None
     dispatch_smtp_port: int = 587
@@ -143,6 +151,8 @@ class Settings(BaseSettings):
     us_sec_user_agent: str = "Open Market Intelligence local research; set US_SEC_USER_AGENT"
     us_market_http_timeout_seconds: int = 30
     jp_market_http_timeout_seconds: int = 30
+    kr_market_http_timeout_seconds: int = 30
+    resource_market_http_timeout_seconds: int = 15
     jquants_api_base_url: str = "https://api.jquants.com/v2"
     jquants_api_key: str | None = None
     jquants_id_token: str | None = None
@@ -150,6 +160,8 @@ class Settings(BaseSettings):
     jquants_mail_address: str | None = None
     jquants_password: str | None = None
     jquants_id_token_cache_seconds: int = 82800
+    opendart_api_base_url: str = "https://opendart.fss.or.kr/api"
+    opendart_api_key: str | None = None
     crypto_market_http_timeout_seconds: int = 15
     crypto_market_ticker_stale_seconds: int = 15
     enable_crypto_market_auto_refresh: bool = True

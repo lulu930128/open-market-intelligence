@@ -436,7 +436,77 @@ function compactProvider(provider: string) {
   if (provider === "binance") return "Binance";
   if (provider === "okx") return "OKX";
   if (provider === "coingecko") return "CoinGecko";
+  if (provider === "coinglass") return "CoinGlass";
+  if (provider === "omi_local") return "OMI local";
   return provider;
+}
+
+function normalizedContractResource(resource: string) {
+  return resource
+    .replace(/^crypto_realtime_/, "")
+    .replace(/^crypto_/, "")
+    .replace(/^realtime_/, "");
+}
+
+function contractResourceStatus(
+  contract: CryptoProviderContract | null,
+  entry: CryptoSourceHealthEntry
+) {
+  const provider = contract?.providers?.[entry.provider];
+  const resource = normalizedContractResource(entry.resource);
+  return provider?.resource_status?.[resource] ?? provider?.status ?? null;
+}
+
+function healthEntryCategory(
+  entry: CryptoSourceHealthEntry,
+  maturity: string | null,
+  t: TranslationFunction
+) {
+  const resource = normalizedContractResource(entry.resource);
+  if (entry.resource.includes("realtime") || entry.resource.includes("persistence")) {
+    return t("crypto.market.healthRealtime");
+  }
+  if (
+    resource.includes("cvd") ||
+    resource.includes("liquidation") ||
+    resource.includes("long_short") ||
+    maturity === "event_driven" ||
+    maturity === "api_key_required" ||
+    maturity === "provider_pending" ||
+    maturity === "local_fallback"
+  ) {
+    return t("crypto.market.healthAdvanced");
+  }
+  return t("crypto.market.healthCore");
+}
+
+function healthStatusLabel(
+  entry: CryptoSourceHealthEntry,
+  maturity: string | null,
+  t: TranslationFunction
+) {
+  if (entry.ok) return t("crypto.market.status.ok");
+  if (entry.status === "stale") return t("crypto.market.status.stale");
+  if (entry.status === "disabled") return t("crypto.market.status.disabled");
+  if (entry.status === "error") return t("crypto.market.status.error");
+  if (maturity === "provider_pending") return t("crypto.market.status.providerPending");
+  if (maturity === "api_key_required") return t("crypto.market.status.apiKeyRequired");
+  if (maturity === "local_fallback") return t("crypto.market.status.localFallback");
+  if (maturity === "event_driven") return t("crypto.market.status.noRecentEvent");
+  if (entry.status === "empty") return t("crypto.market.status.empty");
+  return entry.status;
+}
+
+function healthDisplayEntries(entries: CryptoSourceHealthEntry[]) {
+  const issues = entries.filter((entry) => !entry.ok);
+  if (issues.length) {
+    return issues.sort((left, right) => {
+      const leftErrorScore = left.status === "error" ? 0 : left.status === "stale" ? 1 : 2;
+      const rightErrorScore = right.status === "error" ? 0 : right.status === "stale" ? 1 : 2;
+      return leftErrorScore - rightErrorScore;
+    });
+  }
+  return entries;
 }
 
 function subscriptionModeLabel(
@@ -461,22 +531,54 @@ function subscriptionSourceLabel(
   return settings.source;
 }
 
+type LoadOutcome<T> =
+  | { ok: true; label: string; value: T }
+  | { ok: false; label: string; error: Error };
+
+type CryptoDataView = "overview" | "risk" | "signals" | "raw" | "health";
+
+const CRYPTO_PANEL_REFRESH_INTERVAL_MS = 30000;
+
+function normalizeLoadError(error: unknown) {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+async function loadOutcome<T>(
+  label: string,
+  promise: Promise<T>
+): Promise<LoadOutcome<T>> {
+  try {
+    return { ok: true, label, value: await promise };
+  } catch (error) {
+    return { ok: false, label, error: normalizeLoadError(error) };
+  }
+}
+
+function loadFailureList(outcomes: readonly LoadOutcome<unknown>[]) {
+  return outcomes.flatMap((outcome) =>
+    outcome.ok ? [] : [{ label: outcome.label, error: outcome.error }]
+  );
+}
+
+function loadFailureMessage(
+  t: TranslationFunction,
+  messageKey: string,
+  failures: { label: string; error: Error }[]
+) {
+  const resources = failures
+    .map((failure) => failure.label)
+    .slice(0, 6)
+    .join(", ");
+  const detail = failures[0]?.error.message;
+  const message = t(messageKey, { resources });
+  return detail ? `${message}: ${detail}` : message;
+}
+
 async function loadMarketDataSubscriptionSettingsForPanel() {
   try {
     return await loadMarketDataSubscriptionSettings();
   } catch {
     return FALLBACK_MARKET_DATA_SUBSCRIPTION_SETTINGS;
-  }
-}
-
-async function fetchHistoryOrEmpty<T>(
-  path: string,
-  params: Record<string, string | number | boolean>
-) {
-  try {
-    return await fetchJson<T[]>(path, params);
-  } catch {
-    return [];
   }
 }
 
@@ -887,6 +989,7 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
   const [realtimeLatest, setRealtimeLatest] = useState<CryptoRealtimeLatest[]>([]);
   const [autoRefreshStatus, setAutoRefreshStatus] = useState<CryptoAutoRefreshStatus | null>(null);
   const [sourceHealth, setSourceHealth] = useState<CryptoSourceHealth | null>(null);
+  const [providerContract, setProviderContract] = useState<CryptoProviderContract | null>(null);
   const [providerAssets, setProviderAssets] = useState<CryptoAssetDefinition[] | null>(null);
   const [providerOhlcvIntervals, setProviderOhlcvIntervals] =
     useState<CryptoProviderContract["ohlcv_intervals"] | null>(null);
@@ -894,6 +997,7 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
     useState<MarketDataSubscriptionSettingsRead | null>(null);
   const [chartProfessionalMode, setChartProfessionalMode] = useState(false);
   const [klineRefreshRevision, setKlineRefreshRevision] = useState(0);
+  const [activeDataView, setActiveDataView] = useState<CryptoDataView>("overview");
   const onSelectRefreshKeyRef = useRef<string | null>(null);
   const lastAutoRefreshIssueRef = useRef<string | null>(null);
   const cryptoBaseOptions = useMemo(
@@ -907,13 +1011,17 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
 
   const loadRealtime = useCallback(async () => {
     const [status, latest, autoStatus] = await Promise.all([
-      fetchJson<CryptoRealtimeStatus>("/api/crypto-market/realtime/status"),
-      fetchJson<CryptoRealtimeLatest[]>("/api/crypto-market/realtime/latest"),
+      fetchJson<CryptoRealtimeStatus>("/api/crypto-market/realtime/status").catch(() => null),
+      fetchJson<CryptoRealtimeLatest[]>("/api/crypto-market/realtime/latest").catch(() => null),
       fetchJson<CryptoAutoRefreshStatus>("/api/crypto-market/auto-refresh/status").catch(() => null),
     ]);
 
-    setRealtimeStatus(status);
-    setRealtimeLatest(latest);
+    if (status) {
+      setRealtimeStatus(status);
+    }
+    if (latest) {
+      setRealtimeLatest(latest);
+    }
     setAutoRefreshStatus(autoStatus);
   }, []);
 
@@ -925,91 +1033,201 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
 
     try {
       const [
-        nextQuotes,
-        nextOrderBooks,
-        nextDerivatives,
-        nextMarketCaps,
-        nextSpreads,
-        nextQuoteHistory,
-        nextLiquidityHistory,
-        nextDerivativesHistory,
-        nextSpreadHistory,
-        nextLongShortRatioHistory,
-        nextLiquidationHeatmap,
-        nextSourceHealth,
-        nextProviderContract,
-        nextSubscriptionSettings,
+        quotesResult,
+        orderBooksResult,
+        derivativesResult,
+        marketCapsResult,
+        spreadsResult,
+        quoteHistoryResult,
+        liquidityHistoryResult,
+        derivativesHistoryResult,
+        spreadHistoryResult,
+        longShortRatioHistoryResult,
+        liquidationHeatmapResult,
+        sourceHealthResult,
+        providerContractResult,
+        subscriptionSettingsResult,
       ] = await Promise.all([
-        fetchJson<CryptoTicker[]>("/api/crypto-market/quotes/latest", { limit: 50 }),
-        fetchJson<CryptoOrderBook[]>("/api/crypto-market/order-books/latest", { limit: 50 }),
-        fetchJson<CryptoDerivatives[]>("/api/crypto-market/derivatives/latest", { limit: 50 }),
-        fetchJson<CryptoMarketCap[]>("/api/crypto-market/market-caps/latest", { limit: 20 }),
-        fetchJson<CryptoSpread[]>("/api/crypto-market/spreads", { limit: 20 }),
-        fetchHistoryOrEmpty<CryptoTickerHistory>("/api/crypto-market/quotes/history", {
-          symbols: historySymbolsForBase(selectedBase),
-          limit: 500,
-          ascending: true,
-        }),
-        fetchHistoryOrEmpty<CryptoLiquidityHistory>("/api/crypto-market/order-books/history", {
-          symbols: historySymbolsForBase(selectedBase),
-          limit: 500,
-          ascending: true,
-        }),
-        selectedBase === "USDT"
-          ? Promise.resolve([] as CryptoDerivativesHistory[])
-          : fetchHistoryOrEmpty<CryptoDerivativesHistory>("/api/crypto-market/derivatives/history", {
-              symbols: `${selectedBase}-USDT`,
-              limit: 500,
-              ascending: true,
-            }),
-        fetchHistoryOrEmpty<CryptoSpreadHistory>("/api/crypto-market/spreads/history", {
-          base: selectedBase,
-          limit: 500,
-          ascending: true,
-        }),
-        selectedBase === "USDT"
-          ? Promise.resolve([] as CryptoLongShortRatioHistory[])
-          : fetchHistoryOrEmpty<CryptoLongShortRatioHistory>("/api/crypto-market/long-short-ratios/history", {
-              symbols: `${selectedBase}-USDT`,
-              limit: 500,
-              ascending: true,
-            }),
-        selectedBase === "USDT"
-          ? Promise.resolve([] as CryptoLiquidationHeatmapCell[])
-          : fetchHistoryOrEmpty<CryptoLiquidationHeatmapCell>("/api/crypto-market/liquidations/heatmap", {
-              symbols: `${selectedBase}-USDT`,
-              limit: 500,
-              ascending: true,
-            }),
-        fetchJson<CryptoSourceHealth>("/api/crypto-market/source-health", {
-          base: selectedBase,
-          include_events: false,
-          max_entries: 80,
-        }),
-        fetchJson<CryptoProviderContract>("/api/crypto-market/provider-contract").catch(() => null),
-        loadMarketDataSubscriptionSettingsForPanel(),
+        loadOutcome(
+          t("crypto.market.quotes"),
+          fetchJson<CryptoTicker[]>("/api/crypto-market/quotes/latest", { limit: 50 })
+        ),
+        loadOutcome(
+          t("crypto.market.orderBook"),
+          fetchJson<CryptoOrderBook[]>("/api/crypto-market/order-books/latest", { limit: 50 })
+        ),
+        loadOutcome(
+          t("crypto.market.perpetuals"),
+          fetchJson<CryptoDerivatives[]>("/api/crypto-market/derivatives/latest", { limit: 50 })
+        ),
+        loadOutcome(
+          t("crypto.market.marketCap"),
+          fetchJson<CryptoMarketCap[]>("/api/crypto-market/market-caps/latest", { limit: 20 })
+        ),
+        loadOutcome(
+          t("crypto.market.taiwanSpread"),
+          fetchJson<CryptoSpread[]>("/api/crypto-market/spreads", { limit: 20 })
+        ),
+        loadOutcome(
+          t("crypto.market.trends"),
+          fetchJson<CryptoTickerHistory[]>("/api/crypto-market/quotes/history", {
+            symbols: historySymbolsForBase(selectedBase),
+            limit: 500,
+            ascending: true,
+          })
+        ),
+        loadOutcome(
+          t("crypto.market.microstructure"),
+          fetchJson<CryptoLiquidityHistory[]>("/api/crypto-market/order-books/history", {
+            symbols: historySymbolsForBase(selectedBase),
+            limit: 500,
+            ascending: true,
+          })
+        ),
+        loadOutcome(
+          t("crypto.market.trendFunding"),
+          selectedBase === "USDT"
+            ? Promise.resolve([] as CryptoDerivativesHistory[])
+            : fetchJson<CryptoDerivativesHistory[]>("/api/crypto-market/derivatives/history", {
+                symbols: `${selectedBase}-USDT`,
+                limit: 500,
+                ascending: true,
+              })
+        ),
+        loadOutcome(
+          t("crypto.market.taiwanSpread"),
+          fetchJson<CryptoSpreadHistory[]>("/api/crypto-market/spreads/history", {
+            base: selectedBase,
+            limit: 500,
+            ascending: true,
+          })
+        ),
+        loadOutcome(
+          t("crypto.market.longShortRatio"),
+          selectedBase === "USDT"
+            ? Promise.resolve([] as CryptoLongShortRatioHistory[])
+            : fetchJson<CryptoLongShortRatioHistory[]>("/api/crypto-market/long-short-ratios/history", {
+                symbols: `${selectedBase}-USDT`,
+                limit: 500,
+                ascending: true,
+              })
+        ),
+        loadOutcome(
+          t("crypto.market.liquidationHeatmap"),
+          selectedBase === "USDT"
+            ? Promise.resolve([] as CryptoLiquidationHeatmapCell[])
+            : fetchJson<CryptoLiquidationHeatmapCell[]>("/api/crypto-market/liquidations/heatmap", {
+                symbols: `${selectedBase}-USDT`,
+                limit: 500,
+                ascending: true,
+              })
+        ),
+        loadOutcome(
+          t("crypto.market.sourceHealth"),
+          fetchJson<CryptoSourceHealth>("/api/crypto-market/source-health", {
+            base: selectedBase,
+            include_events: false,
+            max_entries: 80,
+          })
+        ),
+        loadOutcome(
+          t("crypto.market.providerContract"),
+          fetchJson<CryptoProviderContract>("/api/crypto-market/provider-contract")
+        ),
+        loadOutcome(
+          t("crypto.market.subscriptionLabel"),
+          loadMarketDataSubscriptionSettingsForPanel()
+        ),
         loadRealtime(),
       ]);
 
-      setQuotes(nextQuotes);
-      setOrderBooks(nextOrderBooks);
-      setDerivatives(nextDerivatives);
-      setMarketCaps(nextMarketCaps);
-      setSpreads(nextSpreads);
-      setTrendHistory({
-        quote: nextQuoteHistory,
-        liquidity: nextLiquidityHistory,
-        derivatives: nextDerivativesHistory,
-        spreads: nextSpreadHistory,
-        longShortRatios: nextLongShortRatioHistory,
-      });
-      setLiquidationHeatmapRows(nextLiquidationHeatmap);
-      setSourceHealth(nextSourceHealth);
-      if (nextProviderContract) {
-        setProviderAssets(nextProviderContract.assets ?? null);
-        setProviderOhlcvIntervals(nextProviderContract.ohlcv_intervals ?? null);
+      const loadFailures = loadFailureList([
+        quotesResult,
+        orderBooksResult,
+        derivativesResult,
+        marketCapsResult,
+        spreadsResult,
+        quoteHistoryResult,
+        liquidityHistoryResult,
+        derivativesHistoryResult,
+        spreadHistoryResult,
+        longShortRatioHistoryResult,
+        liquidationHeatmapResult,
+        sourceHealthResult,
+        providerContractResult,
+        subscriptionSettingsResult,
+      ]);
+      const userFacingLoadFailures = loadFailureList([
+        quotesResult,
+        orderBooksResult,
+        derivativesResult,
+        marketCapsResult,
+        spreadsResult,
+        quoteHistoryResult,
+        derivativesHistoryResult,
+        spreadHistoryResult,
+        longShortRatioHistoryResult,
+        sourceHealthResult,
+        providerContractResult,
+        subscriptionSettingsResult,
+      ]);
+
+      const criticalOutcomes = [
+        quotesResult,
+        orderBooksResult,
+        derivativesResult,
+        marketCapsResult,
+        spreadsResult,
+        quoteHistoryResult,
+        liquidityHistoryResult,
+        spreadHistoryResult,
+        sourceHealthResult,
+        providerContractResult,
+      ];
+
+      if (criticalOutcomes.every((outcome) => !outcome.ok)) {
+        throw loadFailures[0].error;
       }
-      setSubscriptionSettings(nextSubscriptionSettings);
+
+      if (quotesResult.ok) setQuotes(quotesResult.value);
+      if (orderBooksResult.ok) setOrderBooks(orderBooksResult.value);
+      if (derivativesResult.ok) setDerivatives(derivativesResult.value);
+      if (marketCapsResult.ok) setMarketCaps(marketCapsResult.value);
+      if (spreadsResult.ok) setSpreads(spreadsResult.value);
+      setTrendHistory((current) => ({
+        quote: quoteHistoryResult.ok ? quoteHistoryResult.value : current.quote,
+        liquidity: liquidityHistoryResult.ok ? liquidityHistoryResult.value : current.liquidity,
+        derivatives: derivativesHistoryResult.ok
+          ? derivativesHistoryResult.value
+          : current.derivatives,
+        spreads: spreadHistoryResult.ok ? spreadHistoryResult.value : current.spreads,
+        longShortRatios: longShortRatioHistoryResult.ok
+          ? longShortRatioHistoryResult.value
+          : current.longShortRatios,
+      }));
+      if (liquidationHeatmapResult.ok) {
+        setLiquidationHeatmapRows(liquidationHeatmapResult.value);
+      }
+      if (sourceHealthResult.ok) {
+        setSourceHealth(sourceHealthResult.value);
+      }
+      if (providerContractResult.ok) {
+        setProviderContract(providerContractResult.value);
+        setProviderAssets(providerContractResult.value.assets ?? null);
+        setProviderOhlcvIntervals(providerContractResult.value.ohlcv_intervals ?? null);
+      }
+      if (subscriptionSettingsResult.ok) {
+        setSubscriptionSettings(subscriptionSettingsResult.value);
+      }
+      if (!silent && userFacingLoadFailures.length) {
+        emitDataStatusEvent({
+          market: "crypto",
+          level: "warning",
+          title: t("crypto.market.loadPartial"),
+          message: loadFailureMessage(t, "crypto.market.loadPartialMessage", userFacingLoadFailures),
+          source: t("crypto.market.eyebrow"),
+        });
+      }
       setLoadState("success");
     } catch (error) {
       if (!silent) {
@@ -1065,7 +1283,7 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
     const interval = window.setInterval(() => {
       if (document.visibilityState !== "visible") return;
       void loadData({ silent: true });
-    }, 10000);
+    }, CRYPTO_PANEL_REFRESH_INTERVAL_MS);
 
     return () => window.clearInterval(interval);
   }, [loadData]);
@@ -1383,10 +1601,56 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
     selectedSubscription?.mode,
     subscriptionSettings,
   ]);
-  const healthEntries = sourceHealth?.entries ?? [];
+  const healthEntries = useMemo(
+    () => sourceHealth?.entries ?? [],
+    [sourceHealth]
+  );
+  const visibleHealthEntries = useMemo(
+    () => healthDisplayEntries(healthEntries).slice(0, 12),
+    [healthEntries]
+  );
+  const healthIssueCount = healthEntries.filter((entry) => !entry.ok).length;
   const visibleRealtimeRows = realtimeLatest
     .filter((row) => row.symbol.startsWith(`${selectedBase}-`))
     .slice(0, 8);
+  const dataViewTabs: Array<{
+    key: CryptoDataView;
+    label: string;
+    detail: string;
+    badge?: string | null;
+  }> = [
+    {
+      key: "overview",
+      label: t("crypto.market.views.overview"),
+      detail: t("crypto.market.views.overviewHint"),
+    },
+    {
+      key: "risk",
+      label: t("crypto.market.views.risk"),
+      detail: t("crypto.market.views.riskHint"),
+      badge: selectedLiquidationHeatmapRows.length
+        ? String(selectedLiquidationHeatmapRows.length)
+        : null,
+    },
+    {
+      key: "signals",
+      label: t("crypto.market.views.signals"),
+      detail: t("crypto.market.views.signalsHint"),
+    },
+    {
+      key: "raw",
+      label: t("crypto.market.views.raw"),
+      detail: t("crypto.market.views.rawHint"),
+    },
+    {
+      key: "health",
+      label: t("crypto.market.views.health"),
+      detail: t("crypto.market.views.healthHint"),
+      badge: healthIssueCount ? String(healthIssueCount) : null,
+    },
+  ];
+  const activeDataViewDetail =
+    dataViewTabs.find((tab) => tab.key === activeDataView)?.detail ?? "";
 
   return (
     <section className="space-y-4">
@@ -1452,6 +1716,38 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
         {!chartProfessionalMode ? (
         <aside className="min-w-0 space-y-4">
           <section className="border border-omi-border-subtle bg-omi-surface">
+            <div className="grid grid-cols-5 border-b border-omi-border-subtle">
+              {dataViewTabs.map((tab) => {
+                const active = tab.key === activeDataView;
+                return (
+                  <button
+                    key={tab.key}
+                    type="button"
+                    className={[
+                      "omi-data-tab flex min-h-12 min-w-0 items-center justify-center gap-2 border-r border-omi-border-subtle px-2 py-2 text-sm font-semibold transition last:border-r-0",
+                      active
+                        ? "omi-data-tab-active bg-omi-surface-subtle text-omi-text-strong"
+                        : "text-omi-text-muted hover:bg-omi-surface-subtle hover:text-omi-text",
+                    ].join(" ")}
+                    onClick={() => setActiveDataView(tab.key)}
+                  >
+                    <span className="truncate">{tab.label}</span>
+                    {tab.badge ? (
+                      <span className="shrink-0 border border-omi-warning/40 px-1.5 py-0.5 text-[10px] tabular-nums text-omi-warning">
+                        {tab.badge}
+                      </span>
+                    ) : null}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="px-4 py-2 text-xs text-omi-text-muted">
+              {activeDataViewDetail}
+            </div>
+          </section>
+
+          {activeDataView === "overview" ? (
+          <section className="border border-omi-border-subtle bg-omi-surface">
             <PanelHeader
               title={t("crypto.market.marketData")}
               subtitle={`${selectedBase} / ${subscriptionSourceLabel(subscriptionSettings, t)}`}
@@ -1512,7 +1808,9 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
                 : ""}
             </div>
           </section>
+          ) : null}
 
+          {activeDataView === "risk" ? (
           <section className="border border-omi-border-subtle bg-omi-surface">
             <PanelHeader
               title={t("crypto.market.riskMap")}
@@ -1548,7 +1846,9 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
               />
             </div>
           </section>
+          ) : null}
 
+          {activeDataView === "signals" ? (
           <section className="border border-omi-border-subtle bg-omi-surface">
             <PanelHeader
               title={t("crypto.market.confirmationSignals")}
@@ -1571,18 +1871,6 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
                 yFormatter={(value) => formatCompactNumber(value, 2)}
                 locale={locale}
               />
-              <DataGapCard
-                title={t("crypto.market.spotCvd")}
-                subtitle={t("crypto.market.spotCvdSubtitle")}
-                body={t("crypto.market.cvdPending")}
-                tags={["Binance aggTrade", t("crypto.market.status.pending")]}
-              />
-              <DataGapCard
-                title={t("crypto.market.perpCvd")}
-                subtitle={t("crypto.market.perpCvdSubtitle")}
-                body={t("crypto.market.cvdPending")}
-                tags={["Futures aggTrade", t("crypto.market.status.pending")]}
-              />
               <TrendChartCard
                 title={t("crypto.market.longShortRatio")}
                 subtitle={t("crypto.market.longShortRatioSubtitle")}
@@ -1593,7 +1881,9 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
               />
             </div>
           </section>
+          ) : null}
 
+          {activeDataView === "risk" ? (
           <section className="border border-omi-border-subtle bg-omi-surface">
             <PanelHeader
               title={t("crypto.market.microstructure")}
@@ -1634,7 +1924,9 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
               />
             </div>
           </section>
+          ) : null}
 
+          {activeDataView === "health" ? (
           <section className="border border-omi-border-subtle bg-omi-surface">
             <PanelHeader
               title={t("crypto.market.sourceHealth")}
@@ -1643,35 +1935,53 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
             <div className="grid grid-cols-3 border-b border-omi-border-subtle text-center text-xs">
               <HealthStat label={t("crypto.market.status.ok")} value={sourceHealth?.summary.ok_count ?? 0} />
               <HealthStat label={t("crypto.market.status.stale")} value={sourceHealth?.summary.stale_count ?? 0} />
-              <HealthStat label={t("crypto.market.status.disabled")} value={sourceHealth?.summary.disabled_count ?? 0} />
+              <HealthStat label={t("crypto.market.healthIssues")} value={healthIssueCount} />
             </div>
             <div className="max-h-[280px] overflow-y-auto">
-              {healthEntries.slice(0, 12).map((entry) => (
-                <div
-                  key={`${entry.resource}-${entry.provider}-${entry.target}`}
-                  className="grid grid-cols-[minmax(110px,1fr)_80px_72px] gap-2 border-b border-omi-border-subtle px-3 py-2 text-xs last:border-b-0"
-                >
-                  <div className="min-w-0">
-                    <div className="truncate font-semibold text-omi-text">{entry.resource}</div>
-                    <div className="truncate text-omi-text-muted">
-                      {compactProvider(entry.provider)} {entry.target}
+              {visibleHealthEntries.length ? (
+                visibleHealthEntries.map((entry, index) => {
+                  const maturity = contractResourceStatus(providerContract, entry);
+                  const category = healthEntryCategory(entry, maturity, t);
+
+                  return (
+                    <div
+                      key={`${entry.resource}-${entry.provider}-${entry.target}-${entry.status}-${index}`}
+                      className="grid grid-cols-[minmax(0,1fr)_minmax(84px,auto)_64px] gap-2 border-b border-omi-border-subtle px-3 py-2 text-xs last:border-b-0"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span className="shrink-0 border border-omi-border-subtle px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-omi-text-subtle">
+                            {category}
+                          </span>
+                          <span className="truncate font-semibold text-omi-text">
+                            {normalizedContractResource(entry.resource).replaceAll("_", " ")}
+                          </span>
+                        </div>
+                        <div className="mt-1 truncate text-omi-text-muted">
+                          {compactProvider(entry.provider)} {entry.target}
+                        </div>
+                        {entry.reason ? (
+                          <div className="mt-1 max-h-8 overflow-hidden text-omi-text-subtle">{entry.reason}</div>
+                        ) : null}
+                      </div>
+                      <div className={`self-start border px-2 py-1 text-center font-semibold ${statusClass(entry.status, entry.ok)}`}>
+                        {healthStatusLabel(entry, maturity, t)}
+                      </div>
+                      <div className="self-start text-right tabular-nums text-omi-text-muted">{entry.row_count}</div>
                     </div>
-                  </div>
-                  <div className={`self-center border px-2 py-1 text-center font-semibold ${statusClass(entry.status, entry.ok)}`}>
-                    {entry.ok
-                      ? t("crypto.market.status.ok")
-                      : entry.status === "stale"
-                        ? t("crypto.market.status.stale")
-                        : entry.status === "disabled"
-                          ? t("crypto.market.status.disabled")
-                          : entry.status}
-                  </div>
-                  <div className="self-center text-right tabular-nums text-omi-text-muted">{entry.row_count}</div>
+                  );
+                })
+              ) : (
+                <div className="px-3 py-4 text-center text-xs text-omi-text-muted">
+                  {t("crypto.market.healthNoEntries")}
                 </div>
-              ))}
+              )}
             </div>
           </section>
+          ) : null}
 
+          {activeDataView === "raw" ? (
+          <>
           <section className="border border-omi-border-subtle bg-omi-surface">
             <PanelHeader title={t("crypto.market.quotes")} subtitle={t("crypto.market.quotesSubtitle")} />
             <DataTable
@@ -1796,7 +2106,10 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
               ])}
             />
           </section>
+          </>
+          ) : null}
 
+          {activeDataView === "health" ? (
           <section className="border border-omi-border-subtle bg-omi-surface">
             <PanelHeader
               title={t("crypto.market.realtimeLatest")}
@@ -1824,6 +2137,7 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
               ])}
             />
           </section>
+          ) : null}
         </aside>
         ) : null}
       </div>
@@ -2110,33 +2424,6 @@ function LiquidationHeatmapCard({
         </span>
         <span>{heatmap.providers.map(compactProvider).join(" / ")}</span>
       </div>
-      <div className="mt-3 flex flex-wrap gap-1.5">
-        {tags.map((tag) => (
-          <span key={tag} className="border border-omi-border-subtle px-2 py-1 text-[11px] font-semibold text-omi-text-muted">
-            {tag}
-          </span>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function DataGapCard({
-  title,
-  subtitle,
-  body,
-  tags,
-}: {
-  title: string;
-  subtitle: string;
-  body: string;
-  tags: string[];
-}) {
-  return (
-    <div className="border border-dashed border-omi-border bg-omi-surface-subtle px-3 py-3">
-      <div className="text-sm font-bold text-omi-text-strong">{title}</div>
-      <div className="mt-0.5 text-xs text-omi-text-muted">{subtitle}</div>
-      <p className="mt-3 text-xs leading-5 text-omi-text-muted">{body}</p>
       <div className="mt-3 flex flex-wrap gap-1.5">
         {tags.map((tag) => (
           <span key={tag} className="border border-omi-border-subtle px-2 py-1 text-[11px] font-semibold text-omi-text-muted">

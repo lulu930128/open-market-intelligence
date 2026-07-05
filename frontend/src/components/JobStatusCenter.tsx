@@ -3,6 +3,8 @@
 import { fetchJson, requestJson } from "@/lib/api";
 import {
   subscribeDataStatusEvents,
+  subscribeDataStatusFocus,
+  type DataStatusFocus,
   type DataStatusEvent,
   type DataStatusLevel,
 } from "@/lib/dataStatusEvents";
@@ -13,17 +15,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const ACTIVE_STATUSES = new Set(["queued", "running"]);
 
-type JobMarketFilter = "all" | "tw" | "us" | "jp" | "crypto";
+type JobMarketFilter = "all" | "tw" | "us" | "jp" | "kr" | "crypto";
 
 const NON_RETRYABLE_JOB_TYPES = new Set(["market.tw_futures_quote_refresh"]);
 
-function getJobMarket(jobType: string): "tw" | "us" | "jp" | "crypto" | "other" {
+function getJobMarket(jobType: string): "tw" | "us" | "jp" | "kr" | "crypto" | "other" {
   if (jobType.startsWith("us_market.") || jobType === "scheduler.us_market_daily_refresh") {
     return "us";
   }
 
   if (jobType.startsWith("jp_market.")) {
     return "jp";
+  }
+
+  if (jobType.startsWith("kr_market.")) {
+    return "kr";
   }
 
   if (jobType.startsWith("crypto_market.") || jobType.startsWith("resource_market.")) {
@@ -228,6 +234,14 @@ function buildStatusSummary(t: TranslationFunction, activeCount: number, failedC
   };
 }
 
+function isAttentionDataStatus(event: DataStatusEvent) {
+  return event.level === "error" || event.level === "warning";
+}
+
+function isActiveDataStatus(event: DataStatusEvent) {
+  return event.level === "info";
+}
+
 function formatShortText(value: string | null, maxLength = 220) {
   if (!value) return null;
 
@@ -240,13 +254,25 @@ function formatResultSummary(job: JobRunRead, t: TranslationFunction) {
     "requested_stock_count",
     "requested_symbol_count",
     "symbol_count",
+    "total_symbol_count",
     "total_count",
   ]);
-  const successCount = getFirstResultNumber(job, ["success_count", "current_count"]);
+  const successCount = getFirstResultNumber(job, [
+    "success_count",
+    "current_count",
+    "refreshed_symbol_count",
+    "complete_symbol_count",
+  ]);
+  const partialCount = getFirstResultNumber(job, [
+    "partial_symbol_count",
+    "partial_success_count",
+  ]);
   const warningCount = getFirstResultNumber(job, ["warning_count"]);
   const errorCount =
-    getFirstResultNumber(job, ["error_count", "failed_count"]) ??
+    getFirstResultNumber(job, ["failed_symbol_count", "error_count", "failed_count"]) ??
     getResultErrors(job).length;
+  const resourceSuccessCount = getFirstResultNumber(job, ["resource_success_count"]);
+  const resourceErrorCount = getFirstResultNumber(job, ["resource_error_count"]);
   const insertedCount = getFirstResultNumber(job, ["inserted_count"]);
   const updatedCount = getFirstResultNumber(job, ["updated_count"]);
   const fetchedCount = getFirstResultNumber(job, ["fetched_count"]);
@@ -272,6 +298,15 @@ function formatResultSummary(job: JobRunRead, t: TranslationFunction) {
     );
   }
 
+  if (partialCount !== null && partialCount > 0) {
+    parts.push(t("jobs.result.partial", { count: partialCount }));
+  }
+  if (resourceSuccessCount !== null && resourceSuccessCount > 0) {
+    parts.push(t("jobs.result.resourceSuccess", { count: resourceSuccessCount }));
+  }
+  if (resourceErrorCount !== null && resourceErrorCount > 0) {
+    parts.push(t("jobs.result.resourceErrors", { count: resourceErrorCount }));
+  }
   if (insertedCount !== null && insertedCount > 0) {
     parts.push(t("jobs.result.inserted", { count: insertedCount }));
   }
@@ -425,6 +460,40 @@ function DataStatusEventRow({ event }: { event: DataStatusEvent }) {
   );
 }
 
+function DataStatusSection({
+  title,
+  subtitle,
+  empty,
+  events,
+}: {
+  title: string;
+  subtitle?: string | null;
+  empty: string;
+  events: DataStatusEvent[];
+}) {
+  return (
+    <div className="border-t border-omi-border-subtle">
+      <div className="bg-omi-surface-subtle px-3 py-2">
+        <div className="text-[11px] font-black uppercase tracking-[0.14em] text-omi-text-muted">
+          {title}
+        </div>
+        {subtitle ? (
+          <div className="mt-0.5 truncate text-xs font-semibold text-omi-text">
+            {subtitle}
+          </div>
+        ) : null}
+      </div>
+      {events.length ? (
+        events.map((event) => <DataStatusEventRow key={event.id} event={event} />)
+      ) : (
+        <div className="border-t border-omi-border-subtle px-3 py-3 text-xs text-omi-text-muted">
+          {empty}
+        </div>
+      )}
+    </div>
+  );
+}
+
 type JobStatusCenterProps = {
   placement?: "fixed" | "inline";
   market?: JobMarketFilter;
@@ -439,6 +508,7 @@ export default function JobStatusCenter({
   const [open, setOpen] = useState(false);
   const [jobs, setJobs] = useState<JobRunRead[]>([]);
   const [dataStatusEvents, setDataStatusEvents] = useState<DataStatusEvent[]>([]);
+  const [dataStatusFocus, setDataStatusFocus] = useState<DataStatusFocus | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [retryingJobId, setRetryingJobId] = useState<number | null>(null);
   const inline = placement === "inline";
@@ -481,6 +551,10 @@ export default function JobStatusCenter({
   }, [market]);
 
   useEffect(() => {
+    return subscribeDataStatusFocus(market, setDataStatusFocus);
+  }, [market]);
+
+  useEffect(() => {
     if (!open) return;
 
     function handlePointerDown(event: PointerEvent) {
@@ -499,6 +573,20 @@ export default function JobStatusCenter({
   }, [open]);
 
   const activeCount = useMemo(() => jobs.filter(isActiveJob).length, [jobs]);
+  const focusedDataStatusEvents = useMemo(
+    () =>
+      dataStatusFocus
+        ? dataStatusEvents.filter((event) => event.contextKey === dataStatusFocus.contextKey)
+        : [],
+    [dataStatusEvents, dataStatusFocus]
+  );
+  const backgroundDataStatusEvents = useMemo(
+    () =>
+      dataStatusFocus
+        ? dataStatusEvents.filter((event) => event.contextKey !== dataStatusFocus.contextKey)
+        : dataStatusEvents,
+    [dataStatusEvents, dataStatusFocus]
+  );
   const panelText = useMemo(
     () => ({
       subtitle: t(`jobs.panel.${market}Subtitle`),
@@ -508,14 +596,22 @@ export default function JobStatusCenter({
   );
   const failedCount = useMemo(
     () =>
-      jobs.reduce((count, job) => count + getFailedUnitCount(job), 0) +
-      dataStatusEvents.filter((event) => event.level === "error" || event.level === "warning")
-        .length,
-    [dataStatusEvents, jobs]
+      dataStatusFocus
+        ? focusedDataStatusEvents.filter(isAttentionDataStatus).length
+        : jobs.reduce((count, job) => count + getFailedUnitCount(job), 0) +
+          backgroundDataStatusEvents.filter(isAttentionDataStatus).length,
+    [backgroundDataStatusEvents, dataStatusFocus, focusedDataStatusEvents, jobs]
+  );
+  const summaryActiveCount = useMemo(
+    () =>
+      dataStatusFocus
+        ? focusedDataStatusEvents.filter(isActiveDataStatus).length
+        : activeCount,
+    [activeCount, dataStatusFocus, focusedDataStatusEvents]
   );
   const statusSummary = useMemo(
-    () => buildStatusSummary(t, activeCount, failedCount),
-    [activeCount, failedCount, t]
+    () => buildStatusSummary(t, summaryActiveCount, failedCount),
+    [failedCount, summaryActiveCount, t]
   );
 
   async function handleRetry(job: JobRunRead) {
@@ -576,17 +672,38 @@ export default function JobStatusCenter({
           ) : null}
 
           <div className={inline ? "max-h-72 overflow-y-auto" : "max-h-[520px] overflow-y-auto"}>
-            {dataStatusEvents.length
-              ? dataStatusEvents
-                  .slice(0, 6)
-                  .map((event) => <DataStatusEventRow key={event.id} event={event} />)
-              : null}
-            {jobs.length ? (
-              jobs.map((job) => (
-                <JobRow key={job.id} job={job} retryingJobId={retryingJobId} onRetry={handleRetry} t={t} />
-              ))
+            {dataStatusFocus ? (
+              <>
+                <DataStatusSection
+                  title={t("jobs.scope.current")}
+                  subtitle={dataStatusFocus.label}
+                  empty={t("jobs.scope.currentEmpty", { label: dataStatusFocus.label })}
+                  events={focusedDataStatusEvents.slice(0, 4)}
+                />
+                {backgroundDataStatusEvents.length ? (
+                  <DataStatusSection
+                    title={t("jobs.scope.background")}
+                    empty={t("jobs.scope.backgroundEmpty")}
+                    events={backgroundDataStatusEvents.slice(0, 4)}
+                  />
+                ) : null}
+              </>
+            ) : dataStatusEvents.length ? (
+              dataStatusEvents
+                .slice(0, 6)
+                .map((event) => <DataStatusEventRow key={event.id} event={event} />)
             ) : null}
-            {!jobs.length && !dataStatusEvents.length ? (
+            {jobs.length ? (
+              <div className="border-t border-omi-border-subtle">
+                <div className="bg-omi-surface-subtle px-3 py-2 text-[11px] font-black uppercase tracking-[0.14em] text-omi-text-muted">
+                  {t("jobs.scope.jobs")}
+                </div>
+                {jobs.map((job) => (
+                  <JobRow key={job.id} job={job} retryingJobId={retryingJobId} onRetry={handleRetry} t={t} />
+                ))}
+              </div>
+            ) : null}
+            {!jobs.length && !dataStatusEvents.length && !dataStatusFocus ? (
               <div className="px-3 py-8 text-center text-sm text-omi-text-muted">
                 {panelText.empty}
               </div>

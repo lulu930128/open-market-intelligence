@@ -4,14 +4,37 @@ import json
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import or_
-from sqlalchemy.orm import Session
+from sqlalchemy import case, func, or_
+from sqlalchemy.orm import Session, load_only
 
 from app.db.models import ProviderEvent, SourceHealthSnapshot, utc_now
 
 
 ERROR_STATUSES = {"error", "failed", "timeout", "rate_limited", "blocked", "partial_success"}
 DEFAULT_RECENT_WINDOW_HOURS = 24
+PROVIDER_EVENT_READ_COLUMNS = (
+    ProviderEvent.id,
+    ProviderEvent.market,
+    ProviderEvent.provider,
+    ProviderEvent.resource,
+    ProviderEvent.target,
+    ProviderEvent.status,
+    ProviderEvent.severity,
+    ProviderEvent.event_type,
+    ProviderEvent.event_time,
+    ProviderEvent.observed_at,
+    ProviderEvent.http_status_code,
+    ProviderEvent.rate_limited,
+    ProviderEvent.retry_after_seconds,
+    ProviderEvent.duration_ms,
+    ProviderEvent.source_url,
+    ProviderEvent.message,
+    ProviderEvent.error_message,
+    ProviderEvent.job_run_id,
+    ProviderEvent.fetch_log_id,
+    ProviderEvent.raw_result_id,
+    ProviderEvent.created_at,
+)
 
 
 def _now() -> datetime:
@@ -240,6 +263,7 @@ def list_provider_events(
             target=target,
             status=status,
         )
+        .options(load_only(*PROVIDER_EVENT_READ_COLUMNS))
         .order_by(ProviderEvent.event_time.desc(), ProviderEvent.id.desc())
         .limit(limit)
         .all()
@@ -285,11 +309,34 @@ def provider_event_summary(
         resource=resource,
         target=target,
     )
-    latest_event = query.order_by(ProviderEvent.event_time.desc(), ProviderEvent.id.desc()).first()
+    latest_event = (
+        query.options(load_only(*PROVIDER_EVENT_READ_COLUMNS))
+        .order_by(ProviderEvent.event_time.desc(), ProviderEvent.id.desc())
+        .first()
+    )
     since = _now() - timedelta(hours=max(1, recent_window_hours))
-    recent_events = query.filter(ProviderEvent.event_time >= since).all()
-    recent_error_count = sum(1 for event in recent_events if event.status in ERROR_STATUSES)
-    ordered_events = query.order_by(ProviderEvent.event_time.desc(), ProviderEvent.id.desc()).limit(25).all()
+    recent_event_count, recent_error_count = (
+        query.filter(ProviderEvent.event_time >= since)
+        .with_entities(
+            func.count(ProviderEvent.id),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (ProviderEvent.status.in_(ERROR_STATUSES), 1),
+                        else_=0,
+                    )
+                ),
+                0,
+            ),
+        )
+        .one()
+    )
+    ordered_events = (
+        query.options(load_only(ProviderEvent.status))
+        .order_by(ProviderEvent.event_time.desc(), ProviderEvent.id.desc())
+        .limit(25)
+        .all()
+    )
     consecutive_error_count = 0
     for event in ordered_events:
         if event.status not in ERROR_STATUSES:
@@ -298,7 +345,7 @@ def provider_event_summary(
 
     return {
         "latest_event": provider_event_to_dict(latest_event) if latest_event else None,
-        "recent_event_count": len(recent_events),
+        "recent_event_count": recent_event_count,
         "recent_error_count": recent_error_count,
         "consecutive_error_count": consecutive_error_count,
     }
@@ -335,8 +382,8 @@ def enrich_source_health_entries(
                     if latest_event
                     else None
                 ),
-                "recent_event_count": summary["recent_event_count"],
-                "recent_error_count": summary["recent_error_count"],
+                "recent_event_count": int(summary["recent_event_count"] or 0),
+                "recent_error_count": int(summary["recent_error_count"] or 0),
                 "consecutive_error_count": summary["consecutive_error_count"],
             }
         )

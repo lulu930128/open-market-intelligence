@@ -89,6 +89,12 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("jp_company_fundamental", table_names)
             self.assertIn("jp_watchlist_group", table_names)
             self.assertIn("jp_watchlist_item", table_names)
+            self.assertIn("kr_stock_master", table_names)
+            self.assertIn("kr_daily_price", table_names)
+            self.assertIn("kr_company_fundamental", table_names)
+            self.assertIn("kr_investor_trade_daily", table_names)
+            self.assertIn("kr_watchlist_group", table_names)
+            self.assertIn("kr_watchlist_item", table_names)
             jp_master_columns = {
                 column["name"]
                 for column in inspect(engine).get_columns("jp_stock_master")

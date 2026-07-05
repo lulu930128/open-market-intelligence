@@ -37,6 +37,7 @@ $script:DefaultBackendHost = "127.0.0.1"
 $script:DefaultBackendPort = 8400
 $script:BackendPortSearchSpan = 1000
 $script:DefaultApiProxyPath = "/omi-data"
+$script:BackendReload = $false
 $script:FrontendHost = $script:DefaultFrontendHost
 $script:FrontendPort = $script:DefaultFrontendPort
 $script:DashboardUrl = "http://$($script:DefaultFrontendHost):$($script:DefaultFrontendPort)"
@@ -191,6 +192,25 @@ function Get-ConfigurationValue {
     return $DefaultValue
 }
 
+function Get-BooleanConfigurationValue {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Names,
+        [bool]$DefaultValue = $false
+    )
+
+    $rawValue = Get-ConfigurationValue -Names $Names -DefaultValue ([string]$DefaultValue)
+    $normalized = ([string]$rawValue).Trim().ToLowerInvariant()
+    if ($normalized -in @("1", "true", "yes", "y", "on")) {
+        return $true
+    }
+    if ($normalized -in @("0", "false", "no", "n", "off")) {
+        return $false
+    }
+
+    Write-LauncherLog "Invalid boolean config '$rawValue' for $($Names -join '/'); using default=$DefaultValue." "WARN"
+    return $DefaultValue
+}
+
 function Format-UrlHost {
     param([Parameter(Mandatory = $true)][string]$HostName)
 
@@ -270,6 +290,9 @@ function Initialize-ServiceEnvironment {
     $script:ApiProxyPath = Get-ConfigurationValue `
         -Names @("API_PROXY_PATH", "NEXT_PUBLIC_API_PROXY_PATH") `
         -DefaultValue $script:DefaultApiProxyPath
+    $script:BackendReload = Get-BooleanConfigurationValue `
+        -Names @("OMI_BACKEND_RELOAD", "BACKEND_RELOAD") `
+        -DefaultValue $false
 
     if (-not $script:ApiProxyPath.StartsWith("/")) {
         $script:ApiProxyPath = "/$($script:ApiProxyPath)"
@@ -282,7 +305,7 @@ function Initialize-ServiceEnvironment {
         Set-ProcessEnvironmentValue -Name "NEXT_PUBLIC_API_BASE_URL" -Value ""
     }
 
-    Write-LauncherLog "Service environment initialized. backend=$($script:BackendBaseUrl) frontend=$($script:DashboardUrl) proxy_path=$($script:ApiProxyPath)"
+    Write-LauncherLog "Service environment initialized. backend=$($script:BackendBaseUrl) frontend=$($script:DashboardUrl) proxy_path=$($script:ApiProxyPath) backend_reload=$($script:BackendReload)"
 }
 
 function Invoke-StockMasterSeed {
@@ -815,6 +838,36 @@ function Stop-BackendPortOwners {
     }
 }
 
+function Stop-FrontendPortOwners {
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+
+    $processIds = @(Get-ListeningProcessIdsOnPort -Port $Port)
+    if ($processIds.Count -eq 0) {
+        Write-LauncherLog "No listening process was found on frontend port $Port."
+        return
+    }
+
+    $taskkill = Join-Path $env:SystemRoot "System32\taskkill.exe"
+    foreach ($processId in $processIds) {
+        if ($processId -eq $PID) {
+            Write-LauncherLog "Skipping current launcher process while clearing frontend port $Port." "WARN"
+            continue
+        }
+
+        try {
+            $process = Get-Process -Id $processId -ErrorAction Stop
+            Write-LauncherLog "Stopping OMI frontend port owner. port=$Port pid=$processId process=$($process.ProcessName) reason=$Reason" "WARN"
+            Start-Process -FilePath $taskkill -ArgumentList @("/PID", "$processId", "/T", "/F") -Wait -WindowStyle Hidden | Out-Null
+        }
+        catch {
+            throw "Failed to stop frontend port owner pid=$processId on port $Port. error=$($_.Exception.Message)"
+        }
+    }
+}
+
 function Test-ProcessRunning {
     param($Process)
 
@@ -976,13 +1029,12 @@ function Start-Backend {
 
     Invoke-BackendPythonRuntimeCheck -PythonPath $python
 
-    Write-LauncherLog "Starting backend with $python on $($script:BackendBaseUrl)."
-    $backendArguments = if ($script:IsPackagedRelease) {
-        @("-m", "uvicorn", "app.main:app", "--host", $script:BackendHost, "--port", ([string]$script:BackendPort))
+    Write-LauncherLog "Starting backend with $python on $($script:BackendBaseUrl). reload=$($script:BackendReload)"
+    $backendArguments = @("-m", "uvicorn", "app.main:app")
+    if ((-not $script:IsPackagedRelease) -and $script:BackendReload) {
+        $backendArguments += "--reload"
     }
-    else {
-        @("-m", "uvicorn", "app.main:app", "--reload", "--host", $script:BackendHost, "--port", ([string]$script:BackendPort))
-    }
+    $backendArguments += @("--host", $script:BackendHost, "--port", ([string]$script:BackendPort))
 
     $script:BackendProcess = Start-LoggedService `
         -ServiceName "backend" `
@@ -1082,11 +1134,54 @@ function Start-Services {
     }
 }
 
-function Stop-Services {
-    Stop-ProcessTree $script:FrontendProcess "frontend"
+function Stop-BackendService {
     Stop-ProcessTree $script:BackendProcess "backend"
-    $script:FrontendProcess = $null
     $script:BackendProcess = $null
+
+    $expectedPython = Get-ExpectedBackendPython
+    $backendHealth = Get-BackendHealth
+    if ($null -eq $backendHealth) {
+        return
+    }
+
+    if (Test-BackendHealthMatchesExpected -Health $backendHealth -ExpectedPythonPath $expectedPython) {
+        Write-LauncherLog "Backend still responds after tracked stop; clearing expected backend port owners."
+        Stop-BackendPortOwners -Port $script:BackendPort -Reason "launcher stop"
+        Start-Sleep -Milliseconds 750
+        if (Test-HttpOk $script:BackendHealthUrl) {
+            Write-LauncherLog "Backend health still responds after launcher stop cleanup." "WARN"
+        }
+    }
+    else {
+        Write-LauncherLog "Backend port still responds but does not match this launcher; leaving it running." "WARN"
+    }
+}
+
+function Stop-FrontendService {
+    Stop-ProcessTree $script:FrontendProcess "frontend"
+    $script:FrontendProcess = $null
+
+    $frontendHealth = Get-FrontendHealth
+    if ($null -eq $frontendHealth) {
+        return
+    }
+
+    if (Test-FrontendHealthMatchesExpected -Health $frontendHealth) {
+        Write-LauncherLog "Frontend still responds after tracked stop; clearing expected frontend port owners."
+        Stop-FrontendPortOwners -Port $script:FrontendPort -Reason "launcher stop"
+        Start-Sleep -Milliseconds 750
+        if (Test-FrontendOk) {
+            Write-LauncherLog "Frontend health still responds after launcher stop cleanup." "WARN"
+        }
+    }
+    else {
+        Write-LauncherLog "Frontend port still responds but does not match this launcher; leaving it running." "WARN"
+    }
+}
+
+function Stop-Services {
+    Stop-FrontendService
+    Stop-BackendService
 }
 
 function Restart-Services {

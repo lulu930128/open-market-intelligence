@@ -19,8 +19,8 @@ ALEMBIC_INI_PATH = PROJECT_ROOT / "alembic.ini"
 ALEMBIC_SCRIPT_LOCATION = PROJECT_ROOT / "backend" / "alembic"
 
 
-def _sqlite_connect_args(database_url: str) -> dict[str, bool]:
-    return {"check_same_thread": False} if database_url.startswith("sqlite") else {}
+def _sqlite_connect_args(database_url: str) -> dict[str, bool | int]:
+    return {"check_same_thread": False, "timeout": 30} if database_url.startswith("sqlite") else {}
 
 
 def _ensure_sqlite_parent(database_url: str) -> None:

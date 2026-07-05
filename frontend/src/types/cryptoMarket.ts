@@ -56,6 +56,19 @@ export type CryptoProviderContract = {
   assets?: CryptoAssetDefinition[];
   instruments?: Array<Record<string, unknown>>;
   ohlcv_intervals?: Partial<Record<CryptoProvider, string[]>>;
+  status_taxonomy?: Record<string, string>;
+  providers?: Record<
+    string,
+    {
+      role?: string;
+      resources?: string[];
+      resource_status?: Record<string, string>;
+      status?: string;
+      canonical_symbols?: string[];
+      canonical_assets?: string[];
+      ohlcv_intervals?: string[];
+    }
+  >;
 };
 
 export type CryptoKLineInstrument = {

@@ -11,7 +11,16 @@ function buildSameOriginPath(path: string) {
   return path.replace(/^\/api(?=\/|$)/, API_PROXY_PATH);
 }
 
-export function buildApiUrl(path: string, params?: Record<string, string | number | boolean>) {
+type ApiParams = Record<string, string | number | boolean>;
+
+export type ApiRequestOptions = {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+};
+
+const DEFAULT_GET_TIMEOUT_MS = 20_000;
+
+export function buildApiUrl(path: string, params?: ApiParams) {
   const sameOriginPath = buildSameOriginPath(path);
   const url = API_BASE_URL
     ? new URL(path, API_BASE_URL)
@@ -24,6 +33,59 @@ export function buildApiUrl(path: string, params?: Record<string, string | numbe
   }
 
   return url.toString();
+}
+
+async function fetchWithOptionalTimeout(
+  path: string,
+  params: ApiParams | undefined,
+  init: RequestInit,
+  options: ApiRequestOptions | undefined,
+  defaultTimeoutMs: number
+) {
+  const timeoutMs = options?.timeoutMs ?? defaultTimeoutMs;
+  const externalSignal = options?.signal ?? init.signal ?? null;
+
+  if (timeoutMs <= 0 && !externalSignal) {
+    return fetch(buildApiUrl(path, params), init);
+  }
+
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeoutId =
+    timeoutMs > 0
+      ? setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, timeoutMs)
+      : null;
+  const abortFromExternal = () => controller.abort();
+
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort();
+    } else {
+      externalSignal.addEventListener("abort", abortFromExternal, { once: true });
+    }
+  }
+
+  try {
+    return await fetch(buildApiUrl(path, params), {
+      ...init,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (timedOut) {
+      throw new Error(`API timeout after ${timeoutMs}ms: ${path}`);
+    }
+    throw error;
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+    if (externalSignal) {
+      externalSignal.removeEventListener("abort", abortFromExternal);
+    }
+  }
 }
 
 async function readApiError(response: Response) {
@@ -53,14 +115,21 @@ async function readApiError(response: Response) {
 
 export async function fetchJson<T>(
   path: string,
-  params?: Record<string, string | number | boolean>
+  params?: ApiParams,
+  options?: ApiRequestOptions
 ): Promise<T> {
-  const response = await fetch(buildApiUrl(path, params), {
-    headers: {
-      Accept: "application/json",
+  const response = await fetchWithOptionalTimeout(
+    path,
+    params,
+    {
+      headers: {
+        Accept: "application/json",
+      },
+      cache: "no-store",
     },
-    cache: "no-store",
-  });
+    options,
+    DEFAULT_GET_TIMEOUT_MS
+  );
 
   if (!response.ok) {
     throw new Error(`API ${response.status}: ${await readApiError(response)}`);
@@ -72,17 +141,24 @@ export async function fetchJson<T>(
 export async function requestJson<T>(
   path: string,
   options: RequestInit,
-  params?: Record<string, string | number | boolean>
+  params?: ApiParams,
+  apiOptions?: ApiRequestOptions
 ): Promise<T> {
-  const response = await fetch(buildApiUrl(path, params), {
-    ...options,
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      ...(options.headers ?? {}),
+  const response = await fetchWithOptionalTimeout(
+    path,
+    params,
+    {
+      ...options,
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        ...(options.headers ?? {}),
+      },
+      cache: "no-store",
     },
-    cache: "no-store",
-  });
+    apiOptions,
+    0
+  );
 
   if (!response.ok) {
     throw new Error(`API ${response.status}: ${await readApiError(response)}`);
@@ -97,15 +173,22 @@ export async function requestJson<T>(
 
 export async function deleteRequest(
   path: string,
-  params?: Record<string, string | number | boolean>
+  params?: ApiParams,
+  options?: ApiRequestOptions
 ): Promise<void> {
-  const response = await fetch(buildApiUrl(path, params), {
-    method: "DELETE",
-    headers: {
-      Accept: "application/json",
+  const response = await fetchWithOptionalTimeout(
+    path,
+    params,
+    {
+      method: "DELETE",
+      headers: {
+        Accept: "application/json",
+      },
+      cache: "no-store",
     },
-    cache: "no-store",
-  });
+    options,
+    DEFAULT_GET_TIMEOUT_MS
+  );
 
   if (!response.ok) {
     throw new Error(`API ${response.status}: ${await readApiError(response)}`);

@@ -43,7 +43,7 @@ const marketOptions: Array<{
   { value: "tw", enabled: true },
   { value: "us", enabled: true },
   { value: "jp", enabled: true },
-  { value: "kr", enabled: false },
+  { value: "kr", enabled: true },
   { value: "crypto", enabled: true },
 ];
 
@@ -615,7 +615,7 @@ export default function JPMarketSidebar({
   }
 
   return (
-    <aside className="flex h-full w-[300px] shrink-0 flex-col border-r border-omi-border-subtle bg-omi-surface">
+    <aside className="flex max-h-[55vh] w-full shrink-0 flex-col border-b border-omi-border-subtle bg-omi-surface lg:h-full lg:max-h-none lg:w-[300px] lg:border-b-0 lg:border-r">
       <div className="border-b border-omi-border-subtle px-4 py-4">
         <div className="text-xs font-semibold uppercase tracking-[0.22em] text-omi-accent">
           Open Market Intelligence

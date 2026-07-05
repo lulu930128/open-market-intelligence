@@ -18,7 +18,7 @@ from app.settings.store import (
 )
 
 
-SUPPORTED_REFRESH_EXECUTION_MARKETS = ("tw", "us", "jp")
+SUPPORTED_REFRESH_EXECUTION_MARKETS = ("tw", "us", "jp", "kr")
 REFRESH_EXECUTION_SETTING_KIND = "refresh_execution_settings"
 REFRESH_EXECUTION_SETTING_VERSION = "refresh_execution_settings.v1"
 
@@ -26,11 +26,13 @@ _OBSERVED_STOCK_DEFAULTS = {
     "tw": 0.8,
     "us": 12.0,
     "jp": 1.0,
+    "kr": 1.0,
 }
 _SUBRESOURCE_DEFAULTS = {
     "tw": 0.2,
     "us": 12.0,
     "jp": 15.0,
+    "kr": 15.0,
 }
 
 
@@ -171,6 +173,11 @@ def _default_refresh_execution_payload() -> dict[str, dict[str, float]]:
             "observed_stock_refresh_interval_seconds": _OBSERVED_STOCK_DEFAULTS["jp"],
             "subresource_refresh_interval_seconds": _SUBRESOURCE_DEFAULTS["jp"],
             "market_refresh_interval_seconds": settings.scheduler_jp_market_refresh_sleep_seconds,
+        },
+        "kr": {
+            "observed_stock_refresh_interval_seconds": _OBSERVED_STOCK_DEFAULTS["kr"],
+            "subresource_refresh_interval_seconds": _SUBRESOURCE_DEFAULTS["kr"],
+            "market_refresh_interval_seconds": settings.scheduler_kr_market_refresh_sleep_seconds,
         },
     }
 

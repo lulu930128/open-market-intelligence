@@ -5,6 +5,7 @@ import unittest
 from zoneinfo import ZoneInfo
 
 from app.market.calendar_status import (
+    build_kr_calendar_status,
     build_market_calendar_status,
     build_taiwan_calendar_status,
     build_us_calendar_status,
@@ -15,6 +16,11 @@ from app.us_market.trading_calendar import (
     next_us_trading_day,
     previous_us_trading_day,
     us_market_holiday_name,
+)
+from app.kr_market.trading_calendar import (
+    is_kr_trading_day,
+    next_kr_trading_day,
+    previous_kr_trading_day,
 )
 
 
@@ -124,6 +130,40 @@ class MarketCalendarStatusTests(unittest.TestCase):
         self.assertEqual(
             status["release_windows"]["us_daily_price"]["expected_trade_date"],
             "2026-06-18",
+        )
+
+    def test_kr_status_reports_weekend_and_daily_release_window(self) -> None:
+        timezone = ZoneInfo("Asia/Seoul")
+
+        self.assertFalse(is_kr_trading_day(date(2026, 6, 14)))
+        self.assertEqual(previous_kr_trading_day(date(2026, 6, 14), include_value=True), date(2026, 6, 12))
+        self.assertEqual(next_kr_trading_day(date(2026, 6, 14)), date(2026, 6, 15))
+
+        before_release = build_kr_calendar_status(
+            now=datetime(2026, 6, 15, 16, 0, tzinfo=timezone),
+        )
+        after_release = build_kr_calendar_status(
+            now=datetime(2026, 6, 15, 16, 20, tzinfo=timezone),
+        )
+
+        self.assertEqual(before_release["market"], "kr")
+        self.assertTrue(before_release["is_trading_day"])
+        self.assertEqual(before_release["session"]["close_time"], "15:30")
+        self.assertEqual(
+            before_release["release_windows"]["kr_daily_price"]["status"],
+            "pending",
+        )
+        self.assertEqual(
+            before_release["release_windows"]["kr_daily_price"]["expected_trade_date"],
+            "2026-06-12",
+        )
+        self.assertEqual(
+            after_release["release_windows"]["kr_daily_price"]["status"],
+            "released",
+        )
+        self.assertEqual(
+            after_release["release_windows"]["kr_daily_price"]["expected_trade_date"],
+            "2026-06-15",
         )
 
     def test_market_calendar_status_can_filter_market(self) -> None:

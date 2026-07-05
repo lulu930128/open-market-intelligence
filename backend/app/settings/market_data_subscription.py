@@ -31,6 +31,24 @@ MANUAL_REFRESH_SUBSCRIPTION_MODES = frozenset({"always_on", "on_select", "manual
 ALWAYS_ON_SUBSCRIPTION_MODES = frozenset({"always_on"})
 MIN_INTERVAL_SECONDS = 1.0
 MAX_INTERVAL_SECONDS = 86400.0
+RESOURCE_QUOTE_INTERVALS = {
+    "quote_seconds": 60.0,
+    "ohlcv_seconds": 300.0,
+    "selected_quote_seconds": 5.0,
+    "background_quote_seconds": 300.0,
+}
+LEGACY_MANUAL_RESOURCE_KEYS = frozenset(
+    {
+        "commodity:energy:CL",
+        "commodity:energy:BZ",
+        "commodity:energy:NG",
+    }
+)
+LEGACY_RESOURCE_INTERVALS = {
+    "quote_seconds": 60.0,
+    "ohlcv_seconds": 300.0,
+}
+LEGACY_RESOURCE_RESOURCES = {"quote": True, "ohlcv": True}
 
 
 def _crypto_resources(asset: CryptoAssetDefinition) -> dict[str, bool]:
@@ -111,66 +129,66 @@ DEFAULT_RESOURCE_MARKET_DATA_SUBSCRIPTIONS: tuple[dict[str, Any], ...] = (
         "market": "resource",
         "group": "metals",
         "label": "黃金",
-        "mode": "manual",
+        "mode": "on_select",
         "resources": {"quote": True, "ohlcv": True},
-        "intervals": {"quote_seconds": 60.0, "ohlcv_seconds": 300.0},
-        "provider_status": "provider_pending",
-        "note": "Watch-only commodity context; provider refresh is not wired yet.",
+        "intervals": RESOURCE_QUOTE_INTERVALS,
+        "provider_status": "best_effort_delayed",
+        "note": "Watch-only commodity context from Yahoo chart; delayed/best-effort.",
     },
     {
         "key": "commodity:metals:SI",
         "market": "resource",
         "group": "metals",
         "label": "白銀",
-        "mode": "manual",
+        "mode": "on_select",
         "resources": {"quote": True, "ohlcv": True},
-        "intervals": {"quote_seconds": 60.0, "ohlcv_seconds": 300.0},
-        "provider_status": "provider_pending",
-        "note": "Watch-only commodity context; provider refresh is not wired yet.",
+        "intervals": RESOURCE_QUOTE_INTERVALS,
+        "provider_status": "best_effort_delayed",
+        "note": "Watch-only commodity context from Yahoo chart; delayed/best-effort.",
     },
     {
         "key": "commodity:metals:HG",
         "market": "resource",
         "group": "metals",
         "label": "銅",
-        "mode": "manual",
+        "mode": "on_select",
         "resources": {"quote": True, "ohlcv": True},
-        "intervals": {"quote_seconds": 60.0, "ohlcv_seconds": 300.0},
-        "provider_status": "provider_pending",
-        "note": "Watch-only commodity context; provider refresh is not wired yet.",
+        "intervals": RESOURCE_QUOTE_INTERVALS,
+        "provider_status": "best_effort_delayed",
+        "note": "Watch-only commodity context from Yahoo chart; delayed/best-effort.",
     },
     {
         "key": "commodity:energy:CL",
         "market": "resource",
         "group": "energy",
         "label": "WTI 原油",
-        "mode": "manual",
+        "mode": "on_select",
         "resources": {"quote": True, "ohlcv": True},
-        "intervals": {"quote_seconds": 60.0, "ohlcv_seconds": 300.0},
-        "provider_status": "provider_pending",
-        "note": "Watch-only commodity context; provider refresh is not wired yet.",
+        "intervals": RESOURCE_QUOTE_INTERVALS,
+        "provider_status": "best_effort_delayed",
+        "note": "Watch-only commodity context from Yahoo chart; delayed/best-effort.",
     },
     {
         "key": "commodity:energy:BZ",
         "market": "resource",
         "group": "energy",
         "label": "Brent 原油",
-        "mode": "manual",
+        "mode": "on_select",
         "resources": {"quote": True, "ohlcv": True},
-        "intervals": {"quote_seconds": 60.0, "ohlcv_seconds": 300.0},
-        "provider_status": "provider_pending",
-        "note": "Watch-only commodity context; provider refresh is not wired yet.",
+        "intervals": RESOURCE_QUOTE_INTERVALS,
+        "provider_status": "best_effort_delayed",
+        "note": "Watch-only commodity context from Yahoo chart; delayed/best-effort.",
     },
     {
         "key": "commodity:energy:NG",
         "market": "resource",
         "group": "energy",
         "label": "天然氣",
-        "mode": "manual",
+        "mode": "on_select",
         "resources": {"quote": True, "ohlcv": True},
-        "intervals": {"quote_seconds": 60.0, "ohlcv_seconds": 300.0},
-        "provider_status": "provider_pending",
-        "note": "Watch-only commodity context; provider refresh is not wired yet.",
+        "intervals": RESOURCE_QUOTE_INTERVALS,
+        "provider_status": "best_effort_delayed",
+        "note": "Watch-only commodity context from Yahoo chart; delayed/best-effort.",
     },
 )
 
@@ -284,6 +302,8 @@ def _resolve_subscription_items(
             mode = str(item_payload.get("mode", merged_item["mode"])).strip()
             if mode not in SUBSCRIPTION_MODES:
                 raise ValueError(f"Unsupported subscription mode '{mode}' for '{key}'.")
+            if _is_legacy_resource_manual_default(key=key, item_payload=item_payload):
+                mode = merged_item["mode"]
             merged_item["mode"] = mode
 
             resources = item_payload.get("resources")
@@ -310,6 +330,42 @@ def _resolve_subscription_items(
         MarketDataSubscriptionItemRead(**merged[item["key"]])
         for item in DEFAULT_MARKET_DATA_SUBSCRIPTIONS
     ]
+
+
+def _is_legacy_resource_manual_default(
+    *,
+    key: str,
+    item_payload: Mapping[str, Any],
+) -> bool:
+    if key not in LEGACY_MANUAL_RESOURCE_KEYS:
+        return False
+    if str(item_payload.get("mode", "")).strip() != "manual":
+        return False
+
+    resources = item_payload.get("resources")
+    if isinstance(resources, Mapping):
+        normalized_resources = {
+            str(resource_key): bool(value)
+            for resource_key, value in resources.items()
+            if str(resource_key) in LEGACY_RESOURCE_RESOURCES
+        }
+        if normalized_resources != LEGACY_RESOURCE_RESOURCES:
+            return False
+
+    intervals = item_payload.get("intervals")
+    if not isinstance(intervals, Mapping):
+        return True
+    for interval_key, default_value in LEGACY_RESOURCE_INTERVALS.items():
+        value = intervals.get(interval_key)
+        try:
+            if float(value) != default_value:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return (
+        "selected_quote_seconds" not in intervals
+        and "background_quote_seconds" not in intervals
+    )
 
 
 def _default_subscription_payload_by_key() -> dict[str, dict[str, Any]]:

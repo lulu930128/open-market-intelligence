@@ -2,7 +2,7 @@
 
 import JobStatusCenter from "@/components/JobStatusCenter";
 import SettingsDock from "@/components/SettingsDock";
-import { marketLabel, marketSummary, useT } from "@/i18n";
+import { marketLabel, marketSummary, useT, type TranslationFunction } from "@/i18n";
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
 import {
   CRYPTO_BASE_OPTIONS,
@@ -19,7 +19,9 @@ import {
 import {
   RESOURCE_COMMODITY_GROUPS,
   RESOURCE_COMMODITY_INSTRUMENTS,
+  resourceInstrumentByKey,
   resourceInstrumentsForGroup,
+  type ResourceCommodityInstrument,
 } from "@/types/resourceMarket";
 import type {
   StockMasterRead,
@@ -46,10 +48,12 @@ type Props = {
   selectedMarket: MarketRegion;
   selectedCryptoBase?: CryptoBaseAsset;
   selectedCryptoInstrumentKey?: string | null;
+  selectedResourceInstrumentKey?: string | null;
   onSelectGroup: (group: WatchlistGroupNode | null) => void;
   onSelectStock: (stockId: string, stockName: string | null) => void;
   onSelectFutures?: (symbol: string) => void;
   onSelectCryptoInstrument?: (base: CryptoBaseAsset, instrumentKey: string) => void;
+  onSelectResourceInstrument?: (instrument: ResourceCommodityInstrument) => void;
   onMarketChange: (market: MarketRegion) => void;
   onExplorerDataChanged?: (
     tree: WatchlistGroupNode[],
@@ -108,7 +112,7 @@ const sidebarMarketOptions: SidebarMarketOption[] = [
   { value: "tw", enabled: true },
   { value: "us", enabled: true },
   { value: "jp", enabled: true },
-  { value: "kr", enabled: false },
+  { value: "kr", enabled: true },
   { value: "crypto", enabled: true },
 ];
 
@@ -243,14 +247,28 @@ function SidebarMarketSummary({ selectedMarket }: { selectedMarket: MarketRegion
   );
 }
 
+function resourceProviderStatusLabel(status: string, t: TranslationFunction) {
+  if (status === "provider_pending" || status === "pending") {
+    return t("crypto.sidebar.providerPending");
+  }
+  if (status === "best_effort_delayed" || status === "best_effort") {
+    return t("crypto.sidebar.providerBestEffortDelayed");
+  }
+  return status.replaceAll("_", " ");
+}
+
 function SidebarCryptoControls({
   selectedBase,
   selectedInstrumentKey,
+  selectedResourceInstrumentKey = null,
   onSelectInstrument,
+  onSelectResourceInstrument,
 }: {
   selectedBase: CryptoBaseAsset;
   selectedInstrumentKey?: string | null;
+  selectedResourceInstrumentKey?: string | null;
   onSelectInstrument?: (base: CryptoBaseAsset, instrumentKey: string) => void;
+  onSelectResourceInstrument?: (instrument: ResourceCommodityInstrument) => void;
 }) {
   const t = useT();
   const [expanded, setExpanded] = useState(true);
@@ -287,6 +305,7 @@ function SidebarCryptoControls({
   ).find(
     (instrument) => instrument.key === activeInstrumentKey
   );
+  const selectedResourceInstrument = resourceInstrumentByKey(selectedResourceInstrumentKey);
   const cryptoItemsByGroupId = useMemo(() => {
     const map = new Map<number, CryptoWatchlistItemRead[]>();
     cryptoItems.forEach((item) => {
@@ -305,14 +324,33 @@ function SidebarCryptoControls({
   async function reloadCryptoWatchlist(nextSelectedGroupId?: number | null) {
     setCryptoLoading(true);
     try {
-      const [nextTree, nextItems, nextProviderContract] = await Promise.all([
+      const [treeResult, itemsResult, providerContractResult] = await Promise.allSettled([
         fetchJson<CryptoWatchlistGroupNode[]>("/api/crypto-market/watchlists/tree"),
         fetchJson<CryptoWatchlistItemRead[]>("/api/crypto-market/watchlists/items"),
-        fetchJson<CryptoProviderContract>("/api/crypto-market/provider-contract").catch(() => null),
+        fetchJson<CryptoProviderContract>("/api/crypto-market/provider-contract"),
       ]);
-      setCryptoTree(nextTree);
-      setCryptoItems(nextItems);
-      if (nextProviderContract) {
+
+      const failures = [
+        treeResult.status === "rejected" ? "tree" : null,
+        itemsResult.status === "rejected" ? "items" : null,
+        providerContractResult.status === "rejected" ? "contract" : null,
+      ].filter((value): value is string => Boolean(value));
+
+      if (treeResult.status === "rejected" && itemsResult.status === "rejected") {
+        throw treeResult.reason;
+      }
+
+      const nextTree = treeResult.status === "fulfilled" ? treeResult.value : cryptoTree;
+      const nextItems = itemsResult.status === "fulfilled" ? itemsResult.value : cryptoItems;
+
+      if (treeResult.status === "fulfilled") {
+        setCryptoTree(nextTree);
+      }
+      if (itemsResult.status === "fulfilled") {
+        setCryptoItems(nextItems);
+      }
+      if (providerContractResult.status === "fulfilled") {
+        const nextProviderContract = providerContractResult.value;
         const nextAssetOptions = cryptoBaseOptionsFromAssets(nextProviderContract.assets);
         setCryptoAssetOptions(nextAssetOptions);
         setCryptoKlineInstruments(
@@ -322,6 +360,14 @@ function SidebarCryptoControls({
             nextProviderContract.ohlcv_intervals
           )
         );
+      }
+      if (failures.length) {
+        setCryptoMessage({
+          type: "error",
+          text: t("crypto.sidebar.watchlistLoadPartial", {
+            resources: failures.join(", "),
+          }),
+        });
       }
       const flattened = flattenCryptoGroups(nextTree);
       const resolvedGroupId =
@@ -378,8 +424,12 @@ function SidebarCryptoControls({
   }
 
   const selectedCryptoGroup = findCryptoGroupById(cryptoTree, selectedCryptoGroupId);
-  const selectedAssetLabel = activeInstrument?.symbol ?? selectedBase;
-  const cryptoRootSelected = cryptoItems.some((item) => item.asset === selectedBase);
+  const selectedAssetLabel = selectedResourceInstrument
+    ? `${selectedResourceInstrument.displayName} ${selectedResourceInstrument.symbol}`
+    : activeInstrument?.symbol ?? selectedBase;
+  const cryptoRootSelected =
+    selectedResourceInstrumentKey === null &&
+    cryptoItems.some((item) => item.asset === selectedBase);
 
   async function handleCryptoGroupSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -549,7 +599,7 @@ function SidebarCryptoControls({
         {expandedNode ? (
           <div>
             {groupItems.map((item) => {
-              const itemSelected = selectedBase === item.asset;
+              const itemSelected = selectedResourceInstrumentKey === null && selectedBase === item.asset;
               return (
                 <div
                   key={item.id}
@@ -744,21 +794,35 @@ function SidebarCryptoControls({
                   {groupExpanded ? (
                     <div>
                       {instruments.map((instrument) => (
-                        <div
+                        <button
                           key={instrument.key}
-                          className="group relative flex w-full items-center gap-1 py-1.5 pr-2 text-left text-xs text-omi-text-muted"
+                          type="button"
+                          className={[
+                            "group relative flex w-full cursor-pointer items-center gap-1 py-1.5 pr-2 text-left text-xs",
+                            selectedResourceInstrumentKey === instrument.key
+                              ? "omi-sidebar-selected text-omi-text-strong"
+                              : "text-omi-text-muted hover:bg-omi-surface-muted",
+                          ].join(" ")}
                           style={{ paddingLeft: "48px" }}
                           data-testid={`resource-sidebar-instrument-${instrument.symbol}`}
+                          onClick={() => onSelectResourceInstrument?.(instrument)}
                         >
                           <div className="min-w-0 flex-1">
-                            <div className="truncate font-semibold text-omi-text-strong">
+                            <div className="truncate text-xs font-semibold leading-4 text-omi-text-strong">
                               {instrument.displayName} {instrument.symbol}
                             </div>
-                            <div className="truncate text-omi-text-subtle">
-                              {instrument.exchange} / {instrument.quoteAsset} / {t("crypto.sidebar.providerPending")}
+                            <div
+                              className={
+                                selectedResourceInstrumentKey === instrument.key
+                                  ? "truncate text-xs leading-4 text-omi-text-muted"
+                                  : "truncate text-xs leading-4 text-omi-text-subtle"
+                              }
+                            >
+                              {instrument.exchange} / {instrument.quoteAsset} /{" "}
+                              {resourceProviderStatusLabel(instrument.providerStatus, t)}
                             </div>
                           </div>
-                        </div>
+                        </button>
                       ))}
                     </div>
                   ) : null}
@@ -794,7 +858,9 @@ function SidebarCryptoControls({
                 <div>
                   {currencyInstruments.map((instrument) => {
                     const instrumentSelected =
-                      selectedBase === instrument.baseAsset && activeInstrumentKey === instrument.key;
+                      selectedResourceInstrumentKey === null &&
+                      selectedBase === instrument.baseAsset &&
+                      activeInstrumentKey === instrument.key;
 
                     return (
                       <button
@@ -975,10 +1041,12 @@ export default function SidebarWatchlistExplorer({
   selectedMarket,
   selectedCryptoBase = "BTC",
   selectedCryptoInstrumentKey = null,
+  selectedResourceInstrumentKey = null,
   onSelectGroup,
   onSelectStock,
   onSelectFutures,
   onSelectCryptoInstrument,
+  onSelectResourceInstrument,
   onMarketChange,
   onExplorerDataChanged,
   onChanged,
@@ -2009,7 +2077,7 @@ export default function SidebarWatchlistExplorer({
   }
 
   return (
-    <aside className="flex h-full w-[300px] shrink-0 flex-col border-r border-omi-border-subtle bg-omi-surface">
+    <aside className="flex max-h-[55vh] w-full shrink-0 flex-col border-b border-omi-border-subtle bg-omi-surface lg:h-full lg:max-h-none lg:w-[300px] lg:border-b-0 lg:border-r">
       <div className="border-b border-omi-border-subtle px-4 py-4">
         <div className="text-xs font-semibold uppercase tracking-[0.22em] text-omi-accent">
           Open Market Intelligence
@@ -2256,7 +2324,9 @@ export default function SidebarWatchlistExplorer({
         <SidebarCryptoControls
           selectedBase={selectedCryptoBase}
           selectedInstrumentKey={selectedCryptoInstrumentKey}
+          selectedResourceInstrumentKey={selectedResourceInstrumentKey}
           onSelectInstrument={onSelectCryptoInstrument}
+          onSelectResourceInstrument={onSelectResourceInstrument}
         />
       ) : (
         <SidebarMarketSummary selectedMarket={selectedMarket} />

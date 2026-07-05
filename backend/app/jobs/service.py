@@ -24,15 +24,24 @@ JobTask = Callable[..., None]
 SUMMARY_COUNT_KEYS = (
     "requested_count",
     "requested_stock_count",
+    "requested_symbol_count",
     "total_count",
+    "total_symbol_count",
     "symbol_count",
     "success_count",
     "current_count",
+    "refreshed_symbol_count",
+    "complete_symbol_count",
+    "partial_symbol_count",
+    "failed_symbol_count",
     "partial_success_count",
     "warning_count",
     "error_count",
     "failed_count",
     "symbol_error_count",
+    "resource_attempt_count",
+    "resource_success_count",
+    "resource_error_count",
     "inserted_count",
     "updated_count",
     "fetched_count",
@@ -127,13 +136,39 @@ def _failed_result_items(rows: Any) -> list[dict[str, Any]]:
 
         status_value = _summary_string(row.get("status"))
         error_message = _summary_string(row.get("error_message")) or _summary_string(row.get("message"))
+        nested_failed: list[dict[str, Any]] = []
+        for key, value in row.items():
+            if not isinstance(value, dict):
+                continue
+            nested_status = _summary_string(value.get("status"))
+            nested_error_message = (
+                _summary_string(value.get("error_message")) or _summary_string(value.get("message"))
+            )
+            if nested_status not in {"error", "partial_success"} and not _summary_string(value.get("error_message")):
+                continue
+            compact_nested = _compact_result_item(
+                {
+                    **value,
+                    "symbol": value.get("symbol") or row.get("symbol"),
+                    "resource": value.get("resource") or key,
+                    "status": nested_status or value.get("status") or "error",
+                }
+            )
+            if nested_error_message and "error_message" not in compact_nested:
+                compact_nested["error_message"] = nested_error_message
+            nested_failed.append(compact_nested)
+
         if status_value not in {"error", "partial_success"} and not _summary_string(row.get("error_message")):
+            failed.extend(nested_failed[: max(FAILED_RESULT_ITEM_LIMIT - len(failed), 0)])
+            if len(failed) >= FAILED_RESULT_ITEM_LIMIT:
+                break
             continue
 
         compact = _compact_result_item(row)
         if error_message and "error_message" not in compact:
             compact["error_message"] = error_message
         failed.append(compact)
+        failed.extend(nested_failed[: max(FAILED_RESULT_ITEM_LIMIT - len(failed), 0)])
 
         if len(failed) >= FAILED_RESULT_ITEM_LIMIT:
             break

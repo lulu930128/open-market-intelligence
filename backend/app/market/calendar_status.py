@@ -38,15 +38,26 @@ from app.us_market.trading_calendar import (
     previous_us_trading_day,
     us_market_holiday_name,
 )
+from app.kr_market.trading_calendar import (
+    KR_DAILY_PRICE_RELEASE_TIME,
+    KR_MARKET_TIMEZONE,
+    expected_kr_daily_price_date,
+    is_kr_trading_day,
+    kr_market_holiday_name,
+    next_kr_trading_day,
+    previous_kr_trading_day,
+)
 
 
-MarketCode = Literal["tw", "us"]
+MarketCode = Literal["tw", "us", "kr"]
 
 TAIWAN_PREOPEN_TIME = time(hour=8, minute=30)
 TAIWAN_SESSION_OPEN_TIME = time(hour=9, minute=0)
 TAIWAN_SESSION_CLOSE_TIME = time(hour=13, minute=30)
 US_SESSION_OPEN_TIME = time(hour=9, minute=30)
 US_SESSION_CLOSE_TIME = time(hour=16, minute=0)
+KR_SESSION_OPEN_TIME = time(hour=9, minute=0)
+KR_SESSION_CLOSE_TIME = time(hour=15, minute=30)
 TAIWAN_RELEASE_DATASETS = (
     (TAIWAN_DATASET_DAILY_PRICE, TAIWAN_DAILY_PRICE_RELEASE_TIME),
     (TAIWAN_DATASET_INSTITUTIONAL_TRADE, TAIWAN_INSTITUTIONAL_TRADE_RELEASE_TIME),
@@ -344,20 +355,88 @@ def build_us_calendar_status(now: datetime | None = None) -> dict[str, Any]:
     }
 
 
+def build_kr_calendar_status(now: datetime | None = None) -> dict[str, Any]:
+    local_now = _as_market_datetime(now, KR_MARKET_TIMEZONE)
+    current_date = local_now.date()
+    holiday_name = kr_market_holiday_name(current_date)
+    is_trading_day = is_kr_trading_day(current_date)
+    previous_trading_day = previous_kr_trading_day(
+        current_date,
+        include_value=is_trading_day,
+    )
+    next_trading_day = next_kr_trading_day(current_date, include_value=False)
+    phase = _session_phase(
+        local_now=local_now,
+        is_trading_day=is_trading_day,
+        preopen_time=KR_SESSION_OPEN_TIME,
+        open_time=KR_SESSION_OPEN_TIME,
+        close_time=KR_SESSION_CLOSE_TIME,
+    )
+    release_windows = {
+        "kr_daily_price": _release_window(
+            key="kr_daily_price",
+            label="KR daily price",
+            release_time=KR_DAILY_PRICE_RELEASE_TIME,
+            expected_trade_date=expected_kr_daily_price_date(now=local_now),
+            local_now=local_now,
+            current_date=current_date,
+            is_trading_day=is_trading_day,
+            next_trading_day=next_trading_day,
+            timezone_value=KR_MARKET_TIMEZONE,
+        )
+    }
+    next_session_start_at = _next_session_start_at(
+        current_date=current_date,
+        local_now=local_now,
+        is_trading_day=is_trading_day,
+        preopen_time=KR_SESSION_OPEN_TIME,
+        next_trading_day=next_trading_day,
+        timezone_value=KR_MARKET_TIMEZONE,
+    )
+
+    return {
+        "market": "kr",
+        "timezone": str(KR_MARKET_TIMEZONE),
+        "checked_at": local_now.isoformat(),
+        "date": current_date.isoformat(),
+        "is_trading_day": is_trading_day,
+        "phase": phase,
+        "reason": _market_reason(
+            value=current_date,
+            is_trading_day=is_trading_day,
+            holiday_name=holiday_name,
+        ),
+        "holiday_name": holiday_name,
+        "previous_trading_day": previous_trading_day.isoformat(),
+        "next_trading_day": next_trading_day.isoformat(),
+        "session": {
+            "open_time": KR_SESSION_OPEN_TIME.strftime("%H:%M"),
+            "close_time": KR_SESSION_CLOSE_TIME.strftime("%H:%M"),
+            "next_session_start_at": next_session_start_at.isoformat(),
+            "is_polling_window": phase == "regular",
+            "is_after_close": phase == "post_close",
+        },
+        "release_windows": release_windows,
+        "calendar_limit": "Fixed-date holidays and weekends only; lunar and ad hoc KRX holidays require a future official calendar source.",
+    }
+
+
 def build_market_calendar_status(
     *,
     market: str = "all",
     now: datetime | None = None,
 ) -> dict[str, Any]:
     normalized_market = (market or "all").strip().lower()
-    if normalized_market not in {"all", "tw", "us"}:
-        raise ValueError("market must be one of: all, tw, us.")
+    if normalized_market not in {"all", "tw", "us", "kr"}:
+        raise ValueError("market must be one of: all, tw, us, kr.")
 
     markets: dict[str, dict[str, Any]] = {}
     if normalized_market in {"all", "tw"}:
         markets["tw"] = build_taiwan_calendar_status(now=now)
     if normalized_market in {"all", "us"}:
         markets["us"] = build_us_calendar_status(now=now)
+    if normalized_market in {"all", "kr"}:
+        markets["kr"] = build_kr_calendar_status(now=now)
 
     return {
         "kind": "market_calendar_status",
@@ -465,10 +544,30 @@ def expected_us_trade_date(
     )
 
 
+def expected_kr_trade_date(
+    key: str = "kr_daily_price",
+    *,
+    include_today: bool | None = None,
+    now: datetime | None = None,
+) -> date | None:
+    if key != "kr_daily_price":
+        return None
+    if include_today is not None:
+        return expected_kr_daily_price_date(include_today=include_today, now=now)
+
+    return expected_trade_date_from_calendar(
+        build_kr_calendar_status(now=now),
+        market="kr",
+        key=key,
+    )
+
+
 __all__ = [
     "build_market_calendar_status",
+    "build_kr_calendar_status",
     "build_taiwan_calendar_status",
     "build_us_calendar_status",
+    "expected_kr_trade_date",
     "expected_taiwan_trade_date",
     "expected_trade_date_from_calendar",
     "expected_us_trade_date",

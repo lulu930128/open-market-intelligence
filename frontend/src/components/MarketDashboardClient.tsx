@@ -5,16 +5,26 @@ import type { MarketRegion } from "@/components/SidebarWatchlistExplorer";
 import CryptoMarketPanel from "@/components/CryptoMarketPanel";
 import JPMarketPanel from "@/components/JPMarketPanel";
 import JPMarketSidebar from "@/components/JPMarketSidebar";
+import KRMarketPanel from "@/components/KRMarketPanel";
+import KRMarketSidebar from "@/components/KRMarketSidebar";
 import { LoadingDots } from "@/components/LoadingPlaceholders";
 import OmiAskDock, { type OmiAskDockContext } from "@/components/OmiAskDock";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
+import ResourceMarketPanel from "@/components/ResourceMarketPanel";
 import StockDetailPanel from "@/components/StockDetailPanel";
 import TaiwanFuturesDetailPanel from "@/components/TaiwanFuturesDetailPanel";
 import USStockDetailPanel from "@/components/USStockDetailPanel";
 import USWatchlistSidebar from "@/components/USWatchlistSidebar";
 import WatchlistRadarPanel from "@/components/WatchlistRadarPanel";
-import { fetchJson } from "@/lib/api";
+import { fetchJson, requestJson } from "@/lib/api";
 import { getJobResultStatus, requestBackfillJob } from "@/lib/jobs";
+import {
+  MARKET_DATA_SUBSCRIPTIONS_UPDATED_EVENT,
+  loadMarketDataSubscriptionSettings,
+  resourceBackgroundQuoteIntervalSeconds,
+  resourceSubscriptionAllowsQuotePolling,
+  type MarketDataSubscriptionSettingsRead,
+} from "@/lib/marketDataSubscriptions";
 import {
   getMarketCalendarStatusSnapshot,
   msUntilIsoTime,
@@ -58,6 +68,10 @@ import {
   type TranslationFunction,
 } from "@/i18n";
 import type { CryptoBaseAsset } from "@/types/cryptoMarket";
+import {
+  resourceSymbolFromKey,
+  type ResourceRefreshResult,
+} from "@/types/resourceMarket";
 import type {
   ChartPoint,
   IntradayTrendResponse,
@@ -67,6 +81,11 @@ import type {
   JPWatchlistItemRead,
   JPWatchlistRankingItemRead,
   JPWatchlistRankingRead,
+  KRStockMasterRead,
+  KRWatchlistGroupNode,
+  KRWatchlistItemRead,
+  KRWatchlistRankingItemRead,
+  KRWatchlistRankingRead,
   MarketIndexSnapshot,
   MarketIndexSummary,
   RankingBatchResponse,
@@ -89,9 +108,11 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
 type JPStatusMessage = { type: "success" | "warning" | "error"; text: string } | null;
+type KRStatusMessage = { type: "success" | "warning" | "error"; text: string } | null;
 type RankBy = "none" | "change_pct" | "score" | "volume";
 type USRankBy = "none" | "change_pct" | "volume" | "close";
 type JPRankBy = "none" | "change_pct" | "volume" | "close";
+type KRRankBy = "none" | "change_pct" | "volume" | "close";
 const WATCHLIST_INTRADAY_LIMIT = 30;
 const WATCHLIST_RADAR_MAX_RESULTS = 20;
 const WATCHLIST_RANKING_BATCH_SIZE = 3;
@@ -172,6 +193,42 @@ function markStoredMarketChipRefreshDone(dateKey: string) {
   }
 }
 
+type ResourceBackgroundPollingGroup = {
+  intervalSeconds: number;
+  symbols: string[];
+  key: string;
+};
+
+function resourceBackgroundQuotePollingGroups(
+  settings: MarketDataSubscriptionSettingsRead | null,
+  selectedResourceInstrumentKey: string | null
+) {
+  if (!settings) return [];
+
+  const groups = new Map<number, Set<string>>();
+  for (const item of settings.items) {
+    if (!resourceSubscriptionAllowsQuotePolling(item)) continue;
+    if (item.key === selectedResourceInstrumentKey) continue;
+
+    const symbol = resourceSymbolFromKey(item.key);
+    if (!symbol) continue;
+
+    const intervalSeconds = resourceBackgroundQuoteIntervalSeconds(item);
+    if (!groups.has(intervalSeconds)) {
+      groups.set(intervalSeconds, new Set());
+    }
+    groups.get(intervalSeconds)?.add(symbol);
+  }
+
+  return Array.from(groups.entries())
+    .map<ResourceBackgroundPollingGroup>(([intervalSeconds, symbols]) => ({
+      intervalSeconds,
+      symbols: Array.from(symbols).sort(),
+      key: `${intervalSeconds}:${Array.from(symbols).sort().join(",")}`,
+    }))
+    .sort((left, right) => left.intervalSeconds - right.intervalSeconds);
+}
+
 function apiErrorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
 }
@@ -188,6 +245,7 @@ function buildDashboardHref(params: {
   futuresSymbol?: string | null;
   symbol?: string | null;
   jpSymbol?: string | null;
+  krSymbol?: string | null;
   radarMode?: WatchlistRadarMode | null;
   quoteDepthPreviewMode?: TaiwanStockQuoteDepthPreviewMode | null;
 }) {
@@ -201,6 +259,7 @@ function buildDashboardHref(params: {
   if (params.futuresSymbol) searchParams.set("futures", params.futuresSymbol);
   if (params.symbol) searchParams.set("symbol", params.symbol);
   if (params.jpSymbol) searchParams.set("jp_symbol", params.jpSymbol);
+  if (params.krSymbol) searchParams.set("kr_symbol", params.krSymbol);
   if (params.radarMode) searchParams.set("radar_mode", params.radarMode);
   if (params.quoteDepthPreviewMode) {
     searchParams.set("quote_depth_preview", params.quoteDepthPreviewMode);
@@ -222,6 +281,7 @@ type Props = {
   initialSelectedUsSymbol: string | null;
   initialSelectedUsSecurityName: string | null;
   initialSelectedJpSymbol: string | null;
+  initialSelectedKrSymbol: string | null;
   initialChartData: ChartPoint[];
   initialIndicatorData: StockIndicatorPoint[];
   initialRankingData: RankingResponse | null;
@@ -232,6 +292,8 @@ type Props = {
   initialUsWatchlistItems: USWatchlistItemRead[];
   initialJpWatchlistTree: JPWatchlistGroupNode[];
   initialJpWatchlistItems: JPWatchlistItemRead[];
+  initialKrWatchlistTree: KRWatchlistGroupNode[];
+  initialKrWatchlistItems: KRWatchlistItemRead[];
   quoteDepthPreviewMode: TaiwanStockQuoteDepthPreviewMode | null;
 };
 
@@ -283,6 +345,10 @@ function isUsRankingItemPending(row: USWatchlistRankingItemRead) {
 }
 
 function isJpRankingItemPending(row: JPWatchlistRankingItemRead) {
+  return row.status === "pending";
+}
+
+function isKrRankingItemPending(row: KRWatchlistRankingItemRead) {
   return row.status === "pending";
 }
 
@@ -1387,6 +1453,10 @@ function flattenJpGroups(nodes: JPWatchlistGroupNode[]): JPWatchlistGroupNode[] 
   return nodes.flatMap((node) => [node, ...flattenJpGroups(node.children)]);
 }
 
+function flattenKrGroups(nodes: KRWatchlistGroupNode[]): KRWatchlistGroupNode[] {
+  return nodes.flatMap((node) => [node, ...flattenKrGroups(node.children)]);
+}
+
 function buildWatchlistRows(
   group: WatchlistGroupNode | null,
   items: WatchlistItemRead[]
@@ -1661,6 +1731,77 @@ function buildJpWatchlistRows(
 function mergeJpWatchlistRows(
   baseRows: JPWatchlistRankingItemRead[],
   ranking: JPWatchlistRankingRead | null
+) {
+  if (!ranking) return baseRows;
+
+  const rankingResults = Array.isArray(ranking.results) ? ranking.results : [];
+  const rankingBySymbol = new Map(
+    rankingResults.map((row) => [row.symbol, row])
+  );
+
+  return baseRows.map((row, index) => ({
+    ...row,
+    ...(rankingBySymbol.get(row.symbol) ?? {}),
+    rank: index + 1,
+  }));
+}
+
+function buildKrWatchlistRows(
+  group: KRWatchlistGroupNode | null,
+  items: KRWatchlistItemRead[]
+): KRWatchlistRankingItemRead[] {
+  if (!group) return [];
+
+  const itemsByGroupId = new Map<number, KRWatchlistItemRead[]>();
+  const seenSymbols = new Set<string>();
+  const rows: KRWatchlistRankingItemRead[] = [];
+
+  items.forEach((item) => {
+    if (!item.enabled) return;
+
+    const groupItems = itemsByGroupId.get(item.group_id) ?? [];
+    groupItems.push(item);
+    itemsByGroupId.set(item.group_id, groupItems);
+  });
+
+  function appendGroupRows(currentGroup: KRWatchlistGroupNode) {
+    (itemsByGroupId.get(currentGroup.id) ?? []).forEach((item) => {
+      const symbol = item.symbol.toUpperCase();
+      if (seenSymbols.has(symbol)) return;
+
+      seenSymbols.add(symbol);
+      rows.push({
+        rank: rows.length + 1,
+        symbol,
+        security_name: item.security_name ?? item.security_name_kr,
+        exchange: item.exchange,
+        market_segment: item.market_segment,
+        sector: item.sector,
+        industry: item.industry,
+        asset_type: item.asset_type,
+        group_id: item.group_id,
+        trade_date: null,
+        close: null,
+        previous_close: null,
+        change: null,
+        change_pct: null,
+        volume: null,
+        status: "pending",
+        source: null,
+        error_message: null,
+      });
+    });
+
+    currentGroup.children.forEach(appendGroupRows);
+  }
+
+  appendGroupRows(group);
+  return rows;
+}
+
+function mergeKrWatchlistRows(
+  baseRows: KRWatchlistRankingItemRead[],
+  ranking: KRWatchlistRankingRead | null
 ) {
   if (!ranking) return baseRows;
 
@@ -1953,6 +2094,7 @@ export default function MarketDashboardClient({
   initialSelectedUsSymbol,
   initialSelectedUsSecurityName,
   initialSelectedJpSymbol,
+  initialSelectedKrSymbol,
   initialChartData,
   initialIndicatorData,
   initialRankingData,
@@ -1963,6 +2105,8 @@ export default function MarketDashboardClient({
   initialUsWatchlistItems,
   initialJpWatchlistTree,
   initialJpWatchlistItems,
+  initialKrWatchlistTree,
+  initialKrWatchlistItems,
   quoteDepthPreviewMode,
 }: Props) {
   const t = useT();
@@ -1991,6 +2135,14 @@ export default function MarketDashboardClient({
       null
     );
   }, [initialJpWatchlistTree, initialSelectedGroupId]);
+  const initialSelectedKrGroup = useMemo(() => {
+    const groups = flattenKrGroups(initialKrWatchlistTree);
+    return (
+      groups.find((group) => group.id === initialSelectedGroupId) ??
+      groups[0] ??
+      null
+    );
+  }, [initialKrWatchlistTree, initialSelectedGroupId]);
   const [selectedGroupId, setSelectedGroupId] = useState<number | null>(
     initialSelectedGroup?.id ?? null
   );
@@ -2011,6 +2163,9 @@ export default function MarketDashboardClient({
   const [activeMarket, setActiveMarket] = useState<MarketRegion>(initialMarket);
   const [selectedCryptoBase, setSelectedCryptoBase] = useState<CryptoBaseAsset>("BTC");
   const [selectedCryptoInstrumentKey, setSelectedCryptoInstrumentKey] = useState<string | null>(null);
+  const [selectedResourceInstrumentKey, setSelectedResourceInstrumentKey] = useState<string | null>(null);
+  const [resourceSubscriptionSettings, setResourceSubscriptionSettings] =
+    useState<MarketDataSubscriptionSettingsRead | null>(null);
   const [twChartFocusMode, setTwChartFocusMode] = useState(false);
   const [usChartFocusMode, setUsChartFocusMode] = useState(false);
   const [jpChartFocusMode, setJpChartFocusMode] = useState(false);
@@ -2050,6 +2205,34 @@ export default function MarketDashboardClient({
   const [jpErrorMessage, setJpErrorMessage] = useState<string | null>(null);
   const [jpStatusMessage, setJpStatusMessage] = useState<JPStatusMessage>(null);
   const [jpLastUpdatedAt, setJpLastUpdatedAt] = useState<string | null>(null);
+  const [selectedKrSymbol, setSelectedKrSymbol] = useState<string | null>(
+    initialSelectedKrSymbol
+  );
+  const [selectedKrStock, setSelectedKrStock] = useState<KRStockMasterRead | null>(
+    null
+  );
+  const [selectedKrGroupId, setSelectedKrGroupId] = useState<number | null>(
+    initialSelectedKrGroup?.id ?? null
+  );
+  const [selectedKrGroup, setSelectedKrGroup] = useState<KRWatchlistGroupNode | null>(
+    initialSelectedKrGroup
+  );
+  const [selectedKrGroupName, setSelectedKrGroupName] = useState<string | null>(
+    initialSelectedKrGroup?.group_name ?? null
+  );
+  const [krWatchlistTree, setKrWatchlistTree] =
+    useState<KRWatchlistGroupNode[]>(initialKrWatchlistTree);
+  const [krWatchlistItems, setKrWatchlistItems] =
+    useState<KRWatchlistItemRead[]>(initialKrWatchlistItems);
+  const [krDataRefreshNonce, setKrDataRefreshNonce] = useState(0);
+  const [krRankBy, setKrRankBy] = useState<KRRankBy>("none");
+  const [krRanking, setKrRanking] = useState<KRWatchlistRankingRead | null>(null);
+  const [krLoadState, setKrLoadState] = useState<LoadState>("idle");
+  const [, setKrUniverseRefreshState] =
+    useState<LoadState>("idle");
+  const [krErrorMessage, setKrErrorMessage] = useState<string | null>(null);
+  const [krStatusMessage, setKrStatusMessage] = useState<KRStatusMessage>(null);
+  const [krLastUpdatedAt, setKrLastUpdatedAt] = useState<string | null>(null);
   const [selectedUsGroupId, setSelectedUsGroupId] = useState<number | null>(
     initialSelectedUsGroup?.id ?? null
   );
@@ -2072,6 +2255,8 @@ export default function MarketDashboardClient({
   const [usRadar, setUsRadar] = useState<WatchlistGroupRadarRead | null>(null);
   const [jpRadarMode, setJpRadarMode] = useState<WatchlistRadarMode>(initialRadarMode);
   const [jpRadar, setJpRadar] = useState<WatchlistGroupRadarRead | null>(null);
+  const [krRadarMode, setKrRadarMode] = useState<WatchlistRadarMode>(initialRadarMode);
+  const [krRadar, setKrRadar] = useState<WatchlistGroupRadarRead | null>(null);
   const [usRankBy, setUsRankBy] = useState<USRankBy>("none");
   const [usRanking, setUsRanking] = useState<USWatchlistRankingRead | null>(null);
   const [marketIndexSummary, setMarketIndexSummary] =
@@ -2087,6 +2272,7 @@ export default function MarketDashboardClient({
   );
   const [usRadarLoadState, setUsRadarLoadState] = useState<LoadState>("idle");
   const [jpRadarLoadState, setJpRadarLoadState] = useState<LoadState>("idle");
+  const [krRadarLoadState, setKrRadarLoadState] = useState<LoadState>("idle");
   const [usLoadState, setUsLoadState] = useState<LoadState>("idle");
   const [, setUsUniverseRefreshState] =
     useState<LoadState>("idle");
@@ -2094,6 +2280,7 @@ export default function MarketDashboardClient({
   const [radarErrorMessage, setRadarErrorMessage] = useState<string | null>(null);
   const [usRadarErrorMessage, setUsRadarErrorMessage] = useState<string | null>(null);
   const [jpRadarErrorMessage, setJpRadarErrorMessage] = useState<string | null>(null);
+  const [krRadarErrorMessage, setKrRadarErrorMessage] = useState<string | null>(null);
   const [usErrorMessage, setUsErrorMessage] = useState<string | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
   const [usLastUpdatedAt, setUsLastUpdatedAt] = useState<string | null>(null);
@@ -2101,16 +2288,104 @@ export default function MarketDashboardClient({
   const radarRequestSeq = useRef(0);
   const usRadarRequestSeq = useRef(0);
   const jpRadarRequestSeq = useRef(0);
+  const krRadarRequestSeq = useRef(0);
   const radarModeRef = useRef<WatchlistRadarMode>(radarMode);
   const usRadarModeRef = useRef<WatchlistRadarMode>(usRadarMode);
   const jpRadarModeRef = useRef<WatchlistRadarMode>(jpRadarMode);
+  const krRadarModeRef = useRef<WatchlistRadarMode>(krRadarMode);
   const usDashboardRequestSeq = useRef(0);
   const jpDashboardRequestSeq = useRef(0);
+  const krDashboardRequestSeq = useRef(0);
+  const resourceBackgroundPollingRef = useRef(new Set<string>());
   const marketIndexRequestSeq = useRef(0);
   const rankingTrendTimer = useRef<number | undefined>(undefined);
   const finalDashboardRefreshDate = useRef<string | null>(null);
   const finalUsDashboardRefreshDate = useRef<string | null>(null);
   const initialUsWatchlistPreloadQueued = useRef(false);
+  const resourceBackgroundPollingGroupsForCurrentView = useMemo(
+    () =>
+      activeMarket === "crypto"
+        ? resourceBackgroundQuotePollingGroups(
+            resourceSubscriptionSettings,
+            selectedResourceInstrumentKey
+          )
+        : [],
+    [activeMarket, resourceSubscriptionSettings, selectedResourceInstrumentKey]
+  );
+
+  useEffect(() => {
+    if (activeMarket !== "crypto") return;
+
+    let cancelled = false;
+
+    async function loadResourceSubscriptionSettings() {
+      try {
+        const settings = await loadMarketDataSubscriptionSettings();
+        if (!cancelled) {
+          setResourceSubscriptionSettings(settings);
+        }
+      } catch {
+        if (!cancelled) {
+          setResourceSubscriptionSettings(null);
+        }
+      }
+    }
+
+    function handleSubscriptionSettingsUpdated(event: Event) {
+      const nextSettings = (event as CustomEvent<MarketDataSubscriptionSettingsRead>).detail;
+      if (nextSettings) {
+        setResourceSubscriptionSettings(nextSettings);
+      } else {
+        void loadResourceSubscriptionSettings();
+      }
+    }
+
+    void loadResourceSubscriptionSettings();
+    window.addEventListener(
+      MARKET_DATA_SUBSCRIPTIONS_UPDATED_EVENT,
+      handleSubscriptionSettingsUpdated
+    );
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener(
+        MARKET_DATA_SUBSCRIPTIONS_UPDATED_EVENT,
+        handleSubscriptionSettingsUpdated
+      );
+    };
+  }, [activeMarket]);
+
+  useEffect(() => {
+    if (activeMarket !== "crypto" || !resourceBackgroundPollingGroupsForCurrentView.length) {
+      return;
+    }
+
+    const timers = resourceBackgroundPollingGroupsForCurrentView.map((group) => {
+      const run = async () => {
+        if (document.visibilityState !== "visible") return;
+        if (resourceBackgroundPollingRef.current.has(group.key)) return;
+
+        resourceBackgroundPollingRef.current.add(group.key);
+        try {
+          await requestJson<ResourceRefreshResult>(
+            "/api/resource-market/quotes/refresh",
+            { method: "POST" },
+            { symbols: group.symbols.join(",") }
+          );
+        } catch {
+          // Background quote polling should not replace the visible panel state.
+        } finally {
+          resourceBackgroundPollingRef.current.delete(group.key);
+        }
+      };
+
+      return window.setInterval(run, group.intervalSeconds * 1000);
+    });
+
+    return () => {
+      timers.forEach((timer) => window.clearInterval(timer));
+    };
+  }, [activeMarket, resourceBackgroundPollingGroupsForCurrentView]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2150,9 +2425,11 @@ export default function MarketDashboardClient({
   const activeGroupIdRef = useRef<number | null>(activeGroupId);
   const selectedUsGroupIdRef = useRef<number | null>(selectedUsGroupId);
   const selectedJpGroupIdRef = useRef<number | null>(selectedJpGroupId);
+  const selectedKrGroupIdRef = useRef<number | null>(selectedKrGroupId);
   const watchlistFreshnessRequestKeys = useRef<Set<string>>(new Set());
   const usWatchlistFreshnessRequestKeys = useRef<Set<string>>(new Set());
   const jpWatchlistFreshnessRequestKeys = useRef<Set<string>>(new Set());
+  const krWatchlistFreshnessRequestKeys = useRef<Set<string>>(new Set());
   const marketChipRefreshRequestKeys = useRef<Set<string>>(new Set());
   const baseRows = useMemo(
     () => buildWatchlistRows(selectedGroup, watchlistItems),
@@ -2280,6 +2557,44 @@ export default function MarketDashboardClient({
       downCount,
     };
   }, [jpBaseRows.length, jpVisibleRows]);
+  const krBaseRows = useMemo(
+    () => buildKrWatchlistRows(selectedKrGroup, krWatchlistItems),
+    [selectedKrGroup, krWatchlistItems]
+  );
+  const krRows = useMemo(() => {
+    if (krRankBy === "none" || krRanking?.is_current === false) {
+      return mergeKrWatchlistRows(krBaseRows, krRanking);
+    }
+
+    return krRanking?.results ?? krBaseRows;
+  }, [krBaseRows, krRankBy, krRanking]);
+  const krRankingFreshnessPending = krRanking?.is_current === false;
+  const krVisibleRows = krRows;
+  const krRankingLoadState: LoadState = krLoadState;
+  const krRankingPendingLabel =
+    krRankingFreshnessPending
+      ? formatWatchlistFreshnessLabel(
+          t,
+          t("dashboard.ranking.krData"),
+          krRanking?.target_trade_date,
+          krRanking?.stale_symbol_count,
+          krRanking?.requested_symbol_count
+        )
+      : t("common.loading");
+  const krSummary = useMemo(() => {
+    const upCount = krVisibleRows.filter((row) => {
+      return row.change_pct !== null && row.change_pct !== undefined && row.change_pct > 0;
+    }).length;
+    const downCount = krVisibleRows.filter((row) => {
+      return row.change_pct !== null && row.change_pct !== undefined && row.change_pct < 0;
+    }).length;
+
+    return {
+      stockCount: krBaseRows.length,
+      upCount,
+      downCount,
+    };
+  }, [krBaseRows.length, krVisibleRows]);
   const selectedUsContextProfile =
     selectedUsCompanyProfile?.symbol.toUpperCase() === selectedUsSymbol?.toUpperCase()
       ? selectedUsCompanyProfile
@@ -2445,6 +2760,42 @@ export default function MarketDashboardClient({
       }
       setJpRadarLoadState("error");
       setJpRadarErrorMessage(apiErrorMessage(error, t("radar.loadError")));
+    }
+  }
+
+  async function loadKrWatchlistRadar(
+    groupId: number,
+    options?: { mode?: WatchlistRadarMode; silent?: boolean }
+  ) {
+    const requestSeq = krRadarRequestSeq.current + 1;
+    krRadarRequestSeq.current = requestSeq;
+    const currentMode = options?.mode ?? krRadarModeRef.current;
+
+    if (!options?.silent) {
+      setKrRadarLoadState("loading");
+      setKrRadarErrorMessage(null);
+      setKrRadar(null);
+    }
+
+    try {
+      const radarData = await fetchJson<WatchlistGroupRadarRead>(
+        `/api/kr-market/watchlists/groups/${groupId}/radar`,
+        watchlistTechnicalRadarParams(currentMode)
+      );
+
+      if (krRadarRequestSeq.current !== requestSeq) return;
+
+      setKrRadar(radarData);
+      setKrRadarLoadState("success");
+      setKrRadarErrorMessage(null);
+    } catch (error) {
+      if (krRadarRequestSeq.current !== requestSeq) return;
+
+      if (!options?.silent) {
+        setKrRadar(null);
+      }
+      setKrRadarLoadState("error");
+      setKrRadarErrorMessage(apiErrorMessage(error, t("radar.loadError")));
     }
   }
 
@@ -2696,6 +3047,50 @@ export default function MarketDashboardClient({
     }
   }
 
+  async function loadKrDashboard(
+    groupId: number,
+    currentRankBy = krRankBy,
+    options?: { silent?: boolean }
+  ): Promise<KRWatchlistRankingRead | null> {
+    const requestSeq = krDashboardRequestSeq.current + 1;
+    krDashboardRequestSeq.current = requestSeq;
+
+    if (!options?.silent) {
+      setKrLoadState("loading");
+      setKrErrorMessage(null);
+    }
+
+    void loadKrWatchlistRadar(groupId, { silent: options?.silent });
+
+    try {
+      const rankingData = await fetchJson<KRWatchlistRankingRead>(
+        "/api/kr-market/watchlists/ranking",
+        {
+          group_id: groupId,
+          include_children: true,
+          enabled_only: true,
+          rank_by: currentRankBy,
+          sort_order: currentRankBy === "none" ? "asc" : "desc",
+        }
+      );
+
+      if (krDashboardRequestSeq.current !== requestSeq) return null;
+
+      setKrRanking(rankingData);
+      setKrLastUpdatedAt(formatDashboardTime(new Date()));
+      setKrLoadState("success");
+      return rankingData;
+    } catch (error) {
+      if (krDashboardRequestSeq.current !== requestSeq) return null;
+
+      setKrLoadState("error");
+      setKrErrorMessage(
+        error instanceof Error ? error.message : t("dashboard.ranking.krReadError")
+      );
+      return null;
+    }
+  }
+
   async function loadMarketIndices(options?: { silent?: boolean }) {
     const requestSeq = marketIndexRequestSeq.current + 1;
     marketIndexRequestSeq.current = requestSeq;
@@ -2888,6 +3283,56 @@ export default function MarketDashboardClient({
     }
   }
 
+  async function refreshKrWatchlistDailyPricesForFreshness(
+    groupId: number,
+    currentRankBy: KRRankBy,
+    targetTradeDate: string | null
+  ) {
+    const requestKey = `${groupId}:${targetTradeDate ?? "missing"}:daily`;
+
+    if (krWatchlistFreshnessRequestKeys.current.has(requestKey)) return;
+
+    krWatchlistFreshnessRequestKeys.current.add(requestKey);
+    setKrUniverseRefreshState("loading");
+
+    try {
+      const job = await requestBackfillJob(
+        `/api/kr-market/watchlists/groups/${groupId}/refresh-daily`,
+        { method: "POST" },
+        {
+          include_children: true,
+          enabled_only: true,
+          outputsize: "compact",
+          provider: "auto",
+          sleep_seconds: getRefreshExecutionSeconds(
+            refreshExecutionSettings,
+            "kr",
+            "observed_stock_refresh_interval_seconds",
+            1
+          ),
+        },
+        {
+          intervalMs: 1500,
+          timeoutMs: 1_800_000,
+        }
+      );
+      const result =
+        job.result && typeof job.result === "object" && !Array.isArray(job.result)
+          ? (job.result as Record<string, unknown>)
+          : null;
+      const errors = Array.isArray(result?.errors) ? result.errors : [];
+
+      setKrUniverseRefreshState(errors.length > 0 ? "error" : "success");
+
+      if (selectedKrGroupIdRef.current === groupId) {
+        setKrDataRefreshNonce((value) => value + 1);
+        await loadKrDashboard(groupId, currentRankBy, { silent: true });
+      }
+    } catch {
+      setKrUniverseRefreshState("error");
+    }
+  }
+
   useEffect(() => {
     activeGroupIdRef.current = activeGroupId;
   }, [activeGroupId]);
@@ -2905,12 +3350,20 @@ export default function MarketDashboardClient({
   }, [jpRadarMode]);
 
   useEffect(() => {
+    krRadarModeRef.current = krRadarMode;
+  }, [krRadarMode]);
+
+  useEffect(() => {
     selectedUsGroupIdRef.current = selectedUsGroupId;
   }, [selectedUsGroupId]);
 
   useEffect(() => {
     selectedJpGroupIdRef.current = selectedJpGroupId;
   }, [selectedJpGroupId]);
+
+  useEffect(() => {
+    selectedKrGroupIdRef.current = selectedKrGroupId;
+  }, [selectedKrGroupId]);
 
   useEffect(() => {
     if (selectedUsGroupId === null) return;
@@ -3288,6 +3741,46 @@ export default function MarketDashboardClient({
     jpRanking?.target_trade_date,
   ]);
 
+  useEffect(() => {
+    if (activeMarket !== "kr") return;
+    if (selectedKrGroupId === null) return;
+
+    const groupId = selectedKrGroupId;
+    const refreshTimer = window.setTimeout(() => {
+      void loadKrDashboard(groupId, krRankBy);
+    }, 120);
+
+    return () => {
+      window.clearTimeout(refreshTimer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeMarket, selectedKrGroupId, krRankBy, krDataRefreshNonce]);
+
+  useEffect(() => {
+    if (activeMarket !== "kr") return;
+    if (selectedKrGroupId === null) return;
+    if (krRanking?.is_current !== false) return;
+
+    const refreshTimer = window.setTimeout(() => {
+      void refreshKrWatchlistDailyPricesForFreshness(
+        selectedKrGroupId,
+        krRankBy,
+        krRanking.target_trade_date
+      );
+    }, 0);
+
+    return () => {
+      window.clearTimeout(refreshTimer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    activeMarket,
+    selectedKrGroupId,
+    krRankBy,
+    krRanking?.is_current,
+    krRanking?.target_trade_date,
+  ]);
+
   function addDashboardPreviewParam(params: Parameters<typeof buildDashboardHref>[0]) {
     if (
       quoteDepthPreviewMode &&
@@ -3317,6 +3810,7 @@ export default function MarketDashboardClient({
     setUsChartFocusMode(false);
     setJpChartFocusMode(false);
     setJpStatusMessage(null);
+    setKrStatusMessage(null);
 
     if (market !== "tw") {
       setSelectedFuturesSymbol(null);
@@ -3354,6 +3848,17 @@ export default function MarketDashboardClient({
         market: "jp",
         groupId: fallbackGroup?.id ?? null,
         jpSymbol: selectedJpSymbol,
+      });
+      return;
+    }
+
+    if (market === "kr") {
+      const fallbackGroup = selectedKrGroup ?? flattenKrGroups(krWatchlistTree)[0] ?? null;
+      ensureSelectedKrGroup();
+      pushDashboardUrl({
+        market: "kr",
+        groupId: fallbackGroup?.id ?? null,
+        krSymbol: selectedKrSymbol,
       });
       return;
     }
@@ -3522,6 +4027,81 @@ export default function MarketDashboardClient({
     }
   }
 
+  function handleSelectKrGroup(group: KRWatchlistGroupNode | null) {
+    setSelectedKrGroupId(group?.id ?? null);
+    setSelectedKrGroup(group);
+    setSelectedKrGroupName(group?.group_name ?? null);
+    setSelectedKrSymbol(null);
+    setSelectedKrStock(null);
+    setKrRanking(null);
+    setKrRadar(null);
+    setKrLoadState("idle");
+    setKrRadarLoadState("idle");
+    setKrErrorMessage(null);
+    setKrRadarErrorMessage(null);
+    setKrStatusMessage(null);
+    pushDashboardUrl({ market: "kr", groupId: group?.id ?? null });
+  }
+
+  function handleSelectKrSymbol(symbol: string, securityName: string | null) {
+    const normalizedSymbol = symbol.trim().toUpperCase();
+    if (!normalizedSymbol) return;
+
+    setKrStatusMessage(null);
+    setSelectedKrSymbol(normalizedSymbol);
+    setSelectedKrStock((current) =>
+      current?.symbol === normalizedSymbol
+        ? current
+        : ({
+            id: 0,
+            symbol: normalizedSymbol,
+            local_code: null,
+            security_name: securityName,
+            security_name_kr: null,
+            exchange: null,
+            market_segment: null,
+            sector: null,
+            industry: null,
+            asset_type: "stock",
+            listing_source: "watchlist",
+            currency: "KRW",
+            exchange_timezone_name: "Asia/Seoul",
+            is_active: true,
+            first_seen_at: "",
+            last_seen_at: "",
+            created_at: "",
+            updated_at: "",
+          } satisfies KRStockMasterRead)
+    );
+    pushDashboardUrl({
+      market: "kr",
+      groupId: selectedKrGroupId,
+      krSymbol: normalizedSymbol,
+    });
+  }
+
+  function handleSelectKrStock(stock: KRStockMasterRead | null) {
+    setSelectedKrStock(stock);
+    setSelectedKrSymbol(stock?.symbol ?? null);
+    setKrStatusMessage(null);
+
+    if (stock) {
+      pushDashboardUrl({ market: "kr", groupId: selectedKrGroupId, krSymbol: stock.symbol });
+    } else {
+      pushDashboardUrl({ market: "kr", groupId: selectedKrGroupId });
+    }
+  }
+
+  function ensureSelectedKrGroup() {
+    const fallbackGroup = selectedKrGroup ?? flattenKrGroups(krWatchlistTree)[0] ?? null;
+
+    if (fallbackGroup !== selectedKrGroup) {
+      setSelectedKrGroup(fallbackGroup);
+      setSelectedKrGroupId(fallbackGroup?.id ?? null);
+      setSelectedKrGroupName(fallbackGroup?.group_name ?? null);
+    }
+  }
+
   function ensureSelectedUsGroup() {
     const fallbackGroup = selectedUsGroup ?? flattenUsGroups(usWatchlistTree)[0] ?? null;
 
@@ -3579,6 +4159,19 @@ export default function MarketDashboardClient({
     }
   }
 
+  function handleKrRadarModeChange(value: WatchlistRadarMode) {
+    krRadarModeRef.current = value;
+    setKrRadarMode(value);
+    pushDashboardUrl({
+      market: "kr",
+      groupId: selectedKrGroupId,
+      krSymbol: selectedKrSymbol,
+    });
+    if (selectedKrGroupId !== null) {
+      void loadKrWatchlistRadar(selectedKrGroupId, { mode: value });
+    }
+  }
+
   function handleUsRankByChange(value: string) {
     setUsRankBy(value as USRankBy);
     setUsRanking(null);
@@ -3591,6 +4184,13 @@ export default function MarketDashboardClient({
     setJpRanking(null);
     setJpLoadState("idle");
     setJpErrorMessage(null);
+  }
+
+  function handleKrRankByChange(value: string) {
+    setKrRankBy(value as KRRankBy);
+    setKrRanking(null);
+    setKrLoadState("idle");
+    setKrErrorMessage(null);
   }
 
   function renderRankingRow(row: RankingItem) {
@@ -4048,6 +4648,102 @@ export default function MarketDashboardClient({
     </div>
   );
 
+  const krDisplayRows: RankingDisplayRow[] = krVisibleRows.map((row) => {
+    const selected = row.symbol === selectedKrSymbol;
+    const loading = isKrRankingItemPending(row);
+
+    return {
+      key: `${row.group_id}-${row.symbol}`,
+      rank: row.rank,
+      symbol: row.symbol,
+      name: row.security_name,
+      meta:
+        [
+          row.trade_date?.slice(0, 10),
+          row.market_segment,
+          row.sector,
+          row.source,
+        ]
+          .filter(Boolean)
+          .join(" · ") || statusLabel(t, row.status),
+      visual: (
+        <span className="text-center text-xs text-omi-text-subtle">
+          -
+        </span>
+      ),
+      close: formatPrice(row.close),
+      closeValue: row.close,
+      change: formatPct(row.change_pct),
+      changePct: row.change_pct,
+      trend: trendLabel(t, row.change_pct),
+      volume: formatWholeNumber(row.volume),
+      volumeValue: row.volume,
+      selected,
+      loading,
+      href: dashboardHref({
+        market: "kr",
+        groupId: selectedKrGroupId,
+        krSymbol: row.symbol,
+      }),
+      onSelect: () => handleSelectKrSymbol(row.symbol, row.security_name),
+    };
+  });
+  const krRankingPanel = (
+    <div className="space-y-4">
+      <WatchlistRadarPanel
+        radar={krRadar}
+        loadState={krRadarLoadState}
+        errorMessage={krRadarErrorMessage}
+        mode={krRadarMode}
+        selectedStockId={selectedKrSymbol}
+        disabled={selectedKrGroupId === null}
+        scopeLabel={t("radar.technicalOnly.krScope")}
+        notice={t("radar.technicalOnly.notice")}
+        getModeHref={(nextMode) =>
+          dashboardHref({
+            market: "kr",
+            groupId: selectedKrGroupId,
+            krSymbol: selectedKrSymbol,
+            radarMode: nextMode,
+          })
+        }
+        onModeChange={handleKrRadarModeChange}
+        onReload={() => {
+          if (selectedKrGroupId !== null) {
+            void loadKrWatchlistRadar(selectedKrGroupId);
+          }
+        }}
+        onSelectStock={handleSelectKrSymbol}
+      />
+      <WatchlistRankingPanel
+        groupName={selectedKrGroupName}
+        lastUpdatedAt={krLastUpdatedAt}
+        statusLabel={
+          krRanking?.is_current === false ? krRankingPendingLabel : undefined
+        }
+        rankBy={krRanking?.rank_by ?? krRankBy}
+        rankOptions={[
+          { value: "none", label: t("rank.none") },
+          { value: "change_pct", label: t("rank.changePct") },
+          { value: "volume", label: t("rank.volume") },
+          { value: "close", label: t("rank.close") },
+        ]}
+        onRankByChange={handleKrRankByChange}
+        onReload={() => {
+          if (selectedKrGroupId !== null) void loadKrDashboard(selectedKrGroupId);
+        }}
+        reloadDisabled={selectedKrGroupId === null || krLoadState === "loading"}
+        loadState={krRankingLoadState}
+        loadingLabel={krRankingPendingLabel}
+        errorMessage={krErrorMessage}
+        rows={krDisplayRows}
+        summary={krSummary}
+        volumeHeader={t("dashboard.ranking.volume")}
+        emptyMessage={t("dashboard.ranking.krEmpty")}
+      />
+    </div>
+  );
+
   const omiAskContext = useMemo<OmiAskDockContext>(() => {
     if (activeMarket === "us") {
       if (selectedUsSymbol) {
@@ -4127,6 +4823,47 @@ export default function MarketDashboardClient({
           market: "jp",
           selected_group_id: selectedJpGroupId,
           selected_group_name: selectedJpGroupName,
+        },
+      };
+    }
+
+    if (activeMarket === "kr") {
+      if (selectedKrSymbol) {
+        return {
+          market: "kr",
+          label: `${selectedKrSymbol}${
+            selectedKrStock?.security_name ? ` ${selectedKrStock.security_name}` : ""
+          }`,
+          target: {
+            type: "kr_stock",
+            id: selectedKrSymbol,
+            label: selectedKrStock?.security_name ?? selectedKrSymbol,
+            market: "KR",
+          },
+          uiContext: {
+            market: "kr",
+            selected_symbol: selectedKrSymbol,
+            selected_security_name: selectedKrStock?.security_name ?? null,
+            selected_market_segment: selectedKrStock?.market_segment ?? null,
+            selected_sector: selectedKrStock?.sector ?? null,
+            selected_group_id: selectedKrGroupId,
+            selected_group_name: selectedKrGroupName,
+          },
+        };
+      }
+
+      return {
+        market: "kr",
+        label: t("krMarket.askMarketLabel"),
+        target: {
+          type: "market",
+          market: "KR",
+          label: t("krMarket.askMarketLabel"),
+        },
+        uiContext: {
+          market: "kr",
+          selected_group_id: selectedKrGroupId,
+          selected_group_name: selectedKrGroupName,
         },
       };
     }
@@ -4218,6 +4955,10 @@ export default function MarketDashboardClient({
     selectedJpGroupName,
     selectedJpStock,
     selectedJpSymbol,
+    selectedKrGroupId,
+    selectedKrGroupName,
+    selectedKrStock,
+    selectedKrSymbol,
     selectedStockId,
     selectedStockName,
     selectedUsGroupId,
@@ -4229,8 +4970,8 @@ export default function MarketDashboardClient({
 
   return (
     <main className="h-screen overflow-hidden bg-omi-canvas text-omi-text-strong">
-      <div className="flex h-full min-w-[1180px] flex-col">
-        <div className="flex min-h-0 flex-1">
+      <div className="flex h-full w-full flex-col lg:min-w-[1180px]">
+        <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
           {activeMarket === "us" ? (
             <USWatchlistSidebar
               initialTree={usWatchlistTree}
@@ -4327,6 +5068,55 @@ export default function MarketDashboardClient({
                 }
               }}
             />
+          ) : activeMarket === "kr" ? (
+            <KRMarketSidebar
+              initialTree={krWatchlistTree}
+              initialItems={krWatchlistItems}
+              selectedMarket={activeMarket}
+              selectedGroupId={selectedKrGroupId}
+              selectedSymbol={selectedKrSymbol}
+              selectedStock={selectedKrStock}
+              externalStatusMessage={krStatusMessage}
+              onMarketChange={handleMarketChange}
+              onSelectGroup={handleSelectKrGroup}
+              onSelectSymbol={handleSelectKrSymbol}
+              onExplorerDataChanged={(nextTree, nextItems) => {
+                setKrWatchlistTree(nextTree);
+                setKrWatchlistItems(nextItems);
+                setKrRadar(null);
+                setKrRadarLoadState("idle");
+                setKrRadarErrorMessage(null);
+                setKrDataRefreshNonce((value) => value + 1);
+
+                const nextSelectedGroup =
+                  flattenKrGroups(nextTree).find((group) => group.id === selectedKrGroupId) ??
+                  flattenKrGroups(nextTree)[0] ??
+                  null;
+                const selectedSymbolKey = selectedKrSymbol?.toUpperCase() ?? null;
+                const nextSelectedRow =
+                  selectedSymbolKey === null
+                    ? null
+                    : nextItems.find((item) => item.symbol === selectedSymbolKey) ?? null;
+
+                setSelectedKrGroup(nextSelectedGroup);
+                setSelectedKrGroupId(nextSelectedGroup?.id ?? null);
+                setSelectedKrGroupName(nextSelectedGroup?.group_name ?? null);
+
+                if (selectedSymbolKey !== null && nextSelectedRow === null) {
+                  setSelectedKrSymbol(null);
+                  setSelectedKrStock(null);
+                } else if (
+                  nextSelectedRow !== null &&
+                  (nextSelectedRow.security_name ?? nextSelectedRow.security_name_kr) !==
+                    selectedKrStock?.security_name
+                ) {
+                  handleSelectKrSymbol(
+                    nextSelectedRow.symbol,
+                    nextSelectedRow.security_name ?? nextSelectedRow.security_name_kr
+                  );
+                }
+              }}
+            />
           ) : (
             <SidebarWatchlistExplorer
               initialTree={watchlistTree}
@@ -4339,6 +5129,7 @@ export default function MarketDashboardClient({
               selectedMarket={activeMarket}
               selectedCryptoBase={selectedCryptoBase}
               selectedCryptoInstrumentKey={selectedCryptoInstrumentKey}
+              selectedResourceInstrumentKey={selectedResourceInstrumentKey}
               onSelectGroup={(group) => {
                 if (activeMarket !== "tw") return;
                 handleSelectGroup(group);
@@ -4354,6 +5145,10 @@ export default function MarketDashboardClient({
               onSelectCryptoInstrument={(base, instrumentKey) => {
                 setSelectedCryptoBase(base);
                 setSelectedCryptoInstrumentKey(instrumentKey);
+                setSelectedResourceInstrumentKey(null);
+              }}
+              onSelectResourceInstrument={(instrument) => {
+                setSelectedResourceInstrumentKey(instrument.key);
               }}
               onMarketChange={handleMarketChange}
               onExplorerDataChanged={(nextTree, nextItems) => {
@@ -4446,6 +5241,17 @@ export default function MarketDashboardClient({
                   onStatusMessage={setJpStatusMessage}
                 />
               </>
+            ) : activeMarket === "kr" ? (
+              <KRMarketPanel
+                initialSymbol={selectedKrSymbol}
+                selectedGroupId={selectedKrGroupId}
+                refreshNonce={krDataRefreshNonce}
+                watchlistRankingPanel={krRankingPanel}
+                onSelectStock={handleSelectKrStock}
+                onStatusMessage={setKrStatusMessage}
+              />
+            ) : activeMarket === "crypto" && selectedResourceInstrumentKey ? (
+              <ResourceMarketPanel selectedInstrumentKey={selectedResourceInstrumentKey} />
             ) : activeMarket === "crypto" ? (
               <CryptoMarketPanel
                 selectedBase={selectedCryptoBase}

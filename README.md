@@ -2,7 +2,7 @@
 
 Open Market Intelligence（OMI）是一套本機優先的市場情報與看盤研究工作台。它把自選股、盤勢脈絡、盤中監控、K 線分析、籌碼資料、基本面資料、美股隔夜訊號、Crypto 即時資料、商品參考，以及 AI/Agent evidence 介面整合在同一個專案中。
 
-目前產品主軸仍是台股。美股模組已可作為台股研究的領先訊號層，特別適合觀察半導體、AI 基建、雲端、記憶體、ETF 與大型科技股對台股供應鏈的影響。日股是早期 context layer；Crypto 與商品市場是獨立的輔助市場資料域，用來觀察 24/7 風險資產、USDT 計價脈絡與大宗商品 reference，不是自動交易或下單系統。
+目前產品主軸仍是台股。美股模組已可作為台股研究的領先訊號層，特別適合觀察半導體、AI 基建、雲端、記憶體、ETF 與大型科技股對台股供應鏈的影響。日股與韓股是早期 context layer；Crypto 與商品市場是獨立的輔助市場資料域，用來觀察 24/7 風險資產、USDT 計價脈絡與大宗商品 reference，不是自動交易或下單系統。
 
 OMI 適合的日常流程：
 
@@ -97,10 +97,11 @@ Settings 底部提供來源與責任聲明，把 TWSE/TPEx、TAIFEX、MOPS、SEC
 - 台股個股頁：`今日`、`日K`、`週K`、`月K` 共用一致版型；一般 K 線預設保留乾淨視圖，交叉/突破標記改為 opt-in。
 - 台指期頁：TXF、MXF、TMF 報價、日內/日週月 K、期現價差、成交量與商品比較；即時報價帶 freshness 狀態與 provider fallback。
 - Crypto 市場：BTC/ETH/USDT/SOL/BNB/XRP/DOGE/TON/LINK registry、BitoPro/Binance/OKX/CoinGecko provider contract、Crypto 自選群組、USDT 為主的全球報價視角、WebSocket 即時資料、REST auto-refresh、OHLCV 與 ticker/order book/funding/open-interest/spread bounded history。
-- 商品市場：商品資料獨立在 `商品` 底下，先提供黃金、白銀、銅、WTI、Brent、天然氣的 watch-only contract；報價單位以 USDT 為主，provider 尚未接入時會明確標記 pending。
+- 商品市場：商品資料獨立在 `商品` 底下，先提供黃金、白銀、銅、WTI、Brent、天然氣的 watch-only contract；近即時/延遲報價走 Yahoo chart，報價單位以 USD 為主，來源失敗時明確顯示 empty/error。
 - 專業 K 線模式：台股、美股、台指期與 Crypto 共用同一套全寬圖表 shell，支援壓縮 header、指標分類、VPVR、交叉/突破標記、畫線工具、量測工具、undo/redo、畫線快照保存。
 - 台股籌碼與基本面：法人、融資融券、集保、券商分點 Top15、營收、財報、盈餘。
 - 美股市場：主要指數、自選股、OHLC、盤中資料、SEC facts、Alpha Vantage profile/actions、FINRA short volume、FRED macro。
+- 韓股市場後端 v1：KRX/OpenDART/Yahoo fallback parser、symbols、watchlists、OHLC、source health、resource refresh 與 optional scheduler。
 - 派報：可設定收件群組、預覽模板、手動寄送與 UI 自訂定時派報；同一排程同一分鐘去重，避免重複寄送。
 - Settings 來源聲明：把資料來源、可靠性、stale/partial/missing 邊界與研究用途但書放在 UI 裡，和 README 的信任模型保持一致。
 - AI/Agent 入口：`POST /api/ai/ask` 與 MCP `omi.ask`，支援 evidence freshness、warnings、missing data、tool runs；前端 OMI dock 預設走本機 evidence-only brief answer，自選股問題會把 Watchlist Radar 納入回答與 action plan。
@@ -110,7 +111,7 @@ Settings 底部提供來源與責任聲明，把 TWSE/TPEx、TAIFEX、MOPS、SEC
 - 本機優先：SQLite、cache、jobs、agent evidence 預設都在本機。
 - Evidence before narrative：AI 只能讀 bounded local evidence，不應編造不存在的市場資料。
 - 新鮮度可見：stale、partial、missing、best-effort 狀態要顯示出來。
-- 台股優先：美股、日股、Crypto 與商品是台股研究的 context layer，不是台股資料替代品。
+- 台股優先：美股、日股、韓股、Crypto 與商品是台股研究的 context layer，不是台股資料替代品。
 - 讀取路徑保持輕量：昂貴或會改資料的刷新行為走明確 POST/job route。
 
 ## 功能地圖
@@ -211,7 +212,22 @@ Settings 底部提供來源與責任聲明，把 TWSE/TPEx、TAIFEX、MOPS、SEC
 
 日股定位和美股相同，是台股研究的外部 context layer。現階段以自選股、OHLC、技術雷達與資源補齊流程為主，資料源以 Yahoo chart 與 J-Quants 設定槽為核心。
 
-韓股目前仍是預留市場入口，不會產生假資料或把其他市場資料套用成韓股 context。
+### 韓股市場
+
+韓股定位和美股、日股相同，是台股研究的外部 context layer。後端 v1 已建立資料處理骨架：
+
+- KRX Data parser/fetch wrapper：symbol master、daily price、investor trading resource。
+- Yahoo chart per-symbol fallback：當 KRX daily price 不可用或回空時可用於 bounded daily OHLC refresh，provider 會明確標成 `yahoo_chart`。
+- OpenDART fundamentals：`/api/kr-market/fundamentals/{symbol}/refresh` 可用 `corp_code`、`fiscal_year`、`report_code`、`fs_div` 指定公司財報；未設定 `OPENDART_API_KEY` 時會回傳 `skipped`，不會假裝有資料。
+- 韓股 watchlists、ranking、technical radar lite、OHLC chart 與 resource summary。
+- `GET /api/kr-market/source-health` 會同步 `market=kr` 的 `source_health_snapshot`，顯示 KRX/Yahoo/OpenDART/local cache 的 current、stale、empty 狀態。
+
+重要限制：
+
+- 韓股仍是 backend/data foundation，前端完整韓股工作台與 AI 韓股決策稿尚未完成。
+- KRX Data Marketplace live endpoint 仍需後續用實際 refresh smokes harden；v1 parser 與 DB contract 已用 mocked payload 測試。
+- 韓國假期目前只使用週末、固定假日與年末休市的保守近似；農曆與臨時休市需要後續接正式 KRX calendar source。
+- 不預設全市場大量回補；refresh 預設以單檔、watchlist 或明確 resource 為邊界。
 
 ### Crypto 與商品市場
 
@@ -231,7 +247,7 @@ Crypto 是獨立市場資料域，不和台股、美股或商品共用交易邏�
 
 - 金屬：GC 黃金、SI 白銀、HG 銅。
 - 能源：CL WTI 原油、BZ Brent 原油、NG 天然氣。
-- 報價單位預設 USDT，provider 尚未接入時會顯示 `provider_pending`，不會產生假即時報價。
+- 報價單位預設 USD，近即時/延遲報價走 Yahoo chart explicit POST refresh；來源失敗或快取為空時顯示 empty/error，不會產生假即時報價。
 
 ## 資料來源信任模型
 
@@ -252,10 +268,11 @@ OMI 把每個來源都當作帶有 provenance 與 freshness 的 evidence，而�
 | 美股 profile/actions | Alpha Vantage | 補充資料，API-key dependent。 |
 | 美股 short volume | FINRA CNMS daily short volume | 官方每日 short sale volume，不是 short interest。 |
 | 日股 OHLC/基本面 | Yahoo chart、J-Quants 設定槽 | 早期 context layer；J-Quants 需 key，缺資料時要顯示 missing/partial。 |
+| 韓股 OHLC/基本面/投資人 | KRX Data、OpenDART、Yahoo chart fallback | 早期 context layer；KRX/OpenDART 是 official-source direction，Yahoo 只作 per-symbol fallback。缺 key、stale 或 provider failure 必須顯示。 |
 | Crypto TWD spot | BitoPro REST/WebSocket | 台灣 TWD spot reference 與本地溢價觀察；不是全球成交量基準。 |
 | Crypto USDT spot/perpetual | Binance、OKX | Binance 是主要 verified realtime/reference，包含 USD-M force-order 清算事件；OKX 是 secondary source。來源失敗、stale 或 disabled 要顯示在 source health。 |
 | Crypto ranking/market cap | CoinGecko | 排名與市值 context；不是執行價格來源。 |
-| 商品 futures reference | Resource contract | 目前 provider pending、watch-only；接入 provider 前不得產生假 quote。 |
+| 商品 futures reference | Yahoo chart、Resource contract | Yahoo chart 是 best-effort 延遲來源；商品仍是 watch-only context，不得產生交易指令或假 quote。 |
 | Macro | FRED | 官方 FRED API，需 key。 |
 
 設計規則：如果來源 stale、partial 或 unavailable，UI 與 AI response 要透過 `warnings`、`missing`、status chip、loading state 顯示出來。
@@ -345,6 +362,7 @@ flowchart LR
 | `/api/market/tw-futures` | 台指期 TXF/MXF/TMF 報價、日內與日 K 資料 |
 | `/api/us-market` | 美股 symbols、watchlists、OHLC、intraday、SEC facts、profile、actions、macro |
 | `/api/jp-market` | 日股 symbols、watchlists、OHLC、resource refresh 與 context |
+| `/api/kr-market` | 韓股 symbols、watchlists、OHLC、source health、KRX/OpenDART resource refresh |
 | `/api/crypto-market` | Crypto provider contract、source health、realtime、watchlists、OHLCV、ticker、order book、derivatives、spread |
 | `/api/resource-market` | 商品/resource provider contract、instruments、quotes、OHLCV reference |
 
@@ -469,12 +487,12 @@ LLM enabled 時，模型只能基於這些 evidence 補強敘事；如果 freshn
 
 ### Trading-session awareness
 
-`GET /api/market/calendar-status` 是交易日與資料發布窗口的後端單一來源，回傳 `tw` / `us` market status：
+`GET /api/market/calendar-status` 是交易日與資料發布窗口的後端單一來源，回傳 `tw` / `us` / `kr` market status：
 
 - `is_trading_day`、`phase`、`reason`、`holiday_name`
 - `previous_trading_day`、`next_trading_day`
 - `session.next_session_start_at`、`session.is_polling_window`、`session.is_after_close`
-- `release_windows`，包含日線、法人、融資融券、分點、市場籌碼與美股日線的 `expected_trade_date` / `status`
+- `release_windows`，包含日線、法人、融資融券、分點、市場籌碼、美股日線與韓股日線的 `expected_trade_date` / `status`
 
 台股 target 會檢查台灣交易日：
 
@@ -485,6 +503,8 @@ LLM enabled 時，模型只能基於這些 evidence 補強敘事；如果 freshn
 這個判斷會進入 `decision_evidence.market_session`，來源優先使用 `app.market.calendar_status`；前端 OMI dock 會在 Signals 顯示「交易日判斷」。
 
 Scheduler、refresh policy、AI freshness、watchlist ranking freshness 與美股 overnight context 也會從 calendar status helper 推導 expected trade date；低階 parser/backfill helper 仍保留 trading-day function 作為日期區間計算。
+
+韓股 calendar status 目前支援 Asia/Seoul 時區、09:00-15:30 regular session 與保守的週末/固定假日/年底休市判斷；完整 KRX official holiday calendar 是後續強化項目，因此韓股 freshness 仍需在 source health 內保留資料日期與 provider 狀態。
 
 ### Price-level logic
 
@@ -651,6 +671,7 @@ KGI_API_BASE_URL=
 US_SEC_USER_AGENT=Open Market Intelligence local research; contact=you@example.com
 US_MARKET_HTTP_TIMEOUT_SECONDS=30
 JP_MARKET_HTTP_TIMEOUT_SECONDS=30
+KR_MARKET_HTTP_TIMEOUT_SECONDS=30
 JQUANTS_API_BASE_URL=https://api.jquants.com/v2
 JQUANTS_API_KEY=
 JQUANTS_ID_TOKEN=
@@ -658,6 +679,8 @@ JQUANTS_REFRESH_TOKEN=
 JQUANTS_MAIL_ADDRESS=
 JQUANTS_PASSWORD=
 JQUANTS_ID_TOKEN_CACHE_SECONDS=82800
+OPENDART_API_BASE_URL=https://opendart.fss.or.kr/api
+OPENDART_API_KEY=
 
 CRYPTO_MARKET_HTTP_TIMEOUT_SECONDS=15
 CRYPTO_MARKET_TICKER_STALE_SECONDS=15
@@ -763,6 +786,12 @@ SCHEDULER_JP_MARKET_REFRESH_TIME=16:10
 SCHEDULER_JP_MARKET_REFRESH_DAY_OF_WEEK=mon-fri
 SCHEDULER_JP_MARKET_REFRESH_PROVIDER=auto
 SCHEDULER_JP_MARKET_REFRESH_SLEEP_SECONDS=15.0
+ENABLE_KR_MARKET_SCHEDULER=false
+SCHEDULER_KR_MARKET_REFRESH_TIME=16:20
+SCHEDULER_KR_MARKET_REFRESH_DAY_OF_WEEK=mon-fri
+SCHEDULER_KR_MARKET_REFRESH_PROVIDER=auto
+SCHEDULER_KR_MARKET_REFRESH_INCLUDE_FUNDAMENTALS=false
+SCHEDULER_KR_MARKET_REFRESH_SLEEP_SECONDS=15.0
 ENABLE_DISPATCH_SCHEDULER=true
 SCHEDULER_DISPATCH_TICK_INTERVAL_SECONDS=60
 ```
@@ -793,7 +822,7 @@ Database path：
 data/open_market_intelligence.db
 ```
 
-本機 SQLite 目前包含台股、美股、日股、台指期、Crypto 與商品 reference tables。Crypto schema 包含 provider instruments、ticker snapshots、order book snapshots、OHLCV bars、derivatives metrics、market cap、spread，以及 sampled history tables；這些資料可支援研究與回測前置觀察，但 ticker/order book/funding/OI history 是取樣紀錄，不是交易所逐筆 archive。
+本機 SQLite 目前包含台股、美股、日股、韓股、台指期、Crypto 與商品 reference tables。韓股 schema 包含 `kr_stock_master`、`kr_daily_price`、`kr_company_fundamental`、`kr_investor_trade_daily` 與韓股 watchlist tables；Crypto schema 包含 provider instruments、ticker snapshots、order book snapshots、OHLCV bars、derivatives metrics、market cap、spread，以及 sampled history tables；這些資料可支援研究與回測前置觀察，但 ticker/order book/funding/OI history 是取樣紀錄，不是交易所逐筆 archive。
 
 ## Validation
 
@@ -830,6 +859,8 @@ Invoke-RestMethod "http://127.0.0.1:8400/api/watchlists/groups/1/radar?mode=acti
 Invoke-RestMethod "http://127.0.0.1:8400/api/market/tw-futures/latest?symbols=TXF&refresh=true&session=auto"
 Invoke-RestMethod "http://127.0.0.1:8400/api/us-market/stocks/search?q=SPCX"
 Invoke-RestMethod "http://127.0.0.1:8400/api/us-market/source-health?symbol=MU"
+Invoke-RestMethod "http://127.0.0.1:8400/api/kr-market/stocks/search?keyword=005930"
+Invoke-RestMethod "http://127.0.0.1:8400/api/kr-market/source-health?symbol=005930"
 Invoke-RestMethod "http://127.0.0.1:8400/api/crypto-market/provider-contract"
 Invoke-RestMethod "http://127.0.0.1:8400/api/crypto-market/source-health?base=BTC"
 Invoke-RestMethod "http://127.0.0.1:8400/api/crypto-market/realtime/status"
@@ -837,6 +868,7 @@ Invoke-RestMethod "http://127.0.0.1:8400/api/crypto-market/quotes/latest?symbols
 Invoke-RestMethod "http://127.0.0.1:8400/api/crypto-market/quotes/history?symbols=BTC-USDT&limit=20"
 Invoke-RestMethod "http://127.0.0.1:8400/api/resource-market/provider-contract"
 Invoke-RestMethod "http://127.0.0.1:8400/api/resource-market/instruments"
+Invoke-RestMethod -Method Post "http://127.0.0.1:8400/api/resource-market/refresh?symbols=GC&intervals=1d,1w,1M&limit=220"
 ```
 
 Git hygiene：
@@ -850,7 +882,7 @@ git diff --check
 
 - Frontend API access 應透過 `frontend/src/lib/api.ts` 與 `/omi-data` proxy，除非有明確例外。
 - Backend 外部 HTTP 呼叫應透過 `backend/app/http_client.py`；預設 `OMI_HTTP_TRUST_ENV=false`，避免本機 shell 或 launcher 的 `HTTP_PROXY` / `HTTPS_PROXY` 把 OpenAI、Yahoo、TWSE/TPEx 等來源導到無效 proxy。只有確定需要真實 outbound proxy 時才設成 `true`。
-- Provider/source health observability 使用 `provider_event` 與 `source_health_snapshot` 兩張表；服務入口在 `backend/app/observability/provider_health.py`。`GET /api/system/provider-events` 可查 provider 事件歷史，`GET /api/system/source-health-snapshots` 可查目前持久化 health snapshot。台股與美股 source health API 會同步 snapshot；外部 fetcher 若要記錄錯誤、rate limit、retry-after，應呼叫 `record_provider_event()`。
+- Provider/source health observability 使用 `provider_event` 與 `source_health_snapshot` 兩張表；服務入口在 `backend/app/observability/provider_health.py`。`GET /api/system/provider-events` 可查 provider 事件歷史，`GET /api/system/source-health-snapshots` 可查目前持久化 health snapshot。台股、美股與韓股 source health API 會同步 snapshot；外部 fetcher 若要記錄錯誤、rate limit、retry-after，應呼叫 `record_provider_event()`。
 - 台股 source health 由 `backend/app/market/source_health.py` 從本地表與 `market_calendar_status` 的 release window 推導，API 為 `GET /api/market/source-health`；支援 `stock_id`、`dataset`、`index_id` 與 `now` filter。OMI 台股 context 會帶入 `data.source_health`，用來區分 `current`、`stale`、`empty` 與 ETF/權證等 `not_applicable` 資料。
 - 台指期即時資料預設使用 `TAIWAN_FUTURES_QUOTE_PROVIDER=taifex_mis`；若切到 `kgi`，目前只會檢查 KGI 設定並回傳「adapter 尚未實作」錯誤，避免把空 adapter 當成真實即時資料。相關 API 支援 `provider=auto|taifex_mis|kgi`。
 - 美股 provider adapter 入口放在 `backend/app/us_market/providers/`；source health 由 `backend/app/us_market/source_health.py` 從本地表推導，API 為 `GET /api/us-market/source-health`，OMI 美股 context 也會帶入 `data.source_health`。美股回答權重使用 `backend/app/ai/us_decision_adapter.py`，以 price trend、relative volume、fundamentals、FINRA short volume 與 source health 為核心，不套用台股法人/分點模型。
@@ -859,7 +891,7 @@ git diff --check
 - Crypto source health 由 `backend/app/crypto_market/source_health.py` 彙整 REST cache、WebSocket latest store、auto-refresh 與 persistence 狀態；UI 應顯示 stale/empty/error，不應把 24/7 市場的 missing data 靜默隱藏。
 - Crypto 清算熱力圖 refresh 先走 CoinGlass `/api/futures/liquidation/aggregated-heatmap/model1`，需要 `COINGLASS_API_KEY` 且方案支援該 endpoint；失敗或無 key 時可用 `ENABLE_CRYPTO_MARKET_LIQUIDATION_LOCAL_FALLBACK` 退到本地 liquidation events 聚合。本地 events 可由 Binance USD-M public `@forceOrder` WebSocket persistence 或第三方 liquidation-order feed 寫入，不會從 order book 產生假清算資料。
 - Crypto 多空持倉人數比初版走 Binance USD-M `/futures/data/globalLongShortAccountRatio`，由 `CRYPTO_MARKET_LONG_SHORT_RATIO_PERIOD` 與 `CRYPTO_MARKET_LONG_SHORT_RATIO_LIMIT` 控制 bounded refresh；Bybit 保留為下一個 provider。
-- 商品/resource 市場目前由 `backend/app/resource_market/contract.py` 管理 static contract；provider 接入前，`provider_pending` 是正確狀態，不應在前端補假報價。
+- 商品/resource 市場目前由 `backend/app/resource_market/contract.py` 管理 static contract，並以 `backend/app/resource_market/sources.py` 的 Yahoo chart bounded POST refresh 寫入 quote/OHLCV cache；前端只能讀 cache 或呼叫明確 refresh，不應自行直連 Yahoo 或補假報價。
 - 台股 market time 與 trading-session helpers 放在 `frontend/src/lib/taiwanMarketTime.ts` 與 `frontend/src/lib/taiwanMarketRules.ts`；會優先使用 `frontend/src/lib/marketCalendarStatus.ts` 的後端 snapshot，沒有 snapshot 時才使用本地 fallback。
 - 美股 regular-session helpers 放在 `frontend/src/lib/usMarketTime.ts`；會優先使用 `frontend/src/lib/marketCalendarStatus.ts` 的後端 snapshot，沒有 snapshot 時才使用本地 fallback。
 - 台股、美股與台指期的專業圖表模式應共用 `frontend/src/components/ProfessionalChartPanel.tsx` 與 `frontend/src/components/professionalChartDrawing.ts`；不要在單一 detail panel 重新實作一套工具列。
@@ -875,11 +907,11 @@ git diff --check
 
 - 台股是目前主要 production path；美股可用但仍是 universe-first 且 API-key dependent。
 - US-TW supply-chain mapping 還不是完整 semantic layer，先作為 peer、sector、overnight context 使用。
-- 日股仍是早期 context layer；韓股仍是入口 placeholder。
+- 日股與韓股仍是早期 context layer；韓股目前完成 backend data foundation，完整前端工作台與 AI 韓股決策稿仍待後續補齊。
 - Crypto 已有 registry、provider contract、local cache、WebSocket/REST refresh、K 線與 sampled history，但交易所覆蓋仍是 bounded universe，不是完整 crypto market universe；新增資產仍需進 registry，不做無限制全市場抓取。
 - Crypto WebSocket 目前預設只啟用 BitoPro 與 Binance verified streams；Binance 包含 spot ticker/order book/OHLCV 與 USD-M force-order 清算事件。OKX 是 secondary provider/source，正式即時 stream 還需要獨立驗證後再打開。
 - Crypto ticker、order book、funding、OI、spread history 是 sampled snapshots；適合研究趨勢與資料品質，不等同完整 tick/order-book archive。
-- 商品市場目前 provider pending、watch-only；正式 quote/OHLCV 來源接入前，只能作為分類與 UI/reference contract。
+- 商品市場目前以 Yahoo chart 提供 best-effort 延遲 quote/OHLCV cache，仍是 watch-only；來源失敗、stale 或 disabled 時必須顯示缺口。
 - 派報支援固定模板預覽、手動 SMTP 發送與 UI 自訂定時派報；大漲/大跌觸發派報仍是後續版本。
 - 券商分點多日分析取決於已存 daily Top15 snapshots；如果 DB 只有一天，就只能回傳 partial coverage。
 - 盤中資料取決於外部來源可用性，必要時會退回 snapshot-only 行為。

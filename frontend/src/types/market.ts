@@ -1086,6 +1086,282 @@ export type JPResourceSummaryRead = {
   slots: JPResourceSlotRead[];
 };
 
+export type KRStockMasterRead = {
+  id: number;
+  symbol: string;
+  local_code: string | null;
+  security_name: string | null;
+  security_name_kr: string | null;
+  exchange: string | null;
+  market_segment: string | null;
+  sector: string | null;
+  industry: string | null;
+  asset_type: string;
+  listing_source: string;
+  currency: string;
+  exchange_timezone_name: string | null;
+  is_active: boolean;
+  first_seen_at: string;
+  last_seen_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type KRWatchlistGroupNode = {
+  id: number;
+  parent_id: number | null;
+  group_name: string;
+  description: string | null;
+  sort_order: number;
+  is_active: boolean;
+  children: KRWatchlistGroupNode[];
+};
+
+export type KRWatchlistGroupRead = {
+  id: number;
+  parent_id: number | null;
+  group_name: string;
+  description: string | null;
+  sort_order: number;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type KRWatchlistItemRead = {
+  id: number;
+  group_id: number;
+  symbol: string;
+  local_code: string | null;
+  security_name: string | null;
+  security_name_kr: string | null;
+  exchange: string | null;
+  market_segment: string | null;
+  sector: string | null;
+  industry: string | null;
+  asset_type: string | null;
+  note: string | null;
+  priority: number;
+  tags: string | null;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type KRStockMasterSyncResultRead = {
+  status: string;
+  provider: string;
+  source_url: string | null;
+  scanned_count: number;
+  created_count: number;
+  updated_count: number;
+  deactivated_count: number;
+  message: string;
+};
+
+export type KRDailyPriceRefreshResultRead = {
+  status: string;
+  provider: string;
+  symbol: string;
+  fetched_count: number;
+  inserted_count: number;
+  updated_count: number;
+  message: string;
+};
+
+export type KRResourceRefreshResultRead = {
+  status: string;
+  provider: string;
+  symbol: string | null;
+  fetched_count: number;
+  inserted_count: number;
+  updated_count: number;
+  message: string;
+};
+
+export type KRCompanyFundamentalRead = {
+  id: number;
+  provider: string;
+  symbol: string;
+  corp_code: string | null;
+  stock_code: string | null;
+  company_name: string | null;
+  fiscal_year: number | null;
+  report_code: string | null;
+  report_name: string | null;
+  statement_name: string | null;
+  account_name: string | null;
+  account_id: string | null;
+  current_amount: number | null;
+  previous_amount: number | null;
+  currency: string | null;
+  disclosed_date: string | null;
+  receipt_no: string | null;
+  source_url: string | null;
+  raw_payload_hash: string | null;
+  fetched_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type KRInvestorTradeDailyRead = {
+  id: number;
+  provider: string;
+  symbol: string;
+  trade_date: string;
+  investor_type: string;
+  buy_value: number | null;
+  sell_value: number | null;
+  net_buy_value: number | null;
+  buy_volume: number | null;
+  sell_volume: number | null;
+  net_buy_volume: number | null;
+  source_url: string | null;
+  raw_payload_hash: string | null;
+  fetched_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type KRWatchlistRankingItemRead = {
+  rank: number;
+  symbol: string;
+  security_name: string | null;
+  exchange: string | null;
+  market_segment: string | null;
+  sector: string | null;
+  industry: string | null;
+  asset_type: string | null;
+  group_id: number;
+  trade_date: string | null;
+  close: number | null;
+  previous_close: number | null;
+  change: number | null;
+  change_pct: number | null;
+  volume: number | null;
+  status: string;
+  source: string | null;
+  error_message: string | null;
+};
+
+export type KRWatchlistRankingRead = {
+  group_id: number | null;
+  include_children: boolean;
+  rank_by: string;
+  sort_order: string;
+  requested_symbol_count: number;
+  ranked_count: number;
+  no_data_count: number;
+  error_count: number;
+  trade_date: string | null;
+  target_trade_date: string | null;
+  is_current: boolean;
+  current_symbol_count: number;
+  stale_symbol_count: number;
+  results: KRWatchlistRankingItemRead[];
+};
+
+export type KRWatchlistReadinessItemRead = {
+  symbol: string;
+  security_name: string | null;
+  group_id: number;
+  market_segment: string | null;
+  latest_daily_date: string | null;
+  latest_daily_provider: string | null;
+  daily_row_count: number;
+  daily_status: string;
+  latest_investor_date: string | null;
+  investor_row_count: number;
+  latest_fundamental_date: string | null;
+  fundamental_row_count: number;
+  readiness_status: string;
+  missing_resources: string[];
+};
+
+export type KRWatchlistReadinessRead = {
+  kind: string;
+  group_id: number | null;
+  include_children: boolean;
+  enabled_only: boolean;
+  expected_daily_price_date: string | null;
+  summary: {
+    requested_symbol_count: number;
+    ready_count: number;
+    partial_count: number;
+    no_data_count: number;
+    daily_current_count: number;
+    daily_stale_count: number;
+    daily_empty_count: number;
+    investor_available_count: number;
+    fundamental_available_count: number;
+  };
+  results: KRWatchlistReadinessItemRead[];
+};
+
+export type KROhlcPointRead = {
+  time: string;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  close: number | null;
+  volume: number | null;
+};
+
+export type KROhlcChartRead = {
+  symbol: string;
+  timeframe: string;
+  bars: number;
+  lookback_days: number;
+  from_date: string;
+  to_date: string;
+  point_count: number;
+  points: KROhlcPointRead[];
+  backfill: Record<string, unknown> | null;
+};
+
+export type KRResourceSlotRead = {
+  key: string;
+  status: "available" | "empty" | "planned" | string;
+  available: boolean;
+  source: string | null;
+  latest_date: string | null;
+  row_count: number;
+  metrics?: Record<string, string | number | null>;
+};
+
+export type KRResourceSummaryRead = {
+  symbol: string;
+  slots: KRResourceSlotRead[];
+};
+
+export type KRSourceHealthEntryRead = {
+  resource: string;
+  provider: string;
+  target: string;
+  status: string;
+  ok: boolean;
+  row_count: number;
+  latest_data_date: string | null;
+  expected_data_date: string | null;
+  data_quality: string;
+  reason: string;
+  error_message: string | null;
+};
+
+export type KRSourceHealthRead = {
+  kind: string;
+  generated_at: string;
+  expected_daily_price_date: string | null;
+  summary: {
+    entry_count: number;
+    ok_count: number;
+    empty_count: number;
+    stale_count: number;
+    error_count: number;
+  };
+  entries: KRSourceHealthEntryRead[];
+};
+
 export type USSymbolSyncResultRead = {
   status: string;
   scanned_count: number;

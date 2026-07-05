@@ -4,6 +4,8 @@ import type {
   ChartPoint,
   JPWatchlistGroupNode,
   JPWatchlistItemRead,
+  KRWatchlistGroupNode,
+  KRWatchlistItemRead,
   MarketIndexSummary,
   OhlcChartResponse,
   StockIndicatorPoint,
@@ -106,6 +108,8 @@ export default async function Page({
     initialUsWatchlistItems,
     initialJpWatchlistTree,
     initialJpWatchlistItems,
+    initialKrWatchlistTree,
+    initialKrWatchlistItems,
   ] = await Promise.all([
     fetchBackendJson<WatchlistGroupNode[]>("/api/watchlists/tree", []),
     fetchBackendJson<WatchlistItemRead[]>("/api/watchlists/items?limit=5000&offset=0", []),
@@ -120,6 +124,11 @@ export default async function Page({
       "/api/jp-market/watchlists/items?limit=5000&offset=0",
       []
     ),
+    fetchBackendJson<KRWatchlistGroupNode[]>("/api/kr-market/watchlists/tree", []),
+    fetchBackendJson<KRWatchlistItemRead[]>(
+      "/api/kr-market/watchlists/items?limit=5000&offset=0",
+      []
+    ),
   ]);
 
   const marketParam = firstSearchParam(resolvedSearchParams, "market");
@@ -128,6 +137,7 @@ export default async function Page({
     firstSearchParam(resolvedSearchParams, "stock");
   const symbolParam = firstSearchParam(resolvedSearchParams, "symbol");
   const jpSymbolParam = firstSearchParam(resolvedSearchParams, "jp_symbol");
+  const krSymbolParam = firstSearchParam(resolvedSearchParams, "kr_symbol");
   const futuresParam =
     firstSearchParam(resolvedSearchParams, "futures") ??
     firstSearchParam(resolvedSearchParams, "futures_symbol");
@@ -150,13 +160,19 @@ export default async function Page({
     (jpSymbolParam ?? (marketParam === "jp" ? symbolParam : undefined))
       ?.trim()
       .toUpperCase() || null;
+  const initialSelectedKrSymbol =
+    (krSymbolParam ?? (marketParam === "kr" ? symbolParam : undefined))
+      ?.trim()
+      .toUpperCase() || null;
   const initialSelectedUsSymbol =
-    marketParam === "jp" || marketParam === "crypto"
+    marketParam === "jp" || marketParam === "kr" || marketParam === "crypto"
       ? null
       : symbolParam?.trim().toUpperCase() || null;
   const initialMarket =
     marketParam === "crypto"
       ? "crypto"
+      : marketParam === "kr" || initialSelectedKrSymbol
+      ? "kr"
       : marketParam === "jp" || initialSelectedJpSymbol
       ? "jp"
       : marketParam === "us" || initialSelectedUsSymbol
@@ -234,6 +250,7 @@ export default async function Page({
       initialSelectedUsSymbol={initialSelectedUsSymbol}
       initialSelectedUsSecurityName={selectedUsItem?.security_name ?? null}
       initialSelectedJpSymbol={initialSelectedJpSymbol}
+      initialSelectedKrSymbol={initialSelectedKrSymbol}
       initialChartData={initialChartData}
       initialIndicatorData={initialIndicatorData}
       initialRankingData={null}
@@ -244,6 +261,8 @@ export default async function Page({
       initialUsWatchlistItems={initialUsWatchlistItems}
       initialJpWatchlistTree={initialJpWatchlistTree}
       initialJpWatchlistItems={initialJpWatchlistItems}
+      initialKrWatchlistTree={initialKrWatchlistTree}
+      initialKrWatchlistItems={initialKrWatchlistItems}
       quoteDepthPreviewMode={quoteDepthPreviewMode}
     />
   );

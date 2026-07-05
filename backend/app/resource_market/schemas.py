@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ResourceProviderContractRead(BaseModel):
@@ -15,6 +15,8 @@ class ResourceProviderContractRead(BaseModel):
     notes: list[str]
     root_folders: list[dict[str, Any]]
     providers: dict[str, Any]
+    ohlcv_intervals: dict[str, list[str]]
+    chart_profiles: dict[str, Any]
     instruments: list[dict[str, Any]]
 
 
@@ -108,3 +110,26 @@ class ResourceOhlcvBarRead(BaseModel):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class ResourceRefreshResultRead(BaseModel):
+    status: str
+    provider: str
+    resource: str
+    requested_count: int
+    refreshed_count: int
+    error_count: int
+    skipped_count: int
+    warnings: list[str] = Field(default_factory=list)
+    errors: list[dict[str, str]] = Field(default_factory=list)
+    message: str
+    interval: str | None = None
+    results: list[dict[str, Any]] | None = None
+
+
+class ResourceSourceHealthRead(BaseModel):
+    kind: str
+    generated_at: str
+    filters: dict[str, Any]
+    summary: dict[str, int]
+    entries: list[dict[str, Any]]

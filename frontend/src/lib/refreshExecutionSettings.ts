@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import { fetchJson } from "@/lib/api";
 
-export type RefreshExecutionMarket = "tw" | "us" | "jp";
+export type RefreshExecutionMarket = "tw" | "us" | "jp" | "kr";
 
 export type RefreshExecutionField =
   | "observed_stock_refresh_interval_seconds"

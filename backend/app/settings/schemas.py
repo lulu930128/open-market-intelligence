@@ -135,6 +135,7 @@ class RefreshExecutionMarketsRead(BaseModel):
     tw: RefreshExecutionMarketPolicyRead
     us: RefreshExecutionMarketPolicyRead
     jp: RefreshExecutionMarketPolicyRead
+    kr: RefreshExecutionMarketPolicyRead
 
 
 class RefreshExecutionSettingsRead(BaseModel):

@@ -60,7 +60,12 @@ def _settings_payload() -> MarketDataSubscriptionSettingsWrite:
                 "key": "commodity:energy:CL",
                 "mode": "on_select",
                 "resources": {"quote": True, "ohlcv": False},
-                "intervals": {"quote_seconds": 120.0, "ohlcv_seconds": 600.0},
+                "intervals": {
+                    "quote_seconds": 120.0,
+                    "ohlcv_seconds": 600.0,
+                    "selected_quote_seconds": 5.0,
+                    "background_quote_seconds": 180.0,
+                },
             },
         ]
     )
@@ -84,8 +89,13 @@ class MarketDataSubscriptionSettingsTests(unittest.TestCase):
         self.assertEqual(by_key["crypto:USDT"].mode, "on_select")
         self.assertTrue(by_key["crypto:USDT"].resources["twd_reference"])
         self.assertNotIn("derivatives", by_key["crypto:USDT"].resources)
-        self.assertEqual(by_key["commodity:metals:GC"].mode, "manual")
-        self.assertEqual(by_key["commodity:metals:GC"].provider_status, "provider_pending")
+        self.assertEqual(by_key["commodity:metals:GC"].mode, "on_select")
+        self.assertEqual(by_key["commodity:metals:GC"].provider_status, "best_effort_delayed")
+        self.assertEqual(by_key["commodity:metals:GC"].intervals["selected_quote_seconds"], 5.0)
+        self.assertEqual(
+            by_key["commodity:metals:GC"].intervals["background_quote_seconds"],
+            300.0,
+        )
 
     def test_update_market_data_subscription_settings_persists_database_override(self) -> None:
         with settings_db_session() as db:
@@ -110,6 +120,48 @@ class MarketDataSubscriptionSettingsTests(unittest.TestCase):
         self.assertEqual(reread.source, "database")
         self.assertEqual(reread_by_key["commodity:energy:CL"].mode, "on_select")
         self.assertFalse(reread_by_key["commodity:energy:CL"].resources["ohlcv"])
+        self.assertEqual(
+            reread_by_key["commodity:energy:CL"].intervals["selected_quote_seconds"],
+            5.0,
+        )
+        self.assertEqual(
+            reread_by_key["commodity:energy:CL"].intervals["background_quote_seconds"],
+            180.0,
+        )
+
+    def test_legacy_resource_manual_defaults_upgrade_to_on_select(self) -> None:
+        with settings_db_session() as db:
+            db.add(
+                AppSetting(
+                    setting_key=MARKET_DATA_SUBSCRIPTION_SETTING_KEY,
+                    value_json=json.dumps(
+                        {
+                            "items": [
+                                {
+                                    "key": "commodity:energy:CL",
+                                    "mode": "manual",
+                                    "resources": {"quote": True, "ohlcv": True},
+                                    "intervals": {
+                                        "quote_seconds": 60.0,
+                                        "ohlcv_seconds": 300.0,
+                                    },
+                                }
+                            ]
+                        }
+                    ),
+                    source="user",
+                )
+            )
+            db.commit()
+            response = get_market_data_subscription_settings(db=db)
+
+        by_key = {item.key: item for item in response.items}
+        cl_policy = by_key["commodity:energy:CL"]
+
+        self.assertEqual(cl_policy.mode, "on_select")
+        self.assertTrue(cl_policy.resources["ohlcv"])
+        self.assertEqual(cl_policy.intervals["selected_quote_seconds"], 5.0)
+        self.assertEqual(cl_policy.intervals["background_quote_seconds"], 300.0)
 
     def test_market_data_subscription_endpoint_uses_service_schema(self) -> None:
         with settings_db_session() as db:

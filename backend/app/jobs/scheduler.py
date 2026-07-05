@@ -6,7 +6,10 @@ from zoneinfo import ZoneInfo
 from app.config import settings
 from app.db.session import SessionLocal
 from app.jobs import backfill_tasks, service as job_service
-from app.jobs.job_types import JP_SCHEDULED_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE
+from app.jobs.job_types import (
+    JP_SCHEDULED_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
+    KR_SCHEDULED_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
+)
 from app.market.calendar_status import (
     build_taiwan_calendar_status,
     build_us_calendar_status,
@@ -516,6 +519,55 @@ def enqueue_jp_market_watchlist_resource_refresh() -> None:
         db.close()
 
 
+def enqueue_kr_market_watchlist_resource_refresh() -> None:
+    now = datetime.now(_timezone())
+    sleep_seconds = resolve_market_refresh_interval_seconds(market="kr")
+    request = {
+        "schedule": "kr_market_watchlist_resource_refresh",
+        "run_date": now.date().isoformat(),
+        "group_id": None,
+        "include_children": True,
+        "enabled_only": True,
+        "include_daily": True,
+        "include_investors": settings.scheduler_kr_market_refresh_include_investors,
+        "include_fundamentals": settings.scheduler_kr_market_refresh_include_fundamentals,
+        "outputsize": settings.scheduler_kr_market_refresh_outputsize,
+        "provider": settings.scheduler_kr_market_refresh_provider,
+        "sleep_seconds": sleep_seconds,
+    }
+    db = SessionLocal()
+
+    try:
+        job, created = job_service.enqueue_job(
+            db=db,
+            job_type=KR_SCHEDULED_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
+            target="all",
+            request=request,
+            progress_total=1,
+            message="Queued by scheduler.",
+            task=backfill_tasks.run_kr_watchlist_resource_refresh_job,
+            task_args=(
+                None,
+                True,
+                True,
+                True,
+                settings.scheduler_kr_market_refresh_include_investors,
+                settings.scheduler_kr_market_refresh_include_fundamentals,
+                settings.scheduler_kr_market_refresh_outputsize,
+                settings.scheduler_kr_market_refresh_provider,
+                sleep_seconds,
+                None,
+            ),
+        )
+        logger.info(
+            "Scheduled KR market watchlist resource refresh %s job_id=%s",
+            "queued" if created else "deduped",
+            job.id,
+        )
+    finally:
+        db.close()
+
+
 def collect_taiwan_futures_quotes() -> None:
     now = datetime.now(_timezone())
 
@@ -611,6 +663,25 @@ def _add_jp_market_refresh_job(scheduler: Any) -> bool:
         hour=hour,
         minute=minute,
         id="jp_market_watchlist_resource_refresh",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+    return True
+
+
+def _add_kr_market_refresh_job(scheduler: Any) -> bool:
+    if not settings.enable_scheduler or not settings.enable_kr_market_scheduler:
+        return False
+
+    hour, minute = _parse_hour_minute(settings.scheduler_kr_market_refresh_time)
+    scheduler.add_job(
+        enqueue_kr_market_watchlist_resource_refresh,
+        trigger="cron",
+        day_of_week=settings.scheduler_kr_market_refresh_day_of_week,
+        hour=hour,
+        minute=minute,
+        id="kr_market_watchlist_resource_refresh",
         replace_existing=True,
         coalesce=True,
         max_instances=1,
@@ -741,11 +812,12 @@ def start_scheduler() -> Any | None:
             max_instances=1,
         )
     jp_market_refresh_enabled = _add_jp_market_refresh_job(scheduler)
+    kr_market_refresh_enabled = _add_kr_market_refresh_job(scheduler)
     taiwan_futures_collector_enabled = _add_taiwan_futures_collector_job(scheduler)
     dispatch_schedule_tick_enabled = _add_dispatch_schedule_tick_job(scheduler)
     scheduler.start()
     logger.info(
-        "Job scheduler started. core_scheduler_enabled=%s; market_daily_refresh=%s %s weekdays; market_margin_daily_refresh=%s %s weekdays; market_chip_daily_refresh=%s %s weekdays; market_chip_margin_daily_refresh=%s %s weekdays; us_market_daily_refresh=%s %s %s enabled=%s; jp_market_watchlist_resource_refresh=%s %s %s enabled=%s; taiwan_futures_quote_collector interval=%ss enabled=%s; dispatch_schedule_tick interval=%ss enabled=%s.",
+        "Job scheduler started. core_scheduler_enabled=%s; market_daily_refresh=%s %s weekdays; market_margin_daily_refresh=%s %s weekdays; market_chip_daily_refresh=%s %s weekdays; market_chip_margin_daily_refresh=%s %s weekdays; us_market_daily_refresh=%s %s %s enabled=%s; jp_market_watchlist_resource_refresh=%s %s %s enabled=%s; kr_market_watchlist_resource_refresh=%s %s %s enabled=%s; taiwan_futures_quote_collector interval=%ss enabled=%s; dispatch_schedule_tick interval=%ss enabled=%s.",
         settings.enable_scheduler,
         settings.scheduler_market_refresh_time,
         settings.timezone,
@@ -763,6 +835,10 @@ def start_scheduler() -> Any | None:
         settings.scheduler_jp_market_refresh_day_of_week,
         settings.timezone,
         jp_market_refresh_enabled,
+        settings.scheduler_kr_market_refresh_time,
+        settings.scheduler_kr_market_refresh_day_of_week,
+        settings.timezone,
+        kr_market_refresh_enabled,
         max(int(settings.scheduler_taiwan_futures_interval_seconds), 10),
         taiwan_futures_collector_enabled,
         max(int(settings.scheduler_dispatch_tick_interval_seconds), 10),
