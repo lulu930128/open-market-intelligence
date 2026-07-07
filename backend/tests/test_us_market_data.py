@@ -3,10 +3,12 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 import unittest
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from app.us_market import service as us_market_service
 from app.db.models import (
     Base,
     MacroSeriesObservation,
@@ -193,6 +195,112 @@ YAHOO_CHART_INTRADAY_SAMPLE = {
 }
 
 
+def _ny_timestamp(year: int, month: int, day: int, hour: int, minute: int) -> int:
+    return int(
+        datetime(
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            tzinfo=ZoneInfo("America/New_York"),
+        ).timestamp()
+    )
+
+
+YAHOO_CHART_INTRADAY_EXTENDED_SAMPLE = {
+    "chart": {
+        "result": [
+            {
+                "meta": {
+                    "symbol": "MU",
+                    "gmtoffset": -14400,
+                    "chartPreviousClose": 90.0,
+                },
+                "timestamp": [
+                    _ny_timestamp(2026, 6, 2, 8, 0),
+                    _ny_timestamp(2026, 6, 2, 9, 30),
+                    _ny_timestamp(2026, 6, 2, 16, 30),
+                ],
+                "indicators": {
+                    "quote": [
+                        {
+                            "open": [90.5, 91.0, 92.1],
+                            "high": [90.8, 91.5, 92.4],
+                            "low": [90.1, 90.8, 91.8],
+                            "close": [90.6, 91.25, 92.0],
+                            "volume": [300, 1000, 450],
+                        }
+                    ],
+                },
+            }
+        ],
+        "error": None,
+    }
+}
+
+
+YAHOO_CHART_INTRADAY_PREMARKET_SAMPLE = {
+    "chart": {
+        "result": [
+            {
+                "meta": {
+                    "symbol": "IBM",
+                    "gmtoffset": -14400,
+                    "chartPreviousClose": 90.0,
+                },
+                "timestamp": [
+                    _ny_timestamp(2026, 6, 2, 8, 0),
+                ],
+                "indicators": {
+                    "quote": [
+                        {
+                            "open": [90.5],
+                            "high": [90.8],
+                            "low": [90.1],
+                            "close": [90.6],
+                            "volume": [300],
+                        }
+                    ],
+                },
+            }
+        ],
+        "error": None,
+    }
+}
+
+
+YAHOO_CHART_INTRADAY_PREVIOUS_REGULAR_SAMPLE = {
+    "chart": {
+        "result": [
+            {
+                "meta": {
+                    "symbol": "IBM",
+                    "gmtoffset": -14400,
+                    "chartPreviousClose": 87.0,
+                },
+                "timestamp": [
+                    _ny_timestamp(2026, 6, 1, 15, 59),
+                    _ny_timestamp(2026, 6, 1, 16, 0),
+                ],
+                "indicators": {
+                    "quote": [
+                        {
+                            "open": [88.2, 88.4],
+                            "high": [88.6, 88.7],
+                            "low": [88.1, 88.3],
+                            "close": [88.4, 88.5],
+                            "volume": [900, 1200],
+                        }
+                    ],
+                },
+            }
+        ],
+        "error": None,
+    }
+}
+
+
 SEC_COMPANYFACTS_SAMPLE = {
     "cik": 320193,
     "entityName": "Apple Inc.",
@@ -325,6 +433,9 @@ FRED_OBSERVATIONS_SAMPLE = {
 
 
 class USMarketSourceParsingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        us_market_service._US_INTRADAY_CACHE.clear()
+
     def test_normalize_us_symbol_accepts_ui_labels(self) -> None:
         self.assertEqual(normalize_us_symbol("AAPL / Apple"), "AAPL")
         self.assertEqual(normalize_us_symbol("nasdaq:mu"), "MU")
@@ -384,9 +495,48 @@ class USMarketSourceParsingTests(unittest.TestCase):
         self.assertEqual(trend["source"], "yahoo_finance_chart")
         self.assertEqual(trend["previous_close"], 90.0)
         self.assertEqual(trend["point_count"], 2)
+        self.assertEqual(trend["session_scope"], "regular")
+        self.assertEqual(trend["session_phase"], "regular")
+        self.assertFalse(trend["has_extended_hours"])
+        self.assertEqual(trend["regular_point_count"], 2)
+        self.assertEqual(trend["extended_point_count"], 0)
         self.assertEqual(trend["points"][0]["time"], "2026-06-02T09:30:00-04:00")
+        self.assertEqual(trend["points"][0]["session"], "regular")
         self.assertEqual(trend["points"][0]["price"], 91.25)
         self.assertEqual(trend["points"][1]["volume"], 1500)
+
+    def test_parse_yahoo_intraday_prices_can_return_extended_hours(self) -> None:
+        all_trend = parse_yahoo_intraday_prices(
+            YAHOO_CHART_INTRADAY_EXTENDED_SAMPLE,
+            symbol="mu",
+            source_url="https://example.test/chart/MU?includePrePost=true",
+            session_scope="all",
+        )
+        extended_trend = parse_yahoo_intraday_prices(
+            YAHOO_CHART_INTRADAY_EXTENDED_SAMPLE,
+            symbol="mu",
+            source_url="https://example.test/chart/MU?includePrePost=true",
+            session_scope="extended",
+        )
+
+        self.assertEqual(all_trend["point_count"], 3)
+        self.assertEqual(all_trend["regular_point_count"], 1)
+        self.assertEqual(all_trend["extended_point_count"], 2)
+        self.assertTrue(all_trend["has_extended_hours"])
+        self.assertEqual(all_trend["regular_session_close"], 91.25)
+        self.assertEqual(
+            all_trend["regular_session_close_time"],
+            "2026-06-02T09:30:00-04:00",
+        )
+        self.assertEqual(
+            [point["session"] for point in all_trend["points"]],
+            ["pre_market", "regular", "after_hours"],
+        )
+        self.assertEqual(extended_trend["point_count"], 2)
+        self.assertEqual(
+            [point["session"] for point in extended_trend["points"]],
+            ["pre_market", "after_hours"],
+        )
 
     @patch("app.us_market.service.fetch_yahoo_chart_payload")
     def test_get_us_intraday_trend_uses_yahoo_chart_payload(self, mock_fetch) -> None:
@@ -398,9 +548,24 @@ class USMarketSourceParsingTests(unittest.TestCase):
         trend = get_us_intraday_trend(symbol="mu")
 
         mock_fetch.assert_called_once()
+        self.assertFalse(mock_fetch.call_args.kwargs["include_prepost"])
         self.assertEqual(trend["stock_id"], "MU")
         self.assertEqual(trend["point_count"], 2)
         self.assertEqual(trend["points"][-1]["price"], 91.35)
+
+    @patch("app.us_market.service.fetch_yahoo_chart_payload")
+    def test_get_us_intraday_trend_enables_include_prepost_for_all_scope(self, mock_fetch) -> None:
+        mock_fetch.return_value = (
+            YAHOO_CHART_INTRADAY_EXTENDED_SAMPLE,
+            "https://example.test/chart/MU?includePrePost=true",
+        )
+
+        trend = get_us_intraday_trend(symbol="mu", session_scope="all")
+
+        mock_fetch.assert_called_once()
+        self.assertTrue(mock_fetch.call_args.kwargs["include_prepost"])
+        self.assertEqual(trend["session_scope"], "all")
+        self.assertEqual(trend["point_count"], 3)
 
     def test_parse_sec_companyfacts(self) -> None:
         records = parse_sec_companyfacts(
@@ -479,6 +644,7 @@ class USMarketSourceParsingTests(unittest.TestCase):
 
 class USMarketStorageIsolationTests(unittest.TestCase):
     def setUp(self) -> None:
+        us_market_service._US_INTRADAY_CACHE.clear()
         self.engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(bind=self.engine)
         self.db = Session(self.engine)
@@ -1052,6 +1218,132 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self.assertEqual(ranking["current_symbol_count"], 1)
         self.assertEqual(ranking["stale_symbol_count"], 0)
 
+    @patch("app.us_market.service.fetch_yahoo_chart_payload")
+    def test_us_intraday_trend_uses_latest_daily_close_reference(self, mock_fetch) -> None:
+        self.db.add_all(
+            [
+                USDailyPrice(
+                    provider="yahoo_chart",
+                    symbol="IBM",
+                    trade_date=date(2026, 5, 29),
+                    close_price=87.0,
+                    trade_volume=900,
+                    raw_payload_hash="ibm-older",
+                ),
+                USDailyPrice(
+                    provider="yahoo_chart",
+                    symbol="IBM",
+                    trade_date=date(2026, 6, 1),
+                    close_price=88.5,
+                    trade_volume=1200,
+                    raw_payload_hash="ibm-reference",
+                ),
+            ]
+        )
+        self.db.commit()
+        mock_fetch.return_value = (
+            YAHOO_CHART_INTRADAY_PREMARKET_SAMPLE,
+            "https://example.test/chart/IBM?includePrePost=true",
+        )
+
+        trend = get_us_intraday_trend(
+            symbol="ibm",
+            session_scope="all",
+            db=self.db,
+        )
+
+        mock_fetch.assert_called_once()
+        self.assertEqual(trend["previous_close"], 88.5)
+        self.assertEqual(trend["previous_close_source"], "us_daily_price")
+        self.assertEqual(trend["previous_close_trade_date"], "2026-06-01")
+        self.assertEqual(trend["previous_close_provider"], "yahoo_chart")
+
+    @patch("app.us_market.service.fetch_yahoo_chart_payload")
+    def test_us_intraday_trend_uses_previous_regular_intraday_when_daily_is_stale(
+        self,
+        mock_fetch,
+    ) -> None:
+        self.db.add(
+            USDailyPrice(
+                provider="yahoo_chart",
+                symbol="IBM",
+                trade_date=date(2026, 5, 29),
+                close_price=87.0,
+                trade_volume=900,
+                raw_payload_hash="ibm-stale",
+            )
+        )
+        self.db.commit()
+        mock_fetch.side_effect = [
+            (
+                YAHOO_CHART_INTRADAY_PREMARKET_SAMPLE,
+                "https://example.test/chart/IBM?includePrePost=true",
+            ),
+            (
+                YAHOO_CHART_INTRADAY_PREVIOUS_REGULAR_SAMPLE,
+                "https://example.test/chart/IBM?includePrePost=false",
+            ),
+        ]
+
+        trend = get_us_intraday_trend(
+            symbol="ibm",
+            session_scope="all",
+            db=self.db,
+        )
+
+        self.assertEqual(mock_fetch.call_count, 2)
+        self.assertTrue(mock_fetch.call_args_list[0].kwargs["include_prepost"])
+        self.assertFalse(mock_fetch.call_args_list[1].kwargs["include_prepost"])
+        self.assertEqual(trend["previous_close"], 88.5)
+        self.assertEqual(
+            trend["previous_close_source"],
+            "yahoo_finance_chart_regular_session_close",
+        )
+        self.assertEqual(trend["previous_close_trade_date"], "2026-06-01")
+
+    @patch("app.us_market.service.fetch_yahoo_chart_payload")
+    def test_us_intraday_trend_skips_same_day_daily_close_for_regular_session(
+        self,
+        mock_fetch,
+    ) -> None:
+        self.db.add_all(
+            [
+                USDailyPrice(
+                    provider="yahoo_chart",
+                    symbol="IBM",
+                    trade_date=date(2026, 6, 1),
+                    close_price=88.5,
+                    trade_volume=1200,
+                    raw_payload_hash="ibm-reference",
+                ),
+                USDailyPrice(
+                    provider="yahoo_chart",
+                    symbol="IBM",
+                    trade_date=date(2026, 6, 2),
+                    close_price=91.25,
+                    trade_volume=2000,
+                    raw_payload_hash="ibm-same-day",
+                ),
+            ]
+        )
+        self.db.commit()
+        mock_fetch.return_value = (
+            YAHOO_CHART_INTRADAY_SAMPLE,
+            "https://example.test/chart/IBM?includePrePost=false",
+        )
+
+        trend = get_us_intraday_trend(
+            symbol="ibm",
+            session_scope="regular",
+            db=self.db,
+        )
+
+        mock_fetch.assert_called_once()
+        self.assertEqual(trend["session_phase"], "regular")
+        self.assertEqual(trend["previous_close"], 88.5)
+        self.assertEqual(trend["previous_close_source"], "us_daily_price")
+        self.assertEqual(trend["previous_close_trade_date"], "2026-06-01")
+
     def test_us_watchlist_ranking_limits_intraday_overlay_attempts(self) -> None:
         symbol_records = parse_symbol_directories(
             nasdaq_listed_text=NASDAQ_LISTED_SAMPLE,
@@ -1096,12 +1388,14 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         with patch("app.us_market.service._get_us_intraday_overlay") as mock_overlay:
             mock_overlay.return_value = {
                 "time": "2026-06-05T13:45:00-04:00",
+                "session": "regular",
                 "close": 111.0,
                 "previous_close": 100.0,
                 "change": 11.0,
                 "change_pct": 11.0,
                 "volume": 2000,
                 "source": "test_intraday",
+                "has_extended_hours": False,
                 "points": [{"time": "2026-06-05T13:45:00-04:00", "price": 111.0}],
             }
 
@@ -1112,7 +1406,11 @@ class USMarketStorageIsolationTests(unittest.TestCase):
                 intraday_limit=1,
             )
 
-        mock_overlay.assert_called_once_with(symbol="AAPL")
+        mock_overlay.assert_called_once_with(
+            symbol="AAPL",
+            db=self.db,
+            session_scope="regular",
+        )
         self.assertEqual(ranking["results"][0]["symbol"], "AAPL")
         self.assertEqual(ranking["results"][0]["status"], "intraday")
         self.assertEqual(ranking["results"][0]["close"], 111.0)

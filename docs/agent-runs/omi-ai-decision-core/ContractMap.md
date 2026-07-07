@@ -64,7 +64,8 @@ Core fields:
   - Usually `{ "type": "auto" }` for external callers.
   - Specific targets can include `tw_stock`, `tw_index`, `tw_futures`, `us_stock`, `watchlist`, or other supported types.
 - `mode`
-  - `auto`, `data_only`, `brief`, `analysis`, `report`.
+  - `auto`, `data_only`, `brief`, `full`, `analysis`, `report`.
+  - `brief` is the compact human summary plus key numbers; `data_only` is compact structured core data where available; `full` returns the complete evidence pack.
   - `report` is trusted/write-sensitive and should not be requested by Kuro default policy.
 - `allow_llm`
   - Enables non-persistent LLM analysis only when server policy permits.
@@ -74,6 +75,10 @@ Core fields:
 - `allow_external_fetch`
   - Allows backend-owned bounded external fetch.
   - Does not authorize frontend/MCP/Kuro to call market APIs directly.
+- `market_data_params`
+  - Optional bounded market-data shape controls.
+  - Current shared controls include `include_intraday`, `payload_level`, and `intraday_limit`.
+  - Frontend/MCP/Kuro may request a smaller or richer payload, but backend owns freshness, slot status, provider policy, and final projection.
 - `tool_budget`
   - Controls maximum calls, external fetches, and total seconds.
 - `refresh_policy`
@@ -120,6 +125,11 @@ Backward compatibility rule:
 - New fields should be additive.
 - Existing fields should not change type without a version bump or compatibility shim.
 - Frontend/Kuro should prefer optional-field tolerant parsing.
+
+Related productized payload design:
+
+- `docs/agent-runs/productized-market-payload-contract/ContractDesign.md`
+  - Defines `payload_level`, canonical market data slots, slot status values, and the migration path for ChatGPT Web / MCP / Kuro consumers.
 
 ## Analysis Contract
 

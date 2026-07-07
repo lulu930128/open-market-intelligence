@@ -30,9 +30,13 @@ Public tool:
 - `omi.ask`
 
 `omi.ask` is read-only by default. It accepts a question plus optional v2
-`target` object, then the OMI backend resolves `target.type=auto` into a stock,
-watchlist, market, or freshness context and chooses `data_only`, `brief`, `analysis`, or
-`report` mode. Analysis mode calls OpenAI for a non-persistent OMI LLM answer,
+`target` object, then the OMI backend resolves `target.type=auto` into a Taiwan
+stock/watchlist/index/futures, US stock, Japan stock/index, Korea stock/index,
+crypto market/asset, market, or freshness context and chooses `data_only`,
+`brief`, `full`, `analysis`, or `report` mode. `brief` returns a compact human
+summary plus key numbers; `data_only` returns compact structured core data when
+available; `full` returns the complete backend evidence pack. Analysis mode calls OpenAI for a
+non-persistent OMI LLM answer,
 so it requires a backend server-side trusted request and `allow_llm=true`.
 Report mode calls OpenAI and persists an AI report, so it additionally requires
 `allow_write=true`.
@@ -42,6 +46,37 @@ The MCP client does not call market APIs directly; it sends the request to OMI,
 and the backend chooses from allowlisted market-data tools, enforces the budget,
 executes the tools, updates the local evidence cache when allowed by refresh
 policy, and returns `tool_plan` / `tool_runs` evidence.
+
+`market_data_params` is forwarded unchanged to the backend reader. It is for
+bounded reader selection such as:
+
+- Shared payload controls: `include_intraday`, `payload_level`, `intraday_limit`.
+- US stock: `provider`, `timeframe`, `bars`, `daily_limit`, `include_intraday`.
+- Japan/Korea stock or index: `provider`, `timeframe`, `bars`.
+- Crypto market/asset: `provider`, `providers`, `symbol`, `symbols`,
+  `instrument_type`, `interval`, `limit`.
+
+`payload_level` supports `summary`, `compact`, `standard`, and `full`.
+Use `summary` for voice/desktop-pet answers, `compact` for default ChatGPT/MCP
+answers, and `standard` or `full` only when the user explicitly needs a richer
+chart/evidence view. `intraday_limit` is bounded by the backend and should stay
+small for ChatGPT Web or voice use.
+
+The MCP schema also accepts `include_intraday`, `payload_level`, and
+`intraday_limit` as top-level tool arguments. The server merges those values into
+`market_data_params` before calling OMI so ChatGPT clients do not need to build a
+nested JSON object for simple bounded requests.
+
+OMI responses can include `result.data.slots` or
+`result.data.compact.slots`. Consumers should use slot `status` values such as
+`ready`, `partial`, `missing`, `not_requested`, `planned`, and `not_applicable`
+to decide whether to render, speak, or request a richer follow-up payload.
+Slots point to existing payload fields with `payload_ref`; they are not separate
+large data copies.
+
+Unsupported or missing data remains visible through `missing`, `warnings`,
+`freshness`, and `evidence_passport`; callers must not treat fallback daily data
+as live quote data.
 
 For US/ADR targets, trusted MCP calls default to a small external-fetch budget
 when the request clearly looks like a US stock question, such as `target.type=us_stock`,
@@ -55,6 +90,11 @@ For Taiwan stock targets, `refresh_policy.mode=stale_first` with
 external fetch is allowed, run the backend `tw.refresh_stock_evidence` tool
 before rebuilding the evidence pack.
 `caller_profile` is only a label and is not trusted for permissions.
+
+Japan, Korea, and Crypto ask paths are local-cache evidence paths today. They
+support compact `data_only`, `brief`, and `full` evidence packs, but
+OpenAI-backed `analysis` / persisted `report` mode still downgrade to
+`data_only` until dedicated decision/report paths are implemented.
 
 OpenAI-backed analysis/report mode requires the OMI backend process to have
 `OPENAI_API_KEY`, `OPENAI_LLM_API_KEY`, or `OMI_OPENAI_ENV_FILE` configured.
@@ -75,10 +115,22 @@ Internal tools:
 - `omi.read_market_overview`
 - `omi.read_stock_context`
 - `omi.read_us_stock_context`
+- `omi.read_jp_stock_context`
+- `omi.read_jp_index_context`
+- `omi.read_kr_stock_context`
+- `omi.read_kr_index_context`
+- `omi.read_crypto_market_context`
+- `omi.read_crypto_asset_context`
 - `omi.read_watchlist_context`
 - `omi.read_data_freshness`
 - `omi.generate_stock_brief`
 - `omi.generate_us_stock_brief`
+- `omi.generate_jp_stock_brief`
+- `omi.generate_jp_index_brief`
+- `omi.generate_kr_stock_brief`
+- `omi.generate_kr_index_brief`
+- `omi.generate_crypto_market_brief`
+- `omi.generate_crypto_asset_brief`
 - `omi.generate_watchlist_brief`
 - `omi.generate_stock_llm_report`
 - `omi.generate_us_stock_llm_report`

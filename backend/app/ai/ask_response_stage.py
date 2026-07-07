@@ -99,6 +99,10 @@ def assemble_response_analysis(
         analysis_digest=analysis_digest,
     )
     response_analysis = dict(analysis_digest)
+    result_data = result.get("data") if isinstance(result.get("data"), dict) else {}
+    compact_evidence = result_data.get("compact") if isinstance(result_data.get("compact"), dict) else {}
+    if compact_evidence:
+        response_analysis["compact_evidence"] = compact_evidence
     response_analysis["question_intent"] = question_intent
     response_analysis["question_understanding"] = question_understanding.as_policy_payload()
     response_preferences = policy.get("response_preferences")

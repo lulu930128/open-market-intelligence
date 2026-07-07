@@ -32,6 +32,10 @@ from app.market.trading_calendar import (
 from app.us_market.trading_calendar import (
     US_DAILY_PRICE_RELEASE_TIME,
     US_MARKET_TIMEZONE,
+    US_POST_MARKET_CLOSE_TIME,
+    US_PRE_MARKET_OPEN_TIME,
+    US_SESSION_CLOSE_TIME,
+    US_SESSION_OPEN_TIME,
     expected_us_daily_price_date,
     is_us_trading_day,
     next_us_trading_day,
@@ -54,8 +58,6 @@ MarketCode = Literal["tw", "us", "kr"]
 TAIWAN_PREOPEN_TIME = time(hour=8, minute=30)
 TAIWAN_SESSION_OPEN_TIME = time(hour=9, minute=0)
 TAIWAN_SESSION_CLOSE_TIME = time(hour=13, minute=30)
-US_SESSION_OPEN_TIME = time(hour=9, minute=30)
-US_SESSION_CLOSE_TIME = time(hour=16, minute=0)
 KR_SESSION_OPEN_TIME = time(hour=9, minute=0)
 KR_SESSION_CLOSE_TIME = time(hour=15, minute=30)
 TAIWAN_RELEASE_DATASETS = (
@@ -131,6 +133,26 @@ def _session_phase(
         return "preopen"
     if current_time < close_time:
         return "regular"
+    return "post_close"
+
+
+def _us_session_phase(
+    *,
+    local_now: datetime,
+    is_trading_day: bool,
+) -> str:
+    if not is_trading_day:
+        return "market_closed"
+
+    current_time = local_now.time()
+    if current_time < US_PRE_MARKET_OPEN_TIME:
+        return "pre_market_pending"
+    if current_time < US_SESSION_OPEN_TIME:
+        return "pre_market"
+    if current_time < US_SESSION_CLOSE_TIME:
+        return "regular"
+    if current_time < US_POST_MARKET_CLOSE_TIME:
+        return "after_hours"
     return "post_close"
 
 
@@ -300,12 +322,9 @@ def build_us_calendar_status(now: datetime | None = None) -> dict[str, Any]:
         include_value=is_trading_day,
     )
     next_trading_day = next_us_trading_day(current_date, include_value=False)
-    phase = _session_phase(
+    phase = _us_session_phase(
         local_now=local_now,
         is_trading_day=is_trading_day,
-        preopen_time=US_SESSION_OPEN_TIME,
-        open_time=US_SESSION_OPEN_TIME,
-        close_time=US_SESSION_CLOSE_TIME,
     )
     release_windows = {
         "us_daily_price": _release_window(
@@ -324,7 +343,7 @@ def build_us_calendar_status(now: datetime | None = None) -> dict[str, Any]:
         current_date=current_date,
         local_now=local_now,
         is_trading_day=is_trading_day,
-        preopen_time=US_SESSION_OPEN_TIME,
+        preopen_time=US_PRE_MARKET_OPEN_TIME,
         next_trading_day=next_trading_day,
         timezone_value=US_MARKET_TIMEZONE,
     )
@@ -345,11 +364,14 @@ def build_us_calendar_status(now: datetime | None = None) -> dict[str, Any]:
         "previous_trading_day": previous_trading_day.isoformat(),
         "next_trading_day": next_trading_day.isoformat(),
         "session": {
+            "pre_market_open_time": US_PRE_MARKET_OPEN_TIME.strftime("%H:%M"),
             "open_time": US_SESSION_OPEN_TIME.strftime("%H:%M"),
             "close_time": US_SESSION_CLOSE_TIME.strftime("%H:%M"),
+            "after_hours_close_time": US_POST_MARKET_CLOSE_TIME.strftime("%H:%M"),
             "next_session_start_at": next_session_start_at.isoformat(),
             "is_polling_window": phase == "regular",
-            "is_after_close": phase == "post_close",
+            "is_extended_polling_window": phase in {"pre_market", "after_hours"},
+            "is_after_close": phase in {"after_hours", "post_close"},
         },
         "release_windows": release_windows,
     }

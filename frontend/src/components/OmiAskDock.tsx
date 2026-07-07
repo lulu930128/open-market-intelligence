@@ -76,6 +76,15 @@ type PriceLevelItem = {
   value: string;
   tone: string;
 };
+type SlotSummaryItem = {
+  key: string;
+  label: string;
+  status: string;
+  statusLabel: string;
+  payloadLevel: string | null;
+  capability: string | null;
+  detail: string | null;
+};
 
 const API_PROXY_PATH =
   process.env.NEXT_PUBLIC_API_PROXY_PATH?.trim() || "/omi-data";
@@ -135,6 +144,43 @@ const STAGE_LABEL_KEYS = new Set([
   "stopped",
   "error",
 ]);
+
+const INTRADAY_QUESTION_PATTERN =
+  /盤中|場中|即時|當沖|今天|現在|intraday|real[-\s]?time|today|now|デイトレ|リアルタイム|当日/i;
+const SLOT_PRIORITY = [
+  "quote",
+  "intraday",
+  "index_intraday",
+  "market_breadth",
+  "technical",
+  "data_quality",
+  "daily_chart",
+  "institutional",
+  "fundamentals",
+  "news_events",
+];
+const SLOT_LABEL_KEYS: Record<string, string> = {
+  quote: "ask.slots.quote",
+  intraday: "ask.slots.intraday",
+  index_intraday: "ask.slots.indexIntraday",
+  market_breadth: "ask.slots.marketBreadth",
+  technical: "ask.slots.technical",
+  data_quality: "ask.slots.dataQuality",
+  daily_chart: "ask.slots.dailyChart",
+  institutional: "ask.slots.institutional",
+  fundamentals: "ask.slots.fundamentals",
+  news_events: "ask.slots.newsEvents",
+};
+const SLOT_STATUS_LABEL_KEYS: Record<string, string> = {
+  ready: "ask.slots.statusReady",
+  partial: "ask.slots.statusPartial",
+  missing: "ask.slots.statusMissing",
+  not_requested: "ask.slots.statusNotRequested",
+  planned: "ask.slots.statusPlanned",
+  not_applicable: "ask.slots.statusNotApplicable",
+  blocked: "ask.slots.statusBlocked",
+  stale: "ask.slots.statusStale",
+};
 
 function asRecord(value: unknown): UnknownRecord {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -413,6 +459,144 @@ function priceToneClass(tone: string) {
   return "border-omi-border-subtle bg-omi-surface-subtle text-omi-text-strong";
 }
 
+function fallbackKeyLabel(key: string) {
+  return key.replace(/_/g, " ");
+}
+
+function slotLabel(key: string, t: TranslationFunction) {
+  const labelKey = SLOT_LABEL_KEYS[key];
+  return labelKey ? t(labelKey) : fallbackKeyLabel(key);
+}
+
+function slotStatusLabel(status: string, t: TranslationFunction) {
+  const labelKey = SLOT_STATUS_LABEL_KEYS[status];
+  return labelKey ? t(labelKey) : fallbackKeyLabel(status);
+}
+
+function slotStatusClass(status: string) {
+  if (status === "ready") return "border-omi-success-border bg-omi-success-soft text-omi-success";
+  if (status === "partial" || status === "stale") {
+    return "border-omi-warning-border bg-omi-warning-soft text-omi-warning";
+  }
+  if (status === "missing" || status === "blocked" || status === "failed" || status === "error") {
+    return "border-omi-danger-border bg-omi-danger-soft text-omi-danger";
+  }
+  if (status === "not_requested" || status === "planned" || status === "not_applicable") {
+    return "border-omi-border-subtle bg-omi-surface-subtle text-omi-text-muted";
+  }
+  return "border-omi-info-border bg-omi-info-soft text-omi-info";
+}
+
+function responsePayloadLevel(response: UnknownRecord) {
+  const result = asRecord(response.result);
+  const data = asRecord(result.data);
+  const compact = asRecord(data.compact);
+  return (
+    stringValue(data.payload_level) ||
+    stringValue(compact.payload_level) ||
+    stringValue(response.payload_level)
+  );
+}
+
+function responseSlots(response: UnknownRecord) {
+  const result = asRecord(response.result);
+  const data = asRecord(result.data);
+  const directSlots = asRecord(data.slots);
+  if (Object.keys(directSlots).length > 0) return directSlots;
+
+  const compactSlots = asRecord(asRecord(data.compact).slots);
+  if (Object.keys(compactSlots).length > 0) return compactSlots;
+
+  const topLevelSlots = asRecord(response.slots);
+  if (Object.keys(topLevelSlots).length > 0) return topLevelSlots;
+
+  return asRecord(asRecord(response.analysis).slots);
+}
+
+function slotDetail(slot: UnknownRecord) {
+  const warnings = textItems(slot.warnings, 1);
+  return (
+    stringValue(slot.reason) ||
+    stringValue(slot.next_fill) ||
+    stringValue(slot.missing_reason) ||
+    warnings[0] ||
+    null
+  );
+}
+
+function slotItems(response: UnknownRecord, t: TranslationFunction): SlotSummaryItem[] {
+  const slots = responseSlots(response);
+  return Object.entries(slots)
+    .map(([key, value]) => {
+      const slot = asRecord(value);
+      const status = (stringValue(slot.status) || "missing").toLowerCase();
+      return {
+        key,
+        label: slotLabel(key, t),
+        status,
+        statusLabel: slotStatusLabel(status, t),
+        payloadLevel: stringValue(slot.payload_level),
+        capability: stringValue(slot.capability),
+        detail: slotDetail(slot),
+      };
+    })
+    .sort((left, right) => {
+      const leftIndex = SLOT_PRIORITY.indexOf(left.key);
+      const rightIndex = SLOT_PRIORITY.indexOf(right.key);
+      const normalizedLeft = leftIndex >= 0 ? leftIndex : SLOT_PRIORITY.length;
+      const normalizedRight = rightIndex >= 0 ? rightIndex : SLOT_PRIORITY.length;
+      if (normalizedLeft !== normalizedRight) return normalizedLeft - normalizedRight;
+      return left.label.localeCompare(right.label);
+    })
+    .slice(0, 6);
+}
+
+function SlotStatusPanel({ response }: { response: UnknownRecord | null }) {
+  const t = useT();
+  if (!response) return null;
+
+  const items = slotItems(response, t);
+  if (items.length === 0) return null;
+
+  const payloadLevel = responsePayloadLevel(response);
+
+  return (
+    <section className="space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-omi-text-subtle">
+          {t("ask.slots.title")}
+        </div>
+        {payloadLevel ? (
+          <div className="shrink-0 text-[11px] font-semibold text-omi-text-muted">
+            {t("ask.slots.payloadLevel")}: {payloadLevel}
+          </div>
+        ) : null}
+      </div>
+      <div className="grid gap-1.5 sm:grid-cols-2">
+        {items.map((item) => (
+          <div key={item.key} className="min-w-0 border border-omi-border-subtle bg-omi-surface-subtle px-2.5 py-2">
+            <div className="flex min-w-0 items-center justify-between gap-2">
+              <div className="truncate text-xs font-bold text-omi-text-strong">{item.label}</div>
+              <span className={`shrink-0 border px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-[0.08em] ${slotStatusClass(item.status)}`}>
+                {item.statusLabel}
+              </span>
+            </div>
+            <div className="mt-1 flex min-w-0 flex-wrap gap-x-2 gap-y-0.5 text-[11px] leading-5 text-omi-text-muted">
+              {item.payloadLevel ? <span>{item.payloadLevel}</span> : null}
+              {item.capability ? <span className="truncate">{item.capability}</span> : null}
+            </div>
+            {item.detail ? (
+              <div className="mt-1 line-clamp-2 text-[11px] leading-5 text-omi-text-subtle">
+                {item.detail}
+              </div>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function Pill({ label, value }: { label: string; value: string | null }) {
   if (!value) return null;
 
@@ -534,6 +718,7 @@ function StructuredAnswer({ response }: { response: UnknownRecord | null }) {
         </div>
       </div>
 
+      <SlotStatusPanel response={response} />
       {isEntryDecision ? <PriceLevels response={response} /> : null}
       <TextList
         title={isEntryDecision ? t("ask.structured.evidence") : t("ask.structured.topPoints")}
@@ -573,7 +758,14 @@ function AnswerPanel({
     return <StructuredAnswer response={finalResponse} />;
   }
 
-  if (answerText) return <div className="whitespace-pre-wrap">{answerText}</div>;
+  if (answerText) {
+    return (
+      <div className="space-y-3">
+        <div className="whitespace-pre-wrap">{answerText}</div>
+        <SlotStatusPanel response={finalResponse} />
+      </div>
+    );
+  }
 
   return (
     <div className="border border-dashed border-omi-border bg-omi-surface-subtle px-3 py-4 text-sm leading-6 text-omi-text-muted">
@@ -631,6 +823,16 @@ function buildRequest({
   const strategyProfile =
     stringValue(options.strategyProfile) || "short_term_momentum";
   const intent = stringValue(options.intent);
+  const asksIntraday =
+    analysisHorizon === "intraday" ||
+    intent === "intraday" ||
+    INTRADAY_QUESTION_PATTERN.test(question);
+  const payloadLevel = asksIntraday ? "summary" : "compact";
+  const marketDataParams = {
+    include_intraday: asksIntraday,
+    payload_level: payloadLevel,
+    ...(asksIntraday ? { intraday_limit: 1 } : {}),
+  };
 
   return {
     question,
@@ -639,7 +841,7 @@ function buildRequest({
     caller_profile: "kuro_readonly",
     allow_llm: false,
     allow_write: false,
-    allow_external_fetch: false,
+    allow_external_fetch: asksIntraday,
     tool_budget: {
       max_calls: targetType === "us_stock" ? 5 : 4,
       max_external_fetches: targetType === "us_stock" ? 3 : 2,
@@ -652,6 +854,7 @@ function buildRequest({
     },
     strategy_profile: strategyProfile,
     analysis_horizon: analysisHorizon,
+    market_data_params: marketDataParams,
     conversation_context: {
       last_resolution: lastResolution,
       ui_context: {
@@ -659,6 +862,8 @@ function buildRequest({
         ask_intent: intent,
         analysis_horizon: analysisHorizon,
         strategy_profile: strategyProfile,
+        include_intraday: asksIntraday,
+        payload_level: payloadLevel,
         response_locale: locale,
         response_language: responseLanguage,
         settings: {

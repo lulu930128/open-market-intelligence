@@ -698,6 +698,54 @@ def _extract_analysis_digest(result: dict[str, Any], policy: dict[str, Any]) -> 
             "source": "result.data.overview",
         }
 
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    if summary.get("kind") == "cross_market_brief_summary":
+        human_answer = (
+            summary.get("human_answer")
+            if isinstance(summary.get("human_answer"), dict)
+            else {}
+        )
+        answer_outline = human_answer.get("lines") or []
+        return {
+            "kind": "cross_market_brief_digest",
+            "as_of": result.get("as_of") or summary.get("as_of"),
+            "display": summary.get("display") or "\n".join(str(item) for item in answer_outline),
+            "answer_outline": answer_outline,
+            "human_answer": human_answer,
+            "target": summary.get("target") or {},
+            "quote": summary.get("quote") or {},
+            "resources": summary.get("resources") or {},
+            "freshness": summary.get("freshness") or {},
+            "missing": summary.get("missing") or result.get("missing") or [],
+            "warning_count": summary.get("warning_count"),
+            "source_refs": result.get("source_refs") or [],
+            "source": "result.summary",
+        }
+
+    if result.get("kind") == "market_brief" and summary:
+        human_answer = (
+            summary.get("human_answer")
+            if isinstance(summary.get("human_answer"), dict)
+            else {}
+        )
+        answer_outline = human_answer.get("lines") or summary.get("highlights") or []
+        return {
+            "kind": "market_brief_digest",
+            "as_of": result.get("as_of") or summary.get("as_of"),
+            "display": "\n".join(str(item) for item in answer_outline),
+            "answer_outline": answer_outline,
+            "market_human_answer": human_answer,
+            "breadth": summary.get("breadth") or {},
+            "distribution": summary.get("distribution") or {},
+            "top_gainers": summary.get("top_gainers") or [],
+            "top_losers": summary.get("top_losers") or [],
+            "value_leaders": summary.get("value_leaders") or [],
+            "top_industries": summary.get("top_industries") or [],
+            "weak_industries": summary.get("weak_industries") or [],
+            "source_refs": result.get("source_refs") or [],
+            "source": "result.summary",
+        }
+
     return {}
 
 
@@ -707,6 +755,9 @@ def _report_level(effective_mode: str, freshness_result: dict[str, Any]) -> str:
 
     if effective_mode == "report":
         return "full_report"
+
+    if effective_mode == "full":
+        return "full_evidence"
 
     if effective_mode == "analysis":
         return "analysis"

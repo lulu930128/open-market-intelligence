@@ -37,6 +37,7 @@ def execute_mode_stage(
     question_intent: str = "general",
     tool_runs: list[dict[str, Any]],
     warnings: list[str],
+    policy: dict[str, Any] | None = None,
     progress: pipeline_progress.OmiPipelineProgress,
     read_data_only: Callable[..., tuple[str, dict[str, Any]]],
     build_brief: Callable[..., tuple[str, dict[str, Any]]],
@@ -44,7 +45,7 @@ def execute_mode_stage(
     generate_report: Callable[..., tuple[str, dict[str, Any]]],
 ) -> ModeExecutionResult:
     mode = effective_mode
-    if mode == "data_only":
+    if mode in {"data_only", "full"}:
         action, result = progress.run_read_mode(
             mode=mode,
             operation=lambda: read_data_only(
@@ -53,6 +54,7 @@ def execute_mode_stage(
                 scope_type,
                 question_intent=question_intent,
                 tool_runs=tool_runs,
+                policy=policy,
             ),
         )
     elif mode == "brief":
@@ -64,6 +66,7 @@ def execute_mode_stage(
                 scope_type,
                 question_intent=question_intent,
                 tool_runs=tool_runs,
+                policy=policy,
             ),
         )
     elif mode == "analysis":
@@ -76,6 +79,7 @@ def execute_mode_stage(
                     scope_type,
                     question_intent=question_intent,
                     tool_runs=tool_runs,
+                    policy=policy,
                 ),
             )
         except llm.OpenAILLMError as exc:
@@ -94,6 +98,7 @@ def execute_mode_stage(
                     scope_type,
                     question_intent=question_intent,
                     tool_runs=tool_runs,
+                    policy=policy,
                 ),
             )
     elif mode == "report":
@@ -105,6 +110,7 @@ def execute_mode_stage(
                 scope_type,
                 question_intent=question_intent,
                 tool_runs=tool_runs,
+                policy=policy,
             ),
         )
     else:

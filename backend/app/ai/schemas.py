@@ -79,6 +79,15 @@ class AiAskRequest(BaseModel):
     context_limit: int = Field(default=100, ge=20, le=500)
     include_children: bool = True
     enabled_only: bool = True
+    market_data_params: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Optional bounded data-shape parameters for market-specific readers, "
+            "for example provider, providers, symbols, interval, timeframe, bars, limit, "
+            "include_intraday, payload_level, or intraday_limit. payload_level supports "
+            "summary, compact, standard, and full."
+        ),
+    )
     conversation_context: dict[str, Any] = Field(default_factory=dict)
 
 

@@ -60,6 +60,12 @@ import {
   type JPMarketIndexConfig,
 } from "@/lib/jpMarketIndices";
 import {
+  getKrMarketIndexConfig,
+  getKrPrimaryMarketIndexConfig,
+  resolveKrContextIndexConfig,
+  type KRMarketIndexConfig,
+} from "@/lib/krMarketIndices";
+import {
   rankByLabel,
   rowStatusLabel,
   trendDirectionLabel,
@@ -81,6 +87,8 @@ import type {
   JPWatchlistItemRead,
   JPWatchlistRankingItemRead,
   JPWatchlistRankingRead,
+  KRIndexOhlcChartRead,
+  KRMarketBreadthRead,
   KRStockMasterRead,
   KRWatchlistGroupNode,
   KRWatchlistItemRead,
@@ -103,6 +111,8 @@ import type {
   WatchlistGroupNode,
   WatchlistItemRead,
   WatchlistRadarMode,
+  WatchlistRadarOutcomeSummaryRead,
+  WatchlistRadarSnapshotRead,
 } from "@/types/market";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
@@ -1441,6 +1451,282 @@ function JPMarketTape({
   );
 }
 
+type KRMarketTapeSnapshot = {
+  symbol: string;
+  indexId: string;
+  displaySymbol: string;
+  name: string;
+  exchange: string;
+  note: string;
+  close: number | null;
+  change: number | null;
+  changePct: number | null;
+  priceVsMa20: number | null;
+  volume: number | null;
+  pointCount: number;
+  asOf: string | null;
+  breadth: KRMarketBreadthRead | null;
+};
+
+async function fetchKrMarketTapeSnapshot(config: KRMarketIndexConfig) {
+  const [chart, breadth] = await Promise.all([
+    fetchJson<KRIndexOhlcChartRead>(
+      `/api/kr-market/indices/${encodeURIComponent(config.indexId)}/ohlc`,
+      {
+        timeframe: "daily",
+        bars: 60,
+        ensure_history: false,
+      }
+    ),
+    fetchJson<KRMarketBreadthRead>(
+      `/api/kr-market/indices/${encodeURIComponent(config.indexId)}/breadth`
+    ),
+  ]);
+  const chartPoints = chart.points ?? [];
+  const latestDaily = chartPoints[chartPoints.length - 1] ?? null;
+  const previousDaily = chartPoints[chartPoints.length - 2] ?? null;
+  const close = latestDaily?.close ?? null;
+  const previousClose = previousDaily?.close ?? null;
+  const change =
+    close !== null && previousClose !== null ? close - previousClose : null;
+  const changePct =
+    change !== null && previousClose !== null && previousClose !== 0
+      ? (change / previousClose) * 100
+      : null;
+  const ma20 = averageLastNumbers(
+    chartPoints.map((point) => point.close),
+    20
+  );
+  const priceVsMa20 =
+    close !== null && ma20 !== null && ma20 !== 0
+      ? ((close - ma20) / ma20) * 100
+      : null;
+
+  return {
+    symbol: config.symbol,
+    indexId: config.indexId,
+    displaySymbol: config.displaySymbol,
+    name: config.name,
+    exchange: config.exchange,
+    note: config.note,
+    close,
+    change,
+    changePct,
+    priceVsMa20,
+    volume: latestDaily?.volume ?? null,
+    pointCount: chart.point_count,
+    asOf: latestDaily?.time ?? null,
+    breadth,
+  } satisfies KRMarketTapeSnapshot;
+}
+
+function KRMarketTapeCard({
+  title,
+  snapshot,
+  loadState,
+}: {
+  title: string;
+  snapshot: KRMarketTapeSnapshot | null;
+  loadState: LoadState;
+}) {
+  const t = useT();
+  const breadth = snapshot?.breadth ?? null;
+  const advanceRatio =
+    breadth && breadth.total_count > 0
+      ? (breadth.advance_count / breadth.total_count) * 100
+      : null;
+
+  return (
+    <div className="bg-omi-surface px-4 py-3">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-omi-text-muted">
+            {title}
+          </div>
+          <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <span className="text-lg font-bold text-omi-text-strong">
+              {snapshot ? snapshot.name : loadState === "loading" ? t("common.loading") : "-"}
+            </span>
+            <span className="text-2xl font-black text-omi-text-strong">
+              {formatPrice(snapshot?.close)}
+            </span>
+            <span className={`text-sm font-bold ${valueTone(snapshot?.changePct)}`}>
+              {formatSignedNumber(snapshot?.change)} / {formatPct(snapshot?.changePct)}
+            </span>
+          </div>
+          <div className="mt-1 text-xs text-omi-text-muted">
+            {snapshot
+              ? `${snapshot.displaySymbol} · ${snapshot.exchange} · ${t("dashboard.marketIndex.daily")}`
+              : t("dashboard.marketIndex.waitingData")}
+          </div>
+        </div>
+        <div className="text-right text-xs">
+          <div className="font-semibold text-omi-text">
+            {usMarketRegimeLabel(t, snapshot)}
+          </div>
+          <div className={valueTone(snapshot?.priceVsMa20)}>
+            {formatPct(snapshot?.priceVsMa20)} vs MA20
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+        <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
+          <div className="text-omi-text-muted">{t("dashboard.marketIndex.tradeValueYi")}</div>
+          <div className="mt-1 font-semibold text-omi-text">
+            {formatTradeValueYi(breadth?.trade_value)}
+          </div>
+        </div>
+        <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
+          <div className="text-omi-text-muted">{t("dashboard.marketIndex.advanceDecline")}</div>
+          <div className="mt-1 font-semibold">
+            <span className="text-omi-market-up">{breadth?.advance_count ?? "-"}</span>
+            <span className="px-1 text-omi-text-subtle">/</span>
+            <span className="text-omi-market-down">{breadth?.decline_count ?? "-"}</span>
+          </div>
+        </div>
+        <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
+          <div className="text-omi-text-muted">{t("dashboard.marketIndex.breadth")}</div>
+          <div className={`mt-1 font-semibold ${valueTone((advanceRatio ?? 50) - 50)}`}>
+            {advanceRatio === null
+              ? "-"
+              : t("dashboard.marketIndex.advancePct", {
+                  value: advanceRatio.toFixed(0),
+                })}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function KRMarketTape({
+  selectedSymbol,
+  selectedStock,
+  selectedGroupName,
+}: {
+  selectedSymbol: string | null;
+  selectedStock: KRStockMasterRead | null;
+  selectedGroupName: string | null;
+}) {
+  const t = useT();
+  const primaryIndex = useMemo(() => getKrPrimaryMarketIndexConfig(), []);
+  const contextIndex = useMemo(
+    () =>
+      resolveKrContextIndexConfig({
+        symbol: selectedSymbol,
+        securityName: selectedStock?.security_name ?? selectedStock?.security_name_kr ?? null,
+        groupName: selectedGroupName,
+        stock: selectedStock,
+      }),
+    [selectedGroupName, selectedStock, selectedSymbol]
+  );
+  const [snapshots, setSnapshots] = useState<Record<string, KRMarketTapeSnapshot>>({});
+  const [loadState, setLoadState] = useState<LoadState>("idle");
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const primarySnapshot = snapshots[primaryIndex.symbol] ?? null;
+  const contextSnapshot = snapshots[contextIndex.symbol] ?? null;
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | undefined;
+    let requestInFlight = false;
+    const configs = [primaryIndex, contextIndex].filter(
+      (config, index, items) => {
+        return items.findIndex((item) => item.symbol === config.symbol) === index;
+      }
+    );
+
+    function clearTimer() {
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+        timer = undefined;
+      }
+    }
+
+    async function loadSnapshots(silent = false) {
+      if (requestInFlight) return;
+      requestInFlight = true;
+
+      if (!silent) {
+        setLoadState("loading");
+        setErrorMessage(null);
+      }
+
+      try {
+        const results = await Promise.all(
+          configs.map((config) => fetchKrMarketTapeSnapshot(config))
+        );
+
+        if (cancelled) return;
+
+        setSnapshots((current) => {
+          const next = { ...current };
+          results.forEach((snapshot) => {
+            next[snapshot.symbol] = snapshot;
+          });
+          return next;
+        });
+        setLoadState("success");
+        setErrorMessage(null);
+      } catch {
+        if (!cancelled) {
+          setLoadState("error");
+          setErrorMessage(t("dashboard.marketIndex.krLoadError"));
+        }
+      } finally {
+        requestInFlight = false;
+      }
+    }
+
+    function scheduleRefresh() {
+      if (cancelled) return;
+
+      timer = window.setTimeout(() => {
+        void loadSnapshots(true).finally(scheduleRefresh);
+      }, 300_000);
+    }
+
+    void loadSnapshots().finally(scheduleRefresh);
+
+    return () => {
+      cancelled = true;
+      clearTimer();
+    };
+  }, [contextIndex, primaryIndex, t]);
+
+  const asOf = [primarySnapshot?.asOf, contextSnapshot?.asOf]
+    .filter((value): value is string => Boolean(value))
+    .sort((left, right) => left.localeCompare(right))
+    .at(-1);
+
+  return (
+    <section className="mb-3 border border-omi-border-subtle bg-omi-surface">
+      <div className="grid gap-px bg-omi-surface-strong lg:grid-cols-2">
+        <KRMarketTapeCard
+          title={t("dashboard.marketIndex.market")}
+          snapshot={primarySnapshot}
+          loadState={loadState}
+        />
+        <KRMarketTapeCard
+          title={t("dashboard.marketIndex.context")}
+          snapshot={contextSnapshot}
+          loadState={loadState}
+        />
+      </div>
+      <div className="border-t border-omi-border-subtle px-4 py-2 text-xs text-omi-text-muted">
+        {errorMessage
+          ? errorMessage
+          : asOf
+            ? t("dashboard.marketIndex.krUpdated", {
+                asOf: asOf.slice(0, 10),
+              })
+            : t("dashboard.marketIndex.krWaiting")}
+      </div>
+    </section>
+  );
+}
+
 function flattenGroups(nodes: WatchlistGroupNode[]): WatchlistGroupNode[] {
   return nodes.flatMap((node) => [node, ...flattenGroups(node.children)]);
 }
@@ -1644,6 +1930,8 @@ function buildUsWatchlistRows(
         change_pct: null,
         volume: null,
         status: "pending",
+        session: "regular",
+        has_extended_hours: false,
         source: null,
         intraday_previous_close: null,
         intraday_points: [],
@@ -2251,6 +2539,13 @@ export default function MarketDashboardClient({
   const [ranking, setRanking] = useState<RankingResponse | null>(initialRankingData);
   const [radarMode, setRadarMode] = useState<WatchlistRadarMode>(initialRadarMode);
   const [radar, setRadar] = useState<WatchlistGroupRadarRead | null>(initialRadarData);
+  const [radarOutcomeSummary, setRadarOutcomeSummary] =
+    useState<WatchlistRadarOutcomeSummaryRead | null>(null);
+  const [radarOutcomeHistory, setRadarOutcomeHistory] =
+    useState<WatchlistRadarOutcomeSummaryRead[]>([]);
+  const [radarOutcomeHistoryOpen, setRadarOutcomeHistoryOpen] = useState(false);
+  const [selectedRadarOutcomeSnapshotId, setSelectedRadarOutcomeSnapshotId] =
+    useState<number | null>(null);
   const [usRadarMode, setUsRadarMode] = useState<WatchlistRadarMode>(initialRadarMode);
   const [usRadar, setUsRadar] = useState<WatchlistGroupRadarRead | null>(null);
   const [jpRadarMode, setJpRadarMode] = useState<WatchlistRadarMode>(initialRadarMode);
@@ -2270,6 +2565,10 @@ export default function MarketDashboardClient({
   const [radarLoadState, setRadarLoadState] = useState<LoadState>(
     initialRadarData ? "success" : "idle"
   );
+  const [radarOutcomeLoadState, setRadarOutcomeLoadState] =
+    useState<LoadState>("idle");
+  const [radarOutcomeHistoryLoadState, setRadarOutcomeHistoryLoadState] =
+    useState<LoadState>("idle");
   const [usRadarLoadState, setUsRadarLoadState] = useState<LoadState>("idle");
   const [jpRadarLoadState, setJpRadarLoadState] = useState<LoadState>("idle");
   const [krRadarLoadState, setKrRadarLoadState] = useState<LoadState>("idle");
@@ -2278,6 +2577,10 @@ export default function MarketDashboardClient({
     useState<LoadState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [radarErrorMessage, setRadarErrorMessage] = useState<string | null>(null);
+  const [radarOutcomeErrorMessage, setRadarOutcomeErrorMessage] =
+    useState<string | null>(null);
+  const [radarOutcomeHistoryErrorMessage, setRadarOutcomeHistoryErrorMessage] =
+    useState<string | null>(null);
   const [usRadarErrorMessage, setUsRadarErrorMessage] = useState<string | null>(null);
   const [jpRadarErrorMessage, setJpRadarErrorMessage] = useState<string | null>(null);
   const [krRadarErrorMessage, setKrRadarErrorMessage] = useState<string | null>(null);
@@ -2286,6 +2589,8 @@ export default function MarketDashboardClient({
   const [usLastUpdatedAt, setUsLastUpdatedAt] = useState<string | null>(null);
   const dashboardRequestSeq = useRef(0);
   const radarRequestSeq = useRef(0);
+  const radarOutcomeRequestSeq = useRef(0);
+  const radarOutcomeHistoryRequestSeq = useRef(0);
   const usRadarRequestSeq = useRef(0);
   const jpRadarRequestSeq = useRef(0);
   const krRadarRequestSeq = useRef(0);
@@ -2599,6 +2904,10 @@ export default function MarketDashboardClient({
     selectedUsCompanyProfile?.symbol.toUpperCase() === selectedUsSymbol?.toUpperCase()
       ? selectedUsCompanyProfile
       : null;
+  const selectedUsIndexConfig = getUsMarketIndexConfig(selectedUsSymbol);
+  const isSelectedUsIndex = selectedUsIndexConfig !== null;
+  const selectedJpIndexConfig = getJpMarketIndexConfig(selectedJpSymbol);
+  const isSelectedJpIndex = selectedJpIndexConfig !== null;
 
   function watchlistRadarParams(
     mode: WatchlistRadarMode,
@@ -2625,6 +2934,170 @@ export default function MarketDashboardClient({
       use_intraday: useIntraday,
       intraday_limit: WATCHLIST_INTRADAY_LIMIT,
     };
+  }
+
+  async function loadWatchlistRadarOutcome(
+    groupId: number,
+    options?: { mode?: WatchlistRadarMode; silent?: boolean }
+  ) {
+    const requestSeq = radarOutcomeRequestSeq.current + 1;
+    radarOutcomeRequestSeq.current = requestSeq;
+    const currentMode = options?.mode ?? radarModeRef.current;
+
+    if (!options?.silent) {
+      setRadarOutcomeLoadState("loading");
+      setRadarOutcomeErrorMessage(null);
+      setRadarOutcomeSummary(null);
+    }
+
+    try {
+      const outcomeData = await fetchJson<WatchlistRadarOutcomeSummaryRead>(
+        `/api/watchlists/groups/${groupId}/radar/outcomes/latest`,
+        { mode: currentMode }
+      );
+
+      if (radarOutcomeRequestSeq.current !== requestSeq) return;
+
+      setRadarOutcomeSummary(outcomeData);
+      setRadarOutcomeLoadState("success");
+      setRadarOutcomeErrorMessage(null);
+    } catch (error) {
+      if (radarOutcomeRequestSeq.current !== requestSeq) return;
+
+      if (!options?.silent) {
+        setRadarOutcomeSummary(null);
+      }
+      setRadarOutcomeLoadState("error");
+      setRadarOutcomeErrorMessage(apiErrorMessage(error, t("radar.outcome.loadError")));
+    }
+  }
+
+  async function loadWatchlistRadarOutcomeHistory(
+    groupId: number,
+    options?: { mode?: WatchlistRadarMode; silent?: boolean }
+  ) {
+    const requestSeq = radarOutcomeHistoryRequestSeq.current + 1;
+    radarOutcomeHistoryRequestSeq.current = requestSeq;
+    const currentMode = options?.mode ?? radarModeRef.current;
+
+    if (!options?.silent) {
+      setRadarOutcomeHistoryLoadState("loading");
+      setRadarOutcomeHistoryErrorMessage(null);
+    }
+
+    try {
+      const historyData = await fetchJson<WatchlistRadarOutcomeSummaryRead[]>(
+        `/api/watchlists/groups/${groupId}/radar/outcomes/history`,
+        { mode: currentMode, limit: 60, item_limit: 12 }
+      );
+
+      if (radarOutcomeHistoryRequestSeq.current !== requestSeq) return;
+
+      setRadarOutcomeHistory(historyData);
+      setSelectedRadarOutcomeSnapshotId((current) => {
+        if (current && historyData.some((row) => row.snapshot?.id === current)) {
+          return current;
+        }
+        return historyData[0]?.snapshot?.id ?? null;
+      });
+      setRadarOutcomeHistoryLoadState("success");
+      setRadarOutcomeHistoryErrorMessage(null);
+    } catch (error) {
+      if (radarOutcomeHistoryRequestSeq.current !== requestSeq) return;
+
+      if (!options?.silent) {
+        setRadarOutcomeHistory([]);
+      }
+      setRadarOutcomeHistoryLoadState("error");
+      setRadarOutcomeHistoryErrorMessage(apiErrorMessage(error, t("radar.outcome.loadError")));
+    }
+  }
+
+  function openWatchlistRadarOutcomeHistory() {
+    setRadarOutcomeHistoryOpen(true);
+    if (activeGroupId !== null) {
+      void loadWatchlistRadarOutcomeHistory(activeGroupId);
+    }
+  }
+
+  async function saveWatchlistRadarSnapshot() {
+    if (activeGroupId === null) return;
+
+    const groupId = activeGroupId;
+    const currentMode = radarModeRef.current;
+    const marketState = getTaiwanMarketRefreshState();
+    const requestSeq = radarOutcomeRequestSeq.current + 1;
+
+    radarOutcomeRequestSeq.current = requestSeq;
+    setRadarOutcomeLoadState("loading");
+    setRadarOutcomeErrorMessage(null);
+
+    try {
+      const snapshot = await requestJson<WatchlistRadarSnapshotRead>(
+        `/api/watchlists/groups/${groupId}/radar/snapshots`,
+        { method: "POST" },
+        watchlistRadarParams(
+          currentMode,
+          shouldUseTaiwanWatchlistIntraday(marketState)
+        )
+      );
+      setSelectedRadarOutcomeSnapshotId(snapshot.id);
+      await loadWatchlistRadarOutcome(groupId, { mode: currentMode, silent: true });
+      if (radarOutcomeHistoryOpen) {
+        await loadWatchlistRadarOutcomeHistory(groupId, {
+          mode: currentMode,
+          silent: true,
+        });
+      }
+    } catch (error) {
+      if (radarOutcomeRequestSeq.current !== requestSeq) return;
+
+      setRadarOutcomeLoadState("error");
+      setRadarOutcomeErrorMessage(apiErrorMessage(error, t("radar.outcome.snapshotError")));
+    }
+  }
+
+  async function evaluateWatchlistRadarOutcome(snapshotRunId?: number) {
+    if (activeGroupId === null) return;
+
+    const groupId = activeGroupId;
+    const currentMode = radarModeRef.current;
+    const requestSeq = radarOutcomeRequestSeq.current + 1;
+    radarOutcomeRequestSeq.current = requestSeq;
+
+    setRadarOutcomeLoadState("loading");
+    setRadarOutcomeErrorMessage(null);
+
+    try {
+      const outcomeData = await requestJson<WatchlistRadarOutcomeSummaryRead>(
+        `/api/watchlists/groups/${groupId}/radar/outcomes/evaluate`,
+        { method: "POST" },
+        snapshotRunId
+          ? { mode: currentMode, snapshot_run_id: snapshotRunId }
+          : { mode: currentMode }
+      );
+
+      if (radarOutcomeRequestSeq.current !== requestSeq) return;
+
+      setRadarOutcomeHistory((current) =>
+        current.map((row) =>
+          row.snapshot?.id === outcomeData.snapshot?.id ? outcomeData : row
+        )
+      );
+      const latestSnapshotId =
+        radarOutcomeHistory[0]?.snapshot?.id ?? radarOutcomeSummary?.snapshot?.id ?? null;
+      if (!snapshotRunId || outcomeData.snapshot?.id === latestSnapshotId) {
+        setRadarOutcomeSummary(outcomeData);
+      }
+      setSelectedRadarOutcomeSnapshotId(outcomeData.snapshot?.id ?? snapshotRunId ?? null);
+      setRadarOutcomeLoadState("success");
+      setRadarOutcomeErrorMessage(null);
+    } catch (error) {
+      if (radarOutcomeRequestSeq.current !== requestSeq) return;
+
+      setRadarOutcomeLoadState("error");
+      setRadarOutcomeErrorMessage(apiErrorMessage(error, t("radar.outcome.evaluateError")));
+    }
   }
 
   function clearRankingTrendTimer() {
@@ -2662,6 +3135,9 @@ export default function MarketDashboardClient({
       setRadarLoadState("loading");
       setRadarErrorMessage(null);
       setRadar(null);
+      setRadarOutcomeLoadState("loading");
+      setRadarOutcomeErrorMessage(null);
+      setRadarOutcomeSummary(null);
     }
 
     try {
@@ -2679,11 +3155,14 @@ export default function MarketDashboardClient({
       setRadar(radarData);
       setRadarLoadState("success");
       setRadarErrorMessage(null);
+      void loadWatchlistRadarOutcome(groupId, { mode: currentMode, silent: true });
     } catch (error) {
       if (radarRequestSeq.current !== requestSeq) return;
 
       if (!options?.silent) {
         setRadar(null);
+        setRadarOutcomeSummary(null);
+        setRadarOutcomeLoadState("idle");
       }
       setRadarLoadState("error");
       setRadarErrorMessage(apiErrorMessage(error, t("radar.loadError")));
@@ -2814,6 +3293,9 @@ export default function MarketDashboardClient({
       setRadarLoadState("loading");
       setErrorMessage(null);
       setRadarErrorMessage(null);
+      setRadarOutcomeLoadState("loading");
+      setRadarOutcomeErrorMessage(null);
+      setRadarOutcomeSummary(null);
     }
 
     try {
@@ -2838,12 +3320,18 @@ export default function MarketDashboardClient({
             setRadar(data);
             setRadarLoadState("success");
             setRadarErrorMessage(null);
+            void loadWatchlistRadarOutcome(groupId, {
+              mode: radarModeRef.current,
+              silent: true,
+            });
           })
           .catch((error: unknown) => {
             if (radarRequestSeq.current !== radarSeq) return;
 
             if (!options?.silent) {
               setRadar(null);
+              setRadarOutcomeSummary(null);
+              setRadarOutcomeLoadState("idle");
             }
             setRadarLoadState("error");
             setRadarErrorMessage(apiErrorMessage(error, t("radar.loadError")));
@@ -2971,7 +3459,13 @@ export default function MarketDashboardClient({
       setUsErrorMessage(null);
     }
 
-    void loadUsWatchlistRadar(groupId, { silent: options?.silent });
+    if (isSelectedUsIndex) {
+      setUsRadar(null);
+      setUsRadarLoadState("idle");
+      setUsRadarErrorMessage(null);
+    } else {
+      void loadUsWatchlistRadar(groupId, { silent: options?.silent });
+    }
 
     try {
       const marketState = getUsMarketRefreshState();
@@ -3016,7 +3510,13 @@ export default function MarketDashboardClient({
       setJpErrorMessage(null);
     }
 
-    void loadJpWatchlistRadar(groupId, { silent: options?.silent });
+    if (isSelectedJpIndex) {
+      setJpRadar(null);
+      setJpRadarLoadState("idle");
+      setJpRadarErrorMessage(null);
+    } else {
+      void loadJpWatchlistRadar(groupId, { silent: options?.silent });
+    }
 
     try {
       const rankingData = await fetchJson<JPWatchlistRankingRead>(
@@ -3883,12 +4383,28 @@ export default function MarketDashboardClient({
       setRadarLoadState("idle");
       setErrorMessage(null);
       setRadarErrorMessage(null);
+      setRadarOutcomeSummary(null);
+      setRadarOutcomeLoadState("idle");
+      setRadarOutcomeErrorMessage(null);
+      setRadarOutcomeHistory([]);
+      setRadarOutcomeHistoryLoadState("idle");
+      setRadarOutcomeHistoryErrorMessage(null);
+      setRadarOutcomeHistoryOpen(false);
+      setSelectedRadarOutcomeSnapshotId(null);
       pushDashboardUrl({ market: "tw", groupId: group.id, radarMode });
     } else {
       setRanking(null);
       setRadar(null);
       setRadarLoadState("idle");
       setRadarErrorMessage(null);
+      setRadarOutcomeSummary(null);
+      setRadarOutcomeLoadState("idle");
+      setRadarOutcomeErrorMessage(null);
+      setRadarOutcomeHistory([]);
+      setRadarOutcomeHistoryLoadState("idle");
+      setRadarOutcomeHistoryErrorMessage(null);
+      setRadarOutcomeHistoryOpen(false);
+      setSelectedRadarOutcomeSnapshotId(null);
       pushDashboardUrl({ market: "tw" });
     }
   }
@@ -4047,23 +4563,25 @@ export default function MarketDashboardClient({
     const normalizedSymbol = symbol.trim().toUpperCase();
     if (!normalizedSymbol) return;
 
+    const indexConfig = getKrMarketIndexConfig(normalizedSymbol);
+    const resolvedSymbol = indexConfig?.symbol ?? normalizedSymbol;
     setKrStatusMessage(null);
-    setSelectedKrSymbol(normalizedSymbol);
+    setSelectedKrSymbol(resolvedSymbol);
     setSelectedKrStock((current) =>
-      current?.symbol === normalizedSymbol
+      current?.symbol === resolvedSymbol
         ? current
         : ({
             id: 0,
-            symbol: normalizedSymbol,
-            local_code: null,
-            security_name: securityName,
-            security_name_kr: null,
-            exchange: null,
-            market_segment: null,
+            symbol: resolvedSymbol,
+            local_code: indexConfig?.indexId ?? null,
+            security_name: indexConfig?.name ?? securityName,
+            security_name_kr: indexConfig?.nameKr ?? null,
+            exchange: indexConfig?.exchange ?? null,
+            market_segment: indexConfig?.marketSegment ?? null,
             sector: null,
             industry: null,
-            asset_type: "stock",
-            listing_source: "watchlist",
+            asset_type: indexConfig ? "index" : "stock",
+            listing_source: indexConfig ? "market_index_config" : "watchlist",
             currency: "KRW",
             exchange_timezone_name: "Asia/Seoul",
             is_active: true,
@@ -4076,7 +4594,7 @@ export default function MarketDashboardClient({
     pushDashboardUrl({
       market: "kr",
       groupId: selectedKrGroupId,
-      krSymbol: normalizedSymbol,
+      krSymbol: resolvedSymbol,
     });
   }
 
@@ -4122,6 +4640,11 @@ export default function MarketDashboardClient({
   function handleRadarModeChange(value: WatchlistRadarMode) {
     radarModeRef.current = value;
     setRadarMode(value);
+    setRadarOutcomeHistory([]);
+    setRadarOutcomeHistoryLoadState("idle");
+    setRadarOutcomeHistoryErrorMessage(null);
+    setRadarOutcomeHistoryOpen(false);
+    setSelectedRadarOutcomeSnapshotId(null);
     pushDashboardUrl({
       market: "tw",
       groupId: activeGroupId,
@@ -4407,6 +4930,14 @@ export default function MarketDashboardClient({
         mode={radarMode}
         selectedStockId={selectedStockId}
         disabled={activeGroupId === null}
+        outcomeSummary={radarOutcomeSummary}
+        outcomeLoadState={radarOutcomeLoadState}
+        outcomeErrorMessage={radarOutcomeErrorMessage}
+        outcomeHistory={radarOutcomeHistory}
+        outcomeHistoryOpen={radarOutcomeHistoryOpen}
+        outcomeHistoryLoadState={radarOutcomeHistoryLoadState}
+        outcomeHistoryErrorMessage={radarOutcomeHistoryErrorMessage}
+        selectedOutcomeSnapshotId={selectedRadarOutcomeSnapshotId}
         getModeHref={(nextMode) =>
           dashboardHref({
             market: "tw",
@@ -4420,6 +4951,30 @@ export default function MarketDashboardClient({
           if (activeGroupId !== null) {
             void loadWatchlistRadar(activeGroupId);
           }
+        }}
+        onSaveSnapshot={() => {
+          void saveWatchlistRadarSnapshot();
+        }}
+        onEvaluateOutcome={() => {
+          void evaluateWatchlistRadarOutcome();
+        }}
+        onReloadOutcome={() => {
+          if (activeGroupId !== null) {
+            void loadWatchlistRadarOutcome(activeGroupId);
+          }
+        }}
+        onOpenOutcomeHistory={openWatchlistRadarOutcomeHistory}
+        onCloseOutcomeHistory={() => {
+          setRadarOutcomeHistoryOpen(false);
+        }}
+        onReloadOutcomeHistory={() => {
+          if (activeGroupId !== null) {
+            void loadWatchlistRadarOutcomeHistory(activeGroupId);
+          }
+        }}
+        onSelectOutcomeSnapshot={setSelectedRadarOutcomeSnapshotId}
+        onEvaluateOutcomeSnapshot={(snapshotRunId) => {
+          void evaluateWatchlistRadarOutcome(snapshotRunId);
         }}
         onSelectStock={handleSelectStock}
       />
@@ -4499,31 +5054,33 @@ export default function MarketDashboardClient({
   });
   const usRankingPanel = (
     <div className="space-y-4">
-      <WatchlistRadarPanel
-        radar={usRadar}
-        loadState={usRadarLoadState}
-        errorMessage={usRadarErrorMessage}
-        mode={usRadarMode}
-        selectedStockId={selectedUsSymbol}
-        disabled={selectedUsGroupId === null}
-        scopeLabel={t("radar.technicalOnly.usScope")}
-        notice={t("radar.technicalOnly.notice")}
-        getModeHref={(nextMode) =>
-          dashboardHref({
-            market: "us",
-            groupId: selectedUsGroupId,
-            symbol: selectedUsSymbol,
-            radarMode: nextMode,
-          })
-        }
-        onModeChange={handleUsRadarModeChange}
-        onReload={() => {
-          if (selectedUsGroupId !== null) {
-            void loadUsWatchlistRadar(selectedUsGroupId);
+      {isSelectedUsIndex ? null : (
+        <WatchlistRadarPanel
+          radar={usRadar}
+          loadState={usRadarLoadState}
+          errorMessage={usRadarErrorMessage}
+          mode={usRadarMode}
+          selectedStockId={selectedUsSymbol}
+          disabled={selectedUsGroupId === null}
+          scopeLabel={t("radar.technicalOnly.usScope")}
+          notice={t("radar.technicalOnly.notice")}
+          getModeHref={(nextMode) =>
+            dashboardHref({
+              market: "us",
+              groupId: selectedUsGroupId,
+              symbol: selectedUsSymbol,
+              radarMode: nextMode,
+            })
           }
-        }}
-        onSelectStock={handleSelectUsSymbol}
-      />
+          onModeChange={handleUsRadarModeChange}
+          onReload={() => {
+            if (selectedUsGroupId !== null) {
+              void loadUsWatchlistRadar(selectedUsGroupId);
+            }
+          }}
+          onSelectStock={handleSelectUsSymbol}
+        />
+      )}
       <WatchlistRankingPanel
         groupName={selectedUsGroupName}
         lastUpdatedAt={usLastUpdatedAt}
@@ -4594,31 +5151,33 @@ export default function MarketDashboardClient({
   });
   const jpRankingPanel = (
     <div className="space-y-4">
-      <WatchlistRadarPanel
-        radar={jpRadar}
-        loadState={jpRadarLoadState}
-        errorMessage={jpRadarErrorMessage}
-        mode={jpRadarMode}
-        selectedStockId={selectedJpSymbol}
-        disabled={selectedJpGroupId === null}
-        scopeLabel={t("radar.technicalOnly.jpScope")}
-        notice={t("radar.technicalOnly.notice")}
-        getModeHref={(nextMode) =>
-          dashboardHref({
-            market: "jp",
-            groupId: selectedJpGroupId,
-            jpSymbol: selectedJpSymbol,
-            radarMode: nextMode,
-          })
-        }
-        onModeChange={handleJpRadarModeChange}
-        onReload={() => {
-          if (selectedJpGroupId !== null) {
-            void loadJpWatchlistRadar(selectedJpGroupId);
+      {isSelectedJpIndex ? null : (
+        <WatchlistRadarPanel
+          radar={jpRadar}
+          loadState={jpRadarLoadState}
+          errorMessage={jpRadarErrorMessage}
+          mode={jpRadarMode}
+          selectedStockId={selectedJpSymbol}
+          disabled={selectedJpGroupId === null}
+          scopeLabel={t("radar.technicalOnly.jpScope")}
+          notice={t("radar.technicalOnly.notice")}
+          getModeHref={(nextMode) =>
+            dashboardHref({
+              market: "jp",
+              groupId: selectedJpGroupId,
+              jpSymbol: selectedJpSymbol,
+              radarMode: nextMode,
+            })
           }
-        }}
-        onSelectStock={handleSelectJpSymbol}
-      />
+          onModeChange={handleJpRadarModeChange}
+          onReload={() => {
+            if (selectedJpGroupId !== null) {
+              void loadJpWatchlistRadar(selectedJpGroupId);
+            }
+          }}
+          onSelectStock={handleSelectJpSymbol}
+        />
+      )}
       <WatchlistRankingPanel
         groupName={selectedJpGroupName}
         lastUpdatedAt={jpLastUpdatedAt}
@@ -4829,15 +5388,16 @@ export default function MarketDashboardClient({
 
     if (activeMarket === "kr") {
       if (selectedKrSymbol) {
+        const selectedKrIndexConfig = getKrMarketIndexConfig(selectedKrSymbol);
         return {
           market: "kr",
           label: `${selectedKrSymbol}${
             selectedKrStock?.security_name ? ` ${selectedKrStock.security_name}` : ""
           }`,
           target: {
-            type: "kr_stock",
+            type: selectedKrIndexConfig ? "kr_index" : "kr_stock",
             id: selectedKrSymbol,
-            label: selectedKrStock?.security_name ?? selectedKrSymbol,
+            label: selectedKrIndexConfig?.name ?? selectedKrStock?.security_name ?? selectedKrSymbol,
             market: "KR",
           },
           uiContext: {
@@ -5097,12 +5657,39 @@ export default function MarketDashboardClient({
                   selectedSymbolKey === null
                     ? null
                     : nextItems.find((item) => item.symbol === selectedSymbolKey) ?? null;
+                const selectedIndexConfig = getKrMarketIndexConfig(selectedKrSymbol);
 
                 setSelectedKrGroup(nextSelectedGroup);
                 setSelectedKrGroupId(nextSelectedGroup?.id ?? null);
                 setSelectedKrGroupName(nextSelectedGroup?.group_name ?? null);
 
-                if (selectedSymbolKey !== null && nextSelectedRow === null) {
+                if (selectedIndexConfig) {
+                  setSelectedKrSymbol(selectedIndexConfig.symbol);
+                  setSelectedKrStock((current) =>
+                    current?.symbol === selectedIndexConfig.symbol
+                      ? current
+                      : ({
+                          id: 0,
+                          symbol: selectedIndexConfig.symbol,
+                          local_code: selectedIndexConfig.indexId,
+                          security_name: selectedIndexConfig.name,
+                          security_name_kr: selectedIndexConfig.nameKr,
+                          exchange: selectedIndexConfig.exchange,
+                          market_segment: selectedIndexConfig.marketSegment,
+                          sector: null,
+                          industry: null,
+                          asset_type: "index",
+                          listing_source: "market_index_config",
+                          currency: "KRW",
+                          exchange_timezone_name: "Asia/Seoul",
+                          is_active: true,
+                          first_seen_at: "",
+                          last_seen_at: "",
+                          created_at: "",
+                          updated_at: "",
+                        } satisfies KRStockMasterRead)
+                  );
+                } else if (selectedSymbolKey !== null && nextSelectedRow === null) {
                   setSelectedKrSymbol(null);
                   setSelectedKrStock(null);
                 } else if (
@@ -5173,6 +5760,14 @@ export default function MarketDashboardClient({
                   setRadar(null);
                   setRadarLoadState("idle");
                   setRadarErrorMessage(null);
+                  setRadarOutcomeSummary(null);
+                  setRadarOutcomeLoadState("idle");
+                  setRadarOutcomeErrorMessage(null);
+                  setRadarOutcomeHistory([]);
+                  setRadarOutcomeHistoryLoadState("idle");
+                  setRadarOutcomeHistoryErrorMessage(null);
+                  setRadarOutcomeHistoryOpen(false);
+                  setSelectedRadarOutcomeSnapshotId(null);
                 }
               }}
             />
@@ -5218,7 +5813,7 @@ export default function MarketDashboardClient({
                 <USStockDetailPanel
                   selectedSymbol={selectedUsSymbol}
                   selectedSecurityName={selectedUsSecurityName}
-                  watchlistRankingPanel={usRankingPanel}
+                  watchlistRankingPanel={isSelectedUsIndex ? undefined : usRankingPanel}
                   onCompanyProfileChange={setSelectedUsCompanyProfile}
                   onChartFocusModeChange={setUsChartFocusMode}
                 />
@@ -5235,21 +5830,28 @@ export default function MarketDashboardClient({
                 <JPMarketPanel
                   initialSymbol={selectedJpSymbol}
                   refreshNonce={jpDataRefreshNonce}
-                  watchlistRankingPanel={jpRankingPanel}
+                  watchlistRankingPanel={isSelectedJpIndex ? undefined : jpRankingPanel}
                   onChartFocusModeChange={setJpChartFocusMode}
                   onSelectStock={handleSelectJpStock}
                   onStatusMessage={setJpStatusMessage}
                 />
               </>
             ) : activeMarket === "kr" ? (
-              <KRMarketPanel
-                initialSymbol={selectedKrSymbol}
-                selectedGroupId={selectedKrGroupId}
-                refreshNonce={krDataRefreshNonce}
-                watchlistRankingPanel={krRankingPanel}
-                onSelectStock={handleSelectKrStock}
-                onStatusMessage={setKrStatusMessage}
-              />
+              <>
+                <KRMarketTape
+                  selectedSymbol={selectedKrSymbol}
+                  selectedStock={selectedKrStock}
+                  selectedGroupName={selectedKrGroupName}
+                />
+                <KRMarketPanel
+                  initialSymbol={selectedKrSymbol}
+                  selectedGroupId={selectedKrGroupId}
+                  refreshNonce={krDataRefreshNonce}
+                  watchlistRankingPanel={krRankingPanel}
+                  onSelectStock={handleSelectKrStock}
+                  onStatusMessage={setKrStatusMessage}
+                />
+              </>
             ) : activeMarket === "crypto" && selectedResourceInstrumentKey ? (
               <ResourceMarketPanel selectedInstrumentKey={selectedResourceInstrumentKey} />
             ) : activeMarket === "crypto" ? (

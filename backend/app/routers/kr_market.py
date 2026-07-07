@@ -14,8 +14,17 @@ from app.kr_market.schemas import (
     KRCompanyFundamentalRead,
     KRDailyPriceRead,
     KRDailyPriceRefreshResultRead,
+    KRIndexOhlcChartRead,
+    KRIndexIntradayTrendRead,
+    KRIndexRefreshBatchResultRead,
+    KRIndexRefreshResultRead,
+    KRIndexSummaryRead,
     KRInvestorTradeDailyRead,
+    KRMarketBreadthRead,
+    KRMarketBreadthRefreshResultRead,
     KROhlcChartRead,
+    KRMarketIndexRead,
+    KRMarketIndexSyncResultRead,
     KRResourceRefreshResultRead,
     KRResourceSummaryRead,
     KRSourceHealthRead,
@@ -33,6 +42,7 @@ from app.kr_market.schemas import (
     KRWatchlistReadinessRead,
 )
 from app.kr_market.service import (
+    KRIndexNotFoundError,
     KRStockNotFoundError,
     KRWatchlistDuplicateItemError,
     KRWatchlistGroupNotEmptyError,
@@ -44,6 +54,10 @@ from app.kr_market.service import (
     create_kr_watchlist_item,
     delete_kr_watchlist_group,
     delete_kr_watchlist_item,
+    get_kr_index_summary,
+    get_kr_index_intraday_trend,
+    get_kr_market_breadth,
+    get_kr_market_index_config,
     get_kr_resource_summary,
     get_kr_stock,
     get_kr_watchlist_group,
@@ -51,6 +65,8 @@ from app.kr_market.service import (
     get_kr_watchlist_readiness,
     get_kr_watchlist_technical_radar,
     get_kr_watchlist_tree,
+    list_kr_index_ohlc_chart_data,
+    list_kr_market_indices,
     list_kr_company_fundamentals,
     list_kr_daily_prices,
     list_kr_investor_trades,
@@ -60,7 +76,11 @@ from app.kr_market.service import (
     list_kr_watchlist_items,
     refresh_kr_company_fundamental as refresh_kr_company_fundamental_service,
     refresh_kr_daily_prices as refresh_kr_daily_prices_service,
+    refresh_kr_index_daily_prices as refresh_kr_index_daily_prices_service,
+    refresh_kr_market_breadth_daily_prices,
+    refresh_kr_market_indices,
     refresh_kr_market_resource,
+    sync_kr_index_master,
     search_kr_stocks,
     sync_kr_symbol_master,
     update_kr_watchlist_group,
@@ -167,6 +187,163 @@ def sync_kr_stock_symbols(
 @router.get("/source-health", response_model=KRSourceHealthRead)
 def get_kr_source_health(symbol: str | None = None, db: Session = Depends(get_db)):
     return build_kr_source_health(db=db, symbol=symbol)
+
+
+@router.post("/indices/sync", response_model=KRMarketIndexSyncResultRead)
+def sync_kr_market_indices(db: Session = Depends(get_db)):
+    return sync_kr_index_master(db=db)
+
+
+@router.get("/indices", response_model=list[KRMarketIndexRead])
+def list_kr_market_indices_api(
+    is_active: bool | None = True,
+    db: Session = Depends(get_db),
+):
+    return list_kr_market_indices(db=db, is_active=is_active)
+
+
+@router.get("/indices/summary", response_model=KRIndexSummaryRead)
+def get_kr_index_summary_api(db: Session = Depends(get_db)):
+    return get_kr_index_summary(db=db)
+
+
+@router.get("/indices/{index_id}/breadth", response_model=KRMarketBreadthRead)
+def get_kr_market_breadth_api(
+    index_id: str,
+    trade_date: date | None = None,
+    db: Session = Depends(get_db),
+):
+    try:
+        return get_kr_market_breadth(db=db, index_id=index_id, trade_date=trade_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/market-breadth/refresh", response_model=KRMarketBreadthRefreshResultRead)
+def refresh_kr_market_breadth_api(
+    trade_date: date | None = None,
+    market_id: str = Query(default="ALL", pattern="^(ALL|STK|KSQ)$"),
+    db: Session = Depends(get_db),
+):
+    try:
+        return refresh_kr_market_breadth_daily_prices(
+            db=db,
+            trade_date=trade_date,
+            market_id=market_id,
+        )
+    except requests.RequestException as exc:
+        raise _fetch_error(exc) from exc
+    except KRMarketDataFetchError as exc:
+        raise _fetch_error(exc) from exc
+
+
+@router.post("/indices/refresh", response_model=KRIndexRefreshBatchResultRead)
+def refresh_kr_indices_api(
+    index_ids: str | None = Query(default=None, description="Comma-separated KR index ids. Defaults to all configured indices."),
+    outputsize: str = Query(default="compact", pattern="^(compact|full)$"),
+    start_date: date | None = None,
+    end_date: date | None = None,
+    db: Session = Depends(get_db),
+):
+    try:
+        requested_ids = [
+            value.strip()
+            for value in (index_ids or "").split(",")
+            if value.strip()
+        ] or None
+        return refresh_kr_market_indices(
+            db=db,
+            index_ids=requested_ids,
+            outputsize=outputsize,
+            start_date=start_date,
+            end_date=end_date,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/indices/{index_id}/refresh", response_model=KRIndexRefreshResultRead)
+def refresh_kr_index_api(
+    index_id: str,
+    outputsize: str = Query(default="compact", pattern="^(compact|full)$"),
+    start_date: date | None = None,
+    end_date: date | None = None,
+    db: Session = Depends(get_db),
+):
+    try:
+        return refresh_kr_index_daily_prices_service(
+            db=db,
+            index_id=index_id,
+            outputsize=outputsize,
+            start_date=start_date,
+            end_date=end_date,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except requests.RequestException as exc:
+        raise _fetch_error(exc) from exc
+    except KRMarketDataFetchError as exc:
+        raise _fetch_error(exc) from exc
+
+
+@router.get("/indices/{index_id}", response_model=KRMarketIndexRead)
+def get_kr_market_index_api(index_id: str, db: Session = Depends(get_db)):
+    try:
+        return get_kr_market_index_config(db=db, index_id=index_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except KRIndexNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.get("/indices/{index_id}/ohlc", response_model=KRIndexOhlcChartRead)
+def get_kr_index_ohlc_chart(
+    index_id: str,
+    timeframe: str = Query(default="daily", pattern="^(daily|weekly|monthly)$"),
+    bars: int = Query(default=180, ge=1, le=5000),
+    ensure_history: bool = False,
+    outputsize: str = Query(default="compact", pattern="^(compact|full)$"),
+    to_date: date | None = None,
+    db: Session = Depends(get_db),
+):
+    try:
+        return list_kr_index_ohlc_chart_data(
+            db=db,
+            index_id=index_id,
+            timeframe=timeframe,
+            bars=bars,
+            ensure_history=ensure_history,
+            outputsize=outputsize,
+            to_date=to_date,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except requests.RequestException as exc:
+        raise _fetch_error(exc) from exc
+    except KRMarketDataFetchError as exc:
+        raise _fetch_error(exc) from exc
+
+
+@router.get("/indices/{index_id}/intraday", response_model=KRIndexIntradayTrendRead)
+def get_kr_index_intraday_chart(
+    index_id: str,
+    refresh: bool = False,
+    max_pages: int = Query(default=80, ge=1, le=80),
+    db: Session = Depends(get_db),
+):
+    try:
+        return get_kr_index_intraday_trend(
+            db=db,
+            index_id=index_id,
+            refresh=refresh,
+            max_pages=max_pages,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except requests.RequestException as exc:
+        raise _fetch_error(exc) from exc
+    except KRMarketDataFetchError as exc:
+        raise _fetch_error(exc) from exc
 
 
 @router.get("/stocks/search", response_model=list[KRStockMasterRead])

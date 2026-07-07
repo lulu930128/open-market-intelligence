@@ -5,13 +5,17 @@ import SettingsDock from "@/components/SettingsDock";
 import type { MarketRegion } from "@/components/SidebarWatchlistExplorer";
 import { marketLabel, useT } from "@/i18n";
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
+import {
+  KR_MARKET_INDEX_GROUP_NAME,
+  KR_MARKET_INDEX_ITEMS,
+} from "@/lib/krMarketIndices";
 import type {
   KRStockMasterRead,
   KRWatchlistGroupNode,
   KRWatchlistGroupRead,
   KRWatchlistItemRead,
 } from "@/types/market";
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, type MouseEvent as ReactMouseEvent, useMemo, useState } from "react";
 
 type Message = { type: "success" | "warning" | "error"; text: string } | null;
 
@@ -69,6 +73,14 @@ function submitterValue(event: FormEvent<HTMLFormElement>) {
   return submitter?.value ?? "";
 }
 
+function selectOnPrimaryMouseDown(
+  event: ReactMouseEvent<HTMLElement>,
+  select: () => void
+) {
+  if (event.button !== 0) return;
+  select();
+}
+
 function normalizeSymbolInput(value: string) {
   let cleaned = value.trim().toUpperCase();
   if (!cleaned) return "";
@@ -116,6 +128,7 @@ export default function KRMarketSidebar({
   const [stockNote, setStockNote] = useState("");
   const [stockTags, setStockTags] = useState("");
   const [stockSuggestions, setStockSuggestions] = useState<KRStockMasterRead[]>([]);
+  const [indexGroupExpanded, setIndexGroupExpanded] = useState(false);
 
   const allGroups = useMemo(() => flattenGroups(tree), [tree]);
   const selectedGroup = useMemo(
@@ -409,6 +422,83 @@ export default function KRMarketSidebar({
     void createStockItem();
   }
 
+  function renderPinnedIndexGroup() {
+    const selected = KR_MARKET_INDEX_ITEMS.some((item) => item.symbol === selectedSymbol);
+
+    return (
+      <div>
+        <div
+          className={[
+            "relative flex cursor-pointer items-center gap-1 py-1 pr-1 text-sm",
+            selected
+              ? "omi-sidebar-selected text-omi-text-strong"
+              : "text-omi-text-muted hover:bg-omi-surface-muted",
+          ].join(" ")}
+          style={{ paddingLeft: "4px" }}
+          onClick={() => setIndexGroupExpanded((previous) => !previous)}
+        >
+          <button
+            type="button"
+            className={[
+              "h-6 w-4 text-xs",
+              selected ? "text-omi-accent" : "text-omi-text-muted",
+            ].join(" ")}
+            onClick={(event) => {
+              event.stopPropagation();
+              setIndexGroupExpanded((previous) => !previous);
+            }}
+            aria-label={t("krMarket.watchlist.toggleIndexFolder")}
+          >
+            {indexGroupExpanded ? "v" : ">"}
+          </button>
+          <div className="min-w-0 flex-1 truncate font-semibold">
+            {KR_MARKET_INDEX_GROUP_NAME}
+          </div>
+          <span className={selected ? "pr-2 text-xs text-omi-accent" : "pr-2 text-xs text-omi-text-subtle"}>
+            {KR_MARKET_INDEX_ITEMS.length}
+          </span>
+        </div>
+
+        {indexGroupExpanded ? (
+          <div>
+            {KR_MARKET_INDEX_ITEMS.map((item) => {
+              const itemSelected = item.symbol === selectedSymbol;
+
+              return (
+                <button
+                  key={item.symbol}
+                  type="button"
+                  className={[
+                    "group relative flex w-full cursor-pointer items-center gap-1 py-1.5 pr-2 text-left text-xs",
+                    itemSelected
+                      ? "omi-sidebar-selected text-omi-text-strong"
+                      : "text-omi-text-muted hover:bg-omi-surface-muted",
+                  ].join(" ")}
+                  style={{ paddingLeft: "24px" }}
+                  onMouseDown={(event) =>
+                    selectOnPrimaryMouseDown(event, () =>
+                      onSelectSymbol(item.symbol, item.name)
+                    )
+                  }
+                  onClick={() => onSelectSymbol(item.symbol, item.name)}
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate font-semibold">
+                      {item.displaySymbol} {item.name}
+                    </div>
+                    <div className={itemSelected ? "truncate text-omi-text-muted" : "truncate text-omi-text-subtle"}>
+                      {item.exchange} / index / {item.note}
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
   function renderGroupNode(node: KRWatchlistGroupNode, depth = 0) {
     const selected = node.id === currentGroupId;
     const expanded = expandedIds.has(node.id);
@@ -567,6 +657,7 @@ export default function KRMarketSidebar({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto py-2">
+        {renderPinnedIndexGroup()}
         {tree.length > 0 ? (
           tree.map((node) => renderGroupNode(node))
         ) : (

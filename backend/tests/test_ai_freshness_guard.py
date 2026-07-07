@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from itertools import count
 from types import SimpleNamespace
 import unittest
@@ -9,6 +9,7 @@ from unittest.mock import patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from app.ai import agentic_tools
 from app.ai import ask as ai_ask
 from app.ai import freshness
 from app.ai import reports as ai_reports
@@ -277,6 +278,531 @@ class AiFreshnessGuardTests(unittest.TestCase):
             self.assertTrue(result["is_current"])
             self.assertEqual(result["stale_stock_count"], 0)
             self.assertFalse(result["missing"])
+        finally:
+            db.close()
+
+    def test_ask_exposes_compact_evidence_in_analysis(self) -> None:
+        db = make_session()
+        try:
+            add_stock(db)
+            compact = {
+                "kind": "stock_compact_evidence",
+                "version": "stock_compact_evidence.v1",
+                "target": {"type": "tw_stock", "id": "2330"},
+                "quote": {"source": "market_daily_price", "last_price": 100.0},
+                "intraday_bars": {
+                    "enabled": True,
+                    "series": {
+                        "1m": {
+                            "interval": "1m",
+                            "source": "test_intraday",
+                            "point_count": 1,
+                            "returned_point_count": 1,
+                            "to_time": "2026-05-29T13:30:00+08:00",
+                            "latest": {"time": "2026-05-29T13:30:00+08:00", "close": 101.0},
+                            "points": [{"time": "2026-05-29T13:30:00+08:00", "close": 101.0}],
+                        }
+                    },
+                    "warnings": [],
+                },
+                "freshness_by_domain": {"quote": {"status": "daily_close"}},
+            }
+            context = {
+                "kind": "stock_context",
+                "generated_at": "2026-05-29T08:00:00Z",
+                "as_of": "2026-05-29",
+                "scope": {"stock_id": "2330"},
+                "data": {
+                    "analysis": {
+                        "requested_horizon": "swing",
+                        "selected_horizon": "swing",
+                        "selected_timeframe": "daily",
+                        "selected_score": 1,
+                        "selected_title": "test",
+                        "selected_summary": "test",
+                        "selected_confidence": "medium",
+                    },
+                    "compact": compact,
+                },
+                "missing": [],
+                "warnings": [],
+                "source_refs": [{"type": "table", "name": "market_daily_price"}],
+                "evidence_passport": {},
+            }
+            payload = AiAskRequest(
+                question="2330 context",
+                target={"type": "tw_stock", "id": "2330"},
+                mode="data_only",
+            )
+
+            with (
+                patch.object(ai_ask, "_check_freshness", return_value={"is_current": True, "missing": [], "warnings": []}),
+                patch.object(ai_ask.tools, "read_stock_context", return_value=context),
+            ):
+                response = ai_ask.ask(db=db, payload=payload)
+
+            self.assertEqual(response["analysis"]["compact_evidence"], compact)
+            self.assertEqual(response["result"]["data"]["compact"], compact)
+            self.assertEqual(response["result"]["result_view"]["mode"], "data_only")
+            self.assertNotIn("latest_daily", response["result"]["data"])
+            self.assertEqual(response["result"]["data"]["quote"], compact["quote"])
+            self.assertEqual(response["result"]["stock"]["id"], "2330")
+            self.assertEqual(response["result"]["quote"], compact["quote"])
+            self.assertEqual(response["result"]["intraday"]["status"], "ok")
+            self.assertEqual(response["result"]["intraday"]["latest_point"]["close"], 101.0)
+            self.assertEqual(response["result"]["freshness"], compact["freshness_by_domain"])
+        finally:
+            db.close()
+
+    def test_us_stock_context_projects_intraday_tool_result_into_compact_quote(self) -> None:
+        db = make_session()
+        try:
+            add_us_stock(db)
+            latest_daily = SimpleNamespace(
+                provider="alphavantage",
+                symbol="TSM",
+                trade_date=date(2026, 7, 2),
+                currency="USD",
+                open_price=430.0,
+                high_price=436.0,
+                low_price=429.0,
+                close_price=434.16,
+                adjusted_close=434.16,
+                trade_volume=11_000_000,
+                fetched_at=datetime(2026, 7, 2, 20, 0, tzinfo=timezone.utc),
+                source_url="https://example.test/daily",
+            )
+            profile = SimpleNamespace(
+                provider="test",
+                symbol="TSM",
+                company_name="Taiwan Semiconductor Manufacturing ADR",
+                exchange="NYSE",
+                sector="Technology",
+                industry="Semiconductors",
+                market_cap=None,
+                pe_ratio=None,
+                eps=None,
+                revenue_ttm=None,
+                profit_margin=None,
+                latest_quarter=None,
+                fetched_at=datetime(2026, 7, 2, 20, 0, tzinfo=timezone.utc),
+                source_url="https://example.test/profile",
+            )
+            intraday_summary = {
+                "source": "yahoo_finance_chart",
+                "source_url": "https://query1.finance.yahoo.com/v8/finance/chart/TSM",
+                "session_scope": "regular",
+                "session_phase": "regular",
+                "previous_close": 434.16,
+                "previous_close_source": "us_daily_price",
+                "previous_close_trade_date": "2026-07-02",
+                "previous_close_provider": "alphavantage",
+                "point_count": 65,
+                "points": [
+                    {"time": "2026-07-06T13:29:00-04:00", "session": "regular", "price": 435.1, "volume": 900},
+                    {"time": "2026-07-06T13:30:00-04:00", "session": "regular", "price": 435.5, "volume": 1200},
+                ],
+                "latest_point": {
+                    "time": "2026-07-06T13:30:00-04:00",
+                    "session": "regular",
+                    "price": 435.5,
+                    "volume": 1200,
+                },
+                "warnings": [],
+            }
+            tool_runs = [
+                {
+                    "tool": "us.read_intraday_trend",
+                    "status": "success",
+                    "result_summary": intraday_summary,
+                }
+            ]
+
+            with (
+                patch.object(agentic_tools.us_market_service, "list_us_daily_prices", return_value=[latest_daily]),
+                patch.object(agentic_tools, "_latest_profile", return_value=profile),
+                patch.object(
+                    agentic_tools.us_market_service,
+                    "get_us_sec_fundamental_summary",
+                    return_value={"metric_count": 0},
+                ),
+                patch.object(agentic_tools.us_market_service, "list_us_corporate_actions", return_value=[]),
+                patch.object(agentic_tools.us_market_service, "list_us_short_volumes", return_value=[]),
+                patch.object(agentic_tools, "scan_us_stock_gaps", return_value={"missing": [], "warnings": []}),
+                patch.object(
+                    agentic_tools.us_market_service,
+                    "build_us_source_health",
+                    return_value={"summary": {"status": "ok"}, "entries": []},
+                ),
+                patch.object(
+                    agentic_tools.us_market_service,
+                    "list_us_ohlc_chart_data",
+                    return_value={
+                        "timeframe": "daily",
+                        "bars": 90,
+                        "point_count": 2,
+                        "points": [],
+                    },
+                ) as list_chart,
+            ):
+                context = agentic_tools.read_us_stock_context(
+                    db=db,
+                    symbol="TSM",
+                    tool_runs=tool_runs,
+                    market_data_params={"include_intraday": True, "payload_level": "summary"},
+                )
+
+            list_chart.assert_called_once()
+            self.assertFalse(list_chart.call_args.kwargs["include_intraday"])
+            compact = context["data"]["compact"]
+            self.assertEqual(compact["quote"]["source"], "yahoo_finance_chart")
+            self.assertTrue(compact["quote"]["is_realtime"])
+            self.assertEqual(compact["quote"]["quote_time"], "2026-07-06T13:30:00-04:00")
+            self.assertEqual(compact["quote"]["price"], 435.5)
+            self.assertEqual(compact["payload_level"], "summary")
+            self.assertEqual(compact["freshness_by_domain"]["intraday"], "current")
+            self.assertEqual(compact["intraday_bars"]["series"]["1m"]["point_count"], 65)
+            self.assertEqual(compact["intraday_bars"]["series"]["1m"]["returned_point_count"], 1)
+            self.assertEqual(len(compact["intraday_bars"]["series"]["1m"]["points"]), 1)
+            self.assertEqual(compact["intraday_bars"]["series"]["1m"]["latest"]["price"], 435.5)
+            self.assertEqual(compact["slots"]["quote"]["status"], "ready")
+            self.assertEqual(compact["slots"]["intraday"]["status"], "ready")
+            self.assertEqual(compact["slots"]["intraday"]["payload_level"], "summary")
+            self.assertEqual(compact["slots"]["intraday"]["payload_ref"], "intraday_bars")
+        finally:
+            db.close()
+
+    def test_ask_full_mode_preserves_complete_evidence_pack(self) -> None:
+        db = make_session()
+        try:
+            add_stock(db)
+            compact = {
+                "kind": "stock_compact_evidence",
+                "version": "stock_compact_evidence.v1",
+                "quote": {"latest_price": 100.0, "is_realtime": False},
+            }
+            context = {
+                "kind": "stock_context",
+                "generated_at": date(2026, 6, 4),
+                "as_of": "2026-06-04",
+                "scope": {"stock_id": "2330"},
+                "data": {
+                    "latest_daily": {"trade_date": "2026-06-04", "close_price": 100.0},
+                    "technical_reports": {"daily": {"title": "test"}},
+                    "compact": compact,
+                },
+                "missing": [],
+                "warnings": [],
+                "source_refs": [{"type": "table", "name": "market_daily_price"}],
+                "evidence_passport": {},
+            }
+            payload = AiAskRequest(
+                question="2330 full context",
+                target={"type": "tw_stock", "id": "2330"},
+                mode="full",
+            )
+
+            with (
+                patch.object(ai_ask, "_check_freshness", return_value={"is_current": True, "missing": [], "warnings": []}),
+                patch.object(ai_ask.tools, "read_stock_context", return_value=context),
+            ):
+                response = ai_ask.ask(db=db, payload=payload)
+
+            self.assertEqual(response["mode"]["effective"], "full")
+            self.assertEqual(response["report_level"], "full_evidence")
+            self.assertEqual(response["result"]["data"]["latest_daily"]["close_price"], 100.0)
+            self.assertEqual(response["result"]["data"]["technical_reports"]["daily"]["title"], "test")
+            self.assertNotIn("result_view", response["result"])
+        finally:
+            db.close()
+
+    def test_ask_brief_result_uses_slim_public_view(self) -> None:
+        db = make_session()
+        try:
+            add_stock(db)
+            compact = {
+                "kind": "stock_compact_evidence",
+                "version": "stock_compact_evidence.v1",
+                "target": {"type": "tw_stock", "id": "2330", "label": "TSMC", "market": "TWSE"},
+                "quote": {"latest_price": 100.0, "is_realtime": False},
+                "intraday_bars": {
+                    "enabled": False,
+                    "intervals": ["1m", "5m"],
+                    "series": {},
+                    "warnings": [],
+                },
+                "technical": {"analysis": {"selected_score": 2}},
+            }
+            stock_brief = {
+                "kind": "stock_brief",
+                "generated_at": date(2026, 6, 4),
+                "as_of": "2026-06-04",
+                "scope": {"stock_id": "2330"},
+                "data": {
+                    "compact": compact,
+                    "technical_reports": {"daily": {"title": "raw report"}},
+                },
+                "summary": {
+                    "highlights": ["Latest close is 100."],
+                    "analysis": {"selected_score": 2},
+                    "decision_evidence": {"raw": "large"},
+                    "next_checks": [],
+                },
+                "prompt": {"system": "large prompt"},
+                "missing": [],
+                "warnings": [],
+                "source_refs": [{"type": "table", "name": "market_daily_price"}],
+                "evidence_passport": {},
+            }
+            payload = AiAskRequest(
+                question="2330 brief",
+                target={"type": "tw_stock", "id": "2330"},
+                mode="brief",
+            )
+
+            with (
+                patch.object(ai_ask, "_check_freshness", return_value={"is_current": True, "missing": [], "warnings": []}),
+                patch.object(ai_ask.reports, "build_stock_brief", return_value=stock_brief),
+            ):
+                response = ai_ask.ask(db=db, payload=payload)
+
+            self.assertEqual(response["result"]["result_view"]["mode"], "brief")
+            self.assertNotIn("prompt", response["result"])
+            self.assertNotIn("technical_reports", response["result"]["data"])
+            self.assertNotIn("decision_evidence", response["result"]["summary"])
+            self.assertEqual(response["result"]["data"]["compact"], compact)
+            self.assertEqual(response["result"]["stock"]["id"], "2330")
+            self.assertEqual(response["result"]["stock"]["name"], "TSMC")
+            self.assertEqual(response["result"]["quote"], compact["quote"])
+            self.assertEqual(response["result"]["intraday"]["status"], "not_requested")
+            self.assertEqual(response["result"]["analysis"], compact["technical"]["analysis"])
+        finally:
+            db.close()
+
+    def test_market_brief_mode_returns_compact_market_brief(self) -> None:
+        db = make_session()
+        try:
+            source_id, raw_result_id = add_raw_source(db, "market_daily_price")
+            trade_date = date(2026, 6, 4)
+            db.add_all(
+                [
+                    StockMaster(
+                        stock_id="2330",
+                        stock_name="TSMC",
+                        market="TWSE",
+                        instrument_type="stock",
+                        industry="Semiconductor",
+                    ),
+                    StockMaster(
+                        stock_id="2303",
+                        stock_name="UMC",
+                        market="TWSE",
+                        instrument_type="stock",
+                        industry="Semiconductor",
+                    ),
+                    StockMaster(
+                        stock_id="2603",
+                        stock_name="EMC",
+                        market="TWSE",
+                        instrument_type="stock",
+                        industry="Shipping",
+                    ),
+                    MarketDailyPrice(
+                        source_id=source_id,
+                        raw_result_id=raw_result_id,
+                        trade_date=trade_date,
+                        stock_id="2330",
+                        stock_name="TSMC",
+                        close_price=100.0,
+                        price_change=5.0,
+                        trade_volume=1_000_000,
+                        trade_value=100_000_000,
+                    ),
+                    MarketDailyPrice(
+                        source_id=source_id,
+                        raw_result_id=raw_result_id,
+                        trade_date=trade_date,
+                        stock_id="2303",
+                        stock_name="UMC",
+                        close_price=50.0,
+                        price_change=-2.0,
+                        trade_volume=2_000_000,
+                        trade_value=80_000_000,
+                    ),
+                    MarketDailyPrice(
+                        source_id=source_id,
+                        raw_result_id=raw_result_id,
+                        trade_date=trade_date,
+                        stock_id="2603",
+                        stock_name="EMC",
+                        close_price=30.0,
+                        price_change=1.0,
+                        trade_volume=3_000_000,
+                        trade_value=90_000_000,
+                    ),
+                ]
+            )
+            db.commit()
+            payload = AiAskRequest(
+                question="台股市場總覽 brief",
+                target={"type": "market"},
+                mode="brief",
+                market_limit=2,
+            )
+
+            with patch.object(
+                ai_ask,
+                "_check_freshness",
+                return_value={"is_current": True, "missing": [], "warnings": []},
+            ):
+                response = ai_ask.ask(db=db, payload=payload)
+
+            self.assertEqual(response["mode"]["effective"], "brief")
+            self.assertEqual(response["action"], "omi.generate_market_brief")
+            self.assertEqual(response["result"]["kind"], "market_brief")
+            self.assertNotIn("prompt", response["result"])
+            self.assertEqual(response["analysis"]["kind"], "market_brief_digest")
+            self.assertEqual(response["result"]["latest_trade_date"], "2026-06-04")
+            self.assertEqual(len(response["result"]["top_gainers"]), 2)
+            self.assertEqual(len(response["result"]["top_losers"]), 2)
+            self.assertEqual(len(response["result"]["value_leaders"]), 2)
+            self.assertEqual(len(response["result"]["data"]["top_gainers"]), 2)
+            self.assertEqual(len(response["result"]["data"]["top_losers"]), 2)
+            self.assertTrue(response["analysis"]["human_answer"]["summary"])
+            self.assertFalse(
+                any("does not have a brief" in warning for warning in response["warnings"])
+            )
+        finally:
+            db.close()
+
+    def test_market_brief_can_include_bounded_index_intraday(self) -> None:
+        db = make_session()
+        try:
+            source_id, raw_result_id = add_raw_source(db, "market_daily_price")
+            trade_date = date(2026, 6, 4)
+            db.add_all(
+                [
+                    MarketDailyPrice(
+                        source_id=source_id,
+                        raw_result_id=raw_result_id,
+                        trade_date=trade_date,
+                        stock_id="2330",
+                        stock_name="TSMC",
+                        close_price=100.0,
+                        price_change=5.0,
+                        trade_volume=1_000_000,
+                        trade_value=100_000_000,
+                    ),
+                    MarketDailyPrice(
+                        source_id=source_id,
+                        raw_result_id=raw_result_id,
+                        trade_date=trade_date,
+                        stock_id="2303",
+                        stock_name="UMC",
+                        close_price=50.0,
+                        price_change=-2.0,
+                        trade_volume=2_000_000,
+                        trade_value=80_000_000,
+                    ),
+                ]
+            )
+            db.commit()
+            payload = AiAskRequest(
+                question="台股大盤盤中怎麼看?",
+                target={"type": "market"},
+                mode="brief",
+                allow_external_fetch=True,
+                market_limit=2,
+                market_data_params={"include_intraday": True, "payload_level": "summary"},
+            )
+
+            def intraday_result(index_id):
+                return {
+                    "stock_id": index_id,
+                    "symbol": "^TWII" if index_id == "TAIEX" else "TWOII",
+                    "source": "twse_index_5s",
+                    "previous_close": 18000.0,
+                    "point_count": 3,
+                    "points": [
+                        {
+                            "time": f"2026-06-04T09:0{index}+00:00",
+                            "price": 18000.0 + index,
+                            "open": 18000.0,
+                            "high": 18000.0 + index,
+                            "low": 17990.0,
+                        }
+                        for index in range(3)
+                    ],
+                }
+
+            with (
+                patch.object(
+                    ai_ask,
+                    "_check_freshness",
+                    return_value={"is_current": True, "missing": [], "warnings": []},
+                ),
+                patch.object(ai_ask.tools, "get_market_index_intraday", side_effect=intraday_result) as intraday,
+            ):
+                response = ai_ask.ask(
+                    db=db,
+                    payload=payload,
+                    server_policy=ai_ask.AiAskServerPolicy(
+                        can_external_fetch=True,
+                        trust_source="test",
+                    ),
+                )
+
+            self.assertEqual(intraday.call_count, 2)
+            index_intraday = response["result"]["index_intraday"]
+            self.assertTrue(index_intraday["enabled"])
+            self.assertEqual(index_intraday["payload_level"], "summary")
+            self.assertEqual(len(index_intraday["indices"]), 2)
+            first_series = index_intraday["indices"][0]["intraday_bars"]["series"]["1m"]
+            self.assertEqual(first_series["returned_point_count"], 1)
+            self.assertEqual(response["result"]["data"]["slots"]["index_intraday"]["status"], "ready")
+            self.assertEqual(response["result"]["data"]["slots"]["index_intraday"]["payload_ref"], "index_intraday")
+            self.assertIn("指數盤中", response["analysis"]["display"])
+        finally:
+            db.close()
+
+    def test_untrusted_market_intraday_request_does_not_fetch_external_data(self) -> None:
+        db = make_session()
+        try:
+            source_id, raw_result_id = add_raw_source(db, "market_daily_price")
+            db.add(
+                MarketDailyPrice(
+                    source_id=source_id,
+                    raw_result_id=raw_result_id,
+                    trade_date=date(2026, 6, 4),
+                    stock_id="2330",
+                    stock_name="TSMC",
+                    close_price=100.0,
+                    price_change=5.0,
+                )
+            )
+            db.commit()
+            payload = AiAskRequest(
+                question="台股大盤盤中",
+                target={"type": "market"},
+                mode="data_only",
+                allow_external_fetch=True,
+                market_data_params={"include_intraday": True},
+            )
+
+            with (
+                patch.object(
+                    ai_ask,
+                    "_check_freshness",
+                    return_value={"is_current": True, "missing": [], "warnings": []},
+                ),
+                patch.object(ai_ask.tools, "get_market_index_intraday") as intraday,
+            ):
+                response = ai_ask.ask(db=db, payload=payload)
+
+            intraday.assert_not_called()
+            self.assertFalse(response["policy"]["can_external_fetch"])
+            self.assertFalse(response["result"]["data"]["index_intraday"]["enabled"])
+            self.assertEqual(response["result"]["data"]["slots"]["index_intraday"]["status"], "not_requested")
         finally:
             db.close()
 
@@ -1725,6 +2251,77 @@ class AiFreshnessGuardTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_tw_index_data_only_projects_compact_public_result(self) -> None:
+        db = make_session()
+        try:
+            compact = {
+                "kind": "tw_index_compact_evidence",
+                "version": "tw_index_compact_evidence.v1",
+                "payload_level": "summary",
+                "target": {"type": "tw_index", "id": "TAIEX", "label": "加權指數", "market": "TWSE"},
+                "quote": {"source": "twse_index_5s", "price": 18111.0, "is_realtime": True},
+                "intraday_bars": {
+                    "enabled": True,
+                    "payload_level": "summary",
+                    "series": {
+                        "1m": {
+                            "interval": "1m",
+                            "source": "twse_index_5s",
+                            "point_count": 120,
+                            "returned_point_count": 1,
+                            "latest": {"time": "2026-06-04T13:30:00+08:00", "price": 18111.0},
+                            "points": [{"time": "2026-06-04T13:30:00+08:00", "price": 18111.0}],
+                        }
+                    },
+                    "warnings": [],
+                },
+                "technical": {"analysis": {"selected_score": 2}},
+                "freshness_by_domain": {"quote": {"status": "live"}},
+            }
+            context = {
+                "kind": "tw_index_context",
+                "generated_at": "2026-06-04T05:30:00Z",
+                "as_of": "2026-06-04T13:30:00+08:00",
+                "scope": {"index_id": "TAIEX"},
+                "data": {
+                    "analysis": {
+                        "requested_horizon": "intraday",
+                        "selected_horizon": "intraday",
+                        "selected_timeframe": "today",
+                        "selected_score": 2,
+                        "selected_title": "偏多觀察",
+                        "selected_summary": "盤中站穩短線均價。",
+                        "selected_confidence": "medium",
+                    },
+                    "compact": compact,
+                    "intraday": {"points": [{"price": value} for value in range(120)]},
+                },
+                "missing": [],
+                "warnings": [],
+                "source_refs": [{"type": "external_or_cache", "name": "market_index_intraday"}],
+                "evidence_passport": {},
+            }
+            payload = AiAskRequest(
+                question="加權指數盤中",
+                target={"type": "tw_index", "id": "TAIEX"},
+                mode="data_only",
+            )
+
+            with (
+                patch.object(ai_ask, "_check_freshness", return_value={"is_current": True, "missing": [], "warnings": []}),
+                patch.object(ai_ask.tools, "read_tw_index_context", return_value=context),
+            ):
+                response = ai_ask.ask(db=db, payload=payload)
+
+            self.assertEqual(response["result"]["data"]["compact"], compact)
+            self.assertEqual(response["result"]["data"]["payload_level"], "summary")
+            self.assertEqual(response["result"]["target"]["type"], "tw_index")
+            self.assertEqual(response["result"]["quote"], compact["quote"])
+            self.assertEqual(response["result"]["intraday"]["returned_point_count"], 1)
+            self.assertNotIn("intraday", response["result"]["data"])
+        finally:
+            db.close()
+
     def test_tw_futures_target_uses_futures_context_reader(self) -> None:
         db = make_session()
         try:
@@ -1879,7 +2476,7 @@ class AiFreshnessGuardTests(unittest.TestCase):
             payload = AiAskRequest(
                 question="Toyota Japan context",
                 target={"type": "jp_stock", "id": "7203", "label": "Toyota"},
-                mode="auto",
+                mode="data_only",
                 allow_llm=False,
                 allow_write=False,
             )
@@ -1912,7 +2509,7 @@ class AiFreshnessGuardTests(unittest.TestCase):
             payload = AiAskRequest(
                 question="Nikkei context",
                 target={"type": "jp_index", "id": "^N225", "label": "Nikkei 225"},
-                mode="auto",
+                mode="data_only",
                 allow_llm=False,
                 allow_write=False,
             )
@@ -1936,6 +2533,108 @@ class AiFreshnessGuardTests(unittest.TestCase):
             self.assertEqual(response["target"]["id"], "^N225")
             self.assertEqual(response["action"], "omi.read_jp_index_context")
             self.assertEqual(response["result"]["kind"], "jp_index_context")
+        finally:
+            db.close()
+
+    def test_ask_uses_jp_stock_brief_for_explicit_brief_target(self) -> None:
+        db = make_session()
+        try:
+            add_jp_stock(db)
+            payload = AiAskRequest(
+                question="Toyota Japan brief",
+                target={"type": "jp_stock", "id": "7203", "label": "Toyota"},
+                mode="brief",
+                allow_llm=False,
+                allow_write=False,
+                market_data_params={"timeframe": "weekly", "bars": 26},
+            )
+            context = {
+                "kind": "jp_stock_brief",
+                "as_of": "2026-06-18",
+                "scope": {"target": {"type": "jp_stock", "id": "7203.T", "market": "JP"}},
+                "summary": {"kind": "cross_market_brief_summary", "human_answer": {"lines": ["Toyota"]}},
+                "data": {"compact": {"target": {"type": "jp_stock", "id": "7203.T", "market": "JP"}}},
+                "missing": [],
+                "warnings": [],
+                "source_refs": [{"type": "table", "name": "jp_daily_price"}],
+            }
+
+            with patch.object(ai_ask.reports, "build_jp_stock_brief", return_value=context) as builder:
+                response = ai_ask.ask(db=db, payload=payload)
+
+            builder.assert_called_once()
+            self.assertEqual(builder.call_args.kwargs["symbol"], "7203.T")
+            self.assertFalse(builder.call_args.kwargs["is_index"])
+            self.assertEqual(builder.call_args.kwargs["market_data_params"]["timeframe"], "weekly")
+            self.assertEqual(response["action"], "omi.generate_jp_stock_brief")
+            self.assertEqual(response["mode"]["effective"], "brief")
+        finally:
+            db.close()
+
+    def test_ask_uses_kr_stock_brief_for_explicit_brief_target(self) -> None:
+        db = make_session()
+        try:
+            payload = AiAskRequest(
+                question="Samsung Korea brief",
+                target={"type": "kr_stock", "id": "005930", "label": "Samsung Electronics"},
+                mode="brief",
+                allow_llm=False,
+                allow_write=False,
+                market_data_params={"timeframe": "daily", "bars": 60},
+            )
+            context = {
+                "kind": "kr_stock_brief",
+                "as_of": "2026-06-18",
+                "scope": {"target": {"type": "kr_stock", "id": "005930", "market": "KR"}},
+                "summary": {"kind": "cross_market_brief_summary", "human_answer": {"lines": ["Samsung"]}},
+                "data": {"compact": {"target": {"type": "kr_stock", "id": "005930", "market": "KR"}}},
+                "missing": [],
+                "warnings": [],
+                "source_refs": [{"type": "table", "name": "kr_daily_price"}],
+            }
+
+            with patch.object(ai_ask.reports, "build_kr_stock_brief", return_value=context) as builder:
+                response = ai_ask.ask(db=db, payload=payload)
+
+            builder.assert_called_once()
+            self.assertEqual(builder.call_args.kwargs["symbol"], "005930.KS")
+            self.assertFalse(builder.call_args.kwargs["is_index"])
+            self.assertEqual(builder.call_args.kwargs["market_data_params"]["bars"], 60)
+            self.assertEqual(response["target"]["type"], "kr_stock")
+            self.assertEqual(response["action"], "omi.generate_kr_stock_brief")
+        finally:
+            db.close()
+
+    def test_ask_uses_crypto_asset_brief_for_explicit_brief_target(self) -> None:
+        db = make_session()
+        try:
+            payload = AiAskRequest(
+                question="BTC crypto brief",
+                target={"type": "crypto_asset", "id": "BTC", "label": "Bitcoin"},
+                mode="brief",
+                allow_llm=False,
+                allow_write=False,
+                market_data_params={"symbol": "BTCUSDT", "instrument_type": "perpetual", "interval": "1m", "limit": 80},
+            )
+            context = {
+                "kind": "crypto_asset_brief",
+                "as_of": "2026-06-18T12:00:00+00:00",
+                "scope": {"target": {"type": "crypto_asset", "id": "BTC", "market": "crypto"}},
+                "summary": {"kind": "cross_market_brief_summary", "human_answer": {"lines": ["BTC"]}},
+                "data": {"compact": {"target": {"type": "crypto_asset", "id": "BTC", "market": "crypto"}}},
+                "missing": [],
+                "warnings": [],
+                "source_refs": [{"type": "table", "name": "crypto_ticker_snapshot"}],
+            }
+
+            with patch.object(ai_ask.reports, "build_crypto_brief", return_value=context) as builder:
+                response = ai_ask.ask(db=db, payload=payload)
+
+            builder.assert_called_once()
+            self.assertEqual(builder.call_args.kwargs["asset"], "BTC")
+            self.assertEqual(builder.call_args.kwargs["market_data_params"]["instrument_type"], "perpetual")
+            self.assertEqual(response["target"]["type"], "crypto_asset")
+            self.assertEqual(response["action"], "omi.generate_crypto_asset_brief")
         finally:
             db.close()
 

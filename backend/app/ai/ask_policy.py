@@ -7,7 +7,7 @@ from app.ai import agentic_tools, decision_core, scope_resolution
 from app.ai.schemas import AiAskRequest
 
 
-VALID_MODES = {"auto", "data_only", "brief", "analysis", "report"}
+VALID_MODES = {"auto", "data_only", "brief", "analysis", "report", "full"}
 VALID_RANK_BY = {"watchlist", "score", "change_pct", "volume"}
 VALID_SORT_ORDER = {"asc", "desc"}
 VALID_ANALYSIS_HORIZONS = {"auto", "intraday", "short", "swing", "long"}
@@ -65,6 +65,9 @@ def _validate_request(payload: AiAskRequest) -> None:
 
     if not isinstance(payload.refresh_policy, dict):
         raise ValueError("refresh_policy must be an object.")
+
+    if not isinstance(payload.market_data_params, dict):
+        raise ValueError("market_data_params must be an object.")
 
 
 def _infer_scope_type(payload: AiAskRequest) -> str:
@@ -134,9 +137,25 @@ def _effective_mode(
     policy: dict[str, Any],
     warnings: list[str],
 ) -> str:
-    answer_capable_scopes = {"stock", "watchlist", "us_stock", "jp_stock", "jp_index", "tw_index", "tw_futures"}
+    answer_capable_scopes = {
+        "stock",
+        "watchlist",
+        "market",
+        "us_stock",
+        "jp_stock",
+        "jp_index",
+        "kr_stock",
+        "kr_index",
+        "crypto_market",
+        "crypto_asset",
+        "tw_index",
+        "tw_futures",
+    }
     report_capable_scopes = {"stock", "watchlist", "us_stock"}
-    data_context_only_scopes = {"jp_stock", "jp_index"}
+    data_context_only_scopes = {"jp_stock", "jp_index", "kr_stock", "kr_index", "crypto_market", "crypto_asset"}
+
+    if requested_mode == "full":
+        return "full"
 
     if requested_mode in {"analysis", "report"} and scope_type in data_context_only_scopes:
         warnings.append(
@@ -162,7 +181,11 @@ def _effective_mode(
         )
         return "brief" if scope_type in answer_capable_scopes else "data_only"
 
-    if requested_mode in {"brief", "analysis", "report"} and scope_type in {"market", "data_freshness"}:
+    if requested_mode in {"analysis", "report"} and scope_type == "market":
+        warnings.append("market does not have an LLM analysis/report path yet; returned brief.")
+        return "brief"
+
+    if requested_mode in {"brief", "analysis", "report"} and scope_type == "data_freshness":
         warnings.append(f"{scope_type} does not have a brief/analysis/report path yet; returned data_only.")
         return "data_only"
 

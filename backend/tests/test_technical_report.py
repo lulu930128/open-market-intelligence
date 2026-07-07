@@ -250,6 +250,258 @@ class TechnicalReportTests(unittest.TestCase):
         )
         self.assertIn("base_selected_score", score_model)
 
+    def test_stock_context_exposes_compact_evidence_without_intraday_fetch(self) -> None:
+        with (
+            patch("app.ai.tools.get_taiwan_stock_quote_depth") as quote_depth,
+            patch("app.ai.tools.get_market_intraday_history") as intraday_history,
+        ):
+            context = ai_tools.read_stock_context(
+                db=self.db,
+                stock_id="2330",
+                analysis_horizon="swing",
+                include_intraday=False,
+            )
+
+        quote_depth.assert_not_called()
+        intraday_history.assert_not_called()
+
+        compact = context["data"]["compact"]
+        self.assertEqual(compact["kind"], "stock_compact_evidence")
+        self.assertEqual(compact["version"], "stock_compact_evidence.v1")
+        self.assertEqual(compact["target"]["id"], "2330")
+        self.assertEqual(compact["quote"]["source"], "market_daily_price")
+        self.assertEqual(compact["quote"]["status"], "delayed_daily_close")
+        self.assertEqual(compact["quote"]["latest_price"], compact["quote"]["price"])
+        self.assertFalse(compact["quote"]["is_realtime"])
+        self.assertIsNone(compact["quote"]["latency_ms"])
+        self.assertIn("session_phase", compact["quote"])
+        self.assertFalse(compact["intraday_bars"]["enabled"])
+        self.assertIn("technical", compact)
+        self.assertIn("chips", compact)
+        self.assertIn("fundamentals", compact)
+        self.assertIn("quote", compact["freshness_by_domain"])
+        self.assertIn("technical", compact["freshness_by_domain"])
+        self.assertIn("chips", compact["freshness_by_domain"])
+        self.assertIn("fundamentals", compact["freshness_by_domain"])
+        self.assertEqual(compact["payload_level"], "compact")
+        self.assertEqual(compact["slots"]["quote"]["payload_ref"], "quote")
+        self.assertEqual(compact["slots"]["intraday"]["status"], "not_requested")
+        self.assertEqual(compact["slots"]["intraday"]["payload_ref"], "intraday_bars")
+        self.assertEqual(compact["slots"]["cross_market"]["status"], "planned")
+
+    def test_payload_presence_helper_does_not_treat_false_as_data(self) -> None:
+        self.assertFalse(ai_tools._has_payload_value({"available": False, "rows": []}))
+        self.assertFalse(ai_tools._has_payload_value({"note": "   ", "rows": []}))
+        self.assertTrue(ai_tools._has_payload_value({"price": 0}))
+
+    def test_stock_context_compact_intraday_includes_quote_and_bars(self) -> None:
+        quote_time = datetime(2026, 3, 21, 10, 5)
+
+        def history_result(*, db, stock_id, interval, range_value, refresh):
+            return {
+                "stock_id": stock_id,
+                "symbol": "2330.TW",
+                "interval": interval,
+                "range": range_value,
+                "provider": "test_provider",
+                "source": f"test_{interval}",
+                "from_time": datetime(2026, 3, 21, 9, 0),
+                "to_time": quote_time,
+                "point_count": 2,
+                "cached_count": 0,
+                "refreshed_count": 2,
+                "points": [
+                    {
+                        "time": datetime(2026, 3, 21, 9, 0),
+                        "open": 180.0,
+                        "high": 181.0,
+                        "low": 179.5,
+                        "close": 180.5,
+                        "volume": 1000,
+                    },
+                    {
+                        "time": quote_time,
+                        "open": 180.5,
+                        "high": 182.0,
+                        "low": 180.0,
+                        "close": 181.5,
+                        "volume": 1500,
+                    },
+                ],
+            }
+
+        with (
+            patch(
+                "app.market.technical_report.get_intraday_trend",
+                return_value={
+                    "source": "test_intraday",
+                    "point_count": 2,
+                    "previous_close": 179.0,
+                    "points": [
+                        {"time": "09:00", "close": 180.5, "volume": 1000},
+                        {"time": "10:05", "close": 181.5, "volume": 1500},
+                    ],
+                },
+            ),
+            patch(
+                "app.ai.tools.get_taiwan_stock_quote_depth",
+                return_value={
+                    "provider": "test_provider",
+                    "source": "twse_mis_quote_depth",
+                    "session_phase": "regular",
+                    "phase_label": "regular",
+                    "trade_date": date(2026, 3, 21),
+                    "quote_time": quote_time,
+                    "fetched_at": quote_time,
+                    "last_price": 181.5,
+                    "previous_close": 179.0,
+                    "open_price": 180.0,
+                    "high_price": 182.0,
+                    "low_price": 179.5,
+                    "change": 2.5,
+                    "change_pct": 1.4,
+                    "total_volume_lots": 2500,
+                    "best_bid_price": 181.0,
+                    "best_bid_size_lots": 20,
+                    "best_ask_price": 181.5,
+                    "best_ask_size_lots": 15,
+                    "spread": 0.5,
+                    "spread_pct": 0.28,
+                    "depth_available": True,
+                    "freshness": {
+                        "status": "live",
+                        "is_live": True,
+                        "is_stale": False,
+                        "age_seconds": 5,
+                        "expected_trade_date": date(2026, 3, 21),
+                        "message": "ok",
+                    },
+                },
+            ) as quote_depth,
+            patch("app.ai.tools.get_market_intraday_history", side_effect=history_result) as intraday_history,
+        ):
+            context = ai_tools.read_stock_context(
+                db=self.db,
+                stock_id="2330",
+                analysis_horizon="intraday",
+                include_intraday=True,
+            )
+
+        quote_depth.assert_called_once()
+        self.assertEqual(intraday_history.call_count, 2)
+
+        compact = context["data"]["compact"]
+        self.assertEqual(compact["quote"]["source"], "twse_mis_quote_depth")
+        self.assertEqual(compact["quote"]["latest_price"], 181.5)
+        self.assertEqual(compact["quote"]["price"], 181.5)
+        self.assertEqual(compact["quote"]["last_price"], 181.5)
+        self.assertTrue(compact["quote"]["is_realtime"])
+        self.assertEqual(compact["quote"]["latency_ms"], 5000)
+        self.assertEqual(compact["quote"]["session_phase"], "regular")
+        self.assertTrue(compact["intraday_bars"]["enabled"])
+        self.assertEqual(set(compact["intraday_bars"]["series"].keys()), {"1m", "5m"})
+        self.assertEqual(compact["intraday_bars"]["series"]["1m"]["returned_point_count"], 2)
+        self.assertEqual(compact["intraday_bars"]["series"]["5m"]["latest"]["close"], 181.5)
+        self.assertEqual(compact["freshness_by_domain"]["quote"]["status"], "live")
+        self.assertEqual(compact["slots"]["quote"]["status"], "ready")
+        self.assertEqual(compact["slots"]["intraday"]["status"], "ready")
+        self.assertEqual(compact["slots"]["intraday"]["payload_level"], "compact")
+        self.assertTrue(
+            any(ref["name"] == "market_intraday_bar" for ref in compact["source_refs"])
+        )
+
+    def test_tw_index_context_compact_intraday_respects_payload_level(self) -> None:
+        daily_points = [
+            {
+                "time": date(2026, 3, 1) + timedelta(days=index),
+                "open": 18000.0 + index,
+                "high": 18050.0 + index,
+                "low": 17950.0 + index,
+                "close": 18020.0 + index,
+                "volume": 1_000_000 + index,
+            }
+            for index in range(30)
+        ]
+        intraday_points = [
+            {
+                "time": datetime(2026, 3, 21, 9, 0) + timedelta(minutes=index),
+                "price": 18100.0 + index,
+                "open": 18100.0 + index,
+                "high": 18110.0 + index,
+                "low": 18090.0 + index,
+                "volume": None,
+            }
+            for index in range(12)
+        ]
+
+        def chart_result(*, index_id, timeframe, bars, db):
+            return {
+                "index_id": index_id,
+                "timeframe": timeframe,
+                "from_date": daily_points[0]["time"],
+                "to_date": daily_points[-1]["time"],
+                "point_count": len(daily_points),
+                "points": daily_points,
+            }
+
+        with (
+            patch("app.ai.tools.get_market_index_ohlc_chart_data", side_effect=chart_result),
+            patch(
+                "app.ai.tools.get_market_index_intraday",
+                return_value={
+                    "stock_id": "TAIEX",
+                    "symbol": "^TWII",
+                    "source": "twse_index_5s",
+                    "previous_close": 18090.0,
+                    "point_count": len(intraday_points),
+                    "points": intraday_points,
+                },
+            ),
+            patch(
+                "app.ai.tools.get_market_index_summary",
+                return_value={
+                    "indices": [
+                        {
+                            "index_id": "TAIEX",
+                            "label": "加權指數",
+                            "market": "TWSE",
+                            "source": "test",
+                            "time": date(2026, 3, 21),
+                            "close": 18111.0,
+                        }
+                    ]
+                },
+            ),
+            patch("app.ai.tools.get_latest_market_chip_daily", return_value=None),
+            patch(
+                "app.ai.tools.get_market_index_contributions",
+                return_value={"positive": [], "negative": [], "source": "test"},
+            ),
+        ):
+            context = ai_tools.read_tw_index_context(
+                db=self.db,
+                index_id="TAIEX",
+                include_intraday=True,
+                analysis_horizon="intraday",
+                market_data_params={"payload_level": "summary"},
+            )
+
+        compact = context["data"]["compact"]
+        self.assertEqual(compact["kind"], "tw_index_compact_evidence")
+        self.assertEqual(compact["payload_level"], "summary")
+        self.assertEqual(compact["target"]["type"], "tw_index")
+        self.assertEqual(compact["quote"]["price"], 18111.0)
+        self.assertEqual(compact["intraday_bars"]["bar_limit"], 1)
+        series = compact["intraday_bars"]["series"]["1m"]
+        self.assertEqual(series["point_count"], 12)
+        self.assertEqual(series["returned_point_count"], 1)
+        self.assertEqual(len(series["points"]), 1)
+        self.assertEqual(series["latest"]["price"], 18111.0)
+        self.assertEqual(compact["slots"]["intraday"]["status"], "ready")
+        self.assertEqual(compact["slots"]["intraday"]["payload_level"], "summary")
+        self.assertEqual(compact["slots"]["chips_flows"]["status"], "missing")
+        self.assertEqual(len(context["data"]["intraday"]["points"]), 12)
+
     def test_stock_brief_summary_exposes_selected_analysis_score(self) -> None:
         brief = ai_reports.build_stock_brief(
             db=self.db,

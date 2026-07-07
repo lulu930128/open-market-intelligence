@@ -326,6 +326,7 @@ def ask(
         question_intent=question_intent,
         tool_runs=tool_runs,
         warnings=warnings,
+        policy=policy,
         progress=progress,
         read_data_only=_read_data_only,
         build_brief=_build_brief,

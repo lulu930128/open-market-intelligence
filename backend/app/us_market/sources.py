@@ -6,13 +6,19 @@ import io
 import json
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import requests
 
 from app.http_client import get as http_get
+from app.us_market.trading_calendar import (
+    US_POST_MARKET_CLOSE_TIME,
+    US_PRE_MARKET_OPEN_TIME,
+    US_SESSION_CLOSE_TIME,
+    US_SESSION_OPEN_TIME,
+)
 
 
 NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
@@ -94,6 +100,35 @@ class USDailyPriceRecord:
     split_coefficient: float | None
     source_url: str | None
     raw_payload_hash: str | None
+
+
+def _minutes(value: time) -> int:
+    return value.hour * 60 + value.minute
+
+
+US_PRE_MARKET_OPEN_MINUTES = _minutes(US_PRE_MARKET_OPEN_TIME)
+US_SESSION_OPEN_MINUTES = _minutes(US_SESSION_OPEN_TIME)
+US_SESSION_CLOSE_MINUTES = _minutes(US_SESSION_CLOSE_TIME)
+US_POST_MARKET_CLOSE_MINUTES = _minutes(US_POST_MARKET_CLOSE_TIME)
+
+
+def _us_intraday_session(value: datetime) -> str:
+    minutes = value.hour * 60 + value.minute
+    if US_PRE_MARKET_OPEN_MINUTES <= minutes < US_SESSION_OPEN_MINUTES:
+        return "pre_market"
+    if US_SESSION_OPEN_MINUTES <= minutes <= US_SESSION_CLOSE_MINUTES:
+        return "regular"
+    if US_SESSION_CLOSE_MINUTES < minutes <= US_POST_MARKET_CLOSE_MINUTES:
+        return "after_hours"
+    return "off_session"
+
+
+def _filter_intraday_session_points(points: list[dict], session_scope: str) -> list[dict]:
+    if session_scope == "all":
+        return points
+    if session_scope == "extended":
+        return [point for point in points if point.get("session") in {"pre_market", "after_hours"}]
+    return [point for point in points if point.get("session") == "regular"]
 
 
 @dataclass(frozen=True)
@@ -688,6 +723,7 @@ def fetch_yahoo_chart_payload(
     range_value: str,
     interval: str,
     timeout_seconds: int,
+    include_prepost: bool = False,
 ) -> tuple[dict[str, Any], str]:
     normalized_symbol = normalize_us_symbol(symbol)
     response = http_get(
@@ -695,7 +731,7 @@ def fetch_yahoo_chart_payload(
         params={
             "range": range_value,
             "interval": interval,
-            "includePrePost": "false",
+            "includePrePost": "true" if include_prepost else "false",
         },
         headers={
             "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
@@ -882,8 +918,12 @@ def parse_yahoo_intraday_prices(
     *,
     symbol: str,
     source_url: str | None = None,
+    session_scope: str = "regular",
 ) -> dict:
     normalized_symbol = normalize_us_symbol(symbol)
+    if session_scope not in {"regular", "extended", "all"}:
+        raise ValueError("session_scope must be one of: regular, extended, all.")
+
     result = (payload.get("chart", {}).get("result") or [None])[0]
 
     if not isinstance(result, dict):
@@ -891,10 +931,21 @@ def parse_yahoo_intraday_prices(
             "stock_id": normalized_symbol,
             "symbol": normalized_symbol,
             "source": "yahoo_finance_chart",
+            "session_scope": session_scope,
+            "session_phase": None,
+            "has_extended_hours": False,
+            "regular_point_count": 0,
+            "extended_point_count": 0,
             "previous_close": None,
+            "previous_close_source": None,
+            "previous_close_trade_date": None,
+            "previous_close_provider": None,
+            "regular_session_close": None,
+            "regular_session_close_time": None,
             "point_count": 0,
             "points": [],
             "source_url": source_url,
+            "warnings": ["Yahoo chart payload did not contain result data."],
         }
 
     timestamps = result.get("timestamp") or []
@@ -909,16 +960,18 @@ def parse_yahoo_intraday_prices(
     lows = quote_values.get("low") or []
     closes = quote_values.get("close") or []
     volumes = quote_values.get("volume") or []
-    points: list[dict] = []
+    all_points: list[dict] = []
 
     for index, timestamp in enumerate(timestamps):
         price = _parse_float(_list_value(closes, index))
         if price is None:
             continue
 
-        points.append(
+        point_time = datetime.fromtimestamp(int(timestamp), tz=tz)
+        all_points.append(
             {
-                "time": datetime.fromtimestamp(int(timestamp), tz=tz).isoformat(),
+                "time": point_time.isoformat(),
+                "session": _us_intraday_session(point_time),
                 "price": price,
                 "volume": _parse_int(_list_value(volumes, index)),
                 "open": _parse_float(_list_value(opens, index)),
@@ -926,6 +979,20 @@ def parse_yahoo_intraday_prices(
                 "low": _parse_float(_list_value(lows, index)),
             }
         )
+
+    points = _filter_intraday_session_points(all_points, session_scope)
+    regular_point_count = sum(1 for point in all_points if point.get("session") == "regular")
+    extended_point_count = sum(
+        1
+        for point in all_points
+        if point.get("session") in {"pre_market", "after_hours"}
+    )
+    latest_session = points[-1].get("session") if points else None
+    regular_points = [point for point in all_points if point.get("session") == "regular"]
+    latest_regular_point = regular_points[-1] if regular_points else None
+    warnings: list[str] = []
+    if session_scope != "regular" and extended_point_count == 0:
+        warnings.append("Yahoo chart did not return extended-hours points for this request.")
 
     previous_close = (
         _parse_float(meta.get("chartPreviousClose"))
@@ -937,10 +1004,25 @@ def parse_yahoo_intraday_prices(
         "stock_id": normalized_symbol,
         "symbol": normalized_symbol,
         "source": "yahoo_finance_chart",
+        "session_scope": session_scope,
+        "session_phase": latest_session,
+        "has_extended_hours": extended_point_count > 0,
+        "regular_point_count": regular_point_count,
+        "extended_point_count": extended_point_count,
         "previous_close": previous_close,
+        "previous_close_source": "yahoo_finance_chart" if previous_close is not None else None,
+        "previous_close_trade_date": None,
+        "previous_close_provider": "yahoo_chart" if previous_close is not None else None,
+        "regular_session_close": (
+            latest_regular_point.get("price") if latest_regular_point else None
+        ),
+        "regular_session_close_time": (
+            latest_regular_point.get("time") if latest_regular_point else None
+        ),
         "point_count": len(points),
         "points": points,
         "source_url": source_url,
+        "warnings": warnings,
     }
 
 

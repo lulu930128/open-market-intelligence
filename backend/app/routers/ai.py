@@ -88,6 +88,22 @@ def _raise_llm_http_error(exc: ai_llm.OpenAILLMError) -> None:
     raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
 
+def _market_data_params_from_query(
+    *,
+    include_intraday: bool | None = None,
+    payload_level: str | None = None,
+    intraday_limit: int | None = None,
+) -> dict:
+    params: dict = {}
+    if include_intraday is not None:
+        params["include_intraday"] = include_intraday
+    if payload_level:
+        params["payload_level"] = payload_level
+    if intraday_limit is not None:
+        params["intraday_limit"] = intraday_limit
+    return params
+
+
 def _memory_ids_from_envelope(envelope: dict) -> list[int]:
     prompt = envelope.get("prompt") or {}
     memories = prompt.get("memories") or []
@@ -163,9 +179,21 @@ def read_data_freshness(
 @router.get("/market-overview", response_model=AiDataEnvelope)
 def read_market_overview(
     limit: int = Query(default=10, ge=1, le=50),
+    include_intraday: bool = Query(default=False),
+    payload_level: str = Query(default="compact", pattern="^(summary|compact|standard|full)$"),
+    intraday_limit: int | None = Query(default=None, ge=1, le=500),
     db: Session = Depends(get_db),
 ):
-    return tools.read_market_overview(db=db, limit=limit)
+    return tools.read_market_overview(
+        db=db,
+        limit=limit,
+        include_intraday=include_intraday,
+        market_data_params=_market_data_params_from_query(
+            include_intraday=include_intraday,
+            payload_level=payload_level,
+            intraday_limit=intraday_limit,
+        ),
+    )
 
 
 @router.post("/ask", response_model=AiAskResponse)
@@ -317,6 +345,8 @@ def read_stock_context(
     revenue_months: int = Query(default=12, ge=1, le=120),
     financial_quarters: int = Query(default=8, ge=1, le=40),
     include_intraday: bool = Query(default=False),
+    payload_level: str = Query(default="compact", pattern="^(summary|compact|standard|full)$"),
+    intraday_limit: int | None = Query(default=None, ge=1, le=500),
     analysis_horizon: str = Query(default="swing", pattern="^(auto|intraday|short|swing|long)$"),
     db: Session = Depends(get_db),
 ):
@@ -329,6 +359,11 @@ def read_stock_context(
         financial_quarters=financial_quarters,
         include_intraday=include_intraday,
         analysis_horizon=analysis_horizon,
+        market_data_params=_market_data_params_from_query(
+            include_intraday=include_intraday,
+            payload_level=payload_level,
+            intraday_limit=intraday_limit,
+        ),
     )
 
 
@@ -369,6 +404,8 @@ def build_stock_brief(
     strategy_profile: str = "short_term_momentum",
     branch_days: int = Query(default=5, ge=1, le=120),
     include_intraday: bool = Query(default=False),
+    payload_level: str = Query(default="compact", pattern="^(summary|compact|standard|full)$"),
+    intraday_limit: int | None = Query(default=None, ge=1, le=500),
     analysis_horizon: str = Query(default="swing", pattern="^(auto|intraday|short|swing|long)$"),
     db: Session = Depends(get_db),
 ):
@@ -379,6 +416,11 @@ def build_stock_brief(
         branch_days=branch_days,
         include_intraday=include_intraday,
         analysis_horizon=analysis_horizon,
+        market_data_params=_market_data_params_from_query(
+            include_intraday=include_intraday,
+            payload_level=payload_level,
+            intraday_limit=intraday_limit,
+        ),
     )
 
 

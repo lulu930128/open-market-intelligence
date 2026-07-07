@@ -8,8 +8,10 @@ from sqlalchemy.orm import Session
 
 from app.ai import decision_core
 from app.ai.schemas import AiAskRequest
-from app.db.models import JPStockMaster, StockMaster, USStockMaster, WatchlistGroup
+from app.crypto_market.assets import crypto_asset_codes, get_crypto_asset
+from app.db.models import JPStockMaster, KRStockMaster, StockMaster, USStockMaster, WatchlistGroup
 from app.jp_market.sources import normalize_jp_symbol
+from app.kr_market.sources import KR_INDEX_CONFIG_BY_ID, normalize_kr_index_id, normalize_kr_symbol
 from app.us_market.sources import normalize_us_symbol
 
 
@@ -24,10 +26,15 @@ VALID_TARGET_TYPES = {
     "us_stock",
     "jp_stock",
     "jp_index",
+    "kr_stock",
+    "kr_index",
+    "crypto_market",
+    "crypto_asset",
 }
 TAIWAN_INDEX_TARGET_IDS = {"TAIEX", "TPEX"}
 TAIWAN_FUTURES_TARGET_IDS = {"TXF", "MXF", "TMF"}
 JP_INDEX_TARGET_IDS = {"^N225", "1306.T"}
+KR_INDEX_TARGET_IDS = set(KR_INDEX_CONFIG_BY_ID)
 JP_MARKET_CONTEXT_HINTS = (
     "\u65e5\u80a1",
     "\u65e5\u672c",
@@ -40,6 +47,40 @@ JP_MARKET_CONTEXT_HINTS = (
     "n225",
     "topix",
 )
+KR_MARKET_CONTEXT_HINTS = (
+    "韓股",
+    "韓國",
+    "南韓",
+    "korea",
+    "korean",
+    "kr",
+    "krx",
+    "kospi",
+    "kosdaq",
+    "kospi200",
+    "^ks11",
+    "^kq11",
+    "^ks200",
+)
+CRYPTO_MARKET_CONTEXT_HINTS = (
+    "crypto",
+    "cryptocurrency",
+    "bitcoin",
+    "ethereum",
+    "btc",
+    "eth",
+    "sol",
+    "bnb",
+    "xrp",
+    "doge",
+    "ton",
+    "link",
+    "幣圈",
+    "加密",
+    "虛擬貨幣",
+    "比特幣",
+    "以太坊",
+)
 INTERNAL_SCOPE_TO_TARGET_TYPE = {
     "market": "market",
     "data_freshness": "data_freshness",
@@ -50,6 +91,10 @@ INTERNAL_SCOPE_TO_TARGET_TYPE = {
     "us_stock": "us_stock",
     "jp_stock": "jp_stock",
     "jp_index": "jp_index",
+    "kr_stock": "kr_stock",
+    "kr_index": "kr_index",
+    "crypto_market": "crypto_market",
+    "crypto_asset": "crypto_asset",
 }
 TARGET_TYPE_TO_INTERNAL_SCOPE = {
     "market": "market",
@@ -61,6 +106,10 @@ TARGET_TYPE_TO_INTERNAL_SCOPE = {
     "us_stock": "us_stock",
     "jp_stock": "jp_stock",
     "jp_index": "jp_index",
+    "kr_stock": "kr_stock",
+    "kr_index": "kr_index",
+    "crypto_market": "crypto_market",
+    "crypto_asset": "crypto_asset",
 }
 REPORT_HINTS = decision_core.REPORT_HINTS
 ANALYSIS_HINTS = decision_core.ANALYSIS_HINTS
@@ -143,6 +192,10 @@ def _target_dict(
             market = "US"
         elif target_type.startswith("jp_"):
             market = "JP"
+        elif target_type.startswith("kr_"):
+            market = "KR"
+        elif target_type.startswith("crypto_"):
+            market = "crypto"
 
     return {
         "type": target_type,
@@ -322,6 +375,214 @@ def _get_jp_stock(db: Session | None, symbol: str | None) -> JPStockMaster | Non
 
 def _jp_stock_label(stock: JPStockMaster | None, symbol: str) -> str:
     return stock.security_name if stock and stock.security_name else symbol
+
+
+def _kr_stock_display_name(db: Session | None, symbol: str | None, fallback: str | None = None) -> str | None:
+    if db is None or not symbol:
+        return fallback
+
+    normalized_symbol = normalize_kr_symbol(symbol)
+    if not normalized_symbol:
+        return fallback
+
+    stock = db.query(KRStockMaster).filter(KRStockMaster.symbol == normalized_symbol).first()
+    if stock is None:
+        return fallback
+
+    return stock.security_name or stock.security_name_kr or fallback
+
+
+def _get_kr_stock(db: Session | None, symbol: str | None) -> KRStockMaster | None:
+    if db is None or not symbol:
+        return None
+
+    normalized_symbol = normalize_kr_symbol(symbol)
+    if not normalized_symbol:
+        return None
+
+    return (
+        db.query(KRStockMaster)
+        .filter(KRStockMaster.symbol == normalized_symbol)
+        .filter(KRStockMaster.is_active.is_(True))
+        .first()
+    )
+
+
+def _kr_stock_label(stock: KRStockMaster | None, symbol: str) -> str:
+    if stock and stock.security_name:
+        return stock.security_name
+    if stock and stock.security_name_kr:
+        return stock.security_name_kr
+    return symbol
+
+
+def _looks_like_kr_symbol(symbol: str | None) -> bool:
+    normalized_symbol = normalize_kr_symbol(symbol)
+    return bool(re.fullmatch(r"\d{6}\.(KS|KQ)", normalized_symbol))
+
+
+def _kr_index_label(index_id: str) -> str:
+    index_config = KR_INDEX_CONFIG_BY_ID.get(index_id)
+    if index_config is None:
+        return index_id
+    return index_config.short_name or index_config.name or index_id
+
+
+def _resolve_kr_index(index_id: str | None, *, source: str, confidence: str = "high") -> ScopeResolution | None:
+    normalized_index_id = normalize_kr_index_id(index_id)
+    if normalized_index_id not in KR_INDEX_TARGET_IDS:
+        return None
+    label = _kr_index_label(normalized_index_id)
+    return ScopeResolution(
+        selected_scope_type="kr_index",
+        selected_scope_id=normalized_index_id,
+        display_name=label,
+        confidence=confidence,
+        source=source,
+        candidates=(
+            _resolution_candidate(
+                scope_type="kr_index",
+                scope_id=normalized_index_id,
+                label=label,
+                confidence=confidence,
+                source=source,
+            ),
+        ),
+    )
+
+
+def _resolve_kr_stock_symbol(
+    db: Session | None,
+    symbol: str | None,
+    *,
+    source: str,
+    confidence: str = "high",
+    allow_unknown: bool = False,
+) -> ScopeResolution | None:
+    normalized_symbol = normalize_kr_symbol(symbol)
+    if not _looks_like_kr_symbol(normalized_symbol):
+        return None
+
+    stock = _get_kr_stock(db, normalized_symbol)
+    if stock is None and not allow_unknown:
+        return None
+
+    label = _kr_stock_label(stock, normalized_symbol)
+    return ScopeResolution(
+        selected_scope_type="kr_stock",
+        selected_scope_id=normalized_symbol,
+        display_name=label,
+        confidence=confidence if stock is not None else "medium",
+        assumption=None
+        if stock is not None
+        else "KR stock master is incomplete; using the normalized symbol and exposing data gaps.",
+        source=source if stock is not None else f"{source}_unverified_symbol",
+        candidates=(
+            _resolution_candidate(
+                scope_type="kr_stock",
+                scope_id=normalized_symbol,
+                label=label,
+                confidence=confidence if stock is not None else "medium",
+                source=source if stock is not None else f"{source}_unverified_symbol",
+            ),
+        ),
+    )
+
+
+def _question_has_kr_context(question: str) -> bool:
+    return _contains_hint(question, KR_MARKET_CONTEXT_HINTS)
+
+
+def _resolve_kr_index_from_question(question: str) -> ScopeResolution | None:
+    normalized_question = question.upper().replace("-", "").replace("_", "")
+    for alias in ("KOSPI200", "KPI200", "^KS200"):
+        if alias in normalized_question:
+            return _resolve_kr_index("KOSPI200", source="question_kr_index", confidence="high")
+    if "KOSDAQ" in normalized_question or "^KQ11" in normalized_question:
+        return _resolve_kr_index("KOSDAQ", source="question_kr_index", confidence="high")
+    if "KOSPI" in normalized_question or "^KS11" in normalized_question:
+        return _resolve_kr_index("KOSPI", source="question_kr_index", confidence="high")
+    return None
+
+
+def _resolve_kr_stock_symbol_from_question(db: Session | None, question: str) -> ScopeResolution | None:
+    if not _question_has_kr_context(question):
+        return None
+
+    index_resolution = _resolve_kr_index_from_question(question)
+    if index_resolution is not None:
+        return index_resolution
+
+    for match in re.finditer(r"(?<!\d)(\d{4,6}(?:\.(?:KS|KQ))?)(?!\d)", question.upper()):
+        resolution = _resolve_kr_stock_symbol(
+            db,
+            match.group(1),
+            source="question_kr_symbol",
+            confidence="high",
+            allow_unknown=True,
+        )
+        if resolution is not None:
+            return resolution
+
+    return None
+
+
+def _crypto_asset_label(asset_code: str) -> str:
+    asset = get_crypto_asset(asset_code)
+    if asset is None:
+        return asset_code
+    return asset.name or asset.asset
+
+
+def _resolve_crypto_asset(asset_code: str | None, *, source: str, confidence: str = "high") -> ScopeResolution | None:
+    normalized_asset = str(asset_code or "").strip().upper()
+    asset = get_crypto_asset(normalized_asset)
+    if asset is None:
+        return None
+    label = asset.name or asset.asset
+    return ScopeResolution(
+        selected_scope_type="crypto_asset",
+        selected_scope_id=asset.asset,
+        display_name=label,
+        confidence=confidence,
+        source=source,
+        candidates=(
+            _resolution_candidate(
+                scope_type="crypto_asset",
+                scope_id=asset.asset,
+                label=label,
+                confidence=confidence,
+                source=source,
+            ),
+        ),
+    )
+
+
+def _question_has_crypto_context(question: str) -> bool:
+    return _contains_hint(question, CRYPTO_MARKET_CONTEXT_HINTS)
+
+
+def _resolve_crypto_asset_from_question(question: str) -> ScopeResolution | None:
+    normalized_question = question.upper()
+    for asset_code in crypto_asset_codes():
+        if re.search(rf"(?<![A-Z0-9]){re.escape(asset_code)}(?![A-Z0-9])", normalized_question):
+            return _resolve_crypto_asset(asset_code, source="question_crypto_asset", confidence="high")
+
+    aliases = {
+        "BITCOIN": "BTC",
+        "比特幣": "BTC",
+        "ETHEREUM": "ETH",
+        "以太坊": "ETH",
+        "TETHER": "USDT",
+        "SOLANA": "SOL",
+        "DOGECOIN": "DOGE",
+        "CHAINLINK": "LINK",
+    }
+    lowered = question.lower()
+    for alias, asset_code in aliases.items():
+        if alias.lower() in lowered or alias in question:
+            return _resolve_crypto_asset(asset_code, source="question_crypto_asset_alias", confidence="high")
+    return None
 
 
 def _resolve_jp_stock_symbol(
@@ -774,6 +1035,7 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
     requested_target = _request_target(payload)
     requested_label = _string_from_dict(requested_target, "label")
     target_id = _request_target_id(payload)
+    target_market = str(requested_target.get("market") or "").strip().lower()
     question = payload.question
 
     if requested_target_type != "auto":
@@ -785,7 +1047,22 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
                 f"target.type is not supported yet: {requested_target_type}.",
             )
 
-        if scope_type in {"stock", "watchlist", "us_stock", "jp_stock", "jp_index", "tw_index", "tw_futures"} and target_id is None:
+        if (
+            scope_type
+            in {
+                "stock",
+                "watchlist",
+                "us_stock",
+                "jp_stock",
+                "jp_index",
+                "kr_stock",
+                "kr_index",
+                "crypto_asset",
+                "tw_index",
+                "tw_futures",
+            }
+            and target_id is None
+        ):
             return _clarify_scope(
                 scope_type,
                 question,
@@ -829,8 +1106,38 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
                     scope_type,
                     question,
                     f"Unsupported Japan index target.id: {target_id}.",
-                )
+            )
             target_id = normalized_jp_index
+
+        if scope_type == "kr_stock":
+            normalized_kr_symbol = normalize_kr_symbol(target_id)
+            if not _looks_like_kr_symbol(normalized_kr_symbol):
+                return _clarify_scope(
+                    scope_type,
+                    question,
+                    f"Unsupported Korea stock target.id: {target_id}.",
+                )
+            target_id = normalized_kr_symbol
+
+        if scope_type == "kr_index":
+            normalized_kr_index = normalize_kr_index_id(target_id)
+            if normalized_kr_index not in KR_INDEX_TARGET_IDS:
+                return _clarify_scope(
+                    scope_type,
+                    question,
+                    f"Unsupported Korea index target.id: {target_id}.",
+                )
+            target_id = normalized_kr_index
+
+        if scope_type == "crypto_asset":
+            normalized_crypto_asset = str(target_id or "").strip().upper()
+            if get_crypto_asset(normalized_crypto_asset) is None:
+                return _clarify_scope(
+                    scope_type,
+                    question,
+                    f"Unsupported crypto asset target.id: {target_id}.",
+                )
+            target_id = normalized_crypto_asset
 
         display_name = (
             _stock_display_name(db, target_id)
@@ -839,6 +1146,14 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
             if scope_type == "us_stock" and target_id
             else _jp_stock_display_name(db, target_id, fallback=requested_label or target_id)
             if scope_type == "jp_stock" and target_id
+            else _kr_stock_display_name(db, target_id, fallback=requested_label or target_id)
+            if scope_type == "kr_stock" and target_id
+            else _kr_index_label(target_id)
+            if scope_type == "kr_index" and target_id
+            else _crypto_asset_label(target_id)
+            if scope_type == "crypto_asset" and target_id
+            else requested_label or "Crypto Market"
+            if scope_type == "crypto_market"
             else requested_label
         )
         return ScopeResolution(
@@ -883,6 +1198,36 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
 
     if target_id is not None:
         normalized_target_id = target_id.upper()
+        crypto_market_requested = target_market in {"crypto", "cryptocurrency"} or _question_has_crypto_context(question)
+        if crypto_market_requested:
+            crypto_resolution = _resolve_crypto_asset(
+                target_id,
+                source="explicit_scope_id",
+                confidence="high",
+            )
+            if crypto_resolution is not None:
+                return crypto_resolution
+
+        kr_market_requested = target_market in {"kr", "korea", "krx"} or _question_has_kr_context(question)
+        if kr_market_requested:
+            kr_index_resolution = _resolve_kr_index(
+                target_id,
+                source="explicit_scope_id",
+                confidence="high",
+            )
+            if kr_index_resolution is not None:
+                return kr_index_resolution
+
+            kr_stock_resolution = _resolve_kr_stock_symbol(
+                db,
+                target_id,
+                source="explicit_scope_id",
+                confidence="high",
+                allow_unknown=True,
+            )
+            if kr_stock_resolution is not None:
+                return kr_stock_resolution
+
         if normalized_target_id in TAIWAN_INDEX_TARGET_IDS:
             label = requested_label or normalized_target_id
             return ScopeResolution(
@@ -1010,6 +1355,23 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
     jp_symbol_resolution = _resolve_jp_stock_symbol_from_question(db, question)
     if jp_symbol_resolution is not None:
         return jp_symbol_resolution
+
+    kr_symbol_resolution = _resolve_kr_stock_symbol_from_question(db, question)
+    if kr_symbol_resolution is not None:
+        return kr_symbol_resolution
+
+    if _question_has_crypto_context(question):
+        crypto_asset_resolution = _resolve_crypto_asset_from_question(question)
+        if crypto_asset_resolution is not None:
+            return crypto_asset_resolution
+
+        return ScopeResolution(
+            selected_scope_type="crypto_market",
+            display_name="Crypto Market",
+            confidence="medium",
+            source="question_crypto_market",
+            candidates=(),
+        )
 
     if _contains_hint(question, FRESHNESS_HINTS):
         stock_id = _first_stock_id_in_text(question)

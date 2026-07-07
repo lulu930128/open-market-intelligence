@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import hashlib
+from html.parser import HTMLParser
 import json
 import re
 from dataclasses import dataclass
@@ -13,6 +15,9 @@ from app.http_client import post as http_post
 
 
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+NAVER_SISE_INDEX_URL = "https://api.finance.naver.com/siseJson.naver"
+NAVER_SISE_INDEX_TIME_URL = "https://finance.naver.com/sise/sise_index_time.naver"
+NAVER_INDEX_REALTIME_URL = "https://polling.finance.naver.com/api/realtime"
 KRX_DATA_URL = "https://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
 KRX_STOCK_MASTER_BLD = "dbms/MDC/STAT/standard/MDCSTAT01901"
 KRX_DAILY_PRICE_BLD = "dbms/MDC/STAT/standard/MDCSTAT01501"
@@ -107,6 +112,127 @@ class KRInvestorTradeRecord:
     raw_payload_hash: str | None
 
 
+@dataclass(frozen=True)
+class KRIndexRecord:
+    index_id: str
+    provider_symbol: str
+    name: str
+    short_name: str
+    name_kr: str | None
+    market_segment: str
+    index_family: str
+    currency: str
+    provider: str
+    source_url: str | None
+    exchange_timezone_name: str
+    sort_order: int
+
+
+@dataclass(frozen=True)
+class KRIndexDailyPriceRecord:
+    provider: str
+    index_id: str
+    trade_date: date
+    currency: str
+    open_value: float | None
+    high_value: float | None
+    low_value: float | None
+    close_value: float | None
+    price_change: float | None
+    change_pct: float | None
+    trade_volume: int | None
+    source_url: str | None
+    raw_payload_hash: str | None
+
+
+@dataclass(frozen=True)
+class KRIndexIntradayPointRecord:
+    index_id: str
+    time: datetime
+    price: float
+    volume: int | None
+    cumulative_volume: int | None
+    trade_value: int | None
+
+
+@dataclass(frozen=True)
+class KRIndexRealtimeQuoteRecord:
+    index_id: str
+    provider_symbol: str
+    time: datetime | None
+    price: float | None
+    change: float | None
+    change_pct: float | None
+    open_value: float | None
+    high_value: float | None
+    low_value: float | None
+    volume: int | None
+    trade_value: int | None
+    market_status: str | None
+    polling_interval_seconds: int | None
+
+
+KR_INDEX_RECORDS: tuple[KRIndexRecord, ...] = (
+    KRIndexRecord(
+        index_id="KOSPI",
+        provider_symbol="KOSPI",
+        name="KOSPI Composite Index",
+        short_name="KOSPI",
+        name_kr="코스피",
+        market_segment="KOSPI",
+        index_family="KOSPI",
+        currency="KRW",
+        provider="naver_sise_index",
+        source_url="https://finance.naver.com/sise/sise_index.naver?code=KOSPI",
+        exchange_timezone_name="Asia/Seoul",
+        sort_order=10,
+    ),
+    KRIndexRecord(
+        index_id="KOSDAQ",
+        provider_symbol="KOSDAQ",
+        name="KOSDAQ Composite Index",
+        short_name="KOSDAQ",
+        name_kr="코스닥",
+        market_segment="KOSDAQ",
+        index_family="KOSDAQ",
+        currency="KRW",
+        provider="naver_sise_index",
+        source_url="https://finance.naver.com/sise/sise_index.naver?code=KOSDAQ",
+        exchange_timezone_name="Asia/Seoul",
+        sort_order=20,
+    ),
+    KRIndexRecord(
+        index_id="KOSPI200",
+        provider_symbol="KPI200",
+        name="KOSPI 200",
+        short_name="KOSPI 200",
+        name_kr="코스피 200",
+        market_segment="KOSPI",
+        index_family="KOSPI",
+        currency="KRW",
+        provider="naver_sise_index",
+        source_url="https://finance.naver.com/sise/sise_index.naver?code=KPI200",
+        exchange_timezone_name="Asia/Seoul",
+        sort_order=30,
+    ),
+)
+KR_INDEX_CONFIG_BY_ID = {record.index_id: record for record in KR_INDEX_RECORDS}
+KR_INDEX_ALIAS_TO_ID = {
+    record.index_id: record.index_id
+    for record in KR_INDEX_RECORDS
+}
+KR_INDEX_ALIAS_TO_ID.update(
+    {
+        "KPI200": "KOSPI200",
+        "KOSPI_200": "KOSPI200",
+        "KOSPI-200": "KOSPI200",
+        "^KS11": "KOSPI",
+        "^KQ11": "KOSDAQ",
+        "^KS200": "KOSPI200",
+    }
+)
+
+
 def normalize_kr_symbol(value: str | None) -> str:
     if value is None:
         return ""
@@ -137,6 +263,13 @@ def normalize_kr_symbol(value: str | None) -> str:
         return f"{local_code}.KS"
 
     return normalized
+
+
+def normalize_kr_index_id(value: str | None) -> str:
+    cleaned = (value or "").strip().upper()
+    if not cleaned:
+        return ""
+    return KR_INDEX_ALIAS_TO_ID.get(cleaned, cleaned)
 
 
 def local_code_from_symbol(symbol: str) -> str:
@@ -217,6 +350,20 @@ def _parse_date_value(value: Any) -> date | None:
     return None
 
 
+def _parse_index_datetime(value: Any) -> datetime | None:
+    cleaned = _clean_text(value)
+    if cleaned is None:
+        return None
+
+    for fmt in ("%Y%m%d%H%M%S", "%Y%m%d%H%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(cleaned, fmt)
+        except ValueError:
+            continue
+
+    return None
+
+
 def _list_value(values: list[Any], index: int) -> Any:
     return values[index] if index < len(values) else None
 
@@ -224,6 +371,17 @@ def _list_value(values: list[Any], index: int) -> Any:
 def _payload_hash(payload: Any) -> str:
     serialized = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _payload_text_hash(payload_text: str) -> str:
+    return hashlib.sha256(payload_text.encode("utf-8")).hexdigest()
+
+
+def _kr_index_scaled_float(value: Any) -> float | None:
+    parsed = _parse_float(value)
+    if parsed is None:
+        return None
+    return parsed / 100
 
 
 def _row_value(row: dict[str, Any], *names: str) -> Any:
@@ -545,6 +703,239 @@ def parse_yahoo_daily_prices(
     return sorted(records, key=lambda item: item.trade_date)
 
 
+def _parse_naver_index_rows(payload_text: str) -> list[list[Any]]:
+    text = payload_text.strip()
+    if not text:
+        raise KRMarketDataFetchError("Naver index payload was empty.")
+
+    try:
+        payload = ast.literal_eval(text)
+    except (SyntaxError, ValueError) as exc:
+        raise KRMarketDataFetchError("Naver index payload was not a valid array.") from exc
+
+    if not isinstance(payload, list):
+        raise KRMarketDataFetchError("Naver index payload was not a list.")
+
+    return [row for row in payload if isinstance(row, list)]
+
+
+def parse_naver_index_daily_prices(
+    payload_text: str,
+    *,
+    index_id: str,
+    provider: str = "naver_sise_index",
+    source_url: str | None = None,
+) -> list[KRIndexDailyPriceRecord]:
+    normalized_index_id = normalize_kr_index_id(index_id)
+    if normalized_index_id not in KR_INDEX_CONFIG_BY_ID:
+        supported = ", ".join(sorted(KR_INDEX_CONFIG_BY_ID))
+        raise KRMarketDataFetchError(f"Unsupported KR index_id='{index_id}'. Supported: {supported}.")
+
+    rows = _parse_naver_index_rows(payload_text)
+    payload_hash = _payload_text_hash(payload_text)
+    records: list[KRIndexDailyPriceRecord] = []
+    previous_close: float | None = None
+
+    for row in rows:
+        if len(row) < 6:
+            continue
+
+        row_date = _parse_date_value(_list_value(row, 0))
+        close_value = _parse_float(_list_value(row, 4))
+        if row_date is None or close_value is None:
+            continue
+
+        price_change = None
+        change_pct = None
+        if previous_close is not None and previous_close != 0:
+            price_change = close_value - previous_close
+            change_pct = (price_change / previous_close) * 100
+
+        records.append(
+            KRIndexDailyPriceRecord(
+                provider=provider,
+                index_id=normalized_index_id,
+                trade_date=row_date,
+                currency=KR_INDEX_CONFIG_BY_ID[normalized_index_id].currency,
+                open_value=_parse_float(_list_value(row, 1)),
+                high_value=_parse_float(_list_value(row, 2)),
+                low_value=_parse_float(_list_value(row, 3)),
+                close_value=close_value,
+                price_change=price_change,
+                change_pct=change_pct,
+                trade_volume=_parse_int(_list_value(row, 5)),
+                source_url=source_url,
+                raw_payload_hash=payload_hash,
+            )
+        )
+        previous_close = close_value
+
+    if not records:
+        raise KRMarketDataFetchError(f"Naver index returned no OHLC rows for index_id='{normalized_index_id}'.")
+
+    return records
+
+
+class _NaverIndexTimeTableParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.rows: list[list[str]] = []
+        self._current_row: list[str] | None = None
+        self._current_cell: list[str] | None = None
+        self._capture_cell = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() == "tr":
+            self._current_row = []
+            return
+
+        if tag.lower() != "td" or self._current_row is None:
+            return
+
+        attr_map = {name.lower(): value or "" for name, value in attrs}
+        classes = set(attr_map.get("class", "").split())
+        self._capture_cell = bool(
+            classes.intersection({"date", "number_1", "rate_up", "rate_down", "rate_same"})
+        )
+        self._current_cell = [] if self._capture_cell else None
+
+    def handle_data(self, data: str) -> None:
+        if self._current_cell is not None:
+            self._current_cell.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "td" and self._current_row is not None and self._current_cell is not None:
+            text = " ".join("".join(self._current_cell).split())
+            self._current_row.append(text)
+            self._current_cell = None
+            self._capture_cell = False
+            return
+
+        if tag.lower() == "tr" and self._current_row is not None:
+            if self._current_row:
+                self.rows.append(self._current_row)
+            self._current_row = None
+            self._current_cell = None
+            self._capture_cell = False
+
+
+def _parse_intraday_trade_date(thistime: str | None) -> date:
+    parsed = _parse_index_datetime(thistime)
+    if parsed is not None:
+        return parsed.date()
+    return datetime.now(timezone(timedelta(hours=9))).date()
+
+
+def _parse_intraday_time(value: str, *, trade_date: date) -> datetime | None:
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})", (value or "").strip())
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    return datetime(
+        trade_date.year,
+        trade_date.month,
+        trade_date.day,
+        hour,
+        minute,
+        tzinfo=timezone(timedelta(hours=9)),
+    )
+
+
+def parse_naver_index_intraday_points(
+    payload_text: str,
+    *,
+    index_id: str,
+    thistime: str | None = None,
+) -> list[KRIndexIntradayPointRecord]:
+    normalized_index_id = normalize_kr_index_id(index_id)
+    if normalized_index_id not in KR_INDEX_CONFIG_BY_ID:
+        supported = ", ".join(sorted(KR_INDEX_CONFIG_BY_ID))
+        raise KRMarketDataFetchError(f"Unsupported KR index_id='{index_id}'. Supported: {supported}.")
+
+    parser = _NaverIndexTimeTableParser()
+    parser.feed(payload_text)
+    trade_date = _parse_intraday_trade_date(thistime)
+    records: list[KRIndexIntradayPointRecord] = []
+
+    for row in parser.rows:
+        if len(row) < 2:
+            continue
+        row_time = _parse_intraday_time(row[0], trade_date=trade_date)
+        price = _parse_float(row[1])
+        if row_time is None or price is None:
+            continue
+
+        records.append(
+            KRIndexIntradayPointRecord(
+                index_id=normalized_index_id,
+                time=row_time,
+                price=price,
+                volume=_parse_int(_list_value(row, 3)),
+                cumulative_volume=_parse_int(_list_value(row, 4)),
+                trade_value=_parse_int(_list_value(row, 5)),
+            )
+        )
+
+    return sorted(records, key=lambda item: item.time)
+
+
+def parse_naver_index_realtime_quote(
+    payload: dict[str, Any],
+    *,
+    index_id: str,
+) -> KRIndexRealtimeQuoteRecord:
+    normalized_index_id = normalize_kr_index_id(index_id)
+    if normalized_index_id not in KR_INDEX_CONFIG_BY_ID:
+        supported = ", ".join(sorted(KR_INDEX_CONFIG_BY_ID))
+        raise KRMarketDataFetchError(f"Unsupported KR index_id='{index_id}'. Supported: {supported}.")
+
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    areas = result.get("areas") if isinstance(result.get("areas"), list) else []
+    data: dict[str, Any] | None = None
+    for area in areas:
+        if not isinstance(area, dict):
+            continue
+        rows = area.get("datas") if isinstance(area.get("datas"), list) else []
+        for row in rows:
+            if isinstance(row, dict):
+                data = row
+                break
+        if data is not None:
+            break
+
+    if data is None:
+        raise KRMarketDataFetchError("Naver realtime index payload did not contain index data.")
+
+    payload_time = _parse_int(result.get("time"))
+    quote_time = (
+        datetime.fromtimestamp(payload_time / 1000, tz=timezone(timedelta(hours=9)))
+        if payload_time is not None
+        else None
+    )
+    polling_interval_ms = _parse_int(result.get("pollingInterval"))
+
+    return KRIndexRealtimeQuoteRecord(
+        index_id=normalized_index_id,
+        provider_symbol=_clean_text(data.get("cd")) or KR_INDEX_CONFIG_BY_ID[normalized_index_id].provider_symbol,
+        time=quote_time,
+        price=_kr_index_scaled_float(data.get("nv")),
+        change=_kr_index_scaled_float(data.get("cv")),
+        change_pct=_parse_float(data.get("cr")),
+        open_value=_kr_index_scaled_float(data.get("ov")),
+        high_value=_kr_index_scaled_float(data.get("hv")),
+        low_value=_kr_index_scaled_float(data.get("lv")),
+        volume=_parse_int(data.get("aq")),
+        trade_value=_parse_int(data.get("aa")),
+        market_status=_clean_text(data.get("ms")),
+        polling_interval_seconds=(
+            max(1, int(polling_interval_ms / 1000))
+            if polling_interval_ms is not None
+            else None
+        ),
+    )
+
+
 def parse_opendart_company_fundamental_records(
     payload: dict[str, Any],
     *,
@@ -594,6 +985,82 @@ def parse_opendart_company_fundamental_records(
     return records
 
 
+def fetch_naver_index_chart_payload(
+    *,
+    provider_symbol: str,
+    start_date: date,
+    end_date: date,
+    timeout_seconds: int,
+) -> tuple[str, str]:
+    response = http_get(
+        NAVER_SISE_INDEX_URL,
+        params={
+            "symbol": provider_symbol,
+            "requestType": "1",
+            "startTime": start_date.strftime("%Y%m%d"),
+            "endTime": end_date.strftime("%Y%m%d"),
+            "timeframe": "day",
+        },
+        headers={
+            "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
+            "Accept": "text/plain,*/*",
+            "Referer": "https://finance.naver.com/",
+        },
+        timeout=timeout_seconds,
+    )
+    response.raise_for_status()
+    response.encoding = response.encoding or "utf-8"
+    return response.text, response.url
+
+
+def fetch_naver_index_intraday_page_payload(
+    *,
+    provider_symbol: str,
+    thistime: str,
+    page: int,
+    timeout_seconds: int,
+) -> tuple[str, str]:
+    response = http_get(
+        NAVER_SISE_INDEX_TIME_URL,
+        params={
+            "code": provider_symbol,
+            "thistime": thistime,
+            "page": page,
+        },
+        headers={
+            "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
+            "Accept": "text/html,*/*",
+            "Referer": "https://finance.naver.com/",
+        },
+        timeout=timeout_seconds,
+    )
+    response.raise_for_status()
+    response.encoding = response.encoding or "euc-kr"
+    return response.text, response.url
+
+
+def fetch_naver_index_realtime_payload(
+    *,
+    provider_symbol: str,
+    timeout_seconds: int,
+) -> tuple[dict[str, Any], str]:
+    response = http_get(
+        NAVER_INDEX_REALTIME_URL,
+        params={"query": f"SERVICE_INDEX:{provider_symbol}"},
+        headers={
+            "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
+            "Accept": "application/json,text/plain,*/*",
+            "Referer": "https://finance.naver.com/",
+        },
+        timeout=timeout_seconds,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise KRMarketDataFetchError("Naver realtime index returned a non-object JSON payload.")
+    return payload, response.url
+
+
 def fetch_krx_stock_master_payload(*, timeout_seconds: int) -> tuple[dict[str, Any], str]:
     response = http_post(
         KRX_DATA_URL,
@@ -619,15 +1086,16 @@ def fetch_krx_stock_master_payload(*, timeout_seconds: int) -> tuple[dict[str, A
 
 def fetch_krx_daily_price_payload(
     *,
-    local_code: str,
+    local_code: str | None = None,
+    market_id: str = "ALL",
     trade_date: date | None = None,
     timeout_seconds: int,
 ) -> tuple[dict[str, Any], str]:
     params = {
         "bld": KRX_DAILY_PRICE_BLD,
-        "mktId": "ALL",
-        "isuCd": local_code,
-        "isuCd2": local_code,
+        "mktId": market_id,
+        "isuCd": local_code or "",
+        "isuCd2": local_code or "",
         "csvxls_isNo": "false",
     }
     if trade_date is not None:

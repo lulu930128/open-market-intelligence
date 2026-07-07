@@ -219,6 +219,11 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
             patch.object(scheduler.settings, "scheduler_kr_market_refresh_provider", "auto"),
             patch.object(
                 scheduler.settings,
+                "scheduler_kr_market_refresh_include_investors",
+                True,
+            ),
+            patch.object(
+                scheduler.settings,
                 "scheduler_kr_market_refresh_include_fundamentals",
                 False,
             ),
@@ -246,10 +251,14 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
         self.assertTrue(request["include_children"])
         self.assertTrue(request["enabled_only"])
         self.assertTrue(request["include_daily"])
+        self.assertTrue(request["include_investors"])
         self.assertFalse(request["include_fundamentals"])
         self.assertEqual(request["outputsize"], "compact")
         self.assertEqual(request["provider"], "auto")
-        self.assertEqual(task_args, (None, True, True, True, False, "compact", "auto", 1.75))
+        self.assertEqual(
+            task_args,
+            (None, True, True, True, True, False, "compact", "auto", 1.75, None),
+        )
         resolve_sleep.assert_called_once_with(market="kr")
         fake_db.close.assert_called_once()
 

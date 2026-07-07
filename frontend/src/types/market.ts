@@ -266,6 +266,101 @@ export type WatchlistGroupRadarRead = {
   results: WatchlistRadarItemRead[];
 };
 
+export type WatchlistRadarSnapshotRead = {
+  id: number;
+  group_id: number;
+  include_children: boolean;
+  enabled_only: boolean;
+  mode: string;
+  max_results: number;
+  calculation_limit: number;
+  radar_rule_version: string;
+  snapshot_date: string;
+  trade_date: string | null;
+  target_trade_date: string | null;
+  is_current: boolean;
+  current_stock_count: number;
+  stale_stock_count: number;
+  requested_stock_count: number;
+  ranked_count: number;
+  matched_count: number;
+  radar_count: number;
+  no_data_count: number;
+  error_count: number;
+  buckets: WatchlistRadarBucketRead[];
+  data_limitations: string[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type WatchlistRadarOutcomeStatus =
+  | "no_snapshot"
+  | "not_evaluated"
+  | "evaluated"
+  | "pending"
+  | "hit"
+  | "miss"
+  | "neutral"
+  | "unevaluable"
+  | string;
+
+export type WatchlistRadarOutcomeItemRead = {
+  id: number;
+  snapshot_item_id: number;
+  rank: number;
+  stock_id: string;
+  stock_name: string | null;
+  bucket: string;
+  bucket_label: string;
+  status: WatchlistRadarOutcomeStatus;
+  reason: string;
+  snapshot_date: string;
+  outcome_trade_date: string | null;
+  signal_close_price: number | null;
+  outcome_open_price: number | null;
+  outcome_high_price: number | null;
+  outcome_low_price: number | null;
+  outcome_close_price: number | null;
+  outcome_volume: number | null;
+  open_gap_pct: number | null;
+  close_return_pct: number | null;
+  max_favorable_pct: number | null;
+  max_adverse_pct: number | null;
+  intraday_range_pct: number | null;
+  volume_change_pct: number | null;
+};
+
+export type WatchlistRadarOutcomeBucketSummaryRead = {
+  bucket: string;
+  bucket_label: string;
+  total_count: number;
+  hit_count: number;
+  miss_count: number;
+  neutral_count: number;
+  unevaluable_count: number;
+  pending_count: number;
+  avg_close_return_pct: number | null;
+  avg_max_adverse_pct: number | null;
+};
+
+export type WatchlistRadarOutcomeSummaryRead = {
+  status: WatchlistRadarOutcomeStatus;
+  snapshot: WatchlistRadarSnapshotRead | null;
+  evaluated_at: string | null;
+  total_count: number;
+  hit_count: number;
+  miss_count: number;
+  neutral_count: number;
+  unevaluable_count: number;
+  pending_count: number;
+  avg_close_return_pct: number | null;
+  avg_max_favorable_pct: number | null;
+  avg_max_adverse_pct: number | null;
+  bucket_summaries: WatchlistRadarOutcomeBucketSummaryRead[];
+  items: WatchlistRadarOutcomeItemRead[];
+  data_limitations: string[];
+};
+
 export type Signal = {
   key: string;
   label: string;
@@ -571,6 +666,7 @@ export type MarketIndexContributionResponse = {
 
 export type IntradayTrendPoint = {
   time: string;
+  session?: string;
   price: number;
   volume: number | null;
   open: number | null;
@@ -582,9 +678,21 @@ export type IntradayTrendResponse = {
   stock_id: string;
   symbol: string | null;
   source: string;
+  session_scope?: string;
+  session_phase?: string | null;
+  has_extended_hours?: boolean;
+  regular_point_count?: number;
+  extended_point_count?: number;
   previous_close: number | null;
+  previous_close_source?: string | null;
+  previous_close_trade_date?: string | null;
+  previous_close_provider?: string | null;
+  regular_session_close?: number | null;
+  regular_session_close_time?: string | null;
   point_count: number;
   points: IntradayTrendPoint[];
+  source_url?: string | null;
+  warnings?: string[];
 };
 
 export type TaiwanStockQuoteDepthLevel = {
@@ -1169,6 +1277,89 @@ export type KRDailyPriceRefreshResultRead = {
   message: string;
 };
 
+export type KRMarketIndexRead = {
+  id: number | null;
+  index_id: string;
+  provider_symbol: string;
+  name: string;
+  short_name: string;
+  name_kr: string | null;
+  market_segment: string;
+  index_family: string;
+  provider: string;
+  currency: string;
+  source_url: string | null;
+  exchange_timezone_name: string;
+  sort_order: number;
+  is_active: boolean;
+};
+
+export type KRIndexRefreshResultRead = {
+  status: string;
+  provider: string;
+  index_id: string;
+  provider_symbol: string | null;
+  from_date: string | null;
+  to_date: string | null;
+  fetched_count: number;
+  inserted_count: number;
+  updated_count: number;
+  message: string;
+};
+
+export type KRMarketBreadthRead = {
+  index_id: string;
+  market_segment: string;
+  trade_date: string | null;
+  advance_count: number;
+  decline_count: number;
+  unchanged_count: number;
+  total_count: number;
+  positive_ratio: number | null;
+  advance_decline_ratio: number | null;
+  average_change_pct: number | null;
+  trade_value: number | null;
+  source: string | null;
+  status: string;
+  coverage_note: string | null;
+};
+
+export type KRMarketBreadthRefreshResultRead = {
+  status: string;
+  provider: string;
+  market_id: string;
+  trade_date: string | null;
+  fetched_count: number;
+  inserted_count: number;
+  updated_count: number;
+  message: string;
+};
+
+export type KRIndexSnapshotRead = KRMarketIndexRead & {
+  latest_date: string | null;
+  close: number | null;
+  change: number | null;
+  change_pct: number | null;
+  volume: number | null;
+  latest_provider: string | null;
+  latest_source_url: string | null;
+  status: string;
+  breadth: KRMarketBreadthRead | null;
+};
+
+export type KRIndexSummaryRead = {
+  kind: string;
+  generated_at: string;
+  expected_daily_price_date: string | null;
+  summary: {
+    index_count: number;
+    current_count: number;
+    stale_count: number;
+    empty_count: number;
+  };
+  indices: KRIndexSnapshotRead[];
+};
+
 export type KRResourceRefreshResultRead = {
   status: string;
   provider: string;
@@ -1309,6 +1500,21 @@ export type KROhlcPointRead = {
 
 export type KROhlcChartRead = {
   symbol: string;
+  timeframe: string;
+  bars: number;
+  lookback_days: number;
+  from_date: string;
+  to_date: string;
+  point_count: number;
+  points: KROhlcPointRead[];
+  backfill: Record<string, unknown> | null;
+};
+
+export type KRIndexOhlcChartRead = {
+  index_id: string;
+  provider_symbol: string;
+  name: string;
+  short_name: string;
   timeframe: string;
   bars: number;
   lookback_days: number;
@@ -1609,6 +1815,7 @@ export type USWatchlistRankingItemRead = {
   group_id: number;
   trade_date: string | null;
   time: string | null;
+  session: string | null;
   close: number | null;
   previous_close: number | null;
   change: number | null;
@@ -1616,6 +1823,7 @@ export type USWatchlistRankingItemRead = {
   volume: number | null;
   status: string;
   source: string | null;
+  has_extended_hours: boolean;
   intraday_previous_close: number | null;
   intraday_points: Array<{
     time: string;

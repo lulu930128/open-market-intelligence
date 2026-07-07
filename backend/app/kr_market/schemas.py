@@ -83,6 +83,151 @@ class KRDailyPriceRefreshResultRead(BaseModel):
     message: str
 
 
+class KRMarketIndexRead(BaseModel):
+    id: int | None = None
+    index_id: str
+    provider_symbol: str
+    name: str
+    short_name: str
+    name_kr: str | None = None
+    market_segment: str
+    index_family: str
+    provider: str
+    currency: str
+    source_url: str | None = None
+    exchange_timezone_name: str
+    sort_order: int
+    is_active: bool
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class KRMarketIndexSyncResultRead(BaseModel):
+    status: str
+    provider: str
+    scanned_count: int
+    created_count: int
+    updated_count: int
+    message: str
+
+
+class KRIndexDailyPriceRead(BaseModel):
+    id: int
+    provider: str
+    index_id: str
+    trade_date: date
+    currency: str
+    open_value: float | None = None
+    high_value: float | None = None
+    low_value: float | None = None
+    close_value: float | None = None
+    price_change: float | None = None
+    change_pct: float | None = None
+    trade_volume: int | None = None
+    source_url: str | None = None
+    raw_payload_hash: str | None = None
+    fetched_at: datetime
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class KRMarketBreadthRead(BaseModel):
+    index_id: str
+    market_segment: str
+    trade_date: date | None = None
+    advance_count: int
+    decline_count: int
+    unchanged_count: int
+    total_count: int
+    positive_ratio: float | None = None
+    advance_decline_ratio: float | None = None
+    average_change_pct: float | None = None
+    trade_value: int | None = None
+    source: str | None = None
+    status: str
+    coverage_note: str | None = None
+
+
+class KRMarketBreadthRefreshResultRead(BaseModel):
+    status: str
+    provider: str
+    market_id: str
+    trade_date: date | None = None
+    fetched_count: int
+    inserted_count: int
+    updated_count: int
+    message: str
+
+
+class KRIndexRefreshResultRead(BaseModel):
+    status: str
+    provider: str
+    index_id: str
+    provider_symbol: str | None = None
+    from_date: date | None = None
+    to_date: date | None = None
+    fetched_count: int
+    inserted_count: int
+    updated_count: int
+    message: str
+
+
+class KRIndexRefreshBatchResultRead(BaseModel):
+    status: str
+    provider: str
+    requested_index_count: int
+    success_count: int
+    error_count: int
+    fetched_count: int
+    inserted_count: int
+    updated_count: int
+    results: list[dict]
+    message: str
+
+
+class KRIndexSnapshotRead(BaseModel):
+    id: int | None = None
+    index_id: str
+    provider_symbol: str
+    name: str
+    short_name: str
+    name_kr: str | None = None
+    market_segment: str
+    index_family: str
+    provider: str
+    currency: str
+    source_url: str | None = None
+    exchange_timezone_name: str
+    sort_order: int
+    is_active: bool
+    latest_date: date | None = None
+    close: float | None = None
+    change: float | None = None
+    change_pct: float | None = None
+    volume: int | None = None
+    latest_provider: str | None = None
+    latest_source_url: str | None = None
+    status: str
+    breadth: KRMarketBreadthRead | None = None
+
+
+class KRIndexSummaryStatsRead(BaseModel):
+    index_count: int
+    current_count: int
+    stale_count: int
+    empty_count: int
+
+
+class KRIndexSummaryRead(BaseModel):
+    kind: str
+    generated_at: datetime
+    expected_daily_price_date: date | None = None
+    summary: KRIndexSummaryStatsRead
+    indices: list[KRIndexSnapshotRead]
+
+
 class KRCompanyFundamentalRead(BaseModel):
     id: int
 
@@ -168,6 +313,56 @@ class KROhlcChartRead(BaseModel):
     point_count: int
     points: list[KROhlcPointRead]
     backfill: dict | None = None
+
+
+class KRIndexOhlcChartRead(BaseModel):
+    index_id: str
+    provider_symbol: str
+    name: str
+    short_name: str
+    timeframe: str
+    bars: int
+    lookback_days: int
+    from_date: date
+    to_date: date
+    point_count: int
+    points: list[KROhlcPointRead]
+    backfill: dict | None = None
+
+
+class KRIndexIntradayTrendPointRead(BaseModel):
+    time: str
+    session: str = "regular"
+    price: float
+    volume: int | None = None
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    cumulative_volume: int | None = None
+    trade_value: int | None = None
+
+
+class KRIndexIntradayTrendRead(BaseModel):
+    stock_id: str
+    symbol: str | None = None
+    source: str
+    session_scope: str = "regular"
+    session_phase: str | None = None
+    has_extended_hours: bool = False
+    regular_point_count: int = 0
+    extended_point_count: int = 0
+    previous_close: float | None = None
+    previous_close_source: str | None = None
+    previous_close_trade_date: str | None = None
+    previous_close_provider: str | None = None
+    regular_session_close: float | None = None
+    regular_session_close_time: str | None = None
+    point_count: int
+    points: list[KRIndexIntradayTrendPointRead]
+    source_url: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+    fetched_pages: int = 0
+    polling_interval_seconds: int | None = None
 
 
 class KRResourceSlotRead(BaseModel):

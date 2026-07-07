@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory = $true)][string]$RepoRoot,
     [Parameter(Mandatory = $true)][string]$WorkingDirectory,
     [Parameter(Mandatory = $true)][string]$FilePath,
-    [Parameter(Mandatory = $true)][string]$ArgumentsJsonBase64
+    [Parameter(Mandatory = $true)][string]$ArgumentsJsonBase64,
+    [int]$LauncherPid = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -74,6 +75,31 @@ function ConvertTo-ProcessArgument {
     return $result
 }
 
+function Stop-ServiceProcessTree {
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+
+    $taskkill = Join-Path $env:SystemRoot "System32\taskkill.exe"
+    if (Test-Path -LiteralPath $taskkill) {
+        Write-ServiceLog "Stopping service process tree. pid=$ProcessId reason=$Reason" "SYSTEM"
+        Start-Process -FilePath $taskkill -ArgumentList @("/PID", "$ProcessId", "/T", "/F") -Wait -WindowStyle Hidden | Out-Null
+        return
+    }
+
+    Write-ServiceLog "taskkill.exe was not found; stopping only root process. pid=$ProcessId reason=$Reason" "WARN"
+    Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+}
+
+function Test-LauncherAlive {
+    if ($LauncherPid -le 0) {
+        return $true
+    }
+
+    return $null -ne (Get-Process -Id $LauncherPid -ErrorAction SilentlyContinue)
+}
+
 try {
     $argumentsJson = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($ArgumentsJsonBase64))
     $parsedArguments = ConvertFrom-Json -InputObject $argumentsJson
@@ -104,7 +130,7 @@ try {
     $innerCommand = "$innerCommand >> $(ConvertTo-ProcessArgument $serviceLogPath) 2>&1"
     $processArguments = "/d /s /c `"$innerCommand`""
 
-    Write-ServiceLog "Starting service. file=$FilePath args=$($arguments -join ' ') cwd=$WorkingDirectory" "SYSTEM"
+    Write-ServiceLog "Starting service. file=$FilePath args=$($arguments -join ' ') cwd=$WorkingDirectory launcher_pid=$LauncherPid" "SYSTEM"
     Write-ServiceLog "Process runner. file=$processFilePath args=$processArguments" "SYSTEM"
 
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -119,7 +145,16 @@ try {
     $process.StartInfo = $startInfo
 
     [void]$process.Start()
-    $process.WaitForExit()
+    while (-not $process.HasExited) {
+        if (-not (Test-LauncherAlive)) {
+            Stop-ServiceProcessTree -ProcessId $process.Id -Reason "launcher process exited"
+            Write-ServiceLog "Service runner exiting because launcher process is gone. launcher_pid=$LauncherPid" "WARN"
+            exit 0
+        }
+
+        Start-Sleep -Seconds 2
+        $process.Refresh()
+    }
 
     $exitCode = $process.ExitCode
     Write-ServiceLog "Service exited. exit_code=$exitCode" "SYSTEM"

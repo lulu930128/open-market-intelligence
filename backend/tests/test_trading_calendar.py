@@ -132,6 +132,34 @@ class MarketCalendarStatusTests(unittest.TestCase):
             "2026-06-18",
         )
 
+    def test_us_status_distinguishes_pre_market_regular_and_after_hours(self) -> None:
+        timezone = ZoneInfo("America/New_York")
+
+        pre_market = build_us_calendar_status(
+            now=datetime(2026, 6, 18, 8, 0, tzinfo=timezone),
+        )
+        regular = build_us_calendar_status(
+            now=datetime(2026, 6, 18, 10, 0, tzinfo=timezone),
+        )
+        after_hours = build_us_calendar_status(
+            now=datetime(2026, 6, 18, 17, 0, tzinfo=timezone),
+        )
+
+        self.assertEqual(pre_market["phase"], "pre_market")
+        self.assertFalse(pre_market["session"]["is_polling_window"])
+        self.assertTrue(pre_market["session"]["is_extended_polling_window"])
+        self.assertEqual(pre_market["session"]["pre_market_open_time"], "04:00")
+        self.assertEqual(pre_market["session"]["after_hours_close_time"], "20:00")
+
+        self.assertEqual(regular["phase"], "regular")
+        self.assertTrue(regular["session"]["is_polling_window"])
+        self.assertFalse(regular["session"]["is_extended_polling_window"])
+
+        self.assertEqual(after_hours["phase"], "after_hours")
+        self.assertFalse(after_hours["session"]["is_polling_window"])
+        self.assertTrue(after_hours["session"]["is_extended_polling_window"])
+        self.assertTrue(after_hours["session"]["is_after_close"])
+
     def test_kr_status_reports_weekend_and_daily_release_window(self) -> None:
         timezone = ZoneInfo("Asia/Seoul")
 

@@ -128,6 +128,7 @@ class USOhlcChartRead(BaseModel):
 
 class USIntradayTrendPointRead(BaseModel):
     time: str
+    session: str = "regular"
     price: float
     volume: int | None = None
     open: float | None = None
@@ -139,9 +140,21 @@ class USIntradayTrendRead(BaseModel):
     stock_id: str
     symbol: str | None = None
     source: str
+    session_scope: str = "regular"
+    session_phase: str | None = None
+    has_extended_hours: bool = False
+    regular_point_count: int = 0
+    extended_point_count: int = 0
     previous_close: float | None = None
+    previous_close_source: str | None = None
+    previous_close_trade_date: str | None = None
+    previous_close_provider: str | None = None
+    regular_session_close: float | None = None
+    regular_session_close_time: str | None = None
     point_count: int
     points: list[USIntradayTrendPointRead]
+    source_url: str | None = None
+    warnings: list[str] = Field(default_factory=list)
 
 
 class USSecCompanyFactRead(BaseModel):
@@ -467,6 +480,7 @@ class USWatchlistRankingItemRead(BaseModel):
     group_id: int
     trade_date: date | None = None
     time: str | None = None
+    session: str | None = None
     close: float | None = None
     previous_close: float | None = None
     change: float | None = None
@@ -474,6 +488,7 @@ class USWatchlistRankingItemRead(BaseModel):
     volume: int | None = None
     status: str
     source: str | None = None
+    has_extended_hours: bool = False
     intraday_previous_close: float | None = None
     intraday_points: list[dict] = Field(default_factory=list)
     error_message: str | None = None

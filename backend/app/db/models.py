@@ -2485,6 +2485,72 @@ class KRDailyPrice(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class KRMarketIndex(Base):
+    __tablename__ = "kr_market_index"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "index_id",
+            name="uq_kr_market_index_index_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    index_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    provider_symbol: Mapped[str] = mapped_column(String(32), index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    short_name: Mapped[str] = mapped_column(String(80))
+    name_kr: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    market_segment: Mapped[str] = mapped_column(String(80), index=True)
+    index_family: Mapped[str] = mapped_column(String(80), index=True)
+    provider: Mapped[str] = mapped_column(String(40), default="naver_sise_index", index=True)
+    currency: Mapped[str] = mapped_column(String(10), default="KRW", index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    exchange_timezone_name: Mapped[str] = mapped_column(String(80), default="Asia/Seoul")
+    sort_order: Mapped[int] = mapped_column(Integer, default=100, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class KRIndexDailyPrice(Base):
+    __tablename__ = "kr_index_daily_price"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "index_id",
+            "trade_date",
+            name="uq_kr_index_daily_provider_index_date",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    index_id: Mapped[str] = mapped_column(String(32), index=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+    currency: Mapped[str] = mapped_column(String(10), default="KRW", index=True)
+
+    open_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    close_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    price_change: Mapped[float | None] = mapped_column(Float, nullable=True)
+    change_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    trade_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload_hash: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class KRCompanyFundamental(Base):
     __tablename__ = "kr_company_fundamental"
 
@@ -2902,5 +2968,159 @@ class WatchlistItem(Base):
     tags: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class WatchlistRadarSnapshotRun(Base):
+    __tablename__ = "watchlist_radar_snapshot_run"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "group_id",
+            "mode",
+            "snapshot_date",
+            "radar_rule_version",
+            "include_children",
+            "enabled_only",
+            name="uq_watchlist_radar_snapshot_scope",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    group_id: Mapped[int] = mapped_column(
+        ForeignKey("watchlist_group.id"),
+        nullable=False,
+        index=True,
+    )
+
+    include_children: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    enabled_only: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    mode: Mapped[str] = mapped_column(String(40), index=True)
+    max_results: Mapped[int] = mapped_column(Integer, default=30)
+    calculation_limit: Mapped[int] = mapped_column(Integer, default=100)
+    radar_rule_version: Mapped[str] = mapped_column(String(80), default="radar_v1", index=True)
+
+    snapshot_date: Mapped[date] = mapped_column(Date, index=True)
+    trade_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    target_trade_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    current_stock_count: Mapped[int] = mapped_column(Integer, default=0)
+    stale_stock_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    requested_stock_count: Mapped[int] = mapped_column(Integer, default=0)
+    ranked_count: Mapped[int] = mapped_column(Integer, default=0)
+    matched_count: Mapped[int] = mapped_column(Integer, default=0)
+    radar_count: Mapped[int] = mapped_column(Integer, default=0)
+    no_data_count: Mapped[int] = mapped_column(Integer, default=0)
+    error_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    buckets_json: Mapped[str] = mapped_column(Text, default="[]")
+    data_limitations_json: Mapped[str] = mapped_column(Text, default="[]")
+    request_json: Mapped[str] = mapped_column(Text, default="{}")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class WatchlistRadarSnapshotItem(Base):
+    __tablename__ = "watchlist_radar_snapshot_item"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "snapshot_run_id",
+            "rank",
+            "stock_id",
+            "bucket",
+            name="uq_watchlist_radar_snapshot_item_rank",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    snapshot_run_id: Mapped[int] = mapped_column(
+        ForeignKey("watchlist_radar_snapshot_run.id"),
+        nullable=False,
+        index=True,
+    )
+
+    rank: Mapped[int] = mapped_column(Integer, index=True)
+    source_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    stock_id: Mapped[str] = mapped_column(String(20), index=True)
+    stock_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    bucket: Mapped[str] = mapped_column(String(80), index=True)
+    bucket_label: Mapped[str] = mapped_column(String(120))
+    urgency: Mapped[str] = mapped_column(String(40), index=True)
+    priority_score: Mapped[float] = mapped_column(Float, default=0)
+    technical_evidence_score: Mapped[float] = mapped_column(Float, default=0)
+    technical_score: Mapped[float] = mapped_column(Float, default=0)
+    technical_grade: Mapped[str] = mapped_column(String(40), default="watch", index=True)
+    direction: Mapped[str] = mapped_column(String(40), default="neutral", index=True)
+
+    signal_trade_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    close_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    change_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    previous_close: Mapped[float | None] = mapped_column(Float, nullable=True)
+    limit_status: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+    action_label: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    signal_keys_json: Mapped[str] = mapped_column(Text, default="[]")
+    matched_signal_keys_json: Mapped[str] = mapped_column(Text, default="[]")
+    context_signals_json: Mapped[str] = mapped_column(Text, default="[]")
+    factor_scores_json: Mapped[str] = mapped_column(Text, default="{}")
+    price_levels_json: Mapped[str] = mapped_column(Text, default="{}")
+    raw_item_json: Mapped[str] = mapped_column(Text, default="{}")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class WatchlistRadarOutcome(Base):
+    __tablename__ = "watchlist_radar_outcome"
+
+    __table_args__ = (
+        UniqueConstraint("snapshot_item_id", name="uq_watchlist_radar_outcome_item"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    snapshot_run_id: Mapped[int] = mapped_column(
+        ForeignKey("watchlist_radar_snapshot_run.id"),
+        nullable=False,
+        index=True,
+    )
+    snapshot_item_id: Mapped[int] = mapped_column(
+        ForeignKey("watchlist_radar_snapshot_item.id"),
+        nullable=False,
+        index=True,
+    )
+
+    group_id: Mapped[int] = mapped_column(Integer, index=True)
+    stock_id: Mapped[str] = mapped_column(String(20), index=True)
+    bucket: Mapped[str] = mapped_column(String(80), index=True)
+    snapshot_date: Mapped[date] = mapped_column(Date, index=True)
+    outcome_trade_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+
+    status: Mapped[str] = mapped_column(String(40), index=True)
+    reason: Mapped[str] = mapped_column(Text, default="")
+
+    signal_close_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    outcome_open_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    outcome_high_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    outcome_low_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    outcome_close_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    outcome_volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    open_gap_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    close_return_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_favorable_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_adverse_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    intraday_range_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume_change_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)

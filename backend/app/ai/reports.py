@@ -443,6 +443,184 @@ def _compact_us_stock_summary(context: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _compact_market_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "stock_id": row.get("stock_id"),
+        "stock_name": row.get("stock_name"),
+        "industry": row.get("industry"),
+        "close_price": row.get("close_price"),
+        "price_change": row.get("price_change"),
+        "change_pct": row.get("change_pct"),
+        "trade_value": row.get("trade_value"),
+        "trade_volume": row.get("trade_volume"),
+    }
+
+
+def _compact_market_industry(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "industry": row.get("industry"),
+        "count": row.get("count"),
+        "advance_count": row.get("advance_count"),
+        "decline_count": row.get("decline_count"),
+        "average_change_pct": row.get("average_change_pct"),
+        "trade_value": row.get("trade_value"),
+        "top_stock_id": row.get("top_stock_id"),
+        "top_stock_name": row.get("top_stock_name"),
+    }
+
+
+def _market_row_labels(rows: list[dict[str, Any]], *, include_pct: bool = True) -> str:
+    labels: list[str] = []
+    for row in rows[:HUMAN_ANSWER_MAX_ITEMS]:
+        label = _row_label(row)
+        pct = _pct_display(row.get("change_pct")) if include_pct else None
+        labels.append(f"{label} {pct}" if pct else label)
+    return "、".join(labels) if labels else "無可用資料"
+
+
+def _compact_market_summary(overview: dict[str, Any]) -> dict[str, Any]:
+    data = overview.get("data") if isinstance(overview.get("data"), dict) else {}
+    breadth = data.get("breadth") if isinstance(data.get("breadth"), dict) else {}
+    distribution = data.get("distribution") if isinstance(data.get("distribution"), dict) else {}
+    index_intraday = data.get("index_intraday") if isinstance(data.get("index_intraday"), dict) else {}
+    slots = data.get("slots") if isinstance(data.get("slots"), dict) else {}
+    top_gainers = [
+        _compact_market_row(row)
+        for row in data.get("top_gainers", [])
+        if isinstance(row, dict)
+    ]
+    top_losers = [
+        _compact_market_row(row)
+        for row in data.get("top_losers", [])
+        if isinstance(row, dict)
+    ]
+    value_leaders = [
+        _compact_market_row(row)
+        for row in data.get("value_leaders", [])
+        if isinstance(row, dict)
+    ]
+    top_industries = [
+        _compact_market_industry(row)
+        for row in data.get("top_industries", [])
+        if isinstance(row, dict)
+    ]
+    weak_industries = [
+        _compact_market_industry(row)
+        for row in data.get("weak_industries", [])
+        if isinstance(row, dict)
+    ]
+
+    advance_count = breadth.get("advance_count")
+    decline_count = breadth.get("decline_count")
+    unchanged_count = breadth.get("unchanged_count")
+    positive_ratio_text = _pct_display(
+        (breadth.get("positive_ratio") or 0) * 100
+        if breadth.get("positive_ratio") is not None
+        else None
+    )
+    average_change_text = _pct_display(breadth.get("average_change_pct"))
+    breadth_line = (
+        f"上漲 {advance_count}、下跌 {decline_count}、持平 {unchanged_count}"
+        if advance_count is not None and decline_count is not None
+        else "市場廣度資料不足"
+    )
+    if positive_ratio_text:
+        breadth_line += f"，上漲比 {positive_ratio_text}"
+    if average_change_text:
+        breadth_line += f"，平均漲跌 {average_change_text}"
+
+    industry_labels = [
+        str(row.get("industry"))
+        for row in top_industries[:HUMAN_ANSWER_MAX_ITEMS]
+        if row.get("industry")
+    ]
+    human_sections = [
+        {"label": "市場廣度", "text": breadth_line},
+        {"label": "強勢股", "text": _market_row_labels(top_gainers)},
+        {"label": "弱勢股", "text": _market_row_labels(top_losers)},
+        {"label": "成交值", "text": _market_row_labels(value_leaders, include_pct=False)},
+        {"label": "強勢產業", "text": "、".join(industry_labels) or "無可用資料"},
+    ]
+    if index_intraday.get("enabled"):
+        index_labels = []
+        for item in index_intraday.get("indices", [])[:2]:
+            if not isinstance(item, dict):
+                continue
+            quote = item.get("quote") if isinstance(item.get("quote"), dict) else {}
+            index_id = item.get("index_id") or quote.get("index_id")
+            price = quote.get("price")
+            change_pct = _pct_display(quote.get("change_pct"))
+            if index_id and price is not None:
+                index_labels.append(f"{index_id} {price}{' ' + change_pct if change_pct else ''}")
+        human_sections.insert(
+            1,
+            {
+                "label": "指數盤中",
+                "text": "、".join(index_labels) if index_labels else "盤中指數資料不足",
+            },
+        )
+    human_lines = [f"{section['label']}：{section['text']}" for section in human_sections]
+
+    return {
+        "kind": "market_brief_summary",
+        "as_of": overview.get("as_of"),
+        "highlights": human_lines,
+        "human_answer": {
+            "kind": "market_brief_human_answer",
+            "style": "concise_market_brief",
+            "sections": human_sections,
+            "lines": human_lines,
+            "text": "\n".join(human_lines),
+        },
+        "breadth": breadth,
+        "distribution": distribution,
+        "top_gainers": top_gainers,
+        "top_losers": top_losers,
+        "value_leaders": value_leaders,
+        "top_industries": top_industries,
+        "weak_industries": weak_industries,
+        "index_intraday": index_intraday,
+        "slots": slots,
+        "next_checks": overview.get("missing", []),
+    }
+
+
+def build_market_brief(
+    db: Session,
+    *,
+    limit: int = 10,
+    include_intraday: bool = False,
+    analysis_horizon: str = "swing",
+    market_data_params: dict[str, Any] | None = None,
+    response_preferences: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    overview = tools.read_market_overview(
+        db=db,
+        limit=limit,
+        include_intraday=include_intraday or analysis_horizon == "intraday",
+        market_data_params=market_data_params,
+    )
+    summary = _compact_market_summary(overview)
+    return {
+        **overview,
+        "kind": "market_brief",
+        "data": {
+            "summary": summary,
+            "breadth": summary["breadth"],
+            "distribution": summary["distribution"],
+            "top_gainers": summary["top_gainers"],
+            "top_losers": summary["top_losers"],
+            "value_leaders": summary["value_leaders"],
+            "top_industries": summary["top_industries"],
+            "weak_industries": summary["weak_industries"],
+            "index_intraday": summary["index_intraday"],
+            "slots": summary["slots"],
+        },
+        "summary": summary,
+        "response_preferences": response_preferences or {},
+    }
+
+
 def _build_us_stock_analysis(context: dict[str, Any], requested_horizon: str) -> dict[str, Any]:
     compact = _compact_us_stock_summary(context)
     latest = compact.get("latest") if isinstance(compact.get("latest"), dict) else {}
@@ -977,6 +1155,7 @@ def build_stock_brief(
     branch_days: int = 5,
     include_intraday: bool = False,
     analysis_horizon: str = "swing",
+    market_data_params: dict[str, Any] | None = None,
     response_preferences: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     context = tools.read_stock_context(
@@ -985,6 +1164,7 @@ def build_stock_brief(
         branch_days=branch_days,
         include_intraday=include_intraday,
         analysis_horizon=analysis_horizon,
+        market_data_params=market_data_params,
     )
     profile = prompts.get_strategy_profile(strategy_profile)
     memories = _memory_context(
@@ -1024,12 +1204,14 @@ def build_us_stock_brief(
     strategy_profile: str = "short_term_momentum",
     analysis_horizon: str = "swing",
     tool_runs: list[dict[str, Any]] | None = None,
+    market_data_params: dict[str, Any] | None = None,
     response_preferences: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     context = agentic_tools.read_us_stock_context(
         db=db,
         symbol=symbol,
         tool_runs=tool_runs,
+        market_data_params=market_data_params,
     )
     profile = prompts.get_strategy_profile(strategy_profile)
     normalized_symbol = ((context.get("scope") or {}).get("target") or {}).get("id") or symbol
@@ -1063,6 +1245,213 @@ def build_us_stock_brief(
             "memories": memories,
         },
         "summary": _compact_us_stock_summary({**context, "data": data}),
+    }
+
+
+def _compact_cross_market_summary(context: dict[str, Any]) -> dict[str, Any]:
+    data = context.get("data") if isinstance(context.get("data"), dict) else {}
+    compact = data.get("compact") if isinstance(data.get("compact"), dict) else {}
+    target = compact.get("target") if isinstance(compact.get("target"), dict) else (
+        (context.get("scope") or {}).get("target") if isinstance(context.get("scope"), dict) else {}
+    )
+    quote = compact.get("quote") if isinstance(compact.get("quote"), dict) else {}
+    resources = compact.get("resources") if isinstance(compact.get("resources"), dict) else {}
+    freshness = compact.get("freshness_by_domain") if isinstance(compact.get("freshness_by_domain"), dict) else {}
+    summary = context.get("summary") if isinstance(context.get("summary"), dict) else {}
+    missing = list(context.get("missing") or [])
+    warnings = list(context.get("warnings") or [])
+    price = quote.get("price") if quote else summary.get("latest_close") or summary.get("latest_price")
+    change_pct = quote.get("change_pct_24h") if quote else None
+    label = (target or {}).get("label") or (target or {}).get("id") or "-"
+    title = "local-cache evidence"
+    if missing:
+        title = "local-cache evidence with gaps"
+    display_parts = [str(label)]
+    if price is not None:
+        display_parts.append(f"price {price}")
+    pct_text = _pct_display(change_pct)
+    if pct_text:
+        display_parts.append(f"24h {pct_text}")
+    if missing:
+        display_parts.append(f"missing {len(missing)} dataset(s)")
+
+    human_lines = [
+        " / ".join(display_parts),
+        f"resources: {resources}",
+        "read path: local cache only; use bounded refresh endpoints before relying on missing/stale data.",
+    ]
+    if warnings:
+        human_lines.append(f"warnings: {warnings[:3]}")
+
+    return {
+        "kind": "cross_market_brief_summary",
+        "target": target or {},
+        "quote": quote,
+        "resources": resources,
+        "freshness": freshness,
+        "title": title,
+        "display": " / ".join(display_parts),
+        "missing": missing,
+        "warning_count": len(warnings),
+        "human_answer": {
+            "kind": "cross_market_human_answer",
+            "style": "concise_evidence_brief",
+            "lines": human_lines,
+            "text": "\n".join(str(item) for item in human_lines),
+        },
+    }
+
+
+def build_jp_stock_brief(
+    db: Session,
+    symbol: str,
+    *,
+    is_index: bool = False,
+    strategy_profile: str = "short_term_momentum",
+    tool_runs: list[dict[str, Any]] | None = None,
+    market_data_params: dict[str, Any] | None = None,
+    response_preferences: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    context = agentic_tools.read_jp_stock_context(
+        db=db,
+        symbol=symbol,
+        is_index=is_index,
+        tool_runs=tool_runs,
+        market_data_params=market_data_params,
+    )
+    profile = prompts.get_strategy_profile(strategy_profile)
+    target = (context.get("scope") or {}).get("target") or {}
+    scope_type = "jp_index" if is_index else "jp_stock"
+    scope_id = str(target.get("id") or symbol)
+    memories = _memory_context(
+        db=db,
+        scope_type=scope_type,
+        scope_id=scope_id,
+        strategy_profile=profile.key,
+    )
+
+    return {
+        **context,
+        "kind": "jp_index_brief" if is_index else "jp_stock_brief",
+        "strategy_profile": profile.key,
+        "response_preferences": response_preferences or {},
+        "prompt": {
+            "system": prompts.build_system_prompt(
+                profile.key,
+                response_preferences=response_preferences,
+            ),
+            "profile": {
+                "key": profile.key,
+                "label": profile.label,
+                "description": profile.description,
+                "focus_points": list(profile.focus_points),
+                "risk_notes": list(profile.risk_notes),
+            },
+            "memories": memories,
+        },
+        "summary": _compact_cross_market_summary(context),
+    }
+
+
+def build_kr_stock_brief(
+    db: Session,
+    symbol: str,
+    *,
+    is_index: bool = False,
+    strategy_profile: str = "short_term_momentum",
+    tool_runs: list[dict[str, Any]] | None = None,
+    market_data_params: dict[str, Any] | None = None,
+    response_preferences: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    context = agentic_tools.read_kr_stock_context(
+        db=db,
+        symbol=symbol,
+        is_index=is_index,
+        tool_runs=tool_runs,
+        market_data_params=market_data_params,
+    )
+    profile = prompts.get_strategy_profile(strategy_profile)
+    target = (context.get("scope") or {}).get("target") or {}
+    scope_type = "kr_index" if is_index else "kr_stock"
+    scope_id = str(target.get("id") or symbol)
+    memories = _memory_context(
+        db=db,
+        scope_type=scope_type,
+        scope_id=scope_id,
+        strategy_profile=profile.key,
+    )
+
+    return {
+        **context,
+        "kind": "kr_index_brief" if is_index else "kr_stock_brief",
+        "strategy_profile": profile.key,
+        "response_preferences": response_preferences or {},
+        "prompt": {
+            "system": prompts.build_system_prompt(
+                profile.key,
+                response_preferences=response_preferences,
+            ),
+            "profile": {
+                "key": profile.key,
+                "label": profile.label,
+                "description": profile.description,
+                "focus_points": list(profile.focus_points),
+                "risk_notes": list(profile.risk_notes),
+            },
+            "memories": memories,
+        },
+        "summary": _compact_cross_market_summary(context),
+    }
+
+
+def build_crypto_brief(
+    db: Session,
+    *,
+    asset: str | None = None,
+    strategy_profile: str = "short_term_momentum",
+    tool_runs: list[dict[str, Any]] | None = None,
+    market_data_params: dict[str, Any] | None = None,
+    context_limit: int = 100,
+    response_preferences: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    context = agentic_tools.read_crypto_context(
+        db=db,
+        asset=asset,
+        tool_runs=tool_runs,
+        market_data_params=market_data_params,
+        context_limit=context_limit,
+    )
+    profile = prompts.get_strategy_profile(strategy_profile)
+    target = (context.get("scope") or {}).get("target") or {}
+    scope_type = str(target.get("type") or ("crypto_asset" if asset else "crypto_market"))
+    scope_id = str(target.get("id") or asset or "market")
+    memories = _memory_context(
+        db=db,
+        scope_type=scope_type,
+        scope_id=scope_id,
+        strategy_profile=profile.key,
+    )
+
+    return {
+        **context,
+        "kind": "crypto_asset_brief" if asset else "crypto_market_brief",
+        "strategy_profile": profile.key,
+        "response_preferences": response_preferences or {},
+        "prompt": {
+            "system": prompts.build_system_prompt(
+                profile.key,
+                response_preferences=response_preferences,
+            ),
+            "profile": {
+                "key": profile.key,
+                "label": profile.label,
+                "description": profile.description,
+                "focus_points": list(profile.focus_points),
+                "risk_notes": list(profile.risk_notes),
+            },
+            "memories": memories,
+        },
+        "summary": _compact_cross_market_summary(context),
     }
 
 

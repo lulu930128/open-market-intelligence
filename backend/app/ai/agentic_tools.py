@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.ai import llm, progress_events
 from app.db.models import (
     JPStockMaster,
+    KRStockMaster,
     USDailyPrice,
     USCompanyProfile,
     USCorporateAction,
@@ -20,8 +21,14 @@ from app.db.models import (
 )
 from app.ai.evidence_passport import build_evidence_passport
 from app.ai import freshness
+from app.crypto_market import service as crypto_market_service
+from app.crypto_market.assets import get_crypto_asset
+from app.crypto_market.contract import PERPETUAL, SPOT, list_provider_instruments, normalize_symbol as normalize_crypto_symbol
+from app.crypto_market.source_health import build_crypto_source_health
 from app.jp_market import service as jp_market_service
 from app.jp_market.sources import normalize_jp_symbol
+from app.kr_market import service as kr_market_service
+from app.kr_market.sources import KR_INDEX_CONFIG_BY_ID, normalize_kr_index_id, normalize_kr_symbol
 from app.market.overnight_impact import scan_us_overnight_impact_gaps
 from app.market import stock_selection_refresh
 from app.us_market import service as us_market_service
@@ -756,6 +763,20 @@ def plan_tw_watchlist_tools(
     ), []
 
 
+def _compact_intraday_points(points: list[Any], *, max_points: int = 80) -> list[dict[str, Any]]:
+    valid_points = [_json_ready(point) for point in points if isinstance(point, dict)]
+    valid_points = [point for point in valid_points if isinstance(point, dict)]
+    if len(valid_points) <= max_points:
+        return valid_points
+
+    last_index = len(valid_points) - 1
+    indexes = {
+        round(index * last_index / (max_points - 1))
+        for index in range(max_points)
+    }
+    return [valid_points[index] for index in sorted(indexes)]
+
+
 def _compact_result(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {"value": _json_value(value)}
@@ -785,12 +806,30 @@ def _compact_result(value: Any) -> dict[str, Any]:
         "lookback_days",
         "point_count",
         "previous_close",
+        "previous_close_source",
+        "previous_close_trade_date",
+        "previous_close_provider",
+        "session_scope",
+        "session_phase",
+        "has_extended_hours",
+        "regular_point_count",
+        "extended_point_count",
+        "regular_session_close",
+        "regular_session_close_time",
+        "source",
+        "source_url",
         "metric_count",
         "message",
     )
     summary = {key: _json_value(value.get(key)) for key in keys if key in value}
-    if "points" in value and "point_count" not in summary and isinstance(value["points"], list):
-        summary["point_count"] = len(value["points"])
+    if "points" in value and isinstance(value["points"], list):
+        points = _compact_intraday_points(value["points"])
+        summary["returned_point_count"] = len(points)
+        summary["points"] = points
+        if points:
+            summary["latest_point"] = points[-1]
+        if "point_count" not in summary:
+            summary["point_count"] = len(value["points"])
     if "metrics" in value and "metric_count" not in summary and isinstance(value["metrics"], list):
         summary["metric_count"] = len(value["metrics"])
     return summary
@@ -1260,14 +1299,419 @@ def _append_source_ref_once(source_refs: list[dict[str, Any]], ref: dict[str, An
     source_refs.append(ref)
 
 
+def _latest_timestamp_from_rows(rows: list[Any], fields: tuple[str, ...]) -> str | None:
+    values: list[datetime] = []
+    for row in rows:
+        for field in fields:
+            value = getattr(row, field, None)
+            if isinstance(value, datetime):
+                values.append(value)
+    if not values:
+        return None
+    return max(values).isoformat()
+
+
+def _has_market_payload_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, dict):
+        return any(_has_market_payload_value(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_has_market_payload_value(item) for item in value)
+    return True
+
+
+def _market_slot(
+    *,
+    status: str,
+    capability: str,
+    payload_ref: str | None = None,
+    payload_level: str | None = None,
+    priority: str = "support",
+    next_fill: str | None = None,
+) -> dict[str, Any]:
+    slot: dict[str, Any] = {
+        "status": status,
+        "capability": capability,
+        "priority": priority,
+    }
+    if payload_ref:
+        slot["payload_ref"] = payload_ref
+    if payload_level:
+        slot["payload_level"] = payload_level
+    if next_fill:
+        slot["next_fill"] = next_fill
+    return slot
+
+
+def _freshness_status(freshness: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = freshness.get(key)
+        if isinstance(value, dict):
+            status = value.get("status") or value.get("summary")
+            if status:
+                return str(status)
+        elif value is not None:
+            return str(value)
+    return None
+
+
+def _market_resource_count(resources: dict[str, Any], *keys: str) -> int:
+    total = 0
+    for key in keys:
+        value = resources.get(key)
+        if isinstance(value, bool):
+            total += 1 if value else 0
+        elif isinstance(value, int):
+            total += max(0, value)
+        elif isinstance(value, dict):
+            total += sum(item for item in value.values() if isinstance(item, int) and item > 0)
+    return total
+
+
+MARKET_PAYLOAD_LEVELS = {"summary", "compact", "standard", "full"}
+MARKET_PAYLOAD_INTRADAY_LIMITS = {
+    "summary": 1,
+    "compact": 80,
+    "standard": 160,
+    "full": 500,
+}
+
+
+def _market_payload_level(params: dict[str, Any] | None) -> str:
+    data_params = params if isinstance(params, dict) else {}
+    raw_level = (
+        data_params.get("payload_level")
+        or data_params.get("detail_level")
+        or data_params.get("detail")
+        or "compact"
+    )
+    level = str(raw_level).strip().lower()
+    return level if level in MARKET_PAYLOAD_LEVELS else "compact"
+
+
+def _market_intraday_point_limit(params: dict[str, Any] | None) -> int:
+    level = _market_payload_level(params)
+    data_params = params if isinstance(params, dict) else {}
+    default = MARKET_PAYLOAD_INTRADAY_LIMITS[level]
+    for key in ("intraday_limit", "intraday_bar_limit", "point_limit"):
+        if key not in data_params:
+            continue
+        try:
+            value = int(data_params[key])
+        except (TypeError, ValueError):
+            continue
+        return max(1, min(MARKET_PAYLOAD_INTRADAY_LIMITS["full"], value))
+    return default
+
+
+def _freshness_has_missing(value: Any) -> bool:
+    if isinstance(value, str):
+        return value == "missing"
+    if isinstance(value, dict):
+        return any(_freshness_has_missing(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_freshness_has_missing(item) for item in value)
+    return False
+
+
+def _compact_market_slots(
+    *,
+    target: dict[str, Any],
+    quote: dict[str, Any],
+    resources: dict[str, Any],
+    freshness: dict[str, Any],
+    payload_level: str,
+) -> dict[str, Any]:
+    target_type = str(target.get("type") or "")
+    is_index = target_type.endswith("_index") or target_type == "index"
+    is_crypto = target_type.startswith("crypto")
+    quote_status = _freshness_status(freshness, "quote", "price")
+    has_quote = _has_market_payload_value(quote)
+    include_intraday = resources.get("include_intraday")
+    intraday_status = _freshness_status(freshness, "intraday")
+
+    if include_intraday is False:
+        intraday_slot_status = "not_requested"
+    elif resources.get("intraday_available") or intraday_status == "current":
+        intraday_slot_status = "ready"
+    elif intraday_status == "missing":
+        intraday_slot_status = "missing"
+    else:
+        intraday_slot_status = "planned"
+
+    chart_count = _market_resource_count(resources, "chart_points", "daily_rows", "ohlcv_rows")
+    fundamental_count = _market_resource_count(
+        resources,
+        "profile_available",
+        "fundamental_available",
+        "fundamental_rows",
+        "sec_metric_count",
+        "market_cap_rows",
+    )
+    flow_count = _market_resource_count(
+        resources,
+        "investor_trade_rows",
+        "short_volume_rows",
+        "order_book_rows",
+        "spread_rows",
+    )
+    derivative_count = _market_resource_count(
+        resources,
+        "derivatives_rows",
+        "long_short_ratio",
+        "liquidation_heatmap",
+    )
+
+    return {
+        "identity": _market_slot(
+            status="ready" if target else "partial",
+            capability="target_identity",
+            payload_ref="target",
+            payload_level=payload_level,
+            priority="core",
+        ),
+        "quote": _market_slot(
+            status="ready" if has_quote and quote_status != "missing" else "missing",
+            capability="quote_snapshot",
+            payload_ref="quote",
+            payload_level=payload_level,
+            priority="core",
+        ),
+        "intraday": _market_slot(
+            status=intraday_slot_status,
+            capability="live_intraday_bars",
+            payload_ref="intraday_bars",
+            payload_level=payload_level,
+            priority="core",
+            next_fill="Route through bounded backend refresh/tool policy before exposing as default."
+            if intraday_slot_status == "planned"
+            else None,
+        ),
+        "daily_chart": _market_slot(
+            status="ready" if chart_count > 0 else "missing",
+            capability="daily_ohlc_chart",
+            payload_ref="full.data.chart",
+            payload_level=payload_level,
+            priority="core",
+        ),
+        "fundamentals": _market_slot(
+            status="not_applicable" if is_index else "ready" if fundamental_count > 0 else "missing",
+            capability="fundamentals",
+            payload_ref="resources",
+            payload_level=payload_level,
+        ),
+        "flows_liquidity": _market_slot(
+            status="ready" if flow_count > 0 else "planned",
+            capability="flows_and_liquidity",
+            payload_ref="resources",
+            payload_level=payload_level,
+            next_fill="Normalize market-specific flow/liquidity evidence into a shared compact payload.",
+        ),
+        "derivatives": _market_slot(
+            status="ready" if derivative_count > 0 else "missing" if is_crypto else "planned",
+            capability="derivatives_context",
+            payload_ref="resources",
+            payload_level=payload_level,
+            next_fill="Keep derivatives as auxiliary risk context unless the target market has a native derivatives workflow.",
+        ),
+        "data_quality": _market_slot(
+            status="partial" if _freshness_has_missing(freshness) else "ready",
+            capability="data_quality_and_freshness",
+            payload_ref="freshness_by_domain",
+            payload_level=payload_level,
+            priority="core",
+        ),
+    }
+
+
+def _compact_market_context(
+    *,
+    kind: str,
+    target: dict[str, Any],
+    quote: dict[str, Any] | None,
+    resources: dict[str, Any],
+    freshness: dict[str, Any],
+    payload_level: str = "compact",
+) -> dict[str, Any]:
+    return {
+        "kind": kind,
+        "version": "market_compact_evidence.v1",
+        "payload_level": payload_level,
+        "target": target,
+        "quote": quote or {},
+        "resources": resources,
+        "freshness_by_domain": freshness,
+        "slots": _compact_market_slots(
+            target=target,
+            quote=quote or {},
+            resources=resources,
+            freshness=freshness,
+            payload_level=payload_level,
+        ),
+    }
+
+
+def _market_data_param(params: dict[str, Any] | None, key: str, default: Any = None) -> Any:
+    if not isinstance(params, dict):
+        return default
+    value = params.get(key, default)
+    return default if value is None else value
+
+
+def _market_data_int(params: dict[str, Any] | None, key: str, default: int, *, minimum: int, maximum: int) -> int:
+    return _safe_int(_market_data_param(params, key, default), default, minimum=minimum, maximum=maximum)
+
+
+def _market_data_str(params: dict[str, Any] | None, key: str, default: str | None = None) -> str | None:
+    value = _market_data_param(params, key, default)
+    if value is None:
+        return default
+    text = str(value).strip()
+    return text or default
+
+
+def _market_data_bool(params: dict[str, Any] | None, key: str, default: bool = False) -> bool:
+    value = _market_data_param(params, key, default)
+    return bool(_optional_bool(value)) if value is not None else default
+
+
+def _us_intraday_compact(
+    intraday_summary: dict[str, Any] | None,
+    *,
+    market_data_params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload_level = _market_payload_level(market_data_params)
+    point_limit = _market_intraday_point_limit(market_data_params)
+    if not isinstance(intraday_summary, dict) or not intraday_summary:
+        return {
+            "enabled": False,
+            "payload_level": payload_level,
+            "bar_limit": point_limit,
+            "series": {},
+            "warnings": ["US intraday trend was not requested or did not return data."],
+        }
+
+    raw_points = intraday_summary.get("points") if isinstance(intraday_summary.get("points"), list) else []
+    points = [point for point in raw_points if isinstance(point, dict)]
+    compact_points = points[-point_limit:]
+    latest = intraday_summary.get("latest_point") if isinstance(intraday_summary.get("latest_point"), dict) else None
+    if latest is None and points:
+        latest = points[-1]
+
+    point_count = _safe_int(
+        intraday_summary.get("point_count"),
+        len(points),
+        minimum=0,
+        maximum=100000,
+    )
+    raw_warnings = intraday_summary.get("warnings")
+    warnings = raw_warnings if isinstance(raw_warnings, list) else []
+    status = "ok" if latest or point_count > 0 else "missing"
+    source = intraday_summary.get("source") or ("yahoo_finance_chart" if status == "ok" else "not_available")
+
+    return {
+        "enabled": True,
+        "payload_level": payload_level,
+        "bar_limit": point_limit,
+        "series": {
+            "1m": {
+                "interval": "1m",
+                "source": source,
+                "provider": "yahoo_chart" if source == "yahoo_finance_chart" else source,
+                "session_scope": intraday_summary.get("session_scope") or "regular",
+                "session_phase": intraday_summary.get("session_phase"),
+                "point_count": point_count,
+                "returned_point_count": len(compact_points),
+                "latest": latest,
+                "points": compact_points,
+                "to_time": latest.get("time") if isinstance(latest, dict) else None,
+                "previous_close": intraday_summary.get("previous_close"),
+                "previous_close_source": intraday_summary.get("previous_close_source"),
+                "previous_close_trade_date": intraday_summary.get("previous_close_trade_date"),
+                "regular_session_close": intraday_summary.get("regular_session_close"),
+                "regular_session_close_time": intraday_summary.get("regular_session_close_time"),
+                "has_extended_hours": intraday_summary.get("has_extended_hours"),
+                "source_url": intraday_summary.get("source_url"),
+            }
+        },
+        "warnings": warnings,
+    }
+
+
+def _us_intraday_quote(intraday_summary: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(intraday_summary, dict) or not intraday_summary:
+        return {}
+
+    latest = intraday_summary.get("latest_point") if isinstance(intraday_summary.get("latest_point"), dict) else None
+    points = intraday_summary.get("points") if isinstance(intraday_summary.get("points"), list) else []
+    if latest is None and points:
+        latest = points[-1]
+    if not isinstance(latest, dict):
+        return {}
+
+    price = latest.get("price")
+    previous_close = intraday_summary.get("previous_close")
+    change = None
+    change_pct = None
+    if isinstance(price, (int, float)) and isinstance(previous_close, (int, float)) and previous_close:
+        change = float(price) - float(previous_close)
+        change_pct = change / float(previous_close) * 100
+
+    return {
+        "source": intraday_summary.get("source") or "yahoo_finance_chart",
+        "price": price,
+        "change": change,
+        "change_pct": change_pct,
+        "volume": latest.get("volume"),
+        "quote_time": latest.get("time"),
+        "is_realtime": True,
+        "latency_ms": None,
+        "session_phase": intraday_summary.get("session_phase") or latest.get("session"),
+        "provider": "yahoo_chart",
+        "previous_close": previous_close,
+        "previous_close_source": intraday_summary.get("previous_close_source"),
+        "point_count": intraday_summary.get("point_count"),
+    }
+
+
+def _us_daily_quote(latest_daily: USDailyPrice | None, *, intraday_requested: bool) -> dict[str, Any]:
+    quote = {
+        "source": "us_daily_price",
+        "price": latest_daily.close_price if latest_daily else None,
+        "volume": latest_daily.trade_volume if latest_daily else None,
+        "quote_time": latest_daily.trade_date.isoformat() if latest_daily else None,
+        "is_realtime": False,
+        "latency_ms": None,
+        "session_phase": "daily_close" if latest_daily else None,
+        "provider": latest_daily.provider if latest_daily else None,
+    }
+    if intraday_requested:
+        quote["fallback_reason"] = "live_quote_not_available"
+    return quote
+
+
 def read_us_stock_context(
     db: Session,
     *,
     symbol: str,
     tool_runs: list[dict[str, Any]] | None = None,
+    market_data_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized_symbol = normalize_us_symbol(symbol)
     tool_runs = tool_runs or []
+    daily_limit = _market_data_int(market_data_params, "daily_limit", 10, minimum=1, maximum=200)
+    timeframe = _market_data_str(market_data_params, "timeframe", "daily") or "daily"
+    bars = _market_data_int(market_data_params, "bars", 90, minimum=1, maximum=5000)
+    provider = _market_data_str(market_data_params, "provider", "auto") or "auto"
+    include_intraday = _market_data_bool(market_data_params, "include_intraday", False)
+    payload_level = _market_payload_level(market_data_params)
+    session_scope = _market_data_str(market_data_params, "session_scope", "regular") or "regular"
+    intraday_summary = _latest_tool_result(tool_runs, "us.read_intraday_trend")
     stock = (
         db.query(USStockMaster)
         .filter(USStockMaster.symbol == normalized_symbol)
@@ -1276,7 +1720,7 @@ def read_us_stock_context(
     daily_rows = us_market_service.list_us_daily_prices(
         db=db,
         symbol=normalized_symbol,
-        limit=10,
+        limit=daily_limit,
     )
     profile = _latest_profile(db, normalized_symbol)
     sec_summary: dict[str, Any] | None = None
@@ -1311,6 +1755,28 @@ def read_us_stock_context(
         missing.append("us_sec_company_fact")
     if sec_warning:
         warnings.append(sec_warning)
+
+    chart: dict[str, Any] = {}
+    try:
+        chart = us_market_service.list_us_ohlc_chart_data(
+            db=db,
+            symbol=normalized_symbol,
+            timeframe=timeframe,
+            bars=bars,
+            ensure_history=False,
+            include_intraday=False,
+            outputsize="compact",
+            adjusted=False,
+            provider=provider,
+        )
+        if include_intraday and session_scope != "regular":
+            chart["requested_session_scope"] = session_scope
+        if not chart.get("point_count") and "us_ohlc_chart" not in missing:
+            missing.append("us_ohlc_chart")
+    except Exception as exc:
+        missing.append("us_ohlc_chart")
+        warnings.append(f"US OHLC chart unavailable: {exc}")
+
     for entry in source_health.get("entries") or []:
         if not isinstance(entry, dict) or entry.get("status") != "stale":
             continue
@@ -1350,7 +1816,9 @@ def read_us_stock_context(
         _append_source_ref_once(source_refs, {"type": "table", "name": "us_short_volume_daily"})
     _append_source_ref_once(source_refs, {"type": "derived", "name": "app.us_market.source_health"})
 
-    intraday_summary = _latest_tool_result(tool_runs, "us.read_intraday_trend")
+    intraday_quote = _us_intraday_quote(intraday_summary)
+    quote = intraday_quote or _us_daily_quote(latest_daily, intraday_requested=include_intraday)
+    intraday_bars = _us_intraday_compact(intraday_summary, market_data_params=market_data_params)
     envelope = {
         "kind": "us_stock_context",
         "generated_at": _now().isoformat(),
@@ -1387,6 +1855,13 @@ def read_us_stock_context(
                 ),
             ),
             "sec_metric_count": (sec_summary or {}).get("metric_count") if sec_summary else 0,
+            "chart": {
+                "timeframe": chart.get("timeframe"),
+                "bars": chart.get("bars"),
+                "point_count": chart.get("point_count"),
+                "include_intraday": False,
+                "requested_include_intraday": include_intraday,
+            } if chart else {},
             "source_health": source_health.get("summary"),
         },
         "data": {
@@ -1420,6 +1895,7 @@ def read_us_stock_context(
                     "fetched_at",
                 ),
             ),
+            "chart": _json_ready(chart),
             "sec_fundamentals": sec_summary,
             "corporate_actions": _list_rows(
                 corporate_actions,
@@ -1453,6 +1929,35 @@ def read_us_stock_context(
         "warnings": list(dict.fromkeys(warnings)),
         "source_refs": source_refs,
     }
+    envelope["data"]["compact"] = _compact_market_context(
+        kind="us_stock_compact_evidence",
+        target=envelope["scope"]["target"],
+        quote=quote,
+        resources={
+            "daily_rows": len(daily_rows),
+            "profile_available": profile is not None,
+            "sec_metric_count": (sec_summary or {}).get("metric_count") if sec_summary else 0,
+            "corporate_action_rows": len(corporate_actions),
+            "short_volume_rows": len(short_volume_rows),
+            "chart_points": chart.get("point_count") if chart else 0,
+            "timeframe": timeframe,
+            "bars": bars,
+            "payload_level": payload_level,
+            "requested_provider": provider,
+            "intraday": intraday_summary or {},
+            "include_intraday": include_intraday,
+            "intraday_available": bool(intraday_quote),
+        },
+        freshness={
+            "price": "current" if latest_daily or intraday_quote else "missing",
+            "profile": "current" if profile else "missing",
+            "chart": "current" if chart else "missing",
+            "intraday": "current" if intraday_quote else "missing",
+            "source_health": source_health.get("summary"),
+        },
+        payload_level=payload_level,
+    )
+    envelope["data"]["compact"]["intraday_bars"] = intraday_bars
     envelope["evidence_passport"] = build_evidence_passport(
         kind="us_stock_context",
         as_of=envelope["as_of"],
@@ -1471,9 +1976,14 @@ def read_jp_stock_context(
     symbol: str,
     is_index: bool = False,
     tool_runs: list[dict[str, Any]] | None = None,
+    market_data_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized_symbol = normalize_jp_symbol(symbol)
     tool_runs = tool_runs or []
+    timeframe = _market_data_str(market_data_params, "timeframe", "daily") or "daily"
+    bars = _market_data_int(market_data_params, "bars", 90, minimum=1, maximum=5000)
+    provider = _market_data_str(market_data_params, "provider", "auto") or "auto"
+    payload_level = _market_payload_level(market_data_params)
     stock = (
         db.query(JPStockMaster)
         .filter(JPStockMaster.symbol == normalized_symbol)
@@ -1512,11 +2022,11 @@ def read_jp_stock_context(
         chart = jp_market_service.list_jp_ohlc_chart_data(
             db=db,
             symbol=normalized_symbol,
-            timeframe="daily",
-            bars=90,
+            timeframe=timeframe,
+            bars=bars,
             ensure_history=False,
             outputsize="compact",
-            provider="auto",
+            provider=provider,
         )
     except Exception as exc:
         if "jp_daily_price" not in missing:
@@ -1745,6 +2255,32 @@ def read_jp_stock_context(
         "warnings": list(dict.fromkeys(warnings)),
         "source_refs": source_refs,
     }
+    envelope["data"]["compact"] = _compact_market_context(
+        kind="jp_index_compact_evidence" if is_index else "jp_stock_compact_evidence",
+        target=envelope["scope"]["target"],
+        quote={
+            "source": "jp_daily_price",
+            "price": latest_close,
+            "volume": latest_volume,
+            "quote_time": latest_trade_date,
+            "is_realtime": False,
+            "provider": latest_daily.provider if latest_daily else None,
+        },
+        resources={
+            "daily_rows": len(daily_rows),
+            "chart_points": len(chart_points),
+            "timeframe": timeframe,
+            "bars": bars,
+            "payload_level": payload_level,
+            "fundamental_available": fundamental is not None,
+            "resource_status": envelope["summary"].get("resource_status"),
+        },
+        freshness={
+            "price": "current" if latest_trade_date else "missing",
+            "fundamental": "current" if fundamental is not None else "missing" if not is_index else "not_applicable",
+        },
+        payload_level=payload_level,
+    )
     freshness_result = {
         "kind": "jp_index_freshness" if is_index else "jp_stock_freshness",
         "scope": {"target": envelope["scope"]["target"]},
@@ -1753,6 +2289,872 @@ def read_jp_stock_context(
         "missing": envelope["missing"],
         "warnings": envelope["warnings"],
         "as_of": latest_trade_date,
+    }
+    envelope["evidence_passport"] = build_evidence_passport(
+        kind=envelope["kind"],
+        as_of=envelope["as_of"],
+        source_refs=source_refs,
+        missing=envelope["missing"],
+        warnings=envelope["warnings"],
+        freshness=freshness_result,
+        tool_runs=tool_runs,
+    )
+    return envelope
+
+
+def read_kr_stock_context(
+    db: Session,
+    *,
+    symbol: str,
+    is_index: bool = False,
+    tool_runs: list[dict[str, Any]] | None = None,
+    market_data_params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    tool_runs = tool_runs or []
+    timeframe = _market_data_str(market_data_params, "timeframe", "daily") or "daily"
+    bars = _market_data_int(market_data_params, "bars", 90, minimum=1, maximum=5000)
+    provider = _market_data_str(market_data_params, "provider", "auto") or "auto"
+    payload_level = _market_payload_level(market_data_params)
+    warnings: list[str] = [
+        "Korea AI context is local-cache only; it does not fetch external data on the read path.",
+    ]
+    missing: list[str] = []
+    source_refs: list[dict[str, Any]] = []
+    stock: KRStockMaster | None = None
+    daily_rows: list[Any] = []
+    chart: dict[str, Any] = {}
+    fundamentals: list[Any] = []
+    investor_rows: list[Any] = []
+    resource_summary: dict[str, Any] | None = None
+    source_health: dict[str, Any] = {}
+
+    if is_index:
+        normalized_id = normalize_kr_index_id(symbol)
+        index_config = KR_INDEX_CONFIG_BY_ID.get(normalized_id)
+        if index_config is None:
+            missing.append("kr_market_index")
+            warnings.append(f"Unsupported KR index id: {symbol}.")
+        try:
+            chart = kr_market_service.list_kr_index_ohlc_chart_data(
+                db=db,
+                index_id=normalized_id,
+                timeframe=timeframe,
+                bars=bars,
+                ensure_history=False,
+                outputsize="compact",
+            )
+        except Exception as exc:
+            missing.append("kr_index_daily_price")
+            warnings.append(f"KR index OHLC chart unavailable: {exc}")
+
+        chart_points = chart.get("points") if isinstance(chart, dict) else []
+        if not chart_points and "kr_index_daily_price" not in missing:
+            missing.append("kr_index_daily_price")
+        latest_point = chart_points[-1] if chart_points else None
+        latest_trade_date = _json_value(latest_point.get("time")) if isinstance(latest_point, dict) else None
+        latest_close = latest_point.get("close") if isinstance(latest_point, dict) else None
+        latest_volume = latest_point.get("volume") if isinstance(latest_point, dict) else None
+        label = (
+            index_config.short_name or index_config.name
+            if index_config is not None
+            else normalized_id
+        )
+        target = {"type": "kr_index", "id": normalized_id, "label": label, "market": "KR"}
+        _append_source_ref_once(source_refs, {"type": "table", "name": "kr_market_index"})
+        _append_source_ref_once(source_refs, {"type": "table", "name": "kr_index_daily_price"})
+        data = {
+            "stock": None,
+            "daily_prices": [],
+            "chart": _json_ready(chart),
+            "fundamentals": [],
+            "investor_trading": [],
+            "resource_summary": None,
+            "source_health": {},
+            "tool_runs": tool_runs,
+        }
+    else:
+        normalized_id = normalize_kr_symbol(symbol)
+        stock = (
+            db.query(KRStockMaster)
+            .filter(KRStockMaster.symbol == normalized_id)
+            .first()
+        )
+        if stock is None:
+            missing.append("kr_stock_master")
+            warnings.append("KR stock master row is missing; symbol-level cached evidence is still returned when available.")
+
+        try:
+            daily_rows = kr_market_service.list_kr_daily_prices(
+                db=db,
+                symbol=normalized_id,
+                provider=None if provider == "auto" else provider,
+                limit=10,
+            )
+        except Exception as exc:
+            missing.append("kr_daily_price")
+            warnings.append(f"KR daily prices unavailable: {exc}")
+
+        try:
+            chart = kr_market_service.list_kr_ohlc_chart_data(
+                db=db,
+                symbol=normalized_id,
+                timeframe=timeframe,
+                bars=bars,
+                ensure_history=False,
+                outputsize="compact",
+                provider=provider,
+            )
+        except Exception as exc:
+            if "kr_daily_price" not in missing:
+                missing.append("kr_daily_price")
+            warnings.append(f"KR OHLC chart unavailable: {exc}")
+
+        try:
+            fundamentals = kr_market_service.list_kr_company_fundamentals(
+                db=db,
+                symbol=normalized_id,
+                limit=20,
+            )
+        except Exception as exc:
+            missing.append("kr_company_fundamental")
+            warnings.append(f"KR company fundamentals unavailable: {exc}")
+
+        try:
+            investor_rows = kr_market_service.list_kr_investor_trades(
+                db=db,
+                symbol=normalized_id,
+                limit=10,
+            )
+        except Exception as exc:
+            missing.append("kr_investor_trade_daily")
+            warnings.append(f"KR investor trading unavailable: {exc}")
+
+        try:
+            resource_summary = kr_market_service.get_kr_resource_summary(
+                db=db,
+                symbol=normalized_id,
+            )
+        except Exception as exc:
+            warnings.append(f"KR resource summary unavailable: {exc}")
+
+        try:
+            source_health = kr_market_service.build_kr_source_health(
+                db=db,
+                symbol=normalized_id,
+            )
+        except Exception as exc:
+            warnings.append(f"KR source health unavailable: {exc}")
+
+        if not daily_rows and not (chart.get("points") if isinstance(chart, dict) else None):
+            if "kr_daily_price" not in missing:
+                missing.append("kr_daily_price")
+        if not fundamentals and "kr_company_fundamental" not in missing:
+            missing.append("kr_company_fundamental")
+        if not investor_rows and "kr_investor_trade_daily" not in missing:
+            missing.append("kr_investor_trade_daily")
+
+        latest_daily = daily_rows[0] if daily_rows else None
+        chart_points = chart.get("points") if isinstance(chart, dict) else []
+        latest_point = chart_points[-1] if chart_points else None
+        latest_trade_date = (
+            latest_daily.trade_date.isoformat()
+            if latest_daily is not None
+            else _json_value(latest_point.get("time")) if isinstance(latest_point, dict) else None
+        )
+        latest_close = (
+            latest_daily.adjusted_close if latest_daily and latest_daily.adjusted_close is not None
+            else latest_daily.close_price if latest_daily is not None
+            else latest_point.get("close") if isinstance(latest_point, dict) else None
+        )
+        latest_volume = (
+            latest_daily.trade_volume
+            if latest_daily is not None
+            else latest_point.get("volume") if isinstance(latest_point, dict) else None
+        )
+        label = (
+            stock.security_name
+            if stock and stock.security_name
+            else stock.security_name_kr
+            if stock and stock.security_name_kr
+            else normalized_id
+        )
+        target = {"type": "kr_stock", "id": normalized_id, "label": label, "market": "KR"}
+        for row in daily_rows[:3]:
+            if row.source_url:
+                source_refs.append(
+                    {
+                        "kind": "kr_daily_price",
+                        "provider": row.provider,
+                        "symbol": row.symbol,
+                        "date": row.trade_date.isoformat(),
+                        "url": row.source_url,
+                    }
+                )
+        _append_source_ref_once(source_refs, {"type": "table", "name": "kr_stock_master"})
+        _append_source_ref_once(source_refs, {"type": "table", "name": "kr_daily_price"})
+        _append_source_ref_once(source_refs, {"type": "table", "name": "kr_company_fundamental"})
+        _append_source_ref_once(source_refs, {"type": "table", "name": "kr_investor_trade_daily"})
+        _append_source_ref_once(source_refs, {"type": "derived", "name": "app.kr_market.source_health"})
+        data = {
+            "stock": _row_dict(
+                stock,
+                (
+                    "symbol",
+                    "local_code",
+                    "security_name",
+                    "security_name_kr",
+                    "exchange",
+                    "market_segment",
+                    "sector",
+                    "industry",
+                    "asset_type",
+                    "currency",
+                    "exchange_timezone_name",
+                    "is_active",
+                    "last_seen_at",
+                    "updated_at",
+                ),
+            ),
+            "daily_prices": _list_rows(
+                daily_rows,
+                (
+                    "provider",
+                    "symbol",
+                    "trade_date",
+                    "currency",
+                    "open_price",
+                    "high_price",
+                    "low_price",
+                    "close_price",
+                    "adjusted_close",
+                    "price_change",
+                    "change_pct",
+                    "trade_volume",
+                    "trade_value",
+                    "market_cap",
+                    "fetched_at",
+                ),
+            ),
+            "chart": _json_ready(chart),
+            "fundamentals": _list_rows(
+                fundamentals,
+                (
+                    "provider",
+                    "symbol",
+                    "corp_code",
+                    "stock_code",
+                    "company_name",
+                    "fiscal_year",
+                    "report_code",
+                    "report_name",
+                    "statement_name",
+                    "account_name",
+                    "current_amount",
+                    "previous_amount",
+                    "currency",
+                    "disclosed_date",
+                    "fetched_at",
+                ),
+            ),
+            "investor_trading": _list_rows(
+                investor_rows,
+                (
+                    "provider",
+                    "symbol",
+                    "trade_date",
+                    "investor_type",
+                    "buy_value",
+                    "sell_value",
+                    "net_buy_value",
+                    "buy_volume",
+                    "sell_volume",
+                    "net_buy_volume",
+                    "fetched_at",
+                ),
+            ),
+            "resource_summary": _json_ready(resource_summary),
+            "source_health": _json_ready(source_health),
+            "tool_runs": tool_runs,
+        }
+
+    data["compact"] = _compact_market_context(
+        kind="kr_index_compact_evidence" if is_index else "kr_stock_compact_evidence",
+        target=target,
+        quote={
+            "source": "kr_index_daily_price" if is_index else "kr_daily_price",
+            "price": latest_close,
+            "volume": latest_volume,
+            "quote_time": latest_trade_date,
+            "is_realtime": False,
+            "provider": provider,
+        },
+        resources={
+            "daily_rows": len(daily_rows),
+            "chart_points": len(chart.get("points") or []) if isinstance(chart, dict) else 0,
+            "timeframe": timeframe,
+            "bars": bars,
+            "payload_level": payload_level,
+            "fundamental_rows": len(fundamentals),
+            "investor_trade_rows": len(investor_rows),
+            "source_health": (source_health.get("summary") if isinstance(source_health, dict) else {}),
+        },
+        freshness={
+            "price": "current" if latest_trade_date else "missing",
+            "fundamentals": "current" if fundamentals else "missing" if not is_index else "not_applicable",
+            "investor_trading": "current" if investor_rows else "missing" if not is_index else "not_applicable",
+        },
+        payload_level=payload_level,
+    )
+    envelope = {
+        "kind": "kr_index_context" if is_index else "kr_stock_context",
+        "generated_at": _now().isoformat(),
+        "as_of": latest_trade_date,
+        "scope": {"target": target},
+        "summary": {
+            "latest_close": latest_close,
+            "latest_trade_date": latest_trade_date,
+            "latest_volume": latest_volume,
+            "source_health": source_health.get("summary") if isinstance(source_health, dict) else {},
+        },
+        "data": data,
+        "data_limitations": [
+            "No KR-specific AI decision adapter or persisted LLM report path is enabled yet.",
+            "KR context is based on bounded local-cache evidence unless a separate refresh endpoint is called.",
+        ],
+        "missing": list(dict.fromkeys(missing)),
+        "warnings": list(dict.fromkeys(warnings)),
+        "source_refs": source_refs,
+    }
+    freshness_result = {
+        "kind": "kr_index_freshness" if is_index else "kr_stock_freshness",
+        "scope": {"target": target},
+        "is_current": latest_trade_date is not None,
+        "refresh_recommended": latest_trade_date is None,
+        "missing": envelope["missing"],
+        "warnings": envelope["warnings"],
+        "as_of": latest_trade_date,
+    }
+    envelope["evidence_passport"] = build_evidence_passport(
+        kind=envelope["kind"],
+        as_of=envelope["as_of"],
+        source_refs=source_refs,
+        missing=envelope["missing"],
+        warnings=envelope["warnings"],
+        freshness=freshness_result,
+        tool_runs=tool_runs,
+    )
+    return envelope
+
+
+def _crypto_supported_symbols_for_asset(asset: str, *, instrument_type: str | None = None, resource: str = "ticker") -> list[str]:
+    symbols: list[str] = []
+    for instrument in list_provider_instruments(instrument_type=instrument_type, resource=resource):
+        if instrument.base_asset != asset:
+            continue
+        if instrument.symbol in symbols:
+            continue
+        symbols.append(instrument.symbol)
+    return symbols
+
+
+def _crypto_asset_from_symbol(symbol: str | None) -> str | None:
+    normalized = normalize_crypto_symbol(symbol)
+    if "-" not in normalized:
+        return normalized if get_crypto_asset(normalized) is not None else None
+    base = normalized.split("-", maxsplit=1)[0]
+    return base if get_crypto_asset(base) is not None else None
+
+
+def _crypto_requested_symbols(
+    *,
+    asset: str | None,
+    market_data_params: dict[str, Any] | None,
+    instrument_type: str | None,
+) -> list[str] | None:
+    symbols_value = _market_data_param(market_data_params, "symbols")
+    if symbols_value is None:
+        symbols_value = _market_data_param(market_data_params, "symbol")
+    if symbols_value:
+        if isinstance(symbols_value, str):
+            return [normalize_crypto_symbol(part) for part in symbols_value.split(",") if part.strip()]
+        if isinstance(symbols_value, (list, tuple)):
+            return [normalize_crypto_symbol(part) for part in symbols_value if str(part).strip()]
+
+    if asset:
+        supported = _crypto_supported_symbols_for_asset(
+            asset,
+            instrument_type=instrument_type,
+            resource="ticker",
+        )
+        return supported or [f"{asset}-USDT"]
+    return None
+
+
+def read_crypto_context(
+    db: Session,
+    *,
+    asset: str | None = None,
+    tool_runs: list[dict[str, Any]] | None = None,
+    market_data_params: dict[str, Any] | None = None,
+    context_limit: int = 100,
+) -> dict[str, Any]:
+    tool_runs = tool_runs or []
+    requested_asset = str(asset or "").strip().upper() or None
+    params_symbol = _market_data_str(market_data_params, "symbol")
+    if requested_asset is None and params_symbol:
+        requested_asset = _crypto_asset_from_symbol(params_symbol)
+    asset_definition = get_crypto_asset(requested_asset) if requested_asset else None
+    if requested_asset and asset_definition is None:
+        warnings = [f"Unsupported crypto asset: {requested_asset}."]
+        target = {"type": "crypto_asset", "id": requested_asset, "label": requested_asset, "market": "crypto"}
+        payload_level = _market_payload_level(market_data_params)
+        envelope = {
+            "kind": "crypto_asset_context",
+            "generated_at": _now().isoformat(),
+            "as_of": None,
+            "scope": {"target": target},
+            "summary": {},
+            "data": {"compact": _compact_market_context(kind="crypto_asset_compact_evidence", target=target, quote={}, resources={}, freshness={}, payload_level=payload_level)},
+            "missing": ["crypto_asset"],
+            "warnings": warnings,
+            "source_refs": [],
+        }
+        envelope["evidence_passport"] = build_evidence_passport(
+            kind="crypto_asset_context",
+            missing=envelope["missing"],
+            warnings=warnings,
+            confidence="low",
+            tool_runs=tool_runs,
+        )
+        return envelope
+
+    normalized_asset = asset_definition.asset if asset_definition else None
+    instrument_type = _market_data_str(market_data_params, "instrument_type")
+    provider = _market_data_str(market_data_params, "provider")
+    interval = _market_data_str(market_data_params, "interval", "1m") or "1m"
+    limit = _market_data_int(market_data_params, "limit", min(context_limit, 100), minimum=1, maximum=500)
+    payload_level = _market_payload_level(market_data_params)
+    history_limit = min(limit, 100)
+    requested_symbols = _crypto_requested_symbols(
+        asset=normalized_asset,
+        market_data_params=market_data_params,
+        instrument_type=instrument_type,
+    )
+    derivative_symbols = (
+        _crypto_supported_symbols_for_asset(normalized_asset, instrument_type=PERPETUAL, resource="derivatives")
+        if normalized_asset
+        else None
+    )
+    if normalized_asset and not derivative_symbols and normalized_asset != "USDT":
+        derivative_symbols = [f"{normalized_asset}-USDT"]
+
+    warnings: list[str] = [
+        "Crypto AI context is read-only local-cache evidence; refresh endpoints are separate bounded POST operations.",
+    ]
+    missing: list[str] = []
+    source_refs: list[dict[str, Any]] = []
+
+    tickers = crypto_market_service.list_latest_crypto_tickers(
+        db,
+        provider=provider,
+        symbols=requested_symbols,
+        instrument_type=instrument_type,
+        limit=limit,
+    )
+    order_books = crypto_market_service.list_latest_crypto_order_books(
+        db,
+        provider=provider,
+        symbols=requested_symbols,
+        instrument_type=instrument_type,
+        limit=limit,
+    )
+    ohlcv_rows = crypto_market_service.list_latest_crypto_ohlcv_bars(
+        db,
+        provider=provider,
+        symbols=requested_symbols,
+        instrument_type=instrument_type or SPOT,
+        interval=interval,
+        limit=limit,
+    )
+    coverage = crypto_market_service.list_crypto_ohlcv_coverage(
+        db,
+        provider=provider,
+        symbols=requested_symbols,
+        instrument_type=instrument_type,
+    )
+    derivatives = crypto_market_service.list_latest_crypto_derivatives(
+        db,
+        provider=provider,
+        symbols=derivative_symbols or requested_symbols,
+        limit=limit,
+    )
+    market_caps = crypto_market_service.list_latest_crypto_market_caps(db, vs_currency="usd", limit=100)
+    if normalized_asset:
+        market_caps = [row for row in market_caps if row.symbol.upper() == normalized_asset]
+    spreads = crypto_market_service.list_latest_crypto_spreads(
+        db,
+        base=normalized_asset,
+        global_provider=provider,
+        limit=limit,
+    )
+    ticker_history = crypto_market_service.list_crypto_ticker_history(
+        db,
+        provider=provider,
+        symbols=requested_symbols,
+        instrument_type=instrument_type,
+        limit=history_limit,
+        ascending=False,
+    )
+    liquidity_history = crypto_market_service.list_crypto_liquidity_history(
+        db,
+        provider=provider,
+        symbols=requested_symbols,
+        instrument_type=instrument_type,
+        limit=history_limit,
+        ascending=False,
+    )
+    derivatives_history = crypto_market_service.list_crypto_derivatives_history(
+        db,
+        provider=provider,
+        symbols=derivative_symbols or requested_symbols,
+        instrument_type=PERPETUAL if derivative_symbols else instrument_type,
+        limit=history_limit,
+        ascending=False,
+    )
+    long_short_history = crypto_market_service.list_crypto_long_short_ratio_history(
+        db,
+        provider=provider,
+        symbols=derivative_symbols or requested_symbols,
+        instrument_type=PERPETUAL if derivative_symbols else instrument_type,
+        limit=history_limit,
+        ascending=False,
+    )
+    liquidation_heatmap = crypto_market_service.list_crypto_liquidation_heatmap_cells(
+        db,
+        symbols=derivative_symbols or requested_symbols,
+        instrument_type=PERPETUAL if derivative_symbols else instrument_type,
+        limit=min(history_limit, 200),
+        ascending=False,
+    )
+    provider_contract = crypto_market_service.get_crypto_provider_contract()
+    source_health = build_crypto_source_health(
+        db,
+        provider=provider,
+        base=normalized_asset,
+        required_only=False,
+        include_events=False,
+        max_entries=min(max(limit, 20), 100),
+    )
+
+    if not tickers:
+        missing.append("crypto_ticker")
+    if not order_books:
+        missing.append("crypto_order_book")
+    if not ohlcv_rows:
+        missing.append("crypto_ohlcv")
+    if normalized_asset and not market_caps and asset_definition and asset_definition.market_cap:
+        missing.append("crypto_market_cap")
+
+    for entry in source_health.get("entries") or []:
+        if isinstance(entry, dict) and not entry.get("ok", True):
+            warnings.append(
+                f"Crypto source health {entry.get('status')}: {entry.get('resource')} {entry.get('provider')} {entry.get('target')} - {entry.get('reason')}"
+            )
+
+    primary_ticker = tickers[0] if tickers else None
+    as_of = _latest_timestamp_from_rows(
+        [*tickers, *order_books, *ohlcv_rows, *derivatives, *market_caps, *spreads],
+        ("fetched_at", "event_time", "bar_time", "last_updated", "observed_at"),
+    )
+    target_id = normalized_asset if normalized_asset else "market"
+    target_label = asset_definition.name if asset_definition else "Crypto Market"
+    target_type = "crypto_asset" if normalized_asset else "crypto_market"
+    target = {"type": target_type, "id": target_id, "label": target_label, "market": "crypto"}
+
+    _append_source_ref_once(source_refs, {"type": "table", "name": "crypto_ticker_snapshot"})
+    _append_source_ref_once(source_refs, {"type": "table", "name": "crypto_order_book_snapshot"})
+    _append_source_ref_once(source_refs, {"type": "table", "name": "crypto_ohlcv_bar"})
+    _append_source_ref_once(source_refs, {"type": "table", "name": "crypto_derivatives_metric"})
+    _append_source_ref_once(source_refs, {"type": "table", "name": "crypto_market_cap_snapshot"})
+    _append_source_ref_once(source_refs, {"type": "table", "name": "crypto_spread_snapshot"})
+    _append_source_ref_once(source_refs, {"type": "derived", "name": "app.crypto_market.source_health"})
+    data = {
+        "provider_contract": {
+            "kind": provider_contract.get("kind"),
+            "execution_enabled": provider_contract.get("execution_enabled"),
+            "ai_execution_enabled": provider_contract.get("ai_execution_enabled"),
+            "notes": provider_contract.get("notes") or [],
+            "ohlcv_intervals": provider_contract.get("ohlcv_intervals") or {},
+            "selected_asset": asset_definition.to_dict() if asset_definition else None,
+        },
+        "latest_tickers": _list_rows(
+            tickers,
+            (
+                "provider",
+                "exchange",
+                "symbol",
+                "provider_symbol",
+                "base_asset",
+                "quote_asset",
+                "instrument_type",
+                "last_price",
+                "bid_price",
+                "ask_price",
+                "high_24h",
+                "low_24h",
+                "price_change_24h",
+                "price_change_pct_24h",
+                "base_volume_24h",
+                "quote_volume_24h",
+                "event_time",
+                "fetched_at",
+            ),
+        ),
+        "order_books": _list_rows(
+            order_books,
+            (
+                "provider",
+                "exchange",
+                "symbol",
+                "instrument_type",
+                "depth_limit",
+                "best_bid_price",
+                "best_bid_size",
+                "best_ask_price",
+                "best_ask_size",
+                "spread",
+                "spread_pct",
+                "event_time",
+                "fetched_at",
+            ),
+        ),
+        "ohlcv": _list_rows(
+            ohlcv_rows,
+            (
+                "provider",
+                "exchange",
+                "symbol",
+                "instrument_type",
+                "interval",
+                "bar_time",
+                "open_price",
+                "high_price",
+                "low_price",
+                "close_price",
+                "base_volume",
+                "quote_volume",
+                "fetched_at",
+            ),
+        ),
+        "ohlcv_coverage": _json_ready(coverage),
+        "derivatives": _list_rows(
+            derivatives,
+            (
+                "provider",
+                "exchange",
+                "symbol",
+                "instrument_type",
+                "mark_price",
+                "index_price",
+                "funding_rate",
+                "next_funding_time",
+                "open_interest",
+                "open_interest_value",
+                "event_time",
+                "fetched_at",
+            ),
+        ),
+        "market_caps": _list_rows(
+            market_caps,
+            (
+                "provider",
+                "coin_id",
+                "symbol",
+                "name",
+                "vs_currency",
+                "current_price",
+                "market_cap",
+                "market_cap_rank",
+                "total_volume",
+                "price_change_pct_24h",
+                "last_updated",
+                "fetched_at",
+            ),
+        ),
+        "spreads": _list_rows(
+            spreads,
+            (
+                "base_asset",
+                "local_provider",
+                "global_provider",
+                "local_symbol",
+                "global_symbol",
+                "fx_symbol",
+                "local_price",
+                "global_price",
+                "fx_rate",
+                "implied_twd_price",
+                "spread",
+                "spread_pct",
+                "observed_at",
+            ),
+        ),
+        "history": {
+            "tickers": _list_rows(
+                ticker_history,
+                (
+                    "provider",
+                    "symbol",
+                    "instrument_type",
+                    "last_price",
+                    "bid_price",
+                    "ask_price",
+                    "price_change_pct_24h",
+                    "base_volume_24h",
+                    "quote_volume_24h",
+                    "sampled_at",
+                    "fetched_at",
+                ),
+            ),
+            "liquidity": _list_rows(
+                liquidity_history,
+                (
+                    "provider",
+                    "symbol",
+                    "instrument_type",
+                    "depth_limit",
+                    "best_bid_price",
+                    "best_ask_price",
+                    "spread",
+                    "spread_pct",
+                    "sampled_at",
+                    "fetched_at",
+                ),
+            ),
+            "derivatives": _list_rows(
+                derivatives_history,
+                (
+                    "provider",
+                    "symbol",
+                    "instrument_type",
+                    "mark_price",
+                    "funding_rate",
+                    "open_interest",
+                    "sampled_at",
+                    "fetched_at",
+                ),
+            ),
+            "long_short_ratio": _list_rows(
+                long_short_history,
+                (
+                    "provider",
+                    "symbol",
+                    "instrument_type",
+                    "ratio_scope",
+                    "long_ratio",
+                    "short_ratio",
+                    "long_short_ratio",
+                    "sampled_at",
+                    "fetched_at",
+                ),
+            ),
+            "liquidation_heatmap": _list_rows(
+                liquidation_heatmap,
+                (
+                    "provider",
+                    "source_kind",
+                    "method",
+                    "symbol",
+                    "instrument_type",
+                    "time_bucket",
+                    "bucket_seconds",
+                    "price_bucket",
+                    "liquidation_side",
+                    "liquidation_notional",
+                    "event_count",
+                    "intensity",
+                    "fetched_at",
+                ),
+            ),
+        },
+        "source_health": _json_ready(source_health),
+        "tool_runs": tool_runs,
+    }
+    data["compact"] = _compact_market_context(
+        kind="crypto_asset_compact_evidence" if normalized_asset else "crypto_market_compact_evidence",
+        target=target,
+        quote={
+            "source": "crypto_ticker_snapshot",
+            "provider": primary_ticker.provider if primary_ticker else None,
+            "symbol": primary_ticker.symbol if primary_ticker else None,
+            "instrument_type": primary_ticker.instrument_type if primary_ticker else None,
+            "price": primary_ticker.last_price if primary_ticker else None,
+            "bid": primary_ticker.bid_price if primary_ticker else None,
+            "ask": primary_ticker.ask_price if primary_ticker else None,
+            "change_pct_24h": primary_ticker.price_change_pct_24h if primary_ticker else None,
+            "quote_time": primary_ticker.event_time.isoformat() if primary_ticker and primary_ticker.event_time else None,
+            "is_realtime": False,
+        },
+        resources={
+            "ticker_rows": len(tickers),
+            "order_book_rows": len(order_books),
+            "ohlcv_rows": len(ohlcv_rows),
+            "ohlcv_coverage_rows": len(coverage),
+            "derivatives_rows": len(derivatives),
+            "market_cap_rows": len(market_caps),
+            "spread_rows": len(spreads),
+            "history_rows": {
+                "ticker": len(ticker_history),
+                "liquidity": len(liquidity_history),
+                "derivatives": len(derivatives_history),
+                "long_short_ratio": len(long_short_history),
+                "liquidation_heatmap": len(liquidation_heatmap),
+            },
+            "provider": provider,
+            "symbols": requested_symbols,
+            "interval": interval,
+            "limit": limit,
+            "payload_level": payload_level,
+        },
+        freshness={
+            "quote": "current" if tickers else "missing",
+            "order_book": "current" if order_books else "missing",
+            "ohlcv": "current" if ohlcv_rows else "missing",
+            "source_health": source_health.get("summary"),
+        },
+        payload_level=payload_level,
+    )
+    envelope = {
+        "kind": "crypto_asset_context" if normalized_asset else "crypto_market_context",
+        "generated_at": _now().isoformat(),
+        "as_of": as_of,
+        "scope": {"target": target},
+        "summary": {
+            "latest_price": primary_ticker.last_price if primary_ticker else None,
+            "latest_symbol": primary_ticker.symbol if primary_ticker else None,
+            "latest_provider": primary_ticker.provider if primary_ticker else None,
+            "latest_fetched_at": primary_ticker.fetched_at.isoformat() if primary_ticker else None,
+            "source_health": source_health.get("summary"),
+        },
+        "data": data,
+        "data_limitations": [
+            "GET/read paths use local cache only; POST refresh endpoints are required for external data fetch.",
+            "Crypto contract is watch/research only and exposes no order placement endpoint.",
+            "Event-driven resources such as liquidations can be empty without implying provider failure.",
+        ],
+        "missing": list(dict.fromkeys(missing)),
+        "warnings": list(dict.fromkeys(warnings)),
+        "source_refs": source_refs,
+    }
+    freshness_result = {
+        "kind": "crypto_asset_freshness" if normalized_asset else "crypto_market_freshness",
+        "scope": {"target": target},
+        "is_current": bool(tickers or ohlcv_rows or market_caps),
+        "refresh_recommended": bool(missing),
+        "missing": envelope["missing"],
+        "warnings": envelope["warnings"],
+        "as_of": as_of,
+        "source_health": source_health.get("summary"),
     }
     envelope["evidence_passport"] = build_evidence_passport(
         kind=envelope["kind"],

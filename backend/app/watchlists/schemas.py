@@ -364,6 +364,99 @@ class WatchlistGroupRadarRead(BaseModel):
     results: list[WatchlistRadarItemRead]
 
 
+class WatchlistRadarSnapshotRead(BaseModel):
+    id: int
+    group_id: int
+    include_children: bool
+    enabled_only: bool
+    mode: str
+    max_results: int
+    calculation_limit: int
+    radar_rule_version: str
+
+    snapshot_date: date
+    trade_date: date | None = None
+    target_trade_date: date | None = None
+    is_current: bool = True
+    current_stock_count: int = 0
+    stale_stock_count: int = 0
+
+    requested_stock_count: int = 0
+    ranked_count: int = 0
+    matched_count: int = 0
+    radar_count: int = 0
+    no_data_count: int = 0
+    error_count: int = 0
+
+    buckets: list[WatchlistRadarBucketRead] = Field(default_factory=list)
+    data_limitations: list[str] = Field(default_factory=list)
+
+    created_at: datetime
+    updated_at: datetime
+
+
+class WatchlistRadarOutcomeItemRead(BaseModel):
+    id: int
+    snapshot_item_id: int
+    rank: int
+    stock_id: str
+    stock_name: str | None = None
+    bucket: str
+    bucket_label: str
+    status: str
+    reason: str
+
+    snapshot_date: date
+    outcome_trade_date: date | None = None
+    signal_close_price: float | None = None
+    outcome_open_price: float | None = None
+    outcome_high_price: float | None = None
+    outcome_low_price: float | None = None
+    outcome_close_price: float | None = None
+    outcome_volume: int | None = None
+
+    open_gap_pct: float | None = None
+    close_return_pct: float | None = None
+    max_favorable_pct: float | None = None
+    max_adverse_pct: float | None = None
+    intraday_range_pct: float | None = None
+    volume_change_pct: float | None = None
+
+
+class WatchlistRadarOutcomeBucketSummaryRead(BaseModel):
+    bucket: str
+    bucket_label: str
+    total_count: int
+    hit_count: int = 0
+    miss_count: int = 0
+    neutral_count: int = 0
+    unevaluable_count: int = 0
+    pending_count: int = 0
+    avg_close_return_pct: float | None = None
+    avg_max_adverse_pct: float | None = None
+
+
+class WatchlistRadarOutcomeSummaryRead(BaseModel):
+    status: str
+    snapshot: WatchlistRadarSnapshotRead | None = None
+    evaluated_at: datetime | None = None
+
+    total_count: int = 0
+    hit_count: int = 0
+    miss_count: int = 0
+    neutral_count: int = 0
+    unevaluable_count: int = 0
+    pending_count: int = 0
+
+    avg_close_return_pct: float | None = None
+    avg_max_favorable_pct: float | None = None
+    avg_max_adverse_pct: float | None = None
+
+    bucket_summaries: list[WatchlistRadarOutcomeBucketSummaryRead] = Field(default_factory=list)
+    items: list[WatchlistRadarOutcomeItemRead] = Field(default_factory=list)
+    data_limitations: list[str] = Field(default_factory=list)
+
+
 class WatchlistGroupDeleteResultRead(BaseModel):
     group_id: int
     recursive: bool

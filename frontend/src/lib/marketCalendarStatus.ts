@@ -13,10 +13,13 @@ export type MarketCalendarReleaseWindow = {
 
 export type MarketCalendarSession = {
   preopen_time?: string | null;
+  pre_market_open_time?: string | null;
   open_time: string;
   close_time: string;
+  after_hours_close_time?: string | null;
   next_session_start_at: string;
   is_polling_window: boolean;
+  is_extended_polling_window?: boolean;
   is_after_close: boolean;
 };
 

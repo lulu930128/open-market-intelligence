@@ -17,10 +17,13 @@ class MarketCalendarReleaseWindowRead(BaseModel):
 
 class MarketCalendarSessionRead(BaseModel):
     preopen_time: str | None = None
+    pre_market_open_time: str | None = None
     open_time: str
     close_time: str
+    after_hours_close_time: str | None = None
     next_session_start_at: datetime
     is_polling_window: bool
+    is_extended_polling_window: bool = False
     is_after_close: bool
 
 

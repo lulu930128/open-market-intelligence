@@ -358,6 +358,7 @@ def get_us_watchlist_ranking_api(
     sort_order: str = Query(default="asc", pattern="^(asc|desc)$"),
     use_intraday: bool = False,
     intraday_limit: int = Query(default=30, ge=1, le=100),
+    intraday_session_scope: str = Query(default="regular", pattern="^(regular|extended|all)$"),
     db: Session = Depends(get_db),
 ):
     try:
@@ -370,6 +371,7 @@ def get_us_watchlist_ranking_api(
             sort_order=sort_order,
             use_intraday=use_intraday,
             intraday_limit=intraday_limit,
+            intraday_session_scope=intraday_session_scope,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -835,8 +837,12 @@ def get_us_ohlc_chart_data(
 
 
 @router.get("/intraday/{symbol}", response_model=USIntradayTrendRead)
-def get_us_intraday_trend_api(symbol: str):
-    return get_us_intraday_trend(symbol=symbol)
+def get_us_intraday_trend_api(
+    symbol: str,
+    session_scope: str = Query(default="regular", pattern="^(regular|extended|all)$"),
+    db: Session = Depends(get_db),
+):
+    return get_us_intraday_trend(symbol=symbol, session_scope=session_scope, db=db)
 
 
 @router.post("/sec/{symbol}/refresh-facts", response_model=USSecFactRefreshResultRead)

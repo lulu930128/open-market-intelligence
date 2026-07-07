@@ -67,6 +67,7 @@ from app.us_market.sources import (
     parse_yahoo_symbol_record,
 )
 from app.us_market.source_health import build_us_source_health
+from app.us_market.trading_calendar import previous_us_trading_day
 from app.market.calendar_status import expected_us_trade_date
 from app.market.ohlc_overlay import aggregate_ohlc_points, append_intraday_overlay
 from app.market.technical_radar import (
@@ -192,6 +193,10 @@ def _get_us_intraday_cache(cache_key: str) -> dict | None:
 def _set_us_intraday_cache(cache_key: str, payload: dict) -> dict:
     _US_INTRADAY_CACHE[cache_key] = (time.monotonic(), deepcopy(payload))
     return payload
+
+
+def _copy_us_intraday_payload(payload: dict) -> dict:
+    return deepcopy(payload)
 
 
 def _clean_setting(value: str | None) -> str:
@@ -1162,7 +1167,7 @@ def list_us_ohlc_chart_data(
     if include_intraday:
         daily_points, intraday_overlay = append_intraday_overlay(
             points=daily_points,
-            intraday=get_us_intraday_trend(symbol=normalized_symbol),
+            intraday=get_us_intraday_trend(symbol=normalized_symbol, db=db),
             end_date=end_date,
         )
         points = aggregate_ohlc_points(points=daily_points, timeframe=timeframe)[-bars:]
@@ -1197,7 +1202,7 @@ def list_us_ohlc_chart_data(
         if include_intraday:
             daily_points, intraday_overlay = append_intraday_overlay(
                 points=daily_points,
-                intraday=get_us_intraday_trend(symbol=normalized_symbol),
+                intraday=get_us_intraday_trend(symbol=normalized_symbol, db=db),
                 end_date=end_date,
             )
             points = aggregate_ohlc_points(points=daily_points, timeframe=timeframe)[-bars:]
@@ -1216,41 +1221,70 @@ def list_us_ohlc_chart_data(
     }
 
 
-def get_us_intraday_trend(*, symbol: str) -> dict:
+def get_us_intraday_trend(
+    *,
+    symbol: str,
+    session_scope: str = "regular",
+    db: Session | None = None,
+) -> dict:
+    if session_scope not in {"regular", "extended", "all"}:
+        raise ValueError("session_scope must be one of: regular, extended, all.")
+
     normalized_symbol = normalize_us_symbol(symbol)
-    cache_key = f"US:{normalized_symbol}"
+    cache_key = f"US:{normalized_symbol}:{session_scope}"
     cached = _get_us_intraday_cache(cache_key)
 
     if cached is not None:
-        return cached
+        return _apply_us_intraday_previous_close_reference(
+            cached,
+            db=db,
+            symbol=normalized_symbol,
+        )
 
     try:
-        payload, source_url = fetch_yahoo_chart_payload(
+        yahoo_payload, source_url = fetch_yahoo_chart_payload(
             symbol=normalized_symbol,
             range_value="1d",
             interval="1m",
             timeout_seconds=settings.us_market_http_timeout_seconds,
+            include_prepost=session_scope != "regular",
         )
-        return _set_us_intraday_cache(
+        payload = _set_us_intraday_cache(
             cache_key,
             parse_yahoo_intraday_prices(
-                payload,
+                yahoo_payload,
                 symbol=normalized_symbol,
                 source_url=source_url,
+                session_scope=session_scope,
             ),
         )
     except Exception:
-        return _set_us_intraday_cache(
+        payload = _set_us_intraday_cache(
             cache_key,
             {
                 "stock_id": normalized_symbol,
                 "symbol": normalized_symbol,
                 "source": "unavailable",
+                "session_scope": session_scope,
+                "session_phase": None,
+                "has_extended_hours": False,
+                "regular_point_count": 0,
+                "extended_point_count": 0,
                 "previous_close": None,
+                "previous_close_source": None,
+                "previous_close_trade_date": None,
+                "previous_close_provider": None,
                 "point_count": 0,
                 "points": [],
+                "warnings": ["US intraday source is unavailable."],
             },
         )
+
+    return _apply_us_intraday_previous_close_reference(
+        payload,
+        db=db,
+        symbol=normalized_symbol,
+    )
 
 
 def _resolve_cik_for_symbol(db: Session, symbol: str) -> str:
@@ -2416,6 +2450,174 @@ def _latest_distinct_us_daily_rows(
     return selected_rows
 
 
+def _latest_us_daily_close_reference(
+    db: Session,
+    *,
+    symbol: str,
+    before_date: date | None = None,
+    on_date: date | None = None,
+) -> dict | None:
+    for row in _latest_distinct_us_daily_rows(db=db, symbol=symbol, limit=10):
+        if on_date is not None and row.trade_date != on_date:
+            continue
+
+        if before_date is not None and row.trade_date >= before_date:
+            continue
+
+        close = _close_value(row)
+
+        if _valid_number(close):
+            return {
+                "previous_close": float(close),
+                "previous_close_source": "us_daily_price",
+                "previous_close_trade_date": row.trade_date.isoformat(),
+                "previous_close_provider": row.provider,
+            }
+
+    return None
+
+
+def _us_intraday_latest_trade_date(payload: dict) -> date | None:
+    points = payload.get("points") or []
+
+    for point in reversed(points):
+        if isinstance(point, dict):
+            trade_date = _us_row_trade_date(point)
+
+            if trade_date is not None:
+                return trade_date
+
+    return None
+
+
+def _us_regular_session_close_reference(payload: dict) -> dict | None:
+    if payload.get("session_phase") != "after_hours":
+        return None
+
+    regular_close = payload.get("regular_session_close")
+
+    if not _valid_number(regular_close):
+        return None
+
+    regular_close_date = _us_row_trade_date(
+        {"time": payload.get("regular_session_close_time")}
+    )
+
+    return {
+        "previous_close": float(regular_close),
+        "previous_close_source": "yahoo_finance_chart_regular_session_close",
+        "previous_close_trade_date": (
+            regular_close_date.isoformat() if regular_close_date is not None else None
+        ),
+        "previous_close_provider": "yahoo_chart",
+    }
+
+
+def _us_reference_trade_date(reference: dict | None) -> date | None:
+    if reference is None:
+        return None
+
+    return _parse_us_row_trade_date(reference.get("previous_close_trade_date"))
+
+
+def _us_previous_regular_intraday_close_reference(
+    *,
+    symbol: str,
+    expected_trade_date: date,
+) -> dict | None:
+    intraday = get_us_intraday_trend(
+        symbol=symbol,
+        session_scope="regular",
+        db=None,
+    )
+    points = intraday.get("points") or []
+
+    for point in reversed(points):
+        if not isinstance(point, dict):
+            continue
+
+        if point.get("session") != "regular":
+            continue
+
+        trade_date = _us_row_trade_date(point)
+
+        if trade_date != expected_trade_date:
+            continue
+
+        price = point.get("price")
+
+        if not _valid_number(price):
+            continue
+
+        return {
+            "previous_close": float(price),
+            "previous_close_source": "yahoo_finance_chart_regular_session_close",
+            "previous_close_trade_date": trade_date.isoformat(),
+            "previous_close_provider": "yahoo_chart",
+        }
+
+    return None
+
+
+def _apply_us_intraday_previous_close_reference(
+    payload: dict,
+    *,
+    db: Session | None,
+    symbol: str,
+) -> dict:
+    result = _copy_us_intraday_payload(payload)
+    result.setdefault(
+        "previous_close_source",
+        "yahoo_finance_chart" if _valid_number(result.get("previous_close")) else None,
+    )
+    result.setdefault("previous_close_trade_date", None)
+    result.setdefault("previous_close_provider", None)
+
+    if db is None:
+        return result
+
+    latest_trade_date = _us_intraday_latest_trade_date(result)
+    reference = None
+
+    if result.get("session_phase") == "after_hours" and latest_trade_date is not None:
+        reference = _latest_us_daily_close_reference(
+            db=db,
+            symbol=symbol,
+            on_date=latest_trade_date,
+        )
+
+    if reference is None:
+        reference = _us_regular_session_close_reference(result)
+
+    if reference is None:
+        reference = _latest_us_daily_close_reference(
+            db=db,
+            symbol=symbol,
+            before_date=latest_trade_date,
+        )
+
+    if result.get("session_phase") == "pre_market" and latest_trade_date is not None:
+        expected_reference_date = previous_us_trading_day(
+            latest_trade_date,
+            include_value=False,
+        )
+
+        if _us_reference_trade_date(reference) != expected_reference_date:
+            intraday_reference = _us_previous_regular_intraday_close_reference(
+                symbol=symbol,
+                expected_trade_date=expected_reference_date,
+            )
+
+            if intraday_reference is not None:
+                reference = intraday_reference
+
+    if reference is None:
+        return result
+
+    result.update(reference)
+    return result
+
+
 def _sum_us_intraday_volume(points: list[dict]) -> int | None:
     volumes = [
         int(point["volume"])
@@ -2433,6 +2635,7 @@ def _compact_us_intraday_points(points: list[dict], max_points: int = 72) -> lis
     valid_points = [
         {
             "time": point.get("time"),
+            "session": point.get("session"),
             "price": float(point["price"]),
         }
         for point in points
@@ -2508,8 +2711,17 @@ def _us_ranking_freshness(rows: list[dict], requested_symbol_count: int) -> dict
     }
 
 
-def _get_us_intraday_overlay(symbol: str) -> dict | None:
-    intraday = get_us_intraday_trend(symbol=symbol)
+def _get_us_intraday_overlay(
+    symbol: str,
+    *,
+    db: Session | None = None,
+    session_scope: str = "regular",
+) -> dict | None:
+    intraday = get_us_intraday_trend(
+        symbol=symbol,
+        session_scope=session_scope,
+        db=db,
+    )
     points = intraday.get("points") or []
 
     if not points:
@@ -2536,12 +2748,15 @@ def _get_us_intraday_overlay(symbol: str) -> dict | None:
 
     return {
         "time": latest.get("time"),
+        "session": latest.get("session"),
         "close": float(latest_price),
         "previous_close": float(previous_close) if _valid_number(previous_close) else None,
         "change": change,
         "change_pct": change_pct,
         "volume": volume,
         "source": intraday.get("source"),
+        "session_scope": intraday.get("session_scope"),
+        "has_extended_hours": bool(intraday.get("has_extended_hours")),
         "points": _compact_us_intraday_points(points),
     }
 
@@ -2556,12 +2771,16 @@ def get_us_watchlist_ranking(
     sort_order: str = "asc",
     use_intraday: bool = False,
     intraday_limit: int = 30,
+    intraday_session_scope: str = "regular",
 ) -> dict:
     if rank_by not in {"none", "change_pct", "volume", "close"}:
         raise ValueError("rank_by must be one of: none, change_pct, volume, close.")
 
     if sort_order not in {"asc", "desc"}:
         raise ValueError("sort_order must be one of: asc, desc.")
+
+    if intraday_session_scope not in {"regular", "extended", "all"}:
+        raise ValueError("intraday_session_scope must be one of: regular, extended, all.")
 
     query = db.query(USWatchlistItem)
 
@@ -2637,6 +2856,7 @@ def get_us_watchlist_ranking(
             "group_id": item.group_id,
             "trade_date": latest.trade_date if latest is not None else None,
             "time": None,
+            "session": None,
             "close": close,
             "previous_close": previous_close,
             "change": change,
@@ -2644,6 +2864,7 @@ def get_us_watchlist_ranking(
             "volume": latest.trade_volume if latest is not None else None,
             "status": "ready" if close is not None else "no_data",
             "source": None,
+            "has_extended_hours": False,
             "intraday_previous_close": None,
             "intraday_points": [],
             "error_message": None,
@@ -2651,22 +2872,32 @@ def get_us_watchlist_ranking(
 
         if use_intraday and intraday_overlay_attempts < intraday_limit:
             intraday_overlay_attempts += 1
-            overlay = _get_us_intraday_overlay(symbol=symbol)
+            overlay = _get_us_intraday_overlay(
+                symbol=symbol,
+                db=db,
+                session_scope=intraday_session_scope,
+            )
 
             if overlay is not None:
                 row["time"] = overlay["time"]
+                row["session"] = overlay["session"]
                 row["close"] = overlay["close"]
                 row["previous_close"] = overlay["previous_close"]
                 row["change"] = overlay["change"]
                 row["change_pct"] = overlay["change_pct"]
                 row["source"] = overlay["source"]
+                row["has_extended_hours"] = overlay["has_extended_hours"]
                 row["intraday_previous_close"] = overlay["previous_close"]
                 row["intraday_points"] = overlay["points"]
 
                 if overlay["volume"] is not None:
                     row["volume"] = overlay["volume"]
 
-                row["status"] = "intraday"
+                row["status"] = (
+                    "intraday"
+                    if overlay.get("session") == "regular"
+                    else "extended_hours"
+                )
 
         rows.append(row)
 

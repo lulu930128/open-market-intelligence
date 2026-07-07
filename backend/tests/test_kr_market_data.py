@@ -7,18 +7,31 @@ from unittest.mock import patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.db.models import Base, KRDailyPrice
-from app.kr_market.schemas import KRWatchlistGroupCreate, KRWatchlistItemCreate, KRWatchlistReadinessRead
+from app.db.models import Base, KRDailyPrice, KRIndexDailyPrice
+from app.kr_market.schemas import (
+    KRIndexOhlcChartRead,
+    KRIndexIntradayTrendRead,
+    KRIndexSummaryRead,
+    KRWatchlistGroupCreate,
+    KRWatchlistItemCreate,
+    KRWatchlistReadinessRead,
+)
 from app.kr_market.service import (
     create_kr_watchlist_group,
     create_kr_watchlist_item,
+    get_kr_index_summary,
+    get_kr_index_intraday_trend,
+    get_kr_market_breadth,
     get_kr_resource_summary,
     get_kr_watchlist_readiness,
     get_kr_watchlist_ranking,
+    list_kr_index_ohlc_chart_data,
     list_kr_ohlc_chart_data,
     refresh_kr_company_fundamental,
     refresh_kr_watchlist_resources,
+    sync_kr_index_master,
     upsert_kr_daily_price_records,
+    upsert_kr_index_daily_price_records,
     upsert_kr_investor_trade_records,
     upsert_kr_stock_records,
 )
@@ -28,6 +41,10 @@ from app.kr_market.sources import (
     KRInvestorTradeRecord,
     KRMarketDataFetchError,
     normalize_kr_symbol,
+    normalize_kr_index_id,
+    parse_naver_index_daily_prices,
+    parse_naver_index_intraday_points,
+    parse_naver_index_realtime_quote,
     parse_krx_daily_price_records,
     parse_krx_investor_trade_records,
     parse_krx_stock_records,
@@ -124,6 +141,57 @@ KRX_DAILY_SAMPLE = {
 }
 
 
+KRX_MARKET_BREADTH_SAMPLE = {
+    "OutBlock_1": [
+        {
+            "TRD_DD": "2026/07/03",
+            "ISU_SRT_CD": "005930",
+            "MKT_NM": "KOSPI",
+            "TDD_OPNPRC": "72,000",
+            "TDD_HGPRC": "73,500",
+            "TDD_LWPRC": "71,800",
+            "TDD_CLSPRC": "73,200",
+            "CMPPREVDD_PRC": "+700",
+            "FLUC_RT": "0.97",
+            "ACC_TRDVOL": "14,900,000",
+            "ACC_TRDVAL": "1,090,000,000,000",
+            "MKTCAP": "437,000,000,000,000",
+            "LIST_SHRS": "5,969,782,550",
+        },
+        {
+            "TRD_DD": "2026/07/03",
+            "ISU_SRT_CD": "000660",
+            "MKT_NM": "KOSPI",
+            "TDD_OPNPRC": "242,000",
+            "TDD_HGPRC": "244,000",
+            "TDD_LWPRC": "238,000",
+            "TDD_CLSPRC": "239,000",
+            "CMPPREVDD_PRC": "-3,000",
+            "FLUC_RT": "-1.24",
+            "ACC_TRDVOL": "5,500,000",
+            "ACC_TRDVAL": "1,300,000,000,000",
+            "MKTCAP": "174,000,000,000,000",
+            "LIST_SHRS": "728,000,000",
+        },
+        {
+            "TRD_DD": "2026/07/03",
+            "ISU_SRT_CD": "035720",
+            "MKT_NM": "KOSDAQ",
+            "TDD_OPNPRC": "50,000",
+            "TDD_HGPRC": "51,000",
+            "TDD_LWPRC": "49,500",
+            "TDD_CLSPRC": "50,000",
+            "CMPPREVDD_PRC": "0",
+            "FLUC_RT": "0.00",
+            "ACC_TRDVOL": "1,100,000",
+            "ACC_TRDVAL": "55,000,000,000",
+            "MKTCAP": "22,000,000,000,000",
+            "LIST_SHRS": "440,000,000",
+        },
+    ]
+}
+
+
 OPENDART_FINANCIAL_SAMPLE = {
     "status": "000",
     "message": "정상",
@@ -164,6 +232,70 @@ KRX_INVESTOR_SAMPLE = {
 }
 
 
+NAVER_KR_INDEX_SAMPLE = """
+ [['날짜', '시가', '고가', '저가', '종가', '거래량', '외국인소진율'],
+
+["20260701", 3300.1, 3320.2, 3288.4, 3310.5, 468193, 0.0],
+["20260702", 3312.0, 3340.8, 3301.2, 3333.4, 505157, 0.0],
+["20260703", 3338.3, 3360.1, 3329.0, 3355.2, 465821, 0.0]
+]
+"""
+
+
+NAVER_KR_INDEX_INTRADAY_SAMPLE = """
+<html><body>
+<table>
+  <tr>
+    <td class="date">15:32</td>
+    <td class="number_1">7,656.31</td>
+    <td class="rate_down"><span class="tah p11 nv01">395.02</span></td>
+    <td class="number_1">81</td>
+    <td class="number_1">512,294</td>
+    <td class="number_1">39,659,682</td>
+  </tr>
+  <tr>
+    <td class="date">15:30</td>
+    <td class="number_1">7,655.92</td>
+    <td class="rate_down"><span class="tah p11 nv01">395.41</span></td>
+    <td class="number_1">11,865</td>
+    <td class="number_1">512,213</td>
+    <td class="number_1">39,654,556</td>
+  </tr>
+</table>
+</body></html>
+"""
+
+
+NAVER_KR_INDEX_REALTIME_SAMPLE = {
+    "resultCode": "success",
+    "result": {
+        "pollingInterval": 70000,
+        "areas": [
+            {
+                "name": "SERVICE_INDEX",
+                "datas": [
+                    {
+                        "ms": "CLOSE",
+                        "nv": 765631,
+                        "cv": -39502,
+                        "cr": -4.91,
+                        "rf": "5",
+                        "ov": 791920,
+                        "hv": 795455,
+                        "lv": 738922,
+                        "aq": 516366,
+                        "aa": 40717403,
+                        "bs": 0,
+                        "cd": "KOSPI",
+                    }
+                ],
+            }
+        ],
+        "time": 1783417654003,
+    },
+}
+
+
 class KRMarketDataTests(unittest.TestCase):
     def setUp(self) -> None:
         self.engine = create_engine("sqlite:///:memory:")
@@ -180,6 +312,7 @@ class KRMarketDataTests(unittest.TestCase):
         self.assertEqual(normalize_kr_symbol("5930"), "005930.KS")
         self.assertEqual(normalize_kr_symbol("KRX:005930"), "005930.KS")
         self.assertEqual(normalize_kr_symbol("035720.kq"), "035720.KQ")
+        self.assertEqual(normalize_kr_index_id("KPI200"), "KOSPI200")
 
     def test_parse_krx_stock_records_and_daily_prices(self) -> None:
         stocks = parse_krx_stock_records(KRX_STOCK_SAMPLE)
@@ -211,6 +344,147 @@ class KRMarketDataTests(unittest.TestCase):
         self.assertEqual(len(records), 2)
         self.assertEqual(records[-1].close_price, 73200.0)
         self.assertEqual(records[-1].trade_volume, 14900000)
+
+    def test_parse_naver_index_daily_prices(self) -> None:
+        records = parse_naver_index_daily_prices(
+            NAVER_KR_INDEX_SAMPLE,
+            index_id="KOSPI",
+            source_url="https://api.finance.naver.com/siseJson.naver?symbol=KOSPI",
+        )
+
+        self.assertEqual(len(records), 3)
+        self.assertEqual(records[0].index_id, "KOSPI")
+        self.assertEqual(records[0].trade_date, date(2026, 7, 1))
+        self.assertEqual(records[0].close_value, 3310.5)
+        self.assertIsNone(records[0].price_change)
+        self.assertAlmostEqual(records[1].price_change or 0, 22.90000000000009)
+        self.assertEqual(records[-1].trade_volume, 465821)
+
+    def test_parse_naver_index_intraday_points_and_realtime_quote(self) -> None:
+        points = parse_naver_index_intraday_points(
+            NAVER_KR_INDEX_INTRADAY_SAMPLE,
+            index_id="KOSPI",
+            thistime="20260707184700",
+        )
+        quote = parse_naver_index_realtime_quote(
+            NAVER_KR_INDEX_REALTIME_SAMPLE,
+            index_id="KOSPI",
+        )
+
+        self.assertEqual(len(points), 2)
+        self.assertEqual(points[0].time.isoformat(), "2026-07-07T15:30:00+09:00")
+        self.assertEqual(points[0].price, 7655.92)
+        self.assertEqual(points[0].volume, 11865)
+        self.assertEqual(points[-1].price, 7656.31)
+        self.assertEqual(quote.price, 7656.31)
+        self.assertEqual(quote.change, -395.02)
+        self.assertEqual(quote.open_value, 7919.2)
+        self.assertEqual(quote.polling_interval_seconds, 70)
+
+    def test_get_kr_index_intraday_trend_uses_naver_points_and_realtime_reference(self) -> None:
+        sync_kr_index_master(self.db)
+
+        with (
+            patch(
+                "app.kr_market.service.fetch_naver_index_intraday_page_payload",
+                return_value=(
+                    NAVER_KR_INDEX_INTRADAY_SAMPLE,
+                    "https://finance.naver.com/sise/sise_index_time.naver?code=KOSPI",
+                ),
+            ) as intraday_fetch,
+            patch(
+                "app.kr_market.service.fetch_naver_index_realtime_payload",
+                return_value=(
+                    NAVER_KR_INDEX_REALTIME_SAMPLE,
+                    "https://polling.finance.naver.com/api/realtime?query=SERVICE_INDEX:KOSPI",
+                ),
+            ),
+            patch(
+                "app.kr_market.service._kr_index_intraday_thistime",
+                return_value="20260707184700",
+            ),
+        ):
+            result = get_kr_index_intraday_trend(
+                self.db,
+                index_id="KOSPI",
+                refresh=True,
+                max_pages=1,
+            )
+
+        self.assertEqual(result["stock_id"], "KOSPI")
+        self.assertEqual(result["source"], "naver_index_time")
+        self.assertEqual(result["point_count"], 3)
+        self.assertAlmostEqual(result["previous_close"] or 0, 8051.33)
+        self.assertEqual(result["polling_interval_seconds"], 70)
+        self.assertEqual(intraday_fetch.call_count, 1)
+        self.assertEqual(KRIndexIntradayTrendRead.model_validate(result).point_count, 3)
+
+    def test_upsert_index_prices_summary_and_ohlc(self) -> None:
+        sync_kr_index_master(self.db)
+        records = parse_naver_index_daily_prices(NAVER_KR_INDEX_SAMPLE, index_id="KPI200")
+        result = upsert_kr_index_daily_price_records(self.db, records)
+
+        self.assertEqual(result["inserted_count"], 3)
+        self.assertEqual(self.db.query(KRIndexDailyPrice).count(), 3)
+
+        summary = get_kr_index_summary(
+            self.db,
+            expected_daily_date=date(2026, 7, 3),
+        )
+        chart = list_kr_index_ohlc_chart_data(
+            self.db,
+            index_id="KPI200",
+            bars=5,
+            to_date=date(2026, 7, 3),
+        )
+
+        kospi200 = next(row for row in summary["indices"] if row["index_id"] == "KOSPI200")
+        self.assertEqual(kospi200["status"], "current")
+        self.assertEqual(kospi200["close"], 3355.2)
+        self.assertEqual(summary["summary"]["index_count"], 3)
+        self.assertEqual(chart["index_id"], "KOSPI200")
+        self.assertEqual(chart["name"], "KOSPI 200")
+        self.assertEqual(chart["point_count"], 3)
+        self.assertEqual(chart["points"][-1]["close"], 3355.2)
+        self.assertEqual(KRIndexSummaryRead.model_validate(summary).summary.index_count, 3)
+        self.assertEqual(KRIndexOhlcChartRead.model_validate(chart).point_count, 3)
+
+    def test_kr_market_breadth_uses_public_daily_rows_by_index_segment(self) -> None:
+        sync_kr_index_master(self.db)
+        upsert_kr_daily_price_records(
+            self.db,
+            parse_krx_daily_price_records(
+                KRX_MARKET_BREADTH_SAMPLE,
+                source_url="https://data.krx.co.kr/example-market",
+            ),
+        )
+        upsert_kr_index_daily_price_records(
+            self.db,
+            parse_naver_index_daily_prices(NAVER_KR_INDEX_SAMPLE, index_id="KOSPI"),
+        )
+
+        kospi = get_kr_market_breadth(self.db, index_id="KOSPI", trade_date=date(2026, 7, 3))
+        kosdaq = get_kr_market_breadth(self.db, index_id="KOSDAQ", trade_date=date(2026, 7, 3))
+        kospi200 = get_kr_market_breadth(self.db, index_id="KPI200", trade_date=date(2026, 7, 3))
+        summary = get_kr_index_summary(
+            self.db,
+            expected_daily_date=date(2026, 7, 3),
+        )
+        kospi_summary = next(row for row in summary["indices"] if row["index_id"] == "KOSPI")
+
+        self.assertEqual(kospi["advance_count"], 1)
+        self.assertEqual(kospi["decline_count"], 1)
+        self.assertEqual(kospi["unchanged_count"], 0)
+        self.assertEqual(kospi["total_count"], 2)
+        self.assertEqual(kospi["trade_value"], 2_390_000_000_000)
+        self.assertEqual(kospi["positive_ratio"], 0.5)
+        self.assertEqual(kosdaq["advance_count"], 0)
+        self.assertEqual(kosdaq["decline_count"], 0)
+        self.assertEqual(kosdaq["unchanged_count"], 1)
+        self.assertEqual(kospi200["market_segment"], "KOSPI")
+        self.assertIn("KOSPI 200", kospi200["coverage_note"] or "")
+        self.assertEqual(kospi_summary["breadth"]["advance_count"], 1)
+        self.assertEqual(KRIndexSummaryRead.model_validate(summary).indices[0].breadth.status, "current")
 
     def test_parse_opendart_and_investor_records(self) -> None:
         fundamentals = parse_opendart_company_fundamental_records(
@@ -475,6 +749,12 @@ class KRMarketDataTests(unittest.TestCase):
         matching_paths = {getattr(route, "path", None) for route in app.routes}
 
         self.assertIn("/api/kr-market/source-health", matching_paths)
+        self.assertIn("/api/kr-market/market-breadth/refresh", matching_paths)
+        self.assertIn("/api/kr-market/indices/summary", matching_paths)
+        self.assertIn("/api/kr-market/indices/{index_id}/breadth", matching_paths)
+        self.assertIn("/api/kr-market/indices/{index_id}/intraday", matching_paths)
+        self.assertIn("/api/kr-market/indices/{index_id}/ohlc", matching_paths)
+        self.assertIn("/api/kr-market/indices/{index_id}/refresh", matching_paths)
         self.assertIn("/api/kr-market/daily/{symbol}/refresh", matching_paths)
         self.assertIn("/api/kr-market/watchlists/readiness", matching_paths)
         self.assertIn("/api/kr-market/watchlists/resources/refresh", matching_paths)
