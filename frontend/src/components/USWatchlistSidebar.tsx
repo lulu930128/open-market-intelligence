@@ -2,9 +2,9 @@
 
 import JobStatusCenter from "@/components/JobStatusCenter";
 import SettingsDock from "@/components/SettingsDock";
-import type { MarketRegion } from "@/components/SidebarWatchlistExplorer";
 import { marketLabel, usAssetTypeLabel, useT } from "@/i18n";
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
+import type { MarketRegion } from "@/lib/dashboardNavigation";
 import {
   US_MARKET_INDEX_GROUP_NAME,
   US_MARKET_INDEX_ITEMS,

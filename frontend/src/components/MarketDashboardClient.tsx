@@ -1,7 +1,6 @@
 "use client";
 
 import SidebarWatchlistExplorer from "@/components/SidebarWatchlistExplorer";
-import type { MarketRegion } from "@/components/SidebarWatchlistExplorer";
 import CryptoMarketPanel from "@/components/CryptoMarketPanel";
 import JPMarketPanel from "@/components/JPMarketPanel";
 import JPMarketSidebar from "@/components/JPMarketSidebar";
@@ -17,6 +16,11 @@ import USStockDetailPanel from "@/components/USStockDetailPanel";
 import USWatchlistSidebar from "@/components/USWatchlistSidebar";
 import WatchlistRadarPanel from "@/components/WatchlistRadarPanel";
 import { fetchJson, requestJson } from "@/lib/api";
+import {
+  buildDashboardHref,
+  type DashboardHrefParams,
+  type MarketRegion,
+} from "@/lib/dashboardNavigation";
 import { getJobResultStatus, requestBackfillJob } from "@/lib/jobs";
 import {
   MARKET_DATA_SUBSCRIPTIONS_UPDATED_EVENT,
@@ -247,38 +251,6 @@ type RankingPanelOption = {
   value: string;
   label: string;
 };
-
-function buildDashboardHref(params: {
-  market?: MarketRegion;
-  groupId?: number | null;
-  stockId?: string | null;
-  futuresSymbol?: string | null;
-  symbol?: string | null;
-  jpSymbol?: string | null;
-  krSymbol?: string | null;
-  radarMode?: WatchlistRadarMode | null;
-  quoteDepthPreviewMode?: TaiwanStockQuoteDepthPreviewMode | null;
-}) {
-  const searchParams = new URLSearchParams();
-
-  if (params.market) searchParams.set("market", params.market);
-  if (params.groupId !== null && params.groupId !== undefined) {
-    searchParams.set("group_id", String(params.groupId));
-  }
-  if (params.stockId) searchParams.set("stock_id", params.stockId);
-  if (params.futuresSymbol) searchParams.set("futures", params.futuresSymbol);
-  if (params.symbol) searchParams.set("symbol", params.symbol);
-  if (params.jpSymbol) searchParams.set("jp_symbol", params.jpSymbol);
-  if (params.krSymbol) searchParams.set("kr_symbol", params.krSymbol);
-  if (params.radarMode) searchParams.set("radar_mode", params.radarMode);
-  if (params.quoteDepthPreviewMode) {
-    searchParams.set("quote_depth_preview", params.quoteDepthPreviewMode);
-  }
-
-  const query = searchParams.toString();
-
-  return query ? `/?${query}` : "/";
-}
 
 type Props = {
   initialMarket: MarketRegion;
@@ -4281,7 +4253,7 @@ export default function MarketDashboardClient({
     krRanking?.target_trade_date,
   ]);
 
-  function addDashboardPreviewParam(params: Parameters<typeof buildDashboardHref>[0]) {
+  function addDashboardPreviewParam(params: DashboardHrefParams) {
     if (
       quoteDepthPreviewMode &&
       (params.market === "tw" || (!params.market && activeMarket === "tw"))
@@ -4292,11 +4264,11 @@ export default function MarketDashboardClient({
     return params;
   }
 
-  function dashboardHref(params: Parameters<typeof buildDashboardHref>[0]) {
+  function dashboardHref(params: DashboardHrefParams) {
     return buildDashboardHref(addDashboardPreviewParam(params));
   }
 
-  function pushDashboardUrl(params: Parameters<typeof buildDashboardHref>[0]) {
+  function pushDashboardUrl(params: DashboardHrefParams) {
     if (typeof window === "undefined") return;
 
     window.history.pushState(null, "", dashboardHref(params));

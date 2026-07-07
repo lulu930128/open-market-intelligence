@@ -128,6 +128,21 @@ class TechnicalReportTests(unittest.TestCase):
         self.db.close()
         engine.dispose()
 
+    def assertSlotEnvelope(
+        self,
+        slot: dict,
+        *,
+        payload_ref: str | None = None,
+        payload_level: str | None = None,
+    ) -> None:
+        self.assertIsInstance(slot.get("status"), str)
+        self.assertIsInstance(slot.get("capability"), str)
+        self.assertIsInstance(slot.get("priority"), str)
+        if payload_ref is not None:
+            self.assertEqual(slot.get("payload_ref"), payload_ref)
+        if payload_level is not None:
+            self.assertEqual(slot.get("payload_level"), payload_level)
+
     def test_indicator_points_include_scanning_indicators(self) -> None:
         start = date(2026, 1, 1)
         points = [
@@ -288,6 +303,50 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(compact["slots"]["intraday"]["status"], "not_requested")
         self.assertEqual(compact["slots"]["intraday"]["payload_ref"], "intraday_bars")
         self.assertEqual(compact["slots"]["cross_market"]["status"], "planned")
+
+    def test_stock_context_compact_slots_follow_consumer_contract(self) -> None:
+        context = ai_tools.read_stock_context(
+            db=self.db,
+            stock_id="2330",
+            analysis_horizon="swing",
+            include_intraday=False,
+        )
+
+        compact = context["data"]["compact"]
+        slots = compact["slots"]
+        expected_slots = {
+            "identity",
+            "quote",
+            "intraday",
+            "daily_chart",
+            "technical",
+            "chips_flows",
+            "fundamentals",
+            "cross_market",
+            "news_events",
+            "data_quality",
+        }
+        self.assertTrue(expected_slots.issubset(slots))
+
+        for slot_key in expected_slots:
+            self.assertSlotEnvelope(slots[slot_key])
+
+        payload_ref_by_slot = {
+            "identity": "target",
+            "quote": "quote",
+            "intraday": "intraday_bars",
+            "daily_chart": "full.data.chart",
+            "technical": "technical",
+            "chips_flows": "chips",
+            "fundamentals": "fundamentals",
+            "data_quality": "data_quality",
+        }
+        for slot_key, payload_ref in payload_ref_by_slot.items():
+            self.assertSlotEnvelope(slots[slot_key], payload_ref=payload_ref)
+
+        payload_level_slots = expected_slots - {"identity"}
+        for slot_key in payload_level_slots:
+            self.assertSlotEnvelope(slots[slot_key], payload_level="compact")
 
     def test_payload_presence_helper_does_not_treat_false_as_data(self) -> None:
         self.assertFalse(ai_tools._has_payload_value({"available": False, "rows": []}))

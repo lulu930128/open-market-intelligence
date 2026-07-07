@@ -4,6 +4,7 @@ import JobStatusCenter from "@/components/JobStatusCenter";
 import SettingsDock from "@/components/SettingsDock";
 import { marketLabel, marketSummary, useT, type TranslationFunction } from "@/i18n";
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
+import type { MarketRegion } from "@/lib/dashboardNavigation";
 import {
   CRYPTO_BASE_OPTIONS,
   CRYPTO_KLINE_INSTRUMENTS,
@@ -63,7 +64,6 @@ type Props = {
 };
 
 type Message = { type: "success" | "error"; text: string } | null;
-export type MarketRegion = "tw" | "us" | "jp" | "kr" | "crypto";
 type DragPayload =
   | { type: "group"; groupId: number }
   | { type: "stock"; itemId: number; groupId: number; stockId: string };
