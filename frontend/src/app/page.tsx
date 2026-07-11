@@ -8,6 +8,7 @@ import type {
   KRWatchlistItemRead,
   MarketIndexSummary,
   OhlcChartResponse,
+  OhlcIntradayOverlay,
   StockIndicatorPoint,
   TaiwanStockQuoteDepthPreviewMode,
   USWatchlistGroupNode,
@@ -21,6 +22,22 @@ import type {
 const apiProxyTarget = getApiProxyTarget();
 const indexProductIds = new Set(["TAIEX", "TPEX"]);
 const futuresProductIds = new Set(["TXF", "MXF", "TMF"]);
+
+type MarketCalendarStatusEnvelope = {
+  markets?: {
+    tw?: {
+      session?: {
+        is_polling_window?: boolean;
+        is_after_close?: boolean;
+      };
+      release_windows?: {
+        market_daily_price?: {
+          is_released?: boolean;
+        };
+      };
+    } | null;
+  };
+};
 
 function firstSearchParam(
   params: Record<string, string | string[] | undefined> | undefined,
@@ -73,6 +90,30 @@ function watchlistRadarPath(groupId: number, mode: WatchlistRadarMode) {
   return `/api/watchlists/groups/${groupId}/radar?${params.toString()}`;
 }
 
+function shouldUseTaiwanOhlcIntraday(calendarStatus: MarketCalendarStatusEnvelope | null) {
+  const twStatus = calendarStatus?.markets?.tw;
+  const dailyRelease = twStatus?.release_windows?.market_daily_price;
+
+  return Boolean(
+    twStatus?.session?.is_polling_window ||
+      (twStatus?.session?.is_after_close && !dailyRelease?.is_released)
+  );
+}
+
+function stockOhlcPath(stockId: string, includeIntraday: boolean) {
+  const params = new URLSearchParams({
+    timeframe: "daily",
+    bars: "180",
+    ensure_history: "false",
+  });
+
+  if (includeIntraday) {
+    params.set("include_intraday", "true");
+  }
+
+  return `/api/market/ohlc/${encodeURIComponent(stockId)}?${params.toString()}`;
+}
+
 function flattenGroups(nodes: WatchlistGroupNode[]): WatchlistGroupNode[] {
   return nodes.flatMap((node) => [node, ...flattenGroups(node.children)]);
 }
@@ -110,6 +151,7 @@ export default async function Page({
     initialJpWatchlistItems,
     initialKrWatchlistTree,
     initialKrWatchlistItems,
+    initialCalendarStatus,
   ] = await Promise.all([
     fetchBackendJson<WatchlistGroupNode[]>("/api/watchlists/tree", []),
     fetchBackendJson<WatchlistItemRead[]>("/api/watchlists/items?limit=5000&offset=0", []),
@@ -128,6 +170,10 @@ export default async function Page({
     fetchBackendJson<KRWatchlistItemRead[]>(
       "/api/kr-market/watchlists/items?limit=5000&offset=0",
       []
+    ),
+    fetchBackendJson<MarketCalendarStatusEnvelope | null>(
+      "/api/market/calendar-status?market=tw",
+      null
     ),
   ]);
 
@@ -198,6 +244,8 @@ export default async function Page({
       : null;
   const isIndexProduct =
     initialSelectedStockId !== null && indexProductIds.has(initialSelectedStockId);
+  const includeInitialStockIntraday =
+    !isIndexProduct && shouldUseTaiwanOhlcIntraday(initialCalendarStatus);
   const initialRadarPromise =
     initialMarket === "tw" && initialSelectedGroupId !== null
       ? fetchBackendJson<WatchlistGroupRadarRead | null>(
@@ -212,9 +260,7 @@ export default async function Page({
             ? `/api/market/indices/${encodeURIComponent(
                 initialSelectedStockId
               )}/ohlc?timeframe=daily&bars=180&ensure_history=false`
-            : `/api/market/ohlc/${encodeURIComponent(
-                initialSelectedStockId
-              )}?timeframe=daily&bars=180&ensure_history=false`,
+            : stockOhlcPath(initialSelectedStockId, includeInitialStockIntraday),
           null
         )
       : Promise.resolve<OhlcChartResponse | null>(null);
@@ -237,6 +283,8 @@ export default async function Page({
     initialIndicatorDataPromise,
   ]);
   const initialChartData: ChartPoint[] = initialOhlc?.points ?? [];
+  const initialChartIntradayOverlay: OhlcIntradayOverlay | null =
+    initialOhlc?.intraday_overlay ?? null;
 
   return (
     <MarketDashboardClient
@@ -252,6 +300,7 @@ export default async function Page({
       initialSelectedJpSymbol={initialSelectedJpSymbol}
       initialSelectedKrSymbol={initialSelectedKrSymbol}
       initialChartData={initialChartData}
+      initialChartIntradayOverlay={initialChartIntradayOverlay}
       initialIndicatorData={initialIndicatorData}
       initialRankingData={null}
       initialRadarMode={initialRadarMode}

@@ -100,6 +100,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("watchlist_radar_snapshot_run", table_names)
             self.assertIn("watchlist_radar_snapshot_item", table_names)
             self.assertIn("watchlist_radar_outcome", table_names)
+            self.assertIn("portfolio_holding", table_names)
             jp_master_columns = {
                 column["name"]
                 for column in inspect(engine).get_columns("jp_stock_master")

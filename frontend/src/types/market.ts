@@ -32,6 +32,27 @@ export type WatchlistItemRead = {
   updated_at: string;
 };
 
+export type PortfolioMarket = "tw" | "us" | "jp" | "kr";
+
+export type PortfolioHoldingRead = {
+  id: number;
+  market: PortfolioMarket;
+  symbol: string;
+  symbol_name: string | null;
+  quantity: number;
+  cost_amount: number;
+  currency: string;
+  average_cost: number | null;
+  note: string | null;
+  tags: string | null;
+  strategy_horizon: string | null;
+  opened_at: string | null;
+  is_active: boolean;
+  position_context: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
 export type WatchlistBackfillStockResult = {
   stock_id: string;
   stock_name: string | null;
@@ -431,6 +452,15 @@ export type ChartPoint = {
   transaction_count: number | null;
 };
 
+export type OhlcIntradayOverlay = {
+  source: string | null;
+  trade_date: string;
+  point_count: number;
+  latest_time: string | null;
+  previous_close: number | null;
+  provisional: boolean;
+};
+
 export type OhlcChartResponse = {
   stock_id: string;
   timeframe: "daily" | "weekly" | "monthly";
@@ -441,12 +471,13 @@ export type OhlcChartResponse = {
   point_count: number;
   points: ChartPoint[];
   backfill: Record<string, unknown> | null;
-  intraday_overlay: Record<string, unknown> | null;
+  intraday_overlay: OhlcIntradayOverlay | null;
 };
 
 export type MarketBreadth = {
   market: string;
   trade_date: string | null;
+  as_of?: string | null;
   advance_count: number;
   decline_count: number;
   unchanged_count: number;
@@ -454,6 +485,11 @@ export type MarketBreadth = {
   limit_up_count: number | null;
   limit_down_count: number | null;
   trade_value: number | null;
+  coverage_count?: number | null;
+  unknown_count?: number | null;
+  message_count?: number | null;
+  missing_count?: number | null;
+  warnings?: string[];
   source: string | null;
 };
 

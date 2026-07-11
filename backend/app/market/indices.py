@@ -10,7 +10,7 @@ from urllib.parse import quote
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.db.models import MarketDailyPrice, MarketIndexDailyStat, SourceRegistry
+from app.db.models import MarketDailyPrice, MarketIndexDailyStat, SourceRegistry, StockMaster
 from app.http_client import get as http_get
 from app.sources.defaults import (
     TPEX_DAILY_QUOTES_SOURCE_NAME,
@@ -20,6 +20,7 @@ from app.sources.defaults import (
 
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 TWSE_MIS_STOCK_INFO_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
+TWSE_MIS_REFERER_URL = "https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw"
 TWSE_INDEX_LIST_URL = "https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX"
 TWSE_DAILY_QUOTES_URL = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
 TWSE_RWD_MI_INDEX_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
@@ -31,8 +32,12 @@ TPEX_DAILY_INDEX_URL = "https://www.tpex.org.tw/openapi/v1/tpex_daily_trading_in
 TPEX_DAILY_QUOTES_URL = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes"
 TAIPEI_TZ = timezone(timedelta(hours=8))
 CACHE_TTL_SECONDS = 45
+TWSE_MIS_LIVE_BREADTH_CACHE_TTL_SECONDS = 10
+TWSE_MIS_LIVE_BREADTH_BATCH_SIZE = 100
+TWSE_MIS_LIVE_BREADTH_MIN_CODES = 500
 INDEX_LIST_CACHE_TTL_SECONDS = 300
 MAX_INDEX_STAT_FETCH_WORKERS = 4
+MAX_TWSE_MIS_BREADTH_FETCH_WORKERS = 4
 
 INDEX_CONFIGS = (
     {
@@ -69,6 +74,8 @@ _INDEX_LIST_CACHE: dict[str, dict[str, object]] = {}
 _SHARES_CACHE: dict[str, dict[str, object]] = {}
 _CONTRIBUTION_CACHE: dict[str, dict[str, object]] = {}
 _TWSE_INDEX_5S_CACHE: dict[str, dict[str, object]] = {}
+_TWSE_MIS_LIVE_BREADTH_CACHE: dict[str, dict[str, object]] = {}
+_TWSE_MIS_STOCK_STATE: dict[str, dict[str, object]] = {}
 TWSE_INDEX_5S_FIELD_BY_INDEX_ID = {
     "TAIEX": "發行量加權股價指數",
 }
@@ -250,6 +257,280 @@ def _quote_limit_counts(close: float | None, change: float | None) -> tuple[int,
         return 0, 1
 
     return 0, 0
+
+
+def _prices_equal(left: float | None, right: float | None) -> bool:
+    if left is None or right is None:
+        return False
+
+    return abs(left - right) < 0.000001
+
+
+def _twse_mis_live_breadth_stock_codes(db: Session) -> list[str]:
+    rows = (
+        db.query(StockMaster.stock_id)
+        .filter(StockMaster.market == "TWSE")
+        .filter(StockMaster.instrument_type == "stock")
+        .filter(StockMaster.is_active.is_(True))
+        .order_by(StockMaster.stock_id.asc())
+        .all()
+    )
+    codes = [
+        code
+        for row in rows
+        for code in [_regular_stock_code(row.stock_id)]
+        if code is not None
+    ]
+    return list(dict.fromkeys(codes))
+
+
+def _chunked(values: list[str], size: int) -> Iterable[list[str]]:
+    for index in range(0, len(values), size):
+        yield values[index : index + size]
+
+
+def _fetch_twse_mis_stock_message_batch(codes: list[str]) -> list[dict]:
+    response = http_get(
+        TWSE_MIS_STOCK_INFO_URL,
+        params={
+            "ex_ch": "|".join(f"tse_{code}.tw" for code in codes),
+            "json": "1",
+            "delay": "0",
+        },
+        headers={
+            "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
+            "Accept": "application/json,text/plain,*/*",
+            "Referer": TWSE_MIS_REFERER_URL,
+        },
+        timeout=20,
+    )
+    response.raise_for_status()
+    response.encoding = "utf-8"
+    payload = response.json()
+
+    if not isinstance(payload, dict) or str(payload.get("rtcode") or "") not in {"", "0000"}:
+        raise ValueError("TWSE MIS live stock quote payload is unavailable.")
+
+    messages = payload.get("msgArray") or []
+    return [message for message in messages if isinstance(message, dict)]
+
+
+def _fetch_twse_mis_stock_messages(codes: list[str]) -> tuple[list[dict], int]:
+    batches = list(_chunked(codes, TWSE_MIS_LIVE_BREADTH_BATCH_SIZE))
+
+    if not batches:
+        return [], 0
+
+    messages: list[dict] = []
+    failed_batches = 0
+
+    with ThreadPoolExecutor(max_workers=MAX_TWSE_MIS_BREADTH_FETCH_WORKERS) as executor:
+        futures = [
+            executor.submit(_fetch_twse_mis_stock_message_batch, batch)
+            for batch in batches
+        ]
+
+        for future in as_completed(futures):
+            try:
+                messages.extend(future.result())
+            except Exception:
+                failed_batches += 1
+
+    return messages, failed_batches
+
+
+def _cache_twse_mis_live_breadth(market: str, payload: dict | None) -> dict | None:
+    _TWSE_MIS_LIVE_BREADTH_CACHE[market] = {
+        "expires_at": monotonic() + TWSE_MIS_LIVE_BREADTH_CACHE_TTL_SECONDS,
+        "payload": payload,
+    }
+    return payload
+
+
+def _twse_mis_message_datetime(message: dict) -> datetime | None:
+    snapshot = _build_mis_snapshot_time(
+        str(message.get("d") or message.get("^") or ""),
+        str(message.get("t") or message.get("%") or ""),
+    )
+
+    if not snapshot:
+        return None
+
+    try:
+        return datetime.fromisoformat(snapshot)
+    except ValueError:
+        return None
+
+
+def _classify_twse_mis_live_breadth_message(message: dict) -> dict | None:
+    code = _regular_stock_code(message.get("c"))
+
+    if code is None:
+        return None
+
+    trade_date = _parse_trade_date(message.get("d") or message.get("^"))
+    previous_close = _as_float(message.get("y"))
+    latest_price = _as_float(message.get("z")) or _as_float(message.get("pz"))
+    cached_state = _TWSE_MIS_STOCK_STATE.get(code)
+
+    if (
+        latest_price is None
+        and isinstance(cached_state, dict)
+        and cached_state.get("trade_date") == trade_date
+    ):
+        latest_price = _as_float(cached_state.get("price"))
+
+    if latest_price is not None:
+        _TWSE_MIS_STOCK_STATE[code] = {
+            "trade_date": trade_date,
+            "price": latest_price,
+            "as_of": _twse_mis_message_datetime(message),
+        }
+
+    direction: str | None = None
+
+    if latest_price is not None and previous_close is not None:
+        if latest_price > previous_close:
+            direction = "advance"
+        elif latest_price < previous_close:
+            direction = "decline"
+        else:
+            direction = "unchanged"
+    elif previous_close is not None:
+        high = _as_float(message.get("h"))
+        low = _as_float(message.get("l"))
+        open_price = _as_float(message.get("o"))
+
+        if high is not None and high < previous_close:
+            direction = "decline"
+        elif low is not None and low > previous_close:
+            direction = "advance"
+        elif (
+            _prices_equal(open_price, previous_close)
+            and _prices_equal(high, previous_close)
+            and _prices_equal(low, previous_close)
+        ):
+            direction = "unchanged"
+
+    limit_up_price = _as_float(message.get("u"))
+    limit_down_price = _as_float(message.get("w"))
+    is_limit_up = (
+        latest_price is not None
+        and limit_up_price is not None
+        and latest_price >= limit_up_price
+    )
+    is_limit_down = (
+        latest_price is not None
+        and limit_down_price is not None
+        and latest_price <= limit_down_price
+    )
+
+    return {
+        "code": code,
+        "trade_date": trade_date,
+        "as_of": _twse_mis_message_datetime(message),
+        "direction": direction,
+        "is_limit_up": is_limit_up,
+        "is_limit_down": is_limit_down,
+    }
+
+
+def _fetch_twse_mis_live_market_breadth(db: Session, market: str) -> dict | None:
+    if market != "TWSE":
+        return None
+
+    cached = _TWSE_MIS_LIVE_BREADTH_CACHE.get(market)
+
+    if cached and monotonic() < float(cached["expires_at"]):
+        payload = cached.get("payload")
+
+        if isinstance(payload, dict):
+            return payload
+
+        return None
+
+    codes = _twse_mis_live_breadth_stock_codes(db)
+
+    if len(codes) < TWSE_MIS_LIVE_BREADTH_MIN_CODES:
+        return _cache_twse_mis_live_breadth(market, None)
+
+    messages, failed_batches = _fetch_twse_mis_stock_messages(codes)
+
+    if not messages:
+        return _cache_twse_mis_live_breadth(market, None)
+
+    code_set = set(codes)
+    classified_rows = [
+        row
+        for message in messages
+        for row in [_classify_twse_mis_live_breadth_message(message)]
+        if row is not None and row["code"] in code_set
+    ]
+
+    if not classified_rows:
+        return _cache_twse_mis_live_breadth(market, None)
+
+    received_codes = {str(row["code"]) for row in classified_rows}
+    advance_count = sum(1 for row in classified_rows if row.get("direction") == "advance")
+    decline_count = sum(1 for row in classified_rows if row.get("direction") == "decline")
+    unchanged_count = sum(1 for row in classified_rows if row.get("direction") == "unchanged")
+    coverage_count = advance_count + decline_count + unchanged_count
+    total_count = len(codes)
+    unknown_count = max(total_count - coverage_count, 0)
+    missing_count = max(total_count - len(received_codes), 0)
+    as_of_values = [row.get("as_of") for row in classified_rows if row.get("as_of") is not None]
+    trade_dates = [
+        row.get("trade_date")
+        for row in classified_rows
+        if isinstance(row.get("trade_date"), date)
+    ]
+    source = (
+        "twse_mis_live_breadth"
+        if unknown_count == 0 and failed_batches == 0
+        else "twse_mis_live_breadth_partial"
+    )
+    warnings: list[str] = []
+
+    if unknown_count > 0:
+        warnings.append("Some TWSE MIS quotes did not expose a current or inferable price.")
+
+    if failed_batches > 0:
+        warnings.append(f"{failed_batches} TWSE MIS quote batch(es) failed.")
+
+    payload = {
+        "market": "TWSE",
+        "trade_date": max(trade_dates) if trade_dates else None,
+        "advance_count": advance_count,
+        "decline_count": decline_count,
+        "unchanged_count": unchanged_count,
+        "total_count": total_count,
+        "limit_up_count": sum(1 for row in classified_rows if row.get("is_limit_up")),
+        "limit_down_count": sum(1 for row in classified_rows if row.get("is_limit_down")),
+        "trade_value": None,
+        "source": source,
+        "as_of": max(as_of_values) if as_of_values else datetime.now(TAIPEI_TZ),
+        "coverage_count": coverage_count,
+        "unknown_count": unknown_count,
+        "message_count": len(received_codes),
+        "missing_count": missing_count,
+        "warnings": warnings,
+    }
+    return _cache_twse_mis_live_breadth(market, payload)
+
+
+def _market_index_summary_cache_ttl(indices: list[dict]) -> int:
+    for item in indices:
+        breadth = item.get("breadth") if isinstance(item, dict) else None
+
+        if not isinstance(breadth, dict):
+            continue
+
+        source = str(breadth.get("source") or "")
+
+        if source.startswith("twse_mis_live_breadth"):
+            return TWSE_MIS_LIVE_BREADTH_CACHE_TTL_SECONDS
+
+    return CACHE_TTL_SECONDS
 
 
 def _market_quote_breadth_from_rows(
@@ -508,6 +789,20 @@ def _resolve_market_breadth(
     ):
         return quote_breadth
 
+    live_breadth: dict | None = None
+
+    try:
+        live_breadth = _fetch_twse_mis_live_market_breadth(db=db, market=market)
+    except Exception:
+        live_breadth = None
+
+    if (
+        target_trade_date is not None
+        and _breadth_trade_date(live_breadth) == target_trade_date
+        and _is_plausible_market_breadth(live_breadth)
+    ):
+        return live_breadth
+
     local_breadth = _latest_market_breadth(db=db, market=market)
 
     if target_trade_date is not None:
@@ -525,6 +820,9 @@ def _resolve_market_breadth(
         local_date is None or quote_date >= local_date
     ) and _is_plausible_market_breadth(quote_breadth):
         return quote_breadth
+
+    if _is_plausible_market_breadth(live_breadth):
+        return live_breadth
 
     if _is_plausible_market_breadth(local_breadth):
         return local_breadth
@@ -2632,5 +2930,5 @@ def get_market_index_summary(db: Session, force_refresh: bool = False) -> dict:
         "indices": indices,
     }
     _CACHE["payload"] = payload
-    _CACHE["expires_at"] = monotonic() + CACHE_TTL_SECONDS
+    _CACHE["expires_at"] = monotonic() + _market_index_summary_cache_ttl(indices)
     return payload

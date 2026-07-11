@@ -86,6 +86,7 @@ class OhlcIntradayOverlayTests(unittest.TestCase):
         self.assertEqual(chart["points"][-1]["close"], 105.0)
         self.assertEqual(chart["points"][-1]["volume"], 30)
         self.assertEqual(chart["intraday_overlay"]["trade_date"], date(2026, 6, 29))
+        self.assertEqual(chart["intraday_overlay"]["previous_close"], 101.0)
         self.assertTrue(chart["intraday_overlay"]["provisional"])
 
     def test_us_weekly_ohlc_merges_provisional_intraday_candle(self) -> None:
@@ -162,6 +163,7 @@ class OhlcIntradayOverlayTests(unittest.TestCase):
         self.assertEqual(chart["points"][0]["close"], 111.0)
         self.assertEqual(chart["points"][0]["volume"], 3300)
         self.assertEqual(chart["intraday_overlay"]["trade_date"], date(2026, 6, 26))
+        self.assertEqual(chart["intraday_overlay"]["previous_close"], 108.0)
         self.assertTrue(chart["intraday_overlay"]["provisional"])
 
 

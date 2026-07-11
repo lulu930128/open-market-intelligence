@@ -24,6 +24,7 @@ import {
 } from "@/types/cryptoMarket";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import CryptoKLinePanel from "@/components/CryptoKLinePanel";
+import { StateSurface } from "@/components/LoadingPlaceholders";
 
 type LoadState = "idle" | "loading" | "success" | "error";
 
@@ -2194,9 +2195,7 @@ function LiquidityHeatmapCard({
       <div className="border border-omi-border-subtle bg-omi-surface-subtle px-3 py-3">
         <div className="text-sm font-bold text-omi-text-strong">{title}</div>
         <div className="mt-0.5 text-xs text-omi-text-muted">{subtitle}</div>
-        <div className="mt-3 flex h-64 items-center justify-center border border-dashed border-omi-border-subtle text-xs text-omi-text-muted">
-          {emptyLabel}
-        </div>
+        <StateSurface title={emptyLabel} tone="empty" compact className="mt-3 h-64" />
       </div>
     );
   }
@@ -2333,10 +2332,13 @@ function LiquidationHeatmapCard({
       <div className="border border-dashed border-omi-border bg-omi-surface-subtle px-3 py-3">
         <div className="text-sm font-bold text-omi-text-strong">{title}</div>
         <div className="mt-0.5 text-xs text-omi-text-muted">{subtitle}</div>
-        <div className="mt-3 flex h-48 flex-col items-center justify-center border border-dashed border-omi-border-subtle px-4 text-center">
-          <div className="text-xs font-semibold text-omi-text-muted">{emptyLabel}</div>
-          <p className="mt-2 max-w-sm text-xs leading-5 text-omi-text-muted">{emptyBody}</p>
-        </div>
+        <StateSurface
+          title={emptyLabel}
+          description={emptyBody}
+          tone="empty"
+          compact
+          className="mt-3 h-48"
+        />
         <div className="mt-3 flex flex-wrap gap-1.5">
           {tags.map((tag) => (
             <span key={tag} className="border border-omi-border-subtle px-2 py-1 text-[11px] font-semibold text-omi-text-muted">
@@ -2476,9 +2478,7 @@ function TrendChartCard({
             <div className="mt-0.5 truncate text-xs text-omi-text-muted">{subtitle}</div>
           </div>
         </div>
-        <div className="mt-3 flex h-32 items-center justify-center border border-dashed border-omi-border-subtle text-xs text-omi-text-muted">
-          {emptyLabel}
-        </div>
+        <StateSurface title={emptyLabel} tone="empty" compact className="mt-3 h-32" />
       </div>
     );
   }
@@ -2638,8 +2638,13 @@ function DataTable({
         <tbody>
           {rows.length === 0 ? (
             <tr>
-              <td className="px-3 py-6 text-center text-omi-text-muted" colSpan={columns.length}>
-                {emptyLabel}
+              <td className="px-3 py-4" colSpan={columns.length}>
+                <StateSurface
+                  title={emptyLabel}
+                  tone="empty"
+                  compact
+                  className="mx-auto max-w-sm"
+                />
               </td>
             </tr>
           ) : (

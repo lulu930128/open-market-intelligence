@@ -1,6 +1,7 @@
 "use client";
 
 import JobStatusCenter from "@/components/JobStatusCenter";
+import PortfolioHoldingsPanel from "@/components/PortfolioHoldingsPanel";
 import SettingsDock from "@/components/SettingsDock";
 import { marketLabel, usAssetTypeLabel, useT } from "@/i18n";
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
@@ -659,6 +660,15 @@ export default function USWatchlistSidebar({
 
       <div className="min-h-0 flex-1 overflow-y-auto py-2">
         {renderPinnedIndexGroup()}
+        <PortfolioHoldingsPanel
+          market="us"
+          selectedSymbol={selectedSymbol}
+          defaultCurrency="USD"
+          symbolPlaceholder="Ticker, e.g. AAPL"
+          normalizeSymbol={normalizeTickerInput}
+          onSelectSymbol={onSelectSymbol}
+          onChanged={onChanged}
+        />
         {tree.length > 0 ? (
           tree.map((node) => renderGroupNode(node))
         ) : (

@@ -127,6 +127,19 @@ class Settings(BaseSettings):
     scheduler_kr_market_refresh_include_investors: bool = True
     scheduler_kr_market_refresh_include_fundamentals: bool = False
     scheduler_kr_market_refresh_sleep_seconds: float = 15.0
+    enable_watchlist_radar_scheduler: bool = True
+    scheduler_watchlist_radar_time: str = "15:45"
+    scheduler_watchlist_radar_day_of_week: str = "mon-fri"
+    scheduler_watchlist_radar_group_ids: str = ""
+    scheduler_watchlist_radar_modes: str = "action"
+    scheduler_watchlist_radar_include_children: bool = True
+    scheduler_watchlist_radar_enabled_only: bool = True
+    scheduler_watchlist_radar_max_results: int = 30
+    scheduler_watchlist_radar_calculation_limit: int = 100
+    scheduler_watchlist_radar_use_intraday: bool = False
+    scheduler_watchlist_radar_intraday_limit: int = 30
+    scheduler_watchlist_radar_evaluate_lookback_days: int = 10
+    scheduler_watchlist_radar_require_daily_release: bool = True
 
     dispatch_smtp_host: str | None = None
     dispatch_smtp_port: int = 587

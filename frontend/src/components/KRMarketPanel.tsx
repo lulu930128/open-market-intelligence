@@ -5,6 +5,7 @@ import IntradayTrendChart, {
   type IntradayIndicatorSettings,
   type IntradaySessionConfig,
 } from "@/components/IntradayTrendChart";
+import { StateSurface } from "@/components/LoadingPlaceholders";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
 import ResourceSlotTabs from "@/components/market-detail/ResourceSlotTabs";
 import StockKLineChart, {
@@ -15,6 +16,11 @@ import StockKLineChart, {
 import type { ResourceSlotTabItem } from "@/components/market-detail/types";
 import { timeframeLabel, useT } from "@/i18n";
 import { fetchJson, requestJson } from "@/lib/api";
+import {
+  clearDataStatusFocus,
+  emitDataStatusEvent,
+  setDataStatusFocus,
+} from "@/lib/dataStatusEvents";
 import { getKrMarketIndexConfig } from "@/lib/krMarketIndices";
 import {
   KOREA_INTRADAY_REFRESH_MS,
@@ -61,7 +67,6 @@ type Props = {
   refreshNonce?: number;
   watchlistRankingPanel?: ReactNode;
   onSelectStock: (stock: KRStockMasterRead | null) => void;
-  onStatusMessage?: (message: Message) => void;
 };
 
 const indexTimeframeOptions: KRChartTimeframe[] = ["today", "daily", "weekly", "monthly"];
@@ -254,12 +259,6 @@ function readinessStatusLabelKey(status: string | null | undefined) {
   return "krMarket.readiness.status.empty";
 }
 
-function messageToneClass(type: "success" | "warning" | "error") {
-  if (type === "success") return "border-omi-success-border bg-omi-success-soft text-omi-success";
-  if (type === "warning") return "border-omi-warning-border bg-omi-warning-soft text-omi-warning";
-  return "border-omi-danger-border bg-omi-danger-soft text-omi-danger";
-}
-
 function readinessResourceLabelKey(resource: string) {
   if (resource === "daily_price") return "krMarket.readiness.resources.dailyPrice";
   if (resource === "investor_trading") return "krMarket.readiness.resources.investorTrading";
@@ -352,7 +351,6 @@ export default function KRMarketPanel({
   refreshNonce = 0,
   watchlistRankingPanel,
   onSelectStock,
-  onStatusMessage,
 }: Props) {
   const t = useT();
   const onSelectStockRef = useRef(onSelectStock);
@@ -360,7 +358,6 @@ export default function KRMarketPanel({
   const [chart, setChart] = useState<KRChartRead | null>(null);
   const [resourceSummary, setResourceSummary] = useState<KRResourceSummaryRead | null>(null);
   const [indexBreadth, setIndexBreadth] = useState<KRMarketBreadthRead | null>(null);
-  const [indexBreadthMessage, setIndexBreadthMessage] = useState<Message>(null);
   const [fundamentals, setFundamentals] = useState<KRCompanyFundamentalRead[]>([]);
   const [investorRows, setInvestorRows] = useState<KRInvestorTradeDailyRead[]>([]);
   const [sourceHealth, setSourceHealth] = useState<KRSourceHealthRead | null>(null);
@@ -378,7 +375,6 @@ export default function KRMarketPanel({
   const [todaySource, setTodaySource] = useState("naver_index_time");
   const [todayUpdatedAt, setTodayUpdatedAt] = useState<string | null>(null);
   const [todayIntradayState, setTodayIntradayState] = useState<LoadState>("idle");
-  const [todayIntradayMessage, setTodayIntradayMessage] = useState<Message>(null);
   const finalIntradayRefreshDate = useRef<string | null>(null);
 
   const chartData = useMemo<ChartPoint[]>(
@@ -450,6 +446,12 @@ export default function KRMarketPanel({
           .join(" / ")
       : t("krMarket.empty.selectStockPrompt");
   const chartLoading = stockState === "loading" || dataState === "loading";
+  const dataStatusContextKey = useMemo(
+    () => `kr:${selectedStock?.symbol ?? initialSymbol ?? "unknown"}`,
+    [initialSymbol, selectedStock?.symbol]
+  );
+  const dataStatusContextLabel = selectedTitle;
+  const dataStatusSource = t(isSelectedIndex ? "krMarket.sections.index" : "krMarket.sections.stock");
 
   const latestFundamental = fundamentals[0] ?? null;
   const latestInvestorRows = useMemo(() => {
@@ -680,10 +682,21 @@ export default function KRMarketPanel({
   }, [readinessState, t, watchlistReadiness]);
 
   const publishStatus = useCallback(
-    (message: Message) => {
-      onStatusMessage?.(message);
+    (message: Message, title = dataStatusContextLabel) => {
+      if (!message) return;
+
+      emitDataStatusEvent({
+        market: "kr",
+        level: message.type,
+        title,
+        message: message.text,
+        source: dataStatusSource,
+        contextKey: dataStatusContextKey,
+        contextLabel: dataStatusContextLabel,
+        dedupeKey: `${dataStatusContextKey}:${title}:${message.type}`,
+      });
     },
-    [onStatusMessage]
+    [dataStatusContextKey, dataStatusContextLabel, dataStatusSource]
   );
 
   const applyTodayTrend = useCallback((today: IntradayTrendResponse) => {
@@ -694,9 +707,6 @@ export default function KRMarketPanel({
     setTodaySource(today.source);
     setTodayUpdatedAt(latestIntradayPoint ? formatKoreaDateTime(latestIntradayPoint.time) : null);
     setTodayIntradayState("success");
-    setTodayIntradayMessage(
-      today.warnings?.length ? { type: "warning", text: today.warnings[0] } : null
-    );
   }, []);
 
   useEffect(() => {
@@ -817,7 +827,6 @@ export default function KRMarketPanel({
 
       setStockState("loading");
       publishStatus(null);
-      setIndexBreadthMessage(null);
 
       try {
         let stock: KRStockMasterRead;
@@ -862,7 +871,6 @@ export default function KRMarketPanel({
         setChart(null);
         setResourceSummary(null);
         setIndexBreadth(null);
-        setIndexBreadthMessage(null);
         setFundamentals([]);
         setInvestorRows([]);
         setSourceHealth(null);
@@ -946,7 +954,6 @@ export default function KRMarketPanel({
   async function refreshMarketBreadth() {
     if (!selectedIndexConfig || !selectedStock) return;
     setRefreshing(true);
-    setIndexBreadthMessage(null);
 
     try {
       const result = await requestJson<KRMarketBreadthRefreshResultRead>(
@@ -958,19 +965,19 @@ export default function KRMarketPanel({
         }
       );
       await loadStockData(selectedStock.symbol, timeframe);
-      setIndexBreadthMessage({
+      publishStatus({
         type: isRefreshSuccess(result.status) ? "success" : "warning",
         text: t("krMarket.messages.marketBreadthRefreshSuccess", {
           fetched: result.fetched_count,
           inserted: result.inserted_count,
           updated: result.updated_count,
         }),
-      });
+      }, t("krMarket.sections.marketBreadth"));
     } catch (error) {
-      setIndexBreadthMessage({
+      publishStatus({
         type: "error",
         text: `${t("krMarket.messages.marketBreadthRefreshFailed")}: ${apiErrorMessage(error, t("krMarket.errors.dataLoadFailed"))}`,
-      });
+      }, t("krMarket.sections.marketBreadth"));
     } finally {
       setRefreshing(false);
     }
@@ -1083,6 +1090,19 @@ export default function KRMarketPanel({
   }, [initialSymbol, loadReadiness, refreshNonce]);
 
   useEffect(() => {
+    if (!initialSymbol) return;
+
+    setDataStatusFocus({
+      market: "kr",
+      contextKey: dataStatusContextKey,
+      label: dataStatusContextLabel,
+      source: dataStatusSource,
+    });
+
+    return () => clearDataStatusFocus(dataStatusContextKey);
+  }, [dataStatusContextKey, dataStatusContextLabel, dataStatusSource, initialSymbol]);
+
+  useEffect(() => {
     if (!selectedIndexId || timeframe !== "today") {
       return;
     }
@@ -1106,7 +1126,6 @@ export default function KRMarketPanel({
 
       if (showLoading) {
         setTodayIntradayState("loading");
-        setTodayIntradayMessage(null);
         setTodayUpdatedAt(null);
         setTodayTrend([]);
       }
@@ -1117,14 +1136,20 @@ export default function KRMarketPanel({
         if (cancelled) return;
 
         applyTodayTrend(today);
+        if (today.warnings?.length) {
+          publishStatus({
+            type: "warning",
+            text: today.warnings[0],
+          }, t("krMarket.sections.index"));
+        }
       } catch (error) {
         if (cancelled) return;
 
         setTodayIntradayState("error");
-        setTodayIntradayMessage({
+        publishStatus({
           type: "error",
           text: apiErrorMessage(error, t("krMarket.errors.dataLoadFailed")),
-        });
+        }, t("krMarket.sections.index"));
       } finally {
         intradayRequestInFlight = false;
       }
@@ -1165,7 +1190,7 @@ export default function KRMarketPanel({
       cancelled = true;
       clearIntradayTimer();
     };
-  }, [applyTodayTrend, selectedIndexId, t, timeframe]);
+  }, [applyTodayTrend, publishStatus, selectedIndexId, t, timeframe]);
 
   if (!initialSymbol) {
     return watchlistRankingPanel ? (
@@ -1263,18 +1288,14 @@ export default function KRMarketPanel({
 
             {isIntradayTimeframe ? (
               <>
-                {todayIntradayMessage ? (
-                  <div
-                    className={`border-t px-5 py-3 text-xs ${messageToneClass(
-                      todayIntradayMessage.type
-                    )}`}
-                  >
-                    {todayIntradayMessage.text}
-                  </div>
-                ) : null}
                 {todayChartLoading ? (
-                  <div className="flex h-[420px] items-center justify-center border-t border-omi-border-subtle text-sm text-omi-text-muted">
-                    {t("common.loading")}
+                  <div className="flex h-[420px] items-center justify-center border-t border-omi-border-subtle p-4">
+                    <StateSurface
+                      title={t("common.loading")}
+                      tone="loading"
+                      busy
+                      className="w-full max-w-xl"
+                    />
                   </div>
                 ) : (
                   <IntradayTrendChart
@@ -1308,10 +1329,17 @@ export default function KRMarketPanel({
                 volumeValueFormatter={formatWholeNumber}
               />
             ) : (
-              <div className="flex h-[460px] items-center justify-center border-t border-omi-border-subtle text-sm text-omi-text-muted">
-                {chartLoading
-                  ? t("common.loading")
-                  : t(isSelectedIndex ? "krMarket.empty.noIndexKline" : "krMarket.empty.noKline")}
+              <div className="border-t border-omi-border-subtle bg-omi-surface p-4">
+                <StateSurface
+                  title={
+                    chartLoading
+                      ? t("common.loading")
+                      : t(isSelectedIndex ? "krMarket.empty.noIndexKline" : "krMarket.empty.noKline")
+                  }
+                  tone={chartLoading ? "loading" : "empty"}
+                  busy={chartLoading}
+                  className="h-[428px]"
+                />
               </div>
             )}
           </section>
@@ -1396,11 +1424,6 @@ export default function KRMarketPanel({
                       {refreshing ? t("krMarket.actions.refreshing") : t("krMarket.actions.refreshBreadth")}
                     </button>
                   </div>
-                  {indexBreadthMessage ? (
-                    <div className={`mt-3 border px-3 py-2 text-xs ${messageToneClass(indexBreadthMessage.type)}`}>
-                      {indexBreadthMessage.text}
-                    </div>
-                  ) : null}
                   {indexBreadth && indexBreadth.total_count > 0 ? (
                     <>
                       <div className="mt-4 grid grid-cols-2 gap-px bg-omi-border-subtle">
@@ -1417,9 +1440,17 @@ export default function KRMarketPanel({
                       </div>
                     </>
                   ) : (
-                    <div className="mt-4 border border-omi-border-subtle bg-omi-surface-subtle px-3 py-3 text-xs text-omi-text-muted">
-                      {dataState === "loading" ? t("common.loading") : t("krMarket.marketBreadthEmpty")}
-                    </div>
+                    <StateSurface
+                      title={
+                        dataState === "loading"
+                          ? t("common.loading")
+                          : t("krMarket.marketBreadthEmpty")
+                      }
+                      tone={dataState === "loading" ? "loading" : "empty"}
+                      busy={dataState === "loading"}
+                      compact
+                      className="mt-4"
+                    />
                   )}
                 </div>
               </section>
@@ -1480,9 +1511,17 @@ export default function KRMarketPanel({
               </div>
             </>
           ) : (
-            <div className="mt-3 border border-omi-border-subtle bg-omi-surface-subtle px-3 py-3 text-xs text-omi-text-muted">
-              {readinessState === "loading" ? t("krMarket.readiness.loading") : t("krMarket.readiness.unavailable")}
-            </div>
+            <StateSurface
+              title={
+                readinessState === "loading"
+                  ? t("krMarket.readiness.loading")
+                  : t("krMarket.readiness.unavailable")
+              }
+              tone={readinessState === "loading" ? "loading" : "empty"}
+              busy={readinessState === "loading"}
+              compact
+              className="mt-3"
+            />
           )}
         </section>
 

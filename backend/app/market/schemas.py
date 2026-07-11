@@ -231,6 +231,7 @@ class ChartDrawingSnapshotRead(BaseModel):
 class MarketBreadthRead(BaseModel):
     market: str
     trade_date: date | None = None
+    as_of: datetime | None = None
     advance_count: int
     decline_count: int
     unchanged_count: int
@@ -238,6 +239,11 @@ class MarketBreadthRead(BaseModel):
     limit_up_count: int | None = None
     limit_down_count: int | None = None
     trade_value: int | None = None
+    coverage_count: int | None = None
+    unknown_count: int | None = None
+    message_count: int | None = None
+    missing_count: int | None = None
+    warnings: list[str] = Field(default_factory=list)
     source: str | None = None
 
 

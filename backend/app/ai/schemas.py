@@ -88,6 +88,13 @@ class AiAskRequest(BaseModel):
             "summary, compact, standard, and full."
         ),
     )
+    position_context: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Optional caller-supplied position context. The backend may also attach "
+            "saved portfolio context for the resolved stock target."
+        ),
+    )
     conversation_context: dict[str, Any] = Field(default_factory=dict)
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import unittest
 from unittest.mock import patch
@@ -28,6 +29,7 @@ from app.jp_market.service import (
     create_jp_watchlist_group,
     create_jp_watchlist_item,
     get_jp_company_fundamental,
+    get_jp_intraday_trend,
     get_jp_resource_summary,
     get_jp_watchlist_ranking,
     get_jp_watchlist_technical_radar,
@@ -59,12 +61,32 @@ from app.jp_market.sources import (
     parse_yahoo_company_fundamental,
     parse_jpx_listed_issue_rows,
     parse_yahoo_daily_prices,
+    parse_yahoo_intraday_prices,
     parse_yahoo_stock_record,
 )
 
 
 def _tokyo_timestamp(year: int, month: int, day: int) -> int:
     return int(datetime(year, month, day, 15, 0, tzinfo=timezone(timedelta(hours=9))).timestamp())
+
+
+def _tokyo_intraday_timestamp(
+    year: int,
+    month: int,
+    day: int,
+    hour: int,
+    minute: int,
+) -> int:
+    return int(
+        datetime(
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            tzinfo=timezone(timedelta(hours=9)),
+        ).timestamp()
+    )
 
 
 YAHOO_JP_CHART_SAMPLE = {
@@ -97,6 +119,44 @@ YAHOO_JP_CHART_SAMPLE = {
                     "adjclose": [
                         {
                             "adjclose": [3050.0, 3080.0],
+                        }
+                    ],
+                },
+            }
+        ],
+        "error": None,
+    }
+}
+
+
+YAHOO_JP_INTRADAY_SAMPLE = {
+    "chart": {
+        "result": [
+            {
+                "meta": {
+                    "symbol": "^N225",
+                    "fullExchangeName": "Nikkei",
+                    "instrumentType": "INDEX",
+                    "currency": "JPY",
+                    "exchangeTimezoneName": "Asia/Tokyo",
+                    "gmtoffset": 32400,
+                    "chartPreviousClose": 39800.0,
+                },
+                "timestamp": [
+                    _tokyo_intraday_timestamp(2026, 6, 19, 9, 0),
+                    _tokyo_intraday_timestamp(2026, 6, 19, 9, 1),
+                    _tokyo_intraday_timestamp(2026, 6, 19, 11, 45),
+                    _tokyo_intraday_timestamp(2026, 6, 19, 12, 30),
+                    _tokyo_intraday_timestamp(2026, 6, 19, 15, 30),
+                ],
+                "indicators": {
+                    "quote": [
+                        {
+                            "open": [39900.0, 39920.0, 39940.0, 40010.0, 40120.0],
+                            "high": [39940.0, 39950.0, 39950.0, 40080.0, 40180.0],
+                            "low": [39890.0, 39910.0, 39930.0, 39990.0, 40100.0],
+                            "close": [39920.0, 39940.0, 39945.0, 40060.0, 40150.0],
+                            "volume": [100000, 120000, 0, 150000, 180000],
                         }
                     ],
                 },
@@ -413,6 +473,25 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertEqual(records[-1].symbol, "7203.T")
         self.assertEqual(records[-1].close_price, 3080.0)
         self.assertEqual(records[-1].trade_volume, 15000000)
+
+    def test_parse_yahoo_intraday_prices_classifies_japan_sessions(self) -> None:
+        trend = parse_yahoo_intraday_prices(
+            YAHOO_JP_INTRADAY_SAMPLE,
+            symbol="^N225",
+            source_url="https://query1.finance.yahoo.com/v8/finance/chart/%5EN225",
+        )
+
+        self.assertEqual(trend["stock_id"], "^N225")
+        self.assertEqual(trend["symbol"], "^N225")
+        self.assertEqual(trend["source"], "yahoo_finance_chart")
+        self.assertEqual(trend["previous_close"], 39800.0)
+        self.assertEqual(trend["previous_close_source"], "yahoo_finance_chart")
+        self.assertEqual(trend["point_count"], 5)
+        self.assertEqual(trend["regular_point_count"], 4)
+        self.assertEqual(trend["session_phase"], "regular")
+        self.assertEqual(trend["regular_session_close"], 40150.0)
+        self.assertEqual(trend["points"][0]["time"], "2026-06-19T09:00:00+09:00")
+        self.assertEqual(trend["points"][2]["session"], "lunch_break")
 
     def test_parse_yahoo_company_fundamental(self) -> None:
         record = parse_yahoo_company_fundamental(
@@ -1057,6 +1136,72 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertEqual(result["point_count"], 0)
         self.assertEqual(result["backfill"]["status"], "success")
 
+    def test_get_jp_intraday_trend_uses_yahoo_chart_payload(self) -> None:
+        with patch(
+            "app.jp_market.service.fetch_yahoo_chart_payload",
+            return_value=(
+                YAHOO_JP_INTRADAY_SAMPLE,
+                "https://query1.finance.yahoo.com/v8/finance/chart/%5EN225",
+            ),
+        ) as fetch_mock:
+            result = get_jp_intraday_trend(
+                db=self.db,
+                symbol="^N225",
+                refresh=True,
+            )
+
+        fetch_mock.assert_called_once()
+        call_kwargs = fetch_mock.call_args.kwargs
+        self.assertEqual(call_kwargs["symbol"], "^N225")
+        self.assertEqual(call_kwargs["range_value"], "1d")
+        self.assertEqual(call_kwargs["interval"], "1m")
+        self.assertEqual(result["symbol"], "^N225")
+        self.assertEqual(result["point_count"], 5)
+        self.assertEqual(result["regular_point_count"], 4)
+        self.assertEqual(result["previous_close"], 39800.0)
+
+    def test_get_jp_intraday_trend_falls_back_to_daily_previous_close(self) -> None:
+        upsert_jp_daily_price_records(
+            self.db,
+            [
+                JPDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="^N225",
+                    trade_date=datetime(2026, 6, 18).date(),
+                    currency="JPY",
+                    open_price=39700.0,
+                    high_price=39950.0,
+                    low_price=39650.0,
+                    close_price=39780.0,
+                    adjusted_close=39780.0,
+                    trade_volume=200000000,
+                    source_url="source",
+                    raw_payload_hash="hash",
+                ),
+            ],
+        )
+        payload = deepcopy(YAHOO_JP_INTRADAY_SAMPLE)
+        meta = payload["chart"]["result"][0]["meta"]
+        meta.pop("chartPreviousClose", None)
+
+        with patch(
+            "app.jp_market.service.fetch_yahoo_chart_payload",
+            return_value=(
+                payload,
+                "https://query1.finance.yahoo.com/v8/finance/chart/%5EN225",
+            ),
+        ):
+            result = get_jp_intraday_trend(
+                db=self.db,
+                symbol="^N225",
+                refresh=True,
+            )
+
+        self.assertEqual(result["previous_close"], 39780.0)
+        self.assertEqual(result["previous_close_source"], "jp_daily_price")
+        self.assertEqual(result["previous_close_trade_date"], "2026-06-18")
+        self.assertEqual(result["previous_close_provider"], "yahoo_chart")
+
     def test_refresh_jp_watchlist_resources_refreshes_group_symbols(self) -> None:
         with (
             patch(
@@ -1497,6 +1642,7 @@ class JPMarketDataTests(unittest.TestCase):
 
         self.assertIn("POST", routes["/api/jp-market/watchlists/daily/refresh"])
         self.assertIn("POST", routes["/api/jp-market/resources/{symbol}/refresh"])
+        self.assertIn("GET", routes["/api/jp-market/intraday/{symbol}"])
         self.assertIn(
             "POST",
             routes["/api/jp-market/watchlists/groups/{group_id}/refresh-daily"],

@@ -1,6 +1,7 @@
 "use client";
 
 import JobStatusCenter from "@/components/JobStatusCenter";
+import PortfolioHoldingsPanel from "@/components/PortfolioHoldingsPanel";
 import SettingsDock from "@/components/SettingsDock";
 import { marketLabel, useT } from "@/i18n";
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
@@ -658,6 +659,14 @@ export default function KRMarketSidebar({
 
       <div className="min-h-0 flex-1 overflow-y-auto py-2">
         {renderPinnedIndexGroup()}
+        <PortfolioHoldingsPanel
+          market="kr"
+          selectedSymbol={selectedSymbol}
+          defaultCurrency="KRW"
+          symbolPlaceholder={t("krMarket.watchlist.symbolPlaceholder")}
+          normalizeSymbol={normalizeSymbolInput}
+          onSelectSymbol={onSelectSymbol}
+        />
         {tree.length > 0 ? (
           tree.map((node) => renderGroupNode(node))
         ) : (

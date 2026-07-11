@@ -4,6 +4,7 @@ import {
   professionalChartDrawingToolGroups,
   professionalChartDrawingToolOptionMap,
 } from "@/components/professionalChartDrawing";
+import { LoadingStateSurface } from "@/components/LoadingPlaceholders";
 import type { IndicatorParameters, IndicatorSettings } from "@/components/StockKLineChart";
 import type {
   ChartDrawing,
@@ -20,8 +21,8 @@ function ChartEngineLoading() {
   const t = useT();
 
   return (
-    <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle bg-omi-surface text-sm text-omi-text-muted">
-      {t("chart.engineLoading")}
+    <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle bg-omi-surface p-4">
+      <LoadingStateSurface title={t("chart.engineLoading")} className="w-full max-w-xl" />
     </div>
   );
 }
@@ -347,8 +348,11 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
         />
       ) : (
         emptyState ?? (
-          <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle text-sm text-omi-text-muted">
-            {t("chart.loadingKline", { label })}
+          <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle p-4">
+            <LoadingStateSurface
+              title={t("chart.loadingKline", { label })}
+              className="w-full max-w-xl"
+            />
           </div>
         )
       )}

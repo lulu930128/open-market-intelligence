@@ -6,7 +6,10 @@ import JPMarketPanel from "@/components/JPMarketPanel";
 import JPMarketSidebar from "@/components/JPMarketSidebar";
 import KRMarketPanel from "@/components/KRMarketPanel";
 import KRMarketSidebar from "@/components/KRMarketSidebar";
-import { LoadingDots } from "@/components/LoadingPlaceholders";
+import {
+  LoadingDots,
+  StateSurface,
+} from "@/components/LoadingPlaceholders";
 import OmiAskDock, { type OmiAskDockContext } from "@/components/OmiAskDock";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
 import ResourceMarketPanel from "@/components/ResourceMarketPanel";
@@ -21,6 +24,11 @@ import {
   type DashboardHrefParams,
   type MarketRegion,
 } from "@/lib/dashboardNavigation";
+import {
+  emitDataStatusEvent,
+  type DataStatusLevel,
+  type DataStatusMarket,
+} from "@/lib/dataStatusEvents";
 import { getJobResultStatus, requestBackfillJob } from "@/lib/jobs";
 import {
   MARKET_DATA_SUBSCRIPTIONS_UPDATED_EVENT,
@@ -100,6 +108,7 @@ import type {
   KRWatchlistRankingRead,
   MarketIndexSnapshot,
   MarketIndexSummary,
+  OhlcIntradayOverlay,
   RankingBatchResponse,
   RankingItem,
   RankingResponse,
@@ -122,7 +131,6 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
 type JPStatusMessage = { type: "success" | "warning" | "error"; text: string } | null;
-type KRStatusMessage = { type: "success" | "warning" | "error"; text: string } | null;
 type RankBy = "none" | "change_pct" | "score" | "volume";
 type USRankBy = "none" | "change_pct" | "volume" | "close";
 type JPRankBy = "none" | "change_pct" | "volume" | "close";
@@ -247,6 +255,41 @@ function apiErrorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
 }
 
+type DashboardDataStatusMarket = Exclude<DataStatusMarket, "all">;
+
+function emitDashboardDataStatus({
+  market,
+  level = "error",
+  title,
+  message,
+  source,
+  contextKey,
+  contextLabel,
+  dedupeKey,
+}: {
+  market: DashboardDataStatusMarket;
+  level?: DataStatusLevel;
+  title: string;
+  message: string;
+  source: string;
+  contextKey?: string;
+  contextLabel?: string;
+  dedupeKey?: string;
+}) {
+  emitDataStatusEvent({
+    market,
+    level,
+    title,
+    message,
+    source,
+    contextKey,
+    contextLabel,
+    dedupeKey:
+      dedupeKey ??
+      `${market}:${contextKey ?? contextLabel ?? source}:${title}:${level}`,
+  });
+}
+
 type RankingPanelOption = {
   value: string;
   label: string;
@@ -265,6 +308,7 @@ type Props = {
   initialSelectedJpSymbol: string | null;
   initialSelectedKrSymbol: string | null;
   initialChartData: ChartPoint[];
+  initialChartIntradayOverlay: OhlcIntradayOverlay | null;
   initialIndicatorData: StockIndicatorPoint[];
   initialRankingData: RankingResponse | null;
   initialRadarMode: WatchlistRadarMode;
@@ -281,7 +325,7 @@ type Props = {
 
 function RankingLoadingRows({ rows = 5 }: { rows?: number }) {
   return (
-    <div className="border-t border-omi-border-subtle" aria-hidden="true">
+    <div className="omi-loading-surface border-t border-omi-border-subtle" aria-hidden="true">
       {Array.from({ length: rows }).map((_, index) => (
         <div
           key={index}
@@ -818,9 +862,17 @@ function MarketTape({
             );
           })
         ) : (
-          <div className="bg-omi-surface px-4 py-3 text-sm text-omi-text-muted">
-            {loadState === "loading" ? t("dashboard.marketIndex.loading") : t("dashboard.marketIndex.empty")}
-          </div>
+          <StateSurface
+            title={
+              loadState === "loading"
+                ? t("dashboard.marketIndex.loading")
+                : t("dashboard.marketIndex.empty")
+            }
+            tone={loadState === "loading" ? "loading" : "empty"}
+            busy={loadState === "loading"}
+            compact
+            className="m-3 lg:col-span-2"
+          />
         )}
       </div>
       <div className="border-t border-omi-border-subtle px-4 py-2 text-xs text-omi-text-muted">
@@ -1055,7 +1107,6 @@ function USMarketTape({
   );
   const [snapshots, setSnapshots] = useState<Record<string, USMarketTapeSnapshot>>({});
   const [loadState, setLoadState] = useState<LoadState>("idle");
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const primarySnapshot = snapshots[primaryIndex.symbol] ?? null;
   const contextSnapshot = snapshots[contextIndex.symbol] ?? null;
 
@@ -1083,7 +1134,6 @@ function USMarketTape({
       if (!silent) {
         setLoadState("loading");
       }
-      setErrorMessage(null);
 
       try {
         const nextSnapshots = await Promise.all(
@@ -1104,9 +1154,14 @@ function USMarketTape({
         if (cancelled) return;
 
         setLoadState("error");
-        setErrorMessage(
-          error instanceof Error ? error.message : t("dashboard.marketIndex.usLoadError")
-        );
+        emitDashboardDataStatus({
+          market: "us",
+          title: t("dashboard.marketIndex.usLoadError"),
+          message: apiErrorMessage(error, t("dashboard.marketIndex.usLoadError")),
+          source: t("dashboard.marketIndex.market"),
+          contextKey: "us:market-index-tape",
+          contextLabel: t("dashboard.marketIndex.market"),
+        });
       } finally {
         requestInFlight = false;
       }
@@ -1153,13 +1208,11 @@ function USMarketTape({
         />
       </div>
       <div className="border-t border-omi-border-subtle px-4 py-2 text-xs text-omi-text-muted">
-        {errorMessage
-          ? errorMessage
-          : asOf
-            ? t("dashboard.marketIndex.usUpdated", {
-                asOf: formatRowTime(asOf) ?? asOf.slice(0, 10),
-              })
-            : t("dashboard.marketIndex.usWaiting")}
+        {asOf
+          ? t("dashboard.marketIndex.usUpdated", {
+              asOf: formatRowTime(asOf) ?? asOf.slice(0, 10),
+            })
+          : t("dashboard.marketIndex.usWaiting")}
       </div>
     </section>
   );
@@ -1319,7 +1372,6 @@ function JPMarketTape({
   );
   const [snapshots, setSnapshots] = useState<Record<string, JPMarketTapeSnapshot>>({});
   const [loadState, setLoadState] = useState<LoadState>("idle");
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const primarySnapshot = snapshots[primaryIndex.symbol] ?? null;
   const contextSnapshot = snapshots[contextIndex.symbol] ?? null;
 
@@ -1346,7 +1398,6 @@ function JPMarketTape({
 
       if (!silent) {
         setLoadState("loading");
-        setErrorMessage(null);
       }
 
       try {
@@ -1364,11 +1415,17 @@ function JPMarketTape({
           return next;
         });
         setLoadState("success");
-        setErrorMessage(null);
-      } catch {
+      } catch (error) {
         if (!cancelled) {
           setLoadState("error");
-          setErrorMessage(t("dashboard.marketIndex.jpLoadError"));
+          emitDashboardDataStatus({
+            market: "jp",
+            title: t("dashboard.marketIndex.jpLoadError"),
+            message: apiErrorMessage(error, t("dashboard.marketIndex.jpLoadError")),
+            source: t("dashboard.marketIndex.market"),
+            contextKey: "jp:market-index-tape",
+            contextLabel: t("dashboard.marketIndex.market"),
+          });
         }
       } finally {
         requestInFlight = false;
@@ -1411,13 +1468,11 @@ function JPMarketTape({
         />
       </div>
       <div className="border-t border-omi-border-subtle px-4 py-2 text-xs text-omi-text-muted">
-        {errorMessage
-          ? errorMessage
-          : asOf
-            ? t("dashboard.marketIndex.jpUpdated", {
-                asOf: asOf.slice(0, 10),
-              })
-            : t("dashboard.marketIndex.jpWaiting")}
+        {asOf
+          ? t("dashboard.marketIndex.jpUpdated", {
+              asOf: asOf.slice(0, 10),
+            })
+          : t("dashboard.marketIndex.jpWaiting")}
       </div>
     </section>
   );
@@ -1595,7 +1650,6 @@ function KRMarketTape({
   );
   const [snapshots, setSnapshots] = useState<Record<string, KRMarketTapeSnapshot>>({});
   const [loadState, setLoadState] = useState<LoadState>("idle");
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const primarySnapshot = snapshots[primaryIndex.symbol] ?? null;
   const contextSnapshot = snapshots[contextIndex.symbol] ?? null;
 
@@ -1622,7 +1676,6 @@ function KRMarketTape({
 
       if (!silent) {
         setLoadState("loading");
-        setErrorMessage(null);
       }
 
       try {
@@ -1640,11 +1693,17 @@ function KRMarketTape({
           return next;
         });
         setLoadState("success");
-        setErrorMessage(null);
-      } catch {
+      } catch (error) {
         if (!cancelled) {
           setLoadState("error");
-          setErrorMessage(t("dashboard.marketIndex.krLoadError"));
+          emitDashboardDataStatus({
+            market: "kr",
+            title: t("dashboard.marketIndex.krLoadError"),
+            message: apiErrorMessage(error, t("dashboard.marketIndex.krLoadError")),
+            source: t("dashboard.marketIndex.market"),
+            contextKey: "kr:market-index-tape",
+            contextLabel: t("dashboard.marketIndex.market"),
+          });
         }
       } finally {
         requestInFlight = false;
@@ -1687,13 +1746,11 @@ function KRMarketTape({
         />
       </div>
       <div className="border-t border-omi-border-subtle px-4 py-2 text-xs text-omi-text-muted">
-        {errorMessage
-          ? errorMessage
-          : asOf
-            ? t("dashboard.marketIndex.krUpdated", {
-                asOf: asOf.slice(0, 10),
-              })
-            : t("dashboard.marketIndex.krWaiting")}
+        {asOf
+          ? t("dashboard.marketIndex.krUpdated", {
+              asOf: asOf.slice(0, 10),
+            })
+          : t("dashboard.marketIndex.krWaiting")}
       </div>
     </section>
   );
@@ -2089,7 +2146,6 @@ function WatchlistRankingPanel({
   secondaryAction,
   loadState,
   loadingLabel,
-  errorMessage,
   rows,
   summary,
   volumeHeader,
@@ -2106,7 +2162,6 @@ function WatchlistRankingPanel({
   secondaryAction?: ReactNode;
   loadState: LoadState;
   loadingLabel?: string;
-  errorMessage: string | null;
   rows: RankingDisplayRow[];
   summary: {
     stockCount: number;
@@ -2165,12 +2220,6 @@ function WatchlistRankingPanel({
           </div>
         </div>
 
-        {errorMessage ? (
-          <div className="border-t border-omi-danger-border bg-omi-danger-soft px-5 py-3 text-sm text-omi-danger">
-            {errorMessage}
-          </div>
-        ) : null}
-
         <div className="grid grid-cols-2 border-t border-omi-border-subtle md:grid-cols-4">
           <div className="px-5 py-3">
             <div className="text-xs text-omi-text-muted">{t("dashboard.ranking.stockCount")}</div>
@@ -2180,7 +2229,7 @@ function WatchlistRankingPanel({
             <div className="text-xs text-omi-text-muted">{t("dashboard.ranking.upCount")}</div>
             <div className="mt-1 text-xl font-bold text-omi-market-up">
               {isLoadingRows ? (
-                <span className="block h-6 w-8 animate-pulse bg-omi-surface-strong" />
+                <span className="omi-skeleton block h-6 w-8" />
               ) : (
                 summary.upCount
               )}
@@ -2190,7 +2239,7 @@ function WatchlistRankingPanel({
             <div className="text-xs text-omi-text-muted">{t("dashboard.ranking.downCount")}</div>
             <div className="mt-1 text-xl font-bold text-omi-market-down">
               {isLoadingRows ? (
-                <span className="block h-6 w-8 animate-pulse bg-omi-surface-strong" />
+                <span className="omi-skeleton block h-6 w-8" />
               ) : (
                 summary.downCount
               )}
@@ -2334,8 +2383,8 @@ function WatchlistRankingPanel({
         ) : isLoadingRows ? (
           <RankingLoadingRows />
         ) : (
-          <div className="border-t border-omi-border-subtle px-5 py-10 text-center text-sm text-omi-text-muted">
-            {emptyMessage}
+          <div className="border-t border-omi-border-subtle p-3">
+            <StateSurface title={emptyMessage} tone="empty" compact />
           </div>
         )}
       </section>
@@ -2356,6 +2405,7 @@ export default function MarketDashboardClient({
   initialSelectedJpSymbol,
   initialSelectedKrSymbol,
   initialChartData,
+  initialChartIntradayOverlay,
   initialIndicatorData,
   initialRankingData,
   initialRadarMode,
@@ -2462,7 +2512,7 @@ export default function MarketDashboardClient({
   const [jpLoadState, setJpLoadState] = useState<LoadState>("idle");
   const [, setJpUniverseRefreshState] =
     useState<LoadState>("idle");
-  const [jpErrorMessage, setJpErrorMessage] = useState<string | null>(null);
+  const [, setJpErrorMessage] = useState<string | null>(null);
   const [jpStatusMessage, setJpStatusMessage] = useState<JPStatusMessage>(null);
   const [jpLastUpdatedAt, setJpLastUpdatedAt] = useState<string | null>(null);
   const [selectedKrSymbol, setSelectedKrSymbol] = useState<string | null>(
@@ -2490,8 +2540,7 @@ export default function MarketDashboardClient({
   const [krLoadState, setKrLoadState] = useState<LoadState>("idle");
   const [, setKrUniverseRefreshState] =
     useState<LoadState>("idle");
-  const [krErrorMessage, setKrErrorMessage] = useState<string | null>(null);
-  const [krStatusMessage, setKrStatusMessage] = useState<KRStatusMessage>(null);
+  const [, setKrErrorMessage] = useState<string | null>(null);
   const [krLastUpdatedAt, setKrLastUpdatedAt] = useState<string | null>(null);
   const [selectedUsGroupId, setSelectedUsGroupId] = useState<number | null>(
     initialSelectedUsGroup?.id ?? null
@@ -2547,16 +2596,15 @@ export default function MarketDashboardClient({
   const [usLoadState, setUsLoadState] = useState<LoadState>("idle");
   const [, setUsUniverseRefreshState] =
     useState<LoadState>("idle");
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [radarErrorMessage, setRadarErrorMessage] = useState<string | null>(null);
-  const [radarOutcomeErrorMessage, setRadarOutcomeErrorMessage] =
+  const [, setRadarErrorMessage] = useState<string | null>(null);
+  const [, setRadarOutcomeErrorMessage] =
     useState<string | null>(null);
-  const [radarOutcomeHistoryErrorMessage, setRadarOutcomeHistoryErrorMessage] =
+  const [, setRadarOutcomeHistoryErrorMessage] =
     useState<string | null>(null);
-  const [usRadarErrorMessage, setUsRadarErrorMessage] = useState<string | null>(null);
-  const [jpRadarErrorMessage, setJpRadarErrorMessage] = useState<string | null>(null);
-  const [krRadarErrorMessage, setKrRadarErrorMessage] = useState<string | null>(null);
-  const [usErrorMessage, setUsErrorMessage] = useState<string | null>(null);
+  const [, setUsRadarErrorMessage] = useState<string | null>(null);
+  const [, setJpRadarErrorMessage] = useState<string | null>(null);
+  const [, setKrRadarErrorMessage] = useState<string | null>(null);
+  const [, setUsErrorMessage] = useState<string | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
   const [usLastUpdatedAt, setUsLastUpdatedAt] = useState<string | null>(null);
   const dashboardRequestSeq = useRef(0);
@@ -2708,6 +2756,18 @@ export default function MarketDashboardClient({
   const jpWatchlistFreshnessRequestKeys = useRef<Set<string>>(new Set());
   const krWatchlistFreshnessRequestKeys = useRef<Set<string>>(new Set());
   const marketChipRefreshRequestKeys = useRef<Set<string>>(new Set());
+  const twWatchlistContextLabel =
+    selectedGroup?.group_name ??
+    (activeGroupId !== null ? String(activeGroupId) : t("watchlist.noGroupSelected"));
+  const usWatchlistContextLabel =
+    selectedUsGroupName ??
+    (selectedUsGroupId !== null ? String(selectedUsGroupId) : t("watchlist.noGroupSelected"));
+  const jpWatchlistContextLabel =
+    selectedJpGroupName ??
+    (selectedJpGroupId !== null ? String(selectedJpGroupId) : t("watchlist.noGroupSelected"));
+  const krWatchlistContextLabel =
+    selectedKrGroupName ??
+    (selectedKrGroupId !== null ? String(selectedKrGroupId) : t("watchlist.noGroupSelected"));
   const baseRows = useMemo(
     () => buildWatchlistRows(selectedGroup, watchlistItems),
     [selectedGroup, watchlistItems]
@@ -2940,7 +3000,16 @@ export default function MarketDashboardClient({
         setRadarOutcomeSummary(null);
       }
       setRadarOutcomeLoadState("error");
-      setRadarOutcomeErrorMessage(apiErrorMessage(error, t("radar.outcome.loadError")));
+      const message = apiErrorMessage(error, t("radar.outcome.loadError"));
+      setRadarOutcomeErrorMessage(message);
+      emitDashboardDataStatus({
+        market: "tw",
+        title: t("radar.outcome.loadError"),
+        message,
+        source: t("radar.outcome.title"),
+        contextKey: `tw:watchlist:${groupId}:radar-outcome`,
+        contextLabel: twWatchlistContextLabel,
+      });
     }
   }
 
@@ -2981,7 +3050,16 @@ export default function MarketDashboardClient({
         setRadarOutcomeHistory([]);
       }
       setRadarOutcomeHistoryLoadState("error");
-      setRadarOutcomeHistoryErrorMessage(apiErrorMessage(error, t("radar.outcome.loadError")));
+      const message = apiErrorMessage(error, t("radar.outcome.loadError"));
+      setRadarOutcomeHistoryErrorMessage(message);
+      emitDashboardDataStatus({
+        market: "tw",
+        title: t("radar.outcome.loadError"),
+        message,
+        source: t("radar.outcome.history"),
+        contextKey: `tw:watchlist:${groupId}:radar-outcome-history`,
+        contextLabel: twWatchlistContextLabel,
+      });
     }
   }
 
@@ -3025,7 +3103,16 @@ export default function MarketDashboardClient({
       if (radarOutcomeRequestSeq.current !== requestSeq) return;
 
       setRadarOutcomeLoadState("error");
-      setRadarOutcomeErrorMessage(apiErrorMessage(error, t("radar.outcome.snapshotError")));
+      const message = apiErrorMessage(error, t("radar.outcome.snapshotError"));
+      setRadarOutcomeErrorMessage(message);
+      emitDashboardDataStatus({
+        market: "tw",
+        title: t("radar.outcome.snapshotError"),
+        message,
+        source: t("radar.outcome.title"),
+        contextKey: `tw:watchlist:${groupId}:radar-outcome`,
+        contextLabel: twWatchlistContextLabel,
+      });
     }
   }
 
@@ -3068,7 +3155,16 @@ export default function MarketDashboardClient({
       if (radarOutcomeRequestSeq.current !== requestSeq) return;
 
       setRadarOutcomeLoadState("error");
-      setRadarOutcomeErrorMessage(apiErrorMessage(error, t("radar.outcome.evaluateError")));
+      const message = apiErrorMessage(error, t("radar.outcome.evaluateError"));
+      setRadarOutcomeErrorMessage(message);
+      emitDashboardDataStatus({
+        market: "tw",
+        title: t("radar.outcome.evaluateError"),
+        message,
+        source: t("radar.outcome.title"),
+        contextKey: `tw:watchlist:${groupId}:radar-outcome`,
+        contextLabel: twWatchlistContextLabel,
+      });
     }
   }
 
@@ -3137,7 +3233,16 @@ export default function MarketDashboardClient({
         setRadarOutcomeLoadState("idle");
       }
       setRadarLoadState("error");
-      setRadarErrorMessage(apiErrorMessage(error, t("radar.loadError")));
+      const message = apiErrorMessage(error, t("radar.loadError"));
+      setRadarErrorMessage(message);
+      emitDashboardDataStatus({
+        market: "tw",
+        title: t("radar.loadError"),
+        message,
+        source: t("radar.title"),
+        contextKey: `tw:watchlist:${groupId}:radar`,
+        contextLabel: twWatchlistContextLabel,
+      });
     }
   }
 
@@ -3174,7 +3279,16 @@ export default function MarketDashboardClient({
         setUsRadar(null);
       }
       setUsRadarLoadState("error");
-      setUsRadarErrorMessage(apiErrorMessage(error, t("radar.loadError")));
+      const message = apiErrorMessage(error, t("radar.loadError"));
+      setUsRadarErrorMessage(message);
+      emitDashboardDataStatus({
+        market: "us",
+        title: t("radar.loadError"),
+        message,
+        source: t("radar.title"),
+        contextKey: `us:watchlist:${groupId}:radar`,
+        contextLabel: usWatchlistContextLabel,
+      });
     }
   }
 
@@ -3210,7 +3324,16 @@ export default function MarketDashboardClient({
         setJpRadar(null);
       }
       setJpRadarLoadState("error");
-      setJpRadarErrorMessage(apiErrorMessage(error, t("radar.loadError")));
+      const message = apiErrorMessage(error, t("radar.loadError"));
+      setJpRadarErrorMessage(message);
+      emitDashboardDataStatus({
+        market: "jp",
+        title: t("radar.loadError"),
+        message,
+        source: t("radar.title"),
+        contextKey: `jp:watchlist:${groupId}:radar`,
+        contextLabel: jpWatchlistContextLabel,
+      });
     }
   }
 
@@ -3246,7 +3369,16 @@ export default function MarketDashboardClient({
         setKrRadar(null);
       }
       setKrRadarLoadState("error");
-      setKrRadarErrorMessage(apiErrorMessage(error, t("radar.loadError")));
+      const message = apiErrorMessage(error, t("radar.loadError"));
+      setKrRadarErrorMessage(message);
+      emitDashboardDataStatus({
+        market: "kr",
+        title: t("radar.loadError"),
+        message,
+        source: t("radar.title"),
+        contextKey: `kr:watchlist:${groupId}:radar`,
+        contextLabel: krWatchlistContextLabel,
+      });
     }
   }
 
@@ -3263,7 +3395,6 @@ export default function MarketDashboardClient({
     if (!options?.silent) {
       setLoadState("loading");
       setRadarLoadState("loading");
-      setErrorMessage(null);
       setRadarErrorMessage(null);
       setRadarOutcomeLoadState("loading");
       setRadarOutcomeErrorMessage(null);
@@ -3306,7 +3437,16 @@ export default function MarketDashboardClient({
               setRadarOutcomeLoadState("idle");
             }
             setRadarLoadState("error");
-            setRadarErrorMessage(apiErrorMessage(error, t("radar.loadError")));
+            const message = apiErrorMessage(error, t("radar.loadError"));
+            setRadarErrorMessage(message);
+            emitDashboardDataStatus({
+              market: "tw",
+              title: t("radar.loadError"),
+              message,
+              source: t("radar.title"),
+              contextKey: `tw:watchlist:${groupId}:radar`,
+              contextLabel: twWatchlistContextLabel,
+            });
           });
 
         return radarPromise;
@@ -3414,7 +3554,15 @@ export default function MarketDashboardClient({
       clearRankingTrendTimer();
       setRankingTrendPending(false);
       setLoadState("error");
-      setErrorMessage(apiErrorMessage(error, t("dashboard.ranking.readError")));
+      const message = apiErrorMessage(error, t("dashboard.ranking.readError"));
+      emitDashboardDataStatus({
+        market: "tw",
+        title: t("dashboard.ranking.readError"),
+        message,
+        source: t("dashboard.ranking.listTitle"),
+        contextKey: `tw:watchlist:${groupId}:ranking`,
+        contextLabel: twWatchlistContextLabel,
+      });
     }
   }
 
@@ -3464,7 +3612,16 @@ export default function MarketDashboardClient({
       if (usDashboardRequestSeq.current !== requestSeq) return null;
 
       setUsLoadState("error");
-      setUsErrorMessage(error instanceof Error ? error.message : t("dashboard.ranking.usReadError"));
+      const message = apiErrorMessage(error, t("dashboard.ranking.usReadError"));
+      setUsErrorMessage(message);
+      emitDashboardDataStatus({
+        market: "us",
+        title: t("dashboard.ranking.usReadError"),
+        message,
+        source: t("dashboard.ranking.listTitle"),
+        contextKey: `us:watchlist:${groupId}:ranking`,
+        contextLabel: usWatchlistContextLabel,
+      });
       return null;
     }
   }
@@ -3512,9 +3669,16 @@ export default function MarketDashboardClient({
       if (jpDashboardRequestSeq.current !== requestSeq) return null;
 
       setJpLoadState("error");
-      setJpErrorMessage(
-        error instanceof Error ? error.message : t("dashboard.ranking.jpReadError")
-      );
+      const message = apiErrorMessage(error, t("dashboard.ranking.jpReadError"));
+      setJpErrorMessage(message);
+      emitDashboardDataStatus({
+        market: "jp",
+        title: t("dashboard.ranking.jpReadError"),
+        message,
+        source: t("dashboard.ranking.listTitle"),
+        contextKey: `jp:watchlist:${groupId}:ranking`,
+        contextLabel: jpWatchlistContextLabel,
+      });
       return null;
     }
   }
@@ -3556,9 +3720,16 @@ export default function MarketDashboardClient({
       if (krDashboardRequestSeq.current !== requestSeq) return null;
 
       setKrLoadState("error");
-      setKrErrorMessage(
-        error instanceof Error ? error.message : t("dashboard.ranking.krReadError")
-      );
+      const message = apiErrorMessage(error, t("dashboard.ranking.krReadError"));
+      setKrErrorMessage(message);
+      emitDashboardDataStatus({
+        market: "kr",
+        title: t("dashboard.ranking.krReadError"),
+        message,
+        source: t("dashboard.ranking.listTitle"),
+        contextKey: `kr:watchlist:${groupId}:ranking`,
+        contextLabel: krWatchlistContextLabel,
+      });
       return null;
     }
   }
@@ -3578,10 +3749,18 @@ export default function MarketDashboardClient({
 
       setMarketIndexSummary(summaryData);
       setMarketIndexLoadState("success");
-    } catch {
+    } catch (error) {
       if (marketIndexRequestSeq.current !== requestSeq) return;
 
       setMarketIndexLoadState("error");
+      emitDashboardDataStatus({
+        market: "tw",
+        title: "市場指數載入失敗",
+        message: apiErrorMessage(error, "市場指數載入失敗"),
+        source: "市場環境",
+        contextKey: "tw:market-index-summary",
+        contextLabel: "台股市場環境",
+      });
     }
   }
 
@@ -3612,6 +3791,14 @@ export default function MarketDashboardClient({
       await loadMarketIndices({ silent: true });
     } catch (error) {
       console.warn("Market chip daily refresh failed.", error);
+      emitDashboardDataStatus({
+        market: "tw",
+        title: "大盤資料更新失敗",
+        message: apiErrorMessage(error, "大盤資料更新失敗"),
+        source: "市場環境",
+        contextKey: `tw:market-chip:${dateKey}`,
+        contextLabel: dateKey,
+      });
     }
   }
 
@@ -3653,6 +3840,14 @@ export default function MarketDashboardClient({
     } catch (error) {
       watchlistFreshnessRequestKeys.current.delete(requestKey);
       console.warn("Watchlist daily price refresh failed.", error);
+      emitDashboardDataStatus({
+        market: "tw",
+        title: "自選股日線補齊失敗",
+        message: apiErrorMessage(error, "自選股日線補齊失敗"),
+        source: "自選股資料",
+        contextKey: `tw:watchlist:${groupId}:daily-refresh`,
+        contextLabel: twWatchlistContextLabel,
+      });
     }
   }
 
@@ -3700,8 +3895,16 @@ export default function MarketDashboardClient({
       if (selectedUsGroupIdRef.current === groupId) {
         await loadUsDashboard(groupId, currentRankBy, { silent: true });
       }
-    } catch {
+    } catch (error) {
       setUsUniverseRefreshState("error");
+      emitDashboardDataStatus({
+        market: "us",
+        title: "美股自選日線補齊失敗",
+        message: apiErrorMessage(error, "美股自選日線補齊失敗"),
+        source: "美股自選資料",
+        contextKey: `us:watchlist:${groupId}:daily-refresh`,
+        contextLabel: usWatchlistContextLabel,
+      });
     }
   }
 
@@ -3750,8 +3953,16 @@ export default function MarketDashboardClient({
         setJpDataRefreshNonce((value) => value + 1);
         await loadJpDashboard(groupId, currentRankBy, { silent: true });
       }
-    } catch {
+    } catch (error) {
       setJpUniverseRefreshState("error");
+      emitDashboardDataStatus({
+        market: "jp",
+        title: "日股自選日線補齊失敗",
+        message: apiErrorMessage(error, "日股自選日線補齊失敗"),
+        source: "日股自選資料",
+        contextKey: `jp:watchlist:${groupId}:daily-refresh`,
+        contextLabel: jpWatchlistContextLabel,
+      });
     }
   }
 
@@ -3800,8 +4011,16 @@ export default function MarketDashboardClient({
         setKrDataRefreshNonce((value) => value + 1);
         await loadKrDashboard(groupId, currentRankBy, { silent: true });
       }
-    } catch {
+    } catch (error) {
       setKrUniverseRefreshState("error");
+      emitDashboardDataStatus({
+        market: "kr",
+        title: "韓股自選日線補齊失敗",
+        message: apiErrorMessage(error, "韓股自選日線補齊失敗"),
+        source: "韓股自選資料",
+        contextKey: `kr:watchlist:${groupId}:daily-refresh`,
+        contextLabel: krWatchlistContextLabel,
+      });
     }
   }
 
@@ -4276,13 +4495,11 @@ export default function MarketDashboardClient({
 
   function handleMarketChange(market: MarketRegion) {
     setActiveMarket(market);
-    setErrorMessage(null);
     setUsErrorMessage(null);
     setTwChartFocusMode(false);
     setUsChartFocusMode(false);
     setJpChartFocusMode(false);
     setJpStatusMessage(null);
-    setKrStatusMessage(null);
 
     if (market !== "tw") {
       setSelectedFuturesSymbol(null);
@@ -4353,7 +4570,6 @@ export default function MarketDashboardClient({
       setRadar(null);
       setLoadState("idle");
       setRadarLoadState("idle");
-      setErrorMessage(null);
       setRadarErrorMessage(null);
       setRadarOutcomeSummary(null);
       setRadarOutcomeLoadState("idle");
@@ -4385,7 +4601,6 @@ export default function MarketDashboardClient({
     setSelectedStockId(stockId);
     setSelectedStockName(stockName);
     setSelectedFuturesSymbol(null);
-    setErrorMessage(null);
     setTwChartFocusMode(false);
     pushDashboardUrl({ market: "tw", groupId: activeGroupId, stockId, radarMode });
   }
@@ -4398,7 +4613,6 @@ export default function MarketDashboardClient({
     setSelectedStockId(null);
     setSelectedStockName(null);
     setSelectedFuturesSymbol(normalizedSymbol);
-    setErrorMessage(null);
     setTwChartFocusMode(false);
     pushDashboardUrl({
       market: "tw",
@@ -4527,7 +4741,6 @@ export default function MarketDashboardClient({
     setKrRadarLoadState("idle");
     setKrErrorMessage(null);
     setKrRadarErrorMessage(null);
-    setKrStatusMessage(null);
     pushDashboardUrl({ market: "kr", groupId: group?.id ?? null });
   }
 
@@ -4537,7 +4750,6 @@ export default function MarketDashboardClient({
 
     const indexConfig = getKrMarketIndexConfig(normalizedSymbol);
     const resolvedSymbol = indexConfig?.symbol ?? normalizedSymbol;
-    setKrStatusMessage(null);
     setSelectedKrSymbol(resolvedSymbol);
     setSelectedKrStock((current) =>
       current?.symbol === resolvedSymbol
@@ -4573,7 +4785,6 @@ export default function MarketDashboardClient({
   function handleSelectKrStock(stock: KRStockMasterRead | null) {
     setSelectedKrStock(stock);
     setSelectedKrSymbol(stock?.symbol ?? null);
-    setKrStatusMessage(null);
 
     if (stock) {
       pushDashboardUrl({ market: "kr", groupId: selectedKrGroupId, krSymbol: stock.symbol });
@@ -4606,7 +4817,6 @@ export default function MarketDashboardClient({
     setRankBy(value);
     setRanking(null);
     setLoadState("idle");
-    setErrorMessage(null);
   }
 
   function handleRadarModeChange(value: WatchlistRadarMode) {
@@ -4851,12 +5061,6 @@ export default function MarketDashboardClient({
         </div>
       </div>
 
-      {errorMessage ? (
-        <div className="border-t border-omi-danger-border bg-omi-danger-soft px-5 py-3 text-sm text-omi-danger">
-          {errorMessage}
-        </div>
-      ) : null}
-
       <div className="grid grid-cols-2 border-t border-omi-border-subtle md:grid-cols-4">
         <div className="px-5 py-3">
           <div className="text-xs text-omi-text-muted">{t("dashboard.ranking.stockCount")}</div>
@@ -4866,7 +5070,7 @@ export default function MarketDashboardClient({
           <div className="text-xs text-omi-text-muted">{t("dashboard.ranking.upCount")}</div>
           <div className="mt-1 text-xl font-bold text-omi-market-up">
             {rankingListLoading ? (
-              <span className="block h-6 w-8 animate-pulse bg-omi-surface-strong" />
+              <span className="omi-skeleton block h-6 w-8" />
             ) : (
               summary.upCount
             )}
@@ -4876,7 +5080,7 @@ export default function MarketDashboardClient({
           <div className="text-xs text-omi-text-muted">{t("dashboard.ranking.downCount")}</div>
           <div className="mt-1 text-xl font-bold text-omi-market-down">
             {rankingListLoading ? (
-              <span className="block h-6 w-8 animate-pulse bg-omi-surface-strong" />
+              <span className="omi-skeleton block h-6 w-8" />
             ) : (
               summary.downCount
             )}
@@ -4898,17 +5102,14 @@ export default function MarketDashboardClient({
       <WatchlistRadarPanel
         radar={radar}
         loadState={radarLoadState}
-        errorMessage={radarErrorMessage}
         mode={radarMode}
         selectedStockId={selectedStockId}
         disabled={activeGroupId === null}
         outcomeSummary={radarOutcomeSummary}
         outcomeLoadState={radarOutcomeLoadState}
-        outcomeErrorMessage={radarOutcomeErrorMessage}
         outcomeHistory={radarOutcomeHistory}
         outcomeHistoryOpen={radarOutcomeHistoryOpen}
         outcomeHistoryLoadState={radarOutcomeHistoryLoadState}
-        outcomeHistoryErrorMessage={radarOutcomeHistoryErrorMessage}
         selectedOutcomeSnapshotId={selectedRadarOutcomeSnapshotId}
         getModeHref={(nextMode) =>
           dashboardHref({
@@ -4984,8 +5185,8 @@ export default function MarketDashboardClient({
         ) : rankingListLoading ? (
           <RankingLoadingRows />
         ) : (
-          <div className="border-t border-omi-border-subtle px-5 py-10 text-center text-sm text-omi-text-muted">
-            {t("dashboard.ranking.empty")}
+          <div className="border-t border-omi-border-subtle p-3">
+            <StateSurface title={t("dashboard.ranking.empty")} tone="empty" compact />
           </div>
         )}
       </section>
@@ -5030,7 +5231,6 @@ export default function MarketDashboardClient({
         <WatchlistRadarPanel
           radar={usRadar}
           loadState={usRadarLoadState}
-          errorMessage={usRadarErrorMessage}
           mode={usRadarMode}
           selectedStockId={selectedUsSymbol}
           disabled={selectedUsGroupId === null}
@@ -5073,7 +5273,6 @@ export default function MarketDashboardClient({
         reloadDisabled={selectedUsGroupId === null || usLoadState === "loading"}
         loadState={usRankingLoadState}
         loadingLabel={usRankingPendingLabel}
-        errorMessage={usErrorMessage}
         rows={usDisplayRows}
         summary={usSummary}
         volumeHeader={t("dashboard.ranking.volume")}
@@ -5127,7 +5326,6 @@ export default function MarketDashboardClient({
         <WatchlistRadarPanel
           radar={jpRadar}
           loadState={jpRadarLoadState}
-          errorMessage={jpRadarErrorMessage}
           mode={jpRadarMode}
           selectedStockId={selectedJpSymbol}
           disabled={selectedJpGroupId === null}
@@ -5170,7 +5368,6 @@ export default function MarketDashboardClient({
         reloadDisabled={selectedJpGroupId === null || jpLoadState === "loading"}
         loadState={jpRankingLoadState}
         loadingLabel={jpRankingPendingLabel}
-        errorMessage={jpErrorMessage}
         rows={jpDisplayRows}
         summary={jpSummary}
         volumeHeader={t("dashboard.ranking.volume")}
@@ -5224,7 +5421,6 @@ export default function MarketDashboardClient({
       <WatchlistRadarPanel
         radar={krRadar}
         loadState={krRadarLoadState}
-        errorMessage={krRadarErrorMessage}
         mode={krRadarMode}
         selectedStockId={selectedKrSymbol}
         disabled={selectedKrGroupId === null}
@@ -5266,7 +5462,6 @@ export default function MarketDashboardClient({
         reloadDisabled={selectedKrGroupId === null || krLoadState === "loading"}
         loadState={krRankingLoadState}
         loadingLabel={krRankingPendingLabel}
-        errorMessage={krErrorMessage}
         rows={krDisplayRows}
         summary={krSummary}
         volumeHeader={t("dashboard.ranking.volume")}
@@ -5608,7 +5803,6 @@ export default function MarketDashboardClient({
               selectedGroupId={selectedKrGroupId}
               selectedSymbol={selectedKrSymbol}
               selectedStock={selectedKrStock}
-              externalStatusMessage={krStatusMessage}
               onMarketChange={handleMarketChange}
               onSelectGroup={handleSelectKrGroup}
               onSelectSymbol={handleSelectKrSymbol}
@@ -5763,6 +5957,7 @@ export default function MarketDashboardClient({
                     stockId={selectedStockId}
                     stockName={selectedStockName}
                     initialChartData={initialChartData}
+                    initialChartIntradayOverlay={initialChartIntradayOverlay}
                     initialIndicatorData={initialIndicatorData}
                     watchlistRankingPanel={rankingPanel}
                     marketIndexSummary={marketIndexSummary}
@@ -5821,7 +6016,6 @@ export default function MarketDashboardClient({
                   refreshNonce={krDataRefreshNonce}
                   watchlistRankingPanel={krRankingPanel}
                   onSelectStock={handleSelectKrStock}
-                  onStatusMessage={setKrStatusMessage}
                 />
               </>
             ) : activeMarket === "crypto" && selectedResourceInstrumentKey ? (

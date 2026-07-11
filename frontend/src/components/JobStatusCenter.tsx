@@ -1,5 +1,6 @@
 "use client";
 
+import { StateSurface } from "@/components/LoadingPlaceholders";
 import { fetchJson, requestJson } from "@/lib/api";
 import {
   subscribeDataStatusEvents,
@@ -486,8 +487,8 @@ function DataStatusSection({
       {events.length ? (
         events.map((event) => <DataStatusEventRow key={event.id} event={event} />)
       ) : (
-        <div className="border-t border-omi-border-subtle px-3 py-3 text-xs text-omi-text-muted">
-          {empty}
+        <div className="border-t border-omi-border-subtle p-3">
+          <StateSurface title={empty} tone="empty" compact />
         </div>
       )}
     </div>
@@ -497,11 +498,16 @@ function DataStatusSection({
 type JobStatusCenterProps = {
   placement?: "fixed" | "inline";
   market?: JobMarketFilter;
+  inlineMessage?: {
+    type: "success" | "warning" | "error";
+    text: string;
+  } | null;
 };
 
 export default function JobStatusCenter({
   placement = "fixed",
   market = "all",
+  inlineMessage = null,
 }: JobStatusCenterProps) {
   const t = useT();
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -627,14 +633,29 @@ export default function JobStatusCenter({
     }
   }
 
+  function inlineMessageClass() {
+    if (inlineMessage?.type === "success") {
+      return "border-omi-market-down-border bg-omi-market-down-soft text-omi-market-down";
+    }
+    if (inlineMessage?.type === "warning") {
+      return "border-omi-warning-border bg-omi-warning-soft text-omi-warning";
+    }
+    return "border-omi-danger-border bg-omi-danger-soft text-omi-danger";
+  }
+
   return (
-    <div ref={rootRef} className={inline ? "relative" : "fixed right-6 top-4 z-50"}>
+    <div
+      ref={rootRef}
+      className={inline ? "relative border border-omi-border bg-omi-surface" : "fixed right-6 top-4 z-50"}
+    >
       <button
         type="button"
         aria-expanded={open}
         className={[
-          "flex min-w-[104px] items-center justify-between gap-2 border border-omi-border bg-omi-surface px-3 py-2 text-sm font-bold text-omi-text shadow-sm hover:border-omi-border-strong",
-          inline ? "w-full" : "",
+          "flex min-w-[104px] items-center justify-between gap-2 bg-omi-surface px-3 py-2 text-sm font-bold text-omi-text",
+          inline
+            ? "w-full hover:bg-omi-surface-subtle"
+            : "border border-omi-border shadow-sm hover:border-omi-border-strong",
         ].join(" ")}
         onClick={() => setOpen((value) => !value)}
       >
@@ -644,11 +665,17 @@ export default function JobStatusCenter({
         </span>
       </button>
 
+      {inline && inlineMessage ? (
+        <div className={`border-t px-3 py-2 text-xs leading-5 ${inlineMessageClass()}`}>
+          {inlineMessage.text}
+        </div>
+      ) : null}
+
       {open ? (
         <section
           className={[
-            "mt-2 border border-omi-border bg-omi-surface shadow-xl",
-            inline ? "w-full" : "w-[420px]",
+            "bg-omi-surface shadow-xl",
+            inline ? "w-full border-t border-omi-border-subtle" : "mt-2 w-[420px] border border-omi-border",
           ].join(" ")}
         >
           <div className="flex items-start justify-between gap-2 border-b border-omi-border-subtle px-3 py-2">

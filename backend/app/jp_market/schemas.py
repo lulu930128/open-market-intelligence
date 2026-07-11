@@ -182,6 +182,37 @@ class JPOhlcChartRead(BaseModel):
     backfill: dict | None = None
 
 
+class JPIntradayTrendPointRead(BaseModel):
+    time: str
+    session: str = "regular"
+    price: float
+    volume: int | None = None
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+
+
+class JPIntradayTrendRead(BaseModel):
+    stock_id: str
+    symbol: str | None = None
+    source: str
+    session_scope: str = "regular"
+    session_phase: str | None = None
+    has_extended_hours: bool = False
+    regular_point_count: int = 0
+    extended_point_count: int = 0
+    previous_close: float | None = None
+    previous_close_source: str | None = None
+    previous_close_trade_date: str | None = None
+    previous_close_provider: str | None = None
+    regular_session_close: float | None = None
+    regular_session_close_time: str | None = None
+    point_count: int
+    points: list[JPIntradayTrendPointRead]
+    source_url: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
 class JPResourceSlotRead(BaseModel):
     key: str
     status: str

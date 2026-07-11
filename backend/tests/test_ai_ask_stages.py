@@ -82,6 +82,40 @@ class AiAskStagesTests(unittest.TestCase):
         self.assertEqual(preferences["theme"], "dark")
         self.assertIn("English", preferences["language_instruction"])
 
+    def test_build_question_stage_promotes_saved_position_context(self) -> None:
+        progress = pipeline_progress.OmiPipelineProgress(lambda event: None)
+        payload = AiAskRequest(
+            question="AAPL risk?",
+            target={"type": "us_stock", "id": "AAPL"},
+            position_context={
+                "source": "portfolio_holding",
+                "holding_id": 7,
+                "entry_price": 150,
+                "quantity": 10,
+                "cost_amount": 1500,
+                "currency": "USD",
+            },
+        )
+
+        stage = ask_stages.build_question_stage(
+            payload=payload,
+            scope_type="us_stock",
+            server_policy=object(),
+            progress=progress,
+            build_policy=lambda request, server_policy: {},
+            infer_mode=lambda request, scope_type, policy: "brief",
+            normalize_analysis_horizon=lambda value: value,
+        )
+
+        self.assertEqual(stage.question_intent, "position_risk_decision")
+        self.assertTrue(stage.position_context["has_position_context"])
+        self.assertEqual(stage.position_context["entry_price"], 150)
+        self.assertEqual(stage.policy["position_context"]["source"], "portfolio_holding")
+        self.assertEqual(
+            stage.policy["question_understanding"]["intent"],
+            "position_risk_decision",
+        )
+
     def test_execute_tool_stages_runs_tw_stock_refresh_and_preserves_warnings(self) -> None:
         events = []
         progress = pipeline_progress.OmiPipelineProgress(events.append)
@@ -209,6 +243,140 @@ class AiAskStagesTests(unittest.TestCase):
         )
         self.assertEqual(assembled.reasoning_steps[0]["stage"], "decision_synthesis")
         self.assertIn("decision_synthesis", [event["stage"] for event in events])
+
+    def test_assemble_response_analysis_builds_position_decision_for_us_stock(self) -> None:
+        progress = pipeline_progress.OmiPipelineProgress(lambda event: None)
+        question_understanding = SimpleNamespace(
+            as_policy_payload=lambda: {"intent": "position_risk_decision"}
+        )
+
+        assembled = ask_stages.assemble_response_analysis(
+            result={},
+            freshness_result={},
+            warnings=[],
+            resolution=SimpleNamespace(),
+            effective_mode="brief",
+            policy={},
+            requested_mode="brief",
+            question_understanding=question_understanding,
+            question_intent="position_risk_decision",
+            position_context={"has_position_context": True, "entry_price": 150},
+            scope_type="us_stock",
+            response_target={"type": "us_stock", "id": "AAPL"},
+            progress=progress,
+            extract_list=lambda source, key: source.get(key, []),
+            extract_analysis_digest=lambda result, policy: {"kind": "stock_analysis_digest"},
+            clarification_dict=lambda resolution: {},
+            build_next_actions=lambda **kwargs: [],
+            build_position_decision=lambda **kwargs: {"summary": ["position decision"]},
+            try_attach_position_decision_llm=lambda **kwargs: kwargs["position_decision"],
+            build_consumer_human_answer=lambda **kwargs: {},
+            build_reasoning_steps=lambda **kwargs: [],
+            payload=AiAskRequest(question="AAPL risk?"),
+        )
+
+        self.assertEqual(assembled.position_decision["summary"], ["position decision"])
+        self.assertEqual(
+            assembled.response_analysis["question_understanding"]["position_context"]["entry_price"],
+            150,
+        )
+
+    def test_assemble_response_analysis_projects_decision_contract(self) -> None:
+        progress = pipeline_progress.OmiPipelineProgress(lambda event: None)
+        question_understanding = SimpleNamespace(
+            as_policy_payload=lambda: {"intent": "entry_decision"}
+        )
+
+        def build_human_answer(**kwargs):
+            return {
+                "source": "question_intent",
+                "style": "question_aware_summary",
+                "headline": "Use a pullback plan",
+                "text": "Conclusion: use a pullback plan.",
+                "summary": ["Latest price is above the preferred zone."],
+                "action_plan": [{"label": "Entry", "text": "Wait for pullback confirmation."}],
+                "scenarios": [{"label": "Pullback", "text": "Preferred zone holds."}],
+                "counter_evidence": ["Breaks the invalidation line."],
+                "risks": ["Do not chase an extended move."],
+                "data_limits": ["Daily price is stale."],
+            }
+
+        assembled = ask_stages.assemble_response_analysis(
+            result={
+                "warnings": ["result warning"],
+                "missing": ["daily_price"],
+                "source_refs": [{"name": "market_daily_price"}],
+            },
+            freshness_result={
+                "is_current": False,
+                "refresh_recommended": True,
+                "warnings": ["freshness warning"],
+                "missing": ["margin_trade"],
+            },
+            warnings=["base warning"],
+            resolution=SimpleNamespace(),
+            effective_mode="brief",
+            policy={},
+            requested_mode="brief",
+            question_understanding=question_understanding,
+            question_intent="entry_decision",
+            position_context={},
+            scope_type="stock",
+            response_target={"type": "tw_stock", "id": "2330", "label": "2330 TSMC"},
+            progress=progress,
+            extract_list=lambda source, key: source.get(key, []),
+            extract_analysis_digest=lambda result, policy: {"kind": "stock_analysis_digest"},
+            clarification_dict=lambda resolution: {},
+            build_next_actions=lambda **kwargs: [],
+            build_position_decision=lambda **kwargs: {},
+            try_attach_position_decision_llm=lambda **kwargs: {},
+            build_consumer_human_answer=build_human_answer,
+            build_reasoning_steps=lambda **kwargs: [],
+            payload=AiAskRequest(question="Should I buy 2330 on a pullback?"),
+        )
+
+        decision_contract = assembled.response_analysis["decision_contract"]
+        self.assertEqual(decision_contract["kind"], "omi_ai_decision_contract")
+        self.assertEqual(decision_contract["version"], "decision_contract.v1")
+        self.assertEqual(decision_contract["intent"], "entry_decision")
+        self.assertEqual(decision_contract["answer_source"], "question_intent")
+        self.assertEqual(decision_contract["answer_style"], "question_aware_summary")
+        self.assertEqual(decision_contract["target"]["id"], "2330")
+        self.assertEqual(decision_contract["headline"], "Use a pullback plan")
+        self.assertEqual(decision_contract["text"], "Conclusion: use a pullback plan.")
+        self.assertEqual(
+            decision_contract["sections"]["action_plan"],
+            [{"label": "Entry", "text": "Wait for pullback confirmation."}],
+        )
+        self.assertEqual(
+            decision_contract["sections"]["scenarios"],
+            [{"label": "Pullback", "text": "Preferred zone holds."}],
+        )
+        self.assertEqual(
+            decision_contract["sections"]["counter_evidence"],
+            ["Breaks the invalidation line."],
+        )
+        self.assertEqual(decision_contract["missing"], ["daily_price", "margin_trade"])
+        self.assertEqual(
+            decision_contract["warnings"],
+            ["base warning", "freshness warning", "result warning"],
+        )
+        self.assertEqual(
+            decision_contract["readiness"],
+            {
+                "answer_ready": True,
+                "has_text": True,
+                "has_action_plan": True,
+                "has_scenarios": True,
+                "has_counter_evidence": True,
+                "has_risks": True,
+                "has_data_limits": True,
+                "has_missing": True,
+                "has_warnings": True,
+            },
+        )
+        self.assertFalse(decision_contract["freshness"]["is_current"])
+        self.assertTrue(decision_contract["freshness"]["refresh_recommended"])
 
 
 if __name__ == "__main__":

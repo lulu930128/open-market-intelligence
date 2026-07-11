@@ -1,6 +1,6 @@
 "use client";
 
-import { LoadingDots } from "@/components/LoadingPlaceholders";
+import { LoadingDots, StateSurface } from "@/components/LoadingPlaceholders";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
 import ProfessionalChartPanel, {
   type ProfessionalChartStyle,
@@ -32,6 +32,7 @@ import {
   type ChartDrawingStorageState,
 } from "@/components/professionalChartDrawing";
 import { fetchJson, requestJson } from "@/lib/api";
+import { emitDataStatusEvent, type DataStatusLevel } from "@/lib/dataStatusEvents";
 import { timeframeLabel, useT, type TranslationFunction } from "@/i18n";
 import type {
   ChartDrawingSnapshotRead,
@@ -311,8 +312,13 @@ function aggregateChartPoints(points: ChartPoint[], mode: "weekly" | "monthly"):
 
 function EmptyChartState({ loading, message }: { loading: boolean; message: string }) {
   return (
-    <div className="flex min-h-[420px] items-center justify-center border border-omi-border-subtle bg-omi-surface text-sm text-omi-text-muted">
-      {loading ? <LoadingDots label={message} /> : message}
+    <div className="flex min-h-[420px] items-center justify-center border border-omi-border-subtle bg-omi-surface p-4">
+      <StateSurface
+        title={message}
+        tone={loading ? "loading" : "empty"}
+        busy={loading}
+        className="w-full max-w-xl"
+      />
     </div>
   );
 }
@@ -465,7 +471,6 @@ export default function TaiwanFuturesDetailPanel({
   const [quoteState, setQuoteState] = useState<LoadState>("idle");
   const [dailyState, setDailyState] = useState<LoadState>("idle");
   const [barsState, setBarsState] = useState<LoadState>("idle");
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [chartTimeframe, setChartTimeframe] = useState<FuturesTimeframe>("daily");
   const [showChartIndicators, setShowChartIndicators] = useState(false);
   const [chartExpanded, setChartExpanded] = useState(false);
@@ -518,6 +523,41 @@ export default function TaiwanFuturesDetailPanel({
         quote?.product_name ?? t("futures.products.representative")
       )}`
     : "TXF / MXF / TMF";
+  const dataStatusContextKey = `tw:futures:${normalizedSymbol ?? "unknown"}`;
+  const dataStatusContextLabel = normalizedSymbol
+    ? `${normalizedSymbol} ${futuresProductLabel(
+        t,
+        normalizedSymbol,
+        t("futures.products.representative")
+      )}`
+    : "TXF / MXF / TMF";
+  const publishFuturesDataStatus = useCallback(
+    ({
+      level = "error",
+      title,
+      message,
+      source = "台指期",
+    }: {
+      level?: DataStatusLevel;
+      title: string;
+      message: string;
+      source?: string;
+    }) => {
+      if (!normalizedSymbol) return;
+
+      emitDataStatusEvent({
+        market: "tw",
+        level,
+        title,
+        message,
+        source,
+        contextKey: dataStatusContextKey,
+        contextLabel: dataStatusContextLabel,
+        dedupeKey: `${dataStatusContextKey}:${source}:${title}:${level}`,
+      });
+    },
+    [dataStatusContextKey, dataStatusContextLabel, normalizedSymbol]
+  );
   const chartDrawingKey = chartDrawingStorageKey(normalizedSymbol, chartTimeframe);
   const storedChartDrawings = useMemo(
     () => loadChartDrawings(chartDrawingKey),
@@ -550,7 +590,6 @@ export default function TaiwanFuturesDetailPanel({
     async function loadQuotes(silent = false) {
       if (!silent) {
         setQuoteState("loading");
-        setErrorMessage(null);
       }
 
       try {
@@ -559,11 +598,15 @@ export default function TaiwanFuturesDetailPanel({
 
         setQuotes(nextQuotes);
         setQuoteState("success");
-      } catch {
+      } catch (error) {
         if (cancelled) return;
 
         setQuoteState("error");
-        setErrorMessage(null);
+        publishFuturesDataStatus({
+          title: "台指期報價讀取失敗",
+          message: error instanceof Error ? error.message : "台指期報價讀取失敗",
+          source: "台指期報價",
+        });
       }
     }
 
@@ -581,11 +624,16 @@ export default function TaiwanFuturesDetailPanel({
 
         setBars(nextBars);
         setBarsState("success");
-      } catch {
+      } catch (error) {
         if (cancelled) return;
 
         setBars([]);
         setBarsState("error");
+        publishFuturesDataStatus({
+          title: "台指期盤中資料讀取失敗",
+          message: error instanceof Error ? error.message : "台指期盤中資料讀取失敗",
+          source: "台指期盤中 K 線",
+        });
       }
     }
 
@@ -631,11 +679,15 @@ export default function TaiwanFuturesDetailPanel({
         }
 
         setDailyState("error");
-        setErrorMessage(
+        const message =
           error instanceof Error
             ? error.message
-            : tRef.current("futures.errors.dailyBackfillFailed")
-        );
+            : tRef.current("futures.errors.dailyBackfillFailed");
+        publishFuturesDataStatus({
+          title: tRef.current("futures.errors.dailyBackfillFailed"),
+          message,
+          source: "台指期日 K",
+        });
       }
     }
 
@@ -651,7 +703,7 @@ export default function TaiwanFuturesDetailPanel({
       cancelled = true;
       window.clearInterval(liveRefreshTimer);
     };
-  }, [normalizedSymbol]);
+  }, [normalizedSymbol, publishFuturesDataStatus]);
 
   const dailyChartData = useMemo(
     () => dailyBars.map(dailyBarToChartPoint).filter((point) => point.close !== null),
@@ -1102,13 +1154,6 @@ export default function TaiwanFuturesDetailPanel({
               setChartDrawingTool("cursor");
               setChartExpanded(false);
             }}
-            message={
-              errorMessage ? (
-                <div className="border-b border-omi-danger-border bg-omi-danger-soft px-5 py-3 text-sm text-omi-danger">
-                  {errorMessage}
-                </div>
-              ) : null
-            }
             chartReady={futuresChartData.length > 0}
             emptyState={
               <EmptyChartState
@@ -1261,11 +1306,6 @@ export default function TaiwanFuturesDetailPanel({
               </div>
             </div>
 
-            {errorMessage ? (
-              <div className="border-b border-omi-danger-border bg-omi-danger-soft px-5 py-3 text-sm text-omi-danger">
-                {errorMessage}
-              </div>
-            ) : null}
             {quoteFreshnessBanner ? (
               <div className={quoteFreshnessBannerClass(quoteFreshnessBanner.status)}>
                 {quoteFreshnessBanner.message}

@@ -8,3 +8,4 @@ KR_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE = "kr_market.watchlist_resource_refresh"
 KR_SCHEDULED_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE = (
     "kr_market.scheduler.watchlist_resource_refresh"
 )
+WATCHLIST_RADAR_AUTO_SNAPSHOT_JOB_TYPE = "watchlist.scheduler.radar_snapshot"

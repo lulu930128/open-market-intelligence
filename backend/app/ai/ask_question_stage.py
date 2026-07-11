@@ -8,6 +8,83 @@ from app.ai.ask_stage_models import QuestionStage
 from app.ai.schemas import AiAskRequest
 
 
+POSITION_CONTEXT_PROMOTABLE_INTENTS = {"general", "trend_view", "risk_check"}
+POSITION_CONTEXT_TOPIC_INTENTS = {"position", "risk", "stop_loss", "take_profit", "exit", "hold"}
+
+
+def _positive_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        number = float(str(value).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+    if number <= 0 or number != number:
+        return None
+    return number
+
+
+def _normalized_explicit_position_context(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or not value:
+        return {}
+
+    quantity = _positive_float(value.get("quantity"))
+    cost_amount = _positive_float(value.get("cost_amount"))
+    entry_price = (
+        _positive_float(value.get("entry_price"))
+        or _positive_float(value.get("average_cost"))
+    )
+    if entry_price is None and quantity is not None and cost_amount is not None:
+        entry_price = cost_amount / quantity
+
+    has_context = bool(value.get("has_position_context")) or entry_price is not None
+    if not has_context:
+        return {}
+
+    result: dict[str, Any] = {
+        "kind": "position_context",
+        "has_position_context": True,
+        "entry_price": entry_price,
+        "entry_price_source": value.get("entry_price_source") or "explicit_position_context",
+        "decision_topic": value.get("decision_topic") or "position",
+        "position_side": value.get("position_side") or "long",
+    }
+    for key in (
+        "source",
+        "holding_id",
+        "market",
+        "symbol",
+        "symbol_name",
+        "quantity",
+        "cost_amount",
+        "currency",
+        "strategy_horizon",
+        "opened_at",
+    ):
+        if value.get(key) is not None:
+            result[key] = value[key]
+    return result
+
+
+def _merge_position_context(
+    inferred_context: dict[str, Any],
+    explicit_context_payload: Any,
+) -> dict[str, Any]:
+    explicit_context = _normalized_explicit_position_context(explicit_context_payload)
+    if not explicit_context:
+        return inferred_context
+
+    inferred_topic = inferred_context.get("decision_topic")
+    explicit_topic = explicit_context.get("decision_topic")
+    merged = {**inferred_context, **explicit_context}
+    merged["has_position_context"] = True
+    if inferred_topic in POSITION_CONTEXT_TOPIC_INTENTS and inferred_topic != "position":
+        merged["decision_topic"] = inferred_topic
+    else:
+        merged["decision_topic"] = explicit_topic or "position"
+    return merged
+
+
 def normalize_payload_for_resolution(
     *,
     payload: AiAskRequest,
@@ -47,15 +124,26 @@ def build_question_stage(
     response_preference_payload = response_preferences.build_response_preferences(
         normalized_payload.conversation_context
     )
-    position_context = question_understanding.position_context.as_dict()
+    position_context = _merge_position_context(
+        question_understanding.position_context.as_dict(),
+        payload.position_context,
+    )
     question_intent = question_understanding.intent
+    if (
+        position_context.get("has_position_context")
+        and question_intent in POSITION_CONTEXT_PROMOTABLE_INTENTS
+    ):
+        question_intent = "position_risk_decision"
     progress.question_understood(
         question_intent=question_intent,
         effective_horizon=effective_horizon,
     )
 
+    question_understanding_payload = question_understanding.as_policy_payload()
+    question_understanding_payload["intent"] = question_intent
+    question_understanding_payload["position_context"] = position_context
     policy["question_intent"] = question_intent
-    policy["question_understanding"] = question_understanding.as_policy_payload()
+    policy["question_understanding"] = question_understanding_payload
     policy["response_preferences"] = response_preference_payload
     if position_context.get("has_position_context"):
         policy["position_context"] = position_context

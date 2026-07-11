@@ -1,6 +1,7 @@
 "use client";
 
 import type { ChartDrawing, ChartDrawingTool } from "@/components/LightweightKLineChart";
+import { StateSurface } from "@/components/LoadingPlaceholders";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
 import ProfessionalChartPanel, {
   type ProfessionalChartStyle,
@@ -1976,10 +1977,17 @@ export default function CryptoKLinePanel({
         }
         chartReady={displayChartData.length > 0}
         emptyState={
-          <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle px-4 text-center text-sm text-omi-text-muted">
-            {loadState === "loading" || refreshing
-              ? t("crypto.kline.loadingBars")
-              : t("crypto.kline.emptyBars")}
+          <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle p-4">
+            <StateSurface
+              title={
+                loadState === "loading" || refreshing
+                  ? t("crypto.kline.loadingBars")
+                  : t("crypto.kline.emptyBars")
+              }
+              tone={loadState === "loading" || refreshing ? "loading" : "empty"}
+              busy={loadState === "loading" || refreshing}
+              className="w-full max-w-xl"
+            />
           </div>
         }
         chartData={displayChartData}
@@ -2220,10 +2228,17 @@ export default function CryptoKLinePanel({
             volumeValueFormatter={formatCryptoVolume}
           />
         ) : (
-          <div className={`flex ${emptyHeight} items-center justify-center border border-dashed border-omi-border-subtle bg-omi-surface-subtle px-4 text-center text-sm text-omi-text-muted`}>
-            {loadState === "loading" || refreshing
-              ? t("crypto.kline.loadingBars")
-              : t("crypto.kline.emptyBars")}
+          <div className={`flex ${emptyHeight} items-center justify-center border border-omi-border-subtle bg-omi-surface p-4`}>
+            <StateSurface
+              title={
+                loadState === "loading" || refreshing
+                  ? t("crypto.kline.loadingBars")
+                  : t("crypto.kline.emptyBars")
+              }
+              tone={loadState === "loading" || refreshing ? "loading" : "empty"}
+              busy={loadState === "loading" || refreshing}
+              className="w-full max-w-xl"
+            />
           </div>
         )}
       </div>

@@ -110,6 +110,7 @@ import {
   type ChartDrawingStorageState,
 } from "@/components/professionalChartDrawing";
 import { fetchJson, requestJson } from "@/lib/api";
+import { emitDataStatusEvent, type DataStatusLevel } from "@/lib/dataStatusEvents";
 import { getJobResultStatus, requestBackfillJob } from "@/lib/jobs";
 import {
   getMarketCalendarStatusSnapshot,
@@ -153,6 +154,7 @@ import type {
   MarketIndexSummary,
   MonthlyRevenueRead,
   OhlcChartResponse,
+  OhlcIntradayOverlay,
   OvernightImpactRead,
   ShareholdingDistributionWeeklyRead,
   StockChipCoverageRead,
@@ -175,6 +177,7 @@ type Props = {
   stockId: string | null;
   stockName: string | null;
   initialChartData?: ChartPoint[];
+  initialChartIntradayOverlay?: OhlcIntradayOverlay | null;
   initialIndicatorData?: StockIndicatorPoint[];
   watchlistRankingPanel?: ReactNode;
   marketIndexSummary?: MarketIndexSummary | null;
@@ -280,6 +283,32 @@ function shouldIncludeTaiwanOhlcIntraday() {
   return (
     marketState.isPollingWindow ||
     (marketState.isAfterClose && !marketState.isDailyPriceReleased)
+  );
+}
+
+function latestOhlcDate(ohlc: OhlcChartResponse) {
+  return normalizeIsoDate(ohlc.points[ohlc.points.length - 1]?.time);
+}
+
+function shouldRetryTaiwanDailyOhlcWithIntraday(ohlc: OhlcChartResponse) {
+  const marketState = getTaiwanMarketRefreshState();
+
+  if (!marketState.isAfterClose || !marketState.isDailyPriceReleased) {
+    return false;
+  }
+
+  const latestDate = latestOhlcDate(ohlc);
+
+  return latestDate === null || latestDate < marketState.dateKey;
+}
+
+function overlayMatchesChartLatest(
+  overlay: OhlcIntradayOverlay | null,
+  latestChart: ChartPoint | null
+) {
+  return (
+    Boolean(overlay?.provisional) &&
+    normalizeIsoDate(overlay?.trade_date) === normalizeIsoDate(latestChart?.time)
   );
 }
 
@@ -686,6 +715,7 @@ export default function StockDetailPanel({
   stockId,
   stockName,
   initialChartData = [],
+  initialChartIntradayOverlay = null,
   initialIndicatorData = [],
   watchlistRankingPanel,
   marketIndexSummary,
@@ -749,8 +779,11 @@ export default function StockDetailPanel({
   const [indicatorParameters, setIndicatorParameters] =
     useState<IndicatorParameters>(defaultIndicatorParameters);
   const [chartData, setChartData] = useState<ChartPoint[]>(initialChartData);
+  const [chartIntradayOverlay, setChartIntradayOverlay] =
+    useState<OhlcIntradayOverlay | null>(initialChartIntradayOverlay);
   const [chartStockId, setChartStockId] = useState<string | null>(stockId);
   const [chartTimeframe, setChartTimeframe] = useState<ChartTimeframe>("daily");
+  const [chartRefreshNonce, setChartRefreshNonce] = useState(0);
   const [benchmarkChartData, setBenchmarkChartData] = useState<ChartPoint[]>([]);
   const [benchmarkChartKey, setBenchmarkChartKey] = useState<string | null>(null);
   const [todayTrend, setTodayTrend] = useState<IntradayTrendPoint[]>([]);
@@ -828,6 +861,40 @@ export default function StockDetailPanel({
   const chartDrawingSyncTimerRef = useRef<number | null>(null);
   const indexProduct = stockId ? indexProducts.get(stockId) ?? null : null;
   const isIndexProduct = indexProduct !== null;
+  const dataStatusDisplayName = indexProduct?.stockName ?? stockName;
+  const dataStatusContextLabel = stockId
+    ? `${stockId}${dataStatusDisplayName ? ` ${dataStatusDisplayName}` : ""}`
+    : t("watchlist.noGroupSelected");
+  const dataStatusContextKey = `tw:${isIndexProduct ? "index" : "stock"}:${stockId ?? "unknown"}`;
+  const dataStatusSource = isIndexProduct ? "台股指數" : "台股個股";
+
+  const publishDetailDataStatus = useCallback(
+    ({
+      level = "error",
+      title,
+      message,
+      source = dataStatusSource,
+    }: {
+      level?: DataStatusLevel;
+      title: string;
+      message: string;
+      source?: string;
+    }) => {
+      if (!stockId) return;
+
+      emitDataStatusEvent({
+        market: "tw",
+        level,
+        title,
+        message,
+        source,
+        contextKey: dataStatusContextKey,
+        contextLabel: dataStatusContextLabel,
+        dedupeKey: `${dataStatusContextKey}:${source}:${title}:${level}`,
+      });
+    },
+    [dataStatusContextKey, dataStatusContextLabel, dataStatusSource, stockId]
+  );
   const effectiveTimeframe = timeframe;
   const availableTimeframes = isIndexProduct ? indexTimeframes : allTimeframes;
   const indexMarket = indexProduct?.market ?? null;
@@ -1415,6 +1482,7 @@ export default function StockDetailPanel({
     if (!stockId) {
       const timer = window.setTimeout(() => {
         setChartData([]);
+        setChartIntradayOverlay(null);
         setChartStockId(null);
         setChartTimeframe("daily");
         setTodayTrend([]);
@@ -1587,7 +1655,14 @@ export default function StockDetailPanel({
       } catch (error) {
         if (cancelled) return;
         setLoadState("error");
-        setErrorMessage(error instanceof Error ? error.message : tRef.current("stockDetail.errors.dataLoad"));
+        const message =
+          error instanceof Error ? error.message : tRef.current("stockDetail.errors.dataLoad");
+        setErrorMessage(message);
+        publishDetailDataStatus({
+          title: tRef.current("stockDetail.errors.dataLoad"),
+          message,
+          source: "今日走勢",
+        });
       } finally {
         intradayRequestInFlight = false;
       }
@@ -1621,7 +1696,14 @@ export default function StockDetailPanel({
           if (cancelled || activeStockIdRef.current !== effectStockId) return;
 
           setProfessionalIntradayFallbackActive(true);
-          setErrorMessage(tRef.current("stockDetail.errors.intradayHistoryFallbackNoData"));
+          const message = tRef.current("stockDetail.errors.intradayHistoryFallbackNoData");
+          setErrorMessage(message);
+          publishDetailDataStatus({
+            level: "warning",
+            title: tRef.current("stockDetail.errors.intradayHistoryFallbackNoData"),
+            message,
+            source: "K 線 / 技術指標",
+          });
           return;
         }
 
@@ -1642,13 +1724,19 @@ export default function StockDetailPanel({
         if (cancelled || activeStockIdRef.current !== effectStockId) return;
 
         setProfessionalIntradayFallbackActive(true);
-        setErrorMessage(
+        const message =
           error instanceof Error
             ? tRef.current("stockDetail.errors.intradayHistoryFallbackFailedWithMessage", {
                 message: error.message,
               })
-            : tRef.current("stockDetail.errors.intradayHistoryFallbackFailed")
-        );
+            : tRef.current("stockDetail.errors.intradayHistoryFallbackFailed");
+        setErrorMessage(message);
+        publishDetailDataStatus({
+          level: "warning",
+          title: tRef.current("stockDetail.errors.intradayHistoryFallbackFailed"),
+          message,
+          source: "K 線 / 技術指標",
+        });
       }
     }
 
@@ -1784,6 +1872,7 @@ export default function StockDetailPanel({
         if (cancelled || activeStockIdRef.current !== targetStockId) return;
 
         setChartData(refreshedOhlc.points);
+        setChartIntradayOverlay(refreshedOhlc.intraday_overlay);
         setIndicatorData(refreshedIndicators);
         setChartStockId(targetStockId);
         setChartTimeframe(requestedTimeframe);
@@ -1835,17 +1924,36 @@ export default function StockDetailPanel({
         const chartBars = chartBarsByTimeframe[requestedTimeframe];
         const includeIntraday =
           !isIndexProduct && shouldIncludeTaiwanOhlcIntraday();
-        const ohlc = await fetchJson<OhlcChartResponse>(
+        const ohlcParams = {
+          timeframe: requestedTimeframe,
+          bars: chartBars,
+          ensure_history: false,
+          ...(includeIntraday ? { include_intraday: true } : {}),
+        };
+        let ohlc = await fetchJson<OhlcChartResponse>(
           isIndexProduct
             ? `/api/market/indices/${requestedStockId}/ohlc`
             : `/api/market/ohlc/${requestedStockId}`,
-          {
-            timeframe: requestedTimeframe,
-            bars: chartBars,
-            ensure_history: false,
-            ...(includeIntraday ? { include_intraday: true } : {}),
-          }
+          ohlcParams
         );
+
+        if (
+          requestedTimeframe === "daily" &&
+          !includeIntraday &&
+          !isIndexProduct &&
+          shouldRetryTaiwanDailyOhlcWithIntraday(ohlc)
+        ) {
+          ohlc = await fetchJson<OhlcChartResponse>(
+            `/api/market/ohlc/${requestedStockId}`,
+            {
+              timeframe: requestedTimeframe,
+              bars: chartBars,
+              ensure_history: false,
+              include_intraday: true,
+            }
+          );
+        }
+
         const indicators =
           isIndexProduct
             ? []
@@ -1861,6 +1969,7 @@ export default function StockDetailPanel({
         if (cancelled) return;
 
         setChartData(ohlc.points);
+        setChartIntradayOverlay(ohlc.intraday_overlay);
         setIndicatorData(indicators);
         setChartStockId(requestedStockId);
         setChartTimeframe(requestedTimeframe);
@@ -1872,7 +1981,14 @@ export default function StockDetailPanel({
       } catch (error) {
         if (cancelled) return;
         setLoadState("error");
-        setErrorMessage(error instanceof Error ? error.message : tRef.current("stockDetail.errors.dataLoad"));
+        const message =
+          error instanceof Error ? error.message : tRef.current("stockDetail.errors.dataLoad");
+        setErrorMessage(message);
+        publishDetailDataStatus({
+          title: tRef.current("stockDetail.errors.dataLoad"),
+          message,
+          source: "K 線 / 技術指標",
+        });
       }
     }
 
@@ -1884,11 +2000,13 @@ export default function StockDetailPanel({
     };
   }, [
     chartFocusMode,
+    chartRefreshNonce,
     currentStockInfoId,
     currentStockInfoMarket,
     effectiveTimeframe,
     isIndexProduct,
     professionalTimeframe,
+    publishDetailDataStatus,
     stockId,
   ]);
 
@@ -2044,6 +2162,20 @@ export default function StockDetailPanel({
   const latestIndicator = indicatorData[indicatorData.length - 1] ?? null;
   const latestChart = chartData[chartData.length - 1] ?? null;
   const previousChart = chartData[chartData.length - 2] ?? null;
+  const latestChartDate = normalizeIsoDate(latestChart?.time);
+  const latestIndicatorDate = normalizeIsoDate(latestIndicator?.time);
+  const latestCurrentIndicator =
+    latestIndicator !== null &&
+    latestChartDate !== null &&
+    latestIndicatorDate === latestChartDate
+      ? latestIndicator
+      : null;
+  const chartOverlayPreviousClose =
+    overlayMatchesChartLatest(chartIntradayOverlay, latestChart) &&
+    finiteNumber(chartIntradayOverlay?.previous_close)
+      ? chartIntradayOverlay.previous_close
+      : null;
+  const chartPreviousClose = chartOverlayPreviousClose ?? previousChart?.close ?? null;
   const currentChartReady =
     effectiveTimeframe !== "today" &&
     chartStockId === stockId &&
@@ -2109,38 +2241,38 @@ export default function StockDetailPanel({
   const latestClose =
     effectiveTimeframe === "today"
       ? latestToday?.price ?? null
-      : latestIndicator?.close ?? latestChart?.close ?? null;
+      : latestCurrentIndicator?.close ?? latestChart?.close ?? null;
   const dailyPreviousClose =
-    latestIndicator?.close !== null &&
-    latestIndicator?.close !== undefined &&
-    latestIndicator?.change !== null &&
-    latestIndicator?.change !== undefined
-      ? latestIndicator.close - latestIndicator.change
+    latestCurrentIndicator?.close !== null &&
+    latestCurrentIndicator?.close !== undefined &&
+    latestCurrentIndicator?.change !== null &&
+    latestCurrentIndicator?.change !== undefined
+      ? latestCurrentIndicator.close - latestCurrentIndicator.change
       : null;
   const todayReferenceClose = todayPreviousClose ?? dailyPreviousClose;
   const chartChangePct =
     latestChart?.close !== null &&
     latestChart?.close !== undefined &&
-    previousChart?.close !== null &&
-    previousChart?.close !== undefined &&
-    previousChart.close !== 0
-      ? ((latestChart.close - previousChart.close) / previousChart.close) * 100
+    chartPreviousClose !== null &&
+    chartPreviousClose !== undefined &&
+    chartPreviousClose !== 0
+      ? ((latestChart.close - chartPreviousClose) / chartPreviousClose) * 100
       : null;
   const chartChange =
     latestChart?.close !== null &&
     latestChart?.close !== undefined &&
-    previousChart?.close !== null &&
-    previousChart?.close !== undefined
-      ? latestChart.close - previousChart.close
+    chartPreviousClose !== null &&
+    chartPreviousClose !== undefined
+      ? latestChart.close - chartPreviousClose
       : null;
   const latestChange =
     effectiveTimeframe === "today" && latestToday && todayReferenceClose
       ? latestToday.price - todayReferenceClose
-      : latestIndicator?.change ?? chartChange;
+      : latestCurrentIndicator?.change ?? chartChange;
   const latestChangePct =
     effectiveTimeframe === "today" && latestToday && todayReferenceClose
       ? ((latestToday.price - todayReferenceClose) / todayReferenceClose) * 100
-      : latestIndicator?.change_pct ?? chartChangePct;
+      : latestCurrentIndicator?.change_pct ?? chartChangePct;
   const professionalLatestClose =
     chartFocusMode && professionalIsIntraday
       ? latestProfessionalChart?.close ?? latestToday?.price ?? latestClose
@@ -2165,11 +2297,12 @@ export default function StockDetailPanel({
     ? null
     : estimatedPriceLimitStatus(professionalLatestChangePct);
   const headerLimitStatus = isIndexProduct ? null : estimatedPriceLimitStatus(latestChangePct);
-  const ma5 = latestIndicator?.ma?.ma5 ?? averageRecentChartValue(chartData, "close", 5);
-  const ma20 = latestIndicator?.ma?.ma20 ?? averageRecentChartValue(chartData, "close", 20);
-  const ma60 = latestIndicator?.ma?.ma60 ?? averageRecentChartValue(chartData, "close", 60);
+  const ma5 = latestCurrentIndicator?.ma?.ma5 ?? averageRecentChartValue(chartData, "close", 5);
+  const ma20 = latestCurrentIndicator?.ma?.ma20 ?? averageRecentChartValue(chartData, "close", 20);
+  const ma60 = latestCurrentIndicator?.ma?.ma60 ?? averageRecentChartValue(chartData, "close", 60);
   const volumeMa20 =
-    latestIndicator?.volume_ma?.volume_ma20 ?? averageRecentChartValue(chartData, "volume", 20);
+    latestCurrentIndicator?.volume_ma?.volume_ma20 ??
+    averageRecentChartValue(chartData, "volume", 20);
   const priceVsMa20 =
     latestClose !== null && ma20 !== null && ma20 !== 0
       ? ((latestClose - ma20) / ma20) * 100
@@ -2177,7 +2310,7 @@ export default function StockDetailPanel({
   const latestVolume =
     effectiveTimeframe === "today"
       ? todayStats.volume ?? latestToday?.volume ?? null
-      : latestIndicator?.volume ?? latestChart?.volume ?? null;
+      : latestCurrentIndicator?.volume ?? latestChart?.volume ?? null;
   const volumeRatio = safeRatio(latestVolume, volumeMa20);
   const volumeRatioPct = volumeRatio === null ? null : (volumeRatio - 1) * 100;
   const totalInstitutionalNet = institutional?.total_institutional_net ?? null;
@@ -2186,7 +2319,7 @@ export default function StockDetailPanel({
       ? formatDateTime(latestToday.time)
       : effectiveTimeframe === "today"
         ? "-"
-        : latestIndicator?.time ?? latestChart?.time ?? "-";
+        : latestCurrentIndicator?.time ?? latestChart?.time ?? "-";
   const marketIndicesById = useMemo(() => {
     return new Map(
       (marketIndexSummary?.indices ?? []).map((index) => [index.index_id, index])
@@ -2293,16 +2426,16 @@ export default function StockDetailPanel({
       };
     }
 
-    const rsi14 = latestIndicator?.rsi?.rsi14 ?? null;
-    const macdHistogram = latestIndicator?.macd?.histogram ?? null;
-    const roc12 = latestIndicator?.roc?.roc12 ?? null;
-    const mfi14 = latestIndicator?.mfi?.mfi14 ?? null;
-    const atr14 = latestIndicator?.atr?.atr14 ?? null;
-    const adx14 = latestIndicator?.adx?.adx14 ?? null;
-    const plusDi14 = latestIndicator?.adx?.plus_di14 ?? null;
-    const minusDi14 = latestIndicator?.adx?.minus_di14 ?? null;
-    const donchianUpper20 = latestIndicator?.donchian?.upper20 ?? null;
-    const donchianLower20 = latestIndicator?.donchian?.lower20 ?? null;
+    const rsi14 = latestCurrentIndicator?.rsi?.rsi14 ?? null;
+    const macdHistogram = latestCurrentIndicator?.macd?.histogram ?? null;
+    const roc12 = latestCurrentIndicator?.roc?.roc12 ?? null;
+    const mfi14 = latestCurrentIndicator?.mfi?.mfi14 ?? null;
+    const atr14 = latestCurrentIndicator?.atr?.atr14 ?? null;
+    const adx14 = latestCurrentIndicator?.adx?.adx14 ?? null;
+    const plusDi14 = latestCurrentIndicator?.adx?.plus_di14 ?? null;
+    const minusDi14 = latestCurrentIndicator?.adx?.minus_di14 ?? null;
+    const donchianUpper20 = latestCurrentIndicator?.donchian?.upper20 ?? null;
+    const donchianLower20 = latestCurrentIndicator?.donchian?.lower20 ?? null;
     const atrPct =
       finiteNumber(atr14) && latestClose !== 0 ? (atr14 / latestClose) * 100 : null;
     const donchianPositionPct =
@@ -2757,7 +2890,7 @@ export default function StockDetailPanel({
     latestChangePct,
     latestChart?.volume,
     latestClose,
-    latestIndicator,
+    latestCurrentIndicator,
     latestToday,
     loadState,
     ma5,
@@ -3363,6 +3496,9 @@ export default function StockDetailPanel({
 
           const resultStatus = getJobResultStatus(job);
           const translate = tRef.current;
+          if (resultStatus !== "error") {
+            setChartRefreshNonce((value) => value + 1);
+          }
           setDataPanelMessage(
             resultStatus === "partial_success"
               ? translate("stockDetail.dataPanel.basicAutoRefresh.partial")
@@ -3627,11 +3763,6 @@ export default function StockDetailPanel({
 
           )}
 
-          {!chartFocusMode && errorMessage ? (
-            <div className="border-b border-omi-danger-border bg-omi-danger-soft px-5 py-3 text-sm text-omi-danger">
-              {errorMessage}
-            </div>
-          ) : null}
           {!chartFocusMode && chartHistoryMessage && !errorMessage ? (
             <div className="border-b border-omi-warning-border bg-omi-warning-soft px-5 py-2 text-xs text-omi-warning-strong">
               {chartHistoryMessage}
@@ -3702,11 +3833,7 @@ export default function StockDetailPanel({
                 setChartFocusMode(false);
               }}
               message={
-                errorMessage ? (
-                  <div className="border-b border-omi-danger-border bg-omi-danger-soft px-5 py-3 text-sm text-omi-danger">
-                    {errorMessage}
-                  </div>
-                ) : chartHistoryMessage ? (
+                chartHistoryMessage && !errorMessage ? (
                   <div className="border-b border-omi-warning-border bg-omi-warning-soft px-5 py-2 text-xs text-omi-warning-strong">
                     {chartHistoryMessage}
                   </div>
@@ -3718,6 +3845,9 @@ export default function StockDetailPanel({
                   message={t("stockDetail.loadingFrame", {
                     label: professionalTimeframeLabel,
                   })}
+                  tone="loading"
+                  busy
+                  className="m-4"
                 />
               }
               chartData={professionalChartData}
@@ -3779,12 +3909,16 @@ export default function StockDetailPanel({
               volumeTooltipLabel={isIndexProduct ? t("chart.kline.tradeValueYi") : undefined}
               volumeValueKey={isIndexProduct ? "trade_value" : "volume"}
               volumeValueFormatter={isIndexProduct ? formatTradeValueYi : undefined}
+              latestPreviousClose={chartOverlayPreviousClose}
             />
           ) : (
             <EmptyDataState
               message={t("stockDetail.loadingFrame", {
                 label: timeframeLabel(t, effectiveTimeframe),
               })}
+              tone="loading"
+              busy
+              className="m-4"
             />
           )}
         </div>
@@ -4060,9 +4194,7 @@ export default function StockDetailPanel({
                   </div>
                 ))
               ) : (
-                <div className="border border-dashed border-omi-border-subtle px-4 py-6 text-center text-sm text-omi-text-muted">
-                  {t("stockDetail.chipMetrics.empty")}
-                </div>
+                <EmptyDataState message={t("stockDetail.chipMetrics.empty")} />
               )}
             </div>
           </div>

@@ -1,6 +1,7 @@
 "use client";
 
 import JobStatusCenter from "@/components/JobStatusCenter";
+import PortfolioHoldingsPanel from "@/components/PortfolioHoldingsPanel";
 import SettingsDock from "@/components/SettingsDock";
 import { marketLabel, useT } from "@/i18n";
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
@@ -679,6 +680,14 @@ export default function JPMarketSidebar({
 
       <div className="min-h-0 flex-1 overflow-y-auto py-2">
         {renderPinnedIndexGroup()}
+        <PortfolioHoldingsPanel
+          market="jp"
+          selectedSymbol={selectedSymbol}
+          defaultCurrency="JPY"
+          symbolPlaceholder={t("jpMarket.watchlist.symbolPlaceholder")}
+          normalizeSymbol={normalizeSymbolInput}
+          onSelectSymbol={onSelectSymbol}
+        />
         {tree.length > 0 ? (
           tree.map((node) => renderGroupNode(node))
         ) : (
@@ -688,22 +697,8 @@ export default function JPMarketSidebar({
         )}
       </div>
 
-      <div className="space-y-2 border-b border-omi-border-subtle px-4 py-4">
-        <JobStatusCenter placement="inline" market="jp" />
-        {statusMessage ? (
-          <div
-            className={[
-              "border px-3 py-2 text-xs",
-              statusMessage.type === "success"
-                ? "border-omi-market-down-border bg-omi-market-down-soft text-omi-market-down"
-                : statusMessage.type === "warning"
-                  ? "border-omi-warning-border bg-omi-warning-soft text-omi-warning"
-                  : "border-omi-danger-border bg-omi-danger-soft text-omi-danger",
-            ].join(" ")}
-          >
-            {statusMessage.text}
-          </div>
-        ) : null}
+      <div className="border-b border-omi-border-subtle px-4 py-4">
+        <JobStatusCenter placement="inline" market="jp" inlineMessage={statusMessage} />
       </div>
 
       <div className="space-y-4 p-4">

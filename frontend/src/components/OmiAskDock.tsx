@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { StateSurface } from "@/components/LoadingPlaceholders";
 import { useOmiAskStream, type OmiSseMessage } from "@/hooks/useOmiAskStream";
 import { useI18n, useT, type AppLocale, type TranslationFunction } from "@/i18n";
 
@@ -768,9 +769,7 @@ function AnswerPanel({
   }
 
   return (
-    <div className="border border-dashed border-omi-border bg-omi-surface-subtle px-3 py-4 text-sm leading-6 text-omi-text-muted">
-      {t("ask.fallback.empty")}
-    </div>
+    <StateSurface title={t("ask.fallback.empty")} tone="empty" compact />
   );
 }
 

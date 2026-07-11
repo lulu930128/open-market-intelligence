@@ -1200,7 +1200,286 @@ select {
   );
 }
 
+.omi-feedback-strip {
+  --omi-feedback-color: var(--omi-color-info);
+  --omi-feedback-bg: color-mix(
+    in srgb,
+    var(--omi-feedback-color) 8%,
+    var(--omi-color-surface)
+  );
+  --omi-feedback-border: color-mix(
+    in srgb,
+    var(--omi-feedback-color) 32%,
+    var(--omi-color-border-subtle)
+  );
+  border-color: var(--omi-feedback-border);
+  background: var(--omi-feedback-bg);
+  color: var(--omi-feedback-color);
+}
+
+.omi-feedback-strip-success {
+  --omi-feedback-color: var(--omi-color-success);
+}
+
+.omi-feedback-strip-warning {
+  --omi-feedback-color: var(--omi-color-warning);
+}
+
+.omi-feedback-strip-danger {
+  --omi-feedback-color: var(--omi-color-danger);
+}
+
+.omi-feedback-strip-info {
+  --omi-feedback-color: var(--omi-color-info);
+}
+
+.omi-state-surface {
+  --omi-state-color: var(--omi-color-text-muted);
+  --omi-state-bg: color-mix(
+    in srgb,
+    var(--omi-state-color) 6%,
+    var(--omi-color-surface)
+  );
+  --omi-state-border: color-mix(
+    in srgb,
+    var(--omi-state-color) 24%,
+    var(--omi-color-border-subtle)
+  );
+  position: relative;
+  display: grid;
+  grid-template-columns: 2.5rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+  min-height: 5.5rem;
+  overflow: hidden;
+  border: 1px solid var(--omi-state-border);
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--omi-state-color) 9%, transparent) 0%,
+      transparent 58%
+    ),
+    var(--omi-state-bg);
+  box-shadow:
+    var(--omi-shadow-surface-inset),
+    0 10px 24px rgb(var(--omi-rgb-text) / 0.05);
+  color: var(--omi-color-text);
+  padding: 1rem;
+}
+
+.omi-state-surface::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--omi-state-color);
+}
+
+.omi-state-surface-compact {
+  grid-template-columns: 2rem minmax(0, 1fr) auto;
+  min-height: 4.25rem;
+  gap: 0.625rem;
+  padding: 0.75rem 0.875rem;
+}
+
+.omi-state-surface-neutral {
+  --omi-state-color: var(--omi-color-text-muted);
+}
+
+.omi-state-surface-loading,
+.omi-state-surface-info {
+  --omi-state-color: var(--omi-color-info);
+}
+
+.omi-state-surface-empty {
+  --omi-state-color: var(--omi-color-text-subtle);
+  --omi-state-bg: var(--omi-color-surface-subtle);
+  --omi-state-border: color-mix(
+    in srgb,
+    var(--omi-color-border) 62%,
+    transparent
+  );
+}
+
+.omi-state-surface-warning {
+  --omi-state-color: var(--omi-color-warning);
+}
+
+.omi-state-surface-danger {
+  --omi-state-color: var(--omi-color-danger);
+}
+
+.omi-state-surface-success {
+  --omi-state-color: var(--omi-color-success);
+}
+
+.omi-state-glyph {
+  display: grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border: 1px solid color-mix(in srgb, var(--omi-state-color) 32%, transparent);
+  background: color-mix(
+    in srgb,
+    var(--omi-state-color) 11%,
+    var(--omi-color-surface)
+  );
+  color: var(--omi-state-color);
+}
+
+.omi-state-surface-compact .omi-state-glyph {
+  width: 2rem;
+  height: 2rem;
+}
+
+.omi-state-glyph span {
+  position: relative;
+  display: block;
+  width: 1rem;
+  height: 0.875rem;
+  border: 1.5px solid currentColor;
+}
+
+.omi-state-glyph span::before,
+.omi-state-glyph span::after {
+  content: "";
+  position: absolute;
+  right: 2px;
+  left: 2px;
+  height: 1.5px;
+  background: currentColor;
+}
+
+.omi-state-glyph span::before {
+  top: 3px;
+}
+
+.omi-state-glyph span::after {
+  bottom: 3px;
+}
+
+.omi-state-surface-empty .omi-state-glyph span {
+  border-style: dashed;
+}
+
+.omi-state-surface-loading .omi-state-glyph span {
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 999px;
+  animation: omi-state-spin 780ms linear infinite;
+}
+
+.omi-state-surface-loading .omi-state-glyph span::before,
+.omi-state-surface-loading .omi-state-glyph span::after {
+  content: none;
+}
+
+.omi-state-eyebrow {
+  display: block;
+  color: var(--omi-state-color);
+  font-size: 0.6875rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.omi-state-title {
+  display: block;
+  color: var(--omi-color-text-strong);
+  font-size: 0.9375rem;
+  font-weight: 750;
+  letter-spacing: 0;
+  line-height: 1.35;
+}
+
+.omi-state-eyebrow + .omi-state-title {
+  margin-top: 0.125rem;
+}
+
+.omi-state-description {
+  display: block;
+  margin-top: 0.25rem;
+  color: var(--omi-color-text-muted);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.omi-state-action {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.omi-state-dots {
+  color: var(--omi-state-color);
+}
+
+.omi-state-progress {
+  position: relative;
+  display: block;
+  width: min(18rem, 100%);
+  height: 0.25rem;
+  margin-top: 0.75rem;
+  overflow: hidden;
+  background: color-mix(
+    in srgb,
+    var(--omi-state-color) 10%,
+    var(--omi-color-surface-muted)
+  );
+}
+
+.omi-state-progress > span {
+  display: block;
+  width: 42%;
+  height: 100%;
+  background: var(--omi-state-color);
+  transform-origin: left center;
+  animation: omi-loading-bar 1040ms cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+
+.omi-loading-surface {
+  position: relative;
+  overflow: hidden;
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--omi-color-info) 5%, transparent),
+      transparent 62%
+    ),
+    var(--omi-color-surface);
+}
+
+.omi-refresh-frame {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.omi-refresh-frame[data-refreshing="true"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  background:
+    linear-gradient(
+      90deg,
+      transparent 0%,
+      rgb(var(--omi-rgb-surface-subtle) / 0.52) 46%,
+      transparent 100%
+    ),
+    rgb(var(--omi-rgb-surface) / 0.18);
+  animation: omi-soft-refresh-sweep 1200ms cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+
 .omi-soft-refresh {
+  position: relative;
+  isolation: isolate;
   overflow: hidden;
 }
 
@@ -1339,6 +1618,15 @@ select {
   }
   100% {
     transform: translateX(100%);
+  }
+}
+
+@keyframes omi-state-spin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
   }
 }
 
@@ -1545,6 +1833,8 @@ select {
   .omi-technical-row,
   .omi-technical-loading-row,
   .omi-technical-badge,
+  .omi-state-surface-loading .omi-state-glyph span,
+  .omi-state-progress > span,
   .omi-loading-dots span,
   .omi-technical-summary::after {
     animation: none;
@@ -1584,6 +1874,7 @@ select {
 
   .omi-tab-panel,
   .omi-soft-refresh::after,
+  .omi-refresh-frame[data-refreshing="true"]::after,
   .omi-loading-bar,
   .omi-skeleton::after {
     animation: none;

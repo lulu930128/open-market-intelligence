@@ -9,6 +9,7 @@ from app.jobs import backfill_tasks, service as job_service
 from app.jobs.job_types import (
     JP_SCHEDULED_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
     KR_SCHEDULED_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
+    WATCHLIST_RADAR_AUTO_SNAPSHOT_JOB_TYPE,
 )
 from app.market.calendar_status import (
     build_taiwan_calendar_status,
@@ -18,6 +19,7 @@ from app.market.calendar_status import (
 )
 from app.market.market_chips import normalize_market_chip_index_ids
 from app.market.taiwan_rules import (
+    TAIWAN_DATASET_DAILY_PRICE,
     TAIWAN_DATASET_INSTITUTIONAL_TRADE,
     TAIWAN_DATASET_MARGIN_TRADING,
     TAIWAN_REFRESH_INSTITUTIONAL_TRADE,
@@ -689,6 +691,112 @@ def _add_kr_market_refresh_job(scheduler: Any) -> bool:
     return True
 
 
+def enqueue_watchlist_radar_auto_snapshot() -> None:
+    now = datetime.now(_timezone())
+    calendar_status = build_taiwan_calendar_status(now=now)
+    release_window = calendar_status.get("release_windows", {}).get(TAIWAN_DATASET_DAILY_PRICE)
+
+    if not calendar_status.get("is_trading_day"):
+        logger.info(
+            "Skipped scheduled watchlist radar snapshot because %s is not a trading day phase=%s reason=%s.",
+            calendar_status.get("date"),
+            calendar_status.get("phase"),
+            calendar_status.get("reason"),
+        )
+        return
+
+    daily_price_released = is_release_released_from_calendar(
+        calendar_status,
+        market="tw",
+        key=TAIWAN_DATASET_DAILY_PRICE,
+    )
+    if settings.scheduler_watchlist_radar_require_daily_release and not daily_price_released:
+        logger.info(
+            "Skipped scheduled watchlist radar snapshot because daily price release is not ready date=%s window=%s.",
+            calendar_status.get("date"),
+            release_window,
+        )
+        return
+
+    group_ids = _split_csv(settings.scheduler_watchlist_radar_group_ids)
+    evaluate_before_date = (
+        expected_trade_date_from_calendar(
+            calendar_status,
+            market="tw",
+            key=TAIWAN_DATASET_DAILY_PRICE,
+        )
+        or now.date()
+    )
+    request = {
+        "schedule": "watchlist_radar_auto_snapshot",
+        "run_date": now.date().isoformat(),
+        "group_ids": group_ids or None,
+        "modes": settings.scheduler_watchlist_radar_modes,
+        "include_children": settings.scheduler_watchlist_radar_include_children,
+        "enabled_only": settings.scheduler_watchlist_radar_enabled_only,
+        "max_results": settings.scheduler_watchlist_radar_max_results,
+        "calculation_limit": settings.scheduler_watchlist_radar_calculation_limit,
+        "use_intraday": settings.scheduler_watchlist_radar_use_intraday,
+        "intraday_limit": settings.scheduler_watchlist_radar_intraday_limit,
+        "evaluate_before_date": evaluate_before_date,
+        "evaluate_lookback_days": settings.scheduler_watchlist_radar_evaluate_lookback_days,
+        "save_snapshots": True,
+        "calendar_phase": calendar_status.get("phase"),
+        "calendar_release_window": release_window,
+    }
+    db = SessionLocal()
+
+    try:
+        job, created = job_service.enqueue_job(
+            db=db,
+            job_type=WATCHLIST_RADAR_AUTO_SNAPSHOT_JOB_TYPE,
+            target=",".join(group_ids) if group_ids else "active-root",
+            request=request,
+            progress_total=1,
+            message="Queued by scheduler.",
+            task=backfill_tasks.run_watchlist_radar_auto_snapshot_job,
+            task_args=(
+                group_ids or None,
+                settings.scheduler_watchlist_radar_modes,
+                settings.scheduler_watchlist_radar_include_children,
+                settings.scheduler_watchlist_radar_enabled_only,
+                settings.scheduler_watchlist_radar_max_results,
+                settings.scheduler_watchlist_radar_calculation_limit,
+                settings.scheduler_watchlist_radar_use_intraday,
+                settings.scheduler_watchlist_radar_intraday_limit,
+                evaluate_before_date,
+                settings.scheduler_watchlist_radar_evaluate_lookback_days,
+                True,
+            ),
+        )
+        logger.info(
+            "Scheduled watchlist radar snapshot %s job_id=%s",
+            "queued" if created else "deduped",
+            job.id,
+        )
+    finally:
+        db.close()
+
+
+def _add_watchlist_radar_auto_snapshot_job(scheduler: Any) -> bool:
+    if not settings.enable_watchlist_radar_scheduler:
+        return False
+
+    hour, minute = _parse_hour_minute(settings.scheduler_watchlist_radar_time)
+    scheduler.add_job(
+        enqueue_watchlist_radar_auto_snapshot,
+        trigger="cron",
+        day_of_week=settings.scheduler_watchlist_radar_day_of_week,
+        hour=hour,
+        minute=minute,
+        id="watchlist_radar_auto_snapshot",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+    return True
+
+
 def enqueue_due_dispatch_schedules() -> None:
     from app.dispatch import service as dispatch_service
 
@@ -730,6 +838,7 @@ def start_scheduler() -> Any | None:
         not settings.enable_scheduler
         and not settings.enable_taiwan_futures_scheduler
         and not settings.enable_dispatch_scheduler
+        and not settings.enable_watchlist_radar_scheduler
     ):
         logger.info("Job scheduler disabled.")
         return None
@@ -813,11 +922,12 @@ def start_scheduler() -> Any | None:
         )
     jp_market_refresh_enabled = _add_jp_market_refresh_job(scheduler)
     kr_market_refresh_enabled = _add_kr_market_refresh_job(scheduler)
+    watchlist_radar_snapshot_enabled = _add_watchlist_radar_auto_snapshot_job(scheduler)
     taiwan_futures_collector_enabled = _add_taiwan_futures_collector_job(scheduler)
     dispatch_schedule_tick_enabled = _add_dispatch_schedule_tick_job(scheduler)
     scheduler.start()
     logger.info(
-        "Job scheduler started. core_scheduler_enabled=%s; market_daily_refresh=%s %s weekdays; market_margin_daily_refresh=%s %s weekdays; market_chip_daily_refresh=%s %s weekdays; market_chip_margin_daily_refresh=%s %s weekdays; us_market_daily_refresh=%s %s %s enabled=%s; jp_market_watchlist_resource_refresh=%s %s %s enabled=%s; kr_market_watchlist_resource_refresh=%s %s %s enabled=%s; taiwan_futures_quote_collector interval=%ss enabled=%s; dispatch_schedule_tick interval=%ss enabled=%s.",
+        "Job scheduler started. core_scheduler_enabled=%s; market_daily_refresh=%s %s weekdays; market_margin_daily_refresh=%s %s weekdays; market_chip_daily_refresh=%s %s weekdays; market_chip_margin_daily_refresh=%s %s weekdays; us_market_daily_refresh=%s %s %s enabled=%s; jp_market_watchlist_resource_refresh=%s %s %s enabled=%s; kr_market_watchlist_resource_refresh=%s %s %s enabled=%s; watchlist_radar_auto_snapshot=%s %s %s enabled=%s; taiwan_futures_quote_collector interval=%ss enabled=%s; dispatch_schedule_tick interval=%ss enabled=%s.",
         settings.enable_scheduler,
         settings.scheduler_market_refresh_time,
         settings.timezone,
@@ -839,6 +949,10 @@ def start_scheduler() -> Any | None:
         settings.scheduler_kr_market_refresh_day_of_week,
         settings.timezone,
         kr_market_refresh_enabled,
+        settings.scheduler_watchlist_radar_time,
+        settings.scheduler_watchlist_radar_day_of_week,
+        settings.timezone,
+        watchlist_radar_snapshot_enabled,
         max(int(settings.scheduler_taiwan_futures_interval_seconds), 10),
         taiwan_futures_collector_enabled,
         max(int(settings.scheduler_dispatch_tick_interval_seconds), 10),

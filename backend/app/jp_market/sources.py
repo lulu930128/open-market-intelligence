@@ -829,6 +829,99 @@ def parse_yahoo_daily_prices(
     return sorted(records, key=lambda item: item.trade_date)
 
 
+def _jp_intraday_session(value: datetime) -> str:
+    local = value.astimezone(timezone(timedelta(hours=9)))
+    minutes = local.hour * 60 + local.minute + local.second / 60
+
+    if 9 * 60 <= minutes <= 11 * 60 + 30:
+        return "regular"
+    if 12 * 60 + 30 <= minutes <= 15 * 60 + 30:
+        return "regular"
+    if 11 * 60 + 30 < minutes < 12 * 60 + 30:
+        return "lunch_break"
+    if minutes < 9 * 60:
+        return "pre_market"
+    return "post_close"
+
+
+def parse_yahoo_intraday_prices(
+    payload: dict[str, Any],
+    *,
+    symbol: str,
+    source_url: str | None = None,
+) -> dict:
+    normalized_symbol = normalize_jp_symbol(symbol)
+    result = _chart_result(payload)
+    timestamps = result.get("timestamp") or []
+    indicators = result.get("indicators") or {}
+    quote_values = (indicators.get("quote") or [{}])[0] or {}
+    meta = result.get("meta") or {}
+    offset = int(meta.get("gmtoffset") or 32400)
+    tz = timezone(timedelta(seconds=offset))
+
+    opens = quote_values.get("open") or []
+    highs = quote_values.get("high") or []
+    lows = quote_values.get("low") or []
+    closes = quote_values.get("close") or []
+    volumes = quote_values.get("volume") or []
+    points: list[dict] = []
+
+    for index, timestamp in enumerate(timestamps):
+        price = _parse_float(_list_value(closes, index))
+        if price is None:
+            continue
+
+        point_time = datetime.fromtimestamp(int(timestamp), tz=tz)
+        points.append(
+            {
+                "time": point_time.isoformat(),
+                "session": _jp_intraday_session(point_time),
+                "price": price,
+                "volume": _parse_int(_list_value(volumes, index)),
+                "open": _parse_float(_list_value(opens, index)),
+                "high": _parse_float(_list_value(highs, index)),
+                "low": _parse_float(_list_value(lows, index)),
+            }
+        )
+
+    regular_points = [point for point in points if point.get("session") == "regular"]
+    latest_point = points[-1] if points else None
+    latest_regular_point = regular_points[-1] if regular_points else None
+    previous_close = (
+        _parse_float(meta.get("chartPreviousClose"))
+        or _parse_float(meta.get("previousClose"))
+        or _parse_float(meta.get("regularMarketPreviousClose"))
+    )
+    warnings: list[str] = []
+    if not points:
+        warnings.append("Yahoo chart returned no Japan intraday points.")
+
+    return {
+        "stock_id": normalized_symbol,
+        "symbol": normalized_symbol,
+        "source": "yahoo_finance_chart" if points else "unavailable",
+        "session_scope": "regular",
+        "session_phase": latest_point.get("session") if latest_point else None,
+        "has_extended_hours": False,
+        "regular_point_count": len(regular_points),
+        "extended_point_count": 0,
+        "previous_close": previous_close,
+        "previous_close_source": "yahoo_finance_chart" if previous_close is not None else None,
+        "previous_close_trade_date": None,
+        "previous_close_provider": "yahoo_chart" if previous_close is not None else None,
+        "regular_session_close": (
+            latest_regular_point.get("price") if latest_regular_point else None
+        ),
+        "regular_session_close_time": (
+            latest_regular_point.get("time") if latest_regular_point else None
+        ),
+        "point_count": len(points),
+        "points": points,
+        "source_url": source_url,
+        "warnings": warnings,
+    }
+
+
 def _quote_summary_result(payload: dict[str, Any]) -> dict[str, Any]:
     error = payload.get("quoteSummary", {}).get("error")
     if error:

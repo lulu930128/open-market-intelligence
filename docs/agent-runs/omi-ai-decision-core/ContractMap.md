@@ -136,11 +136,13 @@ Related productized payload design:
 Primary user-facing location:
 
 - `analysis.human_answer`
+- `analysis.decision_contract`
 
 Responsible modules:
 
 - `backend/app/ai/answer_composer.py`
 - `backend/app/ai/ask_response_support.py`
+- `backend/app/ai/decision_contract.py`
 
 Expected answer concepts:
 
@@ -153,6 +155,47 @@ Expected answer concepts:
 - risks
 - data limits
 - readable text for frontend/Kuro
+
+### `analysis.decision_contract`
+
+`decision_contract` is an additive v1 projection for downstream consumers. It does not replace `analysis.human_answer`; it normalizes the backend-owned answer into a stable shape so frontend, MCP, Kuro, and future consumers do not need source-specific parsing.
+
+Current shape:
+
+- `kind`: `omi_ai_decision_contract`
+- `version`: `decision_contract.v1`
+- `intent`
+- `answer_source`
+- `answer_style`
+- `target`
+- `headline`
+- `text`
+- `sections`
+  - `summary`
+  - `action_plan`
+  - `scenarios`
+  - `counter_evidence`
+  - `risks`
+  - `data_limits`
+- `readiness`
+  - `answer_ready`
+  - `has_text`
+  - `has_action_plan`
+  - `has_scenarios`
+  - `has_counter_evidence`
+  - `has_risks`
+  - `has_data_limits`
+  - `has_missing`
+  - `has_warnings`
+- `freshness`
+- `missing`
+- `warnings`
+
+Consumer rule:
+
+- Use `analysis.decision_contract` when a stable card, spoken brief, task-wall item, or downstream transformation needs structured sections.
+- Keep `analysis.human_answer.text` as the safest direct human-readable answer.
+- Do not infer market meaning from missing sections. Use `readiness` and `data_limits` to decide whether to render disabled/partial states.
 
 Do not hide:
 

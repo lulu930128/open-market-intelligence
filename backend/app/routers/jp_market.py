@@ -18,6 +18,7 @@ from app.jp_market.schemas import (
     JPCompanyFundamentalRead,
     JPDailyPriceRead,
     JPDailyPriceRefreshResultRead,
+    JPIntradayTrendRead,
     JPOhlcChartRead,
     JPResourceSummaryRead,
     JPResourceRefreshResultRead,
@@ -50,6 +51,7 @@ from app.jp_market.service import (
     get_jp_watchlist_group,
     get_jp_watchlist_ranking,
     get_jp_watchlist_technical_radar,
+    get_jp_intraday_trend,
     get_jp_stock,
     get_jp_resource_summary,
     list_jp_daily_prices,
@@ -714,3 +716,22 @@ def get_jp_ohlc_chart_data(
         raise _fetch_error(exc) from exc
     except JPMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
+
+
+@router.get("/intraday/{symbol}", response_model=JPIntradayTrendRead)
+def get_jp_intraday_trend_api(
+    symbol: str,
+    refresh: bool = False,
+    db: Session = Depends(get_db),
+):
+    try:
+        return get_jp_intraday_trend(
+            db=db,
+            symbol=symbol,
+            refresh=refresh,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc

@@ -120,6 +120,7 @@ def intraday_overlay_point(
         "trade_date": latest_date,
         "point_count": len(session_points),
         "latest_time": session_points[-1][0],
+        "previous_close": _number(intraday.get("previous_close")),
         "provisional": True,
     }
 

@@ -423,6 +423,126 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertEqual(result["points"][0]["price"], 44571.76)
         self.assertEqual(result["points"][-1]["price"], 44999.90)
 
+    def test_twse_mis_live_breadth_counts_classified_and_unknown_quotes(self) -> None:
+        indices._TWSE_MIS_LIVE_BREADTH_CACHE.clear()
+        indices._TWSE_MIS_STOCK_STATE.clear()
+        codes = [f"{1000 + index:04d}" for index in range(1, 502)]
+        messages = [
+            {
+                "c": "1001",
+                "d": "20260709",
+                "t": "09:05:00",
+                "y": "100.00",
+                "z": "101.00",
+                "u": "110.00",
+                "w": "90.00",
+            },
+            {
+                "c": "1002",
+                "d": "20260709",
+                "t": "09:05:00",
+                "y": "100.00",
+                "z": "90.00",
+                "u": "110.00",
+                "w": "90.00",
+            },
+            {
+                "c": "1003",
+                "d": "20260709",
+                "t": "09:05:00",
+                "y": "100.00",
+                "z": "100.00",
+                "u": "110.00",
+                "w": "90.00",
+            },
+            {
+                "c": "1004",
+                "d": "20260709",
+                "t": "09:05:00",
+                "y": "100.00",
+                "z": "-",
+                "h": "99.00",
+                "l": "95.00",
+            },
+            {
+                "c": "1005",
+                "d": "20260709",
+                "t": "09:05:00",
+                "y": "100.00",
+                "z": "-",
+                "h": "105.00",
+                "l": "95.00",
+            },
+        ]
+
+        with (
+            patch.object(indices, "_twse_mis_live_breadth_stock_codes", return_value=codes),
+            patch.object(indices, "_fetch_twse_mis_stock_messages", return_value=(messages, 0)),
+        ):
+            payload = indices._fetch_twse_mis_live_market_breadth(self.db, "TWSE")
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload["source"], "twse_mis_live_breadth_partial")
+        self.assertEqual(payload["trade_date"], date(2026, 7, 9))
+        self.assertEqual(payload["advance_count"], 1)
+        self.assertEqual(payload["decline_count"], 2)
+        self.assertEqual(payload["unchanged_count"], 1)
+        self.assertEqual(payload["limit_up_count"], 0)
+        self.assertEqual(payload["limit_down_count"], 1)
+        self.assertEqual(payload["coverage_count"], 4)
+        self.assertEqual(payload["message_count"], 5)
+        self.assertEqual(payload["missing_count"], 496)
+        self.assertEqual(payload["unknown_count"], 497)
+        self.assertIsNone(payload["trade_value"])
+        self.assertTrue(payload["warnings"])
+
+    def test_resolve_market_breadth_prefers_live_when_daily_source_is_stale(self) -> None:
+        target_date = date(2026, 7, 9)
+        stale_daily = {
+            "market": "TWSE",
+            "trade_date": date(2026, 7, 8),
+            "advance_count": 100,
+            "decline_count": 200,
+            "unchanged_count": 10,
+            "total_count": 1086,
+            "limit_up_count": 1,
+            "limit_down_count": 2,
+            "trade_value": 123,
+            "source": "twse_rwd_mi_index",
+        }
+        live_breadth = {
+            "market": "TWSE",
+            "trade_date": target_date,
+            "advance_count": 300,
+            "decline_count": 250,
+            "unchanged_count": 50,
+            "total_count": 1086,
+            "limit_up_count": 3,
+            "limit_down_count": 4,
+            "trade_value": None,
+            "coverage_count": 600,
+            "unknown_count": 486,
+            "source": "twse_mis_live_breadth_partial",
+        }
+
+        with (
+            patch.object(indices, "_fetch_market_quote_breadth", return_value=stale_daily),
+            patch.object(
+                indices,
+                "_fetch_twse_mis_live_market_breadth",
+                return_value=live_breadth,
+            ),
+            patch.object(indices, "_latest_market_breadth", return_value=None),
+        ):
+            payload = indices._resolve_market_breadth(
+                db=self.db,
+                market="TWSE",
+                target_trade_date=target_date,
+            )
+
+        self.assertEqual(payload, live_breadth)
+
     def test_index_contributions_prefer_newer_local_daily_prices(self) -> None:
         source = SourceRegistry(
             source_name="TWSE OpenAPI Daily Trading",

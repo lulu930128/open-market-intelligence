@@ -1702,6 +1702,7 @@ export const zhTW = {
         marginChangeShares: "融資變動(張)",
         shortChangeShares: "融券變動(張)",
         breadthSource: "市場廣度來源 {source}；貢獻排行為估算值",
+        breadthCoverage: "盤中聚合覆蓋 {coverage}/{total}；未判定 {unknown}",
         breadthPending: "市場廣度待資料更新",
       },
       contribution: {
@@ -1765,12 +1766,18 @@ export const zhTW = {
       },
     },
     sections: {
+      index: "指數",
       stock: "個股",
       master: "主檔",
       price: "價格",
       history: "資料",
       technical: "技術面",
       marketData: "市場資料",
+      indexData: "指數資料",
+    },
+    entity: {
+      index: "index",
+      stock: "stock",
     },
     actions: {
       syncMaster: "同步 JPX",
@@ -1787,6 +1794,10 @@ export const zhTW = {
       segment: "市場區分",
       sector: "產業",
       source: "來源",
+      symbol: "代號",
+      display: "顯示",
+      exchange: "交易所",
+      candleCount: "資料筆數",
     },
     table: {
       date: "日期",
@@ -1811,6 +1822,10 @@ export const zhTW = {
     marketData: {
       title: "個股資料",
     },
+    indexDataDescription:
+      "日股指數目前使用 Yahoo chart 的今日 1 分鐘走勢與日/週/月 K 線。指數不套用個股信用、投資部門、業績或財務插槽。",
+    indexDataLimitations:
+      "成分股廣度、權重貢獻與官方即時指數來源尚未接入；若 provider 回傳空值或延遲，會保留缺口提示。",
     dataSlots: {
       demand: {
         label: "需給",
@@ -1959,6 +1974,13 @@ export const zhTW = {
       resourceRefreshRateLimited:
         "{resource}更新已達 J-Quants 速率上限，請稍候再更新。",
       resourceRefreshFailed: "更新{resource}失敗",
+      intradayLoaded:
+        "{symbol} 今日走勢已更新：{count} 筆，來源 {source}，更新 {updatedAt}",
+      intradayInsufficient:
+        "{symbol} 今日走勢資料不足：{source} 目前只回傳 {count} 筆。",
+      intradayLoadFailed: "日股指數今日走勢讀取失敗：{message}",
+      intradayRouteMissing:
+        "日股指數今日走勢 API 404：目前前端 proxy 指到的 backend 尚未載入日股 intraday route；請重啟 OMI backend/frontend 後再試。原始錯誤：{message}",
     },
     errors: {
       listLoadFailed: "讀取日股清單失敗",
@@ -1974,6 +1996,7 @@ export const zhTW = {
       unknownName: "未命名",
       noStocks: "尚未載入日股主檔，請先同步 JPX。",
       noKline: "尚無 K 線資料，請先更新日 K。",
+      noIndexKline: "尚無指數 K 線資料，請稍後更新或檢查資料來源。",
       noHistory: "尚無日 K 歷史資料",
     },
   },

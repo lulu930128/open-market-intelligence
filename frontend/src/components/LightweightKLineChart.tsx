@@ -104,6 +104,7 @@ import {
   mergeIndicators,
   movingAverage,
 } from "@/components/chart/LightweightKLineChartIndicators";
+import { StateSurface } from "@/components/LoadingPlaceholders";
 import { useI18n } from "@/i18n";
 import { getOmiChartColors, type OmiTheme } from "@/lib/themeColors";
 export type {
@@ -3196,8 +3197,12 @@ export default function LightweightKLineChart({
 
   if (seriesData.candles.length === 0) {
     return (
-      <div className="flex h-[520px] items-center justify-center border-t border-omi-border-subtle bg-omi-surface text-sm text-omi-text-muted">
-        {t("chart.kline.empty")}
+      <div className="border-t border-omi-border-subtle bg-omi-surface p-4">
+        <StateSurface
+          title={t("chart.kline.empty")}
+          tone="empty"
+          className="h-[488px]"
+        />
       </div>
     );
   }

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from collections import OrderedDict
 from datetime import date, datetime, timedelta, timezone
+import math
 import time
 from types import SimpleNamespace
 
@@ -52,6 +53,7 @@ from app.jp_market.sources import (
     parse_jquants_margin_interest_records,
     parse_yahoo_company_fundamental,
     parse_yahoo_daily_prices,
+    parse_yahoo_intraday_prices,
     parse_yahoo_stock_record,
 )
 from app.market.technical_radar import (
@@ -106,6 +108,8 @@ _jquants_id_token_cache: dict[str, str | float] | None = None
 MAX_JP_CHART_BARS = 5000
 YAHOO_CHART_COMPACT_RANGE = "1y"
 YAHOO_CHART_FULL_RANGE = "10y"
+JP_INTRADAY_CACHE_SECONDS = 60
+_jp_intraday_cache: dict[str, tuple[float, dict]] = {}
 ProgressCallback = Callable[[int | None, int | None, str | None], None]
 
 
@@ -2626,3 +2630,171 @@ def list_jp_ohlc_chart_data(
         "points": points,
         "backfill": backfill_result,
     }
+
+
+def _valid_float(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
+
+
+def _copy_jp_intraday_payload(payload: dict) -> dict:
+    copied = dict(payload)
+    copied["points"] = [dict(point) for point in payload.get("points") or []]
+    copied["warnings"] = list(payload.get("warnings") or [])
+    return copied
+
+
+def _get_fresh_jp_intraday_cache(cache_key: str) -> dict | None:
+    cached = _jp_intraday_cache.get(cache_key)
+    if cached is None:
+        return None
+
+    expires_at, payload = cached
+    if time.time() >= expires_at:
+        return None
+
+    return _copy_jp_intraday_payload(payload)
+
+
+def _set_jp_intraday_cache(cache_key: str, payload: dict) -> dict:
+    _jp_intraday_cache[cache_key] = (
+        time.time() + JP_INTRADAY_CACHE_SECONDS,
+        _copy_jp_intraday_payload(payload),
+    )
+    return _copy_jp_intraday_payload(payload)
+
+
+def _jp_intraday_latest_trade_date(payload: dict) -> date | None:
+    for point in reversed(payload.get("points") or []):
+        if not isinstance(point, dict):
+            continue
+
+        time_value = point.get("time")
+        if not isinstance(time_value, str):
+            continue
+
+        try:
+            return datetime.fromisoformat(time_value).date()
+        except ValueError:
+            continue
+
+    return None
+
+
+def _latest_jp_daily_close_reference(
+    db: Session,
+    *,
+    symbol: str,
+    before_date: date | None = None,
+) -> dict | None:
+    rows = list_jp_daily_prices(
+        db=db,
+        symbol=symbol,
+        to_date=before_date - timedelta(days=1) if before_date else None,
+        limit=30,
+        offset=0,
+    )
+
+    for row in rows:
+        close = _jp_close_value(row)
+        if _valid_float(close):
+            return {
+                "previous_close": float(close),
+                "previous_close_source": "jp_daily_price",
+                "previous_close_trade_date": row.trade_date.isoformat(),
+                "previous_close_provider": row.provider,
+            }
+
+    return None
+
+
+def _apply_jp_intraday_previous_close_reference(
+    payload: dict,
+    *,
+    db: Session | None,
+    symbol: str,
+) -> dict:
+    result = _copy_jp_intraday_payload(payload)
+    result.setdefault(
+        "previous_close_source",
+        "yahoo_finance_chart" if _valid_float(result.get("previous_close")) else None,
+    )
+    result.setdefault("previous_close_trade_date", None)
+    result.setdefault("previous_close_provider", None)
+
+    if _valid_float(result.get("previous_close")) or db is None:
+        return result
+
+    latest_trade_date = _jp_intraday_latest_trade_date(result)
+    reference = _latest_jp_daily_close_reference(
+        db,
+        symbol=symbol,
+        before_date=latest_trade_date,
+    )
+    if reference is not None:
+        result.update(reference)
+
+    return result
+
+
+def get_jp_intraday_trend(
+    *,
+    symbol: str,
+    db: Session | None = None,
+    refresh: bool = False,
+) -> dict:
+    normalized_symbol = _valid_symbol(symbol)
+    cache_key = f"JP:{normalized_symbol}"
+
+    if not refresh:
+        cached = _get_fresh_jp_intraday_cache(cache_key)
+        if cached is not None:
+            return _apply_jp_intraday_previous_close_reference(
+                cached,
+                db=db,
+                symbol=normalized_symbol,
+            )
+
+    try:
+        yahoo_payload, source_url = fetch_yahoo_chart_payload(
+            symbol=normalized_symbol,
+            range_value="1d",
+            interval="1m",
+            timeout_seconds=settings.jp_market_http_timeout_seconds,
+        )
+        payload = parse_yahoo_intraday_prices(
+            yahoo_payload,
+            symbol=normalized_symbol,
+            source_url=source_url,
+        )
+    except Exception as exc:
+        payload = {
+            "stock_id": normalized_symbol,
+            "symbol": normalized_symbol,
+            "source": "unavailable",
+            "session_scope": "regular",
+            "session_phase": None,
+            "has_extended_hours": False,
+            "regular_point_count": 0,
+            "extended_point_count": 0,
+            "previous_close": None,
+            "previous_close_source": None,
+            "previous_close_trade_date": None,
+            "previous_close_provider": None,
+            "regular_session_close": None,
+            "regular_session_close_time": None,
+            "point_count": 0,
+            "points": [],
+            "source_url": None,
+            "warnings": [f"Japan intraday source is unavailable: {exc}"],
+        }
+
+    payload = _set_jp_intraday_cache(cache_key, payload)
+    return _apply_jp_intraday_previous_close_reference(
+        payload,
+        db=db,
+        symbol=normalized_symbol,
+    )

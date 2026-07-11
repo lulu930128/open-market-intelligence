@@ -1,6 +1,11 @@
 "use client";
 
-import { LoadingDots } from "@/components/LoadingPlaceholders";
+import {
+  LoadingDots,
+  LoadingStateSurface,
+  StateSurface,
+  type StateSurfaceTone,
+} from "@/components/LoadingPlaceholders";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
 import {
   useT,
@@ -1597,6 +1602,17 @@ export function IndexDetailDataPanel({
   const reference = todayPreviousClose ?? index?.previous_close ?? null;
   const tradeValue = index?.trade_value ?? breadth?.trade_value ?? latestChart?.trade_value ?? null;
   const estimatedTradeValue = index?.estimated_trade_value ?? tradeValue;
+  const breadthCoverageText =
+    breadth?.coverage_count !== null &&
+    breadth?.coverage_count !== undefined &&
+    breadth?.unknown_count !== null &&
+    breadth?.unknown_count !== undefined
+      ? t("stockDetail.dataViews.indexDetail.breadthCoverage", {
+          coverage: formatNumber(breadth.coverage_count),
+          total: formatNumber(breadth.total_count),
+          unknown: formatNumber(breadth.unknown_count),
+        })
+      : null;
 
   return (
     <section className="border border-omi-border-subtle bg-omi-surface">
@@ -1745,12 +1761,15 @@ export function IndexDetailDataPanel({
         loadState={contributionLoadState}
       />
 
-      <div className="px-5 py-3 text-xs text-omi-text-muted">
-        {breadth?.source
-          ? t("stockDetail.dataViews.indexDetail.breadthSource", {
-              source: breadth.source,
-            })
-          : t("stockDetail.dataViews.indexDetail.breadthPending")}
+      <div className="space-y-1 px-5 py-3 text-xs text-omi-text-muted">
+        <div>
+          {breadth?.source
+            ? t("stockDetail.dataViews.indexDetail.breadthSource", {
+                source: breadth.source,
+              })
+            : t("stockDetail.dataViews.indexDetail.breadthPending")}
+        </div>
+        {breadthCoverageText ? <div>{breadthCoverageText}</div> : null}
       </div>
     </section>
   );
@@ -1983,26 +2002,26 @@ export function DataTabButton({
   );
 }
 
-export function EmptyDataState({ message }: { message: string }) {
+export function EmptyDataState({
+  message,
+  tone = "empty",
+  busy = false,
+  className = "",
+}: {
+  message: string;
+  tone?: StateSurfaceTone;
+  busy?: boolean;
+  className?: string;
+}) {
   return (
-    <div className="border border-dashed border-omi-border-subtle px-4 py-8 text-center text-sm text-omi-text-muted">
-      {message}
-    </div>
+    <StateSurface title={message} tone={tone} busy={busy} compact className={className} />
   );
 }
 
 export function DataPanelLoadingState({ message }: { message: string }) {
   return (
-    <div className="omi-tab-panel border border-omi-border-subtle bg-omi-surface px-4 py-5">
-      <div className="mb-4 flex items-center justify-between gap-4">
-        <div className="inline-flex min-w-0 items-center gap-2 text-sm font-semibold text-omi-text">
-          <span className="truncate">{message}</span>
-          <LoadingDots label={message} />
-        </div>
-        <div className="h-1.5 w-20 overflow-hidden bg-omi-surface-muted">
-          <div className="omi-loading-bar h-full w-1/2 bg-omi-control" />
-        </div>
-      </div>
+    <div className="omi-tab-panel omi-loading-surface border border-omi-border-subtle bg-omi-surface px-4 py-5">
+      <LoadingStateSurface title={message} compact className="mb-4" />
       <div className="space-y-3">
         <div className="omi-skeleton h-3 w-2/3" />
         <div className="grid grid-cols-3 gap-3">
@@ -2023,7 +2042,7 @@ export function DataPanelRefreshRail({ message }: { message: string | null }) {
         <div className="omi-loading-bar h-full w-1/3 bg-omi-accent" />
       </div>
       {message ? (
-        <div className="absolute right-0 top-2 max-w-[70%] truncate bg-omi-surface/90 px-2 py-1 text-[11px] font-medium text-omi-text-muted shadow-sm ring-1 ring-slate-200">
+        <div className="absolute right-0 top-2 max-w-[70%] truncate bg-omi-surface/90 px-2 py-1 text-[11px] font-medium text-omi-text-muted shadow-sm ring-1 ring-omi-border-subtle">
           {message}
         </div>
       ) : null}

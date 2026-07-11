@@ -1704,6 +1704,7 @@ export const enUS = {
         marginChangeShares: "Margin change (shares)",
         shortChangeShares: "Short change (shares)",
         breadthSource: "Breadth source {source}; contribution ranking is estimated",
+        breadthCoverage: "Live aggregation coverage {coverage}/{total}; unknown {unknown}",
         breadthPending: "Market breadth pending update",
       },
       contribution: {
@@ -1767,12 +1768,18 @@ export const enUS = {
       },
     },
     sections: {
+      index: "Index",
       stock: "Stock",
       master: "Master",
       price: "Price",
       history: "Data",
       technical: "Technical",
       marketData: "Market Data",
+      indexData: "Index Data",
+    },
+    entity: {
+      index: "index",
+      stock: "stock",
     },
     actions: {
       syncMaster: "Sync JPX",
@@ -1789,6 +1796,10 @@ export const enUS = {
       segment: "Segment",
       sector: "Sector",
       source: "Source",
+      symbol: "Symbol",
+      display: "Display",
+      exchange: "Exchange",
+      candleCount: "Rows",
     },
     table: {
       date: "Date",
@@ -1813,6 +1824,10 @@ export const enUS = {
     marketData: {
       title: "Stock data",
     },
+    indexDataDescription:
+      "Japan indices currently use Yahoo chart 1-minute trend data for Today plus daily/weekly/monthly K-lines. Index surfaces do not show stock-only margin, investor, performance, or financial slots.",
+    indexDataLimitations:
+      "Constituent breadth, weighted contribution, and official real-time index sources are not connected yet. Provider gaps or delayed data remain visible.",
     dataSlots: {
       demand: {
         label: "Supply/Demand",
@@ -1961,6 +1976,13 @@ export const enUS = {
       resourceRefreshRateLimited:
         "{resource} reached the J-Quants rate limit. Please wait before updating again.",
       resourceRefreshFailed: "Failed to update {resource}",
+      intradayLoaded:
+        "{symbol} intraday trend updated: {count} points, source {source}, updated {updatedAt}",
+      intradayInsufficient:
+        "{symbol} intraday trend is insufficient: {source} returned only {count} points.",
+      intradayLoadFailed: "Failed to load Japan index intraday trend: {message}",
+      intradayRouteMissing:
+        "Japan index intraday API returned 404: the frontend proxy is pointing at a backend that has not loaded the JP intraday route yet. Restart OMI backend/frontend and retry. Raw error: {message}",
     },
     errors: {
       listLoadFailed: "Failed to load JP stock list",
@@ -1976,6 +1998,7 @@ export const enUS = {
       unknownName: "Unknown name",
       noStocks: "No JP stocks loaded. Sync JPX master first.",
       noKline: "No K-line data yet. Update daily data first.",
+      noIndexKline: "No index K-line data yet. Refresh later or check the source.",
       noHistory: "No daily history",
     },
   },

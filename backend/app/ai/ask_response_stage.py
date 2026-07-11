@@ -3,9 +3,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from app.ai import decision_core, pipeline_progress
+from app.ai import decision_contract, decision_core, pipeline_progress
 from app.ai.ask_stage_models import ResponseAssembly
 from app.ai.schemas import AiAskRequest
+
+
+POSITION_DECISION_SCOPE_TYPES = {"stock", "us_stock", "jp_stock", "kr_stock"}
 
 
 def assemble_response_analysis(
@@ -57,7 +60,7 @@ def assemble_response_analysis(
     combined_missing = list(dict.fromkeys(result_missing + freshness_missing))
     combined_warnings = list(dict.fromkeys(warnings + freshness_warnings + result_warnings))
     position_decision = {}
-    if question_intent == "position_risk_decision" and scope_type == "stock":
+    if question_intent == "position_risk_decision" and scope_type in POSITION_DECISION_SCOPE_TYPES:
         position_decision = build_position_decision(
             question=payload.question,
             position_context=position_context,
@@ -103,8 +106,11 @@ def assemble_response_analysis(
     compact_evidence = result_data.get("compact") if isinstance(result_data.get("compact"), dict) else {}
     if compact_evidence:
         response_analysis["compact_evidence"] = compact_evidence
+    question_understanding_payload = question_understanding.as_policy_payload()
+    question_understanding_payload["intent"] = question_intent
+    question_understanding_payload["position_context"] = position_context
     response_analysis["question_intent"] = question_intent
-    response_analysis["question_understanding"] = question_understanding.as_policy_payload()
+    response_analysis["question_understanding"] = question_understanding_payload
     response_preferences = policy.get("response_preferences")
     if isinstance(response_preferences, dict):
         response_analysis["response_preferences"] = response_preferences
@@ -117,6 +123,15 @@ def assemble_response_analysis(
         progress.reasoning_steps(reasoning_steps)
     if consumer_human_answer:
         response_analysis["human_answer"] = consumer_human_answer
+        response_analysis["decision_contract"] = decision_contract.build_decision_contract(
+            question_intent=question_intent,
+            target=response_target,
+            human_answer=consumer_human_answer,
+            freshness_result=freshness_result,
+            missing=combined_missing,
+            warnings=combined_warnings,
+            answer_ready=answer_ready,
+        )
 
     return ResponseAssembly(
         response_analysis=response_analysis,

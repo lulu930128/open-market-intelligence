@@ -7,6 +7,7 @@ import IntradayTrendChart, {
   type IntradayIndicatorSettings,
   type IntradaySessionConfig,
 } from "@/components/IntradayTrendChart";
+import { StateSurface } from "@/components/LoadingPlaceholders";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
 import ProfessionalChartPanel, {
   type ProfessionalChartStyle,
@@ -707,9 +708,7 @@ function safeDivide(
 
 function EmptyDataState({ message }: { message: string }) {
   return (
-    <div className="border border-dashed border-omi-border-subtle px-4 py-8 text-center text-sm text-omi-text-muted">
-      {message}
-    </div>
+    <StateSurface title={message} tone="empty" compact />
   );
 }
 
@@ -2401,8 +2400,13 @@ export default function USStockDetailPanel({
             }
             chartReady={professionalChartReady}
             emptyState={
-              <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle text-sm text-omi-text-muted">
-                {t("usStockDetail.loadingKline", { label: professionalTimeframeLabel })}
+              <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle p-4">
+                <StateSurface
+                  title={t("usStockDetail.loadingKline", { label: professionalTimeframeLabel })}
+                  tone="loading"
+                  busy
+                  className="w-full max-w-xl"
+                />
               </div>
             }
             chartData={professionalChartData}
@@ -2614,14 +2618,21 @@ export default function USStockDetailPanel({
               volumeValueFormatter={formatVolume}
             />
           ) : (
-            <div className="flex h-[460px] items-center justify-center border-t border-omi-border-subtle text-sm text-omi-text-muted">
-              {loadState === "loading"
-                ? t("usStockDetail.loadingKlineShort")
-                : selectedSymbol
-                  ? selectedIndexConfig
-                    ? t("usStockDetail.noIndexKline")
-                    : t("usStockDetail.noKline")
-                  : t("usStockDetail.noStockSelected")}
+            <div className="border-t border-omi-border-subtle bg-omi-surface p-4">
+              <StateSurface
+                title={
+                  loadState === "loading"
+                    ? t("usStockDetail.loadingKlineShort")
+                    : selectedSymbol
+                      ? selectedIndexConfig
+                        ? t("usStockDetail.noIndexKline")
+                        : t("usStockDetail.noKline")
+                      : t("usStockDetail.noStockSelected")
+                }
+                tone={loadState === "loading" ? "loading" : "empty"}
+                busy={loadState === "loading"}
+                className="h-[428px]"
+              />
             </div>
           )}
         </section>

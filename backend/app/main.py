@@ -29,6 +29,7 @@ from app.routers import (
     kr_market,
     jobs,
     market,
+    portfolio,
     raw_results,
     reports,
     resource_market,
@@ -146,6 +147,7 @@ app.include_router(us_market.router, prefix="/api/us-market", tags=["us-market"]
 app.include_router(jp_market.router, prefix="/api/jp-market", tags=["jp-market"])
 app.include_router(kr_market.router, prefix="/api/kr-market", tags=["kr-market"])
 app.include_router(watchlists.router, prefix="/api/watchlists", tags=["watchlists"])
+app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
 app.include_router(reports.router, prefix="/api/reports", tags=["reports"])
 
 

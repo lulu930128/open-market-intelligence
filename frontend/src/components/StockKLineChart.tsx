@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { StateSurface } from "@/components/LoadingPlaceholders";
 import { useT, type TranslationFunction } from "@/i18n";
 import type { ChartPoint, StockIndicatorPoint } from "@/types/market";
 
@@ -23,6 +24,7 @@ type Props = {
   volumeTooltipLabel?: string;
   volumeValueKey?: "volume" | "trade_value";
   volumeValueFormatter?: (value: number | null | undefined) => string;
+  latestPreviousClose?: number | null;
 };
 
 export type IndicatorSettings = {
@@ -1549,6 +1551,7 @@ export default function StockKLineChart({
   volumeTooltipLabel,
   volumeValueKey = "volume",
   volumeValueFormatter = formatLots,
+  latestPreviousClose = null,
 }: Props) {
   const t = useT();
   const resolvedVolumePanelLabel = volumePanelLabel ?? t("chart.kline.volumeLots");
@@ -1615,7 +1618,10 @@ export default function StockKLineChart({
 
     return chartData.map((point, index) => {
       const indicator = indicatorByTime.get(point.time);
-      const previousClose = chartData[index - 1]?.close;
+      const previousClose =
+        index === chartData.length - 1 && validNumber(latestPreviousClose)
+          ? latestPreviousClose
+          : chartData[index - 1]?.close;
       const maShort =
         indicator?.ma?.[`ma${params.maShort}`] ?? movingAverage(closes, index, params.maShort);
       const maMiddle =
@@ -1672,7 +1678,7 @@ export default function StockKLineChart({
         correlation: relativeMetrics.correlation[index],
       };
     });
-  }, [benchmarkData, chartData, indicatorData, params]);
+  }, [benchmarkData, chartData, indicatorData, latestPreviousClose, params]);
 
   const dataKey = `${label}:${data.length}:${data[0]?.time ?? ""}:${data[data.length - 1]?.time ?? ""}`;
   const activeVisibleRange =
@@ -1857,8 +1863,12 @@ export default function StockKLineChart({
 
   if (data.length < 1) {
     return (
-      <div className="flex h-[420px] items-center justify-center border border-omi-border-subtle bg-omi-surface text-sm text-omi-text-muted">
-        {t("chart.kline.insufficient")}
+      <div className="border border-omi-border-subtle bg-omi-surface p-4">
+        <StateSurface
+          title={t("chart.kline.insufficient")}
+          tone="empty"
+          className="h-[388px]"
+        />
       </div>
     );
   }

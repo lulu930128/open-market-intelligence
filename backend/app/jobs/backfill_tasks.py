@@ -25,6 +25,7 @@ from app.watchlists.backfill_service import (
     backfill_watchlist_group_twse,
     refresh_watchlist_group_daily_prices,
 )
+from app.watchlists.radar_automation import run_watchlist_radar_automation
 
 
 def run_twse_daily_price_job(
@@ -349,6 +350,41 @@ def run_watchlist_group_refresh_latest_job(
             enabled_only=enabled_only,
             sleep_seconds=sleep_seconds,
             skip_existing_months=skip_existing_months,
+            progress_callback=progress,
+        )
+
+    run_tracked_job(job_id, worker)
+
+
+def run_watchlist_radar_auto_snapshot_job(
+    job_id: int,
+    group_ids: str | list[int] | None,
+    modes: str,
+    include_children: bool,
+    enabled_only: bool,
+    max_results: int,
+    calculation_limit: int,
+    use_intraday: bool,
+    intraday_limit: int,
+    evaluate_before_date: date,
+    evaluate_lookback_days: int,
+    save_snapshots: bool,
+) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        progress(0, 1, "Running watchlist radar snapshot automation.")
+        return run_watchlist_radar_automation(
+            db=db,
+            group_ids=group_ids,
+            modes=modes,
+            include_children=include_children,
+            enabled_only=enabled_only,
+            max_results=max_results,
+            calculation_limit=calculation_limit,
+            use_intraday=use_intraday,
+            intraday_limit=intraday_limit,
+            evaluate_before_date=evaluate_before_date,
+            evaluate_lookback_days=evaluate_lookback_days,
+            save_snapshots=save_snapshots,
             progress_callback=progress,
         )
 

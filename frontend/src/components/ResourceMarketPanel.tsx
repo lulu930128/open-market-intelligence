@@ -2,6 +2,7 @@
 
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
 import type { ChartDrawing, ChartDrawingTool } from "@/components/LightweightKLineChart";
+import { StateSurface } from "@/components/LoadingPlaceholders";
 import ProfessionalChartPanel, {
   type ProfessionalChartStyle,
 } from "@/components/ProfessionalChartPanel";
@@ -1188,12 +1189,13 @@ export default function ResourceMarketPanel({ selectedInstrumentKey }: Props) {
   function renderEmptyChartState(className: string) {
     return (
       <div className={className}>
-        <div className="max-w-xl">
-          <div className="font-semibold text-omi-text">{emptyChartTitle}</div>
-          <div className="mt-1 text-xs leading-5 text-omi-text-muted">
-            {emptyChartDetail}
-          </div>
-        </div>
+        <StateSurface
+          title={emptyChartTitle}
+          description={emptyChartDetail}
+          tone={loadState === "loading" || refreshing ? "loading" : "empty"}
+          busy={loadState === "loading" || refreshing}
+          className="w-full max-w-xl"
+        />
       </div>
     );
   }

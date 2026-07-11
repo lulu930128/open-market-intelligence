@@ -1947,6 +1947,38 @@ class FinancialMetricQuarterly(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class PortfolioHolding(Base):
+    __tablename__ = "portfolio_holding"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "market",
+            "symbol",
+            name="uq_portfolio_holding_market_symbol",
+        ),
+        Index("ix_portfolio_holding_market_symbol", "market", "symbol"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    market: Mapped[str] = mapped_column(String(10), index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    symbol_name: Mapped[str | None] = mapped_column(String(240), nullable=True)
+
+    quantity: Mapped[float] = mapped_column(Float)
+    cost_amount: Mapped[float] = mapped_column(Float)
+    currency: Mapped[str] = mapped_column(String(10), index=True)
+
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tags: Mapped[str | None] = mapped_column(Text, nullable=True)
+    strategy_horizon: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    opened_at: Mapped[date | None] = mapped_column(Date, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 
 
 class StockMaster(Base):

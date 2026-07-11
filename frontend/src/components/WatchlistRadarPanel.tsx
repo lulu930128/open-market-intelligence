@@ -1,5 +1,6 @@
 "use client";
 
+import { StateSurface } from "@/components/LoadingPlaceholders";
 import type {
   WatchlistGroupRadarRead,
   WatchlistRadarBucketRead,
@@ -31,7 +32,6 @@ type LoadState = "idle" | "loading" | "success" | "error";
 type WatchlistRadarPanelProps = {
   radar: WatchlistGroupRadarRead | null;
   loadState: LoadState;
-  errorMessage: string | null;
   mode: WatchlistRadarMode;
   selectedStockId: string | null;
   disabled?: boolean;
@@ -39,11 +39,9 @@ type WatchlistRadarPanelProps = {
   notice?: string | null;
   outcomeSummary?: WatchlistRadarOutcomeSummaryRead | null;
   outcomeLoadState?: LoadState;
-  outcomeErrorMessage?: string | null;
   outcomeHistory?: WatchlistRadarOutcomeSummaryRead[];
   outcomeHistoryOpen?: boolean;
   outcomeHistoryLoadState?: LoadState;
-  outcomeHistoryErrorMessage?: string | null;
   selectedOutcomeSnapshotId?: number | null;
   getModeHref?: (mode: WatchlistRadarMode) => string;
   onModeChange: (mode: WatchlistRadarMode) => void;
@@ -712,18 +710,18 @@ function detailCount(...detailGroups: string[][]) {
 
 function RadarLoadingRows() {
   return (
-    <div className="divide-y divide-omi-border-subtle">
+    <div className="omi-loading-surface divide-y divide-omi-border-subtle" aria-hidden="true">
       {Array.from({ length: 4 }).map((_, index) => (
         <div
           key={index}
           className="grid grid-cols-[42px_minmax(180px,1fr)_86px] items-center gap-3 px-4 py-3"
         >
-          <span className="h-3 w-7 animate-pulse bg-omi-surface-strong" />
+          <span className="omi-skeleton h-3 w-7" />
           <span className="space-y-2">
-            <span className="block h-3 w-32 animate-pulse bg-omi-surface-strong" />
-            <span className="block h-2.5 w-64 animate-pulse bg-omi-surface-muted" />
+            <span className="omi-skeleton block h-3 w-32" />
+            <span className="omi-skeleton block h-2.5 w-64 max-w-full" />
           </span>
-          <span className="h-3 w-14 animate-pulse bg-omi-surface-muted" />
+          <span className="omi-skeleton h-3 w-14" />
         </div>
       ))}
     </div>
@@ -733,7 +731,6 @@ function RadarLoadingRows() {
 export default function WatchlistRadarPanel({
   radar,
   loadState,
-  errorMessage,
   mode,
   selectedStockId,
   disabled = false,
@@ -741,11 +738,9 @@ export default function WatchlistRadarPanel({
   notice,
   outcomeSummary,
   outcomeLoadState = "idle",
-  outcomeErrorMessage,
   outcomeHistory = [],
   outcomeHistoryOpen = false,
   outcomeHistoryLoadState = "idle",
-  outcomeHistoryErrorMessage,
   selectedOutcomeSnapshotId,
   getModeHref,
   onModeChange,
@@ -766,14 +761,14 @@ export default function WatchlistRadarPanel({
   const activeBuckets = radar?.buckets.filter((bucket) => bucket.count > 0) ?? [];
   const activeBucketGroups = groupedRadarBuckets(activeBuckets);
   const showOutcomeTools = Boolean(
-    onSaveSnapshot ||
+    outcomeSummary ||
+      onSaveSnapshot ||
       onEvaluateOutcome ||
       onReloadOutcome ||
       onOpenOutcomeHistory
   );
   const outcomeBusy = outcomeLoadState === "loading";
   const outcomeHistoryBusy = outcomeHistoryLoadState === "loading";
-  const outcomeCanEvaluate = Boolean(outcomeSummary?.snapshot);
   const outcomeBuckets = outcomeSummary?.bucket_summaries.slice(0, 4) ?? [];
   const selectedOutcomeSummary =
     outcomeHistory.find((summary) => summary.snapshot?.id === selectedOutcomeSnapshotId) ??
@@ -833,6 +828,16 @@ export default function WatchlistRadarPanel({
               </a>
             ))}
           </div>
+          {onOpenOutcomeHistory ? (
+            <button
+              type="button"
+              onClick={onOpenOutcomeHistory}
+              disabled={disabled || outcomeHistoryBusy}
+              className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text-muted hover:border-omi-accent hover:text-omi-accent disabled:border-omi-border-subtle disabled:text-omi-text-subtle"
+            >
+              {t("radar.outcome.history")}
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={onReload}
@@ -843,12 +848,6 @@ export default function WatchlistRadarPanel({
           </button>
         </div>
       </div>
-
-      {errorMessage ? (
-        <div className="border-b border-omi-warning-border bg-omi-warning-soft px-5 py-3 text-sm text-omi-warning">
-          {errorMessage}
-        </div>
-      ) : null}
 
       {notice ? (
         <div className="border-b border-omi-info-border bg-omi-info-soft px-5 py-3 text-sm text-omi-info-strong">
@@ -884,56 +883,7 @@ export default function WatchlistRadarPanel({
                 </p>
               ) : null}
             </div>
-
-            <div className="flex flex-wrap items-center gap-2">
-              {onSaveSnapshot ? (
-                <button
-                  type="button"
-                  onClick={onSaveSnapshot}
-                  disabled={disabled || outcomeBusy || loadState === "loading" || !radar}
-                  className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text-muted hover:border-omi-accent hover:text-omi-accent disabled:border-omi-border-subtle disabled:text-omi-text-subtle"
-                >
-                  {t("radar.outcome.saveSnapshot")}
-                </button>
-              ) : null}
-              {onEvaluateOutcome ? (
-                <button
-                  type="button"
-                  onClick={onEvaluateOutcome}
-                  disabled={disabled || outcomeBusy || !outcomeCanEvaluate}
-                  className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text-muted hover:border-omi-accent hover:text-omi-accent disabled:border-omi-border-subtle disabled:text-omi-text-subtle"
-                >
-                  {t("radar.outcome.evaluate")}
-                </button>
-              ) : null}
-              {onReloadOutcome ? (
-                <button
-                  type="button"
-                  onClick={onReloadOutcome}
-                  disabled={disabled || outcomeBusy}
-                  className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text-muted hover:border-omi-accent hover:text-omi-accent disabled:border-omi-border-subtle disabled:text-omi-text-subtle"
-                >
-                  {t("radar.outcome.reload")}
-                </button>
-              ) : null}
-              {onOpenOutcomeHistory ? (
-                <button
-                  type="button"
-                  onClick={onOpenOutcomeHistory}
-                  disabled={disabled || outcomeHistoryBusy}
-                  className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text-muted hover:border-omi-accent hover:text-omi-accent disabled:border-omi-border-subtle disabled:text-omi-text-subtle"
-                >
-                  {t("radar.outcome.history")}
-                </button>
-              ) : null}
-            </div>
           </div>
-
-          {outcomeErrorMessage ? (
-            <div className="mt-3 border border-omi-warning-border bg-omi-warning-soft px-3 py-2 text-xs text-omi-warning">
-              {outcomeErrorMessage}
-            </div>
-          ) : null}
 
           {outcomeSummary?.snapshot ? (
             <div className="mt-3 flex flex-wrap gap-2 text-xs">
@@ -1033,20 +983,14 @@ export default function WatchlistRadarPanel({
               </div>
             </div>
 
-            {outcomeHistoryErrorMessage ? (
-              <div className="border-b border-omi-warning-border bg-omi-warning-soft px-5 py-3 text-sm text-omi-warning">
-                {outcomeHistoryErrorMessage}
-              </div>
-            ) : null}
-
             <div className="grid min-h-0 flex-1 grid-cols-1 overflow-hidden md:grid-cols-[280px_minmax(0,1fr)]">
               <div className="min-h-0 overflow-y-auto border-b border-omi-border-subtle bg-omi-surface-subtle p-3 md:border-b-0 md:border-r">
                 {outcomeHistoryBusy && outcomeHistory.length === 0 ? (
-                  <div className="space-y-2">
+                  <div className="omi-loading-surface space-y-2">
                     {Array.from({ length: 4 }).map((_, index) => (
                       <div
                         key={index}
-                        className="h-16 animate-pulse border border-omi-border-subtle bg-omi-surface"
+                        className="omi-skeleton h-16 border border-omi-border-subtle bg-omi-surface"
                       />
                     ))}
                   </div>
@@ -1098,9 +1042,11 @@ export default function WatchlistRadarPanel({
                     })}
                   </div>
                 ) : (
-                  <div className="border border-omi-border-subtle bg-omi-surface px-3 py-4 text-sm text-omi-text-muted">
-                    {t("radar.outcome.historyEmpty")}
-                  </div>
+                  <StateSurface
+                    title={t("radar.outcome.historyEmpty")}
+                    tone="empty"
+                    compact
+                  />
                 )}
               </div>
 
@@ -1260,9 +1206,10 @@ export default function WatchlistRadarPanel({
                     ) : null}
                   </div>
                 ) : (
-                  <div className="border border-omi-border-subtle bg-omi-surface-subtle px-4 py-8 text-center text-sm text-omi-text-muted">
-                    {t("radar.outcome.historyEmpty")}
-                  </div>
+                  <StateSurface
+                    title={t("radar.outcome.historyEmpty")}
+                    tone="empty"
+                  />
                 )}
               </div>
             </div>
@@ -1302,7 +1249,18 @@ export default function WatchlistRadarPanel({
       ) : null}
 
       {isLoading ? (
-        <RadarLoadingRows />
+        <div>
+          <div className="border-b border-omi-border-subtle p-3">
+            <StateSurface
+              eyebrow={t("radar.eyebrow")}
+              title={t("common.loading")}
+              tone="loading"
+              busy
+              compact
+            />
+          </div>
+          <RadarLoadingRows />
+        </div>
       ) : hasResults ? (
         <div
           className="max-h-[36rem] space-y-1 overflow-y-auto overscroll-contain bg-omi-surface-subtle p-2"
@@ -1486,8 +1444,19 @@ export default function WatchlistRadarPanel({
           })}
         </div>
       ) : (
-        <div className="px-5 py-8 text-center text-sm text-omi-text-muted">
-          {radar ? t("radar.emptyWithRadar") : t("radar.emptyNoGroup")}
+        <div className="p-3">
+          <StateSurface
+            eyebrow={t("radar.eyebrow")}
+            title={
+              loadState === "error"
+                ? t("radar.loadError")
+                : radar
+                  ? t("radar.emptyWithRadar")
+                  : t("radar.emptyNoGroup")
+            }
+            tone={loadState === "error" ? "danger" : "empty"}
+            compact
+          />
         </div>
       )}
     </section>

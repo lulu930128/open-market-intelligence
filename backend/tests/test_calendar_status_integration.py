@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from app.jobs import scheduler
 from app.market.taiwan_rules import (
+    TAIWAN_DATASET_DAILY_PRICE,
     TAIWAN_DATASET_INSTITUTIONAL_TRADE,
     TAIWAN_DATASET_MARGIN_TRADING,
     TAIWAN_REFRESH_INSTITUTIONAL_TRADE,
@@ -394,6 +395,105 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
         self.assertEqual(kwargs["hour"], 16)
         self.assertEqual(kwargs["minute"], 20)
         self.assertEqual(kwargs["id"], "kr_market_watchlist_resource_refresh")
+
+    def test_watchlist_radar_auto_snapshot_queues_job_after_daily_release(self) -> None:
+        fake_db = SimpleNamespace(close=Mock())
+        calendar_status = {
+            "market": "tw",
+            "date": "2026-07-07",
+            "is_trading_day": True,
+            "phase": "post_close",
+            "reason": "trading_day",
+            "release_windows": {
+                TAIWAN_DATASET_DAILY_PRICE: {
+                    "expected_trade_date": "2026-07-07",
+                    "is_released": True,
+                }
+            },
+        }
+
+        with (
+            patch.object(scheduler, "build_taiwan_calendar_status", return_value=calendar_status),
+            patch.object(scheduler.settings, "scheduler_watchlist_radar_group_ids", "1,2"),
+            patch.object(scheduler.settings, "scheduler_watchlist_radar_modes", "action,risk"),
+            patch.object(scheduler.settings, "scheduler_watchlist_radar_max_results", 20),
+            patch.object(scheduler.settings, "scheduler_watchlist_radar_calculation_limit", 80),
+            patch.object(scheduler.settings, "scheduler_watchlist_radar_use_intraday", False),
+            patch.object(scheduler.settings, "scheduler_watchlist_radar_intraday_limit", 30),
+            patch.object(scheduler.settings, "scheduler_watchlist_radar_evaluate_lookback_days", 10),
+            patch.object(scheduler.settings, "scheduler_watchlist_radar_require_daily_release", True),
+            patch.object(scheduler, "SessionLocal", return_value=fake_db),
+            patch.object(
+                scheduler.job_service,
+                "enqueue_job",
+                return_value=(SimpleNamespace(id=24), True),
+            ) as enqueue,
+        ):
+            scheduler.enqueue_watchlist_radar_auto_snapshot()
+
+        kwargs = enqueue.call_args.kwargs
+        request = kwargs["request"]
+        task_args = kwargs["task_args"]
+        self.assertEqual(kwargs["job_type"], "watchlist.scheduler.radar_snapshot")
+        self.assertEqual(kwargs["target"], "1,2")
+        self.assertEqual(request["schedule"], "watchlist_radar_auto_snapshot")
+        self.assertEqual(request["group_ids"], ["1", "2"])
+        self.assertEqual(request["modes"], "action,risk")
+        self.assertEqual(request["evaluate_before_date"], date(2026, 7, 7))
+        self.assertEqual(task_args[0], ["1", "2"])
+        self.assertEqual(task_args[1], "action,risk")
+        self.assertEqual(task_args[4], 20)
+        self.assertEqual(task_args[5], 80)
+        self.assertEqual(task_args[9], 10)
+        self.assertTrue(task_args[10])
+        fake_db.close.assert_called_once()
+
+    def test_watchlist_radar_auto_snapshot_skips_before_daily_release(self) -> None:
+        calendar_status = {
+            "market": "tw",
+            "date": "2026-07-07",
+            "is_trading_day": True,
+            "phase": "post_close",
+            "reason": "trading_day",
+            "release_windows": {
+                TAIWAN_DATASET_DAILY_PRICE: {
+                    "expected_trade_date": "2026-07-07",
+                    "is_released": False,
+                }
+            },
+        }
+
+        with (
+            patch.object(scheduler, "build_taiwan_calendar_status", return_value=calendar_status),
+            patch.object(scheduler.settings, "scheduler_watchlist_radar_require_daily_release", True),
+            patch.object(scheduler.job_service, "enqueue_job") as enqueue,
+        ):
+            scheduler.enqueue_watchlist_radar_auto_snapshot()
+
+        enqueue.assert_not_called()
+
+    def test_watchlist_radar_auto_snapshot_job_is_registered_as_cron_job(self) -> None:
+        fake_scheduler = SimpleNamespace(add_job=Mock())
+
+        with (
+            patch.object(scheduler.settings, "enable_watchlist_radar_scheduler", True),
+            patch.object(scheduler.settings, "scheduler_watchlist_radar_time", "15:45"),
+            patch.object(scheduler.settings, "scheduler_watchlist_radar_day_of_week", "mon-fri"),
+        ):
+            added = scheduler._add_watchlist_radar_auto_snapshot_job(fake_scheduler)
+
+        self.assertTrue(added)
+        fake_scheduler.add_job.assert_called_once()
+        kwargs = fake_scheduler.add_job.call_args.kwargs
+        self.assertIs(
+            fake_scheduler.add_job.call_args.args[0],
+            scheduler.enqueue_watchlist_radar_auto_snapshot,
+        )
+        self.assertEqual(kwargs["trigger"], "cron")
+        self.assertEqual(kwargs["day_of_week"], "mon-fri")
+        self.assertEqual(kwargs["hour"], 15)
+        self.assertEqual(kwargs["minute"], 45)
+        self.assertEqual(kwargs["id"], "watchlist_radar_auto_snapshot")
 
 
 if __name__ == "__main__":

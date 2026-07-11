@@ -29,6 +29,8 @@ SUMMARY_COUNT_KEYS = (
     "total_symbol_count",
     "symbol_count",
     "success_count",
+    "saved_count",
+    "evaluated_count",
     "current_count",
     "refreshed_symbol_count",
     "complete_symbol_count",

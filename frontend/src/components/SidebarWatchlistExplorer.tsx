@@ -1,6 +1,7 @@
 "use client";
 
 import JobStatusCenter from "@/components/JobStatusCenter";
+import PortfolioHoldingsPanel from "@/components/PortfolioHoldingsPanel";
 import SettingsDock from "@/components/SettingsDock";
 import { marketLabel, marketSummary, useT, type TranslationFunction } from "@/i18n";
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
@@ -2147,6 +2148,14 @@ export default function SidebarWatchlistExplorer({
           </div>
         ) : null}
         {renderPinnedIndexGroup()}
+        <PortfolioHoldingsPanel
+          market="tw"
+          selectedSymbol={selectedStockId}
+          defaultCurrency="TWD"
+          symbolPlaceholder={t("watchlist.stockInputPlaceholder")}
+          normalizeSymbol={(value) => value.trim().toUpperCase()}
+          onSelectSymbol={onSelectStock}
+        />
         {tree.length > 0 ? (
           tree.map((node) => renderGroupNode(node))
         ) : (

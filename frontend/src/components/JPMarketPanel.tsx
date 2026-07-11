@@ -1,5 +1,11 @@
 "use client";
 
+import IntradayTrendChart, {
+  defaultIntradayIndicators,
+  type IntradayIndicatorSettings,
+  type IntradaySessionConfig,
+} from "@/components/IntradayTrendChart";
+import { StateSurface } from "@/components/LoadingPlaceholders";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
 import ProfessionalChartPanel, {
   type ProfessionalChartStyle,
@@ -30,9 +36,25 @@ import {
 } from "@/components/professionalChartDrawing";
 import { timeframeLabel, useT } from "@/i18n";
 import { fetchJson, requestJson } from "@/lib/api";
+import {
+  clearDataStatusFocus,
+  emitDataStatusEvent,
+  setDataStatusFocus,
+} from "@/lib/dataStatusEvents";
 import { getJpMarketIndexConfig } from "@/lib/jpMarketIndices";
+import {
+  JAPAN_INTRADAY_REFRESH_MS,
+  JAPAN_SESSION_END_MINUTES,
+  JAPAN_SESSION_START_MINUTES,
+  getJapanIntradayXRatio,
+  getJapanMarketRefreshState,
+  getTokyoMinutesOfDay,
+  isJapanRegularSessionPoint,
+} from "@/lib/jpMarketTime";
 import type {
   ChartPoint,
+  IntradayTrendPoint,
+  IntradayTrendResponse,
   JPCompanyFundamentalRead,
   JPOhlcChartRead,
   JPOhlcPointRead,
@@ -44,7 +66,8 @@ import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } fro
 
 type LoadState = "idle" | "loading" | "success" | "error";
 type Message = { type: "success" | "warning" | "error"; text: string } | null;
-type JPChartTimeframe = "today" | "daily" | "weekly" | "monthly";
+type JPHistoricalTimeframe = "daily" | "weekly" | "monthly";
+type JPChartTimeframe = "today" | JPHistoricalTimeframe;
 type JPProfessionalTimeframe = Exclude<JPChartTimeframe, "today">;
 type JPDataSlot = "demand" | "investors" | "disclosures" | "performance" | "financials";
 
@@ -57,10 +80,10 @@ type Props = {
   onStatusMessage?: (message: Message) => void;
 };
 
-const timeframeOptions: JPChartTimeframe[] = ["today", "daily", "weekly", "monthly"];
+const indexTimeframeOptions: JPChartTimeframe[] = ["today", "daily", "weekly", "monthly"];
+const stockTimeframeOptions: JPHistoricalTimeframe[] = ["daily", "weekly", "monthly"];
 const professionalTimeframeOptions: JPProfessionalTimeframe[] = ["daily", "weekly", "monthly"];
-const barsByTimeframe: Record<JPChartTimeframe, number> = {
-  today: 60,
+const barsByTimeframe: Record<JPHistoricalTimeframe, number> = {
   daily: 180,
   weekly: 104,
   monthly: 72,
@@ -98,6 +121,23 @@ const jpChartIndicators: IndicatorSettings = {
   ma: true,
   volume: true,
   signals: false,
+};
+
+const jpIndexIntradaySession: IntradaySessionConfig = {
+  startMinutes: JAPAN_SESSION_START_MINUTES,
+  endMinutes: JAPAN_SESSION_END_MINUTES,
+  timeTicks: [
+    { label: "09:00", minutes: 9 * 60 },
+    { label: "10:30", minutes: 10 * 60 + 30 },
+    { label: "11:30", minutes: 11 * 60 + 30 },
+    { label: "12:30", minutes: 12 * 60 + 30 },
+    { label: "14:00", minutes: 14 * 60 },
+    { label: "15:30", minutes: 15 * 60 + 30 },
+  ],
+  getMinutesOfDay: getTokyoMinutesOfDay,
+  getXRatio: getJapanIntradayXRatio,
+  isRegularSessionPoint: isJapanRegularSessionPoint,
+  volumeFormatter: formatVolume,
 };
 
 function chartDrawingStorageKey(symbol: string | null, timeframe: JPProfessionalTimeframe) {
@@ -150,6 +190,23 @@ function formatCompactMoney(
 function formatDate(value: string | null | undefined) {
   if (!value) return "-";
   return value.slice(0, 10);
+}
+
+function formatJapanDateTime(value: string | null | undefined) {
+  if (!value) return "-";
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime()) || !value.includes("T")) return value;
+
+  return new Intl.DateTimeFormat("zh-TW", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "Asia/Tokyo",
+  }).format(date);
 }
 
 function formatSignedNumber(value: number | null | undefined) {
@@ -241,6 +298,17 @@ function toChartPoint(point: JPOhlcPointRead): ChartPoint {
     trade_value: null,
     transaction_count: null,
   };
+}
+
+async function fetchJpIntradayTrend(symbol: string, refresh = false) {
+  return fetchJson<IntradayTrendResponse>(
+    `/api/jp-market/intraday/${encodeURIComponent(symbol)}`,
+    refresh ? { refresh: true } : undefined
+  );
+}
+
+function isApiNotFoundMessage(value: string) {
+  return value.startsWith("API 404:");
 }
 
 function latestPoint(points: ChartPoint[]) {
@@ -337,6 +405,8 @@ export default function JPMarketPanel({
     useState<ProfessionalChartStyle>("candlestick");
   const [chartIndicators, setChartIndicators] =
     useState<IndicatorSettings>(jpChartIndicators);
+  const [intradayIndicators] =
+    useState<IntradayIndicatorSettings>(defaultIntradayIndicators);
   const [activeIndicatorTemplate, setActiveIndicatorTemplate] =
     useState<IndicatorTemplateKey | null>("basic");
   const [indicatorParameters, setIndicatorParameters] =
@@ -356,6 +426,12 @@ export default function JPMarketPanel({
   const [activeDataSlot, setActiveDataSlot] = useState<JPDataSlot>("demand");
   const [stockState, setStockState] = useState<LoadState>("idle");
   const [dataState, setDataState] = useState<LoadState>("idle");
+  const [todayTrend, setTodayTrend] = useState<IntradayTrendPoint[]>([]);
+  const [todayPreviousClose, setTodayPreviousClose] = useState<number | null>(null);
+  const [todaySource, setTodaySource] = useState("yahoo_finance_chart");
+  const [todayUpdatedAt, setTodayUpdatedAt] = useState<string | null>(null);
+  const [todayIntradayState, setTodayIntradayState] = useState<LoadState>("idle");
+  const finalIntradayRefreshDate = useRef<string | null>(null);
 
   const chartData = useMemo<ChartPoint[]>(
     () => chart?.points.map(toChartPoint) ?? [],
@@ -365,6 +441,7 @@ export default function JPMarketPanel({
   const latestClose = latest?.close ?? null;
   const change = changeValue(chartData);
   const pct = changePct(chartData);
+  const todayLatest = todayTrend[todayTrend.length - 1] ?? null;
   const ma20 = useMemo(() => movingAverage(chartData, "close", 20), [chartData]);
   const volumeMa20 = useMemo(() => movingAverage(chartData, "volume", 20), [chartData]);
   const priceVsMa20 =
@@ -381,19 +458,55 @@ export default function JPMarketPanel({
     volumeMa20 !== 0
       ? ((latest.volume - volumeMa20) / volumeMa20) * 100
       : null;
-  const selectedTitle = selectedStock
-    ? `${selectedStock.symbol} ${selectedStock.security_name ?? ""}`.trim()
+  const selectedIndexConfig = getJpMarketIndexConfig(selectedStock?.symbol ?? initialSymbol);
+  const isSelectedIndex = selectedIndexConfig !== null;
+  const selectedIndexSymbol = selectedIndexConfig?.symbol ?? null;
+  const timeframeOptions = isSelectedIndex ? indexTimeframeOptions : stockTimeframeOptions;
+  const isIntradayTimeframe = isSelectedIndex && timeframe === "today";
+  const displayPrice =
+    isIntradayTimeframe && todayLatest ? todayLatest.price : latest?.close ?? null;
+  const displayChange =
+    isIntradayTimeframe && todayLatest && todayPreviousClose !== null
+      ? todayLatest.price - todayPreviousClose
+      : change;
+  const displayPct =
+    isIntradayTimeframe &&
+    todayLatest &&
+    todayPreviousClose !== null &&
+    todayPreviousClose !== 0
+      ? ((todayLatest.price - todayPreviousClose) / todayPreviousClose) * 100
+      : pct;
+  const todayChartReady = todayTrend.length >= 2 && todayIntradayState !== "error";
+  const todayChartLoading = todayIntradayState === "loading" && todayTrend.length < 2;
+  const selectedTitle = selectedIndexConfig
+    ? `${selectedIndexConfig.displaySymbol} ${selectedIndexConfig.name}`.trim()
+    : selectedStock
+      ? `${selectedStock.symbol} ${selectedStock.security_name ?? ""}`.trim()
     : t("jpMarket.empty.noStockSelected");
-  const selectedSubtitle = selectedStock
+  const selectedSubtitle = selectedIndexConfig
     ? [
-        selectedStock.exchange ?? "JPX",
-        selectedStock.market_segment,
-        selectedStock.sector_33_name,
-        selectedStock.asset_type,
+        selectedIndexConfig.exchange,
+        t("jpMarket.entity.index"),
+        selectedIndexConfig.note,
       ]
         .filter(Boolean)
         .join(" / ")
+    : selectedStock
+      ? [
+          selectedStock.exchange ?? "JPX",
+          selectedStock.market_segment,
+          selectedStock.sector_33_name,
+          selectedStock.asset_type,
+        ]
+          .filter(Boolean)
+          .join(" / ")
     : t("jpMarket.empty.selectStockPrompt");
+  const dataStatusContextKey = useMemo(
+    () => `jp:${selectedStock?.symbol ?? initialSymbol ?? "unknown"}`,
+    [initialSymbol, selectedStock?.symbol]
+  );
+  const dataStatusContextLabel = selectedTitle;
+  const dataStatusSource = t(isSelectedIndex ? "jpMarket.sections.index" : "jpMarket.sections.stock");
   const chartLoading = stockState === "loading" || dataState === "loading";
   const resourceSlotLabels = useMemo(
     () => ({
@@ -681,12 +794,32 @@ export default function JPMarketPanel({
   }, [onStatusMessage]);
 
   useEffect(() => {
+    if (!initialSymbol) return;
+
+    setDataStatusFocus({
+      market: "jp",
+      contextKey: dataStatusContextKey,
+      label: dataStatusContextLabel,
+      source: dataStatusSource,
+    });
+
+    return () => clearDataStatusFocus(dataStatusContextKey);
+  }, [dataStatusContextKey, dataStatusContextLabel, dataStatusSource, initialSymbol]);
+
+  useEffect(() => {
     onChartFocusModeChange?.(chartFocusMode);
   }, [chartFocusMode, onChartFocusModeChange]);
 
   useEffect(() => {
     return () => onChartFocusModeChange?.(false);
   }, [onChartFocusModeChange]);
+
+  useEffect(() => {
+    if (!isSelectedIndex && timeframe === "today") {
+      const resetTimer = window.setTimeout(() => setTimeframe("daily"), 0);
+      return () => window.clearTimeout(resetTimer);
+    }
+  }, [isSelectedIndex, timeframe]);
 
   const headerMetrics = useMemo(
     () => [
@@ -718,6 +851,72 @@ export default function JPMarketPanel({
     [chart, latest?.close, latest?.time, latest?.volume, selectedStock, t]
   );
 
+  const indexDataMetrics = useMemo(
+    () =>
+      selectedIndexConfig
+        ? [
+            {
+              label: t("jpMarket.metrics.symbol"),
+              value: selectedIndexConfig.symbol,
+            },
+            {
+              label: t("jpMarket.metrics.display"),
+              value: selectedIndexConfig.displaySymbol,
+            },
+            {
+              label: t("jpMarket.metrics.exchange"),
+              value: selectedIndexConfig.exchange,
+            },
+            {
+              label: t("jpMarket.metrics.source"),
+              value: isIntradayTimeframe
+                ? todaySource
+                : chart?.backfill?.provider
+                  ? String(chart.backfill.provider)
+                  : "Yahoo chart",
+            },
+            {
+              label: t("jpMarket.metrics.date"),
+              value: isIntradayTimeframe
+                ? todayUpdatedAt ?? formatJapanDateTime(todayLatest?.time)
+                : formatDate(latest?.time),
+            },
+            {
+              label: t("jpMarket.metrics.close"),
+              value: formatNumber(displayPrice, 2),
+            },
+            {
+              label: t("jpMarket.metrics.volume"),
+              value: isIntradayTimeframe
+                ? formatVolume(todayLatest?.volume)
+                : formatVolume(latest?.volume),
+            },
+            {
+              label: t("jpMarket.metrics.candleCount"),
+              value: formatNumber(
+                isIntradayTimeframe ? todayTrend.length : chartData.length,
+                0
+              ),
+            },
+          ]
+        : [],
+    [
+      chart,
+      chartData.length,
+      displayPrice,
+      isIntradayTimeframe,
+      latest?.time,
+      latest?.volume,
+      selectedIndexConfig,
+      t,
+      todayLatest?.time,
+      todayLatest?.volume,
+      todaySource,
+      todayTrend.length,
+      todayUpdatedAt,
+    ]
+  );
+
   const technicalRows = useMemo(
     () => [
       {
@@ -740,12 +939,12 @@ export default function JPMarketPanel({
       },
       {
         label: t("jpMarket.metrics.change"),
-        value: `${formatSignedNumber(change)} / ${formatSignedPct(pct)}`,
-        tone: pct,
+        value: `${formatSignedNumber(displayChange)} / ${formatSignedPct(displayPct)}`,
+        tone: displayPct,
         detail: timeframeLabel(t, timeframe),
       },
     ],
-    [change, ma20, pct, priceVsMa20, t, timeframe, volumeMa20, volumeVsMa20]
+    [displayChange, displayPct, ma20, priceVsMa20, t, timeframe, volumeMa20, volumeVsMa20]
   );
 
   const selectedChartSymbol = selectedStock?.symbol ?? initialSymbol;
@@ -781,8 +980,33 @@ export default function JPMarketPanel({
     [professionalTimeframe, selectedChartSymbol]
   );
 
-  const publishStatus = useCallback((nextMessage: Message) => {
-    onStatusMessageRef.current?.(nextMessage);
+  const publishStatus = useCallback(
+    (nextMessage: Message, title = dataStatusContextLabel) => {
+      onStatusMessageRef.current?.(nextMessage);
+      if (!nextMessage) return;
+
+      emitDataStatusEvent({
+        market: "jp",
+        level: nextMessage.type,
+        title,
+        message: nextMessage.text,
+        source: dataStatusSource,
+        contextKey: dataStatusContextKey,
+        contextLabel: dataStatusContextLabel,
+        dedupeKey: `${dataStatusContextKey}:${title}:${nextMessage.type}`,
+      });
+    },
+    [dataStatusContextKey, dataStatusContextLabel, dataStatusSource]
+  );
+
+  const applyTodayTrend = useCallback((today: IntradayTrendResponse) => {
+    const latestIntradayPoint = today.points[today.points.length - 1] ?? null;
+
+    setTodayTrend(today.points);
+    setTodayPreviousClose(today.previous_close);
+    setTodaySource(today.source);
+    setTodayUpdatedAt(latestIntradayPoint ? formatJapanDateTime(latestIntradayPoint.time) : null);
+    setTodayIntradayState("success");
   }, []);
 
   function handleTimeframeChange(nextTimeframe: JPChartTimeframe) {
@@ -958,7 +1182,7 @@ export default function JPMarketPanel({
       setDataState("loading");
 
       try {
-        const requestTimeframe =
+        const requestTimeframe: JPHistoricalTimeframe =
           nextTimeframe === "today" ? "daily" : nextTimeframe;
         const isIndexSymbol = getJpMarketIndexConfig(symbol) !== null;
         const [chartResult, resourceResult, fundamentalResult] = await Promise.allSettled([
@@ -966,7 +1190,7 @@ export default function JPMarketPanel({
             `/api/jp-market/ohlc/${encodeURIComponent(symbol)}`,
             {
               timeframe: requestTimeframe,
-              bars: barsByTimeframe[nextTimeframe],
+              bars: barsByTimeframe[requestTimeframe],
               ensure_history: !isIndexSymbol,
             }
           ),
@@ -1249,6 +1473,120 @@ export default function JPMarketPanel({
     void loadStockBySymbol(initialSymbol, timeframe);
   }, [initialSymbol, loadStockBySymbol, refreshNonce, timeframe]);
 
+  useEffect(() => {
+    if (!selectedIndexSymbol || timeframe !== "today") {
+      return;
+    }
+
+    const effectSymbol = selectedIndexSymbol;
+
+    let cancelled = false;
+    let intradayTimer: number | undefined;
+    let intradayRequestInFlight = false;
+
+    function clearIntradayTimer() {
+      if (intradayTimer !== undefined) {
+        window.clearTimeout(intradayTimer);
+        intradayTimer = undefined;
+      }
+    }
+
+    async function refreshTodayTrend(showLoading: boolean) {
+      if (intradayRequestInFlight) return;
+      intradayRequestInFlight = true;
+
+      if (showLoading) {
+        setTodayIntradayState("loading");
+        setTodayUpdatedAt(null);
+        setTodayTrend([]);
+      }
+
+      try {
+        const today = await fetchJpIntradayTrend(effectSymbol);
+
+        if (cancelled) return;
+
+        applyTodayTrend(today);
+        const pointCount = today.point_count ?? today.points.length;
+        if (today.warnings?.length) {
+          publishStatus({
+            type: "warning",
+            text: today.warnings[0],
+          });
+        } else if (pointCount < 2) {
+          publishStatus({
+            type: "warning",
+            text: t("jpMarket.messages.intradayInsufficient", {
+              symbol: effectSymbol,
+              count: pointCount,
+              source: today.source,
+            }),
+          });
+        } else if (showLoading) {
+          const latestPoint = today.points[today.points.length - 1] ?? null;
+          publishStatus({
+            type: "success",
+            text: t("jpMarket.messages.intradayLoaded", {
+              symbol: effectSymbol,
+              count: pointCount,
+              source: today.source,
+              updatedAt: formatJapanDateTime(latestPoint?.time),
+            }),
+          });
+        }
+      } catch (error) {
+        if (cancelled) return;
+
+        const message = apiErrorMessage(error, t("jpMarket.errors.dataLoadFailed"));
+        setTodayIntradayState("error");
+        publishStatus({
+          type: "error",
+          text: isApiNotFoundMessage(message)
+            ? t("jpMarket.messages.intradayRouteMissing", { message })
+            : t("jpMarket.messages.intradayLoadFailed", { message }),
+        });
+      } finally {
+        intradayRequestInFlight = false;
+      }
+    }
+
+    function scheduleTodayRefresh() {
+      if (cancelled) return;
+
+      const marketState = getJapanMarketRefreshState();
+
+      if (marketState.isPollingWindow) {
+        intradayTimer = window.setTimeout(() => {
+          void refreshTodayTrend(false).finally(scheduleTodayRefresh);
+        }, JAPAN_INTRADAY_REFRESH_MS);
+        return;
+      }
+
+      if (
+        marketState.isAfterClose &&
+        finalIntradayRefreshDate.current !== marketState.dateKey
+      ) {
+        finalIntradayRefreshDate.current = marketState.dateKey;
+        intradayTimer = window.setTimeout(() => {
+          void refreshTodayTrend(false).finally(scheduleTodayRefresh);
+        }, 0);
+        return;
+      }
+
+      intradayTimer = window.setTimeout(
+        scheduleTodayRefresh,
+        Math.min(marketState.msUntilNextPollingStart, 60_000)
+      );
+    }
+
+    void refreshTodayTrend(true).finally(scheduleTodayRefresh);
+
+    return () => {
+      cancelled = true;
+      clearIntradayTimer();
+    };
+  }, [applyTodayTrend, publishStatus, selectedIndexSymbol, t, timeframe]);
+
   if (!initialSymbol) {
     return watchlistRankingPanel ? (
       <section className="min-w-0">{watchlistRankingPanel}</section>
@@ -1330,10 +1668,17 @@ export default function JPMarketPanel({
             message={null}
             chartReady={professionalChartReady}
             emptyState={
-              <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle text-sm text-omi-text-muted">
-                {chartLoading
-                  ? t("common.loading")
-                  : t("chart.loadingKline", { label: professionalTimeframeLabel })}
+              <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle p-4">
+                <StateSurface
+                  title={
+                    chartLoading
+                      ? t("common.loading")
+                      : t("chart.loadingKline", { label: professionalTimeframeLabel })
+                  }
+                  tone={chartLoading ? "loading" : "empty"}
+                  busy={chartLoading}
+                  className="w-full max-w-xl"
+                />
               </div>
             }
             chartData={chartData}
@@ -1368,7 +1713,7 @@ export default function JPMarketPanel({
           <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-4 px-5 py-4">
             <div className="min-w-0">
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
-                {t("jpMarket.sections.stock")}
+                {t(isSelectedIndex ? "jpMarket.sections.index" : "jpMarket.sections.stock")}
               </div>
               <h2 className="mt-1 text-2xl font-bold text-omi-text-strong">
                 {selectedTitle}
@@ -1380,15 +1725,15 @@ export default function JPMarketPanel({
 
             <div className="shrink-0 text-right">
               <PriceUpdatePulse
-                value={latest?.close ?? null}
-                direction={change}
-                resetKey={`${selectedStock?.symbol ?? initialSymbol}:${timeframe}`}
+                value={displayPrice}
+                direction={displayChange}
+                resetKey={`${selectedStock?.symbol ?? initialSymbol}:${timeframe}:${todayTrend.length}`}
                 className="text-3xl font-black text-omi-text-strong"
               >
-                {formatNumber(latest?.close, 2)}
+                {formatNumber(displayPrice, 2)}
               </PriceUpdatePulse>
-              <div className={`text-sm font-bold ${priceToneClass(pct)}`}>
-                {formatSignedNumber(change)} / {formatSignedPct(pct)}
+              <div className={`text-sm font-bold ${priceToneClass(displayPct)}`}>
+                {formatSignedNumber(displayChange)} / {formatSignedPct(displayPct)}
               </div>
               <div className="mt-3 inline-flex border border-omi-border-subtle bg-omi-surface-subtle p-1">
                 {timeframeOptions.map((option) => (
@@ -1407,6 +1752,7 @@ export default function JPMarketPanel({
                   </button>
                 ))}
               </div>
+              {!isIntradayTimeframe ? (
               <div className="mt-2 flex items-start justify-end gap-2">
                 <div className="relative">
                   <button
@@ -1436,10 +1782,36 @@ export default function JPMarketPanel({
                   {t("stockDetail.expand")}
                 </button>
               </div>
+              ) : null}
             </div>
           </div>
 
-          {chartData.length > 0 ? (
+          {isIntradayTimeframe ? (
+            todayChartReady ? (
+              <IntradayTrendChart
+                points={todayTrend}
+                previousClose={todayPreviousClose}
+                label={`${
+                  selectedIndexConfig?.displaySymbol ??
+                  selectedStock?.symbol ??
+                  initialSymbol ??
+                  ""
+                } ${timeframeLabel(t, "today")}`}
+                source={todaySource}
+                indicators={intradayIndicators}
+                session={jpIndexIntradaySession}
+                revealKey={`${selectedIndexSymbol ?? "empty"}-${timeframe}-${todayTrend.length}`}
+                refreshIntervalMs={JAPAN_INTRADAY_REFRESH_MS}
+                updatedAt={todayUpdatedAt}
+                priceLimitEnabled={false}
+              />
+            ) : (
+              <div
+                aria-busy={todayChartLoading}
+                className="h-[420px] border-t border-omi-border-subtle bg-omi-surface"
+              />
+            )
+          ) : chartData.length > 0 ? (
             <StockKLineChart
               chartData={chartData}
               label={selectedStock?.symbol ?? initialSymbol}
@@ -1451,13 +1823,22 @@ export default function JPMarketPanel({
               volumeValueFormatter={formatVolume}
             />
           ) : (
-            <div className="flex h-[460px] items-center justify-center border-t border-omi-border-subtle text-sm text-omi-text-muted">
-              {chartLoading ? t("common.loading") : t("jpMarket.empty.noKline")}
+            <div className="border-t border-omi-border-subtle bg-omi-surface p-4">
+              <StateSurface
+                title={
+                  chartLoading
+                    ? t("common.loading")
+                    : t(isSelectedIndex ? "jpMarket.empty.noIndexKline" : "jpMarket.empty.noKline")
+                }
+                tone={chartLoading ? "loading" : "empty"}
+                busy={chartLoading}
+                className="h-[428px]"
+              />
             </div>
           )}
         </section>
 
-        {watchlistRankingPanel ? (
+        {!isSelectedIndex && watchlistRankingPanel ? (
           <div className="min-w-0">{watchlistRankingPanel}</div>
         ) : null}
           </>
@@ -1502,41 +1883,63 @@ export default function JPMarketPanel({
 
         <div className="h-2 border-y border-omi-border-subtle bg-omi-surface-muted" aria-hidden="true" />
 
-        <div className="bg-omi-surface">
-          <ResourceSlotTabs
-            activeKey={activeDataSlot}
-            labels={resourceSlotLabels}
-            onActiveKeyChange={setActiveDataSlot}
-            slots={resourceSlotItems}
-            statusLabel={(status) => t(resourceStatusLabelKey(status))}
-            statusToneClass={resourceStatusClass}
-            footer={
-              <>
-                <div className="border-b border-omi-border-subtle px-5 py-4 text-sm">
-                  <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
-                    {activeSlotDetail.eyebrow}
+        {selectedIndexConfig ? (
+          <section className="bg-omi-surface px-5 py-4">
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
+              {t("jpMarket.sections.indexData")}
+            </div>
+            <h3 className="mt-1 text-lg font-bold text-omi-text-strong">
+              {selectedIndexConfig.name}
+            </h3>
+            <div className="mt-1 text-sm leading-6 text-omi-text-muted">
+              {t("jpMarket.indexDataDescription")}
+            </div>
+            <div className="mt-4 grid grid-cols-2 gap-px bg-omi-border-subtle">
+              {indexDataMetrics.map((item) => (
+                <MetricCell key={item.label} label={item.label} value={item.value} />
+              ))}
+            </div>
+            <div className="mt-4 border border-omi-border-subtle bg-omi-surface-subtle px-3 py-3 text-xs leading-5 text-omi-text-muted">
+              {t("jpMarket.indexDataLimitations")}
+            </div>
+          </section>
+        ) : (
+          <div className="bg-omi-surface">
+            <ResourceSlotTabs
+              activeKey={activeDataSlot}
+              labels={resourceSlotLabels}
+              onActiveKeyChange={setActiveDataSlot}
+              slots={resourceSlotItems}
+              statusLabel={(status) => t(resourceStatusLabelKey(status))}
+              statusToneClass={resourceStatusClass}
+              footer={
+                <>
+                  <div className="border-b border-omi-border-subtle px-5 py-4 text-sm">
+                    <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
+                      {activeSlotDetail.eyebrow}
+                    </div>
+                    <h3 className="mt-1 text-lg font-bold text-omi-text-strong">
+                      {activeSlotDetail.title}
+                    </h3>
+                    <div className="mt-1 text-xs text-omi-text-muted">
+                      {activeSlotDetail.subtitle}
+                    </div>
                   </div>
-                  <h3 className="mt-1 text-lg font-bold text-omi-text-strong">
-                    {activeSlotDetail.title}
-                  </h3>
-                  <div className="mt-1 text-xs text-omi-text-muted">
-                    {activeSlotDetail.subtitle}
+                  <div className="grid grid-cols-2 gap-px bg-omi-border-subtle">
+                    {activeSlotMetrics.map((item) => (
+                      <MetricCell key={item.label} label={item.label} value={item.value} />
+                    ))}
                   </div>
-                </div>
-                <div className="grid grid-cols-2 gap-px bg-omi-border-subtle">
-                  {activeSlotMetrics.map((item) => (
-                    <MetricCell key={item.label} label={item.label} value={item.value} />
-                  ))}
-                </div>
-                <div className="grid grid-cols-2 gap-px bg-omi-border-subtle">
-                  {headerMetrics.map((item) => (
-                    <MetricCell key={item.label} label={item.label} value={item.value} />
-                  ))}
-                </div>
-              </>
-            }
-          />
-        </div>
+                  <div className="grid grid-cols-2 gap-px bg-omi-border-subtle">
+                    {headerMetrics.map((item) => (
+                      <MetricCell key={item.label} label={item.label} value={item.value} />
+                    ))}
+                  </div>
+                </>
+              }
+            />
+          </div>
+        )}
       </aside>
       ) : null}
     </section>

@@ -23,6 +23,7 @@ from app.ai import (
     tools,
 )
 from app.ai.schemas import AiAskRequest
+from app.portfolio import service as portfolio_service
 
 
 CONTRACT_VERSION = ask_response_support.CONTRACT_VERSION
@@ -250,6 +251,18 @@ def ask(
         resolution_target=_resolution_target,
     )
     warnings: list[str] = []
+    if not payload.position_context:
+        try:
+            saved_position_context = portfolio_service.get_position_context_for_scope(
+                db,
+                scope_type=scope_type,
+                scope_id=resolution.selected_scope_id,
+            )
+        except portfolio_service.PortfolioError as exc:
+            saved_position_context = {}
+            warnings.append(f"Portfolio position context skipped: {exc}")
+        if saved_position_context:
+            payload = payload.model_copy(update={"position_context": saved_position_context})
     question_stage = ask_stages.build_question_stage(
         payload=payload,
         scope_type=scope_type,
