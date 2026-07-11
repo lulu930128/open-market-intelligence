@@ -5,6 +5,18 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.ai import evidence_builder, technical_analysis
+from app.ai.evidence_passport import build_evidence_passport
+from app.ai.market_payload_contract import (
+    COMPACT_INTRADAY_BAR_LIMIT,
+    PAYLOAD_LEVELS,
+    bounded_int_param as _bounded_int_param,
+    has_payload_value as _has_payload_value,
+    intraday_point_limit as _intraday_point_limit,
+    market_data_params as _market_data_params,
+    payload_level as _payload_level,
+    payload_slot_status as _payload_slot_status,
+    slot_envelope as _slot_envelope,
+)
 from app.db.models import (
     BrokerBranchTradeDaily,
     FinancialMetricQuarterly,
@@ -15,7 +27,6 @@ from app.db.models import (
     ShareholdingDistributionWeekly,
     StockMaster,
 )
-from app.ai.evidence_passport import build_evidence_passport
 from app.market import service as market_service
 from app.market.broker_branch import get_broker_branch_trade_summary
 from app.market.calendar_status import build_taiwan_calendar_status
@@ -128,15 +139,6 @@ def _add_missing(missing: list[str], key: str, value: Any) -> None:
 
 
 COMPACT_INTRADAY_INTERVALS = ("1m", "5m")
-COMPACT_INTRADAY_BAR_LIMIT = 80
-PAYLOAD_LEVELS = {"summary", "compact", "standard", "full"}
-PAYLOAD_LEVEL_INTRADAY_LIMITS = {
-    "summary": 1,
-    "compact": COMPACT_INTRADAY_BAR_LIMIT,
-    "standard": 160,
-    "full": 500,
-}
-
 FRESHNESS_DOMAIN_RESOURCES = {
     "technical": {"market_daily_price"},
     "chips": {
@@ -153,102 +155,6 @@ FRESHNESS_DOMAIN_RESOURCES = {
 def _append_source_ref_once(source_refs: list[dict[str, Any]], ref: dict[str, Any]) -> None:
     if not any(item.get("type") == ref.get("type") and item.get("name") == ref.get("name") for item in source_refs):
         source_refs.append(ref)
-
-
-def _market_data_params(params: dict[str, Any] | None) -> dict[str, Any]:
-    return params if isinstance(params, dict) else {}
-
-
-def _payload_level(params: dict[str, Any] | None) -> str:
-    data_params = _market_data_params(params)
-    raw_level = (
-        data_params.get("payload_level")
-        or data_params.get("detail_level")
-        or data_params.get("detail")
-        or "compact"
-    )
-    level = str(raw_level).strip().lower()
-    return level if level in PAYLOAD_LEVELS else "compact"
-
-
-def _bounded_int_param(
-    params: dict[str, Any] | None,
-    keys: tuple[str, ...],
-    *,
-    default: int,
-    minimum: int,
-    maximum: int,
-) -> int:
-    data_params = _market_data_params(params)
-    for key in keys:
-        if key not in data_params:
-            continue
-        try:
-            value = int(data_params[key])
-        except (TypeError, ValueError):
-            continue
-        return max(minimum, min(maximum, value))
-    return default
-
-
-def _intraday_point_limit(params: dict[str, Any] | None) -> int:
-    level = _payload_level(params)
-    default = PAYLOAD_LEVEL_INTRADAY_LIMITS[level]
-    return _bounded_int_param(
-        params,
-        ("intraday_limit", "intraday_bar_limit", "point_limit"),
-        default=default,
-        minimum=1,
-        maximum=PAYLOAD_LEVEL_INTRADAY_LIMITS["full"],
-    )
-
-
-def _has_payload_value(value: Any) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, dict):
-        return any(_has_payload_value(item) for item in value.values())
-    if isinstance(value, list):
-        return any(_has_payload_value(item) for item in value)
-    return True
-
-
-def _slot_envelope(
-    *,
-    status: str,
-    capability: str,
-    payload_ref: str | None = None,
-    payload_level: str | None = None,
-    priority: str = "support",
-    as_of: str | None = None,
-    missing: list[str] | None = None,
-    warnings: list[str] | None = None,
-    next_fill: str | None = None,
-) -> dict[str, Any]:
-    slot: dict[str, Any] = {
-        "status": status,
-        "capability": capability,
-        "priority": priority,
-    }
-    if payload_ref:
-        slot["payload_ref"] = payload_ref
-    if payload_level:
-        slot["payload_level"] = payload_level
-    if as_of:
-        slot["as_of"] = as_of
-    compact_missing = list(dict.fromkeys(missing or []))
-    compact_warnings = list(dict.fromkeys(warnings or []))
-    if compact_missing:
-        slot["missing"] = compact_missing
-    if compact_warnings:
-        slot["warnings"] = compact_warnings
-    if next_fill:
-        slot["next_fill"] = next_fill
-    return slot
 
 
 def _quote_slot_status(quote: dict[str, Any]) -> str:
@@ -272,22 +178,6 @@ def _intraday_slot_status(intraday_bars: dict[str, Any]) -> str:
         if isinstance(item, dict) and (item.get("latest") or item.get("returned_point_count")):
             return "ready"
     return "missing"
-
-
-def _payload_slot_status(
-    payload: Any,
-    *,
-    missing: list[str] | None = None,
-    partial_if_missing: bool = True,
-    not_applicable: bool = False,
-) -> str:
-    if not_applicable:
-        return "not_applicable"
-    if not _has_payload_value(payload):
-        return "missing"
-    if partial_if_missing and missing:
-        return "partial"
-    return "ready"
 
 
 def _build_tw_stock_slots(

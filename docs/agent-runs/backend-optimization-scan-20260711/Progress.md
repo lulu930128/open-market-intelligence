@@ -2,7 +2,142 @@
 
 ## Current status
 
-Status: scan complete; no backend behavior changed in this pass. Minimal backend syntax/import validation passed.
+Status: Batch 1 and Batch 2 implemented after checkpoint commit `70ad046`. Runtime lifecycle and AI market payload helper consolidation are now in code with targeted backend validation passing.
+
+## Implementation update - 2026-07-11
+
+### Batch 0 - Baseline
+
+Completed. The current worktree was checkpointed before maintenance, then the fuller Batch 0 backend baseline passed:
+
+```powershell
+.\scripts\run-safe-validation.ps1 -Profile backend -BackendPytestArgs @(
+  'backend\tests\test_ai_ask_stages.py',
+  'backend\tests\test_ai_freshness_guard.py',
+  'backend\tests\test_jp_market_data.py',
+  'backend\tests\test_kr_market_data.py',
+  'backend\tests\test_portfolio_holdings.py',
+  'backend\tests\test_watchlist_radar_automation.py'
+) -BackendTestTimeoutSeconds 240
+```
+
+Result:
+
+- `backend compileall`: passed.
+- targeted `backend pytest`: passed.
+- `git diff --check`: passed.
+
+### Batch 1 - Runtime side-effect boundary
+
+Completed. `backend/app/runtime.py` now owns the startup/shutdown lifecycle:
+
+- database migrations and `init_db`;
+- interrupted job marking;
+- scheduler startup/shutdown;
+- crypto auto-refresh startup/shutdown;
+- crypto realtime collector startup/shutdown;
+- job executor shutdown.
+
+`backend/app/main.py` now only wires the FastAPI app, middleware, exception handlers, and routers, then delegates lifespan behavior to `app.runtime.lifespan`. This keeps behavior equivalent while making runtime side effects testable without bloating the route registry module.
+
+Regression coverage added in `backend/tests/test_runtime.py`:
+
+- startup initializes DB and background components;
+- startup failure after a partial background start triggers cleanup;
+- shutdown calls every runtime cleanup step;
+- shutdown still attempts remaining cleanup when an earlier step fails.
+
+Targeted validation:
+
+```powershell
+.\scripts\run-safe-validation.ps1 -Profile backend -BackendPytestArgs @(
+  'backend\tests\test_runtime.py',
+  'backend\tests\test_system_health.py',
+  'backend\tests\test_calendar_status_integration.py'
+) -BackendTestTimeoutSeconds 240
+```
+
+Result:
+
+- `backend compileall`: passed.
+- targeted `backend pytest`: passed.
+- `git diff --check`: passed.
+
+### Batch 2 - AI market payload contract helper consolidation
+
+Completed. `backend/app/ai/market_payload_contract.py` now centralizes pure payload contract helpers:
+
+- payload level parsing and aliases (`payload_level`, `detail_level`, `detail`);
+- intraday point limit defaults and bounds;
+- generic bounded integer request parameter parsing;
+- recursive payload presence checks;
+- slot envelope construction;
+- payload slot status calculation.
+
+`backend/app/ai/tools.py` and `backend/app/ai/agentic_tools.py` now import these helpers instead of carrying separate implementations. The existing response shapes remain unchanged: `result.data.slots`, `result.data.compact.slots`, `analysis.human_answer`, and `analysis.decision_contract` are still assembled by the same higher-level code paths.
+
+Regression coverage added in `backend/tests/test_ai_market_payload_contract.py`:
+
+- payload-level aliases and fallback behavior;
+- intraday defaults and override bounds;
+- bounded integer parsing across fallback keys;
+- slot metadata de-duplication;
+- payload presence/status semantics.
+
+Targeted validation:
+
+```powershell
+.\scripts\run-safe-validation.ps1 -Profile backend -BackendPytestArgs @(
+  'backend\tests\test_ai_market_payload_contract.py',
+  'backend\tests\test_ai_ask_stages.py',
+  'backend\tests\test_ai_freshness_guard.py'
+) -BackendTestTimeoutSeconds 240
+```
+
+Result:
+
+- `backend compileall`: passed.
+- targeted `backend pytest`: passed.
+- `git diff --check`: passed.
+
+### Additional stability fix - portfolio context on DB-less AI paths
+
+Full backend validation exposed an existing regression in the AI decision-core tests: some read-only AI assembly paths call `ai_ask.ask(db=None, ...)`, but portfolio saved-position lookup expected a live SQLAlchemy session and called `db.query(...)`.
+
+Fixed by making `portfolio_service.get_position_context_for_scope` return an empty context when no DB session is available. This keeps saved position context additive: missing DB context should not block AI question understanding or answer assembly.
+
+Regression coverage added in `backend/tests/test_portfolio_holdings.py`.
+
+Targeted validation:
+
+```powershell
+.\scripts\run-safe-validation.ps1 -Profile backend -BackendPytestArgs @(
+  'backend\tests\test_ai_decision_core.py',
+  'backend\tests\test_portfolio_holdings.py'
+) -BackendTestTimeoutSeconds 240
+```
+
+Result:
+
+- `backend compileall`: passed.
+- targeted `backend pytest`: passed.
+- `git diff --check`: passed.
+
+### Final backend validation
+
+After the runtime, payload-helper, and portfolio-context fixes, the full backend profile passed:
+
+```powershell
+.\scripts\run-safe-validation.ps1 -Profile backend -BackendTestTimeoutSeconds 600
+```
+
+Result:
+
+- `backend compileall`: passed.
+- `backend pytest backend/tests`: passed.
+- `git diff --check`: passed.
+
+This final run was repeated after adding startup-failure cleanup coverage for `RuntimeCoordinator`.
 
 ## Evidence collected
 

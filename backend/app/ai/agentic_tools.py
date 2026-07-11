@@ -8,7 +8,15 @@ from typing import Any
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.ai import freshness
 from app.ai import llm, progress_events
+from app.ai.evidence_passport import build_evidence_passport
+from app.ai.market_payload_contract import (
+    has_payload_value as _has_market_payload_value,
+    intraday_point_limit as _market_intraday_point_limit,
+    payload_level as _market_payload_level,
+    slot_envelope as _market_slot,
+)
 from app.db.models import (
     JPStockMaster,
     KRStockMaster,
@@ -19,8 +27,6 @@ from app.db.models import (
     USShortVolumeDaily,
     USStockMaster,
 )
-from app.ai.evidence_passport import build_evidence_passport
-from app.ai import freshness
 from app.crypto_market import service as crypto_market_service
 from app.crypto_market.assets import get_crypto_asset
 from app.crypto_market.contract import PERPETUAL, SPOT, list_provider_instruments, normalize_symbol as normalize_crypto_symbol
@@ -1311,43 +1317,6 @@ def _latest_timestamp_from_rows(rows: list[Any], fields: tuple[str, ...]) -> str
     return max(values).isoformat()
 
 
-def _has_market_payload_value(value: Any) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, dict):
-        return any(_has_market_payload_value(item) for item in value.values())
-    if isinstance(value, list):
-        return any(_has_market_payload_value(item) for item in value)
-    return True
-
-
-def _market_slot(
-    *,
-    status: str,
-    capability: str,
-    payload_ref: str | None = None,
-    payload_level: str | None = None,
-    priority: str = "support",
-    next_fill: str | None = None,
-) -> dict[str, Any]:
-    slot: dict[str, Any] = {
-        "status": status,
-        "capability": capability,
-        "priority": priority,
-    }
-    if payload_ref:
-        slot["payload_ref"] = payload_ref
-    if payload_level:
-        slot["payload_level"] = payload_level
-    if next_fill:
-        slot["next_fill"] = next_fill
-    return slot
-
-
 def _freshness_status(freshness: dict[str, Any], *keys: str) -> str | None:
     for key in keys:
         value = freshness.get(key)
@@ -1371,42 +1340,6 @@ def _market_resource_count(resources: dict[str, Any], *keys: str) -> int:
         elif isinstance(value, dict):
             total += sum(item for item in value.values() if isinstance(item, int) and item > 0)
     return total
-
-
-MARKET_PAYLOAD_LEVELS = {"summary", "compact", "standard", "full"}
-MARKET_PAYLOAD_INTRADAY_LIMITS = {
-    "summary": 1,
-    "compact": 80,
-    "standard": 160,
-    "full": 500,
-}
-
-
-def _market_payload_level(params: dict[str, Any] | None) -> str:
-    data_params = params if isinstance(params, dict) else {}
-    raw_level = (
-        data_params.get("payload_level")
-        or data_params.get("detail_level")
-        or data_params.get("detail")
-        or "compact"
-    )
-    level = str(raw_level).strip().lower()
-    return level if level in MARKET_PAYLOAD_LEVELS else "compact"
-
-
-def _market_intraday_point_limit(params: dict[str, Any] | None) -> int:
-    level = _market_payload_level(params)
-    data_params = params if isinstance(params, dict) else {}
-    default = MARKET_PAYLOAD_INTRADAY_LIMITS[level]
-    for key in ("intraday_limit", "intraday_bar_limit", "point_limit"):
-        if key not in data_params:
-            continue
-        try:
-            value = int(data_params[key])
-        except (TypeError, ValueError):
-            continue
-        return max(1, min(MARKET_PAYLOAD_INTRADAY_LIMITS["full"], value))
-    return default
 
 
 def _freshness_has_missing(value: Any) -> bool:

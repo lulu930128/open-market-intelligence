@@ -248,13 +248,13 @@ def delete_holding(db: Session, holding_id: int) -> None:
 
 
 def get_position_context_for_scope(
-    db: Session,
+    db: Session | None,
     *,
     scope_type: str,
     scope_id: str | None,
 ) -> dict[str, Any]:
     market = SCOPE_TO_MARKET.get(scope_type)
-    if market is None or not scope_id:
+    if db is None or market is None or not scope_id:
         return {}
 
     symbol = normalize_symbol(market, scope_id)

@@ -59,6 +59,15 @@ class PortfolioHoldingServiceTests(unittest.TestCase):
         self.assertEqual(context["entry_price"], 50)
         self.assertEqual(context["currency"], "TWD")
 
+    def test_position_context_without_db_session_is_empty(self) -> None:
+        context = service.get_position_context_for_scope(
+            None,
+            scope_type="stock",
+            scope_id="2330",
+        )
+
+        self.assertEqual(context, {})
+
     def test_normalizes_cross_market_symbols(self) -> None:
         jp_holding = service.create_holding(
             self.db,
