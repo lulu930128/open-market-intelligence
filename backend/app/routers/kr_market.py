@@ -7,9 +7,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.jobs import backfill_tasks, service as job_service
+from app.jobs import backfill_tasks
 from app.jobs.job_types import KR_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE
 from app.jobs.schemas import JobRunRead
+from app.routers.market_family_helpers import (
+    enqueue_serialized_job,
+    fetch_error,
+    watchlist_group_error,
+    watchlist_group_target,
+    watchlist_item_error,
+)
 from app.kr_market.schemas import (
     KRCompanyFundamentalRead,
     KRDailyPriceRead,
@@ -98,26 +105,23 @@ router = APIRouter()
 
 
 def _fetch_error(exc: Exception) -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_502_BAD_GATEWAY,
-        detail=str(exc),
-    )
+    return fetch_error(exc)
 
 
 def _group_error(exc: Exception) -> HTTPException:
-    if isinstance(exc, KRWatchlistGroupNotFoundError):
-        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
-    if isinstance(exc, (KRWatchlistInvalidTreeError, KRWatchlistGroupNotEmptyError)):
-        return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
-    return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return watchlist_group_error(
+        exc,
+        not_found_errors=(KRWatchlistGroupNotFoundError,),
+        bad_request_errors=(KRWatchlistInvalidTreeError, KRWatchlistGroupNotEmptyError),
+    )
 
 
 def _item_error(exc: Exception) -> HTTPException:
-    if isinstance(exc, (KRWatchlistGroupNotFoundError, KRWatchlistItemNotFoundError, KRStockNotFoundError)):
-        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
-    if isinstance(exc, KRWatchlistDuplicateItemError):
-        return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
-    return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return watchlist_item_error(
+        exc,
+        not_found_errors=(KRWatchlistGroupNotFoundError, KRWatchlistItemNotFoundError, KRStockNotFoundError),
+        duplicate_errors=(KRWatchlistDuplicateItemError,),
+    )
 
 
 def _enqueue_kr_watchlist_resource_refresh(
@@ -134,7 +138,7 @@ def _enqueue_kr_watchlist_resource_refresh(
     sleep_seconds: float,
     max_symbols: int | None,
 ) -> dict:
-    target = f"group:{group_id}" if group_id is not None else "all"
+    target = watchlist_group_target(group_id)
     request = {
         "group_id": group_id,
         "include_children": include_children,
@@ -147,7 +151,7 @@ def _enqueue_kr_watchlist_resource_refresh(
         "sleep_seconds": sleep_seconds,
         "max_symbols": max_symbols,
     }
-    job, _created = job_service.enqueue_job(
+    return enqueue_serialized_job(
         db=db,
         job_type=KR_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
         target=target,
@@ -168,7 +172,6 @@ def _enqueue_kr_watchlist_resource_refresh(
             max_symbols,
         ),
     )
-    return job_service.serialize_job(job)
 
 
 @router.post("/stocks/sync-symbols", response_model=KRStockMasterSyncResultRead)

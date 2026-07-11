@@ -7,9 +7,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.jobs import backfill_tasks, service as job_service
+from app.jobs import backfill_tasks
 from app.jobs.job_types import JP_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE
 from app.jobs.schemas import JobRunRead
+from app.routers.market_family_helpers import (
+    enqueue_serialized_job,
+    fetch_error,
+    watchlist_group_error,
+    watchlist_group_target,
+    watchlist_item_error,
+)
 from app.settings.refresh_execution import (
     resolve_observed_stock_refresh_interval_seconds,
     resolve_subresource_refresh_interval_seconds,
@@ -75,30 +82,23 @@ router = APIRouter()
 
 
 def _fetch_error(exc: Exception) -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_502_BAD_GATEWAY,
-        detail=str(exc),
-    )
+    return fetch_error(exc)
 
 
 def _group_error(exc: Exception) -> HTTPException:
-    if isinstance(exc, JPWatchlistGroupNotFoundError):
-        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
-
-    if isinstance(exc, (JPWatchlistInvalidTreeError, JPWatchlistGroupNotEmptyError)):
-        return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
-
-    return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return watchlist_group_error(
+        exc,
+        not_found_errors=(JPWatchlistGroupNotFoundError,),
+        bad_request_errors=(JPWatchlistInvalidTreeError, JPWatchlistGroupNotEmptyError),
+    )
 
 
 def _item_error(exc: Exception) -> HTTPException:
-    if isinstance(exc, (JPWatchlistGroupNotFoundError, JPWatchlistItemNotFoundError, JPStockNotFoundError)):
-        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
-
-    if isinstance(exc, JPWatchlistDuplicateItemError):
-        return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
-
-    return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return watchlist_item_error(
+        exc,
+        not_found_errors=(JPWatchlistGroupNotFoundError, JPWatchlistItemNotFoundError, JPStockNotFoundError),
+        duplicate_errors=(JPWatchlistDuplicateItemError,),
+    )
 
 
 def _enqueue_jp_watchlist_resource_refresh(
@@ -113,7 +113,7 @@ def _enqueue_jp_watchlist_resource_refresh(
     provider: str,
     sleep_seconds: float,
 ) -> dict:
-    target = f"group:{group_id}" if group_id is not None else "all"
+    target = watchlist_group_target(group_id)
     request = {
         "group_id": group_id,
         "include_children": include_children,
@@ -124,7 +124,7 @@ def _enqueue_jp_watchlist_resource_refresh(
         "provider": provider,
         "sleep_seconds": sleep_seconds,
     }
-    job, _created = job_service.enqueue_job(
+    return enqueue_serialized_job(
         db=db,
         job_type=JP_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
         target=target,
@@ -143,7 +143,6 @@ def _enqueue_jp_watchlist_resource_refresh(
             sleep_seconds,
         ),
     )
-    return job_service.serialize_job(job)
 
 
 @router.post("/stocks/sync-symbols", response_model=JPStockMasterSyncResultRead)

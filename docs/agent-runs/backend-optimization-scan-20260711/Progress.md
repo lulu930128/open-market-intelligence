@@ -139,6 +139,54 @@ Result:
 
 This final run was repeated after adding startup-failure cleanup coverage for `RuntimeCoordinator`.
 
+### Batch 3 - Market-family router helper pass
+
+Completed first router-level slice. `backend/app/routers/market_family_helpers.py` now centralizes:
+
+- provider fetch error mapping to `502`;
+- market watchlist group error mapping;
+- market watchlist item error mapping;
+- watchlist group target formatting (`all` vs `group:{id}`);
+- serialized job enqueue wrapper used by market-family router refresh endpoints.
+
+`backend/app/routers/us_market.py`, `backend/app/routers/jp_market.py`, and `backend/app/routers/kr_market.py` now use the shared helper for their watchlist error mapping and resource refresh job enqueue paths. Route paths, response models, query parameters, service calls, job type strings, request envelope keys, and task argument order are preserved.
+
+Regression coverage added in `backend/tests/test_market_family_router_helpers.py`.
+
+Targeted validation:
+
+```powershell
+.\scripts\run-safe-validation.ps1 -Profile backend -BackendPytestArgs @(
+  'backend\tests\test_market_family_router_helpers.py',
+  'backend\tests\test_us_market_data.py',
+  'backend\tests\test_jp_market_data.py',
+  'backend\tests\test_kr_market_data.py'
+) -BackendTestTimeoutSeconds 360
+```
+
+Result:
+
+- `backend compileall`: passed.
+- targeted `backend pytest`: passed.
+- `git diff --check`: passed.
+
+Full backend validation after this Batch 3 slice:
+
+```powershell
+.\scripts\run-safe-validation.ps1 -Profile backend -BackendTestTimeoutSeconds 600
+```
+
+Result:
+
+- `backend compileall`: passed.
+- `backend pytest backend/tests`: passed.
+- `git diff --check`: passed.
+
+Remaining Batch 3 work:
+
+- Consider whether scheduler enqueue functions should also adopt the same helper, but only if it does not hide schedule-specific request fields such as `schedule` and calendar release metadata.
+- Consider a second pass over Taiwan `watchlists.py`; it has older local patterns and visible whitespace churn, so it should be handled as its own bounded cleanup rather than folded into US/JP/KR router helper extraction.
+
 ## Evidence collected
 
 - Product docs are now filled and usable, not blank templates. Key direction: backend owns market data, freshness, AI reasoning, tool orchestration, and answer contract.
