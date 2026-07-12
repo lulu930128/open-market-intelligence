@@ -34,7 +34,9 @@ frontend / MCP / Kuro -> backend HTTP API only
 - `market/` 是台股核心；`us_market/`、`jp_market/`、`kr_market/`、`crypto_market/` 與 `resource_market/` 是 context layers。
 - Service 擁有 normalization、fallback、upsert、bounded refresh、resource aggregation 與市場特有 policy。
 - Parser 與 provider adapter 保持純 IO / payload conversion，不接受 SQLAlchemy `Session`。
-- US provider namespace 已使用 `us_market/providers/` 作為薄 adapter；JP/KR 仍由 `sources.py` 承擔 provider IO 與 parser，後續拆分時必須保留 service import seam。
+- US、JP、KR provider 都使用各市場的 `providers/` namespace。Service 直接 import provider fetcher，讓 provider ownership 可被辨識與獨立測試。
+- US、JP、KR `sources.py` 不直接執行 provider HTTP；舊 `fetch_*` 名稱保留為 forwarding wrapper，保護既有 import seam。US `fetch_symbol_directories()` 只組合 NASDAQ/SEC provider payload 與既有 parser。
+- US、JP、KR 的 provider exception 與 symbol normalization 分別放在 `errors.py`、`symbols.py`，provider 與 parser 共同依賴純 contract，禁止互相反向 import。
 
 ## Provider HTTP Contract
 
@@ -79,7 +81,7 @@ frontend / MCP / Kuro -> backend HTTP API only
 ## 驗證層級
 
 - Pure contract：`test_provider_http.py`、`test_source_health_contract.py`。
-- Provider/event integration：`test_provider_health.py`。
+- Provider/event integration：`test_provider_health.py`、`test_market_provider_adapters.py`。
 - 市場 contract：`test_market_source_health.py`、`test_us_market_data.py`、`test_jp_market_data.py`、`test_kr_market_data.py`、`test_crypto_market.py`、`test_resource_market.py`。
 - 跨模組修改完成後使用 `scripts/run-safe-validation.ps1 -Profile backend` 跑完整 backend regression。
 

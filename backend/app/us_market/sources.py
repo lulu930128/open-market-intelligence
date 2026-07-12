@@ -8,30 +8,16 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
-from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
-import requests
-
-from app.observability.provider_http import (
-    ProviderRequestContext,
-    get as provider_get,
-)
+from app.us_market.errors import USMarketDataFetchError
+from app.us_market.providers import alphavantage, finra, fred, nasdaq, sec, yahoo
+from app.us_market.symbols import normalize_us_symbol
 from app.us_market.trading_calendar import (
     US_POST_MARKET_CLOSE_TIME,
     US_PRE_MARKET_OPEN_TIME,
     US_SESSION_CLOSE_TIME,
     US_SESSION_OPEN_TIME,
 )
-
-
-NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
-NASDAQ_OTHER_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
-SEC_COMPANY_TICKERS_EXCHANGE_URL = "https://www.sec.gov/files/company_tickers_exchange.json"
-SEC_COMPANY_FACTS_URL_TEMPLATE = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
-ALPHAVANTAGE_QUERY_URL = "https://www.alphavantage.co/query"
-FINRA_SHORT_VOLUME_URL_TEMPLATE = "https://cdn.finra.org/equity/regsho/daily/CNMSshvol{date}.txt"
-FRED_SERIES_OBSERVATIONS_URL = "https://api.stlouisfed.org/fred/series/observations"
-YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 
 
 OTHER_EXCHANGE_CODES = {
@@ -64,10 +50,6 @@ YAHOO_INSTRUMENT_TYPES = {
     "INDEX": "index",
     "MUTUALFUND": "fund",
 }
-
-
-class USMarketDataFetchError(Exception):
-    pass
 
 
 @dataclass(frozen=True)
@@ -228,27 +210,6 @@ class MacroSeriesObservationRecord:
     raw_payload_hash: str | None
 
 
-US_SYMBOL_TOKEN_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9.$-]{0,31}")
-
-
-def normalize_us_symbol(value: str | None) -> str:
-    if value is None:
-        return ""
-
-    cleaned = str(value).strip().upper()
-    if not cleaned:
-        return ""
-
-    if ":" in cleaned:
-        cleaned = cleaned.rsplit(":", maxsplit=1)[-1].strip()
-
-    if "/" in cleaned:
-        cleaned = cleaned.split("/", maxsplit=1)[0].strip()
-
-    match = US_SYMBOL_TOKEN_PATTERN.match(cleaned)
-    return match.group(0) if match else cleaned
-
-
 def _clean_text(value: Any) -> str | None:
     if value is None:
         return None
@@ -321,49 +282,6 @@ def _parse_compact_date(value: Any) -> date | None:
 def _payload_hash(payload: Any) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
-
-
-def _redact_url_params(url: str, names: tuple[str, ...] = ("apikey", "api_key")) -> str:
-    parts = urlsplit(url)
-    if not parts.query:
-        return url
-
-    redacted_names = {name.lower() for name in names}
-    changed = False
-    query_pairs: list[tuple[str, str]] = []
-    for key, value in parse_qsl(parts.query, keep_blank_values=True):
-        if key.lower() in redacted_names:
-            query_pairs.append((key, "REDACTED"))
-            changed = True
-            continue
-
-        query_pairs.append((key, value))
-
-    if not changed:
-        return url
-
-    return urlunsplit(
-        (
-            parts.scheme,
-            parts.netloc,
-            parts.path,
-            urlencode(query_pairs),
-            parts.fragment,
-        )
-    )
-
-
-def _alphavantage_payload_or_raise(response: requests.Response) -> dict[str, Any]:
-    payload = response.json()
-
-    if not isinstance(payload, dict):
-        raise USMarketDataFetchError("Alpha Vantage returned a non-object JSON payload.")
-
-    error_message = payload.get("Error Message") or payload.get("Note") or payload.get("Information")
-    if error_message:
-        raise USMarketDataFetchError(str(error_message))
-
-    return payload
 
 
 def _list_value(values: Any, index: int) -> Any:
@@ -542,86 +460,15 @@ def parse_symbol_directories(
     return sorted(merge_sec_company_data(records, sec_mapping), key=lambda item: item.symbol)
 
 
-def _provider_get(
-    url: str,
-    *,
-    provider: str,
-    resource: str,
-    target: str = "all",
-    timeout_seconds: int,
-    **kwargs: Any,
-) -> requests.Response:
-    return provider_get(
-        ProviderRequestContext(
-            market="us",
-            provider=provider,
-            resource=resource,
-            target=target,
-        ),
-        url,
-        timeout_seconds=timeout_seconds,
-        **kwargs,
-    )
-
-
-def _get_json(
-    url: str,
-    *,
-    provider: str,
-    resource: str,
-    target: str = "all",
-    timeout_seconds: int,
-    headers: dict[str, str] | None = None,
-) -> dict[str, Any]:
-    response = _provider_get(
-        url,
-        provider=provider,
-        resource=resource,
-        target=target,
-        headers=headers,
-        timeout_seconds=timeout_seconds,
-    )
-    payload = response.json()
-
-    if not isinstance(payload, dict):
-        raise USMarketDataFetchError(f"Expected JSON object from {url}.")
-
-    return payload
-
-
-def _get_text(
-    url: str,
-    *,
-    provider: str,
-    resource: str,
-    target: str = "all",
-    timeout_seconds: int,
-    headers: dict[str, str] | None = None,
-) -> str:
-    response = _provider_get(
-        url,
-        provider=provider,
-        resource=resource,
-        target=target,
-        headers=headers,
-        timeout_seconds=timeout_seconds,
-    )
-    return response.text
-
-
 def fetch_sec_company_tickers_exchange_payload(
     *,
     sec_user_agent: str,
     timeout_seconds: int,
 ) -> tuple[dict[str, Any], str]:
-    payload = _get_json(
-        SEC_COMPANY_TICKERS_EXCHANGE_URL,
-        provider="sec_edgar",
-        resource="symbol_master",
-        headers={"User-Agent": sec_user_agent},
+    return sec.fetch_sec_company_tickers_exchange_payload(
+        sec_user_agent=sec_user_agent,
         timeout_seconds=timeout_seconds,
     )
-    return payload, SEC_COMPANY_TICKERS_EXCHANGE_URL
 
 
 def fetch_symbol_directories(
@@ -630,16 +477,7 @@ def fetch_symbol_directories(
     sec_user_agent: str,
     timeout_seconds: int,
 ) -> list[USSymbolRecord]:
-    nasdaq_text = _get_text(
-        NASDAQ_LISTED_URL,
-        provider="nasdaq_trader",
-        resource="symbol_master",
-        timeout_seconds=timeout_seconds,
-    )
-    other_text = _get_text(
-        NASDAQ_OTHER_LISTED_URL,
-        provider="nasdaq_trader",
-        resource="symbol_master",
+    nasdaq_text, other_text = nasdaq.fetch_symbol_directory_payloads(
         timeout_seconds=timeout_seconds,
     )
     sec_payload = None
@@ -665,23 +503,13 @@ def fetch_alphavantage_daily_payload(
     adjusted: bool,
     timeout_seconds: int,
 ) -> tuple[dict[str, Any], str]:
-    function_name = "TIME_SERIES_DAILY_ADJUSTED" if adjusted else "TIME_SERIES_DAILY"
-    normalized_symbol = normalize_us_symbol(symbol)
-    response = _provider_get(
-        ALPHAVANTAGE_QUERY_URL,
-        provider="alphavantage",
-        resource="daily_price",
-        target=normalized_symbol,
-        params={
-            "function": function_name,
-            "symbol": normalized_symbol,
-            "outputsize": outputsize,
-            "apikey": api_key,
-        },
+    return alphavantage.fetch_alphavantage_daily_payload(
+        symbol=symbol,
+        api_key=api_key,
+        outputsize=outputsize,
+        adjusted=adjusted,
         timeout_seconds=timeout_seconds,
     )
-    payload = _alphavantage_payload_or_raise(response)
-    return payload, _redact_url_params(response.url)
 
 
 def fetch_alphavantage_overview_payload(
@@ -690,21 +518,11 @@ def fetch_alphavantage_overview_payload(
     api_key: str,
     timeout_seconds: int,
 ) -> tuple[dict[str, Any], str]:
-    normalized_symbol = normalize_us_symbol(symbol)
-    response = _provider_get(
-        ALPHAVANTAGE_QUERY_URL,
-        provider="alphavantage",
-        resource="profile",
-        target=normalized_symbol,
-        params={
-            "function": "OVERVIEW",
-            "symbol": normalized_symbol,
-            "apikey": api_key,
-        },
+    return alphavantage.fetch_alphavantage_overview_payload(
+        symbol=symbol,
+        api_key=api_key,
         timeout_seconds=timeout_seconds,
     )
-    payload = _alphavantage_payload_or_raise(response)
-    return payload, _redact_url_params(response.url)
 
 
 def fetch_alphavantage_dividends_payload(
@@ -713,21 +531,11 @@ def fetch_alphavantage_dividends_payload(
     api_key: str,
     timeout_seconds: int,
 ) -> tuple[dict[str, Any], str]:
-    normalized_symbol = normalize_us_symbol(symbol)
-    response = _provider_get(
-        ALPHAVANTAGE_QUERY_URL,
-        provider="alphavantage",
-        resource="corporate_actions",
-        target=normalized_symbol,
-        params={
-            "function": "DIVIDENDS",
-            "symbol": normalized_symbol,
-            "apikey": api_key,
-        },
+    return alphavantage.fetch_alphavantage_dividends_payload(
+        symbol=symbol,
+        api_key=api_key,
         timeout_seconds=timeout_seconds,
     )
-    payload = _alphavantage_payload_or_raise(response)
-    return payload, _redact_url_params(response.url)
 
 
 def fetch_alphavantage_splits_payload(
@@ -736,21 +544,11 @@ def fetch_alphavantage_splits_payload(
     api_key: str,
     timeout_seconds: int,
 ) -> tuple[dict[str, Any], str]:
-    normalized_symbol = normalize_us_symbol(symbol)
-    response = _provider_get(
-        ALPHAVANTAGE_QUERY_URL,
-        provider="alphavantage",
-        resource="corporate_actions",
-        target=normalized_symbol,
-        params={
-            "function": "SPLITS",
-            "symbol": normalized_symbol,
-            "apikey": api_key,
-        },
+    return alphavantage.fetch_alphavantage_splits_payload(
+        symbol=symbol,
+        api_key=api_key,
         timeout_seconds=timeout_seconds,
     )
-    payload = _alphavantage_payload_or_raise(response)
-    return payload, _redact_url_params(response.url)
 
 
 def fetch_finra_short_volume_payload(
@@ -758,15 +556,9 @@ def fetch_finra_short_volume_payload(
     trade_date: date,
     timeout_seconds: int,
 ) -> tuple[str, str]:
-    url = FINRA_SHORT_VOLUME_URL_TEMPLATE.format(date=trade_date.strftime("%Y%m%d"))
-    return (
-        _get_text(
-            url,
-            provider="finra",
-            resource="short_volume",
-            timeout_seconds=timeout_seconds,
-        ),
-        url,
+    return finra.fetch_finra_short_volume_payload(
+        trade_date=trade_date,
+        timeout_seconds=timeout_seconds,
     )
 
 
@@ -778,34 +570,13 @@ def fetch_fred_series_observations_payload(
     observation_start: date | None = None,
     observation_end: date | None = None,
 ) -> tuple[dict[str, Any], str]:
-    params: dict[str, str] = {
-        "series_id": series_id.strip().upper(),
-        "api_key": api_key,
-        "file_type": "json",
-    }
-    if observation_start is not None:
-        params["observation_start"] = observation_start.isoformat()
-    if observation_end is not None:
-        params["observation_end"] = observation_end.isoformat()
-
-    normalized_series_id = series_id.strip().upper()
-    response = _provider_get(
-        FRED_SERIES_OBSERVATIONS_URL,
-        provider="fred",
-        resource="macro_series",
-        target=normalized_series_id,
-        params=params,
+    return fred.fetch_fred_series_observations_payload(
+        series_id=series_id,
+        api_key=api_key,
+        observation_start=observation_start,
+        observation_end=observation_end,
         timeout_seconds=timeout_seconds,
     )
-    payload = response.json()
-
-    if not isinstance(payload, dict):
-        raise USMarketDataFetchError("FRED returned a non-object JSON payload.")
-
-    if "error_code" in payload:
-        raise USMarketDataFetchError(str(payload.get("error_message") or payload["error_code"]))
-
-    return payload, _redact_url_params(response.url)
 
 
 def fetch_yahoo_chart_payload(
@@ -816,29 +587,13 @@ def fetch_yahoo_chart_payload(
     timeout_seconds: int,
     include_prepost: bool = False,
 ) -> tuple[dict[str, Any], str]:
-    normalized_symbol = normalize_us_symbol(symbol)
-    response = _provider_get(
-        YAHOO_CHART_URL.format(symbol=quote(normalized_symbol, safe="")),
-        provider="yahoo_chart",
-        resource="daily_price",
-        target=normalized_symbol,
-        params={
-            "range": range_value,
-            "interval": interval,
-            "includePrePost": "true" if include_prepost else "false",
-        },
-        headers={
-            "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
-            "Accept": "application/json,text/plain,*/*",
-        },
+    return yahoo.fetch_yahoo_chart_payload(
+        symbol=symbol,
+        range_value=range_value,
+        interval=interval,
+        include_prepost=include_prepost,
         timeout_seconds=timeout_seconds,
     )
-    payload = response.json()
-
-    if not isinstance(payload, dict):
-        raise USMarketDataFetchError("Yahoo chart returned a non-object JSON payload.")
-
-    return payload, response.url
 
 
 def parse_alphavantage_daily_prices(
@@ -1362,20 +1117,11 @@ def fetch_sec_companyfacts_payload(
     sec_user_agent: str,
     timeout_seconds: int,
 ) -> tuple[dict[str, Any], str]:
-    padded_cik = f"{_parse_int(cik) or 0:010d}"
-    if padded_cik == "0000000000":
-        raise USMarketDataFetchError(f"Invalid CIK value: {cik}")
-
-    url = SEC_COMPANY_FACTS_URL_TEMPLATE.format(cik=padded_cik)
-    payload = _get_json(
-        url,
-        provider="sec_edgar",
-        resource="sec_facts",
-        target=padded_cik,
-        headers={"User-Agent": sec_user_agent},
+    return sec.fetch_sec_companyfacts_payload(
+        cik=cik,
+        sec_user_agent=sec_user_agent,
         timeout_seconds=timeout_seconds,
     )
-    return payload, url
 
 
 def _fact_key(*parts: Any) -> str:

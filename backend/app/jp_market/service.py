@@ -29,6 +29,19 @@ from app.jp_market.schemas import (
     JPWatchlistItemCreate,
     JPWatchlistItemUpdate,
 )
+from app.jp_market.providers.jpx import fetch_jpx_listed_issues_workbook
+from app.jp_market.providers.jquants import (
+    fetch_jquants_id_token,
+    fetch_jquants_investor_types_payload,
+    fetch_jquants_margin_interest_payload,
+    fetch_jquants_refresh_token,
+    fetch_jquants_statements_payload,
+    fetch_jquants_summary_payload,
+)
+from app.jp_market.providers.yahoo import (
+    fetch_yahoo_chart_payload,
+    fetch_yahoo_quote_summary_payload,
+)
 from app.jp_market.sources import (
     JPCompanyFundamentalRecord,
     JPDailyPriceRecord,
@@ -36,15 +49,6 @@ from app.jp_market.sources import (
     JPMarginInterestRecord,
     JPMarketDataFetchError,
     JPStockRecord,
-    fetch_jquants_id_token,
-    fetch_jquants_investor_types_payload,
-    fetch_jquants_margin_interest_payload,
-    fetch_jquants_refresh_token,
-    fetch_jquants_statements_payload,
-    fetch_jquants_summary_payload,
-    fetch_jpx_listed_issues_workbook,
-    fetch_yahoo_chart_payload,
-    fetch_yahoo_quote_summary_payload,
     local_code_from_symbol,
     normalize_jp_symbol,
     parse_jpx_listed_issues_workbook,

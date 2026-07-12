@@ -6,36 +6,12 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
-from urllib.parse import quote
 
-import requests
-
-from app.observability.provider_http import (
-    ProviderHttpError,
-    ProviderRequestContext,
-    get as provider_get,
-    post as provider_post,
-)
+from app.jp_market.errors import JPMarketDataFetchError
+from app.jp_market.providers import jpx, jquants, yahoo
+from app.jp_market.symbols import local_code_from_symbol, normalize_jp_symbol
 
 
-YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-YAHOO_QUOTE_SUMMARY_URL = "https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
-YAHOO_QUOTE_SUMMARY_MODULES = (
-    "price",
-    "assetProfile",
-    "summaryDetail",
-    "defaultKeyStatistics",
-    "financialData",
-    "calendarEvents",
-)
-JQUANTS_AUTH_USER_PATH = "/token/auth_user"
-JQUANTS_AUTH_REFRESH_PATH = "/token/auth_refresh"
-JQUANTS_STATEMENTS_PATH = "/fins/statements"
-JQUANTS_SUMMARY_PATH = "/fins/summary"
-JQUANTS_MARGIN_INTEREST_PATH = "/markets/margin-interest"
-JQUANTS_INVESTOR_TYPES_PATH = "/equities/investor-types"
-JPX_LISTED_ISSUES_URL = "https://www.jpx.co.jp/english/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_e.xls"
-JP_SYMBOL_TOKEN_PATTERN = re.compile(r"^[0-9A-Z][0-9A-Z.\-]{0,31}")
 YAHOO_INSTRUMENT_TYPES = {
     "EQUITY": "stock",
     "ETF": "ETF",
@@ -43,74 +19,6 @@ YAHOO_INSTRUMENT_TYPES = {
     "MUTUALFUND": "fund",
     "REIT": "REIT",
 }
-
-
-class JPMarketDataFetchError(Exception):
-    pass
-
-
-def _provider_context(
-    *,
-    provider: str,
-    resource: str,
-    target: str = "all",
-) -> ProviderRequestContext:
-    return ProviderRequestContext(
-        market="jp",
-        provider=provider,
-        resource=resource,
-        target=target,
-    )
-
-
-def _provider_get(
-    url: str,
-    *,
-    provider: str,
-    resource: str,
-    target: str = "all",
-    timeout_seconds: int,
-    **kwargs: Any,
-) -> requests.Response:
-    return provider_get(
-        _provider_context(provider=provider, resource=resource, target=target),
-        url,
-        timeout_seconds=timeout_seconds,
-        **kwargs,
-    )
-
-
-def _jquants_request(
-    operation: str,
-    method: str,
-    url: str,
-    *,
-    provider: str,
-    resource: str,
-    target: str = "all",
-    timeout_seconds: int,
-    **kwargs: Any,
-) -> requests.Response:
-    try:
-        if method == "POST":
-            return provider_post(
-                _provider_context(provider=provider, resource=resource, target=target),
-                url,
-                timeout_seconds=timeout_seconds,
-                **kwargs,
-            )
-        return provider_get(
-            _provider_context(provider=provider, resource=resource, target=target),
-            url,
-            timeout_seconds=timeout_seconds,
-            **kwargs,
-        )
-    except ProviderHttpError as exc:
-        if exc.http_status_code is not None:
-            raise JPMarketDataFetchError(
-                f"J-Quants {operation} failed: HTTP {exc.http_status_code}."
-            ) from exc
-        raise
 
 
 @dataclass(frozen=True)
@@ -260,37 +168,6 @@ class JPInvestorTypeRecord:
     raw_payload_hash: str | None
 
 
-def normalize_jp_symbol(value: str | None) -> str:
-    if value is None:
-        return ""
-
-    cleaned = str(value).strip().upper()
-    if not cleaned:
-        return ""
-
-    if ":" in cleaned:
-        cleaned = cleaned.rsplit(":", maxsplit=1)[-1].strip()
-
-    if "/" in cleaned:
-        cleaned = cleaned.split("/", maxsplit=1)[0].strip()
-
-    match = JP_SYMBOL_TOKEN_PATTERN.match(cleaned)
-    normalized = match.group(0) if match else cleaned
-
-    if "." in normalized:
-        return normalized
-
-    if re.fullmatch(r"[0-9A-Z]{4}", normalized):
-        return f"{normalized}.T"
-
-    return normalized
-
-
-def local_code_from_symbol(symbol: str) -> str:
-    normalized_symbol = normalize_jp_symbol(symbol)
-    return normalized_symbol.split(".", maxsplit=1)[0]
-
-
 def _clean_text(value: Any) -> str | None:
     if value is None:
         return None
@@ -431,14 +308,6 @@ def _row_value(row: dict[str, Any], *names: str) -> Any:
     return None
 
 
-def _jquants_base_url(base_url: str) -> str:
-    return base_url.rstrip("/")
-
-
-def _jquants_url(base_url: str, path: str) -> str:
-    return f"{_jquants_base_url(base_url)}{path}"
-
-
 def fetch_jquants_refresh_token(
     *,
     base_url: str,
@@ -446,22 +315,12 @@ def fetch_jquants_refresh_token(
     password: str,
     timeout_seconds: int = 30,
 ) -> str:
-    response = _jquants_request(
-        "auth_user",
-        "POST",
-        _jquants_url(base_url, JQUANTS_AUTH_USER_PATH),
-        provider="jquants",
-        resource="auth",
-        json={"mailaddress": mail_address, "password": password},
+    return jquants.fetch_jquants_refresh_token(
+        base_url=base_url,
+        mail_address=mail_address,
+        password=password,
         timeout_seconds=timeout_seconds,
     )
-
-    payload = response.json()
-    refresh_token = _clean_text(payload.get("refreshToken"))
-    if refresh_token is None:
-        raise JPMarketDataFetchError("J-Quants auth_user did not return refreshToken.")
-
-    return refresh_token
 
 
 def fetch_jquants_id_token(
@@ -470,22 +329,11 @@ def fetch_jquants_id_token(
     refresh_token: str,
     timeout_seconds: int = 30,
 ) -> str:
-    response = _jquants_request(
-        "auth_refresh",
-        "POST",
-        _jquants_url(base_url, JQUANTS_AUTH_REFRESH_PATH),
-        provider="jquants",
-        resource="auth",
-        params={"refreshtoken": refresh_token},
+    return jquants.fetch_jquants_id_token(
+        base_url=base_url,
+        refresh_token=refresh_token,
         timeout_seconds=timeout_seconds,
     )
-
-    payload = response.json()
-    id_token = _clean_text(payload.get("idToken"))
-    if id_token is None:
-        raise JPMarketDataFetchError("J-Quants auth_refresh did not return idToken.")
-
-    return id_token
 
 
 def fetch_jquants_statements_payload(
@@ -495,20 +343,12 @@ def fetch_jquants_statements_payload(
     local_code: str,
     timeout_seconds: int = 30,
 ) -> tuple[dict[str, Any], str]:
-    url = _jquants_url(base_url, JQUANTS_STATEMENTS_PATH)
-    response = _jquants_request(
-        "statements",
-        "GET",
-        url,
-        provider="jquants_statements",
-        resource="fundamentals",
-        target=local_code,
-        params={"code": local_code},
-        headers={"Authorization": f"Bearer {id_token}"},
+    return jquants.fetch_jquants_statements_payload(
+        base_url=base_url,
+        id_token=id_token,
+        local_code=local_code,
         timeout_seconds=timeout_seconds,
     )
-
-    return response.json(), response.url
 
 
 def fetch_jquants_summary_payload(
@@ -518,20 +358,12 @@ def fetch_jquants_summary_payload(
     local_code: str,
     timeout_seconds: int = 30,
 ) -> tuple[dict[str, Any], str]:
-    url = _jquants_url(base_url, JQUANTS_SUMMARY_PATH)
-    response = _jquants_request(
-        "summary",
-        "GET",
-        url,
-        provider="jquants_summary",
-        resource="fundamentals",
-        target=local_code,
-        params={"code": local_code},
-        headers={"x-api-key": api_key},
+    return jquants.fetch_jquants_summary_payload(
+        base_url=base_url,
+        api_key=api_key,
+        local_code=local_code,
         timeout_seconds=timeout_seconds,
     )
-
-    return response.json(), response.url
 
 
 def fetch_jquants_margin_interest_payload(
@@ -543,26 +375,14 @@ def fetch_jquants_margin_interest_payload(
     to_date: date | None = None,
     timeout_seconds: int = 30,
 ) -> tuple[dict[str, Any], str]:
-    params: dict[str, str] = {"code": local_code}
-    if from_date is not None:
-        params["from"] = from_date.isoformat()
-    if to_date is not None:
-        params["to"] = to_date.isoformat()
-
-    url = _jquants_url(base_url, JQUANTS_MARGIN_INTEREST_PATH)
-    response = _jquants_request(
-        "margin-interest",
-        "GET",
-        url,
-        provider="jquants_margin_interest",
-        resource="margin_interest",
-        target=local_code,
-        params=params,
-        headers={"x-api-key": api_key},
+    return jquants.fetch_jquants_margin_interest_payload(
+        base_url=base_url,
+        api_key=api_key,
+        local_code=local_code,
+        from_date=from_date,
+        to_date=to_date,
         timeout_seconds=timeout_seconds,
     )
-
-    return response.json(), response.url
 
 
 def fetch_jquants_investor_types_payload(
@@ -574,28 +394,14 @@ def fetch_jquants_investor_types_payload(
     to_date: date | None = None,
     timeout_seconds: int = 30,
 ) -> tuple[dict[str, Any], str]:
-    params: dict[str, str] = {}
-    if section:
-        params["section"] = section
-    if from_date is not None:
-        params["from"] = from_date.isoformat()
-    if to_date is not None:
-        params["to"] = to_date.isoformat()
-
-    url = _jquants_url(base_url, JQUANTS_INVESTOR_TYPES_PATH)
-    response = _jquants_request(
-        "investor-types",
-        "GET",
-        url,
-        provider="jquants_investor_types",
-        resource="investor_types",
-        target=section or "all",
-        params=params,
-        headers={"x-api-key": api_key},
+    return jquants.fetch_jquants_investor_types_payload(
+        base_url=base_url,
+        api_key=api_key,
+        section=section,
+        from_date=from_date,
+        to_date=to_date,
         timeout_seconds=timeout_seconds,
     )
-
-    return response.json(), response.url
 
 
 def _jquants_statement_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -729,17 +535,9 @@ def fetch_jpx_listed_issues_workbook(
     *,
     timeout_seconds: int,
 ) -> tuple[bytes, str]:
-    response = _provider_get(
-        JPX_LISTED_ISSUES_URL,
-        provider="jpx_listed_issues",
-        resource="symbol_master",
-        headers={
-            "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
-            "Accept": "application/vnd.ms-excel,application/octet-stream,*/*",
-        },
+    return jpx.fetch_jpx_listed_issues_workbook(
         timeout_seconds=timeout_seconds,
     )
-    return response.content, response.url
 
 
 def fetch_yahoo_chart_payload(
@@ -749,29 +547,12 @@ def fetch_yahoo_chart_payload(
     interval: str,
     timeout_seconds: int,
 ) -> tuple[dict[str, Any], str]:
-    normalized_symbol = normalize_jp_symbol(symbol)
-    response = _provider_get(
-        YAHOO_CHART_URL.format(symbol=quote(normalized_symbol, safe="")),
-        provider="yahoo_chart",
-        resource="daily_price",
-        target=normalized_symbol,
-        params={
-            "range": range_value,
-            "interval": interval,
-            "includePrePost": "false",
-        },
-        headers={
-            "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
-            "Accept": "application/json,text/plain,*/*",
-        },
+    return yahoo.fetch_yahoo_chart_payload(
+        symbol=symbol,
+        range_value=range_value,
+        interval=interval,
         timeout_seconds=timeout_seconds,
     )
-    payload = response.json()
-
-    if not isinstance(payload, dict):
-        raise JPMarketDataFetchError("Yahoo chart returned a non-object JSON payload.")
-
-    return payload, response.url
 
 
 def fetch_yahoo_quote_summary_payload(
@@ -779,25 +560,10 @@ def fetch_yahoo_quote_summary_payload(
     symbol: str,
     timeout_seconds: int,
 ) -> tuple[dict[str, Any], str]:
-    normalized_symbol = normalize_jp_symbol(symbol)
-    response = _provider_get(
-        YAHOO_QUOTE_SUMMARY_URL.format(symbol=quote(normalized_symbol, safe="")),
-        provider="yahoo_quote_summary",
-        resource="fundamentals",
-        target=normalized_symbol,
-        params={"modules": ",".join(YAHOO_QUOTE_SUMMARY_MODULES)},
-        headers={
-            "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
-            "Accept": "application/json,text/plain,*/*",
-        },
+    return yahoo.fetch_yahoo_quote_summary_payload(
+        symbol=symbol,
         timeout_seconds=timeout_seconds,
     )
-    payload = response.json()
-
-    if not isinstance(payload, dict):
-        raise JPMarketDataFetchError("Yahoo quote summary returned a non-object JSON payload.")
-
-    return payload, response.url
 
 
 def parse_yahoo_stock_record(

@@ -247,6 +247,99 @@ Result:
 - `git diff --check`: passed.
 - Runtime: 71 seconds; validation logs: `.tmp/validation/20260711-192905`.
 
+### Batch 5 - US/JP/KR provider adapter responsibility split
+
+Completed the first large-module split only where Batch 4 exposed a stable seam. No route, response shape, DB transaction, refresh policy, or fallback order changed.
+
+JP and KR external IO now lives in provider-specific modules:
+
+- JP: `providers/jquants.py`, `providers/jpx.py`, `providers/yahoo.py`;
+- KR: `providers/naver.py`, `providers/krx.py`, `providers/yahoo.py`, `providers/opendart.py`;
+- each market has a private `_http.py` that supplies the correct `market/provider/resource/target` context to the shared provider HTTP contract;
+- `errors.py` and `symbols.py` are pure shared contracts used by both providers and parsers.
+
+The market services now import fetchers directly from provider modules. Existing `sources.fetch_*`, error, symbol normalization, and local-code imports remain backward-compatible through forwarding or re-export, so external callers and existing router imports do not break. Existing tests can still patch `app.jp_market.service.fetch_*` and `app.kr_market.service.fetch_*`.
+
+Added `backend/tests/test_market_provider_adapters.py` to lock down:
+
+- service-to-provider binding;
+- legacy source forwarding;
+- symbol and exception re-export compatibility;
+- JP/KR provider context identity;
+- KRX POST behavior and payload error wording;
+- J-Quants HTTP status fallback wording.
+
+Targeted validation completed:
+
+```powershell
+.\scripts\run-safe-validation.ps1 -Profile backend -BackendPytestArgs @(
+  'backend\tests\test_jp_market_data.py',
+  'backend\tests\test_kr_market_data.py'
+) -BackendTestTimeoutSeconds 420
+
+.\scripts\run-safe-validation.ps1 -Profile backend -BackendPytestArgs @(
+  'backend\tests\test_market_provider_adapters.py'
+) -BackendTestTimeoutSeconds 180
+```
+
+Both runs passed compileall, pytest, and `git diff --check`.
+
+Final full backend validation:
+
+```powershell
+.\scripts\run-safe-validation.ps1 -Profile backend -BackendTestTimeoutSeconds 600
+```
+
+Result:
+
+- `backend compileall`: passed;
+- `backend pytest backend/tests`: 542 passed, 1 existing Python 3.12 SQLite datetime adapter deprecation warning;
+- `git diff --check`: passed;
+- runtime: 82 seconds; validation logs: `.tmp/validation/20260712-215201`.
+
+US provider ownership was then brought to the same boundary. The existing `us_market/providers/` files no longer call back into `sources.py`; they now own the real HTTP request, provider identity, response validation, and successful source-URL redaction for:
+
+- Alpha Vantage;
+- FINRA;
+- FRED;
+- SEC EDGAR;
+- Yahoo Chart;
+- NASDAQ Trader symbol directories.
+
+US now also has `errors.py`, `symbols.py`, and provider-local `_http.py`, matching the dependency direction used by JP/KR. `sources.py` retains all old fetch signatures as forwarding wrappers. Its legacy `fetch_symbol_directories()` compatibility entrypoint composes NASDAQ/SEC provider payloads with the existing parser but performs no direct HTTP.
+
+Additional targeted validation:
+
+```powershell
+.\scripts\run-safe-validation.ps1 -Profile backend -BackendPytestArgs @(
+  'backend\tests\test_us_market_data.py'
+) -BackendTestTimeoutSeconds 420
+
+.\scripts\run-safe-validation.ps1 -Profile backend -BackendPytestArgs @(
+  'backend\tests\test_market_provider_adapters.py'
+) -BackendTestTimeoutSeconds 180
+```
+
+Results:
+
+- US market regression passed;
+- provider adapter contract: 12 passed;
+- both runs passed compileall and `git diff --check`;
+- logs: `.tmp/validation/20260712-220342` and `.tmp/validation/20260712-220711`.
+
+Final full backend validation after completing all US/JP/KR provider boundaries:
+
+```powershell
+.\scripts\run-safe-validation.ps1 -Profile backend -BackendTestTimeoutSeconds 600
+```
+
+Result:
+
+- `backend compileall`: passed;
+- `backend pytest backend/tests`: 547 passed, 1 existing Python 3.12 SQLite datetime adapter deprecation warning;
+- `git diff --check`: passed;
+- runtime: 81 seconds; validation logs: `.tmp/validation/20260712-220737`.
+
 ## Evidence collected
 
 - Product docs are now filled and usable, not blank templates. Key direction: backend owns market data, freshness, AI reasoning, tool orchestration, and answer contract.
@@ -363,4 +456,4 @@ Recommended fuller Batch 0 baseline:
 
 ## Next step
 
-Start with Batch 0. If it passes, implement Batch 1 as the first real backend optimization because it reduces test/runtime fragility before changing AI or market logic.
+先將 Batch 5 的 US/JP/KR provider adapter responsibility split 建立 checkpoint commit。後續依 `Plan.md` 的 2026-07-13 規劃進入 Batch 6：優先拆出台股 `market/indices.py` 的 provider IO，同時保留既有 `_fetch_*` patch seam、fallback order 與 public payload contract。

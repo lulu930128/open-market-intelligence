@@ -29,6 +29,18 @@ from app.kr_market.schemas import (
     KRWatchlistItemCreate,
     KRWatchlistItemUpdate,
 )
+from app.kr_market.providers.krx import (
+    fetch_krx_daily_price_payload,
+    fetch_krx_investor_trade_payload,
+    fetch_krx_stock_master_payload,
+)
+from app.kr_market.providers.naver import (
+    fetch_naver_index_chart_payload,
+    fetch_naver_index_intraday_page_payload,
+    fetch_naver_index_realtime_payload,
+)
+from app.kr_market.providers.opendart import fetch_opendart_financial_statement_payload
+from app.kr_market.providers.yahoo import fetch_yahoo_chart_payload
 from app.kr_market.source_health import build_kr_source_health
 from app.kr_market.sources import (
     KRCompanyFundamentalRecord,
@@ -41,14 +53,6 @@ from app.kr_market.sources import (
     KRIndexRecord,
     KRMarketDataFetchError,
     KRStockRecord,
-    fetch_naver_index_chart_payload,
-    fetch_naver_index_intraday_page_payload,
-    fetch_naver_index_realtime_payload,
-    fetch_krx_daily_price_payload,
-    fetch_krx_investor_trade_payload,
-    fetch_krx_stock_master_payload,
-    fetch_opendart_financial_statement_payload,
-    fetch_yahoo_chart_payload,
     local_code_from_symbol,
     normalize_kr_index_id,
     normalize_kr_symbol,
