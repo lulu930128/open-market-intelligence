@@ -187,6 +187,66 @@ Remaining Batch 3 work:
 - Consider whether scheduler enqueue functions should also adopt the same helper, but only if it does not hide schedule-specific request fields such as `schedule` and calendar release metadata.
 - Consider a second pass over Taiwan `watchlists.py`; it has older local patterns and visible whitespace churn, so it should be handled as its own bounded cleanup rather than folded into US/JP/KR router helper extraction.
 
+### Batch 4 - Provider HTTP and source-health architecture consolidation
+
+Completed the provider/freshness contract layer without changing existing market refresh response shapes.
+
+`backend/app/observability/provider_http.py` now separates provider policy from the low-level `http_client` transport:
+
+- normalized market/provider/resource/target identity;
+- mandatory bounded timeout;
+- timeout, rate-limit, blocked, client failure, and server/network error classification;
+- `Retry-After` parsing;
+- secret-safe source URL handling;
+- structured fields suitable for `record_provider_event`.
+
+US, JP, and KR source adapters now use this provider contract. Existing `requests.RequestException` compatibility is preserved because `ProviderHttpError` remains a requests exception, and JP keeps its existing `HTTP 403` / `HTTP 429` messages for plan/rate-limit fallback behavior.
+
+`backend/app/observability/source_health_contract.py` now owns shared UTC timestamp, daily freshness, and summary primitives. Taiwan, US, KR, crypto, and resource source-health modules use those primitives while retaining market-specific calendars, sessions, required status, delayed status, and stale thresholds.
+
+Provider event matching now supports composite source providers such as `krx_data+yahoo_chart`, so a real provider event can enrich the combined source-health entry.
+
+JP now has additive source-health parity:
+
+- `backend/app/jp_market/source_health.py`;
+- `GET /api/jp-market/source-health`;
+- Pydantic source-health contract;
+- explicit `availability_only` mode when no Japan exchange-calendar target is supplied;
+- exact stale/current evaluation only when `expected_daily_price_date` is provided.
+
+Durable dependency, provider, source-health, transaction ownership, and validation rules are documented in `docs/architecture/BackendArchitecture.md`.
+
+Targeted validation completed during this slice:
+
+```powershell
+.\scripts\run-safe-validation.ps1 -Profile backend -BackendPytestArgs @(
+  'backend\tests\test_provider_http.py',
+  'backend\tests\test_provider_health.py',
+  'backend\tests\test_source_health_contract.py',
+  'backend\tests\test_market_source_health.py',
+  'backend\tests\test_us_market_data.py',
+  'backend\tests\test_jp_market_data.py',
+  'backend\tests\test_kr_market_data.py',
+  'backend\tests\test_crypto_market.py',
+  'backend\tests\test_resource_market.py'
+)
+```
+
+All targeted runs passed compileall, pytest, and `git diff --check`.
+
+Final full backend validation:
+
+```powershell
+.\scripts\run-safe-validation.ps1 -Profile backend -BackendTestTimeoutSeconds 600
+```
+
+Result:
+
+- `backend compileall`: passed.
+- `backend pytest backend/tests`: passed.
+- `git diff --check`: passed.
+- Runtime: 71 seconds; validation logs: `.tmp/validation/20260711-192905`.
+
 ## Evidence collected
 
 - Product docs are now filled and usable, not blank templates. Key direction: backend owns market data, freshness, AI reasoning, tool orchestration, and answer contract.

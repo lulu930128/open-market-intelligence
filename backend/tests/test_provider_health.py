@@ -134,6 +134,40 @@ class ProviderHealthTests(unittest.TestCase):
         self.assertEqual(rows[0].recent_error_count, 1)
         self.assertEqual(snapshot_rows[0]["resource"], "daily_price")
 
+    def test_composite_source_provider_matches_any_component_event(self) -> None:
+        now = datetime(2026, 7, 11, 4, 0, tzinfo=timezone.utc)
+        with patch.object(provider_health, "_now", return_value=now):
+            event = record_provider_event(
+                self.db,
+                market="kr",
+                provider="krx_data",
+                resource="symbol_master",
+                target="005930.KS",
+                status="error",
+                event_time=now,
+                error_message="KRX unavailable",
+            )
+            entries = enrich_source_health_entries(
+                self.db,
+                market="kr",
+                entries=[
+                    {
+                        "resource": "symbol_master",
+                        "provider": "krx_data+yahoo_chart",
+                        "target": "005930.KS",
+                        "status": "available",
+                        "ok": True,
+                        "row_count": 1,
+                        "data_quality": "ok",
+                        "reason": "local row available",
+                    }
+                ],
+            )
+
+        self.assertEqual(entries[0]["latest_event_id"], event.id)
+        self.assertEqual(entries[0]["latest_event_status"], "error")
+        self.assertEqual(entries[0]["recent_error_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

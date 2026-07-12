@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, load_only
 
 from app.db.models import ResourceOhlcvBar, ResourceQuoteSnapshot
 from app.observability.provider_health import enrich_source_health_entries
+from app.observability.source_health_contract import summarize_source_health
 from app.resource_market.contract import (
     PROVIDER_BEST_EFFORT,
     YAHOO_CHART_PROVIDER,
@@ -353,19 +354,12 @@ def _entry_status(entry: dict[str, Any]) -> str:
 
 
 def _summary(entries: list[dict[str, Any]]) -> dict[str, int]:
-    return {
-        "entry_count": len(entries),
-        "ok_count": sum(1 for entry in entries if bool(entry.get("ok"))),
-        "empty_count": sum(1 for entry in entries if _entry_status(entry) == "empty"),
-        "stale_count": sum(1 for entry in entries if _entry_status(entry) == "stale"),
-        "delayed_count": sum(1 for entry in entries if _entry_status(entry) == "delayed"),
-        "error_count": sum(
-            1
-            for entry in entries
-            if _entry_status(entry) in ERROR_STATUSES or int(entry.get("recent_error_count") or 0) > 0
-        ),
-        "disabled_count": sum(1 for entry in entries if _entry_status(entry) == "disabled"),
-    }
+    return summarize_source_health(
+        entries,
+        counted_statuses=("empty", "stale", "delayed", "error", "disabled"),
+        error_statuses=ERROR_STATUSES,
+        count_recent_errors=True,
+    )
 
 
 def build_resource_source_health(

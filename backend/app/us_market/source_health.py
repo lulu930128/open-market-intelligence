@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy.orm import Query, Session
@@ -19,6 +19,12 @@ from app.market.calendar_status import expected_us_trade_date
 from app.observability.provider_health import (
     enrich_source_health_entries,
     sync_source_health_snapshots,
+)
+from app.observability.source_health_contract import (
+    daily_row_status,
+    freshness_lag_days as _freshness_lag,
+    generated_at as _generated_at,
+    summarize_source_health,
 )
 from app.us_market.sources import normalize_us_symbol
 
@@ -66,18 +72,8 @@ class USSourceHealthEntry:
         }
 
 
-def _generated_at() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 def _target(*, symbol: str | None = None, series_id: str | None = None) -> str:
     return symbol or series_id or "all"
-
-
-def _freshness_lag(expected: date | None, latest: date | None) -> int | None:
-    if expected is None or latest is None:
-        return None
-    return max((expected - latest).days, 0)
 
 
 def _status_for(
@@ -87,20 +83,15 @@ def _status_for(
     expected_data_date: date | None = None,
     freshness_required: bool = False,
 ) -> tuple[str, bool, str, str]:
-    if row_count <= 0:
-        return "empty", False, "empty", "No local rows are available for this provider/resource."
-
-    if freshness_required and expected_data_date is not None and latest_data_date is not None:
-        if latest_data_date < expected_data_date:
-            return (
-                "stale",
-                False,
-                "stale",
-                f"Latest data date {latest_data_date.isoformat()} is behind expected {expected_data_date.isoformat()}.",
-            )
-        return "current", True, "ok", "Latest local row is aligned with the expected US trade date."
-
-    return "available", True, "ok", "Local rows are available; no daily freshness target is enforced."
+    return daily_row_status(
+        row_count=row_count,
+        latest_data_date=latest_data_date,
+        expected_data_date=expected_data_date,
+        freshness_required=freshness_required,
+        empty_reason="No local rows are available for this provider/resource.",
+        current_reason="Latest local row is aligned with the expected US trade date.",
+        available_reason="Local rows are available; no daily freshness target is enforced.",
+    )
 
 
 def _latest_or_none(query: Query, *order_by):
@@ -305,13 +296,10 @@ def _macro_entry(db: Session, *, series_id: str | None) -> USSourceHealthEntry:
 
 
 def _summary(entries: list[USSourceHealthEntry]) -> dict[str, int]:
-    return {
-        "entry_count": len(entries),
-        "ok_count": sum(1 for entry in entries if entry.ok),
-        "empty_count": sum(1 for entry in entries if entry.status == "empty"),
-        "stale_count": sum(1 for entry in entries if entry.status == "stale"),
-        "error_count": sum(1 for entry in entries if entry.status == "error"),
-    }
+    return summarize_source_health(
+        entries,
+        counted_statuses=("empty", "stale", "error"),
+    )
 
 
 def build_us_source_health(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -52,6 +53,20 @@ def _normalized_market(value: Any) -> str:
 
 def _normalized_provider(value: Any) -> str:
     return _normalized_key(value, default="all").lower()
+
+
+def _provider_candidates(value: Any) -> tuple[str, ...]:
+    normalized = _normalized_provider(value)
+    if normalized == "all":
+        return ("all",)
+    candidates = tuple(
+        dict.fromkeys(
+            part.strip()
+            for part in re.split(r"[+,]", normalized)
+            if part.strip()
+        )
+    )
+    return candidates or (normalized,)
 
 
 def _normalized_status(value: Any) -> str:
@@ -279,9 +294,9 @@ def _matching_events_query(
     resource: str,
     target: str,
 ):
-    normalized_provider = _normalized_provider(provider)
-    provider_filter = True if normalized_provider == "all" else or_(
-        ProviderEvent.provider == normalized_provider,
+    provider_candidates = _provider_candidates(provider)
+    provider_filter = True if provider_candidates == ("all",) else or_(
+        ProviderEvent.provider.in_(provider_candidates),
         ProviderEvent.provider == "all",
     )
     return (

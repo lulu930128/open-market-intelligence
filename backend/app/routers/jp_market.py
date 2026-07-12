@@ -29,6 +29,7 @@ from app.jp_market.schemas import (
     JPOhlcChartRead,
     JPResourceSummaryRead,
     JPResourceRefreshResultRead,
+    JPSourceHealthRead,
     JPStockMasterRead,
     JPStockMasterSyncResultRead,
     JPWatchlistGroupCreate,
@@ -41,6 +42,7 @@ from app.jp_market.schemas import (
     JPWatchlistItemUpdate,
     JPWatchlistRankingRead,
 )
+from app.jp_market.source_health import build_jp_source_health
 from app.watchlists.schemas import WatchlistGroupRadarRead
 from app.jp_market.service import (
     JPWatchlistDuplicateItemError,
@@ -98,6 +100,19 @@ def _item_error(exc: Exception) -> HTTPException:
         exc,
         not_found_errors=(JPWatchlistGroupNotFoundError, JPWatchlistItemNotFoundError, JPStockNotFoundError),
         duplicate_errors=(JPWatchlistDuplicateItemError,),
+    )
+
+
+@router.get("/source-health", response_model=JPSourceHealthRead)
+def get_jp_source_health(
+    symbol: str | None = None,
+    expected_daily_price_date: date | None = None,
+    db: Session = Depends(get_db),
+):
+    return build_jp_source_health(
+        db=db,
+        symbol=symbol,
+        expected_daily_price_date=expected_daily_price_date,
     )
 
 

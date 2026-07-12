@@ -40,6 +40,10 @@ from app.observability.provider_health import (
     enrich_source_health_entries,
     sync_source_health_snapshots,
 )
+from app.observability.source_health_contract import (
+    generated_at as _generated_at,
+    summarize_source_health,
+)
 
 
 @dataclass(frozen=True)
@@ -70,10 +74,6 @@ class CryptoSourceHealthEntry:
             "data_quality": self.data_quality,
             "reason": self.reason,
         }
-
-
-def _generated_at() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _age_seconds(now: datetime, value: datetime | None) -> int | None:
@@ -247,14 +247,10 @@ def _entry_value(entry: CryptoSourceHealthEntry | dict[str, Any], key: str) -> A
 
 
 def _summary(entries: list[CryptoSourceHealthEntry | dict[str, Any]]) -> dict[str, int]:
-    return {
-        "entry_count": len(entries),
-        "ok_count": sum(1 for entry in entries if bool(_entry_value(entry, "ok"))),
-        "empty_count": sum(1 for entry in entries if _entry_value(entry, "status") == "empty"),
-        "stale_count": sum(1 for entry in entries if _entry_value(entry, "status") == "stale"),
-        "error_count": sum(1 for entry in entries if _entry_value(entry, "status") == "error"),
-        "disabled_count": sum(1 for entry in entries if _entry_value(entry, "status") == "disabled"),
-    }
+    return summarize_source_health(
+        entries,
+        counted_statuses=("empty", "stale", "error", "disabled"),
+    )
 
 
 def _instrument_required(instrument: ProviderInstrument) -> bool:

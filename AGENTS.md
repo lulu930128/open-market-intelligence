@@ -39,6 +39,7 @@ OMI 不是自動交易系統。它只能做研究、情境判斷、技術位階�
 
 ## 架構邊界
 
+- Backend dependency、provider HTTP、source-health 與 transaction ownership 的完整契約見 `docs/architecture/BackendArchitecture.md`。
 - `backend/app/ai/` 是 AI evidence、question routing、decision core、answer contract 與 OMI AI 行為的主要位置。
 - 使用者可見的 OMI 回答文字與 structured answer contract，優先在 backend AI 層處理；frontend 只負責呈現與互動，不應重做判斷邏輯。
 - `agents/` 只放外部 agent adapter，例如 MCP。Adapter 要保持 thin：呼叫 backend API，不直接 import database、不複製市場邏輯。

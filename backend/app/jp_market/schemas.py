@@ -80,6 +80,48 @@ class JPResourceRefreshResultRead(BaseModel):
     message: str
 
 
+class JPSourceHealthEntryRead(BaseModel):
+    resource: str
+    provider: str
+    target: str
+    status: str
+    ok: bool
+    row_count: int
+    latest_data_date: date | None = None
+    latest_fetched_at: datetime | None = None
+    expected_data_date: date | None = None
+    freshness_lag_days: int | None = None
+    source_url: str | None = None
+    data_quality: str
+    reason: str
+    latest_event_id: int | None = None
+    latest_event_at: datetime | None = None
+    latest_event_status: str | None = None
+    latest_event_severity: str | None = None
+    latest_event_message: str | None = None
+    recent_event_count: int = 0
+    recent_error_count: int = 0
+    consecutive_error_count: int = 0
+
+
+class JPSourceHealthSummaryRead(BaseModel):
+    entry_count: int
+    ok_count: int
+    empty_count: int
+    stale_count: int
+    error_count: int
+
+
+class JPSourceHealthRead(BaseModel):
+    kind: str
+    generated_at: datetime
+    filters: dict[str, str | None] = Field(default_factory=dict)
+    expected_daily_price_date: date | None = None
+    freshness_policy: dict[str, str | None] = Field(default_factory=dict)
+    summary: JPSourceHealthSummaryRead
+    entries: list[JPSourceHealthEntryRead] = Field(default_factory=list)
+
+
 class JPCompanyFundamentalRead(BaseModel):
     id: int
 

@@ -10,8 +10,13 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
 
-from app.http_client import get as http_get
-from app.http_client import post as http_post
+import requests
+
+from app.observability.provider_http import (
+    ProviderRequestContext,
+    get as provider_get,
+    post as provider_post,
+)
 
 
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
@@ -35,6 +40,54 @@ YAHOO_INSTRUMENT_TYPES = {
 
 class KRMarketDataFetchError(Exception):
     pass
+
+
+def _provider_context(
+    *,
+    provider: str,
+    resource: str,
+    target: str = "all",
+) -> ProviderRequestContext:
+    return ProviderRequestContext(
+        market="kr",
+        provider=provider,
+        resource=resource,
+        target=target,
+    )
+
+
+def _provider_get(
+    url: str,
+    *,
+    provider: str,
+    resource: str,
+    target: str = "all",
+    timeout_seconds: int,
+    **kwargs: Any,
+) -> requests.Response:
+    return provider_get(
+        _provider_context(provider=provider, resource=resource, target=target),
+        url,
+        timeout_seconds=timeout_seconds,
+        **kwargs,
+    )
+
+
+def _provider_post(
+    url: str,
+    *,
+    provider: str,
+    resource: str,
+    target: str = "all",
+    timeout_seconds: int,
+    **kwargs: Any,
+) -> requests.Response:
+    return provider_post(
+        _provider_context(provider=provider, resource=resource, target=target),
+        url,
+        timeout_seconds=timeout_seconds,
+        **kwargs,
+    )
 
 
 @dataclass(frozen=True)
@@ -992,8 +1045,11 @@ def fetch_naver_index_chart_payload(
     end_date: date,
     timeout_seconds: int,
 ) -> tuple[str, str]:
-    response = http_get(
+    response = _provider_get(
         NAVER_SISE_INDEX_URL,
+        provider="naver_sise_index",
+        resource="index_daily_price",
+        target=provider_symbol,
         params={
             "symbol": provider_symbol,
             "requestType": "1",
@@ -1006,9 +1062,8 @@ def fetch_naver_index_chart_payload(
             "Accept": "text/plain,*/*",
             "Referer": "https://finance.naver.com/",
         },
-        timeout=timeout_seconds,
+        timeout_seconds=timeout_seconds,
     )
-    response.raise_for_status()
     response.encoding = response.encoding or "utf-8"
     return response.text, response.url
 
@@ -1020,8 +1075,11 @@ def fetch_naver_index_intraday_page_payload(
     page: int,
     timeout_seconds: int,
 ) -> tuple[str, str]:
-    response = http_get(
+    response = _provider_get(
         NAVER_SISE_INDEX_TIME_URL,
+        provider="naver_sise_index",
+        resource="index_intraday",
+        target=provider_symbol,
         params={
             "code": provider_symbol,
             "thistime": thistime,
@@ -1032,9 +1090,8 @@ def fetch_naver_index_intraday_page_payload(
             "Accept": "text/html,*/*",
             "Referer": "https://finance.naver.com/",
         },
-        timeout=timeout_seconds,
+        timeout_seconds=timeout_seconds,
     )
-    response.raise_for_status()
     response.encoding = response.encoding or "euc-kr"
     return response.text, response.url
 
@@ -1044,17 +1101,19 @@ def fetch_naver_index_realtime_payload(
     provider_symbol: str,
     timeout_seconds: int,
 ) -> tuple[dict[str, Any], str]:
-    response = http_get(
+    response = _provider_get(
         NAVER_INDEX_REALTIME_URL,
+        provider="naver_sise_index",
+        resource="index_quote",
+        target=provider_symbol,
         params={"query": f"SERVICE_INDEX:{provider_symbol}"},
         headers={
             "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
             "Accept": "application/json,text/plain,*/*",
             "Referer": "https://finance.naver.com/",
         },
-        timeout=timeout_seconds,
+        timeout_seconds=timeout_seconds,
     )
-    response.raise_for_status()
     payload = response.json()
     if not isinstance(payload, dict):
         raise KRMarketDataFetchError("Naver realtime index returned a non-object JSON payload.")
@@ -1062,8 +1121,10 @@ def fetch_naver_index_realtime_payload(
 
 
 def fetch_krx_stock_master_payload(*, timeout_seconds: int) -> tuple[dict[str, Any], str]:
-    response = http_post(
+    response = _provider_post(
         KRX_DATA_URL,
+        provider="krx_data",
+        resource="symbol_master",
         data={
             "bld": KRX_STOCK_MASTER_BLD,
             "mktId": "ALL",
@@ -1075,9 +1136,8 @@ def fetch_krx_stock_master_payload(*, timeout_seconds: int) -> tuple[dict[str, A
             "Accept": "application/json,text/plain,*/*",
             "Referer": "https://data.krx.co.kr/",
         },
-        timeout=timeout_seconds,
+        timeout_seconds=timeout_seconds,
     )
-    response.raise_for_status()
     payload = response.json()
     if not isinstance(payload, dict):
         raise KRMarketDataFetchError("KRX stock master returned a non-object JSON payload.")
@@ -1101,17 +1161,19 @@ def fetch_krx_daily_price_payload(
     if trade_date is not None:
         params["trdDd"] = trade_date.strftime("%Y%m%d")
 
-    response = http_post(
+    response = _provider_post(
         KRX_DATA_URL,
+        provider="krx_data",
+        resource="daily_price",
+        target=local_code or "all",
         data=params,
         headers={
             "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
             "Accept": "application/json,text/plain,*/*",
             "Referer": "https://data.krx.co.kr/",
         },
-        timeout=timeout_seconds,
+        timeout_seconds=timeout_seconds,
     )
-    response.raise_for_status()
     payload = response.json()
     if not isinstance(payload, dict):
         raise KRMarketDataFetchError("KRX daily price returned a non-object JSON payload.")
@@ -1134,17 +1196,19 @@ def fetch_krx_investor_trade_payload(
     if trade_date is not None:
         params["trdDd"] = trade_date.strftime("%Y%m%d")
 
-    response = http_post(
+    response = _provider_post(
         KRX_DATA_URL,
+        provider="krx_data",
+        resource="investor_trading",
+        target=local_code,
         data=params,
         headers={
             "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
             "Accept": "application/json,text/plain,*/*",
             "Referer": "https://data.krx.co.kr/",
         },
-        timeout=timeout_seconds,
+        timeout_seconds=timeout_seconds,
     )
-    response.raise_for_status()
     payload = response.json()
     if not isinstance(payload, dict):
         raise KRMarketDataFetchError("KRX investor trading returned a non-object JSON payload.")
@@ -1159,8 +1223,11 @@ def fetch_yahoo_chart_payload(
     timeout_seconds: int,
 ) -> tuple[dict[str, Any], str]:
     normalized_symbol = normalize_kr_symbol(symbol)
-    response = http_get(
+    response = _provider_get(
         YAHOO_CHART_URL.format(symbol=quote(normalized_symbol, safe="")),
+        provider="yahoo_chart",
+        resource="daily_price",
+        target=normalized_symbol,
         params={
             "range": range_value,
             "interval": interval,
@@ -1170,9 +1237,8 @@ def fetch_yahoo_chart_payload(
             "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
             "Accept": "application/json,text/plain,*/*",
         },
-        timeout=timeout_seconds,
+        timeout_seconds=timeout_seconds,
     )
-    response.raise_for_status()
     payload = response.json()
     if not isinstance(payload, dict):
         raise KRMarketDataFetchError("Yahoo chart returned a non-object JSON payload.")
@@ -1189,8 +1255,11 @@ def fetch_opendart_financial_statement_payload(
     fs_div: str = "CFS",
     timeout_seconds: int = 30,
 ) -> tuple[dict[str, Any], str]:
-    response = http_get(
+    response = _provider_get(
         f"{base_url.rstrip('/')}{OPENDART_SINGLE_ACCOUNT_ALL_PATH}",
+        provider="opendart_fnltt_singl_acnt_all",
+        resource="financials",
+        target=corp_code,
         params={
             "crtfc_key": api_key,
             "corp_code": corp_code,
@@ -1202,9 +1271,8 @@ def fetch_opendart_financial_statement_payload(
             "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
             "Accept": "application/json,text/plain,*/*",
         },
-        timeout=timeout_seconds,
+        timeout_seconds=timeout_seconds,
     )
-    response.raise_for_status()
     payload = response.json()
     if not isinstance(payload, dict):
         raise KRMarketDataFetchError("OpenDART financial statement returned a non-object JSON payload.")

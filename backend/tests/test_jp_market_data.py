@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import unittest
 from unittest.mock import patch
 
@@ -22,8 +22,14 @@ from app.db.models import (
     USWatchlistItem,
     WatchlistGroup,
     WatchlistItem,
+    SourceHealthSnapshot,
 )
-from app.jp_market.schemas import JPWatchlistGroupCreate, JPWatchlistItemCreate
+from app.jp_market.schemas import (
+    JPSourceHealthRead,
+    JPWatchlistGroupCreate,
+    JPWatchlistItemCreate,
+)
+from app.jp_market.source_health import build_jp_source_health
 from app.jp_market.service import (
     JPWatchlistDuplicateItemError,
     create_jp_watchlist_group,
@@ -913,6 +919,55 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertIsNotNone(stock)
         self.assertEqual(stock.local_code, "7203")
 
+    def test_jp_source_health_exposes_explicit_freshness_policy(self) -> None:
+        with patch(
+            "app.jp_market.service.fetch_yahoo_chart_payload",
+            return_value=(
+                YAHOO_JP_CHART_SAMPLE,
+                "https://query1.finance.yahoo.com/v8/finance/chart/7203.T",
+            ),
+        ):
+            refresh_jp_daily_prices_from_yahoo_chart(
+                db=self.db,
+                symbol="7203",
+                outputsize="compact",
+            )
+
+        availability = build_jp_source_health(self.db, symbol="7203.T")
+        exact = build_jp_source_health(
+            self.db,
+            symbol="7203.T",
+            expected_daily_price_date=date(2026, 6, 18),
+        )
+        entries = {
+            (entry["resource"], entry["provider"]): entry
+            for entry in exact["entries"]
+        }
+
+        self.assertEqual(availability["freshness_policy"]["mode"], "availability_only")
+        self.assertIsNotNone(availability["freshness_policy"]["calendar_limit"])
+        self.assertEqual(exact["freshness_policy"]["mode"], "expected_date")
+        self.assertEqual(entries[("daily_price", "yahoo_chart")]["status"], "current")
+        self.assertGreater(self.db.query(SourceHealthSnapshot).count(), 0)
+        self.assertEqual(JPSourceHealthRead.model_validate(exact).kind, "jp_source_health")
+
+        self.db.add(
+            JPInvestorType(
+                provider="jquants_investor_types",
+                section="TSEPrime",
+                published_date=date(2026, 6, 18),
+            )
+        )
+        self.db.commit()
+        unknown_symbol = build_jp_source_health(self.db, symbol="9999.T")
+        investor_entry = next(
+            entry
+            for entry in unknown_symbol["entries"]
+            if entry["resource"] == "investor_types"
+        )
+        self.assertEqual(investor_entry["status"], "empty")
+        self.assertEqual(investor_entry["target"], "9999.T")
+
     def test_upsert_jp_daily_price_records_updates_existing_row(self) -> None:
         first = JPDailyPriceRecord(
             provider="yahoo_chart",
@@ -1643,6 +1698,7 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertIn("POST", routes["/api/jp-market/watchlists/daily/refresh"])
         self.assertIn("POST", routes["/api/jp-market/resources/{symbol}/refresh"])
         self.assertIn("GET", routes["/api/jp-market/intraday/{symbol}"])
+        self.assertIn("GET", routes["/api/jp-market/source-health"])
         self.assertIn(
             "POST",
             routes["/api/jp-market/watchlists/groups/{group_id}/refresh-daily"],

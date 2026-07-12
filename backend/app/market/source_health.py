@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy.orm import Query, Session
@@ -16,6 +16,12 @@ from app.market.taiwan_rules import (
 from app.observability.provider_health import (
     enrich_source_health_entries,
     sync_source_health_snapshots,
+)
+from app.observability.source_health_contract import (
+    daily_row_status,
+    freshness_lag_days as _freshness_lag,
+    generated_at as _generated_at,
+    summarize_source_health,
 )
 
 
@@ -64,10 +70,6 @@ class TaiwanSourceHealthEntry:
         }
 
 
-def _generated_at() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 def _normalized_stock_id(stock_id: str | None) -> str | None:
     normalized = (stock_id or "").strip()
     return normalized or None
@@ -80,12 +82,6 @@ def _normalized_index_id(index_id: str | None) -> str | None:
 
 def _target(*, stock_id: str | None = None, index_id: str | None = None) -> str:
     return stock_id or index_id or "all"
-
-
-def _freshness_lag(expected: date | None, latest: date | None) -> int | None:
-    if expected is None or latest is None:
-        return None
-    return max((expected - latest).days, 0)
 
 
 def _date_or_none(value: Any) -> date | None:
@@ -131,20 +127,15 @@ def _status_for(
     expected_data_date: date | None = None,
     freshness_required: bool = False,
 ) -> tuple[str, bool, str, str]:
-    if row_count <= 0:
-        return "empty", False, "empty", "No local rows are available for this resource."
-
-    if freshness_required and expected_data_date is not None and latest_data_date is not None:
-        if latest_data_date < expected_data_date:
-            return (
-                "stale",
-                False,
-                "stale",
-                f"Latest data date {latest_data_date.isoformat()} is behind expected {expected_data_date.isoformat()}.",
-            )
-        return "current", True, "ok", "Latest local row is aligned with the expected Taiwan release window."
-
-    return "available", True, "ok", "Local rows are available; no exact release-date target is enforced."
+    return daily_row_status(
+        row_count=row_count,
+        latest_data_date=latest_data_date,
+        expected_data_date=expected_data_date,
+        freshness_required=freshness_required,
+        empty_reason="No local rows are available for this resource.",
+        current_reason="Latest local row is aligned with the expected Taiwan release window.",
+        available_reason="Local rows are available; no exact release-date target is enforced.",
+    )
 
 
 def _latest_or_none(query: Query, *order_by):
@@ -297,14 +288,10 @@ def _market_chip_entry(
 
 
 def _summary(entries: list[TaiwanSourceHealthEntry]) -> dict[str, int]:
-    return {
-        "entry_count": len(entries),
-        "ok_count": sum(1 for entry in entries if entry.ok),
-        "empty_count": sum(1 for entry in entries if entry.status == "empty"),
-        "stale_count": sum(1 for entry in entries if entry.status == "stale"),
-        "not_applicable_count": sum(1 for entry in entries if entry.status == "not_applicable"),
-        "error_count": sum(1 for entry in entries if entry.status == "error"),
-    }
+    return summarize_source_health(
+        entries,
+        counted_statuses=("empty", "stale", "not_applicable", "error"),
+    )
 
 
 def build_taiwan_source_health(
