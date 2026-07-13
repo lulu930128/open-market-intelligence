@@ -5,7 +5,7 @@ import time as monotonic_time
 from sqlalchemy.orm import Session
 
 from app.db.models import MarketIntradayBar, StockMaster, utc_now
-from app.http_client import get as http_get
+from app.market.providers import http_get
 
 
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"

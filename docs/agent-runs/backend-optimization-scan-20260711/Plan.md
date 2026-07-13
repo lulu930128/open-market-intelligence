@@ -1,5 +1,7 @@
 # Backend Optimization Scan Plan
 
+> Historical note: this file records the completed scan and Batches 0-5. The long-running post-checkpoint execution plan now lives in `docs/agent-runs/backend-architecture-consolidation-20260713/Plan.md`.
+
 ## Batch 0 - 收斂現有變更與基線驗證
 
 Acceptance criteria:

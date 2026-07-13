@@ -456,4 +456,4 @@ Recommended fuller Batch 0 baseline:
 
 ## Next step
 
-先將 Batch 5 的 US/JP/KR provider adapter responsibility split 建立 checkpoint commit。後續依 `Plan.md` 的 2026-07-13 規劃進入 Batch 6：優先拆出台股 `market/indices.py` 的 provider IO，同時保留既有 `_fetch_*` patch seam、fallback order 與 public payload contract。
+Batch 5 已在 commit `910a1ca` 建立 checkpoint。後續大型執行已移到 `docs/agent-runs/backend-architecture-consolidation-20260713/`；開始實作時先依該目錄的 `Progress.md` 執行 M0 fresh baseline 與 contract inventory，不直接跳進 production refactor。

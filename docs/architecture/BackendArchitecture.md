@@ -27,16 +27,21 @@ frontend / MCP / Kuro -> backend HTTP API only
 - `backend/app/main.py` 只建立 FastAPI app、middleware、exception handler 與 route registry。
 - `backend/app/runtime.py` 擁有 startup/shutdown lifecycle，包括 migration、DB init、scheduler、crypto background components 與 job executor cleanup。
 - `backend/app/routers/` 只負責 HTTP schema、參數、status code 與 service dispatch。跨市場共用的 error/job pattern 放在 `market_family_helpers.py`。
+- 大型 router 可依 route family 拆成 subrouter，例如 Taiwan index routes 由 `tw_market_indices.py` 擁有；原 router 應 include subrouter 並保留既有 handler import seam。
 - Public route、method、query parameter 與 response shape 預設向後相容；共用 helper 不得改變 request envelope。
+- Router 搬移後必須比較 OpenAPI operation ID、response model 與 path/method inventory，不能只以 route 數量判定相容。
 
 ## Market Service
 
 - `market/` 是台股核心；`us_market/`、`jp_market/`、`kr_market/`、`crypto_market/` 與 `resource_market/` 是 context layers。
 - Service 擁有 normalization、fallback、upsert、bounded refresh、resource aggregation 與市場特有 policy。
 - Parser 與 provider adapter 保持純 IO / payload conversion，不接受 SQLAlchemy `Session`。
+- Taiwan stateless read paths 使用 `market/providers/`；provider identity、resource、target 與 bounded timeout 由 adapter 統一提供。需要 cookie/session 的期貨與 history/backfill workflow 保留 stateful transport boundary。
 - US、JP、KR provider 都使用各市場的 `providers/` namespace。Service 直接 import provider fetcher，讓 provider ownership 可被辨識與獨立測試。
 - US、JP、KR `sources.py` 不直接執行 provider HTTP；舊 `fetch_*` 名稱保留為 forwarding wrapper，保護既有 import seam。US `fetch_symbol_directories()` 只組合 NASDAQ/SEC provider payload 與既有 parser。
 - US、JP、KR 的 provider exception 與 symbol normalization 分別放在 `errors.py`、`symbols.py`，provider 與 parser 共同依賴純 contract，禁止互相反向 import。
+- US、JP、KR OHLC aggregation/projection 分別放在 `chart_projection.py`；transaction-owning refresh、cache 與 public service entrypoint 留在 `service.py` façade。
+- Crypto 與 resource 的 bounded REST request 使用各自 `providers/` namespace。Crypto realtime/WebSocket lifecycle、persistence 與 stateful refresh 不因 REST adapter 拆分而移動。
 
 ## Provider HTTP Contract
 
@@ -66,6 +71,7 @@ frontend / MCP / Kuro -> backend HTTP API only
 
 - Query/read helper 不 commit。既有 source-health builder 為保存 snapshot 會寫 DB，這是明示的 observability side effect。
 - `upsert_*`、`refresh_*`、job worker 與 maintenance pipeline 是 transaction owner；它們可以 commit，失敗時必須 rollback 或讓上層 owner rollback。
+- 直接擁有 `commit()` 的 service owner 必須在 commit failure 時 `rollback()` 並重新拋出，避免 session 留在 failed transaction 狀態。
 - Provider adapter、parser、payload contract 與 source-health pure helper 不持有 transaction。
 - `record_provider_event(..., commit=...)` 與 `sync_source_health_snapshots(..., commit=...)` 必須明確選擇 transaction 行為。
 - Composite refresh 必須隔離單一 provider/symbol failure，不得因 event recording 失敗而提交半套 market data。
@@ -75,14 +81,24 @@ frontend / MCP / Kuro -> backend HTTP API only
 ## AI 與 Consumer Contract
 
 - `backend/app/ai/market_payload_contract.py` 擁有 payload level、bounded intraday points 與 slot completeness primitives。
+- `answer_localization.py`、`answer_data_limits.py` 與 `answer_scenarios.py` 分別擁有 locale/text、資料限制/confidence cap、scenario/counter-evidence 純投影；`answer_composer.py` 保留高階組裝與相容 re-export。
+- `backend/app/ai/market_context/common.py` 擁有 source-ref 去重、freshness、resource counting 與 compact slot/context 純投影；tool registry、schema、budget、planner 與 execution policy 仍留在原 façade。
 - Backend AI 層擁有 evidence、freshness、tool orchestration、human answer 與 decision contract。
 - Consumer 只呈現 backend contract；不得依 UI 狀態自行推論 freshness 或重做 provider fallback。
+
+## Database Model Registry
+
+- `backend/app/db/models.py` 保持唯一 ORM model registry，`Base.metadata` 是 Alembic 與 runtime 的單一真相來源。
+- 目前不按 domain 拆 model 檔案：model import 密度、foreign-key resolution 與 migration discovery 的風險高於檔案縮短的收益。
+- 未來若重新評估，必須先保護 `app.db.models` import set、table metadata、constraint/index identity 與 Alembic discovery；不得建立第二個 `Base`。
+- 本次 evidence 與決策記錄在 `docs/agent-runs/backend-architecture-consolidation-20260713/DatabaseModelDecision.md`。
 
 ## 驗證層級
 
 - Pure contract：`test_provider_http.py`、`test_source_health_contract.py`。
-- Provider/event integration：`test_provider_health.py`、`test_market_provider_adapters.py`。
+- Provider/event integration：`test_provider_health.py`、`test_market_provider_adapters.py`、`test_taiwan_index_provider_adapters.py`、`test_crypto_resource_provider_adapters.py`。
 - 市場 contract：`test_market_source_health.py`、`test_us_market_data.py`、`test_jp_market_data.py`、`test_kr_market_data.py`、`test_crypto_market.py`、`test_resource_market.py`。
+- 架構 contract：`test_market_transaction_contracts.py`、`test_market_chart_projections.py`、`test_ai_answer_pure_modules.py`、`test_ai_market_context_projection.py`、`test_api_contract_inventory.py`、`test_database_model_contract.py`。
 - 跨模組修改完成後使用 `scripts/run-safe-validation.ps1 -Profile backend` 跑完整 backend regression。
 
 ## 後續拆分原則

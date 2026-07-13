@@ -13,8 +13,8 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import MarketChipDaily, MarketIndexDailyStat
-from app.http_client import get as http_get
 from app.market.indices import ensure_market_index_daily_stat_coverage
+from app.market.providers import http_get
 from app.market.trading_calendar import latest_released_trading_day
 from app.parsers.twse_common import (
     list_row_to_dict,

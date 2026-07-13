@@ -37,13 +37,6 @@ from app.market.institutional_holding_ratios import (
     InstitutionalHoldingRatioFetchError,
     fetch_institutional_holding_ratios,
 )
-from app.market.indices import (
-    get_market_index_contributions,
-    get_market_index_intraday,
-    get_market_index_list,
-    get_market_index_ohlc_chart_data,
-    get_market_index_summary,
-)
 from app.market.intraday import get_intraday_trend, get_market_intraday_history
 from app.market.quote_depth import get_taiwan_stock_quote_depth
 from app.market.market_chips import (
@@ -101,19 +94,16 @@ from app.market.schemas import (
     ChartDrawingSnapshotRead,
     ChartDrawingSnapshotWrite,
     FinancialMetricQuarterlyRead,
+    IntradayTrendRead,
     MarketCalendarStatusRead,
     MarketIntradayChartRead,
-    IntradayTrendRead,
     InstitutionalHoldingRatioRead,
     InstitutionalTradeDailyRead,
     MarginTradingDailyRead,
     MarketDailyChartRead,
-    MarketIndexContributionRead,
-    MarketIndexListRead,
-    MarketIndexSummaryRead,
     MarketChipDailyRead,
-    MarketOhlcChartRead,
     MarketDailyPriceRead,
+    MarketOhlcChartRead,
     MonthlyRevenueRead,
     OvernightImpactRead,
     ShareholdingDistributionWeeklyRead,
@@ -152,8 +142,17 @@ from app.market.service import (
     list_stock_monthly_revenue_history,
     list_stock_shareholding_history,
 )
+from app.routers.tw_market_indices import (
+    get_index_contributions,
+    get_index_intraday_trend,
+    get_index_ohlc_chart_data,
+    get_indices_list,
+    get_indices_summary,
+    router as market_indices_router,
+)
 
 router = APIRouter()
+router.include_router(market_indices_router)
 
 TAIWAN_FUTURES_QUOTE_REFRESH_JOB_TYPE = "market.tw_futures_quote_refresh"
 TAIWAN_DAILY_METRIC_CATEGORY_DATASET_KEYS = {
@@ -1264,14 +1263,6 @@ def list_taiwan_futures_intraday_bars_api(
     return [taiwan_futures_intraday_bar_to_dict(row) for row in rows]
 
 
-@router.get("/indices/summary", response_model=MarketIndexSummaryRead)
-def get_indices_summary(
-    force_refresh: bool = False,
-    db: Session = Depends(get_db),
-):
-    return get_market_index_summary(db=db, force_refresh=force_refresh)
-
-
 @router.post(
     "/market-chips/refresh",
     response_model=JobRunRead,
@@ -1372,87 +1363,6 @@ def list_market_chip_daily_api(
             limit=limit,
         )
     ]
-
-
-@router.get("/indices/list", response_model=MarketIndexListRead)
-def get_indices_list(
-    market: str = Query(default="TWSE", pattern="^(TWSE|TPEX)$"),
-    limit: int = Query(default=80, ge=1, le=200),
-):
-    try:
-        return get_market_index_list(market=market, limit=limit)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Index list source unavailable: {exc}",
-        ) from exc
-
-
-@router.get("/indices/{index_id}/intraday", response_model=IntradayTrendRead)
-def get_index_intraday_trend(index_id: str):
-    try:
-        return get_market_index_intraday(index_id=index_id)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Index intraday source unavailable: {exc}",
-        ) from exc
-
-
-@router.get("/indices/{index_id}/contributions", response_model=MarketIndexContributionRead)
-def get_index_contributions(
-    index_id: str,
-    limit: int = Query(default=20, ge=1, le=100),
-    db: Session = Depends(get_db),
-):
-    try:
-        return get_market_index_contributions(index_id=index_id, limit=limit, db=db)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Index contribution source unavailable: {exc}",
-        ) from exc
-
-
-@router.get("/indices/{index_id}/ohlc", response_model=MarketOhlcChartRead)
-def get_index_ohlc_chart_data(
-    index_id: str,
-    timeframe: str = Query(default="daily", pattern="^(daily|weekly|monthly)$"),
-    bars: int = Query(default=90, ge=1, le=5000),
-    db: Session = Depends(get_db),
-):
-    try:
-        return get_market_index_ohlc_chart_data(
-            index_id=index_id,
-            timeframe=timeframe,
-            bars=bars,
-            db=db,
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Index chart source unavailable: {exc}",
-        ) from exc
 
 
 @router.get("/institutional/latest", response_model=list[InstitutionalTradeDailyRead])

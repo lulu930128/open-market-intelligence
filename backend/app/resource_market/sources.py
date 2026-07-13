@@ -5,18 +5,17 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from typing import Any
-from urllib.parse import quote
 
 from app.config import settings
-from app.http_client import get as http_get
 from app.resource_market.contract import (
     ResourceInstrument,
     SUPPORTED_RESOURCE_OHLCV_INTERVALS,
     YAHOO_CHART_PROVIDER,
 )
+from app.resource_market.providers import yahoo
 
 
-YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+YAHOO_CHART_URL = yahoo.CHART_URL
 SUPPORTED_YAHOO_INTERVALS = set(SUPPORTED_RESOURCE_OHLCV_INTERVALS)
 YAHOO_INTERVAL_MAP = {
     "1m": "1m",
@@ -215,24 +214,15 @@ def fetch_yahoo_chart_payload(
     interval: str,
     timeout_seconds: int | None = None,
 ) -> tuple[dict[str, Any], str]:
-    response = http_get(
-        YAHOO_CHART_URL.format(symbol=quote(provider_symbol, safe="")),
-        params={
-            "range": range_value,
-            "interval": interval,
-            "includePrePost": "false",
-        },
-        headers={
-            "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
-            "Accept": "application/json,text/plain,*/*",
-        },
-        timeout=timeout_seconds or settings.resource_market_http_timeout_seconds,
+    payload, source_url = yahoo.fetch_chart_payload(
+        provider_symbol=provider_symbol,
+        range_value=range_value,
+        interval=interval,
+        timeout_seconds=timeout_seconds or settings.resource_market_http_timeout_seconds,
     )
-    response.raise_for_status()
-    payload = response.json()
     if not isinstance(payload, dict):
         raise ResourceMarketDataFetchError("Yahoo chart returned a non-object JSON payload.")
-    return payload, response.url
+    return payload, source_url
 
 
 def fetch_yahoo_chart_payload_for_interval(

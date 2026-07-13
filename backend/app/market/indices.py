@@ -5,31 +5,43 @@ from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, time, timedelta, timezone
 from time import monotonic
-from urllib.parse import quote
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import MarketDailyPrice, MarketIndexDailyStat, SourceRegistry, StockMaster
-from app.http_client import get as http_get
+from app.market.index_parsers import as_float as _as_float
+from app.market.index_parsers import as_int as _as_int
+from app.market.index_parsers import count_with_limit as _count_with_limit
+from app.market.index_parsers import list_value as _list_value
+from app.market.index_parsers import parse_tpex_market_daily_rows as _parse_tpex_market_daily_rows
+from app.market.index_parsers import parse_trade_date as _parse_trade_date
+from app.market.index_parsers import (
+    parse_twse_market_daily_history_rows as _parse_twse_market_daily_history_rows,
+)
+from app.market.index_parsers import regular_stock_code as _regular_stock_code
+from app.market.index_parsers import signed_change as _signed_change
+from app.market.providers import fetch_json as provider_fetch_json
+from app.market.providers import http_get
+from app.market.providers import tpex, twse, twse_mis, yahoo
 from app.sources.defaults import (
     TPEX_DAILY_QUOTES_SOURCE_NAME,
     TWSE_DAILY_TRADING_SOURCE_NAME,
 )
 
 
-YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-TWSE_MIS_STOCK_INFO_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
-TWSE_MIS_REFERER_URL = "https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw"
-TWSE_INDEX_LIST_URL = "https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX"
-TWSE_DAILY_QUOTES_URL = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
-TWSE_RWD_MI_INDEX_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
-TWSE_INDEX_5S_URL = "https://www.twse.com.tw/exchangeReport/MI_5MINS_INDEX"
-TWSE_MARKET_DAILY_URL = "https://openapi.twse.com.tw/v1/exchangeReport/FMTQIK"
-TWSE_MARKET_DAILY_HISTORY_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK"
-TWSE_COMPANY_BASIC_URL = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
-TPEX_DAILY_INDEX_URL = "https://www.tpex.org.tw/openapi/v1/tpex_daily_trading_index"
-TPEX_DAILY_QUOTES_URL = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes"
+YAHOO_CHART_URL = yahoo.CHART_URL
+TWSE_MIS_STOCK_INFO_URL = twse_mis.STOCK_INFO_URL
+TWSE_MIS_REFERER_URL = twse_mis.REFERER_URL
+TWSE_INDEX_LIST_URL = twse.INDEX_LIST_URL
+TWSE_DAILY_QUOTES_URL = twse.DAILY_QUOTES_URL
+TWSE_RWD_MI_INDEX_URL = twse.RWD_MI_INDEX_URL
+TWSE_INDEX_5S_URL = twse.INDEX_5S_URL
+TWSE_MARKET_DAILY_URL = twse.MARKET_DAILY_URL
+TWSE_MARKET_DAILY_HISTORY_URL = twse.MARKET_DAILY_HISTORY_URL
+TWSE_COMPANY_BASIC_URL = twse.COMPANY_BASIC_URL
+TPEX_DAILY_INDEX_URL = tpex.DAILY_INDEX_URL
+TPEX_DAILY_QUOTES_URL = tpex.DAILY_QUOTES_URL
 TAIPEI_TZ = timezone(timedelta(hours=8))
 CACHE_TTL_SECONDS = 45
 TWSE_MIS_LIVE_BREADTH_CACHE_TTL_SECONDS = 10
@@ -81,111 +93,8 @@ TWSE_INDEX_5S_FIELD_BY_INDEX_ID = {
 }
 
 
-def _as_float(value) -> float | None:
-    if value is None:
-        return None
-
-    try:
-        return float(str(value).replace(",", "").replace("%", ""))
-    except (TypeError, ValueError):
-        return None
-
-
-def _as_int(value) -> int | None:
-    if value is None:
-        return None
-
-    try:
-        return int(float(str(value).replace(",", "")))
-    except (TypeError, ValueError):
-        return None
-
-
-def _list_value(values, index: int):
-    if not isinstance(values, list) or index >= len(values):
-        return None
-
-    return values[index]
-
-
 def _fetch_json(url: str):
-    response = http_get(
-        url,
-        headers={
-            "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
-            "Accept": "application/json,text/plain,*/*",
-        },
-        timeout=20,
-    )
-    response.raise_for_status()
-    response.encoding = "utf-8"
-    return response.json()
-
-
-def _parse_trade_date(value) -> date | None:
-    if isinstance(value, date):
-        return value
-
-    if value is None:
-        return None
-
-    text = str(value).strip()
-
-    if not text:
-        return None
-
-    for separator in ("/", "-"):
-        if separator not in text:
-            continue
-
-        parts = text.split(separator)
-
-        if len(parts) == 3 and parts[0].isdigit() and len(parts[0]) <= 3:
-            year = int(parts[0]) + 1911
-            return date(year, int(parts[1]), int(parts[2]))
-
-    normalized = text.replace("/", "").replace("-", "")
-
-    if len(normalized) == 7 and normalized.isdigit():
-        year = int(normalized[:3]) + 1911
-        return date(year, int(normalized[3:5]), int(normalized[5:7]))
-
-    for fmt in ("%Y%m%d", "%Y/%m/%d", "%Y-%m-%d"):
-        try:
-            return datetime.strptime(text, fmt).date()
-        except ValueError:
-            pass
-
-    return None
-
-
-def _signed_change(sign_value, change_value) -> float | None:
-    change = _as_float(change_value)
-
-    if change is None:
-        return None
-
-    sign = str(sign_value or "").strip()
-
-    if sign in {"-", "－"}:
-        return -abs(change)
-
-    if sign in {"+", "＋"}:
-        return abs(change)
-
-    return change
-
-
-def _regular_stock_code(value) -> str | None:
-    if value is None:
-        return None
-
-    code = str(value).strip()
-
-    if len(code) == 4 and code.isdigit():
-        return code
-
-    return None
+    return provider_fetch_json(url, timeout_seconds=20, request=http_get)
 
 
 def _moving_average(values: list[float | None], window: int) -> float | None:
@@ -290,29 +199,11 @@ def _chunked(values: list[str], size: int) -> Iterable[list[str]]:
 
 
 def _fetch_twse_mis_stock_message_batch(codes: list[str]) -> list[dict]:
-    response = http_get(
-        TWSE_MIS_STOCK_INFO_URL,
-        params={
-            "ex_ch": "|".join(f"tse_{code}.tw" for code in codes),
-            "json": "1",
-            "delay": "0",
-        },
-        headers={
-            "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
-            "Accept": "application/json,text/plain,*/*",
-            "Referer": TWSE_MIS_REFERER_URL,
-        },
-        timeout=20,
+    return twse_mis.fetch_stock_messages(
+        codes,
+        timeout_seconds=20,
+        request=http_get,
     )
-    response.raise_for_status()
-    response.encoding = "utf-8"
-    payload = response.json()
-
-    if not isinstance(payload, dict) or str(payload.get("rtcode") or "") not in {"", "0000"}:
-        raise ValueError("TWSE MIS live stock quote payload is unavailable.")
-
-    messages = payload.get("msgArray") or []
-    return [message for message in messages if isinstance(message, dict)]
 
 
 def _fetch_twse_mis_stock_messages(codes: list[str]) -> tuple[list[dict], int]:
@@ -599,20 +490,6 @@ def _market_quote_breadth_from_rows(
     }
 
 
-def _count_with_limit(value) -> tuple[int | None, int | None]:
-    if value is None:
-        return None, None
-
-    text = str(value).strip()
-    base_text = text.split("(", 1)[0]
-    limit_text = (
-        text.split("(", 1)[1].split(")", 1)[0]
-        if "(" in text and ")" in text
-        else None
-    )
-    return _as_int(base_text), _as_int(limit_text)
-
-
 def _twse_rwd_mi_index_url(trade_date: date) -> str:
     return (
         f"{TWSE_RWD_MI_INDEX_URL}?date={trade_date:%Y%m%d}"
@@ -843,118 +720,6 @@ def _twse_market_daily_history_url(month_start: date) -> str:
     return f"{TWSE_MARKET_DAILY_HISTORY_URL}?date={month_start:%Y%m%d}&response=json"
 
 
-def _row_value(row, keys: Iterable[str], positions: Iterable[int]):
-    if isinstance(row, dict):
-        for key in keys:
-            value = row.get(key)
-            if value not in (None, ""):
-                return value
-        return None
-
-    if isinstance(row, (list, tuple)):
-        for position in positions:
-            if position < len(row):
-                value = row[position]
-                if value not in (None, ""):
-                    return value
-
-    return None
-
-
-def _market_index_stat_item(
-    *,
-    trade_date: date | None,
-    trade_volume: int | None,
-    trade_value: int | None,
-    transaction_count: int | None,
-    close_value: float | None,
-    price_change: float | None,
-) -> dict | None:
-    if trade_date is None:
-        return None
-
-    if trade_volume is None and trade_value is None and close_value is None:
-        return None
-
-    return {
-        "trade_date": trade_date,
-        "trade_volume": trade_volume,
-        "trade_value": trade_value,
-        "transaction_count": transaction_count,
-        "close_value": close_value,
-        "price_change": price_change,
-    }
-
-
-def _parse_twse_market_daily_history_rows(payload) -> list[dict]:
-    rows = payload.get("data") if isinstance(payload, dict) else payload
-    if not isinstance(rows, list):
-        return []
-
-    results: list[dict] = []
-
-    for row in rows:
-        item = _market_index_stat_item(
-            trade_date=_parse_trade_date(
-                _row_value(row, keys=("Date", "date", "日期"), positions=(0,))
-            ),
-            trade_volume=_as_int(
-                _row_value(row, keys=("TradeVolume", "trade_volume", "成交股數"), positions=(1,))
-            ),
-            trade_value=_as_int(
-                _row_value(row, keys=("TradeValue", "trade_value", "成交金額"), positions=(2,))
-            ),
-            transaction_count=_as_int(
-                _row_value(row, keys=("Transaction", "transaction_count", "成交筆數"), positions=(3,))
-            ),
-            close_value=_as_float(
-                _row_value(row, keys=("TAIEX", "close_value", "發行量加權股價指數"), positions=(4,))
-            ),
-            price_change=_as_float(
-                _row_value(row, keys=("Change", "price_change", "漲跌點數"), positions=(5,))
-            ),
-        )
-        if item is not None:
-            results.append(item)
-
-    return results
-
-
-def _parse_tpex_market_daily_rows(payload) -> list[dict]:
-    rows = payload if isinstance(payload, list) else []
-    results: list[dict] = []
-
-    for row in rows:
-        item = _market_index_stat_item(
-            trade_date=_parse_trade_date(_row_value(row, keys=("Date", "date"), positions=(0,))),
-            trade_volume=_as_int(
-                _row_value(
-                    row,
-                    keys=("TradeVolume", "Volume", "TransactionVolume"),
-                    positions=(1,),
-                )
-            ),
-            trade_value=_as_int(
-                _row_value(row, keys=("TradeAmount", "TradeValue", "TransactionAmount"), positions=(2,))
-            ),
-            transaction_count=_as_int(
-                _row_value(row, keys=("Transaction", "TransactionCount"), positions=(3,))
-            ),
-            close_value=_as_float(
-                _row_value(
-                    row,
-                    keys=("TPExIndex", "Index", "Close", "TPEX"),
-                    positions=(4,),
-                )
-            ),
-            price_change=_as_float(_row_value(row, keys=("Change",), positions=(5,))),
-        )
-        if item is not None:
-            results.append(item)
-
-    return results
-
-
 def _fetch_twse_market_daily_stats_for_month(month_start: date) -> tuple[list[dict], str]:
     url = _twse_market_daily_history_url(month_start)
     payload = _fetch_json(url)
@@ -1043,7 +808,11 @@ def _persist_market_index_daily_stats(
         if changed:
             updated_count += 1
 
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
 
     return {
         "inserted_count": inserted_count,
@@ -1555,22 +1324,13 @@ def _fetch_yahoo_index_points(
     interval: str,
 ) -> tuple[list[dict], dict, timezone]:
     symbol = str(config["symbol"])
-    response = http_get(
-        YAHOO_CHART_URL.format(symbol=quote(symbol, safe="")),
-        params={
-            "range": range_value,
-            "interval": interval,
-            "includePrePost": "false",
-        },
-        headers={
-            "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
-            "Accept": "application/json,text/plain,*/*",
-        },
-        timeout=20,
+    payload = yahoo.fetch_index_chart_payload(
+        symbol=symbol,
+        range_value=range_value,
+        interval=interval,
+        timeout_seconds=20,
+        request=http_get,
     )
-    response.raise_for_status()
-
-    payload = response.json()
     result = (payload.get("chart", {}).get("result") or [None])[0]
 
     if not result:
@@ -1780,23 +1540,13 @@ def _fetch_yahoo_index(config: dict) -> dict:
 def _fetch_yahoo_index_intraday(config: dict) -> dict:
     symbol = str(config["symbol"])
     intraday_points: list[dict] = []
-
-    response = http_get(
-        YAHOO_CHART_URL.format(symbol=quote(symbol, safe="")),
-        params={
-            "range": "1d",
-            "interval": "1m",
-            "includePrePost": "false",
-        },
-        headers={
-            "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
-            "Accept": "application/json,text/plain,*/*",
-        },
-        timeout=20,
+    payload = yahoo.fetch_index_chart_payload(
+        symbol=symbol,
+        range_value="1d",
+        interval="1m",
+        timeout_seconds=20,
+        request=http_get,
     )
-    response.raise_for_status()
-
-    payload = response.json()
     result = (payload.get("chart", {}).get("result") or [None])[0]
 
     if not result:
@@ -1862,21 +1612,11 @@ def _fetch_twse_index_5s_intraday(
         if isinstance(payload, dict):
             return payload
 
-    response = http_get(
-        TWSE_INDEX_5S_URL,
-        params={
-            "response": "json",
-            "date": requested_date.strftime("%Y%m%d"),
-        },
-        headers={
-            "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
-            "Accept": "application/json,text/plain,*/*",
-        },
-        timeout=20,
+    raw_payload = twse.fetch_index_5s_payload(
+        requested_date,
+        timeout_seconds=20,
+        request=http_get,
     )
-    response.raise_for_status()
-    response.encoding = "utf-8"
-    raw_payload = response.json()
 
     if not isinstance(raw_payload, dict) or raw_payload.get("stat") != "OK":
         raise ValueError("TWSE 5-second index payload is unavailable.")
@@ -2018,24 +1758,12 @@ def _fetch_mis_index_message(config: dict) -> dict | None:
     if not channel:
         return None
 
-    response = http_get(
-        TWSE_MIS_STOCK_INFO_URL,
-        params={
-            "ex_ch": channel,
-            "json": "1",
-            "delay": "0",
-        },
-        headers={
-            "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
-            "Accept": "application/json,text/plain,*/*",
-            "Referer": "https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw",
-        },
-        timeout=20,
+    return twse_mis.fetch_index_message(
+        channel,
+        target=str(config.get("index_id") or config.get("symbol") or channel),
+        timeout_seconds=20,
+        request=http_get,
     )
-    response.raise_for_status()
-    response.encoding = "utf-8"
-    payload = response.json()
-    return (payload.get("msgArray") or [None])[0]
 
 
 def _fetch_mis_index_intraday(config: dict) -> dict:

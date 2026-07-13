@@ -17,6 +17,7 @@ from app.ai.market_payload_contract import (
     payload_slot_status as _payload_slot_status,
     slot_envelope as _slot_envelope,
 )
+from app.ai.market_context.common import append_source_ref_once as _append_source_ref_once
 from app.db.models import (
     BrokerBranchTradeDaily,
     FinancialMetricQuarterly,
@@ -150,11 +151,6 @@ FRESHNESS_DOMAIN_RESOURCES = {
     },
     "fundamentals": {"monthly_revenue", "financial_metric_quarterly"},
 }
-
-
-def _append_source_ref_once(source_refs: list[dict[str, Any]], ref: dict[str, Any]) -> None:
-    if not any(item.get("type") == ref.get("type") and item.get("name") == ref.get("name") for item in source_refs):
-        source_refs.append(ref)
 
 
 def _quote_slot_status(quote: dict[str, Any]) -> str:

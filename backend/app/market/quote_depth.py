@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.db.models import StockMaster, TaiwanStockQuoteSnapshot, utc_now
-from app.http_client import get as http_get
+from app.market.providers import http_get
 from app.market.trading_calendar import (
     TAIWAN_TZ,
     is_taiwan_trading_day,
