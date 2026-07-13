@@ -7,6 +7,7 @@ from datetime import date
 from unittest.mock import patch
 
 import requests
+from fastapi import HTTPException, status
 
 from app.jp_market import service as jp_service
 from app.jp_market import sources as jp_sources
@@ -20,6 +21,9 @@ from app.kr_market.errors import KRMarketDataFetchError
 from app.kr_market.providers import krx, naver, opendart
 from app.kr_market.providers import yahoo as kr_yahoo
 from app.observability import provider_http
+from app.routers import jp_market as jp_router
+from app.routers import kr_market as kr_router
+from app.routers import us_market as us_router
 from app.us_market import service as us_service
 from app.us_market import sources as us_sources
 from app.us_market.errors import USMarketDataFetchError
@@ -53,6 +57,90 @@ class MarketProviderAdapterTests(unittest.TestCase):
         self.assertEqual(us_sources.normalize_us_symbol("nasdaq:mu"), "MU")
         self.assertEqual(jp_sources.normalize_jp_symbol("7203"), "7203.T")
         self.assertEqual(kr_sources.normalize_kr_symbol("5930"), "005930.KS")
+
+    def test_market_service_boundaries_translate_raw_transport_errors(self) -> None:
+        cases = (
+            (
+                "us",
+                "app.us_market.service.fetch_symbol_directories",
+                lambda: us_service.sync_us_symbol_master(
+                    object(),  # type: ignore[arg-type]
+                    include_sec_company_data=False,
+                ),
+                USMarketDataFetchError,
+            ),
+            (
+                "jp",
+                "app.jp_market.service.fetch_jpx_listed_issues_workbook",
+                lambda: jp_service.sync_jp_symbol_master(object()),  # type: ignore[arg-type]
+                JPMarketDataFetchError,
+            ),
+            (
+                "kr",
+                "app.kr_market.service.fetch_krx_stock_master_payload",
+                lambda: kr_service.sync_kr_symbol_master(object()),  # type: ignore[arg-type]
+                KRMarketDataFetchError,
+            ),
+        )
+
+        for market, target, operation, error_type in cases:
+            with self.subTest(market=market):
+                timeout = requests.Timeout(f"{market} provider timeout")
+                with (
+                    patch(target, side_effect=timeout),
+                    self.assertRaises(error_type) as raised,
+                ):
+                    operation()
+
+                self.assertEqual(str(raised.exception), str(timeout))
+                self.assertIs(raised.exception.__cause__, timeout)
+
+    def test_market_routes_preserve_bad_gateway_transport_contract(self) -> None:
+        cases = (
+            (
+                "us",
+                "app.us_market.service.fetch_symbol_directories",
+                lambda: us_router.sync_us_stock_symbols(
+                    include_sec_company_data=False,
+                    deactivate_missing=False,
+                    db=object(),  # type: ignore[arg-type]
+                ),
+                USMarketDataFetchError,
+            ),
+            (
+                "jp",
+                "app.jp_market.service.fetch_jpx_listed_issues_workbook",
+                lambda: jp_router.sync_jp_stock_symbols(
+                    deactivate_missing=False,
+                    db=object(),  # type: ignore[arg-type]
+                ),
+                JPMarketDataFetchError,
+            ),
+            (
+                "kr",
+                "app.kr_market.service.fetch_krx_stock_master_payload",
+                lambda: kr_router.sync_kr_stock_symbols(
+                    deactivate_missing=False,
+                    db=object(),  # type: ignore[arg-type]
+                ),
+                KRMarketDataFetchError,
+            ),
+        )
+
+        for market, target, operation, error_type in cases:
+            with self.subTest(market=market):
+                timeout = requests.Timeout(f"{market} provider timeout")
+                with (
+                    patch(target, side_effect=timeout),
+                    self.assertRaises(HTTPException) as raised,
+                ):
+                    operation()
+
+                error = raised.exception
+                self.assertEqual(error.status_code, status.HTTP_502_BAD_GATEWAY)
+                self.assertEqual(error.detail, str(timeout))
+                self.assertIsInstance(error.__cause__, error_type)
+                self.assertIs(error.__cause__.__cause__, timeout)
 
     def test_services_bind_fetchers_from_provider_modules(self) -> None:
         bindings = (

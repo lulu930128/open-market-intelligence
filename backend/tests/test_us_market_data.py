@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from app.ai import agentic_tools
 from app.us_market import service as us_market_service
 from app.db.models import (
     Base,
@@ -652,6 +653,78 @@ class USMarketStorageIsolationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.db.close()
         self.engine.dispose()
+
+    @patch("app.ai.agentic_tools.us_market_service.get_us_intraday_trend")
+    def test_read_us_stock_context_fetches_intraday_when_requested(self, mock_intraday) -> None:
+        upsert_us_daily_price_records(
+            self.db,
+            [
+                USDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="MU",
+                    trade_date=date(2026, 6, 1),
+                    open_price=89.0,
+                    high_price=91.0,
+                    low_price=88.0,
+                    close_price=90.0,
+                    adjusted_close=None,
+                    trade_volume=1000,
+                    dividend_amount=None,
+                    split_coefficient=None,
+                    source_url="https://example.test/chart/MU?range=1y&interval=1d",
+                    raw_payload_hash="daily-mu",
+                )
+            ],
+        )
+        mock_intraday.return_value = {
+            "stock_id": "MU",
+            "symbol": "MU",
+            "source": "yahoo_finance_chart",
+            "session_scope": "all",
+            "session_phase": "regular",
+            "has_extended_hours": True,
+            "previous_close": 90.0,
+            "point_count": 2,
+            "points": [
+                {
+                    "time": "2026-06-02T09:30:00-04:00",
+                    "session": "regular",
+                    "price": 91.25,
+                    "volume": 1000,
+                },
+                {
+                    "time": "2026-06-02T09:31:00-04:00",
+                    "session": "regular",
+                    "price": 91.35,
+                    "volume": 1500,
+                },
+            ],
+            "source_url": "https://example.test/chart/MU?range=1d&interval=1m",
+        }
+
+        context = agentic_tools.read_us_stock_context(
+            db=self.db,
+            symbol="mu",
+            market_data_params={
+                "include_intraday": True,
+                "payload_level": "summary",
+                "intraday_limit": 1,
+                "session_scope": "all",
+            },
+        )
+
+        mock_intraday.assert_called_once_with(symbol="MU", session_scope="all")
+        compact = context["data"]["compact"]
+        self.assertEqual(context["as_of"], "2026-06-02T09:31:00-04:00")
+        self.assertEqual(compact["quote"]["price"], 91.35)
+        self.assertTrue(compact["quote"]["is_realtime"])
+        self.assertEqual(compact["slots"]["intraday"]["status"], "ready")
+        self.assertTrue(compact["resources"]["include_intraday"])
+        self.assertEqual(
+            compact["intraday_bars"]["series"]["1m"]["returned_point_count"],
+            1,
+        )
+        self.assertNotIn("us_intraday_trend", context["missing"])
 
     def _set_daily_fetched_at(
         self,

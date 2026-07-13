@@ -1,6 +1,6 @@
 from datetime import date, datetime
 import unittest
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from app.watchlists import ranking_service
 
@@ -143,6 +143,76 @@ class WatchlistRankingLimitStatusTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["stock_id"], "2330")
         self.assertEqual(result["results"][0]["indicator_snapshot"]["atr"]["atr14"], 2.5)
 
+    def test_ranking_batch_applies_intraday_limit_across_offsets(self):
+        items = [
+            {"stock_id": str(1000 + index), "stock_name": f"Stock {index}"}
+            for index in range(40)
+        ]
+        signal_result = {
+            "time": "2026-06-08",
+            "close": 100.0,
+            "volume": 1000,
+            "change": 0.0,
+            "change_pct": 0.0,
+            "score": 0,
+            "status": "ready",
+            "signals": [],
+            "indicator_snapshot": {},
+        }
+
+        with (
+            patch.object(ranking_service.watchlist_service, "get_group", return_value={}),
+            patch.object(
+                ranking_service.watchlist_service,
+                "get_group_tree",
+                return_value=[{"id": 1, "children": []}],
+            ),
+            patch.object(
+                ranking_service.watchlist_service,
+                "list_items",
+                return_value=items,
+            ),
+            patch.object(
+                ranking_service,
+                "calculate_latest_stock_signals",
+                return_value=signal_result,
+            ),
+            patch.object(ranking_service, "_market_context_by_stock", return_value={}),
+            patch.object(
+                ranking_service,
+                "_get_intraday_overlay",
+                return_value=None,
+            ) as get_overlay,
+            patch.object(
+                ranking_service,
+                "expected_daily_price_date",
+                return_value=date(2026, 6, 8),
+            ),
+        ):
+            first_result = ranking_service.get_watchlist_group_latest_ranking_batch(
+                db=object(),
+                group_id=1,
+                use_intraday=True,
+                intraday_limit=30,
+                offset=27,
+                batch_size=6,
+            )
+            second_result = ranking_service.get_watchlist_group_latest_ranking_batch(
+                db=object(),
+                group_id=1,
+                use_intraday=True,
+                intraday_limit=30,
+                offset=30,
+                batch_size=3,
+            )
+
+        self.assertEqual(len(first_result["results"]), 6)
+        self.assertEqual(len(second_result["results"]), 3)
+        self.assertEqual(
+            [call.kwargs["stock_id"] for call in get_overlay.call_args_list],
+            ["1027", "1028", "1029"],
+        )
+
     def test_ranking_rows_include_market_context_snapshot(self):
         def fake_signal_result(*, stock_id: str, **_: object):
             return {
@@ -251,6 +321,49 @@ class WatchlistRankingLimitStatusTests(unittest.TestCase):
             1.9802,
             places=4,
         )
+
+    def test_intraday_overlay_cache_is_reused_across_ranking_scopes(self):
+        signal_result = {
+            "time": "2026-06-08",
+            "close": 100.0,
+            "volume": 1000,
+            "change": 0.0,
+            "change_pct": 0.0,
+            "score": 0,
+            "status": "ready",
+            "signals": [],
+            "indicator_snapshot": {},
+        }
+        cache: dict[str, dict | None] = {}
+
+        with (
+            patch.object(
+                ranking_service,
+                "calculate_latest_stock_signals",
+                return_value=signal_result,
+            ),
+            patch.object(ranking_service, "_market_context_by_stock", return_value={}),
+            patch.object(
+                ranking_service,
+                "_get_intraday_overlay",
+                return_value=None,
+            ) as get_overlay,
+        ):
+            for _ in range(2):
+                ranking_service._build_watchlist_ranking_rows(
+                    db=object(),
+                    items=[{"stock_id": "2330", "stock_name": "TSMC"}],
+                    ma_windows="5,20,60",
+                    volume_ma_windows="5,20",
+                    limit=100,
+                    volume_ratio_threshold=1.5,
+                    use_intraday=True,
+                    intraday_limit=30,
+                    intraday_overlay_cache=cache,
+                )
+
+        get_overlay.assert_called_once_with(db=ANY, stock_id="2330")
+        self.assertIn("2330", cache)
 
     def test_unique_watchlist_items_follow_group_tree_order(self):
         def fake_list_items(*, group_id: int, **_: object):

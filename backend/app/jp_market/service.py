@@ -22,6 +22,7 @@ from app.db.models import (
     JPWatchlistItem,
     utc_now,
 )
+from app.observability.provider_http import translate_provider_http_errors
 from app.jp_market.chart_projection import (
     aggregate_daily_rows as _aggregate_jp_daily_rows,
     daily_canonical_sort_key as _jp_daily_canonical_sort_key,
@@ -31,6 +32,7 @@ from app.jp_market.chart_projection import (
     ohlc_point as _jp_ohlc_point,
     sum_nullable as _sum_nullable,
 )
+from app.jp_market.errors import JPMarketDataFetchError
 from app.jp_market.schemas import (
     JPWatchlistGroupCreate,
     JPWatchlistGroupUpdate,
@@ -55,7 +57,6 @@ from app.jp_market.sources import (
     JPDailyPriceRecord,
     JPInvestorTypeRecord,
     JPMarginInterestRecord,
-    JPMarketDataFetchError,
     JPStockRecord,
     local_code_from_symbol,
     normalize_jp_symbol,
@@ -72,6 +73,9 @@ from app.market.technical_radar import (
     TechnicalRadarBar,
     build_technical_watchlist_radar,
 )
+
+
+_translate_jp_provider_errors = translate_provider_http_errors(JPMarketDataFetchError)
 
 
 class JPStockNotFoundError(Exception):
@@ -282,6 +286,7 @@ def upsert_jp_stock_records(db: Session, records: list[JPStockRecord]) -> dict:
     }
 
 
+@_translate_jp_provider_errors
 def sync_jp_symbol_master(
     db: Session,
     *,
@@ -1063,6 +1068,7 @@ def refresh_jp_daily_prices_from_yahoo_chart(
     }
 
 
+@_translate_jp_provider_errors
 def refresh_jp_daily_prices(
     db: Session,
     *,
@@ -1654,6 +1660,7 @@ def refresh_jp_investor_types_from_jquants(
     }
 
 
+@_translate_jp_provider_errors
 def refresh_jp_market_resource(
     db: Session,
     *,
@@ -1821,6 +1828,7 @@ def _run_jp_fundamental_provider_refresh(
         return None, str(exc)
 
 
+@_translate_jp_provider_errors
 def refresh_jp_company_fundamental(
     db: Session,
     *,
@@ -2478,6 +2486,7 @@ def _refresh_jp_ohlc_history_if_needed(
         }
 
 
+@_translate_jp_provider_errors
 def list_jp_ohlc_chart_data(
     db: Session,
     *,

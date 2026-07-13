@@ -15,6 +15,8 @@
 - Alembic revisions: 33, latest `20260709_0033_portfolio_holdings.py`
 - Final backend validation: `580 passed, 1 warning`
 - Final validation logs: `.tmp/validation/20260713-100213`
+- Follow-up hardening validation: `586 passed`, no warning summary
+- Follow-up validation logs: `.tmp/validation/20260713-130020`
 
 ## Current dependency map
 
@@ -66,6 +68,8 @@ frontend / MCP / Kuro
 | AI answer leaf projections | `answer_localization.py`, `answer_data_limits.py`, `answer_scenarios.py` | pure helpers; high-level façade retained |
 | AI market-context projection | `backend/app/ai/market_context/common.py` | shared source/freshness/compact projection |
 | Taiwan index route family | `backend/app/routers/tw_market_indices.py` | subrouter with handler re-exports from `market.py` |
+| Taiwan futures route family | `backend/app/routers/tw_market_futures.py` | subrouter with handler re-exports from `market.py` |
+| Taiwan futures fallback jobs | `backend/app/market/tw_futures_jobs.py` | domain orchestration through `jobs.service`; no router transaction |
 | ORM model registry | `backend/app/db/models.py` | intentional single-registry Option A |
 | Market-family router errors/jobs | `backend/app/routers/market_family_helpers.py` | first shared slice complete |
 
@@ -82,14 +86,15 @@ frontend / MCP / Kuro
 | `jp_market/service.py` | 2711 | stock, watchlist, refresh, resources, intraday | pure chart projection extracted; façade retained |
 | `crypto_market/service.py` | 2709 | refresh, realtime persistence, resources, source events | REST/realtime/persistence audit |
 | `kr_market/service.py` | 2607 | stock, watchlist, indices, resources, intraday | pure chart projection extracted; façade retained |
-| `routers/market.py` | 1884 | 55 Taiwan routes + 5-route index subrouter | first route-family split complete |
+| `routers/market.py` | 1557 | 50 Taiwan routes + index/futures subrouters | two route-family splits complete |
 
 ## Router surface
 
 | Router file | Route count | Main domain |
 | --- | ---: | --- |
-| `market.py` | 55 | Taiwan market, chips, futures, charts, metrics; includes index subrouter |
+| `market.py` | 50 | Taiwan market, chips, charts and metrics; includes index/futures subrouters |
 | `tw_market_indices.py` | 5 | Taiwan index summary/list/intraday/contribution/OHLC |
+| `tw_market_futures.py` | 5 | Taiwan futures products/quotes/daily/intraday |
 | `crypto_market.py` | 43 | crypto REST/realtime/resources |
 | `us_market.py` | 39 | US stock/watchlist/resources |
 | `kr_market.py` | 39 | KR stock/index/watchlist/resources |

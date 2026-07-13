@@ -11,6 +11,7 @@
 - Methods: GET 186, POST 102, PATCH 18, DELETE 15, PUT 4
 - Backend regression after M1: `556 passed, 1 warning`
 - Final backend regression after M9: `580 passed, 1 warning`
+- Follow-up hardening regression: `586 passed`, no warning summary
 - Final OpenAPI inventory: 326 total operations, 325 under `/api/*`
 
 ## Router prefix matrix
@@ -26,7 +27,7 @@
 | `crypto_market.py` | `/api/crypto-market` | 43 | crypto context |
 | `resource_market.py` | `/api/resource-market` | 8 | resource context |
 | `dispatch.py` | `/api/dispatch` | 12 | dispatch |
-| `market.py` + `tw_market_indices.py` | `/api/market` | 55 + 5 | Taiwan market core; index subrouter |
+| `market.py` + Taiwan subrouters | `/api/market` | 50 + 5 + 5 | Taiwan market core; index and futures subrouters |
 | `indicators.py` | `/api/market/indicators` | 2 | indicators |
 | `stocks.py` | `/api/stocks` | 8 | Taiwan stock master |
 | `us_market.py` | `/api/us-market` | 39 | US context |
@@ -54,6 +55,22 @@ M1/M7 compatibility result：
 - 不改 index id normalization、market selection、fallback order、cache behavior 或 freshness metadata。
 - M7 將 handlers 移到 `tw_market_indices.py`，`market.py` include subrouter 並 re-export 同一 handler identity。
 - 五條 route 的 OpenAPI operation ID 與 response model ref 均保持不變。
+
+## Taiwan futures API surface
+
+| Method | Full path | Router function | Response item contract |
+| --- | --- | --- | --- |
+| GET | `/api/market/tw-futures/products` | `list_taiwan_futures_products_api` | `TaiwanFuturesProductRead` |
+| POST | `/api/market/tw-futures/refresh` | `refresh_taiwan_futures_quotes_api` | `TaiwanFuturesQuoteRead` |
+| GET | `/api/market/tw-futures/latest` | `get_latest_taiwan_futures_quotes_api` | `TaiwanFuturesQuoteRead` |
+| GET | `/api/market/tw-futures/{symbol}/daily` | `list_taiwan_futures_daily_bars_api` | `TaiwanFuturesDailyBarRead` |
+| GET | `/api/market/tw-futures/{symbol}/intraday` | `list_taiwan_futures_intraday_bars_api` | `TaiwanFuturesIntradayBarRead` |
+
+Follow-up hardening restrictions:
+
+- `market.py` include `tw_market_futures.py` and re-export the same five handler identities.
+- Operation IDs, response item refs, query defaults and fallback behavior remain unchanged.
+- Futures refresh/job persistence is owned by `tw_futures.py` and `tw_futures_jobs.py`; router modules contain no direct transaction calls.
 
 ## Service façade consumers
 

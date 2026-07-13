@@ -136,10 +136,12 @@ class Settings(BaseSettings):
     scheduler_watchlist_radar_enabled_only: bool = True
     scheduler_watchlist_radar_max_results: int = 30
     scheduler_watchlist_radar_calculation_limit: int = 100
-    scheduler_watchlist_radar_use_intraday: bool = False
+    scheduler_watchlist_radar_use_intraday: bool = True
     scheduler_watchlist_radar_intraday_limit: int = 30
     scheduler_watchlist_radar_evaluate_lookback_days: int = 10
     scheduler_watchlist_radar_require_daily_release: bool = True
+    scheduler_watchlist_radar_reconcile_interval_minutes: int = 30
+    scheduler_watchlist_radar_reconcile_until: str = "18:15"
 
     dispatch_smtp_host: str | None = None
     dispatch_smtp_port: int = 587

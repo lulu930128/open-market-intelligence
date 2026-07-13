@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import date
 
-import requests
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
@@ -20,6 +19,7 @@ from app.settings.refresh_execution import (
     resolve_observed_stock_refresh_interval_seconds,
     resolve_subresource_refresh_interval_seconds,
 )
+from app.us_market.errors import USMarketDataFetchError
 from app.us_market.schemas import (
     MacroSeriesObservationRead,
     USDailyPriceRead,
@@ -50,7 +50,6 @@ from app.us_market.schemas import (
 from app.watchlists.schemas import WatchlistGroupRadarRead
 from app.us_market.service import (
     USMarketConfigurationError,
-    USMarketDataFetchError,
     USStockNotFoundError,
     USWatchlistDuplicateItemError,
     USWatchlistGroupNotEmptyError,
@@ -601,8 +600,6 @@ def sync_us_stock_symbols(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except USMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -616,8 +613,6 @@ def sync_us_stock_sec_company_data(db: Session = Depends(get_db)):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except USMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -764,8 +759,6 @@ def refresh_us_daily_prices(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except USMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -827,8 +820,6 @@ def get_us_ohlc_chart_data(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except USMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -856,8 +847,6 @@ def refresh_us_sec_facts(symbol: str, db: Session = Depends(get_db)):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except USMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -905,8 +894,6 @@ def refresh_us_company_profile(symbol: str, db: Session = Depends(get_db)):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except USMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -954,8 +941,6 @@ def refresh_us_corporate_actions(symbol: str, db: Session = Depends(get_db)):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except USMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -987,8 +972,6 @@ def list_us_actions(
 def refresh_us_short_volume(trade_date: date, db: Session = Depends(get_db)):
     try:
         return refresh_us_short_volume_from_finra(db=db, trade_date=trade_date)
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except USMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -1033,8 +1016,6 @@ def refresh_us_macro_series(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except USMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 

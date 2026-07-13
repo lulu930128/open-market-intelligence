@@ -640,7 +640,7 @@ export const enUS = {
     outcome: {
       title: "Radar backtest",
       loading: "Loading",
-      noSnapshot: "No radar snapshot saved yet",
+      noSnapshot: "Today's snapshot is pending (runs after market close)",
       notEvaluated: "{date} saved, not evaluated",
       pending: "{date} waiting for next-day data: {count}",
       evaluated: "{date} evaluated: {count}",
@@ -650,7 +650,7 @@ export const enUS = {
       reload: "Refresh result",
       history: "History",
       historyTitle: "Radar snapshot history",
-      historyEmpty: "No radar snapshots saved yet",
+      historyEmpty: "No snapshots for this group yet; one is saved after market close",
       close: "Close",
       snapshot: "Snapshot",
       evaluateSelected: "Evaluate selected",

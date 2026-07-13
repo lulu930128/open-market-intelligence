@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import date
 
-import requests
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
@@ -21,6 +20,7 @@ from app.settings.refresh_execution import (
     resolve_observed_stock_refresh_interval_seconds,
     resolve_subresource_refresh_interval_seconds,
 )
+from app.jp_market.errors import JPMarketDataFetchError
 from app.jp_market.schemas import (
     JPCompanyFundamentalRead,
     JPDailyPriceRead,
@@ -77,7 +77,6 @@ from app.jp_market.service import (
     update_jp_watchlist_group,
     update_jp_watchlist_item,
 )
-from app.jp_market.sources import JPMarketDataFetchError
 
 
 router = APIRouter()
@@ -170,8 +169,6 @@ def sync_jp_stock_symbols(
             db=db,
             deactivate_missing=deactivate_missing,
         )
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except JPMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -255,8 +252,6 @@ def refresh_jp_market_resource_api(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except JPMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -278,8 +273,6 @@ def refresh_jp_company_fundamental(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except JPMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -345,8 +338,6 @@ def refresh_jp_daily_prices(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except JPMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -726,8 +717,6 @@ def get_jp_ohlc_chart_data(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except JPMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 

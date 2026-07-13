@@ -1422,6 +1422,22 @@ def _us_intraday_quote(intraday_summary: dict[str, Any] | None) -> dict[str, Any
     }
 
 
+def _us_intraday_latest_time(intraday_summary: dict[str, Any] | None) -> str | None:
+    if not isinstance(intraday_summary, dict) or not intraday_summary:
+        return None
+
+    latest = intraday_summary.get("latest_point") if isinstance(intraday_summary.get("latest_point"), dict) else None
+    points = intraday_summary.get("points") if isinstance(intraday_summary.get("points"), list) else []
+    if latest is None and points:
+        last_point = points[-1]
+        latest = last_point if isinstance(last_point, dict) else None
+    if not isinstance(latest, dict):
+        return None
+
+    time_value = latest.get("time")
+    return str(time_value) if time_value else None
+
+
 def _us_daily_quote(latest_daily: USDailyPrice | None, *, intraday_requested: bool) -> dict[str, Any]:
     quote = {
         "source": "us_daily_price",
@@ -1499,6 +1515,19 @@ def read_us_stock_context(
     if sec_warning:
         warnings.append(sec_warning)
 
+    if include_intraday and intraday_summary is None:
+        try:
+            intraday_summary = us_market_service.get_us_intraday_trend(
+                symbol=normalized_symbol,
+                session_scope=session_scope,
+            )
+        except Exception as exc:
+            if "us_intraday_trend" not in missing:
+                missing.append("us_intraday_trend")
+            warnings.append(f"US intraday trend unavailable: {exc}")
+
+    intraday_requested = include_intraday or intraday_summary is not None
+
     chart: dict[str, Any] = {}
     try:
         chart = us_market_service.list_us_ohlc_chart_data(
@@ -1512,7 +1541,7 @@ def read_us_stock_context(
             adjusted=False,
             provider=provider,
         )
-        if include_intraday and session_scope != "regular":
+        if intraday_requested and session_scope != "regular":
             chart["requested_session_scope"] = session_scope
         if not chart.get("point_count") and "us_ohlc_chart" not in missing:
             missing.append("us_ohlc_chart")
@@ -1558,14 +1587,17 @@ def read_us_stock_context(
     if short_volume_rows:
         _append_source_ref_once(source_refs, {"type": "table", "name": "us_short_volume_daily"})
     _append_source_ref_once(source_refs, {"type": "derived", "name": "app.us_market.source_health"})
+    if intraday_summary:
+        _append_source_ref_once(source_refs, {"type": "external_or_cache", "name": "yahoo_finance_chart"})
 
     intraday_quote = _us_intraday_quote(intraday_summary)
-    quote = intraday_quote or _us_daily_quote(latest_daily, intraday_requested=include_intraday)
+    quote = intraday_quote or _us_daily_quote(latest_daily, intraday_requested=intraday_requested)
     intraday_bars = _us_intraday_compact(intraday_summary, market_data_params=market_data_params)
+    intraday_as_of = _us_intraday_latest_time(intraday_summary)
     envelope = {
         "kind": "us_stock_context",
         "generated_at": _now().isoformat(),
-        "as_of": latest_daily.trade_date.isoformat() if latest_daily else None,
+        "as_of": intraday_as_of or (latest_daily.trade_date.isoformat() if latest_daily else None),
         "scope": {
             "target": {
                 "type": "us_stock",
@@ -1603,7 +1635,7 @@ def read_us_stock_context(
                 "bars": chart.get("bars"),
                 "point_count": chart.get("point_count"),
                 "include_intraday": False,
-                "requested_include_intraday": include_intraday,
+                "requested_include_intraday": intraday_requested,
             } if chart else {},
             "source_health": source_health.get("summary"),
         },
@@ -1688,14 +1720,20 @@ def read_us_stock_context(
             "payload_level": payload_level,
             "requested_provider": provider,
             "intraday": intraday_summary or {},
-            "include_intraday": include_intraday,
+            "include_intraday": intraday_requested,
             "intraday_available": bool(intraday_quote),
         },
         freshness={
             "price": "current" if latest_daily or intraday_quote else "missing",
             "profile": "current" if profile else "missing",
             "chart": "current" if chart else "missing",
-            "intraday": "current" if intraday_quote else "missing",
+            "intraday": (
+                "current"
+                if intraday_quote
+                else "missing"
+                if intraday_requested
+                else "not_requested"
+            ),
             "source_health": source_health.get("summary"),
         },
         payload_level=payload_level,

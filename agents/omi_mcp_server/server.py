@@ -155,6 +155,13 @@ INCLUDE_INTRADAY_SCHEMA: dict[str, Any] = {
     "description": "Request bounded intraday evidence when the backend trust policy allows external/cache refresh.",
 }
 
+SESSION_SCOPE_SCHEMA: dict[str, Any] = {
+    "type": "string",
+    "enum": ["regular", "extended", "all"],
+    "default": "regular",
+    "description": "US intraday session scope. Use all to include pre-market and after-hours bars.",
+}
+
 ASK_TOOL: dict[str, Any] = {
     "name": "omi.ask",
     "title": "Ask OMI",
@@ -267,6 +274,7 @@ ASK_TOOL: dict[str, Any] = {
             "include_intraday": INCLUDE_INTRADAY_SCHEMA,
             "payload_level": PAYLOAD_LEVEL_SCHEMA,
             "intraday_limit": INTRADAY_LIMIT_SCHEMA,
+            "session_scope": SESSION_SCOPE_SCHEMA,
             "include_children": {"type": "boolean", "default": True},
             "enabled_only": {"type": "boolean", "default": True},
             "conversation_context": {
@@ -279,7 +287,7 @@ ASK_TOOL: dict[str, Any] = {
                     "Optional bounded market-data parameters forwarded to OMI readers, "
                     "for example provider, providers, symbol, symbols, instrument_type, "
                     "interval, timeframe, bars, daily_limit, include_intraday, payload_level, "
-                    "intraday_limit, or limit."
+                    "intraday_limit, session_scope, or limit."
                 ),
             },
         },
@@ -305,12 +313,13 @@ MARKET_DATA_PARAMS_SCHEMA: dict[str, Any] = {
         "Optional bounded market-data parameters forwarded to OMI readers, "
         "for example provider, providers, symbol, symbols, instrument_type, "
         "interval, timeframe, bars, daily_limit, include_intraday, payload_level, "
-        "intraday_limit, or limit."
+        "intraday_limit, session_scope, or limit."
     ),
     "properties": {
         "include_intraday": INCLUDE_INTRADAY_SCHEMA,
         "payload_level": PAYLOAD_LEVEL_SCHEMA,
         "intraday_limit": INTRADAY_LIMIT_SCHEMA,
+        "session_scope": SESSION_SCOPE_SCHEMA,
     },
     "additionalProperties": True,
 }
@@ -319,6 +328,7 @@ MARKET_PAYLOAD_CONTROL_PROPERTIES: dict[str, Any] = {
     "include_intraday": INCLUDE_INTRADAY_SCHEMA,
     "payload_level": PAYLOAD_LEVEL_SCHEMA,
     "intraday_limit": INTRADAY_LIMIT_SCHEMA,
+    "session_scope": SESSION_SCOPE_SCHEMA,
     "market_data_params": MARKET_DATA_PARAMS_SCHEMA,
 }
 
@@ -986,6 +996,7 @@ def _augment_market_payload_control_schema(tool: dict[str, Any]) -> dict[str, An
                 ("include_intraday", INCLUDE_INTRADAY_SCHEMA),
                 ("payload_level", PAYLOAD_LEVEL_SCHEMA),
                 ("intraday_limit", INTRADAY_LIMIT_SCHEMA),
+                ("session_scope", SESSION_SCOPE_SCHEMA),
             ):
                 market_data_params["properties"].setdefault(key, value)
         market_data_params.setdefault("additionalProperties", True)
@@ -1239,6 +1250,9 @@ def _merge_market_data_params(arguments: dict[str, Any]) -> dict[str, Any]:
     params = dict(_dict_arg(arguments, "market_data_params"))
     if "include_intraday" in arguments and "include_intraday" not in params:
         params["include_intraday"] = _bool_arg(arguments, "include_intraday", False)
+    analysis_horizon = str(arguments.get("analysis_horizon") or "").strip().lower()
+    if analysis_horizon == "intraday" and "include_intraday" not in params:
+        params["include_intraday"] = True
     if "payload_level" in arguments and "payload_level" not in params:
         level = str(arguments.get("payload_level") or "").strip().lower()
         if level in {"summary", "compact", "standard", "full"}:
@@ -1248,6 +1262,10 @@ def _merge_market_data_params(arguments: dict[str, Any]) -> dict[str, Any]:
             params["intraday_limit"] = max(1, min(500, int(arguments["intraday_limit"])))
         except (TypeError, ValueError):
             pass
+    if "session_scope" in arguments and "session_scope" not in params:
+        session_scope = str(arguments.get("session_scope") or "").strip().lower()
+        if session_scope in {"regular", "extended", "all"}:
+            params["session_scope"] = session_scope
     return params
 
 

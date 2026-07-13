@@ -9,6 +9,10 @@ import requests
 from app.observability import provider_http
 
 
+class DomainFetchError(Exception):
+    pass
+
+
 def _response(status_code: int, *, retry_after: str | None = None) -> requests.Response:
     response = requests.Response()
     response.status_code = status_code
@@ -118,6 +122,42 @@ class ProviderHttpTests(unittest.TestCase):
         self.assertIsNotNone(failure)
         self.assertEqual(failure.status, "blocked")
         self.assertEqual(failure.http_status_code, 403)
+
+    def test_service_boundary_translates_transport_error_and_preserves_context(self) -> None:
+        response = _response(503)
+
+        @provider_http.translate_provider_http_errors(DomainFetchError)
+        def provider_operation() -> None:
+            provider_http.get(
+                self.context,
+                "https://provider.test/data",
+                timeout_seconds=10,
+            )
+
+        with (
+            patch.object(provider_http.http_client, "request", return_value=response),
+            self.assertRaises(DomainFetchError) as raised,
+        ):
+            provider_operation()
+
+        error = raised.exception
+        self.assertIsInstance(error.__cause__, provider_http.ProviderHttpError)
+        failure = provider_http.provider_http_failure(error)
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure.status, "error")
+        self.assertEqual(failure.http_status_code, 503)
+
+    def test_service_boundary_does_not_translate_non_transport_error(self) -> None:
+        expected = ValueError("invalid provider payload")
+
+        @provider_http.translate_provider_http_errors(DomainFetchError)
+        def provider_operation() -> None:
+            raise expected
+
+        with self.assertRaises(ValueError) as raised:
+            provider_operation()
+
+        self.assertIs(raised.exception, expected)
 
     def test_retry_after_http_date_is_bounded_to_seconds(self) -> None:
         now = datetime(2026, 7, 11, 4, 0, tzinfo=timezone.utc)

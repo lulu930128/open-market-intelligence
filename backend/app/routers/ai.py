@@ -93,6 +93,11 @@ def _market_data_params_from_query(
     include_intraday: bool | None = None,
     payload_level: str | None = None,
     intraday_limit: int | None = None,
+    session_scope: str | None = None,
+    daily_limit: int | None = None,
+    timeframe: str | None = None,
+    bars: int | None = None,
+    provider: str | None = None,
 ) -> dict:
     params: dict = {}
     if include_intraday is not None:
@@ -101,6 +106,16 @@ def _market_data_params_from_query(
         params["payload_level"] = payload_level
     if intraday_limit is not None:
         params["intraday_limit"] = intraday_limit
+    if session_scope:
+        params["session_scope"] = session_scope
+    if daily_limit is not None:
+        params["daily_limit"] = daily_limit
+    if timeframe:
+        params["timeframe"] = timeframe
+    if bars is not None:
+        params["bars"] = bars
+    if provider:
+        params["provider"] = provider
     return params
 
 
@@ -489,15 +504,41 @@ def generate_stock_llm_report(
 @router.get("/us-stocks/{symbol}/context", response_model=AiDataEnvelope)
 def read_us_stock_context(
     symbol: str,
+    include_intraday: bool = Query(default=False),
+    payload_level: str = Query(default="compact", pattern="^(summary|compact|standard|full)$"),
+    intraday_limit: int | None = Query(default=None, ge=1, le=500),
+    session_scope: str = Query(default="regular", pattern="^(regular|extended|all)$"),
+    daily_limit: int = Query(default=10, ge=1, le=200),
+    timeframe: str = Query(default="daily", pattern="^(daily|weekly|monthly)$"),
+    bars: int = Query(default=90, ge=1, le=5000),
+    provider: str = Query(default="auto", pattern="^(auto|alphavantage|yahoo_chart)$"),
+    analysis_horizon: str = Query(default="swing", pattern="^(auto|intraday|short|swing|long)$"),
     db: Session = Depends(get_db),
 ):
-    return agentic_tools.read_us_stock_context(db=db, symbol=symbol)
+    return agentic_tools.read_us_stock_context(
+        db=db,
+        symbol=symbol,
+        market_data_params=_market_data_params_from_query(
+            include_intraday=include_intraday or analysis_horizon == "intraday",
+            payload_level=payload_level,
+            intraday_limit=intraday_limit,
+            session_scope=session_scope,
+            daily_limit=daily_limit,
+            timeframe=timeframe,
+            bars=bars,
+            provider=provider,
+        ),
+    )
 
 
 @router.get("/us-stocks/{symbol}/brief", response_model=AiReportEnvelope)
 def build_us_stock_brief(
     symbol: str,
     strategy_profile: str = "short_term_momentum",
+    include_intraday: bool = Query(default=False),
+    payload_level: str = Query(default="compact", pattern="^(summary|compact|standard|full)$"),
+    intraday_limit: int | None = Query(default=None, ge=1, le=500),
+    session_scope: str = Query(default="regular", pattern="^(regular|extended|all)$"),
     analysis_horizon: str = Query(default="swing", pattern="^(auto|intraday|short|swing|long)$"),
     db: Session = Depends(get_db),
 ):
@@ -506,6 +547,12 @@ def build_us_stock_brief(
         symbol=symbol,
         strategy_profile=strategy_profile,
         analysis_horizon=analysis_horizon,
+        market_data_params=_market_data_params_from_query(
+            include_intraday=include_intraday or analysis_horizon == "intraday",
+            payload_level=payload_level,
+            intraday_limit=intraday_limit,
+            session_scope=session_scope,
+        ),
     )
 
 

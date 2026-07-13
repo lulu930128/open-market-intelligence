@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 import unittest
 from unittest.mock import patch
 
@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.db.models import (
     Base,
     MarketDailyPrice,
+    MarketIntradayBar,
     RawFetchResult,
     SourceRegistry,
     WatchlistGroup,
@@ -241,9 +242,9 @@ class WatchlistRadarAutomationTests(unittest.TestCase):
         self.assertEqual(self.db.query(WatchlistRadarSnapshotRun).count(), 2)
         get_radar.assert_called_once()
 
-    def test_automation_defaults_to_active_root_groups(self) -> None:
+    def test_automation_defaults_to_all_active_groups(self) -> None:
         root = self.add_group("Root")
-        self.add_group("Child", parent_id=root.id)
+        child = self.add_group("Child", parent_id=root.id)
         self.add_group("Inactive", is_active=False)
         called_group_ids: list[int] = []
 
@@ -265,8 +266,205 @@ class WatchlistRadarAutomationTests(unittest.TestCase):
             )
 
         self.assertEqual(result["status"], "success")
-        self.assertEqual(called_group_ids, [root.id])
-        self.assertEqual(result["group_ids"], [root.id])
+        self.assertEqual(called_group_ids, [root.id, child.id])
+        self.assertEqual(result["group_ids"], [root.id, child.id])
+        self.assertEqual(result["coverage"]["status"], "complete")
+
+    def test_automation_rejects_stale_snapshot_date(self) -> None:
+        group = self.add_group()
+        stale_radar = self.radar_payload(
+            group_id=group.id,
+            trade_date="2026-07-06",
+            results=[],
+        )
+
+        with patch.object(
+            radar_automation.radar_service,
+            "get_watchlist_group_radar",
+            return_value=stale_radar,
+        ):
+            result = radar_automation.run_watchlist_radar_automation(
+                db=self.db,
+                group_ids=[group.id],
+                evaluate_before_date=date(2026, 7, 7),
+            )
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["saved_count"], 0)
+        self.assertEqual(result["invalid_count"], 1)
+        self.assertEqual(result["coverage"]["missing_count"], 1)
+        self.assertEqual(result["results"][0]["snapshot_status"], "stale")
+        self.assertEqual(self.db.query(WatchlistRadarSnapshotRun).count(), 0)
+
+    def test_automation_reports_existing_snapshot_without_false_save(self) -> None:
+        group = self.add_group()
+        radar = self.radar_payload(
+            group_id=group.id,
+            trade_date="2026-07-07",
+            results=[],
+        )
+        self.save_snapshot(
+            group_id=group.id,
+            trade_date="2026-07-07",
+            results=[],
+        )
+
+        with patch.object(
+            radar_automation.radar_service,
+            "get_watchlist_group_radar",
+            return_value=radar,
+        ):
+            result = radar_automation.run_watchlist_radar_automation(
+                db=self.db,
+                group_ids=[group.id],
+                evaluate_before_date=date(2026, 7, 7),
+            )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["saved_count"], 0)
+        self.assertEqual(result["existing_count"], 1)
+        self.assertEqual(result["coverage"]["status"], "complete")
+        self.assertEqual(result["results"][0]["snapshot_status"], "existing")
+        self.assertEqual(self.db.query(WatchlistRadarSnapshotRun).count(), 1)
+
+    def test_partial_outcome_rows_still_require_evaluation(self) -> None:
+        group = self.add_group()
+        snapshot = self.save_snapshot(
+            group_id=group.id,
+            trade_date="2026-07-06",
+            results=[
+                self.radar_item(
+                    rank=1,
+                    stock_id="2330",
+                    bucket="volume_up",
+                    close=100,
+                    trade_date="2026-07-06",
+                ),
+                self.radar_item(
+                    rank=2,
+                    stock_id="2303",
+                    bucket="volume_up",
+                    close=50,
+                    trade_date="2026-07-06",
+                ),
+            ],
+        )
+        radar_outcome_service.evaluate_watchlist_radar_outcome(
+            db=self.db,
+            group_id=group.id,
+            mode="action",
+            snapshot_run_id=int(snapshot["id"]),
+        )
+        outcome = self.db.query(WatchlistRadarOutcome).first()
+        self.db.delete(outcome)
+        self.db.commit()
+
+        self.assertTrue(
+            radar_automation._run_needs_evaluation(
+                self.db,
+                int(snapshot["id"]),
+            )
+        )
+
+    def test_automation_fetches_current_intraday_before_outcome_evaluation(self) -> None:
+        group = self.add_group()
+        self.save_snapshot(
+            group_id=group.id,
+            trade_date="2026-07-06",
+            results=[
+                self.radar_item(
+                    rank=1,
+                    stock_id="2330",
+                    bucket="volume_up",
+                    close=100,
+                    trade_date="2026-07-06",
+                )
+            ],
+        )
+        today_radar = self.radar_payload(
+            group_id=group.id,
+            trade_date="2026-07-07",
+            results=[],
+        )
+
+        def fake_radar(**_: object):
+            for bar_time, close_price in (
+                (datetime(2026, 7, 7, 9, 0), 101.0),
+                (datetime(2026, 7, 7, 13, 30), 103.0),
+            ):
+                self.db.add(
+                    MarketIntradayBar(
+                        provider="test",
+                        stock_id="2330",
+                        market="TWSE",
+                        symbol="TWSE_2330.tw",
+                        interval="1m",
+                        bar_time=bar_time,
+                        open_price=101.0,
+                        high_price=max(103.0, close_price),
+                        low_price=99.0,
+                        close_price=close_price,
+                        trade_volume=100,
+                        source="test_intraday",
+                    )
+                )
+            self.db.commit()
+            return today_radar
+
+        with patch.object(
+            radar_automation.radar_service,
+            "get_watchlist_group_radar",
+            side_effect=fake_radar,
+        ):
+            result = radar_automation.run_watchlist_radar_automation(
+                db=self.db,
+                group_ids=[group.id],
+                use_intraday=True,
+                evaluate_before_date=date(2026, 7, 7),
+            )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["evaluated_count"], 1)
+        self.assertEqual(result["results"][0]["evaluated_snapshots"][0]["hit_count"], 1)
+        outcome = self.db.query(WatchlistRadarOutcome).one()
+        self.assertEqual(outcome.outcome_trade_date, date(2026, 7, 7))
+        self.assertEqual(outcome.outcome_close_price, 103.0)
+
+    def test_automation_reports_pending_outcomes_as_partial_success(self) -> None:
+        group = self.add_group()
+        self.save_snapshot(
+            group_id=group.id,
+            trade_date="2026-07-06",
+            results=[
+                self.radar_item(
+                    rank=1,
+                    stock_id="2330",
+                    bucket="volume_up",
+                    close=100,
+                    trade_date="2026-07-06",
+                )
+            ],
+        )
+        today_radar = self.radar_payload(
+            group_id=group.id,
+            trade_date="2026-07-07",
+            results=[],
+        )
+
+        with patch.object(
+            radar_automation.radar_service,
+            "get_watchlist_group_radar",
+            return_value=today_radar,
+        ):
+            result = radar_automation.run_watchlist_radar_automation(
+                db=self.db,
+                group_ids=[group.id],
+                evaluate_before_date=date(2026, 7, 7),
+            )
+
+        self.assertEqual(result["status"], "partial_success")
+        self.assertEqual(result["coverage"]["pending_evaluation_count"], 1)
+        self.assertFalse(result["coverage"]["reconciliation_complete"])
 
 
 if __name__ == "__main__":

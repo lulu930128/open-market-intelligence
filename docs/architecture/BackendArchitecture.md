@@ -27,9 +27,12 @@ frontend / MCP / Kuro -> backend HTTP API only
 - `backend/app/main.py` 只建立 FastAPI app、middleware、exception handler 與 route registry。
 - `backend/app/runtime.py` 擁有 startup/shutdown lifecycle，包括 migration、DB init、scheduler、crypto background components 與 job executor cleanup。
 - `backend/app/routers/` 只負責 HTTP schema、參數、status code 與 service dispatch。跨市場共用的 error/job pattern 放在 `market_family_helpers.py`。
-- 大型 router 可依 route family 拆成 subrouter，例如 Taiwan index routes 由 `tw_market_indices.py` 擁有；原 router 應 include subrouter 並保留既有 handler import seam。
+- 大型 router 可依 route family 拆成 subrouter，例如 Taiwan index 與 futures routes 分別由 `tw_market_indices.py`、`tw_market_futures.py` 擁有；原 router 應 include subrouter 並保留既有 handler import seam。
+- Router 不擁有 SQLAlchemy transaction，不直接呼叫 `commit()`、`rollback()` 或 `flush()`；transaction recovery 與 job persistence 留在 service/domain owner。
+- Router 不 import `requests` 或辨識 provider transport exception；transport failure 必須先在 service boundary 轉成市場 domain error，再由 router 映射既有 HTTP status/detail。
 - Public route、method、query parameter 與 response shape 預設向後相容；共用 helper 不得改變 request envelope。
 - Router 搬移後必須比較 OpenAPI operation ID、response model 與 path/method inventory，不能只以 route 數量判定相容。
+- Watchlist Radar snapshot 由 scheduler/job/service 鏈路擁有：預設涵蓋所有 active group，保存前驗證預期交易日，重跑區分 created/existing，並以收盤後 reconciliation 補足漏跑；router 與 GET read path 不隱性建立快照。
 
 ## Market Service
 
@@ -37,9 +40,11 @@ frontend / MCP / Kuro -> backend HTTP API only
 - Service 擁有 normalization、fallback、upsert、bounded refresh、resource aggregation 與市場特有 policy。
 - Parser 與 provider adapter 保持純 IO / payload conversion，不接受 SQLAlchemy `Session`。
 - Taiwan stateless read paths 使用 `market/providers/`；provider identity、resource、target 與 bounded timeout 由 adapter 統一提供。需要 cookie/session 的期貨與 history/backfill workflow 保留 stateful transport boundary。
+- Taiwan futures quote/daily refresh 由 `tw_futures.py` 擁有 transaction，失敗時 rollback 並重新拋出；provider fallback job lifecycle 由 `tw_futures_jobs.py` 協調 `jobs.service`，不放在 router。
 - US、JP、KR provider 都使用各市場的 `providers/` namespace。Service 直接 import provider fetcher，讓 provider ownership 可被辨識與獨立測試。
 - US、JP、KR `sources.py` 不直接執行 provider HTTP；舊 `fetch_*` 名稱保留為 forwarding wrapper，保護既有 import seam。US `fetch_symbol_directories()` 只組合 NASDAQ/SEC provider payload 與既有 parser。
 - US、JP、KR 的 provider exception 與 symbol normalization 分別放在 `errors.py`、`symbols.py`，provider 與 parser 共同依賴純 contract，禁止互相反向 import。
+- 對外 service entrypoint 使用 `translate_provider_http_errors()` 將未處理的 `requests.RequestException` 轉成各市場 `MarketDataFetchError`；既有 provider-specific domain error 不重包裝，原 transport error 保留為 cause。
 - US、JP、KR OHLC aggregation/projection 分別放在 `chart_projection.py`；transaction-owning refresh、cache 與 public service entrypoint 留在 `service.py` façade。
 - Crypto 與 resource 的 bounded REST request 使用各自 `providers/` namespace。Crypto realtime/WebSocket lifecycle、persistence 與 stateful refresh 不因 REST adapter 拆分而移動。
 
@@ -54,6 +59,7 @@ frontend / MCP / Kuro -> backend HTTP API only
   - 不含 query secret 的 safe source URL；
   - 可交給 `record_provider_event()` 的結構化欄位。
 - Provider HTTP 層不得直接寫 DB。事件是否落庫由擁有 transaction 的 service、job 或 pipeline 決定。
+- `translate_provider_http_errors()` 只提供 service boundary translation；它不得吞掉非 transport error，且 exception chaining 必須讓 `provider_http_failure()` 仍能取回結構化 failure。
 - Stateful multi-request flow 可使用 `http_client.new_session()`，但仍須明確 timeout、錯誤分類與來源資訊。
 
 ## Provider Events 與 Source Health
@@ -72,6 +78,7 @@ frontend / MCP / Kuro -> backend HTTP API only
 - Query/read helper 不 commit。既有 source-health builder 為保存 snapshot 會寫 DB，這是明示的 observability side effect。
 - `upsert_*`、`refresh_*`、job worker 與 maintenance pipeline 是 transaction owner；它們可以 commit，失敗時必須 rollback 或讓上層 owner rollback。
 - 直接擁有 `commit()` 的 service owner 必須在 commit failure 時 `rollback()` 並重新拋出，避免 session 留在 failed transaction 狀態。
+- Transaction-owning refresh 若允許 provider/cache fallback，必須先恢復 session 再執行 fallback query；router 不補做 session recovery。
 - Provider adapter、parser、payload contract 與 source-health pure helper 不持有 transaction。
 - `record_provider_event(..., commit=...)` 與 `sync_source_health_snapshots(..., commit=...)` 必須明確選擇 transaction 行為。
 - Composite refresh 必須隔離單一 provider/symbol failure，不得因 event recording 失敗而提交半套 market data。
@@ -99,7 +106,11 @@ frontend / MCP / Kuro -> backend HTTP API only
 - Provider/event integration：`test_provider_health.py`、`test_market_provider_adapters.py`、`test_taiwan_index_provider_adapters.py`、`test_crypto_resource_provider_adapters.py`。
 - 市場 contract：`test_market_source_health.py`、`test_us_market_data.py`、`test_jp_market_data.py`、`test_kr_market_data.py`、`test_crypto_market.py`、`test_resource_market.py`。
 - 架構 contract：`test_market_transaction_contracts.py`、`test_market_chart_projections.py`、`test_ai_answer_pure_modules.py`、`test_ai_market_context_projection.py`、`test_api_contract_inventory.py`、`test_database_model_contract.py`。
+- Router transport boundary 與跨市場 error translation：`test_api_contract_inventory.py`、`test_provider_http.py`、`test_market_provider_adapters.py`。
+- Taiwan futures job/fallback contract：`test_taiwan_futures_jobs.py`。
+- Watchlist Radar daily snapshot/coverage contract：`test_watchlist_radar_automation.py`、`test_calendar_status_integration.py`。
 - 跨模組修改完成後使用 `scripts/run-safe-validation.ps1 -Profile backend` 跑完整 backend regression。
+- GitHub backend CI 使用 `pytest -p no:cacheprovider backend/tests`，與 repo-local backend profile 採相同 collection surface。
 
 ## 後續拆分原則
 

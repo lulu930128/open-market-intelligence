@@ -167,7 +167,9 @@ class OmiMcpServerPayloadTests(unittest.TestCase):
 
         self.assertEqual(properties["payload_level"]["enum"], ["summary", "compact", "standard", "full"])
         self.assertEqual(properties["intraday_limit"]["maximum"], 500)
+        self.assertEqual(properties["session_scope"]["enum"], ["regular", "extended", "all"])
         self.assertIn("payload_level", properties["market_data_params"]["properties"])
+        self.assertIn("session_scope", properties["market_data_params"]["properties"])
 
         kr_tool = next(tool for tool in self.server.TOOLS if tool["name"] == "omi.ask")
         self.assertIn("payload_level", kr_tool["inputSchema"]["properties"])
@@ -235,6 +237,24 @@ class OmiMcpServerPayloadTests(unittest.TestCase):
         self.assertEqual(payload["target"], {"type": "us_stock", "id": "TSM"})
         self.assertEqual(payload["market_data_params"]["payload_level"], "summary")
         self.assertEqual(payload["market_data_params"]["intraday_limit"], 1)
+
+    def test_us_direct_tool_uses_ask_when_intraday_horizon_requested(self) -> None:
+        with patch.object(self.server, "_api_post", return_value={"ok": True}) as api_post:
+            result = self.server._call_tool(
+                "omi.read_us_stock_context",
+                {
+                    "symbol": "MU",
+                    "analysis_horizon": "intraday",
+                    "session_scope": "all",
+                },
+            )
+
+        self.assertEqual(result, {"ok": True})
+        payload = api_post.call_args.kwargs["payload"]
+        self.assertEqual(payload["target"], {"type": "us_stock", "id": "MU"})
+        self.assertEqual(payload["analysis_horizon"], "intraday")
+        self.assertTrue(payload["market_data_params"]["include_intraday"])
+        self.assertEqual(payload["market_data_params"]["session_scope"], "all")
 
 
 if __name__ == "__main__":

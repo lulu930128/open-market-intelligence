@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from datetime import date, datetime
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
 import json
 from numbers import Real
 from typing import Any
@@ -10,11 +11,13 @@ from sqlalchemy.orm import Session
 
 from app.db.models import (
     MarketDailyPrice,
+    MarketIntradayBar,
     WatchlistRadarOutcome,
     WatchlistRadarSnapshotItem,
     WatchlistRadarSnapshotRun,
     utc_now,
 )
+from app.market.trading_calendar import next_taiwan_trading_day
 from app.watchlists import service as watchlist_service
 
 
@@ -47,6 +50,23 @@ NON_SCORING_BUCKETS = {"quiet", "no_data", "error"}
 
 class WatchlistRadarSnapshotNotFoundError(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class WatchlistRadarSnapshotSaveResult:
+    snapshot: dict[str, Any]
+    created: bool
+
+
+@dataclass(frozen=True)
+class WatchlistRadarOutcomeBar:
+    trade_date: date
+    open_price: float | None
+    high_price: float | None
+    low_price: float | None
+    close_price: float
+    trade_volume: int | None
+    source: str
 
 
 def _json_dumps(value: Any) -> str:
@@ -98,7 +118,7 @@ def _avg(values: list[float | None]) -> float | None:
     return round(sum(valid) / len(valid), 4)
 
 
-def _snapshot_date_from_radar(radar: dict[str, Any]) -> date:
+def watchlist_radar_snapshot_date(radar: dict[str, Any]) -> date:
     return (
         _as_date(radar.get("trade_date"))
         or _as_date(radar.get("target_trade_date"))
@@ -243,18 +263,18 @@ def _snapshot_items(
     )
 
 
-def save_watchlist_radar_snapshot(
+def save_watchlist_radar_snapshot_with_status(
     *,
     db: Session,
     radar: dict[str, Any],
     request: dict[str, Any],
     enabled_only: bool = True,
     radar_rule_version: str = RADAR_RULE_VERSION,
-) -> dict[str, Any]:
+) -> WatchlistRadarSnapshotSaveResult:
     group_id = int(radar["group_id"])
     watchlist_service.get_group(db=db, group_id=group_id)
     mode = str(radar.get("mode") or request.get("mode") or "action")
-    snapshot_date = _snapshot_date_from_radar(radar)
+    snapshot_date = watchlist_radar_snapshot_date(radar)
     include_children = bool(radar.get("include_children", True))
 
     existing = _snapshot_for_scope(
@@ -267,7 +287,10 @@ def save_watchlist_radar_snapshot(
         radar_rule_version=radar_rule_version,
     )
     if existing is not None:
-        return _snapshot_to_read(existing)
+        return WatchlistRadarSnapshotSaveResult(
+            snapshot=_snapshot_to_read(existing),
+            created=False,
+        )
 
     run = WatchlistRadarSnapshotRun(
         group_id=group_id,
@@ -333,7 +356,27 @@ def save_watchlist_radar_snapshot(
 
     db.commit()
     db.refresh(run)
-    return _snapshot_to_read(run)
+    return WatchlistRadarSnapshotSaveResult(
+        snapshot=_snapshot_to_read(run),
+        created=True,
+    )
+
+
+def save_watchlist_radar_snapshot(
+    *,
+    db: Session,
+    radar: dict[str, Any],
+    request: dict[str, Any],
+    enabled_only: bool = True,
+    radar_rule_version: str = RADAR_RULE_VERSION,
+) -> dict[str, Any]:
+    return save_watchlist_radar_snapshot_with_status(
+        db=db,
+        radar=radar,
+        request=request,
+        enabled_only=enabled_only,
+        radar_rule_version=radar_rule_version,
+    ).snapshot
 
 
 def get_latest_watchlist_radar_snapshot(
@@ -354,16 +397,70 @@ def get_latest_watchlist_radar_snapshot(
     return _snapshot_to_read(run) if run is not None else None
 
 
-def _next_daily_bar(
+def _next_intraday_outcome_bar(
     *,
     db: Session,
     stock_id: str,
     after_date: date,
-) -> MarketDailyPrice | None:
-    return (
+) -> WatchlistRadarOutcomeBar | None:
+    trade_date = next_taiwan_trading_day(after_date, include_value=False)
+    day_start = datetime.combine(trade_date, time.min)
+    day_end = day_start + timedelta(days=1)
+    rows = (
+        db.query(MarketIntradayBar)
+        .filter(MarketIntradayBar.stock_id == stock_id)
+        .filter(MarketIntradayBar.interval == "1m")
+        .filter(MarketIntradayBar.bar_time >= day_start)
+        .filter(MarketIntradayBar.bar_time < day_end)
+        .filter(MarketIntradayBar.close_price.isnot(None))
+        .order_by(MarketIntradayBar.bar_time.asc(), MarketIntradayBar.id.asc())
+        .all()
+    )
+    if not rows or rows[-1].bar_time.time() < time(13, 25):
+        return None
+
+    open_price = next(
+        (
+            row.open_price if row.open_price is not None else row.close_price
+            for row in rows
+            if row.close_price is not None
+        ),
+        None,
+    )
+    high_prices = [
+        row.high_price if row.high_price is not None else row.close_price
+        for row in rows
+        if row.close_price is not None
+    ]
+    low_prices = [
+        row.low_price if row.low_price is not None else row.close_price
+        for row in rows
+        if row.close_price is not None
+    ]
+    sources = sorted({str(row.source) for row in rows if row.source})
+
+    return WatchlistRadarOutcomeBar(
+        trade_date=trade_date,
+        open_price=open_price,
+        high_price=max(high_prices) if high_prices else None,
+        low_price=min(low_prices) if low_prices else None,
+        close_price=float(rows[-1].close_price),
+        trade_volume=None,
+        source=f"market_intraday_bar:{','.join(sources) or 'unknown'}",
+    )
+
+
+def _next_outcome_bar(
+    *,
+    db: Session,
+    stock_id: str,
+    after_date: date,
+) -> WatchlistRadarOutcomeBar | None:
+    expected_trade_date = next_taiwan_trading_day(after_date, include_value=False)
+    daily = (
         db.query(MarketDailyPrice)
         .filter(MarketDailyPrice.stock_id == stock_id)
-        .filter(MarketDailyPrice.trade_date > after_date)
+        .filter(MarketDailyPrice.trade_date == expected_trade_date)
         .filter(MarketDailyPrice.close_price.isnot(None))
         .order_by(
             MarketDailyPrice.trade_date.asc(),
@@ -371,6 +468,22 @@ def _next_daily_bar(
             MarketDailyPrice.id.desc(),
         )
         .first()
+    )
+    if daily is not None:
+        return WatchlistRadarOutcomeBar(
+            trade_date=daily.trade_date,
+            open_price=daily.open_price,
+            high_price=daily.high_price,
+            low_price=daily.low_price,
+            close_price=float(daily.close_price),
+            trade_volume=daily.trade_volume,
+            source="market_daily_price",
+        )
+
+    return _next_intraday_outcome_bar(
+        db=db,
+        stock_id=stock_id,
+        after_date=after_date,
     )
 
 
@@ -426,7 +539,7 @@ def _evaluate_item(
     item: WatchlistRadarSnapshotItem,
 ) -> WatchlistRadarOutcome:
     base_date = item.signal_trade_date or run.trade_date or run.snapshot_date
-    daily = _next_daily_bar(db=db, stock_id=item.stock_id, after_date=base_date)
+    outcome_bar = _next_outcome_bar(db=db, stock_id=item.stock_id, after_date=base_date)
     signal_close = item.close_price
 
     values: dict[str, Any] = {
@@ -440,37 +553,47 @@ def _evaluate_item(
         "evaluated_at": utc_now(),
     }
 
-    if daily is None:
+    if outcome_bar is None:
         values.update(
             {
                 "outcome_trade_date": None,
                 "status": "pending",
-                "reason": "尚無 snapshot 後的本機日線資料可評估。",
+                "reason": "尚無 snapshot 後的日線或完整收盤分時資料可評估。",
             }
         )
     elif signal_close is None or signal_close <= 0:
         values.update(
             {
-                "outcome_trade_date": daily.trade_date,
+                "outcome_trade_date": outcome_bar.trade_date,
                 "status": "unevaluable",
                 "reason": "snapshot 缺少有效收盤價，無法計算 T+1 報酬。",
-                "outcome_open_price": daily.open_price,
-                "outcome_high_price": daily.high_price,
-                "outcome_low_price": daily.low_price,
-                "outcome_close_price": daily.close_price,
-                "outcome_volume": daily.trade_volume,
+                "outcome_open_price": outcome_bar.open_price,
+                "outcome_high_price": outcome_bar.high_price,
+                "outcome_low_price": outcome_bar.low_price,
+                "outcome_close_price": outcome_bar.close_price,
+                "outcome_volume": outcome_bar.trade_volume,
             }
         )
     else:
-        open_gap_pct = _pct_change(daily.open_price, signal_close)
-        close_return_pct = _pct_change(daily.close_price, signal_close)
-        max_favorable_pct = _pct_change(daily.high_price, signal_close)
-        max_adverse_pct = _pct_change(daily.low_price, signal_close)
+        open_gap_pct = _pct_change(outcome_bar.open_price, signal_close)
+        close_return_pct = _pct_change(outcome_bar.close_price, signal_close)
+        max_favorable_pct = _pct_change(outcome_bar.high_price, signal_close)
+        max_adverse_pct = _pct_change(outcome_bar.low_price, signal_close)
         intraday_range_pct = None
-        if daily.high_price is not None and daily.low_price is not None and signal_close:
-            intraday_range_pct = round(((daily.high_price - daily.low_price) / signal_close) * 100, 4)
+        if (
+            outcome_bar.high_price is not None
+            and outcome_bar.low_price is not None
+            and signal_close
+        ):
+            intraday_range_pct = round(
+                ((outcome_bar.high_price - outcome_bar.low_price) / signal_close)
+                * 100,
+                4,
+            )
         volume_change_pct = _pct_change(
-            float(daily.trade_volume) if daily.trade_volume is not None else None,
+            float(outcome_bar.trade_volume)
+            if outcome_bar.trade_volume is not None
+            else None,
             float(item.volume) if item.volume is not None else None,
         )
         status_value, reason = _outcome_status(
@@ -480,16 +603,18 @@ def _evaluate_item(
             max_adverse_pct=max_adverse_pct,
             intraday_range_pct=intraday_range_pct,
         )
+        if outcome_bar.source.startswith("market_intraday_bar:"):
+            reason = f"{reason}；結果使用收盤後分時資料彙整。"
         values.update(
             {
-                "outcome_trade_date": daily.trade_date,
+                "outcome_trade_date": outcome_bar.trade_date,
                 "status": status_value,
                 "reason": reason,
-                "outcome_open_price": daily.open_price,
-                "outcome_high_price": daily.high_price,
-                "outcome_low_price": daily.low_price,
-                "outcome_close_price": daily.close_price,
-                "outcome_volume": daily.trade_volume,
+                "outcome_open_price": outcome_bar.open_price,
+                "outcome_high_price": outcome_bar.high_price,
+                "outcome_low_price": outcome_bar.low_price,
+                "outcome_close_price": outcome_bar.close_price,
+                "outcome_volume": outcome_bar.trade_volume,
                 "open_gap_pct": open_gap_pct,
                 "close_return_pct": close_return_pct,
                 "max_favorable_pct": max_favorable_pct,
@@ -597,7 +722,7 @@ def _summary_from_run(
 
     data_limitations = list(_json_loads(run.data_limitations_json, []))
     if counts.get("pending", 0):
-        data_limitations.append("部分雷達項目尚無 snapshot 後的本機日線資料。")
+        data_limitations.append("部分雷達項目尚無 snapshot 後的日線或完整收盤分時資料。")
     if counts.get("unevaluable", 0):
         data_limitations.append("部分雷達項目缺少必要價格或屬於不評分 bucket。")
 

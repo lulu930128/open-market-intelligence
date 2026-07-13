@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import DateTime, bindparam, text
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.orm import Session
 
@@ -115,6 +115,14 @@ def compact_resource_ohlcv_raw_payloads(
             "min_raw_chars": min_raw_chars,
         }
 
+    update_statement = text(
+        """
+        UPDATE resource_ohlcv_bar
+        SET raw_payload_json = :raw_payload_json,
+            updated_at = :updated_at
+        WHERE id = :id
+        """
+    ).bindparams(bindparam("updated_at", type_=DateTime(timezone=True)))
     compacted_count = 0
     before_chars = 0
     after_chars = 0
@@ -170,14 +178,7 @@ def compact_resource_ohlcv_raw_payloads(
             compact_json = _json_dumps(compact_payload)
             after_chars += len(compact_json)
             db.execute(
-                text(
-                    """
-                    UPDATE resource_ohlcv_bar
-                    SET raw_payload_json = :raw_payload_json,
-                        updated_at = :updated_at
-                    WHERE id = :id
-                    """
-                ),
+                update_statement,
                 {
                     "id": row["id"],
                     "raw_payload_json": compact_json,

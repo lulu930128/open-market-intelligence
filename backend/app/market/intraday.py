@@ -1,5 +1,6 @@
 from copy import deepcopy
 from datetime import datetime, time, timedelta, timezone
+from threading import Lock
 import time as monotonic_time
 
 from sqlalchemy.orm import Session
@@ -14,6 +15,8 @@ TWSE_MIS_STOCK_INFO_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 TAIPEI_TZ = timezone(timedelta(hours=8))
 INTRADAY_CACHE_TTL_SECONDS = 4.75
 _INTRADAY_CACHE: dict[str, tuple[float, dict]] = {}
+_INTRADAY_CACHE_LOCK = Lock()
+_INTRADAY_FETCH_LOCKS: dict[str, Lock] = {}
 
 INTRADAY_HISTORY_PROVIDER = "yahoo_finance_chart"
 # Yahoo's `5d` minute range is trading-day based. Query the local DB with a
@@ -40,21 +43,31 @@ INTRADAY_HISTORY_RANGE_DAYS = {
 
 
 def _cache_get(cache_key: str) -> dict | None:
-    cached = _INTRADAY_CACHE.get(cache_key)
-    if cached is None:
-        return None
+    with _INTRADAY_CACHE_LOCK:
+        cached = _INTRADAY_CACHE.get(cache_key)
+        if cached is None:
+            return None
 
-    cached_at, payload = cached
-    if monotonic_time.monotonic() - cached_at > INTRADAY_CACHE_TTL_SECONDS:
-        _INTRADAY_CACHE.pop(cache_key, None)
-        return None
+        cached_at, payload = cached
+        if monotonic_time.monotonic() - cached_at > INTRADAY_CACHE_TTL_SECONDS:
+            _INTRADAY_CACHE.pop(cache_key, None)
+            return None
 
-    return deepcopy(payload)
+        return deepcopy(payload)
 
 
 def _cache_set(cache_key: str, payload: dict) -> dict:
-    _INTRADAY_CACHE[cache_key] = (monotonic_time.monotonic(), deepcopy(payload))
+    with _INTRADAY_CACHE_LOCK:
+        _INTRADAY_CACHE[cache_key] = (
+            monotonic_time.monotonic(),
+            deepcopy(payload),
+        )
     return payload
+
+
+def _get_intraday_fetch_lock(cache_key: str) -> Lock:
+    with _INTRADAY_CACHE_LOCK:
+        return _INTRADAY_FETCH_LOCKS.setdefault(cache_key, Lock())
 
 
 def _as_float(value) -> float | None:
@@ -716,15 +729,13 @@ def _fetch_mis_snapshot(stock_id: str, market: str | None) -> dict:
     }
 
 
-def get_intraday_trend(db: Session, stock_id: str) -> dict:
-    stock = _get_stock(db=db, stock_id=stock_id)
-    market = stock.market.upper() if stock else None
-    cache_key = f"{market or 'UNKNOWN'}:{stock_id}"
-    cached = _cache_get(cache_key)
-
-    if cached is not None:
-        return cached
-
+def _load_intraday_trend_uncached(
+    db: Session,
+    *,
+    stock_id: str,
+    market: str | None,
+    cache_key: str,
+) -> dict:
     try:
         nstock_result = _fetch_nstock_intraday(stock_id=stock_id)
 
@@ -782,6 +793,31 @@ def get_intraday_trend(db: Session, stock_id: str) -> dict:
             "point_count": 0,
             "points": [],
         })
+
+
+def get_intraday_trend(db: Session, stock_id: str) -> dict:
+    stock = _get_stock(db=db, stock_id=stock_id)
+    market = stock.market.upper() if stock else None
+    cache_key = f"{market or 'UNKNOWN'}:{stock_id}"
+    cached = _cache_get(cache_key)
+
+    if cached is not None:
+        return cached
+
+    # Ranking and radar requests can ask for the same stock concurrently. Only
+    # one request should perform provider I/O; waiters reuse its fresh result.
+    with _get_intraday_fetch_lock(cache_key):
+        cached = _cache_get(cache_key)
+
+        if cached is not None:
+            return cached
+
+        return _load_intraday_trend_uncached(
+            db,
+            stock_id=stock_id,
+            market=market,
+            cache_key=cache_key,
+        )
 
 
 def get_market_intraday_history(

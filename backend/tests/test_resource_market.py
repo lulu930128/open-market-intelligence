@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+import warnings
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -210,12 +211,14 @@ class ResourceMarketTests(unittest.TestCase):
             apply=False,
             min_raw_chars=1000,
         )
-        applied = compact_resource_ohlcv_raw_payloads(
-            self.db,
-            apply=True,
-            min_raw_chars=1000,
-            batch_size=1,
-        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            applied = compact_resource_ohlcv_raw_payloads(
+                self.db,
+                apply=True,
+                min_raw_chars=1000,
+                batch_size=1,
+            )
         row = self.db.query(ResourceOhlcvBar).one()
         compact_payload = json.loads(row.raw_payload_json or "{}")
 

@@ -424,6 +424,18 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
             patch.object(scheduler.settings, "scheduler_watchlist_radar_require_daily_release", True),
             patch.object(scheduler, "SessionLocal", return_value=fake_db),
             patch.object(
+                scheduler.radar_automation,
+                "get_watchlist_radar_daily_coverage",
+                return_value={
+                    "complete": False,
+                    "reconciliation_complete": False,
+                    "snapshot_date": "2026-07-07",
+                    "covered_count": 0,
+                    "expected_count": 4,
+                    "pending_evaluation_count": 0,
+                },
+            ),
+            patch.object(
                 scheduler.job_service,
                 "enqueue_job",
                 return_value=(SimpleNamespace(id=24), True),
@@ -446,6 +458,7 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
         self.assertEqual(task_args[5], 80)
         self.assertEqual(task_args[9], 10)
         self.assertTrue(task_args[10])
+        self.assertEqual(kwargs["progress_total"], 4)
         fake_db.close.assert_called_once()
 
     def test_watchlist_radar_auto_snapshot_skips_before_daily_release(self) -> None:
@@ -472,6 +485,44 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
 
         enqueue.assert_not_called()
 
+    def test_watchlist_radar_auto_snapshot_skips_when_daily_coverage_is_complete(self) -> None:
+        fake_db = SimpleNamespace(close=Mock())
+        calendar_status = {
+            "market": "tw",
+            "date": "2026-07-07",
+            "is_trading_day": True,
+            "phase": "post_close",
+            "reason": "trading_day",
+            "release_windows": {
+                TAIWAN_DATASET_DAILY_PRICE: {
+                    "expected_trade_date": "2026-07-07",
+                    "is_released": True,
+                }
+            },
+        }
+
+        with (
+            patch.object(scheduler, "build_taiwan_calendar_status", return_value=calendar_status),
+            patch.object(scheduler, "SessionLocal", return_value=fake_db),
+            patch.object(
+                scheduler.radar_automation,
+                "get_watchlist_radar_daily_coverage",
+                return_value={
+                    "complete": True,
+                    "reconciliation_complete": True,
+                    "snapshot_date": "2026-07-07",
+                    "covered_count": 35,
+                    "expected_count": 35,
+                    "pending_evaluation_count": 0,
+                },
+            ),
+            patch.object(scheduler.job_service, "enqueue_job") as enqueue,
+        ):
+            scheduler.enqueue_watchlist_radar_auto_snapshot()
+
+        enqueue.assert_not_called()
+        fake_db.close.assert_called_once()
+
     def test_watchlist_radar_auto_snapshot_job_is_registered_as_cron_job(self) -> None:
         fake_scheduler = SimpleNamespace(add_job=Mock())
 
@@ -479,14 +530,20 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
             patch.object(scheduler.settings, "enable_watchlist_radar_scheduler", True),
             patch.object(scheduler.settings, "scheduler_watchlist_radar_time", "15:45"),
             patch.object(scheduler.settings, "scheduler_watchlist_radar_day_of_week", "mon-fri"),
+            patch.object(
+                scheduler.settings,
+                "scheduler_watchlist_radar_reconcile_interval_minutes",
+                30,
+            ),
         ):
             added = scheduler._add_watchlist_radar_auto_snapshot_job(fake_scheduler)
 
         self.assertTrue(added)
-        fake_scheduler.add_job.assert_called_once()
-        kwargs = fake_scheduler.add_job.call_args.kwargs
+        self.assertEqual(fake_scheduler.add_job.call_count, 2)
+        cron_call, reconcile_call = fake_scheduler.add_job.call_args_list
+        kwargs = cron_call.kwargs
         self.assertIs(
-            fake_scheduler.add_job.call_args.args[0],
+            cron_call.args[0],
             scheduler.enqueue_watchlist_radar_auto_snapshot,
         )
         self.assertEqual(kwargs["trigger"], "cron")
@@ -494,6 +551,41 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
         self.assertEqual(kwargs["hour"], 15)
         self.assertEqual(kwargs["minute"], 45)
         self.assertEqual(kwargs["id"], "watchlist_radar_auto_snapshot")
+        self.assertIs(
+            reconcile_call.args[0],
+            scheduler.reconcile_watchlist_radar_auto_snapshot,
+        )
+        self.assertEqual(reconcile_call.kwargs["trigger"], "interval")
+        self.assertEqual(reconcile_call.kwargs["minutes"], 30)
+        self.assertEqual(
+            reconcile_call.kwargs["id"],
+            "watchlist_radar_auto_snapshot_reconcile",
+        )
+
+    def test_watchlist_radar_reconciliation_respects_configured_time(self) -> None:
+        timezone = ZoneInfo("Asia/Taipei")
+
+        with (
+            patch.object(scheduler.settings, "scheduler_watchlist_radar_time", "15:45"),
+            patch.object(
+                scheduler.settings,
+                "scheduler_watchlist_radar_reconcile_until",
+                "18:15",
+            ),
+            patch.object(scheduler, "datetime") as datetime_mock,
+            patch.object(scheduler, "enqueue_watchlist_radar_auto_snapshot") as enqueue,
+        ):
+            datetime_mock.now.return_value = datetime(2026, 7, 7, 15, 44, tzinfo=timezone)
+            scheduler.reconcile_watchlist_radar_auto_snapshot()
+            enqueue.assert_not_called()
+
+            datetime_mock.now.return_value = datetime(2026, 7, 7, 15, 45, tzinfo=timezone)
+            scheduler.reconcile_watchlist_radar_auto_snapshot()
+            enqueue.assert_called_once_with()
+
+            datetime_mock.now.return_value = datetime(2026, 7, 7, 18, 16, tzinfo=timezone)
+            scheduler.reconcile_watchlist_radar_auto_snapshot()
+            enqueue.assert_called_once_with()
 
 
 if __name__ == "__main__":

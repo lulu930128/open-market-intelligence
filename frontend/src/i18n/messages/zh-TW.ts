@@ -646,7 +646,7 @@ export const zhTW = {
     outcome: {
       title: "雷達回測",
       loading: "讀取中",
-      noSnapshot: "尚未保存今日快照",
+      noSnapshot: "今日快照尚未保存（收盤後自動處理）",
       notEvaluated: "{date} 已保存，尚未評估",
       pending: "{date} 等待隔日行情 {count} 檔",
       evaluated: "{date} 已評估 {count} 檔",
@@ -656,7 +656,7 @@ export const zhTW = {
       reload: "刷新結果",
       history: "歷史",
       historyTitle: "雷達快照歷史",
-      historyEmpty: "尚未保存任何雷達快照",
+      historyEmpty: "此群組尚無雷達快照，收盤後會自動保存",
       close: "關閉",
       snapshot: "快照",
       evaluateSelected: "評估選定快照",

@@ -1682,6 +1682,7 @@ def get_watchlist_group_radar(
     volume_ratio_threshold: float | None = None,
     use_intraday: bool = False,
     intraday_limit: int = 30,
+    intraday_overlay_cache: dict[str, dict | None] | None = None,
 ) -> dict:
     ranking = ranking_service.get_watchlist_group_latest_ranking(
         db=db,
@@ -1696,6 +1697,7 @@ def get_watchlist_group_radar(
         volume_ratio_threshold=volume_ratio_threshold,
         use_intraday=use_intraday,
         intraday_limit=intraday_limit,
+        intraday_overlay_cache=intraday_overlay_cache,
     )
 
     radar = build_watchlist_radar_from_ranking(

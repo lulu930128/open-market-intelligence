@@ -4,7 +4,8 @@ import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any
+from functools import wraps
+from typing import Any, Callable, ParamSpec, TypeVar
 
 import requests
 
@@ -12,6 +13,8 @@ from app import http_client
 
 
 DEFAULT_TARGET = "all"
+P = ParamSpec("P")
+R = TypeVar("R")
 
 
 def _normalized_key(value: Any, *, default: str) -> str:
@@ -266,6 +269,24 @@ def provider_http_failure(exc: BaseException) -> ProviderHttpFailure | None:
     return None
 
 
+def translate_provider_http_errors(
+    error_type: type[Exception],
+) -> Callable[[Callable[P, R]], Callable[P, R]]:
+    """Translate transport failures at a service boundary without losing context."""
+
+    def decorator(operation: Callable[P, R]) -> Callable[P, R]:
+        @wraps(operation)
+        def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+            try:
+                return operation(*args, **kwargs)
+            except requests.RequestException as exc:
+                raise error_type(str(exc)) from exc
+
+        return wrapped
+
+    return decorator
+
+
 __all__ = [
     "ProviderHttpError",
     "ProviderHttpFailure",
@@ -276,4 +297,5 @@ __all__ = [
     "provider_status_for_http_code",
     "request",
     "retry_after_seconds",
+    "translate_provider_http_errors",
 ]

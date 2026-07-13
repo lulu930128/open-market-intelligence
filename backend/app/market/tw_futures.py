@@ -879,20 +879,25 @@ def refresh_taiwan_futures_quotes(
     active_only: bool = True,
     provider: str | None = None,
 ) -> list[TaiwanFuturesQuoteSnapshot]:
-    quotes = fetch_taiwan_futures_quotes(
-        symbols=symbols,
-        session=session,
-        active_only=active_only,
-        provider=provider,
-    )
+    try:
+        quotes = fetch_taiwan_futures_quotes(
+            symbols=symbols,
+            session=session,
+            active_only=active_only,
+            provider=provider,
+        )
 
-    rows: list[TaiwanFuturesQuoteSnapshot] = []
-    for quote in quotes:
-        row = _upsert_quote_snapshot(db=db, quote=quote)
-        _upsert_one_minute_bar(db=db, quote=quote)
-        rows.append(row)
+        rows: list[TaiwanFuturesQuoteSnapshot] = []
+        for quote in quotes:
+            row = _upsert_quote_snapshot(db=db, quote=quote)
+            _upsert_one_minute_bar(db=db, quote=quote)
+            rows.append(row)
 
-    db.commit()
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
     for row in rows:
         db.refresh(row)
     return rows
@@ -950,7 +955,12 @@ def refresh_taiwan_futures_daily_bars(
     if not rows and errors:
         raise TaiwanFuturesFetchError("; ".join(errors))
 
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
     for row in rows:
         db.refresh(row)
     return rows

@@ -23,12 +23,14 @@ from app.db.models import (
     KRWatchlistItem,
     utc_now,
 )
+from app.observability.provider_http import translate_provider_http_errors
 from app.kr_market.chart_projection import (
     aggregate_daily_rows as _aggregate_kr_daily_rows,
     aggregate_index_daily_rows as _aggregate_kr_index_daily_rows,
     chart_row as _chart_row,
     close_value as _kr_close_value,
 )
+from app.kr_market.errors import KRMarketDataFetchError
 from app.kr_market.schemas import (
     KRWatchlistGroupCreate,
     KRWatchlistGroupUpdate,
@@ -57,7 +59,6 @@ from app.kr_market.sources import (
     KR_INDEX_RECORDS,
     KRInvestorTradeRecord,
     KRIndexRecord,
-    KRMarketDataFetchError,
     KRStockRecord,
     local_code_from_symbol,
     normalize_kr_index_id,
@@ -77,6 +78,9 @@ from app.market.technical_radar import (
     TechnicalRadarBar,
     build_technical_watchlist_radar,
 )
+
+
+_translate_kr_provider_errors = translate_provider_http_errors(KRMarketDataFetchError)
 
 
 class KRStockNotFoundError(Exception):
@@ -328,6 +332,7 @@ def upsert_kr_stock_records(db: Session, records: list[KRStockRecord]) -> dict:
     return {"created_count": created_count, "updated_count": updated_count}
 
 
+@_translate_kr_provider_errors
 def sync_kr_symbol_master(db: Session, *, deactivate_missing: bool = False) -> dict:
     payload, source_url = fetch_krx_stock_master_payload(
         timeout_seconds=settings.kr_market_http_timeout_seconds,
@@ -574,6 +579,7 @@ def _kr_index_refresh_window(
     return resolved_end_date - timedelta(days=lookback_days), resolved_end_date
 
 
+@_translate_kr_provider_errors
 def refresh_kr_index_daily_prices(
     db: Session,
     *,
@@ -620,6 +626,7 @@ def refresh_kr_index_daily_prices(
     }
 
 
+@_translate_kr_provider_errors
 def refresh_kr_market_indices(
     db: Session,
     *,
@@ -693,6 +700,7 @@ def _kr_index_breadth_segment(index_id: str) -> tuple[str, str, str | None]:
     return segment, suffix, note
 
 
+@_translate_kr_provider_errors
 def refresh_kr_market_breadth_daily_prices(
     db: Session,
     *,
@@ -999,6 +1007,7 @@ def refresh_kr_daily_prices_from_krx_data(
     }
 
 
+@_translate_kr_provider_errors
 def refresh_kr_daily_prices(
     db: Session,
     *,
@@ -1153,6 +1162,7 @@ def _latest_kr_corp_code(db: Session, *, symbol: str) -> str | None:
     return latest.corp_code if latest else None
 
 
+@_translate_kr_provider_errors
 def refresh_kr_company_fundamental(
     db: Session,
     *,
@@ -2079,6 +2089,7 @@ def refresh_kr_watchlist_resources(
     }
 
 
+@_translate_kr_provider_errors
 def refresh_kr_market_resource(
     db: Session,
     *,
@@ -2324,6 +2335,7 @@ def _fetch_kr_index_intraday_pages(
     return [points_by_time[key] for key in sorted(points_by_time)], fetched_pages, source_url, warnings
 
 
+@_translate_kr_provider_errors
 def get_kr_index_intraday_trend(
     db: Session,
     *,
@@ -2549,6 +2561,7 @@ def list_kr_index_ohlc_chart_data(
     }
 
 
+@_translate_kr_provider_errors
 def list_kr_ohlc_chart_data(
     db: Session,
     *,

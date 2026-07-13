@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 import unittest
 
 from sqlalchemy import create_engine
@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.db.models import (
     Base,
     MarketDailyPrice,
+    MarketIntradayBar,
     RawFetchResult,
     SourceRegistry,
     WatchlistGroup,
@@ -81,6 +82,34 @@ class WatchlistRadarOutcomeTests(unittest.TestCase):
                 high_price=high_price,
                 low_price=low_price,
                 close_price=close_price,
+            )
+        )
+        self.db.commit()
+
+    def add_intraday_bar(
+        self,
+        *,
+        stock_id: str,
+        bar_time: datetime,
+        open_price: float,
+        high_price: float,
+        low_price: float,
+        close_price: float,
+    ) -> None:
+        self.db.add(
+            MarketIntradayBar(
+                provider="test",
+                stock_id=stock_id,
+                market="TWSE",
+                symbol=f"TWSE_{stock_id}.tw",
+                interval="1m",
+                bar_time=bar_time,
+                open_price=open_price,
+                high_price=high_price,
+                low_price=low_price,
+                close_price=close_price,
+                trade_volume=100,
+                source="test_intraday",
             )
         )
         self.db.commit()
@@ -242,6 +271,89 @@ class WatchlistRadarOutcomeTests(unittest.TestCase):
         self.assertEqual(summary["total_count"], 1)
         self.assertEqual(summary["pending_count"], 1)
         self.assertEqual(summary["hit_count"], 0)
+
+    def test_evaluate_snapshot_uses_complete_intraday_session_fallback(self) -> None:
+        group = self.add_group()
+        self.save_snapshot(
+            group.id,
+            [self.radar_item(rank=1, stock_id="2330", bucket="volume_up", close=100)],
+        )
+        self.add_intraday_bar(
+            stock_id="2330",
+            bar_time=datetime(2026, 7, 7, 9, 0),
+            open_price=101,
+            high_price=101,
+            low_price=100,
+            close_price=101,
+        )
+        self.add_intraday_bar(
+            stock_id="2330",
+            bar_time=datetime(2026, 7, 7, 13, 30),
+            open_price=101,
+            high_price=105,
+            low_price=99,
+            close_price=103,
+        )
+
+        summary = radar_outcome_service.evaluate_watchlist_radar_outcome(
+            db=self.db,
+            group_id=group.id,
+            mode="action",
+        )
+
+        self.assertEqual(summary["status"], "evaluated")
+        self.assertEqual(summary["hit_count"], 1)
+        self.assertEqual(summary["items"][0]["outcome_trade_date"], date(2026, 7, 7))
+        self.assertEqual(summary["items"][0]["outcome_close_price"], 103)
+        self.assertIn("收盤後分時資料", summary["items"][0]["reason"])
+
+    def test_evaluate_snapshot_rejects_incomplete_intraday_session(self) -> None:
+        group = self.add_group()
+        self.save_snapshot(
+            group.id,
+            [self.radar_item(rank=1, stock_id="2330", bucket="volume_up", close=100)],
+        )
+        self.add_intraday_bar(
+            stock_id="2330",
+            bar_time=datetime(2026, 7, 7, 12, 0),
+            open_price=101,
+            high_price=102,
+            low_price=100,
+            close_price=102,
+        )
+
+        summary = radar_outcome_service.evaluate_watchlist_radar_outcome(
+            db=self.db,
+            group_id=group.id,
+            mode="action",
+        )
+
+        self.assertEqual(summary["status"], "pending")
+        self.assertEqual(summary["pending_count"], 1)
+
+    def test_evaluate_snapshot_does_not_skip_missing_next_trading_day(self) -> None:
+        group = self.add_group()
+        self.save_snapshot(
+            group.id,
+            [self.radar_item(rank=1, stock_id="2330", bucket="volume_up", close=100)],
+        )
+        self.add_intraday_bar(
+            stock_id="2330",
+            bar_time=datetime(2026, 7, 8, 13, 30),
+            open_price=101,
+            high_price=104,
+            low_price=99,
+            close_price=103,
+        )
+
+        summary = radar_outcome_service.evaluate_watchlist_radar_outcome(
+            db=self.db,
+            group_id=group.id,
+            mode="action",
+        )
+
+        self.assertEqual(summary["status"], "pending")
+        self.assertEqual(summary["pending_count"], 1)
 
     def test_history_lists_multiple_snapshot_dates(self) -> None:
         group = self.add_group()

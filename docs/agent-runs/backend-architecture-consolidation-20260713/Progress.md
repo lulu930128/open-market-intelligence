@@ -2,13 +2,14 @@
 
 ## Status
 
-- Program state: implementation and verification completed; checkpoint commit not yet requested.
+- Program state: implementation, verification and checkpoint commit completed.
 - Current phase: M9 convergence completed.
 - Last updated: 2026-07-13 10:12 Asia/Taipei.
 - Baseline branch: `codex-kr-market-readiness`.
 - Baseline commit: `910a1caf3c88e6aeee217a03067dc3efddb8b827`.
 - Baseline worktree: clean at planning start.
 - Branch relation at planning start: ahead of `origin/codex-kr-market-readiness` by 5 commits.
+- Checkpoint commit: `1a4e847 refactor: consolidate backend architecture boundaries`.
 
 ## Milestone tracker
 
@@ -239,11 +240,4 @@ At the start of every continuation:
 
 ## Next step
 
-The architecture consolidation is ready for a checkpoint review and commit. Before committing:
-
-1. Inspect the complete changed-file list and diff summary.
-2. Confirm no local database, logs, `.tmp`, credentials or generated artifacts are staged.
-3. Stage only this program's code, tests and documentation.
-4. Create one architecture-refactor checkpoint commit after explicit user request.
-
-After the checkpoint, the highest-value bounded follow-up is replacing the deprecated SQLite datetime adapter behavior and rerunning the focused resource-market test plus the backend profile.
+The architecture consolidation was committed as `1a4e847`. Follow-up hardening is tracked in `docs/agent-runs/backend-hardening-convergence-20260713/`.

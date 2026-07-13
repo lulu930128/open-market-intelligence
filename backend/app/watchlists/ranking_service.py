@@ -476,6 +476,7 @@ def _build_watchlist_ranking_rows(
     volume_ratio_threshold: float | None,
     use_intraday: bool,
     intraday_limit: int,
+    intraday_overlay_cache: dict[str, dict | None] | None = None,
 ) -> list[dict]:
     rows: list[dict] = []
     intraday_overlay_attempts = 0
@@ -538,7 +539,15 @@ def _build_watchlist_ranking_rows(
 
             if use_intraday and intraday_overlay_attempts < intraday_limit:
                 intraday_overlay_attempts += 1
-                overlay = _get_intraday_overlay(db=db, stock_id=stock_id)
+                if intraday_overlay_cache is None:
+                    overlay = _get_intraday_overlay(db=db, stock_id=stock_id)
+                else:
+                    if stock_id not in intraday_overlay_cache:
+                        intraday_overlay_cache[stock_id] = _get_intraday_overlay(
+                            db=db,
+                            stock_id=stock_id,
+                        )
+                    overlay = intraday_overlay_cache[stock_id]
 
                 if overlay is not None:
                     row["time"] = overlay["time"]
@@ -605,6 +614,7 @@ def get_watchlist_group_latest_ranking(
     volume_ratio_threshold: float | None = None,
     use_intraday: bool = False,
     intraday_limit: int = 30,
+    intraday_overlay_cache: dict[str, dict | None] | None = None,
 ) -> dict:
     rank_by = rank_by.lower()
     sort_order = sort_order.lower()
@@ -636,6 +646,7 @@ def get_watchlist_group_latest_ranking(
         volume_ratio_threshold=volume_ratio_threshold,
         use_intraday=use_intraday,
         intraday_limit=intraday_limit,
+        intraday_overlay_cache=intraday_overlay_cache,
     )
 
     no_data_count = sum(1 for row in rows if row["status"] == "no_data")
@@ -723,6 +734,7 @@ def get_watchlist_group_latest_ranking_batch(
     )
     total_stock_count = len(unique_items)
     batch_items = unique_items[offset : offset + batch_size]
+    batch_intraday_limit = max(0, int(intraday_limit) - offset)
     rows = _build_watchlist_ranking_rows(
         db=db,
         items=batch_items,
@@ -731,7 +743,7 @@ def get_watchlist_group_latest_ranking_batch(
         limit=limit,
         volume_ratio_threshold=volume_ratio_threshold,
         use_intraday=use_intraday,
-        intraday_limit=intraday_limit,
+        intraday_limit=batch_intraday_limit,
     )
 
     for index, row in enumerate(rows, start=offset + 1):

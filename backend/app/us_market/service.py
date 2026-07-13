@@ -24,6 +24,7 @@ from app.db.models import (
     USWatchlistItem,
     utc_now,
 )
+from app.observability.provider_http import translate_provider_http_errors
 from app.us_market.chart_projection import (
     US_DAILY_CANONICAL_PROVIDER_PRIORITY,
     aggregate_daily_rows as _aggregate_us_daily_rows,
@@ -37,6 +38,7 @@ from app.us_market.chart_projection import (
     ohlc_point as _us_ohlc_point,
     should_skip_daily_price_update as _should_skip_us_daily_price_update,
 )
+from app.us_market.errors import USMarketDataFetchError
 from app.us_market.schemas import (
     USWatchlistGroupCreate,
     USWatchlistGroupUpdate,
@@ -61,7 +63,6 @@ from app.us_market.sources import (
     USDailyPriceRecord,
     USCompanyProfileRecord,
     USCorporateActionRecord,
-    USMarketDataFetchError,
     USSecFactRecord,
     USShortVolumeRecord,
     USSymbolRecord,
@@ -87,6 +88,9 @@ from app.market.technical_radar import (
     TechnicalRadarBar,
     build_technical_watchlist_radar,
 )
+
+
+_translate_us_provider_errors = translate_provider_http_errors(USMarketDataFetchError)
 
 
 def expected_us_daily_price_date() -> date:
@@ -329,6 +333,7 @@ def upsert_us_symbol_records(
     }
 
 
+@_translate_us_provider_errors
 def sync_us_symbol_master(
     db: Session,
     *,
@@ -347,6 +352,7 @@ def sync_us_symbol_master(
     )
 
 
+@_translate_us_provider_errors
 def sync_us_sec_company_data(db: Session) -> dict:
     payload, _source_url = fetch_sec_company_tickers_exchange_payload(
         sec_user_agent=_require_sec_user_agent(),
@@ -843,6 +849,7 @@ def refresh_us_daily_prices_from_yahoo_chart(
     }
 
 
+@_translate_us_provider_errors
 def refresh_us_daily_prices(
     db: Session,
     *,
@@ -999,6 +1006,7 @@ def _refresh_us_ohlc_history_if_needed(
         }
 
 
+@_translate_us_provider_errors
 def list_us_ohlc_chart_data(
     db: Session,
     *,
@@ -1234,6 +1242,7 @@ def upsert_us_sec_fact_records(
     }
 
 
+@_translate_us_provider_errors
 def refresh_us_sec_companyfacts(
     db: Session,
     *,
@@ -1480,6 +1489,7 @@ def upsert_us_company_profile_records(
     }
 
 
+@_translate_us_provider_errors
 def refresh_us_company_profile_from_alphavantage(
     db: Session,
     *,
@@ -1613,6 +1623,7 @@ def upsert_us_corporate_action_records(
     }
 
 
+@_translate_us_provider_errors
 def refresh_us_corporate_actions_from_alphavantage(
     db: Session,
     *,
@@ -1754,6 +1765,7 @@ def upsert_us_short_volume_records(
     }
 
 
+@_translate_us_provider_errors
 def refresh_us_short_volume_from_finra(
     db: Session,
     *,
@@ -1863,6 +1875,7 @@ def upsert_macro_series_observation_records(
     }
 
 
+@_translate_us_provider_errors
 def refresh_fred_macro_series(
     db: Session,
     *,

@@ -33,6 +33,7 @@ from app.market.tw_futures import (
 )
 from app.observability.provider_health import record_provider_event
 from app.settings.refresh_execution import resolve_market_refresh_interval_seconds
+from app.watchlists import radar_automation
 
 
 logger = logging.getLogger(__name__)
@@ -747,12 +748,31 @@ def enqueue_watchlist_radar_auto_snapshot() -> None:
     db = SessionLocal()
 
     try:
+        coverage = radar_automation.get_watchlist_radar_daily_coverage(
+            db=db,
+            snapshot_date=evaluate_before_date,
+            group_ids=group_ids or None,
+            modes=settings.scheduler_watchlist_radar_modes,
+            include_children=settings.scheduler_watchlist_radar_include_children,
+            enabled_only=settings.scheduler_watchlist_radar_enabled_only,
+            evaluate_lookback_days=settings.scheduler_watchlist_radar_evaluate_lookback_days,
+        )
+        if coverage["reconciliation_complete"]:
+            logger.info(
+                "Skipped scheduled watchlist radar snapshot because daily reconciliation is complete date=%s covered=%s expected=%s pending_evaluations=%s.",
+                coverage["snapshot_date"],
+                coverage["covered_count"],
+                coverage["expected_count"],
+                coverage["pending_evaluation_count"],
+            )
+            return
+
         job, created = job_service.enqueue_job(
             db=db,
             job_type=WATCHLIST_RADAR_AUTO_SNAPSHOT_JOB_TYPE,
-            target=",".join(group_ids) if group_ids else "active-root",
+            target=",".join(group_ids) if group_ids else "all-active",
             request=request,
-            progress_total=1,
+            progress_total=max(int(coverage["expected_count"]), 1),
             message="Queued by scheduler.",
             task=backfill_tasks.run_watchlist_radar_auto_snapshot_job,
             task_args=(
@@ -778,6 +798,30 @@ def enqueue_watchlist_radar_auto_snapshot() -> None:
         db.close()
 
 
+def reconcile_watchlist_radar_auto_snapshot() -> None:
+    now = datetime.now(_timezone())
+    hour, minute = _parse_hour_minute(settings.scheduler_watchlist_radar_time)
+    end_hour, end_minute = _parse_hour_minute(
+        settings.scheduler_watchlist_radar_reconcile_until
+    )
+    if (now.hour, now.minute) < (hour, minute):
+        logger.info(
+            "Skipped watchlist radar reconciliation before configured time now=%s configured=%s.",
+            now.strftime("%H:%M"),
+            settings.scheduler_watchlist_radar_time,
+        )
+        return
+    if (now.hour, now.minute) > (end_hour, end_minute):
+        logger.info(
+            "Skipped watchlist radar reconciliation after retry window now=%s until=%s.",
+            now.strftime("%H:%M"),
+            settings.scheduler_watchlist_radar_reconcile_until,
+        )
+        return
+
+    enqueue_watchlist_radar_auto_snapshot()
+
+
 def _add_watchlist_radar_auto_snapshot_job(scheduler: Any) -> bool:
     if not settings.enable_watchlist_radar_scheduler:
         return False
@@ -793,6 +837,19 @@ def _add_watchlist_radar_auto_snapshot_job(scheduler: Any) -> bool:
         replace_existing=True,
         coalesce=True,
         max_instances=1,
+    )
+    scheduler.add_job(
+        reconcile_watchlist_radar_auto_snapshot,
+        trigger="interval",
+        minutes=max(
+            int(settings.scheduler_watchlist_radar_reconcile_interval_minutes),
+            5,
+        ),
+        id="watchlist_radar_auto_snapshot_reconcile",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        next_run_time=datetime.now(_timezone()),
     )
     return True
 
@@ -927,7 +984,7 @@ def start_scheduler() -> Any | None:
     dispatch_schedule_tick_enabled = _add_dispatch_schedule_tick_job(scheduler)
     scheduler.start()
     logger.info(
-        "Job scheduler started. core_scheduler_enabled=%s; market_daily_refresh=%s %s weekdays; market_margin_daily_refresh=%s %s weekdays; market_chip_daily_refresh=%s %s weekdays; market_chip_margin_daily_refresh=%s %s weekdays; us_market_daily_refresh=%s %s %s enabled=%s; jp_market_watchlist_resource_refresh=%s %s %s enabled=%s; kr_market_watchlist_resource_refresh=%s %s %s enabled=%s; watchlist_radar_auto_snapshot=%s %s %s enabled=%s; taiwan_futures_quote_collector interval=%ss enabled=%s; dispatch_schedule_tick interval=%ss enabled=%s.",
+        "Job scheduler started. core_scheduler_enabled=%s; market_daily_refresh=%s %s weekdays; market_margin_daily_refresh=%s %s weekdays; market_chip_daily_refresh=%s %s weekdays; market_chip_margin_daily_refresh=%s %s weekdays; us_market_daily_refresh=%s %s %s enabled=%s; jp_market_watchlist_resource_refresh=%s %s %s enabled=%s; kr_market_watchlist_resource_refresh=%s %s %s enabled=%s; watchlist_radar_auto_snapshot=%s %s %s reconcile_interval=%sm reconcile_until=%s enabled=%s; taiwan_futures_quote_collector interval=%ss enabled=%s; dispatch_schedule_tick interval=%ss enabled=%s.",
         settings.enable_scheduler,
         settings.scheduler_market_refresh_time,
         settings.timezone,
@@ -952,6 +1009,8 @@ def start_scheduler() -> Any | None:
         settings.scheduler_watchlist_radar_time,
         settings.scheduler_watchlist_radar_day_of_week,
         settings.timezone,
+        max(int(settings.scheduler_watchlist_radar_reconcile_interval_minutes), 5),
+        settings.scheduler_watchlist_radar_reconcile_until,
         watchlist_radar_snapshot_enabled,
         max(int(settings.scheduler_taiwan_futures_interval_seconds), 10),
         taiwan_futures_collector_enabled,

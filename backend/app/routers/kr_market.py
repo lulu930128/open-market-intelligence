@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import date
 
-import requests
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
@@ -10,6 +9,7 @@ from app.db.session import get_db
 from app.jobs import backfill_tasks
 from app.jobs.job_types import KR_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE
 from app.jobs.schemas import JobRunRead
+from app.kr_market.errors import KRMarketDataFetchError
 from app.routers.market_family_helpers import (
     enqueue_serialized_job,
     fetch_error,
@@ -93,7 +93,6 @@ from app.kr_market.service import (
     update_kr_watchlist_group,
     update_kr_watchlist_item,
 )
-from app.kr_market.sources import KRMarketDataFetchError
 from app.settings.refresh_execution import (
     resolve_observed_stock_refresh_interval_seconds,
     resolve_subresource_refresh_interval_seconds,
@@ -181,8 +180,6 @@ def sync_kr_stock_symbols(
 ):
     try:
         return sync_kr_symbol_master(db=db, deactivate_missing=deactivate_missing)
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except KRMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -234,8 +231,6 @@ def refresh_kr_market_breadth_api(
             trade_date=trade_date,
             market_id=market_id,
         )
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except KRMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -283,8 +278,6 @@ def refresh_kr_index_api(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except KRMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -321,8 +314,6 @@ def get_kr_index_ohlc_chart(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except KRMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -343,8 +334,6 @@ def get_kr_index_intraday_chart(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except KRMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -408,8 +397,6 @@ def refresh_kr_market_resource_api(
         return refresh_kr_market_resource(db=db, symbol=symbol, resource=resource)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except KRMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -434,8 +421,6 @@ def refresh_kr_company_fundamental(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except KRMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -477,8 +462,6 @@ def refresh_kr_daily_prices(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except KRMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -881,7 +864,5 @@ def get_kr_ohlc_chart_data(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except KRMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc

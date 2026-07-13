@@ -137,6 +137,7 @@ type JPRankBy = "none" | "change_pct" | "volume" | "close";
 type KRRankBy = "none" | "change_pct" | "volume" | "close";
 const WATCHLIST_INTRADAY_LIMIT = 30;
 const WATCHLIST_RADAR_MAX_RESULTS = 20;
+const WATCHLIST_RADAR_TIMEOUT_MS = 60_000;
 const WATCHLIST_RANKING_BATCH_SIZE = 3;
 const WATCHLIST_DAILY_RELEASE_CHECK_MIN_MS = 5_000;
 const WATCHLIST_DAILY_RELEASE_CHECK_MAX_MS = 300_000;
@@ -3215,7 +3216,8 @@ export default function MarketDashboardClient({
         watchlistRadarParams(
           currentMode,
           shouldUseTaiwanWatchlistIntraday(marketState)
-        )
+        ),
+        { timeoutMs: WATCHLIST_RADAR_TIMEOUT_MS }
       );
 
       if (radarRequestSeq.current !== requestSeq) return;
@@ -3415,7 +3417,8 @@ export default function MarketDashboardClient({
 
         radarPromise = fetchJson<WatchlistGroupRadarRead>(
           `/api/watchlists/groups/${groupId}/radar`,
-          watchlistRadarParams(radarModeRef.current, useIntraday)
+          watchlistRadarParams(radarModeRef.current, useIntraday),
+          { timeoutMs: WATCHLIST_RADAR_TIMEOUT_MS }
         )
           .then((data) => {
             if (radarRequestSeq.current !== radarSeq) return;

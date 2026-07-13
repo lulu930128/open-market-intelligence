@@ -590,7 +590,7 @@ export const jaJP = {
     outcome: {
       title: "レーダー検証",
       loading: "読み込み中",
-      noSnapshot: "レーダースナップショット未保存",
+      noSnapshot: "本日のスナップショットは未保存（取引終了後に自動処理）",
       notEvaluated: "{date} 保存済み、未評価",
       pending: "{date} 翌営業日データ待ち {count} 件",
       evaluated: "{date} 評価済み {count} 件",
@@ -600,7 +600,7 @@ export const jaJP = {
       reload: "結果更新",
       history: "履歴",
       historyTitle: "レーダースナップショット履歴",
-      historyEmpty: "保存済みのレーダースナップショットはありません",
+      historyEmpty: "このグループの履歴はまだありません。取引終了後に自動保存されます",
       close: "閉じる",
       snapshot: "スナップショット",
       evaluateSelected: "選択を評価",
