@@ -124,7 +124,12 @@ class ProviderHealthTests(unittest.TestCase):
         )
 
         rows = self.db.query(SourceHealthSnapshot).all()
-        snapshot_rows = list_source_health_snapshots(self.db, market="us", target="MU")
+        with patch.object(
+            provider_health,
+            "_now",
+            return_value=now + timedelta(minutes=2),
+        ):
+            snapshot_rows = list_source_health_snapshots(self.db, market="us", target="MU")
 
         self.assertEqual(snapshots[0].latest_event_id, event.id)
         self.assertEqual(len(rows), 1)
@@ -133,6 +138,35 @@ class ProviderHealthTests(unittest.TestCase):
         self.assertEqual(rows[0].latest_event_status, "rate_limited")
         self.assertEqual(rows[0].recent_error_count, 1)
         self.assertEqual(snapshot_rows[0]["resource"], "daily_price")
+        self.assertEqual(snapshot_rows[0]["snapshot_age_seconds"], 60)
+        self.assertFalse(snapshot_rows[0]["snapshot_is_stale"])
+
+    def test_source_health_snapshot_reports_stale_snapshot_age(self) -> None:
+        checked_at = datetime(2026, 6, 14, 11, 59, 59, tzinfo=timezone.utc)
+        now = datetime(2026, 6, 15, 12, 0, tzinfo=timezone.utc)
+        sync_source_health_snapshots(
+            self.db,
+            market="tw",
+            entries=[
+                {
+                    "resource": "daily_price",
+                    "provider": "twse",
+                    "target": "all",
+                    "status": "current",
+                    "ok": True,
+                    "row_count": 10,
+                    "required": True,
+                    "data_quality": "ok",
+                }
+            ],
+            checked_at=checked_at,
+        )
+
+        with patch.object(provider_health, "_now", return_value=now):
+            snapshots = list_source_health_snapshots(self.db, market="tw")
+
+        self.assertEqual(snapshots[0]["snapshot_age_seconds"], 86401)
+        self.assertTrue(snapshots[0]["snapshot_is_stale"])
 
     def test_composite_source_provider_matches_any_component_event(self) -> None:
         now = datetime(2026, 7, 11, 4, 0, tzinfo=timezone.utc)

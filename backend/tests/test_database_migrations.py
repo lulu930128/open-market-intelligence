@@ -47,6 +47,7 @@ class DatabaseMigrationTests(unittest.TestCase):
                 engine.dispose()
 
             self.assertIn("alembic_version", table_names)
+            self.assertEqual(table_names - {"alembic_version"}, set(Base.metadata.tables))
             self.assertIn("stock_master", table_names)
             self.assertIn("us_stock_master", table_names)
             self.assertIn("us_daily_price", table_names)

@@ -2,7 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 
-import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
+import { deleteRequest, fetchJson, requestJson, requireJsonArray } from "@/lib/api";
 import type { PortfolioHoldingRead, PortfolioMarket } from "@/types/market";
 
 type Message = { type: "success" | "error"; text: string } | null;
@@ -47,6 +47,44 @@ function defaultNormalize(value: string) {
   return value.trim().toUpperCase();
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function isNullableNumber(value: unknown): value is number | null {
+  return value === null || (typeof value === "number" && Number.isFinite(value));
+}
+
+function isPortfolioHolding(value: unknown): value is PortfolioHoldingRead {
+  if (!isRecord(value)) return false;
+
+  return (
+    typeof value.id === "number" &&
+    ["tw", "us", "jp", "kr"].includes(String(value.market)) &&
+    typeof value.symbol === "string" &&
+    value.symbol.length > 0 &&
+    isNullableString(value.symbol_name) &&
+    typeof value.quantity === "number" &&
+    Number.isFinite(value.quantity) &&
+    typeof value.cost_amount === "number" &&
+    Number.isFinite(value.cost_amount) &&
+    typeof value.currency === "string" &&
+    isNullableNumber(value.average_cost) &&
+    isNullableString(value.note) &&
+    isNullableString(value.tags) &&
+    isNullableString(value.strategy_horizon) &&
+    isNullableString(value.opened_at) &&
+    typeof value.is_active === "boolean" &&
+    isRecord(value.position_context) &&
+    typeof value.created_at === "string" &&
+    typeof value.updated_at === "string"
+  );
+}
+
 export default function PortfolioHoldingsPanel({
   market,
   selectedSymbol,
@@ -73,12 +111,13 @@ export default function PortfolioHoldingsPanel({
   const reloadHoldings = useCallback(async () => {
     setLoading(true);
     try {
-      const rows = await fetchJson<PortfolioHoldingRead[]>("/api/portfolio/holdings", {
+      const payload = await fetchJson<unknown>("/api/portfolio/holdings", {
         market,
         is_active: true,
         limit: 500,
         offset: 0,
       });
+      const rows = requireJsonArray(payload, "持股", isPortfolioHolding);
       setHoldings(rows);
     } catch (error) {
       setMessage({

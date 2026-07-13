@@ -589,7 +589,7 @@ $env:OMI_MCP_AI_TRUST_TOKEN = "<same value as backend OMI_AI_TRUST_TOKEN>"
 ### Requirements
 
 - Windows PowerShell
-- Python 3.10+
+- Python 3.11+
 - Node.js `>=20.9.0`
 - npm `>=10`
 
@@ -829,7 +829,7 @@ Crypto OHLCV auto-refresh 分成兩層：fast plan 依訂閱設定維持 `1m` �
 
 ## Database And Migrations
 
-後端啟動時會先跑 Alembic migrations，再打開 application sessions。這能讓舊本機 SQLite database 對齊目前 schema。
+後端啟動時會先取得 schema process lock，再只透過 Alembic migrations 對齊目前 schema；正常 runtime 不再用 `Base.metadata.create_all()` 補表。接著各 API process 會競選 background lock，只有持有者啟動 scheduler、Crypto auto-refresh 與 WebSocket collectors，其餘 process 保持 API worker。lock 預設放在 `data/.runtime`，可用 `RUNTIME_LOCK_DIR` 隔離平行 runtime。
 
 手動 migration：
 

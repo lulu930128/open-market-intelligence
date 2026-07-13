@@ -4,6 +4,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, time, timedelta, timezone
+import logging
 from time import monotonic
 
 from sqlalchemy import func
@@ -24,12 +25,14 @@ from app.market.index_parsers import signed_change as _signed_change
 from app.market.providers import fetch_json as provider_fetch_json
 from app.market.providers import http_get
 from app.market.providers import tpex, twse, twse_mis, yahoo
+from app.observability.provider_fallback import observe_provider_fallback
 from app.sources.defaults import (
     TPEX_DAILY_QUOTES_SOURCE_NAME,
     TWSE_DAILY_TRADING_SOURCE_NAME,
 )
 
 
+logger = logging.getLogger(__name__)
 YAHOO_CHART_URL = yahoo.CHART_URL
 TWSE_MIS_STOCK_INFO_URL = twse_mis.STOCK_INFO_URL
 TWSE_MIS_REFERER_URL = twse_mis.REFERER_URL
@@ -224,7 +227,11 @@ def _fetch_twse_mis_stock_messages(codes: list[str]) -> tuple[list[dict], int]:
         for future in as_completed(futures):
             try:
                 messages.extend(future.result())
-            except Exception:
+            except Exception as exc:
+                observe_provider_fallback(
+                    exc,
+                    operation="indices.twse_mis_breadth_batch",
+                )
                 failed_batches += 1
 
     return messages, failed_batches
@@ -602,7 +609,11 @@ def _fetch_market_quote_breadth(market: str) -> dict | None:
     else:
         try:
             result = _fetch_twse_rwd_market_quote_breadth()
-        except Exception:
+        except Exception as exc:
+            observe_provider_fallback(
+                exc,
+                operation="indices.twse_rwd_breadth_primary",
+            )
             result = None
 
         if result is None:
@@ -656,8 +667,8 @@ def _resolve_market_breadth(
 
     try:
         quote_breadth = _fetch_market_quote_breadth(market)
-    except Exception:
-        pass
+    except Exception as exc:
+        observe_provider_fallback(exc, operation="indices.market_quote_breadth")
 
     if (
         target_trade_date is not None
@@ -670,7 +681,8 @@ def _resolve_market_breadth(
 
     try:
         live_breadth = _fetch_twse_mis_live_market_breadth(db=db, market=market)
-    except Exception:
+    except Exception as exc:
+        observe_provider_fallback(exc, operation="indices.twse_mis_live_breadth")
         live_breadth = None
 
     if (
@@ -1192,7 +1204,8 @@ def _apply_latest_official_market_index_stat(
 
     try:
         official_ohlc = _fetch_twse_index_5s_ohlc(config, latest_stat.trade_date)
-    except Exception:
+    except Exception as exc:
+        observe_provider_fallback(exc, operation="indices.official_ohlc_overlay")
         official_ohlc = None
 
     if official_ohlc is not None:
@@ -2082,12 +2095,15 @@ def get_market_index_intraday(index_id: str) -> dict:
                 mis_payload = _fetch_mis_index_intraday(config)
                 if mis_payload["point_count"] > 0:
                     return _merge_index_intraday_snapshot(official_payload, mis_payload)
-            except Exception:
-                pass
+            except Exception as exc:
+                observe_provider_fallback(
+                    exc,
+                    operation="indices.official_intraday_mis_merge",
+                )
 
             return official_payload
-    except Exception:
-        pass
+    except Exception as exc:
+        observe_provider_fallback(exc, operation="indices.official_intraday")
 
     yahoo_error: Exception | None = None
     yahoo_payload: dict | None = None
@@ -2095,6 +2111,7 @@ def get_market_index_intraday(index_id: str) -> dict:
     try:
         yahoo_payload = _fetch_yahoo_index_intraday(config)
     except Exception as exc:
+        observe_provider_fallback(exc, operation="indices.yahoo_intraday")
         yahoo_error = exc
 
     try:
@@ -2104,6 +2121,7 @@ def get_market_index_intraday(index_id: str) -> dict:
                 return _merge_index_intraday_snapshot(yahoo_payload, mis_payload)
             return mis_payload
     except Exception as exc:
+        observe_provider_fallback(exc, operation="indices.mis_intraday")
         if yahoo_error is None:
             yahoo_error = exc
 
@@ -2309,7 +2327,8 @@ def _contribution_quote_rows(
             if source_rows
             else None
         )
-    except Exception:
+    except Exception as exc:
+        observe_provider_fallback(exc, operation="indices.contribution_source_rows")
         source_rows = []
 
     if db is not None:
@@ -2373,7 +2392,8 @@ def get_market_index_contributions(
     rows, shares_by_code, source, keys = _contribution_quote_rows(market, db=db)
     try:
         index_item = _market_index_item_for_contribution(market)
-    except Exception:
+    except Exception as exc:
+        observe_provider_fallback(exc, operation="indices.contribution_index_quote")
         index_item = None
     index_close = _as_float(index_item.get("close")) if index_item else None
     index_change = _as_float(index_item.get("change")) if index_item else None
@@ -2563,8 +2583,8 @@ def get_market_index_ohlc_chart_data(
 
             for point in selected_points:
                 point["trade_value"] = trade_values_by_date.get(point["time"])
-        except Exception:
-            pass
+        except Exception as exc:
+            observe_provider_fallback(exc, operation="indices.trade_value_enrichment")
 
     if selected_points:
         from_date = selected_points[0]["time"]
@@ -2596,6 +2616,7 @@ def get_market_index_summary(db: Session, force_refresh: bool = False) -> dict:
         try:
             index_payload = _fetch_yahoo_index(config)
         except Exception as exc:
+            observe_provider_fallback(exc, operation="indices.summary_yahoo")
             index_payload = _unavailable_index(config, exc)
 
         try:
@@ -2618,6 +2639,11 @@ def get_market_index_summary(db: Session, force_refresh: bool = False) -> dict:
                 payload=index_payload,
             )
         except Exception:
+            logger.exception(
+                "Market index coverage refresh failed index_id=%s market=%s",
+                config["index_id"],
+                config["market"],
+            )
             db.rollback()
 
         index_trade_date = index_payload.get("time")
@@ -2641,8 +2667,8 @@ def get_market_index_summary(db: Session, force_refresh: bool = False) -> dict:
 
             if official_trade_value is not None:
                 trade_value = official_trade_value
-        except Exception:
-            pass
+        except Exception as exc:
+            observe_provider_fallback(exc, operation="indices.summary_trade_value")
 
         index_payload["breadth"] = market_breadth
         index_payload["trade_value"] = trade_value

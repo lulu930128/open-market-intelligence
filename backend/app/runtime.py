@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 import logging
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Protocol
 
 from fastapi import FastAPI
 
@@ -12,22 +12,64 @@ from app.crypto_market.ws_runtime import (
     stop_crypto_realtime_collectors,
 )
 from app.db.migrations import run_database_migrations
-from app.db.session import SessionLocal, init_db
+from app.db.session import SessionLocal
 from app.jobs import scheduler as job_scheduler, service as job_service
+from app.config import settings
+from app.runtime_lock import ProcessFileLock
 
 
 logger = logging.getLogger(__name__)
 
 
+class RuntimeLock(Protocol):
+    def acquire(
+        self,
+        *,
+        timeout_seconds: float = 0,
+        poll_interval_seconds: float = 0.05,
+    ) -> bool: ...
+
+    def release(self) -> None: ...
+
+
 class RuntimeCoordinator:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        schema_lock: RuntimeLock | None = None,
+        background_lock: RuntimeLock | None = None,
+    ) -> None:
+        lock_dir = settings.runtime_lock_dir
+        self.schema_lock = schema_lock or ProcessFileLock(lock_dir / "schema.lock")
+        self.background_lock = background_lock or ProcessFileLock(lock_dir / "background.lock")
         self.scheduler: Any | None = None
         self.started = False
+        self.background_leader = False
 
     async def start(self) -> None:
+        if self.started:
+            return
+
         try:
-            run_database_migrations()
-            init_db()
+            if not self.schema_lock.acquire(
+                timeout_seconds=settings.runtime_schema_lock_timeout_seconds,
+            ):
+                raise RuntimeError(
+                    "Timed out waiting for the database schema migration lock."
+                )
+            try:
+                run_database_migrations()
+            finally:
+                self.schema_lock.release()
+
+            self.background_leader = self.background_lock.acquire(timeout_seconds=0)
+            if not self.background_leader:
+                self.started = True
+                logger.info(
+                    "Runtime started as an API worker; background ownership is held by another process."
+                )
+                return
+
             self._mark_interrupted_jobs()
 
             self.scheduler = job_scheduler.start_scheduler()
@@ -45,22 +87,33 @@ class RuntimeCoordinator:
     async def stop(self) -> None:
         errors: list[BaseException] = []
 
-        for name, stop_step in (
-            ("crypto realtime collectors", stop_crypto_realtime_collectors),
-            ("crypto auto refresh", stop_crypto_auto_refresh),
-        ):
+        if self.background_leader:
+            for name, stop_step in (
+                ("crypto realtime collectors", stop_crypto_realtime_collectors),
+                ("crypto auto refresh", stop_crypto_auto_refresh),
+            ):
+                try:
+                    await stop_step()
+                except Exception as exc:
+                    errors.append(exc)
+                    logger.exception("Failed to stop %s.", name)
+
             try:
-                await stop_step()
+                job_scheduler.stop_scheduler(self.scheduler)
             except Exception as exc:
                 errors.append(exc)
-                logger.exception("Failed to stop %s.", name)
+                logger.exception("Failed to stop job scheduler.")
+            finally:
+                self.scheduler = None
 
-        try:
-            job_scheduler.stop_scheduler(self.scheduler)
-        except Exception as exc:
-            errors.append(exc)
-            logger.exception("Failed to stop job scheduler.")
-        finally:
+            try:
+                self.background_lock.release()
+            except Exception as exc:
+                errors.append(exc)
+                logger.exception("Failed to release background runtime ownership.")
+            finally:
+                self.background_leader = False
+        else:
             self.scheduler = None
 
         try:

@@ -18,6 +18,18 @@ export type ApiRequestOptions = {
   timeoutMs?: number;
 };
 
+export function requireJsonArray<T>(
+  payload: unknown,
+  label: string,
+  isItem?: (value: unknown) => value is T
+): T[] {
+  if (!Array.isArray(payload) || (isItem && !payload.every(isItem))) {
+    throw new Error(`${label}資料格式錯誤，請重新整理。`);
+  }
+
+  return payload as T[];
+}
+
 const DEFAULT_GET_TIMEOUT_MS = 20_000;
 
 export function buildApiUrl(path: string, params?: ApiParams) {

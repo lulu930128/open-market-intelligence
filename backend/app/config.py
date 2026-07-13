@@ -50,6 +50,8 @@ class Settings(BaseSettings):
     app_port: int = 8400
 
     database_url: str = f"sqlite:///{DEFAULT_DB_PATH.as_posix()}"
+    runtime_lock_dir: Path = DEFAULT_DB_PATH.parent / ".runtime"
+    runtime_schema_lock_timeout_seconds: float = 60.0
 
     enable_scheduler: bool = False
     timezone: str = "Asia/Taipei"

@@ -13,6 +13,7 @@ from app.db.models import ProviderEvent, SourceHealthSnapshot, utc_now
 
 ERROR_STATUSES = {"error", "failed", "timeout", "rate_limited", "blocked", "partial_success"}
 DEFAULT_RECENT_WINDOW_HOURS = 24
+DEFAULT_SOURCE_HEALTH_SNAPSHOT_STALE_SECONDS = 24 * 60 * 60
 PROVIDER_EVENT_READ_COLUMNS = (
     ProviderEvent.id,
     ProviderEvent.market,
@@ -145,7 +146,21 @@ def provider_event_to_dict(event: ProviderEvent) -> dict[str, Any]:
     }
 
 
-def source_health_snapshot_to_dict(snapshot: SourceHealthSnapshot) -> dict[str, Any]:
+def _utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def source_health_snapshot_to_dict(
+    snapshot: SourceHealthSnapshot,
+    *,
+    now: datetime | None = None,
+    stale_after_seconds: int = DEFAULT_SOURCE_HEALTH_SNAPSHOT_STALE_SECONDS,
+) -> dict[str, Any]:
+    current = _utc_datetime(now or _now())
+    checked_at = _utc_datetime(snapshot.checked_at)
+    snapshot_age_seconds = max(int((current - checked_at).total_seconds()), 0)
     return {
         "id": snapshot.id,
         "market": snapshot.market,
@@ -173,6 +188,8 @@ def source_health_snapshot_to_dict(snapshot: SourceHealthSnapshot) -> dict[str, 
         "recent_error_count": snapshot.recent_error_count,
         "consecutive_error_count": snapshot.consecutive_error_count,
         "checked_at": snapshot.checked_at.isoformat() if snapshot.checked_at else None,
+        "snapshot_age_seconds": snapshot_age_seconds,
+        "snapshot_is_stale": snapshot_age_seconds > max(stale_after_seconds, 0),
         "created_at": snapshot.created_at.isoformat() if snapshot.created_at else None,
         "updated_at": snapshot.updated_at.isoformat() if snapshot.updated_at else None,
     }
@@ -508,10 +525,12 @@ def list_source_health_snapshots(
         .limit(limit)
         .all()
     )
-    return [source_health_snapshot_to_dict(snapshot) for snapshot in snapshots]
+    now = _now()
+    return [source_health_snapshot_to_dict(snapshot, now=now) for snapshot in snapshots]
 
 
 __all__ = [
+    "DEFAULT_SOURCE_HEALTH_SNAPSHOT_STALE_SECONDS",
     "enrich_source_health_entries",
     "list_provider_events",
     "list_source_health_snapshots",

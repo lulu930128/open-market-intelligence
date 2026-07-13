@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import MarketIntradayBar, StockMaster, utc_now
 from app.market.providers import http_get
+from app.observability.provider_fallback import observe_provider_fallback
 
 
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
@@ -742,7 +743,11 @@ def _load_intraday_trend_uncached(
         if nstock_result["points"]:
             try:
                 message = _fetch_mis_message(stock_id=stock_id, market=market)
-            except Exception:
+            except Exception as exc:
+                observe_provider_fallback(
+                    exc,
+                    operation="intraday.nstock_volume_adjustment",
+                )
                 message = None
             result = _apply_mis_volume_adjustment(nstock_result, message)
             _upsert_market_intraday_bars(
@@ -756,8 +761,8 @@ def _load_intraday_trend_uncached(
                 points=result.get("points") or [],
             )
             return _cache_set(cache_key, result)
-    except Exception:
-        pass
+    except Exception as exc:
+        observe_provider_fallback(exc, operation="intraday.nstock_primary")
 
     try:
         yahoo_result = _fetch_yahoo_intraday(stock_id=stock_id, market=market)
@@ -765,7 +770,11 @@ def _load_intraday_trend_uncached(
         if yahoo_result["points"]:
             try:
                 message = _fetch_mis_message(stock_id=stock_id, market=market)
-            except Exception:
+            except Exception as exc:
+                observe_provider_fallback(
+                    exc,
+                    operation="intraday.yahoo_volume_adjustment",
+                )
                 message = None
             result = _apply_mis_volume_adjustment(yahoo_result, message)
             _upsert_market_intraday_bars(
@@ -779,12 +788,13 @@ def _load_intraday_trend_uncached(
                 points=result.get("points") or [],
             )
             return _cache_set(cache_key, result)
-    except Exception:
-        pass
+    except Exception as exc:
+        observe_provider_fallback(exc, operation="intraday.yahoo_secondary")
 
     try:
         return _cache_set(cache_key, _fetch_mis_snapshot(stock_id=stock_id, market=market))
-    except Exception:
+    except Exception as exc:
+        observe_provider_fallback(exc, operation="intraday.mis_snapshot_final")
         return _cache_set(cache_key, {
             "stock_id": stock_id,
             "symbol": _yahoo_symbol(stock_id=stock_id, market=market),
@@ -869,7 +879,8 @@ def get_market_intraday_history(
             )
             source = str(fetched.get("source") or "yahoo_finance_chart")
             source_url = fetched.get("source_url")
-        except Exception:
+        except Exception as exc:
+            observe_provider_fallback(exc, operation="intraday.history_remote_refresh")
             source = "market_intraday_bar_cache"
 
     rows = _query_intraday_rows(
