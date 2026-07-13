@@ -15,9 +15,9 @@
 - `backend/app/us_market/service.py`：3,275 行，集中美股 master、報價、SEC、FINRA、FRED、watchlist 與 refresh。
 - `frontend/src/components/LightweightKLineChart.tsx`：4,492 行，集中 chart engine、drawing、indicator、projection、interaction。
 - `frontend/src/components/StockDetailPanel.tsx`：4,206 行，集中台股個股頁、資料 tab、refresh、專業模式、AI context。
-- `frontend/src/components/MarketDashboardClient.tsx`：6,042 行，集中台股/美股/日股/韓股 dashboard selection、watchlist、ranking、radar 與 refresh state。
+- `frontend/src/components/MarketDashboardClient.tsx`：5,365 行，仍集中台股/美股/日股/韓股 dashboard selection、radar 與 refresh state；watchlist ranking row projection 與共用 panel 已完成第一批抽離。
 
-2026-07-14 收斂已完成 frontend payload guard、嚴格 E2E fixtures、provider fallback telemetry、source-health snapshot age、Alembic-only startup、跨程序 background leader lock、direct dependency pins 與 CI Python/browser gates。上述大型檔案拆分刻意延後，避免把 runtime/contract 維護和高風險 UI 重構混在同一輪。
+2026-07-14 收斂已完成 frontend payload guard、嚴格 E2E fixtures、provider fallback telemetry、source-health snapshot age、Alembic-only startup、跨程序 background leader lock、direct dependency pins 與 CI Python/browser gates。後續大型檔案拆分採獨立批次進行；第一批已先從 dashboard ranking 的純資料與 presentation boundary 開始，避免把 runtime/contract 維護和高風險 UI 重構混在同一輪。
 
 ## P1：優先處理
 
@@ -84,25 +84,26 @@
 
 ### 4. 前端核心元件過大
 
-狀態：仍存在，本輪刻意延後大型元件拆分；目前以 payload runtime guard、typecheck、production build 與 Playwright smoke 降低修改風險。
+狀態：仍存在，但第一批已完成 dashboard ranking boundary 拆分；目前以 payload runtime guard、typecheck、production build 與 Playwright characterization 降低後續修改風險。
 
 現況：
 
 - `LightweightKLineChart.tsx` 同時處理 chart lifecycle、series、drawing、projection、indicator、keyboard/mouse interaction。
 - `StockDetailPanel.tsx` 同時處理個股頁 UI、資料 tab、intraday polling、professional mode、refresh job、AI context。
-- `MarketDashboardClient.tsx` 同時處理台股、美股、日股、韓股 active market、selection、watchlist tree、ranking、radar 與 refresh states。
+- `MarketDashboardClient.tsx` 仍處理台股、美股、日股、韓股 active market、selection、radar 與 refresh states；group flatten、pending row build、ranking merge/progressive batch 已移到 `market-dashboard/watchlistRankingRows.ts`，共用 US/JP/KR ranking layout 已移到 `WatchlistRankingPanel.tsx`。
 
 風險：
 
 - 專業模式後續加工具會越來越容易破壞既有 chart behavior。
 - OMI context 與資料 refresh 很難復用到美股或期貨。
-- 現有 Playwright 仍是 smoke 等級；圖表互動與跨市場狀態細節多數仍需人工驗證。
+- Playwright 已新增 loaded Taiwan parent/child watchlist ranking 與 US regional panel characterization；圖表互動與 JP/KR 狀態細節仍多數需要後續案例。
 
 建議：
 
 - Chart 拆成 `ChartCanvas`、`DrawingLayer`、`IndicatorLayer`、`ProjectionLayer`、`useChartInteraction`。
 - 個股資料拆成 `useTaiwanStockData`、`useTaiwanIntradayRefresh`、`useTaiwanDataPanelRefresh`。
 - Dashboard selection 拆成 `useMarketSelection`、`useWatchlistState`、`useRankingState`。
+- 下一批優先抽 dashboard ranking load/state orchestration 或 market selection helper，不把 radar、refresh 與 routing 同時搬動。
 
 ### 5. 交易日/休市規則前後端不共用
 
@@ -398,12 +399,14 @@
 - `analysis.human_answer` 有 headline 時才使用結構化回答卡；若 final response 缺少可渲染 answer，會回落到 streaming text 或空狀態提示。
 - SSE parsing 可單獨測試，後續若加 retry、timeout、heartbeat 或 reconnect，不需要再改動 dock UI 主體。
 - `LightweightKLineChart.tsx` 已把 header、選取畫線摘要卡與靜態 indicator SVG overlay 拆到 `frontend/src/components/chart/`，目前為 4,492 行。
-- `npm run test:e2e` 會用 Playwright 啟動隔離 backend 的 Next server，並以 route mock 測 OMI SSE、專業圖表入口與 malformed payload；CI 在 production build 後以 `next start` 驗證正式 bundle。
+- `MarketDashboardClient.tsx` 已把四市場 watchlist row projection、progressive ranking merge 與共用 ranking panel 拆到 `frontend/src/components/market-dashboard/`，由 6,042 行降至 5,365 行。
+- `npm run test:e2e` 會用 Playwright 啟動隔離 backend 的 Next server，並以嚴格 route mock 測 OMI SSE、專業圖表入口、malformed payload、loaded Taiwan ranking 與 US 共用 regional panel；CI 在 production build 後以 standalone launcher 驗證正式 bundle。
 
 後續可再做：
 
 - `LightweightKLineChart.tsx` 仍是大型互動元件；可在下一輪繼續抽 `ChartCanvas`、互動畫線 layer、indicator calculation modules 與 projection helpers。
-- Playwright 目前是 smoke baseline；若後續要覆蓋畫線工具拖曳、時間週期切換、mobile layout，可再補更細的 e2e cases。
+- `MarketDashboardClient.tsx` 仍需分批抽 ranking load/state、market selection 與各市場 tape；不得同時改 URL/API contract。
+- Playwright 目前是 smoke + ranking characterization baseline；若後續要覆蓋畫線工具拖曳、時間週期切換、mobile layout，可再補更細的 e2e cases。
 
 ### Phase 4：美股 provider 與 source health
 

@@ -20,6 +20,234 @@ function chartPoints() {
 
 const points = chartPoints();
 
+function seededTaiwanWatchlistTree() {
+  return [
+    {
+      id: 7,
+      parent_id: null,
+      group_name: "科技股",
+      description: "Playwright ranking fixture",
+      sort_order: 0,
+      is_active: true,
+      children: [
+        {
+          id: 8,
+          parent_id: 7,
+          group_name: "半導體",
+          description: null,
+          sort_order: 0,
+          is_active: true,
+          children: [],
+        },
+      ],
+    },
+  ];
+}
+
+function seededTaiwanWatchlistItems() {
+  const timestamp = "2026-06-15T09:30:00+08:00";
+
+  return [
+    {
+      id: 70,
+      group_id: 7,
+      stock_id: "2330",
+      stock_name: "台積電",
+      note: null,
+      priority: 0,
+      tags: "core",
+      enabled: true,
+      created_at: timestamp,
+      updated_at: timestamp,
+    },
+    {
+      id: 80,
+      group_id: 8,
+      stock_id: "2303",
+      stock_name: "聯電",
+      note: null,
+      priority: 0,
+      tags: null,
+      enabled: true,
+      created_at: timestamp,
+      updated_at: timestamp,
+    },
+    {
+      id: 71,
+      group_id: 7,
+      stock_id: "9999",
+      stock_name: "停用測試股",
+      note: null,
+      priority: 0,
+      tags: null,
+      enabled: false,
+      created_at: timestamp,
+      updated_at: timestamp,
+    },
+  ];
+}
+
+function seededTaiwanRankingRows() {
+  return [
+    {
+      rank: 1,
+      stock_id: "2330",
+      stock_name: "台積電",
+      time: "2026-06-15T09:30:00+08:00",
+      close: 1015,
+      volume: 98_000,
+      change: 15,
+      previous_close: 1000,
+      change_pct: 1.5,
+      limit_status: null,
+      score: 82,
+      status: "success",
+      signal_count: 1,
+      signal_keys: ["trend_up"],
+      primary_signal_key: "trend_up",
+      primary_signal_label: "趨勢向上",
+      indicator_snapshot: {},
+      context_snapshot: {},
+      intraday_previous_close: 1000,
+      intraday_points: [
+        { time: "2026-06-15T09:00:00+08:00", price: 1005 },
+        { time: "2026-06-15T09:30:00+08:00", price: 1015 },
+      ],
+      error_message: null,
+    },
+    {
+      rank: 2,
+      stock_id: "2303",
+      stock_name: "聯電",
+      time: "2026-06-15T09:30:00+08:00",
+      close: 52.4,
+      volume: 64_000,
+      change: -0.6,
+      previous_close: 53,
+      change_pct: -1.13,
+      limit_status: null,
+      score: 45,
+      status: "success",
+      signal_count: 0,
+      signal_keys: [],
+      primary_signal_key: null,
+      primary_signal_label: null,
+      indicator_snapshot: {},
+      context_snapshot: {},
+      intraday_previous_close: 53,
+      intraday_points: [
+        { time: "2026-06-15T09:00:00+08:00", price: 52.8 },
+        { time: "2026-06-15T09:30:00+08:00", price: 52.4 },
+      ],
+      error_message: null,
+    },
+  ];
+}
+
+function seededUsWatchlistTree() {
+  return [
+    {
+      id: 17,
+      parent_id: null,
+      group_name: "Mega Cap Tech",
+      description: "Playwright regional ranking fixture",
+      sort_order: 0,
+      is_active: true,
+      children: [],
+    },
+  ];
+}
+
+function seededUsWatchlistItems() {
+  const timestamp = "2026-06-15T09:30:00-04:00";
+
+  return [
+    {
+      id: 170,
+      group_id: 17,
+      symbol: "AAPL",
+      security_name: "Apple Inc.",
+      exchange: "NASDAQ",
+      asset_type: "stock",
+      note: null,
+      priority: 0,
+      tags: "core",
+      enabled: true,
+      created_at: timestamp,
+      updated_at: timestamp,
+    },
+    {
+      id: 171,
+      group_id: 17,
+      symbol: "MSFT",
+      security_name: "Microsoft Corp.",
+      exchange: "NASDAQ",
+      asset_type: "stock",
+      note: null,
+      priority: 0,
+      tags: null,
+      enabled: true,
+      created_at: timestamp,
+      updated_at: timestamp,
+    },
+  ];
+}
+
+function seededUsRankingRows() {
+  return [
+    {
+      rank: 1,
+      symbol: "AAPL",
+      security_name: "Apple Inc.",
+      exchange: "NASDAQ",
+      asset_type: "stock",
+      group_id: 17,
+      trade_date: "2026-06-15",
+      time: "2026-06-15T09:30:00-04:00",
+      session: "regular",
+      close: 214.5,
+      previous_close: 210.5,
+      change: 4,
+      change_pct: 1.9,
+      volume: 1_250_000,
+      status: "success",
+      source: "playwright.fixture",
+      has_extended_hours: false,
+      intraday_previous_close: 210.5,
+      intraday_points: [
+        { time: "2026-06-15T09:00:00-04:00", price: 211 },
+        { time: "2026-06-15T09:30:00-04:00", price: 214.5 },
+      ],
+      error_message: null,
+    },
+    {
+      rank: 2,
+      symbol: "MSFT",
+      security_name: "Microsoft Corp.",
+      exchange: "NASDAQ",
+      asset_type: "stock",
+      group_id: 17,
+      trade_date: "2026-06-15",
+      time: "2026-06-15T09:30:00-04:00",
+      session: "regular",
+      close: 476.25,
+      previous_close: 480,
+      change: -3.75,
+      change_pct: -0.78,
+      volume: 980_000,
+      status: "success",
+      source: "playwright.fixture",
+      has_extended_hours: false,
+      intraday_previous_close: 480,
+      intraday_points: [
+        { time: "2026-06-15T09:00:00-04:00", price: 479 },
+        { time: "2026-06-15T09:30:00-04:00", price: 476.25 },
+      ],
+      error_message: null,
+    },
+  ];
+}
+
 function ohlcResponse(stockId: string) {
   return {
     stock_id: stockId,
@@ -169,6 +397,101 @@ function emptyTaiwanRankingResponse(url: URL) {
   };
 }
 
+function seededTaiwanRankingBatch(
+  url: URL,
+  rows: ReturnType<typeof seededTaiwanRankingRows>
+) {
+  const empty = emptyTaiwanRankingBatch(url);
+  const offset = empty.offset;
+  const batchSize = empty.batch_size;
+  const results = rows.slice(offset, offset + batchSize);
+
+  return {
+    ...empty,
+    total_stock_count: rows.length,
+    requested_stock_count: results.length,
+    ranked_count: results.length,
+    current_stock_count: results.length,
+    has_more: offset + results.length < rows.length,
+    results,
+  };
+}
+
+function seededUsRankingResponse(
+  url: URL,
+  rows: ReturnType<typeof seededUsRankingRows>
+) {
+  return {
+    ...emptyRankingResponse(url),
+    group_id: Number(url.searchParams.get("group_id") ?? 17),
+    requested_symbol_count: rows.length,
+    ranked_count: rows.length,
+    current_symbol_count: rows.length,
+    results: rows,
+  };
+}
+
+function usOhlcResponse(symbol: string) {
+  return {
+    symbol,
+    timeframe: "daily",
+    bars: 60,
+    lookback_days: 120,
+    from_date: points[0].time,
+    to_date: points[points.length - 1].time,
+    point_count: points.length,
+    points: points.map(({ time, open, high, low, close, volume }) => ({
+      time,
+      open,
+      high,
+      low,
+      close,
+      volume,
+    })),
+    backfill: null,
+    intraday_overlay: null,
+  };
+}
+
+function usIntradayResponse(symbol: string) {
+  return {
+    stock_id: symbol,
+    symbol,
+    source: "playwright.fixture",
+    session_scope: "regular",
+    session_phase: "regular",
+    has_extended_hours: false,
+    previous_close: 940,
+    point_count: 2,
+    points: [
+      { time: "2026-06-15T09:00:00-04:00", price: 942, volume: 1000 },
+      { time: "2026-06-15T09:30:00-04:00", price: 948, volume: 1200 },
+    ],
+    warnings: [],
+  };
+}
+
+function completedRefreshJob() {
+  const timestamp = "2026-06-15T09:30:00+08:00";
+
+  return {
+    id: 1,
+    job_type: "watchlist_refresh_latest",
+    status: "success",
+    target: "group:7",
+    progress_current: 2,
+    progress_total: 2,
+    message: "Playwright refresh fixture completed.",
+    error_message: null,
+    request: {},
+    result: { status: "success", error_count: 0 },
+    created_at: timestamp,
+    started_at: timestamp,
+    ended_at: timestamp,
+    updated_at: timestamp,
+  };
+}
+
 async function fulfillJson(route: Route, body: unknown) {
   await route.fulfill({
     status: 200,
@@ -218,10 +541,22 @@ async function fulfillOmiStream(route: Route) {
 
 type MockOmiApiOptions = {
   portfolioHoldingsPayload?: unknown;
+  taiwanWatchlistTree?: ReturnType<typeof seededTaiwanWatchlistTree>;
+  taiwanWatchlistItems?: ReturnType<typeof seededTaiwanWatchlistItems>;
+  taiwanRankingRows?: ReturnType<typeof seededTaiwanRankingRows>;
+  usWatchlistTree?: ReturnType<typeof seededUsWatchlistTree>;
+  usWatchlistItems?: ReturnType<typeof seededUsWatchlistItems>;
+  usRankingRows?: ReturnType<typeof seededUsRankingRows>;
 };
 
 async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
   const portfolioHoldingsPayload = options.portfolioHoldingsPayload ?? [];
+  const taiwanWatchlistTree = options.taiwanWatchlistTree ?? [];
+  const taiwanWatchlistItems = options.taiwanWatchlistItems ?? [];
+  const taiwanRankingRows = options.taiwanRankingRows ?? [];
+  const usWatchlistTree = options.usWatchlistTree ?? [];
+  const usWatchlistItems = options.usWatchlistItems ?? [];
+  const usRankingRows = options.usRankingRows ?? [];
 
   await page.route("**/omi-data/**", async (route) => {
     const url = new URL(route.request().url());
@@ -312,6 +647,18 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
       return;
     }
 
+    if (/\/us-market\/ohlc\//.test(path)) {
+      const symbol = decodeURIComponent(path.split("/").at(-1) ?? "SPY");
+      await fulfillJson(route, usOhlcResponse(symbol));
+      return;
+    }
+
+    if (/\/us-market\/intraday\//.test(path)) {
+      const symbol = decodeURIComponent(path.split("/").at(-1) ?? "SPY");
+      await fulfillJson(route, usIntradayResponse(symbol));
+      return;
+    }
+
     if (path.includes("/market/indicators/")) {
       await fulfillJson(route, []);
       return;
@@ -394,13 +741,28 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
       return;
     }
 
+    if (/\/(?:wl|watchlists)\/groups\/\d+\/radar\/outcomes\/latest$/.test(path)) {
+      await fulfillJson(route, null);
+      return;
+    }
+
     if (/\/(?:us-market|jp-market|kr-market)\/watchlists\/ranking$/.test(path)) {
-      await fulfillJson(route, emptyRankingResponse(url));
+      await fulfillJson(
+        route,
+        path.includes("/us-market/") && usRankingRows.length > 0
+          ? seededUsRankingResponse(url, usRankingRows)
+          : emptyRankingResponse(url)
+      );
       return;
     }
 
     if (/\/(?:wl|watchlists)\/groups\/\d+\/rankings\/latest-batch$/.test(path)) {
-      await fulfillJson(route, emptyTaiwanRankingBatch(url));
+      await fulfillJson(
+        route,
+        taiwanRankingRows.length > 0
+          ? seededTaiwanRankingBatch(url, taiwanRankingRows)
+          : emptyTaiwanRankingBatch(url)
+      );
       return;
     }
 
@@ -485,7 +847,37 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
       return;
     }
 
-    if (path.includes("/wl/tree") || path.includes("/wl/items") || path.includes("/jobs")) {
+    if (path.includes("/wl/tree")) {
+      await fulfillJson(route, taiwanWatchlistTree);
+      return;
+    }
+
+    if (path.includes("/wl/items")) {
+      await fulfillJson(route, taiwanWatchlistItems);
+      return;
+    }
+
+    if (path.includes("/us-market/watchlists/tree")) {
+      await fulfillJson(route, usWatchlistTree);
+      return;
+    }
+
+    if (path.includes("/us-market/watchlists/items")) {
+      await fulfillJson(route, usWatchlistItems);
+      return;
+    }
+
+    if (/\/wl\/groups\/\d+\/refresh-latest$/.test(path)) {
+      await fulfillJson(route, completedRefreshJob());
+      return;
+    }
+
+    if (/\/jobs\/\d+$/.test(path)) {
+      await fulfillJson(route, completedRefreshJob());
+      return;
+    }
+
+    if (path.endsWith("/jobs")) {
       await fulfillJson(route, []);
       return;
     }
@@ -535,6 +927,60 @@ test.describe("OMI dashboard smoke", () => {
     expect(await portfolioResponse.json()).toEqual({ unexpected: true });
     await expect(page.getByText("持股資料格式錯誤，請重新整理。")).toBeVisible();
     await expect(page.getByRole("button", { name: "開啟 OMI 即時問答" })).toBeVisible();
+    expect(pageErrors).toEqual([]);
+  });
+
+  test("Taiwan watchlist ranking preserves nested rows and selection links", async ({
+    page,
+  }) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await mockOmiApi(page, {
+      taiwanWatchlistTree: seededTaiwanWatchlistTree(),
+      taiwanWatchlistItems: seededTaiwanWatchlistItems(),
+      taiwanRankingRows: seededTaiwanRankingRows(),
+    });
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+
+    const group = page.locator('[data-watchlist-group-id="7"]');
+    await expect(group).toContainText("科技股");
+    await group.click();
+    await expect(page).toHaveURL(/group_id=7/);
+
+    const rankingRows = page.locator("[data-ranking-stock-id]");
+    const tsmcRow = page.locator('[data-ranking-stock-id="2330"]');
+    const umcRow = page.locator('[data-ranking-stock-id="2303"]');
+    await expect(rankingRows).toHaveCount(2);
+    await expect(tsmcRow).toContainText("2330 台積電");
+    await expect(tsmcRow).toContainText("1,015");
+    await expect(tsmcRow).toContainText("+1.50%");
+    await expect(tsmcRow).toHaveAttribute("href", /group_id=7.*stock_id=2330/);
+    await expect(umcRow).toContainText("2303 聯電");
+    await expect(page.locator('[data-ranking-stock-id="9999"]')).toHaveCount(0);
+    expect(pageErrors).toEqual([]);
+  });
+
+  test("US watchlist ranking renders the extracted regional panel", async ({ page }) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(),
+      usWatchlistItems: seededUsWatchlistItems(),
+      usRankingRows: seededUsRankingRows(),
+    });
+    await page.goto("/?market=us", { waitUntil: "domcontentloaded" });
+
+    await page.getByRole("button", { name: "Reload" }).first().click();
+    const rankingRows = page.locator("[data-ranking-symbol]");
+    const appleRow = page.locator('[data-ranking-symbol="AAPL"]');
+    await expect(rankingRows).toHaveCount(2);
+    await expect(appleRow).toContainText("AAPL Apple Inc.");
+    await expect(appleRow).toContainText("214.5");
+    await expect(appleRow).toContainText("+1.90%");
+    await expect(appleRow).toHaveAttribute("href", /market=us.*symbol=AAPL/);
+    await expect(page.locator('[data-ranking-symbol="MSFT"]')).toContainText(
+      "MSFT Microsoft Corp."
+    );
     expect(pageErrors).toEqual([]);
   });
 });
