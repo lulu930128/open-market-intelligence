@@ -1,4 +1,5 @@
 import MarketDashboardClient from "@/components/MarketDashboardClient";
+import { normalizeDashboardRadarMode } from "@/components/market-dashboard/selection/dashboardRoutes";
 import { getApiProxyTarget } from "@/lib/serverApiConfig";
 import type {
   ChartPoint,
@@ -46,23 +47,6 @@ function firstSearchParam(
   const value = params?.[key];
 
   return Array.isArray(value) ? value[0] : value;
-}
-
-function normalizeRadarMode(value: string | undefined): WatchlistRadarMode {
-  if (value === "volume") return "momentum";
-  if (value === "weakness") return "risk";
-
-  if (
-    value === "surge" ||
-    value === "breakout" ||
-    value === "overheat" ||
-    value === "risk" ||
-    value === "momentum"
-  ) {
-    return value;
-  }
-
-  return "action";
 }
 
 function normalizeQuoteDepthPreviewMode(
@@ -188,7 +172,7 @@ export default async function Page({
     firstSearchParam(resolvedSearchParams, "futures") ??
     firstSearchParam(resolvedSearchParams, "futures_symbol");
   const groupIdParam = firstSearchParam(resolvedSearchParams, "group_id");
-  const initialRadarMode = normalizeRadarMode(
+  const initialRadarMode = normalizeDashboardRadarMode(
     firstSearchParam(resolvedSearchParams, "radar_mode")
   );
   const quoteDepthPreviewMode = normalizeQuoteDepthPreviewMode(

@@ -2,10 +2,10 @@
 
 ## 狀態
 
-- 目前階段：里程碑 2A（Market selection 與 URL contract）實作完成，完整 frontend gate 通過
+- 目前階段：里程碑 2B（Radar state ownership）實作完成，完整 frontend gate 通過
 - 最後更新：2026-07-14
 - Implementation gate：已開啟
-- Commit 狀態：里程碑 0 baseline 已保存為 `cc2ce8d`；里程碑 1 已保存為 `2493387`；里程碑 2A 尚未提交
+- Commit 狀態：里程碑 0 baseline 已保存為 `cc2ce8d`；里程碑 1 已保存為 `2493387`；里程碑 2A 已保存並推送為 `88f9958`；里程碑 2B 尚未提交
 
 ## 已完成
 
@@ -69,9 +69,9 @@
 
 ## 已知風險
 
-- 里程碑 2A 目前仍是未提交工作樹，進入里程碑 2B 前應建立可獨立回退的 commit boundary。
+- 里程碑 2B 目前仍是未提交工作樹，進入里程碑 2C 前應建立可獨立回退的 commit boundary。
 - Browser characterization 已覆蓋 visible loaded/empty/error/reload/stale 行為；Taiwan daily-release timer 與 regional freshness nonce 尚無 fake-clock/unit-level coverage，仍依既有 integration path 與 request guard。
-- `MarketDashboardClient.tsx` 仍有 4,188 行；selection/URL 已移交，radar、market tape 與 OMI context ownership 尚待里程碑 2B/2C。
+- `MarketDashboardClient.tsx` 仍有 3,697 行；selection/URL 與 radar 已移交，market tape 與 OMI context ownership 尚待里程碑 2C。
 - JP/KR hooks 有刻意保留的相似 transition；在 parity coverage 足夠前抽 shared core 仍可能隱藏市場差異。
 - Chart、StockDetail 與 backend facade 尚未開始，本批驗證不能外推到後續里程碑。
 
@@ -80,7 +80,7 @@
 - 拆分目標維持單一 ownership 與清楚 dependency direction，不追求任意小檔案。
 - Frontend 使用 colocated hooks + pure projection + presentation layers，不新增全域 state framework。
 - Ranking hook 不擁有 URL、router、presentation 或 market-specific visible wording。
-- Dashboard 保留 radar/data-status composition，直到里程碑 2B 再移交完整 radar state machine。
+- Dashboard 只保留 radar URL composition 與 data-status wording；完整 radar state machine 已由里程碑 2B 移交 domain hooks。
 - 每個 ownership migration 必須先通過 targeted gate，再建立獨立 commit。
 
 ## 里程碑 1 交接（已完成）
@@ -135,7 +135,58 @@ Selection modules 行數：`dashboardRoutes.ts` 130、`marketSelectionState.ts` 
 - `PLAYWRIGHT_SERVER_MODE=production npm run test:e2e`：11/11 通過。
 - Production E2E 使用隔離的 `3100` standalone server，未停止既有 `3000` dev server。
 
-### 下一步
+### 2A 交接（已完成）
 
-1. 里程碑 2B：抽離 Taiwan radar snapshot/outcome/history state machine，regional radar 維持 typed adapter，先補 mode/reload/stale response characterization。
-2. 里程碑 2C：抽離 market tape transport/state 與 OMI context projection；不在 2B 同批搬 formatting 或 detail panel。
+1. 已保存並推送 `88f9958 refactor(frontend): extract market selection ownership`。
+2. 里程碑 2B 沿用 2A 的 route boundary，不在 radar hooks 內直接操作 browser history。
+
+## 2026-07-14 里程碑 2B：Radar state ownership
+
+### 已完成
+
+- 新增 `useTaiwanRadarState.ts`，接管 mode、radar、load state、outcome summary/history、history dialog、selected snapshot、outcome evaluation 與 request sequence。
+- ranking companion load 在 ranking request 開始時預留 radar request sequence；若使用者先切換 mode，較舊的 ranking callback 不會蓋回新請求。
+- 新增 `useRegionalRadarState.ts` typed market adapter，只抽出已有共同證據的 load/cancel/reset transition；US 保留 intraday policy，JP/KR 維持 technical-only policy。
+- `MarketDashboardClient.tsx` 不再直接持有 radar API endpoint、request sequence、mode ref 或成組 setter，只保留 route composition 與 data-status wording。
+- route mode 改由 `dashboardRoute` 同步，Taiwan Back/Forward 會還原正確 mode 並重新載入資料。
+- US/JP/KR 的非預設 mode 會保存在 group/symbol URL；預設 `action` 仍維持既有省略 contract。
+- `normalizeDashboardRadarMode` 集中處理 route normalization，保留 legacy `volume -> momentum` 與 `weakness -> risk` aliases。
+- 移除 `WatchlistRadarPanel` 無可達 UI 的 manual snapshot/outcome mutation props；daily snapshot 仍由 backend scheduler 管理，本批未在 read/render path 增加寫入 side effect。
+- route/group synchronization 使用可取消的 zero-delay timer，符合 React 19 effect lint，cleanup 同時使舊 request 失效。
+
+### Characterization 與 regression
+
+- 實作前重現 Taiwan Back/Forward 只改 URL、未還原 radar mode/load 的缺陷。
+- 實作前重現 regional mode request 正確但 URL 遺失 `radar_mode` 的缺陷。
+- 新增 Taiwan mode/reload/Back/Forward synchronization case。
+- 新增 Taiwan radar API error 後 reload recovery case。
+- 新增 history snapshot select 與 evaluate contract case；POST 使用 `mode`、`snapshot_run_id` query parameters，不送 JSON body。
+- 新增 regional mode URL preservation 與 stale response guard case。
+- 所有未知 fixture API route 持續 fail-fast，避免漏接 contract 被假成功掩蓋。
+
+### Ownership 指標
+
+| 指標 | 里程碑 2A 後 | 里程碑 2B 後 | 變化 |
+| --- | ---: | ---: | ---: |
+| `MarketDashboardClient.tsx` 行數 | 4,188 | 3,697 | -491 |
+| Dashboard `useState` 呼叫 | 46 | 22 | -24 |
+| Dashboard `useEffect` 呼叫 | 12 | 8 | -4 |
+| Dashboard `useRef` 呼叫 | 13 | 3 | -10 |
+| Production Playwright cases | 11 | 15 | +4 |
+
+Radar hooks 行數：約 `useTaiwanRadarState.ts` 430、`useRegionalRadarState.ts` 195。檔案大小不是成功指標；重點是 request lifecycle、mode synchronization、outcome/history 與 stale guard 只有一個 owner。
+
+### 驗證證據
+
+- `npm exec tsc -- --noEmit --incremental false --pretty false`：通過。
+- `npm run lint`：通過，0 warning / 0 error。
+- `npm run build`：Next.js 16.2.6 production build 通過，6/6 pages generated。
+- Radar targeted production Playwright 四案各 repeat 3 次：12/12 通過。
+- `PLAYWRIGHT_SERVER_MODE=production npm run test:e2e`：15/15 通過。
+- Production E2E 使用隔離的 `3101` standalone server；既有 `3000` dev server 未停止。
+
+### 風險與下一步
+
+- 本批未修改 backend daily snapshot scheduler、外部 provider、SQLite schema 或本機市場資料。
+- 里程碑 2B 應先建立獨立 commit boundary，再進入 2C。
+- 里程碑 2C 抽離 market tape transport/state 與 OMI context projection；不把 detail panel 或純 formatting 混入同一批 ownership migration。

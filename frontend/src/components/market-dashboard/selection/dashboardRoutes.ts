@@ -40,6 +40,14 @@ const radarModes = new Set<WatchlistRadarMode>([
   "risk",
   "momentum",
 ]);
+const visibleRadarModes = new Set<WatchlistRadarMode>([
+  "action",
+  "surge",
+  "breakout",
+  "overheat",
+  "risk",
+  "momentum",
+]);
 
 function normalizedValue(value: string | null) {
   return value?.trim() || null;
@@ -60,6 +68,16 @@ function parsedRadarMode(value: string | null): WatchlistRadarMode | null {
   return value !== null && radarModes.has(value as WatchlistRadarMode)
     ? (value as WatchlistRadarMode)
     : null;
+}
+
+export function normalizeDashboardRadarMode(
+  value: WatchlistRadarMode | string | null | undefined
+): WatchlistRadarMode {
+  if (value === "volume") return "momentum";
+  if (value === "weakness") return "risk";
+  return visibleRadarModes.has(value as WatchlistRadarMode)
+    ? (value as WatchlistRadarMode)
+    : "action";
 }
 
 function parsedPreviewMode(

@@ -497,7 +497,7 @@ function calendarStatus() {
   };
 }
 
-function emptyRadarResponse(path: string) {
+function emptyRadarResponse(path: string, mode = "action") {
   const groupId = Number(path.match(/groups\/(\d+)\/radar/)?.[1] ?? 0);
   const market = path.includes("/us-market/")
     ? "us"
@@ -510,7 +510,7 @@ function emptyRadarResponse(path: string) {
   return {
     group_id: groupId,
     include_children: true,
-    mode: "action",
+    mode,
     max_results: 8,
     market,
     scope_label: null,
@@ -528,6 +528,159 @@ function emptyRadarResponse(path: string) {
     stale_stock_count: 0,
     buckets: [],
     results: [],
+  };
+}
+
+function seededRadarResponse(url: URL, label: string) {
+  const path = url.pathname;
+  const empty = emptyRadarResponse(path, url.searchParams.get("mode") ?? "action");
+  const stockId = path.includes("/us-market/")
+    ? "AAPL"
+    : path.includes("/jp-market/")
+      ? "7203.T"
+      : path.includes("/kr-market/")
+        ? "005930.KS"
+        : "2330";
+
+  return {
+    ...empty,
+    requested_stock_count: 1,
+    ranked_count: 1,
+    matched_count: 1,
+    radar_count: 1,
+    current_stock_count: 1,
+    buckets: [
+      {
+        key: empty.mode === "risk" ? "selloff_risk" : "momentum",
+        label,
+        description: label,
+        count: 1,
+      },
+    ],
+    results: [
+      {
+        rank: 1,
+        source_rank: 1,
+        bucket: empty.mode === "risk" ? "selloff_risk" : "momentum",
+        bucket_label: label,
+        urgency: "medium",
+        priority_score: 80,
+        technical_evidence_score: 75,
+        technical_score: 75,
+        technical_grade: "medium",
+        technical_grade_label: "Medium",
+        technical_grade_description: label,
+        direction: empty.mode === "risk" ? "bearish" : "bullish",
+        direction_label: empty.mode === "risk" ? "Bearish" : "Bullish",
+        setup_label: label,
+        timing_label: "Watch",
+        risk_label: "Bounded",
+        factor_scores: {},
+        price_levels: {},
+        technical_notes: [label],
+        action_label: label,
+        reason: label,
+        stock_id: stockId,
+        stock_name: label,
+        time: "2026-06-15T09:30:00+08:00",
+        trade_date: "2026-06-15",
+        close: 100,
+        volume: 1_000,
+        change: 1,
+        previous_close: 99,
+        change_pct: 1.01,
+        limit_status: null,
+        score: 75,
+        status: "ok",
+        signal_count: 1,
+        signal_keys: ["fixture"],
+        matched_signal_keys: ["fixture"],
+        matched_signal_labels: [label],
+        signal_labels: [label],
+        primary_signal_key: "fixture",
+        primary_signal_label: label,
+        indicator_snapshot: {},
+        context_snapshot: {},
+        context_signals: [],
+        context_summary: label,
+        context_score: 0,
+        stale: false,
+        error_message: null,
+      },
+    ],
+  };
+}
+
+function radarSnapshot(id: number, snapshotDate: string, mode = "action") {
+  return {
+    id,
+    group_id: 7,
+    include_children: true,
+    enabled_only: true,
+    mode,
+    max_results: 20,
+    calculation_limit: 100,
+    radar_rule_version: "playwright.v1",
+    snapshot_date: snapshotDate,
+    trade_date: snapshotDate,
+    target_trade_date: snapshotDate,
+    is_current: true,
+    current_stock_count: 1,
+    stale_stock_count: 0,
+    requested_stock_count: 1,
+    ranked_count: 1,
+    matched_count: 1,
+    radar_count: 1,
+    no_data_count: 0,
+    error_count: 0,
+    buckets: [],
+    data_limitations: [],
+    created_at: `${snapshotDate}T14:00:00+08:00`,
+    updated_at: `${snapshotDate}T14:00:00+08:00`,
+  };
+}
+
+function radarOutcomeSummary(
+  id: number,
+  snapshotDate: string,
+  status = "evaluated"
+) {
+  return {
+    status,
+    snapshot: radarSnapshot(id, snapshotDate),
+    evaluated_at: `${snapshotDate}T15:00:00+08:00`,
+    total_count: 1,
+    hit_count: status === "evaluated" ? 1 : 0,
+    miss_count: 0,
+    neutral_count: 0,
+    unevaluable_count: 0,
+    pending_count: status === "pending" ? 1 : 0,
+    avg_close_return_pct: status === "evaluated" ? 1.25 : null,
+    avg_max_favorable_pct: status === "evaluated" ? 2.5 : null,
+    avg_max_adverse_pct: status === "evaluated" ? -0.5 : null,
+    bucket_summaries: [],
+    items: [],
+    data_limitations: [],
+  };
+}
+
+function noRadarOutcomeSummary() {
+  return {
+    status: "no_snapshot",
+    snapshot: null,
+    evaluated_at: null,
+    total_count: 0,
+    hit_count: 0,
+    miss_count: 0,
+    neutral_count: 0,
+    unevaluable_count: 0,
+    pending_count: 0,
+    avg_close_return_pct: null,
+    avg_max_favorable_pct: null,
+    avg_max_adverse_pct: null,
+    bucket_summaries: [],
+    items: [],
+    data_limitations: [],
   };
 }
 
@@ -883,6 +1036,18 @@ type MockOmiApiOptions = {
     | Promise<{ body: unknown; delayMs?: number; status?: number } | null>
     | { body: unknown; delayMs?: number; status?: number }
     | null;
+  radarResponder?: (context: {
+    market: "tw" | "us" | "jp" | "kr";
+    groupId: number;
+    requestNumber: number;
+    url: URL;
+  }) =>
+    | Promise<{ body: unknown; delayMs?: number; status?: number } | null>
+    | { body: unknown; delayMs?: number; status?: number }
+    | null;
+  taiwanRadarOutcomeLatest?: unknown;
+  taiwanRadarOutcomeHistory?: unknown[];
+  taiwanRadarOutcomeEvaluation?: unknown;
 };
 
 async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
@@ -900,6 +1065,7 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
   const krWatchlistItems = options.krWatchlistItems ?? [];
   const krRankingRows = options.krRankingRows ?? [];
   const regionalRankingRequestCounts = { us: 0, jp: 0, kr: 0 };
+  const radarRequestCounts = { tw: 0, us: 0, jp: 0, kr: 0 };
 
   await page.route("**/omi-data/**", async (route) => {
     const url = new URL(route.request().url());
@@ -1432,12 +1598,59 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
       /\/(?:us-market|jp-market|kr-market)\/watchlists\/groups\/\d+\/radar$/.test(path) ||
       /\/(?:wl|watchlists)\/groups\/\d+\/radar$/.test(path)
     ) {
-      await fulfillJson(route, emptyRadarResponse(path));
+      const market = path.includes("/us-market/")
+        ? "us"
+        : path.includes("/jp-market/")
+          ? "jp"
+          : path.includes("/kr-market/")
+            ? "kr"
+            : "tw";
+      const groupId = Number(path.match(/groups\/(\d+)\/radar/)?.[1] ?? 0);
+      radarRequestCounts[market] += 1;
+      const customResponse = await options.radarResponder?.({
+        market,
+        groupId,
+        requestNumber: radarRequestCounts[market],
+        url,
+      });
+
+      if (customResponse) {
+        if (customResponse.delayMs) {
+          await new Promise((resolve) => setTimeout(resolve, customResponse.delayMs));
+        }
+        await route.fulfill({
+          status: customResponse.status ?? 200,
+          contentType: "application/json",
+          body: JSON.stringify(customResponse.body),
+        });
+        return;
+      }
+
+      await fulfillJson(
+        route,
+        emptyRadarResponse(path, url.searchParams.get("mode") ?? "action")
+      );
       return;
     }
 
     if (/\/(?:wl|watchlists)\/groups\/\d+\/radar\/outcomes\/latest$/.test(path)) {
-      await fulfillJson(route, null);
+      await fulfillJson(
+        route,
+        options.taiwanRadarOutcomeLatest ?? noRadarOutcomeSummary()
+      );
+      return;
+    }
+
+    if (/\/(?:wl|watchlists)\/groups\/\d+\/radar\/outcomes\/history$/.test(path)) {
+      await fulfillJson(route, options.taiwanRadarOutcomeHistory ?? []);
+      return;
+    }
+
+    if (/\/(?:wl|watchlists)\/groups\/\d+\/radar\/outcomes\/evaluate$/.test(path)) {
+      if (options.taiwanRadarOutcomeEvaluation === undefined) {
+        throw new Error(`Unexpected radar outcome evaluation: ${route.request().method()} ${path}`);
+      }
+      await fulfillJson(route, options.taiwanRadarOutcomeEvaluation);
       return;
     }
 
@@ -1934,6 +2147,226 @@ test.describe("OMI dashboard smoke", () => {
     ).toBeVisible();
     await expect(page).toHaveURL(/\?market=crypto$/);
     expect(await page.evaluate(() => window.history.length)).toBe(cryptoHistoryLength);
+    expect(pageErrors).toEqual([]);
+  });
+
+  test("Taiwan radar mode reload and browser history stay synchronized", async ({ page }) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await mockOmiApi(page, {
+      taiwanWatchlistTree: seededTaiwanWatchlistTree(),
+      taiwanWatchlistItems: seededTaiwanWatchlistItems(),
+      taiwanRankingRows: seededTaiwanRankingRows(),
+      radarResponder: ({ market, requestNumber, url }) =>
+        market === "tw"
+          ? {
+              body: seededRadarResponse(
+                url,
+                `${url.searchParams.get("mode") ?? "action"}-request-${requestNumber}`
+              ),
+            }
+          : null,
+    });
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+
+    const initialRadarResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return /\/(?:wl|watchlists)\/groups\/7\/radar$/.test(url.pathname) &&
+        url.searchParams.get("mode") === "action";
+    });
+    await page.locator('[data-watchlist-group-id="7"]').click();
+    await initialRadarResponse;
+    await expect(page.getByTestId("watchlist-radar-result-2330")).toBeVisible();
+
+    const riskRadarResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return /\/(?:wl|watchlists)\/groups\/7\/radar$/.test(url.pathname) &&
+        url.searchParams.get("mode") === "risk";
+    });
+    await page.getByTestId("watchlist-radar-mode-risk").click();
+    await riskRadarResponse;
+    await expect(page).toHaveURL(/\?market=tw&group_id=7&radar_mode=risk$/);
+    await expect(page.getByTestId("watchlist-radar-mode-risk")).toHaveAttribute(
+      "aria-disabled",
+      "true"
+    );
+
+    const reloadResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return /\/(?:wl|watchlists)\/groups\/7\/radar$/.test(url.pathname) &&
+        url.searchParams.get("mode") === "risk";
+    });
+    await page.getByTestId("watchlist-radar-reload").click();
+    await reloadResponse;
+
+    const restoredActionResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return /\/(?:wl|watchlists)\/groups\/7\/radar$/.test(url.pathname) &&
+        url.searchParams.get("mode") === "action";
+    });
+    await page.goBack();
+    await restoredActionResponse;
+    await expect(page).toHaveURL(/\?market=tw&group_id=7&radar_mode=action$/);
+    await expect(page.getByTestId("watchlist-radar-mode-action")).toHaveAttribute(
+      "aria-disabled",
+      "true"
+    );
+
+    const restoredRiskResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return /\/(?:wl|watchlists)\/groups\/7\/radar$/.test(url.pathname) &&
+        url.searchParams.get("mode") === "risk";
+    });
+    await page.goForward();
+    await restoredRiskResponse;
+    await expect(page).toHaveURL(/\?market=tw&group_id=7&radar_mode=risk$/);
+    await expect(page.getByTestId("watchlist-radar-mode-risk")).toHaveAttribute(
+      "aria-disabled",
+      "true"
+    );
+    expect(pageErrors).toEqual([]);
+  });
+
+  test("Taiwan radar can reload after an API error", async ({ page }) => {
+    const pageErrors: string[] = [];
+    let recoverRadar = false;
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await mockOmiApi(page, {
+      taiwanWatchlistTree: seededTaiwanWatchlistTree(),
+      taiwanWatchlistItems: seededTaiwanWatchlistItems(),
+      taiwanRankingRows: seededTaiwanRankingRows(),
+      radarResponder: ({ market, url }) => {
+        if (market !== "tw") return null;
+        return recoverRadar
+          ? { body: seededRadarResponse(url, "radar-recovered") }
+          : { body: { detail: "radar fixture failure" }, status: 503 };
+      },
+    });
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+
+    const failedResponse = page.waitForResponse((response) =>
+      /\/(?:wl|watchlists)\/groups\/7\/radar$/.test(
+        new URL(response.url()).pathname
+      )
+    );
+    await page.locator('[data-watchlist-group-id="7"]').click();
+    expect((await failedResponse).status()).toBe(503);
+
+    recoverRadar = true;
+    const recoveredResponse = page.waitForResponse((response) =>
+      /\/(?:wl|watchlists)\/groups\/7\/radar$/.test(
+        new URL(response.url()).pathname
+      )
+    );
+    await page.getByTestId("watchlist-radar-reload").click();
+    await recoveredResponse;
+    await expect(page.getByTestId("watchlist-radar-result-2330")).toContainText(
+      "radar-recovered"
+    );
+    expect(pageErrors).toEqual([]);
+  });
+
+  test("Taiwan radar history evaluates the selected snapshot", async ({ page }) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await mockOmiApi(page, {
+      taiwanWatchlistTree: seededTaiwanWatchlistTree(),
+      taiwanWatchlistItems: seededTaiwanWatchlistItems(),
+      taiwanRankingRows: seededTaiwanRankingRows(),
+      radarResponder: ({ market, url }) =>
+        market === "tw" ? { body: seededRadarResponse(url, "history-radar") } : null,
+      taiwanRadarOutcomeLatest: radarOutcomeSummary(102, "2026-06-14"),
+      taiwanRadarOutcomeHistory: [
+        radarOutcomeSummary(102, "2026-06-14"),
+        radarOutcomeSummary(101, "2026-06-13", "pending"),
+      ],
+      taiwanRadarOutcomeEvaluation: radarOutcomeSummary(101, "2026-06-13"),
+    });
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+
+    await page.locator('[data-watchlist-group-id="7"]').click();
+    await expect(page.getByTestId("watchlist-radar-result-2330")).toBeVisible();
+    const historyResponse = page.waitForResponse((response) =>
+      /\/(?:wl|watchlists)\/groups\/7\/radar\/outcomes\/history$/.test(
+        new URL(response.url()).pathname
+      )
+    );
+    await page.getByTestId("watchlist-radar-history-open").click();
+    await historyResponse;
+    await expect(page.getByTestId("watchlist-radar-history-dialog")).toBeVisible();
+    await page.getByTestId("watchlist-radar-history-snapshot-101").click();
+
+    const evaluationRequest = page.waitForRequest((request) =>
+      /\/(?:wl|watchlists)\/groups\/7\/radar\/outcomes\/evaluate$/.test(
+        new URL(request.url()).pathname
+      )
+    );
+    await page.getByTestId("watchlist-radar-history-evaluate-selected").click();
+    const request = await evaluationRequest;
+    const evaluationUrl = new URL(request.url());
+    expect(evaluationUrl.searchParams.get("mode")).toBe("action");
+    expect(evaluationUrl.searchParams.get("snapshot_run_id")).toBe("101");
+    expect(request.postData()).toBeNull();
+    await expect(page.getByTestId("watchlist-radar-history-dialog")).toBeVisible();
+    expect(pageErrors).toEqual([]);
+  });
+
+  test("regional radar preserves mode and ignores a stale response", async ({ page }) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(),
+      usWatchlistItems: seededUsWatchlistItems(),
+      usRankingRows: seededUsRankingRows(),
+      radarResponder: ({ market, url }) => {
+        if (market !== "us") return null;
+        const mode = url.searchParams.get("mode") ?? "action";
+        return {
+          body: seededRadarResponse(
+            url,
+            mode === "risk" ? "current-risk-response" : "stale-action-response"
+          ),
+          delayMs: mode === "risk" ? 10 : 350,
+        };
+      },
+    });
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+
+    await page.locator('a[href="/?market=us"]').click();
+    await page.getByRole("button", { name: "Reload" }).first().click();
+    const usSidebar = page.getByRole("complementary");
+    const usGroupLabel = usSidebar.getByText("Mega Cap Tech", { exact: true }).last();
+    const staleActionRequest = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return /\/us-market\/watchlists\/groups\/17\/radar$/.test(url.pathname) &&
+        url.searchParams.get("mode") === "action";
+    });
+    const staleActionResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return /\/us-market\/watchlists\/groups\/17\/radar$/.test(url.pathname) &&
+        url.searchParams.get("mode") === "action";
+    });
+    await usGroupLabel.click();
+    await staleActionRequest;
+
+    const currentRiskResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return /\/us-market\/watchlists\/groups\/17\/radar$/.test(url.pathname) &&
+        url.searchParams.get("mode") === "risk";
+    });
+    await page.getByTestId("watchlist-radar-mode-risk").click();
+    await currentRiskResponse;
+    await expect(page).toHaveURL(/\?market=us&group_id=17&radar_mode=risk$/);
+    await expect(page.getByTestId("watchlist-radar-result-AAPL")).toContainText(
+      "current-risk-response"
+    );
+
+    await staleActionResponse;
+    await expect(page.getByTestId("watchlist-radar-result-AAPL")).toContainText(
+      "current-risk-response"
+    );
+    await page.getByTestId("watchlist-radar-result-AAPL").getByRole("button").click();
+    await expect(page).toHaveURL(/\?market=us&symbol=AAPL&radar_mode=risk$/);
     expect(pageErrors).toEqual([]);
   });
 

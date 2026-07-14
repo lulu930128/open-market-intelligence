@@ -38,10 +38,9 @@ import type {
   WatchlistRadarMode,
 } from "@/types/market";
 import { useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type UseMarketSelectionOptions = InitialMarketSelectionOptions & {
-  radarMode: WatchlistRadarMode;
   quoteDepthPreviewMode: TaiwanStockQuoteDepthPreviewMode | null;
   onHistoryNavigation?: (route: DashboardRoute) => void;
 };
@@ -82,15 +81,20 @@ export function useMarketSelection(options: UseMarketSelectionOptions) {
   );
 
   const routeSearch = searchParams.toString();
+  const dashboardRoute = useMemo(
+    () => parseDashboardSearch(routeSearch),
+    [routeSearch]
+  );
   useEffect(() => {
     const currentOptions = routeOptionsRef.current;
-    const route = parseDashboardSearch(routeSearch);
-    setSelection((current) => applyDashboardRoute(current, route, currentOptions));
-    currentOptions.onHistoryNavigation?.(route);
-  }, [routeSearch]);
+    setSelection((current) =>
+      applyDashboardRoute(current, dashboardRoute, currentOptions)
+    );
+    currentOptions.onHistoryNavigation?.(dashboardRoute);
+  }, [dashboardRoute]);
 
   const changeMarket = useCallback(
-    (market: MarketRegion) => {
+    (market: MarketRegion, radarMode?: WatchlistRadarMode | null) => {
       const usGroup =
         selection.us.group ??
         resolveInitialSelectionGroup(options.usTree, selection.us.groupId);
@@ -143,7 +147,7 @@ export function useMarketSelection(options: UseMarketSelectionOptions) {
             market: "tw",
             groupId: selection.taiwan.groupId,
             stockId: selection.taiwan.stockId,
-            radarMode: options.radarMode,
+            radarMode,
           });
         }
       } else if (market === "us") {
@@ -151,24 +155,27 @@ export function useMarketSelection(options: UseMarketSelectionOptions) {
           market: "us",
           groupId: usGroup?.id ?? null,
           symbol: selection.us.symbol,
+          radarMode,
         });
       } else if (market === "jp") {
         pushDashboardUrl({
           market: "jp",
           groupId: jpGroup?.id ?? null,
           jpSymbol: selection.jp.symbol,
+          radarMode,
         });
       } else if (market === "kr") {
         pushDashboardUrl({
           market: "kr",
           groupId: krGroup?.id ?? null,
           krSymbol: selection.kr.symbol,
+          radarMode,
         });
       } else {
         pushDashboardUrl({ market: "crypto" });
       }
     },
-    [options.jpTree, options.krTree, options.radarMode, options.usTree, pushDashboardUrl, selection]
+    [options.jpTree, options.krTree, options.usTree, pushDashboardUrl, selection]
   );
 
   const selectTaiwanGroup = useCallback(
@@ -234,7 +241,7 @@ export function useMarketSelection(options: UseMarketSelectionOptions) {
   );
 
   const selectUsGroup = useCallback(
-    (group: USWatchlistGroupNode | null) => {
+    (group: USWatchlistGroupNode | null, radarMode?: WatchlistRadarMode | null) => {
       setSelection((current) => ({
         ...current,
         us: {
@@ -245,13 +252,17 @@ export function useMarketSelection(options: UseMarketSelectionOptions) {
           securityName: null,
         },
       }));
-      pushDashboardUrl({ market: "us", groupId: group?.id ?? null });
+      pushDashboardUrl({ market: "us", groupId: group?.id ?? null, radarMode });
     },
     [pushDashboardUrl]
   );
 
   const selectUsSymbol = useCallback(
-    (symbol: string, securityName: string | null) => {
+    (
+      symbol: string,
+      securityName: string | null,
+      radarMode?: WatchlistRadarMode | null
+    ) => {
       const normalized = normalizeSelectionSymbol(symbol);
       if (!normalized) return;
 
@@ -263,13 +274,13 @@ export function useMarketSelection(options: UseMarketSelectionOptions) {
           securityName: getUsMarketIndexConfig(normalized)?.name ?? securityName,
         },
       }));
-      pushDashboardUrl({ market: "us", symbol: normalized });
+      pushDashboardUrl({ market: "us", symbol: normalized, radarMode });
     },
     [pushDashboardUrl]
   );
 
   const selectJpGroup = useCallback(
-    (group: JPWatchlistGroupNode | null) => {
+    (group: JPWatchlistGroupNode | null, radarMode?: WatchlistRadarMode | null) => {
       setSelection((current) => ({
         ...current,
         jp: {
@@ -280,13 +291,17 @@ export function useMarketSelection(options: UseMarketSelectionOptions) {
           stock: null,
         },
       }));
-      pushDashboardUrl({ market: "jp", groupId: group?.id ?? null });
+      pushDashboardUrl({ market: "jp", groupId: group?.id ?? null, radarMode });
     },
     [pushDashboardUrl]
   );
 
   const selectJpSymbol = useCallback(
-    (symbol: string, securityName: string | null) => {
+    (
+      symbol: string,
+      securityName: string | null,
+      radarMode?: WatchlistRadarMode | null
+    ) => {
       const normalized = normalizeSelectionSymbol(symbol);
       if (!normalized) return;
 
@@ -302,6 +317,7 @@ export function useMarketSelection(options: UseMarketSelectionOptions) {
         market: "jp",
         groupId: selection.jp.groupId,
         jpSymbol: normalized,
+        radarMode,
       });
     },
     [pushDashboardUrl, selection.jp.groupId]
@@ -321,7 +337,7 @@ export function useMarketSelection(options: UseMarketSelectionOptions) {
   );
 
   const selectKrGroup = useCallback(
-    (group: KRWatchlistGroupNode | null) => {
+    (group: KRWatchlistGroupNode | null, radarMode?: WatchlistRadarMode | null) => {
       setSelection((current) => ({
         ...current,
         kr: {
@@ -332,13 +348,17 @@ export function useMarketSelection(options: UseMarketSelectionOptions) {
           stock: null,
         },
       }));
-      pushDashboardUrl({ market: "kr", groupId: group?.id ?? null });
+      pushDashboardUrl({ market: "kr", groupId: group?.id ?? null, radarMode });
     },
     [pushDashboardUrl]
   );
 
   const selectKrSymbol = useCallback(
-    (symbol: string, securityName: string | null) => {
+    (
+      symbol: string,
+      securityName: string | null,
+      radarMode?: WatchlistRadarMode | null
+    ) => {
       const normalized = normalizeSelectionSymbol(symbol);
       if (!normalized) return;
 
@@ -356,6 +376,7 @@ export function useMarketSelection(options: UseMarketSelectionOptions) {
         market: "kr",
         groupId: selection.kr.groupId,
         krSymbol: resolvedSymbol,
+        radarMode,
       });
     },
     [pushDashboardUrl, selection.kr.groupId]
@@ -417,6 +438,7 @@ export function useMarketSelection(options: UseMarketSelectionOptions) {
   );
 
   return {
+    dashboardRoute,
     activeMarket: selection.activeMarket,
     selectedGroupId: selection.taiwan.groupId,
     selectedGroup: selection.taiwan.group,

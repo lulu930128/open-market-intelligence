@@ -54,8 +54,19 @@ import {
   type KrRankBy,
   type KrRankingErrorKind,
 } from "@/components/market-dashboard/ranking/useKrRankingState";
+import {
+  useRegionalRadarState,
+  type RegionalRadarMarket,
+} from "@/components/market-dashboard/radar/useRegionalRadarState";
+import {
+  useTaiwanRadarState,
+  type TaiwanRadarErrorKind,
+} from "@/components/market-dashboard/radar/useTaiwanRadarState";
 import { fetchJson, requestJson } from "@/lib/api";
-import type { MarketRegion } from "@/components/market-dashboard/selection/dashboardRoutes";
+import {
+  normalizeDashboardRadarMode,
+  type MarketRegion,
+} from "@/components/market-dashboard/selection/dashboardRoutes";
 import { useMarketSelection } from "@/components/market-dashboard/selection/useMarketSelection";
 import {
   emitDataStatusEvent,
@@ -147,8 +158,6 @@ import type {
   WatchlistGroupNode,
   WatchlistItemRead,
   WatchlistRadarMode,
-  WatchlistRadarOutcomeSummaryRead,
-  WatchlistRadarSnapshotRead,
 } from "@/types/market";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -158,25 +167,11 @@ type RankBy = TaiwanRankBy;
 type USRankBy = UsRankBy;
 type JPRankBy = JpRankBy;
 type KRRankBy = KrRankBy;
-const WATCHLIST_INTRADAY_LIMIT = 30;
-const WATCHLIST_RADAR_MAX_RESULTS = 20;
-const WATCHLIST_RADAR_TIMEOUT_MS = 60_000;
 const MARKET_CHIP_REFRESH_STORAGE_PREFIX = "omi:market-chip-refresh";
 const TAIWAN_INDEX_TARGET_IDS = new Set(["TAIEX", "TPEX"]);
-const WATCHLIST_ANALYSIS_PARAMS = {
-  include_children: true,
-  enabled_only: true,
-  ma_windows: "5,20,60",
-  volume_ma_windows: "5,20",
-  volume_ratio_threshold: 1.5,
-};
-type TaiwanMarketRefreshState = ReturnType<typeof getTaiwanMarketRefreshState>;
 
-function shouldUseTaiwanWatchlistIntraday(marketState: TaiwanMarketRefreshState) {
-  return (
-    marketState.isPollingWindow ||
-    (marketState.isAfterClose && !marketState.isDailyPriceReleased)
-  );
+function regionalRadarRouteMode(mode: WatchlistRadarMode) {
+  return mode === "action" ? null : mode;
 }
 
 function marketChipRefreshStorageKey(dateKey: string) {
@@ -1747,7 +1742,6 @@ export default function MarketDashboardClient({
   const [selectedUsCompanyProfile, setSelectedUsCompanyProfile] =
     useState<USCompanyProfileRead | null>(null);
   const [jpStatusMessage, setJpStatusMessage] = useState<JPStatusMessage>(null);
-  const [radarMode, setRadarMode] = useState<WatchlistRadarMode>(initialRadarMode);
   const marketSelection = useMarketSelection({
     initialMarket,
     initialSelectedGroupId,
@@ -1758,7 +1752,6 @@ export default function MarketDashboardClient({
     initialSelectedUsSecurityName,
     initialSelectedJpSymbol,
     initialSelectedKrSymbol,
-    radarMode,
     quoteDepthPreviewMode,
     taiwanTree: watchlistTree,
     taiwanItems: watchlistItems,
@@ -1776,6 +1769,7 @@ export default function MarketDashboardClient({
     },
   });
   const {
+    dashboardRoute,
     activeMarket,
     selectedGroupId,
     selectedGroup,
@@ -1803,52 +1797,10 @@ export default function MarketDashboardClient({
     dashboardHref,
     pushDashboardUrl,
   } = marketSelection;
-  const [radar, setRadar] = useState<WatchlistGroupRadarRead | null>(initialRadarData);
-  const [radarOutcomeSummary, setRadarOutcomeSummary] =
-    useState<WatchlistRadarOutcomeSummaryRead | null>(null);
-  const [radarOutcomeHistory, setRadarOutcomeHistory] =
-    useState<WatchlistRadarOutcomeSummaryRead[]>([]);
-  const [radarOutcomeHistoryOpen, setRadarOutcomeHistoryOpen] = useState(false);
-  const [selectedRadarOutcomeSnapshotId, setSelectedRadarOutcomeSnapshotId] =
-    useState<number | null>(null);
-  const [usRadarMode, setUsRadarMode] = useState<WatchlistRadarMode>(initialRadarMode);
-  const [usRadar, setUsRadar] = useState<WatchlistGroupRadarRead | null>(null);
-  const [jpRadarMode, setJpRadarMode] = useState<WatchlistRadarMode>(initialRadarMode);
-  const [jpRadar, setJpRadar] = useState<WatchlistGroupRadarRead | null>(null);
-  const [krRadarMode, setKrRadarMode] = useState<WatchlistRadarMode>(initialRadarMode);
-  const [krRadar, setKrRadar] = useState<WatchlistGroupRadarRead | null>(null);
   const [marketIndexSummary, setMarketIndexSummary] =
     useState<MarketIndexSummary | null>(initialMarketIndexSummary);
   const [marketIndexLoadState, setMarketIndexLoadState] =
     useState<LoadState>(initialMarketIndexSummary ? "success" : "idle");
-  const [radarLoadState, setRadarLoadState] = useState<LoadState>(
-    initialRadarData ? "success" : "idle"
-  );
-  const [radarOutcomeLoadState, setRadarOutcomeLoadState] =
-    useState<LoadState>("idle");
-  const [radarOutcomeHistoryLoadState, setRadarOutcomeHistoryLoadState] =
-    useState<LoadState>("idle");
-  const [usRadarLoadState, setUsRadarLoadState] = useState<LoadState>("idle");
-  const [jpRadarLoadState, setJpRadarLoadState] = useState<LoadState>("idle");
-  const [krRadarLoadState, setKrRadarLoadState] = useState<LoadState>("idle");
-  const [, setRadarErrorMessage] = useState<string | null>(null);
-  const [, setRadarOutcomeErrorMessage] =
-    useState<string | null>(null);
-  const [, setRadarOutcomeHistoryErrorMessage] =
-    useState<string | null>(null);
-  const [, setUsRadarErrorMessage] = useState<string | null>(null);
-  const [, setJpRadarErrorMessage] = useState<string | null>(null);
-  const [, setKrRadarErrorMessage] = useState<string | null>(null);
-  const radarRequestSeq = useRef(0);
-  const radarOutcomeRequestSeq = useRef(0);
-  const radarOutcomeHistoryRequestSeq = useRef(0);
-  const usRadarRequestSeq = useRef(0);
-  const jpRadarRequestSeq = useRef(0);
-  const krRadarRequestSeq = useRef(0);
-  const radarModeRef = useRef<WatchlistRadarMode>(radarMode);
-  const usRadarModeRef = useRef<WatchlistRadarMode>(usRadarMode);
-  const jpRadarModeRef = useRef<WatchlistRadarMode>(jpRadarMode);
-  const krRadarModeRef = useRef<WatchlistRadarMode>(krRadarMode);
   const resourceBackgroundPollingRef = useRef(new Set<string>());
   const marketIndexRequestSeq = useRef(0);
   const resourceBackgroundPollingGroupsForCurrentView = useMemo(
@@ -1976,6 +1928,91 @@ export default function MarketDashboardClient({
   const krWatchlistContextLabel =
     selectedKrGroupName ??
     (selectedKrGroupId !== null ? String(selectedKrGroupId) : t("watchlist.noGroupSelected"));
+  const selectedUsIndexConfig = getUsMarketIndexConfig(selectedUsSymbol);
+  const isSelectedUsIndex = selectedUsIndexConfig !== null;
+  const selectedJpIndexConfig = getJpMarketIndexConfig(selectedJpSymbol);
+  const isSelectedJpIndex = selectedJpIndexConfig !== null;
+  const {
+    state: {
+      mode: radarMode,
+      radar,
+      loadState: radarLoadState,
+      outcomeSummary: radarOutcomeSummary,
+      outcomeLoadState: radarOutcomeLoadState,
+      outcomeHistory: radarOutcomeHistory,
+      outcomeHistoryOpen: radarOutcomeHistoryOpen,
+      outcomeHistoryLoadState: radarOutcomeHistoryLoadState,
+      selectedOutcomeSnapshotId: selectedRadarOutcomeSnapshotId,
+    },
+    actions: taiwanRadarActions,
+  } = useTaiwanRadarState({
+    active: activeMarket === "tw",
+    groupId: activeGroupId,
+    initialMode: initialRadarMode,
+    initialRadar: initialRadarData,
+    routeMode:
+      dashboardRoute.market === "tw"
+        ? normalizeDashboardRadarMode(dashboardRoute.radarMode)
+        : null,
+    onError: handleTaiwanRadarError,
+  });
+  const {
+    state: {
+      mode: usRadarMode,
+      radar: usRadar,
+      loadState: usRadarLoadState,
+    },
+    actions: usRadarActions,
+  } = useRegionalRadarState({
+    active: activeMarket === "us",
+    enabled: !isSelectedUsIndex,
+    market: "us",
+    groupId: selectedUsGroupId,
+    initialMode: initialRadarMode,
+    routeMode:
+      dashboardRoute.market === "us"
+        ? normalizeDashboardRadarMode(dashboardRoute.radarMode)
+        : null,
+    onError: handleUsRadarError,
+  });
+  const {
+    state: {
+      mode: jpRadarMode,
+      radar: jpRadar,
+      loadState: jpRadarLoadState,
+    },
+    actions: jpRadarActions,
+  } = useRegionalRadarState({
+    active: activeMarket === "jp",
+    enabled: !isSelectedJpIndex,
+    market: "jp",
+    groupId: selectedJpGroupId,
+    initialMode: initialRadarMode,
+    routeMode:
+      dashboardRoute.market === "jp"
+        ? normalizeDashboardRadarMode(dashboardRoute.radarMode)
+        : null,
+    onError: handleJpRadarError,
+  });
+  const {
+    state: {
+      mode: krRadarMode,
+      radar: krRadar,
+      loadState: krRadarLoadState,
+    },
+    actions: krRadarActions,
+  } = useRegionalRadarState({
+    active: activeMarket === "kr",
+    enabled: true,
+    market: "kr",
+    groupId: selectedKrGroupId,
+    initialMode: initialRadarMode,
+    routeMode:
+      dashboardRoute.market === "kr"
+        ? normalizeDashboardRadarMode(dashboardRoute.radarMode)
+        : null,
+    onError: handleKrRadarError,
+  });
   const {
     state: {
       rankBy,
@@ -1990,7 +2027,7 @@ export default function MarketDashboardClient({
     groupId: activeGroupId,
     initialRanking: initialRankingData,
     refreshExecutionSettings,
-    prepareCompanionLoad: prepareTaiwanRankingRadarLoad,
+    prepareCompanionLoad: taiwanRadarActions.prepareCompanionLoad,
     onError: handleTaiwanRankingError,
   });
   const loadDashboard = taiwanRankingActions.load;
@@ -2006,7 +2043,7 @@ export default function MarketDashboardClient({
     active: activeMarket === "us",
     groupId: selectedUsGroupId,
     refreshExecutionSettings,
-    startCompanionLoad: startUsRankingCompanionLoad,
+    startCompanionLoad: usRadarActions.startCompanionLoad,
     onError: handleUsRankingError,
   });
   const loadUsDashboard = usRankingActions.load;
@@ -2023,7 +2060,7 @@ export default function MarketDashboardClient({
     active: activeMarket === "jp",
     groupId: selectedJpGroupId,
     refreshExecutionSettings,
-    startCompanionLoad: startJpRankingCompanionLoad,
+    startCompanionLoad: jpRadarActions.startCompanionLoad,
     onError: handleJpRankingError,
   });
   const loadJpDashboard = jpRankingActions.load;
@@ -2040,7 +2077,7 @@ export default function MarketDashboardClient({
     active: activeMarket === "kr",
     groupId: selectedKrGroupId,
     refreshExecutionSettings,
-    startCompanionLoad: startKrRankingCompanionLoad,
+    startCompanionLoad: krRadarActions.startCompanionLoad,
     onError: handleKrRankingError,
   });
   const loadKrDashboard = krRankingActions.load;
@@ -2212,491 +2249,68 @@ export default function MarketDashboardClient({
     selectedUsCompanyProfile?.symbol.toUpperCase() === selectedUsSymbol?.toUpperCase()
       ? selectedUsCompanyProfile
       : null;
-  const selectedUsIndexConfig = getUsMarketIndexConfig(selectedUsSymbol);
-  const isSelectedUsIndex = selectedUsIndexConfig !== null;
-  const selectedJpIndexConfig = getJpMarketIndexConfig(selectedJpSymbol);
-  const isSelectedJpIndex = selectedJpIndexConfig !== null;
 
-  function watchlistRadarParams(
-    mode: WatchlistRadarMode,
-    useIntraday: boolean
+  function handleTaiwanRadarError(
+    kind: TaiwanRadarErrorKind,
+    error: unknown,
+    groupId: number
   ) {
-    return {
-      ...WATCHLIST_ANALYSIS_PARAMS,
-      mode,
-      max_results: WATCHLIST_RADAR_MAX_RESULTS,
-      calculation_limit: 100,
-      use_intraday: useIntraday,
-      intraday_limit: WATCHLIST_INTRADAY_LIMIT,
-    };
+    const title =
+      kind === "radar"
+        ? t("radar.loadError")
+        : kind === "evaluate"
+          ? t("radar.outcome.evaluateError")
+          : t("radar.outcome.loadError");
+    const source =
+      kind === "radar"
+        ? t("radar.title")
+        : kind === "history"
+          ? t("radar.outcome.history")
+          : t("radar.outcome.title");
+    const contextSuffix =
+      kind === "radar"
+        ? "radar"
+        : kind === "history"
+          ? "radar-outcome-history"
+          : "radar-outcome";
+
+    emitDashboardDataStatus({
+      market: "tw",
+      title,
+      message: apiErrorMessage(error, title),
+      source,
+      contextKey: `tw:watchlist:${groupId}:${contextSuffix}`,
+      contextLabel: twWatchlistContextLabel,
+    });
   }
 
-  function watchlistTechnicalRadarParams(
-    mode: WatchlistRadarMode,
-    useIntraday = false
-  ) {
-    return {
-      mode,
-      max_results: WATCHLIST_RADAR_MAX_RESULTS,
-      calculation_limit: 100,
-      use_intraday: useIntraday,
-      intraday_limit: WATCHLIST_INTRADAY_LIMIT,
-    };
-  }
-
-  async function loadWatchlistRadarOutcome(
+  function handleRegionalRadarError(
+    market: RegionalRadarMarket,
+    error: unknown,
     groupId: number,
-    options?: { mode?: WatchlistRadarMode; silent?: boolean }
+    contextLabel: string
   ) {
-    const requestSeq = radarOutcomeRequestSeq.current + 1;
-    radarOutcomeRequestSeq.current = requestSeq;
-    const currentMode = options?.mode ?? radarModeRef.current;
-
-    if (!options?.silent) {
-      setRadarOutcomeLoadState("loading");
-      setRadarOutcomeErrorMessage(null);
-      setRadarOutcomeSummary(null);
-    }
-
-    try {
-      const outcomeData = await fetchJson<WatchlistRadarOutcomeSummaryRead>(
-        `/api/watchlists/groups/${groupId}/radar/outcomes/latest`,
-        { mode: currentMode }
-      );
-
-      if (radarOutcomeRequestSeq.current !== requestSeq) return;
-
-      setRadarOutcomeSummary(outcomeData);
-      setRadarOutcomeLoadState("success");
-      setRadarOutcomeErrorMessage(null);
-    } catch (error) {
-      if (radarOutcomeRequestSeq.current !== requestSeq) return;
-
-      if (!options?.silent) {
-        setRadarOutcomeSummary(null);
-      }
-      setRadarOutcomeLoadState("error");
-      const message = apiErrorMessage(error, t("radar.outcome.loadError"));
-      setRadarOutcomeErrorMessage(message);
-      emitDashboardDataStatus({
-        market: "tw",
-        title: t("radar.outcome.loadError"),
-        message,
-        source: t("radar.outcome.title"),
-        contextKey: `tw:watchlist:${groupId}:radar-outcome`,
-        contextLabel: twWatchlistContextLabel,
-      });
-    }
+    const title = t("radar.loadError");
+    emitDashboardDataStatus({
+      market,
+      title,
+      message: apiErrorMessage(error, title),
+      source: t("radar.title"),
+      contextKey: `${market}:watchlist:${groupId}:radar`,
+      contextLabel,
+    });
   }
 
-  async function loadWatchlistRadarOutcomeHistory(
-    groupId: number,
-    options?: { mode?: WatchlistRadarMode; silent?: boolean }
-  ) {
-    const requestSeq = radarOutcomeHistoryRequestSeq.current + 1;
-    radarOutcomeHistoryRequestSeq.current = requestSeq;
-    const currentMode = options?.mode ?? radarModeRef.current;
-
-    if (!options?.silent) {
-      setRadarOutcomeHistoryLoadState("loading");
-      setRadarOutcomeHistoryErrorMessage(null);
-    }
-
-    try {
-      const historyData = await fetchJson<WatchlistRadarOutcomeSummaryRead[]>(
-        `/api/watchlists/groups/${groupId}/radar/outcomes/history`,
-        { mode: currentMode, limit: 60, item_limit: 12 }
-      );
-
-      if (radarOutcomeHistoryRequestSeq.current !== requestSeq) return;
-
-      setRadarOutcomeHistory(historyData);
-      setSelectedRadarOutcomeSnapshotId((current) => {
-        if (current && historyData.some((row) => row.snapshot?.id === current)) {
-          return current;
-        }
-        return historyData[0]?.snapshot?.id ?? null;
-      });
-      setRadarOutcomeHistoryLoadState("success");
-      setRadarOutcomeHistoryErrorMessage(null);
-    } catch (error) {
-      if (radarOutcomeHistoryRequestSeq.current !== requestSeq) return;
-
-      if (!options?.silent) {
-        setRadarOutcomeHistory([]);
-      }
-      setRadarOutcomeHistoryLoadState("error");
-      const message = apiErrorMessage(error, t("radar.outcome.loadError"));
-      setRadarOutcomeHistoryErrorMessage(message);
-      emitDashboardDataStatus({
-        market: "tw",
-        title: t("radar.outcome.loadError"),
-        message,
-        source: t("radar.outcome.history"),
-        contextKey: `tw:watchlist:${groupId}:radar-outcome-history`,
-        contextLabel: twWatchlistContextLabel,
-      });
-    }
+  function handleUsRadarError(error: unknown, groupId: number) {
+    handleRegionalRadarError("us", error, groupId, usWatchlistContextLabel);
   }
 
-  function openWatchlistRadarOutcomeHistory() {
-    setRadarOutcomeHistoryOpen(true);
-    if (activeGroupId !== null) {
-      void loadWatchlistRadarOutcomeHistory(activeGroupId);
-    }
+  function handleJpRadarError(error: unknown, groupId: number) {
+    handleRegionalRadarError("jp", error, groupId, jpWatchlistContextLabel);
   }
 
-  async function saveWatchlistRadarSnapshot() {
-    if (activeGroupId === null) return;
-
-    const groupId = activeGroupId;
-    const currentMode = radarModeRef.current;
-    const marketState = getTaiwanMarketRefreshState();
-    const requestSeq = radarOutcomeRequestSeq.current + 1;
-
-    radarOutcomeRequestSeq.current = requestSeq;
-    setRadarOutcomeLoadState("loading");
-    setRadarOutcomeErrorMessage(null);
-
-    try {
-      const snapshot = await requestJson<WatchlistRadarSnapshotRead>(
-        `/api/watchlists/groups/${groupId}/radar/snapshots`,
-        { method: "POST" },
-        watchlistRadarParams(
-          currentMode,
-          shouldUseTaiwanWatchlistIntraday(marketState)
-        )
-      );
-      setSelectedRadarOutcomeSnapshotId(snapshot.id);
-      await loadWatchlistRadarOutcome(groupId, { mode: currentMode, silent: true });
-      if (radarOutcomeHistoryOpen) {
-        await loadWatchlistRadarOutcomeHistory(groupId, {
-          mode: currentMode,
-          silent: true,
-        });
-      }
-    } catch (error) {
-      if (radarOutcomeRequestSeq.current !== requestSeq) return;
-
-      setRadarOutcomeLoadState("error");
-      const message = apiErrorMessage(error, t("radar.outcome.snapshotError"));
-      setRadarOutcomeErrorMessage(message);
-      emitDashboardDataStatus({
-        market: "tw",
-        title: t("radar.outcome.snapshotError"),
-        message,
-        source: t("radar.outcome.title"),
-        contextKey: `tw:watchlist:${groupId}:radar-outcome`,
-        contextLabel: twWatchlistContextLabel,
-      });
-    }
-  }
-
-  async function evaluateWatchlistRadarOutcome(snapshotRunId?: number) {
-    if (activeGroupId === null) return;
-
-    const groupId = activeGroupId;
-    const currentMode = radarModeRef.current;
-    const requestSeq = radarOutcomeRequestSeq.current + 1;
-    radarOutcomeRequestSeq.current = requestSeq;
-
-    setRadarOutcomeLoadState("loading");
-    setRadarOutcomeErrorMessage(null);
-
-    try {
-      const outcomeData = await requestJson<WatchlistRadarOutcomeSummaryRead>(
-        `/api/watchlists/groups/${groupId}/radar/outcomes/evaluate`,
-        { method: "POST" },
-        snapshotRunId
-          ? { mode: currentMode, snapshot_run_id: snapshotRunId }
-          : { mode: currentMode }
-      );
-
-      if (radarOutcomeRequestSeq.current !== requestSeq) return;
-
-      setRadarOutcomeHistory((current) =>
-        current.map((row) =>
-          row.snapshot?.id === outcomeData.snapshot?.id ? outcomeData : row
-        )
-      );
-      const latestSnapshotId =
-        radarOutcomeHistory[0]?.snapshot?.id ?? radarOutcomeSummary?.snapshot?.id ?? null;
-      if (!snapshotRunId || outcomeData.snapshot?.id === latestSnapshotId) {
-        setRadarOutcomeSummary(outcomeData);
-      }
-      setSelectedRadarOutcomeSnapshotId(outcomeData.snapshot?.id ?? snapshotRunId ?? null);
-      setRadarOutcomeLoadState("success");
-      setRadarOutcomeErrorMessage(null);
-    } catch (error) {
-      if (radarOutcomeRequestSeq.current !== requestSeq) return;
-
-      setRadarOutcomeLoadState("error");
-      const message = apiErrorMessage(error, t("radar.outcome.evaluateError"));
-      setRadarOutcomeErrorMessage(message);
-      emitDashboardDataStatus({
-        market: "tw",
-        title: t("radar.outcome.evaluateError"),
-        message,
-        source: t("radar.outcome.title"),
-        contextKey: `tw:watchlist:${groupId}:radar-outcome`,
-        contextLabel: twWatchlistContextLabel,
-      });
-    }
-  }
-
-  async function loadWatchlistRadar(
-    groupId: number,
-    options?: { mode?: WatchlistRadarMode; silent?: boolean }
-  ) {
-    const requestSeq = radarRequestSeq.current + 1;
-    radarRequestSeq.current = requestSeq;
-    const currentMode = options?.mode ?? radarModeRef.current;
-
-    if (!options?.silent) {
-      setRadarLoadState("loading");
-      setRadarErrorMessage(null);
-      setRadar(null);
-      setRadarOutcomeLoadState("loading");
-      setRadarOutcomeErrorMessage(null);
-      setRadarOutcomeSummary(null);
-    }
-
-    try {
-      const marketState = getTaiwanMarketRefreshState();
-      const radarData = await fetchJson<WatchlistGroupRadarRead>(
-        `/api/watchlists/groups/${groupId}/radar`,
-        watchlistRadarParams(
-          currentMode,
-          shouldUseTaiwanWatchlistIntraday(marketState)
-        ),
-        { timeoutMs: WATCHLIST_RADAR_TIMEOUT_MS }
-      );
-
-      if (radarRequestSeq.current !== requestSeq) return;
-
-      setRadar(radarData);
-      setRadarLoadState("success");
-      setRadarErrorMessage(null);
-      void loadWatchlistRadarOutcome(groupId, { mode: currentMode, silent: true });
-    } catch (error) {
-      if (radarRequestSeq.current !== requestSeq) return;
-
-      if (!options?.silent) {
-        setRadar(null);
-        setRadarOutcomeSummary(null);
-        setRadarOutcomeLoadState("idle");
-      }
-      setRadarLoadState("error");
-      const message = apiErrorMessage(error, t("radar.loadError"));
-      setRadarErrorMessage(message);
-      emitDashboardDataStatus({
-        market: "tw",
-        title: t("radar.loadError"),
-        message,
-        source: t("radar.title"),
-        contextKey: `tw:watchlist:${groupId}:radar`,
-        contextLabel: twWatchlistContextLabel,
-      });
-    }
-  }
-
-  async function loadUsWatchlistRadar(
-    groupId: number,
-    options?: { mode?: WatchlistRadarMode; silent?: boolean }
-  ) {
-    const requestSeq = usRadarRequestSeq.current + 1;
-    usRadarRequestSeq.current = requestSeq;
-    const currentMode = options?.mode ?? usRadarModeRef.current;
-
-    if (!options?.silent) {
-      setUsRadarLoadState("loading");
-      setUsRadarErrorMessage(null);
-      setUsRadar(null);
-    }
-
-    try {
-      const marketState = getUsMarketRefreshState();
-      const radarData = await fetchJson<WatchlistGroupRadarRead>(
-        `/api/us-market/watchlists/groups/${groupId}/radar`,
-        watchlistTechnicalRadarParams(currentMode, marketState.isPollingWindow)
-      );
-
-      if (usRadarRequestSeq.current !== requestSeq) return;
-
-      setUsRadar(radarData);
-      setUsRadarLoadState("success");
-      setUsRadarErrorMessage(null);
-    } catch (error) {
-      if (usRadarRequestSeq.current !== requestSeq) return;
-
-      if (!options?.silent) {
-        setUsRadar(null);
-      }
-      setUsRadarLoadState("error");
-      const message = apiErrorMessage(error, t("radar.loadError"));
-      setUsRadarErrorMessage(message);
-      emitDashboardDataStatus({
-        market: "us",
-        title: t("radar.loadError"),
-        message,
-        source: t("radar.title"),
-        contextKey: `us:watchlist:${groupId}:radar`,
-        contextLabel: usWatchlistContextLabel,
-      });
-    }
-  }
-
-  async function loadJpWatchlistRadar(
-    groupId: number,
-    options?: { mode?: WatchlistRadarMode; silent?: boolean }
-  ) {
-    const requestSeq = jpRadarRequestSeq.current + 1;
-    jpRadarRequestSeq.current = requestSeq;
-    const currentMode = options?.mode ?? jpRadarModeRef.current;
-
-    if (!options?.silent) {
-      setJpRadarLoadState("loading");
-      setJpRadarErrorMessage(null);
-      setJpRadar(null);
-    }
-
-    try {
-      const radarData = await fetchJson<WatchlistGroupRadarRead>(
-        `/api/jp-market/watchlists/groups/${groupId}/radar`,
-        watchlistTechnicalRadarParams(currentMode)
-      );
-
-      if (jpRadarRequestSeq.current !== requestSeq) return;
-
-      setJpRadar(radarData);
-      setJpRadarLoadState("success");
-      setJpRadarErrorMessage(null);
-    } catch (error) {
-      if (jpRadarRequestSeq.current !== requestSeq) return;
-
-      if (!options?.silent) {
-        setJpRadar(null);
-      }
-      setJpRadarLoadState("error");
-      const message = apiErrorMessage(error, t("radar.loadError"));
-      setJpRadarErrorMessage(message);
-      emitDashboardDataStatus({
-        market: "jp",
-        title: t("radar.loadError"),
-        message,
-        source: t("radar.title"),
-        contextKey: `jp:watchlist:${groupId}:radar`,
-        contextLabel: jpWatchlistContextLabel,
-      });
-    }
-  }
-
-  async function loadKrWatchlistRadar(
-    groupId: number,
-    options?: { mode?: WatchlistRadarMode; silent?: boolean }
-  ) {
-    const requestSeq = krRadarRequestSeq.current + 1;
-    krRadarRequestSeq.current = requestSeq;
-    const currentMode = options?.mode ?? krRadarModeRef.current;
-
-    if (!options?.silent) {
-      setKrRadarLoadState("loading");
-      setKrRadarErrorMessage(null);
-      setKrRadar(null);
-    }
-
-    try {
-      const radarData = await fetchJson<WatchlistGroupRadarRead>(
-        `/api/kr-market/watchlists/groups/${groupId}/radar`,
-        watchlistTechnicalRadarParams(currentMode)
-      );
-
-      if (krRadarRequestSeq.current !== requestSeq) return;
-
-      setKrRadar(radarData);
-      setKrRadarLoadState("success");
-      setKrRadarErrorMessage(null);
-    } catch (error) {
-      if (krRadarRequestSeq.current !== requestSeq) return;
-
-      if (!options?.silent) {
-        setKrRadar(null);
-      }
-      setKrRadarLoadState("error");
-      const message = apiErrorMessage(error, t("radar.loadError"));
-      setKrRadarErrorMessage(message);
-      emitDashboardDataStatus({
-        market: "kr",
-        title: t("radar.loadError"),
-        message,
-        source: t("radar.title"),
-        contextKey: `kr:watchlist:${groupId}:radar`,
-        contextLabel: krWatchlistContextLabel,
-      });
-    }
-  }
-
-  function prepareTaiwanRankingRadarLoad({
-    groupId,
-    silent,
-    useIntraday,
-  }: {
-    groupId: number;
-    silent: boolean;
-    useIntraday: boolean;
-  }) {
-    const radarSeq = radarRequestSeq.current + 1;
-    radarRequestSeq.current = radarSeq;
-    let radarPromise: Promise<void> | null = null;
-
-    if (!silent) {
-      setRadarLoadState("loading");
-      setRadarErrorMessage(null);
-      setRadarOutcomeLoadState("loading");
-      setRadarOutcomeErrorMessage(null);
-      setRadarOutcomeSummary(null);
-    }
-
-    return () => {
-      if (radarPromise) return;
-
-      radarPromise = fetchJson<WatchlistGroupRadarRead>(
-        `/api/watchlists/groups/${groupId}/radar`,
-        watchlistRadarParams(radarModeRef.current, useIntraday),
-        { timeoutMs: WATCHLIST_RADAR_TIMEOUT_MS }
-      )
-        .then((data) => {
-          if (radarRequestSeq.current !== radarSeq) return;
-
-          setRadar(data);
-          setRadarLoadState("success");
-          setRadarErrorMessage(null);
-          void loadWatchlistRadarOutcome(groupId, {
-            mode: radarModeRef.current,
-            silent: true,
-          });
-        })
-        .catch((error: unknown) => {
-          if (radarRequestSeq.current !== radarSeq) return;
-
-          if (!silent) {
-            setRadar(null);
-            setRadarOutcomeSummary(null);
-            setRadarOutcomeLoadState("idle");
-          }
-          setRadarLoadState("error");
-          const message = apiErrorMessage(error, t("radar.loadError"));
-          setRadarErrorMessage(message);
-          emitDashboardDataStatus({
-            market: "tw",
-            title: t("radar.loadError"),
-            message,
-            source: t("radar.title"),
-            contextKey: `tw:watchlist:${groupId}:radar`,
-            contextLabel: twWatchlistContextLabel,
-          });
-        });
-    };
+  function handleKrRadarError(error: unknown, groupId: number) {
+    handleRegionalRadarError("kr", error, groupId, krWatchlistContextLabel);
   }
 
   function handleTaiwanRankingError(
@@ -2725,48 +2339,6 @@ export default function MarketDashboardClient({
       contextKey: `tw:watchlist:${groupId}:${kind}`,
       contextLabel: twWatchlistContextLabel,
     });
-  }
-
-  function startUsRankingCompanionLoad({
-    groupId,
-    silent,
-  }: {
-    groupId: number;
-    silent: boolean;
-  }) {
-    if (isSelectedUsIndex) {
-      setUsRadar(null);
-      setUsRadarLoadState("idle");
-      setUsRadarErrorMessage(null);
-    } else {
-      void loadUsWatchlistRadar(groupId, { silent });
-    }
-  }
-
-  function startJpRankingCompanionLoad({
-    groupId,
-    silent,
-  }: {
-    groupId: number;
-    silent: boolean;
-  }) {
-    if (isSelectedJpIndex) {
-      setJpRadar(null);
-      setJpRadarLoadState("idle");
-      setJpRadarErrorMessage(null);
-    } else {
-      void loadJpWatchlistRadar(groupId, { silent });
-    }
-  }
-
-  function startKrRankingCompanionLoad({
-    groupId,
-    silent,
-  }: {
-    groupId: number;
-    silent: boolean;
-  }) {
-    void loadKrWatchlistRadar(groupId, { silent });
   }
 
   function handleUsRankingError(
@@ -2894,23 +2466,6 @@ export default function MarketDashboardClient({
     }
   }
 
-
-  useEffect(() => {
-    radarModeRef.current = radarMode;
-  }, [radarMode]);
-
-  useEffect(() => {
-    usRadarModeRef.current = usRadarMode;
-  }, [usRadarMode]);
-
-  useEffect(() => {
-    jpRadarModeRef.current = jpRadarMode;
-  }, [jpRadarMode]);
-
-  useEffect(() => {
-    krRadarModeRef.current = krRadarMode;
-  }, [krRadarMode]);
-
   useEffect(() => {
     if (activeMarket !== "tw") return;
 
@@ -2998,22 +2553,22 @@ export default function MarketDashboardClient({
     setUsChartFocusMode(false);
     setJpChartFocusMode(false);
     setJpStatusMessage(null);
-    marketSelection.changeMarket(market);
+    const nextRadarMode =
+      market === "tw"
+        ? radarMode
+        : market === "us"
+          ? regionalRadarRouteMode(usRadarMode)
+          : market === "jp"
+            ? regionalRadarRouteMode(jpRadarMode)
+            : market === "kr"
+              ? regionalRadarRouteMode(krRadarMode)
+              : null;
+    marketSelection.changeMarket(market, nextRadarMode);
   }
 
   function resetTaiwanGroupAnalysis() {
     taiwanRankingActions.reset();
-    setRadar(null);
-    setRadarLoadState("idle");
-    setRadarErrorMessage(null);
-    setRadarOutcomeSummary(null);
-    setRadarOutcomeLoadState("idle");
-    setRadarOutcomeErrorMessage(null);
-    setRadarOutcomeHistory([]);
-    setRadarOutcomeHistoryLoadState("idle");
-    setRadarOutcomeHistoryErrorMessage(null);
-    setRadarOutcomeHistoryOpen(false);
-    setSelectedRadarOutcomeSnapshotId(null);
+    taiwanRadarActions.reset();
   }
 
   function onTaiwanGroupChange(group: WatchlistGroupNode | null) {
@@ -3033,31 +2588,35 @@ export default function MarketDashboardClient({
   }
 
   function onUsGroupChange(group: USWatchlistGroupNode | null) {
-    marketSelection.selectUsGroup(group);
+    marketSelection.selectUsGroup(group, regionalRadarRouteMode(usRadarMode));
     usRankingActions.reset();
-    setUsRadar(null);
-    setUsRadarLoadState("idle");
-    setUsRadarErrorMessage(null);
+    usRadarActions.reset();
     setUsChartFocusMode(false);
   }
 
   function onUsSymbolChange(symbol: string, securityName: string | null) {
-    marketSelection.selectUsSymbol(symbol, securityName);
+    marketSelection.selectUsSymbol(
+      symbol,
+      securityName,
+      regionalRadarRouteMode(usRadarMode)
+    );
     setUsChartFocusMode(false);
   }
 
   function onJpGroupChange(group: JPWatchlistGroupNode | null) {
-    marketSelection.selectJpGroup(group);
+    marketSelection.selectJpGroup(group, regionalRadarRouteMode(jpRadarMode));
     jpRankingActions.reset();
-    setJpRadar(null);
-    setJpRadarLoadState("idle");
-    setJpRadarErrorMessage(null);
+    jpRadarActions.reset();
     setJpChartFocusMode(false);
     setJpStatusMessage(null);
   }
 
   function onJpSymbolChange(symbol: string, securityName: string | null) {
-    marketSelection.selectJpSymbol(symbol, securityName);
+    marketSelection.selectJpSymbol(
+      symbol,
+      securityName,
+      regionalRadarRouteMode(jpRadarMode)
+    );
     setJpChartFocusMode(false);
     setJpStatusMessage(null);
   }
@@ -3071,15 +2630,17 @@ export default function MarketDashboardClient({
   }
 
   function onKrGroupChange(group: KRWatchlistGroupNode | null) {
-    marketSelection.selectKrGroup(group);
+    marketSelection.selectKrGroup(group, regionalRadarRouteMode(krRadarMode));
     krRankingActions.reset();
-    setKrRadar(null);
-    setKrRadarLoadState("idle");
-    setKrRadarErrorMessage(null);
+    krRadarActions.reset();
   }
 
   function onKrSymbolChange(symbol: string, securityName: string | null) {
-    marketSelection.selectKrSymbol(symbol, securityName);
+    marketSelection.selectKrSymbol(
+      symbol,
+      securityName,
+      regionalRadarRouteMode(krRadarMode)
+    );
   }
 
   function onKrStockChange(stock: KRStockMasterRead | null) {
@@ -3093,61 +2654,43 @@ export default function MarketDashboardClient({
   }
 
   function handleRadarModeChange(value: WatchlistRadarMode) {
-    radarModeRef.current = value;
-    setRadarMode(value);
-    setRadarOutcomeHistory([]);
-    setRadarOutcomeHistoryLoadState("idle");
-    setRadarOutcomeHistoryErrorMessage(null);
-    setRadarOutcomeHistoryOpen(false);
-    setSelectedRadarOutcomeSnapshotId(null);
     pushDashboardUrl({
       market: "tw",
       groupId: activeGroupId,
       stockId: selectedStockId,
       radarMode: value,
     });
-    if (activeGroupId !== null) {
-      void loadWatchlistRadar(activeGroupId, { mode: value });
-    }
+    taiwanRadarActions.changeMode(value);
   }
 
   function handleUsRadarModeChange(value: WatchlistRadarMode) {
-    usRadarModeRef.current = value;
-    setUsRadarMode(value);
     pushDashboardUrl({
       market: "us",
       groupId: selectedUsGroupId,
       symbol: selectedUsSymbol,
+      radarMode: value,
     });
-    if (selectedUsGroupId !== null) {
-      void loadUsWatchlistRadar(selectedUsGroupId, { mode: value });
-    }
+    usRadarActions.changeMode(value);
   }
 
   function handleJpRadarModeChange(value: WatchlistRadarMode) {
-    jpRadarModeRef.current = value;
-    setJpRadarMode(value);
     pushDashboardUrl({
       market: "jp",
       groupId: selectedJpGroupId,
       jpSymbol: selectedJpSymbol,
+      radarMode: value,
     });
-    if (selectedJpGroupId !== null) {
-      void loadJpWatchlistRadar(selectedJpGroupId, { mode: value });
-    }
+    jpRadarActions.changeMode(value);
   }
 
   function handleKrRadarModeChange(value: WatchlistRadarMode) {
-    krRadarModeRef.current = value;
-    setKrRadarMode(value);
     pushDashboardUrl({
       market: "kr",
       groupId: selectedKrGroupId,
       krSymbol: selectedKrSymbol,
+      radarMode: value,
     });
-    if (selectedKrGroupId !== null) {
-      void loadKrWatchlistRadar(selectedKrGroupId, { mode: value });
-    }
+    krRadarActions.changeMode(value);
   }
 
   function handleUsRankByChange(value: string) {
@@ -3386,32 +2929,15 @@ export default function MarketDashboardClient({
         onModeChange={handleRadarModeChange}
         onReload={() => {
           if (activeGroupId !== null) {
-            void loadWatchlistRadar(activeGroupId);
+            void taiwanRadarActions.load(activeGroupId);
           }
         }}
-        onSaveSnapshot={() => {
-          void saveWatchlistRadarSnapshot();
-        }}
-        onEvaluateOutcome={() => {
-          void evaluateWatchlistRadarOutcome();
-        }}
-        onReloadOutcome={() => {
-          if (activeGroupId !== null) {
-            void loadWatchlistRadarOutcome(activeGroupId);
-          }
-        }}
-        onOpenOutcomeHistory={openWatchlistRadarOutcomeHistory}
-        onCloseOutcomeHistory={() => {
-          setRadarOutcomeHistoryOpen(false);
-        }}
-        onReloadOutcomeHistory={() => {
-          if (activeGroupId !== null) {
-            void loadWatchlistRadarOutcomeHistory(activeGroupId);
-          }
-        }}
-        onSelectOutcomeSnapshot={setSelectedRadarOutcomeSnapshotId}
+        onOpenOutcomeHistory={taiwanRadarActions.openOutcomeHistory}
+        onCloseOutcomeHistory={taiwanRadarActions.closeOutcomeHistory}
+        onReloadOutcomeHistory={taiwanRadarActions.reloadOutcomeHistory}
+        onSelectOutcomeSnapshot={taiwanRadarActions.selectOutcomeSnapshot}
         onEvaluateOutcomeSnapshot={(snapshotRunId) => {
-          void evaluateWatchlistRadarOutcome(snapshotRunId);
+          void taiwanRadarActions.evaluateOutcome(snapshotRunId);
         }}
         onSelectStock={onTaiwanStockChange}
       />
@@ -3511,7 +3037,7 @@ export default function MarketDashboardClient({
           onModeChange={handleUsRadarModeChange}
           onReload={() => {
             if (selectedUsGroupId !== null) {
-              void loadUsWatchlistRadar(selectedUsGroupId);
+              void usRadarActions.load(selectedUsGroupId);
             }
           }}
           onSelectStock={onUsSymbolChange}
@@ -3606,7 +3132,7 @@ export default function MarketDashboardClient({
           onModeChange={handleJpRadarModeChange}
           onReload={() => {
             if (selectedJpGroupId !== null) {
-              void loadJpWatchlistRadar(selectedJpGroupId);
+              void jpRadarActions.load(selectedJpGroupId);
             }
           }}
           onSelectStock={onJpSymbolChange}
@@ -3701,7 +3227,7 @@ export default function MarketDashboardClient({
         onModeChange={handleKrRadarModeChange}
         onReload={() => {
           if (selectedKrGroupId !== null) {
-            void loadKrWatchlistRadar(selectedKrGroupId);
+            void krRadarActions.load(selectedKrGroupId);
           }
         }}
         onSelectStock={onKrSymbolChange}
@@ -3978,9 +3504,7 @@ export default function MarketDashboardClient({
                 marketSelection.reconcileUsExplorer(nextTree, nextItems);
               }}
               onChanged={() => {
-                setUsRadar(null);
-                setUsRadarLoadState("idle");
-                setUsRadarErrorMessage(null);
+                usRadarActions.reset();
                 usRankingActions.notifyWatchlistChanged();
               }}
             />
@@ -4000,9 +3524,7 @@ export default function MarketDashboardClient({
                 setJpWatchlistTree(nextTree);
                 setJpWatchlistItems(nextItems);
                 marketSelection.reconcileJpExplorer(nextTree, nextItems);
-                setJpRadar(null);
-                setJpRadarLoadState("idle");
-                setJpRadarErrorMessage(null);
+                jpRadarActions.reset();
                 jpRankingActions.notifyDataChanged();
               }}
             />
@@ -4021,9 +3543,7 @@ export default function MarketDashboardClient({
                 setKrWatchlistTree(nextTree);
                 setKrWatchlistItems(nextItems);
                 marketSelection.reconcileKrExplorer(nextTree, nextItems);
-                setKrRadar(null);
-                setKrRadarLoadState("idle");
-                setKrRadarErrorMessage(null);
+                krRadarActions.reset();
                 krRankingActions.notifyDataChanged();
               }}
             />
@@ -4071,18 +3591,7 @@ export default function MarketDashboardClient({
                 if (groupId !== null) {
                   void loadDashboard(groupId);
                 } else {
-                  taiwanRankingActions.reset();
-                  setRadar(null);
-                  setRadarLoadState("idle");
-                  setRadarErrorMessage(null);
-                  setRadarOutcomeSummary(null);
-                  setRadarOutcomeLoadState("idle");
-                  setRadarOutcomeErrorMessage(null);
-                  setRadarOutcomeHistory([]);
-                  setRadarOutcomeHistoryLoadState("idle");
-                  setRadarOutcomeHistoryErrorMessage(null);
-                  setRadarOutcomeHistoryOpen(false);
-                  setSelectedRadarOutcomeSnapshotId(null);
+                  resetTaiwanGroupAnalysis();
                 }
               }}
             />

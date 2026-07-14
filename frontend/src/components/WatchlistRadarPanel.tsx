@@ -46,9 +46,6 @@ type WatchlistRadarPanelProps = {
   getModeHref?: (mode: WatchlistRadarMode) => string;
   onModeChange: (mode: WatchlistRadarMode) => void;
   onReload: () => void;
-  onSaveSnapshot?: () => void;
-  onEvaluateOutcome?: () => void;
-  onReloadOutcome?: () => void;
   onOpenOutcomeHistory?: () => void;
   onCloseOutcomeHistory?: () => void;
   onReloadOutcomeHistory?: () => void;
@@ -745,9 +742,6 @@ export default function WatchlistRadarPanel({
   getModeHref,
   onModeChange,
   onReload,
-  onSaveSnapshot,
-  onEvaluateOutcome,
-  onReloadOutcome,
   onOpenOutcomeHistory,
   onCloseOutcomeHistory,
   onReloadOutcomeHistory,
@@ -760,13 +754,7 @@ export default function WatchlistRadarPanel({
   const hasResults = (radar?.results.length ?? 0) > 0;
   const activeBuckets = radar?.buckets.filter((bucket) => bucket.count > 0) ?? [];
   const activeBucketGroups = groupedRadarBuckets(activeBuckets);
-  const showOutcomeTools = Boolean(
-    outcomeSummary ||
-      onSaveSnapshot ||
-      onEvaluateOutcome ||
-      onReloadOutcome ||
-      onOpenOutcomeHistory
-  );
+  const showOutcomeTools = Boolean(outcomeSummary || onOpenOutcomeHistory);
   const outcomeBusy = outcomeLoadState === "loading";
   const outcomeHistoryBusy = outcomeHistoryLoadState === "loading";
   const outcomeBuckets = outcomeSummary?.bucket_summaries.slice(0, 4) ?? [];
@@ -831,6 +819,7 @@ export default function WatchlistRadarPanel({
           {onOpenOutcomeHistory ? (
             <button
               type="button"
+              data-testid="watchlist-radar-history-open"
               onClick={onOpenOutcomeHistory}
               disabled={disabled || outcomeHistoryBusy}
               className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text-muted hover:border-omi-accent hover:text-omi-accent disabled:border-omi-border-subtle disabled:text-omi-text-subtle"
@@ -840,6 +829,7 @@ export default function WatchlistRadarPanel({
           ) : null}
           <button
             type="button"
+            data-testid="watchlist-radar-reload"
             onClick={onReload}
             disabled={disabled || loadState === "loading"}
             className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text-muted hover:border-omi-accent hover:text-omi-accent disabled:border-omi-border-subtle disabled:text-omi-text-subtle"
@@ -949,6 +939,7 @@ export default function WatchlistRadarPanel({
           role="dialog"
           aria-modal="true"
           aria-label={t("radar.outcome.historyTitle")}
+          data-testid="watchlist-radar-history-dialog"
         >
           <div className="flex max-h-[88vh] w-full max-w-6xl flex-col overflow-hidden border border-omi-border bg-omi-surface shadow-2xl">
             <div className="flex flex-wrap items-start justify-between gap-3 border-b border-omi-border-subtle px-5 py-4">
@@ -964,6 +955,7 @@ export default function WatchlistRadarPanel({
                 {onReloadOutcomeHistory ? (
                   <button
                     type="button"
+                    data-testid="watchlist-radar-history-reload"
                     onClick={onReloadOutcomeHistory}
                     disabled={disabled || outcomeHistoryBusy}
                     className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text-muted hover:border-omi-accent hover:text-omi-accent disabled:border-omi-border-subtle disabled:text-omi-text-subtle"
@@ -1004,6 +996,11 @@ export default function WatchlistRadarPanel({
                         <button
                           key={snapshotId ?? summary.snapshot?.snapshot_date ?? "empty"}
                           type="button"
+                          data-testid={
+                            snapshotId
+                              ? `watchlist-radar-history-snapshot-${snapshotId}`
+                              : undefined
+                          }
                           disabled={!snapshotId}
                           onClick={() => {
                             if (snapshotId) onSelectOutcomeSnapshot?.(snapshotId);
@@ -1071,6 +1068,7 @@ export default function WatchlistRadarPanel({
                       {selectedOutcomeSnapshotIdValue && onEvaluateOutcomeSnapshot ? (
                         <button
                           type="button"
+                          data-testid="watchlist-radar-history-evaluate-selected"
                           onClick={() => onEvaluateOutcomeSnapshot(selectedOutcomeSnapshotIdValue)}
                           disabled={disabled || outcomeBusy}
                           className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text-muted hover:border-omi-accent hover:text-omi-accent disabled:border-omi-border-subtle disabled:text-omi-text-subtle"
@@ -1311,6 +1309,7 @@ export default function WatchlistRadarPanel({
             return (
               <article
                 key={`${item.rank}-${item.stock_id}-${item.bucket}`}
+                data-testid={`watchlist-radar-result-${item.stock_id}`}
                 className={[
                   "relative border text-sm transition",
                   selected
