@@ -1,7 +1,6 @@
 from datetime import date, datetime, timezone
 from typing import Any
 
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.ai import evidence_builder, technical_analysis, tool_catalog
@@ -18,6 +17,7 @@ from app.ai.market_payload_contract import (
     slot_envelope as _slot_envelope,
 )
 from app.ai.market_context.common import append_source_ref_once as _append_source_ref_once
+from app.ai.market_context import taiwan_freshness
 from app.db.models import (
     BrokerBranchTradeDaily,
     FinancialMetricQuarterly,
@@ -1446,89 +1446,10 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
 
 
 def read_data_freshness(db: Session, stock_id: str | None = None) -> dict[str, Any]:
-    def latest(model: Any, column: Any) -> Any:
-        query = db.query(func.max(column))
-        if stock_id and hasattr(model, "stock_id"):
-            query = query.filter(model.stock_id == stock_id)
-        return query.scalar()
-
-    def count(model: Any) -> int:
-        query = db.query(func.count(model.id))
-        if stock_id and hasattr(model, "stock_id"):
-            query = query.filter(model.stock_id == stock_id)
-        return int(query.scalar() or 0)
-
-    financial_latest = (
-        db.query(FinancialMetricQuarterly)
-        .filter(FinancialMetricQuarterly.stock_id == stock_id)
-        .order_by(
-            FinancialMetricQuarterly.fiscal_year.desc(),
-            FinancialMetricQuarterly.quarter.desc(),
-        )
-        .first()
-        if stock_id
-        else db.query(FinancialMetricQuarterly)
-        .order_by(
-            FinancialMetricQuarterly.fiscal_year.desc(),
-            FinancialMetricQuarterly.quarter.desc(),
-        )
-        .first()
-    )
-
-    tables = {
-        "market_daily_price": {
-            "latest": _json_value(latest(MarketDailyPrice, MarketDailyPrice.trade_date)),
-            "row_count": count(MarketDailyPrice),
-        },
-        "institutional_trade_daily": {
-            "latest": _json_value(latest(InstitutionalTradeDaily, InstitutionalTradeDaily.trade_date)),
-            "row_count": count(InstitutionalTradeDaily),
-        },
-        "margin_trading_daily": {
-            "latest": _json_value(latest(MarginTradingDaily, MarginTradingDaily.trade_date)),
-            "row_count": count(MarginTradingDaily),
-        },
-        "broker_branch_trade_daily": {
-            "latest": _json_value(latest(BrokerBranchTradeDaily, BrokerBranchTradeDaily.trade_date)),
-            "row_count": count(BrokerBranchTradeDaily),
-        },
-        "shareholding_distribution_weekly": {
-            "latest": _json_value(
-                latest(ShareholdingDistributionWeekly, ShareholdingDistributionWeekly.data_date)
-            ),
-            "row_count": count(ShareholdingDistributionWeekly),
-        },
-        "monthly_revenue": {
-            "latest": _json_value(latest(MonthlyRevenue, MonthlyRevenue.period)),
-            "row_count": count(MonthlyRevenue),
-        },
-        "financial_metric_quarterly": {
-            "latest": _latest_financial_period(financial_latest),
-            "row_count": count(FinancialMetricQuarterly),
-        },
-    }
-
-    missing = [name for name, info in tables.items() if not info["latest"] or info["row_count"] == 0]
-
-    envelope = {
-        "kind": "data_freshness",
-        "generated_at": _now(),
-        "as_of": _latest_date_string([info["latest"] for info in tables.values()]),
-        "scope": {"stock_id": stock_id},
-        "data": {"tables": tables},
-        "missing": missing,
-        "warnings": [
-            "Freshness is based on the local OMI database, not direct exchange availability.",
-        ],
-        "source_refs": [{"type": "database", "name": "open_market_intelligence.db"}],
-    }
-    return _with_evidence_passport(
-        envelope,
-        freshness={
-            "is_current": not missing,
-            "missing": missing,
-            "warnings": envelope["warnings"],
-        },
+    return taiwan_freshness.read_data_freshness(
+        db=db,
+        stock_id=stock_id,
+        now=_now,
     )
 
 

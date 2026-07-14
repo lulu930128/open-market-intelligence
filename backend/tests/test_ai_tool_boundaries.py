@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 import unittest
+from unittest.mock import patch
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
 from app.ai import tools
+from app.db.models import Base
 
 
 EXPECTED_INTERNAL_TOOL_NAMES = (
@@ -74,6 +80,41 @@ class AIToolBoundaryTests(unittest.TestCase):
         second = tools.list_ai_tools(include_internal=True)
 
         self.assertEqual(second["tools"][0]["title"], "Ask OMI")
+
+    def test_data_freshness_facade_preserves_clock_patch_and_empty_contract(self) -> None:
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(bind=engine)
+        db = Session(engine)
+        fixed_now = datetime(2026, 7, 14, 12, 0, tzinfo=timezone.utc)
+
+        try:
+            with patch.object(tools, "_now", return_value=fixed_now):
+                envelope = tools.read_data_freshness(db=db, stock_id="2330")
+        finally:
+            db.close()
+
+        expected_tables = (
+            "market_daily_price",
+            "institutional_trade_daily",
+            "margin_trading_daily",
+            "broker_branch_trade_daily",
+            "shareholding_distribution_weekly",
+            "monthly_revenue",
+            "financial_metric_quarterly",
+        )
+        self.assertEqual(envelope["kind"], "data_freshness")
+        self.assertEqual(envelope["generated_at"], fixed_now)
+        self.assertIsNone(envelope["as_of"])
+        self.assertEqual(tuple(envelope["data"]["tables"]), expected_tables)
+        self.assertEqual(envelope["missing"], list(expected_tables))
+        self.assertTrue(
+            all(
+                table["latest"] is None and table["row_count"] == 0
+                for table in envelope["data"]["tables"].values()
+            )
+        )
+        self.assertEqual(envelope["evidence_passport"]["kind"], "evidence_passport")
+        self.assertEqual(envelope["evidence_passport"]["target_kind"], "data_freshness")
 
 
 if __name__ == "__main__":
