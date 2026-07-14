@@ -248,6 +248,208 @@ function seededUsRankingRows() {
   ];
 }
 
+function seededJpWatchlistTree() {
+  return [
+    {
+      id: 27,
+      parent_id: null,
+      group_name: "Japan Core",
+      description: "Playwright Japan ranking fixture",
+      sort_order: 0,
+      is_active: true,
+      children: [],
+    },
+  ];
+}
+
+function seededJpWatchlistItems() {
+  const timestamp = "2026-06-15T09:30:00+09:00";
+
+  return [
+    {
+      id: 270,
+      group_id: 27,
+      symbol: "7203.T",
+      local_code: "7203",
+      security_name: "Toyota Motor",
+      exchange: "TSE",
+      market_segment: "Prime",
+      sector_33_name: "Transportation Equipment",
+      asset_type: "stock",
+      note: null,
+      priority: 0,
+      tags: "core",
+      enabled: true,
+      created_at: timestamp,
+      updated_at: timestamp,
+    },
+    {
+      id: 271,
+      group_id: 27,
+      symbol: "6758.T",
+      local_code: "6758",
+      security_name: "Sony Group",
+      exchange: "TSE",
+      market_segment: "Prime",
+      sector_33_name: "Electric Appliances",
+      asset_type: "stock",
+      note: null,
+      priority: 0,
+      tags: null,
+      enabled: true,
+      created_at: timestamp,
+      updated_at: timestamp,
+    },
+  ];
+}
+
+function seededJpRankingRows() {
+  return [
+    {
+      rank: 1,
+      symbol: "7203.T",
+      security_name: "Toyota Motor",
+      exchange: "TSE",
+      market_segment: "Prime",
+      sector_33_name: "Transportation Equipment",
+      asset_type: "stock",
+      group_id: 27,
+      trade_date: "2026-06-15",
+      close: 2850.5,
+      previous_close: 2800.5,
+      change: 50,
+      change_pct: 1.79,
+      volume: 4_200_000,
+      status: "success",
+      source: "playwright.fixture",
+      error_message: null,
+    },
+    {
+      rank: 2,
+      symbol: "6758.T",
+      security_name: "Sony Group",
+      exchange: "TSE",
+      market_segment: "Prime",
+      sector_33_name: "Electric Appliances",
+      asset_type: "stock",
+      group_id: 27,
+      trade_date: "2026-06-15",
+      close: 3725,
+      previous_close: 3750,
+      change: -25,
+      change_pct: -0.67,
+      volume: 3_100_000,
+      status: "success",
+      source: "playwright.fixture",
+      error_message: null,
+    },
+  ];
+}
+
+function seededKrWatchlistTree() {
+  return [
+    {
+      id: 37,
+      parent_id: null,
+      group_name: "Korea Core",
+      description: "Playwright Korea ranking fixture",
+      sort_order: 0,
+      is_active: true,
+      children: [],
+    },
+  ];
+}
+
+function seededKrWatchlistItems() {
+  const timestamp = "2026-06-15T09:30:00+09:00";
+
+  return [
+    {
+      id: 370,
+      group_id: 37,
+      symbol: "005930.KS",
+      local_code: "005930",
+      security_name: "Samsung Electronics",
+      security_name_kr: null,
+      exchange: "KRX",
+      market_segment: "KOSPI",
+      sector: "Technology",
+      industry: "Semiconductors",
+      asset_type: "stock",
+      note: null,
+      priority: 0,
+      tags: "core",
+      enabled: true,
+      created_at: timestamp,
+      updated_at: timestamp,
+    },
+    {
+      id: 371,
+      group_id: 37,
+      symbol: "000660.KS",
+      local_code: "000660",
+      security_name: "SK Hynix",
+      security_name_kr: null,
+      exchange: "KRX",
+      market_segment: "KOSPI",
+      sector: "Technology",
+      industry: "Semiconductors",
+      asset_type: "stock",
+      note: null,
+      priority: 0,
+      tags: null,
+      enabled: true,
+      created_at: timestamp,
+      updated_at: timestamp,
+    },
+  ];
+}
+
+function seededKrRankingRows() {
+  return [
+    {
+      rank: 1,
+      symbol: "005930.KS",
+      security_name: "Samsung Electronics",
+      exchange: "KRX",
+      market_segment: "KOSPI",
+      sector: "Technology",
+      industry: "Semiconductors",
+      asset_type: "stock",
+      group_id: 37,
+      trade_date: "2026-06-15",
+      close: 76500,
+      previous_close: 75000,
+      change: 1500,
+      change_pct: 2,
+      volume: 12_500_000,
+      status: "success",
+      source: "playwright.fixture",
+      error_message: null,
+    },
+    {
+      rank: 2,
+      symbol: "000660.KS",
+      security_name: "SK Hynix",
+      exchange: "KRX",
+      market_segment: "KOSPI",
+      sector: "Technology",
+      industry: "Semiconductors",
+      asset_type: "stock",
+      group_id: 37,
+      trade_date: "2026-06-15",
+      close: 198500,
+      previous_close: 200000,
+      change: -1500,
+      change_pct: -0.75,
+      volume: 5_800_000,
+      status: "success",
+      source: "playwright.fixture",
+      error_message: null,
+    },
+  ];
+}
+
 function ohlcResponse(stockId: string) {
   return {
     stock_id: stockId,
@@ -431,6 +633,34 @@ function seededUsRankingResponse(
   };
 }
 
+function seededJpRankingResponse(
+  url: URL,
+  rows: ReturnType<typeof seededJpRankingRows>
+) {
+  return {
+    ...emptyRankingResponse(url),
+    group_id: Number(url.searchParams.get("group_id") ?? 27),
+    requested_symbol_count: rows.length,
+    ranked_count: rows.length,
+    current_symbol_count: rows.length,
+    results: rows,
+  };
+}
+
+function seededKrRankingResponse(
+  url: URL,
+  rows: ReturnType<typeof seededKrRankingRows>
+) {
+  return {
+    ...emptyRankingResponse(url),
+    group_id: Number(url.searchParams.get("group_id") ?? 37),
+    requested_symbol_count: rows.length,
+    ranked_count: rows.length,
+    current_symbol_count: rows.length,
+    results: rows,
+  };
+}
+
 function usOhlcResponse(symbol: string) {
   return {
     symbol,
@@ -468,6 +698,98 @@ function usIntradayResponse(symbol: string) {
       { time: "2026-06-15T09:30:00-04:00", price: 948, volume: 1200 },
     ],
     warnings: [],
+  };
+}
+
+function regionalOhlcResponse(symbol: string) {
+  return {
+    symbol,
+    timeframe: "daily",
+    bars: 60,
+    lookback_days: 120,
+    from_date: points[0].time,
+    to_date: points[points.length - 1].time,
+    point_count: points.length,
+    points: points.map(({ time, open, high, low, close, volume }) => ({
+      time,
+      open,
+      high,
+      low,
+      close,
+      volume,
+    })),
+    backfill: null,
+  };
+}
+
+function regionalIntradayResponse(symbol: string) {
+  return {
+    stock_id: symbol,
+    symbol,
+    source: "playwright.fixture",
+    session_scope: "regular",
+    session_phase: "regular",
+    has_extended_hours: false,
+    previous_close: 940,
+    point_count: 2,
+    points: [
+      { time: "2026-06-15T09:00:00+09:00", price: 942, volume: 1000 },
+      { time: "2026-06-15T09:30:00+09:00", price: 948, volume: 1200 },
+    ],
+    warnings: [],
+  };
+}
+
+function krIndexOhlcResponse(indexId: string) {
+  const chart = regionalOhlcResponse(indexId);
+
+  return {
+    ...chart,
+    index_id: indexId,
+    provider_symbol: indexId === "KOSDAQ" ? "^KQ11" : "^KS11",
+    name: indexId === "KOSDAQ" ? "KOSDAQ Composite" : "KOSPI Composite",
+    short_name: indexId,
+  };
+}
+
+function krIndexBreadthResponse(indexId: string) {
+  return {
+    index_id: indexId,
+    market_segment: indexId,
+    trade_date: "2026-06-15",
+    advance_count: 520,
+    decline_count: 310,
+    unchanged_count: 70,
+    total_count: 900,
+    positive_ratio: 57.78,
+    advance_decline_ratio: 1.68,
+    average_change_pct: 0.42,
+    trade_value: 12_500_000_000,
+    source: "playwright.fixture",
+    status: "success",
+    coverage_note: null,
+  };
+}
+
+function emptyKrWatchlistReadiness(groupId: number | null) {
+  return {
+    kind: "kr_watchlist_readiness",
+    group_id: groupId,
+    include_children: true,
+    enabled_only: true,
+    expected_daily_price_date: "2026-06-15",
+    summary: {
+      requested_symbol_count: 0,
+      ready_count: 0,
+      partial_count: 0,
+      no_data_count: 0,
+      daily_current_count: 0,
+      daily_stale_count: 0,
+      daily_empty_count: 0,
+      investor_available_count: 0,
+      fundamental_available_count: 0,
+    },
+    results: [],
   };
 }
 
@@ -547,6 +869,20 @@ type MockOmiApiOptions = {
   usWatchlistTree?: ReturnType<typeof seededUsWatchlistTree>;
   usWatchlistItems?: ReturnType<typeof seededUsWatchlistItems>;
   usRankingRows?: ReturnType<typeof seededUsRankingRows>;
+  jpWatchlistTree?: ReturnType<typeof seededJpWatchlistTree>;
+  jpWatchlistItems?: ReturnType<typeof seededJpWatchlistItems>;
+  jpRankingRows?: ReturnType<typeof seededJpRankingRows>;
+  krWatchlistTree?: ReturnType<typeof seededKrWatchlistTree>;
+  krWatchlistItems?: ReturnType<typeof seededKrWatchlistItems>;
+  krRankingRows?: ReturnType<typeof seededKrRankingRows>;
+  regionalRankingResponder?: (context: {
+    market: "us" | "jp" | "kr";
+    requestNumber: number;
+    url: URL;
+  }) =>
+    | Promise<{ body: unknown; delayMs?: number; status?: number } | null>
+    | { body: unknown; delayMs?: number; status?: number }
+    | null;
 };
 
 async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
@@ -557,6 +893,13 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
   const usWatchlistTree = options.usWatchlistTree ?? [];
   const usWatchlistItems = options.usWatchlistItems ?? [];
   const usRankingRows = options.usRankingRows ?? [];
+  const jpWatchlistTree = options.jpWatchlistTree ?? [];
+  const jpWatchlistItems = options.jpWatchlistItems ?? [];
+  const jpRankingRows = options.jpRankingRows ?? [];
+  const krWatchlistTree = options.krWatchlistTree ?? [];
+  const krWatchlistItems = options.krWatchlistItems ?? [];
+  const krRankingRows = options.krRankingRows ?? [];
+  const regionalRankingRequestCounts = { us: 0, jp: 0, kr: 0 };
 
   await page.route("**/omi-data/**", async (route) => {
     const url = new URL(route.request().url());
@@ -659,6 +1002,49 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
       return;
     }
 
+    if (/\/jp-market\/ohlc\//.test(path)) {
+      const symbol = decodeURIComponent(path.split("/").at(-1) ?? "^N225");
+      await fulfillJson(route, regionalOhlcResponse(symbol));
+      return;
+    }
+
+    if (/\/jp-market\/intraday\//.test(path)) {
+      const symbol = decodeURIComponent(path.split("/").at(-1) ?? "^N225");
+      await fulfillJson(route, regionalIntradayResponse(symbol));
+      return;
+    }
+
+    const krIndexOhlcMatch = path.match(/\/kr-market\/indices\/([^/]+)\/ohlc$/);
+    if (krIndexOhlcMatch) {
+      const indexId = decodeURIComponent(krIndexOhlcMatch[1]);
+      await fulfillJson(route, krIndexOhlcResponse(indexId));
+      return;
+    }
+
+    const krIndexIntradayMatch = path.match(/\/kr-market\/indices\/([^/]+)\/intraday$/);
+    if (krIndexIntradayMatch) {
+      const indexId = decodeURIComponent(krIndexIntradayMatch[1]);
+      await fulfillJson(route, regionalIntradayResponse(indexId));
+      return;
+    }
+
+    const krIndexBreadthMatch = path.match(/\/kr-market\/indices\/([^/]+)\/breadth$/);
+    if (krIndexBreadthMatch) {
+      const indexId = decodeURIComponent(krIndexBreadthMatch[1]);
+      await fulfillJson(route, krIndexBreadthResponse(indexId));
+      return;
+    }
+
+    if (path.endsWith("/kr-market/watchlists/readiness")) {
+      await fulfillJson(
+        route,
+        emptyKrWatchlistReadiness(
+          url.searchParams.has("group_id") ? Number(url.searchParams.get("group_id")) : null
+        )
+      );
+      return;
+    }
+
     if (path.includes("/market/indicators/")) {
       await fulfillJson(route, []);
       return;
@@ -747,11 +1133,39 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
     }
 
     if (/\/(?:us-market|jp-market|kr-market)\/watchlists\/ranking$/.test(path)) {
+      const market = path.includes("/us-market/")
+        ? "us"
+        : path.includes("/jp-market/")
+          ? "jp"
+          : "kr";
+      regionalRankingRequestCounts[market] += 1;
+      const customResponse = await options.regionalRankingResponder?.({
+        market,
+        requestNumber: regionalRankingRequestCounts[market],
+        url,
+      });
+
+      if (customResponse) {
+        if (customResponse.delayMs) {
+          await new Promise((resolve) => setTimeout(resolve, customResponse.delayMs));
+        }
+        await route.fulfill({
+          status: customResponse.status ?? 200,
+          contentType: "application/json",
+          body: JSON.stringify(customResponse.body),
+        });
+        return;
+      }
+
       await fulfillJson(
         route,
-        path.includes("/us-market/") && usRankingRows.length > 0
+        market === "us" && usRankingRows.length > 0
           ? seededUsRankingResponse(url, usRankingRows)
-          : emptyRankingResponse(url)
+          : market === "jp" && jpRankingRows.length > 0
+            ? seededJpRankingResponse(url, jpRankingRows)
+            : market === "kr" && krRankingRows.length > 0
+              ? seededKrRankingResponse(url, krRankingRows)
+              : emptyRankingResponse(url)
       );
       return;
     }
@@ -867,6 +1281,26 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
       return;
     }
 
+    if (path.includes("/jp-market/watchlists/tree")) {
+      await fulfillJson(route, jpWatchlistTree);
+      return;
+    }
+
+    if (path.includes("/jp-market/watchlists/items")) {
+      await fulfillJson(route, jpWatchlistItems);
+      return;
+    }
+
+    if (path.includes("/kr-market/watchlists/tree")) {
+      await fulfillJson(route, krWatchlistTree);
+      return;
+    }
+
+    if (path.includes("/kr-market/watchlists/items")) {
+      await fulfillJson(route, krWatchlistItems);
+      return;
+    }
+
     if (/\/wl\/groups\/\d+\/refresh-latest$/.test(path)) {
       await fulfillJson(route, completedRefreshJob());
       return;
@@ -971,6 +1405,11 @@ test.describe("OMI dashboard smoke", () => {
     await page.goto("/?market=us", { waitUntil: "domcontentloaded" });
 
     await page.getByRole("button", { name: "Reload" }).first().click();
+    const rankingResponse = page.waitForResponse((response) =>
+      new URL(response.url()).pathname.endsWith("/us-market/watchlists/ranking")
+    );
+    await page.getByText("Mega Cap Tech", { exact: true }).first().click();
+    await rankingResponse;
     const rankingRows = page.locator("[data-ranking-symbol]");
     const appleRow = page.locator('[data-ranking-symbol="AAPL"]');
     await expect(rankingRows).toHaveCount(2);
@@ -981,6 +1420,150 @@ test.describe("OMI dashboard smoke", () => {
     await expect(page.locator('[data-ranking-symbol="MSFT"]')).toContainText(
       "MSFT Microsoft Corp."
     );
+    expect(pageErrors).toEqual([]);
+  });
+
+  test("Japan ranking stays intact when switching to an empty Korea watchlist", async ({
+    page,
+  }) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await mockOmiApi(page, {
+      jpWatchlistTree: seededJpWatchlistTree(),
+      jpWatchlistItems: seededJpWatchlistItems(),
+      jpRankingRows: seededJpRankingRows(),
+      krWatchlistTree: seededKrWatchlistTree(),
+    });
+    await page.goto("/?market=jp", { waitUntil: "domcontentloaded" });
+
+    await page.getByRole("button", { name: "Reload" }).first().click();
+    const japanRankingResponse = page.waitForResponse((response) =>
+      new URL(response.url()).pathname.endsWith("/jp-market/watchlists/ranking")
+    );
+    await page.getByText("Japan Core", { exact: true }).first().click();
+    await japanRankingResponse;
+    const toyotaRow = page.locator('[data-ranking-symbol="7203.T"]');
+    await expect(page.locator("[data-ranking-symbol]")).toHaveCount(2);
+    await expect(toyotaRow).toContainText("7203.T Toyota Motor");
+    await expect(toyotaRow).toContainText("2,850.5");
+    await expect(toyotaRow).toContainText("+1.79%");
+    await expect(toyotaRow).toHaveAttribute("href", /market=jp.*jp_symbol=7203.T/);
+
+    await page.locator('a[href="/?market=kr"]').click();
+    await expect(page).toHaveURL(/market=kr/);
+    const koreaRankingResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname.endsWith("/kr-market/watchlists/ranking");
+    });
+    await page.getByRole("button", { name: "Reload" }).first().click();
+    await page.getByText("Korea Core", { exact: true }).first().click();
+    await koreaRankingResponse;
+
+    const koreaPanel = page
+      .getByRole("heading", { name: "Korea Core" })
+      .locator("xpath=ancestor::section[1]");
+    await expect(koreaPanel.locator("select")).toBeVisible();
+    await expect(koreaPanel.getByRole("button", { name: "Reload" })).toBeEnabled();
+    await expect(page.locator("[data-ranking-symbol]")).toHaveCount(0);
+    expect(pageErrors).toEqual([]);
+  });
+
+  test("Japan ranking can reload after an API error", async ({ page }) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await mockOmiApi(page, {
+      jpWatchlistTree: seededJpWatchlistTree(),
+      jpWatchlistItems: seededJpWatchlistItems(),
+      regionalRankingResponder: ({ market, requestNumber, url }) => {
+        if (market !== "jp") return null;
+        if (requestNumber === 1) {
+          return {
+            status: 503,
+            body: { detail: "Playwright ranking failure" },
+          };
+        }
+        return { body: seededJpRankingResponse(url, seededJpRankingRows()) };
+      },
+    });
+    await page.goto("/?market=jp", { waitUntil: "domcontentloaded" });
+
+    const failedResponse = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname.endsWith("/jp-market/watchlists/ranking") &&
+        response.status() === 503
+    );
+    await page.getByRole("button", { name: "Reload" }).first().click();
+    await page.getByText("Japan Core", { exact: true }).first().click();
+    await failedResponse;
+
+    const japanPanel = page
+      .getByRole("heading", { name: "Japan Core" })
+      .locator("xpath=ancestor::section[1]");
+    const rankingReload = japanPanel.getByRole("button", { name: "Reload" });
+    await expect(rankingReload).toBeEnabled();
+    await rankingReload.click();
+    await expect(page.locator('[data-ranking-symbol="7203.T"]')).toContainText("2,850.5");
+    expect(pageErrors).toEqual([]);
+  });
+
+  test("Korea ranking ignores a stale response after rank mode changes", async ({ page }) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    const staleRows = seededKrRankingRows().map((row) =>
+      row.symbol === "005930.KS"
+        ? { ...row, close: 11100, change: -900, change_pct: -7.5 }
+        : row
+    );
+    const currentRows = seededKrRankingRows().map((row) =>
+      row.symbol === "005930.KS"
+        ? { ...row, close: 77700, change: 2700, change_pct: 3.6 }
+        : row
+    );
+    await mockOmiApi(page, {
+      krWatchlistTree: seededKrWatchlistTree(),
+      krWatchlistItems: seededKrWatchlistItems(),
+      regionalRankingResponder: ({ market, url }) => {
+        if (market !== "kr") return null;
+        if (url.searchParams.get("rank_by") === "none") {
+          return {
+            delayMs: 900,
+            body: seededKrRankingResponse(url, staleRows),
+          };
+        }
+        return { body: seededKrRankingResponse(url, currentRows) };
+      },
+    });
+    await page.goto("/?market=kr", { waitUntil: "domcontentloaded" });
+
+    const staleResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return (
+        url.pathname.endsWith("/kr-market/watchlists/ranking") &&
+        url.searchParams.get("rank_by") === "none"
+      );
+    });
+    const initialRequest = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return (
+        url.pathname.endsWith("/kr-market/watchlists/ranking") &&
+        url.searchParams.get("rank_by") === "none"
+      );
+    });
+    await page.getByRole("button", { name: "Reload" }).first().click();
+    await page.getByText("Korea Core", { exact: true }).first().click();
+    await initialRequest;
+
+    const koreaPanel = page
+      .getByRole("heading", { name: "Korea Core" })
+      .locator("xpath=ancestor::section[1]");
+    await koreaPanel.locator("select").selectOption("change_pct");
+    const samsungRow = page.locator('[data-ranking-symbol="005930.KS"]');
+    await expect(samsungRow).toContainText("77,700");
+    await expect(samsungRow).toContainText("+3.60%");
+
+    await staleResponse;
+    await expect(samsungRow).toContainText("77,700");
+    await expect(samsungRow).toContainText("+3.60%");
     expect(pageErrors).toEqual([]);
   });
 });

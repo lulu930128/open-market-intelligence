@@ -2,76 +2,89 @@
 
 ## 狀態
 
-- 目前階段：長期架構規劃完成，等待使用者確認
+- 目前階段：里程碑 1（Dashboard ranking state ownership）實作完成，完整 frontend gate 通過
 - 最後更新：2026-07-14
-- Implementation gate：尚未開啟；本輪未修改產品程式碼、未 commit
+- Implementation gate：已開啟
+- Commit 狀態：里程碑 0 baseline 已保存為 `cc2ce8d`；里程碑 1 尚未提交
 
 ## 已完成
 
-- 讀取 repo/root 與 frontend instructions、`docs/product/`、`BackendArchitecture.md`、`ARCHITECTURE_REVIEW.md` 和既有 task docs。
-- 盤點 tracked TypeScript/Python 大檔，排除 DB、`.next`、cache 與其他 runtime artifact。
-- 以 TypeScript/Python 結構分析確認 state/effect/API/function ownership，不只依 line count 判斷。
-- 確認 Dashboard ranking 第一批已抽出 pure row projection 與共用 presentation panel。
-- 確認 `tools.py`、`agentic_tools.py` 與 `us_market/service.py` 有大量 facade-level caller/monkeypatch seam，後續不能只做靜態 re-export。
-- 確認 `models.py` 為單一 ORM registry，依既有架構決策不納入拆檔。
-- 完成 `Prompt.md`、`TargetArchitecture.md` 與分十個里程碑的 `Plan.md`。
+### 里程碑 0：baseline
 
-## 第一批既有成果
+- 保存 watchlist ranking row projection、共用 ranking panel、Taiwan/US characterization 與架構文件。
+- Baseline commit：`cc2ce8d refactor(frontend): extract watchlist ranking boundaries`。
+- 確認 baseline 不含 `.env`、DB、logs、`.next`、測試產物或 private data。
 
-- `market-dashboard/watchlistRankingRows.ts`：四市場 group flatten、pending row、ranking merge 與 Taiwan progressive batch projection。
-- `market-dashboard/WatchlistRankingPanel.tsx`：US/JP/KR 共用 ranking layout、loading rows 與 skeleton。
-- `MarketDashboardClient.tsx`：由 6,042 行降至 5,365 行，未改 API/URL contract。
-- Playwright：Taiwan parent/child ranking、selection href 與 US regional panel 已有 characterization。
+### 里程碑 1A：跨市場 characterization
 
-## 既有驗證證據
+- 補齊 JP/KR watchlist tree、items、ranking、index/chart/breadth 與 readiness fixtures。
+- regional ranking mock 支援延遲、HTTP error 與自訂 response，可重現 request race。
+- 新增 JP 切換至 empty KR、JP error 後 reload、KR rank change stale response guard 三個 browser cases。
+- 修正 US case 的 fixture 群組選取，避免 live SSR 初始 group id 影響 mock contract。
+- 所有未知 mock API route 維持 fail-fast，不以 fallback response 掩蓋漏接 contract。
 
+### 里程碑 1B：Taiwan ranking hook
+
+- 新增 `useTaiwanRankingState`，擁有 ranking、load state、trend pending、last-updated state。
+- 搬入 progressive batch merge、request sequence、trend timer、market polling、收盤 final refresh、daily release check 與 freshness guard。
+- 透過 `prepareCompanionLoad` 保留「第一批 ranking row 到達後才啟動 radar」的既有順序。
+- `MarketDashboardClient` 不再直接持有 Taiwan ranking endpoint、timer、request sequence 或 freshness effect。
+
+### 里程碑 1C：regional ranking hooks
+
+- 新增 typed `useUsRankingState`、`useJpRankingState`、`useKrRankingState`。
+- 各 hook 保留自己的 endpoint、rank type、freshness job、refresh nonce/polling 與 stale request guard。
+- 暫不建立 shared regional state machine；JP/KR 雖然相似，仍等待更多 transition parity coverage。
+- `MarketDashboardClient` 只負責 ranking 與 radar/data-status 的 composition callback，不再直接 fetch regional ranking。
+
+### 行為與 React 審查
+
+- 恢復 Taiwan ranking/freshness data-status 原有標題、來源與 context key 語意。
+- 恢復 regional freshness request guard 的既有失敗後行為，避免 ownership migration 混入 retry policy 變更。
+- 保留 rank/group change 的立即 request invalidation，並由 KR stale-response case 驗證。
+- 檢查 hooks 規則、dependency arrays、timer cleanup、request sequence cleanup 與 typed action boundary；未發現需擴大重構的問題。
+- 重複的 dashboard time formatter 暫留各 ownership module，等里程碑 2C 處理 formatting boundary。
+
+## Ownership 變化
+
+| 指標 | Baseline | 里程碑 1 後 | 變化 |
+| --- | ---: | ---: | ---: |
+| `MarketDashboardClient.tsx` 行數 | 5,365 | 4,589 | -776 |
+| Dashboard `useState` 呼叫 | 96 | 70 | -26 |
+| Dashboard `useEffect` 呼叫 | 27 | 12 | -15 |
+| Dashboard `useRef` 呼叫 | 29 | 13 | -16 |
+| Production Playwright cases | 5 | 8 | +3 |
+
+新 hooks 的行數與 state 數不作為品質分數；關鍵結果是 ranking request、polling、freshness、timer 與 cancellation 已有明確 owner，Dashboard 不再保存第二份 implementation。
+
+## 驗證證據
+
+- Targeted ESLint（Dashboard、四個 ranking hooks、E2E fixture）：通過。
 - `npm exec tsc -- --noEmit --incremental false --pretty false`：通過。
 - `npm run lint`：通過。
 - `npm run build`：Next.js 16.2.6 production build 通過，6/6 static pages 完成。
-- `PLAYWRIGHT_SERVER_MODE=production npm run test:e2e`：5 passed。
-- `git diff --check`：上一輪通過。
-
-這些是第一批完成時的證據；implementation gate 開啟前仍會依里程碑 0 重跑，不能視為永久有效。
-
-## 規劃基線
-
-| 模組 | 結構訊號 | 判斷 |
-| --- | --- | --- |
-| `MarketDashboardClient.tsx` | 96 state、27 effect、21 API call expression | 多市場 state machine 過載 |
-| `StockDetailPanel.tsx` | 67 state、21 effect、23 API call expression | chart/data/refresh ownership 過載 |
-| `LightweightKLineChart.tsx` | 16 state、12 effect、0 API；大型 lifecycle/overlay | 互動與圖表引擎耦合 |
-| `StockDetailDataViews.tsx` | 5 state、0 effect、0 API | 大型 presentation collection，較低風險 |
-| `backend/app/ai/tools.py` | 50 top-level functions；多個長 reader | AI facade 過重 |
-| `backend/app/ai/agentic_tools.py` | 38 top-level definitions；四市場 reader | planning/execution/context 混合 |
-| `backend/app/us_market/service.py` | 92 functions、7 exceptions | 多 use case/transaction owner 集中 |
-| `backend/app/db/models.py` | 79 ORM classes、1 helper | 大型但一致 registry |
-
-數字為粗略結構快照，之後用來比較 ownership 是否下降，不設任意行數 pass/fail。
-
-## 已決定事項
-
-- 拆分目標是單一 ownership 與清楚 dependency direction，不是追求小檔案。
-- Frontend 使用 colocated hooks + pure projection + presentation layers，不新增全域 state framework。
-- Dashboard 延續已完成的 ranking boundary，先拆 ranking state，再 selection/radar/tape。
-- StockDetail 先拆 drawing/data/polling ownership，再處理純 view collections。
-- Chart 先補互動 characterization，再動 lifecycle、geometry 與 overlay。
-- Backend 保留 compatibility facade，以 wrapper runtime dependency handoff 維持既有 monkeypatch seam。
-- US provider modules已存在；後續拆 use-case service，不重做 provider adapter。
-- `models.py`、i18n 與長測試檔不按行數拆分。
-- 每個 ownership migration 經 targeted gate 後獨立 commit。
+- `PLAYWRIGHT_SERVER_MODE=production npm run test:e2e`：8 passed。
+- Regional targeted Playwright：US/JP/KR 4 passed。
+- Production E2E 使用獨立 `3100` standalone server；完成後 listener 已釋放，既有 `3000` dev server 未停止。
 
 ## 已知風險
 
-- 目前第一批產品程式碼與本規劃文件仍在同一個未提交工作樹；核准後必須先保存 baseline，不能直接疊第二批。
-- 現有 Playwright 只有 5 個 smoke/characterization cases；Dashboard JP/KR、StockDetail 與 Chart interaction coverage 仍不足。
-- Dashboard/StockDetail 內有多個 timer、request sequence、refresh nonce 與 local/remote persistence，搬移時最容易產生 duplicate effect 或 stale response regression。
-- Chart 是最高 UI 互動風險區，只有 build/typecheck 不足以驗收。
-- Backend tests大量 patch facade symbols；錯誤的 re-export 會讓測試看似能 import，但 patch 不再控制實際 dependency。
-- `answer_composer.py` 的 wording 與多 locale 行為可能受 fixture 敏感，必須在純拆分前固定 intent evidence cases。
-- Exact line/function counts 會隨後續修改變動，不能把本快照當成永久架構事實。
+- 里程碑 1 目前仍是未提交工作樹，必須在進入里程碑 2 前建立可獨立回退的 commit boundary。
+- Browser characterization 已覆蓋 visible loaded/empty/error/reload/stale 行為；Taiwan daily-release timer 與 regional freshness nonce 尚無 fake-clock/unit-level coverage，仍依既有 integration path 與 request guard。
+- `MarketDashboardClient.tsx` 仍有 4,589 行；selection/URL、radar、market tape 與 OMI context ownership 尚待里程碑 2。
+- JP/KR hooks 有刻意保留的相似 transition；在 parity coverage 足夠前抽 shared core 仍可能隱藏市場差異。
+- Chart、StockDetail 與 backend facade 尚未開始，本批驗證不能外推到後續里程碑。
+
+## 已決定事項
+
+- 拆分目標維持單一 ownership 與清楚 dependency direction，不追求任意小檔案。
+- Frontend 使用 colocated hooks + pure projection + presentation layers，不新增全域 state framework。
+- Ranking hook 不擁有 URL、router、presentation 或 market-specific visible wording。
+- Dashboard 保留 radar/data-status composition，直到里程碑 2B 再移交完整 radar state machine。
+- 每個 ownership migration 必須先通過 targeted gate，再建立獨立 commit。
 
 ## 下一步
 
-- 等待使用者確認 `TargetArchitecture.md` 與 `Plan.md`。
-- 確認後執行里程碑 0：重新驗證、檢查 staged scope、提交目前 dashboard ranking baseline。
-- Baseline commit 完成後才開始里程碑 1A 的跨市場 ranking characterization。
+1. 完成 repository diff/hygiene 審查並保存里程碑 1 commit。
+2. 進入里程碑 2A，先補 market/group/symbol/futures/crypto/resource URL 與 back/forward characterization。
+3. 建立 `useMarketSelection` 與純 `dashboardRoutes` helper；不在同批搬 radar、tape 或 formatting。

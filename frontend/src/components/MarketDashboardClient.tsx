@@ -27,7 +27,6 @@ import {
 import {
   buildJpWatchlistRows,
   buildKrWatchlistRows,
-  buildProgressiveRankingResponse,
   buildUsWatchlistRows,
   buildWatchlistRows,
   flattenGroups,
@@ -36,10 +35,29 @@ import {
   flattenUsGroups,
   mergeJpWatchlistRows,
   mergeKrWatchlistRows,
-  mergeRankingBatchRows,
   mergeUsWatchlistRows,
   mergeWatchlistRows,
 } from "@/components/market-dashboard/watchlistRankingRows";
+import {
+  useTaiwanRankingState,
+  type TaiwanRankBy,
+  type TaiwanRankingErrorKind,
+} from "@/components/market-dashboard/ranking/useTaiwanRankingState";
+import {
+  useUsRankingState,
+  type UsRankBy,
+  type UsRankingErrorKind,
+} from "@/components/market-dashboard/ranking/useUsRankingState";
+import {
+  useJpRankingState,
+  type JpRankBy,
+  type JpRankingErrorKind,
+} from "@/components/market-dashboard/ranking/useJpRankingState";
+import {
+  useKrRankingState,
+  type KrRankBy,
+  type KrRankingErrorKind,
+} from "@/components/market-dashboard/ranking/useKrRankingState";
 import { fetchJson, requestJson } from "@/lib/api";
 import {
   buildDashboardHref,
@@ -60,14 +78,9 @@ import {
   type MarketDataSubscriptionSettingsRead,
 } from "@/lib/marketDataSubscriptions";
 import {
-  getMarketCalendarStatusSnapshot,
-  msUntilIsoTime,
   refreshMarketCalendarStatus,
 } from "@/lib/marketCalendarStatus";
-import {
-  getRefreshExecutionSeconds,
-  useRefreshExecutionSettings,
-} from "@/lib/refreshExecutionSettings";
+import { useRefreshExecutionSettings } from "@/lib/refreshExecutionSettings";
 import {
   TAIWAN_INTRADAY_REFRESH_MS,
   getTaiwanIntradayXRatio,
@@ -120,18 +133,15 @@ import type {
   JPWatchlistGroupNode,
   JPWatchlistItemRead,
   JPWatchlistRankingItemRead,
-  JPWatchlistRankingRead,
   KRIndexOhlcChartRead,
   KRMarketBreadthRead,
   KRStockMasterRead,
   KRWatchlistGroupNode,
   KRWatchlistItemRead,
   KRWatchlistRankingItemRead,
-  KRWatchlistRankingRead,
   MarketIndexSnapshot,
   MarketIndexSummary,
   OhlcIntradayOverlay,
-  RankingBatchResponse,
   RankingItem,
   RankingResponse,
   StockIndicatorPoint,
@@ -141,7 +151,6 @@ import type {
   USWatchlistGroupNode,
   USWatchlistItemRead,
   USWatchlistRankingItemRead,
-  USWatchlistRankingRead,
   WatchlistGroupRadarRead,
   WatchlistGroupNode,
   WatchlistItemRead,
@@ -153,16 +162,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
 type JPStatusMessage = { type: "success" | "warning" | "error"; text: string } | null;
-type RankBy = "none" | "change_pct" | "score" | "volume";
-type USRankBy = "none" | "change_pct" | "volume" | "close";
-type JPRankBy = "none" | "change_pct" | "volume" | "close";
-type KRRankBy = "none" | "change_pct" | "volume" | "close";
+type RankBy = TaiwanRankBy;
+type USRankBy = UsRankBy;
+type JPRankBy = JpRankBy;
+type KRRankBy = KrRankBy;
 const WATCHLIST_INTRADAY_LIMIT = 30;
 const WATCHLIST_RADAR_MAX_RESULTS = 20;
 const WATCHLIST_RADAR_TIMEOUT_MS = 60_000;
-const WATCHLIST_RANKING_BATCH_SIZE = 3;
-const WATCHLIST_DAILY_RELEASE_CHECK_MIN_MS = 5_000;
-const WATCHLIST_DAILY_RELEASE_CHECK_MAX_MS = 300_000;
 const MARKET_CHIP_REFRESH_STORAGE_PREFIX = "omi:market-chip-refresh";
 const TAIWAN_INDEX_TARGET_IDS = new Set(["TAIEX", "TPEX"]);
 const WATCHLIST_ANALYSIS_PARAMS = {
@@ -178,24 +184,6 @@ function shouldUseTaiwanWatchlistIntraday(marketState: TaiwanMarketRefreshState)
   return (
     marketState.isPollingWindow ||
     (marketState.isAfterClose && !marketState.isDailyPriceReleased)
-  );
-}
-
-function getTaiwanWatchlistDailyReleaseCheckDelay() {
-  const marketState = getTaiwanMarketRefreshState();
-  const dailyRelease =
-    getMarketCalendarStatusSnapshot("tw")?.release_windows.market_daily_price;
-  const releaseDelay = marketState.isDailyPriceReleased
-    ? msUntilIsoTime(dailyRelease?.next_release_at)
-    : msUntilIsoTime(dailyRelease?.release_at);
-  const fallbackDelay = marketState.isDailyPriceReleased
-    ? marketState.msUntilNextPollingStart
-    : 60_000;
-  const delay = releaseDelay ?? fallbackDelay;
-
-  return Math.min(
-    Math.max(delay, WATCHLIST_DAILY_RELEASE_CHECK_MIN_MS),
-    WATCHLIST_DAILY_RELEASE_CHECK_MAX_MS
   );
 }
 
@@ -1830,15 +1818,7 @@ export default function MarketDashboardClient({
     useState<JPWatchlistGroupNode[]>(initialJpWatchlistTree);
   const [jpWatchlistItems, setJpWatchlistItems] =
     useState<JPWatchlistItemRead[]>(initialJpWatchlistItems);
-  const [jpDataRefreshNonce, setJpDataRefreshNonce] = useState(0);
-  const [jpRankBy, setJpRankBy] = useState<JPRankBy>("none");
-  const [jpRanking, setJpRanking] = useState<JPWatchlistRankingRead | null>(null);
-  const [jpLoadState, setJpLoadState] = useState<LoadState>("idle");
-  const [, setJpUniverseRefreshState] =
-    useState<LoadState>("idle");
-  const [, setJpErrorMessage] = useState<string | null>(null);
   const [jpStatusMessage, setJpStatusMessage] = useState<JPStatusMessage>(null);
-  const [jpLastUpdatedAt, setJpLastUpdatedAt] = useState<string | null>(null);
   const [selectedKrSymbol, setSelectedKrSymbol] = useState<string | null>(
     initialSelectedKrSymbol
   );
@@ -1858,14 +1838,6 @@ export default function MarketDashboardClient({
     useState<KRWatchlistGroupNode[]>(initialKrWatchlistTree);
   const [krWatchlistItems, setKrWatchlistItems] =
     useState<KRWatchlistItemRead[]>(initialKrWatchlistItems);
-  const [krDataRefreshNonce, setKrDataRefreshNonce] = useState(0);
-  const [krRankBy, setKrRankBy] = useState<KRRankBy>("none");
-  const [krRanking, setKrRanking] = useState<KRWatchlistRankingRead | null>(null);
-  const [krLoadState, setKrLoadState] = useState<LoadState>("idle");
-  const [, setKrUniverseRefreshState] =
-    useState<LoadState>("idle");
-  const [, setKrErrorMessage] = useState<string | null>(null);
-  const [krLastUpdatedAt, setKrLastUpdatedAt] = useState<string | null>(null);
   const [selectedUsGroupId, setSelectedUsGroupId] = useState<number | null>(
     initialSelectedUsGroup?.id ?? null
   );
@@ -1879,9 +1851,6 @@ export default function MarketDashboardClient({
     useState<USWatchlistGroupNode[]>(initialUsWatchlistTree);
   const [usWatchlistItems, setUsWatchlistItems] =
     useState<USWatchlistItemRead[]>(initialUsWatchlistItems);
-  const [usWatchlistVersion, setUsWatchlistVersion] = useState(0);
-  const [rankBy, setRankBy] = useState<RankBy>("none");
-  const [ranking, setRanking] = useState<RankingResponse | null>(initialRankingData);
   const [radarMode, setRadarMode] = useState<WatchlistRadarMode>(initialRadarMode);
   const [radar, setRadar] = useState<WatchlistGroupRadarRead | null>(initialRadarData);
   const [radarOutcomeSummary, setRadarOutcomeSummary] =
@@ -1897,16 +1866,10 @@ export default function MarketDashboardClient({
   const [jpRadar, setJpRadar] = useState<WatchlistGroupRadarRead | null>(null);
   const [krRadarMode, setKrRadarMode] = useState<WatchlistRadarMode>(initialRadarMode);
   const [krRadar, setKrRadar] = useState<WatchlistGroupRadarRead | null>(null);
-  const [usRankBy, setUsRankBy] = useState<USRankBy>("none");
-  const [usRanking, setUsRanking] = useState<USWatchlistRankingRead | null>(null);
   const [marketIndexSummary, setMarketIndexSummary] =
     useState<MarketIndexSummary | null>(initialMarketIndexSummary);
   const [marketIndexLoadState, setMarketIndexLoadState] =
     useState<LoadState>(initialMarketIndexSummary ? "success" : "idle");
-  const [loadState, setLoadState] = useState<LoadState>(
-    initialRankingData ? "success" : "idle"
-  );
-  const [rankingTrendPending, setRankingTrendPending] = useState(false);
   const [radarLoadState, setRadarLoadState] = useState<LoadState>(
     initialRadarData ? "success" : "idle"
   );
@@ -1917,9 +1880,6 @@ export default function MarketDashboardClient({
   const [usRadarLoadState, setUsRadarLoadState] = useState<LoadState>("idle");
   const [jpRadarLoadState, setJpRadarLoadState] = useState<LoadState>("idle");
   const [krRadarLoadState, setKrRadarLoadState] = useState<LoadState>("idle");
-  const [usLoadState, setUsLoadState] = useState<LoadState>("idle");
-  const [, setUsUniverseRefreshState] =
-    useState<LoadState>("idle");
   const [, setRadarErrorMessage] = useState<string | null>(null);
   const [, setRadarOutcomeErrorMessage] =
     useState<string | null>(null);
@@ -1928,10 +1888,6 @@ export default function MarketDashboardClient({
   const [, setUsRadarErrorMessage] = useState<string | null>(null);
   const [, setJpRadarErrorMessage] = useState<string | null>(null);
   const [, setKrRadarErrorMessage] = useState<string | null>(null);
-  const [, setUsErrorMessage] = useState<string | null>(null);
-  const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
-  const [usLastUpdatedAt, setUsLastUpdatedAt] = useState<string | null>(null);
-  const dashboardRequestSeq = useRef(0);
   const radarRequestSeq = useRef(0);
   const radarOutcomeRequestSeq = useRef(0);
   const radarOutcomeHistoryRequestSeq = useRef(0);
@@ -1942,15 +1898,8 @@ export default function MarketDashboardClient({
   const usRadarModeRef = useRef<WatchlistRadarMode>(usRadarMode);
   const jpRadarModeRef = useRef<WatchlistRadarMode>(jpRadarMode);
   const krRadarModeRef = useRef<WatchlistRadarMode>(krRadarMode);
-  const usDashboardRequestSeq = useRef(0);
-  const jpDashboardRequestSeq = useRef(0);
-  const krDashboardRequestSeq = useRef(0);
   const resourceBackgroundPollingRef = useRef(new Set<string>());
   const marketIndexRequestSeq = useRef(0);
-  const rankingTrendTimer = useRef<number | undefined>(undefined);
-  const finalDashboardRefreshDate = useRef<string | null>(null);
-  const finalUsDashboardRefreshDate = useRef<string | null>(null);
-  const initialUsWatchlistPreloadQueued = useRef(false);
   const resourceBackgroundPollingGroupsForCurrentView = useMemo(
     () =>
       activeMarket === "crypto"
@@ -2062,23 +2011,7 @@ export default function MarketDashboardClient({
     };
   }, []);
 
-  useEffect(() => {
-    return () => {
-      if (rankingTrendTimer.current !== undefined) {
-        window.clearTimeout(rankingTrendTimer.current);
-      }
-    };
-  }, []);
-
   const activeGroupId = selectedGroupId ?? selectedGroup?.id ?? null;
-  const activeGroupIdRef = useRef<number | null>(activeGroupId);
-  const selectedUsGroupIdRef = useRef<number | null>(selectedUsGroupId);
-  const selectedJpGroupIdRef = useRef<number | null>(selectedJpGroupId);
-  const selectedKrGroupIdRef = useRef<number | null>(selectedKrGroupId);
-  const watchlistFreshnessRequestKeys = useRef<Set<string>>(new Set());
-  const usWatchlistFreshnessRequestKeys = useRef<Set<string>>(new Set());
-  const jpWatchlistFreshnessRequestKeys = useRef<Set<string>>(new Set());
-  const krWatchlistFreshnessRequestKeys = useRef<Set<string>>(new Set());
   const marketChipRefreshRequestKeys = useRef<Set<string>>(new Set());
   const twWatchlistContextLabel =
     selectedGroup?.group_name ??
@@ -2092,6 +2025,74 @@ export default function MarketDashboardClient({
   const krWatchlistContextLabel =
     selectedKrGroupName ??
     (selectedKrGroupId !== null ? String(selectedKrGroupId) : t("watchlist.noGroupSelected"));
+  const {
+    state: {
+      rankBy,
+      ranking,
+      loadState,
+      trendPending: rankingTrendPending,
+      lastUpdatedAt,
+    },
+    actions: taiwanRankingActions,
+  } = useTaiwanRankingState({
+    active: activeMarket === "tw",
+    groupId: activeGroupId,
+    initialRanking: initialRankingData,
+    refreshExecutionSettings,
+    prepareCompanionLoad: prepareTaiwanRankingRadarLoad,
+    onError: handleTaiwanRankingError,
+  });
+  const loadDashboard = taiwanRankingActions.load;
+  const {
+    state: {
+      rankBy: usRankBy,
+      ranking: usRanking,
+      loadState: usLoadState,
+      lastUpdatedAt: usLastUpdatedAt,
+    },
+    actions: usRankingActions,
+  } = useUsRankingState({
+    active: activeMarket === "us",
+    groupId: selectedUsGroupId,
+    refreshExecutionSettings,
+    startCompanionLoad: startUsRankingCompanionLoad,
+    onError: handleUsRankingError,
+  });
+  const loadUsDashboard = usRankingActions.load;
+  const {
+    state: {
+      rankBy: jpRankBy,
+      ranking: jpRanking,
+      loadState: jpLoadState,
+      lastUpdatedAt: jpLastUpdatedAt,
+      dataRefreshNonce: jpDataRefreshNonce,
+    },
+    actions: jpRankingActions,
+  } = useJpRankingState({
+    active: activeMarket === "jp",
+    groupId: selectedJpGroupId,
+    refreshExecutionSettings,
+    startCompanionLoad: startJpRankingCompanionLoad,
+    onError: handleJpRankingError,
+  });
+  const loadJpDashboard = jpRankingActions.load;
+  const {
+    state: {
+      rankBy: krRankBy,
+      ranking: krRanking,
+      loadState: krLoadState,
+      lastUpdatedAt: krLastUpdatedAt,
+      dataRefreshNonce: krDataRefreshNonce,
+    },
+    actions: krRankingActions,
+  } = useKrRankingState({
+    active: activeMarket === "kr",
+    groupId: selectedKrGroupId,
+    refreshExecutionSettings,
+    startCompanionLoad: startKrRankingCompanionLoad,
+    onError: handleKrRankingError,
+  });
+  const loadKrDashboard = krRankingActions.load;
   const baseRows = useMemo(
     () => buildWatchlistRows(selectedGroup, watchlistItems),
     [selectedGroup, watchlistItems]
@@ -2492,29 +2493,6 @@ export default function MarketDashboardClient({
     }
   }
 
-  function clearRankingTrendTimer() {
-    if (rankingTrendTimer.current === undefined) return;
-
-    window.clearTimeout(rankingTrendTimer.current);
-    rankingTrendTimer.current = undefined;
-  }
-
-  function scheduleRankingTrendData(
-    requestSeq: number,
-    rankingData: RankingResponse
-  ) {
-    clearRankingTrendTimer();
-
-    rankingTrendTimer.current = window.setTimeout(() => {
-      rankingTrendTimer.current = undefined;
-
-      if (dashboardRequestSeq.current !== requestSeq) return;
-
-      setRanking(rankingData);
-      setRankingTrendPending(false);
-    }, 0);
-  }
-
   async function loadWatchlistRadar(
     groupId: number,
     options?: { mode?: WatchlistRadarMode; silent?: boolean }
@@ -2707,18 +2685,20 @@ export default function MarketDashboardClient({
     }
   }
 
-  async function loadDashboard(
-    groupId: number,
-    currentRankBy = rankBy,
-    options?: { silent?: boolean }
-  ) {
-    const requestSeq = dashboardRequestSeq.current + 1;
-    dashboardRequestSeq.current = requestSeq;
+  function prepareTaiwanRankingRadarLoad({
+    groupId,
+    silent,
+    useIntraday,
+  }: {
+    groupId: number;
+    silent: boolean;
+    useIntraday: boolean;
+  }) {
     const radarSeq = radarRequestSeq.current + 1;
     radarRequestSeq.current = radarSeq;
+    let radarPromise: Promise<void> | null = null;
 
-    if (!options?.silent) {
-      setLoadState("loading");
+    if (!silent) {
       setRadarLoadState("loading");
       setRadarErrorMessage(null);
       setRadarOutcomeLoadState("loading");
@@ -2726,338 +2706,173 @@ export default function MarketDashboardClient({
       setRadarOutcomeSummary(null);
     }
 
-    try {
-      const marketState = getTaiwanMarketRefreshState();
-      const useIntraday = shouldUseTaiwanWatchlistIntraday(marketState);
-      const deferTrendData = !options?.silent && currentRankBy === "none" && useIntraday;
-      let radarPromise: Promise<void> | null = null;
+    return () => {
+      if (radarPromise) return;
 
-      clearRankingTrendTimer();
-      setRankingTrendPending(deferTrendData);
+      radarPromise = fetchJson<WatchlistGroupRadarRead>(
+        `/api/watchlists/groups/${groupId}/radar`,
+        watchlistRadarParams(radarModeRef.current, useIntraday),
+        { timeoutMs: WATCHLIST_RADAR_TIMEOUT_MS }
+      )
+        .then((data) => {
+          if (radarRequestSeq.current !== radarSeq) return;
 
-      function queueRadarLoad() {
-        if (radarPromise) return radarPromise;
-
-        radarPromise = fetchJson<WatchlistGroupRadarRead>(
-          `/api/watchlists/groups/${groupId}/radar`,
-          watchlistRadarParams(radarModeRef.current, useIntraday),
-          { timeoutMs: WATCHLIST_RADAR_TIMEOUT_MS }
-        )
-          .then((data) => {
-            if (radarRequestSeq.current !== radarSeq) return;
-
-            setRadar(data);
-            setRadarLoadState("success");
-            setRadarErrorMessage(null);
-            void loadWatchlistRadarOutcome(groupId, {
-              mode: radarModeRef.current,
-              silent: true,
-            });
-          })
-          .catch((error: unknown) => {
-            if (radarRequestSeq.current !== radarSeq) return;
-
-            if (!options?.silent) {
-              setRadar(null);
-              setRadarOutcomeSummary(null);
-              setRadarOutcomeLoadState("idle");
-            }
-            setRadarLoadState("error");
-            const message = apiErrorMessage(error, t("radar.loadError"));
-            setRadarErrorMessage(message);
-            emitDashboardDataStatus({
-              market: "tw",
-              title: t("radar.loadError"),
-              message,
-              source: t("radar.title"),
-              contextKey: `tw:watchlist:${groupId}:radar`,
-              contextLabel: twWatchlistContextLabel,
-            });
+          setRadar(data);
+          setRadarLoadState("success");
+          setRadarErrorMessage(null);
+          void loadWatchlistRadarOutcome(groupId, {
+            mode: radarModeRef.current,
+            silent: true,
           });
+        })
+        .catch((error: unknown) => {
+          if (radarRequestSeq.current !== radarSeq) return;
 
-        return radarPromise;
-      }
-
-      function markRadarLoadQueued() {
-        if (radarPromise) return;
-
-        void queueRadarLoad();
-      }
-
-      if (currentRankBy === "none") {
-        let offset = 0;
-        let loadedRows: RankingItem[] = [];
-        let currentStockCount = 0;
-        let staleStockCount = 0;
-        let noDataCount = 0;
-        let errorCount = 0;
-
-        while (true) {
-          const batch = await fetchJson<RankingBatchResponse>(
-            `/api/watchlists/groups/${groupId}/rankings/latest-batch`,
-            {
-              ...WATCHLIST_ANALYSIS_PARAMS,
-              rank_by: "watchlist",
-              sort_order: "asc",
-              limit: 100,
-              use_intraday: useIntraday,
-              intraday_limit: WATCHLIST_INTRADAY_LIMIT,
-              offset,
-              batch_size: WATCHLIST_RANKING_BATCH_SIZE,
-            }
-          );
-
-          if (dashboardRequestSeq.current !== requestSeq) return;
-
-          loadedRows = mergeRankingBatchRows(loadedRows, batch.results);
-          currentStockCount += batch.current_stock_count;
-          staleStockCount += batch.stale_stock_count;
-          noDataCount += batch.no_data_count;
-          errorCount += batch.error_count;
-
-          const nextRanking = buildProgressiveRankingResponse({
-            batch,
-            rows: loadedRows,
-            currentStockCount,
-            staleStockCount,
-            noDataCount,
-            errorCount,
-            complete: !batch.has_more,
-            deferTrendData,
-          });
-
-          setRanking(nextRanking);
-          markRadarLoadQueued();
-
-          if (!batch.has_more || batch.requested_stock_count === 0) {
-            setLastUpdatedAt(formatDashboardTime(new Date()));
-            setLoadState("success");
-            if (deferTrendData) {
-              scheduleRankingTrendData(
-                requestSeq,
-                buildProgressiveRankingResponse({
-                  batch,
-                  rows: loadedRows,
-                  currentStockCount,
-                  staleStockCount,
-                  noDataCount,
-                  errorCount,
-                  complete: true,
-                })
-              );
-            }
-            void radarPromise;
-            return;
+          if (!silent) {
+            setRadar(null);
+            setRadarOutcomeSummary(null);
+            setRadarOutcomeLoadState("idle");
           }
-
-          offset += batch.requested_stock_count;
-        }
-      }
-
-      const rankingPromise = fetchJson<RankingResponse>(
-        `/api/watchlists/groups/${groupId}/rankings/latest`,
-        {
-          ...WATCHLIST_ANALYSIS_PARAMS,
-          rank_by: currentRankBy,
-          sort_order: "desc",
-          limit: 100,
-          use_intraday: useIntraday,
-          intraday_limit: WATCHLIST_INTRADAY_LIMIT,
-        }
-      );
-      const rankingData = await rankingPromise;
-
-      if (dashboardRequestSeq.current !== requestSeq) return;
-
-      setRanking(rankingData);
-      setRankingTrendPending(false);
-      setLastUpdatedAt(formatDashboardTime(new Date()));
-      setLoadState("success");
-      void queueRadarLoad();
-    } catch (error) {
-      if (dashboardRequestSeq.current !== requestSeq) return;
-
-      clearRankingTrendTimer();
-      setRankingTrendPending(false);
-      setLoadState("error");
-      const message = apiErrorMessage(error, t("dashboard.ranking.readError"));
-      emitDashboardDataStatus({
-        market: "tw",
-        title: t("dashboard.ranking.readError"),
-        message,
-        source: t("dashboard.ranking.listTitle"),
-        contextKey: `tw:watchlist:${groupId}:ranking`,
-        contextLabel: twWatchlistContextLabel,
-      });
-    }
+          setRadarLoadState("error");
+          const message = apiErrorMessage(error, t("radar.loadError"));
+          setRadarErrorMessage(message);
+          emitDashboardDataStatus({
+            market: "tw",
+            title: t("radar.loadError"),
+            message,
+            source: t("radar.title"),
+            contextKey: `tw:watchlist:${groupId}:radar`,
+            contextLabel: twWatchlistContextLabel,
+          });
+        });
+    };
   }
 
-  async function loadUsDashboard(
-    groupId: number,
-    currentRankBy = usRankBy,
-    options?: { silent?: boolean }
-  ): Promise<USWatchlistRankingRead | null> {
-    const requestSeq = usDashboardRequestSeq.current + 1;
-    usDashboardRequestSeq.current = requestSeq;
+  function handleTaiwanRankingError(
+    kind: TaiwanRankingErrorKind,
+    error: unknown,
+    groupId: number
+  ) {
+    const title =
+      kind === "ranking"
+        ? t("dashboard.ranking.readError")
+        : "自選股日線補齊失敗";
+    const source =
+      kind === "ranking"
+        ? t("dashboard.ranking.listTitle")
+        : "自選股資料";
 
-    if (!options?.silent) {
-      setUsLoadState("loading");
-      setUsErrorMessage(null);
+    if (kind === "daily-refresh") {
+      console.warn("Watchlist daily price refresh failed.", error);
     }
 
+    emitDashboardDataStatus({
+      market: "tw",
+      title,
+      message: apiErrorMessage(error, title),
+      source,
+      contextKey: `tw:watchlist:${groupId}:${kind}`,
+      contextLabel: twWatchlistContextLabel,
+    });
+  }
+
+  function startUsRankingCompanionLoad({
+    groupId,
+    silent,
+  }: {
+    groupId: number;
+    silent: boolean;
+  }) {
     if (isSelectedUsIndex) {
       setUsRadar(null);
       setUsRadarLoadState("idle");
       setUsRadarErrorMessage(null);
     } else {
-      void loadUsWatchlistRadar(groupId, { silent: options?.silent });
-    }
-
-    try {
-      const marketState = getUsMarketRefreshState();
-      const rankingData = await fetchJson<USWatchlistRankingRead>(
-        "/api/us-market/watchlists/ranking",
-        {
-          group_id: groupId,
-          include_children: true,
-          enabled_only: true,
-          rank_by: currentRankBy,
-          sort_order: currentRankBy === "none" ? "asc" : "desc",
-          use_intraday: marketState.isPollingWindow,
-          intraday_limit: WATCHLIST_INTRADAY_LIMIT,
-        }
-      );
-
-      if (usDashboardRequestSeq.current !== requestSeq) return null;
-
-      setUsRanking(rankingData);
-      setUsLastUpdatedAt(formatDashboardTime(new Date()));
-      setUsLoadState("success");
-      return rankingData;
-    } catch (error) {
-      if (usDashboardRequestSeq.current !== requestSeq) return null;
-
-      setUsLoadState("error");
-      const message = apiErrorMessage(error, t("dashboard.ranking.usReadError"));
-      setUsErrorMessage(message);
-      emitDashboardDataStatus({
-        market: "us",
-        title: t("dashboard.ranking.usReadError"),
-        message,
-        source: t("dashboard.ranking.listTitle"),
-        contextKey: `us:watchlist:${groupId}:ranking`,
-        contextLabel: usWatchlistContextLabel,
-      });
-      return null;
+      void loadUsWatchlistRadar(groupId, { silent });
     }
   }
 
-  async function loadJpDashboard(
-    groupId: number,
-    currentRankBy = jpRankBy,
-    options?: { silent?: boolean }
-  ): Promise<JPWatchlistRankingRead | null> {
-    const requestSeq = jpDashboardRequestSeq.current + 1;
-    jpDashboardRequestSeq.current = requestSeq;
-
-    if (!options?.silent) {
-      setJpLoadState("loading");
-      setJpErrorMessage(null);
-    }
-
+  function startJpRankingCompanionLoad({
+    groupId,
+    silent,
+  }: {
+    groupId: number;
+    silent: boolean;
+  }) {
     if (isSelectedJpIndex) {
       setJpRadar(null);
       setJpRadarLoadState("idle");
       setJpRadarErrorMessage(null);
     } else {
-      void loadJpWatchlistRadar(groupId, { silent: options?.silent });
-    }
-
-    try {
-      const rankingData = await fetchJson<JPWatchlistRankingRead>(
-        "/api/jp-market/watchlists/ranking",
-        {
-          group_id: groupId,
-          include_children: true,
-          enabled_only: true,
-          rank_by: currentRankBy,
-          sort_order: currentRankBy === "none" ? "asc" : "desc",
-        }
-      );
-
-      if (jpDashboardRequestSeq.current !== requestSeq) return null;
-
-      setJpRanking(rankingData);
-      setJpLastUpdatedAt(formatDashboardTime(new Date()));
-      setJpLoadState("success");
-      return rankingData;
-    } catch (error) {
-      if (jpDashboardRequestSeq.current !== requestSeq) return null;
-
-      setJpLoadState("error");
-      const message = apiErrorMessage(error, t("dashboard.ranking.jpReadError"));
-      setJpErrorMessage(message);
-      emitDashboardDataStatus({
-        market: "jp",
-        title: t("dashboard.ranking.jpReadError"),
-        message,
-        source: t("dashboard.ranking.listTitle"),
-        contextKey: `jp:watchlist:${groupId}:ranking`,
-        contextLabel: jpWatchlistContextLabel,
-      });
-      return null;
+      void loadJpWatchlistRadar(groupId, { silent });
     }
   }
 
-  async function loadKrDashboard(
+  function startKrRankingCompanionLoad({
+    groupId,
+    silent,
+  }: {
+    groupId: number;
+    silent: boolean;
+  }) {
+    void loadKrWatchlistRadar(groupId, { silent });
+  }
+
+  function handleUsRankingError(
+    kind: UsRankingErrorKind,
+    error: unknown,
+    groupId: number
+  ) {
+    const title =
+      kind === "ranking"
+        ? t("dashboard.ranking.usReadError")
+        : "美股自選日線補齊失敗";
+    emitDashboardDataStatus({
+      market: "us",
+      title,
+      message: apiErrorMessage(error, title),
+      source: kind === "ranking" ? t("dashboard.ranking.listTitle") : "美股自選資料",
+      contextKey: `us:watchlist:${groupId}:${kind}`,
+      contextLabel: usWatchlistContextLabel,
+    });
+  }
+
+  function handleJpRankingError(
+    kind: JpRankingErrorKind,
+    error: unknown,
+    groupId: number
+  ) {
+    const title =
+      kind === "ranking"
+        ? t("dashboard.ranking.jpReadError")
+        : "日股自選日線補齊失敗";
+    emitDashboardDataStatus({
+      market: "jp",
+      title,
+      message: apiErrorMessage(error, title),
+      source: kind === "ranking" ? t("dashboard.ranking.listTitle") : "日股自選資料",
+      contextKey: `jp:watchlist:${groupId}:${kind}`,
+      contextLabel: jpWatchlistContextLabel,
+    });
+  }
+
+  function handleKrRankingError(
+    kind: KrRankingErrorKind,
+    error: unknown,
     groupId: number,
-    currentRankBy = krRankBy,
-    options?: { silent?: boolean }
-  ): Promise<KRWatchlistRankingRead | null> {
-    const requestSeq = krDashboardRequestSeq.current + 1;
-    krDashboardRequestSeq.current = requestSeq;
-
-    if (!options?.silent) {
-      setKrLoadState("loading");
-      setKrErrorMessage(null);
-    }
-
-    void loadKrWatchlistRadar(groupId, { silent: options?.silent });
-
-    try {
-      const rankingData = await fetchJson<KRWatchlistRankingRead>(
-        "/api/kr-market/watchlists/ranking",
-        {
-          group_id: groupId,
-          include_children: true,
-          enabled_only: true,
-          rank_by: currentRankBy,
-          sort_order: currentRankBy === "none" ? "asc" : "desc",
-        }
-      );
-
-      if (krDashboardRequestSeq.current !== requestSeq) return null;
-
-      setKrRanking(rankingData);
-      setKrLastUpdatedAt(formatDashboardTime(new Date()));
-      setKrLoadState("success");
-      return rankingData;
-    } catch (error) {
-      if (krDashboardRequestSeq.current !== requestSeq) return null;
-
-      setKrLoadState("error");
-      const message = apiErrorMessage(error, t("dashboard.ranking.krReadError"));
-      setKrErrorMessage(message);
-      emitDashboardDataStatus({
-        market: "kr",
-        title: t("dashboard.ranking.krReadError"),
-        message,
-        source: t("dashboard.ranking.listTitle"),
-        contextKey: `kr:watchlist:${groupId}:ranking`,
-        contextLabel: krWatchlistContextLabel,
-      });
-      return null;
-    }
+  ) {
+    const title =
+      kind === "ranking"
+        ? t("dashboard.ranking.krReadError")
+        : "韓股自選日線補齊失敗";
+    emitDashboardDataStatus({
+      market: "kr",
+      title,
+      message: apiErrorMessage(error, title),
+      source: kind === "ranking" ? t("dashboard.ranking.listTitle") : "韓股自選資料",
+      contextKey: `kr:watchlist:${groupId}:${kind}`,
+      contextLabel: krWatchlistContextLabel,
+    });
   }
 
   async function loadMarketIndices(options?: { silent?: boolean }) {
@@ -3128,231 +2943,6 @@ export default function MarketDashboardClient({
     }
   }
 
-  async function refreshWatchlistDailyPricesOnOpen(groupId: number, currentRankBy: RankBy) {
-    const marketState = getTaiwanMarketRefreshState();
-    const includeToday = marketState.isDailyPriceReleased;
-    const requestKey = `${groupId}:${marketState.dateKey}:${includeToday ? "today" : "latest"}`;
-
-    if (watchlistFreshnessRequestKeys.current.has(requestKey)) return;
-
-    watchlistFreshnessRequestKeys.current.add(requestKey);
-
-    try {
-      await requestBackfillJob(
-        `/api/watchlists/groups/${groupId}/refresh-latest`,
-        { method: "POST" },
-        {
-          lookback_days: 14,
-          include_today: includeToday,
-          include_children: true,
-          enabled_only: true,
-          sleep_seconds: getRefreshExecutionSeconds(
-            refreshExecutionSettings,
-            "tw",
-            "observed_stock_refresh_interval_seconds",
-            0.3
-          ),
-          skip_existing_months: true,
-        },
-        {
-          intervalMs: 1500,
-          timeoutMs: 600000,
-        }
-      );
-
-      if (activeGroupIdRef.current === groupId) {
-        await loadDashboard(groupId, currentRankBy, { silent: true });
-      }
-    } catch (error) {
-      watchlistFreshnessRequestKeys.current.delete(requestKey);
-      console.warn("Watchlist daily price refresh failed.", error);
-      emitDashboardDataStatus({
-        market: "tw",
-        title: "自選股日線補齊失敗",
-        message: apiErrorMessage(error, "自選股日線補齊失敗"),
-        source: "自選股資料",
-        contextKey: `tw:watchlist:${groupId}:daily-refresh`,
-        contextLabel: twWatchlistContextLabel,
-      });
-    }
-  }
-
-  async function refreshUsWatchlistDailyPricesForFreshness(
-    groupId: number,
-    currentRankBy: USRankBy,
-    targetTradeDate: string | null
-  ) {
-    const requestKey = `${groupId}:${targetTradeDate ?? "unknown"}:daily`;
-
-    if (usWatchlistFreshnessRequestKeys.current.has(requestKey)) return;
-
-    usWatchlistFreshnessRequestKeys.current.add(requestKey);
-    setUsUniverseRefreshState("loading");
-
-    try {
-      const job = await requestBackfillJob(
-        `/api/us-market/watchlists/groups/${groupId}/refresh-daily`,
-        { method: "POST" },
-        {
-          include_children: true,
-          enabled_only: true,
-          outputsize: "compact",
-          adjusted: false,
-          sleep_seconds: getRefreshExecutionSeconds(
-            refreshExecutionSettings,
-            "us",
-            "observed_stock_refresh_interval_seconds",
-            12
-          ),
-        },
-        {
-          intervalMs: 1500,
-          timeoutMs: 1_800_000,
-        }
-      );
-      const result =
-        job.result && typeof job.result === "object" && !Array.isArray(job.result)
-          ? (job.result as Record<string, unknown>)
-          : null;
-      const errors = Array.isArray(result?.errors) ? result.errors : [];
-
-      setUsUniverseRefreshState(errors.length > 0 ? "error" : "success");
-
-      if (selectedUsGroupIdRef.current === groupId) {
-        await loadUsDashboard(groupId, currentRankBy, { silent: true });
-      }
-    } catch (error) {
-      setUsUniverseRefreshState("error");
-      emitDashboardDataStatus({
-        market: "us",
-        title: "美股自選日線補齊失敗",
-        message: apiErrorMessage(error, "美股自選日線補齊失敗"),
-        source: "美股自選資料",
-        contextKey: `us:watchlist:${groupId}:daily-refresh`,
-        contextLabel: usWatchlistContextLabel,
-      });
-    }
-  }
-
-  async function refreshJpWatchlistDailyPricesForFreshness(
-    groupId: number,
-    currentRankBy: JPRankBy,
-    targetTradeDate: string | null
-  ) {
-    const requestKey = `${groupId}:${targetTradeDate ?? "missing"}:daily`;
-
-    if (jpWatchlistFreshnessRequestKeys.current.has(requestKey)) return;
-
-    jpWatchlistFreshnessRequestKeys.current.add(requestKey);
-    setJpUniverseRefreshState("loading");
-
-    try {
-      const job = await requestBackfillJob(
-        `/api/jp-market/watchlists/groups/${groupId}/refresh-daily`,
-        { method: "POST" },
-        {
-          include_children: true,
-          enabled_only: true,
-          outputsize: "compact",
-          provider: "auto",
-          sleep_seconds: getRefreshExecutionSeconds(
-            refreshExecutionSettings,
-            "jp",
-            "observed_stock_refresh_interval_seconds",
-            1
-          ),
-        },
-        {
-          intervalMs: 1500,
-          timeoutMs: 1_800_000,
-        }
-      );
-      const result =
-        job.result && typeof job.result === "object" && !Array.isArray(job.result)
-          ? (job.result as Record<string, unknown>)
-          : null;
-      const errors = Array.isArray(result?.errors) ? result.errors : [];
-
-      setJpUniverseRefreshState(errors.length > 0 ? "error" : "success");
-
-      if (selectedJpGroupIdRef.current === groupId) {
-        setJpDataRefreshNonce((value) => value + 1);
-        await loadJpDashboard(groupId, currentRankBy, { silent: true });
-      }
-    } catch (error) {
-      setJpUniverseRefreshState("error");
-      emitDashboardDataStatus({
-        market: "jp",
-        title: "日股自選日線補齊失敗",
-        message: apiErrorMessage(error, "日股自選日線補齊失敗"),
-        source: "日股自選資料",
-        contextKey: `jp:watchlist:${groupId}:daily-refresh`,
-        contextLabel: jpWatchlistContextLabel,
-      });
-    }
-  }
-
-  async function refreshKrWatchlistDailyPricesForFreshness(
-    groupId: number,
-    currentRankBy: KRRankBy,
-    targetTradeDate: string | null
-  ) {
-    const requestKey = `${groupId}:${targetTradeDate ?? "missing"}:daily`;
-
-    if (krWatchlistFreshnessRequestKeys.current.has(requestKey)) return;
-
-    krWatchlistFreshnessRequestKeys.current.add(requestKey);
-    setKrUniverseRefreshState("loading");
-
-    try {
-      const job = await requestBackfillJob(
-        `/api/kr-market/watchlists/groups/${groupId}/refresh-daily`,
-        { method: "POST" },
-        {
-          include_children: true,
-          enabled_only: true,
-          outputsize: "compact",
-          provider: "auto",
-          sleep_seconds: getRefreshExecutionSeconds(
-            refreshExecutionSettings,
-            "kr",
-            "observed_stock_refresh_interval_seconds",
-            1
-          ),
-        },
-        {
-          intervalMs: 1500,
-          timeoutMs: 1_800_000,
-        }
-      );
-      const result =
-        job.result && typeof job.result === "object" && !Array.isArray(job.result)
-          ? (job.result as Record<string, unknown>)
-          : null;
-      const errors = Array.isArray(result?.errors) ? result.errors : [];
-
-      setKrUniverseRefreshState(errors.length > 0 ? "error" : "success");
-
-      if (selectedKrGroupIdRef.current === groupId) {
-        setKrDataRefreshNonce((value) => value + 1);
-        await loadKrDashboard(groupId, currentRankBy, { silent: true });
-      }
-    } catch (error) {
-      setKrUniverseRefreshState("error");
-      emitDashboardDataStatus({
-        market: "kr",
-        title: "韓股自選日線補齊失敗",
-        message: apiErrorMessage(error, "韓股自選日線補齊失敗"),
-        source: "韓股自選資料",
-        contextKey: `kr:watchlist:${groupId}:daily-refresh`,
-        contextLabel: krWatchlistContextLabel,
-      });
-    }
-  }
-
-  useEffect(() => {
-    activeGroupIdRef.current = activeGroupId;
-  }, [activeGroupId]);
 
   useEffect(() => {
     radarModeRef.current = radarMode;
@@ -3369,46 +2959,6 @@ export default function MarketDashboardClient({
   useEffect(() => {
     krRadarModeRef.current = krRadarMode;
   }, [krRadarMode]);
-
-  useEffect(() => {
-    selectedUsGroupIdRef.current = selectedUsGroupId;
-  }, [selectedUsGroupId]);
-
-  useEffect(() => {
-    selectedJpGroupIdRef.current = selectedJpGroupId;
-  }, [selectedJpGroupId]);
-
-  useEffect(() => {
-    selectedKrGroupIdRef.current = selectedKrGroupId;
-  }, [selectedKrGroupId]);
-
-  useEffect(() => {
-    if (selectedUsGroupId === null) return;
-    if (activeMarket === "us") return;
-    if (initialUsWatchlistPreloadQueued.current) return;
-
-    initialUsWatchlistPreloadQueued.current = true;
-    const groupId = selectedUsGroupId;
-    const refreshTimer = window.setTimeout(() => {
-      void loadUsDashboard(groupId, usRankBy, { silent: true }).then(
-        (rankingData) => {
-          if (selectedUsGroupIdRef.current !== groupId) return;
-          if (rankingData?.is_current !== false) return;
-
-          void refreshUsWatchlistDailyPricesForFreshness(
-            groupId,
-            usRankBy,
-            rankingData.target_trade_date
-          );
-        }
-      );
-    }, 0);
-
-    return () => {
-      window.clearTimeout(refreshTimer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeMarket, selectedUsGroupId]);
 
   useEffect(() => {
     if (activeMarket !== "tw") return;
@@ -3491,312 +3041,6 @@ export default function MarketDashboardClient({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeMarket]);
 
-  useEffect(() => {
-    if (activeMarket !== "tw") return;
-    if (activeGroupId === null) return;
-
-    const groupId = activeGroupId;
-    let disposed = false;
-    let refreshTimer: number | undefined;
-
-    function clearRefreshTimer() {
-      if (refreshTimer !== undefined) {
-        window.clearTimeout(refreshTimer);
-        refreshTimer = undefined;
-      }
-    }
-
-    function scheduleRefresh() {
-      if (disposed) return;
-
-      const marketState = getTaiwanMarketRefreshState();
-
-      if (marketState.isPollingWindow) {
-        refreshTimer = window.setTimeout(() => {
-          void loadDashboard(groupId, rankBy, { silent: true }).finally(scheduleRefresh);
-        }, TAIWAN_INTRADAY_REFRESH_MS);
-        return;
-      }
-
-      if (
-        marketState.isAfterClose &&
-        finalDashboardRefreshDate.current !== marketState.dateKey
-      ) {
-        finalDashboardRefreshDate.current = marketState.dateKey;
-        refreshTimer = window.setTimeout(() => {
-          void loadDashboard(groupId, rankBy, { silent: true }).finally(scheduleRefresh);
-        }, 0);
-        return;
-      }
-
-      refreshTimer = window.setTimeout(
-        scheduleRefresh,
-        Math.min(marketState.msUntilNextPollingStart, 60_000)
-      );
-    }
-
-    const initialTimer = window.setTimeout(() => {
-      void loadDashboard(groupId, rankBy).finally(() => {
-        const marketState = getTaiwanMarketRefreshState();
-
-        if (marketState.isAfterClose) {
-          finalDashboardRefreshDate.current = marketState.dateKey;
-        }
-
-        scheduleRefresh();
-        void refreshWatchlistDailyPricesOnOpen(groupId, rankBy);
-      });
-    }, 120);
-
-    return () => {
-      disposed = true;
-      window.clearTimeout(initialTimer);
-      clearRefreshTimer();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeGroupId, activeMarket, rankBy]);
-
-  useEffect(() => {
-    if (activeMarket !== "tw") return;
-    if (activeGroupId === null) return;
-
-    const groupId = activeGroupId;
-    let disposed = false;
-    let refreshTimer: number | undefined;
-
-    function clearRefreshTimer() {
-      if (refreshTimer !== undefined) {
-        window.clearTimeout(refreshTimer);
-        refreshTimer = undefined;
-      }
-    }
-
-    function scheduleReleaseCheck(delay = getTaiwanWatchlistDailyReleaseCheckDelay()) {
-      if (disposed) return;
-
-      refreshTimer = window.setTimeout(() => {
-        void checkDailyPriceRelease().finally(() => {
-          if (!disposed) {
-            scheduleReleaseCheck();
-          }
-        });
-      }, delay);
-    }
-
-    async function checkDailyPriceRelease() {
-      try {
-        await refreshMarketCalendarStatus("tw");
-      } catch (error) {
-        console.warn("Taiwan calendar status refresh failed.", error);
-      }
-
-      if (disposed) return;
-
-      const marketState = getTaiwanMarketRefreshState();
-
-      if (marketState.isDailyPriceReleased) {
-        await refreshWatchlistDailyPricesOnOpen(groupId, rankBy);
-      }
-    }
-
-    scheduleReleaseCheck(0);
-
-    return () => {
-      disposed = true;
-      clearRefreshTimer();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeGroupId, activeMarket, rankBy]);
-
-  useEffect(() => {
-    if (activeMarket !== "tw") return;
-    if (activeGroupId === null) return;
-    if (!rankingFreshnessPending) return;
-
-    const refreshTimer = window.setTimeout(() => {
-      void refreshWatchlistDailyPricesOnOpen(activeGroupId, rankBy);
-    }, 0);
-
-    return () => {
-      window.clearTimeout(refreshTimer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    activeGroupId,
-    activeMarket,
-    rankBy,
-    ranking?.target_trade_date,
-    rankingFreshnessPending,
-  ]);
-
-  useEffect(() => {
-    if (activeMarket !== "us") return;
-    if (selectedUsGroupId === null) return;
-
-    const groupId = selectedUsGroupId;
-    let disposed = false;
-    let refreshTimer: number | undefined;
-
-    function clearRefreshTimer() {
-      if (refreshTimer !== undefined) {
-        window.clearTimeout(refreshTimer);
-        refreshTimer = undefined;
-      }
-    }
-
-    function scheduleRefresh() {
-      if (disposed) return;
-
-      const marketState = getUsMarketRefreshState();
-
-      if (marketState.isPollingWindow) {
-        refreshTimer = window.setTimeout(() => {
-          void loadUsDashboard(groupId, usRankBy, { silent: true }).finally(scheduleRefresh);
-        }, US_INTRADAY_REFRESH_MS);
-        return;
-      }
-
-      if (
-        marketState.isAfterClose &&
-        finalUsDashboardRefreshDate.current !== marketState.dateKey
-      ) {
-        finalUsDashboardRefreshDate.current = marketState.dateKey;
-        refreshTimer = window.setTimeout(() => {
-          void loadUsDashboard(groupId, usRankBy, { silent: true }).finally(scheduleRefresh);
-        }, 0);
-        return;
-      }
-
-      refreshTimer = window.setTimeout(
-        scheduleRefresh,
-        Math.min(marketState.msUntilNextPollingStart, 60_000)
-      );
-    }
-
-    const initialTimer = window.setTimeout(() => {
-      void loadUsDashboard(groupId, usRankBy).finally(() => {
-        const marketState = getUsMarketRefreshState();
-
-        if (marketState.isAfterClose) {
-          finalUsDashboardRefreshDate.current = marketState.dateKey;
-        }
-
-        scheduleRefresh();
-      });
-    }, 120);
-
-    return () => {
-      disposed = true;
-      window.clearTimeout(initialTimer);
-      clearRefreshTimer();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeMarket, selectedUsGroupId, usRankBy, usWatchlistVersion]);
-
-  useEffect(() => {
-    if (activeMarket !== "us") return;
-    if (selectedUsGroupId === null) return;
-    if (usRanking?.is_current !== false) return;
-
-    const refreshTimer = window.setTimeout(() => {
-      void refreshUsWatchlistDailyPricesForFreshness(
-        selectedUsGroupId,
-        usRankBy,
-        usRanking.target_trade_date
-      );
-    }, 0);
-
-    return () => {
-      window.clearTimeout(refreshTimer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    activeMarket,
-    selectedUsGroupId,
-    usRankBy,
-    usRanking?.is_current,
-    usRanking?.target_trade_date,
-  ]);
-
-  useEffect(() => {
-    if (activeMarket !== "jp") return;
-    if (selectedJpGroupId === null) return;
-
-    const groupId = selectedJpGroupId;
-    const refreshTimer = window.setTimeout(() => {
-      void loadJpDashboard(groupId, jpRankBy);
-    }, 120);
-
-    return () => {
-      window.clearTimeout(refreshTimer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeMarket, selectedJpGroupId, jpRankBy, jpDataRefreshNonce]);
-
-  useEffect(() => {
-    if (activeMarket !== "jp") return;
-    if (selectedJpGroupId === null) return;
-    if (jpRanking?.is_current !== false) return;
-
-    const refreshTimer = window.setTimeout(() => {
-      void refreshJpWatchlistDailyPricesForFreshness(
-        selectedJpGroupId,
-        jpRankBy,
-        jpRanking.target_trade_date
-      );
-    }, 0);
-
-    return () => {
-      window.clearTimeout(refreshTimer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    activeMarket,
-    selectedJpGroupId,
-    jpRankBy,
-    jpRanking?.is_current,
-    jpRanking?.target_trade_date,
-  ]);
-
-  useEffect(() => {
-    if (activeMarket !== "kr") return;
-    if (selectedKrGroupId === null) return;
-
-    const groupId = selectedKrGroupId;
-    const refreshTimer = window.setTimeout(() => {
-      void loadKrDashboard(groupId, krRankBy);
-    }, 120);
-
-    return () => {
-      window.clearTimeout(refreshTimer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeMarket, selectedKrGroupId, krRankBy, krDataRefreshNonce]);
-
-  useEffect(() => {
-    if (activeMarket !== "kr") return;
-    if (selectedKrGroupId === null) return;
-    if (krRanking?.is_current !== false) return;
-
-    const refreshTimer = window.setTimeout(() => {
-      void refreshKrWatchlistDailyPricesForFreshness(
-        selectedKrGroupId,
-        krRankBy,
-        krRanking.target_trade_date
-      );
-    }, 0);
-
-    return () => {
-      window.clearTimeout(refreshTimer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    activeMarket,
-    selectedKrGroupId,
-    krRankBy,
-    krRanking?.is_current,
-    krRanking?.target_trade_date,
-  ]);
 
   function addDashboardPreviewParam(params: DashboardHrefParams) {
     if (
@@ -3821,7 +3065,6 @@ export default function MarketDashboardClient({
 
   function handleMarketChange(market: MarketRegion) {
     setActiveMarket(market);
-    setUsErrorMessage(null);
     setTwChartFocusMode(false);
     setUsChartFocusMode(false);
     setJpChartFocusMode(false);
@@ -3892,9 +3135,8 @@ export default function MarketDashboardClient({
     if (group !== null) {
       setSelectedStockId(null);
       setSelectedStockName(null);
-      setRanking(null);
+      taiwanRankingActions.reset();
       setRadar(null);
-      setLoadState("idle");
       setRadarLoadState("idle");
       setRadarErrorMessage(null);
       setRadarOutcomeSummary(null);
@@ -3907,7 +3149,7 @@ export default function MarketDashboardClient({
       setSelectedRadarOutcomeSnapshotId(null);
       pushDashboardUrl({ market: "tw", groupId: group.id, radarMode });
     } else {
-      setRanking(null);
+      taiwanRankingActions.reset();
       setRadar(null);
       setRadarLoadState("idle");
       setRadarErrorMessage(null);
@@ -3952,11 +3194,9 @@ export default function MarketDashboardClient({
     setSelectedUsGroupName(group?.group_name ?? null);
     setSelectedUsSymbol(null);
     setSelectedUsSecurityName(null);
-    setUsRanking(null);
+    usRankingActions.reset();
     setUsRadar(null);
-    setUsLoadState("idle");
     setUsRadarLoadState("idle");
-    setUsErrorMessage(null);
     setUsRadarErrorMessage(null);
     setUsChartFocusMode(false);
     pushDashboardUrl({ market: "us", groupId: group?.id ?? null });
@@ -3968,7 +3208,6 @@ export default function MarketDashboardClient({
 
     setSelectedUsSymbol(normalizedSymbol);
     setSelectedUsSecurityName(securityName);
-    setUsErrorMessage(null);
     setUsChartFocusMode(false);
     pushDashboardUrl({ market: "us", symbol: normalizedSymbol });
   }
@@ -3979,11 +3218,9 @@ export default function MarketDashboardClient({
     setSelectedJpGroupName(group?.group_name ?? null);
     setSelectedJpSymbol(null);
     setSelectedJpStock(null);
-    setJpRanking(null);
+    jpRankingActions.reset();
     setJpRadar(null);
-    setJpLoadState("idle");
     setJpRadarLoadState("idle");
-    setJpErrorMessage(null);
     setJpRadarErrorMessage(null);
     setJpChartFocusMode(false);
     setJpStatusMessage(null);
@@ -4061,11 +3298,9 @@ export default function MarketDashboardClient({
     setSelectedKrGroupName(group?.group_name ?? null);
     setSelectedKrSymbol(null);
     setSelectedKrStock(null);
-    setKrRanking(null);
+    krRankingActions.reset();
     setKrRadar(null);
-    setKrLoadState("idle");
     setKrRadarLoadState("idle");
-    setKrErrorMessage(null);
     setKrRadarErrorMessage(null);
     pushDashboardUrl({ market: "kr", groupId: group?.id ?? null });
   }
@@ -4140,9 +3375,7 @@ export default function MarketDashboardClient({
   }
 
   function handleRankByChange(value: RankBy) {
-    setRankBy(value);
-    setRanking(null);
-    setLoadState("idle");
+    taiwanRankingActions.changeRankBy(value);
   }
 
   function handleRadarModeChange(value: WatchlistRadarMode) {
@@ -4204,24 +3437,15 @@ export default function MarketDashboardClient({
   }
 
   function handleUsRankByChange(value: string) {
-    setUsRankBy(value as USRankBy);
-    setUsRanking(null);
-    setUsLoadState("idle");
-    setUsErrorMessage(null);
+    usRankingActions.changeRankBy(value as USRankBy);
   }
 
   function handleJpRankByChange(value: string) {
-    setJpRankBy(value as JPRankBy);
-    setJpRanking(null);
-    setJpLoadState("idle");
-    setJpErrorMessage(null);
+    jpRankingActions.changeRankBy(value as JPRankBy);
   }
 
   function handleKrRankByChange(value: string) {
-    setKrRankBy(value as KRRankBy);
-    setKrRanking(null);
-    setKrLoadState("idle");
-    setKrErrorMessage(null);
+    krRankingActions.changeRankBy(value as KRRankBy);
   }
 
   function renderRankingRow(row: RankingItem) {
@@ -5073,7 +4297,7 @@ export default function MarketDashboardClient({
                 setUsRadar(null);
                 setUsRadarLoadState("idle");
                 setUsRadarErrorMessage(null);
-                setUsWatchlistVersion((version) => version + 1);
+                usRankingActions.notifyWatchlistChanged();
               }}
             />
           ) : activeMarket === "jp" ? (
@@ -5094,7 +4318,7 @@ export default function MarketDashboardClient({
                 setJpRadar(null);
                 setJpRadarLoadState("idle");
                 setJpRadarErrorMessage(null);
-                setJpDataRefreshNonce((value) => value + 1);
+                jpRankingActions.notifyDataChanged();
 
                 const nextSelectedGroup =
                   flattenJpGroups(nextTree).find((group) => group.id === selectedJpGroupId) ??
@@ -5138,7 +4362,7 @@ export default function MarketDashboardClient({
                 setKrRadar(null);
                 setKrRadarLoadState("idle");
                 setKrRadarErrorMessage(null);
-                setKrDataRefreshNonce((value) => value + 1);
+                krRankingActions.notifyDataChanged();
 
                 const nextSelectedGroup =
                   flattenKrGroups(nextTree).find((group) => group.id === selectedKrGroupId) ??
@@ -5248,7 +4472,7 @@ export default function MarketDashboardClient({
                 if (groupId !== null) {
                   void loadDashboard(groupId);
                 } else {
-                  setRanking(null);
+                  taiwanRankingActions.reset();
                   setRadar(null);
                   setRadarLoadState("idle");
                   setRadarErrorMessage(null);
