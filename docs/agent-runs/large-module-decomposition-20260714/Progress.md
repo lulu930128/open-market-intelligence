@@ -2,10 +2,10 @@
 
 ## 狀態
 
-- 目前階段：里程碑 5A（Lightweight chart interaction characterization）完成，進入 5B pure geometry／projection
+- 目前階段：里程碑 5B（Lightweight chart pure model／analytics／geometry／projection）完成，進入 5C interaction controller
 - 最後更新：2026-07-14
 - Implementation gate：已開啟
-- Commit 狀態：里程碑 0 baseline 已保存為 `cc2ce8d`；里程碑 1 已保存為 `2493387`；里程碑 2A 已保存並推送為 `88f9958`；里程碑 2B 已保存為 `12669e6`；里程碑 2C 已保存為 `ea8acf0`；里程碑 3 已保存並推送為 `13264f0`；里程碑 4A 已保存為 `b9a9596`；里程碑 4B 已保存為 `3773a8f`；里程碑 5A 將由本批 `test(frontend): characterize chart drawing interaction` 保存
+- Commit 狀態：里程碑 0 baseline 已保存為 `cc2ce8d`；里程碑 1 已保存為 `2493387`；里程碑 2A 已保存並推送為 `88f9958`；里程碑 2B 已保存為 `12669e6`；里程碑 2C 已保存為 `ea8acf0`；里程碑 3 已保存並推送為 `13264f0`；里程碑 4A 已保存為 `b9a9596`；里程碑 4B 已保存為 `3773a8f`；里程碑 5A 已保存為 `afc8bc2`；里程碑 5B 將由本批 `refactor(frontend): split lightweight chart projections` 保存
 
 ## 已完成
 
@@ -385,3 +385,39 @@ projection 檔案雖仍有 1,017 行，但內容是同一個無 side effect 的�
 
 - 本批只增加 observability 與 regression coverage，未改 chart engine、drawing geometry、API contract 或 persistence policy。
 - 下一步 5B 先把 `LightweightKLineChartDrawing.ts` 按 model／analytics／geometry 分層，保留原 compatibility import path，再處理 React interaction 與 chart instance lifecycle。
+
+## 2026-07-14 里程碑 5B：Pure model、analytics、geometry 與 projection
+
+### 已完成
+
+- `LightweightKLineChartDrawing.ts` 由 2,824 行縮為 3 行 compatibility barrel，既有 public export 與 consumer import path 保持不變。
+- drawing contract 分為 `drawingModel.ts`（types、defaults、time／format contract）、`drawingAnalytics.ts`（line／zone／Fibonacci／AVWAP／volume-profile evidence）與 `drawingGeometry.ts`（screen-space hit testing、ray／rectangle／drag geometry）。
+- `LightweightKLineChartIndicators.ts` 由 1,583 行縮為 2 行 compatibility barrel；公式移入 `indicatorMath.ts`，lightweight-charts series payload 與 visible-range helper 移入 `indicatorSeriesProjection.ts`。
+- implementation modules 直接依賴下層 model，不反向 import compatibility barrel；未建立 React、DOM、chart instance 或 API side effect。
+- 以 Git baseline 逐字比對五個搬移區塊，model、analytics、geometry、indicator math 與 series projection 全部一致。
+
+### Ownership 指標
+
+| 模組 | 拆分前 | 拆分後 |
+| --- | ---: | ---: |
+| `LightweightKLineChartDrawing.ts` | 2,824 | 3 |
+| `LightweightKLineChartIndicators.ts` | 1,583 | 2 |
+| drawing model | 混合 | 1,200 |
+| drawing analytics | 混合 | 1,387 |
+| drawing geometry | 混合 | 282 |
+| indicator math | 混合 | 1,184 |
+| indicator series projection | 混合 | 444 |
+
+analytics 與 math 仍是中大型純模組，但各自只有單一數值領域、沒有 state 或 side effect；目前再依單一公式切碎不會增加 ownership 清晰度。
+
+### 驗證證據
+
+- `npm exec tsc -- --noEmit --incremental false`：通過。
+- compatibility barrels 與五個新模組 targeted ESLint：通過，0 warning / 0 error。
+- Git baseline 逐字比對：五個搬移區塊全部一致。
+- 專業圖表 targeted Playwright：index shell、drawing persistence、pointer create/undo 3/3 通過。
+
+### 風險與下一步
+
+- 本批未改公式、drawing evidence、coordinate geometry、public exports、chart lifecycle、pointer state 或可見 UI。
+- 下一步 5C 建立 drawing interaction controller；hit testing 只依賴 `drawingGeometry.ts`，hook 不建立 lightweight-charts instance，也不負責 persistence。
