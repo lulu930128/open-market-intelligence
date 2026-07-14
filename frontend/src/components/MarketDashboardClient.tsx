@@ -924,9 +924,13 @@ export default function MarketDashboardClient({
   }
 
   function onUsGroupChange(group: USWatchlistGroupNode | null) {
+    const groupChanged = (group?.id ?? null) !== selectedUsGroupId;
+
     marketSelection.selectUsGroup(group, regionalRadarRouteMode(usRadarMode));
-    usRankingActions.reset();
-    usRadarActions.reset();
+    if (groupChanged) {
+      usRankingActions.reset();
+      usRadarActions.reset();
+    }
     setUsChartFocusMode(false);
   }
 
@@ -940,9 +944,13 @@ export default function MarketDashboardClient({
   }
 
   function onJpGroupChange(group: JPWatchlistGroupNode | null) {
+    const groupChanged = (group?.id ?? null) !== selectedJpGroupId;
+
     marketSelection.selectJpGroup(group, regionalRadarRouteMode(jpRadarMode));
-    jpRankingActions.reset();
-    jpRadarActions.reset();
+    if (groupChanged) {
+      jpRankingActions.reset();
+      jpRadarActions.reset();
+    }
     setJpChartFocusMode(false);
     setJpStatusMessage(null);
   }
@@ -966,9 +974,13 @@ export default function MarketDashboardClient({
   }
 
   function onKrGroupChange(group: KRWatchlistGroupNode | null) {
+    const groupChanged = (group?.id ?? null) !== selectedKrGroupId;
+
     marketSelection.selectKrGroup(group, regionalRadarRouteMode(krRadarMode));
-    krRankingActions.reset();
-    krRadarActions.reset();
+    if (groupChanged) {
+      krRankingActions.reset();
+      krRadarActions.reset();
+    }
   }
 
   function onKrSymbolChange(symbol: string, securityName: string | null) {

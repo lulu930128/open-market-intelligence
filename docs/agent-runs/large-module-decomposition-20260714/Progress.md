@@ -481,3 +481,41 @@ engine hook 雖為中大型檔案，但內容是單一 imperative chart lifecycl
 
 - 本批未修改 indicator formula、series options、pane order、visible-range policy、drawing API、SVG 樣式或使用者操作文案。
 - 下一步 5E 將 drawing SVG node tree 抽成 presentation component；它只接收 projected drawings 與 event callbacks，不讀 chart instance 或 API。
+
+## 2026-07-14 里程碑 5E：drawing presentation 與完整回歸
+
+### 已完成
+
+- 新增 `ChartDrawingLayer.tsx`，統一擁有 projected drawings、draft、snap marker、selection badge 與 SVG event binding 的 presentation。
+- `ChartDrawingLayer` 只接收 projection 結果、顏色、目前工具與 callbacks；不持有 chart instance、不發 API request，也不管理 drawing persistence。
+- `LightweightKLineChart.tsx` 收斂為資料投影、engine、interaction 與 presentation 的 composition root，由 5A 前約 4,497 行降至 1,870 行。
+- 將抽取前後完整 drawing SVG node tree 正規化後逐字比對：51,769 characters，SHA-256 均為 `66CD6403EF4522D9A568F33E5504FF637038F7A25C7EC58F0706B08F12059289`。
+- 完整 E2E 發現區域市場已選分組被再次點擊時會重設 ranking request sequence，造成 in-flight response 永久失效；US／JP／KR selection handler 改為只有 group id 真正變更時才 reset ranking/radar state。
+
+### Ownership 指標
+
+| 指標 | 5A 前 | 5E 後 |
+| --- | ---: | ---: |
+| `LightweightKLineChart.tsx` 行數 | 約 4,497 | 1,870 |
+| drawing interaction owner | 主元件 | `useChartDrawingInteraction.ts`（820 行） |
+| chart lifecycle owner | 主元件 | `useLightweightChartEngine.ts`（933 行） |
+| drawing SVG presentation owner | 主元件 | `ChartDrawingLayer.tsx`（1,228 行） |
+
+這些 owner 檔案仍偏長，但各自只有一個可命名的變更理由。繼續依函式數量機械拆分，會讓 pointer state、imperative chart refs 或 SVG branch 在多個 owner 間往返，反而增加 race 與行為漂移風險。
+
+### 驗證證據
+
+- Targeted ESLint、完整 `npm run lint`：通過，0 warning / 0 error。
+- `npm exec tsc -- --noEmit --incremental false`：通過。
+- `npm run build`：Next.js 16.2.6 production build 通過，6/6 pages generated。
+- 專業圖表 targeted Playwright：3/3 通過。
+- 日本排序失敗在修正前以單 worker 重複 3 次皆可重現，修正後重複 3 次皆通過。
+- 完整 Playwright suite：23/23 通過。
+- 實際瀏覽器：桌面 1,096 x 768 與手機 390 x 844 viewport 均有非空 canvas/SVG 渲染；手機圖表寬 346px，horizontal overflow 為 0。
+- 桌面圖表截圖 entropy 2.6548；手機可見圖表 crop entropy 2.9719，RGB channels 均有 0-255 variation，排除空白 canvas。
+- `git diff --check`：通過；僅有既有 Git line-ending 提示。
+
+### 風險與下一步
+
+- 本批未改 indicator formula、drawing analytics、series options、drawing API contract、persistence debounce 或 visible-range policy。
+- 里程碑 5 的 lightweight chart 大檔拆分完成。下一步重新掃描 tracked production files，依責任混雜程度排序後端里程碑 6-8，不再以行數作為唯一拆分條件。
