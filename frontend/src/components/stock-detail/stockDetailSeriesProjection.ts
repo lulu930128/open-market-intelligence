@@ -1,20 +1,24 @@
 import {
-  buildEarningsSeries,
-  buildRevenueSeries,
+  formatPeriodLabel,
+  toRevenueYi,
+} from "@/components/stock-detail/stockDetailFormatters";
+import {
   shareholdingLevelRanges,
-} from "@/components/stock-detail/StockDetailDataViews";
+  type EarningsSeriesPoint,
+  type EarningsView,
+  type InstitutionalSeriesPoint,
+  type RevenueSeriesPoint,
+  type RevenueView,
+  type ShareholdingSeriesPoint,
+} from "@/components/stock-detail/stockDetailTypes";
 import type {
-  InstitutionalSeriesPoint,
-  ShareholdingSeriesPoint,
-} from "@/components/stock-detail/StockDetailDataViews";
-import type {
+  FinancialMetricQuarterlyRead,
   InstitutionalTradeDailyRead,
   MarginTradingDailyRead,
+  MonthlyRevenueRead,
   ShareholdingDistributionWeeklyRead,
   StockIndicatorPoint,
 } from "@/types/market";
-
-export { buildEarningsSeries, buildRevenueSeries };
 
 export type ShareholdingSeriesInput = {
   indicatorData: StockIndicatorPoint[];
@@ -184,4 +188,170 @@ export function buildChipDateGroups(
   return Array.from(groups.values()).sort((left, right) =>
     right.tradeDate.localeCompare(left.tradeDate)
   );
+}
+
+export function quarterFromMonth(month: number) {
+  return Math.floor((month - 1) / 3) + 1;
+}
+
+export function revenueGrowth(current: number | null, previous: number | null) {
+  if (
+    current === null ||
+    previous === null ||
+    previous === 0 ||
+    Number.isNaN(current) ||
+    Number.isNaN(previous)
+  ) {
+    return null;
+  }
+
+  return ((current - previous) / previous) * 100;
+}
+
+export function buildRevenueSeries(rows: MonthlyRevenueRead[], view: RevenueView) {
+  const sortedRows = rows
+    .slice()
+    .sort((a, b) => a.period.localeCompare(b.period));
+
+  if (view === "monthly") {
+    return sortedRows.map<RevenueSeriesPoint>((row) => ({
+      period: row.period,
+      label: formatPeriodLabel(row.period),
+      year: Number(row.period.slice(0, 4)),
+      revenue: toRevenueYi(row.monthly_revenue),
+      previousRevenue: toRevenueYi(row.previous_year_month_revenue),
+      growthPct: row.year_over_year_pct,
+      cumulativeRevenue: toRevenueYi(row.cumulative_revenue),
+      cumulativeGrowthPct: row.cumulative_year_over_year_pct,
+      monthCount: 1,
+    }));
+  }
+
+  const groups = new Map<
+    string,
+    {
+      year: number;
+      quarter: number | null;
+      revenue: number;
+      previousRevenue: number;
+      monthCount: number;
+      lastPeriod: string;
+    }
+  >();
+
+  sortedRows.forEach((row) => {
+    const year = Number(row.period.slice(0, 4));
+    const month = Number(row.period.slice(5, 7));
+    const quarter = quarterFromMonth(month);
+    const key = view === "quarterly" ? `${year}-Q${quarter}` : String(year);
+    const current = groups.get(key) ?? {
+      year,
+      quarter: view === "quarterly" ? quarter : null,
+      revenue: 0,
+      previousRevenue: 0,
+      monthCount: 0,
+      lastPeriod: row.period,
+    };
+
+    current.revenue += toRevenueYi(row.monthly_revenue) ?? 0;
+    current.previousRevenue += toRevenueYi(row.previous_year_month_revenue) ?? 0;
+    current.monthCount += row.monthly_revenue === null || row.monthly_revenue === undefined ? 0 : 1;
+    current.lastPeriod = row.period;
+    groups.set(key, current);
+  });
+
+  return Array.from(groups.entries()).map<RevenueSeriesPoint>(([key, group]) => {
+    const previousRevenue = group.previousRevenue || null;
+    const revenue = group.monthCount ? group.revenue : null;
+
+    return {
+      period: key,
+      label: key,
+      year: group.year,
+      revenue,
+      previousRevenue,
+      growthPct: revenueGrowth(revenue, previousRevenue),
+      cumulativeRevenue: null,
+      cumulativeGrowthPct: null,
+      monthCount: group.monthCount,
+    };
+  });
+}
+
+export function buildEarningsSeries(rows: FinancialMetricQuarterlyRead[], view: EarningsView) {
+  const sortedRows = rows
+    .slice()
+    .sort((a, b) => a.fiscal_year - b.fiscal_year || a.quarter - b.quarter);
+
+  if (view === "quarterly") {
+    const byPeriod = new Map(sortedRows.map((row) => [row.period, row]));
+
+    return sortedRows.map<EarningsSeriesPoint>((row) => {
+      const previous = byPeriod.get(`${row.fiscal_year - 1}Q${row.quarter}`);
+
+      return {
+        period: row.period,
+        label: row.period,
+        fiscalYear: row.fiscal_year,
+        quarter: row.quarter,
+        eps: row.eps,
+        previousEps: previous?.eps ?? null,
+        growthPct: revenueGrowth(row.eps, previous?.eps ?? null),
+        roe: row.roe,
+        roa: row.roa,
+        periodCount: 1,
+      };
+    });
+  }
+
+  const groups = new Map<
+    number,
+    {
+      eps: number;
+      previousEps: number;
+      periodCount: number;
+      roe: number | null;
+      roa: number | null;
+    }
+  >();
+  const rowsByYear = new Map<number, FinancialMetricQuarterlyRead[]>();
+
+  sortedRows.forEach((row) => {
+    const list = rowsByYear.get(row.fiscal_year) ?? [];
+    list.push(row);
+    rowsByYear.set(row.fiscal_year, list);
+  });
+
+  Array.from(rowsByYear.entries()).forEach(([year, yearRows]) => {
+    const previousRows = rowsByYear.get(year - 1) ?? [];
+    const quarterSet = new Set(yearRows.map((row) => row.quarter));
+    const previousComparableRows = previousRows.filter((row) => quarterSet.has(row.quarter));
+    const latestRow = yearRows[yearRows.length - 1];
+
+    groups.set(year, {
+      eps: yearRows.reduce((sum, row) => sum + (row.eps ?? 0), 0),
+      previousEps: previousComparableRows.reduce((sum, row) => sum + (row.eps ?? 0), 0),
+      periodCount: yearRows.filter((row) => row.eps !== null && row.eps !== undefined).length,
+      roe: latestRow?.roe ?? null,
+      roa: latestRow?.roa ?? null,
+    });
+  });
+
+  return Array.from(groups.entries()).map<EarningsSeriesPoint>(([year, group]) => {
+    const eps = group.periodCount ? group.eps : null;
+    const previousEps = group.previousEps || null;
+
+    return {
+      period: String(year),
+      label: String(year),
+      fiscalYear: year,
+      quarter: null,
+      eps,
+      previousEps,
+      growthPct: revenueGrowth(eps, previousEps),
+      roe: group.roe,
+      roa: group.roa,
+      periodCount: group.periodCount,
+    };
+  });
 }

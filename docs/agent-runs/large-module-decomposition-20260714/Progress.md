@@ -2,10 +2,10 @@
 
 ## 狀態
 
-- 目前階段：里程碑 3（StockDetail 資料與 side-effect ownership）實作完成，完整 frontend gate 通過
+- 目前階段：里程碑 4A（StockDetail presentation collections）實作完成，準備進入 4B StockKLineChart
 - 最後更新：2026-07-14
 - Implementation gate：已開啟
-- Commit 狀態：里程碑 0 baseline 已保存為 `cc2ce8d`；里程碑 1 已保存為 `2493387`；里程碑 2A 已保存並推送為 `88f9958`；里程碑 2B 已保存為 `12669e6`；里程碑 2C 已保存為 `ea8acf0`；里程碑 3 將由本批 `refactor(frontend): extract stock detail ownership` 保存
+- Commit 狀態：里程碑 0 baseline 已保存為 `cc2ce8d`；里程碑 1 已保存為 `2493387`；里程碑 2A 已保存並推送為 `88f9958`；里程碑 2B 已保存為 `12669e6`；里程碑 2C 已保存為 `ea8acf0`；里程碑 3 已保存並推送為 `13264f0`；里程碑 4A 將由本批 `refactor(frontend): split stock detail view domains` 保存
 
 ## 已完成
 
@@ -292,3 +292,40 @@ Radar hooks 行數：約 `useTaiwanRadarState.ts` 430、`useRegionalRadarState.t
 - `useTaiwanDataPanel.ts` 與 `useTaiwanStockChartData.ts` 仍屬中大型 state owner；目前各自只有單一 lifecycle boundary，後續應依修改熱點與測試證據再評估，不按行數拆成薄函式檔。
 - `StockDetailDataViews.tsx` 仍是大型 presentation collection；里程碑 4 應按 index、technical、revenue/earnings、shareholding/institutional view domain 拆分並保留 compatibility exports。
 - 下一步進入里程碑 4 前，先保存本批獨立 commit；不要把 chart engine interaction migration 混入同一 commit。
+
+## 2026-07-14 里程碑 4A：StockDetail presentation collections
+
+### 已完成
+
+- 將 `StockDetailDataViews.tsx` 由 3,351 行實作集合縮成 14 行 compatibility barrel，既有 consumer import path 與 export names 保持不變。
+- 新增 `stockDetailTypes.ts`、`stockDetailFormatters.ts`、`stockDetailAnalytics.ts` 與 `stockDetailDataAccess.ts`，建立 types/constants、format/job wording、純市場衍生與 optional API 的單向基礎層。
+- 將 technical、overnight、index、data panel primitives 分別移入 `TechnicalDataViews.tsx`、`OvernightDataViews.tsx`、`IndexDataViews.tsx`、`DataPanelPrimitives.tsx`。
+- 將 SVG 共用座標、path、tooltip 與 nearest-point helper 移入無 React state 的 `stockDetailChartGeometry.ts`。
+- 將營收／獲利圖表移入 `FundamentalCharts.tsx`，股權／法人圖表移入 `ChipCharts.tsx`；兩者只接收 projected series 與 UI callbacks。
+- `stockDetailSeriesProjection.ts` 現在直接擁有 revenue/earnings/shareholding/institutional projection，不再從舊大檔轉手 re-export。
+- 新模組不 import compatibility barrel；barrel 只向下 re-export，避免形成循環 implementation dependency。
+
+### Ownership 指標
+
+| 指標 | 里程碑 4A 前 | 里程碑 4A 後 |
+| --- | ---: | ---: |
+| `StockDetailDataViews.tsx` 行數 | 3,351 | 14 |
+| 最大 presentation domain | 單檔 3,351 | `ChipCharts.tsx` 642 |
+| compatibility consumer path | 既有 | 保留 |
+| Playwright cases | 22 | 22 |
+
+其餘主要模組：`IndexDataViews.tsx` 531 行、formatters 424 行、technical views 407 行、fundamental charts 387 行、series projection 357 行。這些邊界按可獨立理解與測試的 view/data domain 建立，不按單一 component 或函式任意碎切。
+
+### 驗證證據
+
+- 新增 domain modules targeted ESLint：通過，0 warning / 0 error。
+- `npm exec tsc -- --noEmit --incremental false`：通過。
+- `npm run lint`：通過，0 warning / 0 error。
+- `npm run build`：Next.js 16.2.6 production build 通過，6/6 pages generated。
+- StockDetail targeted Playwright：4/4 通過。
+- `PLAYWRIGHT_REUSE_EXISTING_SERVER=1 npm run test:e2e`：22/22 通過；沿用既有 `3000` dev server。
+
+### 風險與下一步
+
+- 本批只移動 presentation、format/projection ownership；未修改 API、資料 shape、freshness、refresh job、SQLite 或 visible UX。
+- 下一批 4B 處理 `StockKLineChart.tsx` 的 indicator catalog 與純計算，不改 chart interaction、K 線可視範圍或 SVG layout。
