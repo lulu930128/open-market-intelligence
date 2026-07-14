@@ -2,10 +2,10 @@
 
 ## 狀態
 
-- 目前階段：里程碑 2B（Radar state ownership）實作完成，完整 frontend gate 通過
+- 目前階段：里程碑 2C（Market tape、formatting 與 OMI context）實作完成，完整 frontend gate 通過
 - 最後更新：2026-07-14
 - Implementation gate：已開啟
-- Commit 狀態：里程碑 0 baseline 已保存為 `cc2ce8d`；里程碑 1 已保存為 `2493387`；里程碑 2A 已保存並推送為 `88f9958`；里程碑 2B 尚未提交
+- Commit 狀態：里程碑 0 baseline 已保存為 `cc2ce8d`；里程碑 1 已保存為 `2493387`；里程碑 2A 已保存並推送為 `88f9958`；里程碑 2B 已保存為 `12669e6`；里程碑 2C 尚未提交
 
 ## 已完成
 
@@ -69,9 +69,9 @@
 
 ## 已知風險
 
-- 里程碑 2B 目前仍是未提交工作樹，進入里程碑 2C 前應建立可獨立回退的 commit boundary。
+- 里程碑 2C 目前仍是未提交工作樹，進入里程碑 3A 前應建立可獨立回退的 commit boundary。
 - Browser characterization 已覆蓋 visible loaded/empty/error/reload/stale 行為；Taiwan daily-release timer 與 regional freshness nonce 尚無 fake-clock/unit-level coverage，仍依既有 integration path 與 request guard。
-- `MarketDashboardClient.tsx` 仍有 3,697 行；selection/URL 與 radar 已移交，market tape 與 OMI context ownership 尚待里程碑 2C。
+- `MarketDashboardClient.tsx` 已降至 1,837 行且不再擁有 effect/ref/API transport；剩餘主要是四市場 ranking/radar composition、sidebar 與 active detail panel wiring，後續不應只為行數拆碎。
 - JP/KR hooks 有刻意保留的相似 transition；在 parity coverage 足夠前抽 shared core 仍可能隱藏市場差異。
 - Chart、StockDetail 與 backend facade 尚未開始，本批驗證不能外推到後續里程碑。
 
@@ -188,5 +188,55 @@ Radar hooks 行數：約 `useTaiwanRadarState.ts` 430、`useRegionalRadarState.t
 ### 風險與下一步
 
 - 本批未修改 backend daily snapshot scheduler、外部 provider、SQLite schema 或本機市場資料。
-- 里程碑 2B 應先建立獨立 commit boundary，再進入 2C。
-- 里程碑 2C 抽離 market tape transport/state 與 OMI context projection；不把 detail panel 或純 formatting 混入同一批 ownership migration。
+- 里程碑 2B 已保存為 `12669e6 refactor(frontend): extract radar state ownership`。
+- 里程碑 2C 抽離 market tape transport/state 與 OMI context projection；未把 detail panel 混入同一批 ownership migration。
+
+## 2026-07-14 里程碑 2C：Market tape、formatting 與 OMI context
+
+### 已完成
+
+- 新增 `useTaiwanMarketTapeState.ts`，接管台股指數 summary、request sequence、交易時段 polling、每日 market-chip refresh、localStorage guard 與錯誤 callback。
+- 新增 `useRegionalMarketTapeState.ts`，以已有相同行為證據的 polling core 接管 US/JP/KR tape；各市場仍保留自己的 index resolver、endpoint、query、session cadence、breadth 與 intraday fallback。
+- 新增 `MarketTapePanels.tsx`，集中四市場純 presentation；元件不直接 fetch、不保存 timer，也不重新判定 freshness policy。
+- 新增 `dashboardFormatters.ts` 與 `rankingPresentation.tsx`，抽離 number/time/tone、freshness label、rank/status/trend 與 sparkline projection。
+- 新增純 `buildOmiAskContext.ts`，投影 TW stock/index/futures/watchlist、US、JP 與 KR target/ui context；不自行 fetch 或推論資料新鮮度。
+- 新增 `useDashboardRuntime.ts`，接管全域 market calendar polling 與 resource background quote subscription；維持原 interval、visibility、request dedupe 與 silent-failure 行為。
+- `MarketDashboardClient.tsx` 不再直接呼叫 dashboard market API，不持有 request sequence、timer、`useEffect` 或 `useRef`；只保留 selection/ranking/radar hook composition、可見錯誤文案與 active panel wiring。
+
+### Characterization 與 regression
+
+- 擴充 market tape mock，可按 market/kind/target/request number 精準延遲、失敗或回傳自訂 payload；未知 route 仍 fail-fast。
+- 新增 OMI context case，鎖定 TAIEX 為 `tw_index`、KOSDAQ 為 `kr_index`，並驗證對應 `ui_context`。
+- 新增 Taiwan summary race case：較舊首請求在 manual reload 後完成時不得覆寫新 summary。
+- 新增 US tape query/cancellation case：鎖定 daily `bars=60`、`ensure_history=true`、`outputsize=compact`、`provider=yahoo_chart` 與 intraday request；舊 context failure 不得污染新選擇。
+- 新增 US unmount/remount case：第一次載入失敗後，離開再返回市場必須重新載入並恢復成功。
+
+### Ownership 指標
+
+| 指標 | 里程碑 2B 後 | 里程碑 2C 後 | 變化 |
+| --- | ---: | ---: | ---: |
+| `MarketDashboardClient.tsx` 行數 | 3,697 | 1,837 | -1,860 |
+| Dashboard `useState` 呼叫 | 22 | 13 | -9 |
+| Dashboard `useEffect` 呼叫 | 8 | 0 | -8 |
+| Dashboard `useRef` 呼叫 | 3 | 0 | -3 |
+| Dashboard 直接 market API/job 呼叫 | 有 | 0 | 全部移交 |
+| Production Playwright cases | 15 | 19 | +4 |
+
+新 ownership modules 行數：約 `MarketTapePanels.tsx` 544、`useRegionalMarketTapeState.ts` 516、`useTaiwanMarketTapeState.ts` 222、`useDashboardRuntime.ts` 192、`buildOmiAskContext.ts` 262、`rankingPresentation.tsx` 322。行數不是完成條件；檢查重點是 transport/state、純投影與 presentation 不再互相重做責任。
+
+### 驗證證據
+
+- Targeted ESLint（Dashboard、tape/runtime hooks、presentation、OMI builder、E2E fixture）：通過。
+- `npm exec tsc -- --noEmit --incremental false`：通過。
+- `npm run lint`：通過，0 warning / 0 error。
+- `npm run build`：Next.js 16.2.6 production build 通過，6/6 pages generated。
+- 2C targeted production Playwright 四案各 repeat 3 次：12/12 通過。
+- `PLAYWRIGHT_SERVER_MODE=production npm run test:e2e`：19/19 通過。
+- Production E2E 使用隔離的 `3102`、`3103`、`3104` standalone servers；完成後 listener 均已釋放，未停止既有偏好 port runtime。
+
+### 風險與下一步
+
+- 本批未修改 backend、API response shape、SQLite、refresh cadence 或 visible information architecture。
+- `MarketTapePanels.tsx` 刻意保留為同層級 presentation collection；四個 component 沒有 transport/state，現階段再拆成四個薄檔案不會改善 ownership。
+- 台股 daily-release/calendar timer 尚無 fake-clock unit test；本批維持既有 integration contract，並以 request race、完整 E2E 與 cleanup review 驗證。
+- 里程碑 2C 應先建立獨立 commit boundary，再開始 3A；下一步先補 `StockDetailPanel` characterization，不直接搬約 392 行 chart load effect。

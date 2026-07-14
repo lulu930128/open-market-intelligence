@@ -497,6 +497,50 @@ function calendarStatus() {
   };
 }
 
+function marketIndexSummaryResponse(close: number) {
+  const previousClose = close - 10;
+
+  return {
+    as_of: "2026-06-15T09:30:00+08:00",
+    source: "playwright.fixture",
+    indices: [
+      {
+        index_id: "TAIEX",
+        label: "加權指數",
+        short_label: "TAIEX",
+        market: "TWSE",
+        symbol: "TAIEX",
+        source: "playwright.fixture",
+        as_of: "2026-06-15T09:30:00+08:00",
+        time: "2026-06-15T09:30:00+08:00",
+        open: previousClose,
+        high: close + 5,
+        low: previousClose - 5,
+        close,
+        previous_close: previousClose,
+        change: 10,
+        change_pct: (10 / previousClose) * 100,
+        volume: 1_200_000,
+        estimated_volume: null,
+        trade_value: 120_000_000_000,
+        estimated_trade_value: null,
+        ma20: close - 20,
+        price_vs_ma20: 1.2,
+        point_count: 60,
+        points: [],
+        breadth: {
+          advance_count: 600,
+          decline_count: 220,
+          unchanged_count: 80,
+          total_count: 900,
+          trade_value: 120_000_000_000,
+        },
+        error_message: null,
+      },
+    ],
+  };
+}
+
 function emptyRadarResponse(path: string, mode = "action") {
   const groupId = Number(path.match(/groups\/(\d+)\/radar/)?.[1] ?? 0);
   const market = path.includes("/us-market/")
@@ -1045,6 +1089,17 @@ type MockOmiApiOptions = {
     | Promise<{ body: unknown; delayMs?: number; status?: number } | null>
     | { body: unknown; delayMs?: number; status?: number }
     | null;
+  marketTapeResponder?: (context: {
+    market: "tw" | "us" | "jp" | "kr";
+    kind: "summary" | "ohlc" | "intraday" | "breadth";
+    target: string;
+    requestNumber: number;
+    url: URL;
+  }) =>
+    | Promise<{ body: unknown; delayMs?: number; status?: number } | null>
+    | { body: unknown; delayMs?: number; status?: number }
+    | null;
+  omiAskRequests?: unknown[];
   taiwanRadarOutcomeLatest?: unknown;
   taiwanRadarOutcomeHistory?: unknown[];
   taiwanRadarOutcomeEvaluation?: unknown;
@@ -1066,12 +1121,45 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
   const krRankingRows = options.krRankingRows ?? [];
   const regionalRankingRequestCounts = { us: 0, jp: 0, kr: 0 };
   const radarRequestCounts = { tw: 0, us: 0, jp: 0, kr: 0 };
+  const marketTapeRequestCounts = new Map<string, number>();
+
+  async function tryFulfillMarketTape(
+    route: Route,
+    url: URL,
+    market: "tw" | "us" | "jp" | "kr",
+    kind: "summary" | "ohlc" | "intraday" | "breadth",
+    target: string
+  ) {
+    const key = `${market}:${kind}:${target}`;
+    const requestNumber = (marketTapeRequestCounts.get(key) ?? 0) + 1;
+    marketTapeRequestCounts.set(key, requestNumber);
+    const customResponse = await options.marketTapeResponder?.({
+      market,
+      kind,
+      target,
+      requestNumber,
+      url,
+    });
+
+    if (!customResponse) return false;
+
+    if (customResponse.delayMs) {
+      await new Promise((resolve) => setTimeout(resolve, customResponse.delayMs));
+    }
+    await route.fulfill({
+      status: customResponse.status ?? 200,
+      contentType: "application/json",
+      body: JSON.stringify(customResponse.body),
+    });
+    return true;
+  }
 
   await page.route("**/omi-data/**", async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
 
     if (path.endsWith("/ai/ask/stream")) {
+      options.omiAskRequests?.push(route.request().postDataJSON());
       await fulfillOmiStream(route);
       return;
     }
@@ -1082,22 +1170,8 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
     }
 
     if (path.includes("/market/indices/summary")) {
-      await fulfillJson(route, {
-        as_of: "2026-06-15T09:30:00+08:00",
-        indices: [
-          {
-            index_id: "TAIEX",
-            name: "加權指數",
-            close: 861,
-            change: 12,
-            change_pct: 1.4,
-            volume: 1_200_000,
-            advancers: 600,
-            decliners: 220,
-            market_breadth_pct: 72,
-          },
-        ],
-      });
+      if (await tryFulfillMarketTape(route, url, "tw", "summary", "summary")) return;
+      await fulfillJson(route, marketIndexSummaryResponse(861));
       return;
     }
 
@@ -1163,12 +1237,14 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
 
     if (/\/us-market\/ohlc\//.test(path)) {
       const symbol = decodeURIComponent(path.split("/").at(-1) ?? "SPY");
+      if (await tryFulfillMarketTape(route, url, "us", "ohlc", symbol)) return;
       await fulfillJson(route, usOhlcResponse(symbol));
       return;
     }
 
     if (/\/us-market\/intraday\//.test(path)) {
       const symbol = decodeURIComponent(path.split("/").at(-1) ?? "SPY");
+      if (await tryFulfillMarketTape(route, url, "us", "intraday", symbol)) return;
       await fulfillJson(route, usIntradayResponse(symbol));
       return;
     }
@@ -1231,12 +1307,14 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
 
     if (/\/jp-market\/ohlc\//.test(path)) {
       const symbol = decodeURIComponent(path.split("/").at(-1) ?? "^N225");
+      if (await tryFulfillMarketTape(route, url, "jp", "ohlc", symbol)) return;
       await fulfillJson(route, regionalOhlcResponse(symbol));
       return;
     }
 
     if (/\/jp-market\/intraday\//.test(path)) {
       const symbol = decodeURIComponent(path.split("/").at(-1) ?? "^N225");
+      if (await tryFulfillMarketTape(route, url, "jp", "intraday", symbol)) return;
       await fulfillJson(route, regionalIntradayResponse(symbol));
       return;
     }
@@ -1347,6 +1425,7 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
     const krIndexOhlcMatch = path.match(/\/kr-market\/indices\/([^/]+)\/ohlc$/);
     if (krIndexOhlcMatch) {
       const indexId = decodeURIComponent(krIndexOhlcMatch[1]);
+      if (await tryFulfillMarketTape(route, url, "kr", "ohlc", indexId)) return;
       await fulfillJson(route, krIndexOhlcResponse(indexId));
       return;
     }
@@ -1360,6 +1439,7 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
     const krIndexIntradayMatch = path.match(/\/kr-market\/indices\/([^/]+)\/intraday$/);
     if (krIndexIntradayMatch) {
       const indexId = decodeURIComponent(krIndexIntradayMatch[1]);
+      if (await tryFulfillMarketTape(route, url, "kr", "intraday", indexId)) return;
       await fulfillJson(route, regionalIntradayResponse(indexId));
       return;
     }
@@ -1367,6 +1447,7 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
     const krIndexBreadthMatch = path.match(/\/kr-market\/indices\/([^/]+)\/breadth$/);
     if (krIndexBreadthMatch) {
       const indexId = decodeURIComponent(krIndexBreadthMatch[1]);
+      if (await tryFulfillMarketTape(route, url, "kr", "breadth", indexId)) return;
       await fulfillJson(route, krIndexBreadthResponse(indexId));
       return;
     }
@@ -1395,6 +1476,30 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
           last_seen_at: item.updated_at,
           created_at: item.created_at,
           updated_at: item.updated_at,
+        });
+        return;
+      }
+      if (["KOSPI", "KOSDAQ", "KOSPI200"].includes(symbol)) {
+        const timestamp = "2026-06-15T09:30:00+09:00";
+        await fulfillJson(route, {
+          id: 0,
+          symbol,
+          local_code: symbol,
+          security_name: symbol === "KOSDAQ" ? "KOSDAQ Composite" : symbol,
+          security_name_kr: null,
+          exchange: "KRX",
+          market_segment: symbol === "KOSDAQ" ? "KOSDAQ" : "KOSPI",
+          sector: null,
+          industry: null,
+          asset_type: "index",
+          listing_source: "playwright.fixture",
+          currency: "KRW",
+          exchange_timezone_name: "Asia/Seoul",
+          is_active: true,
+          first_seen_at: timestamp,
+          last_seen_at: timestamp,
+          created_at: timestamp,
+          updated_at: timestamp,
         });
         return;
       }
@@ -1855,6 +1960,211 @@ test.describe("OMI dashboard smoke", () => {
 
     await expect(page.getByText("測試回答：目前偏多但等待確認")).toBeVisible();
     await expect(page.getByRole("button", { name: "查看 OMI 處理訊號" })).toContainText("完成");
+  });
+
+  test("OMI context payload follows Taiwan and Korea index selection", async ({ page }) => {
+    const omiAskRequests: unknown[] = [];
+    await mockOmiApi(page, {
+      omiAskRequests,
+      krWatchlistTree: seededKrWatchlistTree(),
+      krWatchlistItems: seededKrWatchlistItems(),
+      krRankingRows: seededKrRankingRows(),
+    });
+
+    async function askCurrentContext(question: string) {
+      await page.getByRole("button", { name: "開啟 OMI 即時問答" }).click();
+      await page.getByPlaceholder("輸入問題...").fill(question);
+      await page.getByRole("button", { name: "送出" }).click();
+      await expect(page.getByText("測試回答：目前偏多但等待確認")).toBeVisible();
+    }
+
+    await page.goto("/?stock_id=TAIEX", { waitUntil: "domcontentloaded" });
+    await askCurrentContext("台股指數目前狀態？");
+
+    await page.goto("/?market=kr&kr_symbol=KOSDAQ", {
+      waitUntil: "domcontentloaded",
+    });
+    await askCurrentContext("韓股指數目前狀態？");
+
+    expect(omiAskRequests).toHaveLength(2);
+    expect(omiAskRequests[0]).toMatchObject({
+      target: {
+        type: "tw_index",
+        id: "TAIEX",
+        market: "TW",
+      },
+      conversation_context: {
+        ui_context: {
+          market: "tw",
+          selected_index_id: "TAIEX",
+        },
+      },
+    });
+    expect(omiAskRequests[1]).toMatchObject({
+      target: {
+        type: "kr_index",
+        id: "KOSDAQ",
+        market: "KR",
+      },
+      conversation_context: {
+        ui_context: {
+          market: "kr",
+          selected_symbol: "KOSDAQ",
+        },
+      },
+    });
+  });
+
+  test("Taiwan market tape ignores an older summary after manual reload", async ({ page }) => {
+    let resolveFirstSummaryStarted!: () => void;
+    let releaseFirstSummary!: () => void;
+    const firstSummaryStarted = new Promise<void>((resolve) => {
+      resolveFirstSummaryStarted = resolve;
+    });
+    const firstSummaryResponse = new Promise<{
+      body: unknown;
+      status: number;
+    }>((resolve) => {
+      releaseFirstSummary = () =>
+        resolve({ body: marketIndexSummaryResponse(1_111), status: 200 });
+    });
+
+    await mockOmiApi(page, {
+      taiwanWatchlistTree: seededTaiwanWatchlistTree(),
+      taiwanWatchlistItems: seededTaiwanWatchlistItems(),
+      taiwanRankingRows: seededTaiwanRankingRows(),
+      marketTapeResponder: ({ market, kind, requestNumber }) => {
+        if (market !== "tw" || kind !== "summary") return null;
+        if (requestNumber === 1) {
+          resolveFirstSummaryStarted();
+          return firstSummaryResponse;
+        }
+        if (requestNumber === 2) {
+          return { body: marketIndexSummaryResponse(2_222), status: 200 };
+        }
+        return null;
+      },
+    });
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await firstSummaryStarted;
+
+    await page.locator('[data-watchlist-group-id="7"]').click();
+    const dashboardReload = page.getByTestId("watchlist-ranking-reload");
+    await expect(dashboardReload).toBeEnabled();
+    await dashboardReload.click();
+
+    const tape = page.getByTestId("market-tape-tw");
+    await expect(tape).toHaveAttribute("data-load-state", "success");
+    await expect(tape).toContainText("2,222");
+
+    releaseFirstSummary();
+    await page.waitForTimeout(100);
+    await expect(tape).toHaveAttribute("data-load-state", "success");
+    await expect(tape).toContainText("2,222");
+    await expect(tape).not.toContainText("1,111");
+  });
+
+  test("US market tape preserves request params and ignores a stale context failure", async ({
+    page,
+  }) => {
+    const tapeCalls: Array<{
+      market: string;
+      kind: string;
+      target: string;
+      requestNumber: number;
+      url: URL;
+    }> = [];
+    let resolveStaleRequestStarted!: () => void;
+    let releaseStaleRequest!: () => void;
+    const staleRequestStarted = new Promise<void>((resolve) => {
+      resolveStaleRequestStarted = resolve;
+    });
+    const staleResponse = new Promise<{
+      body: unknown;
+      status: number;
+    }>((resolve) => {
+      releaseStaleRequest = () =>
+        resolve({ body: { detail: "stale context failure" }, status: 500 });
+    });
+
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(),
+      usWatchlistItems: seededUsWatchlistItems(),
+      usRankingRows: seededUsRankingRows(),
+      marketTapeResponder: (context) => {
+        tapeCalls.push(context);
+        if (
+          context.market === "us" &&
+          context.kind === "ohlc" &&
+          context.target === "^IXIC" &&
+          context.requestNumber === 1
+        ) {
+          resolveStaleRequestStarted();
+          return staleResponse;
+        }
+        return null;
+      },
+    });
+    await page.goto("/?market=us&group_id=17&symbol=AAPL", {
+      waitUntil: "domcontentloaded",
+    });
+    await staleRequestStarted;
+
+    await page.getByText("美股指數", { exact: true }).click();
+    await page.getByRole("button", { name: /DJI 道瓊指數/ }).click();
+    expect(new URL(page.url()).searchParams.get("symbol")).toBe("^DJI");
+
+    const tape = page.getByTestId("market-tape-us");
+    await expect(tape).toHaveAttribute("data-load-state", "success");
+    await expect(tape.getByText("道瓊指數", { exact: true })).toBeVisible();
+
+    releaseStaleRequest();
+    await page.waitForTimeout(100);
+    await expect(tape).toHaveAttribute("data-load-state", "success");
+    await expect(tape.getByText("道瓊指數", { exact: true })).toBeVisible();
+
+    const djiOhlc = tapeCalls.find(
+      (call) => call.market === "us" && call.kind === "ohlc" && call.target === "^DJI"
+    );
+    expect(djiOhlc).toBeDefined();
+    expect(djiOhlc?.url.searchParams.get("timeframe")).toBe("daily");
+    expect(djiOhlc?.url.searchParams.get("bars")).toBe("60");
+    expect(djiOhlc?.url.searchParams.get("ensure_history")).toBe("true");
+    expect(djiOhlc?.url.searchParams.get("outputsize")).toBe("compact");
+    expect(djiOhlc?.url.searchParams.get("provider")).toBe("yahoo_chart");
+    expect(
+      tapeCalls.some(
+        (call) => call.market === "us" && call.kind === "intraday" && call.target === "^DJI"
+      )
+    ).toBe(true);
+  });
+
+  test("US market tape reloads after leaving and returning to the market", async ({ page }) => {
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(),
+      usWatchlistItems: seededUsWatchlistItems(),
+      marketTapeResponder: ({ market, kind, target, requestNumber }) => {
+        if (
+          market === "us" &&
+          kind === "ohlc" &&
+          target === "^GSPC" &&
+          requestNumber === 1
+        ) {
+          return { body: { detail: "initial market tape failure" }, status: 500 };
+        }
+        return null;
+      },
+    });
+    await page.goto("/?market=us", { waitUntil: "domcontentloaded" });
+
+    const tape = page.getByTestId("market-tape-us");
+    await expect(tape).toHaveAttribute("data-load-state", "error");
+
+    await page.getByRole("link", { name: "台股", exact: true }).click();
+    await page.getByRole("link", { name: "美股", exact: true }).click();
+
+    await expect(tape).toHaveAttribute("data-load-state", "success");
+    await expect(tape.getByText("S&P 500", { exact: true })).toBeVisible();
   });
 
   test("Taiwan index professional chart shell renders", async ({ page }) => {

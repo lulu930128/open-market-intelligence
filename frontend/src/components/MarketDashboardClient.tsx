@@ -10,7 +10,7 @@ import {
   LoadingDots,
   StateSurface,
 } from "@/components/LoadingPlaceholders";
-import OmiAskDock, { type OmiAskDockContext } from "@/components/OmiAskDock";
+import OmiAskDock from "@/components/OmiAskDock";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
 import ResourceMarketPanel from "@/components/ResourceMarketPanel";
 import StockDetailPanel from "@/components/StockDetailPanel";
@@ -24,6 +24,24 @@ import {
   WatchlistRankingPanel,
   type RankingDisplayRow,
 } from "@/components/market-dashboard/WatchlistRankingPanel";
+import {
+  formatPct,
+  formatPrice,
+  formatRowTime,
+  formatWholeNumber,
+  valueTone,
+} from "@/components/market-dashboard/dashboardFormatters";
+import { buildOmiAskContext } from "@/components/market-dashboard/omi/buildOmiAskContext";
+import {
+  RankingSparkline,
+  USRankingSparkline,
+  formatLots,
+  formatWatchlistFreshnessLabel,
+  rankLabel,
+  statusLabel,
+  trendClass,
+  trendLabel,
+} from "@/components/market-dashboard/ranking/rankingPresentation";
 import {
   buildJpWatchlistRows,
   buildKrWatchlistRows,
@@ -62,87 +80,41 @@ import {
   useTaiwanRadarState,
   type TaiwanRadarErrorKind,
 } from "@/components/market-dashboard/radar/useTaiwanRadarState";
-import { fetchJson, requestJson } from "@/lib/api";
+import { useDashboardRuntime } from "@/components/market-dashboard/runtime/useDashboardRuntime";
 import {
   normalizeDashboardRadarMode,
   type MarketRegion,
 } from "@/components/market-dashboard/selection/dashboardRoutes";
 import { useMarketSelection } from "@/components/market-dashboard/selection/useMarketSelection";
 import {
+  JPMarketTape,
+  KRMarketTape,
+  TaiwanMarketTape,
+  USMarketTape,
+} from "@/components/market-dashboard/tape/MarketTapePanels";
+import {
+  useTaiwanMarketTapeState,
+  type TaiwanMarketTapeErrorKind,
+} from "@/components/market-dashboard/tape/useTaiwanMarketTapeState";
+import {
   emitDataStatusEvent,
   type DataStatusLevel,
   type DataStatusMarket,
 } from "@/lib/dataStatusEvents";
-import { getJobResultStatus, requestBackfillJob } from "@/lib/jobs";
-import {
-  MARKET_DATA_SUBSCRIPTIONS_UPDATED_EVENT,
-  loadMarketDataSubscriptionSettings,
-  resourceBackgroundQuoteIntervalSeconds,
-  resourceSubscriptionAllowsQuotePolling,
-  type MarketDataSubscriptionSettingsRead,
-} from "@/lib/marketDataSubscriptions";
-import {
-  refreshMarketCalendarStatus,
-} from "@/lib/marketCalendarStatus";
 import { useRefreshExecutionSettings } from "@/lib/refreshExecutionSettings";
-import {
-  TAIWAN_INTRADAY_REFRESH_MS,
-  getTaiwanIntradayXRatio,
-  getTaiwanMarketChipRefreshState,
-  getTaiwanMarketRefreshState,
-  isTaiwanRegularSessionPoint,
-} from "@/lib/taiwanMarketTime";
-import {
-  US_INTRADAY_REFRESH_MS,
-  getUsIntradayXRatio,
-  getUsMarketRefreshState,
-  isUsRegularSessionPoint,
-} from "@/lib/usMarketTime";
-import {
-  getUsPrimaryMarketIndexConfig,
-  resolveUsContextIndexConfig,
-  getUsMarketIndexConfig,
-  type USMarketIndexConfig,
-} from "@/lib/usMarketIndices";
-import {
-  getJpMarketIndexConfig,
-  getJpPrimaryMarketIndexConfig,
-  resolveJpContextIndexConfig,
-  type JPMarketIndexConfig,
-} from "@/lib/jpMarketIndices";
-import {
-  getKrMarketIndexConfig,
-  getKrPrimaryMarketIndexConfig,
-  resolveKrContextIndexConfig,
-  type KRMarketIndexConfig,
-} from "@/lib/krMarketIndices";
-import {
-  rankByLabel,
-  rowStatusLabel,
-  trendDirectionLabel,
-  usAssetTypeLabel,
-  useT,
-  type TranslationFunction,
-} from "@/i18n";
-import {
-  resourceSymbolFromKey,
-  type ResourceRefreshResult,
-} from "@/types/resourceMarket";
+import { getUsMarketIndexConfig } from "@/lib/usMarketIndices";
+import { getJpMarketIndexConfig } from "@/lib/jpMarketIndices";
+import { usAssetTypeLabel, useT } from "@/i18n";
 import type {
   ChartPoint,
-  IntradayTrendResponse,
   JPStockMasterRead,
-  JPOhlcChartRead,
   JPWatchlistGroupNode,
   JPWatchlistItemRead,
   JPWatchlistRankingItemRead,
-  KRIndexOhlcChartRead,
-  KRMarketBreadthRead,
   KRStockMasterRead,
   KRWatchlistGroupNode,
   KRWatchlistItemRead,
   KRWatchlistRankingItemRead,
-  MarketIndexSnapshot,
   MarketIndexSummary,
   OhlcIntradayOverlay,
   RankingItem,
@@ -150,7 +122,6 @@ import type {
   StockIndicatorPoint,
   TaiwanStockQuoteDepthPreviewMode,
   USCompanyProfileRead,
-  USOhlcChartRead,
   USWatchlistGroupNode,
   USWatchlistItemRead,
   USWatchlistRankingItemRead,
@@ -159,7 +130,7 @@ import type {
   WatchlistItemRead,
   WatchlistRadarMode,
 } from "@/types/market";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
 type JPStatusMessage = { type: "success" | "warning" | "error"; text: string } | null;
@@ -167,67 +138,9 @@ type RankBy = TaiwanRankBy;
 type USRankBy = UsRankBy;
 type JPRankBy = JpRankBy;
 type KRRankBy = KrRankBy;
-const MARKET_CHIP_REFRESH_STORAGE_PREFIX = "omi:market-chip-refresh";
-const TAIWAN_INDEX_TARGET_IDS = new Set(["TAIEX", "TPEX"]);
 
 function regionalRadarRouteMode(mode: WatchlistRadarMode) {
   return mode === "action" ? null : mode;
-}
-
-function marketChipRefreshStorageKey(dateKey: string) {
-  return `${MARKET_CHIP_REFRESH_STORAGE_PREFIX}:${dateKey}`;
-}
-
-function isStoredMarketChipRefreshDone(dateKey: string) {
-  try {
-    return window.localStorage.getItem(marketChipRefreshStorageKey(dateKey)) === "done";
-  } catch {
-    return false;
-  }
-}
-
-function markStoredMarketChipRefreshDone(dateKey: string) {
-  try {
-    window.localStorage.setItem(marketChipRefreshStorageKey(dateKey), "done");
-  } catch {
-    // Ignore storage failures; job dedupe still prevents active duplicates.
-  }
-}
-
-type ResourceBackgroundPollingGroup = {
-  intervalSeconds: number;
-  symbols: string[];
-  key: string;
-};
-
-function resourceBackgroundQuotePollingGroups(
-  settings: MarketDataSubscriptionSettingsRead | null,
-  selectedResourceInstrumentKey: string | null
-) {
-  if (!settings) return [];
-
-  const groups = new Map<number, Set<string>>();
-  for (const item of settings.items) {
-    if (!resourceSubscriptionAllowsQuotePolling(item)) continue;
-    if (item.key === selectedResourceInstrumentKey) continue;
-
-    const symbol = resourceSymbolFromKey(item.key);
-    if (!symbol) continue;
-
-    const intervalSeconds = resourceBackgroundQuoteIntervalSeconds(item);
-    if (!groups.has(intervalSeconds)) {
-      groups.set(intervalSeconds, new Set());
-    }
-    groups.get(intervalSeconds)?.add(symbol);
-  }
-
-  return Array.from(groups.entries())
-    .map<ResourceBackgroundPollingGroup>(([intervalSeconds, symbols]) => ({
-      intervalSeconds,
-      symbols: Array.from(symbols).sort(),
-      key: `${intervalSeconds}:${Array.from(symbols).sort().join(",")}`,
-    }))
-    .sort((left, right) => left.intervalSeconds - right.intervalSeconds);
 }
 
 function apiErrorMessage(error: unknown, fallback: string) {
@@ -313,1384 +226,6 @@ function isKrRankingItemPending(row: KRWatchlistRankingItemRead) {
   return row.status === "pending";
 }
 
-function formatWatchlistFreshnessLabel(
-  t: TranslationFunction,
-  marketLabel: string,
-  targetDate: string | null | undefined,
-  staleCount: number | null | undefined,
-  requestedCount: number | null | undefined
-) {
-  const dateText = targetDate
-    ? t("dashboard.freshness.waitingMarketDate", { targetDate, marketLabel })
-    : t("dashboard.freshness.waitingMarket", { marketLabel });
-
-  if (
-    staleCount !== null &&
-    staleCount !== undefined &&
-    requestedCount !== null &&
-    requestedCount !== undefined &&
-    requestedCount > 0
-  ) {
-    return t("dashboard.freshness.pendingBackfill", {
-      dateText,
-      staleCount,
-      requestedCount,
-    });
-  }
-
-  return dateText;
-}
-
-function formatLots(value: number | null | undefined) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "-";
-  return new Intl.NumberFormat("zh-TW").format(Math.round(value / 1000));
-}
-
-function formatWholeNumber(value: number | null | undefined) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "-";
-  return new Intl.NumberFormat("en-US").format(Math.round(value));
-}
-
-function formatPrice(value: number | null | undefined) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "-";
-
-  return value.toLocaleString("zh-TW", {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 2,
-  });
-}
-
-function formatSignedNumber(value: number | null | undefined) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "-";
-  const sign = value > 0 ? "+" : "";
-
-  return `${sign}${value.toLocaleString("zh-TW", {
-    maximumFractionDigits: 2,
-  })}`;
-}
-
-function formatPct(value: number | null | undefined) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "-";
-  const sign = value > 0 ? "+" : "";
-  return `${sign}${value.toFixed(2)}%`;
-}
-
-function formatTradeValueYi(value: number | null | undefined) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "-";
-
-  return (value / 100_000_000).toLocaleString("zh-TW", {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 1,
-  });
-}
-
-function valueTone(value: number | null | undefined) {
-  if (value === null || value === undefined) return "text-omi-text-muted";
-  if (value > 0) return "text-omi-market-up";
-  if (value < 0) return "text-omi-market-down";
-  return "text-omi-text";
-}
-
-function statusLabel(t: TranslationFunction, status: string) {
-  if (status === "pending") return "-";
-  return rowStatusLabel(t, status);
-}
-
-function rankLabel(t: TranslationFunction, rankBy: string) {
-  return rankByLabel(t, rankBy);
-}
-
-function trendLabel(
-  t: TranslationFunction,
-  value: number | null | undefined,
-  limitStatus?: RankingItem["limit_status"]
-) {
-  if (limitStatus === "limit_up") return t("statusLabels.limitUp");
-  if (limitStatus === "limit_down") return t("statusLabels.limitDown");
-  return trendDirectionLabel(t, value);
-}
-
-function trendClass(
-  value: number | null | undefined,
-  limitStatus?: RankingItem["limit_status"]
-) {
-  if (limitStatus === "limit_up") return "omi-ranking-trend-limit-up";
-  if (limitStatus === "limit_down") return "omi-ranking-trend-limit-down";
-  if (value === null || value === undefined || Number.isNaN(value)) {
-    return "omi-ranking-trend-neutral";
-  }
-  if (value > 0) return "omi-ranking-trend-up";
-  if (value < 0) return "omi-ranking-trend-down";
-  return "omi-ranking-trend-neutral";
-}
-
-function sparklineTone(
-  latestPrice: number | null,
-  previousClose: number | null,
-  selected: boolean
-) {
-  if (latestPrice === null || previousClose === null || previousClose === 0) {
-    return selected ? "stroke-omi-text-inverse-muted" : "stroke-omi-text-subtle";
-  }
-
-  if (latestPrice > previousClose) return "stroke-omi-market-up";
-  if (latestPrice < previousClose) return "stroke-omi-market-down";
-  return selected ? "stroke-omi-text-inverse-muted" : "stroke-omi-text-subtle";
-}
-
-function formatRowTime(value: string | null | undefined) {
-  if (!value) return null;
-
-  const date = new Date(value);
-
-  if (Number.isNaN(date.getTime()) || !value.includes("T")) return value;
-
-  const parts = Object.fromEntries(
-    new Intl.DateTimeFormat("en-CA", {
-      timeZone: "Asia/Taipei",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-    })
-      .formatToParts(date)
-      .map((part) => [part.type, part.value])
-  );
-
-  return `${parts.month}/${parts.day} ${parts.hour}:${parts.minute}`;
-}
-
-function formatDashboardTime(value: Date) {
-  const parts = Object.fromEntries(
-    new Intl.DateTimeFormat("en-CA", {
-      timeZone: "Asia/Taipei",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false,
-    })
-      .formatToParts(value)
-      .map((part) => [part.type, part.value])
-  );
-
-  return `${parts.year}/${parts.month}/${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
-}
-
-function buildSparklinePath(
-  points: Array<{ time: string; price: number }>,
-  previousClose: number | null,
-  getXRatio: (value: string | Date) => number = getTaiwanIntradayXRatio
-) {
-  const width = 92;
-  const height = 28;
-  const paddingX = 2;
-  const paddingY = 4;
-  const usableWidth = width - paddingX * 2;
-  const usableHeight = height - paddingY * 2;
-  const prices = [
-    ...points.map((point) => point.price),
-    ...(previousClose !== null ? [previousClose] : []),
-  ];
-  const minPrice = Math.min(...prices);
-  const maxPrice = Math.max(...prices);
-  const range = maxPrice - minPrice || Math.max(maxPrice * 0.01, 1);
-  const yMin = minPrice - range * 0.08;
-  const yMax = maxPrice + range * 0.08;
-  const yRange = yMax - yMin || 1;
-  const path = points
-    .map((point, index) => {
-      const x = paddingX + getXRatio(point.time) * usableWidth;
-      const y = paddingY + ((yMax - point.price) / yRange) * usableHeight;
-
-      return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
-    })
-    .join(" ");
-  const previousCloseY =
-    previousClose === null
-      ? null
-      : paddingY + ((yMax - previousClose) / yRange) * usableHeight;
-  const latestPoint = points[points.length - 1];
-  const latestPointX = paddingX + getXRatio(latestPoint.time) * usableWidth;
-  const latestPointY = paddingY + ((yMax - latestPoint.price) / yRange) * usableHeight;
-
-  return { path, previousCloseY, latestPointX, latestPointY, width, height };
-}
-
-function sparklinePointTone(
-  latestPrice: number | null,
-  previousClose: number | null,
-  selected: boolean
-) {
-  if (latestPrice !== null && previousClose !== null && previousClose !== 0) {
-    if (latestPrice > previousClose) {
-      return {
-        core: selected ? "fill-omi-market-up-border" : "fill-omi-market-up",
-        ring: selected ? "stroke-omi-market-up-border" : "stroke-omi-market-up",
-      };
-    }
-
-    if (latestPrice < previousClose) {
-      return {
-        core: selected ? "fill-omi-market-down-border" : "fill-omi-market-down",
-        ring: selected ? "stroke-omi-market-down-border" : "stroke-omi-market-down",
-      };
-    }
-  }
-
-  return {
-    core: selected ? "fill-omi-text-inverse-muted" : "fill-omi-text-subtle",
-    ring: selected ? "stroke-omi-text-inverse-muted" : "stroke-omi-text-inverse-muted",
-  };
-}
-
-function RankingSparkline({
-  row,
-  selected,
-}: {
-  row: RankingItem;
-  selected: boolean;
-}) {
-  const t = useT();
-  const points = (row.intraday_points ?? []).filter((point) => {
-    return (
-      point.time &&
-      point.price !== null &&
-      point.price !== undefined &&
-      !Number.isNaN(point.price) &&
-      isTaiwanRegularSessionPoint(point.time)
-    );
-  });
-
-  if (points.length < 2) {
-    return (
-      <span className="text-center text-xs text-omi-text-subtle">
-        -
-      </span>
-    );
-  }
-
-  const previousClose = row.intraday_previous_close ?? null;
-  const latestPrice = points[points.length - 1]?.price ?? null;
-  const chart = buildSparklinePath(points, previousClose);
-  const latestPoint = points[points.length - 1];
-  const pointTone = sparklinePointTone(latestPrice, previousClose, selected);
-
-  return (
-    <svg
-      viewBox={`0 0 ${chart.width} ${chart.height}`}
-      className="h-8 w-[92px]"
-      aria-label={t("dashboard.marketIndex.intradayTrend")}
-    >
-      <rect width={chart.width} height={chart.height} fill="transparent" />
-      {chart.previousCloseY !== null ? (
-        <line
-          x1="2"
-          x2={chart.width - 2}
-          y1={chart.previousCloseY}
-          y2={chart.previousCloseY}
-          className={selected ? "stroke-omi-text-inverse-subtle" : "stroke-omi-border-subtle"}
-          strokeDasharray="3 3"
-        />
-      ) : null}
-      <path
-        d={chart.path}
-        fill="none"
-        strokeWidth="1.8"
-        className={sparklineTone(latestPrice, previousClose, selected)}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <g
-        key={`${latestPoint.time}-${latestPoint.price}`}
-        className="omi-live-sparkline-point"
-        pointerEvents="none"
-      >
-        <circle
-          cx={chart.latestPointX}
-          cy={chart.latestPointY}
-          r="5.5"
-          className={`omi-live-point-ring ${pointTone.ring}`}
-        />
-        <circle
-          cx={chart.latestPointX}
-          cy={chart.latestPointY}
-          r="2.2"
-          className={`omi-live-point-core ${pointTone.core}`}
-        />
-      </g>
-    </svg>
-  );
-}
-
-function USRankingSparkline({
-  row,
-  selected,
-}: {
-  row: USWatchlistRankingItemRead;
-  selected: boolean;
-}) {
-  const t = useT();
-  const points = (row.intraday_points ?? []).filter((point) => {
-    return (
-      point.time &&
-      point.price !== null &&
-      point.price !== undefined &&
-      !Number.isNaN(point.price) &&
-      isUsRegularSessionPoint(point.time)
-    );
-  });
-
-  if (points.length < 2) {
-    return (
-      <span className="text-center text-xs text-omi-text-subtle">
-        {row.time ? t("statusLabels.intraday") : "-"}
-      </span>
-    );
-  }
-
-  const previousClose = row.intraday_previous_close ?? null;
-  const latestPrice = points[points.length - 1]?.price ?? null;
-  const chart = buildSparklinePath(points, previousClose, getUsIntradayXRatio);
-  const latestPoint = points[points.length - 1];
-  const pointTone = sparklinePointTone(latestPrice, previousClose, selected);
-
-  return (
-    <svg
-      viewBox={`0 0 ${chart.width} ${chart.height}`}
-      className="h-8 w-[92px]"
-      aria-label="US intraday trend"
-    >
-      <rect width={chart.width} height={chart.height} fill="transparent" />
-      {chart.previousCloseY !== null ? (
-        <line
-          x1="2"
-          x2={chart.width - 2}
-          y1={chart.previousCloseY}
-          y2={chart.previousCloseY}
-          className={selected ? "stroke-omi-text-inverse-subtle" : "stroke-omi-border-subtle"}
-          strokeDasharray="3 3"
-        />
-      ) : null}
-      <path
-        d={chart.path}
-        fill="none"
-        strokeWidth="1.8"
-        className={sparklineTone(latestPrice, previousClose, selected)}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <g
-        key={`${latestPoint.time}-${latestPoint.price}`}
-        className="omi-live-sparkline-point"
-        pointerEvents="none"
-      >
-        <circle
-          cx={chart.latestPointX}
-          cy={chart.latestPointY}
-          r="5.5"
-          className={`omi-live-point-ring ${pointTone.ring}`}
-        />
-        <circle
-          cx={chart.latestPointX}
-          cy={chart.latestPointY}
-          r="2.2"
-          className={`omi-live-point-core ${pointTone.core}`}
-        />
-      </g>
-    </svg>
-  );
-}
-
-function marketRegimeLabel(t: TranslationFunction, index: MarketIndexSnapshot) {
-  if (index.close === null || index.close === undefined) return t("dashboard.marketIndex.insufficient");
-  if (index.price_vs_ma20 !== null && index.price_vs_ma20 !== undefined) {
-    if (index.price_vs_ma20 > 1) return t("dashboard.marketIndex.aboveMa20");
-    if (index.price_vs_ma20 < -1) return t("dashboard.marketIndex.belowMa20");
-  }
-
-  if (index.change_pct !== null && index.change_pct !== undefined) {
-    if (index.change_pct > 0) return t("dashboard.marketIndex.bullishShort");
-    if (index.change_pct < 0) return t("dashboard.marketIndex.weakShort");
-  }
-
-  return t("dashboard.marketIndex.neutral");
-}
-
-function MarketTape({
-  summary,
-  loadState,
-}: {
-  summary: MarketIndexSummary | null;
-  loadState: LoadState;
-}) {
-  const t = useT();
-  const indices = summary?.indices ?? [];
-  const asOf = summary?.as_of ? formatDashboardTime(new Date(summary.as_of)) : null;
-
-  return (
-    <section className="mb-3 border border-omi-border-subtle bg-omi-surface">
-      <div className="grid gap-px bg-omi-surface-strong lg:grid-cols-2">
-        {indices.length > 0 ? (
-          indices.map((index) => {
-            const breadth = index.breadth;
-            const advanceRatio =
-              breadth && breadth.total_count > 0
-                ? (breadth.advance_count / breadth.total_count) * 100
-                : null;
-
-            return (
-              <div key={index.index_id} className="bg-omi-surface px-4 py-3">
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <div className="text-xs font-semibold uppercase tracking-[0.16em] text-omi-text-muted">
-                      {t("app.market")}
-                    </div>
-                    <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                      <span className="text-lg font-bold text-omi-text-strong">{index.label}</span>
-                      <span className="text-2xl font-black text-omi-text-strong">
-                        {formatPrice(index.close)}
-                      </span>
-                      <span className={`text-sm font-bold ${valueTone(index.change_pct)}`}>
-                        {formatSignedNumber(index.change)} / {formatPct(index.change_pct)}
-                      </span>
-                    </div>
-                  </div>
-                  <div className="text-right text-xs">
-                    <div className="font-semibold text-omi-text">{marketRegimeLabel(t, index)}</div>
-                    <div className={valueTone(index.price_vs_ma20)}>
-                      {formatPct(index.price_vs_ma20)} vs MA20
-                    </div>
-                  </div>
-                </div>
-
-                <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
-                  <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-                    <div className="text-omi-text-muted">{t("dashboard.marketIndex.tradeValueYi")}</div>
-                    <div className="mt-1 font-semibold text-omi-text">
-                      {formatTradeValueYi(index.trade_value)}
-                    </div>
-                  </div>
-                  <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-                    <div className="text-omi-text-muted">{t("dashboard.marketIndex.advanceDecline")}</div>
-                    <div className="mt-1 font-semibold">
-                      <span className="text-omi-market-up">{breadth?.advance_count ?? "-"}</span>
-                      <span className="px-1 text-omi-text-subtle">/</span>
-                      <span className="text-omi-market-down">{breadth?.decline_count ?? "-"}</span>
-                    </div>
-                  </div>
-                  <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-                    <div className="text-omi-text-muted">{t("dashboard.marketIndex.breadth")}</div>
-                    <div className={`mt-1 font-semibold ${valueTone((advanceRatio ?? 50) - 50)}`}>
-                      {advanceRatio === null
-                        ? "-"
-                        : t("dashboard.marketIndex.advancePct", {
-                            value: advanceRatio.toFixed(0),
-                          })}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            );
-          })
-        ) : (
-          <StateSurface
-            title={
-              loadState === "loading"
-                ? t("dashboard.marketIndex.loading")
-                : t("dashboard.marketIndex.empty")
-            }
-            tone={loadState === "loading" ? "loading" : "empty"}
-            busy={loadState === "loading"}
-            compact
-            className="m-3 lg:col-span-2"
-          />
-        )}
-      </div>
-      <div className="border-t border-omi-border-subtle px-4 py-2 text-xs text-omi-text-muted">
-        {asOf
-          ? t("dashboard.marketIndex.updated", { asOf })
-          : t("dashboard.marketIndex.waiting")}
-      </div>
-    </section>
-  );
-}
-
-type USMarketTapeSnapshot = {
-  symbol: string;
-  displaySymbol: string;
-  name: string;
-  exchange: string;
-  note: string;
-  close: number | null;
-  change: number | null;
-  changePct: number | null;
-  priceVsMa20: number | null;
-  volume: number | null;
-  pointCount: number;
-  asOf: string | null;
-  source: "intraday" | "daily";
-};
-
-function averageLastNumbers(values: Array<number | null | undefined>, windowSize: number) {
-  const validValues = values
-    .filter((value): value is number => {
-      return value !== null && value !== undefined && !Number.isNaN(value);
-    })
-    .slice(-windowSize);
-
-  if (!validValues.length) return null;
-
-  return validValues.reduce((total, value) => total + value, 0) / validValues.length;
-}
-
-function sumUsIntradayVolume(points: IntradayTrendResponse["points"]) {
-  const regularVolumes = points
-    .filter((point) => isUsRegularSessionPoint(point.time))
-    .map((point) => point.volume)
-    .filter((value): value is number => {
-      return value !== null && value !== undefined && !Number.isNaN(value) && value > 0;
-    });
-
-  if (!regularVolumes.length) return null;
-
-  return regularVolumes.reduce((total, value) => total + value, 0);
-}
-
-function usMarketRegimeLabel(
-  t: TranslationFunction,
-  snapshot:
-    | {
-        close: number | null;
-        priceVsMa20: number | null;
-        changePct: number | null;
-      }
-    | null
-    | undefined
-) {
-  if (!snapshot || snapshot.close === null) return t("dashboard.marketIndex.insufficient");
-  if (snapshot.priceVsMa20 !== null) {
-    if (snapshot.priceVsMa20 > 1) return t("dashboard.marketIndex.aboveMa20");
-    if (snapshot.priceVsMa20 < -1) return t("dashboard.marketIndex.belowMa20");
-  }
-
-  if (snapshot.changePct !== null) {
-    if (snapshot.changePct > 0) return t("dashboard.marketIndex.bullishShort");
-    if (snapshot.changePct < 0) return t("dashboard.marketIndex.weakShort");
-  }
-
-  return t("dashboard.marketIndex.neutral");
-}
-
-async function fetchUsMarketTapeSnapshot(config: USMarketIndexConfig) {
-  const [chart, intraday] = await Promise.all([
-    fetchJson<USOhlcChartRead>(
-      `/api/us-market/ohlc/${encodeURIComponent(config.symbol)}`,
-      {
-        timeframe: "daily",
-        bars: 60,
-        ensure_history: true,
-        outputsize: "compact",
-        provider: "yahoo_chart",
-      }
-    ),
-    fetchJson<IntradayTrendResponse>(
-      `/api/us-market/intraday/${encodeURIComponent(config.symbol)}`
-    ).catch(() => null),
-  ]);
-  const chartPoints = chart.points ?? [];
-  const latestDaily = chartPoints[chartPoints.length - 1] ?? null;
-  const previousDaily = chartPoints[chartPoints.length - 2] ?? null;
-  const latestIntraday = intraday?.points[intraday.points.length - 1] ?? null;
-  const close = latestIntraday?.price ?? latestDaily?.close ?? null;
-  const previousClose =
-    latestIntraday && intraday?.previous_close !== null && intraday?.previous_close !== undefined
-      ? intraday.previous_close
-      : previousDaily?.close ?? null;
-  const change =
-    close !== null && previousClose !== null ? close - previousClose : null;
-  const changePct =
-    change !== null && previousClose !== null && previousClose !== 0
-      ? (change / previousClose) * 100
-      : null;
-  const ma20 = averageLastNumbers(
-    chartPoints.map((point) => point.close),
-    20
-  );
-  const priceVsMa20 =
-    close !== null && ma20 !== null && ma20 !== 0
-      ? ((close - ma20) / ma20) * 100
-      : null;
-
-  return {
-    symbol: config.symbol,
-    displaySymbol: config.displaySymbol,
-    name: config.name,
-    exchange: config.exchange,
-    note: config.note,
-    close,
-    change,
-    changePct,
-    priceVsMa20,
-    volume: latestIntraday
-      ? sumUsIntradayVolume(intraday?.points ?? []) ?? latestDaily?.volume ?? null
-      : latestDaily?.volume ?? null,
-    pointCount: chart.point_count,
-    asOf: latestIntraday?.time ?? latestDaily?.time ?? null,
-    source: latestIntraday ? "intraday" : "daily",
-  } satisfies USMarketTapeSnapshot;
-}
-
-function USMarketTapeCard({
-  title,
-  snapshot,
-  loadState,
-}: {
-  title: string;
-  snapshot: USMarketTapeSnapshot | null;
-  loadState: LoadState;
-}) {
-  const t = useT();
-
-  return (
-    <div className="bg-omi-surface px-4 py-3">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-omi-text-muted">
-            {title}
-          </div>
-          <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-            <span className="text-lg font-bold text-omi-text-strong">
-              {snapshot ? snapshot.name : loadState === "loading" ? t("common.loading") : "-"}
-            </span>
-            <span className="text-2xl font-black text-omi-text-strong">
-              {formatPrice(snapshot?.close)}
-            </span>
-            <span className={`text-sm font-bold ${valueTone(snapshot?.changePct)}`}>
-              {formatSignedNumber(snapshot?.change)} / {formatPct(snapshot?.changePct)}
-            </span>
-          </div>
-          <div className="mt-1 text-xs text-omi-text-muted">
-            {snapshot
-              ? `${snapshot.displaySymbol} · ${snapshot.exchange} · ${
-                  snapshot.source === "intraday"
-                    ? t("statusLabels.intraday")
-                    : t("dashboard.marketIndex.daily")
-                }`
-              : t("dashboard.marketIndex.waitingData")}
-          </div>
-        </div>
-        <div className="text-right text-xs">
-          <div className="font-semibold text-omi-text">
-            {usMarketRegimeLabel(t, snapshot)}
-          </div>
-          <div className={valueTone(snapshot?.priceVsMa20)}>
-            {formatPct(snapshot?.priceVsMa20)} vs MA20
-          </div>
-        </div>
-      </div>
-
-      <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
-        <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-          <div className="text-omi-text-muted">{t("dashboard.marketIndex.volume")}</div>
-          <div className="mt-1 font-semibold text-omi-text">
-            {formatWholeNumber(snapshot?.volume)}
-          </div>
-        </div>
-        <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-          <div className="text-omi-text-muted">{t("dashboard.marketIndex.candleCount")}</div>
-          <div className="mt-1 font-semibold text-omi-text">
-            {snapshot?.pointCount ?? "-"}
-          </div>
-        </div>
-        <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-          <div className="text-omi-text-muted">{t("common.update")}</div>
-          <div className="mt-1 truncate font-semibold text-omi-text">
-            {snapshot?.asOf ? formatRowTime(snapshot.asOf) ?? snapshot.asOf.slice(0, 10) : "-"}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function USMarketTape({
-  selectedSymbol,
-  selectedSecurityName,
-  selectedGroupName,
-  companyProfile,
-}: {
-  selectedSymbol: string | null;
-  selectedSecurityName: string | null;
-  selectedGroupName: string | null;
-  companyProfile: USCompanyProfileRead | null;
-}) {
-  const t = useT();
-  const primaryIndex = useMemo(() => getUsPrimaryMarketIndexConfig(), []);
-  const contextIndex = useMemo(
-    () =>
-      resolveUsContextIndexConfig({
-        symbol: selectedSymbol,
-        securityName: selectedSecurityName,
-        groupName: selectedGroupName,
-        profile: companyProfile,
-      }),
-    [companyProfile, selectedGroupName, selectedSecurityName, selectedSymbol]
-  );
-  const [snapshots, setSnapshots] = useState<Record<string, USMarketTapeSnapshot>>({});
-  const [loadState, setLoadState] = useState<LoadState>("idle");
-  const primarySnapshot = snapshots[primaryIndex.symbol] ?? null;
-  const contextSnapshot = snapshots[contextIndex.symbol] ?? null;
-
-  useEffect(() => {
-    let cancelled = false;
-    let timer: number | undefined;
-    let requestInFlight = false;
-    const configs = [primaryIndex, contextIndex].filter(
-      (config, index, items) => {
-        return items.findIndex((item) => item.symbol === config.symbol) === index;
-      }
-    );
-
-    function clearTimer() {
-      if (timer !== undefined) {
-        window.clearTimeout(timer);
-        timer = undefined;
-      }
-    }
-
-    async function loadSnapshots(silent = false) {
-      if (requestInFlight) return;
-      requestInFlight = true;
-
-      if (!silent) {
-        setLoadState("loading");
-      }
-
-      try {
-        const nextSnapshots = await Promise.all(
-          configs.map((config) => fetchUsMarketTapeSnapshot(config))
-        );
-
-        if (cancelled) return;
-
-        setSnapshots((current) => {
-          const updated = { ...current };
-          nextSnapshots.forEach((snapshot) => {
-            updated[snapshot.symbol] = snapshot;
-          });
-          return updated;
-        });
-        setLoadState("success");
-      } catch (error) {
-        if (cancelled) return;
-
-        setLoadState("error");
-        emitDashboardDataStatus({
-          market: "us",
-          title: t("dashboard.marketIndex.usLoadError"),
-          message: apiErrorMessage(error, t("dashboard.marketIndex.usLoadError")),
-          source: t("dashboard.marketIndex.market"),
-          contextKey: "us:market-index-tape",
-          contextLabel: t("dashboard.marketIndex.market"),
-        });
-      } finally {
-        requestInFlight = false;
-      }
-    }
-
-    function scheduleRefresh() {
-      if (cancelled) return;
-
-      const marketState = getUsMarketRefreshState();
-      const delay = marketState.isPollingWindow
-        ? US_INTRADAY_REFRESH_MS
-        : Math.min(marketState.msUntilNextPollingStart, 60_000);
-
-      timer = window.setTimeout(() => {
-        void loadSnapshots(true).finally(scheduleRefresh);
-      }, delay);
-    }
-
-    void loadSnapshots().finally(scheduleRefresh);
-
-    return () => {
-      cancelled = true;
-      clearTimer();
-    };
-  }, [contextIndex, primaryIndex, t]);
-
-  const asOf = [primarySnapshot?.asOf, contextSnapshot?.asOf]
-    .filter((value): value is string => Boolean(value))
-    .sort((left, right) => left.localeCompare(right))
-    .at(-1);
-
-  return (
-    <section className="mb-3 border border-omi-border-subtle bg-omi-surface">
-      <div className="grid gap-px bg-omi-surface-strong lg:grid-cols-2">
-        <USMarketTapeCard
-          title={t("dashboard.marketIndex.market")}
-          snapshot={primarySnapshot}
-          loadState={loadState}
-        />
-        <USMarketTapeCard
-          title={t("dashboard.marketIndex.context")}
-          snapshot={contextSnapshot}
-          loadState={loadState}
-        />
-      </div>
-      <div className="border-t border-omi-border-subtle px-4 py-2 text-xs text-omi-text-muted">
-        {asOf
-          ? t("dashboard.marketIndex.usUpdated", {
-              asOf: formatRowTime(asOf) ?? asOf.slice(0, 10),
-            })
-          : t("dashboard.marketIndex.usWaiting")}
-      </div>
-    </section>
-  );
-}
-
-type JPMarketTapeSnapshot = {
-  symbol: string;
-  displaySymbol: string;
-  name: string;
-  exchange: string;
-  note: string;
-  close: number | null;
-  change: number | null;
-  changePct: number | null;
-  priceVsMa20: number | null;
-  volume: number | null;
-  pointCount: number;
-  asOf: string | null;
-};
-
-async function fetchJpMarketTapeSnapshot(config: JPMarketIndexConfig) {
-  const chart = await fetchJson<JPOhlcChartRead>(
-    `/api/jp-market/ohlc/${encodeURIComponent(config.symbol)}`,
-    {
-      timeframe: "daily",
-      bars: 60,
-      ensure_history: true,
-      outputsize: "compact",
-      provider: "auto",
-    }
-  );
-  const chartPoints = chart.points ?? [];
-  const latestDaily = chartPoints[chartPoints.length - 1] ?? null;
-  const previousDaily = chartPoints[chartPoints.length - 2] ?? null;
-  const close = latestDaily?.close ?? null;
-  const previousClose = previousDaily?.close ?? null;
-  const change =
-    close !== null && previousClose !== null ? close - previousClose : null;
-  const changePct =
-    change !== null && previousClose !== null && previousClose !== 0
-      ? (change / previousClose) * 100
-      : null;
-  const ma20 = averageLastNumbers(
-    chartPoints.map((point) => point.close),
-    20
-  );
-  const priceVsMa20 =
-    close !== null && ma20 !== null && ma20 !== 0
-      ? ((close - ma20) / ma20) * 100
-      : null;
-
-  return {
-    symbol: config.symbol,
-    displaySymbol: config.displaySymbol,
-    name: config.name,
-    exchange: config.exchange,
-    note: config.note,
-    close,
-    change,
-    changePct,
-    priceVsMa20,
-    volume: latestDaily?.volume ?? null,
-    pointCount: chart.point_count,
-    asOf: latestDaily?.time ?? null,
-  } satisfies JPMarketTapeSnapshot;
-}
-
-function JPMarketTapeCard({
-  title,
-  snapshot,
-  loadState,
-}: {
-  title: string;
-  snapshot: JPMarketTapeSnapshot | null;
-  loadState: LoadState;
-}) {
-  const t = useT();
-
-  return (
-    <div className="bg-omi-surface px-4 py-3">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-omi-text-muted">
-            {title}
-          </div>
-          <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-            <span className="text-lg font-bold text-omi-text-strong">
-              {snapshot ? snapshot.name : loadState === "loading" ? t("common.loading") : "-"}
-            </span>
-            <span className="text-2xl font-black text-omi-text-strong">
-              {formatPrice(snapshot?.close)}
-            </span>
-            <span className={`text-sm font-bold ${valueTone(snapshot?.changePct)}`}>
-              {formatSignedNumber(snapshot?.change)} / {formatPct(snapshot?.changePct)}
-            </span>
-          </div>
-          <div className="mt-1 text-xs text-omi-text-muted">
-            {snapshot
-              ? `${snapshot.displaySymbol} · ${snapshot.exchange} · ${t("dashboard.marketIndex.daily")}`
-              : t("dashboard.marketIndex.waitingData")}
-          </div>
-        </div>
-        <div className="text-right text-xs">
-          <div className="font-semibold text-omi-text">
-            {usMarketRegimeLabel(t, snapshot)}
-          </div>
-          <div className={valueTone(snapshot?.priceVsMa20)}>
-            {formatPct(snapshot?.priceVsMa20)} vs MA20
-          </div>
-        </div>
-      </div>
-
-      <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
-        <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-          <div className="text-omi-text-muted">{t("dashboard.marketIndex.volume")}</div>
-          <div className="mt-1 font-semibold text-omi-text">
-            {formatWholeNumber(snapshot?.volume)}
-          </div>
-        </div>
-        <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-          <div className="text-omi-text-muted">{t("dashboard.marketIndex.candleCount")}</div>
-          <div className="mt-1 font-semibold text-omi-text">
-            {snapshot?.pointCount ?? "-"}
-          </div>
-        </div>
-        <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-          <div className="text-omi-text-muted">{t("common.update")}</div>
-          <div className="mt-1 truncate font-semibold text-omi-text">
-            {snapshot?.asOf ? snapshot.asOf.slice(0, 10) : "-"}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function JPMarketTape({
-  selectedSymbol,
-  selectedStock,
-  selectedGroupName,
-}: {
-  selectedSymbol: string | null;
-  selectedStock: JPStockMasterRead | null;
-  selectedGroupName: string | null;
-}) {
-  const t = useT();
-  const primaryIndex = useMemo(() => getJpPrimaryMarketIndexConfig(), []);
-  const contextIndex = useMemo(
-    () =>
-      resolveJpContextIndexConfig({
-        symbol: selectedSymbol,
-        securityName: selectedStock?.security_name ?? null,
-        groupName: selectedGroupName,
-        stock: selectedStock,
-      }),
-    [selectedGroupName, selectedStock, selectedSymbol]
-  );
-  const [snapshots, setSnapshots] = useState<Record<string, JPMarketTapeSnapshot>>({});
-  const [loadState, setLoadState] = useState<LoadState>("idle");
-  const primarySnapshot = snapshots[primaryIndex.symbol] ?? null;
-  const contextSnapshot = snapshots[contextIndex.symbol] ?? null;
-
-  useEffect(() => {
-    let cancelled = false;
-    let timer: number | undefined;
-    let requestInFlight = false;
-    const configs = [primaryIndex, contextIndex].filter(
-      (config, index, items) => {
-        return items.findIndex((item) => item.symbol === config.symbol) === index;
-      }
-    );
-
-    function clearTimer() {
-      if (timer !== undefined) {
-        window.clearTimeout(timer);
-        timer = undefined;
-      }
-    }
-
-    async function loadSnapshots(silent = false) {
-      if (requestInFlight) return;
-      requestInFlight = true;
-
-      if (!silent) {
-        setLoadState("loading");
-      }
-
-      try {
-        const results = await Promise.all(
-          configs.map((config) => fetchJpMarketTapeSnapshot(config))
-        );
-
-        if (cancelled) return;
-
-        setSnapshots((current) => {
-          const next = { ...current };
-          results.forEach((snapshot) => {
-            next[snapshot.symbol] = snapshot;
-          });
-          return next;
-        });
-        setLoadState("success");
-      } catch (error) {
-        if (!cancelled) {
-          setLoadState("error");
-          emitDashboardDataStatus({
-            market: "jp",
-            title: t("dashboard.marketIndex.jpLoadError"),
-            message: apiErrorMessage(error, t("dashboard.marketIndex.jpLoadError")),
-            source: t("dashboard.marketIndex.market"),
-            contextKey: "jp:market-index-tape",
-            contextLabel: t("dashboard.marketIndex.market"),
-          });
-        }
-      } finally {
-        requestInFlight = false;
-      }
-    }
-
-    function scheduleRefresh() {
-      if (cancelled) return;
-
-      timer = window.setTimeout(() => {
-        void loadSnapshots(true).finally(scheduleRefresh);
-      }, 300_000);
-    }
-
-    void loadSnapshots().finally(scheduleRefresh);
-
-    return () => {
-      cancelled = true;
-      clearTimer();
-    };
-  }, [contextIndex, primaryIndex, t]);
-
-  const asOf = [primarySnapshot?.asOf, contextSnapshot?.asOf]
-    .filter((value): value is string => Boolean(value))
-    .sort((left, right) => left.localeCompare(right))
-    .at(-1);
-
-  return (
-    <section className="mb-3 border border-omi-border-subtle bg-omi-surface">
-      <div className="grid gap-px bg-omi-surface-strong lg:grid-cols-2">
-        <JPMarketTapeCard
-          title={t("dashboard.marketIndex.market")}
-          snapshot={primarySnapshot}
-          loadState={loadState}
-        />
-        <JPMarketTapeCard
-          title={t("dashboard.marketIndex.context")}
-          snapshot={contextSnapshot}
-          loadState={loadState}
-        />
-      </div>
-      <div className="border-t border-omi-border-subtle px-4 py-2 text-xs text-omi-text-muted">
-        {asOf
-          ? t("dashboard.marketIndex.jpUpdated", {
-              asOf: asOf.slice(0, 10),
-            })
-          : t("dashboard.marketIndex.jpWaiting")}
-      </div>
-    </section>
-  );
-}
-
-type KRMarketTapeSnapshot = {
-  symbol: string;
-  indexId: string;
-  displaySymbol: string;
-  name: string;
-  exchange: string;
-  note: string;
-  close: number | null;
-  change: number | null;
-  changePct: number | null;
-  priceVsMa20: number | null;
-  volume: number | null;
-  pointCount: number;
-  asOf: string | null;
-  breadth: KRMarketBreadthRead | null;
-};
-
-async function fetchKrMarketTapeSnapshot(config: KRMarketIndexConfig) {
-  const [chart, breadth] = await Promise.all([
-    fetchJson<KRIndexOhlcChartRead>(
-      `/api/kr-market/indices/${encodeURIComponent(config.indexId)}/ohlc`,
-      {
-        timeframe: "daily",
-        bars: 60,
-        ensure_history: false,
-      }
-    ),
-    fetchJson<KRMarketBreadthRead>(
-      `/api/kr-market/indices/${encodeURIComponent(config.indexId)}/breadth`
-    ),
-  ]);
-  const chartPoints = chart.points ?? [];
-  const latestDaily = chartPoints[chartPoints.length - 1] ?? null;
-  const previousDaily = chartPoints[chartPoints.length - 2] ?? null;
-  const close = latestDaily?.close ?? null;
-  const previousClose = previousDaily?.close ?? null;
-  const change =
-    close !== null && previousClose !== null ? close - previousClose : null;
-  const changePct =
-    change !== null && previousClose !== null && previousClose !== 0
-      ? (change / previousClose) * 100
-      : null;
-  const ma20 = averageLastNumbers(
-    chartPoints.map((point) => point.close),
-    20
-  );
-  const priceVsMa20 =
-    close !== null && ma20 !== null && ma20 !== 0
-      ? ((close - ma20) / ma20) * 100
-      : null;
-
-  return {
-    symbol: config.symbol,
-    indexId: config.indexId,
-    displaySymbol: config.displaySymbol,
-    name: config.name,
-    exchange: config.exchange,
-    note: config.note,
-    close,
-    change,
-    changePct,
-    priceVsMa20,
-    volume: latestDaily?.volume ?? null,
-    pointCount: chart.point_count,
-    asOf: latestDaily?.time ?? null,
-    breadth,
-  } satisfies KRMarketTapeSnapshot;
-}
-
-function KRMarketTapeCard({
-  title,
-  snapshot,
-  loadState,
-}: {
-  title: string;
-  snapshot: KRMarketTapeSnapshot | null;
-  loadState: LoadState;
-}) {
-  const t = useT();
-  const breadth = snapshot?.breadth ?? null;
-  const advanceRatio =
-    breadth && breadth.total_count > 0
-      ? (breadth.advance_count / breadth.total_count) * 100
-      : null;
-
-  return (
-    <div className="bg-omi-surface px-4 py-3">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-omi-text-muted">
-            {title}
-          </div>
-          <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-            <span className="text-lg font-bold text-omi-text-strong">
-              {snapshot ? snapshot.name : loadState === "loading" ? t("common.loading") : "-"}
-            </span>
-            <span className="text-2xl font-black text-omi-text-strong">
-              {formatPrice(snapshot?.close)}
-            </span>
-            <span className={`text-sm font-bold ${valueTone(snapshot?.changePct)}`}>
-              {formatSignedNumber(snapshot?.change)} / {formatPct(snapshot?.changePct)}
-            </span>
-          </div>
-          <div className="mt-1 text-xs text-omi-text-muted">
-            {snapshot
-              ? `${snapshot.displaySymbol} · ${snapshot.exchange} · ${t("dashboard.marketIndex.daily")}`
-              : t("dashboard.marketIndex.waitingData")}
-          </div>
-        </div>
-        <div className="text-right text-xs">
-          <div className="font-semibold text-omi-text">
-            {usMarketRegimeLabel(t, snapshot)}
-          </div>
-          <div className={valueTone(snapshot?.priceVsMa20)}>
-            {formatPct(snapshot?.priceVsMa20)} vs MA20
-          </div>
-        </div>
-      </div>
-
-      <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
-        <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-          <div className="text-omi-text-muted">{t("dashboard.marketIndex.tradeValueYi")}</div>
-          <div className="mt-1 font-semibold text-omi-text">
-            {formatTradeValueYi(breadth?.trade_value)}
-          </div>
-        </div>
-        <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-          <div className="text-omi-text-muted">{t("dashboard.marketIndex.advanceDecline")}</div>
-          <div className="mt-1 font-semibold">
-            <span className="text-omi-market-up">{breadth?.advance_count ?? "-"}</span>
-            <span className="px-1 text-omi-text-subtle">/</span>
-            <span className="text-omi-market-down">{breadth?.decline_count ?? "-"}</span>
-          </div>
-        </div>
-        <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-          <div className="text-omi-text-muted">{t("dashboard.marketIndex.breadth")}</div>
-          <div className={`mt-1 font-semibold ${valueTone((advanceRatio ?? 50) - 50)}`}>
-            {advanceRatio === null
-              ? "-"
-              : t("dashboard.marketIndex.advancePct", {
-                  value: advanceRatio.toFixed(0),
-                })}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function KRMarketTape({
-  selectedSymbol,
-  selectedStock,
-  selectedGroupName,
-}: {
-  selectedSymbol: string | null;
-  selectedStock: KRStockMasterRead | null;
-  selectedGroupName: string | null;
-}) {
-  const t = useT();
-  const primaryIndex = useMemo(() => getKrPrimaryMarketIndexConfig(), []);
-  const contextIndex = useMemo(
-    () =>
-      resolveKrContextIndexConfig({
-        symbol: selectedSymbol,
-        securityName: selectedStock?.security_name ?? selectedStock?.security_name_kr ?? null,
-        groupName: selectedGroupName,
-        stock: selectedStock,
-      }),
-    [selectedGroupName, selectedStock, selectedSymbol]
-  );
-  const [snapshots, setSnapshots] = useState<Record<string, KRMarketTapeSnapshot>>({});
-  const [loadState, setLoadState] = useState<LoadState>("idle");
-  const primarySnapshot = snapshots[primaryIndex.symbol] ?? null;
-  const contextSnapshot = snapshots[contextIndex.symbol] ?? null;
-
-  useEffect(() => {
-    let cancelled = false;
-    let timer: number | undefined;
-    let requestInFlight = false;
-    const configs = [primaryIndex, contextIndex].filter(
-      (config, index, items) => {
-        return items.findIndex((item) => item.symbol === config.symbol) === index;
-      }
-    );
-
-    function clearTimer() {
-      if (timer !== undefined) {
-        window.clearTimeout(timer);
-        timer = undefined;
-      }
-    }
-
-    async function loadSnapshots(silent = false) {
-      if (requestInFlight) return;
-      requestInFlight = true;
-
-      if (!silent) {
-        setLoadState("loading");
-      }
-
-      try {
-        const results = await Promise.all(
-          configs.map((config) => fetchKrMarketTapeSnapshot(config))
-        );
-
-        if (cancelled) return;
-
-        setSnapshots((current) => {
-          const next = { ...current };
-          results.forEach((snapshot) => {
-            next[snapshot.symbol] = snapshot;
-          });
-          return next;
-        });
-        setLoadState("success");
-      } catch (error) {
-        if (!cancelled) {
-          setLoadState("error");
-          emitDashboardDataStatus({
-            market: "kr",
-            title: t("dashboard.marketIndex.krLoadError"),
-            message: apiErrorMessage(error, t("dashboard.marketIndex.krLoadError")),
-            source: t("dashboard.marketIndex.market"),
-            contextKey: "kr:market-index-tape",
-            contextLabel: t("dashboard.marketIndex.market"),
-          });
-        }
-      } finally {
-        requestInFlight = false;
-      }
-    }
-
-    function scheduleRefresh() {
-      if (cancelled) return;
-
-      timer = window.setTimeout(() => {
-        void loadSnapshots(true).finally(scheduleRefresh);
-      }, 300_000);
-    }
-
-    void loadSnapshots().finally(scheduleRefresh);
-
-    return () => {
-      cancelled = true;
-      clearTimer();
-    };
-  }, [contextIndex, primaryIndex, t]);
-
-  const asOf = [primarySnapshot?.asOf, contextSnapshot?.asOf]
-    .filter((value): value is string => Boolean(value))
-    .sort((left, right) => left.localeCompare(right))
-    .at(-1);
-
-  return (
-    <section className="mb-3 border border-omi-border-subtle bg-omi-surface">
-      <div className="grid gap-px bg-omi-surface-strong lg:grid-cols-2">
-        <KRMarketTapeCard
-          title={t("dashboard.marketIndex.market")}
-          snapshot={primarySnapshot}
-          loadState={loadState}
-        />
-        <KRMarketTapeCard
-          title={t("dashboard.marketIndex.context")}
-          snapshot={contextSnapshot}
-          loadState={loadState}
-        />
-      </div>
-      <div className="border-t border-omi-border-subtle px-4 py-2 text-xs text-omi-text-muted">
-        {asOf
-          ? t("dashboard.marketIndex.krUpdated", {
-              asOf: asOf.slice(0, 10),
-            })
-          : t("dashboard.marketIndex.krWaiting")}
-      </div>
-    </section>
-  );
-}
-
 export default function MarketDashboardClient({
   initialMarket,
   initialTree,
@@ -1734,8 +269,6 @@ export default function MarketDashboardClient({
     useState<KRWatchlistGroupNode[]>(initialKrWatchlistTree);
   const [krWatchlistItems, setKrWatchlistItems] =
     useState<KRWatchlistItemRead[]>(initialKrWatchlistItems);
-  const [resourceSubscriptionSettings, setResourceSubscriptionSettings] =
-    useState<MarketDataSubscriptionSettingsRead | null>(null);
   const [twChartFocusMode, setTwChartFocusMode] = useState(false);
   const [usChartFocusMode, setUsChartFocusMode] = useState(false);
   const [jpChartFocusMode, setJpChartFocusMode] = useState(false);
@@ -1797,125 +330,23 @@ export default function MarketDashboardClient({
     dashboardHref,
     pushDashboardUrl,
   } = marketSelection;
-  const [marketIndexSummary, setMarketIndexSummary] =
-    useState<MarketIndexSummary | null>(initialMarketIndexSummary);
-  const [marketIndexLoadState, setMarketIndexLoadState] =
-    useState<LoadState>(initialMarketIndexSummary ? "success" : "idle");
-  const resourceBackgroundPollingRef = useRef(new Set<string>());
-  const marketIndexRequestSeq = useRef(0);
-  const resourceBackgroundPollingGroupsForCurrentView = useMemo(
-    () =>
-      activeMarket === "crypto"
-        ? resourceBackgroundQuotePollingGroups(
-            resourceSubscriptionSettings,
-            selectedResourceInstrumentKey
-          )
-        : [],
-    [activeMarket, resourceSubscriptionSettings, selectedResourceInstrumentKey]
-  );
-
-  useEffect(() => {
-    if (activeMarket !== "crypto") return;
-
-    let cancelled = false;
-
-    async function loadResourceSubscriptionSettings() {
-      try {
-        const settings = await loadMarketDataSubscriptionSettings();
-        if (!cancelled) {
-          setResourceSubscriptionSettings(settings);
-        }
-      } catch {
-        if (!cancelled) {
-          setResourceSubscriptionSettings(null);
-        }
-      }
-    }
-
-    function handleSubscriptionSettingsUpdated(event: Event) {
-      const nextSettings = (event as CustomEvent<MarketDataSubscriptionSettingsRead>).detail;
-      if (nextSettings) {
-        setResourceSubscriptionSettings(nextSettings);
-      } else {
-        void loadResourceSubscriptionSettings();
-      }
-    }
-
-    void loadResourceSubscriptionSettings();
-    window.addEventListener(
-      MARKET_DATA_SUBSCRIPTIONS_UPDATED_EVENT,
-      handleSubscriptionSettingsUpdated
-    );
-
-    return () => {
-      cancelled = true;
-      window.removeEventListener(
-        MARKET_DATA_SUBSCRIPTIONS_UPDATED_EVENT,
-        handleSubscriptionSettingsUpdated
-      );
-    };
-  }, [activeMarket]);
-
-  useEffect(() => {
-    if (activeMarket !== "crypto" || !resourceBackgroundPollingGroupsForCurrentView.length) {
-      return;
-    }
-
-    const timers = resourceBackgroundPollingGroupsForCurrentView.map((group) => {
-      const run = async () => {
-        if (document.visibilityState !== "visible") return;
-        if (resourceBackgroundPollingRef.current.has(group.key)) return;
-
-        resourceBackgroundPollingRef.current.add(group.key);
-        try {
-          await requestJson<ResourceRefreshResult>(
-            "/api/resource-market/quotes/refresh",
-            { method: "POST" },
-            { symbols: group.symbols.join(",") }
-          );
-        } catch {
-          // Background quote polling should not replace the visible panel state.
-        } finally {
-          resourceBackgroundPollingRef.current.delete(group.key);
-        }
-      };
-
-      return window.setInterval(run, group.intervalSeconds * 1000);
-    });
-
-    return () => {
-      timers.forEach((timer) => window.clearInterval(timer));
-    };
-  }, [activeMarket, resourceBackgroundPollingGroupsForCurrentView]);
-
-  useEffect(() => {
-    let cancelled = false;
-    let timer: number | undefined;
-
-    async function loadCalendarStatus() {
-      try {
-        await refreshMarketCalendarStatus("all");
-      } catch (error) {
-        console.warn("Market calendar status refresh failed.", error);
-      } finally {
-        if (!cancelled) {
-          timer = window.setTimeout(loadCalendarStatus, 60_000);
-        }
-      }
-    }
-
-    void loadCalendarStatus();
-
-    return () => {
-      cancelled = true;
-      if (timer !== undefined) {
-        window.clearTimeout(timer);
-      }
-    };
-  }, []);
-
+  useDashboardRuntime({
+    activeMarket,
+    selectedResourceInstrumentKey,
+  });
+  const {
+    state: {
+      summary: marketIndexSummary,
+      loadState: marketIndexLoadState,
+    },
+    actions: taiwanMarketTapeActions,
+  } = useTaiwanMarketTapeState({
+    active: activeMarket === "tw",
+    initialSummary: initialMarketIndexSummary,
+    onError: handleTaiwanMarketTapeError,
+  });
+  const loadMarketIndices = taiwanMarketTapeActions.load;
   const activeGroupId = selectedGroupId ?? selectedGroup?.id ?? null;
-  const marketChipRefreshRequestKeys = useRef<Set<string>>(new Set());
   const twWatchlistContextLabel =
     selectedGroup?.group_name ??
     (activeGroupId !== null ? String(activeGroupId) : t("watchlist.noGroupSelected"));
@@ -2398,155 +829,60 @@ export default function MarketDashboardClient({
     });
   }
 
-  async function loadMarketIndices(options?: { silent?: boolean }) {
-    const requestSeq = marketIndexRequestSeq.current + 1;
-    marketIndexRequestSeq.current = requestSeq;
-
-    if (!options?.silent) {
-      setMarketIndexLoadState("loading");
-    }
-
-    try {
-      const summaryData = await fetchJson<MarketIndexSummary>("/api/market/indices/summary");
-
-      if (marketIndexRequestSeq.current !== requestSeq) return;
-
-      setMarketIndexSummary(summaryData);
-      setMarketIndexLoadState("success");
-    } catch (error) {
-      if (marketIndexRequestSeq.current !== requestSeq) return;
-
-      setMarketIndexLoadState("error");
-      emitDashboardDataStatus({
-        market: "tw",
-        title: "市場指數載入失敗",
-        message: apiErrorMessage(error, "市場指數載入失敗"),
-        source: "市場環境",
-        contextKey: "tw:market-index-summary",
-        contextLabel: "台股市場環境",
-      });
-    }
+  function handleTaiwanMarketTapeError(
+    kind: TaiwanMarketTapeErrorKind,
+    error: unknown,
+    context?: { dateKey: string }
+  ) {
+    const isSummaryError = kind === "summary";
+    const title = isSummaryError ? "市場指數載入失敗" : "大盤資料更新失敗";
+    emitDashboardDataStatus({
+      market: "tw",
+      title,
+      message: apiErrorMessage(error, title),
+      source: "市場環境",
+      contextKey: isSummaryError
+        ? "tw:market-index-summary"
+        : `tw:market-chip:${context?.dateKey ?? "unknown"}`,
+      contextLabel: isSummaryError ? "台股市場環境" : context?.dateKey ?? "-",
+    });
   }
 
-  async function refreshMarketChipsForFreshness(dateKey: string) {
-    if (isStoredMarketChipRefreshDone(dateKey)) return;
-    if (marketChipRefreshRequestKeys.current.has(dateKey)) return;
-
-    marketChipRefreshRequestKeys.current.add(dateKey);
-
-    try {
-      const job = await requestBackfillJob(
-        "/api/market/market-chips/refresh",
-        { method: "POST" },
-        {
-          include_today: true,
-          force: false,
-        },
-        {
-          intervalMs: 1500,
-          timeoutMs: 600_000,
-        }
-      );
-
-      if (getJobResultStatus(job) === "success") {
-        markStoredMarketChipRefreshDone(dateKey);
-      }
-
-      await loadMarketIndices({ silent: true });
-    } catch (error) {
-      console.warn("Market chip daily refresh failed.", error);
-      emitDashboardDataStatus({
-        market: "tw",
-        title: "大盤資料更新失敗",
-        message: apiErrorMessage(error, "大盤資料更新失敗"),
-        source: "市場環境",
-        contextKey: `tw:market-chip:${dateKey}`,
-        contextLabel: dateKey,
-      });
-    }
+  function handleUsMarketTapeError(error: unknown) {
+    const title = t("dashboard.marketIndex.usLoadError");
+    emitDashboardDataStatus({
+      market: "us",
+      title,
+      message: apiErrorMessage(error, title),
+      source: t("dashboard.marketIndex.market"),
+      contextKey: "us:market-index-tape",
+      contextLabel: t("dashboard.marketIndex.market"),
+    });
   }
 
-  useEffect(() => {
-    if (activeMarket !== "tw") return;
+  function handleJpMarketTapeError(error: unknown) {
+    const title = t("dashboard.marketIndex.jpLoadError");
+    emitDashboardDataStatus({
+      market: "jp",
+      title,
+      message: apiErrorMessage(error, title),
+      source: t("dashboard.marketIndex.market"),
+      contextKey: "jp:market-index-tape",
+      contextLabel: t("dashboard.marketIndex.market"),
+    });
+  }
 
-    let disposed = false;
-    let refreshTimer: number | undefined;
-
-    function scheduleRefresh() {
-      if (disposed) return;
-
-      const marketState = getTaiwanMarketRefreshState();
-      const delay = marketState.isPollingWindow
-        ? TAIWAN_INTRADAY_REFRESH_MS
-        : Math.min(marketState.msUntilNextPollingStart, 300_000);
-
-      refreshTimer = window.setTimeout(() => {
-        void loadMarketIndices({ silent: true }).finally(scheduleRefresh);
-      }, delay);
-    }
-
-    const initialTimer = window.setTimeout(() => {
-      void loadMarketIndices().finally(scheduleRefresh);
-    }, 0);
-
-    return () => {
-      disposed = true;
-      window.clearTimeout(initialTimer);
-      if (refreshTimer !== undefined) {
-        window.clearTimeout(refreshTimer);
-      }
-    };
-  }, [activeMarket]);
-
-  useEffect(() => {
-    if (activeMarket !== "tw") return;
-
-    let disposed = false;
-    let refreshTimer: number | undefined;
-
-    function clearRefreshTimer() {
-      if (refreshTimer !== undefined) {
-        window.clearTimeout(refreshTimer);
-        refreshTimer = undefined;
-      }
-    }
-
-    function scheduleRefresh() {
-      if (disposed) return;
-
-      const state = getTaiwanMarketChipRefreshState();
-      const alreadyQueued =
-        marketChipRefreshRequestKeys.current.has(state.dateKey) ||
-        isStoredMarketChipRefreshDone(state.dateKey);
-      const delay =
-        state.shouldRefreshNow && !alreadyQueued ? 0 : state.msUntilNextRefresh;
-
-      refreshTimer = window.setTimeout(() => {
-        const nextState = getTaiwanMarketChipRefreshState();
-        const nextAlreadyQueued =
-          marketChipRefreshRequestKeys.current.has(nextState.dateKey) ||
-          isStoredMarketChipRefreshDone(nextState.dateKey);
-
-        if (nextState.shouldRefreshNow && !nextAlreadyQueued) {
-          void refreshMarketChipsForFreshness(nextState.dateKey).finally(
-            scheduleRefresh
-          );
-          return;
-        }
-
-        scheduleRefresh();
-      }, delay);
-    }
-
-    scheduleRefresh();
-
-    return () => {
-      disposed = true;
-      clearRefreshTimer();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeMarket]);
-
+  function handleKrMarketTapeError(error: unknown) {
+    const title = t("dashboard.marketIndex.krLoadError");
+    emitDashboardDataStatus({
+      market: "kr",
+      title,
+      message: apiErrorMessage(error, title),
+      source: t("dashboard.marketIndex.market"),
+      contextKey: "kr:market-index-tape",
+      contextLabel: t("dashboard.marketIndex.market"),
+    });
+  }
 
   function handleMarketChange(market: MarketRegion) {
     setTwChartFocusMode(false);
@@ -2856,6 +1192,7 @@ export default function MarketDashboardClient({
           </select>
           <button
             type="button"
+            data-testid="watchlist-ranking-reload"
             onClick={() => {
               void loadMarketIndices({ silent: true });
               if (activeGroupId !== null) void loadDashboard(activeGroupId);
@@ -3260,230 +1597,27 @@ export default function MarketDashboardClient({
     </div>
   );
 
-  const omiAskContext = useMemo<OmiAskDockContext>(() => {
-    if (activeMarket === "us") {
-      if (selectedUsSymbol) {
-        return {
-          market: "us",
-          label: `${selectedUsSymbol}${selectedUsSecurityName ? ` ${selectedUsSecurityName}` : ""}`,
-          target: {
-            type: "us_stock",
-            id: selectedUsSymbol,
-            label: selectedUsSecurityName ?? selectedUsSymbol,
-            market: "US",
-          },
-          uiContext: {
-            market: "us",
-            selected_symbol: selectedUsSymbol,
-            selected_security_name: selectedUsSecurityName,
-            selected_group_id: selectedUsGroupId,
-            selected_group_name: selectedUsGroupName,
-          },
-        };
-      }
-
-      return {
-        market: "us",
-        label: selectedUsGroupName
-          ? t("dashboard.ranking.usLabel", { groupName: selectedUsGroupName })
-          : t("dashboard.ranking.usMarket"),
-        target: {
-          type: "auto",
-          market: "US",
-          label: selectedUsGroupName ?? t("dashboard.ranking.usMarket"),
-        },
-        uiContext: {
-          market: "us",
-          selected_group_id: selectedUsGroupId,
-          selected_group_name: selectedUsGroupName,
-        },
-      };
-    }
-
-    if (activeMarket === "jp") {
-      if (selectedJpSymbol) {
-        const selectedJpIndexConfig = getJpMarketIndexConfig(selectedJpSymbol);
-
-        return {
-          market: "jp",
-          label: `${selectedJpSymbol}${
-            selectedJpStock?.security_name ? ` ${selectedJpStock.security_name}` : ""
-          }`,
-          target: {
-            type: selectedJpIndexConfig ? "jp_index" : "jp_stock",
-            id: selectedJpSymbol,
-            label: selectedJpIndexConfig?.name ?? selectedJpStock?.security_name ?? selectedJpSymbol,
-            market: "JP",
-          },
-          uiContext: {
-            market: "jp",
-            selected_symbol: selectedJpSymbol,
-            selected_security_name: selectedJpStock?.security_name ?? null,
-            selected_market_segment: selectedJpStock?.market_segment ?? null,
-            selected_sector: selectedJpStock?.sector_33_name ?? null,
-            selected_group_id: selectedJpGroupId,
-            selected_group_name: selectedJpGroupName,
-          },
-        };
-      }
-
-      return {
-        market: "jp",
-        label: t("jpMarket.askMarketLabel"),
-        target: {
-          type: "market",
-          market: "JP",
-          label: t("jpMarket.askMarketLabel"),
-        },
-        uiContext: {
-          market: "jp",
-          selected_group_id: selectedJpGroupId,
-          selected_group_name: selectedJpGroupName,
-        },
-      };
-    }
-
-    if (activeMarket === "kr") {
-      if (selectedKrSymbol) {
-        const selectedKrIndexConfig = getKrMarketIndexConfig(selectedKrSymbol);
-        return {
-          market: "kr",
-          label: `${selectedKrSymbol}${
-            selectedKrStock?.security_name ? ` ${selectedKrStock.security_name}` : ""
-          }`,
-          target: {
-            type: selectedKrIndexConfig ? "kr_index" : "kr_stock",
-            id: selectedKrSymbol,
-            label: selectedKrIndexConfig?.name ?? selectedKrStock?.security_name ?? selectedKrSymbol,
-            market: "KR",
-          },
-          uiContext: {
-            market: "kr",
-            selected_symbol: selectedKrSymbol,
-            selected_security_name: selectedKrStock?.security_name ?? null,
-            selected_market_segment: selectedKrStock?.market_segment ?? null,
-            selected_sector: selectedKrStock?.sector ?? null,
-            selected_group_id: selectedKrGroupId,
-            selected_group_name: selectedKrGroupName,
-          },
-        };
-      }
-
-      return {
-        market: "kr",
-        label: t("krMarket.askMarketLabel"),
-        target: {
-          type: "market",
-          market: "KR",
-          label: t("krMarket.askMarketLabel"),
-        },
-        uiContext: {
-          market: "kr",
-          selected_group_id: selectedKrGroupId,
-          selected_group_name: selectedKrGroupName,
-        },
-      };
-    }
-
-    if (selectedFuturesSymbol) {
-      const futuresLabel = `${selectedFuturesSymbol} ${t("futures.productTitle")}`;
-
-      return {
-        market: "tw",
-        label: futuresLabel,
-        target: {
-          type: "tw_futures",
-          id: selectedFuturesSymbol,
-          label: futuresLabel,
-          market: "TW",
-        },
-        uiContext: {
-          market: "tw",
-          selected_futures_symbol: selectedFuturesSymbol,
-          selected_group_id: activeGroupId,
-          selected_group_name: selectedGroup?.group_name ?? null,
-        },
-      };
-    }
-
-    if (selectedStockId) {
-      const isIndexTarget = TAIWAN_INDEX_TARGET_IDS.has(selectedStockId);
-      return {
-        market: "tw",
-        label: `${selectedStockId}${selectedStockName ? ` ${selectedStockName}` : ""}`,
-        target: {
-          type: isIndexTarget ? "tw_index" : "tw_stock",
-          id: selectedStockId,
-          label: selectedStockName ?? selectedStockId,
-          market: "TW",
-        },
-        uiContext: {
-          market: "tw",
-          [isIndexTarget ? "selected_index_id" : "selected_stock_id"]: selectedStockId,
-          [isIndexTarget ? "selected_index_name" : "selected_stock_name"]: selectedStockName,
-          selected_group_id: activeGroupId,
-          selected_group_name: selectedGroup?.group_name ?? null,
-        },
-      };
-    }
-
-    if (activeGroupId !== null) {
-      const groupLabel = selectedGroup?.group_name ?? String(activeGroupId);
-
-      return {
-        market: "tw",
-        label: t("dashboard.ranking.twLabel", { groupName: groupLabel }),
-        target: {
-          type: "tw_watchlist",
-          id: String(activeGroupId),
-          label: groupLabel,
-          market: "TW",
-        },
-        uiContext: {
-          market: "tw",
-          selected_group_id: activeGroupId,
-          selected_group_name: selectedGroup?.group_name ?? null,
-        },
-      };
-    }
-
-    return {
-      market: activeMarket,
-      label:
-        activeMarket === "tw"
-          ? t("dashboard.ranking.twMarket")
-          : t("dashboard.ranking.genericMarket", {
-              market: activeMarket.toUpperCase(),
-            }),
-      target: {
-        type: "auto",
-        market: activeMarket.toUpperCase(),
-      },
-      uiContext: {
-        market: activeMarket,
-      },
-    };
-  }, [
-    activeGroupId,
+  const omiAskContext = buildOmiAskContext({
     activeMarket,
-    selectedGroup?.group_name,
-    selectedFuturesSymbol,
-    selectedJpGroupId,
-    selectedJpGroupName,
-    selectedJpStock,
-    selectedJpSymbol,
-    selectedKrGroupId,
-    selectedKrGroupName,
-    selectedKrStock,
-    selectedKrSymbol,
+    activeGroupId,
+    selectedGroupName: selectedGroup?.group_name ?? null,
     selectedStockId,
     selectedStockName,
+    selectedFuturesSymbol,
     selectedUsGroupId,
     selectedUsGroupName,
-    selectedUsSecurityName,
     selectedUsSymbol,
+    selectedUsSecurityName,
+    selectedJpGroupId,
+    selectedJpGroupName,
+    selectedJpSymbol,
+    selectedJpStock,
+    selectedKrGroupId,
+    selectedKrGroupName,
+    selectedKrSymbol,
+    selectedKrStock,
     t,
-  ]);
+  });
 
   return (
     <main className="h-screen overflow-hidden bg-omi-canvas text-omi-text-strong">
@@ -3601,7 +1735,10 @@ export default function MarketDashboardClient({
             {activeMarket === "tw" ? (
               <>
                 <div className={twChartFocusMode ? "hidden" : ""}>
-                  <MarketTape summary={marketIndexSummary} loadState={marketIndexLoadState} />
+                  <TaiwanMarketTape
+                    summary={marketIndexSummary}
+                    loadState={marketIndexLoadState}
+                  />
                 </div>
 
                 {selectedFuturesSymbol ? (
@@ -3632,6 +1769,7 @@ export default function MarketDashboardClient({
                     selectedSecurityName={selectedUsSecurityName}
                     selectedGroupName={selectedUsGroupName}
                     companyProfile={selectedUsContextProfile}
+                    onError={handleUsMarketTapeError}
                   />
                 </div>
 
@@ -3650,6 +1788,7 @@ export default function MarketDashboardClient({
                     selectedSymbol={selectedJpSymbol}
                     selectedStock={selectedJpStock}
                     selectedGroupName={selectedJpGroupName}
+                    onError={handleJpMarketTapeError}
                   />
                 </div>
                 <JPMarketPanel
@@ -3667,6 +1806,7 @@ export default function MarketDashboardClient({
                   selectedSymbol={selectedKrSymbol}
                   selectedStock={selectedKrStock}
                   selectedGroupName={selectedKrGroupName}
+                  onError={handleKrMarketTapeError}
                 />
                 <KRMarketPanel
                   initialSymbol={selectedKrSymbol}

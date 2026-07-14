@@ -170,6 +170,7 @@ export function WatchlistRankingPanel({
             {secondaryAction}
             <button
               type="button"
+              data-testid="watchlist-ranking-reload"
               onClick={onReload}
               className="h-9 bg-omi-control px-4 text-sm font-semibold text-omi-text-inverse hover:bg-omi-control-border disabled:bg-omi-surface-strong"
               disabled={reloadDisabled}
