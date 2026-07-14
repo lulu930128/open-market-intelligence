@@ -137,7 +137,10 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
   const t = useT();
 
   return (
-    <section className="border border-omi-border-subtle bg-omi-surface">
+    <section
+      className="border border-omi-border-subtle bg-omi-surface"
+      data-testid="professional-chart-panel"
+    >
       <div className="border-b border-omi-border-subtle px-4 py-2">
         <div className="flex min-h-9 flex-wrap items-center justify-between gap-x-4 gap-y-2">
           <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
@@ -254,6 +257,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
               <button
                 type="button"
                 title="Undo (Ctrl+Z)"
+                data-testid="chart-drawing-undo"
                 disabled={!canUndoDrawing}
                 onClick={onUndoDrawing}
                 className={[
@@ -295,6 +299,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
               <button
                 type="button"
                 disabled={drawings.length === 0}
+                data-testid="chart-drawing-clear"
                 onClick={onClearDrawings}
                 className={[
                   "h-7 px-2 text-xs font-semibold transition",

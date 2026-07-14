@@ -2,10 +2,10 @@
 
 ## 狀態
 
-- 目前階段：里程碑 2C（Market tape、formatting 與 OMI context）實作完成，完整 frontend gate 通過
+- 目前階段：里程碑 3（StockDetail 資料與 side-effect ownership）實作完成，完整 frontend gate 通過
 - 最後更新：2026-07-14
 - Implementation gate：已開啟
-- Commit 狀態：里程碑 0 baseline 已保存為 `cc2ce8d`；里程碑 1 已保存為 `2493387`；里程碑 2A 已保存並推送為 `88f9958`；里程碑 2B 已保存為 `12669e6`；里程碑 2C 尚未提交
+- Commit 狀態：里程碑 0 baseline 已保存為 `cc2ce8d`；里程碑 1 已保存為 `2493387`；里程碑 2A 已保存並推送為 `88f9958`；里程碑 2B 已保存為 `12669e6`；里程碑 2C 已保存為 `ea8acf0`；里程碑 3 將由本批 `refactor(frontend): extract stock detail ownership` 保存
 
 ## 已完成
 
@@ -240,3 +240,55 @@ Radar hooks 行數：約 `useTaiwanRadarState.ts` 430、`useRegionalRadarState.t
 - `MarketTapePanels.tsx` 刻意保留為同層級 presentation collection；四個 component 沒有 transport/state，現階段再拆成四個薄檔案不會改善 ownership。
 - 台股 daily-release/calendar timer 尚無 fake-clock unit test；本批維持既有 integration contract，並以 request race、完整 E2E 與 cleanup review 驗證。
 - 里程碑 2C 應先建立獨立 commit boundary，再開始 3A；下一步先補 `StockDetailPanel` characterization，不直接搬約 392 行 chart load effect。
+
+## 2026-07-14 里程碑 3：StockDetail 資料與 side-effect ownership
+
+### 已完成
+
+- 擴充 Playwright OMI API fixture，支援通用 request capture、延遲與自訂 response；新增 stock/chart/quote、drawing 與 broker branch 的固定 payload。
+- 新增 `useChartDrawingPersistence.ts`，唯一擁有 localStorage、remote load/save、700ms debounce、history、undo/redo、delete/clear 與 stale stock guard。
+- 新增 `useTaiwanStockChartData.ts`，接管日／週／月／盤中／professional chart load、history backfill、intraday overlay、benchmark 與 request cancellation。
+- 新增 `useTaiwanQuoteDepth.ts`，接管 quote depth polling、in-flight guard 與切換股票後的 stale response 防護。
+- 新增 `useTaiwanDetailContext.ts`，接管 overnight impact、index list/contribution 與 market chip context。
+- 新增 `useTaiwanDataPanel.ts`，接管 market calendar release status、basic detail、lazy tab data、refresh jobs、partial result、branch day cache key 與 chart reload nonce。
+- 新增 `useTaiwanTechnicalReport.ts`，接管 backend technical report request、timeframe gating 與 stale stock response guard。
+- 新增純 `stockDetailTechnicalReportProjection.ts`、`stockDetailSignalProjection.ts` 與 `stockDetailSeriesProjection.ts`；均不 import React hook、API client 或 router。
+- `StockDetailPanel.tsx` 現在只保留 chart/view mode、indicator controls、derived memo wiring 與 JSX composition；不再內嵌大型 fetch effect、drawing persistence 或 data-tab loader。
+- `playwright.config.ts` 新增明確 opt-in 的 existing server reuse；預設測試啟動策略不變，且本批未停止使用者既有 `3000` dev server。
+
+### Characterization 與 regression
+
+- 新增股票切換 race case：舊股票的 OHLC 與 quote depth 延遲完成時，不得覆寫目前股票。
+- 新增 drawing persistence case：local drawing 必須同步 remote，clear 後仍可 undo，三次 PUT payload 依序為 1、0、1 筆 drawing。
+- 新增 branch cache case：切離再回到 branch tab 不重抓相同 day key，切換 `days=5` 才發新 request。
+- 保留 TAIEX professional chart shell case，並以 `data-testid`／state attributes 固定 chart、drawing 與 data-tab 可觀察契約。
+- 完整 suite 揭露三個既有 fixture 脆弱點，已修正 hydration 前 dock click、summary 額外 reload request 與 regional 預選 group history 假設；測試仍驗證原 API、stale guard 與 URL contract。
+
+### Ownership 指標
+
+| 指標 | 里程碑 3 前 | 里程碑 3 後 | 變化 |
+| --- | ---: | ---: | ---: |
+| `StockDetailPanel.tsx` 行數 | 4,206 | 1,424 | -2,782 |
+| StockDetail `useState` 呼叫 | 67 | 17 | -50 |
+| StockDetail `useEffect` 呼叫 | 21 | 2 | -19 |
+| StockDetail `useRef` 呼叫 | 11 | 0 | -11 |
+| Playwright cases | 19 | 22 | +3 |
+
+新 ownership modules 約為：`useTaiwanDataPanel.ts` 750 行、`useTaiwanStockChartData.ts` 624 行、`useChartDrawingPersistence.ts` 356 行、`useTaiwanDetailContext.ts` 177 行、`useTaiwanQuoteDepth.ts` 114 行、`useTaiwanTechnicalReport.ts` 61 行、technical report projection 658 行、signal projection 379 行、series projection 187 行。這些檔案依 state machine／純投影責任切分，不再以任意行數繼續拆碎。
+
+### 驗證證據
+
+- Targeted ESLint（StockDetail、六個 ownership hooks、三個純 projection、E2E fixture）：通過。
+- `npm exec tsc -- --noEmit --incremental false`：通過。
+- `npm run lint`：通過，0 warning / 0 error。
+- `npm run build`：Next.js 16.2.6 production build 通過，6/6 pages generated。
+- StockDetail targeted Playwright：index shell、stale stock response、drawing sync/history、branch cache 4/4 通過。
+- `PLAYWRIGHT_REUSE_EXISTING_SERVER=1 npm run test:e2e`：22/22 通過；使用既有 `3000` dev server，未停止或替換其 process。
+- `git diff --check`：通過；僅有既有 Git line-ending 提示，無 whitespace error。
+
+### 風險與下一步
+
+- 本批未修改 backend、API response shape、SQLite schema、market refresh policy 或可見資訊架構。
+- `useTaiwanDataPanel.ts` 與 `useTaiwanStockChartData.ts` 仍屬中大型 state owner；目前各自只有單一 lifecycle boundary，後續應依修改熱點與測試證據再評估，不按行數拆成薄函式檔。
+- `StockDetailDataViews.tsx` 仍是大型 presentation collection；里程碑 4 應按 index、technical、revenue/earnings、shareholding/institutional view domain 拆分並保留 compatibility exports。
+- 下一步進入里程碑 4 前，先保存本批獨立 commit；不要把 chart engine interaction migration 混入同一 commit。

@@ -5,6 +5,7 @@ const host = process.env.PLAYWRIGHT_HOST ?? "127.0.0.1";
 const baseURL = `http://${host}:${port}`;
 const productionServer =
   process.env.CI || process.env.PLAYWRIGHT_SERVER_MODE === "production";
+const reuseExistingServer = process.env.PLAYWRIGHT_REUSE_EXISTING_SERVER === "1";
 const serverCommand = productionServer
   ? `npm run start:e2e-production -- --hostname ${host} --port ${port}`
   : `npm run dev -- --hostname ${host} --port ${port}`;
@@ -27,7 +28,7 @@ export default defineConfig({
   webServer: {
     command: serverCommand,
     url: baseURL,
-    reuseExistingServer: false,
+    reuseExistingServer,
     timeout: 120_000,
   },
 });

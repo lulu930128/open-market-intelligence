@@ -574,6 +574,7 @@ export default function StockDetailDataPanel({
                 <button
                   key={option.label}
                   type="button"
+                  data-branch-days={option.days ?? "more"}
                   onClick={() => {
                     if (option.days !== null) setBranchDays(option.days);
                   }}

@@ -464,6 +464,184 @@ function ohlcResponse(stockId: string) {
   };
 }
 
+function stockOhlcResponse(stockId: string) {
+  const basePrice = stockId === "2303" ? 50 : 1_000;
+  const stockPoints = Array.from({ length: 180 }, (_, index) => {
+    const date = new Date(Date.UTC(2026, 0, 16 + index));
+    const close = basePrice + index * (stockId === "2303" ? 0.02 : 0.5);
+
+    return {
+      time: date.toISOString().slice(0, 10),
+      open: close - 0.5,
+      high: close + 1,
+      low: close - 1,
+      close,
+      volume: 20_000 + index * 100,
+      trade_value: 1_000_000 + index * 10_000,
+      transaction_count: 1_000 + index,
+    };
+  });
+
+  return {
+    stock_id: stockId,
+    timeframe: "daily",
+    bars: 180,
+    lookback_days: 260,
+    from_date: stockPoints[0].time,
+    to_date: stockPoints[stockPoints.length - 1].time,
+    point_count: stockPoints.length,
+    points: stockPoints,
+    intraday_overlay: null,
+    backfill: null,
+  };
+}
+
+function stockMasterResponse(stockId: string) {
+  const timestamp = "2026-06-15T09:30:00+08:00";
+
+  return {
+    id: stockId === "2303" ? 2303 : 2330,
+    stock_id: stockId,
+    stock_name: stockId === "2303" ? "United Microelectronics" : "TSMC",
+    market: "TWSE",
+    instrument_type: "stock",
+    industry: "Semiconductors",
+    category: null,
+    is_active: true,
+    notes: null,
+    first_seen_at: timestamp,
+    last_seen_at: timestamp,
+    created_at: timestamp,
+    updated_at: timestamp,
+  };
+}
+
+function intradayResponse(stockId: string) {
+  const latestPrice = stockId === "2303" ? 52.4 : 1_015;
+  const previousClose = stockId === "2303" ? 53 : 1_000;
+
+  return {
+    stock_id: stockId,
+    symbol: stockId,
+    source: "playwright.fixture",
+    previous_close: previousClose,
+    point_count: 2,
+    points: [
+      {
+        time: "2026-06-15T09:00:00+08:00",
+        price: previousClose,
+        volume: 1_000,
+        accumulated_volume: 1_000,
+      },
+      {
+        time: "2026-06-15T09:30:00+08:00",
+        price: latestPrice,
+        volume: 2_000,
+        accumulated_volume: 3_000,
+      },
+    ],
+  };
+}
+
+function quoteDepthResponse(stockId: string) {
+  const lastPrice = stockId === "2303" ? 52.4 : 1_015;
+  const previousClose = stockId === "2303" ? 53 : 1_000;
+  const tick = stockId === "2303" ? 0.1 : 5;
+  const change = lastPrice - previousClose;
+
+  return {
+    stock_id: stockId,
+    stock_name: stockId === "2303" ? "United Microelectronics" : "TSMC",
+    market: "TWSE",
+    provider: "playwright.fixture",
+    source: "twse_mis_quote_depth",
+    source_url: null,
+    exchange_channel: stockId,
+    session_phase: "regular_live",
+    phase_label: "Regular",
+    trade_date: "2026-06-15",
+    quote_time: "2026-06-15T09:30:00+08:00",
+    fetched_at: "2026-06-15T09:30:01+08:00",
+    last_price: lastPrice,
+    previous_close: previousClose,
+    open_price: previousClose,
+    high_price: lastPrice + tick,
+    low_price: previousClose - tick,
+    change,
+    change_pct: (change / previousClose) * 100,
+    total_volume_lots: 12_000,
+    best_bid_price: lastPrice - tick,
+    best_bid_size_lots: 100,
+    best_ask_price: lastPrice + tick,
+    best_ask_size_lots: 120,
+    bid_total_size_lots: 500,
+    ask_total_size_lots: 600,
+    spread: tick * 2,
+    spread_pct: ((tick * 2) / lastPrice) * 100,
+    bid_levels: Array.from({ length: 5 }, (_, index) => ({
+      level: index + 1,
+      price: lastPrice - tick * (index + 1),
+      size_lots: 100 - index * 10,
+    })),
+    ask_levels: Array.from({ length: 5 }, (_, index) => ({
+      level: index + 1,
+      price: lastPrice + tick * (index + 1),
+      size_lots: 120 - index * 10,
+    })),
+    depth_available: true,
+    freshness: {
+      status: "live",
+      is_live: true,
+      is_stale: false,
+      age_seconds: 1,
+      expected_trade_date: "2026-06-15",
+      message: `Live quote for ${stockId}`,
+      source_error: null,
+    },
+  };
+}
+
+function brokerBranchSummaryResponse(stockId: string, days: number) {
+  const timestamp = "2026-06-15T09:30:00+08:00";
+  const branchRow = {
+    id: 1,
+    source_id: 1,
+    raw_result_id: 1,
+    trade_date: "2026-06-15",
+    stock_id: stockId,
+    stock_name: stockId === "2303" ? "United Microelectronics" : "TSMC",
+    branch_code: "9A00",
+    branch_name: "Fixture Branch",
+    buy_lots: 120,
+    sell_lots: 40,
+    net_lots: 80,
+    buy_avg_price: 1_010,
+    sell_avg_price: 1_008,
+    buy_rank: 1,
+    sell_rank: 1,
+    source_label: "Fixture",
+    created_at: timestamp,
+    updated_at: timestamp,
+  };
+
+  return {
+    stock_id: stockId,
+    stock_name: stockId === "2303" ? "United Microelectronics" : "TSMC",
+    trade_date: "2026-06-15",
+    source_name: "playwright.fixture",
+    source_url: "https://example.test/branches",
+    source_label: "Fixture",
+    is_latest: true,
+    requested_days: days,
+    available_days: days,
+    trade_dates: ["2026-06-15"],
+    is_partial: false,
+    row_count: 1,
+    buy_top: [branchRow],
+    sell_top: [{ ...branchRow, net_lots: -40 }],
+  };
+}
+
 function calendarStatus() {
   const status = {
     market: "tw",
@@ -1099,6 +1277,21 @@ type MockOmiApiOptions = {
     | Promise<{ body: unknown; delayMs?: number; status?: number } | null>
     | { body: unknown; delayMs?: number; status?: number }
     | null;
+  apiResponder?: (context: {
+    method: string;
+    path: string;
+    requestNumber: number;
+    url: URL;
+  }) =>
+    | Promise<{ body: unknown; delayMs?: number; status?: number } | null>
+    | { body: unknown; delayMs?: number; status?: number }
+    | null;
+  apiRequests?: Array<{
+    body: unknown;
+    method: string;
+    path: string;
+    search: string;
+  }>;
   omiAskRequests?: unknown[];
   taiwanRadarOutcomeLatest?: unknown;
   taiwanRadarOutcomeHistory?: unknown[];
@@ -1122,6 +1315,7 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
   const regionalRankingRequestCounts = { us: 0, jp: 0, kr: 0 };
   const radarRequestCounts = { tw: 0, us: 0, jp: 0, kr: 0 };
   const marketTapeRequestCounts = new Map<string, number>();
+  const apiRequestCounts = new Map<string, number>();
 
   async function tryFulfillMarketTape(
     route: Route,
@@ -1157,6 +1351,35 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
   await page.route("**/omi-data/**", async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
+    const method = route.request().method();
+    const requestBody = route.request().postDataJSON() ?? null;
+    const requestKey = `${method}:${path}`;
+    const requestNumber = (apiRequestCounts.get(requestKey) ?? 0) + 1;
+    apiRequestCounts.set(requestKey, requestNumber);
+    options.apiRequests?.push({
+      body: requestBody,
+      method,
+      path,
+      search: url.search,
+    });
+
+    const customApiResponse = await options.apiResponder?.({
+      method,
+      path,
+      requestNumber,
+      url,
+    });
+    if (customApiResponse) {
+      if (customApiResponse.delayMs) {
+        await new Promise((resolve) => setTimeout(resolve, customApiResponse.delayMs));
+      }
+      await route.fulfill({
+        status: customApiResponse.status ?? 200,
+        contentType: "application/json",
+        body: JSON.stringify(customApiResponse.body),
+      });
+      return;
+    }
 
     if (path.endsWith("/ai/ask/stream")) {
       options.omiAskRequests?.push(route.request().postDataJSON());
@@ -1230,8 +1453,88 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
       return;
     }
 
-    if (path.includes("/market/ohlc/2330")) {
-      await fulfillJson(route, ohlcResponse("2330"));
+    const taiwanOhlcMatch = path.match(/\/market\/ohlc\/([^/]+)$/);
+    if (taiwanOhlcMatch) {
+      await fulfillJson(route, stockOhlcResponse(decodeURIComponent(taiwanOhlcMatch[1])));
+      return;
+    }
+
+    const taiwanIndicatorMatch = path.match(/\/market\/indicators\/([^/]+)\/daily$/);
+    if (taiwanIndicatorMatch) {
+      await fulfillJson(route, []);
+      return;
+    }
+
+    const taiwanIntradayHistoryMatch = path.match(/\/market\/intraday\/([^/]+)\/history$/);
+    if (taiwanIntradayHistoryMatch) {
+      const stockId = decodeURIComponent(taiwanIntradayHistoryMatch[1]);
+      await fulfillJson(route, {
+        stock_id: stockId,
+        symbol: stockId,
+        interval: url.searchParams.get("interval") ?? "5m",
+        range: url.searchParams.get("range") ?? "auto",
+        provider: "playwright.fixture",
+        source: "playwright.fixture",
+        from_time: null,
+        to_time: null,
+        point_count: 0,
+        cached_count: 0,
+        refreshed_count: 0,
+        points: [],
+      });
+      return;
+    }
+
+    const taiwanIntradayMatch = path.match(/\/market\/intraday\/([^/]+)$/);
+    if (taiwanIntradayMatch) {
+      await fulfillJson(route, intradayResponse(decodeURIComponent(taiwanIntradayMatch[1])));
+      return;
+    }
+
+    const taiwanQuoteDepthMatch = path.match(/\/market\/quote-depth\/([^/]+)$/);
+    if (taiwanQuoteDepthMatch) {
+      await fulfillJson(route, quoteDepthResponse(decodeURIComponent(taiwanQuoteDepthMatch[1])));
+      return;
+    }
+
+    const taiwanTechnicalMatch = path.match(/\/market\/technical\/([^/]+)$/);
+    if (taiwanTechnicalMatch) {
+      const stockId = decodeURIComponent(taiwanTechnicalMatch[1]);
+      await fulfillJson(route, {
+        kind: "stock_technical_report",
+        stock_id: stockId,
+        timeframe: url.searchParams.get("timeframe") ?? "daily",
+        phase: "regular",
+        confidence: "medium",
+        generated_at: "2026-06-15T09:30:00+08:00",
+        title: "Fixture technical report",
+        summary: `Technical fixture for ${stockId}`,
+        score: 1,
+        value: 1,
+        value_label: "fixture",
+        rows: [],
+        badges: [],
+        data: {},
+        missing: [],
+        warnings: [],
+        source_refs: [],
+      });
+      return;
+    }
+
+    const taiwanStockMatch = path.match(/\/stocks\/([^/]+)$/);
+    if (taiwanStockMatch) {
+      await fulfillJson(route, stockMasterResponse(decodeURIComponent(taiwanStockMatch[1])));
+      return;
+    }
+
+    if (/\/market\/(?:institutional|margin|revenue)\/[^/]+\/latest$/.test(path)) {
+      await fulfillJson(route, null);
+      return;
+    }
+
+    if (/\/market\/overnight-impact\/[^/]+$/.test(path)) {
+      await fulfillJson(route, null);
       return;
     }
 
@@ -1812,6 +2115,53 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
       return;
     }
 
+    const taiwanSelectionRefreshMatch = path.match(/\/market\/selection-refresh\/([^/]+)$/);
+    if (taiwanSelectionRefreshMatch) {
+      await fulfillJson(route, completedRefreshJob());
+      return;
+    }
+
+    const taiwanChipCoverageMatch = path.match(/\/market\/chips\/([^/]+)\/coverage$/);
+    if (taiwanChipCoverageMatch) {
+      const stockId = decodeURIComponent(taiwanChipCoverageMatch[1]);
+      await fulfillJson(route, {
+        stock_id: stockId,
+        shareholding_latest_date: null,
+        shareholding_week_count: 0,
+        shareholding_row_count: 0,
+        margin_latest_trade_date: null,
+        margin_row_count: 0,
+        has_shareholding: false,
+        has_margin: false,
+      });
+      return;
+    }
+
+    if (/\/market\/shareholding\/[^/]+\/history$/.test(path)) {
+      await fulfillJson(route, []);
+      return;
+    }
+
+    if (/\/market\/(?:margin|institutional|revenue|financials)\/[^/]+\/history$/.test(path)) {
+      await fulfillJson(route, []);
+      return;
+    }
+
+    const taiwanBrokerBranchMatch = path.match(
+      /\/market\/broker-branches\/([^/]+)\/daily$/
+    );
+    if (taiwanBrokerBranchMatch) {
+      const stockId = decodeURIComponent(taiwanBrokerBranchMatch[1]);
+      const days = Number(url.searchParams.get("days") ?? "1");
+      await fulfillJson(route, brokerBranchSummaryResponse(stockId, days));
+      return;
+    }
+
+    if (path.includes("/market/market-chips/refresh")) {
+      await fulfillJson(route, completedRefreshJob());
+      return;
+    }
+
     if (path.includes("/market/market-chips/latest")) {
       await fulfillJson(route, {
         id: 1,
@@ -1972,8 +2322,14 @@ test.describe("OMI dashboard smoke", () => {
     });
 
     async function askCurrentContext(question: string) {
-      await page.getByRole("button", { name: "開啟 OMI 即時問答" }).click();
-      await page.getByPlaceholder("輸入問題...").fill(question);
+      const composer = page.getByPlaceholder("輸入問題...");
+      await expect(async () => {
+        if (await composer.isVisible()) return;
+        await page.getByRole("button", { name: "開啟 OMI 即時問答" }).click();
+        await expect(composer).toBeVisible({ timeout: 1_000 });
+      }).toPass({ timeout: 5_000 });
+      await expect(composer).toBeVisible();
+      await composer.fill(question);
       await page.getByRole("button", { name: "送出" }).click();
       await expect(page.getByText("測試回答：目前偏多但等待確認")).toBeVisible();
     }
@@ -2039,7 +2395,7 @@ test.describe("OMI dashboard smoke", () => {
           resolveFirstSummaryStarted();
           return firstSummaryResponse;
         }
-        if (requestNumber === 2) {
+        if (requestNumber >= 2) {
           return { body: marketIndexSummaryResponse(2_222), status: 200 };
         }
         return null;
@@ -2177,6 +2533,120 @@ test.describe("OMI dashboard smoke", () => {
 
     await expect(page.getByRole("button", { name: "總覽" })).toBeVisible();
     await expect(page.locator("canvas").first()).toBeVisible();
+  });
+
+  test("Taiwan stock detail ignores stale chart and quote responses after selection changes", async ({
+    page,
+  }) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await mockOmiApi(page, {
+      taiwanWatchlistTree: seededTaiwanWatchlistTree(),
+      taiwanWatchlistItems: seededTaiwanWatchlistItems(),
+      taiwanRankingRows: seededTaiwanRankingRows(),
+      apiResponder: ({ path }) => {
+        if (path.endsWith("/market/ohlc/2330")) {
+          return { body: stockOhlcResponse("2330"), delayMs: 800 };
+        }
+        if (path.endsWith("/market/quote-depth/2330")) {
+          return { body: quoteDepthResponse("2330"), delayMs: 900 };
+        }
+        return null;
+      },
+    });
+    await page.goto("/?market=tw&group_id=7&stock_id=2330&radar_mode=action", {
+      waitUntil: "domcontentloaded",
+    });
+
+    const umcRankingLink = page.locator('[data-ranking-stock-id="2303"]');
+    await expect(umcRankingLink).toBeVisible();
+    await umcRankingLink.click();
+
+    const stockDetail = page.getByTestId("stock-detail-panel");
+    await expect(page.getByRole("heading", { level: 2 }).filter({ hasText: "2303" })).toBeVisible();
+    await expect(stockDetail).toHaveAttribute("data-chart-stock-id", "2303");
+    await expect(stockDetail).toHaveAttribute("data-chart-load-state", "success");
+    await expect(page.getByTestId("quote-depth-panel")).toContainText("52.4");
+
+    await page.waitForTimeout(1_000);
+    await expect(stockDetail).toHaveAttribute("data-chart-stock-id", "2303");
+    await expect(page.getByTestId("quote-depth-panel")).toContainText("52.4");
+    expect(pageErrors).toEqual([]);
+  });
+
+  test("Taiwan professional chart syncs local drawings and preserves clear undo history", async ({
+    page,
+  }) => {
+    const apiRequests: NonNullable<MockOmiApiOptions["apiRequests"]> = [];
+    await page.addInitScript(() => {
+      window.localStorage.setItem(
+        "omi:tw:chart-drawings:v1:2330:daily",
+        JSON.stringify([
+          {
+            id: "fixture-horizontal",
+            type: "horizontal",
+            points: [{ time: "2026-06-15", price: 1_010 }],
+            color: "#f4f4f5",
+            createdAt: "2026-06-15T09:30:00+08:00",
+          },
+        ])
+      );
+    });
+    await mockOmiApi(page, { apiRequests });
+    await page.goto("/?market=tw&stock_id=2330", { waitUntil: "domcontentloaded" });
+
+    const stockDetail = page.getByTestId("stock-detail-panel");
+    await expect(stockDetail).toHaveAttribute("data-chart-load-state", "success");
+    await expect(page.getByTestId("stock-detail-expand")).toBeEnabled();
+    await page.getByTestId("stock-detail-expand").click();
+    await expect(page.getByTestId("professional-chart-panel")).toBeVisible();
+
+    const drawingWrites = () =>
+      apiRequests.filter(
+        (request) =>
+          request.method === "PUT" && request.path.includes("/market/chart-drawings/")
+      );
+    await expect.poll(() => drawingWrites().length).toBe(1);
+    expect((drawingWrites()[0].body as { drawings: unknown[] }).drawings).toHaveLength(1);
+
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.getByTestId("chart-drawing-clear").click();
+    await expect.poll(() => drawingWrites().length).toBe(2);
+    expect((drawingWrites()[1].body as { drawings: unknown[] }).drawings).toHaveLength(0);
+
+    await expect(page.getByTestId("chart-drawing-undo")).toBeEnabled();
+    await page.getByTestId("chart-drawing-undo").click();
+    await expect.poll(() => drawingWrites().length).toBe(3);
+    expect((drawingWrites()[2].body as { drawings: unknown[] }).drawings).toHaveLength(1);
+  });
+
+  test("Taiwan branch data tab reuses each days cache key", async ({ page }) => {
+    const apiRequests: NonNullable<MockOmiApiOptions["apiRequests"]> = [];
+    await mockOmiApi(page, { apiRequests });
+    await page.goto("/?market=tw&stock_id=2330", { waitUntil: "domcontentloaded" });
+
+    await expect(page.getByTestId("stock-detail-panel")).toHaveAttribute(
+      "data-chart-load-state",
+      "success"
+    );
+    await page.locator('[data-data-tab="branch"]').click();
+
+    const branchRequests = () =>
+      apiRequests.filter((request) =>
+        request.path.includes("/market/broker-branches/2330/daily")
+      );
+    await expect.poll(() => branchRequests().length).toBe(1);
+    expect(branchRequests()[0].search).toContain("days=1");
+    await expect(page.locator('[data-branch-days="5"]')).toBeVisible();
+
+    await page.locator('[data-data-tab="chips"]').click();
+    await page.locator('[data-data-tab="branch"]').click();
+    await expect(page.locator('[data-branch-days="5"]')).toBeVisible();
+    expect(branchRequests()).toHaveLength(1);
+
+    await page.locator('[data-branch-days="5"]').click();
+    await expect.poll(() => branchRequests().length).toBe(2);
+    expect(branchRequests()[1].search).toContain("days=5");
   });
 
   test("malformed portfolio payload stays contained", async ({ page }) => {
@@ -2317,6 +2787,8 @@ test.describe("OMI dashboard smoke", () => {
     );
 
     await page.getByRole("link", { name: "韓股", exact: true }).click();
+    await expect(page).toHaveURL(/\?market=kr(?:&group_id=\d+)?$/);
+    const krMarketEntryUrl = page.url();
     await page.getByRole("button", { name: "Reload" }).first().click();
     const krSidebar = page.getByRole("complementary");
     const krGroupLabel = krSidebar.getByText("Korea Core", { exact: true }).last();
@@ -2338,7 +2810,7 @@ test.describe("OMI dashboard smoke", () => {
     await expect(samsungButton.locator("..")).not.toHaveClass(/omi-sidebar-selected/);
 
     await page.goBack();
-    await expect(page).toHaveURL(/\?market=kr$/);
+    await expect(page).toHaveURL(krMarketEntryUrl);
 
     await page.goBack();
     await expect(page).toHaveURL(
@@ -2357,7 +2829,7 @@ test.describe("OMI dashboard smoke", () => {
     await expect(restoredToyotaButton.locator("..")).toHaveClass(/omi-sidebar-selected/);
 
     await page.goForward();
-    await expect(page).toHaveURL(/\?market=kr$/);
+    await expect(page).toHaveURL(krMarketEntryUrl);
     await page.goForward();
     await expect(page).toHaveURL(/\?market=kr&group_id=37$/);
     await page.goForward();

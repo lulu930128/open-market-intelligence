@@ -1988,6 +1988,7 @@ export function DataTabButton({
   return (
     <button
       type="button"
+      data-data-tab={tab.key}
       onClick={onClick}
       className={[
         "omi-data-tab flex h-11 min-w-0 flex-1 items-center justify-center gap-2 border-r border-omi-border-subtle text-sm font-semibold transition last:border-r-0",

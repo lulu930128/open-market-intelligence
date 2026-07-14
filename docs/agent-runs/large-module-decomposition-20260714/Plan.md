@@ -298,3 +298,4 @@ git status --short
 - 2026-07-14：`tools.py`、`agentic_tools.py`、`us_market/service.py` 使用 compatibility facade + runtime dependency handoff，避免破壞 patch seam。
 - 2026-07-14：`models.py` 維持唯一 ORM registry；i18n/test fixtures 不因行數拆檔。
 - 2026-07-14：每個 milestone 獨立驗證與 commit，不做 mega commit。
+- 2026-07-14：里程碑 3 完成；StockDetail 的 drawing、chart/quote/context、data panel 與純 projection 已有獨立 owner，下一批從 presentation collections 開始。
