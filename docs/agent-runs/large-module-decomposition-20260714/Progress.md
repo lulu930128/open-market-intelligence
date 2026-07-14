@@ -666,3 +666,40 @@ engine hook 雖為中大型檔案，但內容是單一 imperative chart lifecycl
 
 - `service.py` 雖仍超過 1,500 行，但剩餘函式皆屬公開 provider orchestration、chart/intraday workflow 或薄 wrapper；繼續只為行數拆分會增加 callback／patch 轉接層，未形成更清楚的 transaction owner。
 - 後續若 price provider 或 fundamentals provider 各自出現獨立修改熱點，再以 typed dependency bundle 抽出 workflow；目前不做預防性碎片化。
+
+## 2026-07-14 最終重掃與整體驗證
+
+### 完整驗證
+
+- 第一次 full profile：compileall 通過；backend 615 通過、7 失敗。失敗原因是 `agentic_tools.py` 抽取後遺漏既有 monkeypatch／projection façade symbols。
+- 恢復 `llm`、`stock_selection_refresh`、`watchlist_backfill_service`、`_compact_market_context` 與 `_append_source_ref_once`，並新增 identity regression 固定這些 runtime patch targets。
+- 受影響 freshness／projection／overnight regression：64/64 通過。
+- 第二次 full profile：backend compileall 通過；backend 623/623 通過；frontend lint 與 TypeScript no-emit 通過。
+- sandbox 內 Next build 已完成 compile 與 TypeScript，但 worker spawn 因 Windows `EPERM` 失敗；同一個 `npm run build` 在 sandbox 外重跑成功，6/6 pages generated。
+- 里程碑 5 已另行完成完整 Playwright 23/23 與桌面／手機實際圖表驗證；本批沒有再改 frontend runtime code。
+
+### 剩餘高風險技術債
+
+以下項目仍是大型可執行單函式，不能視為單純 registry；應列入下一波，而不是在本輪為了宣稱零技術債而匆促拆分。
+
+| 優先 | hotspot | 單函式約行數 | 判斷 |
+| ---: | --- | ---: | --- |
+| 1 | `USStockDetailPanel` | 1,933 | data load、tab/state、chart、fundamental/resource UI 仍高度耦合 |
+| 2 | `StockKLineChart` | 1,792 | 多市場共用圖表入口，使用面廣，需先鎖 props／interaction contract |
+| 3 | `ResourceMarketPanel` | 1,629 | instrument selection、fetch、projection 與 panel UI 混合 |
+| 4 | `MarketDashboardClient` | 1,621 | 跨市場 shell state 與 panel routing 仍集中 |
+| 5 | `JPMarketPanel`／`KRMarketPanel` | 1,566／1,252 | 區域市場 workflow 重複，應先建立共同 contract 再拆 |
+| 6 | `calculate_latest_stock_signals` | 750 | 單一 backend calculation function 過長，需以 signal family 與 evidence aggregation 拆分 |
+| 7 | `_resolve_scope` | 448 | scope routing 分支仍多，應用 resolver registry 收斂 |
+
+### 可接受的大檔
+
+- `frontend/src/i18n/messages/*.ts`：locale dictionary，主要是宣告資料，不以函式行數判定技術債。
+- `backend/app/db/models.py` 與 `frontend/src/types/market.ts`：schema/type registry；後續可按 bounded context 分檔，但目前沒有大型執行函式或 transaction 混雜。
+- `tool_catalog.py`：單函式 736 行但內容為固定 tool schema catalog，已由 schema digest 與 mutable isolation 測試保護。
+- `taiwan_projection.py`、`answer_evidence.py`、`answer_question_locales.py` 與 chart owner modules：仍偏長，但各自只有一個可命名 ownership；待出現獨立修改熱點再拆。
+
+### 結論
+
+- 本輪「chart engine + AI tools/agentic + answer composer + US market service」架構整理完成，相關 façade、patch target、provider／DB ownership 與驗證證據已固定。
+- 專案已從 backend 核心混合責任轉為較清楚的 module ownership，但全站仍不是零技術債；下一波應以前端大型單函式為主，不應再回頭機械拆本輪已收斂的 owner。

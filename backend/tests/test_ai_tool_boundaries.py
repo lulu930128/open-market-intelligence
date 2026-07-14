@@ -9,8 +9,11 @@ from unittest.mock import MagicMock, patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.ai import tools
+from app.ai import agentic_tools, llm, tools
+from app.ai.market_context import common as market_context_common
 from app.db.models import Base
+from app.market import stock_selection_refresh
+from app.watchlists import backfill_service as watchlist_backfill_service
 
 
 EXPECTED_INTERNAL_TOOL_NAMES = (
@@ -51,6 +54,22 @@ EXPECTED_INTERNAL_TOOL_CATALOG_SHA256 = (
 
 
 class AIToolBoundaryTests(unittest.TestCase):
+    def test_agentic_facade_keeps_runtime_patch_targets(self) -> None:
+        self.assertIs(agentic_tools.llm, llm)
+        self.assertIs(agentic_tools.stock_selection_refresh, stock_selection_refresh)
+        self.assertIs(
+            agentic_tools.watchlist_backfill_service,
+            watchlist_backfill_service,
+        )
+        self.assertIs(
+            agentic_tools._compact_market_context,
+            market_context_common.compact_market_context,
+        )
+        self.assertIs(
+            agentic_tools._append_source_ref_once,
+            market_context_common.append_source_ref_once,
+        )
+
     def test_public_tool_inventory_exposes_only_omi_ask(self) -> None:
         catalog = tools.list_ai_tools()
 

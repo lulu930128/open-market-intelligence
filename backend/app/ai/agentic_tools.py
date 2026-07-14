@@ -5,9 +5,10 @@ from typing import Any
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.ai import agentic_common, agentic_execution, agentic_planning, agentic_policy, freshness
+from app.ai import agentic_common, agentic_execution, agentic_planning, agentic_policy, freshness, llm
 from app.ai import progress_events
 from app.ai.market_context import crypto_context, jp_context, kr_context, regional_params, us_context
+from app.ai.market_context import common as market_context_common
 from app.db.models import (
     USDailyPrice,
     USCompanyProfile,
@@ -18,9 +19,11 @@ from app.crypto_market.assets import get_crypto_asset
 from app.crypto_market.source_health import build_crypto_source_health
 from app.jp_market import service as jp_market_service
 from app.kr_market import service as kr_market_service
+from app.market import stock_selection_refresh
 from app.market.overnight_impact import scan_us_overnight_impact_gaps
 from app.us_market import service as us_market_service
 from app.us_market.sources import normalize_us_symbol
+from app.watchlists import backfill_service as watchlist_backfill_service
 
 
 DEFAULT_TOOL_BUDGET = agentic_policy.DEFAULT_TOOL_BUDGET
@@ -42,6 +45,9 @@ _emit_tool_progress = agentic_execution._emit_tool_progress
 
 _age_days = agentic_common._age_days
 _json_value = agentic_common._json_value
+_append_source_ref_once = market_context_common.append_source_ref_once
+_compact_market_context = market_context_common.compact_market_context
+_latest_timestamp_from_rows = market_context_common.latest_timestamp_from_rows
 
 
 normalize_tool_budget = agentic_policy.normalize_tool_budget
