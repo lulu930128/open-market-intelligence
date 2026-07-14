@@ -29,10 +29,6 @@ import {
   buildKrWatchlistRows,
   buildUsWatchlistRows,
   buildWatchlistRows,
-  flattenGroups,
-  flattenJpGroups,
-  flattenKrGroups,
-  flattenUsGroups,
   mergeJpWatchlistRows,
   mergeKrWatchlistRows,
   mergeUsWatchlistRows,
@@ -59,11 +55,8 @@ import {
   type KrRankingErrorKind,
 } from "@/components/market-dashboard/ranking/useKrRankingState";
 import { fetchJson, requestJson } from "@/lib/api";
-import {
-  buildDashboardHref,
-  type DashboardHrefParams,
-  type MarketRegion,
-} from "@/lib/dashboardNavigation";
+import type { MarketRegion } from "@/components/market-dashboard/selection/dashboardRoutes";
+import { useMarketSelection } from "@/components/market-dashboard/selection/useMarketSelection";
 import {
   emitDataStatusEvent,
   type DataStatusLevel,
@@ -120,7 +113,6 @@ import {
   useT,
   type TranslationFunction,
 } from "@/i18n";
-import type { CryptoBaseAsset } from "@/types/cryptoMarket";
 import {
   resourceSymbolFromKey,
   type ResourceRefreshResult,
@@ -1733,125 +1725,84 @@ export default function MarketDashboardClient({
 }: Props) {
   const t = useT();
   const refreshExecutionSettings = useRefreshExecutionSettings();
-  const initialSelectedGroup = useMemo(() => {
-    const groups = flattenGroups(initialTree);
-    return (
-      groups.find((group) => group.id === initialSelectedGroupId) ??
-      groups[0] ??
-      null
-    );
-  }, [initialTree, initialSelectedGroupId]);
-  const initialSelectedUsGroup = useMemo(() => {
-    const groups = flattenUsGroups(initialUsWatchlistTree);
-    return (
-      groups.find((group) => group.id === initialSelectedGroupId) ??
-      groups[0] ??
-      null
-    );
-  }, [initialUsWatchlistTree, initialSelectedGroupId]);
-  const initialSelectedJpGroup = useMemo(() => {
-    const groups = flattenJpGroups(initialJpWatchlistTree);
-    return (
-      groups.find((group) => group.id === initialSelectedGroupId) ??
-      groups[0] ??
-      null
-    );
-  }, [initialJpWatchlistTree, initialSelectedGroupId]);
-  const initialSelectedKrGroup = useMemo(() => {
-    const groups = flattenKrGroups(initialKrWatchlistTree);
-    return (
-      groups.find((group) => group.id === initialSelectedGroupId) ??
-      groups[0] ??
-      null
-    );
-  }, [initialKrWatchlistTree, initialSelectedGroupId]);
-  const [selectedGroupId, setSelectedGroupId] = useState<number | null>(
-    initialSelectedGroup?.id ?? null
-  );
-  const [selectedGroup, setSelectedGroup] = useState<WatchlistGroupNode | null>(
-    initialSelectedGroup
-  );
-  const [selectedStockId, setSelectedStockId] = useState<string | null>(
-    initialSelectedStockId
-  );
-  const [selectedStockName, setSelectedStockName] = useState<string | null>(
-    initialSelectedStockName
-  );
-  const [selectedFuturesSymbol, setSelectedFuturesSymbol] = useState<string | null>(
-    initialSelectedFuturesSymbol
-  );
   const [watchlistTree, setWatchlistTree] = useState<WatchlistGroupNode[]>(initialTree);
   const [watchlistItems, setWatchlistItems] = useState<WatchlistItemRead[]>(initialItems);
-  const [activeMarket, setActiveMarket] = useState<MarketRegion>(initialMarket);
-  const [selectedCryptoBase, setSelectedCryptoBase] = useState<CryptoBaseAsset>("BTC");
-  const [selectedCryptoInstrumentKey, setSelectedCryptoInstrumentKey] = useState<string | null>(null);
-  const [selectedResourceInstrumentKey, setSelectedResourceInstrumentKey] = useState<string | null>(null);
+  const [usWatchlistTree, setUsWatchlistTree] =
+    useState<USWatchlistGroupNode[]>(initialUsWatchlistTree);
+  const [usWatchlistItems, setUsWatchlistItems] =
+    useState<USWatchlistItemRead[]>(initialUsWatchlistItems);
+  const [jpWatchlistTree, setJpWatchlistTree] =
+    useState<JPWatchlistGroupNode[]>(initialJpWatchlistTree);
+  const [jpWatchlistItems, setJpWatchlistItems] =
+    useState<JPWatchlistItemRead[]>(initialJpWatchlistItems);
+  const [krWatchlistTree, setKrWatchlistTree] =
+    useState<KRWatchlistGroupNode[]>(initialKrWatchlistTree);
+  const [krWatchlistItems, setKrWatchlistItems] =
+    useState<KRWatchlistItemRead[]>(initialKrWatchlistItems);
   const [resourceSubscriptionSettings, setResourceSubscriptionSettings] =
     useState<MarketDataSubscriptionSettingsRead | null>(null);
   const [twChartFocusMode, setTwChartFocusMode] = useState(false);
   const [usChartFocusMode, setUsChartFocusMode] = useState(false);
   const [jpChartFocusMode, setJpChartFocusMode] = useState(false);
-  const [selectedUsSymbol, setSelectedUsSymbol] = useState<string | null>(
-    initialSelectedUsSymbol
-  );
-  const [selectedUsSecurityName, setSelectedUsSecurityName] = useState<string | null>(
-    initialSelectedUsSecurityName
-  );
   const [selectedUsCompanyProfile, setSelectedUsCompanyProfile] =
     useState<USCompanyProfileRead | null>(null);
-  const [selectedJpSymbol, setSelectedJpSymbol] = useState<string | null>(
-    initialSelectedJpSymbol
-  );
-  const [selectedJpStock, setSelectedJpStock] = useState<JPStockMasterRead | null>(
-    null
-  );
-  const [selectedJpGroupId, setSelectedJpGroupId] = useState<number | null>(
-    initialSelectedJpGroup?.id ?? null
-  );
-  const [selectedJpGroup, setSelectedJpGroup] = useState<JPWatchlistGroupNode | null>(
-    initialSelectedJpGroup
-  );
-  const [selectedJpGroupName, setSelectedJpGroupName] = useState<string | null>(
-    initialSelectedJpGroup?.group_name ?? null
-  );
-  const [jpWatchlistTree, setJpWatchlistTree] =
-    useState<JPWatchlistGroupNode[]>(initialJpWatchlistTree);
-  const [jpWatchlistItems, setJpWatchlistItems] =
-    useState<JPWatchlistItemRead[]>(initialJpWatchlistItems);
   const [jpStatusMessage, setJpStatusMessage] = useState<JPStatusMessage>(null);
-  const [selectedKrSymbol, setSelectedKrSymbol] = useState<string | null>(
-    initialSelectedKrSymbol
-  );
-  const [selectedKrStock, setSelectedKrStock] = useState<KRStockMasterRead | null>(
-    null
-  );
-  const [selectedKrGroupId, setSelectedKrGroupId] = useState<number | null>(
-    initialSelectedKrGroup?.id ?? null
-  );
-  const [selectedKrGroup, setSelectedKrGroup] = useState<KRWatchlistGroupNode | null>(
-    initialSelectedKrGroup
-  );
-  const [selectedKrGroupName, setSelectedKrGroupName] = useState<string | null>(
-    initialSelectedKrGroup?.group_name ?? null
-  );
-  const [krWatchlistTree, setKrWatchlistTree] =
-    useState<KRWatchlistGroupNode[]>(initialKrWatchlistTree);
-  const [krWatchlistItems, setKrWatchlistItems] =
-    useState<KRWatchlistItemRead[]>(initialKrWatchlistItems);
-  const [selectedUsGroupId, setSelectedUsGroupId] = useState<number | null>(
-    initialSelectedUsGroup?.id ?? null
-  );
-  const [selectedUsGroup, setSelectedUsGroup] = useState<USWatchlistGroupNode | null>(
-    initialSelectedUsGroup
-  );
-  const [selectedUsGroupName, setSelectedUsGroupName] = useState<string | null>(
-    initialSelectedUsGroup?.group_name ?? null
-  );
-  const [usWatchlistTree, setUsWatchlistTree] =
-    useState<USWatchlistGroupNode[]>(initialUsWatchlistTree);
-  const [usWatchlistItems, setUsWatchlistItems] =
-    useState<USWatchlistItemRead[]>(initialUsWatchlistItems);
   const [radarMode, setRadarMode] = useState<WatchlistRadarMode>(initialRadarMode);
+  const marketSelection = useMarketSelection({
+    initialMarket,
+    initialSelectedGroupId,
+    initialSelectedStockId,
+    initialSelectedStockName,
+    initialSelectedFuturesSymbol,
+    initialSelectedUsSymbol,
+    initialSelectedUsSecurityName,
+    initialSelectedJpSymbol,
+    initialSelectedKrSymbol,
+    radarMode,
+    quoteDepthPreviewMode,
+    taiwanTree: watchlistTree,
+    taiwanItems: watchlistItems,
+    usTree: usWatchlistTree,
+    usItems: usWatchlistItems,
+    jpTree: jpWatchlistTree,
+    jpItems: jpWatchlistItems,
+    krTree: krWatchlistTree,
+    krItems: krWatchlistItems,
+    onHistoryNavigation: () => {
+      setTwChartFocusMode(false);
+      setUsChartFocusMode(false);
+      setJpChartFocusMode(false);
+      setJpStatusMessage(null);
+    },
+  });
+  const {
+    activeMarket,
+    selectedGroupId,
+    selectedGroup,
+    selectedStockId,
+    selectedStockName,
+    selectedFuturesSymbol,
+    selectedUsGroupId,
+    selectedUsGroup,
+    selectedUsGroupName,
+    selectedUsSymbol,
+    selectedUsSecurityName,
+    selectedJpGroupId,
+    selectedJpGroup,
+    selectedJpGroupName,
+    selectedJpSymbol,
+    selectedJpStock,
+    selectedKrGroupId,
+    selectedKrGroup,
+    selectedKrGroupName,
+    selectedKrSymbol,
+    selectedKrStock,
+    selectedCryptoBase,
+    selectedCryptoInstrumentKey,
+    selectedResourceInstrumentKey,
+    dashboardHref,
+    pushDashboardUrl,
+  } = marketSelection;
   const [radar, setRadar] = useState<WatchlistGroupRadarRead | null>(initialRadarData);
   const [radarOutcomeSummary, setRadarOutcomeSummary] =
     useState<WatchlistRadarOutcomeSummaryRead | null>(null);
@@ -3042,336 +2993,99 @@ export default function MarketDashboardClient({
   }, [activeMarket]);
 
 
-  function addDashboardPreviewParam(params: DashboardHrefParams) {
-    if (
-      quoteDepthPreviewMode &&
-      (params.market === "tw" || (!params.market && activeMarket === "tw"))
-    ) {
-      return { ...params, quoteDepthPreviewMode };
-    }
-
-    return params;
-  }
-
-  function dashboardHref(params: DashboardHrefParams) {
-    return buildDashboardHref(addDashboardPreviewParam(params));
-  }
-
-  function pushDashboardUrl(params: DashboardHrefParams) {
-    if (typeof window === "undefined") return;
-
-    window.history.pushState(null, "", dashboardHref(params));
-  }
-
   function handleMarketChange(market: MarketRegion) {
-    setActiveMarket(market);
     setTwChartFocusMode(false);
     setUsChartFocusMode(false);
     setJpChartFocusMode(false);
     setJpStatusMessage(null);
-
-    if (market !== "tw") {
-      setSelectedFuturesSymbol(null);
-    }
-
-    if (market === "tw") {
-      if (selectedFuturesSymbol) {
-        pushDashboardUrl({ market: "tw", futuresSymbol: selectedFuturesSymbol });
-      } else {
-        pushDashboardUrl({
-          market: "tw",
-          groupId: activeGroupId,
-          stockId: selectedStockId,
-          radarMode,
-        });
-      }
-      return;
-    }
-
-    if (market === "us") {
-      const fallbackGroup = selectedUsGroup ?? flattenUsGroups(usWatchlistTree)[0] ?? null;
-      ensureSelectedUsGroup();
-      pushDashboardUrl({
-        market: "us",
-        groupId: fallbackGroup?.id ?? null,
-        symbol: selectedUsSymbol,
-      });
-      return;
-    }
-
-    if (market === "jp") {
-      const fallbackGroup = selectedJpGroup ?? flattenJpGroups(jpWatchlistTree)[0] ?? null;
-      ensureSelectedJpGroup();
-      pushDashboardUrl({
-        market: "jp",
-        groupId: fallbackGroup?.id ?? null,
-        jpSymbol: selectedJpSymbol,
-      });
-      return;
-    }
-
-    if (market === "kr") {
-      const fallbackGroup = selectedKrGroup ?? flattenKrGroups(krWatchlistTree)[0] ?? null;
-      ensureSelectedKrGroup();
-      pushDashboardUrl({
-        market: "kr",
-        groupId: fallbackGroup?.id ?? null,
-        krSymbol: selectedKrSymbol,
-      });
-      return;
-    }
-
-    if (market === "crypto") {
-      pushDashboardUrl({ market: "crypto" });
-    }
+    marketSelection.changeMarket(market);
   }
 
-  function handleSelectGroup(group: WatchlistGroupNode | null) {
-    setSelectedGroup(group);
-    setSelectedGroupId(group?.id ?? null);
-    setSelectedFuturesSymbol(null);
+  function resetTaiwanGroupAnalysis() {
+    taiwanRankingActions.reset();
+    setRadar(null);
+    setRadarLoadState("idle");
+    setRadarErrorMessage(null);
+    setRadarOutcomeSummary(null);
+    setRadarOutcomeLoadState("idle");
+    setRadarOutcomeErrorMessage(null);
+    setRadarOutcomeHistory([]);
+    setRadarOutcomeHistoryLoadState("idle");
+    setRadarOutcomeHistoryErrorMessage(null);
+    setRadarOutcomeHistoryOpen(false);
+    setSelectedRadarOutcomeSnapshotId(null);
+  }
+
+  function onTaiwanGroupChange(group: WatchlistGroupNode | null) {
+    marketSelection.selectTaiwanGroup(group, radarMode);
     setTwChartFocusMode(false);
-
-    if (group !== null) {
-      setSelectedStockId(null);
-      setSelectedStockName(null);
-      taiwanRankingActions.reset();
-      setRadar(null);
-      setRadarLoadState("idle");
-      setRadarErrorMessage(null);
-      setRadarOutcomeSummary(null);
-      setRadarOutcomeLoadState("idle");
-      setRadarOutcomeErrorMessage(null);
-      setRadarOutcomeHistory([]);
-      setRadarOutcomeHistoryLoadState("idle");
-      setRadarOutcomeHistoryErrorMessage(null);
-      setRadarOutcomeHistoryOpen(false);
-      setSelectedRadarOutcomeSnapshotId(null);
-      pushDashboardUrl({ market: "tw", groupId: group.id, radarMode });
-    } else {
-      taiwanRankingActions.reset();
-      setRadar(null);
-      setRadarLoadState("idle");
-      setRadarErrorMessage(null);
-      setRadarOutcomeSummary(null);
-      setRadarOutcomeLoadState("idle");
-      setRadarOutcomeErrorMessage(null);
-      setRadarOutcomeHistory([]);
-      setRadarOutcomeHistoryLoadState("idle");
-      setRadarOutcomeHistoryErrorMessage(null);
-      setRadarOutcomeHistoryOpen(false);
-      setSelectedRadarOutcomeSnapshotId(null);
-      pushDashboardUrl({ market: "tw" });
-    }
+    resetTaiwanGroupAnalysis();
   }
 
-  function handleSelectStock(stockId: string, stockName: string | null) {
-    setSelectedStockId(stockId);
-    setSelectedStockName(stockName);
-    setSelectedFuturesSymbol(null);
+  function onTaiwanStockChange(stockId: string, stockName: string | null) {
+    marketSelection.selectTaiwanStock(stockId, stockName, radarMode);
     setTwChartFocusMode(false);
-    pushDashboardUrl({ market: "tw", groupId: activeGroupId, stockId, radarMode });
   }
 
-  function handleSelectTaiwanFutures(symbol: string) {
-    const normalizedSymbol = symbol.trim().toUpperCase();
-
-    if (!normalizedSymbol) return;
-
-    setSelectedStockId(null);
-    setSelectedStockName(null);
-    setSelectedFuturesSymbol(normalizedSymbol);
+  function onTaiwanFuturesChange(symbol: string) {
+    marketSelection.selectTaiwanFutures(symbol);
     setTwChartFocusMode(false);
-    pushDashboardUrl({
-      market: "tw",
-      futuresSymbol: normalizedSymbol,
-    });
   }
 
-  function handleSelectUsGroup(group: USWatchlistGroupNode | null) {
-    setSelectedUsGroupId(group?.id ?? null);
-    setSelectedUsGroup(group);
-    setSelectedUsGroupName(group?.group_name ?? null);
-    setSelectedUsSymbol(null);
-    setSelectedUsSecurityName(null);
+  function onUsGroupChange(group: USWatchlistGroupNode | null) {
+    marketSelection.selectUsGroup(group);
     usRankingActions.reset();
     setUsRadar(null);
     setUsRadarLoadState("idle");
     setUsRadarErrorMessage(null);
     setUsChartFocusMode(false);
-    pushDashboardUrl({ market: "us", groupId: group?.id ?? null });
   }
 
-  function handleSelectUsSymbol(symbol: string, securityName: string | null) {
-    const normalizedSymbol = symbol.trim().toUpperCase();
-    if (!normalizedSymbol) return;
-
-    setSelectedUsSymbol(normalizedSymbol);
-    setSelectedUsSecurityName(securityName);
+  function onUsSymbolChange(symbol: string, securityName: string | null) {
+    marketSelection.selectUsSymbol(symbol, securityName);
     setUsChartFocusMode(false);
-    pushDashboardUrl({ market: "us", symbol: normalizedSymbol });
   }
 
-  function handleSelectJpGroup(group: JPWatchlistGroupNode | null) {
-    setSelectedJpGroupId(group?.id ?? null);
-    setSelectedJpGroup(group);
-    setSelectedJpGroupName(group?.group_name ?? null);
-    setSelectedJpSymbol(null);
-    setSelectedJpStock(null);
+  function onJpGroupChange(group: JPWatchlistGroupNode | null) {
+    marketSelection.selectJpGroup(group);
     jpRankingActions.reset();
     setJpRadar(null);
     setJpRadarLoadState("idle");
     setJpRadarErrorMessage(null);
     setJpChartFocusMode(false);
     setJpStatusMessage(null);
-    pushDashboardUrl({ market: "jp", groupId: group?.id ?? null });
   }
 
-  function handleSelectJpSymbol(symbol: string, securityName: string | null) {
-    const normalizedSymbol = symbol.trim().toUpperCase();
-    if (!normalizedSymbol) return;
-
-    const indexConfig = getJpMarketIndexConfig(normalizedSymbol);
+  function onJpSymbolChange(symbol: string, securityName: string | null) {
+    marketSelection.selectJpSymbol(symbol, securityName);
     setJpChartFocusMode(false);
     setJpStatusMessage(null);
-    setSelectedJpSymbol(normalizedSymbol);
-    setSelectedJpStock((current) =>
-      current?.symbol === normalizedSymbol
-        ? current
-        : ({
-            id: 0,
-            symbol: normalizedSymbol,
-            local_code: null,
-            security_name: indexConfig?.name ?? securityName,
-            exchange: indexConfig?.exchange ?? null,
-            market_segment: null,
-            sector_33_code: null,
-            sector_33_name: null,
-            sector_17_code: null,
-            sector_17_name: null,
-            size_code: null,
-            size_name: null,
-            asset_type: indexConfig ? "index" : "stock",
-            listing_source: indexConfig ? "market_index_config" : "watchlist",
-            currency: "JPY",
-            exchange_timezone_name: null,
-            is_active: true,
-            first_seen_at: "",
-            last_seen_at: "",
-            created_at: "",
-            updated_at: "",
-          } satisfies JPStockMasterRead)
-    );
-    pushDashboardUrl({
-      market: "jp",
-      groupId: selectedJpGroupId,
-      jpSymbol: normalizedSymbol,
-    });
   }
 
-  function handleSelectJpStock(stock: JPStockMasterRead | null) {
-    setSelectedJpStock(stock);
-    setSelectedJpSymbol(stock?.symbol ?? null);
+  function onJpStockChange(stock: JPStockMasterRead | null) {
+    if (!stock || stock.symbol !== selectedJpSymbol) return;
+
+    marketSelection.selectJpStock(stock);
     setJpChartFocusMode(false);
     setJpStatusMessage(null);
-
-    if (stock) {
-      pushDashboardUrl({ market: "jp", groupId: selectedJpGroupId, jpSymbol: stock.symbol });
-    } else {
-      pushDashboardUrl({ market: "jp", groupId: selectedJpGroupId });
-    }
   }
 
-  function ensureSelectedJpGroup() {
-    const fallbackGroup = selectedJpGroup ?? flattenJpGroups(jpWatchlistTree)[0] ?? null;
-
-    if (fallbackGroup !== selectedJpGroup) {
-      setSelectedJpGroup(fallbackGroup);
-      setSelectedJpGroupId(fallbackGroup?.id ?? null);
-      setSelectedJpGroupName(fallbackGroup?.group_name ?? null);
-    }
-  }
-
-  function handleSelectKrGroup(group: KRWatchlistGroupNode | null) {
-    setSelectedKrGroupId(group?.id ?? null);
-    setSelectedKrGroup(group);
-    setSelectedKrGroupName(group?.group_name ?? null);
-    setSelectedKrSymbol(null);
-    setSelectedKrStock(null);
+  function onKrGroupChange(group: KRWatchlistGroupNode | null) {
+    marketSelection.selectKrGroup(group);
     krRankingActions.reset();
     setKrRadar(null);
     setKrRadarLoadState("idle");
     setKrRadarErrorMessage(null);
-    pushDashboardUrl({ market: "kr", groupId: group?.id ?? null });
   }
 
-  function handleSelectKrSymbol(symbol: string, securityName: string | null) {
-    const normalizedSymbol = symbol.trim().toUpperCase();
-    if (!normalizedSymbol) return;
-
-    const indexConfig = getKrMarketIndexConfig(normalizedSymbol);
-    const resolvedSymbol = indexConfig?.symbol ?? normalizedSymbol;
-    setSelectedKrSymbol(resolvedSymbol);
-    setSelectedKrStock((current) =>
-      current?.symbol === resolvedSymbol
-        ? current
-        : ({
-            id: 0,
-            symbol: resolvedSymbol,
-            local_code: indexConfig?.indexId ?? null,
-            security_name: indexConfig?.name ?? securityName,
-            security_name_kr: indexConfig?.nameKr ?? null,
-            exchange: indexConfig?.exchange ?? null,
-            market_segment: indexConfig?.marketSegment ?? null,
-            sector: null,
-            industry: null,
-            asset_type: indexConfig ? "index" : "stock",
-            listing_source: indexConfig ? "market_index_config" : "watchlist",
-            currency: "KRW",
-            exchange_timezone_name: "Asia/Seoul",
-            is_active: true,
-            first_seen_at: "",
-            last_seen_at: "",
-            created_at: "",
-            updated_at: "",
-          } satisfies KRStockMasterRead)
-    );
-    pushDashboardUrl({
-      market: "kr",
-      groupId: selectedKrGroupId,
-      krSymbol: resolvedSymbol,
-    });
+  function onKrSymbolChange(symbol: string, securityName: string | null) {
+    marketSelection.selectKrSymbol(symbol, securityName);
   }
 
-  function handleSelectKrStock(stock: KRStockMasterRead | null) {
-    setSelectedKrStock(stock);
-    setSelectedKrSymbol(stock?.symbol ?? null);
+  function onKrStockChange(stock: KRStockMasterRead | null) {
+    if (!stock || stock.symbol !== selectedKrSymbol) return;
 
-    if (stock) {
-      pushDashboardUrl({ market: "kr", groupId: selectedKrGroupId, krSymbol: stock.symbol });
-    } else {
-      pushDashboardUrl({ market: "kr", groupId: selectedKrGroupId });
-    }
-  }
-
-  function ensureSelectedKrGroup() {
-    const fallbackGroup = selectedKrGroup ?? flattenKrGroups(krWatchlistTree)[0] ?? null;
-
-    if (fallbackGroup !== selectedKrGroup) {
-      setSelectedKrGroup(fallbackGroup);
-      setSelectedKrGroupId(fallbackGroup?.id ?? null);
-      setSelectedKrGroupName(fallbackGroup?.group_name ?? null);
-    }
-  }
-
-  function ensureSelectedUsGroup() {
-    const fallbackGroup = selectedUsGroup ?? flattenUsGroups(usWatchlistTree)[0] ?? null;
-
-    if (fallbackGroup !== selectedUsGroup) {
-      setSelectedUsGroup(fallbackGroup);
-      setSelectedUsGroupId(fallbackGroup?.id ?? null);
-      setSelectedUsGroupName(fallbackGroup?.group_name ?? null);
-    }
+    marketSelection.selectKrStock(stock);
   }
 
   function handleRankByChange(value: RankBy) {
@@ -3464,15 +3178,15 @@ export default function MarketDashboardClient({
         data-ranking-stock-id={row.stock_id}
         onPointerUp={(event) => {
           if (event.button !== 0) return;
-          handleSelectStock(row.stock_id, row.stock_name);
+          onTaiwanStockChange(row.stock_id, row.stock_name);
         }}
         onMouseDown={(event) => {
           if (event.button !== 0) return;
-          handleSelectStock(row.stock_id, row.stock_name);
+          onTaiwanStockChange(row.stock_id, row.stock_name);
         }}
         onClick={(event) => {
           event.preventDefault();
-          handleSelectStock(row.stock_id, row.stock_name);
+          onTaiwanStockChange(row.stock_id, row.stock_name);
         }}
         className={[
           "omi-ranking-row grid w-full grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-omi-border-subtle px-4 py-2 text-left text-sm",
@@ -3699,7 +3413,7 @@ export default function MarketDashboardClient({
         onEvaluateOutcomeSnapshot={(snapshotRunId) => {
           void evaluateWatchlistRadarOutcome(snapshotRunId);
         }}
-        onSelectStock={handleSelectStock}
+        onSelectStock={onTaiwanStockChange}
       />
       <section className="border border-omi-border-subtle bg-omi-surface">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-omi-border-subtle px-5 py-3">
@@ -3772,7 +3486,7 @@ export default function MarketDashboardClient({
       selected,
       loading,
       href: dashboardHref({ market: "us", symbol: row.symbol }),
-      onSelect: () => handleSelectUsSymbol(row.symbol, row.security_name),
+      onSelect: () => onUsSymbolChange(row.symbol, row.security_name),
     };
   });
   const usRankingPanel = (
@@ -3800,7 +3514,7 @@ export default function MarketDashboardClient({
               void loadUsWatchlistRadar(selectedUsGroupId);
             }
           }}
-          onSelectStock={handleSelectUsSymbol}
+          onSelectStock={onUsSymbolChange}
         />
       )}
       <WatchlistRankingPanel
@@ -3867,7 +3581,7 @@ export default function MarketDashboardClient({
         groupId: selectedJpGroupId,
         jpSymbol: row.symbol,
       }),
-      onSelect: () => handleSelectJpSymbol(row.symbol, row.security_name),
+      onSelect: () => onJpSymbolChange(row.symbol, row.security_name),
     };
   });
   const jpRankingPanel = (
@@ -3895,7 +3609,7 @@ export default function MarketDashboardClient({
               void loadJpWatchlistRadar(selectedJpGroupId);
             }
           }}
-          onSelectStock={handleSelectJpSymbol}
+          onSelectStock={onJpSymbolChange}
         />
       )}
       <WatchlistRankingPanel
@@ -3963,7 +3677,7 @@ export default function MarketDashboardClient({
         groupId: selectedKrGroupId,
         krSymbol: row.symbol,
       }),
-      onSelect: () => handleSelectKrSymbol(row.symbol, row.security_name),
+      onSelect: () => onKrSymbolChange(row.symbol, row.security_name),
     };
   });
   const krRankingPanel = (
@@ -3990,7 +3704,7 @@ export default function MarketDashboardClient({
             void loadKrWatchlistRadar(selectedKrGroupId);
           }
         }}
-        onSelectStock={handleSelectKrSymbol}
+        onSelectStock={onKrSymbolChange}
       />
       <WatchlistRankingPanel
         groupName={selectedKrGroupName}
@@ -4256,42 +3970,12 @@ export default function MarketDashboardClient({
               selectedMarket={activeMarket}
               selectedSymbol={selectedUsSymbol}
               onMarketChange={handleMarketChange}
-              onSelectGroup={handleSelectUsGroup}
-              onSelectSymbol={(symbol, securityName) => {
-                handleSelectUsSymbol(symbol, securityName);
-              }}
+              onSelectGroup={onUsGroupChange}
+              onSelectSymbol={onUsSymbolChange}
               onExplorerDataChanged={(nextTree, nextItems) => {
                 setUsWatchlistTree(nextTree);
                 setUsWatchlistItems(nextItems);
-
-                const nextSelectedGroup =
-                  flattenUsGroups(nextTree).find((group) => group.id === selectedUsGroupId) ??
-                  flattenUsGroups(nextTree)[0] ??
-                  null;
-                const rowsForNextGroup = buildUsWatchlistRows(nextSelectedGroup, nextItems);
-                const selectedSymbolKey = selectedUsSymbol?.toUpperCase() ?? null;
-                const nextSelectedRow =
-                  selectedSymbolKey === null
-                    ? null
-                    : rowsForNextGroup.find((row) => row.symbol === selectedSymbolKey) ?? null;
-                const selectedIndexConfig = getUsMarketIndexConfig(selectedUsSymbol);
-
-                setSelectedUsGroup(nextSelectedGroup);
-                setSelectedUsGroupId(nextSelectedGroup?.id ?? null);
-                setSelectedUsGroupName(nextSelectedGroup?.group_name ?? null);
-
-                if (selectedIndexConfig) {
-                  setSelectedUsSymbol(selectedIndexConfig.symbol);
-                  setSelectedUsSecurityName(selectedIndexConfig.name);
-                } else if (selectedSymbolKey !== null && nextSelectedRow === null) {
-                  setSelectedUsSymbol(null);
-                  setSelectedUsSecurityName(null);
-                } else if (
-                  nextSelectedRow !== null &&
-                  nextSelectedRow.security_name !== selectedUsSecurityName
-                ) {
-                  setSelectedUsSecurityName(nextSelectedRow.security_name);
-                }
+                marketSelection.reconcileUsExplorer(nextTree, nextItems);
               }}
               onChanged={() => {
                 setUsRadar(null);
@@ -4310,39 +3994,16 @@ export default function MarketDashboardClient({
               selectedStock={selectedJpStock}
               externalStatusMessage={jpStatusMessage}
               onMarketChange={handleMarketChange}
-              onSelectGroup={handleSelectJpGroup}
-              onSelectSymbol={handleSelectJpSymbol}
+              onSelectGroup={onJpGroupChange}
+              onSelectSymbol={onJpSymbolChange}
               onExplorerDataChanged={(nextTree, nextItems) => {
                 setJpWatchlistTree(nextTree);
                 setJpWatchlistItems(nextItems);
+                marketSelection.reconcileJpExplorer(nextTree, nextItems);
                 setJpRadar(null);
                 setJpRadarLoadState("idle");
                 setJpRadarErrorMessage(null);
                 jpRankingActions.notifyDataChanged();
-
-                const nextSelectedGroup =
-                  flattenJpGroups(nextTree).find((group) => group.id === selectedJpGroupId) ??
-                  flattenJpGroups(nextTree)[0] ??
-                  null;
-                const selectedSymbolKey = selectedJpSymbol?.toUpperCase() ?? null;
-                const nextSelectedRow =
-                  selectedSymbolKey === null
-                    ? null
-                    : nextItems.find((item) => item.symbol === selectedSymbolKey) ?? null;
-
-                setSelectedJpGroup(nextSelectedGroup);
-                setSelectedJpGroupId(nextSelectedGroup?.id ?? null);
-                setSelectedJpGroupName(nextSelectedGroup?.group_name ?? null);
-
-                if (selectedSymbolKey !== null && nextSelectedRow === null) {
-                  setSelectedJpSymbol(null);
-                  setSelectedJpStock(null);
-                } else if (
-                  nextSelectedRow !== null &&
-                  nextSelectedRow.security_name !== selectedJpStock?.security_name
-                ) {
-                  handleSelectJpSymbol(nextSelectedRow.symbol, nextSelectedRow.security_name);
-                }
               }}
             />
           ) : activeMarket === "kr" ? (
@@ -4354,70 +4015,16 @@ export default function MarketDashboardClient({
               selectedSymbol={selectedKrSymbol}
               selectedStock={selectedKrStock}
               onMarketChange={handleMarketChange}
-              onSelectGroup={handleSelectKrGroup}
-              onSelectSymbol={handleSelectKrSymbol}
+              onSelectGroup={onKrGroupChange}
+              onSelectSymbol={onKrSymbolChange}
               onExplorerDataChanged={(nextTree, nextItems) => {
                 setKrWatchlistTree(nextTree);
                 setKrWatchlistItems(nextItems);
+                marketSelection.reconcileKrExplorer(nextTree, nextItems);
                 setKrRadar(null);
                 setKrRadarLoadState("idle");
                 setKrRadarErrorMessage(null);
                 krRankingActions.notifyDataChanged();
-
-                const nextSelectedGroup =
-                  flattenKrGroups(nextTree).find((group) => group.id === selectedKrGroupId) ??
-                  flattenKrGroups(nextTree)[0] ??
-                  null;
-                const selectedSymbolKey = selectedKrSymbol?.toUpperCase() ?? null;
-                const nextSelectedRow =
-                  selectedSymbolKey === null
-                    ? null
-                    : nextItems.find((item) => item.symbol === selectedSymbolKey) ?? null;
-                const selectedIndexConfig = getKrMarketIndexConfig(selectedKrSymbol);
-
-                setSelectedKrGroup(nextSelectedGroup);
-                setSelectedKrGroupId(nextSelectedGroup?.id ?? null);
-                setSelectedKrGroupName(nextSelectedGroup?.group_name ?? null);
-
-                if (selectedIndexConfig) {
-                  setSelectedKrSymbol(selectedIndexConfig.symbol);
-                  setSelectedKrStock((current) =>
-                    current?.symbol === selectedIndexConfig.symbol
-                      ? current
-                      : ({
-                          id: 0,
-                          symbol: selectedIndexConfig.symbol,
-                          local_code: selectedIndexConfig.indexId,
-                          security_name: selectedIndexConfig.name,
-                          security_name_kr: selectedIndexConfig.nameKr,
-                          exchange: selectedIndexConfig.exchange,
-                          market_segment: selectedIndexConfig.marketSegment,
-                          sector: null,
-                          industry: null,
-                          asset_type: "index",
-                          listing_source: "market_index_config",
-                          currency: "KRW",
-                          exchange_timezone_name: "Asia/Seoul",
-                          is_active: true,
-                          first_seen_at: "",
-                          last_seen_at: "",
-                          created_at: "",
-                          updated_at: "",
-                        } satisfies KRStockMasterRead)
-                  );
-                } else if (selectedSymbolKey !== null && nextSelectedRow === null) {
-                  setSelectedKrSymbol(null);
-                  setSelectedKrStock(null);
-                } else if (
-                  nextSelectedRow !== null &&
-                  (nextSelectedRow.security_name ?? nextSelectedRow.security_name_kr) !==
-                    selectedKrStock?.security_name
-                ) {
-                  handleSelectKrSymbol(
-                    nextSelectedRow.symbol,
-                    nextSelectedRow.security_name ?? nextSelectedRow.security_name_kr
-                  );
-                }
               }}
             />
           ) : (
@@ -4435,35 +4042,27 @@ export default function MarketDashboardClient({
               selectedResourceInstrumentKey={selectedResourceInstrumentKey}
               onSelectGroup={(group) => {
                 if (activeMarket !== "tw") return;
-                handleSelectGroup(group);
+                onTaiwanGroupChange(group);
               }}
               onSelectStock={(stockId, stockName) => {
                 if (activeMarket !== "tw") return;
-                handleSelectStock(stockId, stockName);
+                onTaiwanStockChange(stockId, stockName);
               }}
               onSelectFutures={(symbol) => {
                 if (activeMarket !== "tw") return;
-                handleSelectTaiwanFutures(symbol);
+                onTaiwanFuturesChange(symbol);
               }}
               onSelectCryptoInstrument={(base, instrumentKey) => {
-                setSelectedCryptoBase(base);
-                setSelectedCryptoInstrumentKey(instrumentKey);
-                setSelectedResourceInstrumentKey(null);
+                marketSelection.selectCryptoInstrument(base, instrumentKey);
               }}
               onSelectResourceInstrument={(instrument) => {
-                setSelectedResourceInstrumentKey(instrument.key);
+                marketSelection.selectResourceInstrument(instrument.key);
               }}
               onMarketChange={handleMarketChange}
               onExplorerDataChanged={(nextTree, nextItems) => {
                 setWatchlistTree(nextTree);
                 setWatchlistItems(nextItems);
-
-                const nextSelectedGroup =
-                  flattenGroups(nextTree).find((group) => group.id === activeGroupId) ?? null;
-
-                if (activeMarket === "tw" && nextSelectedGroup) {
-                  setSelectedGroup(nextSelectedGroup);
-                }
+                marketSelection.reconcileTaiwanExplorer(nextTree);
               }}
               onChanged={(nextGroupId) => {
                 if (activeMarket !== "tw") return;
@@ -4549,7 +4148,7 @@ export default function MarketDashboardClient({
                   refreshNonce={jpDataRefreshNonce}
                   watchlistRankingPanel={isSelectedJpIndex ? undefined : jpRankingPanel}
                   onChartFocusModeChange={setJpChartFocusMode}
-                  onSelectStock={handleSelectJpStock}
+                  onSelectStock={onJpStockChange}
                   onStatusMessage={setJpStatusMessage}
                 />
               </>
@@ -4565,7 +4164,7 @@ export default function MarketDashboardClient({
                   selectedGroupId={selectedKrGroupId}
                   refreshNonce={krDataRefreshNonce}
                   watchlistRankingPanel={krRankingPanel}
-                  onSelectStock={handleSelectKrStock}
+                  onSelectStock={onKrStockChange}
                 />
               </>
             ) : activeMarket === "crypto" && selectedResourceInstrumentKey ? (

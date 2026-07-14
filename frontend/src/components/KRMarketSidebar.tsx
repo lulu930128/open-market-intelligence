@@ -5,7 +5,7 @@ import PortfolioHoldingsPanel from "@/components/PortfolioHoldingsPanel";
 import SettingsDock from "@/components/SettingsDock";
 import { marketLabel, useT } from "@/i18n";
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
-import type { MarketRegion } from "@/lib/dashboardNavigation";
+import type { MarketRegion } from "@/components/market-dashboard/selection/dashboardRoutes";
 import {
   KR_MARKET_INDEX_GROUP_NAME,
   KR_MARKET_INDEX_ITEMS,
@@ -183,7 +183,6 @@ export default function KRMarketSidebar({
     onExplorerDataChanged?.(treeData, itemData);
     setCurrentGroupId(nextSelected?.id ?? null);
     setRenameValue(nextSelected?.group_name ?? "");
-    onSelectGroup?.(nextSelected);
 
     return nextSelected;
   }

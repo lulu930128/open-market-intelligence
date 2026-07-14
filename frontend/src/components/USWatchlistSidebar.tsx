@@ -5,7 +5,7 @@ import PortfolioHoldingsPanel from "@/components/PortfolioHoldingsPanel";
 import SettingsDock from "@/components/SettingsDock";
 import { marketLabel, usAssetTypeLabel, useT } from "@/i18n";
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
-import type { MarketRegion } from "@/lib/dashboardNavigation";
+import type { MarketRegion } from "@/components/market-dashboard/selection/dashboardRoutes";
 import {
   US_MARKET_INDEX_GROUP_NAME,
   US_MARKET_INDEX_ITEMS,
@@ -178,7 +178,6 @@ export default function USWatchlistSidebar({
     onExplorerDataChanged?.(treeData, itemData);
     setSelectedGroupId(nextSelected?.id ?? null);
     setRenameValue(nextSelected?.group_name ?? "");
-    onSelectGroup?.(nextSelected);
 
     return nextSelected;
   }

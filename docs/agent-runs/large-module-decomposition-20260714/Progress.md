@@ -2,10 +2,10 @@
 
 ## 狀態
 
-- 目前階段：里程碑 1（Dashboard ranking state ownership）實作完成，完整 frontend gate 通過
+- 目前階段：里程碑 2A（Market selection 與 URL contract）實作完成，完整 frontend gate 通過
 - 最後更新：2026-07-14
 - Implementation gate：已開啟
-- Commit 狀態：里程碑 0 baseline 已保存為 `cc2ce8d`；里程碑 1 尚未提交
+- Commit 狀態：里程碑 0 baseline 已保存為 `cc2ce8d`；里程碑 1 已保存為 `2493387`；里程碑 2A 尚未提交
 
 ## 已完成
 
@@ -69,9 +69,9 @@
 
 ## 已知風險
 
-- 里程碑 1 目前仍是未提交工作樹，必須在進入里程碑 2 前建立可獨立回退的 commit boundary。
+- 里程碑 2A 目前仍是未提交工作樹，進入里程碑 2B 前應建立可獨立回退的 commit boundary。
 - Browser characterization 已覆蓋 visible loaded/empty/error/reload/stale 行為；Taiwan daily-release timer 與 regional freshness nonce 尚無 fake-clock/unit-level coverage，仍依既有 integration path 與 request guard。
-- `MarketDashboardClient.tsx` 仍有 4,589 行；selection/URL、radar、market tape 與 OMI context ownership 尚待里程碑 2。
+- `MarketDashboardClient.tsx` 仍有 4,188 行；selection/URL 已移交，radar、market tape 與 OMI context ownership 尚待里程碑 2B/2C。
 - JP/KR hooks 有刻意保留的相似 transition；在 parity coverage 足夠前抽 shared core 仍可能隱藏市場差異。
 - Chart、StockDetail 與 backend facade 尚未開始，本批驗證不能外推到後續里程碑。
 
@@ -83,8 +83,59 @@
 - Dashboard 保留 radar/data-status composition，直到里程碑 2B 再移交完整 radar state machine。
 - 每個 ownership migration 必須先通過 targeted gate，再建立獨立 commit。
 
-## 下一步
+## 里程碑 1 交接（已完成）
 
-1. 完成 repository diff/hygiene 審查並保存里程碑 1 commit。
-2. 進入里程碑 2A，先補 market/group/symbol/futures/crypto/resource URL 與 back/forward characterization。
-3. 建立 `useMarketSelection` 與純 `dashboardRoutes` helper；不在同批搬 radar、tape 或 formatting。
+1. 已完成 repository diff/hygiene 審查並保存里程碑 1 commit。
+2. 已補 market/group/symbol/futures/crypto/resource URL 與 Back/Forward characterization。
+3. 已建立 `useMarketSelection` 與純 `dashboardRoutes` helper；本批未搬 radar、tape 或 formatting。
+
+## 2026-07-14 里程碑 2A：Market selection 與 URL contract
+
+### 已完成
+
+- 新增純 route boundary `market-dashboard/selection/dashboardRoutes.ts`，集中既有 `market`、`group_id`、`stock_id`、`futures`、`symbol`、`jp_symbol`、`kr_symbol`、`radar_mode` 與 `quote_depth_preview` parse/build contract。
+- 新增 `useMarketSelection.ts`，接管 active market、台股/美股/日股/韓股 group 與 instrument selection、futures、crypto/resource selection、URL push dedupe 與 Next App Router search synchronization。
+- 新增無 React 的 `marketSelectionState.ts`，集中 initial state、route projection、synthetic regional stock selection 與 explorer reconciliation；避免把 843 行的第一版 hook 留成新的大檔技術債。
+- `MarketDashboardClient.tsx` 不再直接持有四市場 selection state，不再包含成組 `handleSelect*`、`ensureSelected*`、`window.history` 或 route builder；只保留 ranking/radar reset、chart focus 與 status 等 domain side effects。
+- Sidebar 背景 reload 現在只透過 `onExplorerDataChanged` reconciliation 更新資料，不再冒充使用者 group selection、清掉已選 instrument 或新增 history entry。
+- 相同 href 不再重複 `pushState`，修正 sidebar 同時觸發 `mousedown`/`click` 時一次互動寫入兩筆 history 的問題。
+- URL source of truth 改用 Next 16 `useSearchParams`；Back/Forward 會同步 active market、group、symbol、futures 與 sidebar selected state。
+- JP/KR detail master-data callback 只補強目前仍選中的 symbol；舊 request 完成時不會覆蓋 Back/Forward 已還原的 selection。
+- 保留現有 query 順序與 regional selection shape；台股 `stock_id` 仍只 trim，不新增強制 uppercase 的相容性變更。
+
+### Characterization 與 regression
+
+- 新增 TW -> US -> JP -> KR query contract case，並覆蓋 KR group 中間狀態與 JP/KR Back/Forward selected row 還原。
+- 新增 TAIEX -> TXF -> Back -> Forward case，直接鎖定單一互動只能產生一筆 history 且 visible instrument 必須同步。
+- 新增 crypto -> currency -> resource case，鎖定兩類 instrument selection 不新增 history、URL 維持 `market=crypto`，且內容 panel 與 sidebar selected state 同步切換。
+- 擴充 regional detail mock，只補首屏必需的 stock master、SEC supplement、JP fundamentals/resource 與 KR resource/investor/source-health contract；未知 API route 仍維持 fail-fast。
+- 擴充 crypto/resource read-only fixture，provider contract、source health、subscription policy 與空資料 endpoint 均採明確 payload；未知 API route 仍維持 fail-fast。
+- 修正完整 suite 揭露的既有 reconciliation mismatch：空 tree 的背景 reload 不再清掉 direct-link TAIEX selection。
+
+### Ownership 指標
+
+| 指標 | 里程碑 1 後 | 里程碑 2A 後 | 變化 |
+| --- | ---: | ---: | ---: |
+| `MarketDashboardClient.tsx` 行數 | 4,589 | 4,188 | -401 |
+| Dashboard `useState` 呼叫 | 70 | 46 | -24 |
+| Dashboard `useEffect` 呼叫 | 12 | 12 | 0 |
+| Dashboard `useRef` 呼叫 | 13 | 13 | 0 |
+| Production Playwright cases | 8 | 11 | +3 |
+
+Selection modules 行數：`dashboardRoutes.ts` 130、`marketSelectionState.ts` 455、`useMarketSelection.ts` 465。
+
+### 驗證證據
+
+- `npm exec tsc -- --noEmit --incremental false`：通過。
+- `npm run lint`：通過，0 warning / 0 error。
+- `npm run build`：Next.js 16.2.6 production build 通過，6/6 pages generated。
+- selection/history targeted production Playwright，兩案各 repeat 3 次：6/6 通過。
+- crypto/resource selection targeted production Playwright repeat 3 次：3/3 通過。
+- TAIEX professional chart targeted production Playwright repeat 3 次：3/3 通過。
+- `PLAYWRIGHT_SERVER_MODE=production npm run test:e2e`：11/11 通過。
+- Production E2E 使用隔離的 `3100` standalone server，未停止既有 `3000` dev server。
+
+### 下一步
+
+1. 里程碑 2B：抽離 Taiwan radar snapshot/outcome/history state machine，regional radar 維持 typed adapter，先補 mode/reload/stale response characterization。
+2. 里程碑 2C：抽離 market tape transport/state 與 OMI context projection；不在 2B 同批搬 formatting 或 detail panel。

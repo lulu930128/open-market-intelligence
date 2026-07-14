@@ -940,6 +940,11 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
       return;
     }
 
+    if (/\/market\/tw-futures\/[^/]+\/(?:intraday|daily)$/.test(path)) {
+      await fulfillJson(route, []);
+      return;
+    }
+
     if (path.includes("/market/indices/list")) {
       await fulfillJson(route, {
         market: "TWSE",
@@ -1002,6 +1007,62 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
       return;
     }
 
+    const usStockMatch = path.match(/\/us-market\/stocks\/([^/]+)$/);
+    if (usStockMatch) {
+      const symbol = decodeURIComponent(usStockMatch[1]);
+      const item = usWatchlistItems.find((candidate) => candidate.symbol === symbol);
+      if (item) {
+        await fulfillJson(route, {
+          id: item.id,
+          symbol: item.symbol,
+          security_name: item.security_name,
+          exchange: item.exchange,
+          asset_type: item.asset_type,
+          listing_source: "playwright.fixture",
+          market_category: null,
+          financial_status: null,
+          cqs_symbol: null,
+          nasdaq_symbol: item.symbol,
+          cik: null,
+          sec_company_name: null,
+          is_etf: false,
+          is_test_issue: false,
+          round_lot_size: 100,
+          is_active: item.enabled,
+          first_seen_at: item.created_at,
+          last_seen_at: item.updated_at,
+          created_at: item.created_at,
+          updated_at: item.updated_at,
+        });
+        return;
+      }
+    }
+
+    if (/\/us-market\/sec\/[^/]+\/facts$/.test(path)) {
+      await fulfillJson(route, []);
+      return;
+    }
+
+    if (/\/us-market\/sec\/[^/]+\/fundamentals$/.test(path)) {
+      await fulfillJson(route, null);
+      return;
+    }
+
+    if (/\/us-market\/profiles\/[^/]+$/.test(path)) {
+      await fulfillJson(route, null);
+      return;
+    }
+
+    if (/\/us-market\/corporate-actions\/[^/]+$/.test(path)) {
+      await fulfillJson(route, []);
+      return;
+    }
+
+    if (/\/us-market\/short-volume\/[^/]+\/history$/.test(path)) {
+      await fulfillJson(route, []);
+      return;
+    }
+
     if (/\/jp-market\/ohlc\//.test(path)) {
       const symbol = decodeURIComponent(path.split("/").at(-1) ?? "^N225");
       await fulfillJson(route, regionalOhlcResponse(symbol));
@@ -1014,10 +1075,119 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
       return;
     }
 
+    const jpStockMatch = path.match(/\/jp-market\/stocks\/([^/]+)$/);
+    if (jpStockMatch) {
+      const symbol = decodeURIComponent(jpStockMatch[1]);
+      const item = jpWatchlistItems.find((candidate) => candidate.symbol === symbol);
+      if (item) {
+        await fulfillJson(route, {
+          id: item.id,
+          symbol: item.symbol,
+          local_code: item.local_code,
+          security_name: item.security_name,
+          exchange: item.exchange,
+          market_segment: item.market_segment,
+          sector_33_code: null,
+          sector_33_name: item.sector_33_name,
+          sector_17_code: null,
+          sector_17_name: null,
+          size_code: null,
+          size_name: null,
+          asset_type: item.asset_type,
+          listing_source: "playwright.fixture",
+          currency: "JPY",
+          exchange_timezone_name: "Asia/Tokyo",
+          is_active: item.enabled,
+          first_seen_at: item.created_at,
+          last_seen_at: item.updated_at,
+          created_at: item.created_at,
+          updated_at: item.updated_at,
+        });
+        return;
+      }
+    }
+
+    if (/\/jp-market\/resources\/[^/]+\/summary$/.test(path)) {
+      await fulfillJson(route, null);
+      return;
+    }
+
+    const jpFundamentalMatch = path.match(/\/jp-market\/fundamentals\/([^/]+)$/);
+    if (jpFundamentalMatch) {
+      const symbol = decodeURIComponent(jpFundamentalMatch[1]);
+      const timestamp = "2026-06-15T09:30:00+09:00";
+      await fulfillJson(route, {
+        id: 1,
+        provider: "playwright.fixture",
+        symbol,
+        company_name: null,
+        exchange: null,
+        sector: null,
+        industry: null,
+        currency: "JPY",
+        market_cap: null,
+        enterprise_value: null,
+        trailing_pe: null,
+        forward_pe: null,
+        price_to_book: null,
+        dividend_yield: null,
+        beta: null,
+        disclosed_date: "2026-06-15",
+        fiscal_period: null,
+        fiscal_year_end: null,
+        document_type: null,
+        eps_ttm: null,
+        forward_eps: null,
+        revenue_ttm: null,
+        net_sales: null,
+        operating_profit: null,
+        ordinary_profit: null,
+        profit: null,
+        forecast_net_sales: null,
+        forecast_operating_profit: null,
+        forecast_ordinary_profit: null,
+        forecast_profit: null,
+        gross_margin: null,
+        operating_margin: null,
+        profit_margin: null,
+        return_on_equity: null,
+        return_on_assets: null,
+        revenue_growth: null,
+        earnings_growth: null,
+        total_assets: null,
+        equity: null,
+        equity_to_asset_ratio: null,
+        total_cash: null,
+        total_debt: null,
+        operating_cash_flow: null,
+        investing_cash_flow: null,
+        financing_cash_flow: null,
+        debt_to_equity: null,
+        current_ratio: null,
+        quick_ratio: null,
+        shares_outstanding: null,
+        book_value: null,
+        earnings_date: null,
+        ex_dividend_date: null,
+        source_url: null,
+        raw_payload_hash: null,
+        fetched_at: timestamp,
+        created_at: timestamp,
+        updated_at: timestamp,
+      });
+      return;
+    }
+
     const krIndexOhlcMatch = path.match(/\/kr-market\/indices\/([^/]+)\/ohlc$/);
     if (krIndexOhlcMatch) {
       const indexId = decodeURIComponent(krIndexOhlcMatch[1]);
       await fulfillJson(route, krIndexOhlcResponse(indexId));
+      return;
+    }
+
+    if (/\/kr-market\/ohlc\//.test(path)) {
+      const symbol = decodeURIComponent(path.split("/").at(-1) ?? "005930.KS");
+      await fulfillJson(route, regionalOhlcResponse(symbol));
       return;
     }
 
@@ -1035,6 +1205,55 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
       return;
     }
 
+    const krStockMatch = path.match(/\/kr-market\/stocks\/([^/]+)$/);
+    if (krStockMatch) {
+      const symbol = decodeURIComponent(krStockMatch[1]);
+      const item = krWatchlistItems.find((candidate) => candidate.symbol === symbol);
+      if (item) {
+        await fulfillJson(route, {
+          id: item.id,
+          symbol: item.symbol,
+          local_code: item.local_code,
+          security_name: item.security_name,
+          security_name_kr: item.security_name_kr,
+          exchange: item.exchange,
+          market_segment: item.market_segment,
+          sector: item.sector,
+          industry: item.industry,
+          asset_type: item.asset_type,
+          listing_source: "playwright.fixture",
+          currency: "KRW",
+          exchange_timezone_name: "Asia/Seoul",
+          is_active: item.enabled,
+          first_seen_at: item.created_at,
+          last_seen_at: item.updated_at,
+          created_at: item.created_at,
+          updated_at: item.updated_at,
+        });
+        return;
+      }
+    }
+
+    if (/\/kr-market\/resources\/[^/]+\/summary$/.test(path)) {
+      await fulfillJson(route, null);
+      return;
+    }
+
+    if (path.endsWith("/kr-market/fundamentals")) {
+      await fulfillJson(route, []);
+      return;
+    }
+
+    if (/\/kr-market\/investors\/[^/]+\/history$/.test(path)) {
+      await fulfillJson(route, []);
+      return;
+    }
+
+    if (path.endsWith("/kr-market/source-health")) {
+      await fulfillJson(route, null);
+      return;
+    }
+
     if (path.endsWith("/kr-market/watchlists/readiness")) {
       await fulfillJson(
         route,
@@ -1042,6 +1261,96 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
           url.searchParams.has("group_id") ? Number(url.searchParams.get("group_id")) : null
         )
       );
+      return;
+    }
+
+    if (path.endsWith("/settings/market-data-subscriptions")) {
+      await fulfillJson(route, {
+        kind: "market_data_subscriptions",
+        version: "v1",
+        source: "playwright.fixture",
+        items: [],
+      });
+      return;
+    }
+
+    if (path.endsWith("/crypto-market/provider-contract")) {
+      await fulfillJson(route, {
+        kind: "crypto_provider_contract",
+        market: "crypto",
+        assets: [],
+        instruments: [],
+        ohlcv_intervals: {},
+        providers: {},
+      });
+      return;
+    }
+
+    if (
+      path.endsWith("/crypto-market/realtime/status") ||
+      path.endsWith("/crypto-market/auto-refresh/status")
+    ) {
+      await fulfillJson(route, null);
+      return;
+    }
+
+    if (path.endsWith("/crypto-market/source-health")) {
+      await fulfillJson(route, {
+        generated_at: "2026-06-15T09:30:00+08:00",
+        summary: {
+          entry_count: 0,
+          ok_count: 0,
+          empty_count: 0,
+          stale_count: 0,
+          error_count: 0,
+          disabled_count: 0,
+        },
+        entries: [],
+      });
+      return;
+    }
+
+    if (path.includes("/crypto-market/")) {
+      await fulfillJson(route, []);
+      return;
+    }
+
+    if (path.endsWith("/resource-market/provider-contract")) {
+      await fulfillJson(route, {
+        kind: "resource_provider_contract",
+        market: "resource",
+        execution_enabled: false,
+        ai_execution_enabled: false,
+        trade_candidate_symbols: [],
+        notes: [],
+        root_folders: [],
+        providers: {},
+        instruments: [],
+      });
+      return;
+    }
+
+    if (path.endsWith("/resource-market/source-health")) {
+      await fulfillJson(route, {
+        kind: "resource_source_health",
+        generated_at: "2026-06-15T09:30:00+08:00",
+        filters: {},
+        summary: {
+          entry_count: 0,
+          ok_count: 0,
+          empty_count: 0,
+          stale_count: 0,
+          delayed_count: 0,
+          error_count: 0,
+          disabled_count: 0,
+        },
+        entries: [],
+      });
+      return;
+    }
+
+    if (path.includes("/resource-market/")) {
+      await fulfillJson(route, []);
       return;
     }
 
@@ -1420,6 +1729,211 @@ test.describe("OMI dashboard smoke", () => {
     await expect(page.locator('[data-ranking-symbol="MSFT"]')).toContainText(
       "MSFT Microsoft Corp."
     );
+    expect(pageErrors).toEqual([]);
+  });
+
+  test("market selection keeps the current cross-market query contract", async ({ page }) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await mockOmiApi(page, {
+      taiwanWatchlistTree: seededTaiwanWatchlistTree(),
+      taiwanWatchlistItems: seededTaiwanWatchlistItems(),
+      taiwanRankingRows: seededTaiwanRankingRows(),
+      usWatchlistTree: seededUsWatchlistTree(),
+      usWatchlistItems: seededUsWatchlistItems(),
+      usRankingRows: seededUsRankingRows(),
+      jpWatchlistTree: seededJpWatchlistTree(),
+      jpWatchlistItems: seededJpWatchlistItems(),
+      jpRankingRows: seededJpRankingRows(),
+      krWatchlistTree: seededKrWatchlistTree(),
+      krWatchlistItems: seededKrWatchlistItems(),
+      krRankingRows: seededKrRankingRows(),
+    });
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+
+    await page.locator('[data-watchlist-group-id="7"]').click();
+    const indexButton = page.getByRole("button", { name: /TAIEX 加權指數/ }).first();
+    if (!(await indexButton.isVisible())) {
+      await page.getByRole("button", { name: "切換加權指數資料夾" }).click();
+    }
+    await indexButton.click();
+    await expect(page).toHaveURL(
+      /\?market=tw&group_id=7&stock_id=TAIEX&radar_mode=action$/
+    );
+
+    const futuresButton = page.getByRole("button", { name: /台指期/ }).first();
+    await futuresButton.click();
+    await expect(page).toHaveURL(/\?market=tw&futures=TXF$/);
+
+    await page.getByRole("link", { name: "美股", exact: true }).click();
+    await page.getByRole("button", { name: "Reload" }).first().click();
+    const usSidebar = page.getByRole("complementary");
+    const usGroupLabel = usSidebar.getByText("Mega Cap Tech", { exact: true }).last();
+    await usGroupLabel.click();
+    const appleButton = page.getByRole("button", { name: /AAPL Apple Inc\./ }).first();
+    if (!(await appleButton.isVisible())) {
+      await usGroupLabel.locator("..").getByRole("button").click();
+    }
+    await appleButton.click();
+    await expect(page).toHaveURL(/\?market=us&symbol=AAPL$/);
+
+    await page.getByRole("link", { name: "日股", exact: true }).click();
+    await page.getByRole("button", { name: "Reload" }).first().click();
+    const jpSidebar = page.getByRole("complementary");
+    const jpGroupLabel = jpSidebar.getByText("Japan Core", { exact: true }).last();
+    await jpGroupLabel.click();
+    const toyotaButton = page
+      .getByRole("button", { name: /7203\.T Toyota Motor/ })
+      .first();
+    if (!(await toyotaButton.isVisible())) {
+      await jpGroupLabel.locator("..").getByRole("button").click();
+    }
+    await toyotaButton.click();
+    await expect(page).toHaveURL(
+      /\?market=jp&group_id=27&jp_symbol=7203\.T$/
+    );
+
+    await page.getByRole("link", { name: "韓股", exact: true }).click();
+    await page.getByRole("button", { name: "Reload" }).first().click();
+    const krSidebar = page.getByRole("complementary");
+    const krGroupLabel = krSidebar.getByText("Korea Core", { exact: true }).last();
+    await krGroupLabel.click();
+    const samsungButton = page
+      .getByRole("button", { name: /005930\.KS Samsung Electronics/ })
+      .first();
+    if (!(await samsungButton.isVisible())) {
+      await krGroupLabel.locator("..").getByRole("button").click();
+    }
+    await samsungButton.click();
+    await expect(page).toHaveURL(
+      /\?market=kr&group_id=37&kr_symbol=005930\.KS$/
+    );
+    await expect(samsungButton.locator("..")).toHaveClass(/omi-sidebar-selected/);
+
+    await page.goBack();
+    await expect(page).toHaveURL(/\?market=kr&group_id=37$/);
+    await expect(samsungButton.locator("..")).not.toHaveClass(/omi-sidebar-selected/);
+
+    await page.goBack();
+    await expect(page).toHaveURL(/\?market=kr$/);
+
+    await page.goBack();
+    await expect(page).toHaveURL(
+      /\?market=jp&group_id=27&jp_symbol=7203\.T$/
+    );
+    const restoredToyotaButton = page
+      .getByRole("button", { name: /7203\.T Toyota Motor/ })
+      .first();
+    if (!(await restoredToyotaButton.isVisible())) {
+      const restoredJpGroupLabel = page
+        .getByRole("complementary")
+        .getByText("Japan Core", { exact: true })
+        .last();
+      await restoredJpGroupLabel.locator("..").getByRole("button").click();
+    }
+    await expect(restoredToyotaButton.locator("..")).toHaveClass(/omi-sidebar-selected/);
+
+    await page.goForward();
+    await expect(page).toHaveURL(/\?market=kr$/);
+    await page.goForward();
+    await expect(page).toHaveURL(/\?market=kr&group_id=37$/);
+    await page.goForward();
+    await expect(page).toHaveURL(
+      /\?market=kr&group_id=37&kr_symbol=005930\.KS$/
+    );
+    const restoredSamsungButton = page
+      .getByRole("button", { name: /005930\.KS Samsung Electronics/ })
+      .first();
+    if (!(await restoredSamsungButton.isVisible())) {
+      const restoredKrGroupLabel = page
+        .getByRole("complementary")
+        .getByText("Korea Core", { exact: true })
+        .last();
+      await restoredKrGroupLabel.locator("..").getByRole("button").click();
+    }
+    await expect(restoredSamsungButton.locator("..")).toHaveClass(
+      /omi-sidebar-selected/
+    );
+    expect(pageErrors).toEqual([]);
+  });
+
+  test("Taiwan selection restores the visible instrument with browser history", async ({
+    page,
+  }) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await mockOmiApi(page, {
+      taiwanWatchlistTree: seededTaiwanWatchlistTree(),
+      taiwanWatchlistItems: seededTaiwanWatchlistItems(),
+      taiwanRankingRows: seededTaiwanRankingRows(),
+    });
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+
+    await page.locator('[data-watchlist-group-id="7"]').click();
+    const indexButton = page.getByRole("button", { name: /TAIEX/ }).first();
+    if (!(await indexButton.isVisible())) {
+      await page.getByRole("button", { name: "切換加權指數資料夾" }).click();
+    }
+    const futuresButton = page.getByRole("button", { name: /TXF/ }).first();
+
+    await indexButton.click();
+    await expect(page).toHaveURL(
+      /\?market=tw&group_id=7&stock_id=TAIEX&radar_mode=action$/
+    );
+    await expect(indexButton).toHaveClass(/omi-sidebar-selected/);
+
+    await futuresButton.click();
+    await expect(page).toHaveURL(/\?market=tw&futures=TXF$/);
+    await expect(futuresButton).toHaveClass(/omi-sidebar-selected/);
+
+    await page.goBack();
+    await expect(page).toHaveURL(
+      /\?market=tw&group_id=7&stock_id=TAIEX&radar_mode=action$/
+    );
+    await expect(indexButton).toHaveClass(/omi-sidebar-selected/);
+
+    await page.goForward();
+    await expect(page).toHaveURL(/\?market=tw&futures=TXF$/);
+    await expect(futuresButton).toHaveClass(/omi-sidebar-selected/);
+    expect(pageErrors).toEqual([]);
+  });
+
+  test("crypto and resource selections stay inside the crypto route", async ({ page }) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await mockOmiApi(page);
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+
+    await page.locator('a[href="/?market=crypto"]').click();
+    await expect(page).toHaveURL(/\?market=crypto$/);
+    const cryptoHistoryLength = await page.evaluate(() => window.history.length);
+
+    const currencyButton = page
+      .locator('[data-testid^="currency-sidebar-instrument-"]')
+      .first();
+    await expect(currencyButton).toBeVisible();
+    const currencySymbol = (await currencyButton.innerText()).split("\n")[0].trim();
+    await currencyButton.click();
+    await expect(currencyButton).toHaveClass(/omi-sidebar-selected/);
+    await expect(
+      page.getByRole("heading", { level: 2 }).filter({ hasText: currencySymbol }).first()
+    ).toBeVisible();
+    await expect(page).toHaveURL(/\?market=crypto$/);
+
+    const resourceButton = page
+      .locator('[data-testid^="resource-sidebar-instrument-"]')
+      .first();
+    await expect(resourceButton).toBeVisible();
+    const resourceTestId = await resourceButton.getAttribute("data-testid");
+    expect(resourceTestId).not.toBeNull();
+    const resourceSymbol = resourceTestId!.replace("resource-sidebar-instrument-", "");
+    await resourceButton.click();
+    await expect(resourceButton).toHaveClass(/omi-sidebar-selected/);
+    await expect(
+      page.getByRole("heading", { level: 2 }).filter({ hasText: resourceSymbol }).first()
+    ).toBeVisible();
+    await expect(page).toHaveURL(/\?market=crypto$/);
+    expect(await page.evaluate(() => window.history.length)).toBe(cryptoHistoryLength);
     expect(pageErrors).toEqual([]);
   });
 

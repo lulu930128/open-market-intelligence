@@ -5,7 +5,7 @@ import PortfolioHoldingsPanel from "@/components/PortfolioHoldingsPanel";
 import SettingsDock from "@/components/SettingsDock";
 import { marketLabel, marketSummary, useT, type TranslationFunction } from "@/i18n";
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
-import type { MarketRegion } from "@/lib/dashboardNavigation";
+import type { MarketRegion } from "@/components/market-dashboard/selection/dashboardRoutes";
 import {
   CRYPTO_BASE_OPTIONS,
   CRYPTO_KLINE_INSTRUMENTS,
@@ -1135,7 +1135,6 @@ export default function SidebarWatchlistExplorer({
     if (options?.keepSelection && selectedStillExists) {
       const currentGroup =
         flattened.find((group) => group.id === selectedGroupId) ?? null;
-      onSelectGroup(currentGroup);
       setRenameValue(currentGroup?.group_name ?? "");
       setExpandedIds((previous) => {
         if (selectedGroupId === null) return previous;
@@ -1147,7 +1146,6 @@ export default function SidebarWatchlistExplorer({
       return currentGroup;
     }
 
-    onSelectGroup(null);
     setRenameValue("");
     setExpandedIds(new Set());
     return null;
