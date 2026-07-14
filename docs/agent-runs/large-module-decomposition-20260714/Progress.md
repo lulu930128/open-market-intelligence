@@ -2,10 +2,10 @@
 
 ## 狀態
 
-- 目前階段：里程碑 4A（StockDetail presentation collections）實作完成，準備進入 4B StockKLineChart
+- 目前階段：里程碑 4（Stock detail presentation collections）實作完成，準備進入里程碑 5 chart engine 解耦
 - 最後更新：2026-07-14
 - Implementation gate：已開啟
-- Commit 狀態：里程碑 0 baseline 已保存為 `cc2ce8d`；里程碑 1 已保存為 `2493387`；里程碑 2A 已保存並推送為 `88f9958`；里程碑 2B 已保存為 `12669e6`；里程碑 2C 已保存為 `ea8acf0`；里程碑 3 已保存並推送為 `13264f0`；里程碑 4A 將由本批 `refactor(frontend): split stock detail view domains` 保存
+- Commit 狀態：里程碑 0 baseline 已保存為 `cc2ce8d`；里程碑 1 已保存為 `2493387`；里程碑 2A 已保存並推送為 `88f9958`；里程碑 2B 已保存為 `12669e6`；里程碑 2C 已保存為 `ea8acf0`；里程碑 3 已保存並推送為 `13264f0`；里程碑 4A 已保存為 `b9a9596`；里程碑 4B 將由本批 `refactor(frontend): separate k-line indicator projection` 保存
 
 ## 已完成
 
@@ -329,3 +329,40 @@ Radar hooks 行數：約 `useTaiwanRadarState.ts` 430、`useRegionalRadarState.t
 
 - 本批只移動 presentation、format/projection ownership；未修改 API、資料 shape、freshness、refresh job、SQLite 或 visible UX。
 - 下一批 4B 處理 `StockKLineChart.tsx` 的 indicator catalog 與純計算，不改 chart interaction、K 線可視範圍或 SVG layout。
+
+## 2026-07-14 里程碑 4B：StockKLineChart indicator projection
+
+### 已完成
+
+- 將公開指標型別、分類、選項、翻譯 helper 與預設參數移入 `stock-k-line/indicatorCatalog.ts`；`StockKLineChart.tsx` 保留 compatibility re-export，既有 consumer import path 不變。
+- 將 MA、EMA、Bollinger、RSI、MACD、KD、VWAP、SAR、Donchian、ATR、DMI、OBV、MFI、CCI、Williams %R、ROC、StochRSI 與相對市場計算移入純 `indicatorProjection.ts`。
+- 新增單一 `projectStockKLineData` 入口，集中合併 OHLC、backend indicator payload、benchmark 與 previous-close fallback；React 元件不再編排各演算法。
+- `buildChartSignals` 與 `MergedPoint` 一併歸入 projection contract；該模組不 import React，不讀 DOM、window、API 或 router。
+- `StockKLineChart.tsx` 保留 SVG path、座標、panel layout、visible range、hover、wheel、pointer drag 與 reveal lifecycle，避免在同一批更動互動行為。
+
+### Ownership 指標
+
+| 指標 | 里程碑 4B 前 | 里程碑 4B 後 |
+| --- | ---: | ---: |
+| `StockKLineChart.tsx` 行數 | 3,422 | 2,041 |
+| 公開 indicator catalog | 與元件混合 | `indicatorCatalog.ts` 407 行 |
+| 純 indicator projection | 與元件混合 | `indicatorProjection.ts` 1,017 行 |
+| consumer import path | 既有 | 保留 |
+| Playwright cases | 22 | 22 |
+
+projection 檔案雖仍有 1,017 行，但內容是同一個無 side effect 的數值運算與資料投影邊界；目前再按單一公式拆檔只會增加跨檔跳轉，未形成更清楚的 ownership。
+
+### 驗證證據
+
+- 新增／變更模組 targeted ESLint：通過，0 warning / 0 error。
+- `npm exec tsc -- --noEmit --incremental false`：通過。
+- `npm run lint`：通過，0 warning / 0 error。
+- `npm run build`：Next.js 16.2.6 production build 通過，6/6 pages generated。
+- 台股專業圖表與 StockDetail targeted Playwright：4/4 通過。
+- `PLAYWRIGHT_REUSE_EXISTING_SERVER=1 npm run test:e2e`：22/22 通過；沿用既有 `3000` dev server，未停止或替換其 process。
+
+### 風險與下一步
+
+- 本批未修改圖表公式、indicator defaults、公開 export、SVG layout、可視範圍、pointer interaction、API、SQLite 或使用者可見文案。
+- `StockKLineChart.tsx` 剩餘 2,041 行主要是單一 SVG renderer 與互動 lifecycle；後續若要再拆，應先補 pointer／wheel／range characterization，不能按 JSX 區塊任意切 component。
+- 下一步依計畫進入里程碑 5，處理 `LightweightKLineChart` 的 geometry、interaction controller 與 imperative chart lifecycle；不在本批混入另一套 chart engine。
