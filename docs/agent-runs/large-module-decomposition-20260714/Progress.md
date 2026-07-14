@@ -2,10 +2,10 @@
 
 ## 狀態
 
-- 目前階段：里程碑 5C（Lightweight chart drawing interaction controller）完成，進入 5D imperative chart lifecycle
+- 目前階段：里程碑 5D（Lightweight chart imperative lifecycle）完成，進入 5E drawing presentation layer
 - 最後更新：2026-07-14
 - Implementation gate：已開啟
-- Commit 狀態：里程碑 0 baseline 已保存為 `cc2ce8d`；里程碑 1 已保存為 `2493387`；里程碑 2A 已保存並推送為 `88f9958`；里程碑 2B 已保存為 `12669e6`；里程碑 2C 已保存為 `ea8acf0`；里程碑 3 已保存並推送為 `13264f0`；里程碑 4A 已保存為 `b9a9596`；里程碑 4B 已保存為 `3773a8f`；里程碑 5A 已保存為 `afc8bc2`；里程碑 5B 已保存為 `194ca89`；里程碑 5C 將由本批 `refactor(frontend): extract chart drawing interaction` 保存
+- Commit 狀態：里程碑 0 baseline 已保存為 `cc2ce8d`；里程碑 1 已保存為 `2493387`；里程碑 2A 已保存並推送為 `88f9958`；里程碑 2B 已保存為 `12669e6`；里程碑 2C 已保存為 `ea8acf0`；里程碑 3 已保存並推送為 `13264f0`；里程碑 4A 已保存為 `b9a9596`；里程碑 4B 已保存為 `3773a8f`；里程碑 5A 已保存為 `afc8bc2`；里程碑 5B 已保存為 `194ca89`；里程碑 5C 已保存為 `8a45765`；里程碑 5D 將由本批 `refactor(frontend): extract lightweight chart engine` 保存
 
 ## 已完成
 
@@ -450,3 +450,34 @@ analytics 與 math 仍是中大型純模組，但各自只有單一數值領域�
 
 - 本批沒有修改 drawing API contract、700ms persistence debounce、chart series、indicator formula 或 visible UI。
 - 下一步 5D 抽出 imperative chart lifecycle；chart instance、series updater、ResizeObserver、visible range 與 interaction flush 應只有一個 owner。
+
+## 2026-07-14 里程碑 5D：Imperative chart lifecycle
+
+### 已完成
+
+- 新增 `useLightweightChartEngine.ts`，唯一擁有 lightweight-charts instance、main/indicator series registration、series data updater 與 cleanup。
+- ResizeObserver、overlay size/revision、visible logical range 保存／還原與 chart recreation key 收斂到 engine hook。
+- pointer interactivity、interaction flush timer 與互動期間 pending series data 由同一 lifecycle owner 管理，避免 renderer 與 engine 各存一份狀態。
+- 對外只暴露穩定 refs、range commands、interaction commands 與 overlay projection input；drawing hit test、persistence 與 SVG presentation 未移入 engine。
+
+### Ownership 指標
+
+| 指標 | 5D 前 | 5D 後 |
+| --- | ---: | ---: |
+| `LightweightKLineChart.tsx` 行數 | 3,819 | 約 2,993 |
+| chart instance／series／ResizeObserver owner | 主元件 | `useLightweightChartEngine.ts` |
+| engine hook 行數 | 0 | 約 930 |
+
+engine hook 雖為中大型檔案，但內容是單一 imperative chart lifecycle；series 建立、更新與 cleanup 必須共同存在，否則容易形成跨 hook ref race。
+
+### 驗證證據
+
+- Targeted ESLint（主圖表、engine hook、drawing interaction hook）：通過，0 warning / 0 error。
+- `npm exec tsc -- --noEmit --incremental false`：通過。
+- 專業圖表 targeted Playwright：canvas shell、drawing persistence/clear/undo、pointer create/undo 3/3 通過。
+- `git diff --check`：通過；僅有既有 Git line-ending 提示。
+
+### 風險與下一步
+
+- 本批未修改 indicator formula、series options、pane order、visible-range policy、drawing API、SVG 樣式或使用者操作文案。
+- 下一步 5E 將 drawing SVG node tree 抽成 presentation component；它只接收 projected drawings 與 event callbacks，不讀 chart instance 或 API。
