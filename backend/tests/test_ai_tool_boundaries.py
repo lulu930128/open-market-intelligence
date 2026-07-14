@@ -4,7 +4,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -115,6 +115,34 @@ class AIToolBoundaryTests(unittest.TestCase):
         )
         self.assertEqual(envelope["evidence_passport"]["kind"], "evidence_passport")
         self.assertEqual(envelope["evidence_passport"]["target_kind"], "data_freshness")
+
+    def test_market_overview_facade_hands_off_runtime_dependencies(self) -> None:
+        fixed_now = datetime(2026, 7, 14, 12, 30, tzinfo=timezone.utc)
+        db = MagicMock(spec=Session)
+        intraday_payload = {
+            "index_id": "TAIEX",
+            "points": [],
+            "source": "test",
+        }
+
+        with (
+            patch.object(tools, "_now", return_value=fixed_now),
+            patch.object(tools.market_service, "get_latest_trade_date", return_value=None),
+            patch.object(
+                tools,
+                "get_market_index_intraday",
+                return_value=intraday_payload,
+            ) as get_intraday,
+        ):
+            envelope = tools.read_market_overview(db=db, include_intraday=True)
+
+        self.assertEqual(envelope["generated_at"], fixed_now)
+        self.assertEqual(
+            [call.args[0] for call in get_intraday.call_args_list],
+            ["TAIEX", "TPEX"],
+        )
+        self.assertTrue(envelope["data"]["index_intraday"]["enabled"])
+        self.assertIn("market_daily_price", envelope["missing"])
 
 
 if __name__ == "__main__":
