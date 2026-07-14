@@ -2620,6 +2620,50 @@ test.describe("OMI dashboard smoke", () => {
     expect((drawingWrites()[2].body as { drawings: unknown[] }).drawings).toHaveLength(1);
   });
 
+  test("Taiwan professional chart creates and undoes a horizontal drawing", async ({ page }) => {
+    const apiRequests: NonNullable<MockOmiApiOptions["apiRequests"]> = [];
+    await mockOmiApi(page, { apiRequests });
+    await page.goto("/?market=tw&stock_id=2330", { waitUntil: "domcontentloaded" });
+
+    await expect(page.getByTestId("stock-detail-panel")).toHaveAttribute(
+      "data-chart-load-state",
+      "success"
+    );
+    await page.getByTestId("stock-detail-expand").click();
+
+    const chart = page.getByTestId("lightweight-kline-chart");
+    const overlay = page.getByTestId("lightweight-chart-overlay");
+    await expect(chart).toHaveAttribute("data-drawing-count", "0");
+    await expect(overlay).toBeVisible();
+
+    const overlayBox = await overlay.boundingBox();
+    expect(overlayBox?.width ?? 0).toBeGreaterThan(300);
+    expect(overlayBox?.height ?? 0).toBeGreaterThan(300);
+
+    await page.getByRole("button", { name: "水平", exact: true }).click();
+    await expect(chart).toHaveAttribute("data-drawing-tool", "horizontal");
+    await overlay.click({
+      position: {
+        x: Math.round((overlayBox?.width ?? 600) * 0.45),
+        y: Math.round((overlayBox?.height ?? 600) * 0.42),
+      },
+    });
+    await expect(chart).toHaveAttribute("data-drawing-count", "1");
+
+    const drawingWrites = () =>
+      apiRequests.filter(
+        (request) =>
+          request.method === "PUT" && request.path.includes("/market/chart-drawings/")
+      );
+    await expect.poll(() => drawingWrites().length).toBe(1);
+    expect((drawingWrites()[0].body as { drawings: unknown[] }).drawings).toHaveLength(1);
+
+    await page.getByTestId("chart-drawing-undo").click();
+    await expect(chart).toHaveAttribute("data-drawing-count", "0");
+    await expect.poll(() => drawingWrites().length).toBe(2);
+    expect((drawingWrites()[1].body as { drawings: unknown[] }).drawings).toHaveLength(0);
+  });
+
   test("Taiwan branch data tab reuses each days cache key", async ({ page }) => {
     const apiRequests: NonNullable<MockOmiApiOptions["apiRequests"]> = [];
     await mockOmiApi(page, { apiRequests });

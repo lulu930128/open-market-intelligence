@@ -3257,6 +3257,10 @@ export default function LightweightKLineChart({
       ) : null}
 
       <div
+        data-testid="lightweight-kline-chart"
+        data-drawing-count={activeDrawings.length}
+        data-drawing-tool={drawingTool}
+        data-selected-drawing-id={selectedDrawingId ?? ""}
         className="relative min-h-[520px] w-full overflow-hidden"
         onPointerEnter={() => {
           shortcutActiveRef.current = true;
@@ -3312,6 +3316,7 @@ export default function LightweightKLineChart({
         ) : null}
         <svg
           ref={overlaySvgRef}
+          data-testid="lightweight-chart-overlay"
           className={[
             "absolute inset-0 z-10 h-full w-full",
             drawingTool === "cursor" ? "" : "cursor-crosshair",

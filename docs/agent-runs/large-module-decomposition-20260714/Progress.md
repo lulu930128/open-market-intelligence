@@ -2,10 +2,10 @@
 
 ## 狀態
 
-- 目前階段：里程碑 4（Stock detail presentation collections）實作完成，準備進入里程碑 5 chart engine 解耦
+- 目前階段：里程碑 5A（Lightweight chart interaction characterization）完成，進入 5B pure geometry／projection
 - 最後更新：2026-07-14
 - Implementation gate：已開啟
-- Commit 狀態：里程碑 0 baseline 已保存為 `cc2ce8d`；里程碑 1 已保存為 `2493387`；里程碑 2A 已保存並推送為 `88f9958`；里程碑 2B 已保存為 `12669e6`；里程碑 2C 已保存為 `ea8acf0`；里程碑 3 已保存並推送為 `13264f0`；里程碑 4A 已保存為 `b9a9596`；里程碑 4B 將由本批 `refactor(frontend): separate k-line indicator projection` 保存
+- Commit 狀態：里程碑 0 baseline 已保存為 `cc2ce8d`；里程碑 1 已保存為 `2493387`；里程碑 2A 已保存並推送為 `88f9958`；里程碑 2B 已保存為 `12669e6`；里程碑 2C 已保存為 `ea8acf0`；里程碑 3 已保存並推送為 `13264f0`；里程碑 4A 已保存為 `b9a9596`；里程碑 4B 已保存為 `3773a8f`；里程碑 5A 將由本批 `test(frontend): characterize chart drawing interaction` 保存
 
 ## 已完成
 
@@ -366,3 +366,22 @@ projection 檔案雖仍有 1,017 行，但內容是同一個無 side effect 的�
 - 本批未修改圖表公式、indicator defaults、公開 export、SVG layout、可視範圍、pointer interaction、API、SQLite 或使用者可見文案。
 - `StockKLineChart.tsx` 剩餘 2,041 行主要是單一 SVG renderer 與互動 lifecycle；後續若要再拆，應先補 pointer／wheel／range characterization，不能按 JSX 區塊任意切 component。
 - 下一步依計畫進入里程碑 5，處理 `LightweightKLineChart` 的 geometry、interaction controller 與 imperative chart lifecycle；不在本批混入另一套 chart engine。
+
+## 2026-07-14 里程碑 5A：Lightweight chart interaction characterization
+
+### 已完成
+
+- `LightweightKLineChart` 新增穩定的 chart／overlay test ids，以及 drawing tool、drawing count、selection 狀態屬性；不改畫面與操作行為。
+- 新增 Playwright case，實際選取「水平」工具、在 SVG overlay 落點、確認 drawing count 由 0 變 1、PUT payload 含 1 筆 drawing，再 undo 回 0 筆。
+- characterization 同時覆蓋 overlay 非空尺寸、pointer coordinate conversion、drawing commit、history 與 700ms persistence debounce。
+
+### 驗證證據
+
+- Lightweight chart 與 E2E targeted ESLint：通過。
+- `npm exec tsc -- --noEmit --incremental false`：通過。
+- 新增 pointer／drawing targeted Playwright：1/1 通過；沿用既有 `3000` dev server。
+
+### 風險與下一步
+
+- 本批只增加 observability 與 regression coverage，未改 chart engine、drawing geometry、API contract 或 persistence policy。
+- 下一步 5B 先把 `LightweightKLineChartDrawing.ts` 按 model／analytics／geometry 分層，保留原 compatibility import path，再處理 React interaction 與 chart instance lifecycle。
