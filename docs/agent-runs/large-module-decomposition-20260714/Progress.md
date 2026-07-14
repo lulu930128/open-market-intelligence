@@ -519,3 +519,32 @@ engine hook 雖為中大型檔案，但內容是單一 imperative chart lifecycl
 
 - 本批未改 indicator formula、drawing analytics、series options、drawing API contract、persistence debounce 或 visible-range policy。
 - 里程碑 5 的 lightweight chart 大檔拆分完成。下一步重新掃描 tracked production files，依責任混雜程度排序後端里程碑 6-8，不再以行數作為唯一拆分條件。
+
+## 2026-07-14 里程碑 6A／6B-1：AI tool catalog boundary
+
+### 已完成
+
+- 新增 `test_ai_tool_boundaries.py`，固定 public inventory、29 個 internal tool names、完整 schema digest 與 mutable isolation。
+- 新增 `tool_catalog.py`，唯一擁有 OMI AI tool title、description 與 input schema catalog。
+- `tools.py` 保留 `list_ai_tools()` public wrapper；router、dispatch、report 與外部 caller import path 不變。
+- catalog 每次呼叫仍建立獨立資料結構，避免 caller mutation 污染後續 request。
+
+### Ownership 指標
+
+| 指標 | 搬移前 | 搬移後 |
+| --- | ---: | ---: |
+| `tools.py` 行數 | 3,373 | 2,639 |
+| tool schema/catalog owner | `tools.py` | `tool_catalog.py`（742 行） |
+| internal tool inventory | 29 | 29 |
+| catalog SHA-256 | `73e3d669...d42d1be` | `73e3d669...d42d1be` |
+
+### 驗證證據
+
+- `backend/tests/test_ai_tool_boundaries.py`：3/3 通過。
+- `python -m compileall -q app/ai`：通過。
+- 測試僅有 sandbox 無法寫 `.pytest_cache` 的 warning，沒有 assertion、import 或 runtime failure。
+
+### 風險與下一步
+
+- 本批未修改任何 tool name、schema、reader、DB query、provider call、freshness 或 evidence contract。
+- 下一步將 Taiwan market/index/futures/stock/watchlist context implementation 移入 `ai/market_context/`；`tools.py` 保留 patch-compatible wrappers。
