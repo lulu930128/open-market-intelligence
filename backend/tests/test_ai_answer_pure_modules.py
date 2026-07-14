@@ -2,7 +2,15 @@ from __future__ import annotations
 
 import unittest
 
-from app.ai import answer_composer, answer_data_limits, answer_localization, answer_scenarios
+from app.ai import (
+    answer_composer,
+    answer_data_limits,
+    answer_evidence,
+    answer_localization,
+    answer_question,
+    answer_radar,
+    answer_scenarios,
+)
 
 
 class AIAnswerPureModuleTests(unittest.TestCase):
@@ -24,6 +32,24 @@ class AIAnswerPureModuleTests(unittest.TestCase):
         self.assertIs(
             answer_composer.position_scenarios_from_decision,
             answer_scenarios.position_scenarios_from_decision,
+        )
+
+    def test_answer_composer_keeps_extracted_builder_facades(self) -> None:
+        self.assertIs(
+            answer_composer.decision_evidence_summary_lines,
+            answer_evidence.decision_evidence_summary_lines,
+        )
+        self.assertIs(
+            answer_composer.build_question_aware_consumer_answer,
+            answer_question.build_question_aware_consumer_answer,
+        )
+        self.assertIs(
+            answer_composer.watchlist_radar_rows_for_intent,
+            answer_radar.watchlist_radar_rows_for_intent,
+        )
+        self.assertIs(
+            answer_composer.build_watchlist_radar_consumer_answer,
+            answer_radar.build_watchlist_radar_consumer_answer,
         )
 
     def test_consumer_text_keeps_locale_specific_headings(self) -> None:
