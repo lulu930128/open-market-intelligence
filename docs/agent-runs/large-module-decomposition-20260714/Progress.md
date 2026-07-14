@@ -2,10 +2,10 @@
 
 ## 狀態
 
-- 目前階段：里程碑 5B（Lightweight chart pure model／analytics／geometry／projection）完成，進入 5C interaction controller
+- 目前階段：里程碑 5C（Lightweight chart drawing interaction controller）完成，進入 5D imperative chart lifecycle
 - 最後更新：2026-07-14
 - Implementation gate：已開啟
-- Commit 狀態：里程碑 0 baseline 已保存為 `cc2ce8d`；里程碑 1 已保存為 `2493387`；里程碑 2A 已保存並推送為 `88f9958`；里程碑 2B 已保存為 `12669e6`；里程碑 2C 已保存為 `ea8acf0`；里程碑 3 已保存並推送為 `13264f0`；里程碑 4A 已保存為 `b9a9596`；里程碑 4B 已保存為 `3773a8f`；里程碑 5A 已保存為 `afc8bc2`；里程碑 5B 將由本批 `refactor(frontend): split lightweight chart projections` 保存
+- Commit 狀態：里程碑 0 baseline 已保存為 `cc2ce8d`；里程碑 1 已保存為 `2493387`；里程碑 2A 已保存並推送為 `88f9958`；里程碑 2B 已保存為 `12669e6`；里程碑 2C 已保存為 `ea8acf0`；里程碑 3 已保存並推送為 `13264f0`；里程碑 4A 已保存為 `b9a9596`；里程碑 4B 已保存為 `3773a8f`；里程碑 5A 已保存為 `afc8bc2`；里程碑 5B 已保存為 `194ca89`；里程碑 5C 將由本批 `refactor(frontend): extract chart drawing interaction` 保存
 
 ## 已完成
 
@@ -421,3 +421,32 @@ analytics 與 math 仍是中大型純模組，但各自只有單一數值領域�
 
 - 本批未改公式、drawing evidence、coordinate geometry、public exports、chart lifecycle、pointer state 或可見 UI。
 - 下一步 5C 建立 drawing interaction controller；hit testing 只依賴 `drawingGeometry.ts`，hook 不建立 lightweight-charts instance，也不負責 persistence。
+
+## 2026-07-14 里程碑 5C：Drawing interaction controller
+
+### 已完成
+
+- 新增 `useChartDrawingInteraction.ts`，集中 drawing draft、hover、snap、selection、context delete、Escape/Delete、pointer capture 與 drag preview state。
+- 水平線、AVWAP、雙點工具、risk/reward 三點初始化、整線拖曳、控制點拖曳與 Shift 角度限制維持既有行為。
+- hook 只透過傳入的 coordinate/chart callbacks 操作 lightweight-charts；不建立 chart instance、不載入 API，也不擁有 drawing persistence。
+- `LightweightKLineChart.tsx` 移除第二份 interaction state 與 handlers，改以單一 hook contract 組合 overlay projection 與 SVG presentation。
+
+### Ownership 指標
+
+| 指標 | 5C 前 | 5C 後 |
+| --- | ---: | ---: |
+| `LightweightKLineChart.tsx` interaction 內嵌邏輯 | 約 700 行 | 0 |
+| drawing interaction owner | 主元件混合 | `useChartDrawingInteraction.ts` |
+| drawing persistence owner | `useChartDrawingPersistence.ts` | 不變 |
+
+### 驗證證據
+
+- Targeted ESLint（主圖表與 interaction hook）：通過，0 warning / 0 error。
+- `npm exec tsc -- --noEmit --incremental false`：通過。
+- 水平線建立、remote payload 與 undo targeted Playwright：1/1 通過；沿用既有 `3000` dev server。
+- `git diff --check`：通過；僅有既有 Git line-ending 提示。
+
+### 風險與下一步
+
+- 本批沒有修改 drawing API contract、700ms persistence debounce、chart series、indicator formula 或 visible UI。
+- 下一步 5D 抽出 imperative chart lifecycle；chart instance、series updater、ResizeObserver、visible range 與 interaction flush 應只有一個 owner。
