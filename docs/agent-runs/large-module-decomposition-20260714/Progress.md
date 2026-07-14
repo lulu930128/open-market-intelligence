@@ -585,3 +585,84 @@ engine hook 雖為中大型檔案，但內容是單一 imperative chart lifecycl
 
 - 本批未改 API route、tool name、reader signature/default、payload level、slot/status、freshness、source refs、evidence passport、DB schema 或 provider refresh policy。
 - 里程碑 6B 完成；下一步 6C 處理 `agentic_tools.py` 的 planning/execution 與 US/JP/KR/crypto readers，保留既有 facade 與 patch targets。
+
+## 2026-07-14 里程碑 6C：Agentic planning／execution 與區域 readers
+
+### 已完成
+
+- 新增 `agentic_common.py`、`agentic_policy.py`、`agentic_planning.py` 與 `agentic_execution.py`，分離共用轉換、allowlist/budget、tool planning 與 provider dispatch。
+- US／JP／KR／crypto context reader 移入 `ai/market_context/`；`agentic_tools.py` 保留 session orchestration、freshness 與 patch-compatible wrappers。
+- `agentic_tools.py` 由約 2,949 行降至 479 行；service module、planner LLM 與 refresh patch target 均維持原 import path。
+
+### Ownership 指標
+
+| owner | 行數 | 主要責任 |
+| --- | ---: | --- |
+| `agentic_tools.py` | 479 | public facade、freshness 與 session orchestration |
+| `agentic_policy.py` | 126 | allowlist、tool definition 與 budget policy |
+| `agentic_planning.py` | 422 | deterministic／LLM tool plan |
+| `agentic_execution.py` | 405 | budget enforcement、dispatch、result summary 與 progress |
+
+### 驗證證據
+
+- policy boundary：66/66 通過。
+- planner／ask stage／overnight：77/77 通過。
+- execution、market context 與區域回歸：174/174 通過。
+- US／JP／KR／crypto reader 各批 targeted regression：121、93、74、104 個測試通過。
+
+## 2026-07-14 里程碑 7：Answer composer architecture
+
+### 已完成
+
+- `answer_composer.py` 由 2,936 行降至 524 行，只保留 consumer answer fallback、dispatcher 與既有相容 export。
+- `answer_evidence.py` 擁有資料摘要、技術位階與 decision evidence formatter；`answer_radar.py` 擁有雷達 label、row selection 與 radar answer。
+- `answer_question.py` 只建立共用 evidence context 並 dispatch 語系；原約 820 行單函式拆為英文、日文、中文策略，集中於 `answer_question_locales.py`。
+- 新增 facade identity regression，固定 localization、data limit、scenario、evidence、question 與 radar export 不漂移。
+
+### Ownership 指標
+
+| owner | 行數 | 主要責任 |
+| --- | ---: | --- |
+| `answer_composer.py` | 524 | consumer answer dispatch 與 compatibility facade |
+| `answer_question.py` | 237 | common context 與 locale dispatch |
+| `answer_question_locales.py` | 846 | 三語 intent decision templates |
+| `answer_evidence.py` | 919 | evidence／technical level formatter |
+| `answer_radar.py` | 637 | watchlist radar localization 與 answer |
+
+### 驗證證據
+
+- composer、pure module、ask refactor 與 ask stage regression：41/41 通過。
+- compileall 與 `git diff --check`：通過；僅有既有 Git line-ending 提示。
+
+## 2026-07-14 里程碑 8：US market service boundaries
+
+### 已完成
+
+- `us_market/service.py` 由 3,275 行降至 1,543 行，保留 provider orchestration、公開 façade 與動態 workflow dependency handoff。
+- 新增 catalog、price、fundamentals 與 watchlist ORM store；DB persistence/read model 不再和 provider refresh 混在同一 owner。
+- watchlist reference/freshness calculation 移入 `watchlist_metrics.py`；ranking 與 resource refresh 移入 `watchlist_workflows.py`。
+- 所有 US exceptions 統一由 `errors.py` 擁有，`service.py` 保留同一 class identity。
+- workflow dependencies 在每次 façade 呼叫時解析，確保測試／runtime patch 的 expected date、intraday overlay、daily/profile/SEC refresh 不會在 module import 時被凍結。
+
+### Ownership 指標
+
+| owner | 行數 | 主要責任 |
+| --- | ---: | --- |
+| `us_market/service.py` | 1,543 | provider orchestration 與 public facade |
+| `fundamentals_store.py` | 595 | SEC／profile／actions／short／macro persistence |
+| `watchlist_workflows.py` | 539 | ranking 與 bounded refresh workflow |
+| `watchlist_store.py` | 404 | group／item CRUD 與 tree validation |
+| `watchlist_metrics.py` | 192 | close reference、intraday compact 與 date parsing |
+| `catalog_store.py` | 163 | symbol master persistence/query |
+| `price_store.py` | 140 | daily price persistence/query |
+
+### 驗證證據
+
+- 完整 `test_us_market_data.py`：57/57 通過。
+- store alias、exception identity 與 dynamic dependency boundary：3/3 通過。
+- US market 合計 targeted regression：60/60 通過。
+
+### 停止拆分判斷
+
+- `service.py` 雖仍超過 1,500 行，但剩餘函式皆屬公開 provider orchestration、chart/intraday workflow 或薄 wrapper；繼續只為行數拆分會增加 callback／patch 轉接層，未形成更清楚的 transaction owner。
+- 後續若 price provider 或 fundamentals provider 各自出現獨立修改熱點，再以 typed dependency bundle 抽出 workflow；目前不做預防性碎片化。

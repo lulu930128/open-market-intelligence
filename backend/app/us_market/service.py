@@ -38,7 +38,17 @@ from app.us_market.chart_projection import (
     ohlc_point as _us_ohlc_point,
     should_skip_daily_price_update as _should_skip_us_daily_price_update,
 )
-from app.us_market.errors import USMarketDataFetchError
+from app.us_market import catalog_store, fundamentals_store, price_store, watchlist_metrics, watchlist_store, watchlist_workflows
+from app.us_market.errors import (
+    USMarketConfigurationError,
+    USMarketDataFetchError,
+    USStockNotFoundError,
+    USWatchlistDuplicateItemError,
+    USWatchlistGroupNotEmptyError,
+    USWatchlistGroupNotFoundError,
+    USWatchlistInvalidTreeError,
+    USWatchlistItemNotFoundError,
+)
 from app.us_market.schemas import (
     USWatchlistGroupCreate,
     USWatchlistGroupUpdate,
@@ -99,34 +109,6 @@ def expected_us_daily_price_date() -> date:
         return date.today()
 
     return expected_date
-
-
-class USStockNotFoundError(Exception):
-    pass
-
-
-class USMarketConfigurationError(Exception):
-    pass
-
-
-class USWatchlistGroupNotFoundError(Exception):
-    pass
-
-
-class USWatchlistGroupNotEmptyError(Exception):
-    pass
-
-
-class USWatchlistInvalidTreeError(Exception):
-    pass
-
-
-class USWatchlistItemNotFoundError(Exception):
-    pass
-
-
-class USWatchlistDuplicateItemError(Exception):
-    pass
 
 
 ProgressCallback = Callable[[int | None, int | None, str | None], None]
@@ -242,95 +224,8 @@ def _require_sec_user_agent() -> str:
     return user_agent
 
 
-def _apply_symbol_record(stock: USStockMaster, record: USSymbolRecord) -> None:
-    stock.security_name = record.security_name or stock.security_name
-    stock.exchange = record.exchange or stock.exchange
-    stock.asset_type = record.asset_type
-    stock.listing_source = record.listing_source
-    stock.market_category = record.market_category
-    stock.financial_status = record.financial_status
-    stock.cqs_symbol = record.cqs_symbol
-    stock.nasdaq_symbol = record.nasdaq_symbol
-    stock.cik = record.cik or stock.cik
-    stock.sec_company_name = record.sec_company_name or stock.sec_company_name
-    stock.is_etf = record.is_etf
-    stock.is_test_issue = record.is_test_issue
-    stock.round_lot_size = record.round_lot_size
-    stock.is_active = True
-    stock.last_seen_at = utc_now()
-    stock.updated_at = utc_now()
-
-
-def upsert_us_symbol_records(
-    db: Session,
-    records: list[USSymbolRecord],
-    *,
-    deactivate_missing: bool = False,
-) -> dict:
-    scanned_count = len(records)
-    created_count = 0
-    updated_count = 0
-    now = utc_now()
-    seen_symbols = {record.symbol for record in records}
-
-    existing_by_symbol = {
-        stock.symbol: stock
-        for stock in db.query(USStockMaster).filter(USStockMaster.symbol.in_(seen_symbols)).all()
-    } if seen_symbols else {}
-
-    for record in records:
-        existing = existing_by_symbol.get(record.symbol)
-
-        if existing is None:
-            stock = USStockMaster(
-                symbol=record.symbol,
-                security_name=record.security_name,
-                exchange=record.exchange,
-                asset_type=record.asset_type,
-                listing_source=record.listing_source,
-                market_category=record.market_category,
-                financial_status=record.financial_status,
-                cqs_symbol=record.cqs_symbol,
-                nasdaq_symbol=record.nasdaq_symbol,
-                cik=record.cik,
-                sec_company_name=record.sec_company_name,
-                is_etf=record.is_etf,
-                is_test_issue=record.is_test_issue,
-                round_lot_size=record.round_lot_size,
-                is_active=True,
-                first_seen_at=now,
-                last_seen_at=now,
-            )
-            db.add(stock)
-            created_count += 1
-            continue
-
-        _apply_symbol_record(existing, record)
-        updated_count += 1
-
-    deactivated_count = 0
-    if deactivate_missing and seen_symbols:
-        missing_rows = (
-            db.query(USStockMaster)
-            .filter(USStockMaster.is_active.is_(True))
-            .filter(~USStockMaster.symbol.in_(seen_symbols))
-            .all()
-        )
-        for stock in missing_rows:
-            stock.is_active = False
-            stock.updated_at = utc_now()
-            deactivated_count += 1
-
-    db.commit()
-
-    return {
-        "status": "success",
-        "scanned_count": scanned_count,
-        "created_count": created_count,
-        "updated_count": updated_count,
-        "deactivated_count": deactivated_count,
-        "message": "US stock master synced from Nasdaq Trader symbol directories.",
-    }
+_apply_symbol_record = catalog_store._apply_symbol_record
+upsert_us_symbol_records = catalog_store.upsert_us_symbol_records
 
 
 @_translate_us_provider_errors
@@ -385,26 +280,7 @@ def sync_us_sec_company_data(db: Session) -> dict:
     }
 
 
-def _apply_sec_company_data(stock: USStockMaster, item: dict[str, str | None]) -> bool:
-    changed = False
-    cik = item.get("cik")
-    sec_company_name = item.get("sec_company_name")
-    sec_exchange = item.get("sec_exchange")
-
-    if cik and stock.cik != cik:
-        stock.cik = cik
-        changed = True
-    if sec_company_name and stock.sec_company_name != sec_company_name:
-        stock.sec_company_name = sec_company_name
-        changed = True
-    if sec_exchange and not stock.exchange:
-        stock.exchange = sec_exchange
-        changed = True
-
-    if changed:
-        stock.updated_at = utc_now()
-
-    return changed
+_apply_sec_company_data = catalog_store._apply_sec_company_data
 
 
 def _ensure_us_stock_cik(db: Session, *, symbol: str) -> USStockMaster:
@@ -430,32 +306,7 @@ def _ensure_us_stock_cik(db: Session, *, symbol: str) -> USStockMaster:
     return stock
 
 
-def list_us_stocks(
-    db: Session,
-    *,
-    exchange: str | None = None,
-    asset_type: str | None = None,
-    is_active: bool | None = None,
-    limit: int = 100,
-    offset: int = 0,
-) -> list[USStockMaster]:
-    query = db.query(USStockMaster)
-
-    if exchange is not None:
-        query = query.filter(USStockMaster.exchange == exchange)
-
-    if asset_type is not None:
-        query = query.filter(USStockMaster.asset_type == asset_type)
-
-    if is_active is not None:
-        query = query.filter(USStockMaster.is_active.is_(is_active))
-
-    return (
-        query.order_by(USStockMaster.symbol.asc())
-        .offset(offset)
-        .limit(limit)
-        .all()
-    )
+list_us_stocks = catalog_store.list_us_stocks
 
 
 def search_us_stocks(
@@ -514,18 +365,7 @@ def search_us_stocks(
     return results
 
 
-def get_us_stock(db: Session, *, symbol: str) -> USStockMaster:
-    normalized_symbol = normalize_us_symbol(symbol)
-    stock = (
-        db.query(USStockMaster)
-        .filter(USStockMaster.symbol == normalized_symbol)
-        .first()
-    )
-
-    if stock is None:
-        raise USStockNotFoundError(f"US symbol='{normalized_symbol}' not found.")
-
-    return stock
+get_us_stock = catalog_store.get_us_stock
 
 
 def discover_us_stock_master_from_yahoo_chart(db: Session, *, symbol: str) -> USStockMaster:
@@ -559,87 +399,8 @@ def ensure_us_stock_master(db: Session, *, symbol: str) -> USStockMaster:
         ) from exc
 
 
-def upsert_us_daily_price_records(
-    db: Session,
-    records: list[USDailyPriceRecord],
-) -> dict:
-    inserted_count = 0
-    updated_count = 0
-
-    for record in records:
-        existing = (
-            db.query(USDailyPrice)
-            .filter(USDailyPrice.provider == record.provider)
-            .filter(USDailyPrice.symbol == record.symbol)
-            .filter(USDailyPrice.trade_date == record.trade_date)
-            .first()
-        )
-
-        if existing is None:
-            db.add(
-                USDailyPrice(
-                    provider=record.provider,
-                    symbol=record.symbol,
-                    trade_date=record.trade_date,
-                    open_price=record.open_price,
-                    high_price=record.high_price,
-                    low_price=record.low_price,
-                    close_price=record.close_price,
-                    adjusted_close=record.adjusted_close,
-                    trade_volume=record.trade_volume,
-                    dividend_amount=record.dividend_amount,
-                    split_coefficient=record.split_coefficient,
-                    source_url=record.source_url,
-                    raw_payload_hash=record.raw_payload_hash,
-                    fetched_at=utc_now(),
-                )
-            )
-            inserted_count += 1
-            continue
-
-        if _should_skip_us_daily_price_update(existing=existing, record=record):
-            continue
-
-        existing.open_price = record.open_price
-        existing.high_price = record.high_price
-        existing.low_price = record.low_price
-        existing.close_price = record.close_price
-        existing.adjusted_close = record.adjusted_close
-        existing.trade_volume = record.trade_volume
-        existing.dividend_amount = record.dividend_amount
-        existing.split_coefficient = record.split_coefficient
-        existing.source_url = record.source_url
-        existing.raw_payload_hash = record.raw_payload_hash
-        existing.fetched_at = utc_now()
-        existing.updated_at = utc_now()
-        updated_count += 1
-
-    try:
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-
-    return {
-        "inserted_count": inserted_count,
-        "updated_count": updated_count,
-    }
-
-
-def _us_daily_price_sample(row: USDailyPrice) -> dict:
-    return {
-        "id": row.id,
-        "provider": row.provider,
-        "symbol": row.symbol,
-        "trade_date": row.trade_date,
-        "open_price": row.open_price,
-        "high_price": row.high_price,
-        "low_price": row.low_price,
-        "close_price": row.close_price,
-        "trade_volume": row.trade_volume,
-        "source_url": row.source_url,
-    }
-
+upsert_us_daily_price_records = price_store.upsert_us_daily_price_records
+_us_daily_price_sample = price_store._us_daily_price_sample
 
 def repair_us_daily_price_quality(
     db: Session,
@@ -903,53 +664,8 @@ def refresh_us_daily_prices(
     raise USMarketConfigurationError("ALPHAVANTAGE_API_KEY is not configured.")
 
 
-def list_us_daily_prices(
-    db: Session,
-    *,
-    symbol: str,
-    provider: str | None = None,
-    from_date: date | None = None,
-    to_date: date | None = None,
-    limit: int = 500,
-    offset: int = 0,
-) -> list[USDailyPrice]:
-    normalized_symbol = normalize_us_symbol(symbol)
-    query = db.query(USDailyPrice).filter(USDailyPrice.symbol == normalized_symbol)
-
-    if provider is not None:
-        query = query.filter(USDailyPrice.provider == provider)
-
-    if from_date is not None:
-        query = query.filter(USDailyPrice.trade_date >= from_date)
-
-    if to_date is not None:
-        query = query.filter(USDailyPrice.trade_date <= to_date)
-
-    return (
-        query.order_by(USDailyPrice.trade_date.desc())
-        .offset(offset)
-        .limit(limit)
-        .all()
-    )
-
-
-def _list_us_ohlc_source_rows(
-    db: Session,
-    *,
-    symbol: str,
-    from_date: date,
-    to_date: date,
-) -> list[USDailyPrice]:
-    rows = list_us_daily_prices(
-        db=db,
-        symbol=symbol,
-        from_date=from_date,
-        to_date=to_date,
-        limit=5000,
-        offset=0,
-    )
-    return sorted(rows, key=lambda row: row.trade_date)
-
+list_us_daily_prices = price_store.list_us_daily_prices
+_list_us_ohlc_source_rows = price_store._list_us_ohlc_source_rows
 
 def _refresh_us_ohlc_history_if_needed(
     db: Session,
@@ -1180,66 +896,7 @@ def _resolve_cik_for_symbol(db: Session, symbol: str) -> str:
     return cik
 
 
-def upsert_us_sec_fact_records(
-    db: Session,
-    records: list[USSecFactRecord],
-) -> dict:
-    inserted_count = 0
-    updated_count = 0
-
-    for record in records:
-        existing = (
-            db.query(USSecCompanyFact)
-            .filter(USSecCompanyFact.fact_key == record.fact_key)
-            .first()
-        )
-
-        if existing is None:
-            db.add(
-                USSecCompanyFact(
-                    fact_key=record.fact_key,
-                    cik=record.cik,
-                    symbol=record.symbol,
-                    entity_name=record.entity_name,
-                    taxonomy=record.taxonomy,
-                    tag=record.tag,
-                    label=record.label,
-                    description=record.description,
-                    unit=record.unit,
-                    fiscal_year=record.fiscal_year,
-                    fiscal_period=record.fiscal_period,
-                    form=record.form,
-                    filed_date=record.filed_date,
-                    period_start_date=record.period_start_date,
-                    period_end_date=record.period_end_date,
-                    accession_number=record.accession_number,
-                    frame=record.frame,
-                    value_numeric=record.value_numeric,
-                    value_text=record.value_text,
-                    source_url=record.source_url,
-                    fetched_at=utc_now(),
-                )
-            )
-            inserted_count += 1
-            continue
-
-        existing.symbol = record.symbol or existing.symbol
-        existing.entity_name = record.entity_name or existing.entity_name
-        existing.label = record.label
-        existing.description = record.description
-        existing.value_numeric = record.value_numeric
-        existing.value_text = record.value_text
-        existing.source_url = record.source_url
-        existing.fetched_at = utc_now()
-        existing.updated_at = utc_now()
-        updated_count += 1
-
-    db.commit()
-
-    return {
-        "inserted_count": inserted_count,
-        "updated_count": updated_count,
-    }
+upsert_us_sec_fact_records = fundamentals_store.upsert_us_sec_fact_records
 
 
 @_translate_us_provider_errors
@@ -1273,117 +930,10 @@ def refresh_us_sec_companyfacts(
     }
 
 
-def list_us_sec_company_facts(
-    db: Session,
-    *,
-    symbol: str,
-    taxonomy: str | None = None,
-    tag: str | None = None,
-    form: str | None = None,
-    fiscal_year: int | None = None,
-    limit: int = 500,
-    offset: int = 0,
-) -> list[USSecCompanyFact]:
-    normalized_symbol = normalize_us_symbol(symbol)
-    query = db.query(USSecCompanyFact).filter(USSecCompanyFact.symbol == normalized_symbol)
-
-    if taxonomy is not None:
-        query = query.filter(USSecCompanyFact.taxonomy == taxonomy)
-
-    if tag is not None:
-        query = query.filter(USSecCompanyFact.tag == tag)
-
-    if form is not None:
-        query = query.filter(USSecCompanyFact.form == form)
-
-    if fiscal_year is not None:
-        query = query.filter(USSecCompanyFact.fiscal_year == fiscal_year)
-
-    return (
-        query.order_by(
-            USSecCompanyFact.period_end_date.desc(),
-            USSecCompanyFact.filed_date.desc(),
-            USSecCompanyFact.id.desc(),
-        )
-        .offset(offset)
-        .limit(limit)
-        .all()
-    )
-
-
-def _latest_us_sec_fact_for_tag(
-    db: Session,
-    *,
-    symbol: str,
-    tag: str,
-) -> USSecCompanyFact | None:
-    base_query = (
-        db.query(USSecCompanyFact)
-        .filter(USSecCompanyFact.symbol == symbol)
-        .filter(USSecCompanyFact.tag == tag)
-        .filter(USSecCompanyFact.value_numeric.isnot(None))
-    )
-    ordering = (
-        USSecCompanyFact.period_end_date.desc(),
-        USSecCompanyFact.filed_date.desc(),
-        USSecCompanyFact.id.desc(),
-    )
-    preferred = (
-        base_query.filter(USSecCompanyFact.form.in_(SEC_FUNDAMENTAL_FORMS))
-        .order_by(*ordering)
-        .first()
-    )
-    if preferred is not None:
-        return preferred
-
-    return base_query.order_by(*ordering).first()
-
-
-def _latest_us_sec_fact_for_tags(
-    db: Session,
-    *,
-    symbol: str,
-    tags: tuple[str, ...],
-) -> USSecCompanyFact | None:
-    candidates = [
-        fact
-        for tag in tags
-        if (fact := _latest_us_sec_fact_for_tag(db, symbol=symbol, tag=tag)) is not None
-    ]
-    if not candidates:
-        return None
-
-    tag_priority = {tag: index for index, tag in enumerate(tags)}
-
-    return max(
-        candidates,
-        key=lambda fact: (
-            fact.period_end_date or date.min,
-            fact.filed_date or date.min,
-            -tag_priority.get(fact.tag, len(tags)),
-            fact.id,
-        ),
-    )
-
-
-def _us_sec_metric_to_dict(metric: str, fact: USSecCompanyFact) -> dict:
-    return {
-        "metric": metric,
-        "tag": fact.tag,
-        "label": fact.label,
-        "unit": fact.unit,
-        "value_numeric": fact.value_numeric,
-        "value_text": fact.value_text,
-        "fiscal_year": fact.fiscal_year,
-        "fiscal_period": fact.fiscal_period,
-        "form": fact.form,
-        "filed_date": fact.filed_date,
-        "period_start_date": fact.period_start_date,
-        "period_end_date": fact.period_end_date,
-        "accession_number": fact.accession_number,
-        "source_url": fact.source_url,
-    }
-
+list_us_sec_company_facts = fundamentals_store.list_us_sec_company_facts
+_latest_us_sec_fact_for_tag = fundamentals_store._latest_us_sec_fact_for_tag
+_latest_us_sec_fact_for_tags = fundamentals_store._latest_us_sec_fact_for_tags
+_us_sec_metric_to_dict = fundamentals_store._us_sec_metric_to_dict
 
 def get_us_sec_fundamental_summary(db: Session, *, symbol: str) -> dict:
     stock = get_us_stock(db, symbol=symbol)
@@ -1411,82 +961,7 @@ def get_us_sec_fundamental_summary(db: Session, *, symbol: str) -> dict:
     }
 
 
-def upsert_us_company_profile_records(
-    db: Session,
-    records: list[USCompanyProfileRecord],
-) -> dict:
-    inserted_count = 0
-    updated_count = 0
-
-    for record in records:
-        existing = (
-            db.query(USCompanyProfile)
-            .filter(USCompanyProfile.provider == record.provider)
-            .filter(USCompanyProfile.symbol == record.symbol)
-            .first()
-        )
-
-        if existing is None:
-            db.add(
-                USCompanyProfile(
-                    provider=record.provider,
-                    symbol=record.symbol,
-                    company_name=record.company_name,
-                    description=record.description,
-                    exchange=record.exchange,
-                    sector=record.sector,
-                    industry=record.industry,
-                    country=record.country,
-                    currency=record.currency,
-                    market_cap=record.market_cap,
-                    ebitda=record.ebitda,
-                    pe_ratio=record.pe_ratio,
-                    peg_ratio=record.peg_ratio,
-                    beta=record.beta,
-                    dividend_yield=record.dividend_yield,
-                    eps=record.eps,
-                    revenue_ttm=record.revenue_ttm,
-                    profit_margin=record.profit_margin,
-                    fiscal_year_end=record.fiscal_year_end,
-                    latest_quarter=record.latest_quarter,
-                    source_url=record.source_url,
-                    raw_payload_hash=record.raw_payload_hash,
-                    fetched_at=utc_now(),
-                )
-            )
-            inserted_count += 1
-            continue
-
-        existing.company_name = record.company_name
-        existing.description = record.description
-        existing.exchange = record.exchange
-        existing.sector = record.sector
-        existing.industry = record.industry
-        existing.country = record.country
-        existing.currency = record.currency
-        existing.market_cap = record.market_cap
-        existing.ebitda = record.ebitda
-        existing.pe_ratio = record.pe_ratio
-        existing.peg_ratio = record.peg_ratio
-        existing.beta = record.beta
-        existing.dividend_yield = record.dividend_yield
-        existing.eps = record.eps
-        existing.revenue_ttm = record.revenue_ttm
-        existing.profit_margin = record.profit_margin
-        existing.fiscal_year_end = record.fiscal_year_end
-        existing.latest_quarter = record.latest_quarter
-        existing.source_url = record.source_url
-        existing.raw_payload_hash = record.raw_payload_hash
-        existing.fetched_at = utc_now()
-        existing.updated_at = utc_now()
-        updated_count += 1
-
-    db.commit()
-
-    return {
-        "inserted_count": inserted_count,
-        "updated_count": updated_count,
-    }
+upsert_us_company_profile_records = fundamentals_store.upsert_us_company_profile_records
 
 
 @_translate_us_provider_errors
@@ -1520,107 +995,10 @@ def refresh_us_company_profile_from_alphavantage(
     }
 
 
-def get_us_company_profile(
-    db: Session,
-    *,
-    symbol: str,
-    provider: str | None = None,
-) -> USCompanyProfile | None:
-    normalized_symbol = normalize_us_symbol(symbol)
-    query = db.query(USCompanyProfile).filter(USCompanyProfile.symbol == normalized_symbol)
+get_us_company_profile = fundamentals_store.get_us_company_profile
+list_us_company_profiles = fundamentals_store.list_us_company_profiles
 
-    if provider is not None:
-        query = query.filter(USCompanyProfile.provider == provider)
-
-    return query.order_by(USCompanyProfile.fetched_at.desc(), USCompanyProfile.id.desc()).first()
-
-
-def list_us_company_profiles(
-    db: Session,
-    *,
-    sector: str | None = None,
-    industry: str | None = None,
-    provider: str | None = None,
-    limit: int = 100,
-    offset: int = 0,
-) -> list[USCompanyProfile]:
-    query = db.query(USCompanyProfile)
-
-    if sector is not None:
-        query = query.filter(USCompanyProfile.sector == sector)
-
-    if industry is not None:
-        query = query.filter(USCompanyProfile.industry == industry)
-
-    if provider is not None:
-        query = query.filter(USCompanyProfile.provider == provider)
-
-    return (
-        query.order_by(USCompanyProfile.symbol.asc())
-        .offset(offset)
-        .limit(limit)
-        .all()
-    )
-
-
-def upsert_us_corporate_action_records(
-    db: Session,
-    records: list[USCorporateActionRecord],
-) -> dict:
-    inserted_count = 0
-    updated_count = 0
-
-    for record in records:
-        existing = (
-            db.query(USCorporateAction)
-            .filter(USCorporateAction.provider == record.provider)
-            .filter(USCorporateAction.symbol == record.symbol)
-            .filter(USCorporateAction.action_type == record.action_type)
-            .filter(USCorporateAction.event_date == record.event_date)
-            .first()
-        )
-
-        if existing is None:
-            db.add(
-                USCorporateAction(
-                    provider=record.provider,
-                    symbol=record.symbol,
-                    action_type=record.action_type,
-                    event_date=record.event_date,
-                    declaration_date=record.declaration_date,
-                    record_date=record.record_date,
-                    payment_date=record.payment_date,
-                    amount=record.amount,
-                    split_from=record.split_from,
-                    split_to=record.split_to,
-                    split_ratio=record.split_ratio,
-                    source_url=record.source_url,
-                    raw_payload_hash=record.raw_payload_hash,
-                    fetched_at=utc_now(),
-                )
-            )
-            inserted_count += 1
-            continue
-
-        existing.declaration_date = record.declaration_date
-        existing.record_date = record.record_date
-        existing.payment_date = record.payment_date
-        existing.amount = record.amount
-        existing.split_from = record.split_from
-        existing.split_to = record.split_to
-        existing.split_ratio = record.split_ratio
-        existing.source_url = record.source_url
-        existing.raw_payload_hash = record.raw_payload_hash
-        existing.fetched_at = utc_now()
-        existing.updated_at = utc_now()
-        updated_count += 1
-
-    db.commit()
-
-    return {
-        "inserted_count": inserted_count,
-        "updated_count": updated_count,
-    }
+upsert_us_corporate_action_records = fundamentals_store.upsert_us_corporate_action_records
 
 
 @_translate_us_provider_errors
@@ -1668,101 +1046,9 @@ def refresh_us_corporate_actions_from_alphavantage(
     }
 
 
-def list_us_corporate_actions(
-    db: Session,
-    *,
-    symbol: str,
-    action_type: str | None = None,
-    provider: str | None = None,
-    from_date: date | None = None,
-    to_date: date | None = None,
-    limit: int = 500,
-    offset: int = 0,
-) -> list[USCorporateAction]:
-    normalized_symbol = normalize_us_symbol(symbol)
-    query = db.query(USCorporateAction).filter(USCorporateAction.symbol == normalized_symbol)
+list_us_corporate_actions = fundamentals_store.list_us_corporate_actions
 
-    if action_type is not None:
-        query = query.filter(USCorporateAction.action_type == action_type)
-
-    if provider is not None:
-        query = query.filter(USCorporateAction.provider == provider)
-
-    if from_date is not None:
-        query = query.filter(USCorporateAction.event_date >= from_date)
-
-    if to_date is not None:
-        query = query.filter(USCorporateAction.event_date <= to_date)
-
-    return (
-        query.order_by(USCorporateAction.event_date.desc(), USCorporateAction.id.desc())
-        .offset(offset)
-        .limit(limit)
-        .all()
-    )
-
-
-def upsert_us_short_volume_records(
-    db: Session,
-    records: list[USShortVolumeRecord],
-) -> dict:
-    inserted_count = 0
-    updated_count = 0
-    deduped_records = list(
-        OrderedDict(
-            (
-                (record.provider, record.symbol, record.trade_date, record.market_center),
-                record,
-            )
-            for record in records
-        ).values()
-    )
-
-    for record in deduped_records:
-        existing = (
-            db.query(USShortVolumeDaily)
-            .filter(USShortVolumeDaily.provider == record.provider)
-            .filter(USShortVolumeDaily.symbol == record.symbol)
-            .filter(USShortVolumeDaily.trade_date == record.trade_date)
-            .filter(USShortVolumeDaily.market_center == record.market_center)
-            .first()
-        )
-
-        if existing is None:
-            db.add(
-                USShortVolumeDaily(
-                    provider=record.provider,
-                    symbol=record.symbol,
-                    trade_date=record.trade_date,
-                    market_center=record.market_center,
-                    short_volume=record.short_volume,
-                    short_exempt_volume=record.short_exempt_volume,
-                    total_volume=record.total_volume,
-                    short_ratio=record.short_ratio,
-                    source_url=record.source_url,
-                    raw_payload_hash=record.raw_payload_hash,
-                    fetched_at=utc_now(),
-                )
-            )
-            inserted_count += 1
-            continue
-
-        existing.short_volume = record.short_volume
-        existing.short_exempt_volume = record.short_exempt_volume
-        existing.total_volume = record.total_volume
-        existing.short_ratio = record.short_ratio
-        existing.source_url = record.source_url
-        existing.raw_payload_hash = record.raw_payload_hash
-        existing.fetched_at = utc_now()
-        existing.updated_at = utc_now()
-        updated_count += 1
-
-    db.commit()
-
-    return {
-        "inserted_count": inserted_count,
-        "updated_count": updated_count,
-    }
+upsert_us_short_volume_records = fundamentals_store.upsert_us_short_volume_records
 
 
 @_translate_us_provider_errors
@@ -1793,86 +1079,9 @@ def refresh_us_short_volume_from_finra(
     }
 
 
-def list_us_short_volumes(
-    db: Session,
-    *,
-    symbol: str,
-    provider: str | None = None,
-    from_date: date | None = None,
-    to_date: date | None = None,
-    limit: int = 500,
-    offset: int = 0,
-) -> list[USShortVolumeDaily]:
-    normalized_symbol = normalize_us_symbol(symbol)
-    query = db.query(USShortVolumeDaily).filter(USShortVolumeDaily.symbol == normalized_symbol)
+list_us_short_volumes = fundamentals_store.list_us_short_volumes
 
-    if provider is not None:
-        query = query.filter(USShortVolumeDaily.provider == provider)
-
-    if from_date is not None:
-        query = query.filter(USShortVolumeDaily.trade_date >= from_date)
-
-    if to_date is not None:
-        query = query.filter(USShortVolumeDaily.trade_date <= to_date)
-
-    return (
-        query.order_by(USShortVolumeDaily.trade_date.desc(), USShortVolumeDaily.id.desc())
-        .offset(offset)
-        .limit(limit)
-        .all()
-    )
-
-
-def upsert_macro_series_observation_records(
-    db: Session,
-    records: list[MacroSeriesObservationRecord],
-) -> dict:
-    inserted_count = 0
-    updated_count = 0
-
-    for record in records:
-        existing = (
-            db.query(MacroSeriesObservation)
-            .filter(MacroSeriesObservation.provider == record.provider)
-            .filter(MacroSeriesObservation.series_id == record.series_id)
-            .filter(MacroSeriesObservation.observation_date == record.observation_date)
-            .first()
-        )
-
-        if existing is None:
-            db.add(
-                MacroSeriesObservation(
-                    provider=record.provider,
-                    series_id=record.series_id,
-                    series_name=record.series_name,
-                    observation_date=record.observation_date,
-                    value=record.value,
-                    unit=record.unit,
-                    frequency=record.frequency,
-                    source_url=record.source_url,
-                    raw_payload_hash=record.raw_payload_hash,
-                    fetched_at=utc_now(),
-                )
-            )
-            inserted_count += 1
-            continue
-
-        existing.series_name = record.series_name or existing.series_name
-        existing.value = record.value
-        existing.unit = record.unit or existing.unit
-        existing.frequency = record.frequency or existing.frequency
-        existing.source_url = record.source_url
-        existing.raw_payload_hash = record.raw_payload_hash
-        existing.fetched_at = utc_now()
-        existing.updated_at = utc_now()
-        updated_count += 1
-
-    db.commit()
-
-    return {
-        "inserted_count": inserted_count,
-        "updated_count": updated_count,
-    }
+upsert_macro_series_observation_records = fundamentals_store.upsert_macro_series_observation_records
 
 
 @_translate_us_provider_errors
@@ -1910,273 +1119,23 @@ def refresh_fred_macro_series(
     }
 
 
-def list_macro_series_observations(
-    db: Session,
-    *,
-    series_id: str,
-    provider: str | None = None,
-    from_date: date | None = None,
-    to_date: date | None = None,
-    limit: int = 500,
-    offset: int = 0,
-) -> list[MacroSeriesObservation]:
-    normalized_series_id = series_id.strip().upper()
-    query = db.query(MacroSeriesObservation).filter(
-        MacroSeriesObservation.series_id == normalized_series_id
-    )
+list_macro_series_observations = fundamentals_store.list_macro_series_observations
 
-    if provider is not None:
-        query = query.filter(MacroSeriesObservation.provider == provider)
-
-    if from_date is not None:
-        query = query.filter(MacroSeriesObservation.observation_date >= from_date)
-
-    if to_date is not None:
-        query = query.filter(MacroSeriesObservation.observation_date <= to_date)
-
-    return (
-        query.order_by(
-            MacroSeriesObservation.observation_date.desc(),
-            MacroSeriesObservation.id.desc(),
-        )
-        .offset(offset)
-        .limit(limit)
-        .all()
-    )
-
-
-def get_us_watchlist_group(db: Session, group_id: int) -> USWatchlistGroup:
-    group = (
-        db.query(USWatchlistGroup)
-        .filter(USWatchlistGroup.id == group_id)
-        .first()
-    )
-
-    if group is None:
-        raise USWatchlistGroupNotFoundError(f"US watchlist group id={group_id} not found.")
-
-    return group
-
-
-def _validate_us_watchlist_parent(
-    db: Session,
-    group_id: int | None,
-    parent_id: int | None,
-) -> None:
-    if parent_id is None:
-        return
-
-    parent = (
-        db.query(USWatchlistGroup)
-        .filter(USWatchlistGroup.id == parent_id)
-        .first()
-    )
-
-    if parent is None:
-        raise USWatchlistGroupNotFoundError(f"Parent US watchlist group id={parent_id} not found.")
-
-    if group_id is not None and parent_id == group_id:
-        raise USWatchlistInvalidTreeError("A US watchlist group cannot be its own parent.")
-
-    current = parent
-    while current is not None:
-        if group_id is not None and current.id == group_id:
-            raise USWatchlistInvalidTreeError("Cannot move a US watchlist group under its descendant.")
-
-        if current.parent_id is None:
-            break
-
-        current = (
-            db.query(USWatchlistGroup)
-            .filter(USWatchlistGroup.id == current.parent_id)
-            .first()
-        )
-
-
-def create_us_watchlist_group(
-    db: Session,
-    payload: USWatchlistGroupCreate,
-) -> USWatchlistGroup:
-    _validate_us_watchlist_parent(db=db, group_id=None, parent_id=payload.parent_id)
-
-    group = USWatchlistGroup(**payload.model_dump())
-    db.add(group)
-    db.commit()
-    db.refresh(group)
-    return group
-
-
-def list_us_watchlist_groups(
-    db: Session,
-    *,
-    is_active: bool | None = None,
-) -> list[USWatchlistGroup]:
-    query = db.query(USWatchlistGroup)
-
-    if is_active is not None:
-        query = query.filter(USWatchlistGroup.is_active.is_(is_active))
-
-    return (
-        query.order_by(
-            USWatchlistGroup.parent_id.asc().nullsfirst(),
-            USWatchlistGroup.sort_order.asc(),
-            USWatchlistGroup.id.asc(),
-        )
-        .all()
-    )
-
-
-def _us_group_to_tree_node(
-    group: USWatchlistGroup,
-    children_by_parent: dict[int | None, list[USWatchlistGroup]],
-) -> dict:
-    children = [
-        _us_group_to_tree_node(child, children_by_parent)
-        for child in children_by_parent.get(group.id, [])
-    ]
-
-    return {
-        "id": group.id,
-        "parent_id": group.parent_id,
-        "group_name": group.group_name,
-        "description": group.description,
-        "sort_order": group.sort_order,
-        "is_active": group.is_active,
-        "children": children,
-    }
-
-
-def get_us_watchlist_tree(
-    db: Session,
-    *,
-    is_active: bool | None = True,
-) -> list[dict]:
-    groups = list_us_watchlist_groups(db=db, is_active=is_active)
-    children_by_parent: dict[int | None, list[USWatchlistGroup]] = {}
-
-    for group in groups:
-        children_by_parent.setdefault(group.parent_id, []).append(group)
-
-    return [
-        _us_group_to_tree_node(group, children_by_parent)
-        for group in children_by_parent.get(None, [])
-    ]
-
-
-def update_us_watchlist_group(
-    db: Session,
-    group_id: int,
-    payload: USWatchlistGroupUpdate,
-) -> USWatchlistGroup:
-    group = get_us_watchlist_group(db, group_id)
-    update_data = payload.model_dump(exclude_unset=True)
-
-    if "parent_id" in update_data:
-        _validate_us_watchlist_parent(
-            db=db,
-            group_id=group_id,
-            parent_id=update_data["parent_id"],
-        )
-
-    for key, value in update_data.items():
-        setattr(group, key, value)
-
-    db.commit()
-    db.refresh(group)
-    return group
-
-
-def _get_us_descendant_group_ids(db: Session, group_id: int) -> list[int]:
-    groups = db.query(USWatchlistGroup).all()
-    children_by_parent: dict[int | None, list[USWatchlistGroup]] = {}
-
-    for group in groups:
-        children_by_parent.setdefault(group.parent_id, []).append(group)
-
-    result: list[int] = []
-
-    def walk(current_id: int) -> None:
-        result.append(current_id)
-
-        for child in children_by_parent.get(current_id, []):
-            walk(child.id)
-
-    walk(group_id)
-    return result
-
-
-def delete_us_watchlist_group(
-    db: Session,
-    group_id: int,
-    *,
-    recursive: bool = False,
-) -> dict:
-    get_us_watchlist_group(db, group_id)
-    group_ids = _get_us_descendant_group_ids(db, group_id)
-
-    if not recursive and len(group_ids) > 1:
-        raise USWatchlistGroupNotEmptyError(
-            f"US watchlist group id={group_id} has child groups."
-        )
-
-    item_count = (
-        db.query(USWatchlistItem)
-        .filter(USWatchlistItem.group_id.in_(group_ids))
-        .count()
-    )
-    if not recursive and item_count > 0:
-        raise USWatchlistGroupNotEmptyError(
-            f"US watchlist group id={group_id} has watchlist items."
-        )
-
-    (
-        db.query(USWatchlistItem)
-        .filter(USWatchlistItem.group_id.in_(group_ids))
-        .delete(synchronize_session=False)
-    )
-    (
-        db.query(USWatchlistGroup)
-        .filter(USWatchlistGroup.id.in_(group_ids))
-        .delete(synchronize_session=False)
-    )
-    db.commit()
-
-    return {
-        "deleted_group_id": group_id,
-        "deleted_item_count": item_count,
-        "deleted_group_count": len(group_ids),
-    }
-
+get_us_watchlist_group = watchlist_store.get_us_watchlist_group
+_validate_us_watchlist_parent = watchlist_store._validate_us_watchlist_parent
+create_us_watchlist_group = watchlist_store.create_us_watchlist_group
+list_us_watchlist_groups = watchlist_store.list_us_watchlist_groups
+_us_group_to_tree_node = watchlist_store._us_group_to_tree_node
+get_us_watchlist_tree = watchlist_store.get_us_watchlist_tree
+update_us_watchlist_group = watchlist_store.update_us_watchlist_group
+_get_us_descendant_group_ids = watchlist_store._get_us_descendant_group_ids
+delete_us_watchlist_group = watchlist_store.delete_us_watchlist_group
 
 def _ensure_us_stock_exists(db: Session, symbol: str) -> USStockMaster:
     return ensure_us_stock_master(db=db, symbol=symbol)
 
 
-def _us_watchlist_item_to_dict(
-    db: Session,
-    item: USWatchlistItem,
-) -> dict:
-    stock = (
-        db.query(USStockMaster)
-        .filter(USStockMaster.symbol == item.symbol)
-        .first()
-    )
-
-    return {
-        "id": item.id,
-        "group_id": item.group_id,
-        "symbol": item.symbol,
-        "security_name": stock.security_name if stock else None,
-        "exchange": stock.exchange if stock else None,
-        "asset_type": stock.asset_type if stock else None,
-        "note": item.note,
-        "priority": item.priority,
-        "tags": item.tags,
-        "enabled": item.enabled,
-        "created_at": item.created_at,
-        "updated_at": item.updated_at,
-    }
-
+_us_watchlist_item_to_dict = watchlist_store._us_watchlist_item_to_dict
 
 def create_us_watchlist_item(
     db: Session,
@@ -2202,210 +1161,16 @@ def create_us_watchlist_item(
     return _us_watchlist_item_to_dict(db, item)
 
 
-def get_us_watchlist_item(db: Session, item_id: int) -> USWatchlistItem:
-    item = (
-        db.query(USWatchlistItem)
-        .filter(USWatchlistItem.id == item_id)
-        .first()
-    )
+get_us_watchlist_item = watchlist_store.get_us_watchlist_item
+list_us_watchlist_items = watchlist_store.list_us_watchlist_items
+list_us_watchlist_symbols = watchlist_store.list_us_watchlist_symbols
 
-    if item is None:
-        raise USWatchlistItemNotFoundError(f"US watchlist item id={item_id} not found.")
-
-    return item
-
-
-def list_us_watchlist_items(
-    db: Session,
-    *,
-    group_id: int | None = None,
-    symbol: str | None = None,
-    enabled: bool | None = None,
-    include_children: bool = False,
-    limit: int = 100,
-    offset: int = 0,
-) -> list[dict]:
-    query = db.query(USWatchlistItem)
-
-    if group_id is not None:
-        get_us_watchlist_group(db, group_id)
-
-        if include_children:
-            group_ids = _get_us_descendant_group_ids(db, group_id)
-            query = query.filter(USWatchlistItem.group_id.in_(group_ids))
-        else:
-            query = query.filter(USWatchlistItem.group_id == group_id)
-
-    if symbol is not None:
-        query = query.filter(USWatchlistItem.symbol == normalize_us_symbol(symbol))
-
-    if enabled is not None:
-        query = query.filter(USWatchlistItem.enabled.is_(enabled))
-
-    items = (
-        query.order_by(
-            USWatchlistItem.priority.asc(),
-            USWatchlistItem.id.asc(),
-        )
-        .offset(offset)
-        .limit(limit)
-        .all()
-    )
-
-    return [_us_watchlist_item_to_dict(db, item) for item in items]
-
-
-def list_us_watchlist_symbols(
-    db: Session,
-    *,
-    group_id: int | None = None,
-    include_children: bool = True,
-    enabled_only: bool = True,
-) -> list[str]:
-    query = db.query(USWatchlistItem)
-
-    if group_id is not None:
-        get_us_watchlist_group(db, group_id)
-
-        if include_children:
-            group_ids = _get_us_descendant_group_ids(db, group_id)
-            query = query.filter(USWatchlistItem.group_id.in_(group_ids))
-        else:
-            query = query.filter(USWatchlistItem.group_id == group_id)
-
-    if enabled_only:
-        query = query.filter(USWatchlistItem.enabled.is_(True))
-
-    rows = (
-        query.order_by(
-            USWatchlistItem.priority.asc(),
-            USWatchlistItem.id.asc(),
-        )
-        .all()
-    )
-    symbols: list[str] = []
-    seen: set[str] = set()
-
-    for row in rows:
-        symbol = normalize_us_symbol(row.symbol)
-        if not symbol or symbol in seen:
-            continue
-
-        symbols.append(symbol)
-        seen.add(symbol)
-
-    return symbols
-
-
-def _close_value(row: USDailyPrice | None) -> float | None:
-    if row is None:
-        return None
-
-    return row.adjusted_close if row.adjusted_close is not None else row.close_price
-
-
-def _latest_distinct_us_daily_rows(
-    db: Session,
-    *,
-    symbol: str,
-    limit: int = 2,
-) -> list[USDailyPrice]:
-    rows = (
-        db.query(USDailyPrice)
-        .filter(USDailyPrice.symbol == symbol)
-        .order_by(
-            USDailyPrice.trade_date.desc(),
-            USDailyPrice.fetched_at.desc(),
-            USDailyPrice.id.desc(),
-        )
-        .limit(max(limit * 4, limit))
-        .all()
-    )
-    selected_rows: list[USDailyPrice] = []
-    seen_dates: set[date] = set()
-
-    for row in rows:
-        if row.trade_date in seen_dates:
-            continue
-
-        selected_rows.append(row)
-        seen_dates.add(row.trade_date)
-
-        if len(selected_rows) >= limit:
-            break
-
-    return selected_rows
-
-
-def _latest_us_daily_close_reference(
-    db: Session,
-    *,
-    symbol: str,
-    before_date: date | None = None,
-    on_date: date | None = None,
-) -> dict | None:
-    for row in _latest_distinct_us_daily_rows(db=db, symbol=symbol, limit=10):
-        if on_date is not None and row.trade_date != on_date:
-            continue
-
-        if before_date is not None and row.trade_date >= before_date:
-            continue
-
-        close = _close_value(row)
-
-        if _valid_number(close):
-            return {
-                "previous_close": float(close),
-                "previous_close_source": "us_daily_price",
-                "previous_close_trade_date": row.trade_date.isoformat(),
-                "previous_close_provider": row.provider,
-            }
-
-    return None
-
-
-def _us_intraday_latest_trade_date(payload: dict) -> date | None:
-    points = payload.get("points") or []
-
-    for point in reversed(points):
-        if isinstance(point, dict):
-            trade_date = _us_row_trade_date(point)
-
-            if trade_date is not None:
-                return trade_date
-
-    return None
-
-
-def _us_regular_session_close_reference(payload: dict) -> dict | None:
-    if payload.get("session_phase") != "after_hours":
-        return None
-
-    regular_close = payload.get("regular_session_close")
-
-    if not _valid_number(regular_close):
-        return None
-
-    regular_close_date = _us_row_trade_date(
-        {"time": payload.get("regular_session_close_time")}
-    )
-
-    return {
-        "previous_close": float(regular_close),
-        "previous_close_source": "yahoo_finance_chart_regular_session_close",
-        "previous_close_trade_date": (
-            regular_close_date.isoformat() if regular_close_date is not None else None
-        ),
-        "previous_close_provider": "yahoo_chart",
-    }
-
-
-def _us_reference_trade_date(reference: dict | None) -> date | None:
-    if reference is None:
-        return None
-
-    return _parse_us_row_trade_date(reference.get("previous_close_trade_date"))
-
+_close_value = watchlist_metrics._close_value
+_latest_distinct_us_daily_rows = watchlist_metrics._latest_distinct_us_daily_rows
+_latest_us_daily_close_reference = watchlist_metrics._latest_us_daily_close_reference
+_us_intraday_latest_trade_date = watchlist_metrics._us_intraday_latest_trade_date
+_us_regular_session_close_reference = watchlist_metrics._us_regular_session_close_reference
+_us_reference_trade_date = watchlist_metrics._us_reference_trade_date
 
 def _us_previous_regular_intraday_close_reference(
     *,
@@ -2505,98 +1270,29 @@ def _apply_us_intraday_previous_close_reference(
     return result
 
 
-def _sum_us_intraday_volume(points: list[dict]) -> int | None:
-    volumes = [
-        int(point["volume"])
-        for point in points
-        if _valid_number(point.get("volume")) and int(point["volume"]) > 0
-    ]
+_sum_us_intraday_volume = watchlist_metrics._sum_us_intraday_volume
+_compact_us_intraday_points = watchlist_metrics._compact_us_intraday_points
+_parse_us_row_trade_date = watchlist_metrics._parse_us_row_trade_date
+_us_row_trade_date = watchlist_metrics._us_row_trade_date
 
-    if not volumes:
-        return None
-
-    return sum(volumes)
-
-
-def _compact_us_intraday_points(points: list[dict], max_points: int = 72) -> list[dict]:
-    valid_points = [
-        {
-            "time": point.get("time"),
-            "session": point.get("session"),
-            "price": float(point["price"]),
-        }
-        for point in points
-        if point.get("time") and _valid_number(point.get("price"))
-    ]
-
-    if len(valid_points) <= max_points:
-        return valid_points
-
-    last_index = len(valid_points) - 1
-    indexes = {
-        round(index * last_index / (max_points - 1))
-        for index in range(max_points)
-    }
-
-    return [valid_points[index] for index in sorted(indexes)]
-
-
-def _parse_us_row_trade_date(value) -> date | None:
-    if isinstance(value, datetime):
-        return value.date()
-
-    if isinstance(value, date):
-        return value
-
-    text = str(value or "").strip()
-
-    if not text:
-        return None
-
-    normalized = text.replace("/", "-")
-
-    if normalized.endswith("Z"):
-        normalized = f"{normalized[:-1]}+00:00"
-
-    try:
-        return datetime.fromisoformat(normalized).date()
-    except ValueError:
-        pass
-
-    try:
-        return date.fromisoformat(normalized[:10])
-    except ValueError:
-        return None
-
-
-def _us_row_trade_date(row: dict) -> date | None:
-    return _parse_us_row_trade_date(row.get("time")) or _parse_us_row_trade_date(
-        row.get("trade_date")
+def _us_watchlist_workflow_dependencies() -> watchlist_workflows.USWatchlistWorkflowDependencies:
+    return watchlist_workflows.USWatchlistWorkflowDependencies(
+        expected_daily_price_date=expected_us_daily_price_date,
+        intraday_overlay_loader=_get_us_intraday_overlay,
+        refresh_daily_prices=refresh_us_daily_prices,
+        ensure_stock=_ensure_us_stock_exists,
+        refresh_sec_facts=refresh_us_sec_companyfacts,
+        refresh_company_profile=refresh_us_company_profile_from_alphavantage,
+        refresh_corporate_actions=refresh_us_corporate_actions_from_alphavantage,
     )
 
 
 def _us_ranking_freshness(rows: list[dict], requested_symbol_count: int) -> dict:
-    target_trade_date = expected_us_daily_price_date()
-    row_dates = [_us_row_trade_date(row) for row in rows]
-    latest_trade_date = max(
-        (row_date for row_date in row_dates if row_date is not None),
-        default=None,
+    return watchlist_workflows._us_ranking_freshness(
+        rows,
+        requested_symbol_count,
+        dependencies=_us_watchlist_workflow_dependencies(),
     )
-    current_symbol_count = sum(
-        1
-        for row_date in row_dates
-        if row_date is not None and row_date >= target_trade_date
-    )
-    stale_symbol_count = max(requested_symbol_count - current_symbol_count, 0)
-
-    return {
-        "trade_date": latest_trade_date,
-        "target_trade_date": target_trade_date,
-        "is_current": requested_symbol_count == 0 or stale_symbol_count == 0,
-        "current_symbol_count": current_symbol_count,
-        "stale_symbol_count": stale_symbol_count,
-    }
-
 
 def _get_us_intraday_overlay(
     symbol: str,
@@ -2660,173 +1356,18 @@ def get_us_watchlist_ranking(
     intraday_limit: int = 30,
     intraday_session_scope: str = "regular",
 ) -> dict:
-    if rank_by not in {"none", "change_pct", "volume", "close"}:
-        raise ValueError("rank_by must be one of: none, change_pct, volume, close.")
-
-    if sort_order not in {"asc", "desc"}:
-        raise ValueError("sort_order must be one of: asc, desc.")
-
-    if intraday_session_scope not in {"regular", "extended", "all"}:
-        raise ValueError("intraday_session_scope must be one of: regular, extended, all.")
-
-    query = db.query(USWatchlistItem)
-
-    if group_id is not None:
-        get_us_watchlist_group(db, group_id)
-        group_ids = (
-            _get_us_descendant_group_ids(db, group_id)
-            if include_children
-            else [group_id]
-        )
-        query = query.filter(USWatchlistItem.group_id.in_(group_ids))
-
-    if enabled_only:
-        query = query.filter(USWatchlistItem.enabled.is_(True))
-
-    items = (
-        query.order_by(
-            USWatchlistItem.priority.asc(),
-            USWatchlistItem.id.asc(),
-        )
-        .all()
+    return watchlist_workflows.get_us_watchlist_ranking(
+        db,
+        dependencies=_us_watchlist_workflow_dependencies(),
+        group_id=group_id,
+        include_children=include_children,
+        enabled_only=enabled_only,
+        rank_by=rank_by,
+        sort_order=sort_order,
+        use_intraday=use_intraday,
+        intraday_limit=intraday_limit,
+        intraday_session_scope=intraday_session_scope,
     )
-    unique_items: list[USWatchlistItem] = []
-    seen_symbols: set[str] = set()
-
-    for item in items:
-        symbol = normalize_us_symbol(item.symbol)
-        if not symbol or symbol in seen_symbols:
-            continue
-
-        unique_items.append(item)
-        seen_symbols.add(symbol)
-
-    symbols = [normalize_us_symbol(item.symbol) for item in unique_items]
-    stocks_by_symbol = {
-        stock.symbol: stock
-        for stock in db.query(USStockMaster)
-        .filter(USStockMaster.symbol.in_(symbols))
-        .all()
-    } if symbols else {}
-    rows: list[dict] = []
-    intraday_overlay_attempts = 0
-
-    for item in unique_items:
-        symbol = normalize_us_symbol(item.symbol)
-        stock = stocks_by_symbol.get(symbol)
-        price_rows = _latest_distinct_us_daily_rows(db=db, symbol=symbol, limit=2)
-        latest = price_rows[0] if price_rows else None
-        previous = price_rows[1] if len(price_rows) > 1 else None
-        close = _close_value(latest)
-        previous_close = _close_value(previous)
-        change = (
-            close - previous_close
-            if close is not None and previous_close is not None
-            else None
-        )
-        change_pct = (
-            (change / previous_close) * 100
-            if change is not None and previous_close not in {None, 0}
-            else None
-        )
-
-        row = {
-            "rank": 0,
-            "symbol": symbol,
-            "security_name": (
-                stock.security_name
-                if stock is not None
-                else None
-            ),
-            "exchange": stock.exchange if stock is not None else None,
-            "asset_type": stock.asset_type if stock is not None else None,
-            "group_id": item.group_id,
-            "trade_date": latest.trade_date if latest is not None else None,
-            "time": None,
-            "session": None,
-            "close": close,
-            "previous_close": previous_close,
-            "change": change,
-            "change_pct": change_pct,
-            "volume": latest.trade_volume if latest is not None else None,
-            "status": "ready" if close is not None else "no_data",
-            "source": None,
-            "has_extended_hours": False,
-            "intraday_previous_close": None,
-            "intraday_points": [],
-            "error_message": None,
-        }
-
-        if use_intraday and intraday_overlay_attempts < intraday_limit:
-            intraday_overlay_attempts += 1
-            overlay = _get_us_intraday_overlay(
-                symbol=symbol,
-                db=db,
-                session_scope=intraday_session_scope,
-            )
-
-            if overlay is not None:
-                row["time"] = overlay["time"]
-                row["session"] = overlay["session"]
-                row["close"] = overlay["close"]
-                row["previous_close"] = overlay["previous_close"]
-                row["change"] = overlay["change"]
-                row["change_pct"] = overlay["change_pct"]
-                row["source"] = overlay["source"]
-                row["has_extended_hours"] = overlay["has_extended_hours"]
-                row["intraday_previous_close"] = overlay["previous_close"]
-                row["intraday_points"] = overlay["points"]
-
-                if overlay["volume"] is not None:
-                    row["volume"] = overlay["volume"]
-
-                row["status"] = (
-                    "intraday"
-                    if overlay.get("session") == "regular"
-                    else "extended_hours"
-                )
-
-        rows.append(row)
-
-    if rank_by != "none":
-        ranked_rows = [
-            row
-            for row in rows
-            if row.get(rank_by) is not None
-        ]
-        no_value_rows = [
-            row
-            for row in rows
-            if row.get(rank_by) is None
-        ]
-        ranked_rows.sort(
-            key=lambda row: row[rank_by],
-            reverse=sort_order == "desc",
-        )
-        rows = ranked_rows + no_value_rows
-
-    for index, row in enumerate(rows, start=1):
-        row["rank"] = index
-
-    no_data_count = sum(1 for row in rows if row["status"] == "no_data")
-    freshness = _us_ranking_freshness(
-        rows=rows,
-        requested_symbol_count=len(unique_items),
-    )
-
-    return {
-        "group_id": group_id,
-        "include_children": include_children,
-        "rank_by": rank_by,
-        "sort_order": sort_order,
-        "requested_symbol_count": len(rows),
-        "ranked_count": len(rows) - no_data_count,
-        "no_data_count": no_data_count,
-        "error_count": 0,
-        **freshness,
-        "results": rows,
-    }
-
 
 def get_us_watchlist_technical_radar(
     db: Session,
@@ -2898,79 +1439,20 @@ def refresh_us_watchlist_daily_prices(
     sleep_seconds: float = 12.0,
     progress_callback: ProgressCallback | None = None,
 ) -> dict:
-    symbols = list_us_watchlist_symbols(
-        db=db,
+    return watchlist_workflows.refresh_us_watchlist_daily_prices(
+        db,
+        dependencies=_us_watchlist_workflow_dependencies(),
         group_id=group_id,
         include_children=include_children,
         enabled_only=enabled_only,
+        outputsize=outputsize,
+        adjusted=adjusted,
+        sleep_seconds=sleep_seconds,
+        progress_callback=progress_callback,
     )
-    total = len(symbols)
-
-    if progress_callback is not None:
-        progress_callback(0, max(total, 1), "Refreshing US watchlist daily prices.")
-
-    if not symbols:
-        return {
-            "status": "empty",
-            "group_id": group_id,
-            "symbol_count": 0,
-            "fetched_count": 0,
-            "inserted_count": 0,
-            "updated_count": 0,
-            "errors": [],
-        }
-
-    fetched_count = 0
-    inserted_count = 0
-    updated_count = 0
-    errors: list[dict[str, str]] = []
-
-    for index, symbol in enumerate(symbols, start=1):
-        try:
-            result = refresh_us_daily_prices(
-                db=db,
-                symbol=symbol,
-                outputsize=outputsize,
-                adjusted=adjusted,
-            )
-            fetched_count += result["fetched_count"]
-            inserted_count += result["inserted_count"]
-            updated_count += result["updated_count"]
-        except USMarketConfigurationError:
-            raise
-        except Exception as exc:
-            errors.append(
-                {
-                    "symbol": symbol,
-                    "message": str(exc),
-                }
-            )
-
-        if progress_callback is not None:
-            progress_callback(index, total, f"Refreshed {index}/{total} US symbols.")
-
-        if index < total and sleep_seconds > 0:
-            time.sleep(sleep_seconds)
-
-    return {
-        "status": "partial_success" if errors else "success",
-        "group_id": group_id,
-        "symbol_count": total,
-        "fetched_count": fetched_count,
-        "inserted_count": inserted_count,
-        "updated_count": updated_count,
-        "errors": errors,
-    }
 
 
-def _compact_us_resource_result(result: dict) -> dict:
-    return {
-        "status": result.get("status", "success"),
-        "fetched_count": int(result.get("fetched_count") or 0),
-        "inserted_count": int(result.get("inserted_count") or 0),
-        "updated_count": int(result.get("updated_count") or 0),
-        "message": result.get("message"),
-    }
+_compact_us_resource_result = watchlist_workflows._compact_us_resource_result
 
 
 def _refresh_us_symbol_resources(
@@ -2984,102 +1466,17 @@ def _refresh_us_symbol_resources(
     outputsize: str,
     adjusted: bool,
 ) -> dict:
-    normalized_symbol = normalize_us_symbol(symbol)
-    stock = _ensure_us_stock_exists(db, normalized_symbol)
-    resources: dict[str, dict] = {}
-    errors: list[dict[str, str]] = []
-
-    def run_resource(resource: str, callback: Callable[[], dict]) -> None:
-        try:
-            resources[resource] = _compact_us_resource_result(callback())
-        except Exception as exc:
-            db.rollback()
-            message = str(exc)
-            resources[resource] = {
-                "status": "error",
-                "fetched_count": 0,
-                "inserted_count": 0,
-                "updated_count": 0,
-                "message": message,
-            }
-            errors.append(
-                {
-                    "symbol": normalized_symbol,
-                    "resource": resource,
-                    "message": message,
-                }
-            )
-
-    if include_daily:
-        run_resource(
-            "daily",
-            lambda: refresh_us_daily_prices(
-                db=db,
-                symbol=normalized_symbol,
-                outputsize=outputsize,
-                adjusted=adjusted,
-            ),
-        )
-
-    if include_sec_facts:
-        is_sec_company = not stock.is_etf and (stock.asset_type or "").upper() != "ETF"
-        if is_sec_company:
-            run_resource(
-                "sec_facts",
-                lambda: refresh_us_sec_companyfacts(db=db, symbol=normalized_symbol),
-            )
-        else:
-            resources["sec_facts"] = {
-                "status": "skipped",
-                "fetched_count": 0,
-                "inserted_count": 0,
-                "updated_count": 0,
-                "message": "SEC company facts skipped for ETF/non-company asset.",
-            }
-
-    if include_profile:
-        run_resource(
-            "profile",
-            lambda: refresh_us_company_profile_from_alphavantage(
-                db=db,
-                symbol=normalized_symbol,
-            ),
-        )
-
-    if include_actions:
-        run_resource(
-            "actions",
-            lambda: refresh_us_corporate_actions_from_alphavantage(
-                db=db,
-                symbol=normalized_symbol,
-            ),
-        )
-
-    success_count = sum(1 for item in resources.values() if item["status"] == "success")
-    skipped_count = sum(1 for item in resources.values() if item["status"] == "skipped")
-
-    if errors:
-        symbol_status = "error" if success_count == 0 else "partial_success"
-    elif resources and skipped_count == len(resources):
-        symbol_status = "skipped"
-    else:
-        symbol_status = "success"
-
-    return {
-        "symbol": normalized_symbol,
-        "asset_type": stock.asset_type,
-        "exchange": stock.exchange,
-        "status": symbol_status,
-        "resource_count": len(resources),
-        "success_count": success_count,
-        "skipped_count": skipped_count,
-        "error_count": len(errors),
-        "fetched_count": sum(item["fetched_count"] for item in resources.values()),
-        "inserted_count": sum(item["inserted_count"] for item in resources.values()),
-        "updated_count": sum(item["updated_count"] for item in resources.values()),
-        "resources": resources,
-        "errors": errors,
-    }
+    return watchlist_workflows._refresh_us_symbol_resources(
+        db,
+        dependencies=_us_watchlist_workflow_dependencies(),
+        symbol=symbol,
+        include_daily=include_daily,
+        include_sec_facts=include_sec_facts,
+        include_profile=include_profile,
+        include_actions=include_actions,
+        outputsize=outputsize,
+        adjusted=adjusted,
+    )
 
 
 def refresh_us_watchlist_resources(
@@ -3097,85 +1494,21 @@ def refresh_us_watchlist_resources(
     sleep_seconds: float = 12.0,
     progress_callback: ProgressCallback | None = None,
 ) -> dict:
-    symbols = list_us_watchlist_symbols(
-        db=db,
+    return watchlist_workflows.refresh_us_watchlist_resources(
+        db,
+        dependencies=_us_watchlist_workflow_dependencies(),
         group_id=group_id,
         include_children=include_children,
         enabled_only=enabled_only,
+        include_daily=include_daily,
+        include_sec_facts=include_sec_facts,
+        include_profile=include_profile,
+        include_actions=include_actions,
+        outputsize=outputsize,
+        adjusted=adjusted,
+        sleep_seconds=sleep_seconds,
+        progress_callback=progress_callback,
     )
-    total = len(symbols)
-
-    if progress_callback is not None:
-        progress_callback(0, max(total, 1), "Refreshing US watchlist resources.")
-
-    if not symbols:
-        return {
-            "status": "empty",
-            "group_id": group_id,
-            "symbol_count": 0,
-            "success_count": 0,
-            "partial_success_count": 0,
-            "skipped_count": 0,
-            "error_count": 0,
-            "symbol_error_count": 0,
-            "fetched_count": 0,
-            "inserted_count": 0,
-            "updated_count": 0,
-            "results": [],
-            "errors": [],
-        }
-
-    results: list[dict] = []
-    errors: list[dict[str, str]] = []
-
-    for index, symbol in enumerate(symbols, start=1):
-        result = _refresh_us_symbol_resources(
-            db=db,
-            symbol=symbol,
-            include_daily=include_daily,
-            include_sec_facts=include_sec_facts,
-            include_profile=include_profile,
-            include_actions=include_actions,
-            outputsize=outputsize,
-            adjusted=adjusted,
-        )
-        results.append(result)
-        errors.extend(result["errors"])
-
-        if progress_callback is not None:
-            progress_callback(index, total, f"Refreshed {index}/{total} US symbols.")
-
-        if index < total and sleep_seconds > 0:
-            time.sleep(sleep_seconds)
-
-    success_count = sum(1 for result in results if result["status"] == "success")
-    partial_success_count = sum(1 for result in results if result["status"] == "partial_success")
-    skipped_count = sum(1 for result in results if result["status"] == "skipped")
-    symbol_error_count = sum(1 for result in results if result["status"] == "error")
-
-    if symbol_error_count and success_count == 0 and partial_success_count == 0:
-        status_value = "error"
-    elif errors:
-        status_value = "partial_success"
-    else:
-        status_value = "success"
-
-    return {
-        "status": status_value,
-        "group_id": group_id,
-        "symbol_count": total,
-        "success_count": success_count,
-        "partial_success_count": partial_success_count,
-        "skipped_count": skipped_count,
-        "error_count": len(errors),
-        "symbol_error_count": symbol_error_count,
-        "fetched_count": sum(result["fetched_count"] for result in results),
-        "inserted_count": sum(result["inserted_count"] for result in results),
-        "updated_count": sum(result["updated_count"] for result in results),
-        "results": results,
-        "errors": errors,
-    }
-
 
 def update_us_watchlist_item(
     db: Session,
@@ -3207,69 +1540,4 @@ def update_us_watchlist_item(
     return _us_watchlist_item_to_dict(db, item)
 
 
-def delete_us_watchlist_item(db: Session, item_id: int) -> None:
-    item = get_us_watchlist_item(db, item_id)
-    db.delete(item)
-    db.commit()
-
-
-__all__ = [
-    "USMarketConfigurationError",
-    "USMarketDataFetchError",
-    "USStockNotFoundError",
-    "USWatchlistDuplicateItemError",
-    "USWatchlistGroupNotEmptyError",
-    "USWatchlistGroupNotFoundError",
-    "USWatchlistInvalidTreeError",
-    "USWatchlistItemNotFoundError",
-    "create_us_watchlist_group",
-    "create_us_watchlist_item",
-    "delete_us_watchlist_group",
-    "delete_us_watchlist_item",
-    "discover_us_stock_master_from_yahoo_chart",
-    "ensure_us_stock_master",
-    "build_us_source_health",
-    "get_us_company_profile",
-    "get_us_intraday_trend",
-    "get_us_sec_fundamental_summary",
-    "get_us_stock",
-    "get_us_watchlist_group",
-    "get_us_watchlist_item",
-    "get_us_watchlist_technical_radar",
-    "get_us_watchlist_tree",
-    "get_us_watchlist_ranking",
-    "list_macro_series_observations",
-    "list_us_company_profiles",
-    "list_us_corporate_actions",
-    "list_us_daily_prices",
-    "list_us_ohlc_chart_data",
-    "list_us_sec_company_facts",
-    "list_us_short_volumes",
-    "list_us_stocks",
-    "list_us_watchlist_groups",
-    "list_us_watchlist_items",
-    "list_us_watchlist_symbols",
-    "refresh_fred_macro_series",
-    "repair_us_daily_price_quality",
-    "refresh_us_company_profile_from_alphavantage",
-    "refresh_us_corporate_actions_from_alphavantage",
-    "refresh_us_daily_prices",
-    "refresh_us_daily_prices_from_alphavantage",
-    "refresh_us_daily_prices_from_yahoo_chart",
-    "refresh_us_sec_companyfacts",
-    "refresh_us_short_volume_from_finra",
-    "refresh_us_watchlist_daily_prices",
-    "refresh_us_watchlist_resources",
-    "search_us_stocks",
-    "sync_us_sec_company_data",
-    "sync_us_symbol_master",
-    "update_us_watchlist_group",
-    "update_us_watchlist_item",
-    "upsert_macro_series_observation_records",
-    "upsert_us_company_profile_records",
-    "upsert_us_corporate_action_records",
-    "upsert_us_daily_price_records",
-    "upsert_us_sec_fact_records",
-    "upsert_us_short_volume_records",
-    "upsert_us_symbol_records",
-]
+delete_us_watchlist_item = watchlist_store.delete_us_watchlist_item
