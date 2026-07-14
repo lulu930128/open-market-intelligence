@@ -144,6 +144,53 @@ class AIToolBoundaryTests(unittest.TestCase):
         self.assertTrue(envelope["data"]["index_intraday"]["enabled"])
         self.assertIn("market_daily_price", envelope["missing"])
 
+    def test_futures_facade_hands_off_runtime_dependencies(self) -> None:
+        fixed_now = datetime(2026, 7, 14, 13, 0, tzinfo=timezone.utc)
+        db = MagicMock(spec=Session)
+
+        with (
+            patch.object(tools, "_now", return_value=fixed_now),
+            patch.object(
+                tools,
+                "get_latest_taiwan_futures_quotes",
+                return_value=[],
+            ) as get_quotes,
+            patch.object(
+                tools,
+                "list_taiwan_futures_daily_bars",
+                return_value=[],
+            ) as get_daily,
+            patch.object(
+                tools,
+                "list_taiwan_futures_intraday_bars",
+                return_value=[],
+            ) as get_intraday,
+        ):
+            envelope = tools.read_tw_futures_context(
+                db=db,
+                symbol="TXF",
+                include_intraday=True,
+            )
+
+        get_quotes.assert_called_once_with(db, symbols=["TXF"], refresh=False)
+        get_daily.assert_called_once_with(
+            db=db,
+            symbol="TXF",
+            limit=120,
+            active_only=True,
+        )
+        get_intraday.assert_called_once_with(db=db, symbol="TXF", limit=390)
+        self.assertEqual(envelope["kind"], "tw_futures_context")
+        self.assertEqual(envelope["generated_at"], fixed_now)
+        self.assertEqual(
+            envelope["missing"],
+            [
+                "taiwan_futures_quote_snapshot",
+                "taiwan_futures_daily_bar",
+                "taiwan_futures_intraday_bar",
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

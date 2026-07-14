@@ -17,7 +17,13 @@ from app.ai.market_payload_contract import (
     slot_envelope as _slot_envelope,
 )
 from app.ai.market_context.common import append_source_ref_once as _append_source_ref_once
-from app.ai.market_context import taiwan_freshness, taiwan_index, taiwan_market, taiwan_projection
+from app.ai.market_context import (
+    taiwan_freshness,
+    taiwan_futures,
+    taiwan_index,
+    taiwan_market,
+    taiwan_projection,
+)
 from app.db.models import (
     BrokerBranchTradeDaily,
     FinancialMetricQuarterly,
@@ -283,111 +289,18 @@ def read_tw_futures_context(
     include_intraday: bool = False,
     analysis_horizon: str = "swing",
 ) -> dict[str, Any]:
-    normalized_symbol = normalize_taiwan_futures_symbols([symbol])[0]
-    missing: list[str] = []
-    warnings: list[str] = [
-        "Taiwan futures context uses TAIFEX futures quote and bar tables, not stock_master or stock daily tables.",
-    ]
-
-    quote_rows = get_latest_taiwan_futures_quotes(db, symbols=[normalized_symbol], refresh=False)
-    quote_dicts = [_json_dict(taiwan_futures_quote_to_dict(row)) for row in quote_rows]
-    latest_quote = quote_dicts[0] if quote_dicts else None
-    if latest_quote is None:
-        missing.append("taiwan_futures_quote_snapshot")
-
-    daily_rows = list_taiwan_futures_daily_bars(
+    return taiwan_futures.read_tw_futures_context(
         db=db,
-        symbol=normalized_symbol,
-        limit=max(bars, 1),
-        active_only=True,
-    )
-    daily_dicts = [
-        _json_dict(taiwan_futures_daily_bar_to_dict(row))
-        for row in daily_rows
-    ]
-    daily_points = _normalize_technical_points([row for row in daily_dicts if isinstance(row, dict)])
-    if not daily_points:
-        missing.append("taiwan_futures_daily_bar")
-
-    normalized_horizon = normalize_analysis_horizon(analysis_horizon)
-    intraday_dicts: list[dict[str, Any]] = []
-    intraday_points: list[dict[str, Any]] = []
-    if include_intraday or normalized_horizon == "intraday":
-        intraday_rows = list_taiwan_futures_intraday_bars(
-            db=db,
-            symbol=normalized_symbol,
-            limit=390,
-        )
-        intraday_dicts = [
-            _json_dict(taiwan_futures_intraday_bar_to_dict(row))
-            for row in intraday_rows
-        ]
-        intraday_points = _normalize_technical_points(
-            [row for row in intraday_dicts if isinstance(row, dict)]
-        )
-        if not intraday_points:
-            missing.append("taiwan_futures_intraday_bar")
-    elif normalized_horizon == "intraday":
-        warnings.append(
-            "Intraday analysis horizon was requested without live intraday access; daily futures evidence is used as fallback context."
-        )
-
-    technical_reports: dict[str, Any] = {
-        "daily": _technical_report_from_points(
-            points=daily_points,
-            timeframe="daily",
-            asset_label=normalized_symbol,
+        symbol=symbol,
+        bars=bars,
+        include_intraday=include_intraday,
+        analysis_horizon=analysis_horizon,
+        dependencies=taiwan_futures.TaiwanFuturesDependencies(
+            get_latest_taiwan_futures_quotes=get_latest_taiwan_futures_quotes,
+            list_taiwan_futures_daily_bars=list_taiwan_futures_daily_bars,
+            list_taiwan_futures_intraday_bars=list_taiwan_futures_intraday_bars,
+            now=_now,
         ),
-    }
-    if intraday_points:
-        technical_reports["today"] = _technical_report_from_points(
-            points=intraday_points,
-            timeframe="today",
-            asset_label=normalized_symbol,
-        )
-
-    technical_analysis = _technical_analysis_summary(
-        technical_reports=technical_reports,
-        requested_horizon=analysis_horizon,
-    )
-    daily_chart = _chart_from_points(timeframe="daily", points=daily_points)
-    intraday_chart = _chart_from_points(timeframe="today", points=intraday_points)
-    as_of = _latest_date_string(
-        [
-            (latest_quote or {}).get("quote_time"),
-            daily_chart.get("to_date"),
-            intraday_chart.get("to_date"),
-        ]
-    )
-
-    envelope = {
-        "kind": "tw_futures_context",
-        "generated_at": _now(),
-        "as_of": as_of,
-        "scope": {"symbol": normalized_symbol},
-        "data": {
-            "latest_quote": latest_quote,
-            "quotes": quote_dicts,
-            "daily_chart": daily_chart,
-            "intraday_chart": intraday_chart if intraday_points else None,
-            "daily_bars": daily_dicts,
-            "intraday_bars": intraday_dicts,
-            "technical_reports": technical_reports,
-            "analysis": technical_analysis,
-        },
-        "missing": list(dict.fromkeys(missing)),
-        "warnings": list(dict.fromkeys(warnings)),
-        "source_refs": [
-            {"type": "table", "name": "taiwan_futures_quote_snapshot"},
-            {"type": "table", "name": "taiwan_futures_daily_bar"},
-            {"type": "table", "name": "taiwan_futures_intraday_bar"},
-            {"type": "derived", "name": "app.market.tw_futures"},
-        ],
-    }
-    return _with_evidence_passport(
-        envelope,
-        analysis=technical_analysis,
-        confidence=str(technical_analysis.get("selected_confidence") or ""),
     )
 
 
