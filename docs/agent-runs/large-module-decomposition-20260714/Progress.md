@@ -548,3 +548,40 @@ engine hook 雖為中大型檔案，但內容是單一 imperative chart lifecycl
 
 - 本批未修改任何 tool name、schema、reader、DB query、provider call、freshness 或 evidence contract。
 - 下一步將 Taiwan market/index/futures/stock/watchlist context implementation 移入 `ai/market_context/`；`tools.py` 保留 patch-compatible wrappers。
+
+## 2026-07-14 里程碑 6B：Taiwan AI context readers
+
+### 已完成
+
+- 新增 `taiwan_projection.py`，統一擁有 Taiwan slots、compact payload、freshness domain、technical evidence 與 passport projection；靜態檢查確認沒有 SQLAlchemy Session、provider、HTTP 或 transaction ownership。
+- 新增 `taiwan_freshness.py`、`taiwan_market.py`、`taiwan_index.py`、`taiwan_futures.py`、`taiwan_stock.py`、`taiwan_watchlist.py`，每個 module 只擁有一個 reader/use case。
+- `tools.py` 保留七個 public wrappers 與既有 import/patch path；每次呼叫以 typed dependency bundle 傳入當下 facade provider/service symbols，避免 module import 時捕捉 stale dependency。
+- 固定 clock、market overview、futures 與空 freshness contract；既有 quote depth、intraday history、index summary/OHLC/intraday/chip/contribution monkeypatch tests 全部維持有效。
+- watchlist radar 仍使用同一次 ranking 結果，不增加第二次 ranking read，也未新增 refresh 或 DB write side effect。
+
+### Ownership 指標
+
+| owner | 行數 | 主要責任 |
+| --- | ---: | --- |
+| `tools.py` | 191 | public facade 與 runtime dependency handoff |
+| `taiwan_projection.py` | 1,282 | pure evidence/slot/freshness projection |
+| `taiwan_stock.py` | 555 | Taiwan stock context use case |
+| `taiwan_market.py` | 384 | Taiwan market overview use case |
+| `taiwan_index.py` | 227 | Taiwan index context use case |
+| `taiwan_futures.py` | 158 | Taiwan futures context use case |
+| `taiwan_freshness.py` | 135 | local table freshness use case |
+| `taiwan_watchlist.py` | 94 | watchlist ranking/radar context use case |
+
+`taiwan_projection.py` 仍偏長，但只有純 projection 一個變更理由，且不持有 transport/state/DB；後續只有在出現獨立修改熱點或 contract owner 時才按 slots、freshness、compact evidence 再拆。
+
+### 驗證證據
+
+- `python -m compileall -q app/ai`：通過。
+- AI tool boundary、market context projection、technical report、overnight impact、dispatch 與完整 AI freshness guard：98/98 通過。
+- public/internal tool catalog contract：29 tools 與 schema digest 未變。
+- `git diff --check`：通過；僅有既有 Git line-ending 提示。
+
+### 風險與下一步
+
+- 本批未改 API route、tool name、reader signature/default、payload level、slot/status、freshness、source refs、evidence passport、DB schema 或 provider refresh policy。
+- 里程碑 6B 完成；下一步 6C 處理 `agentic_tools.py` 的 planning/execution 與 US/JP/KR/crypto readers，保留既有 facade 與 patch targets。
