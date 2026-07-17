@@ -2503,6 +2503,54 @@ class AiFreshnessGuardTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_ask_gates_jp_intraday_provider_read_by_external_fetch_policy(self) -> None:
+        db = make_session()
+        try:
+            add_jp_stock(db)
+            context = {
+                "kind": "jp_stock_context",
+                "as_of": "2026-07-15T10:00:00+09:00",
+                "summary": {"latest_close": 3080.0},
+                "data": {"compact": {}},
+                "missing": [],
+                "warnings": [],
+                "source_refs": [],
+            }
+
+            for allow_external_fetch, expected_include_intraday in (
+                (False, False),
+                (True, True),
+            ):
+                payload = AiAskRequest(
+                    question="Toyota Japan intraday context",
+                    target={"type": "jp_stock", "id": "7203", "label": "Toyota"},
+                    mode="data_only",
+                    analysis_horizon="intraday",
+                    allow_external_fetch=allow_external_fetch,
+                    allow_llm=False,
+                    allow_write=False,
+                )
+                with patch.object(
+                    ai_ask.agentic_tools,
+                    "read_jp_stock_context",
+                    return_value=context,
+                ) as reader:
+                    ai_ask.ask(
+                        db=db,
+                        payload=payload,
+                        server_policy=ai_ask.AiAskServerPolicy(
+                            can_external_fetch=allow_external_fetch,
+                            trust_source="test",
+                        ),
+                    )
+
+                self.assertEqual(
+                    reader.call_args.kwargs["market_data_params"]["include_intraday"],
+                    expected_include_intraday,
+                )
+        finally:
+            db.close()
+
     def test_ask_uses_jp_index_context_reader_for_explicit_target(self) -> None:
         db = make_session()
         try:

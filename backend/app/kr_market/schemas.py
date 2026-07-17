@@ -313,6 +313,11 @@ class KROhlcChartRead(BaseModel):
     point_count: int
     points: list[KROhlcPointRead]
     backfill: dict | None = None
+    latest_data_date: date | None = None
+    expected_data_date: date | None = None
+    freshness_status: str = "missing"
+    is_current: bool = False
+    refresh_recommended: bool = True
 
 
 class KRIndexOhlcChartRead(BaseModel):
@@ -328,6 +333,11 @@ class KRIndexOhlcChartRead(BaseModel):
     point_count: int
     points: list[KROhlcPointRead]
     backfill: dict | None = None
+    latest_data_date: date | None = None
+    expected_data_date: date | None = None
+    freshness_status: str = "missing"
+    is_current: bool = False
+    refresh_recommended: bool = True
 
 
 class KRIndexIntradayTrendPointRead(BaseModel):
@@ -357,12 +367,25 @@ class KRIndexIntradayTrendRead(BaseModel):
     previous_close_provider: str | None = None
     regular_session_close: float | None = None
     regular_session_close_time: str | None = None
+    regular_session_close_source: str | None = None
+    regular_session_close_provider: str | None = None
     point_count: int
     points: list[KRIndexIntradayTrendPointRead]
+    as_of: str | None = None
+    total_volume: int | None = None
+    volume_unit: str = "thousand_shares"
+    volume_semantics: str = "interval_with_cumulative_total"
+    trade_value_unit: str = "million_krw"
+    is_partial: bool = False
     source_url: str | None = None
     warnings: list[str] = Field(default_factory=list)
     fetched_pages: int = 0
     polling_interval_seconds: int | None = None
+
+
+class KRStockIntradayTrendRead(KRIndexIntradayTrendRead):
+    volume_unit: str = "shares"
+    trade_value_unit: str = "krw"
 
 
 class KRResourceSlotRead(BaseModel):

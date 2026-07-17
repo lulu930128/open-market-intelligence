@@ -19,6 +19,7 @@ from app.market.tw_futures import (
     list_taiwan_futures_intraday_bars,
     list_taiwan_futures_products,
     refresh_taiwan_futures_daily_bars,
+    refresh_taiwan_futures_intraday_bars,
     refresh_taiwan_futures_quotes,
     taiwan_futures_daily_bar_to_dict,
     taiwan_futures_intraday_bar_to_dict,
@@ -217,11 +218,10 @@ def list_taiwan_futures_intraday_bars_api(
     try:
         if refresh:
             try:
-                refresh_taiwan_futures_quotes(
+                refresh_taiwan_futures_intraday_bars(
                     db=db,
-                    symbols=[symbol],
+                    symbol=symbol,
                     session=session,
-                    active_only=True,
                     provider=provider,
                 )
             except TaiwanFuturesFetchError as exc:
@@ -233,6 +233,7 @@ def list_taiwan_futures_intraday_bars_api(
             interval=interval,
             limit=limit,
             trade_date=trade_date,
+            session=session,
             provider=provider,
         )
     except ValueError as exc:
@@ -241,7 +242,7 @@ def list_taiwan_futures_intraday_bars_api(
             detail=str(exc),
         ) from exc
 
-    if not rows and refresh_error is not None:
+    if refresh_error is not None:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(refresh_error),

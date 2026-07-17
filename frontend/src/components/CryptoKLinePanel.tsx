@@ -53,7 +53,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
 type CryptoInterval = CryptoOhlcvInterval;
-type CryptoOhlcvRefreshReason = "manual" | "auto_empty" | "auto_stale" | "auto_poll";
+type CryptoOhlcvRefreshReason = "auto_empty" | "auto_stale" | "auto_poll";
 type SummaryTimeframe = "today" | "daily" | "weekly" | "monthly";
 type VolumeMetric = "base" | "quote";
 
@@ -1167,21 +1167,10 @@ export default function CryptoKLinePanel({
   ]);
 
   const refreshBars = useCallback(async (
-    reason: CryptoOhlcvRefreshReason = "manual",
+    reason: CryptoOhlcvRefreshReason,
     options?: { reloadAfter?: boolean; updateRefreshing?: boolean }
   ) => {
     if (!ohlcvRefreshEnabled) {
-      if (reason === "manual") {
-        emitDataStatusEvent({
-          market: "crypto",
-          level: "warning",
-          title: t("crypto.kline.status.refreshDisabled"),
-          message: t("crypto.kline.status.refreshDisabledMessage", {
-            asset: selectedInstrument.baseAsset,
-          }),
-          source: chartStatusSource,
-        });
-      }
       return null;
     }
 
@@ -1206,7 +1195,7 @@ export default function CryptoKLinePanel({
           limit: Math.min(chartLimit, OHLCV_REFRESH_LIMIT_MAX),
         }
       );
-      const shouldShowSuccess = reason === "manual" || reason === "auto_empty";
+      const shouldShowSuccess = reason === "auto_empty";
       if (result.error_count > 0 || shouldShowSuccess) {
         const reasonLabel = autoRefreshReasonLabel(reason, t);
         emitDataStatusEvent({
@@ -1259,7 +1248,6 @@ export default function CryptoKLinePanel({
     fetchBars,
     fetchCoverageRows,
     ohlcvRefreshEnabled,
-    selectedInstrument.baseAsset,
     selectedInstrument.symbol,
     selectedSourceProviders,
     t,
@@ -1957,22 +1945,6 @@ export default function CryptoKLinePanel({
             >
               {t("crypto.kline.quoteVolume")}
             </button>
-            <button
-              type="button"
-              className="h-7 px-2 text-xs font-semibold text-omi-text-muted transition hover:bg-omi-surface hover:text-omi-text-strong disabled:cursor-not-allowed disabled:text-omi-text-inverse-muted"
-              onClick={() => void loadBars()}
-              disabled={loadState === "loading" || refreshing}
-            >
-              {t("crypto.kline.reload")}
-            </button>
-            <button
-              type="button"
-              className="h-7 px-2 text-xs font-semibold text-omi-accent transition hover:bg-omi-surface hover:text-omi-text-strong disabled:cursor-not-allowed disabled:text-omi-text-inverse-muted"
-              onClick={() => void refreshBars()}
-              disabled={refreshing || !ohlcvRefreshEnabled}
-            >
-              {refreshing ? t("crypto.kline.refreshing") : t("crypto.kline.refreshOhlcv")}
-            </button>
           </>
         }
         chartReady={displayChartData.length > 0}
@@ -2126,22 +2098,6 @@ export default function CryptoKLinePanel({
                   <span className={`border px-2 py-1 text-xs font-semibold ${statusClass(loadState)}`}>
                     {loadState}
                   </span>
-                  <button
-                    type="button"
-                    className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text-muted transition hover:border-omi-accent hover:text-omi-accent disabled:cursor-not-allowed disabled:opacity-60"
-                    onClick={() => void loadBars()}
-                    disabled={loadState === "loading" || refreshing}
-                  >
-                    {t("crypto.kline.reload")}
-                  </button>
-                  <button
-                    type="button"
-                    className="h-8 border border-omi-accent-border bg-omi-accent-soft px-3 text-xs font-semibold text-omi-accent transition hover:border-omi-accent hover:bg-omi-surface-subtle disabled:cursor-not-allowed disabled:opacity-60"
-                    onClick={() => void refreshBars()}
-                    disabled={refreshing || !ohlcvRefreshEnabled}
-                  >
-                    {refreshing ? t("crypto.kline.refreshing") : t("crypto.kline.refreshOhlcv")}
-                  </button>
                 </>
               ) : null}
               <div className="relative">

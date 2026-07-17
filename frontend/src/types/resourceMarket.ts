@@ -1,9 +1,18 @@
 export type ResourceCommodityGroupKey = "metals" | "energy";
+export type ResourceCurrencyGroupKey =
+  | "twd_to_foreign"
+  | "foreign_to_twd"
+  | "foreign_to_foreign";
+export type ResourceRootFolderKey = "commodity" | "currency";
+export type ResourceInstrumentGroupKey =
+  | ResourceCommodityGroupKey
+  | ResourceCurrencyGroupKey;
 export type ResourceInterval = "1m" | "5m" | "15m" | "30m" | "1h" | "1d" | "1w" | "1M";
 
-export type ResourceCommodityInstrument = {
+export type ResourceMarketInstrument = {
   key: string;
-  group: ResourceCommodityGroupKey;
+  rootFolder: ResourceRootFolderKey;
+  group: ResourceInstrumentGroupKey;
   displayName: string;
   symbol: string;
   exchange: string;
@@ -171,10 +180,19 @@ export type ResourceSourceHealth = {
 
 export const RESOURCE_COMMODITY_GROUPS: {
   key: ResourceCommodityGroupKey;
-  label: string;
+  labelKey: string;
 }[] = [
-  { key: "metals", label: "金屬" },
-  { key: "energy", label: "能源" },
+  { key: "metals", labelKey: "crypto.sidebar.groups.metals" },
+  { key: "energy", labelKey: "crypto.sidebar.groups.energy" },
+];
+
+export const RESOURCE_CURRENCY_GROUPS: {
+  key: ResourceCurrencyGroupKey;
+  labelKey: string;
+}[] = [
+  { key: "twd_to_foreign", labelKey: "crypto.sidebar.groups.twdToForeign" },
+  { key: "foreign_to_twd", labelKey: "crypto.sidebar.groups.foreignToTwd" },
+  { key: "foreign_to_foreign", labelKey: "crypto.sidebar.groups.foreignToForeign" },
 ];
 
 export const RESOURCE_OHLCV_INTERVALS: ResourceInterval[] = [
@@ -188,9 +206,10 @@ export const RESOURCE_OHLCV_INTERVALS: ResourceInterval[] = [
   "1M",
 ];
 
-export const RESOURCE_COMMODITY_INSTRUMENTS: ResourceCommodityInstrument[] = [
+export const RESOURCE_COMMODITY_INSTRUMENTS: ResourceMarketInstrument[] = [
   {
     key: "commodity:metals:GC",
+    rootFolder: "commodity",
     group: "metals",
     displayName: "黃金",
     symbol: "GC",
@@ -202,6 +221,7 @@ export const RESOURCE_COMMODITY_INSTRUMENTS: ResourceCommodityInstrument[] = [
   },
   {
     key: "commodity:metals:SI",
+    rootFolder: "commodity",
     group: "metals",
     displayName: "白銀",
     symbol: "SI",
@@ -213,6 +233,7 @@ export const RESOURCE_COMMODITY_INSTRUMENTS: ResourceCommodityInstrument[] = [
   },
   {
     key: "commodity:metals:HG",
+    rootFolder: "commodity",
     group: "metals",
     displayName: "銅",
     symbol: "HG",
@@ -224,6 +245,7 @@ export const RESOURCE_COMMODITY_INSTRUMENTS: ResourceCommodityInstrument[] = [
   },
   {
     key: "commodity:energy:CL",
+    rootFolder: "commodity",
     group: "energy",
     displayName: "WTI 原油",
     symbol: "CL",
@@ -235,6 +257,7 @@ export const RESOURCE_COMMODITY_INSTRUMENTS: ResourceCommodityInstrument[] = [
   },
   {
     key: "commodity:energy:BZ",
+    rootFolder: "commodity",
     group: "energy",
     displayName: "Brent 原油",
     symbol: "BZ",
@@ -246,6 +269,7 @@ export const RESOURCE_COMMODITY_INSTRUMENTS: ResourceCommodityInstrument[] = [
   },
   {
     key: "commodity:energy:NG",
+    rootFolder: "commodity",
     group: "energy",
     displayName: "天然氣",
     symbol: "NG",
@@ -257,13 +281,155 @@ export const RESOURCE_COMMODITY_INSTRUMENTS: ResourceCommodityInstrument[] = [
   },
 ];
 
-export function resourceInstrumentsForGroup(group: ResourceCommodityGroupKey) {
-  return RESOURCE_COMMODITY_INSTRUMENTS.filter((instrument) => instrument.group === group);
+export const RESOURCE_CURRENCY_INSTRUMENTS: ResourceMarketInstrument[] = [
+  {
+    key: "currency:twd_to_foreign:TWD-USD",
+    rootFolder: "currency",
+    group: "twd_to_foreign",
+    displayName: "台幣／美元",
+    symbol: "TWD-USD",
+    exchange: "FX",
+    providerSymbol: "TWDUSD=X",
+    quoteAsset: "USD",
+    providerStatus: "best_effort_delayed",
+    role: "TWD/USD foreign-exchange watch-only Yahoo chart context; delayed/best-effort.",
+  },
+  {
+    key: "currency:twd_to_foreign:TWD-JPY",
+    rootFolder: "currency",
+    group: "twd_to_foreign",
+    displayName: "台幣／日圓",
+    symbol: "TWD-JPY",
+    exchange: "FX",
+    providerSymbol: "TWDJPY=X",
+    quoteAsset: "JPY",
+    providerStatus: "best_effort_delayed",
+    role: "TWD/JPY foreign-exchange watch-only Yahoo chart context; delayed/best-effort.",
+  },
+  {
+    key: "currency:twd_to_foreign:TWD-KRW",
+    rootFolder: "currency",
+    group: "twd_to_foreign",
+    displayName: "台幣／韓元",
+    symbol: "TWD-KRW",
+    exchange: "FX",
+    providerSymbol: "TWDKRW=X",
+    quoteAsset: "KRW",
+    providerStatus: "best_effort_delayed",
+    role: "TWD/KRW foreign-exchange watch-only Yahoo chart context; delayed/best-effort.",
+  },
+  {
+    key: "currency:foreign_to_twd:USD-TWD",
+    rootFolder: "currency",
+    group: "foreign_to_twd",
+    displayName: "美元／台幣",
+    symbol: "USD-TWD",
+    exchange: "FX",
+    providerSymbol: "USDTWD=X",
+    quoteAsset: "TWD",
+    providerStatus: "best_effort_delayed",
+    role: "USD/TWD foreign-exchange watch-only Yahoo chart context; delayed/best-effort.",
+  },
+  {
+    key: "currency:foreign_to_twd:JPY-TWD",
+    rootFolder: "currency",
+    group: "foreign_to_twd",
+    displayName: "日圓／台幣",
+    symbol: "JPY-TWD",
+    exchange: "FX",
+    providerSymbol: "JPYTWD=X",
+    quoteAsset: "TWD",
+    providerStatus: "best_effort_delayed",
+    role: "JPY/TWD foreign-exchange watch-only Yahoo chart context; delayed/best-effort.",
+  },
+  {
+    key: "currency:foreign_to_twd:KRW-TWD",
+    rootFolder: "currency",
+    group: "foreign_to_twd",
+    displayName: "韓元／台幣",
+    symbol: "KRW-TWD",
+    exchange: "FX",
+    providerSymbol: "KRWTWD=X",
+    quoteAsset: "TWD",
+    providerStatus: "best_effort_delayed",
+    role: "KRW/TWD foreign-exchange watch-only Yahoo chart context; delayed/best-effort.",
+  },
+  {
+    key: "currency:foreign_to_foreign:USD-JPY",
+    rootFolder: "currency",
+    group: "foreign_to_foreign",
+    displayName: "美元／日圓",
+    symbol: "USD-JPY",
+    exchange: "FX",
+    providerSymbol: "USDJPY=X",
+    quoteAsset: "JPY",
+    providerStatus: "best_effort_delayed",
+    role: "USD/JPY foreign-exchange watch-only Yahoo chart context; delayed/best-effort.",
+  },
+  {
+    key: "currency:foreign_to_foreign:USD-KRW",
+    rootFolder: "currency",
+    group: "foreign_to_foreign",
+    displayName: "美元／韓元",
+    symbol: "USD-KRW",
+    exchange: "FX",
+    providerSymbol: "USDKRW=X",
+    quoteAsset: "KRW",
+    providerStatus: "best_effort_delayed",
+    role: "USD/KRW foreign-exchange watch-only Yahoo chart context; delayed/best-effort.",
+  },
+  {
+    key: "currency:foreign_to_foreign:EUR-USD",
+    rootFolder: "currency",
+    group: "foreign_to_foreign",
+    displayName: "歐元／美元",
+    symbol: "EUR-USD",
+    exchange: "FX",
+    providerSymbol: "EURUSD=X",
+    quoteAsset: "USD",
+    providerStatus: "best_effort_delayed",
+    role: "EUR/USD foreign-exchange watch-only Yahoo chart context; delayed/best-effort.",
+  },
+];
+
+export const RESOURCE_MARKET_INSTRUMENTS: ResourceMarketInstrument[] = [
+  ...RESOURCE_COMMODITY_INSTRUMENTS,
+  ...RESOURCE_CURRENCY_INSTRUMENTS,
+];
+
+export function resourceMarketInstrumentFromRead(
+  instrument: ResourceInstrumentRead
+): ResourceMarketInstrument | null {
+  if (instrument.root_folder !== "commodity" && instrument.root_folder !== "currency") {
+    return null;
+  }
+  return {
+    key: instrument.key,
+    rootFolder: instrument.root_folder,
+    group: instrument.group as ResourceInstrumentGroupKey,
+    displayName: instrument.display_name,
+    symbol: instrument.symbol,
+    exchange: instrument.exchange,
+    providerSymbol: instrument.provider_symbol,
+    quoteAsset: instrument.quote_asset,
+    providerStatus: instrument.provider_status,
+    role: instrument.role,
+  };
 }
 
-export function resourceInstrumentByKey(key: string | null | undefined) {
+export function resourceInstrumentsForGroup(
+  group: ResourceInstrumentGroupKey,
+  instruments: readonly ResourceMarketInstrument[] = RESOURCE_MARKET_INSTRUMENTS
+) {
+  return instruments.filter((instrument) => instrument.group === group);
+}
+
+export function resourceInstrumentByKey(
+  key: string | null | undefined,
+  instruments: readonly ResourceMarketInstrument[] = RESOURCE_MARKET_INSTRUMENTS
+) {
   if (!key) return null;
-  return RESOURCE_COMMODITY_INSTRUMENTS.find((instrument) => instrument.key === key) ?? null;
+  return instruments.find((instrument) => instrument.key === key) ?? null;
 }
 
 export function resourceSymbolFromKey(key: string | null | undefined) {

@@ -23,6 +23,8 @@ type Props = {
   refreshIntervalMs?: number;
   updatedAt?: string | null;
   priceLimitEnabled?: boolean;
+  totalVolume?: number | null;
+  volumeLabel?: string;
 };
 
 type IntradayInterval = 1 | 5 | 15;
@@ -151,6 +153,9 @@ function formatSource(t: TranslationFunction, value: string) {
   if (value === "twse_mis_snapshot") {
     return t("stockDetail.intraday.sources.twseSnapshot");
   }
+  if (value === "naver_index_time") {
+    return t("stockDetail.intraday.sources.naverIndex");
+  }
   return t("stockDetail.intraday.sources.fallback");
 }
 
@@ -207,10 +212,13 @@ function ceilToTaiwanPriceStep(value: number) {
 function getNiceAxisInterval(range: number, referencePrice: number) {
   const baseStep = getTaiwanPriceStep(referencePrice);
   const rawStep = Math.max(range / 5, baseStep);
-  const multipliers = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000];
-  const multiplier = multipliers.find((item) => item * baseStep >= rawStep) ?? 1000;
+  const magnitude = 10 ** Math.floor(Math.log10(rawStep));
+  const normalizedStep = rawStep / magnitude;
+  const niceMultiplier =
+    normalizedStep <= 1 ? 1 : normalizedStep <= 2 ? 2 : normalizedStep <= 5 ? 5 : 10;
+  const niceStep = niceMultiplier * magnitude;
 
-  return multiplier * baseStep;
+  return Math.ceil(niceStep / baseStep) * baseStep;
 }
 
 function nearlyEqual(a: number, b: number, tolerance: number) {
@@ -473,6 +481,8 @@ function aggregateIntradayPoints(
         open: first.open ?? first.price,
         high: highs.length > 0 ? Math.max(...highs) : last.price,
         low: lows.length > 0 ? Math.min(...lows) : last.price,
+        cumulative_volume: last.cumulative_volume ?? null,
+        trade_value: last.trade_value ?? null,
       };
     });
 }
@@ -658,6 +668,8 @@ export default function IntradayTrendChart({
   refreshIntervalMs,
   updatedAt,
   priceLimitEnabled = true,
+  totalVolume,
+  volumeLabel,
 }: Props) {
   const chartId = useId();
   const t = useT();
@@ -803,14 +815,22 @@ export default function IntradayTrendChart({
   const cumulativeVolumes = data.reduce<number[]>((result, point, index) => {
     const previous = index > 0 ? result[index - 1] : 0;
     const volume = validNumber(point.volume) && point.volume > 0 ? point.volume : 0;
+    const providerCumulative =
+      validNumber(point.cumulative_volume) && point.cumulative_volume >= 0
+        ? point.cumulative_volume
+        : null;
 
-    result.push(previous + volume);
+    result.push(providerCumulative ?? previous + volume);
 
     return result;
   }, []);
-  const totalVolume = cumulativeVolumes[cumulativeVolumes.length - 1] ?? null;
+  const pointTotalVolume = cumulativeVolumes[cumulativeVolumes.length - 1] ?? null;
   const displayedVolume =
-    safeHoverIndex !== null ? cumulativeVolumes[safeHoverIndex] ?? null : totalVolume;
+    safeHoverIndex !== null
+      ? cumulativeVolumes[safeHoverIndex] ?? null
+      : validNumber(totalVolume)
+        ? totalVolume
+        : pointTotalVolume;
   const rangeHigh = data.reduce<{ index: number; value: number } | null>(
     (best, point, index) => {
       const value = point.high ?? point.price;
@@ -1060,7 +1080,7 @@ export default function IntradayTrendChart({
           </div>
           <div>
             <span className="text-xs text-omi-text-subtle">
-              {t("stockDetail.intraday.volumeLots")}
+              {volumeLabel ?? t("stockDetail.intraday.volumeLots")}
             </span>
             <div className="mt-1 text-base font-bold text-omi-text">
               {formatVolumeValue(displayedVolume)}
@@ -1134,7 +1154,7 @@ export default function IntradayTrendChart({
           );
         })}
 
-        {timeTicks.map((tick) => {
+        {timeTicks.map((tick, index) => {
           const ratio =
             (tick.minutes - session.startMinutes) /
             (session.endMinutes - session.startMinutes);
@@ -1152,7 +1172,7 @@ export default function IntradayTrendChart({
               <text
                 x={x}
                 y={labelY}
-                textAnchor={tick.label === "09:00" ? "start" : tick.label === "13:30" ? "end" : "middle"}
+                textAnchor={index === 0 ? "start" : index === timeTicks.length - 1 ? "end" : "middle"}
                 className="fill-omi-text-muted text-[11px]"
               >
                 {tick.label}

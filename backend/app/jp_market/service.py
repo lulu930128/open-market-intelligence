@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import requests
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -69,6 +69,13 @@ from app.jp_market.sources import (
     parse_yahoo_intraday_prices,
     parse_yahoo_stock_record,
 )
+from app.jp_market.trading_calendar import (
+    JP_MARKET_TIMEZONE,
+    expected_jp_daily_price_date,
+    previous_jp_trading_day,
+)
+from app.jp_market.source_health import build_jp_source_health
+from app.market.calendar_status import build_jp_calendar_status
 from app.market.technical_radar import (
     TechnicalRadarBar,
     build_technical_watchlist_radar,
@@ -107,7 +114,6 @@ JP_CHART_LOOKBACK_MULTIPLIER = {
     "weekly": 8,
     "monthly": 31,
 }
-JP_PLANNED_RESOURCE_KEYS = ("disclosures",)
 JP_FUNDAMENTAL_PRIMARY_PROVIDER = "jquants_statements"
 JP_FUNDAMENTAL_SUPPLEMENTAL_PROVIDER = "yahoo_quote_summary"
 JP_MARGIN_INTEREST_PROVIDER = "jquants_margin_interest"
@@ -126,6 +132,8 @@ YAHOO_CHART_COMPACT_RANGE = "1y"
 YAHOO_CHART_FULL_RANGE = "10y"
 JP_INTRADAY_CACHE_SECONDS = 60
 _jp_intraday_cache: dict[str, tuple[float, dict]] = {}
+JP_DAILY_REFRESH_ATTEMPT_COOLDOWN_SECONDS = 300
+_jp_daily_refresh_attempts: dict[str, float] = {}
 ProgressCallback = Callable[[int | None, int | None, str | None], None]
 
 
@@ -752,24 +760,41 @@ def _latest_distinct_jp_daily_rows(
     return selected_rows
 
 
-def _jp_ranking_freshness(rows: list[dict], requested_symbol_count: int) -> dict:
+def _jp_ranking_freshness(
+    rows: list[dict],
+    requested_symbol_count: int,
+    *,
+    expected_trade_date: date,
+) -> dict:
     row_dates = [
         row.get("trade_date")
         for row in rows
         if isinstance(row.get("trade_date"), date)
     ]
     latest_trade_date = max(row_dates, default=None)
-    current_symbol_count = sum(
-        1 for row_date in row_dates if row_date == latest_trade_date
-    )
-    stale_symbol_count = max(requested_symbol_count - current_symbol_count, 0)
+    current_symbol_count = sum(1 for row_date in row_dates if row_date == expected_trade_date)
+    stale_symbol_count = sum(1 for row_date in row_dates if row_date < expected_trade_date)
+    future_symbol_count = sum(1 for row_date in row_dates if row_date > expected_trade_date)
+    missing_symbol_count = max(requested_symbol_count - len(row_dates), 0)
+    if requested_symbol_count == 0 or current_symbol_count == requested_symbol_count:
+        coverage_status = "current"
+    elif current_symbol_count > 0:
+        coverage_status = "partial"
+    elif row_dates:
+        coverage_status = "stale"
+    else:
+        coverage_status = "missing"
 
     return {
         "trade_date": latest_trade_date,
-        "target_trade_date": latest_trade_date,
-        "is_current": requested_symbol_count == 0 or stale_symbol_count == 0,
+        "target_trade_date": expected_trade_date,
+        "is_current": requested_symbol_count == 0 or current_symbol_count == requested_symbol_count,
         "current_symbol_count": current_symbol_count,
         "stale_symbol_count": stale_symbol_count,
+        "missing_symbol_count": missing_symbol_count,
+        "future_symbol_count": future_symbol_count,
+        "coverage_status": coverage_status,
+        "refresh_recommended": stale_symbol_count > 0 or missing_symbol_count > 0,
     }
 
 
@@ -781,6 +806,8 @@ def get_jp_watchlist_ranking(
     enabled_only: bool = True,
     rank_by: str = "none",
     sort_order: str = "asc",
+    expected_trade_date: date | None = None,
+    now: datetime | None = None,
 ) -> dict:
     if rank_by not in {"none", "change_pct", "volume", "close"}:
         raise ValueError("rank_by must be one of: none, change_pct, volume, close.")
@@ -788,6 +815,7 @@ def get_jp_watchlist_ranking(
     if sort_order not in {"asc", "desc"}:
         raise ValueError("sort_order must be one of: asc, desc.")
 
+    resolved_expected_trade_date = expected_trade_date or expected_jp_daily_price_date(now=now)
     query = db.query(JPWatchlistItem)
 
     if group_id is not None:
@@ -868,9 +896,25 @@ def get_jp_watchlist_ranking(
                 "change": change,
                 "change_pct": change_pct,
                 "volume": latest.trade_volume if latest is not None else None,
-                "status": "ready" if close is not None else "no_data",
+                "status": (
+                    "no_data"
+                    if close is None
+                    else "stale"
+                    if latest is not None and latest.trade_date < resolved_expected_trade_date
+                    else "ready"
+                ),
                 "source": latest.provider if latest is not None else None,
                 "error_message": None,
+                "latest_fetched_at": latest.fetched_at if latest is not None else None,
+                "freshness_status": (
+                    "missing"
+                    if latest is None
+                    else "stale"
+                    if latest.trade_date < resolved_expected_trade_date
+                    else "future"
+                    if latest.trade_date > resolved_expected_trade_date
+                    else "current"
+                ),
             }
         )
 
@@ -890,6 +934,7 @@ def get_jp_watchlist_ranking(
     freshness = _jp_ranking_freshness(
         rows=rows,
         requested_symbol_count=len(unique_items),
+        expected_trade_date=resolved_expected_trade_date,
     )
 
     return {
@@ -903,6 +948,356 @@ def get_jp_watchlist_ranking(
         "error_count": 0,
         **freshness,
         "results": rows,
+    }
+
+
+def _jp_market_overview_recent_rows(
+    db: Session,
+    *,
+    expected_trade_date: date,
+) -> dict[str, list[dict]]:
+    provider_ranked = (
+        db.query(
+            JPDailyPrice.id.label("price_id"),
+            JPDailyPrice.symbol.label("symbol"),
+            JPDailyPrice.trade_date.label("trade_date"),
+            JPDailyPrice.close_price.label("close_price"),
+            JPDailyPrice.adjusted_close.label("adjusted_close"),
+            JPDailyPrice.trade_volume.label("trade_volume"),
+            JPDailyPrice.provider.label("provider"),
+            JPDailyPrice.fetched_at.label("fetched_at"),
+            JPStockMaster.security_name.label("security_name"),
+            JPStockMaster.sector_33_name.label("sector_33_name"),
+            func.row_number()
+            .over(
+                partition_by=(JPDailyPrice.symbol, JPDailyPrice.trade_date),
+                order_by=(JPDailyPrice.fetched_at.desc(), JPDailyPrice.id.desc()),
+            )
+            .label("provider_rank"),
+        )
+        .join(JPStockMaster, JPStockMaster.symbol == JPDailyPrice.symbol)
+        .filter(
+            JPStockMaster.is_active.is_(True),
+            JPStockMaster.asset_type == "stock",
+            JPDailyPrice.trade_date <= expected_trade_date,
+        )
+        .subquery()
+    )
+    canonical = (
+        db.query(
+            provider_ranked.c.price_id,
+            provider_ranked.c.symbol,
+            provider_ranked.c.trade_date,
+            provider_ranked.c.close_price,
+            provider_ranked.c.adjusted_close,
+            provider_ranked.c.trade_volume,
+            provider_ranked.c.provider,
+            provider_ranked.c.fetched_at,
+            provider_ranked.c.security_name,
+            provider_ranked.c.sector_33_name,
+        )
+        .filter(provider_ranked.c.provider_rank == 1)
+        .subquery()
+    )
+    recent = (
+        db.query(
+            canonical,
+            func.row_number()
+            .over(
+                partition_by=canonical.c.symbol,
+                order_by=(canonical.c.trade_date.desc(), canonical.c.price_id.desc()),
+            )
+            .label("date_rank"),
+        )
+        .subquery()
+    )
+    rows = db.query(recent).filter(recent.c.date_rank <= 2).all()
+    by_symbol: dict[str, list[dict]] = {}
+    for row in rows:
+        payload = dict(row._mapping)
+        by_symbol.setdefault(str(payload["symbol"]), []).append(payload)
+    for symbol_rows in by_symbol.values():
+        symbol_rows.sort(key=lambda item: item["date_rank"])
+    return by_symbol
+
+
+def _jp_market_index_snapshots(
+    db: Session,
+    *,
+    expected_trade_date: date,
+) -> list[dict]:
+    snapshots: list[dict] = []
+    for symbol, label, role in (
+        ("^N225", "Nikkei 225", "primary_benchmark"),
+        ("1306.T", "TOPIX ETF", "topix_proxy"),
+    ):
+        rows = _latest_distinct_jp_daily_rows(db=db, symbol=symbol, limit=60)
+        latest = rows[0] if rows else None
+        previous = rows[1] if len(rows) > 1 else None
+        close = _jp_close_value(latest)
+        previous_close = _jp_close_value(previous)
+        change = (
+            close - previous_close
+            if close is not None and previous_close is not None
+            else None
+        )
+        change_pct = (
+            change / previous_close * 100
+            if change is not None and previous_close not in {None, 0}
+            else None
+        )
+        latest_date = latest.trade_date if latest is not None else None
+        freshness_status = (
+            "missing"
+            if latest_date is None
+            else "stale"
+            if latest_date < expected_trade_date
+            else "future"
+            if latest_date > expected_trade_date
+            else "current"
+        )
+        snapshots.append(
+            {
+                "symbol": symbol,
+                "label": label,
+                "role": role,
+                "latest_data_date": latest_date,
+                "expected_data_date": expected_trade_date,
+                "freshness_status": freshness_status,
+                "is_current": freshness_status == "current",
+                "close": close,
+                "previous_close": previous_close,
+                "change": change,
+                "change_pct": change_pct,
+                "volume": latest.trade_volume if latest is not None else None,
+                "provider": latest.provider if latest is not None else None,
+                "point_count": len(rows),
+            }
+        )
+    return snapshots
+
+
+def get_jp_market_overview(
+    db: Session,
+    *,
+    now: datetime | None = None,
+    sector_limit: int = 10,
+    mover_limit: int = 5,
+) -> dict:
+    resolved_sector_limit = max(1, min(sector_limit, 33))
+    resolved_mover_limit = max(1, min(mover_limit, 20))
+    expected_trade_date = expected_jp_daily_price_date(now=now)
+    calendar_status = build_jp_calendar_status(now=now)
+    active_stock_count = (
+        db.query(JPStockMaster)
+        .filter(
+            JPStockMaster.is_active.is_(True),
+            JPStockMaster.asset_type == "stock",
+        )
+        .count()
+    )
+    recent_by_symbol = _jp_market_overview_recent_rows(
+        db,
+        expected_trade_date=expected_trade_date,
+    )
+    observed_symbol_count = len(recent_by_symbol)
+    current_rows: list[dict] = []
+    stale_symbol_count = 0
+    mover_rows: list[dict] = []
+    sector_totals: dict[str, dict[str, float | int]] = {}
+    breadth = {
+        "advance_count": 0,
+        "decline_count": 0,
+        "unchanged_count": 0,
+        "no_comparison_count": 0,
+    }
+
+    for rows in recent_by_symbol.values():
+        latest = rows[0]
+        if latest["trade_date"] != expected_trade_date:
+            stale_symbol_count += 1
+            continue
+        current_rows.append(latest)
+        previous = rows[1] if len(rows) > 1 else None
+        close = latest["close_price"]
+        if close is None:
+            close = latest["adjusted_close"]
+        previous_close = None
+        if previous is not None:
+            previous_close = previous["close_price"]
+            if previous_close is None:
+                previous_close = previous["adjusted_close"]
+        sector = str(latest["sector_33_name"] or "Unclassified")
+        sector_total = sector_totals.setdefault(
+            sector,
+            {
+                "covered_count": 0,
+                "advance_count": 0,
+                "decline_count": 0,
+                "unchanged_count": 0,
+                "change_pct_sum": 0.0,
+                "change_pct_count": 0,
+            },
+        )
+        sector_total["covered_count"] += 1
+        if close is None or previous_close in {None, 0}:
+            breadth["no_comparison_count"] += 1
+            continue
+
+        change = float(close) - float(previous_close)
+        change_pct = change / float(previous_close) * 100
+        direction = (
+            "advance_count"
+            if change > 0
+            else "decline_count"
+            if change < 0
+            else "unchanged_count"
+        )
+        breadth[direction] += 1
+        sector_total[direction] += 1
+        sector_total["change_pct_sum"] += change_pct
+        sector_total["change_pct_count"] += 1
+        mover_rows.append(
+            {
+                "symbol": latest["symbol"],
+                "security_name": latest["security_name"],
+                "sector": latest["sector_33_name"],
+                "trade_date": latest["trade_date"],
+                "close": float(close),
+                "previous_close": float(previous_close),
+                "change": change,
+                "change_pct": change_pct,
+                "volume": latest["trade_volume"],
+                "provider": latest["provider"],
+            }
+        )
+
+    current_symbol_count = len(current_rows)
+    missing_symbol_count = max(active_stock_count - observed_symbol_count, 0)
+    coverage_status = (
+        "current"
+        if active_stock_count > 0 and current_symbol_count == active_stock_count
+        else "partial"
+        if current_symbol_count > 0
+        else "missing"
+    )
+    sectors = []
+    for sector, totals in sector_totals.items():
+        change_count = int(totals["change_pct_count"])
+        sectors.append(
+            {
+                "sector": sector,
+                "covered_count": int(totals["covered_count"]),
+                "advance_count": int(totals["advance_count"]),
+                "decline_count": int(totals["decline_count"]),
+                "unchanged_count": int(totals["unchanged_count"]),
+                "average_change_pct": (
+                    float(totals["change_pct_sum"]) / change_count
+                    if change_count
+                    else None
+                ),
+            }
+        )
+    sectors.sort(key=lambda item: (-item["covered_count"], item["sector"]))
+
+    watchlist_ranking = get_jp_watchlist_ranking(
+        db=db,
+        group_id=None,
+        include_children=True,
+        enabled_only=True,
+        rank_by="none",
+        sort_order="asc",
+        expected_trade_date=expected_trade_date,
+        now=now,
+    )
+    watchlist_coverage = {
+        key: watchlist_ranking.get(key)
+        for key in (
+            "requested_symbol_count",
+            "ranked_count",
+            "no_data_count",
+            "target_trade_date",
+            "is_current",
+            "current_symbol_count",
+            "stale_symbol_count",
+            "missing_symbol_count",
+            "future_symbol_count",
+            "coverage_status",
+            "refresh_recommended",
+        )
+    }
+    indices = _jp_market_index_snapshots(
+        db,
+        expected_trade_date=expected_trade_date,
+    )
+    source_health = build_jp_source_health(
+        db,
+        expected_daily_price_date=expected_trade_date,
+        use_expected_date=True,
+    )
+    warnings = [
+        "JP breadth is computed from active stock-master symbols with local daily-price coverage; it is not full-exchange breadth."
+    ]
+    if missing_symbol_count or stale_symbol_count:
+        warnings.append(
+            "JP active-master coverage is partial: "
+            f"current={current_symbol_count}, stale={stale_symbol_count}, "
+            f"missing={missing_symbol_count}, active={active_stock_count}."
+        )
+    stale_indices = [
+        item["symbol"] for item in indices if not item["is_current"]
+    ]
+    if stale_indices:
+        warnings.append(
+            "JP benchmark data is not current: " + ", ".join(stale_indices)
+        )
+
+    mover_rows.sort(key=lambda item: item["change_pct"], reverse=True)
+    refresh_recommended = bool(
+        watchlist_coverage.get("refresh_recommended") or stale_indices
+    )
+    return {
+        "kind": "jp_market_overview",
+        "generated_at": utc_now(),
+        "expected_trade_date": expected_trade_date,
+        "calendar_status": calendar_status,
+        "coverage": {
+            "scope": "active_jp_stock_master_with_local_daily_prices",
+            "active_stock_count": active_stock_count,
+            "observed_symbol_count": observed_symbol_count,
+            "current_symbol_count": current_symbol_count,
+            "stale_symbol_count": stale_symbol_count,
+            "missing_symbol_count": missing_symbol_count,
+            "active_coverage_ratio": (
+                current_symbol_count / active_stock_count
+                if active_stock_count
+                else 0.0
+            ),
+            "observed_current_ratio": (
+                current_symbol_count / observed_symbol_count
+                if observed_symbol_count
+                else 0.0
+            ),
+            "status": coverage_status,
+            "is_partial": coverage_status != "current",
+        },
+        "watchlist_coverage": watchlist_coverage,
+        "breadth": {
+            "trade_date": expected_trade_date if current_symbol_count else None,
+            **breadth,
+            "total_count": sum(breadth.values()),
+            "coverage_count": current_symbol_count,
+            "source": "omi_local_jp_daily_price_partial",
+            "is_partial": coverage_status != "current",
+        },
+        "sectors": sectors[:resolved_sector_limit],
+        "indices": indices,
+        "top_gainers": mover_rows[:resolved_mover_limit],
+        "top_losers": list(reversed(mover_rows[-resolved_mover_limit:])),
+        "source_health": source_health,
+        "refresh_recommended": refresh_recommended,
+        "refresh_scope": "configured_watchlists_and_index_proxies",
+        "warnings": warnings,
     }
 
 
@@ -2366,15 +2761,53 @@ def _jp_fundamental_resource_slot(
     }
 
 
-def _jp_planned_resource_slot(key: str) -> dict:
+def _jp_disclosure_resource_slot(
+    fundamental: JPCompanyFundamental | SimpleNamespace | None,
+) -> dict:
+    available = _has_any_jp_fundamental_value(
+        fundamental,
+        (
+            "disclosed_date",
+            "document_type",
+            "fiscal_period",
+            "fiscal_year_end",
+            "earnings_date",
+        ),
+    )
+    latest_date = None
+    metrics: dict[str, int | float | str | None] = {
+        "coverage": "company_statement_metadata_only",
+    }
+    if fundamental is not None:
+        latest_date = (
+            fundamental.disclosed_date
+            or fundamental.earnings_date
+            or fundamental.fetched_at.date()
+        )
+        metrics.update(
+            {
+                "disclosed_date": fundamental.disclosed_date.isoformat()
+                if fundamental.disclosed_date
+                else None,
+                "document_type": fundamental.document_type,
+                "fiscal_period": fundamental.fiscal_period,
+                "fiscal_year_end": fundamental.fiscal_year_end.isoformat()
+                if fundamental.fiscal_year_end
+                else None,
+                "earnings_date": fundamental.earnings_date.isoformat()
+                if fundamental.earnings_date
+                else None,
+            }
+        )
+
     return {
-        "key": key,
-        "status": "planned",
-        "available": False,
-        "source": None,
-        "latest_date": None,
-        "row_count": 0,
-        "metrics": {},
+        "key": "disclosures",
+        "status": "partial" if available else "empty",
+        "available": available,
+        "source": fundamental.provider if fundamental else None,
+        "latest_date": latest_date,
+        "row_count": 1 if available else 0,
+        "metrics": metrics,
     }
 
 
@@ -2388,7 +2821,7 @@ def get_jp_resource_summary(db: Session, *, symbol: str) -> dict:
             _jp_daily_price_resource_slot(db, normalized_symbol),
             _jp_margin_interest_resource_slot(db, normalized_symbol),
             _jp_investor_type_resource_slot(db, normalized_symbol),
-            *[_jp_planned_resource_slot(key) for key in JP_PLANNED_RESOURCE_KEYS],
+            _jp_disclosure_resource_slot(fundamental),
             _jp_fundamental_resource_slot(
                 fundamental,
                 key="performance",
@@ -2459,18 +2892,49 @@ def _refresh_jp_ohlc_history_if_needed(
     ensure_history: bool,
     outputsize: str,
     provider: str,
+    latest_data_date: date | None,
+    expected_data_date: date | None,
 ) -> dict | None:
-    if not ensure_history or len(points) >= bars:
+    if not ensure_history:
         return None
+
+    refresh_reasons: list[str] = []
+    if len(points) < bars:
+        refresh_reasons.append("insufficient_history")
+    if expected_data_date is not None and (
+        latest_data_date is None or latest_data_date < expected_data_date
+    ):
+        refresh_reasons.append("stale_latest_date")
+    if not refresh_reasons:
+        return None
+
+    attempted_at = _jp_daily_refresh_attempts.get(symbol)
+    now_monotonic = time.time()
+    if (
+        attempted_at is not None
+        and now_monotonic - attempted_at < JP_DAILY_REFRESH_ATTEMPT_COOLDOWN_SECONDS
+    ):
+        return {
+            "status": "skipped",
+            "provider": provider,
+            "symbol": symbol,
+            "fetched_count": 0,
+            "inserted_count": 0,
+            "updated_count": 0,
+            "refresh_reasons": refresh_reasons,
+            "message": "JP daily refresh skipped during the per-symbol cooldown window.",
+        }
+    _jp_daily_refresh_attempts[symbol] = now_monotonic
 
     refresh_outputsize = "full" if timeframe in {"weekly", "monthly"} else outputsize
     try:
-        return refresh_jp_daily_prices(
+        result = refresh_jp_daily_prices(
             db=db,
             symbol=symbol,
             outputsize=refresh_outputsize,
             provider=provider,
         )
+        return {**result, "refresh_reasons": refresh_reasons}
     except (JPMarketDataFetchError, requests.RequestException, ValueError) as exc:
         if not points:
             raise
@@ -2482,6 +2946,7 @@ def _refresh_jp_ohlc_history_if_needed(
             "fetched_count": 0,
             "inserted_count": 0,
             "updated_count": 0,
+            "refresh_reasons": refresh_reasons,
             "message": f"JP daily refresh failed; using cached rows: {exc}",
         }
 
@@ -2497,6 +2962,7 @@ def list_jp_ohlc_chart_data(
     outputsize: str = "compact",
     provider: str = "auto",
     to_date: date | None = None,
+    expected_data_date: date | None = None,
 ) -> dict:
     if timeframe not in JP_CHART_LOOKBACK_MULTIPLIER:
         raise ValueError("timeframe must be one of: daily, weekly, monthly.")
@@ -2508,7 +2974,14 @@ def list_jp_ohlc_chart_data(
         raise ValueError(f"bars must be less than or equal to {MAX_JP_CHART_BARS}.")
 
     normalized_symbol = _valid_symbol(symbol)
-    end_date = to_date or date.today()
+    end_date = to_date or datetime.now(JP_MARKET_TIMEZONE).date()
+    resolved_expected_data_date = expected_data_date
+    if resolved_expected_data_date is None:
+        resolved_expected_data_date = (
+            previous_jp_trading_day(end_date, include_value=True)
+            if to_date is not None
+            else expected_jp_daily_price_date()
+        )
     lookback_days = bars * JP_CHART_LOOKBACK_MULTIPLIER[timeframe]
     start_date = end_date - timedelta(days=lookback_days)
 
@@ -2519,6 +2992,7 @@ def list_jp_ohlc_chart_data(
         to_date=end_date,
     )
     points = _aggregate_jp_daily_rows(rows=rows, timeframe=timeframe)[-bars:]
+    latest_data_date = points[-1].get("time") if points else None
     backfill_result = _refresh_jp_ohlc_history_if_needed(
         db=db,
         symbol=normalized_symbol,
@@ -2528,6 +3002,8 @@ def list_jp_ohlc_chart_data(
         ensure_history=ensure_history,
         outputsize=outputsize,
         provider=provider,
+        latest_data_date=latest_data_date,
+        expected_data_date=resolved_expected_data_date,
     )
 
     if backfill_result is not None:
@@ -2538,6 +3014,17 @@ def list_jp_ohlc_chart_data(
             to_date=end_date,
         )
         points = _aggregate_jp_daily_rows(rows=rows, timeframe=timeframe)[-bars:]
+        latest_data_date = points[-1].get("time") if points else None
+
+    freshness_status = (
+        "missing"
+        if latest_data_date is None
+        else "stale"
+        if resolved_expected_data_date is not None and latest_data_date < resolved_expected_data_date
+        else "future"
+        if resolved_expected_data_date is not None and latest_data_date > resolved_expected_data_date
+        else "current"
+    )
 
     return {
         "symbol": normalized_symbol,
@@ -2549,6 +3036,11 @@ def list_jp_ohlc_chart_data(
         "point_count": len(points),
         "points": points,
         "backfill": backfill_result,
+        "latest_data_date": latest_data_date,
+        "expected_data_date": resolved_expected_data_date,
+        "freshness_status": freshness_status,
+        "is_current": freshness_status in {"current", "future"},
+        "refresh_recommended": freshness_status in {"missing", "stale"},
     }
 
 

@@ -105,6 +105,12 @@ export const zhTW = {
       advanceDecline: "上漲 / 下跌",
       breadth: "廣度",
       advancePct: "{value}% 上漲",
+      coverage: "資料覆蓋",
+      coverageValue: "{current} / {active}",
+      partialCoverage: "部分覆蓋（本機日線）",
+      currentCoverage: "完整覆蓋",
+      strongestSector: "相對強勢產業",
+      expectedDate: "預期交易日 {date}",
       loading: "市場指數載入中...",
       empty: "市場指數暫無資料",
       updated: "市場環境更新 {asOf}",
@@ -1406,6 +1412,7 @@ export const zhTW = {
         yahooWithVolume: "1 分鐘走勢 + 交易所量",
         yahoo: "1 分鐘走勢",
         twseSnapshot: "即時快照",
+        naverIndex: "Naver 韓國指數分時",
         fallback: "走勢資料",
       },
       indicators: {
@@ -1978,9 +1985,9 @@ export const zhTW = {
         "{symbol} 今日走勢已更新：{count} 筆，來源 {source}，更新 {updatedAt}",
       intradayInsufficient:
         "{symbol} 今日走勢資料不足：{source} 目前只回傳 {count} 筆。",
-      intradayLoadFailed: "日股指數今日走勢讀取失敗：{message}",
+      intradayLoadFailed: "日股今日走勢讀取失敗：{message}",
       intradayRouteMissing:
-        "日股指數今日走勢 API 404：目前前端 proxy 指到的 backend 尚未載入日股 intraday route；請重啟 OMI backend/frontend 後再試。原始錯誤：{message}",
+        "日股今日走勢 API 404：目前前端 proxy 指到的 backend 尚未載入日股 intraday route；請重啟 OMI backend/frontend 後再試。原始錯誤：{message}",
     },
     errors: {
       listLoadFailed: "讀取日股清單失敗",
@@ -2080,6 +2087,8 @@ export const zhTW = {
       close: "收盤",
       change: "漲跌",
       volume: "成交量",
+      volumeThousandShares: "成交量(千股)",
+      volumeShares: "成交量(股)",
       segment: "市場區分",
       sector: "產業",
       exchange: "交易所",
@@ -2258,6 +2267,7 @@ export const zhTW = {
     },
   },
   usStockDetail: {
+    statusSource: "美股詳情",
     usDailyWeeklyMonthly: "美股日/週/月",
     noStockSelected: "尚未選擇股票",
     selectStockPrompt: "請從左側自選或上方搜尋選擇股票",
@@ -2542,6 +2552,7 @@ export const zhTW = {
     },
     errors: {
       dailyBackfillFailed: "台指期日 K 回補失敗",
+      intradayRefreshFailed: "台指期今日走勢更新失敗，顯示本機快取",
     },
   },
   locales: {
@@ -3095,6 +3106,13 @@ export const zhTW = {
       commodity: "商品",
       commoditySubtitle: "商品與貨幣參考",
       currency: "貨幣",
+      groups: {
+        metals: "金屬",
+        energy: "能源",
+        twdToForeign: "台幣對外幣",
+        foreignToTwd: "外幣對台幣",
+        foreignToForeign: "外幣對外幣",
+      },
       providerPending: "資料源待接入",
       providerBestEffortDelayed: "近即時／延遲報價",
       watchlist: "自選幣",
@@ -3109,6 +3127,14 @@ export const zhTW = {
       watchlistSaveFailed: "自選幣更新失敗",
       watchlistLoadFailed: "自選幣讀取失敗",
       watchlistLoadPartial: "自選幣部分讀取失敗，已保留可用資料：{resources}",
+      workspaceSummary: "資產庫 {registry} · 即時 {ready} · 待更新 {attention}",
+      watchlistRegistryCounts: "{watchlist} / {registry}",
+      maturity: {
+        ready: "即時",
+        partial: "部分",
+        stale: "待更",
+        missing: "缺資料",
+      },
       notes: {
         BTC: "交易候選 / BTC/TWD / BTC/USDT",
         ETH: "觀察 / ETH/TWD / ETH/USDT",
@@ -3126,6 +3152,7 @@ export const zhTW = {
         toggleCommodity: "切換商品資料夾",
         toggleCommodityGroup: "切換 {label} 商品資料夾",
         toggleCurrency: "切換貨幣資料夾",
+        toggleCurrencyGroup: "切換 {label} 貨幣資料夾",
         toggleWatchlist: "切換自選幣資料夾",
       },
     },

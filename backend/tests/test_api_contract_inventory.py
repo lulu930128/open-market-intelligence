@@ -102,8 +102,8 @@ class APIContractInventoryTests(unittest.TestCase):
             if method in methods
         ]
 
-        self.assertEqual(len(operations), 326)
-        self.assertEqual(sum(1 for _, path in operations if path.startswith("/api/")), 325)
+        self.assertEqual(len(operations), 329)
+        self.assertEqual(sum(1 for _, path in operations if path.startswith("/api/")), 328)
 
     def test_taiwan_index_openapi_contracts_survive_router_split(self) -> None:
         schema = app.openapi()

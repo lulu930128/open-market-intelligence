@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 import unittest
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import create_engine
@@ -20,8 +21,10 @@ from app.market.tw_futures import (
     list_taiwan_futures_intraday_bars,
     list_taiwan_futures_daily_bars,
     parse_taifex_daily_market_html,
+    parse_taifex_mis_intraday_payload,
     parse_taifex_mis_quote_payload,
     refresh_taiwan_futures_daily_bars,
+    refresh_taiwan_futures_intraday_bars,
     refresh_taiwan_futures_quotes,
     select_active_taiwan_futures_quote,
     taiwan_futures_quote_to_dict,
@@ -94,6 +97,77 @@ def sample_mxf_payload() -> dict:
     }
 
 
+def sample_mxf_after_hours_payload() -> dict:
+    return {
+        "RtCode": "0",
+        "RtMsg": "",
+        "RtData": {
+            "QuoteCount": "3",
+            "QuoteList": [
+                {
+                    "SymbolID": "MXF-P",
+                    "DispEName": "MXF",
+                    "CDate": "20260717",
+                    "CTime": "",
+                    "CLastPrice": "",
+                },
+                {
+                    "SymbolID": "MX4H6-M",
+                    "DispEName": "MX4W4086",
+                    "CDate": "20260717",
+                    "CTime": "191401",
+                    "CLastPrice": "42898.00",
+                    "CTotalVolume": "29",
+                },
+                {
+                    "SymbolID": "MXFH6-M",
+                    "DispEName": "MTX086",
+                    "COpenPrice": "42700.00",
+                    "CHighPrice": "43045.00",
+                    "CLowPrice": "42173.00",
+                    "CLastPrice": "42901.00",
+                    "CRefPrice": "42604.00",
+                    "CTotalVolume": "76688",
+                    "CDate": "20260717",
+                    "CTime": "191441",
+                    "CDiff": "297.00",
+                    "CDiffRate": "0.70",
+                    "CBestBidPrice": "42900.00",
+                    "CBestBidSize": "3",
+                    "CBestAskPrice": "42901.00",
+                    "CBestAskSize": "5",
+                },
+            ],
+        },
+    }
+
+
+def sample_txf_after_hours_chart_payload() -> dict:
+    return {
+        "RtCode": "0",
+        "RtMsg": "",
+        "RtData": {
+            "SymbolID": "TXFH6-M",
+            "Info": {
+                "Status": "0",
+                "Sessions": [{"Start": "1500", "End": "0500"}],
+            },
+            "Quote": {
+                "CDate": "20260717",
+                "CRefPrice": "42604.00",
+                "CTotalVolume": "27364",
+            },
+            "Ticks": [
+                ["150100", "42700.00", "42857.00", "42700.00", "42780.00", "607"],
+                ["235900", "42800.00", "42820.00", "42790.00", "42810.00", "25"],
+                ["000100", "42810.00", "42830.00", "42805.00", "42825.00", "18"],
+                ["bad", "1", "1", "1", "1", "1"],
+                ["060000", "42825.00", "42825.00", "42825.00", "42825.00", "1"],
+            ],
+        },
+    }
+
+
 def sample_daily_html() -> str:
     return """
     <table>
@@ -143,6 +217,65 @@ class TaiwanFuturesParserTests(unittest.TestCase):
         self.assertEqual(quote["session"], "regular")
         self.assertEqual(quote["last_price"], 44199.0)
         self.assertEqual(quote["total_volume"], 408801)
+
+    def test_parse_payload_accepts_after_hours_monthly_contract_suffix(self) -> None:
+        quotes = parse_taifex_mis_quote_payload(
+            symbol="MXF",
+            session="after_hours",
+            payload=sample_mxf_after_hours_payload(),
+            fetched_at=datetime(2026, 7, 17, 19, 15, tzinfo=TAIWAN_TZ),
+        )
+
+        self.assertEqual(len(quotes), 1)
+        quote = quotes[0]
+        self.assertEqual(quote["contract_symbol"], "MXFH6-M")
+        self.assertEqual(quote["contract_month"], "202608")
+        self.assertEqual(quote["session"], "after_hours")
+        self.assertEqual(quote["last_price"], 42901.0)
+        self.assertEqual(quote["total_volume"], 76688)
+
+    def test_fetch_rejects_empty_after_hours_projection(self) -> None:
+        with patch(
+            "app.market.tw_futures.fetch_taifex_mis_quote_payload",
+            return_value=sample_mxf_payload(),
+        ):
+            with self.assertRaisesRegex(
+                TaiwanFuturesFetchError,
+                "no usable after_hours monthly quote",
+            ):
+                fetch_taiwan_futures_quotes(
+                    symbols=["MXF"],
+                    session="after_hours",
+                    provider="taifex_mis",
+                )
+
+    def test_parse_intraday_payload_keeps_minute_ohlc_and_crosses_midnight(self) -> None:
+        bars = parse_taifex_mis_intraday_payload(
+            symbol="TXF",
+            session="after_hours",
+            contract_symbol="TXFH6-M",
+            contract_month="202608",
+            payload=sample_txf_after_hours_chart_payload(),
+            fetched_at=datetime(2026, 7, 17, 20, 34, tzinfo=TAIWAN_TZ),
+        )
+
+        self.assertEqual(len(bars), 3)
+        self.assertEqual(bars[0]["bar_time"], datetime(2026, 7, 17, 15, 1, tzinfo=TAIWAN_TZ))
+        self.assertEqual(bars[-1]["bar_time"], datetime(2026, 7, 18, 0, 1, tzinfo=TAIWAN_TZ))
+        self.assertEqual(bars[0]["open_price"], 42700.0)
+        self.assertEqual(bars[0]["high_price"], 42857.0)
+        self.assertEqual(bars[0]["total_volume"], 607)
+        self.assertEqual(bars[0]["source"], "TAIFEX MIS 1-minute chart")
+
+    def test_parse_intraday_payload_rejects_wrong_session_contract(self) -> None:
+        with self.assertRaisesRegex(TaiwanFuturesFetchError, "does not match"):
+            parse_taifex_mis_intraday_payload(
+                symbol="TXF",
+                session="after_hours",
+                contract_symbol="TXFH6-F",
+                contract_month="202608",
+                payload=sample_txf_after_hours_chart_payload(),
+            )
 
     def test_select_active_quote_prefers_liquid_contract(self) -> None:
         payload = sample_mxf_payload()
@@ -264,6 +397,59 @@ class TaiwanFuturesPersistenceTests(unittest.TestCase):
                 self.assertEqual(bar.symbol, "MXF")
                 self.assertEqual(bar.contract_month, "202606")
                 self.assertEqual(bar.close_price, 44199.0)
+                self.assertIsNone(bar.total_volume)
+        finally:
+            engine.dispose()
+
+    def test_refresh_intraday_bars_upserts_full_chart_idempotently(self) -> None:
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(bind=engine)
+        try:
+            with Session(engine) as db:
+                db.add(
+                    TaiwanFuturesQuoteSnapshot(
+                        provider="taifex_mis",
+                        market="TAIFEX",
+                        symbol="TXF",
+                        product_code="TX",
+                        product_name="Taiwan Index Futures",
+                        contract_symbol="TXFH6-M",
+                        contract_month="202608",
+                        session="after_hours",
+                        trade_date=date(2026, 7, 17),
+                        quote_time=datetime(2026, 7, 17, 20, 34, tzinfo=TAIWAN_TZ),
+                        last_price=42879,
+                        source="test",
+                    )
+                )
+                db.commit()
+
+                with patch(
+                    "app.market.tw_futures.fetch_taifex_mis_intraday_payload",
+                    return_value=sample_txf_after_hours_chart_payload(),
+                ):
+                    first_rows = refresh_taiwan_futures_intraday_bars(
+                        db=db,
+                        symbol="TXF",
+                        session="after_hours",
+                    )
+                    second_rows = refresh_taiwan_futures_intraday_bars(
+                        db=db,
+                        symbol="TXF",
+                        session="after_hours",
+                    )
+
+                self.assertEqual(len(first_rows), 3)
+                self.assertEqual(len(second_rows), 3)
+                self.assertEqual(db.query(TaiwanFuturesIntradayBar).count(), 3)
+                first_bar = (
+                    db.query(TaiwanFuturesIntradayBar)
+                    .order_by(TaiwanFuturesIntradayBar.bar_time.asc())
+                    .first()
+                )
+                self.assertIsNotNone(first_bar)
+                self.assertEqual(first_bar.total_volume, 607)
+                self.assertEqual(first_bar.source, "TAIFEX MIS 1-minute chart")
         finally:
             engine.dispose()
 
@@ -399,10 +585,69 @@ class TaiwanFuturesPersistenceTests(unittest.TestCase):
                     db=db,
                     symbol="MXF",
                     limit=10,
+                    session="regular",
                 )
 
                 self.assertEqual(len(rows), 2)
                 self.assertEqual([row.bar_time.date() for row in rows], [date(2026, 6, 15), date(2026, 6, 15)])
+        finally:
+            engine.dispose()
+
+    def test_intraday_bars_keep_night_session_together_across_midnight(self) -> None:
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(bind=engine)
+        try:
+            with Session(engine) as db:
+                common = {
+                    "provider": "taifex_mis",
+                    "market": "TAIFEX",
+                    "symbol": "TXF",
+                    "product_code": "TX",
+                    "product_name": "Taiwan Index Futures",
+                    "contract_symbol": "TXFH6-M",
+                    "contract_month": "202608",
+                    "interval": "1m",
+                    "open_price": 42800,
+                    "high_price": 42810,
+                    "low_price": 42790,
+                    "close_price": 42805,
+                    "total_volume": 10,
+                    "source": "test",
+                }
+                db.add_all(
+                    [
+                        TaiwanFuturesIntradayBar(
+                            **common,
+                            session="after_hours",
+                            bar_time=datetime(2026, 7, 17, 23, 59, tzinfo=TAIWAN_TZ),
+                        ),
+                        TaiwanFuturesIntradayBar(
+                            **common,
+                            session="after_hours",
+                            bar_time=datetime(2026, 7, 18, 0, 1, tzinfo=TAIWAN_TZ),
+                        ),
+                        TaiwanFuturesIntradayBar(
+                            **{**common, "contract_symbol": "TXFH6-F"},
+                            session="regular",
+                            bar_time=datetime(2026, 7, 18, 9, 0, tzinfo=TAIWAN_TZ),
+                        ),
+                    ]
+                )
+                db.commit()
+
+                rows = list_taiwan_futures_intraday_bars(
+                    db=db,
+                    symbol="TXF",
+                    limit=10,
+                    session="after_hours",
+                )
+
+                self.assertEqual(len(rows), 2)
+                self.assertEqual(
+                    [row.bar_time.hour for row in rows],
+                    [23, 0],
+                )
+                self.assertTrue(all(row.session == "after_hours" for row in rows))
         finally:
             engine.dispose()
 

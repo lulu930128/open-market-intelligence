@@ -162,7 +162,7 @@ def _split_index_ids(value: str) -> list[str]:
 
 @router.get("/calendar-status", response_model=MarketCalendarStatusRead)
 def get_market_calendar_status(
-    market: str = Query(default="all", pattern="^(all|tw|us)$"),
+    market: str = Query(default="all", pattern="^(all|tw|us|jp|kr)$"),
     now: datetime | None = Query(default=None),
 ):
     try:

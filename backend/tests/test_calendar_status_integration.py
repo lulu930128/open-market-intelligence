@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -172,8 +172,23 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
 
     def test_scheduler_jp_watchlist_resource_refresh_queues_job(self) -> None:
         fake_db = SimpleNamespace(close=Mock())
+        calendar_status = {
+            "market": "jp",
+            "date": "2026-07-15",
+            "is_trading_day": True,
+            "phase": "post_close",
+            "reason": "trading_day",
+            "release_windows": {
+                "jp_daily_price": {
+                    "expected_trade_date": "2026-07-15",
+                    "status": "released",
+                    "is_released": True,
+                }
+            },
+        }
 
         with (
+            patch.object(scheduler, "build_jp_calendar_status", return_value=calendar_status),
             patch.object(scheduler.settings, "scheduler_jp_market_refresh_outputsize", "compact"),
             patch.object(scheduler.settings, "scheduler_jp_market_refresh_provider", "auto"),
             patch.object(
@@ -201,6 +216,9 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
         self.assertEqual(kwargs["job_type"], "jp_market.scheduler.watchlist_resource_refresh")
         self.assertEqual(kwargs["target"], "all")
         self.assertEqual(request["schedule"], "jp_market_watchlist_resource_refresh")
+        self.assertEqual(request["market_date"], "2026-07-15")
+        self.assertEqual(request["expected_trade_date"], date(2026, 7, 15))
+        self.assertEqual(request["calendar_phase"], "post_close")
         self.assertIsNone(request["group_id"])
         self.assertTrue(request["include_children"])
         self.assertTrue(request["enabled_only"])
@@ -211,6 +229,24 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
         self.assertEqual(task_args, (None, True, True, True, True, "compact", "auto", 1.5))
         resolve_sleep.assert_called_once_with(market="jp")
         fake_db.close.assert_called_once()
+
+    def test_scheduler_skips_jp_refresh_when_calendar_is_closed(self) -> None:
+        calendar_status = {
+            "market": "jp",
+            "date": "2026-07-20",
+            "is_trading_day": False,
+            "phase": "market_closed",
+            "reason": "holiday",
+            "release_windows": {},
+        }
+
+        with (
+            patch.object(scheduler, "build_jp_calendar_status", return_value=calendar_status),
+            patch.object(scheduler.job_service, "enqueue_job") as enqueue,
+        ):
+            scheduler.enqueue_jp_market_watchlist_resource_refresh()
+
+        enqueue.assert_not_called()
 
     def test_scheduler_kr_watchlist_resource_refresh_queues_job(self) -> None:
         fake_db = SimpleNamespace(close=Mock())
@@ -298,6 +334,41 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
         session_local.assert_not_called()
         refresh.assert_not_called()
 
+    def test_taiwan_futures_provider_failure_backoff_is_bounded(self) -> None:
+        timezone = ZoneInfo("Asia/Taipei")
+        failed_at = datetime(2026, 7, 17, 19, 30, tzinfo=timezone)
+
+        with (
+            patch.object(scheduler, "_LAST_TAIWAN_FUTURES_FAILURE_AT", failed_at),
+            patch.object(
+                scheduler.settings,
+                "scheduler_taiwan_futures_failure_backoff_seconds",
+                300,
+            ),
+        ):
+            self.assertFalse(
+                scheduler._should_attempt_taiwan_futures_refresh(
+                    failed_at + timedelta(seconds=299)
+                )
+            )
+            self.assertTrue(
+                scheduler._should_attempt_taiwan_futures_refresh(
+                    failed_at + timedelta(seconds=300)
+                )
+            )
+
+    def test_taiwan_futures_collector_skips_during_provider_failure_backoff(self) -> None:
+        with (
+            patch.object(scheduler, "_is_taiwan_futures_live_window", return_value=True),
+            patch.object(scheduler, "_should_attempt_taiwan_futures_refresh", return_value=False),
+            patch.object(scheduler, "SessionLocal") as session_local,
+            patch.object(scheduler, "refresh_taiwan_futures_quotes") as refresh,
+        ):
+            scheduler.collect_taiwan_futures_quotes()
+
+        session_local.assert_not_called()
+        refresh.assert_not_called()
+
     def test_taiwan_futures_collector_refreshes_quotes_and_records_sampled_success(self) -> None:
         fake_db = SimpleNamespace(close=Mock(), rollback=Mock())
 
@@ -329,6 +400,37 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
         self.assertEqual(record_event.call_args.kwargs["resource"], "tw_futures_quote")
         self.assertEqual(record_event.call_args.kwargs["target"], "TXF,MXF")
         self.assertEqual(record_event.call_args.kwargs["status"], "success")
+        fake_db.close.assert_called_once()
+
+    def test_taiwan_futures_collector_records_failure_and_retry_time(self) -> None:
+        fake_db = SimpleNamespace(close=Mock(), rollback=Mock())
+
+        with (
+            patch.object(scheduler, "_LAST_TAIWAN_FUTURES_FAILURE_AT", None),
+            patch.object(scheduler, "_is_taiwan_futures_live_window", return_value=True),
+            patch.object(scheduler.settings, "scheduler_taiwan_futures_symbols", "TXF"),
+            patch.object(scheduler.settings, "scheduler_taiwan_futures_session", "auto"),
+            patch.object(scheduler.settings, "taiwan_futures_quote_provider", "taifex_mis"),
+            patch.object(
+                scheduler.settings,
+                "scheduler_taiwan_futures_failure_backoff_seconds",
+                300,
+            ),
+            patch.object(scheduler, "SessionLocal", return_value=fake_db),
+            patch.object(
+                scheduler,
+                "refresh_taiwan_futures_quotes",
+                side_effect=scheduler.TaiwanFuturesFetchError("HTTP 520"),
+            ),
+            patch.object(scheduler, "record_provider_event") as record_event,
+        ):
+            scheduler.collect_taiwan_futures_quotes()
+
+            self.assertIsNotNone(scheduler._LAST_TAIWAN_FUTURES_FAILURE_AT)
+            detail = record_event.call_args.kwargs["detail"]
+            self.assertIsNotNone(detail["retry_at"])
+
+        fake_db.rollback.assert_called_once()
         fake_db.close.assert_called_once()
 
     def test_taiwan_futures_collector_job_is_registered_as_interval_job(self) -> None:

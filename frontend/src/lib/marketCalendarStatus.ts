@@ -1,5 +1,7 @@
 import { fetchJson } from "@/lib/api";
 
+export type MarketCode = "tw" | "us" | "jp" | "kr";
+
 export type MarketCalendarReleaseWindow = {
   key: string;
   label: string;
@@ -17,6 +19,8 @@ export type MarketCalendarSession = {
   open_time: string;
   close_time: string;
   after_hours_close_time?: string | null;
+  lunch_start_time?: string | null;
+  lunch_end_time?: string | null;
   next_session_start_at: string;
   is_polling_window: boolean;
   is_extended_polling_window?: boolean;
@@ -24,7 +28,7 @@ export type MarketCalendarSession = {
 };
 
 export type MarketCalendarMarketStatus = {
-  market: "tw" | "us" | string;
+  market: MarketCode | string;
   timezone: string;
   checked_at: string;
   date: string;
@@ -36,18 +40,21 @@ export type MarketCalendarMarketStatus = {
   next_trading_day: string;
   session: MarketCalendarSession;
   release_windows: Record<string, MarketCalendarReleaseWindow>;
+  calendar_source?: string | null;
+  calendar_verified_years?: number[];
+  calendar_limit?: string | null;
 };
 
 export type MarketCalendarStatusEnvelope = {
   kind: "market_calendar_status";
   generated_at: string;
-  markets: Partial<Record<"tw" | "us", MarketCalendarMarketStatus>>;
+  markets: Partial<Record<MarketCode, MarketCalendarMarketStatus>>;
 };
 
-const snapshots: Partial<Record<"tw" | "us", MarketCalendarMarketStatus>> = {};
+const snapshots: Partial<Record<MarketCode, MarketCalendarMarketStatus>> = {};
 
 export function setMarketCalendarStatusSnapshot(
-  market: "tw" | "us",
+  market: MarketCode,
   status: MarketCalendarMarketStatus | null | undefined
 ) {
   if (!status) return;
@@ -62,13 +69,17 @@ export function setMarketCalendarStatusEnvelope(
 
   setMarketCalendarStatusSnapshot("tw", envelope.markets.tw);
   setMarketCalendarStatusSnapshot("us", envelope.markets.us);
+  setMarketCalendarStatusSnapshot("jp", envelope.markets.jp);
+  setMarketCalendarStatusSnapshot("kr", envelope.markets.kr);
 }
 
-export function getMarketCalendarStatusSnapshot(market: "tw" | "us") {
+export function getMarketCalendarStatusSnapshot(market: MarketCode) {
   return snapshots[market] ?? null;
 }
 
-export async function refreshMarketCalendarStatus(market: "all" | "tw" | "us" = "all") {
+export async function refreshMarketCalendarStatus(
+  market: "all" | MarketCode = "all"
+) {
   const envelope = await fetchJson<MarketCalendarStatusEnvelope>(
     "/api/market/calendar-status",
     { market }

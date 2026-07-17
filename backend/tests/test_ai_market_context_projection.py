@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from app.ai import agentic_tools, tools
 from app.ai.market_context import common
+from app.ai.market_context.crypto_context import _crypto_market_cap_matches_asset
+from app.crypto_market.assets import get_crypto_asset
 
 
 class AIMarketContextProjectionTests(unittest.TestCase):
@@ -48,6 +51,23 @@ class AIMarketContextProjectionTests(unittest.TestCase):
         common.append_source_ref_once(refs, {"type": "derived", "kind": "freshness"})
 
         self.assertEqual(len(refs), 2)
+
+    def test_crypto_market_cap_identity_prefers_registry_coin_id(self) -> None:
+        ton = get_crypto_asset("TON")
+
+        self.assertIsNotNone(ton)
+        self.assertTrue(
+            _crypto_market_cap_matches_asset(
+                SimpleNamespace(coin_id="the-open-network", symbol="gram"),
+                ton,
+            )
+        )
+        self.assertFalse(
+            _crypto_market_cap_matches_asset(
+                SimpleNamespace(coin_id="bitcoin", symbol="btc"),
+                ton,
+            )
+        )
 
 
 if __name__ == "__main__":

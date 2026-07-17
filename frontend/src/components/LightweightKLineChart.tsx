@@ -170,6 +170,7 @@ export default function LightweightKLineChart({
   benchmarkLabel,
   volumePanelLabel,
   volumeValueKey = "volume",
+  pricePrecision,
   drawingTool = "cursor",
   drawings = emptyDrawings,
   selectedDrawingId = null,
@@ -256,6 +257,7 @@ export default function LightweightKLineChart({
       drawingContext?.symbol ?? label,
       drawingContext?.timeframe ?? label,
       volumeValueKey,
+      pricePrecision ?? "",
     ].join(":");
   }, [
     drawingContext?.market,
@@ -264,6 +266,7 @@ export default function LightweightKLineChart({
     label,
     timeMode,
     volumeValueKey,
+    pricePrecision,
   ]);
   const {
     applyChartPointerInteractivity,
@@ -290,6 +293,7 @@ export default function LightweightKLineChart({
     maColors,
     omiChartColors,
     params,
+    pricePrecision,
     resolvedVolumePanelLabel,
     seriesData,
     timeMode,

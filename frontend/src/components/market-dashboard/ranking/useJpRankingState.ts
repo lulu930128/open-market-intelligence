@@ -196,7 +196,7 @@ export function useJpRankingState({
   }, [active, dataRefreshNonce, groupId, load, rankBy]);
 
   useEffect(() => {
-    if (!active || groupId === null || ranking?.is_current !== false) return;
+    if (!active || groupId === null || ranking?.refresh_recommended !== true) return;
 
     const refreshTimer = window.setTimeout(() => {
       void refreshDailyPrices(groupId, rankBy, ranking.target_trade_date);
@@ -205,7 +205,14 @@ export function useJpRankingState({
     return () => {
       window.clearTimeout(refreshTimer);
     };
-  }, [active, groupId, rankBy, ranking?.is_current, ranking?.target_trade_date, refreshDailyPrices]);
+  }, [
+    active,
+    groupId,
+    rankBy,
+    ranking?.refresh_recommended,
+    ranking?.target_trade_date,
+    refreshDailyPrices,
+  ]);
 
   return {
     state: {

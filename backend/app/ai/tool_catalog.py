@@ -206,7 +206,7 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
             {
                 "name": "omi.read_jp_stock_context",
                 "title": "Read Japan Stock Context",
-                "description": "Read an evidence pack for one Japan stock from local OMI data.",
+                "description": "Read a Japan stock evidence pack from local OMI data, with optional bounded intraday provider evidence.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -219,7 +219,7 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
             {
                 "name": "omi.read_jp_index_context",
                 "title": "Read Japan Index Context",
-                "description": "Read an OHLC-only evidence pack for one Japan index or index proxy.",
+                "description": "Read an OHLC-focused evidence pack for one Japan index or index proxy, with optional bounded intraday provider evidence.",
                 "input_schema": {
                     "type": "object",
                     "properties": {

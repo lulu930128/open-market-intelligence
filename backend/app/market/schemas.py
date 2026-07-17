@@ -21,6 +21,8 @@ class MarketCalendarSessionRead(BaseModel):
     open_time: str
     close_time: str
     after_hours_close_time: str | None = None
+    lunch_start_time: str | None = None
+    lunch_end_time: str | None = None
     next_session_start_at: datetime
     is_polling_window: bool
     is_extended_polling_window: bool = False
@@ -40,6 +42,9 @@ class MarketCalendarMarketStatusRead(BaseModel):
     next_trading_day: date
     session: MarketCalendarSessionRead
     release_windows: dict[str, MarketCalendarReleaseWindowRead] = Field(default_factory=dict)
+    calendar_source: str | None = None
+    calendar_verified_years: list[int] = Field(default_factory=list)
+    calendar_limit: str | None = None
 
 
 class MarketCalendarStatusRead(BaseModel):
@@ -201,6 +206,11 @@ class MarketOhlcChartRead(BaseModel):
     points: list[MarketDailyChartRead]
     backfill: dict | None = None
     intraday_overlay: dict[str, Any] | None = None
+    latest_data_date: date | None = None
+    expected_data_date: date | None = None
+    freshness_status: str = "missing"
+    is_current: bool = False
+    refresh_recommended: bool = True
 
 
 class ChartDrawingSnapshotWrite(BaseModel):

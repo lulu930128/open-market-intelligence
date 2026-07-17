@@ -42,7 +42,11 @@ def _include_tw_intraday(payload: AiAskRequest, *, policy: dict[str, Any] | None
     )
 
 
-def _us_market_data_params(payload: AiAskRequest, *, policy: dict[str, Any] | None = None) -> dict[str, Any]:
+def _external_intraday_market_data_params(
+    payload: AiAskRequest,
+    *,
+    policy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     params = dict(payload.market_data_params) if isinstance(payload.market_data_params, dict) else {}
     has_explicit_intraday = "include_intraday" in params
     requested_intraday = bool(params.get("include_intraday")) if has_explicit_intraday else payload.analysis_horizon == "intraday"
@@ -128,7 +132,10 @@ def _read_data_only(
             db=db,
             symbol=symbol,
             tool_runs=tool_runs,
-            market_data_params=_us_market_data_params(payload, policy=policy),
+            market_data_params=_external_intraday_market_data_params(
+                payload,
+                policy=policy,
+            ),
         )
 
     if scope_type in {"jp_stock", "jp_index"}:
@@ -140,7 +147,10 @@ def _read_data_only(
             symbol=symbol,
             is_index=scope_type == "jp_index",
             tool_runs=tool_runs,
-            market_data_params=payload.market_data_params,
+            market_data_params=_external_intraday_market_data_params(
+                payload,
+                policy=policy,
+            ),
         )
 
     if scope_type in {"kr_stock", "kr_index"}:
@@ -232,7 +242,10 @@ def _build_brief(
             strategy_profile=payload.strategy_profile,
             analysis_horizon=payload.analysis_horizon,
             tool_runs=tool_runs,
-            market_data_params=_us_market_data_params(payload, policy=policy),
+            market_data_params=_external_intraday_market_data_params(
+                payload,
+                policy=policy,
+            ),
             response_preferences=_response_preferences(payload),
         )
 
@@ -246,7 +259,10 @@ def _build_brief(
             is_index=scope_type == "jp_index",
             strategy_profile=payload.strategy_profile,
             tool_runs=tool_runs,
-            market_data_params=payload.market_data_params,
+            market_data_params=_external_intraday_market_data_params(
+                payload,
+                policy=policy,
+            ),
             response_preferences=_response_preferences(payload),
         )
 

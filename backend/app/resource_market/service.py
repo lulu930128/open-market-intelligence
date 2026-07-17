@@ -129,7 +129,7 @@ def _split_symbols(symbols: str | None) -> list[str] | None:
 def _supported_instrument_for_symbol(symbol: str | None):
     if not symbol:
         return None
-    matches = list_resource_instruments(root_folder="commodity", symbol=symbol)
+    matches = list_resource_instruments(symbol=symbol)
     return matches[0] if len(matches) == 1 else None
 
 
@@ -245,11 +245,11 @@ def _record_event(
 def _matching_resource_instruments(symbols: str | None) -> list:
     symbol_values = _split_symbols(symbols)
     if not symbol_values:
-        return list_resource_instruments(root_folder="commodity")
+        return list_resource_instruments()
 
     instruments = []
     for symbol in symbol_values:
-        matches = list_resource_instruments(root_folder="commodity", symbol=symbol)
+        matches = list_resource_instruments(symbol=symbol)
         instruments.extend(matches)
     return instruments
 

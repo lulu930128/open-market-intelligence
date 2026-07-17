@@ -972,7 +972,9 @@ const SUBSCRIPTION_GROUP_ORDER = new Map([
 ]);
 
 function subscriptionGroupKey(item: MarketDataSubscriptionItem) {
-  if (item.key === USDT_SUBSCRIPTION_KEY) return "resource.currency";
+  if (item.key === USDT_SUBSCRIPTION_KEY || item.key.startsWith("currency:")) {
+    return "resource.currency";
+  }
   if (item.market === "crypto") return "crypto";
   return `${item.market}.${item.group}`;
 }
@@ -1055,6 +1057,9 @@ function DataSubscriptionRow({
   const activeResources = Object.entries(item.resources)
     .filter(([, enabled]) => enabled)
     .map(([resource]) => resource);
+  const availableModeChoices = item.market === "resource"
+    ? subscriptionModeChoices.filter((choice) => choice !== "manual")
+    : subscriptionModeChoices;
   const showQuoteIntervals = isResourceQuoteSubscription(item);
   const selectedQuoteInterval =
     intervalDraft?.[RESOURCE_SELECTED_QUOTE_SECONDS_KEY] ??
@@ -1105,7 +1110,7 @@ function DataSubscriptionRow({
             }
             className="h-9 w-full border border-omi-border bg-omi-surface px-3 text-sm font-bold text-omi-text outline-none hover:border-omi-border-strong focus:border-omi-accent"
           >
-            {subscriptionModeChoices.map((choice) => (
+            {availableModeChoices.map((choice) => (
               <option key={choice} value={choice}>
                 {t(`settings.dataSubscriptions.modes.${choice}`)}
               </option>

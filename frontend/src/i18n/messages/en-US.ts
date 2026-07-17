@@ -105,6 +105,12 @@ export const enUS = {
       advanceDecline: "Advancers / decliners",
       breadth: "Breadth",
       advancePct: "{value}% advancing",
+      coverage: "Data coverage",
+      coverageValue: "{current} / {active}",
+      partialCoverage: "Partial coverage (local daily data)",
+      currentCoverage: "Complete coverage",
+      strongestSector: "Leading sector",
+      expectedDate: "Expected trade date {date}",
       loading: "Loading market indices...",
       empty: "No market index data",
       updated: "Market context updated {asOf}",
@@ -1405,6 +1411,7 @@ export const enUS = {
         yahooWithVolume: "1m trend + exchange volume",
         yahoo: "1m trend",
         twseSnapshot: "Realtime snapshot",
+        naverIndex: "Naver Korea index intraday",
         fallback: "Trend data",
       },
       indicators: {
@@ -1980,9 +1987,9 @@ export const enUS = {
         "{symbol} intraday trend updated: {count} points, source {source}, updated {updatedAt}",
       intradayInsufficient:
         "{symbol} intraday trend is insufficient: {source} returned only {count} points.",
-      intradayLoadFailed: "Failed to load Japan index intraday trend: {message}",
+      intradayLoadFailed: "Failed to load Japan intraday trend: {message}",
       intradayRouteMissing:
-        "Japan index intraday API returned 404: the frontend proxy is pointing at a backend that has not loaded the JP intraday route yet. Restart OMI backend/frontend and retry. Raw error: {message}",
+        "Japan intraday API returned 404: the frontend proxy is pointing at a backend that has not loaded the JP intraday route yet. Restart OMI backend/frontend and retry. Raw error: {message}",
     },
     errors: {
       listLoadFailed: "Failed to load JP stock list",
@@ -2003,6 +2010,7 @@ export const enUS = {
     },
   },
   usStockDetail: {
+    statusSource: "US stock detail",
     usDailyWeeklyMonthly: "US daily / weekly / monthly",
     noStockSelected: "No stock selected",
     selectStockPrompt: "Select a stock from the left watchlist or top search",
@@ -2288,6 +2296,7 @@ export const enUS = {
     },
     errors: {
       dailyBackfillFailed: "Taiwan futures daily K backfill failed",
+      intradayRefreshFailed: "Taiwan futures intraday refresh failed; showing local cache",
     },
   },
   locales: {
@@ -2831,6 +2840,13 @@ export const enUS = {
       commodity: "Commodities",
       commoditySubtitle: "Commodity and currency references",
       currency: "Currencies",
+      groups: {
+        metals: "Metals",
+        energy: "Energy",
+        twdToForeign: "TWD to foreign",
+        foreignToTwd: "Foreign to TWD",
+        foreignToForeign: "Foreign to foreign",
+      },
       providerPending: "provider pending",
       providerBestEffortDelayed: "near-live / delayed",
       watchlist: "Crypto Watchlist",
@@ -2845,6 +2861,14 @@ export const enUS = {
       watchlistSaveFailed: "Failed to update crypto watchlist",
       watchlistLoadFailed: "Failed to load crypto watchlist",
       watchlistLoadPartial: "Crypto watchlist partially failed to load; available data was preserved: {resources}",
+      workspaceSummary: "Universe {registry} · live {ready} · attention {attention}",
+      watchlistRegistryCounts: "{watchlist} / {registry}",
+      maturity: {
+        ready: "live",
+        partial: "partial",
+        stale: "stale",
+        missing: "missing",
+      },
       notes: {
         BTC: "Trade candidate / BTC/TWD / BTC/USDT",
         ETH: "Watch / ETH/TWD / ETH/USDT",
@@ -2862,6 +2886,7 @@ export const enUS = {
         toggleCommodity: "Toggle commodity folder",
         toggleCommodityGroup: "Toggle {label} commodity folder",
         toggleCurrency: "Toggle currency folder",
+        toggleCurrencyGroup: "Toggle {label} currency folder",
         toggleWatchlist: "Toggle crypto watchlist folder",
       },
     },

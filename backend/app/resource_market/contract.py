@@ -6,10 +6,12 @@ from typing import Any
 
 RESOURCE_MARKET = "resource"
 COMMODITY_FOLDER = "commodity"
+CURRENCY_FOLDER = "currency"
 PROVIDER_PENDING = "provider_pending"
 YAHOO_CHART_PROVIDER = "yahoo_chart"
 PROVIDER_BEST_EFFORT = "best_effort_delayed"
 FUTURES = "futures"
+SPOT = "spot"
 SUPPORTED_RESOURCE_OHLCV_INTERVALS = ("1m", "5m", "15m", "30m", "1h", "1d", "1w", "1M")
 RESOURCE_CHART_PROFILES = {
     "overview": {
@@ -69,7 +71,7 @@ class ResourceInstrument:
         }
 
 
-SUPPORTED_RESOURCE_INSTRUMENTS: tuple[ResourceInstrument, ...] = (
+SUPPORTED_COMMODITY_INSTRUMENTS: tuple[ResourceInstrument, ...] = (
     ResourceInstrument(
         key="commodity:metals:GC",
         root_folder=COMMODITY_FOLDER,
@@ -199,6 +201,114 @@ SUPPORTED_RESOURCE_INSTRUMENTS: tuple[ResourceInstrument, ...] = (
 )
 
 
+def _currency_instrument(
+    *,
+    group: str,
+    base_asset: str,
+    quote_asset: str,
+    display_name: str,
+    provider_symbol: str,
+) -> ResourceInstrument:
+    symbol = f"{base_asset}-{quote_asset}"
+    return ResourceInstrument(
+        key=f"currency:{group}:{symbol}",
+        root_folder=CURRENCY_FOLDER,
+        group=group,
+        asset_class="foreign_exchange",
+        name=f"{base_asset}/{quote_asset} Foreign Exchange",
+        display_name=display_name,
+        symbol=symbol,
+        provider=YAHOO_CHART_PROVIDER,
+        exchange="FX",
+        provider_symbol=provider_symbol,
+        base_asset=base_asset,
+        quote_asset=quote_asset,
+        instrument_type=SPOT,
+        contract_type=SPOT,
+        resources=("quote", "ohlcv"),
+        tradable=False,
+        trade_candidate=False,
+        provider_status=PROVIDER_BEST_EFFORT,
+        role=(
+            f"{base_asset}/{quote_asset} foreign-exchange watch-only Yahoo chart context; "
+            "delayed/best-effort."
+        ),
+    )
+
+
+SUPPORTED_CURRENCY_INSTRUMENTS: tuple[ResourceInstrument, ...] = (
+    _currency_instrument(
+        group="twd_to_foreign",
+        base_asset="TWD",
+        quote_asset="USD",
+        display_name="台幣／美元",
+        provider_symbol="TWDUSD=X",
+    ),
+    _currency_instrument(
+        group="twd_to_foreign",
+        base_asset="TWD",
+        quote_asset="JPY",
+        display_name="台幣／日圓",
+        provider_symbol="TWDJPY=X",
+    ),
+    _currency_instrument(
+        group="twd_to_foreign",
+        base_asset="TWD",
+        quote_asset="KRW",
+        display_name="台幣／韓元",
+        provider_symbol="TWDKRW=X",
+    ),
+    _currency_instrument(
+        group="foreign_to_twd",
+        base_asset="USD",
+        quote_asset="TWD",
+        display_name="美元／台幣",
+        provider_symbol="USDTWD=X",
+    ),
+    _currency_instrument(
+        group="foreign_to_twd",
+        base_asset="JPY",
+        quote_asset="TWD",
+        display_name="日圓／台幣",
+        provider_symbol="JPYTWD=X",
+    ),
+    _currency_instrument(
+        group="foreign_to_twd",
+        base_asset="KRW",
+        quote_asset="TWD",
+        display_name="韓元／台幣",
+        provider_symbol="KRWTWD=X",
+    ),
+    _currency_instrument(
+        group="foreign_to_foreign",
+        base_asset="USD",
+        quote_asset="JPY",
+        display_name="美元／日圓",
+        provider_symbol="USDJPY=X",
+    ),
+    _currency_instrument(
+        group="foreign_to_foreign",
+        base_asset="USD",
+        quote_asset="KRW",
+        display_name="美元／韓元",
+        provider_symbol="USDKRW=X",
+    ),
+    _currency_instrument(
+        group="foreign_to_foreign",
+        base_asset="EUR",
+        quote_asset="USD",
+        display_name="歐元／美元",
+        provider_symbol="EURUSD=X",
+    ),
+)
+
+
+SUPPORTED_RESOURCE_INSTRUMENTS: tuple[ResourceInstrument, ...] = (
+    *SUPPORTED_COMMODITY_INSTRUMENTS,
+    *SUPPORTED_CURRENCY_INSTRUMENTS,
+)
+
+
 def normalize_resource_symbol(value: str | None) -> str:
     return (value or "").strip().upper().replace("/", "-").replace("_", "-")
 
@@ -233,7 +343,7 @@ def resource_provider_contract() -> dict[str, Any]:
         "ai_execution_enabled": False,
         "trade_candidate_symbols": [],
         "notes": [
-            "Resource/commodity data is watch-only and must not place orders.",
+            "Resource, commodity, and currency data is watch-only and must not place orders.",
             "BTC is the only current future trade candidate and remains in the isolated crypto domain.",
             "GET endpoints read the local cache or static contract only; Yahoo chart refresh is behind explicit bounded POST routes.",
         ],
@@ -248,10 +358,15 @@ def resource_provider_contract() -> dict[str, Any]:
                 "label": "商品",
                 "notes": "Watch-only resource futures context.",
             },
+            {
+                "key": CURRENCY_FOLDER,
+                "label": "貨幣",
+                "notes": "Watch-only foreign-exchange reference grouped by base and quote direction.",
+            },
         ],
         "providers": {
             YAHOO_CHART_PROVIDER: {
-                "role": "Best-effort delayed commodity futures reference from Yahoo chart.",
+                "role": "Best-effort delayed commodity futures and foreign-exchange reference from Yahoo chart.",
                 "resources": ["quote", "ohlcv"],
                 "ohlcv_intervals": list(SUPPORTED_RESOURCE_OHLCV_INTERVALS),
                 "status": PROVIDER_BEST_EFFORT,

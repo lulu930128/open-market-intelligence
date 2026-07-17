@@ -133,7 +133,6 @@ import type {
 import { useMemo, useState } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
-type JPStatusMessage = { type: "success" | "warning" | "error"; text: string } | null;
 type RankBy = TaiwanRankBy;
 type USRankBy = UsRankBy;
 type JPRankBy = JpRankBy;
@@ -272,9 +271,9 @@ export default function MarketDashboardClient({
   const [twChartFocusMode, setTwChartFocusMode] = useState(false);
   const [usChartFocusMode, setUsChartFocusMode] = useState(false);
   const [jpChartFocusMode, setJpChartFocusMode] = useState(false);
+  const [krChartFocusMode, setKrChartFocusMode] = useState(false);
   const [selectedUsCompanyProfile, setSelectedUsCompanyProfile] =
     useState<USCompanyProfileRead | null>(null);
-  const [jpStatusMessage, setJpStatusMessage] = useState<JPStatusMessage>(null);
   const marketSelection = useMarketSelection({
     initialMarket,
     initialSelectedGroupId,
@@ -298,7 +297,6 @@ export default function MarketDashboardClient({
       setTwChartFocusMode(false);
       setUsChartFocusMode(false);
       setJpChartFocusMode(false);
-      setJpStatusMessage(null);
     },
   });
   const {
@@ -888,7 +886,6 @@ export default function MarketDashboardClient({
     setTwChartFocusMode(false);
     setUsChartFocusMode(false);
     setJpChartFocusMode(false);
-    setJpStatusMessage(null);
     const nextRadarMode =
       market === "tw"
         ? radarMode
@@ -952,7 +949,6 @@ export default function MarketDashboardClient({
       jpRadarActions.reset();
     }
     setJpChartFocusMode(false);
-    setJpStatusMessage(null);
   }
 
   function onJpSymbolChange(symbol: string, securityName: string | null) {
@@ -962,7 +958,6 @@ export default function MarketDashboardClient({
       regionalRadarRouteMode(jpRadarMode)
     );
     setJpChartFocusMode(false);
-    setJpStatusMessage(null);
   }
 
   function onJpStockChange(stock: JPStockMasterRead | null) {
@@ -970,7 +965,6 @@ export default function MarketDashboardClient({
 
     marketSelection.selectJpStock(stock);
     setJpChartFocusMode(false);
-    setJpStatusMessage(null);
   }
 
   function onKrGroupChange(group: KRWatchlistGroupNode | null) {
@@ -1662,7 +1656,6 @@ export default function MarketDashboardClient({
               selectedGroupId={selectedJpGroupId}
               selectedSymbol={selectedJpSymbol}
               selectedStock={selectedJpStock}
-              externalStatusMessage={jpStatusMessage}
               onMarketChange={handleMarketChange}
               onSelectGroup={onJpGroupChange}
               onSelectSymbol={onJpSymbolChange}
@@ -1809,22 +1802,24 @@ export default function MarketDashboardClient({
                   watchlistRankingPanel={isSelectedJpIndex ? undefined : jpRankingPanel}
                   onChartFocusModeChange={setJpChartFocusMode}
                   onSelectStock={onJpStockChange}
-                  onStatusMessage={setJpStatusMessage}
                 />
               </>
             ) : activeMarket === "kr" ? (
               <>
-                <KRMarketTape
-                  selectedSymbol={selectedKrSymbol}
-                  selectedStock={selectedKrStock}
-                  selectedGroupName={selectedKrGroupName}
-                  onError={handleKrMarketTapeError}
-                />
+                <div className={krChartFocusMode ? "hidden" : ""}>
+                  <KRMarketTape
+                    selectedSymbol={selectedKrSymbol}
+                    selectedStock={selectedKrStock}
+                    selectedGroupName={selectedKrGroupName}
+                    onError={handleKrMarketTapeError}
+                  />
+                </div>
                 <KRMarketPanel
                   initialSymbol={selectedKrSymbol}
                   selectedGroupId={selectedKrGroupId}
                   refreshNonce={krDataRefreshNonce}
                   watchlistRankingPanel={krRankingPanel}
+                  onChartFocusModeChange={setKrChartFocusMode}
                   onSelectStock={onKrStockChange}
                 />
               </>

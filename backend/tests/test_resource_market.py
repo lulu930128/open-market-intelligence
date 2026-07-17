@@ -37,19 +37,33 @@ class ResourceMarketTests(unittest.TestCase):
         self.db.close()
         self.engine.dispose()
 
-    def test_resource_contract_is_watch_only_with_default_commodities(self) -> None:
+    def test_resource_contract_is_watch_only_with_commodities_and_currencies(self) -> None:
         contract = resource_provider_contract()
         symbols = {instrument["symbol"] for instrument in contract["instruments"]}
+        folders = {folder["key"] for folder in contract["root_folders"]}
+        commodity_rows = [
+            row for row in contract["instruments"] if row["root_folder"] == "commodity"
+        ]
+        currency_rows = [
+            row for row in contract["instruments"] if row["root_folder"] == "currency"
+        ]
 
         self.assertFalse(contract["execution_enabled"])
         self.assertFalse(contract["ai_execution_enabled"])
         self.assertEqual(contract["trade_candidate_symbols"], [])
-        self.assertIn("crypto", {folder["key"] for folder in contract["root_folders"]})
-        self.assertIn("commodity", {folder["key"] for folder in contract["root_folders"]})
+        self.assertIn("crypto", folders)
+        self.assertIn("commodity", folders)
+        self.assertIn("currency", folders)
         self.assertTrue({"GC", "SI", "HG", "CL"}.issubset(symbols))
+        self.assertTrue({"TWD-USD", "TWD-JPY", "TWD-KRW"}.issubset(symbols))
         self.assertTrue(all(not row["tradable"] for row in contract["instruments"]))
         self.assertTrue(all(row["provider"] == "yahoo_chart" for row in contract["instruments"]))
-        self.assertTrue(all(row["quote_asset"] == "USD" for row in contract["instruments"]))
+        self.assertTrue(all(row["quote_asset"] == "USD" for row in commodity_rows))
+        self.assertEqual(len(currency_rows), 9)
+        self.assertEqual(
+            {row["group"] for row in currency_rows},
+            {"twd_to_foreign", "foreign_to_twd", "foreign_to_foreign"},
+        )
         self.assertEqual(
             contract["chart_profiles"]["overview"]["intervals"],
             ["1m", "1d", "1w", "1M"],
@@ -63,6 +77,60 @@ class ResourceMarketTests(unittest.TestCase):
         self.assertEqual(len(matches), 1)
         self.assertEqual(matches[0].display_name, "銅")
         self.assertEqual(matches[0].symbol, "HG")
+
+        currency_matches = list_resource_instruments(
+            root_folder="currency",
+            group="twd_to_foreign",
+            symbol="twd/jpy",
+        )
+        self.assertEqual(len(currency_matches), 1)
+        self.assertEqual(currency_matches[0].provider_symbol, "TWDJPY=X")
+        self.assertEqual(currency_matches[0].quote_asset, "JPY")
+
+    def test_currency_quote_refresh_preserves_base_quote_direction(self) -> None:
+        payload = {
+            "chart": {
+                "result": [
+                    {
+                        "meta": {
+                            "symbol": "TWDUSD=X",
+                            "regularMarketPrice": 0.0311,
+                            "previousClose": 0.0310,
+                        },
+                        "timestamp": [1782991050],
+                        "indicators": {
+                            "quote": [
+                                {
+                                    "open": [0.0310],
+                                    "high": [0.0312],
+                                    "low": [0.0309],
+                                    "close": [0.0311],
+                                    "volume": [None],
+                                }
+                            ]
+                        },
+                    }
+                ],
+                "error": None,
+            }
+        }
+
+        with patch(
+            "app.resource_market.service.fetch_yahoo_chart_payload_for_interval",
+            return_value=(
+                payload,
+                "https://query1.finance.yahoo.com/v8/finance/chart/TWDUSD%3DX",
+            ),
+        ):
+            result = resource_service.refresh_resource_quotes(self.db, symbols="TWD/USD")
+
+        quotes = list_latest_resource_quotes(self.db, symbols="TWD-USD")
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(len(quotes), 1)
+        self.assertEqual(quotes[0].root_folder, "currency")
+        self.assertEqual(quotes[0].base_asset, "TWD")
+        self.assertEqual(quotes[0].quote_asset, "USD")
+        self.assertEqual(quotes[0].provider_symbol, "TWDUSD=X")
 
     def test_resource_interval_supports_overview_and_professional_modes(self) -> None:
         self.assertEqual(normalize_resource_interval("1m"), "1m")

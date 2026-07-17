@@ -70,6 +70,7 @@ type Props<TTimeframe extends string> = {
   benchmarkLabel?: string;
   volumePanelLabel?: string;
   volumeValueKey?: "volume" | "trade_value";
+  pricePrecision?: number;
   drawingTool: ChartDrawingTool;
   drawings: ChartDrawing[];
   selectedDrawingId: string | null;
@@ -124,6 +125,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
   onTimeframeChange,
   onToggleIndicatorMenu,
   onUndoDrawing,
+  pricePrecision,
   priceSummary,
   selectedDrawingId,
   showMovingAverages,
@@ -343,6 +345,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
           benchmarkLabel={benchmarkLabel}
           volumePanelLabel={volumePanelLabel}
           volumeValueKey={volumeValueKey}
+          pricePrecision={pricePrecision}
           drawingTool={drawingTool}
           drawings={drawings}
           selectedDrawingId={selectedDrawingId}

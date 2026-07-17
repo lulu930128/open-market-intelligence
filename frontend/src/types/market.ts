@@ -472,6 +472,11 @@ export type OhlcChartResponse = {
   points: ChartPoint[];
   backfill: Record<string, unknown> | null;
   intraday_overlay: OhlcIntradayOverlay | null;
+  latest_data_date: string | null;
+  expected_data_date: string | null;
+  freshness_status: "current" | "stale" | "missing" | "future" | string;
+  is_current: boolean;
+  refresh_recommended: boolean;
 };
 
 export type MarketBreadth = {
@@ -708,6 +713,8 @@ export type IntradayTrendPoint = {
   open: number | null;
   high: number | null;
   low: number | null;
+  cumulative_volume?: number | null;
+  trade_value?: number | null;
 };
 
 export type IntradayTrendResponse = {
@@ -725,10 +732,20 @@ export type IntradayTrendResponse = {
   previous_close_provider?: string | null;
   regular_session_close?: number | null;
   regular_session_close_time?: string | null;
+  regular_session_close_source?: string | null;
+  regular_session_close_provider?: string | null;
   point_count: number;
   points: IntradayTrendPoint[];
+  as_of?: string | null;
+  total_volume?: number | null;
+  volume_unit?: string;
+  volume_semantics?: string;
+  trade_value_unit?: string;
+  is_partial?: boolean;
   source_url?: string | null;
   warnings?: string[];
+  fetched_pages?: number;
+  polling_interval_seconds?: number | null;
 };
 
 export type TaiwanStockQuoteDepthLevel = {
@@ -1173,6 +1190,8 @@ export type JPWatchlistRankingItemRead = {
   change_pct: number | null;
   volume: number | null;
   status: string;
+  latest_fetched_at: string | null;
+  freshness_status: "current" | "stale" | "missing" | "future" | string;
   source: string | null;
   error_message: string | null;
 };
@@ -1191,6 +1210,10 @@ export type JPWatchlistRankingRead = {
   is_current: boolean;
   current_symbol_count: number;
   stale_symbol_count: number;
+  missing_symbol_count: number;
+  future_symbol_count: number;
+  coverage_status: "current" | "partial" | "missing" | string;
+  refresh_recommended: boolean;
   results: JPWatchlistRankingItemRead[];
 };
 
@@ -1213,6 +1236,93 @@ export type JPOhlcChartRead = {
   point_count: number;
   points: JPOhlcPointRead[];
   backfill: Record<string, unknown> | null;
+  latest_data_date: string | null;
+  expected_data_date: string | null;
+  freshness_status: "current" | "stale" | "missing" | "future" | string;
+  is_current: boolean;
+  refresh_recommended: boolean;
+};
+
+export type JPMarketCoverageRead = {
+  scope: string;
+  active_stock_count: number;
+  observed_symbol_count: number;
+  current_symbol_count: number;
+  stale_symbol_count: number;
+  missing_symbol_count: number;
+  active_coverage_ratio: number;
+  observed_current_ratio: number;
+  status: string;
+  is_partial: boolean;
+};
+
+export type JPMarketBreadthRead = {
+  trade_date: string | null;
+  advance_count: number;
+  decline_count: number;
+  unchanged_count: number;
+  no_comparison_count: number;
+  total_count: number;
+  coverage_count: number;
+  source: string;
+  is_partial: boolean;
+};
+
+export type JPMarketSectorBreadthRead = {
+  sector: string;
+  covered_count: number;
+  advance_count: number;
+  decline_count: number;
+  unchanged_count: number;
+  average_change_pct: number | null;
+};
+
+export type JPMarketIndexSnapshotRead = {
+  symbol: string;
+  label: string;
+  role: string;
+  latest_data_date: string | null;
+  expected_data_date: string | null;
+  freshness_status: string;
+  is_current: boolean;
+  close: number | null;
+  previous_close: number | null;
+  change: number | null;
+  change_pct: number | null;
+  volume: number | null;
+  provider: string | null;
+  point_count: number;
+};
+
+export type JPMarketMoverRead = {
+  symbol: string;
+  security_name: string | null;
+  sector: string | null;
+  trade_date: string;
+  close: number;
+  previous_close: number;
+  change: number;
+  change_pct: number;
+  volume: number | null;
+  provider: string;
+};
+
+export type JPMarketOverviewRead = {
+  kind: "jp_market_overview";
+  generated_at: string;
+  expected_trade_date: string;
+  calendar_status: Record<string, unknown>;
+  coverage: JPMarketCoverageRead;
+  watchlist_coverage: Record<string, unknown>;
+  breadth: JPMarketBreadthRead;
+  sectors: JPMarketSectorBreadthRead[];
+  indices: JPMarketIndexSnapshotRead[];
+  top_gainers: JPMarketMoverRead[];
+  top_losers: JPMarketMoverRead[];
+  source_health: Record<string, unknown>;
+  refresh_recommended: boolean;
+  refresh_scope: string;
+  warnings: string[];
 };
 
 export type JPResourceSlotRead = {
@@ -1544,6 +1654,11 @@ export type KROhlcChartRead = {
   point_count: number;
   points: KROhlcPointRead[];
   backfill: Record<string, unknown> | null;
+  latest_data_date: string | null;
+  expected_data_date: string | null;
+  freshness_status: "current" | "stale" | "missing" | "future" | string;
+  is_current: boolean;
+  refresh_recommended: boolean;
 };
 
 export type KRIndexOhlcChartRead = {
@@ -1559,6 +1674,11 @@ export type KRIndexOhlcChartRead = {
   point_count: number;
   points: KROhlcPointRead[];
   backfill: Record<string, unknown> | null;
+  latest_data_date: string | null;
+  expected_data_date: string | null;
+  freshness_status: "current" | "stale" | "missing" | "future" | string;
+  is_current: boolean;
+  refresh_recommended: boolean;
 };
 
 export type KRResourceSlotRead = {
@@ -1664,6 +1784,11 @@ export type USOhlcChartRead = {
   points: USOhlcPointRead[];
   backfill: Record<string, unknown> | null;
   intraday_overlay: Record<string, unknown> | null;
+  latest_data_date: string | null;
+  expected_data_date: string | null;
+  freshness_status: "current" | "stale" | "missing" | "future" | string;
+  is_current: boolean;
+  refresh_recommended: boolean;
 };
 
 export type USSecCompanyFactRead = {

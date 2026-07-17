@@ -2773,7 +2773,7 @@ class USMarketStorageIsolationTests(unittest.TestCase):
             USDailyPriceRecord(
                 provider="yahoo_chart",
                 symbol="MU",
-                trade_date=date(2025, month, 1),
+                trade_date=date(2025, month, 30 if month == 6 else 1),
                 open_price=100.0,
                 high_price=110.0,
                 low_price=90.0,
@@ -2803,6 +2803,58 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         refresh_mock.assert_not_called()
         self.assertEqual(chart["point_count"], 3)
         self.assertIsNone(chart["backfill"])
+
+    def test_us_daily_ohlc_refreshes_when_full_window_is_stale(self) -> None:
+        records = [
+            USDailyPriceRecord(
+                provider="yahoo_chart",
+                symbol="SOX",
+                trade_date=trade_date,
+                open_price=100.0 + index,
+                high_price=105.0 + index,
+                low_price=95.0 + index,
+                close_price=102.0 + index,
+                adjusted_close=None,
+                trade_volume=1000 + index,
+                dividend_amount=None,
+                split_coefficient=None,
+                source_url="https://query1.finance.yahoo.com/v8/finance/chart/%5ESOX",
+                raw_payload_hash=f"stale-sox-{index}",
+            )
+            for index, trade_date in enumerate(
+                [date(2026, 7, 13), date(2026, 7, 14)],
+                start=1,
+            )
+        ]
+        upsert_us_daily_price_records(self.db, records)
+
+        with patch(
+            "app.us_market.service.refresh_us_daily_prices",
+            return_value={
+                "status": "success",
+                "provider": "yahoo_chart",
+                "symbol": "SOX",
+                "fetched_count": 0,
+                "inserted_count": 0,
+                "updated_count": 0,
+                "message": "mocked",
+            },
+        ) as refresh_mock:
+            chart = list_us_ohlc_chart_data(
+                self.db,
+                symbol="SOX",
+                timeframe="daily",
+                bars=2,
+                ensure_history=True,
+                provider="yahoo_chart",
+                to_date=date(2026, 7, 16),
+            )
+
+        refresh_mock.assert_called_once()
+        self.assertEqual(chart["latest_data_date"], date(2026, 7, 14))
+        self.assertEqual(chart["expected_data_date"], date(2026, 7, 16))
+        self.assertEqual(chart["freshness_status"], "stale")
+        self.assertIn("stale_latest_date", chart["backfill"]["refresh_reasons"])
 
 
 if __name__ == "__main__":

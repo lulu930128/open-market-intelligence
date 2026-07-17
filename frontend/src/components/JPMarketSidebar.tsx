@@ -27,7 +27,6 @@ type Props = {
   selectedGroupId: number | null;
   selectedSymbol: string | null;
   selectedStock: JPStockMasterRead | null;
-  externalStatusMessage?: Message;
   onMarketChange: (market: MarketRegion) => void;
   onSelectGroup?: (group: JPWatchlistGroupNode | null) => void;
   onSelectSymbol: (symbol: string, securityName: string | null) => void;
@@ -104,7 +103,6 @@ export default function JPMarketSidebar({
   selectedGroupId,
   selectedSymbol,
   selectedStock,
-  externalStatusMessage,
   onMarketChange,
   onSelectGroup,
   onSelectSymbol,
@@ -149,7 +147,6 @@ export default function JPMarketSidebar({
   const selectedLabel = selectedStock
     ? `${selectedStock.symbol} ${selectedStock.security_name ?? ""}`.trim()
     : selectedSymbol ?? t("jpMarket.sidebar.noSelection");
-  const statusMessage = externalStatusMessage ?? message;
 
   function countGroupItems(node: JPWatchlistGroupNode): number {
     const directCount = itemsByGroupId.get(node.id)?.length ?? 0;
@@ -696,8 +693,23 @@ export default function JPMarketSidebar({
         )}
       </div>
 
+      {message ? (
+        <div
+          className={[
+            "mx-4 mb-3 border px-3 py-2 text-xs",
+            message.type === "success"
+              ? "border-omi-market-down-border bg-omi-market-down-soft text-omi-market-down"
+              : message.type === "warning"
+                ? "border-omi-warning-border bg-omi-warning-soft text-omi-warning"
+                : "border-omi-danger-border bg-omi-danger-soft text-omi-danger",
+          ].join(" ")}
+        >
+          {message.text}
+        </div>
+      ) : null}
+
       <div className="border-b border-omi-border-subtle px-4 py-4">
-        <JobStatusCenter placement="inline" market="jp" inlineMessage={statusMessage} />
+        <JobStatusCenter placement="inline" market="jp" />
       </div>
 
       <div className="space-y-4 p-4">

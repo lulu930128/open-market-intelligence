@@ -498,16 +498,11 @@ function DataStatusSection({
 type JobStatusCenterProps = {
   placement?: "fixed" | "inline";
   market?: JobMarketFilter;
-  inlineMessage?: {
-    type: "success" | "warning" | "error";
-    text: string;
-  } | null;
 };
 
 export default function JobStatusCenter({
   placement = "fixed",
   market = "all",
-  inlineMessage = null,
 }: JobStatusCenterProps) {
   const t = useT();
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -633,16 +628,6 @@ export default function JobStatusCenter({
     }
   }
 
-  function inlineMessageClass() {
-    if (inlineMessage?.type === "success") {
-      return "border-omi-market-down-border bg-omi-market-down-soft text-omi-market-down";
-    }
-    if (inlineMessage?.type === "warning") {
-      return "border-omi-warning-border bg-omi-warning-soft text-omi-warning";
-    }
-    return "border-omi-danger-border bg-omi-danger-soft text-omi-danger";
-  }
-
   return (
     <div
       ref={rootRef}
@@ -664,12 +649,6 @@ export default function JobStatusCenter({
           {statusSummary.label}
         </span>
       </button>
-
-      {inline && inlineMessage ? (
-        <div className={`border-t px-3 py-2 text-xs leading-5 ${inlineMessageClass()}`}>
-          {inlineMessage.text}
-        </div>
-      ) : null}
 
       {open ? (
         <section

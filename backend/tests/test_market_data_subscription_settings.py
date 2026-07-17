@@ -67,6 +67,17 @@ def _settings_payload() -> MarketDataSubscriptionSettingsWrite:
                     "background_quote_seconds": 180.0,
                 },
             },
+            {
+                "key": "currency:twd_to_foreign:TWD-JPY",
+                "mode": "manual",
+                "resources": {"quote": True, "ohlcv": True},
+                "intervals": {
+                    "quote_seconds": 60.0,
+                    "ohlcv_seconds": 300.0,
+                    "selected_quote_seconds": 5.0,
+                    "background_quote_seconds": 300.0,
+                },
+            },
         ]
     )
 
@@ -96,6 +107,12 @@ class MarketDataSubscriptionSettingsTests(unittest.TestCase):
             by_key["commodity:metals:GC"].intervals["background_quote_seconds"],
             300.0,
         )
+        self.assertEqual(by_key["currency:twd_to_foreign:TWD-JPY"].mode, "on_select")
+        self.assertTrue(by_key["currency:twd_to_foreign:TWD-JPY"].resources["ohlcv"])
+        self.assertEqual(
+            by_key["currency:twd_to_foreign:TWD-JPY"].provider_status,
+            "best_effort_delayed",
+        )
 
     def test_update_market_data_subscription_settings_persists_database_override(self) -> None:
         with settings_db_session() as db:
@@ -119,6 +136,10 @@ class MarketDataSubscriptionSettingsTests(unittest.TestCase):
         self.assertEqual(by_key["crypto:BTC"].intervals["quote_seconds"], 10.0)
         self.assertEqual(reread.source, "database")
         self.assertEqual(reread_by_key["commodity:energy:CL"].mode, "on_select")
+        self.assertEqual(
+            reread_by_key["currency:twd_to_foreign:TWD-JPY"].mode,
+            "on_select",
+        )
         self.assertFalse(reread_by_key["commodity:energy:CL"].resources["ohlcv"])
         self.assertEqual(
             reread_by_key["commodity:energy:CL"].intervals["selected_quote_seconds"],

@@ -2,18 +2,36 @@
 
 import IntradayTrendChart, {
   defaultIntradayIndicators,
+  intradayIndicatorOptions,
+  type IntradayIndicatorKey,
   type IntradayIndicatorSettings,
   type IntradaySessionConfig,
 } from "@/components/IntradayTrendChart";
 import { StateSurface } from "@/components/LoadingPlaceholders";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
+import ProfessionalChartPanel, {
+  type ProfessionalChartStyle,
+} from "@/components/ProfessionalChartPanel";
 import ResourceSlotTabs from "@/components/market-detail/ResourceSlotTabs";
 import StockKLineChart, {
   defaultIndicatorParameters,
   defaultIndicators,
+  type IndicatorKey,
+  type IndicatorParameters,
   type IndicatorSettings,
 } from "@/components/StockKLineChart";
+import type { ChartDrawingTool } from "@/components/LightweightKLineChart";
 import type { ResourceSlotTabItem } from "@/components/market-detail/types";
+import TechnicalIndicatorMenu, {
+  indicatorTemplates,
+  type IndicatorTemplateKey,
+} from "@/components/stock-detail/TechnicalIndicatorMenu";
+import {
+  isProfessionalIntradayTimeframe,
+  professionalIntradayMinutes,
+  type ProfessionalTimeframe,
+} from "@/components/stock-detail/StockDetailDataViews";
+import { useChartDrawingPersistence } from "@/components/stock-detail/useChartDrawingPersistence";
 import { timeframeLabel, useT } from "@/i18n";
 import { fetchJson, requestJson } from "@/lib/api";
 import {
@@ -66,11 +84,23 @@ type Props = {
   selectedGroupId?: number | null;
   refreshNonce?: number;
   watchlistRankingPanel?: ReactNode;
+  onChartFocusModeChange?: (enabled: boolean) => void;
   onSelectStock: (stock: KRStockMasterRead | null) => void;
 };
 
 const indexTimeframeOptions: KRChartTimeframe[] = ["today", "daily", "weekly", "monthly"];
-const stockTimeframeOptions: KRHistoricalTimeframe[] = ["daily", "weekly", "monthly"];
+const stockTimeframeOptions: KRChartTimeframe[] = ["today", "daily", "weekly", "monthly"];
+const professionalTimeframeOptions: ProfessionalTimeframe[] = [
+  "1m",
+  "5m",
+  "15m",
+  "30m",
+  "1h",
+  "4h",
+  "daily",
+  "weekly",
+  "monthly",
+];
 const barsByTimeframe: Record<KRHistoricalTimeframe, number> = {
   daily: 180,
   weekly: 104,
@@ -116,7 +146,7 @@ const krChartIndicators: IndicatorSettings = {
   signals: false,
 };
 
-const krIndexIntradaySession: IntradaySessionConfig = {
+const krIntradaySession: IntradaySessionConfig = {
   startMinutes: KOREA_SESSION_START_MINUTES,
   endMinutes: KOREA_SESSION_END_MINUTES,
   timeTicks: [
@@ -286,6 +316,65 @@ async function fetchKrIndexIntradayTrend(indexId: string, refresh = false) {
   );
 }
 
+async function fetchKrStockIntradayTrend(symbol: string, refresh = false) {
+  return fetchJson<IntradayTrendResponse>(
+    `/api/kr-market/stocks/${encodeURIComponent(symbol)}/intraday`,
+    refresh ? { refresh: true } : undefined
+  );
+}
+
+function finiteNumber(value: number | null | undefined): value is number {
+  return value !== null && value !== undefined && Number.isFinite(value);
+}
+
+function aggregateKrProfessionalIntradayBars(
+  points: IntradayTrendPoint[],
+  intervalMinutes: number
+): ChartPoint[] {
+  const buckets = new Map<number, IntradayTrendPoint[]>();
+
+  points
+    .filter((point) => finiteNumber(point.price) && isKoreaRegularSessionPoint(point.time))
+    .slice()
+    .sort((left, right) => new Date(left.time).getTime() - new Date(right.time).getTime())
+    .forEach((point) => {
+      const minutes = getSeoulMinutesOfDay(point.time);
+      if (minutes === null) return;
+
+      const bucket =
+        KOREA_SESSION_START_MINUTES +
+        Math.floor((minutes - KOREA_SESSION_START_MINUTES) / intervalMinutes) *
+          intervalMinutes;
+      const current = buckets.get(bucket) ?? [];
+      current.push(point);
+      buckets.set(bucket, current);
+    });
+
+  return Array.from(buckets.entries())
+    .sort(([left], [right]) => left - right)
+    .map(([, bucketPoints]) => {
+      const first = bucketPoints[0];
+      const last = bucketPoints[bucketPoints.length - 1];
+      const highs = bucketPoints.map((point) => point.high ?? point.price).filter(finiteNumber);
+      const lows = bucketPoints.map((point) => point.low ?? point.price).filter(finiteNumber);
+      const volume = bucketPoints.reduce(
+        (total, point) => total + (finiteNumber(point.volume) && point.volume > 0 ? point.volume : 0),
+        0
+      );
+
+      return {
+        time: first.time,
+        open: first.open ?? first.price,
+        high: highs.length ? Math.max(...highs) : last.price,
+        low: lows.length ? Math.min(...lows) : last.price,
+        close: last.price,
+        volume: volume > 0 ? volume : null,
+        trade_value: null,
+        transaction_count: null,
+      };
+    });
+}
+
 function latestPoint(points: ChartPoint[]) {
   return points.length > 0 ? points[points.length - 1] : null;
 }
@@ -350,6 +439,7 @@ export default function KRMarketPanel({
   selectedGroupId = null,
   refreshNonce = 0,
   watchlistRankingPanel,
+  onChartFocusModeChange,
   onSelectStock,
 }: Props) {
   const t = useT();
@@ -363,17 +453,31 @@ export default function KRMarketPanel({
   const [sourceHealth, setSourceHealth] = useState<KRSourceHealthRead | null>(null);
   const [watchlistReadiness, setWatchlistReadiness] = useState<KRWatchlistReadinessRead | null>(null);
   const [timeframe, setTimeframe] = useState<KRChartTimeframe>("daily");
+  const [professionalTimeframe, setProfessionalTimeframe] =
+    useState<ProfessionalTimeframe>("daily");
+  const [professionalChartStyle, setProfessionalChartStyle] =
+    useState<ProfessionalChartStyle>("candlestick");
+  const [chartFocusMode, setChartFocusMode] = useState(false);
+  const [indicatorMenuOpen, setIndicatorMenuOpen] = useState(false);
   const [activeDataSlot, setActiveDataSlot] = useState<KRDataSlot>("demand");
   const [stockState, setStockState] = useState<LoadState>("idle");
   const [dataState, setDataState] = useState<LoadState>("idle");
   const [readinessState, setReadinessState] = useState<LoadState>("idle");
   const [refreshing, setRefreshing] = useState(false);
-  const [chartIndicators] = useState<IndicatorSettings>(krChartIndicators);
-  const [intradayIndicators] = useState<IntradayIndicatorSettings>(defaultIntradayIndicators);
+  const [chartIndicators, setChartIndicators] = useState<IndicatorSettings>(krChartIndicators);
+  const [intradayIndicators, setIntradayIndicators] =
+    useState<IntradayIndicatorSettings>(defaultIntradayIndicators);
+  const [activeIndicatorTemplate, setActiveIndicatorTemplate] =
+    useState<IndicatorTemplateKey | null>(null);
+  const [indicatorParameters, setIndicatorParameters] =
+    useState<IndicatorParameters>(defaultIndicatorParameters);
+  const [chartDrawingTool, setChartDrawingTool] = useState<ChartDrawingTool>("cursor");
   const [todayTrend, setTodayTrend] = useState<IntradayTrendPoint[]>([]);
   const [todayPreviousClose, setTodayPreviousClose] = useState<number | null>(null);
   const [todaySource, setTodaySource] = useState("naver_index_time");
   const [todayUpdatedAt, setTodayUpdatedAt] = useState<string | null>(null);
+  const [todayTotalVolume, setTodayTotalVolume] = useState<number | null>(null);
+  const [todayVolumeUnit, setTodayVolumeUnit] = useState("thousand_shares");
   const [todayIntradayState, setTodayIntradayState] = useState<LoadState>("idle");
   const finalIntradayRefreshDate = useRef<string | null>(null);
 
@@ -381,6 +485,15 @@ export default function KRMarketPanel({
     () => chart?.points.map(toChartPoint) ?? [],
     [chart]
   );
+  const professionalIsIntraday = isProfessionalIntradayTimeframe(professionalTimeframe);
+  const professionalChartData = useMemo<ChartPoint[]>(() => {
+    if (!professionalIsIntraday) return chartData;
+
+    return aggregateKrProfessionalIntradayBars(
+      todayTrend,
+      professionalIntradayMinutes[professionalTimeframe]
+    );
+  }, [chartData, professionalIsIntraday, professionalTimeframe, todayTrend]);
   const latest = latestPoint(chartData);
   const change = changeValue(chartData);
   const pct = changePct(chartData);
@@ -405,7 +518,7 @@ export default function KRMarketPanel({
   const isSelectedIndex = selectedIndexConfig !== null;
   const selectedIndexId = selectedIndexConfig?.indexId ?? null;
   const timeframeOptions = isSelectedIndex ? indexTimeframeOptions : stockTimeframeOptions;
-  const isIntradayTimeframe = isSelectedIndex && timeframe === "today";
+  const isIntradayTimeframe = timeframe === "today";
   const displayPrice =
     isIntradayTimeframe && todayLatest ? todayLatest.price : latest?.close ?? null;
   const displayChange =
@@ -420,6 +533,7 @@ export default function KRMarketPanel({
       ? ((todayLatest.price - todayPreviousClose) / todayPreviousClose) * 100
       : pct;
   const todayChartLoading = todayIntradayState === "loading" && todayTrend.length < 2;
+  const todayChartReady = todayTrend.length > 0;
   const selectedTitle = selectedIndexConfig
     ? `${selectedIndexConfig.displaySymbol} ${selectedIndexConfig.name}`.trim()
     : selectedStock
@@ -452,6 +566,47 @@ export default function KRMarketPanel({
   );
   const dataStatusContextLabel = selectedTitle;
   const dataStatusSource = t(isSelectedIndex ? "krMarket.sections.index" : "krMarket.sections.stock");
+  const selectedChartSymbol = selectedStock?.symbol ?? initialSymbol;
+  const professionalTimeframeLabel = timeframeLabel(t, professionalTimeframe);
+  const professionalChartReady =
+    chartFocusMode &&
+    professionalChartData.length > 0 &&
+    (professionalIsIntraday ? todayIntradayState !== "loading" : dataState !== "loading");
+  const latestProfessionalPoint =
+    professionalChartData[professionalChartData.length - 1] ?? null;
+  const professionalDrawingContext = useMemo(
+    () => ({
+      symbol: selectedChartSymbol,
+      market: "KR",
+      timeframe: professionalTimeframe,
+    }),
+    [professionalTimeframe, selectedChartSymbol]
+  );
+  const {
+    state: {
+      activeSelectedDrawingId: activeSelectedChartDrawingId,
+      canRedo: canRedoChartDrawing,
+      canUndo: canUndoChartDrawing,
+      drawings: chartDrawings,
+      history: chartDrawingHistory,
+    },
+    actions: {
+      clear: clearChartDrawings,
+      deleteSelected: deleteSelectedChartDrawing,
+      redo: redoChartDrawing,
+      setSelectedDrawingId: setSelectedChartDrawingId,
+      undo: undoChartDrawing,
+      updateDrawingState: updateChartDrawingState,
+      updateDrawings: updateChartDrawings,
+    },
+  } = useChartDrawingPersistence({
+    active: chartFocusMode,
+    clearConfirmationMessage: t("stockDetail.confirm.clearDrawings"),
+    market: "KR",
+    stockId: selectedChartSymbol,
+    stockName: selectedStock?.security_name ?? selectedStock?.security_name_kr ?? null,
+    timeframe: professionalTimeframe,
+  });
 
   const latestFundamental = fundamentals[0] ?? null;
   const latestInvestorRows = useMemo(() => {
@@ -705,7 +860,11 @@ export default function KRMarketPanel({
     setTodayTrend(today.points);
     setTodayPreviousClose(today.previous_close);
     setTodaySource(today.source);
-    setTodayUpdatedAt(latestIntradayPoint ? formatKoreaDateTime(latestIntradayPoint.time) : null);
+    setTodayUpdatedAt(
+      formatKoreaDateTime(today.as_of ?? latestIntradayPoint?.time ?? null)
+    );
+    setTodayTotalVolume(today.total_volume ?? latestIntradayPoint?.cumulative_volume ?? null);
+    setTodayVolumeUnit(today.volume_unit ?? "thousand_shares");
     setTodayIntradayState("success");
   }, []);
 
@@ -714,11 +873,12 @@ export default function KRMarketPanel({
   }, [onSelectStock]);
 
   useEffect(() => {
-    if (!isSelectedIndex && timeframe === "today") {
-      const resetTimer = window.setTimeout(() => setTimeframe("daily"), 0);
-      return () => window.clearTimeout(resetTimer);
-    }
-  }, [isSelectedIndex, timeframe]);
+    onChartFocusModeChange?.(chartFocusMode);
+  }, [chartFocusMode, onChartFocusModeChange]);
+
+  useEffect(() => {
+    return () => onChartFocusModeChange?.(false);
+  }, [onChartFocusModeChange]);
 
   const loadStockData = useCallback(
     async (symbol: string, nextTimeframe: KRChartTimeframe) => {
@@ -744,7 +904,7 @@ export default function KRMarketPanel({
             {
               timeframe: historicalTimeframe,
               bars: barsByTimeframe[historicalTimeframe],
-              ensure_history: false,
+              ensure_history: true,
             }
           ),
           isIndexSymbol
@@ -829,18 +989,14 @@ export default function KRMarketPanel({
       publishStatus(null);
 
       try {
+        const indexConfig = getKrMarketIndexConfig(normalizedSymbol);
         let stock: KRStockMasterRead;
 
-        try {
+        if (!indexConfig) {
           stock = await fetchJson<KRStockMasterRead>(
             `/api/kr-market/stocks/${encodeURIComponent(normalizedSymbol)}`
           );
-        } catch (error) {
-          const indexConfig = getKrMarketIndexConfig(normalizedSymbol);
-          if (!indexConfig) {
-            throw error;
-          }
-
+        } else {
           stock = {
             id: 0,
             symbol: indexConfig.symbol,
@@ -1071,6 +1227,69 @@ export default function KRMarketPanel({
 
   function handleTimeframeChange(nextTimeframe: KRChartTimeframe) {
     setTimeframe(nextTimeframe);
+    setIndicatorMenuOpen(false);
+    if (nextTimeframe !== "today") {
+      setProfessionalTimeframe(nextTimeframe);
+    }
+  }
+
+  function handleProfessionalTimeframeChange(nextTimeframe: ProfessionalTimeframe) {
+    setProfessionalTimeframe(nextTimeframe);
+    setTimeframe(isProfessionalIntradayTimeframe(nextTimeframe) ? "today" : nextTimeframe);
+    setIndicatorMenuOpen(false);
+  }
+
+  function enterChartFocusMode() {
+    const nextTimeframe: ProfessionalTimeframe = timeframe === "today" ? "1m" : timeframe;
+    setProfessionalTimeframe(nextTimeframe);
+    setTimeframe(isProfessionalIntradayTimeframe(nextTimeframe) ? "today" : nextTimeframe);
+    setIndicatorMenuOpen(false);
+    setChartFocusMode(true);
+  }
+
+  function toggleChartIndicator(key: IndicatorKey) {
+    setChartIndicators((current) => ({
+      ...current,
+      [key]: !current[key],
+    }));
+    setActiveIndicatorTemplate(null);
+  }
+
+  function toggleIntradayIndicator(key: IntradayIndicatorKey) {
+    setIntradayIndicators((current) => ({
+      ...current,
+      [key]: !current[key],
+    }));
+  }
+
+  function applyIndicatorTemplate(templateKey: IndicatorTemplateKey) {
+    const template = indicatorTemplates.find((item) => item.key === templateKey);
+    if (!template) return;
+
+    setChartIndicators(template.indicators);
+    if (template.parameters) {
+      setIndicatorParameters((current) => ({
+        ...current,
+        ...template.parameters,
+      }));
+    }
+    setActiveIndicatorTemplate(templateKey);
+  }
+
+  function handleIndicatorParameterChange(
+    key: keyof IndicatorParameters,
+    value: string,
+    min: number,
+    max: number
+  ) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return;
+
+    setIndicatorParameters((current) => ({
+      ...current,
+      [key]: Math.min(Math.max(parsed, min), max),
+    }));
+    setActiveIndicatorTemplate(null);
   }
 
   useEffect(() => {
@@ -1103,11 +1322,12 @@ export default function KRMarketPanel({
   }, [dataStatusContextKey, dataStatusContextLabel, dataStatusSource, initialSymbol]);
 
   useEffect(() => {
-    if (!selectedIndexId || timeframe !== "today") {
+    if (!selectedChartSymbol || timeframe !== "today") {
       return;
     }
 
     const effectIndexId = selectedIndexId;
+    const effectSymbol = selectedChartSymbol;
 
     let cancelled = false;
     let intradayTimer: number | undefined;
@@ -1127,11 +1347,14 @@ export default function KRMarketPanel({
       if (showLoading) {
         setTodayIntradayState("loading");
         setTodayUpdatedAt(null);
+        setTodayTotalVolume(null);
         setTodayTrend([]);
       }
 
       try {
-        const today = await fetchKrIndexIntradayTrend(effectIndexId);
+        const today = effectIndexId
+          ? await fetchKrIndexIntradayTrend(effectIndexId)
+          : await fetchKrStockIntradayTrend(effectSymbol);
 
         if (cancelled) return;
 
@@ -1140,7 +1363,7 @@ export default function KRMarketPanel({
           publishStatus({
             type: "warning",
             text: today.warnings[0],
-          }, t("krMarket.sections.index"));
+          }, t(effectIndexId ? "krMarket.sections.index" : "krMarket.sections.stock"));
         }
       } catch (error) {
         if (cancelled) return;
@@ -1149,7 +1372,7 @@ export default function KRMarketPanel({
         publishStatus({
           type: "error",
           text: apiErrorMessage(error, t("krMarket.errors.dataLoadFailed")),
-        }, t("krMarket.sections.index"));
+        }, t(effectIndexId ? "krMarket.sections.index" : "krMarket.sections.stock"));
       } finally {
         intradayRequestInFlight = false;
       }
@@ -1190,7 +1413,7 @@ export default function KRMarketPanel({
       cancelled = true;
       clearIntradayTimer();
     };
-  }, [applyTodayTrend, publishStatus, selectedIndexId, t, timeframe]);
+  }, [applyTodayTrend, publishStatus, selectedChartSymbol, selectedIndexId, t, timeframe]);
 
   if (!initialSymbol) {
     return watchlistRankingPanel ? (
@@ -1226,6 +1449,103 @@ export default function KRMarketPanel({
 
   return (
     <div className="w-full space-y-4">
+      {chartFocusMode ? (
+        <ProfessionalChartPanel
+          title={selectedTitle}
+          priceSummary={
+            <div className={`flex items-baseline gap-2 ${priceToneClass(displayPct)}`}>
+              <PriceUpdatePulse
+                value={latestProfessionalPoint?.close ?? displayPrice}
+                direction={displayChange}
+                resetKey={`${selectedChartSymbol ?? "empty"}:kr-professional:${professionalTimeframe}`}
+                className="text-2xl font-bold leading-none tracking-normal tabular-nums"
+              >
+                {formatNumber(latestProfessionalPoint?.close ?? displayPrice, 2)}
+              </PriceUpdatePulse>
+              <span className="text-sm font-semibold tabular-nums">
+                {formatSignedNumber(displayChange)}
+              </span>
+              <span className="text-sm font-semibold tabular-nums">
+                ({formatSignedPct(displayPct)})
+              </span>
+            </div>
+          }
+          timeframeOptions={professionalTimeframeOptions.map((option) => ({
+            key: option,
+            label: timeframeLabel(t, option),
+          }))}
+          timeframe={professionalTimeframe}
+          onTimeframeChange={handleProfessionalTimeframeChange}
+          chartStyle={professionalChartStyle}
+          onChartStyleChange={setProfessionalChartStyle}
+          indicatorMenuOpen={indicatorMenuOpen}
+          onToggleIndicatorMenu={() => setIndicatorMenuOpen((value) => !value)}
+          onCloseIndicatorMenu={() => setIndicatorMenuOpen(false)}
+          indicatorMenu={
+            <TechnicalIndicatorMenu
+              indicators={chartIndicators}
+              activeTemplate={activeIndicatorTemplate}
+              onApplyTemplate={applyIndicatorTemplate}
+              onToggleIndicator={toggleChartIndicator}
+              includeParameters
+              parameters={indicatorParameters}
+              onUpdateParameter={handleIndicatorParameterChange}
+            />
+          }
+          onClose={() => {
+            setIndicatorMenuOpen(false);
+            setChartDrawingTool("cursor");
+            setChartFocusMode(false);
+          }}
+          message={null}
+          chartReady={professionalChartReady}
+          emptyState={
+            <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle p-4">
+              <StateSurface
+                title={
+                  professionalIsIntraday && todayIntradayState === "loading"
+                    ? t("common.loading")
+                    : t("chart.loadingKline", { label: professionalTimeframeLabel })
+                }
+                tone={
+                  professionalIsIntraday && todayIntradayState === "loading" ? "loading" : "empty"
+                }
+                busy={professionalIsIntraday && todayIntradayState === "loading"}
+                className="w-full max-w-xl"
+              />
+            </div>
+          }
+          chartData={professionalChartData}
+          label={professionalTimeframeLabel}
+          timeMode={professionalIsIntraday ? "intraday" : "date"}
+          showMovingAverages={chartIndicators.ma}
+          indicators={chartIndicators}
+          indicatorParameters={indicatorParameters}
+          volumePanelLabel={t(
+            professionalIsIntraday ? "krMarket.metrics.volumeShares" : "krMarket.metrics.volume"
+          )}
+          volumeValueKey="volume"
+          pricePrecision={2}
+          drawingTool={chartDrawingTool}
+          drawings={chartDrawings}
+          selectedDrawingId={activeSelectedChartDrawingId}
+          drawingContext={professionalDrawingContext}
+          onDrawingToolChange={setChartDrawingTool}
+          onDrawingsChange={updateChartDrawings}
+          onDrawingStateChange={updateChartDrawingState}
+          onSelectedDrawingChange={setSelectedChartDrawingId}
+          canUndoDrawing={canUndoChartDrawing}
+          canRedoDrawing={canRedoChartDrawing}
+          onUndoDrawing={undoChartDrawing}
+          onRedoDrawing={redoChartDrawing}
+          onDeleteSelectedDrawing={deleteSelectedChartDrawing}
+          onClearDrawings={clearChartDrawings}
+          historyCounts={{
+            past: chartDrawingHistory.past.length,
+            future: chartDrawingHistory.future.length,
+          }}
+        />
+      ) : (
       <section className="grid w-full grid-cols-1 items-start justify-start gap-4 xl:grid-cols-[minmax(0,7fr)_minmax(360px,5fr)]">
         <div className="min-w-0 space-y-4 self-start">
           <section className="border border-omi-border-subtle bg-omi-surface">
@@ -1272,16 +1592,82 @@ export default function KRMarketPanel({
                   ))}
                 </div>
                 <div className="mt-2 flex items-start justify-end gap-2">
+                  {isIntradayTimeframe ? (
+                    <div className="relative">
+                      <button
+                        type="button"
+                        onClick={() => setIndicatorMenuOpen((value) => !value)}
+                        className="h-8 border border-omi-control bg-omi-surface px-3 text-sm font-semibold text-omi-text hover:border-omi-accent hover:text-omi-danger"
+                      >
+                        {t("stockDetail.indicators")}
+                      </button>
+                      {indicatorMenuOpen ? (
+                        <div className="absolute right-0 z-30 mt-2 w-72 border border-omi-border-subtle bg-omi-surface p-3 text-left shadow-lg">
+                          {intradayIndicatorOptions.map((option) => (
+                            <label
+                              key={option.key}
+                              className="flex cursor-pointer items-start gap-2 px-2 py-2 text-xs hover:bg-omi-surface-subtle"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={intradayIndicators[option.key]}
+                                onChange={() => toggleIntradayIndicator(option.key)}
+                                className="mt-0.5"
+                              />
+                              <span>
+                                <span className="block font-semibold text-omi-text">
+                                  {option.label}
+                                </span>
+                                <span className="block text-omi-text-muted">
+                                  {t(option.descriptionKey)}
+                                </span>
+                              </span>
+                            </label>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <div className="relative">
+                      <button
+                        type="button"
+                        onClick={() => setIndicatorMenuOpen((value) => !value)}
+                        className="h-8 border border-omi-control bg-omi-surface px-3 text-sm font-semibold text-omi-text hover:border-omi-accent hover:text-omi-danger"
+                      >
+                        {t("stockDetail.indicators")}
+                      </button>
+                      {indicatorMenuOpen ? (
+                        <TechnicalIndicatorMenu
+                          indicators={chartIndicators}
+                          activeTemplate={activeIndicatorTemplate}
+                          onApplyTemplate={applyIndicatorTemplate}
+                          onToggleIndicator={toggleChartIndicator}
+                          includeParameters
+                          parameters={indicatorParameters}
+                          onUpdateParameter={handleIndicatorParameterChange}
+                        />
+                      ) : null}
+                    </div>
+                  )}
                   <button
                     type="button"
-                    onClick={() => void refreshDailyPrices()}
-                    className="h-8 border border-omi-control bg-omi-surface px-3 text-sm font-semibold text-omi-text hover:border-omi-accent hover:text-omi-danger disabled:cursor-not-allowed disabled:opacity-60"
-                    disabled={refreshing || !selectedStock}
+                    onClick={enterChartFocusMode}
+                    className="h-8 border border-omi-control bg-omi-surface px-3 text-sm font-semibold text-omi-text hover:border-omi-accent hover:text-omi-danger"
                   >
-                    {refreshing
-                      ? t("krMarket.actions.refreshing")
-                      : t(isSelectedIndex ? "krMarket.actions.refreshIndex" : "krMarket.actions.refreshDaily")}
+                    {t("stockDetail.expand")}
                   </button>
+                  {isSelectedIndex ? (
+                    <button
+                      type="button"
+                      onClick={() => void refreshDailyPrices()}
+                      className="h-8 border border-omi-control bg-omi-surface px-3 text-sm font-semibold text-omi-text hover:border-omi-accent hover:text-omi-danger disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={refreshing || !selectedStock}
+                    >
+                      {refreshing
+                        ? t("krMarket.actions.refreshing")
+                        : t("krMarket.actions.refreshIndex")}
+                    </button>
+                  ) : null}
                 </div>
               </div>
             </div>
@@ -1297,7 +1683,7 @@ export default function KRMarketPanel({
                       className="w-full max-w-xl"
                     />
                   </div>
-                ) : (
+                ) : todayChartReady ? (
                   <IntradayTrendChart
                     points={todayTrend}
                     previousClose={todayPreviousClose}
@@ -1309,12 +1695,26 @@ export default function KRMarketPanel({
                     } ${timeframeLabel(t, "today")}`}
                     source={todaySource}
                     indicators={intradayIndicators}
-                    session={krIndexIntradaySession}
-                    revealKey={`${selectedIndexId ?? "empty"}-${timeframe}-${todayTrend.length}`}
+                    session={krIntradaySession}
+                    revealKey={`${selectedChartSymbol ?? "empty"}-${timeframe}`}
                     refreshIntervalMs={KOREA_INTRADAY_REFRESH_MS}
                     updatedAt={todayUpdatedAt}
                     priceLimitEnabled={false}
+                    totalVolume={todayTotalVolume}
+                    volumeLabel={t(
+                      todayVolumeUnit === "thousand_shares"
+                        ? "krMarket.metrics.volumeThousandShares"
+                        : "krMarket.metrics.volumeShares"
+                    )}
                   />
+                ) : (
+                  <div className="flex h-[420px] items-center justify-center border-t border-omi-border-subtle p-4">
+                    <StateSurface
+                      title={t("common.noData")}
+                      tone="empty"
+                      className="w-full max-w-xl"
+                    />
+                  </div>
                 )}
               </>
             ) : chartData.length > 0 ? (
@@ -1322,7 +1722,7 @@ export default function KRMarketPanel({
                 chartData={chartData}
                 label={selectedStock?.symbol ?? initialSymbol}
                 indicators={chartIndicators}
-                indicatorParameters={defaultIndicatorParameters}
+                indicatorParameters={indicatorParameters}
                 revealKey={`${selectedStock?.symbol ?? initialSymbol}-${timeframe}-${chartData.length}`}
                 volumePanelLabel={t("krMarket.metrics.volume")}
                 volumeTooltipLabel={t("krMarket.metrics.volume")}
@@ -1594,6 +1994,7 @@ export default function KRMarketPanel({
           )}
       </aside>
       </section>
+      )}
     </div>
   );
 }

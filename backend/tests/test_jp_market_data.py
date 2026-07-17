@@ -25,6 +25,7 @@ from app.db.models import (
     SourceHealthSnapshot,
 )
 from app.jp_market.schemas import (
+    JPMarketOverviewRead,
     JPSourceHealthRead,
     JPWatchlistGroupCreate,
     JPWatchlistItemCreate,
@@ -36,6 +37,7 @@ from app.jp_market.service import (
     create_jp_watchlist_item,
     get_jp_company_fundamental,
     get_jp_intraday_trend,
+    get_jp_market_overview,
     get_jp_resource_summary,
     get_jp_watchlist_ranking,
     get_jp_watchlist_technical_radar,
@@ -805,6 +807,7 @@ class JPMarketDataTests(unittest.TestCase):
             group_id=group.id,
             rank_by="change_pct",
             sort_order="desc",
+            expected_trade_date=date(2026, 6, 18),
         )
 
         self.assertEqual(ranking["group_id"], group.id)
@@ -813,12 +816,30 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertEqual(ranking["no_data_count"], 0)
         self.assertTrue(ranking["is_current"])
         self.assertEqual(ranking["trade_date"], datetime(2026, 6, 18).date())
+        self.assertEqual(ranking["target_trade_date"], datetime(2026, 6, 18).date())
+        self.assertEqual(ranking["coverage_status"], "current")
+        self.assertFalse(ranking["refresh_recommended"])
         self.assertEqual(ranking["results"][0]["symbol"], "7203.T")
         self.assertEqual(ranking["results"][0]["close"], 3060.0)
         self.assertEqual(ranking["results"][0]["change"], 60.0)
         self.assertAlmostEqual(ranking["results"][0]["change_pct"], 2.0)
         self.assertEqual(ranking["results"][1]["symbol"], "1343.T")
         self.assertAlmostEqual(ranking["results"][1]["change_pct"], -2.0)
+
+        stale_ranking = get_jp_watchlist_ranking(
+            self.db,
+            group_id=group.id,
+            expected_trade_date=date(2026, 6, 19),
+        )
+        self.assertFalse(stale_ranking["is_current"])
+        self.assertEqual(stale_ranking["target_trade_date"], date(2026, 6, 19))
+        self.assertEqual(stale_ranking["stale_symbol_count"], 2)
+        self.assertEqual(stale_ranking["missing_symbol_count"], 0)
+        self.assertEqual(stale_ranking["coverage_status"], "stale")
+        self.assertTrue(stale_ranking["refresh_recommended"])
+        self.assertTrue(
+            all(row["freshness_status"] == "stale" for row in stale_ranking["results"])
+        )
 
     def test_jp_watchlist_technical_radar_flags_support_break(self) -> None:
         with (
@@ -933,7 +954,16 @@ class JPMarketDataTests(unittest.TestCase):
                 outputsize="compact",
             )
 
-        availability = build_jp_source_health(self.db, symbol="7203.T")
+        availability = build_jp_source_health(
+            self.db,
+            symbol="7203.T",
+            use_expected_date=False,
+        )
+        automatic = build_jp_source_health(
+            self.db,
+            symbol="7203.T",
+            now=datetime(2026, 6, 18, 17, 0, tzinfo=timezone(timedelta(hours=9))),
+        )
         exact = build_jp_source_health(
             self.db,
             symbol="7203.T",
@@ -946,6 +976,8 @@ class JPMarketDataTests(unittest.TestCase):
 
         self.assertEqual(availability["freshness_policy"]["mode"], "availability_only")
         self.assertIsNotNone(availability["freshness_policy"]["calendar_limit"])
+        self.assertEqual(automatic["freshness_policy"]["mode"], "expected_date")
+        self.assertEqual(automatic["expected_daily_price_date"], "2026-06-18")
         self.assertEqual(exact["freshness_policy"]["mode"], "expected_date")
         self.assertEqual(entries[("daily_price", "yahoo_chart")]["status"], "current")
         self.assertGreater(self.db.query(SourceHealthSnapshot).count(), 0)
@@ -1190,6 +1222,57 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertEqual(result["symbol"], "7203.T")
         self.assertEqual(result["point_count"], 0)
         self.assertEqual(result["backfill"]["status"], "success")
+        self.assertIn("insufficient_history", result["backfill"]["refresh_reasons"])
+        self.assertEqual(result["freshness_status"], "missing")
+        self.assertTrue(result["refresh_recommended"])
+
+    def test_jp_ohlc_chart_refreshes_when_full_window_is_stale(self) -> None:
+        records = [
+            JPDailyPriceRecord(
+                provider="yahoo_chart",
+                symbol="9984.T",
+                trade_date=date(2026, 6, day),
+                currency="JPY",
+                open_price=1000.0 + day,
+                high_price=1010.0 + day,
+                low_price=990.0 + day,
+                close_price=1005.0 + day,
+                adjusted_close=1005.0 + day,
+                trade_volume=1000000,
+                source_url="source",
+                raw_payload_hash=f"hash-{day}",
+            )
+            for day in range(15, 19)
+        ]
+        upsert_jp_daily_price_records(self.db, records)
+
+        with patch(
+            "app.jp_market.service.refresh_jp_daily_prices",
+            return_value={
+                "status": "success",
+                "provider": "yahoo_chart",
+                "symbol": "9984.T",
+                "fetched_count": 0,
+                "inserted_count": 0,
+                "updated_count": 0,
+                "message": "mocked",
+            },
+        ) as refresh_mock:
+            result = list_jp_ohlc_chart_data(
+                db=self.db,
+                symbol="9984.T",
+                bars=4,
+                ensure_history=True,
+                to_date=date(2026, 6, 22),
+                expected_data_date=date(2026, 6, 22),
+            )
+
+        refresh_mock.assert_called_once()
+        self.assertEqual(result["point_count"], 4)
+        self.assertEqual(result["latest_data_date"], date(2026, 6, 18))
+        self.assertEqual(result["expected_data_date"], date(2026, 6, 22))
+        self.assertEqual(result["freshness_status"], "stale")
+        self.assertIn("stale_latest_date", result["backfill"]["refresh_reasons"])
 
     def test_get_jp_intraday_trend_uses_yahoo_chart_payload(self) -> None:
         with patch(
@@ -1398,9 +1481,111 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertFalse(slots["demand"]["available"])
         self.assertEqual(slots["investors"]["status"], "empty")
         self.assertFalse(slots["investors"]["available"])
-        self.assertEqual(slots["disclosures"]["status"], "planned")
+        self.assertEqual(slots["disclosures"]["status"], "empty")
         self.assertEqual(slots["performance"]["status"], "empty")
         self.assertEqual(slots["financials"]["row_count"], 0)
+
+    def test_jp_market_overview_reports_partial_local_coverage(self) -> None:
+        for symbol, name, sector in (
+            ("1111.T", "Alpha", "Services"),
+            ("2222.T", "Beta", "Banks"),
+            ("3333.T", "Gamma", "Services"),
+            ("4444.T", "Delta", "Banks"),
+        ):
+            self.db.add(
+                JPStockMaster(
+                    symbol=symbol,
+                    local_code=symbol.split(".")[0],
+                    security_name=name,
+                    exchange="Tokyo Stock Exchange",
+                    market_segment="Prime Market (Domestic)",
+                    sector_33_name=sector,
+                    asset_type="stock",
+                    listing_source="test",
+                    currency="JPY",
+                    is_active=True,
+                )
+            )
+        self.db.commit()
+        records = []
+        for symbol, previous_close, current_close in (
+            ("1111.T", 100.0, 110.0),
+            ("2222.T", 100.0, 95.0),
+        ):
+            records.extend(
+                [
+                    JPDailyPriceRecord(
+                        provider="yahoo_chart",
+                        symbol=symbol,
+                        trade_date=date(2026, 7, 14),
+                        currency="JPY",
+                        open_price=previous_close,
+                        high_price=previous_close,
+                        low_price=previous_close,
+                        close_price=previous_close,
+                        adjusted_close=previous_close,
+                        trade_volume=1000,
+                        source_url="source",
+                        raw_payload_hash=f"{symbol}-previous",
+                    ),
+                    JPDailyPriceRecord(
+                        provider="yahoo_chart",
+                        symbol=symbol,
+                        trade_date=date(2026, 7, 15),
+                        currency="JPY",
+                        open_price=previous_close,
+                        high_price=max(previous_close, current_close),
+                        low_price=min(previous_close, current_close),
+                        close_price=current_close,
+                        adjusted_close=current_close,
+                        trade_volume=2000,
+                        source_url="source",
+                        raw_payload_hash=f"{symbol}-current",
+                    ),
+                ]
+            )
+        records.append(
+            JPDailyPriceRecord(
+                provider="yahoo_chart",
+                symbol="3333.T",
+                trade_date=date(2026, 7, 14),
+                currency="JPY",
+                open_price=50.0,
+                high_price=51.0,
+                low_price=49.0,
+                close_price=50.0,
+                adjusted_close=50.0,
+                trade_volume=500,
+                source_url="source",
+                raw_payload_hash="3333-stale",
+            )
+        )
+        upsert_jp_daily_price_records(self.db, records)
+
+        overview = get_jp_market_overview(
+            self.db,
+            now=datetime.fromisoformat("2026-07-15T16:20:00+09:00"),
+        )
+        validated_overview = JPMarketOverviewRead.model_validate(overview)
+
+        self.assertEqual(overview["kind"], "jp_market_overview")
+        self.assertEqual(validated_overview.kind, "jp_market_overview")
+        self.assertEqual(overview["expected_trade_date"], date(2026, 7, 15))
+        self.assertEqual(overview["coverage"]["active_stock_count"], 4)
+        self.assertEqual(overview["coverage"]["observed_symbol_count"], 3)
+        self.assertEqual(overview["coverage"]["current_symbol_count"], 2)
+        self.assertEqual(overview["coverage"]["stale_symbol_count"], 1)
+        self.assertEqual(overview["coverage"]["missing_symbol_count"], 1)
+        self.assertEqual(overview["coverage"]["status"], "partial")
+        self.assertTrue(overview["coverage"]["is_partial"])
+        self.assertEqual(overview["breadth"]["advance_count"], 1)
+        self.assertEqual(overview["breadth"]["decline_count"], 1)
+        self.assertEqual(overview["breadth"]["total_count"], 2)
+        self.assertEqual(overview["top_gainers"][0]["symbol"], "1111.T")
+        self.assertEqual(overview["top_losers"][0]["symbol"], "2222.T")
+        self.assertEqual(len(overview["indices"]), 2)
+        self.assertTrue(all(not item["is_current"] for item in overview["indices"]))
+        self.assertTrue(overview["refresh_recommended"])
 
     def test_read_jp_stock_context_returns_local_evidence_pack(self) -> None:
         self.db.add(
@@ -1467,6 +1652,105 @@ class JPMarketDataTests(unittest.TestCase):
             any(ref.get("kind") == "jp_daily_price" for ref in context["source_refs"])
         )
         self.assertEqual(context["evidence_passport"]["target_kind"], "jp_stock_context")
+
+    def test_read_jp_stock_context_includes_bounded_intraday_evidence(self) -> None:
+        self.db.add(
+            JPStockMaster(
+                symbol="7203.T",
+                local_code="7203",
+                security_name="Toyota Motor Corporation",
+                exchange="Tokyo Stock Exchange",
+                market_segment="Prime Market (Domestic)",
+                sector_33_name="Transportation Equipment",
+                asset_type="stock",
+                listing_source="test",
+                currency="JPY",
+                is_active=True,
+            )
+        )
+        self.db.commit()
+        upsert_jp_daily_price_records(
+            self.db,
+            [
+                JPDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="7203.T",
+                    trade_date=datetime(2026, 7, 14).date(),
+                    currency="JPY",
+                    open_price=3000.0,
+                    high_price=3060.0,
+                    low_price=2990.0,
+                    close_price=3050.0,
+                    adjusted_close=3050.0,
+                    trade_volume=12000000,
+                    source_url="daily-source",
+                    raw_payload_hash="daily-hash",
+                )
+            ],
+        )
+        intraday = {
+            "symbol": "7203.T",
+            "source": "yahoo_finance_chart",
+            "session_scope": "regular",
+            "session_phase": "regular",
+            "previous_close": 3050.0,
+            "previous_close_source": "jp_daily_price",
+            "previous_close_trade_date": "2026-07-14",
+            "point_count": 2,
+            "points": [
+                {
+                    "time": "2026-07-15T09:00:00+09:00",
+                    "price": 3060.0,
+                    "volume": 1000,
+                },
+                {
+                    "time": "2026-07-15T10:00:00+09:00",
+                    "price": 3080.0,
+                    "volume": 1500,
+                },
+            ],
+            "source_url": "intraday-source",
+            "warnings": [],
+        }
+
+        with (
+            patch(
+                "app.ai.agentic_tools._now",
+                return_value=datetime.fromisoformat("2026-07-15T10:05:00+09:00"),
+            ),
+            patch(
+                "app.ai.agentic_tools.jp_market_service.get_jp_intraday_trend",
+                return_value=intraday,
+            ) as intraday_reader,
+        ):
+            context = read_jp_stock_context(
+                db=self.db,
+                symbol="7203",
+                market_data_params={
+                    "include_intraday": True,
+                    "intraday_limit": 1,
+                    "payload_level": "decision",
+                },
+            )
+
+        intraday_reader.assert_called_once_with(symbol="7203.T", db=self.db)
+        compact = context["data"]["compact"]
+        self.assertEqual(context["as_of"], "2026-07-15T10:00:00+09:00")
+        self.assertTrue(compact["quote"]["is_realtime"])
+        self.assertEqual(compact["quote"]["price"], 3080.0)
+        self.assertTrue(compact["resources"]["include_intraday"])
+        self.assertTrue(compact["resources"]["intraday_available"])
+        self.assertEqual(
+            compact["freshness_by_domain"]["intraday"],
+            "current",
+        )
+        intraday_bars = compact["intraday_bars"]
+        self.assertTrue(intraday_bars["enabled"])
+        self.assertEqual(intraday_bars["series"]["1m"]["returned_point_count"], 1)
+        self.assertEqual(
+            intraday_bars["series"]["1m"]["points"][0]["price"],
+            3080.0,
+        )
 
     def test_jp_resource_summary_reports_fundamental_slots(self) -> None:
         upsert_jp_company_fundamental_records(
@@ -1539,6 +1823,13 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertEqual(slots["performance"]["row_count"], 1)
         self.assertEqual(slots["financials"]["status"], "available")
         self.assertTrue(slots["financials"]["available"])
+        self.assertEqual(slots["disclosures"]["status"], "partial")
+        self.assertTrue(slots["disclosures"]["available"])
+        self.assertEqual(slots["disclosures"]["latest_date"], date(2026, 5, 8))
+        self.assertEqual(
+            slots["disclosures"]["metrics"]["coverage"],
+            "company_statement_metadata_only",
+        )
 
     def test_jp_resource_summary_reports_market_resource_metrics(self) -> None:
         self.db.add(
@@ -1699,6 +1990,7 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertIn("POST", routes["/api/jp-market/resources/{symbol}/refresh"])
         self.assertIn("GET", routes["/api/jp-market/intraday/{symbol}"])
         self.assertIn("GET", routes["/api/jp-market/source-health"])
+        self.assertIn("GET", routes["/api/jp-market/overview"])
         self.assertIn(
             "POST",
             routes["/api/jp-market/watchlists/groups/{group_id}/refresh-daily"],

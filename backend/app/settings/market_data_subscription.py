@@ -12,6 +12,7 @@ from app.crypto_market.assets import (
     SUBSCRIPTION_ALWAYS_ON,
     list_crypto_assets,
 )
+from app.resource_market.contract import list_resource_instruments
 from app.settings.schemas import (
     MarketDataSubscriptionItemRead,
     MarketDataSubscriptionSettingsRead,
@@ -37,20 +38,6 @@ RESOURCE_QUOTE_INTERVALS = {
     "selected_quote_seconds": 5.0,
     "background_quote_seconds": 300.0,
 }
-LEGACY_MANUAL_RESOURCE_KEYS = frozenset(
-    {
-        "commodity:energy:CL",
-        "commodity:energy:BZ",
-        "commodity:energy:NG",
-    }
-)
-LEGACY_RESOURCE_INTERVALS = {
-    "quote_seconds": 60.0,
-    "ohlcv_seconds": 300.0,
-}
-LEGACY_RESOURCE_RESOURCES = {"quote": True, "ohlcv": True}
-
-
 def _crypto_resources(asset: CryptoAssetDefinition) -> dict[str, bool]:
     resources = {
         "quote": True,
@@ -123,73 +110,25 @@ def _crypto_subscription_payloads() -> tuple[dict[str, Any], ...]:
     )
 
 
+def _resource_subscription_payloads() -> tuple[dict[str, Any], ...]:
+    return tuple(
+        {
+            "key": instrument.key,
+            "market": "resource",
+            "group": instrument.group,
+            "label": instrument.display_name,
+            "mode": "on_select",
+            "resources": {resource: True for resource in instrument.resources},
+            "intervals": RESOURCE_QUOTE_INTERVALS,
+            "provider_status": instrument.provider_status,
+            "note": instrument.role,
+        }
+        for instrument in list_resource_instruments()
+    )
+
+
 DEFAULT_RESOURCE_MARKET_DATA_SUBSCRIPTIONS: tuple[dict[str, Any], ...] = (
-    {
-        "key": "commodity:metals:GC",
-        "market": "resource",
-        "group": "metals",
-        "label": "黃金",
-        "mode": "on_select",
-        "resources": {"quote": True, "ohlcv": True},
-        "intervals": RESOURCE_QUOTE_INTERVALS,
-        "provider_status": "best_effort_delayed",
-        "note": "Watch-only commodity context from Yahoo chart; delayed/best-effort.",
-    },
-    {
-        "key": "commodity:metals:SI",
-        "market": "resource",
-        "group": "metals",
-        "label": "白銀",
-        "mode": "on_select",
-        "resources": {"quote": True, "ohlcv": True},
-        "intervals": RESOURCE_QUOTE_INTERVALS,
-        "provider_status": "best_effort_delayed",
-        "note": "Watch-only commodity context from Yahoo chart; delayed/best-effort.",
-    },
-    {
-        "key": "commodity:metals:HG",
-        "market": "resource",
-        "group": "metals",
-        "label": "銅",
-        "mode": "on_select",
-        "resources": {"quote": True, "ohlcv": True},
-        "intervals": RESOURCE_QUOTE_INTERVALS,
-        "provider_status": "best_effort_delayed",
-        "note": "Watch-only commodity context from Yahoo chart; delayed/best-effort.",
-    },
-    {
-        "key": "commodity:energy:CL",
-        "market": "resource",
-        "group": "energy",
-        "label": "WTI 原油",
-        "mode": "on_select",
-        "resources": {"quote": True, "ohlcv": True},
-        "intervals": RESOURCE_QUOTE_INTERVALS,
-        "provider_status": "best_effort_delayed",
-        "note": "Watch-only commodity context from Yahoo chart; delayed/best-effort.",
-    },
-    {
-        "key": "commodity:energy:BZ",
-        "market": "resource",
-        "group": "energy",
-        "label": "Brent 原油",
-        "mode": "on_select",
-        "resources": {"quote": True, "ohlcv": True},
-        "intervals": RESOURCE_QUOTE_INTERVALS,
-        "provider_status": "best_effort_delayed",
-        "note": "Watch-only commodity context from Yahoo chart; delayed/best-effort.",
-    },
-    {
-        "key": "commodity:energy:NG",
-        "market": "resource",
-        "group": "energy",
-        "label": "天然氣",
-        "mode": "on_select",
-        "resources": {"quote": True, "ohlcv": True},
-        "intervals": RESOURCE_QUOTE_INTERVALS,
-        "provider_status": "best_effort_delayed",
-        "note": "Watch-only commodity context from Yahoo chart; delayed/best-effort.",
-    },
+    _resource_subscription_payloads()
 )
 
 DEFAULT_MARKET_DATA_SUBSCRIPTIONS: tuple[dict[str, Any], ...] = (
@@ -302,7 +241,7 @@ def _resolve_subscription_items(
             mode = str(item_payload.get("mode", merged_item["mode"])).strip()
             if mode not in SUBSCRIPTION_MODES:
                 raise ValueError(f"Unsupported subscription mode '{mode}' for '{key}'.")
-            if _is_legacy_resource_manual_default(key=key, item_payload=item_payload):
+            if merged_item["market"] == "resource" and mode == "manual":
                 mode = merged_item["mode"]
             merged_item["mode"] = mode
 
@@ -330,42 +269,6 @@ def _resolve_subscription_items(
         MarketDataSubscriptionItemRead(**merged[item["key"]])
         for item in DEFAULT_MARKET_DATA_SUBSCRIPTIONS
     ]
-
-
-def _is_legacy_resource_manual_default(
-    *,
-    key: str,
-    item_payload: Mapping[str, Any],
-) -> bool:
-    if key not in LEGACY_MANUAL_RESOURCE_KEYS:
-        return False
-    if str(item_payload.get("mode", "")).strip() != "manual":
-        return False
-
-    resources = item_payload.get("resources")
-    if isinstance(resources, Mapping):
-        normalized_resources = {
-            str(resource_key): bool(value)
-            for resource_key, value in resources.items()
-            if str(resource_key) in LEGACY_RESOURCE_RESOURCES
-        }
-        if normalized_resources != LEGACY_RESOURCE_RESOURCES:
-            return False
-
-    intervals = item_payload.get("intervals")
-    if not isinstance(intervals, Mapping):
-        return True
-    for interval_key, default_value in LEGACY_RESOURCE_INTERVALS.items():
-        value = intervals.get(interval_key)
-        try:
-            if float(value) != default_value:
-                return False
-        except (TypeError, ValueError):
-            return False
-    return (
-        "selected_quote_seconds" not in intervals
-        and "background_quote_seconds" not in intervals
-    )
 
 
 def _default_subscription_payload_by_key() -> dict[str, dict[str, Any]]:

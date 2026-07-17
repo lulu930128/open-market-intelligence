@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.crypto_market.assets import SUBSCRIPTION_ALWAYS_ON, get_crypto_asset
 from app.crypto_market.contract import (
+    BINANCE_PROVIDER,
     COINGECKO_PROVIDER,
     COINGLASS_PROVIDER,
     OMI_LOCAL_PROVIDER,
@@ -188,7 +189,11 @@ def _market_cap_entry(
     query = db.query(CryptoMarketCapSnapshot).filter(CryptoMarketCapSnapshot.provider == COINGECKO_PROVIDER)
     target = base or "all"
     if base:
-        query = query.filter(CryptoMarketCapSnapshot.symbol == base)
+        asset = get_crypto_asset(base)
+        if asset and asset.coin_id:
+            query = query.filter(CryptoMarketCapSnapshot.coin_id == asset.coin_id)
+        else:
+            query = query.filter(CryptoMarketCapSnapshot.symbol == base)
     row_count = query.count()
     latest = query.order_by(CryptoMarketCapSnapshot.fetched_at.desc(), CryptoMarketCapSnapshot.id.desc()).first()
     latest_fetched_at = latest.fetched_at if latest else None
@@ -336,19 +341,20 @@ def build_crypto_source_health(
                 required=required,
             )
         )
-        entries.append(
-            _latest_query_entry(
-                db,
-                model=CryptoCvdHistory,
-                resource="crypto_cvd_spot",
-                provider=instrument.provider,
-                target=instrument.symbol,
-                now=generated_at,
-                stale_seconds=max(stale_seconds, 300),
-                instrument_type=SPOT,
-                required=False,
+        if instrument.provider == BINANCE_PROVIDER:
+            entries.append(
+                _latest_query_entry(
+                    db,
+                    model=CryptoCvdHistory,
+                    resource="crypto_cvd_spot",
+                    provider=instrument.provider,
+                    target=instrument.symbol,
+                    now=generated_at,
+                    stale_seconds=max(stale_seconds, 300),
+                    instrument_type=SPOT,
+                    required=False,
+                )
             )
-        )
 
     derivative_instruments = _filter_instruments(
         list_provider_instruments(
@@ -374,26 +380,13 @@ def build_crypto_source_health(
                 required=_instrument_required(instrument),
             )
         )
-        entries.append(
-            _latest_query_entry(
-                db,
-                model=CryptoLiquidationEvent,
-                resource="crypto_liquidation_event",
-                provider=instrument.provider,
-                target=instrument.symbol,
-                now=generated_at,
-                stale_seconds=max(stale_seconds, 300),
-                instrument_type=PERPETUAL,
-                required=False,
-            )
-        )
-        for heatmap_provider in (COINGLASS_PROVIDER, OMI_LOCAL_PROVIDER):
+        if "liquidation_event" in instrument.resources:
             entries.append(
                 _latest_query_entry(
                     db,
-                    model=CryptoLiquidationHeatmapCell,
-                    resource="crypto_liquidation_heatmap",
-                    provider=heatmap_provider,
+                    model=CryptoLiquidationEvent,
+                    resource="crypto_liquidation_event",
+                    provider=instrument.provider,
                     target=instrument.symbol,
                     now=generated_at,
                     stale_seconds=max(stale_seconds, 300),
@@ -401,35 +394,68 @@ def build_crypto_source_health(
                     required=False,
                 )
             )
-        entries.append(
-            _latest_query_entry(
-                db,
-                model=CryptoCvdHistory,
-                resource="crypto_cvd_perpetual",
-                provider=instrument.provider,
-                target=instrument.symbol,
-                now=generated_at,
-                stale_seconds=max(stale_seconds, 300),
-                instrument_type=PERPETUAL,
-                required=False,
+            for heatmap_provider in (COINGLASS_PROVIDER, OMI_LOCAL_PROVIDER):
+                entries.append(
+                    _latest_query_entry(
+                        db,
+                        model=CryptoLiquidationHeatmapCell,
+                        resource="crypto_liquidation_heatmap",
+                        provider=heatmap_provider,
+                        target=instrument.symbol,
+                        now=generated_at,
+                        stale_seconds=max(stale_seconds, 300),
+                        instrument_type=PERPETUAL,
+                        required=False,
+                    )
+                )
+        if instrument.provider == BINANCE_PROVIDER:
+            entries.append(
+                _latest_query_entry(
+                    db,
+                    model=CryptoCvdHistory,
+                    resource="crypto_cvd_perpetual",
+                    provider=instrument.provider,
+                    target=instrument.symbol,
+                    now=generated_at,
+                    stale_seconds=max(stale_seconds, 300),
+                    instrument_type=PERPETUAL,
+                    required=False,
+                )
             )
-        )
-        entries.append(
-            _latest_query_entry(
-                db,
-                model=CryptoLongShortRatioHistory,
-                resource="crypto_long_short_ratio",
-                provider=instrument.provider,
-                target=instrument.symbol,
-                now=generated_at,
-                stale_seconds=max(stale_seconds, 300),
-                instrument_type=PERPETUAL,
-                required=False,
+        if "long_short_ratio" in instrument.resources:
+            entries.append(
+                _latest_query_entry(
+                    db,
+                    model=CryptoLongShortRatioHistory,
+                    resource="crypto_long_short_ratio",
+                    provider=instrument.provider,
+                    target=instrument.symbol,
+                    now=generated_at,
+                    stale_seconds=max(stale_seconds, 300),
+                    instrument_type=PERPETUAL,
+                    required=False,
+                )
             )
-        )
     if not required_only or normalized_base is None or _base_required(normalized_base):
-        entries.append(_market_cap_entry(db, base=normalized_base, now=generated_at, stale_seconds=stale_seconds))
-        entries.append(_spread_entry(db, base=normalized_base, now=generated_at, stale_seconds=stale_seconds))
+        asset_definition = get_crypto_asset(normalized_base) if normalized_base else None
+        if asset_definition is None or asset_definition.market_cap:
+            entries.append(
+                _market_cap_entry(
+                    db,
+                    base=normalized_base,
+                    now=generated_at,
+                    stale_seconds=stale_seconds,
+                )
+            )
+        if asset_definition is None or asset_definition.taiwan_spread:
+            entries.append(
+                _spread_entry(
+                    db,
+                    base=normalized_base,
+                    now=generated_at,
+                    stale_seconds=stale_seconds,
+                )
+            )
     collector_status = crypto_realtime_collector_status()
     entry_payloads = [entry.to_dict() for entry in entries]
     realtime_entries = crypto_realtime_store.health_entries(

@@ -107,6 +107,7 @@ class Settings(BaseSettings):
     scheduler_taiwan_futures_symbols: str = "TXF,MXF,TMF"
     scheduler_taiwan_futures_session: str = "auto"
     scheduler_taiwan_futures_interval_seconds: int = 30
+    scheduler_taiwan_futures_failure_backoff_seconds: int = 300
     scheduler_taiwan_futures_success_event_interval_seconds: int = 300
     enable_us_market_scheduler: bool = False
     scheduler_us_market_refresh_time: str = "06:30"

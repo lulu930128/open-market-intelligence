@@ -30,8 +30,13 @@ type UseChartDrawingPersistenceOptions = {
   timeframe: ProfessionalTimeframe;
 };
 
-function chartDrawingStorageKey(stockId: string | null, timeframe: ProfessionalTimeframe) {
-  return `omi:tw:chart-drawings:v1:${stockId ?? "empty"}:${timeframe}`;
+function chartDrawingStorageKey(
+  market: string | null,
+  stockId: string | null,
+  timeframe: ProfessionalTimeframe
+) {
+  const storageMarket = (market ?? "").trim().toUpperCase() === "KR" ? "kr" : "tw";
+  return `omi:${storageMarket}:chart-drawings:v1:${stockId ?? "empty"}:${timeframe}`;
 }
 
 function chartDrawingTimeMode(timeframe: ProfessionalTimeframe) {
@@ -57,7 +62,7 @@ export function useChartDrawingPersistence({
     future: [],
   });
   const syncTimerRef = useRef<number | null>(null);
-  const storageKey = chartDrawingStorageKey(stockId, timeframe);
+  const storageKey = chartDrawingStorageKey(market, stockId, timeframe);
   const storedDrawings = useMemo(() => loadChartDrawings(storageKey), [storageKey]);
   const drawings = drawingState.key === storageKey ? drawingState.drawings : storedDrawings;
   const history =

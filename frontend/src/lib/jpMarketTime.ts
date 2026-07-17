@@ -96,6 +96,38 @@ export function getTokyoMinutesOfDay(value: string | Date) {
 export function getJapanMarketRefreshState(now = new Date()) {
   const parts = getTokyoParts(now);
   const dateKey = tokyoDateKey(parts);
+  const calendarSnapshot = getMarketCalendarStatusSnapshot("jp");
+  const snapshotMatchesDate = calendarSnapshot?.date === dateKey;
+  const snapshotNextStartMs = snapshotMatchesDate
+    ? Date.parse(calendarSnapshot.session.next_session_start_at)
+    : Number.NaN;
+  const snapshotLunchEndMs = tokyoBoundaryToUtcMs(
+    parts.year,
+    parts.month,
+    parts.day,
+    12,
+    30
+  );
+
+  if (calendarSnapshot && snapshotMatchesDate) {
+    const nextPollingStartMs =
+      calendarSnapshot.phase === "lunch_break"
+        ? snapshotLunchEndMs
+        : Number.isFinite(snapshotNextStartMs)
+          ? snapshotNextStartMs
+          : now.getTime() + 60_000;
+
+    return {
+      dateKey,
+      sessionPhase: calendarSnapshot.phase,
+      isPollingWindow: calendarSnapshot.session.is_polling_window,
+      isAfterClose: calendarSnapshot.session.is_after_close,
+      msUntilNextPollingStart: Math.max(1_000, nextPollingStartMs - now.getTime()),
+      calendarSource: calendarSnapshot.calendar_source ?? null,
+      calendarLimit: calendarSnapshot.calendar_limit ?? null,
+    };
+  }
+
   const isTradingDay = isJapanWeekday(parts);
   const nowMs = now.getTime();
   const openMs = tokyoBoundaryToUtcMs(parts.year, parts.month, parts.day, 9, 0);
@@ -125,6 +157,8 @@ export function getJapanMarketRefreshState(now = new Date()) {
     isPollingWindow,
     isAfterClose,
     msUntilNextPollingStart: Math.max(1_000, nextPollingStartMs - nowMs),
+    calendarSource: null,
+    calendarLimit: "weekday_fallback",
   };
 }
 
@@ -150,3 +184,4 @@ export function isJapanRegularSessionPoint(value: string | Date) {
     (minutes <= JAPAN_LUNCH_START_MINUTES || minutes >= JAPAN_LUNCH_END_MINUTES)
   );
 }
+import { getMarketCalendarStatusSnapshot } from "@/lib/marketCalendarStatus";

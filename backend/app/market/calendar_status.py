@@ -51,9 +51,25 @@ from app.kr_market.trading_calendar import (
     next_kr_trading_day,
     previous_kr_trading_day,
 )
+from app.jp_market.trading_calendar import (
+    JPX_CALENDAR_SOURCE,
+    JPX_VERIFIED_CALENDAR_YEARS,
+    JP_DAILY_PRICE_RELEASE_TIME,
+    JP_LUNCH_END_TIME,
+    JP_LUNCH_START_TIME,
+    JP_MARKET_TIMEZONE,
+    JP_SESSION_CLOSE_TIME,
+    JP_SESSION_OPEN_TIME,
+    expected_jp_daily_price_date,
+    is_jp_trading_day,
+    jp_calendar_limit,
+    jp_market_holiday_name,
+    next_jp_trading_day,
+    previous_jp_trading_day,
+)
 
 
-MarketCode = Literal["tw", "us", "kr"]
+MarketCode = Literal["tw", "us", "jp", "kr"]
 
 TAIWAN_PREOPEN_TIME = time(hour=8, minute=30)
 TAIWAN_SESSION_OPEN_TIME = time(hour=9, minute=0)
@@ -153,6 +169,26 @@ def _us_session_phase(
         return "regular"
     if current_time < US_POST_MARKET_CLOSE_TIME:
         return "after_hours"
+    return "post_close"
+
+
+def _jp_session_phase(
+    *,
+    local_now: datetime,
+    is_trading_day: bool,
+) -> str:
+    if not is_trading_day:
+        return "market_closed"
+
+    current_time = local_now.time()
+    if current_time < JP_SESSION_OPEN_TIME:
+        return "pre_market_pending"
+    if current_time < JP_LUNCH_START_TIME:
+        return "regular"
+    if current_time < JP_LUNCH_END_TIME:
+        return "lunch_break"
+    if current_time < JP_SESSION_CLOSE_TIME:
+        return "regular"
     return "post_close"
 
 
@@ -443,20 +479,95 @@ def build_kr_calendar_status(now: datetime | None = None) -> dict[str, Any]:
     }
 
 
+def build_jp_calendar_status(now: datetime | None = None) -> dict[str, Any]:
+    local_now = _as_market_datetime(now, JP_MARKET_TIMEZONE)
+    current_date = local_now.date()
+    holiday_name = jp_market_holiday_name(current_date)
+    is_trading_day = is_jp_trading_day(current_date)
+    previous_trading_day = previous_jp_trading_day(
+        current_date,
+        include_value=is_trading_day,
+    )
+    next_trading_day = next_jp_trading_day(current_date, include_value=False)
+    phase = _jp_session_phase(
+        local_now=local_now,
+        is_trading_day=is_trading_day,
+    )
+    release_windows = {
+        "jp_daily_price": _release_window(
+            key="jp_daily_price",
+            label="JP daily price",
+            release_time=JP_DAILY_PRICE_RELEASE_TIME,
+            expected_trade_date=expected_jp_daily_price_date(now=local_now),
+            local_now=local_now,
+            current_date=current_date,
+            is_trading_day=is_trading_day,
+            next_trading_day=next_trading_day,
+            timezone_value=JP_MARKET_TIMEZONE,
+        )
+    }
+    next_session_start_at = _next_session_start_at(
+        current_date=current_date,
+        local_now=local_now,
+        is_trading_day=is_trading_day,
+        preopen_time=JP_SESSION_OPEN_TIME,
+        next_trading_day=next_trading_day,
+        timezone_value=JP_MARKET_TIMEZONE,
+    )
+    if phase == "lunch_break":
+        next_session_start_at = _local_datetime(
+            current_date,
+            JP_LUNCH_END_TIME,
+            JP_MARKET_TIMEZONE,
+        )
+
+    return {
+        "market": "jp",
+        "timezone": str(JP_MARKET_TIMEZONE),
+        "checked_at": local_now.isoformat(),
+        "date": current_date.isoformat(),
+        "is_trading_day": is_trading_day,
+        "phase": phase,
+        "reason": _market_reason(
+            value=current_date,
+            is_trading_day=is_trading_day,
+            holiday_name=holiday_name,
+        ),
+        "holiday_name": holiday_name,
+        "previous_trading_day": previous_trading_day.isoformat(),
+        "next_trading_day": next_trading_day.isoformat(),
+        "session": {
+            "open_time": JP_SESSION_OPEN_TIME.strftime("%H:%M"),
+            "lunch_start_time": JP_LUNCH_START_TIME.strftime("%H:%M"),
+            "lunch_end_time": JP_LUNCH_END_TIME.strftime("%H:%M"),
+            "close_time": JP_SESSION_CLOSE_TIME.strftime("%H:%M"),
+            "next_session_start_at": next_session_start_at.isoformat(),
+            "is_polling_window": phase == "regular",
+            "is_after_close": phase == "post_close",
+        },
+        "release_windows": release_windows,
+        "calendar_source": JPX_CALENDAR_SOURCE,
+        "calendar_verified_years": sorted(JPX_VERIFIED_CALENDAR_YEARS),
+        "calendar_limit": jp_calendar_limit(current_date.year),
+    }
+
+
 def build_market_calendar_status(
     *,
     market: str = "all",
     now: datetime | None = None,
 ) -> dict[str, Any]:
     normalized_market = (market or "all").strip().lower()
-    if normalized_market not in {"all", "tw", "us", "kr"}:
-        raise ValueError("market must be one of: all, tw, us, kr.")
+    if normalized_market not in {"all", "tw", "us", "jp", "kr"}:
+        raise ValueError("market must be one of: all, tw, us, jp, kr.")
 
     markets: dict[str, dict[str, Any]] = {}
     if normalized_market in {"all", "tw"}:
         markets["tw"] = build_taiwan_calendar_status(now=now)
     if normalized_market in {"all", "us"}:
         markets["us"] = build_us_calendar_status(now=now)
+    if normalized_market in {"all", "jp"}:
+        markets["jp"] = build_jp_calendar_status(now=now)
     if normalized_market in {"all", "kr"}:
         markets["kr"] = build_kr_calendar_status(now=now)
 
@@ -584,11 +695,31 @@ def expected_kr_trade_date(
     )
 
 
+def expected_jp_trade_date(
+    key: str = "jp_daily_price",
+    *,
+    include_today: bool | None = None,
+    now: datetime | None = None,
+) -> date | None:
+    if key != "jp_daily_price":
+        return None
+    if include_today is not None:
+        return expected_jp_daily_price_date(include_today=include_today, now=now)
+
+    return expected_trade_date_from_calendar(
+        build_jp_calendar_status(now=now),
+        market="jp",
+        key=key,
+    )
+
+
 __all__ = [
     "build_market_calendar_status",
+    "build_jp_calendar_status",
     "build_kr_calendar_status",
     "build_taiwan_calendar_status",
     "build_us_calendar_status",
+    "expected_jp_trade_date",
     "expected_kr_trade_date",
     "expected_taiwan_trade_date",
     "expected_trade_date_from_calendar",

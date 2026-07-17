@@ -7,6 +7,11 @@ import {
   type JPMarketIndexConfig,
 } from "@/lib/jpMarketIndices";
 import {
+  JAPAN_INTRADAY_REFRESH_MS,
+  getJapanMarketRefreshState,
+  isJapanRegularSessionPoint,
+} from "@/lib/jpMarketTime";
+import {
   getKrPrimaryMarketIndexConfig,
   resolveKrContextIndexConfig,
   type KRMarketIndexConfig,
@@ -23,6 +28,7 @@ import {
 } from "@/lib/usMarketTime";
 import type {
   IntradayTrendResponse,
+  JPMarketOverviewRead,
   JPStockMasterRead,
   JPOhlcChartRead,
   KRIndexOhlcChartRead,
@@ -67,6 +73,10 @@ export type JPMarketTapeSnapshot = {
   volume: number | null;
   pointCount: number;
   asOf: string | null;
+  expectedTradeDate: string | null;
+  freshnessStatus: string;
+  isCurrent: boolean;
+  source: "intraday" | "daily";
 };
 
 export type KRMarketTapeSnapshot = {
@@ -111,6 +121,19 @@ function averageLastNumbers(
 function sumUsIntradayVolume(points: IntradayTrendResponse["points"]) {
   const regularVolumes = points
     .filter((point) => isUsRegularSessionPoint(point.time))
+    .map((point) => point.volume)
+    .filter((value): value is number => {
+      return value !== null && value !== undefined && !Number.isNaN(value) && value > 0;
+    });
+
+  if (!regularVolumes.length) return null;
+
+  return regularVolumes.reduce((total, value) => total + value, 0);
+}
+
+function sumJpIntradayVolume(points: IntradayTrendResponse["points"]) {
+  const regularVolumes = points
+    .filter((point) => isJapanRegularSessionPoint(point.time))
     .map((point) => point.volume)
     .filter((value): value is number => {
       return value !== null && value !== undefined && !Number.isNaN(value) && value > 0;
@@ -180,21 +203,42 @@ async function fetchUsMarketTapeSnapshot(config: USMarketIndexConfig) {
 }
 
 async function fetchJpMarketTapeSnapshot(config: JPMarketIndexConfig) {
-  const chart = await fetchJson<JPOhlcChartRead>(
-    `/api/jp-market/ohlc/${encodeURIComponent(config.symbol)}`,
-    {
-      timeframe: "daily",
-      bars: 60,
-      ensure_history: true,
-      outputsize: "compact",
-      provider: "auto",
-    }
-  );
+  const [chart, intraday] = await Promise.all([
+    fetchJson<JPOhlcChartRead>(
+      `/api/jp-market/ohlc/${encodeURIComponent(config.symbol)}`,
+      {
+        timeframe: "daily",
+        bars: 60,
+        ensure_history: true,
+        outputsize: "compact",
+        provider: "auto",
+      }
+    ),
+    fetchJson<IntradayTrendResponse>(
+      `/api/jp-market/intraday/${encodeURIComponent(config.symbol)}`
+    ).catch(() => null),
+  ]);
   const chartPoints = chart.points ?? [];
   const latestDaily = chartPoints[chartPoints.length - 1] ?? null;
   const previousDaily = chartPoints[chartPoints.length - 2] ?? null;
-  const close = latestDaily?.close ?? null;
-  const previousClose = previousDaily?.close ?? null;
+  const latestIntraday = intraday?.points[intraday.points.length - 1] ?? null;
+  const marketState = getJapanMarketRefreshState();
+  const intradayTradeDate = latestIntraday?.time.slice(0, 10) ?? null;
+  const expectedIntradayTradeDate =
+    marketState.sessionPhase === "pre_market_pending" ||
+    marketState.sessionPhase === "market_closed"
+      ? chart.expected_data_date
+      : marketState.dateKey;
+  const intradayIsCurrent = Boolean(
+    intradayTradeDate &&
+      expectedIntradayTradeDate &&
+      intradayTradeDate === expectedIntradayTradeDate
+  );
+  const close = latestIntraday?.price ?? latestDaily?.close ?? null;
+  const previousClose =
+    latestIntraday && intraday?.previous_close !== null && intraday?.previous_close !== undefined
+      ? intraday.previous_close
+      : previousDaily?.close ?? null;
   const change = close !== null && previousClose !== null ? close - previousClose : null;
   const changePct =
     change !== null && previousClose !== null && previousClose !== 0
@@ -219,9 +263,19 @@ async function fetchJpMarketTapeSnapshot(config: JPMarketIndexConfig) {
     change,
     changePct,
     priceVsMa20,
-    volume: latestDaily?.volume ?? null,
+    volume: latestIntraday
+      ? sumJpIntradayVolume(intraday?.points ?? []) ?? latestDaily?.volume ?? null
+      : latestDaily?.volume ?? null,
     pointCount: chart.point_count,
-    asOf: latestDaily?.time ?? null,
+    asOf: latestIntraday?.time ?? latestDaily?.time ?? null,
+    expectedTradeDate: chart.expected_data_date,
+    freshnessStatus: latestIntraday
+      ? intradayIsCurrent
+        ? "current"
+        : "stale"
+      : chart.freshness_status,
+    isCurrent: latestIntraday ? intradayIsCurrent : chart.is_current,
+    source: latestIntraday ? "intraday" : "daily",
   } satisfies JPMarketTapeSnapshot;
 }
 
@@ -401,6 +455,13 @@ function regionalDailyRefreshDelay() {
   return 300_000;
 }
 
+function jpRefreshDelay() {
+  const marketState = getJapanMarketRefreshState();
+  return marketState.isPollingWindow
+    ? JAPAN_INTRADAY_REFRESH_MS
+    : Math.min(marketState.msUntilNextPollingStart, 300_000);
+}
+
 export function useUsMarketTapeState({
   selectedSymbol,
   selectedSecurityName,
@@ -466,15 +527,62 @@ export function useJpMarketTapeState({
     () => uniqueConfigs([primaryIndex, contextIndex]),
     [contextIndex, primaryIndex]
   );
-
-  return usePollingMarketTapeState({
+  const tapeState = usePollingMarketTapeState({
     configs,
     primarySymbol: primaryIndex.symbol,
     contextSymbol: contextIndex.symbol,
     loadSnapshot: fetchJpMarketTapeSnapshot,
-    refreshDelay: regionalDailyRefreshDelay,
+    refreshDelay: jpRefreshDelay,
     onError,
   });
+  const [overview, setOverview] = useState<JPMarketOverviewRead | null>(null);
+  const [overviewLoadState, setOverviewLoadState] = useState<DashboardLoadState>("idle");
+  const overviewErrorRef = useRef(onError);
+
+  useEffect(() => {
+    overviewErrorRef.current = onError;
+  }, [onError]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | undefined;
+
+    async function loadOverview(silent = false) {
+      if (!silent) setOverviewLoadState("loading");
+      try {
+        const payload = await fetchJson<JPMarketOverviewRead>("/api/jp-market/overview", {
+          sector_limit: 10,
+          mover_limit: 5,
+        });
+        if (cancelled) return;
+        setOverview(payload);
+        setOverviewLoadState("success");
+      } catch (error) {
+        if (cancelled) return;
+        setOverviewLoadState("error");
+        overviewErrorRef.current(error);
+      }
+    }
+
+    function scheduleRefresh() {
+      if (cancelled) return;
+      timer = window.setTimeout(() => {
+        void loadOverview(true).finally(scheduleRefresh);
+      }, regionalDailyRefreshDelay());
+    }
+
+    void loadOverview().finally(scheduleRefresh);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, []);
+
+  return {
+    ...tapeState,
+    overview,
+    overviewLoadState,
+  };
 }
 
 export function useKrMarketTapeState({

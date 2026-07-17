@@ -110,6 +110,12 @@ export const jaJP = {
       advanceDecline: "上昇 / 下落",
       breadth: "市場幅",
       advancePct: "{value}% 上昇",
+      coverage: "データカバレッジ",
+      coverageValue: "{current} / {active}",
+      partialCoverage: "一部カバレッジ（ローカル日足）",
+      currentCoverage: "完全カバレッジ",
+      strongestSector: "相対的に強い業種",
+      expectedDate: "想定取引日 {date}",
       loading: "市場指数を読み込み中...",
       empty: "市場指数データなし",
       updated: "市場環境を更新 {asOf}",
@@ -896,6 +902,10 @@ export const jaJP = {
       highMarker: "高値 {value}",
       lowMarker: "安値 {value}",
       showPriceLimit: "値幅制限を表示",
+      sources: {
+        ...zhTW.stockDetail.intraday.sources,
+        naverIndex: "Naver 韓国指数分足",
+      },
     },
     dataViews: {
       ...zhTW.stockDetail.dataViews,
@@ -1360,6 +1370,7 @@ export const jaJP = {
   },
   usStockDetail: {
     ...zhTW.usStockDetail,
+    statusSource: "米国株詳細",
     usDailyWeeklyMonthly: "米国株 日/週/月",
     noStockSelected: "銘柄未選択",
     selectStockPrompt: "左側ウォッチリストまたは上部検索から銘柄を選択してください",
@@ -1646,6 +1657,7 @@ export const jaJP = {
     },
     errors: {
       dailyBackfillFailed: "台湾指数先物の日足補完に失敗しました",
+      intradayRefreshFailed: "台湾指数先物の本日データ更新に失敗したため、ローカルキャッシュを表示しています",
     },
   },
   locales: {
@@ -2018,6 +2030,13 @@ export const jaJP = {
       commodity: "商品",
       commoditySubtitle: "商品と通貨の参照",
       currency: "通貨",
+      groups: {
+        metals: "金属",
+        energy: "エネルギー",
+        twdToForeign: "台湾ドルから外貨",
+        foreignToTwd: "外貨から台湾ドル",
+        foreignToForeign: "外貨同士",
+      },
       providerPending: "データソース未接続",
       providerBestEffortDelayed: "準リアルタイム／遅延見積",
       watchlist: "暗号資産ウォッチリスト",
@@ -2032,6 +2051,14 @@ export const jaJP = {
       watchlistSaveFailed: "暗号資産ウォッチリストの更新に失敗しました",
       watchlistLoadFailed: "暗号資産ウォッチリストの読み込みに失敗しました",
       watchlistLoadPartial: "暗号資産ウォッチリストを一部読み込めませんでした。利用可能なデータは保持しました: {resources}",
+      workspaceSummary: "資産 {registry} · live {ready} · 要更新 {attention}",
+      watchlistRegistryCounts: "{watchlist} / {registry}",
+      maturity: {
+        ready: "live",
+        partial: "一部",
+        stale: "要更新",
+        missing: "未取得",
+      },
       notes: {
         BTC: "取引候補 / BTC/TWD / BTC/USDT",
         ETH: "監視 / ETH/TWD / ETH/USDT",
@@ -2049,6 +2076,7 @@ export const jaJP = {
         toggleCommodity: "商品フォルダを切り替え",
         toggleCommodityGroup: "{label} 商品フォルダを切り替え",
         toggleCurrency: "通貨フォルダを切り替え",
+        toggleCurrencyGroup: "{label} 通貨フォルダを切り替え",
         toggleWatchlist: "暗号資産ウォッチリストフォルダを切り替え",
       },
     },

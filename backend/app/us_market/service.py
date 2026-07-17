@@ -679,6 +679,8 @@ def _refresh_us_ohlc_history_if_needed(
     adjusted: bool,
     provider: str,
     has_newer_untrusted_yahoo_rows: bool,
+    latest_data_date: date | None,
+    expected_data_date: date | None,
 ) -> dict | None:
     if not ensure_history:
         return None
@@ -687,11 +689,18 @@ def _refresh_us_ohlc_history_if_needed(
     has_sparse_daily_shape = (
         timeframe == "daily" and _is_sparse_daily_ohlc_shape(points)
     )
-    if (
-        len(points) >= bars
-        and not has_sparse_daily_shape
-        and not has_newer_untrusted_yahoo_rows
+    refresh_reasons: list[str] = []
+    if len(points) < bars:
+        refresh_reasons.append("insufficient_history")
+    if has_sparse_daily_shape:
+        refresh_reasons.append("sparse_daily_shape")
+    if has_newer_untrusted_yahoo_rows:
+        refresh_reasons.append("untrusted_newer_rows")
+    if expected_data_date is not None and (
+        latest_data_date is None or latest_data_date < expected_data_date
     ):
+        refresh_reasons.append("stale_latest_date")
+    if not refresh_reasons:
         return None
 
     if timeframe in {"weekly", "monthly"}:
@@ -700,13 +709,14 @@ def _refresh_us_ohlc_history_if_needed(
         refresh_outputsize = "compact"
 
     try:
-        return refresh_us_daily_prices(
+        result = refresh_us_daily_prices(
             db=db,
             symbol=symbol,
             outputsize=refresh_outputsize,
             adjusted=adjusted,
             provider=provider,
         )
+        return {**result, "refresh_reasons": refresh_reasons}
     except (USMarketConfigurationError, USMarketDataFetchError, requests.RequestException) as exc:
         if not points:
             raise
@@ -718,6 +728,7 @@ def _refresh_us_ohlc_history_if_needed(
             "fetched_count": 0,
             "inserted_count": 0,
             "updated_count": 0,
+            "refresh_reasons": refresh_reasons,
             "message": f"US daily quality refresh failed; using cached clean rows: {exc}",
         }
 
@@ -747,6 +758,11 @@ def list_us_ohlc_chart_data(
 
     normalized_symbol = normalize_us_symbol(symbol)
     end_date = to_date or date.today()
+    resolved_expected_data_date = (
+        previous_us_trading_day(end_date, include_value=True)
+        if to_date is not None
+        else expected_us_daily_price_date()
+    )
     lookback_days = bars * US_CHART_LOOKBACK_MULTIPLIER[timeframe]
     start_date = end_date - timedelta(days=lookback_days)
     backfill_result = None
@@ -759,6 +775,7 @@ def list_us_ohlc_chart_data(
     )
     rows = _filter_us_ohlc_source_rows(source_rows)
     daily_points = [_us_ohlc_point(row) for row in rows]
+    latest_data_date = rows[-1].trade_date if rows else None
     base_points = aggregate_ohlc_points(points=daily_points, timeframe=timeframe)[-bars:]
     intraday_overlay = None
     points = base_points
@@ -783,6 +800,8 @@ def list_us_ohlc_chart_data(
             rows=source_rows,
             trusted_rows=rows,
         ),
+        latest_data_date=latest_data_date,
+        expected_data_date=resolved_expected_data_date,
     )
 
     if backfill_result is not None:
@@ -794,6 +813,7 @@ def list_us_ohlc_chart_data(
         )
         rows = _filter_us_ohlc_source_rows(source_rows)
         daily_points = [_us_ohlc_point(row) for row in rows]
+        latest_data_date = rows[-1].trade_date if rows else None
         base_points = aggregate_ohlc_points(points=daily_points, timeframe=timeframe)[-bars:]
         intraday_overlay = None
         points = base_points
@@ -804,6 +824,16 @@ def list_us_ohlc_chart_data(
                 end_date=end_date,
             )
             points = aggregate_ohlc_points(points=daily_points, timeframe=timeframe)[-bars:]
+
+    freshness_status = (
+        "missing"
+        if latest_data_date is None
+        else "stale"
+        if latest_data_date < resolved_expected_data_date
+        else "future"
+        if latest_data_date > resolved_expected_data_date
+        else "current"
+    )
 
     return {
         "symbol": normalized_symbol,
@@ -816,6 +846,11 @@ def list_us_ohlc_chart_data(
         "points": points,
         "backfill": backfill_result,
         "intraday_overlay": intraday_overlay,
+        "latest_data_date": latest_data_date,
+        "expected_data_date": resolved_expected_data_date,
+        "freshness_status": freshness_status,
+        "is_current": freshness_status in {"current", "future"},
+        "refresh_recommended": freshness_status in {"missing", "stale"},
     }
 
 

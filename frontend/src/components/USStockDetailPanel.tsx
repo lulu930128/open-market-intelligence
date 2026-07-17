@@ -41,6 +41,11 @@ import {
 } from "@/components/professionalChartDrawing";
 import { fetchJson, requestJson } from "@/lib/api";
 import {
+  clearDataStatusFocus,
+  emitDataStatusEvent,
+  setDataStatusFocus,
+} from "@/lib/dataStatusEvents";
+import {
   timeframeLabel,
   usAssetTypeLabel,
   useT,
@@ -87,7 +92,7 @@ import {
 } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
-type Message = { type: "success" | "error"; text: string } | null;
+type SuccessMessage = { text: string } | null;
 type USChartTimeframe = "today" | "daily" | "weekly" | "monthly";
 type USHistoricalTimeframe = Exclude<USChartTimeframe, "today">;
 type USProfessionalIntradayTimeframe = "1m" | "5m" | "15m" | "30m" | "1h" | "4h";
@@ -596,14 +601,6 @@ function formatFundamentalPeriod(metric: USSecFundamentalMetricRead | null | und
   return periodEnd;
 }
 
-function messageClass(message: Message) {
-  if (!message) return "";
-
-  return message.type === "success"
-    ? "border-omi-success-border bg-omi-success-soft text-omi-success"
-    : "border-omi-danger-border bg-omi-danger-soft text-omi-danger";
-}
-
 function daysSince(value: string | null | undefined) {
   if (!value || value === "-") return null;
 
@@ -957,7 +954,7 @@ export default function USStockDetailPanel({
   const [refreshingFacts, setRefreshingFacts] = useState(false);
   const [refreshingProfile, setRefreshingProfile] = useState(false);
   const [refreshingActions, setRefreshingActions] = useState(false);
-  const [message, setMessage] = useState<Message>(null);
+  const [successMessage, setSuccessMessage] = useState<SuccessMessage>(null);
   const requestSeq = useRef(0);
   const finalIntradayRefreshDate = useRef<string | null>(null);
   const chartDrawingSyncTimerRef = useRef<number | null>(null);
@@ -1076,6 +1073,29 @@ export default function USStockDetailPanel({
   const selectedDisplaySymbol = selectedIndexConfig?.displaySymbol ?? selectedSymbol ?? "-";
   const selectedDisplayName =
     selectedIndexConfig?.name ?? stockName(selectedStock, selectedSecurityName);
+  const dataStatusContextKey = `us:${selectedSymbol?.toUpperCase() ?? "unknown"}`;
+  const dataStatusDisplayName = selectedIndexConfig?.name ?? selectedSecurityName;
+  const dataStatusContextLabel = selectedSymbol
+    ? [selectedDisplaySymbol, dataStatusDisplayName].filter(Boolean).join(" ")
+    : t("watchlist.usHeader");
+  const dataStatusSource = t("usStockDetail.statusSource");
+  const publishDetailDataStatus = useCallback(
+    (title: string, error: unknown) => {
+      if (!selectedSymbol) return;
+
+      emitDataStatusEvent({
+        market: "us",
+        level: "error",
+        title,
+        message: error instanceof Error ? error.message : title,
+        source: dataStatusSource,
+        contextKey: dataStatusContextKey,
+        contextLabel: dataStatusContextLabel,
+        dedupeKey: `${dataStatusContextKey}:${title}:error`,
+      });
+    },
+    [dataStatusContextKey, dataStatusContextLabel, dataStatusSource, selectedSymbol]
+  );
   const selectedSubtitle = selectedIndexConfig
     ? `${selectedIndexConfig.exchange} · ${usAssetTypeLabel(t, "index")} · ${formatDate(displayDate)}`
     : selectedStock
@@ -1120,6 +1140,19 @@ export default function USStockDetailPanel({
   useEffect(() => {
     return () => onChartFocusModeChange?.(false);
   }, [onChartFocusModeChange]);
+
+  useEffect(() => {
+    if (!selectedSymbol) return;
+
+    setDataStatusFocus({
+      market: "us",
+      contextKey: dataStatusContextKey,
+      label: dataStatusContextLabel,
+      source: dataStatusSource,
+    });
+
+    return () => clearDataStatusFocus(dataStatusContextKey);
+  }, [dataStatusContextKey, dataStatusContextLabel, dataStatusSource, selectedSymbol]);
 
   const dataCoverageItems: Array<{
     label: string;
@@ -1230,7 +1263,7 @@ export default function USStockDetailPanel({
       requestSeq.current = requestId;
       setLoadState("loading");
       setFactLoadState("loading");
-      setMessage(null);
+      setSuccessMessage(null);
 
       try {
         const indexConfig = getUsMarketIndexConfig(symbol);
@@ -1371,9 +1404,10 @@ export default function USStockDetailPanel({
               setShortVolumeRows(supplementalData.shortVolumeData);
               setFactLoadState("success");
             })
-            .catch(() => {
+            .catch((error) => {
               if (requestSeq.current !== requestId) return;
               setFactLoadState("error");
+              publishDetailDataStatus(tRef.current("usStockDetail.errors.loadFailed"), error);
             });
           return;
         }
@@ -1426,9 +1460,10 @@ export default function USStockDetailPanel({
             setShortVolumeRows(supplementalData.shortVolumeData);
             setFactLoadState("success");
           })
-          .catch(() => {
+          .catch((error) => {
             if (requestSeq.current !== requestId) return;
             setFactLoadState("error");
+            publishDetailDataStatus(tRef.current("usStockDetail.errors.loadFailed"), error);
           });
       } catch (error) {
         if (requestSeq.current !== requestId) return;
@@ -1448,13 +1483,10 @@ export default function USStockDetailPanel({
         setShortVolumeRows([]);
         setLoadState("error");
         setFactLoadState("error");
-        setMessage({
-          type: "error",
-          text: error instanceof Error ? error.message : tRef.current("usStockDetail.errors.loadFailed"),
-        });
+        publishDetailDataStatus(tRef.current("usStockDetail.errors.loadFailed"), error);
       }
     },
-    [intradaySessionScope, onCompanyProfileChange]
+    [intradaySessionScope, onCompanyProfileChange, publishDetailDataStatus]
   );
 
   useEffect(() => {
@@ -1485,7 +1517,7 @@ export default function USStockDetailPanel({
   }, [loadSymbolData, onCompanyProfileChange, selectedSymbol, timeframe]);
 
   useEffect(() => {
-    if (!selectedSymbol || timeframe !== "today") return;
+    if (!selectedSymbol || timeframe !== "today" || loadState !== "success") return;
 
     let cancelled = false;
     let intradayTimer: number | undefined;
@@ -1521,11 +1553,10 @@ export default function USStockDetailPanel({
       } catch (error) {
         if (cancelled) return;
 
-        setLoadState("error");
-        setMessage({
-          type: "error",
-          text: error instanceof Error ? error.message : tRef.current("usStockDetail.errors.intradayRefreshFailed"),
-        });
+        publishDetailDataStatus(
+          tRef.current("usStockDetail.errors.intradayRefreshFailed"),
+          error
+        );
       } finally {
         intradayRequestInFlight = false;
       }
@@ -1566,7 +1597,7 @@ export default function USStockDetailPanel({
       cancelled = true;
       clearIntradayTimer();
     };
-  }, [intradaySessionScope, selectedSymbol, timeframe]);
+  }, [intradaySessionScope, loadState, publishDetailDataStatus, selectedSymbol, timeframe]);
 
   const queueChartDrawingRemoteSave = useCallback((
     drawingsToSave: ChartDrawing[],
@@ -1883,7 +1914,7 @@ export default function USStockDetailPanel({
     if (!selectedSymbol) return;
 
     setRefreshingFacts(true);
-    setMessage(null);
+    setSuccessMessage(null);
 
     try {
       const result = await requestJson<USSecFactRefreshResultRead>(
@@ -1891,8 +1922,7 @@ export default function USStockDetailPanel({
         { method: "POST" }
       );
 
-      setMessage({
-        type: "success",
+      setSuccessMessage({
         text: t("usStockDetail.messages.secFactsRefreshSuccess", {
           symbol: result.symbol,
           fetched: result.fetched_count,
@@ -1900,10 +1930,7 @@ export default function USStockDetailPanel({
       });
       await loadSymbolData(selectedSymbol, timeframe);
     } catch (error) {
-      setMessage({
-        type: "error",
-        text: error instanceof Error ? error.message : t("usStockDetail.errors.secFactsRefreshFailed"),
-      });
+      publishDetailDataStatus(t("usStockDetail.errors.secFactsRefreshFailed"), error);
     } finally {
       setRefreshingFacts(false);
     }
@@ -1913,7 +1940,7 @@ export default function USStockDetailPanel({
     if (!selectedSymbol) return;
 
     setRefreshingProfile(true);
-    setMessage(null);
+    setSuccessMessage(null);
 
     try {
       const result = await requestJson<USResourceRefreshResultRead>(
@@ -1921,8 +1948,7 @@ export default function USStockDetailPanel({
         { method: "POST" }
       );
 
-      setMessage({
-        type: "success",
+      setSuccessMessage({
         text: t("usStockDetail.messages.profileRefreshSuccess", {
           symbol: result.symbol ?? selectedSymbol,
           fetched: result.fetched_count,
@@ -1930,10 +1956,7 @@ export default function USStockDetailPanel({
       });
       await loadSymbolData(selectedSymbol, timeframe);
     } catch (error) {
-      setMessage({
-        type: "error",
-        text: error instanceof Error ? error.message : t("usStockDetail.errors.profileRefreshFailed"),
-      });
+      publishDetailDataStatus(t("usStockDetail.errors.profileRefreshFailed"), error);
     } finally {
       setRefreshingProfile(false);
     }
@@ -1943,7 +1966,7 @@ export default function USStockDetailPanel({
     if (!selectedSymbol) return;
 
     setRefreshingActions(true);
-    setMessage(null);
+    setSuccessMessage(null);
 
     try {
       const result = await requestJson<USResourceRefreshResultRead>(
@@ -1951,8 +1974,7 @@ export default function USStockDetailPanel({
         { method: "POST" }
       );
 
-      setMessage({
-        type: "success",
+      setSuccessMessage({
         text: t("usStockDetail.messages.actionsRefreshSuccess", {
           symbol: result.symbol ?? selectedSymbol,
           fetched: result.fetched_count,
@@ -1960,10 +1982,7 @@ export default function USStockDetailPanel({
       });
       await loadSymbolData(selectedSymbol, timeframe);
     } catch (error) {
-      setMessage({
-        type: "error",
-        text: error instanceof Error ? error.message : t("usStockDetail.errors.actionsRefreshFailed"),
-      });
+      publishDetailDataStatus(t("usStockDetail.errors.actionsRefreshFailed"), error);
     } finally {
       setRefreshingActions(false);
     }
@@ -2392,9 +2411,9 @@ export default function USStockDetailPanel({
               setChartFocusMode(false);
             }}
             message={
-              message ? (
-                <div className={`border-b px-5 py-3 text-sm ${messageClass(message)}`}>
-                  {message.text}
+              successMessage ? (
+                <div className="border-b border-omi-success-border bg-omi-success-soft px-5 py-3 text-sm text-omi-success">
+                  {successMessage.text}
                 </div>
               ) : null
             }
@@ -2547,9 +2566,9 @@ export default function USStockDetailPanel({
             </div>
           </div>
 
-          {message ? (
-            <div className={`border-t px-5 py-3 text-sm ${messageClass(message)}`}>
-              {message.text}
+          {successMessage ? (
+            <div className="border-t border-omi-success-border bg-omi-success-soft px-5 py-3 text-sm text-omi-success">
+              {successMessage.text}
             </div>
           ) : null}
 

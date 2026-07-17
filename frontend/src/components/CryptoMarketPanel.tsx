@@ -26,8 +26,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import CryptoKLinePanel from "@/components/CryptoKLinePanel";
 import { StateSurface } from "@/components/LoadingPlaceholders";
 
-type LoadState = "idle" | "loading" | "success" | "error";
-
 type CryptoTicker = {
   provider: string;
   exchange: string;
@@ -977,8 +975,6 @@ function summarizeCryptoAutoRefreshIssue(
 
 export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey }: Props) {
   const { locale, t } = useI18n();
-  const [loadState, setLoadState] = useState<LoadState>("idle");
-  const [refreshing, setRefreshing] = useState(false);
   const [quotes, setQuotes] = useState<CryptoTicker[]>([]);
   const [orderBooks, setOrderBooks] = useState<CryptoOrderBook[]>([]);
   const [derivatives, setDerivatives] = useState<CryptoDerivatives[]>([]);
@@ -1028,9 +1024,6 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
 
   const loadData = useCallback(async (options?: { silent?: boolean }) => {
     const silent = options?.silent ?? false;
-    if (!silent) {
-      setLoadState("loading");
-    }
 
     try {
       const [
@@ -1229,7 +1222,6 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
           source: t("crypto.market.eyebrow"),
         });
       }
-      setLoadState("success");
     } catch (error) {
       if (!silent) {
         emitDataStatusEvent({
@@ -1239,7 +1231,6 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
           message: error instanceof Error ? error.message : "Failed to load crypto data",
           source: t("crypto.market.eyebrow"),
         });
-        setLoadState("error");
       }
     }
   }, [loadRealtime, selectedBase, t]);
@@ -1290,8 +1281,6 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
   }, [loadData]);
 
   const refreshCoreData = useCallback(async (options?: { emitStatus?: boolean }) => {
-    setRefreshing(true);
-
     try {
       const policy =
         subscriptionSettings ?? (await loadMarketDataSubscriptionSettingsForPanel());
@@ -1445,8 +1434,6 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
         message: error instanceof Error ? error.message : "Failed to refresh crypto data",
         source: t("crypto.market.eyebrow"),
       });
-    } finally {
-      setRefreshing(false);
     }
   }, [
     cryptoBaseOptions,
@@ -1665,24 +1652,6 @@ export default function CryptoMarketPanel({ selectedBase, selectedInstrumentKey 
               <h1 className="mt-1 text-2xl font-bold text-omi-text-strong">
                 {t("crypto.market.title")}
               </h1>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                className="h-9 border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text-muted transition hover:border-omi-accent hover:text-omi-accent disabled:cursor-not-allowed disabled:opacity-60"
-                onClick={() => void loadData()}
-                disabled={loadState === "loading" || refreshing}
-              >
-                {loadState === "loading" ? t("crypto.market.loading") : t("crypto.market.reload")}
-              </button>
-              <button
-                type="button"
-                className="h-9 border border-omi-accent-border bg-omi-accent-soft px-3 text-sm font-semibold text-omi-accent transition hover:border-omi-accent hover:bg-omi-surface-subtle disabled:cursor-not-allowed disabled:opacity-60"
-                onClick={() => void refreshCoreData()}
-                disabled={refreshing || !subscriptionSettings}
-              >
-                {refreshing ? t("crypto.market.refreshing") : t("crypto.market.refreshCoreData")}
-              </button>
             </div>
           </div>
 

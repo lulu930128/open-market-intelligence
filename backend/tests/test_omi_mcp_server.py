@@ -84,6 +84,22 @@ class OmiMcpServerPayloadTests(unittest.TestCase):
         self.assertTrue(payload["allow_external_fetch"])
         self.assertEqual(payload["tool_budget"], self.server.TRUSTED_DEFAULT_TOOL_BUDGET)
 
+    def test_trusted_japan_intraday_request_defaults_external_fetch_and_budget(self) -> None:
+        self.server.AI_TRUST_TOKEN = "trusted-token"
+        self.server.TRUSTED_DEFAULT_EXTERNAL_FETCH = True
+
+        payload = self.server._targeted_ask_payload(
+            {"symbol": "7203.T", "include_intraday": True},
+            target_type="jp_stock",
+            target_id="7203.T",
+            question="Read Japan stock context 7203.T",
+            mode="data_only",
+        )
+
+        self.assertTrue(payload["allow_external_fetch"])
+        self.assertTrue(payload["market_data_params"]["include_intraday"])
+        self.assertEqual(payload["tool_budget"], self.server.TRUSTED_DEFAULT_TOOL_BUDGET)
+
     def test_auto_target_symbol_defaults_external_fetch_when_trusted(self) -> None:
         self.server.AI_TRUST_TOKEN = "trusted-token"
         self.server.TRUSTED_DEFAULT_EXTERNAL_FETCH = True

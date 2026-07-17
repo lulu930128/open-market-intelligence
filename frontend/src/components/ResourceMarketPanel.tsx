@@ -45,7 +45,6 @@ import {
   marketDataSubscriptionItem,
   resourceSubscriptionAllowsAutoRefresh,
   resourceSubscriptionAllowsMissingDataRepair,
-  resourceSubscriptionAllowsManualRefresh,
   resourceSelectedQuoteIntervalSeconds,
   resourceSubscriptionAllowsQuotePolling,
   type MarketDataSubscriptionItem,
@@ -56,9 +55,9 @@ import {
   RESOURCE_OHLCV_INTERVALS,
   resourceInstrumentByKey,
   resourceSymbolFromKey,
-  type ResourceCommodityInstrument,
   type ResourceInterval,
   type ResourceInstrumentRead,
+  type ResourceMarketInstrument,
   type ResourceOhlcvBar,
   type ResourceProviderContract,
   type ResourceQuoteSnapshot,
@@ -69,7 +68,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
-type ResourceOhlcvRefreshReason = "manual" | "auto_empty" | "auto_stale" | "on_select";
+type ResourceOhlcvRefreshReason = "auto_empty" | "auto_stale" | "on_select";
 type ResourceDataView = "overview" | "move" | "compare" | "data" | "health";
 type ResourceMetricCard = {
   key: string;
@@ -210,30 +209,30 @@ function resourceRefreshReasonLabel(
 ) {
   if (reason === "auto_empty") return t("crypto.kline.refreshReasons.auto_empty");
   if (reason === "auto_stale") return t("crypto.kline.refreshReasons.auto_stale");
-  if (reason === "on_select") return t("crypto.market.subscriptionModes.on_select");
-  return t("crypto.kline.refreshReasons.manual");
+  return t("crypto.market.subscriptionModes.on_select");
 }
 
 function fallbackInstrumentToRead(
-  instrument: ResourceCommodityInstrument | null
+  instrument: ResourceMarketInstrument | null
 ): ResourceInstrumentRead | null {
   if (!instrument) return null;
+  const isCurrency = instrument.rootFolder === "currency";
 
   return {
     key: instrument.key,
-    root_folder: "commodity",
+    root_folder: instrument.rootFolder,
     group: instrument.group,
-    asset_class: "commodity_futures",
+    asset_class: isCurrency ? "foreign_exchange" : "commodity_futures",
     name: instrument.displayName,
     display_name: instrument.displayName,
     symbol: instrument.symbol,
     provider: "yahoo_chart",
     exchange: instrument.exchange,
     provider_symbol: instrument.providerSymbol,
-    base_asset: instrument.symbol,
+    base_asset: instrument.symbol.split("-")[0] ?? instrument.symbol,
     quote_asset: instrument.quoteAsset,
-    instrument_type: "futures",
-    contract_type: "front_month",
+    instrument_type: isCurrency ? "spot" : "futures",
+    contract_type: isCurrency ? "spot" : "front_month",
     resources: ["quote", "ohlcv"],
     tradable: false,
     trade_candidate: false,
@@ -286,10 +285,43 @@ function formatNumber(value: number | null | undefined, digits = 2) {
   return value.toLocaleString("en-US", { maximumFractionDigits: digits });
 }
 
-function formatSignedNumber(value: number | null | undefined, digits = 2) {
+function resourcePriceFractionDigits(
+  value: number | null | undefined,
+  rootFolder: string | null | undefined
+) {
+  if (rootFolder !== "currency") return 2;
+  if (value === null || value === undefined || !Number.isFinite(value)) return 6;
+
+  const normalized = Math.abs(value).toFixed(8).replace(/0+$/, "");
+  const fractionDigits = normalized.split(".")[1]?.length ?? 0;
+  return Math.min(8, Math.max(4, fractionDigits));
+}
+
+function formatResourcePrice(
+  value: number | null | undefined,
+  rootFolder: string | null | undefined
+) {
+  return formatNumber(value, resourcePriceFractionDigits(value, rootFolder));
+}
+
+function formatSignedResourcePrice(
+  value: number | null | undefined,
+  rootFolder: string | null | undefined
+) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
   const sign = value > 0 ? "+" : "";
-  return `${sign}${formatNumber(value, digits)}`;
+  return `${sign}${formatResourcePrice(value, rootFolder)}`;
+}
+
+function resourcePricePrecision(
+  values: Array<number | null | undefined>,
+  rootFolder: string | null | undefined
+) {
+  return values.reduce<number>(
+    (precision, value) =>
+      Math.max(precision, resourcePriceFractionDigits(value, rootFolder)),
+    4
+  );
 }
 
 function formatPct(value: number | null | undefined, digits = 2) {
@@ -714,6 +746,11 @@ export default function ResourceMarketPanel({ selectedInstrumentKey }: Props) {
     );
   }, [fallbackInstrument, instruments, requestedSymbol, resolvedKey]);
   const selectedProvider = selectedInstrument?.provider ?? null;
+  const selectedRootFolder = selectedInstrument?.root_folder ?? null;
+  const formatSelectedPrice = (value: number | null | undefined) =>
+    formatResourcePrice(value, selectedRootFolder);
+  const formatSelectedSignedPrice = (value: number | null | undefined) =>
+    formatSignedResourcePrice(value, selectedRootFolder);
   const supportedResourceIntervals = useMemo(() => {
     return normalizeResourceIntervals(
       selectedProvider ? contract?.ohlcv_intervals?.[selectedProvider] : null,
@@ -970,7 +1007,10 @@ export default function ResourceMarketPanel({ selectedInstrumentKey }: Props) {
     ) ?? null;
   }, [effectiveInterval, healthEntries, healthSymbol]);
   const healthIssue = healthEntries.find(resourceHealthEntryHasIssue);
-  const ohlcvRefreshEnabled = !subscriptionItem || resourceSubscriptionAllowsManualRefresh(subscriptionItem);
+  const ohlcvRefreshEnabled =
+    !subscriptionItem ||
+    resourceSubscriptionAllowsAutoRefresh(subscriptionItem) ||
+    resourceSubscriptionAllowsMissingDataRepair(subscriptionItem);
   const ohlcvAutoRefreshEnabled = !subscriptionItem || resourceSubscriptionAllowsAutoRefresh(subscriptionItem);
   const ohlcvMissingDataRepairEnabled =
     !subscriptionItem || resourceSubscriptionAllowsMissingDataRepair(subscriptionItem);
@@ -997,6 +1037,22 @@ export default function ResourceMarketPanel({ selectedInstrumentKey }: Props) {
   const latestClose = selectedQuote?.last_price ?? latestChartPoint?.close ?? null;
   const priceChange = selectedQuote?.price_change ?? null;
   const priceChangePct = selectedQuote?.price_change_pct ?? null;
+  const selectedPricePrecision =
+    selectedRootFolder === "currency"
+      ? resourcePricePrecision(
+          [
+            selectedQuote?.last_price,
+            selectedQuote?.bid_price,
+            selectedQuote?.ask_price,
+            selectedQuote?.open_price,
+            selectedQuote?.high_price,
+            selectedQuote?.low_price,
+            selectedQuote?.previous_close,
+            ...chartData.flatMap((point) => [point.open, point.high, point.low, point.close]),
+          ],
+          selectedRootFolder
+        )
+      : undefined;
   const displayTime = selectedQuote?.event_time ?? selectedQuote?.fetched_at ?? latestChartPoint?.time ?? null;
   const currentIntervalLabel = t(`crypto.intervals.${effectiveInterval}`);
   const quoteFreshness = currentQuoteHealth
@@ -1094,7 +1150,7 @@ export default function ResourceMarketPanel({ selectedInstrumentKey }: Props) {
     {
       key: "day",
       label: "本次報價",
-      value: `${formatSignedNumber(priceChange)} / ${formatPct(priceChangePct)}`,
+      value: `${formatSelectedSignedPrice(priceChange)} / ${formatPct(priceChangePct)}`,
       detail: formatDateTimeShort(displayTime, locale),
       valueClassName: valueTone(priceChangePct),
     },
@@ -1102,28 +1158,28 @@ export default function ResourceMarketPanel({ selectedInstrumentKey }: Props) {
       key: "5d",
       label: "5 日",
       value: formatPct(pctChangeFromBase(latestDailyClose, fiveDayBase)),
-      detail: fiveDayBase ? `基準 ${formatNumber(fiveDayBase)}` : null,
+      detail: fiveDayBase ? `基準 ${formatSelectedPrice(fiveDayBase)}` : null,
       valueClassName: valueTone(pctChangeFromBase(latestDailyClose, fiveDayBase)),
     },
     {
       key: "1m",
       label: "1 個月",
       value: formatPct(pctChangeFromBase(latestDailyClose, oneMonthBase)),
-      detail: oneMonthBase ? `基準 ${formatNumber(oneMonthBase)}` : null,
+      detail: oneMonthBase ? `基準 ${formatSelectedPrice(oneMonthBase)}` : null,
       valueClassName: valueTone(pctChangeFromBase(latestDailyClose, oneMonthBase)),
     },
     {
       key: "3m",
       label: "3 個月",
       value: formatPct(pctChangeFromBase(latestDailyClose, threeMonthBase)),
-      detail: threeMonthBase ? `基準 ${formatNumber(threeMonthBase)}` : null,
+      detail: threeMonthBase ? `基準 ${formatSelectedPrice(threeMonthBase)}` : null,
       valueClassName: valueTone(pctChangeFromBase(latestDailyClose, threeMonthBase)),
     },
     {
       key: "ytd",
       label: "YTD",
       value: formatPct(pctChangeFromBase(latestDailyClose, ytdBase)),
-      detail: ytdBase ? `年初 ${formatNumber(ytdBase)}` : null,
+      detail: ytdBase ? `年初 ${formatSelectedPrice(ytdBase)}` : null,
       valueClassName: valueTone(pctChangeFromBase(latestDailyClose, ytdBase)),
     },
   ];
@@ -1131,19 +1187,19 @@ export default function ResourceMarketPanel({ selectedInstrumentKey }: Props) {
     {
       key: "20d",
       label: "20 日區間",
-      value: range20 ? `${formatNumber(range20.low)} - ${formatNumber(range20.high)}` : "-",
+      value: range20 ? `${formatSelectedPrice(range20.low)} - ${formatSelectedPrice(range20.high)}` : "-",
       detail: range20 ? `位置 ${formatUnsignedPct(range20.position)}` : null,
     },
     {
       key: "60d",
       label: "60 日區間",
-      value: range60 ? `${formatNumber(range60.low)} - ${formatNumber(range60.high)}` : "-",
+      value: range60 ? `${formatSelectedPrice(range60.low)} - ${formatSelectedPrice(range60.high)}` : "-",
       detail: range60 ? `位置 ${formatUnsignedPct(range60.position)}` : null,
     },
     {
       key: "52w",
       label: "近 52 週",
-      value: range260 ? `${formatNumber(range260.low)} - ${formatNumber(range260.high)}` : "-",
+      value: range260 ? `${formatSelectedPrice(range260.low)} - ${formatSelectedPrice(range260.high)}` : "-",
       detail: range260 ? `位置 ${formatUnsignedPct(range260.position)}` : null,
     },
     {
@@ -1156,7 +1212,7 @@ export default function ResourceMarketPanel({ selectedInstrumentKey }: Props) {
       key: "intraday-range",
       label: "盤中振幅",
       value: formatPct(intradayRangePct),
-      detail: `${formatNumber(selectedQuote?.low_price)} - ${formatNumber(selectedQuote?.high_price)}`,
+      detail: `${formatSelectedPrice(selectedQuote?.low_price)} - ${formatSelectedPrice(selectedQuote?.high_price)}`,
     },
   ];
   const ratioCards: ResourceMetricCard[] = [
@@ -1236,7 +1292,7 @@ export default function ResourceMarketPanel({ selectedInstrumentKey }: Props) {
     await loadLatestQuote();
   }, [loadLatestQuote, requestedSymbol]);
 
-  const refreshData = useCallback(async (options?: {
+  const refreshData = useCallback(async (options: {
     silent?: boolean;
     reason?: ResourceOhlcvRefreshReason;
   }) => {
@@ -1244,7 +1300,7 @@ export default function ResourceMarketPanel({ selectedInstrumentKey }: Props) {
 
     setRefreshing(true);
     const silent = options?.silent ?? false;
-    const reason = options?.reason ?? "manual";
+    const reason = options.reason ?? "on_select";
     const refreshIntervalLabel = t(`crypto.intervals.${effectiveInterval}`);
     if (silent && reason === "auto_empty") {
       emitDataStatusEvent({
@@ -1270,7 +1326,7 @@ export default function ResourceMarketPanel({ selectedInstrumentKey }: Props) {
         },
         { timeoutMs: RESOURCE_REFRESH_TIMEOUT_MS }
       );
-      const shouldShowSuccess = reason === "manual" || reason === "auto_empty";
+      const shouldShowSuccess = reason === "auto_empty";
       const intervalResult = resultForOhlcvInterval(result, effectiveInterval);
       const intervalRefreshedCount = intervalResult
         ? numericResultField(intervalResult, "refreshed_count")
@@ -1798,10 +1854,10 @@ export default function ResourceMarketPanel({ selectedInstrumentKey }: Props) {
               resetKey={`${displaySymbol}:resource-professional:${effectiveInterval}`}
               className="text-2xl font-bold leading-none tracking-normal tabular-nums"
             >
-              {formatNumber(latestClose)}
+              {formatSelectedPrice(latestClose)}
             </PriceUpdatePulse>
             <span className="text-sm font-semibold tabular-nums">
-              {formatSignedNumber(priceChange)}
+              {formatSelectedSignedPrice(priceChange)}
             </span>
             <span className="text-sm font-semibold tabular-nums">
               ({formatPct(priceChangePct)})
@@ -1833,26 +1889,6 @@ export default function ResourceMarketPanel({ selectedInstrumentKey }: Props) {
           />
         }
         onClose={closeProfessionalMode}
-        drawingToolbarStart={
-          <>
-            <button
-              type="button"
-              className="h-7 px-2 text-xs font-semibold text-omi-text-muted transition hover:bg-omi-surface hover:text-omi-text-strong disabled:cursor-not-allowed disabled:text-omi-text-inverse-muted"
-              onClick={() => void loadData()}
-              disabled={loadState === "loading" || refreshing}
-            >
-              {t("crypto.resource.reload")}
-            </button>
-            <button
-              type="button"
-              className="h-7 px-2 text-xs font-semibold text-omi-accent transition hover:bg-omi-surface hover:text-omi-text-strong disabled:cursor-not-allowed disabled:text-omi-text-inverse-muted"
-              onClick={() => void refreshData()}
-              disabled={refreshing || !requestedSymbol || !ohlcvRefreshEnabled}
-            >
-              {refreshing ? t("crypto.resource.refreshing") : t("crypto.resource.refreshApprox")}
-            </button>
-          </>
-        }
         chartReady={chartData.length > 0}
         emptyState={
           renderEmptyChartState(
@@ -1860,6 +1896,7 @@ export default function ResourceMarketPanel({ selectedInstrumentKey }: Props) {
           )
         }
         chartData={chartData}
+        pricePrecision={selectedPricePrecision}
         label={`${displaySymbol} ${displayName}`}
         timeMode={chartTimeMode(effectiveInterval)}
         showMovingAverages={chartIndicators.ma}
@@ -1921,10 +1958,10 @@ export default function ResourceMarketPanel({ selectedInstrumentKey }: Props) {
                   resetKey={`${displaySymbol}:${effectiveInterval}`}
                   className="text-3xl font-bold leading-none tracking-normal tabular-nums"
                 >
-                  {formatNumber(latestClose)}
+                  {formatSelectedPrice(latestClose)}
                 </PriceUpdatePulse>
                 <div className="text-base font-semibold tabular-nums">
-                  {formatSignedNumber(priceChange)} / {formatPct(priceChangePct)}
+                  {formatSelectedSignedPrice(priceChange)} / {formatPct(priceChangePct)}
                 </div>
               </div>
 
@@ -1951,22 +1988,6 @@ export default function ResourceMarketPanel({ selectedInstrumentKey }: Props) {
                 </div>
 
                 <div className="flex flex-wrap justify-end gap-2">
-                  <button
-                    type="button"
-                    className="h-8 border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text-muted transition hover:border-omi-accent hover:text-omi-accent disabled:cursor-not-allowed disabled:opacity-60"
-                    onClick={() => void loadData()}
-                    disabled={loadState === "loading" || refreshing}
-                  >
-                    {loadState === "loading" ? t("crypto.resource.loading") : t("crypto.resource.reload")}
-                  </button>
-                  <button
-                    type="button"
-                    className="h-8 border border-omi-accent-border bg-omi-accent-soft px-3 text-sm font-semibold text-omi-accent transition hover:border-omi-accent hover:bg-omi-surface-subtle disabled:cursor-not-allowed disabled:opacity-60"
-                    onClick={() => void refreshData()}
-                    disabled={refreshing || !requestedSymbol || !ohlcvRefreshEnabled}
-                  >
-                    {refreshing ? t("crypto.resource.refreshing") : t("crypto.resource.refreshApprox")}
-                  </button>
                   <div className="relative">
                     <button
                       type="button"
@@ -2016,6 +2037,7 @@ export default function ResourceMarketPanel({ selectedInstrumentKey }: Props) {
                 volumePanelLabel={t("crypto.resource.volume")}
                 volumeTooltipLabel={t("crypto.resource.volume")}
                 volumeValueFormatter={formatVolume}
+                priceMaximumFractionDigits={selectedPricePrecision}
               />
             ) : (
               renderEmptyChartState(
@@ -2090,22 +2112,22 @@ export default function ResourceMarketPanel({ selectedInstrumentKey }: Props) {
                 {
                   key: "last",
                   label: t("crypto.resource.last"),
-                  value: formatNumber(latestClose),
+                  value: formatSelectedPrice(latestClose),
                   detail: formatDateTimeShort(displayTime, locale),
                   valueClassName: valueTone(priceChangePct),
                 },
                 {
                   key: "change",
                   label: t("crypto.resource.change"),
-                  value: `${formatSignedNumber(priceChange)} / ${formatPct(priceChangePct)}`,
+                  value: `${formatSelectedSignedPrice(priceChange)} / ${formatPct(priceChangePct)}`,
                   detail: currentIntervalLabel,
                   valueClassName: valueTone(priceChangePct),
                 },
                 {
                   key: "range",
                   label: `${t("crypto.resource.low")} / ${t("crypto.resource.high")}`,
-                  value: `${formatNumber(selectedQuote?.low_price)} - ${formatNumber(selectedQuote?.high_price)}`,
-                  detail: `open ${formatNumber(selectedQuote?.open_price)}`,
+                  value: `${formatSelectedPrice(selectedQuote?.low_price)} - ${formatSelectedPrice(selectedQuote?.high_price)}`,
+                  detail: `open ${formatSelectedPrice(selectedQuote?.open_price)}`,
                 },
                 {
                   key: "volume",

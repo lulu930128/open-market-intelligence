@@ -242,7 +242,7 @@ ASK_TOOL: dict[str, Any] = {
                 "default": False,
                 "description": (
                     "Allow trusted OMI backend to call configured external market APIs and update local evidence cache. "
-                    "If omitted, trusted MCP calls default this to true for clear US stock questions or explicit Taiwan intraday requests; callers may set it explicitly for bounded OMI-managed refresh."
+                    "If omitted, trusted MCP calls default this to true for clear US stock questions or explicit Taiwan/Japan intraday requests; callers may set it explicitly for bounded OMI-managed refresh."
                 ),
             },
             "tool_budget": {
@@ -336,7 +336,7 @@ CROSS_MARKET_READER_TOOLS: list[dict[str, Any]] = [
     {
         "name": "omi.read_jp_stock_context",
         "title": "Read OMI Japan Stock Context",
-        "description": "Read a local-cache evidence pack for one Japan stock through OMI ask.",
+        "description": "Read a Japan stock evidence pack through OMI ask; daily/resources stay local-cache and include_intraday enables a bounded provider read when trusted.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -349,7 +349,7 @@ CROSS_MARKET_READER_TOOLS: list[dict[str, Any]] = [
     {
         "name": "omi.read_jp_index_context",
         "title": "Read OMI Japan Index Context",
-        "description": "Read a local-cache OHLC evidence pack for one Japan index through OMI ask.",
+        "description": "Read an OHLC-focused Japan index evidence pack through OMI ask; include_intraday enables a bounded provider read when trusted.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1337,6 +1337,19 @@ def _looks_like_tw_intraday_question(arguments: dict[str, Any]) -> bool:
     return any(hint in lowered_question for hint in TW_INTRADAY_HINTS)
 
 
+def _looks_like_jp_intraday_request(arguments: dict[str, Any]) -> bool:
+    target = _target_from_arguments(arguments)
+    target_type = str(target.get("type") or "").strip().lower()
+    if target_type not in {"jp_stock", "jp_index"}:
+        return False
+
+    requested_horizon = str(arguments.get("analysis_horizon") or "").strip().lower()
+    if requested_horizon == "intraday":
+        return True
+
+    return bool(_merge_market_data_params(arguments).get("include_intraday"))
+
+
 def _default_allow_external_fetch(arguments: dict[str, Any]) -> bool:
     if "allow_external_fetch" in arguments:
         return _bool_arg(arguments, "allow_external_fetch", False)
@@ -1344,7 +1357,11 @@ def _default_allow_external_fetch(arguments: dict[str, Any]) -> bool:
     return bool(
         AI_TRUST_TOKEN
         and TRUSTED_DEFAULT_EXTERNAL_FETCH
-        and (_looks_like_us_question(arguments) or _looks_like_tw_intraday_question(arguments))
+        and (
+            _looks_like_us_question(arguments)
+            or _looks_like_tw_intraday_question(arguments)
+            or _looks_like_jp_intraday_request(arguments)
+        )
     )
 
 

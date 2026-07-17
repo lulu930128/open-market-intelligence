@@ -37,6 +37,7 @@ from app.kr_market.schemas import (
     KRSourceHealthRead,
     KRStockMasterRead,
     KRStockMasterSyncResultRead,
+    KRStockIntradayTrendRead,
     KRWatchlistGroupCreate,
     KRWatchlistGroupDeleteResultRead,
     KRWatchlistGroupRead,
@@ -67,6 +68,7 @@ from app.kr_market.service import (
     get_kr_market_index_config,
     get_kr_resource_summary,
     get_kr_stock,
+    get_kr_stock_intraday_trend,
     get_kr_watchlist_group,
     get_kr_watchlist_ranking,
     get_kr_watchlist_readiness,
@@ -322,6 +324,7 @@ def get_kr_index_ohlc_chart(
 def get_kr_index_intraday_chart(
     index_id: str,
     refresh: bool = False,
+    reload_all: bool = False,
     max_pages: int = Query(default=80, ge=1, le=80),
     db: Session = Depends(get_db),
 ):
@@ -330,6 +333,7 @@ def get_kr_index_intraday_chart(
             db=db,
             index_id=index_id,
             refresh=refresh,
+            reload_all=reload_all,
             max_pages=max_pages,
         )
     except ValueError as exc:
@@ -374,6 +378,22 @@ def get_kr_stock_master(symbol: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except KRStockNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.get("/stocks/{symbol}/intraday", response_model=KRStockIntradayTrendRead)
+def get_kr_stock_intraday_chart(
+    symbol: str,
+    refresh: bool = False,
+    db: Session = Depends(get_db),
+):
+    try:
+        return get_kr_stock_intraday_trend(
+            db=db,
+            symbol=symbol,
+            refresh=refresh,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @router.get("/resources/{symbol}/summary", response_model=KRResourceSummaryRead)

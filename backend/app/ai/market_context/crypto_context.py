@@ -83,6 +83,15 @@ def _crypto_requested_symbols(
     return None
 
 
+def _crypto_market_cap_matches_asset(row: Any, asset_definition: Any) -> bool:
+    if asset_definition is None:
+        return True
+    coin_id = str(getattr(asset_definition, "coin_id", "") or "").strip()
+    if coin_id and str(getattr(row, "coin_id", "") or "").strip() == coin_id:
+        return True
+    return str(getattr(row, "symbol", "") or "").strip().upper() == asset_definition.asset
+
+
 def read_crypto_context(
     db: Session,
     *,
@@ -187,7 +196,9 @@ def read_crypto_context(
     )
     market_caps = dependencies.crypto_market_service.list_latest_crypto_market_caps(db, vs_currency="usd", limit=100)
     if normalized_asset:
-        market_caps = [row for row in market_caps if row.symbol.upper() == normalized_asset]
+        market_caps = [
+            row for row in market_caps if _crypto_market_cap_matches_asset(row, asset_definition)
+        ]
     spreads = dependencies.crypto_market_service.list_latest_crypto_spreads(
         db,
         base=normalized_asset,

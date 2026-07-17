@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 import time
@@ -64,6 +65,7 @@ from app.kr_market.sources import (
     normalize_kr_index_id,
     normalize_kr_symbol,
     parse_naver_index_daily_prices,
+    parse_naver_index_intraday_last_page,
     parse_naver_index_intraday_points,
     parse_naver_index_realtime_quote,
     parse_krx_daily_price_records,
@@ -71,9 +73,10 @@ from app.kr_market.sources import (
     parse_krx_stock_records,
     parse_opendart_company_fundamental_records,
     parse_yahoo_daily_prices,
+    parse_yahoo_intraday_prices,
     parse_yahoo_stock_record,
 )
-from app.kr_market.trading_calendar import expected_kr_daily_price_date
+from app.kr_market.trading_calendar import expected_kr_daily_price_date, previous_kr_trading_day
 from app.market.technical_radar import (
     TechnicalRadarBar,
     build_technical_watchlist_radar,
@@ -124,14 +127,19 @@ KR_YAHOO_CHART_FULL_RANGE = "10y"
 KR_INDEX_COMPACT_LOOKBACK_DAYS = 370
 KR_INDEX_FULL_LOOKBACK_DAYS = 3650
 KR_INDEX_INTRADAY_CACHE_TTL_SECONDS = 60
+KR_STOCK_INTRADAY_CACHE_TTL_SECONDS = 60
+KR_DAILY_REFRESH_ATTEMPT_COOLDOWN_SECONDS = 300
 KR_INDEX_INTRADAY_FULL_MAX_PAGES = 80
 KR_INDEX_INTRADAY_INCREMENTAL_PAGES = 1
 KR_INDEX_INTRADAY_PAGE_TIMEOUT_SECONDS = 5
+KR_INDEX_INTRADAY_PAGE_WORKERS = 6
 KR_INDEX_INTRADAY_PROVIDER = "naver_index_time"
 MAX_KR_CHART_BARS = 5000
 ProgressCallback = Callable[[int | None, int | None, str | None], None]
 KR_DAILY_PROVIDER_PRIORITY = {"krx_data": 0, "yahoo_chart": 1}
 _KR_INDEX_INTRADAY_CACHE: dict[str, tuple[float, dict]] = {}
+_KR_STOCK_INTRADAY_CACHE: dict[str, tuple[float, dict]] = {}
+_KR_DAILY_REFRESH_ATTEMPTS: dict[str, float] = {}
 
 
 def _valid_symbol(symbol: str) -> str:
@@ -186,6 +194,24 @@ def _get_fresh_kr_index_intraday_cache(cache_key: str) -> dict | None:
 
 def _set_kr_index_intraday_cache(cache_key: str, payload: dict) -> dict:
     _KR_INDEX_INTRADAY_CACHE[cache_key] = (time.monotonic(), _copy_payload(payload))
+    return payload
+
+
+def _get_fresh_kr_stock_intraday_cache(cache_key: str) -> dict | None:
+    cached = _KR_STOCK_INTRADAY_CACHE.get(cache_key)
+    if cached is None:
+        return None
+
+    cached_at, payload = cached
+    if time.monotonic() - cached_at > KR_STOCK_INTRADAY_CACHE_TTL_SECONDS:
+        _KR_STOCK_INTRADAY_CACHE.pop(cache_key, None)
+        return None
+
+    return _copy_payload(payload)
+
+
+def _set_kr_stock_intraday_cache(cache_key: str, payload: dict) -> dict:
+    _KR_STOCK_INTRADAY_CACHE[cache_key] = (time.monotonic(), _copy_payload(payload))
     return payload
 
 
@@ -2220,6 +2246,264 @@ def _latest_kr_index_daily_row(db: Session, *, index_id: str) -> KRIndexDailyPri
     )
 
 
+def _kr_stock_daily_close_reference(
+    db: Session,
+    *,
+    symbol: str,
+    before_date: date,
+) -> dict | None:
+    rows = (
+        db.query(KRDailyPrice)
+        .filter(KRDailyPrice.symbol == symbol)
+        .filter(KRDailyPrice.trade_date < before_date)
+        .filter(KRDailyPrice.close_price.isnot(None))
+        .order_by(KRDailyPrice.trade_date.desc(), KRDailyPrice.id.desc())
+        .limit(10)
+        .all()
+    )
+    if not rows:
+        return None
+
+    latest_date = rows[0].trade_date
+    latest_rows = [row for row in rows if row.trade_date == latest_date]
+    latest_rows.sort(key=lambda row: (KR_DAILY_PROVIDER_PRIORITY.get(row.provider, 99), -row.id))
+    row = latest_rows[0]
+    return {
+        "previous_close": row.close_price,
+        "previous_close_source": "kr_daily_price",
+        "previous_close_trade_date": row.trade_date.isoformat(),
+        "previous_close_provider": row.provider,
+    }
+
+
+def _apply_kr_stock_previous_close_reference(
+    payload: dict,
+    *,
+    db: Session,
+    symbol: str,
+) -> dict:
+    result = _copy_payload(payload)
+    previous_close = result.get("previous_close")
+    if isinstance(previous_close, (int, float)) and previous_close == previous_close:
+        return result
+
+    points = result.get("points") if isinstance(result.get("points"), list) else []
+    latest_time = points[-1].get("time") if points and isinstance(points[-1], dict) else None
+    if not isinstance(latest_time, str):
+        return result
+
+    try:
+        latest_trade_date = datetime.fromisoformat(latest_time).date()
+    except ValueError:
+        return result
+
+    reference = _kr_stock_daily_close_reference(
+        db,
+        symbol=symbol,
+        before_date=latest_trade_date,
+    )
+    if reference is not None:
+        result.update(reference)
+    return result
+
+
+def _kr_stock_daily_close_on_date(
+    db: Session,
+    *,
+    symbol: str,
+    trade_date: date,
+) -> KRDailyPrice | None:
+    rows = (
+        db.query(KRDailyPrice)
+        .filter(KRDailyPrice.symbol == symbol)
+        .filter(KRDailyPrice.trade_date == trade_date)
+        .filter(KRDailyPrice.close_price.isnot(None))
+        .order_by(KRDailyPrice.id.desc())
+        .limit(10)
+        .all()
+    )
+    if not rows:
+        return None
+
+    rows.sort(key=lambda row: (KR_DAILY_PROVIDER_PRIORITY.get(row.provider, 99), -row.id))
+    return rows[0]
+
+
+def _reconcile_kr_stock_intraday_close(
+    payload: dict,
+    *,
+    db: Session,
+    symbol: str,
+) -> dict:
+    result = _copy_payload(payload)
+    points = result.get("points") if isinstance(result.get("points"), list) else []
+    latest_point = points[-1] if points and isinstance(points[-1], dict) else None
+    latest_time_value = latest_point.get("time") if latest_point is not None else None
+    if not isinstance(latest_time_value, str):
+        return result
+
+    try:
+        latest_time = datetime.fromisoformat(latest_time_value)
+    except ValueError:
+        return result
+
+    seoul_tz = timezone(timedelta(hours=9))
+    if latest_time.tzinfo is None:
+        latest_time = latest_time.replace(tzinfo=seoul_tz)
+    latest_time = latest_time.astimezone(seoul_tz)
+    session_close = latest_time.replace(hour=15, minute=30, second=0, microsecond=0)
+    now = _seoul_now()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=seoul_tz)
+    now = now.astimezone(seoul_tz)
+    if latest_time.date() > now.date() or (
+        latest_time.date() == now.date() and now < session_close
+    ):
+        return result
+
+    daily_row = _kr_stock_daily_close_on_date(
+        db,
+        symbol=symbol,
+        trade_date=latest_time.date(),
+    )
+    if daily_row is None or daily_row.close_price is None:
+        return result
+
+    current_cumulative = next(
+        (
+            point.get("cumulative_volume")
+            for point in reversed(points)
+            if isinstance(point, dict)
+            and isinstance(point.get("cumulative_volume"), int)
+            and point.get("cumulative_volume") >= 0
+        ),
+        None,
+    )
+    daily_volume = daily_row.trade_volume if daily_row.trade_volume is not None else None
+    reconciled_total_volume = current_cumulative
+    closing_interval_volume = None
+    if daily_volume is not None and daily_volume >= 0:
+        reconciled_total_volume = max(daily_volume, current_cumulative or 0)
+        if current_cumulative is not None and daily_volume >= current_cumulative:
+            closing_interval_volume = daily_volume - current_cumulative
+
+    close_price = float(daily_row.close_price)
+    latest_price = latest_point.get("price")
+    open_price = float(latest_price) if isinstance(latest_price, (int, float)) else close_price
+    closing_point = {
+        "time": session_close.isoformat(),
+        "session": "regular",
+        "price": close_price,
+        "volume": closing_interval_volume,
+        "open": open_price,
+        "high": max(open_price, close_price),
+        "low": min(open_price, close_price),
+        "cumulative_volume": reconciled_total_volume,
+        "trade_value": None,
+    }
+
+    if latest_time < session_close:
+        points = [*points, closing_point]
+    elif latest_time == session_close:
+        points = [*points[:-1], closing_point]
+    else:
+        return result
+
+    result.update(
+        {
+            "regular_point_count": len(points),
+            "point_count": len(points),
+            "points": points,
+            "as_of": session_close.isoformat(),
+            "total_volume": reconciled_total_volume,
+            "regular_session_close": close_price,
+            "regular_session_close_time": session_close.isoformat(),
+            "regular_session_close_source": "kr_daily_price",
+            "regular_session_close_provider": daily_row.provider,
+        }
+    )
+    return result
+
+
+def get_kr_stock_intraday_trend(
+    db: Session,
+    *,
+    symbol: str,
+    refresh: bool = False,
+) -> dict:
+    normalized_symbol = _valid_symbol(symbol)
+    cache_key = f"KR_STOCK:{normalized_symbol}"
+
+    if not refresh:
+        cached = _get_fresh_kr_stock_intraday_cache(cache_key)
+        if cached is not None:
+            referenced = _apply_kr_stock_previous_close_reference(
+                cached,
+                db=db,
+                symbol=normalized_symbol,
+            )
+            return _reconcile_kr_stock_intraday_close(
+                referenced,
+                db=db,
+                symbol=normalized_symbol,
+            )
+
+    try:
+        yahoo_payload, source_url = fetch_yahoo_chart_payload(
+            symbol=normalized_symbol,
+            range_value="1d",
+            interval="1m",
+            timeout_seconds=min(settings.kr_market_http_timeout_seconds, 8),
+            resource="intraday",
+        )
+        payload = parse_yahoo_intraday_prices(
+            yahoo_payload,
+            symbol=normalized_symbol,
+            source_url=source_url,
+        )
+    except Exception as exc:
+        payload = {
+            "stock_id": normalized_symbol,
+            "symbol": normalized_symbol,
+            "source": "unavailable",
+            "session_scope": "regular",
+            "session_phase": None,
+            "has_extended_hours": False,
+            "regular_point_count": 0,
+            "extended_point_count": 0,
+            "previous_close": None,
+            "previous_close_source": None,
+            "previous_close_trade_date": None,
+            "previous_close_provider": None,
+            "regular_session_close": None,
+            "regular_session_close_time": None,
+            "point_count": 0,
+            "points": [],
+            "as_of": None,
+            "total_volume": None,
+            "volume_unit": "shares",
+            "volume_semantics": "interval_with_cumulative_total",
+            "trade_value_unit": "krw",
+            "is_partial": True,
+            "source_url": None,
+            "warnings": [f"KR stock intraday source is unavailable: {exc}"],
+            "fetched_pages": 0,
+            "polling_interval_seconds": 60,
+        }
+
+    cached_payload = _set_kr_stock_intraday_cache(cache_key, payload)
+    referenced = _apply_kr_stock_previous_close_reference(
+        cached_payload,
+        db=db,
+        symbol=normalized_symbol,
+    )
+    return _reconcile_kr_stock_intraday_close(
+        referenced,
+        db=db,
+        symbol=normalized_symbol,
+    )
+
+
 def _seoul_now() -> datetime:
     return datetime.now(timezone(timedelta(hours=9)))
 
@@ -2241,6 +2525,57 @@ def _kr_index_intraday_session(value: datetime) -> str:
     return "post_close"
 
 
+def _kr_index_intraday_minute(value: datetime) -> datetime:
+    local = value
+    if local.tzinfo is None:
+        local = local.replace(tzinfo=timezone(timedelta(hours=9)))
+    return local.astimezone(timezone(timedelta(hours=9))).replace(second=0, microsecond=0)
+
+
+def _parse_kr_index_intraday_point_time(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return _kr_index_intraday_minute(parsed)
+
+
+def _kr_index_realtime_interval_volume(
+    points: list[dict],
+    *,
+    quote_time: datetime,
+    cumulative_volume: int | None,
+) -> int | None:
+    if cumulative_volume is None or cumulative_volume < 0:
+        return None
+
+    quote_minute = _kr_index_intraday_minute(quote_time)
+    previous_cumulative: int | None = None
+    same_minute_baseline: int | None = None
+
+    for point in points:
+        point_time = _parse_kr_index_intraday_point_time(point.get("time"))
+        point_cumulative = point.get("cumulative_volume")
+        if point_time is None or not isinstance(point_cumulative, int) or point_cumulative < 0:
+            continue
+
+        if point_time < quote_minute:
+            previous_cumulative = point_cumulative
+            continue
+
+        if point_time == quote_minute:
+            point_volume = point.get("volume")
+            if isinstance(point_volume, int) and point_volume >= 0:
+                same_minute_baseline = max(point_cumulative - point_volume, 0)
+
+    baseline = previous_cumulative if previous_cumulative is not None else same_minute_baseline
+    if baseline is None or cumulative_volume < baseline:
+        return None
+    return cumulative_volume - baseline
+
+
 def _kr_index_intraday_point_dict(point: KRIndexIntradayPointRecord) -> dict:
     return {
         "time": point.time.isoformat(),
@@ -2258,11 +2593,12 @@ def _kr_index_intraday_point_dict(point: KRIndexIntradayPointRecord) -> dict:
 def _merge_intraday_points(existing: list[dict], updates: list[dict]) -> list[dict]:
     by_time: dict[str, dict] = {}
     for point in existing + updates:
-        time_key = str(point.get("time") or "")
+        point_time = _parse_kr_index_intraday_point_time(point.get("time"))
+        time_key = point_time.isoformat() if point_time is not None else ""
         price = point.get("price")
         if not time_key or not isinstance(price, (int, float)):
             continue
-        by_time[time_key] = point
+        by_time[time_key] = {**point, "time": time_key}
     return [by_time[key] for key in sorted(by_time)]
 
 
@@ -2294,17 +2630,20 @@ def _fetch_kr_index_intraday_pages(
     provider_symbol: str,
     thistime: str,
     max_pages: int,
-) -> tuple[list[dict], int, str | None, list[str]]:
+) -> tuple[list[dict], int, str | None, list[str], bool]:
     points_by_time: OrderedDict[str, dict] = OrderedDict()
     warnings: list[str] = []
     source_url: str | None = None
     fetched_pages = 0
+    page_limit_reached = False
     timeout_seconds = min(
         settings.kr_market_http_timeout_seconds,
         KR_INDEX_INTRADAY_PAGE_TIMEOUT_SECONDS,
     )
 
-    for page in range(1, max_pages + 1):
+    def fetch_page(
+        page: int,
+    ) -> tuple[int, list[KRIndexIntradayPointRecord], str | None, Exception | None, str | None]:
         try:
             payload_text, page_source_url = fetch_naver_index_intraday_page_payload(
                 provider_symbol=provider_symbol,
@@ -2312,27 +2651,80 @@ def _fetch_kr_index_intraday_pages(
                 page=page,
                 timeout_seconds=timeout_seconds,
             )
-            source_url = page_source_url if source_url is None else source_url
             records = parse_naver_index_intraday_points(
                 payload_text,
                 index_id=index_id,
                 thistime=thistime,
             )
         except Exception as exc:
-            warnings.append(f"Naver index intraday page {page} failed: {exc}")
-            break
+            return page, [], None, exc, None
 
-        fetched_pages += 1
-        if not records:
-            break
+        return page, records, page_source_url, None, payload_text
 
+    def merge_page(records: list[KRIndexIntradayPointRecord]) -> bool:
         before_count = len(points_by_time)
         for record in records:
             points_by_time[record.time.isoformat()] = _kr_index_intraday_point_dict(record)
-        if len(points_by_time) == before_count:
-            break
+        return len(points_by_time) > before_count
 
-    return [points_by_time[key] for key in sorted(points_by_time)], fetched_pages, source_url, warnings
+    first_page, first_records, first_source_url, first_error, first_payload_text = fetch_page(1)
+    if first_error is not None:
+        warnings.append(f"Naver index intraday page {first_page} failed: {first_error}")
+        return [], 0, None, warnings, False
+
+    fetched_pages = 1
+    source_url = first_source_url
+    if not first_records:
+        return [], fetched_pages, source_url, warnings, False
+    merge_page(first_records)
+
+    advertised_last_page = parse_naver_index_intraday_last_page(first_payload_text or "")
+    if advertised_last_page is not None:
+        page_count = min(max_pages, advertised_last_page)
+        page_limit_reached = advertised_last_page > page_count
+        remaining_pages = list(range(2, page_count + 1))
+        if remaining_pages:
+            worker_count = min(KR_INDEX_INTRADAY_PAGE_WORKERS, len(remaining_pages))
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                page_results = list(executor.map(fetch_page, remaining_pages))
+
+            for page, records, page_source_url, error, _ in sorted(page_results):
+                if error is not None:
+                    warnings.append(f"Naver index intraday page {page} failed: {error}")
+                    continue
+                fetched_pages += 1
+                source_url = source_url or page_source_url
+                merge_page(records)
+
+        return (
+            [points_by_time[key] for key in sorted(points_by_time)],
+            fetched_pages,
+            source_url,
+            warnings,
+            page_limit_reached,
+        )
+
+    for page in range(2, max_pages + 1):
+        _, records, page_source_url, error, _ = fetch_page(page)
+        if error is not None:
+            warnings.append(f"Naver index intraday page {page} failed: {error}")
+            break
+        fetched_pages += 1
+        source_url = source_url or page_source_url
+        if not records:
+            break
+        if not merge_page(records):
+            break
+    else:
+        page_limit_reached = True
+
+    return (
+        [points_by_time[key] for key in sorted(points_by_time)],
+        fetched_pages,
+        source_url,
+        warnings,
+        page_limit_reached,
+    )
 
 
 @_translate_kr_provider_errors
@@ -2341,18 +2733,19 @@ def get_kr_index_intraday_trend(
     *,
     index_id: str,
     refresh: bool = False,
+    reload_all: bool = False,
     max_pages: int = KR_INDEX_INTRADAY_FULL_MAX_PAGES,
 ) -> dict:
     normalized_index_id = _valid_index_id(index_id)
     index_config = KR_INDEX_CONFIG_BY_ID[normalized_index_id]
     cache_key = f"KR_INDEX:{normalized_index_id}"
 
-    if not refresh:
+    if not refresh and not reload_all:
         fresh = _get_fresh_kr_index_intraday_cache(cache_key)
         if fresh is not None:
             return fresh
 
-    stale = None if refresh else _get_kr_index_intraday_cache(cache_key)
+    stale = None if reload_all else _get_kr_index_intraday_cache(cache_key)
     thistime = _kr_index_intraday_thistime()
     trade_date_key = f"{thistime[0:4]}-{thistime[4:6]}-{thistime[6:8]}" if len(thistime) >= 8 else ""
     if stale is not None:
@@ -2361,12 +2754,13 @@ def get_kr_index_intraday_trend(
         cached_latest_time = cached_latest.get("time") if isinstance(cached_latest, dict) else None
         if trade_date_key and isinstance(cached_latest_time, str) and not cached_latest_time.startswith(trade_date_key):
             stale = None
+    needs_full_history = stale is None or bool(stale.get("is_partial"))
     page_count = (
         max(1, min(max_pages, KR_INDEX_INTRADAY_FULL_MAX_PAGES))
-        if stale is None
+        if needs_full_history
         else KR_INDEX_INTRADAY_INCREMENTAL_PAGES
     )
-    points, fetched_pages, source_url, warnings = _fetch_kr_index_intraday_pages(
+    points, fetched_pages, source_url, warnings, page_limit_reached = _fetch_kr_index_intraday_pages(
         index_id=normalized_index_id,
         provider_symbol=index_config.provider_symbol,
         thistime=thistime,
@@ -2392,14 +2786,21 @@ def get_kr_index_intraday_trend(
         merged_points = _merge_intraday_points(stale.get("points") or [], points)
 
     if realtime_quote is not None and realtime_quote.time is not None and realtime_quote.price is not None:
+        realtime_time = _kr_index_intraday_minute(realtime_quote.time)
+        realtime_volume = _kr_index_realtime_interval_volume(
+            merged_points,
+            quote_time=realtime_time,
+            cumulative_volume=realtime_quote.cumulative_volume,
+        )
         realtime_point = {
-            "time": realtime_quote.time.isoformat(),
-            "session": _kr_index_intraday_session(realtime_quote.time),
+            "time": realtime_time.isoformat(),
+            "session": _kr_index_intraday_session(realtime_time),
             "price": realtime_quote.price,
-            "volume": realtime_quote.volume,
+            "volume": realtime_volume,
             "open": realtime_quote.open_value,
             "high": realtime_quote.high_value,
             "low": realtime_quote.low_value,
+            "cumulative_volume": realtime_quote.cumulative_volume,
             "trade_value": realtime_quote.trade_value,
         }
         merged_points = _merge_intraday_points(merged_points, [realtime_point])
@@ -2418,6 +2819,15 @@ def get_kr_index_intraday_trend(
     if not merged_points:
         warnings.append("Naver index intraday source returned no points.")
 
+    latest_cumulative_volume = next(
+        (
+            point.get("cumulative_volume")
+            for point in reversed(merged_points)
+            if isinstance(point.get("cumulative_volume"), int)
+            and point.get("cumulative_volume") >= 0
+        ),
+        None,
+    )
     payload = {
         "stock_id": normalized_index_id,
         "symbol": index_config.provider_symbol,
@@ -2439,6 +2849,12 @@ def get_kr_index_intraday_trend(
         ),
         "point_count": len(merged_points),
         "points": merged_points,
+        "as_of": latest_point.get("time") if isinstance(latest_point, dict) else None,
+        "total_volume": latest_cumulative_volume,
+        "volume_unit": "thousand_shares",
+        "volume_semantics": "interval_with_cumulative_total",
+        "trade_value_unit": "million_krw",
+        "is_partial": bool(warnings) or (needs_full_history and page_limit_reached),
         "source_url": source_url or realtime_source_url,
         "warnings": warnings,
         "fetched_pages": fetched_pages,
@@ -2517,33 +2933,105 @@ def list_kr_index_ohlc_chart_data(
 
     normalized_index_id = _valid_index_id(index_id)
     index_config = get_kr_market_index_config(db, index_id=normalized_index_id)
-    backfill_result = None
-    if ensure_history:
-        backfill_result = refresh_kr_index_daily_prices(
-            db=db,
-            index_id=normalized_index_id,
-            outputsize=outputsize,
-            end_date=to_date,
-        )
-
     end_date = to_date or date.today()
+    resolved_expected_data_date = (
+        previous_kr_trading_day(end_date, include_value=True)
+        if to_date is not None
+        else expected_kr_daily_price_date()
+    )
     lookback_days = max(bars * KR_CHART_LOOKBACK_MULTIPLIER[timeframe], bars)
     start_date = end_date - timedelta(days=lookback_days)
-    rows = (
-        db.query(KRIndexDailyPrice)
-        .filter(KRIndexDailyPrice.index_id == normalized_index_id)
-        .filter(KRIndexDailyPrice.trade_date >= start_date)
-        .filter(KRIndexDailyPrice.trade_date <= end_date)
-        .order_by(KRIndexDailyPrice.trade_date.asc(), KRIndexDailyPrice.provider.asc(), KRIndexDailyPrice.id.asc())
-        .all()
+    backfill_result = None
+
+    def load_points() -> tuple[list[dict], date | None]:
+        rows = (
+            db.query(KRIndexDailyPrice)
+            .filter(KRIndexDailyPrice.index_id == normalized_index_id)
+            .filter(KRIndexDailyPrice.trade_date >= start_date)
+            .filter(KRIndexDailyPrice.trade_date <= end_date)
+            .order_by(
+                KRIndexDailyPrice.trade_date.asc(),
+                KRIndexDailyPrice.provider.asc(),
+                KRIndexDailyPrice.id.asc(),
+            )
+            .all()
+        )
+        latest_by_date: OrderedDict[date, KRIndexDailyPrice] = OrderedDict()
+        provider_priority = {"naver_sise_index": 0, "krx_data": 1, "yahoo_chart": 2}
+        for row in rows:
+            current = latest_by_date.get(row.trade_date)
+            if current is None or provider_priority.get(row.provider, 99) < provider_priority.get(current.provider, 99):
+                latest_by_date[row.trade_date] = row
+        selected = _aggregate_kr_index_daily_rows(list(latest_by_date.values()), timeframe)[-bars:]
+        return selected, next(reversed(latest_by_date), None)
+
+    points, latest_data_date = load_points()
+    refresh_reasons: list[str] = []
+    if len(points) < bars:
+        refresh_reasons.append("insufficient_history")
+    if latest_data_date is None or (
+        resolved_expected_data_date is not None
+        and latest_data_date < resolved_expected_data_date
+    ):
+        refresh_reasons.append("stale_latest_date")
+
+    cooldown_active = False
+    if ensure_history and refresh_reasons:
+        refresh_key = f"index:{normalized_index_id}"
+        attempted_at = _KR_DAILY_REFRESH_ATTEMPTS.get(refresh_key)
+        now_monotonic = time.monotonic()
+        cooldown_active = (
+            attempted_at is not None
+            and now_monotonic - attempted_at < KR_DAILY_REFRESH_ATTEMPT_COOLDOWN_SECONDS
+        )
+        if cooldown_active:
+            backfill_result = {
+                "status": "skipped",
+                "provider": "naver_sise_index",
+                "index_id": normalized_index_id,
+                "fetched_count": 0,
+                "inserted_count": 0,
+                "updated_count": 0,
+                "refresh_reasons": refresh_reasons,
+                "message": "KR index daily refresh skipped during the per-index cooldown window.",
+            }
+        else:
+            _KR_DAILY_REFRESH_ATTEMPTS[refresh_key] = now_monotonic
+
+    if ensure_history and refresh_reasons and not cooldown_active:
+        refresh_outputsize = "full" if timeframe in {"weekly", "monthly"} else outputsize
+        try:
+            result = refresh_kr_index_daily_prices(
+                db=db,
+                index_id=normalized_index_id,
+                outputsize=refresh_outputsize,
+                end_date=resolved_expected_data_date,
+            )
+            backfill_result = {**result, "refresh_reasons": refresh_reasons}
+        except (KRMarketDataFetchError, requests.RequestException, ValueError) as exc:
+            if not points:
+                raise
+            backfill_result = {
+                "status": "error",
+                "provider": "naver_sise_index",
+                "index_id": normalized_index_id,
+                "fetched_count": 0,
+                "inserted_count": 0,
+                "updated_count": 0,
+                "refresh_reasons": refresh_reasons,
+                "message": f"KR index daily refresh failed; using cached rows: {exc}",
+            }
+        points, latest_data_date = load_points()
+
+    freshness_status = (
+        "missing"
+        if latest_data_date is None
+        else "stale"
+        if resolved_expected_data_date is not None and latest_data_date < resolved_expected_data_date
+        else "future"
+        if resolved_expected_data_date is not None and latest_data_date > resolved_expected_data_date
+        else "current"
     )
-    latest_by_date: OrderedDict[date, KRIndexDailyPrice] = OrderedDict()
-    provider_priority = {"naver_sise_index": 0, "krx_data": 1, "yahoo_chart": 2}
-    for row in rows:
-        current = latest_by_date.get(row.trade_date)
-        if current is None or provider_priority.get(row.provider, 99) < provider_priority.get(current.provider, 99):
-            latest_by_date[row.trade_date] = row
-    points = _aggregate_kr_index_daily_rows(list(latest_by_date.values()), timeframe)[-bars:]
 
     return {
         "index_id": normalized_index_id,
@@ -2558,6 +3046,11 @@ def list_kr_index_ohlc_chart_data(
         "point_count": len(points),
         "points": points,
         "backfill": backfill_result,
+        "latest_data_date": latest_data_date,
+        "expected_data_date": resolved_expected_data_date,
+        "freshness_status": freshness_status,
+        "is_current": freshness_status in {"current", "future"},
+        "refresh_recommended": freshness_status in {"missing", "stale"},
     }
 
 
@@ -2579,33 +3072,166 @@ def list_kr_ohlc_chart_data(
         raise ValueError(f"bars must be between 1 and {MAX_KR_CHART_BARS}.")
 
     normalized_symbol = _valid_symbol(symbol)
-    backfill_result = None
-    if ensure_history:
-        backfill_result = refresh_kr_daily_prices(
-            db=db,
-            symbol=normalized_symbol,
-            outputsize=outputsize,
-            provider=provider,
-        )
-
     end_date = to_date or date.today()
+    resolved_expected_data_date = (
+        previous_kr_trading_day(end_date, include_value=True)
+        if to_date is not None
+        else expected_kr_daily_price_date()
+    )
     lookback_days = max(bars * KR_CHART_LOOKBACK_MULTIPLIER[timeframe], bars)
     start_date = end_date - timedelta(days=lookback_days)
-    rows = (
-        db.query(KRDailyPrice)
-        .filter(KRDailyPrice.symbol == normalized_symbol)
-        .filter(KRDailyPrice.trade_date >= start_date)
-        .filter(KRDailyPrice.trade_date <= end_date)
-        .order_by(KRDailyPrice.trade_date.asc(), KRDailyPrice.provider.asc(), KRDailyPrice.id.asc())
-        .all()
+    backfill_result = None
+
+    def load_points() -> tuple[list[dict], date | None]:
+        rows = (
+            db.query(KRDailyPrice)
+            .filter(KRDailyPrice.symbol == normalized_symbol)
+            .filter(KRDailyPrice.trade_date >= start_date)
+            .filter(KRDailyPrice.trade_date <= end_date)
+            .order_by(
+                KRDailyPrice.trade_date.asc(),
+                KRDailyPrice.provider.asc(),
+                KRDailyPrice.id.asc(),
+            )
+            .all()
+        )
+        latest_by_date: OrderedDict[date, KRDailyPrice] = OrderedDict()
+        provider_priority = {"krx_data": 0, "yahoo_chart": 1}
+        for row in rows:
+            current = latest_by_date.get(row.trade_date)
+            if current is None or provider_priority.get(row.provider, 99) < provider_priority.get(current.provider, 99):
+                latest_by_date[row.trade_date] = row
+        selected = _aggregate_kr_daily_rows(list(latest_by_date.values()), timeframe)[-bars:]
+        return selected, next(reversed(latest_by_date), None)
+
+    points, latest_data_date = load_points()
+    refresh_reasons: list[str] = []
+    if len(points) < bars:
+        refresh_reasons.append("insufficient_history")
+    if latest_data_date is None or (
+        resolved_expected_data_date is not None
+        and latest_data_date < resolved_expected_data_date
+    ):
+        refresh_reasons.append("stale_latest_date")
+
+    cooldown_active = False
+    if ensure_history and refresh_reasons:
+        refresh_key = f"stock:{normalized_symbol}"
+        attempted_at = _KR_DAILY_REFRESH_ATTEMPTS.get(refresh_key)
+        now_monotonic = time.monotonic()
+        cooldown_active = (
+            attempted_at is not None
+            and now_monotonic - attempted_at < KR_DAILY_REFRESH_ATTEMPT_COOLDOWN_SECONDS
+        )
+        if cooldown_active:
+            backfill_result = {
+                "status": "skipped",
+                "provider": provider,
+                "symbol": normalized_symbol,
+                "fetched_count": 0,
+                "inserted_count": 0,
+                "updated_count": 0,
+                "refresh_reasons": refresh_reasons,
+                "message": "KR daily refresh skipped during the per-symbol cooldown window.",
+            }
+        else:
+            _KR_DAILY_REFRESH_ATTEMPTS[refresh_key] = now_monotonic
+
+    if ensure_history and refresh_reasons and not cooldown_active:
+        refresh_outputsize = "full" if timeframe in {"weekly", "monthly"} else outputsize
+        if provider == "auto" and "stale_latest_date" in refresh_reasons:
+            step_results: list[dict] = []
+            step_errors: list[str] = []
+            try:
+                step_results.append(
+                    refresh_kr_daily_prices(
+                        db=db,
+                        symbol=normalized_symbol,
+                        outputsize=refresh_outputsize,
+                        provider="yahoo_chart",
+                    )
+                )
+            except (KRMarketDataFetchError, requests.RequestException, ValueError) as exc:
+                step_errors.append(f"yahoo_chart: {exc}")
+
+            points, latest_data_date = load_points()
+            if latest_data_date is None or (
+                resolved_expected_data_date is not None
+                and latest_data_date < resolved_expected_data_date
+            ):
+                try:
+                    step_results.append(
+                        refresh_kr_daily_prices(
+                            db=db,
+                            symbol=normalized_symbol,
+                            outputsize="compact",
+                            provider="krx_data",
+                            trade_date=resolved_expected_data_date,
+                        )
+                    )
+                except (KRMarketDataFetchError, requests.RequestException, ValueError) as exc:
+                    step_errors.append(f"krx_data: {exc}")
+
+            points, latest_data_date = load_points()
+            if not points and not step_results:
+                raise KRMarketDataFetchError("; ".join(step_errors))
+
+            backfill_status = (
+                "success"
+                if step_results and not step_errors
+                else "partial_success"
+                if step_results
+                else "error"
+            )
+            backfill_result = {
+                "status": backfill_status,
+                "provider": "auto",
+                "symbol": normalized_symbol,
+                "fetched_count": sum(int(result.get("fetched_count") or 0) for result in step_results),
+                "inserted_count": sum(int(result.get("inserted_count") or 0) for result in step_results),
+                "updated_count": sum(int(result.get("updated_count") or 0) for result in step_results),
+                "refresh_reasons": refresh_reasons,
+                "steps": step_results,
+                "errors": step_errors,
+                "message": (
+                    "KR daily history catch-up completed with Yahoo range history and KRX latest-day fallback."
+                    if not step_errors
+                    else "KR daily history catch-up was partial; using the best available cached rows."
+                ),
+            }
+        else:
+            try:
+                result = refresh_kr_daily_prices(
+                    db=db,
+                    symbol=normalized_symbol,
+                    outputsize=refresh_outputsize,
+                    provider=provider,
+                )
+                backfill_result = {**result, "refresh_reasons": refresh_reasons}
+            except (KRMarketDataFetchError, requests.RequestException, ValueError) as exc:
+                if not points:
+                    raise
+                backfill_result = {
+                    "status": "error",
+                    "provider": provider,
+                    "symbol": normalized_symbol,
+                    "fetched_count": 0,
+                    "inserted_count": 0,
+                    "updated_count": 0,
+                    "refresh_reasons": refresh_reasons,
+                    "message": f"KR daily refresh failed; using cached rows: {exc}",
+                }
+            points, latest_data_date = load_points()
+
+    freshness_status = (
+        "missing"
+        if latest_data_date is None
+        else "stale"
+        if resolved_expected_data_date is not None and latest_data_date < resolved_expected_data_date
+        else "future"
+        if resolved_expected_data_date is not None and latest_data_date > resolved_expected_data_date
+        else "current"
     )
-    latest_by_date: OrderedDict[date, KRDailyPrice] = OrderedDict()
-    provider_priority = {"krx_data": 0, "yahoo_chart": 1}
-    for row in rows:
-        current = latest_by_date.get(row.trade_date)
-        if current is None or provider_priority.get(row.provider, 99) < provider_priority.get(current.provider, 99):
-            latest_by_date[row.trade_date] = row
-    points = _aggregate_kr_daily_rows(list(latest_by_date.values()), timeframe)[-bars:]
 
     return {
         "symbol": normalized_symbol,
@@ -2617,4 +3243,10 @@ def list_kr_ohlc_chart_data(
         "point_count": len(points),
         "points": points,
         "backfill": backfill_result,
+        "latest_data_date": latest_data_date,
+        "expected_data_date": resolved_expected_data_date,
+        "freshness_status": freshness_status,
+        "is_current": freshness_status in {"current", "future"},
+        "refresh_recommended": freshness_status in {"missing", "stale"}
+        or (backfill_result or {}).get("status") in {"error", "partial_success"},
     }

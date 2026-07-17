@@ -61,12 +61,15 @@ import {
   calculateRelativeMetrics,
 } from "@/components/chart/lightweight-chart/indicatorMath";
 
-export function formatPrice(value: number | null | undefined) {
+export function formatPrice(
+  value: number | null | undefined,
+  maximumFractionDigits?: number
+) {
   if (!finiteNumber(value)) return "-";
 
   return value.toLocaleString("zh-TW", {
     minimumFractionDigits: 0,
-    maximumFractionDigits: value >= 1000 ? 2 : 4,
+    maximumFractionDigits: maximumFractionDigits ?? (value >= 1000 ? 2 : 4),
   });
 }
 

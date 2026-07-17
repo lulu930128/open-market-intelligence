@@ -5,10 +5,18 @@ import unittest
 from zoneinfo import ZoneInfo
 
 from app.market.calendar_status import (
+    build_jp_calendar_status,
     build_kr_calendar_status,
     build_market_calendar_status,
     build_taiwan_calendar_status,
     build_us_calendar_status,
+)
+from app.jp_market.trading_calendar import (
+    expected_jp_daily_price_date,
+    is_jp_trading_day,
+    jp_market_holiday_name,
+    next_jp_trading_day,
+    previous_jp_trading_day,
 )
 from app.market.trading_calendar import is_taiwan_trading_day, latest_released_trading_day
 from app.us_market.trading_calendar import (
@@ -194,6 +202,55 @@ class MarketCalendarStatusTests(unittest.TestCase):
             "2026-06-15",
         )
 
+    def test_jp_calendar_models_jpx_holidays_and_observed_days(self) -> None:
+        self.assertFalse(is_jp_trading_day(date(2026, 5, 6)))
+        self.assertFalse(is_jp_trading_day(date(2026, 7, 20)))
+        self.assertFalse(is_jp_trading_day(date(2026, 9, 22)))
+        self.assertFalse(is_jp_trading_day(date(2026, 12, 31)))
+        self.assertEqual(jp_market_holiday_name(date(2026, 9, 22)), "Citizen's Holiday")
+        self.assertEqual(
+            previous_jp_trading_day(date(2026, 9, 24), include_value=False),
+            date(2026, 9, 18),
+        )
+        self.assertEqual(next_jp_trading_day(date(2026, 9, 18)), date(2026, 9, 24))
+
+    def test_jp_status_models_lunch_break_and_daily_release(self) -> None:
+        timezone = ZoneInfo("Asia/Tokyo")
+        lunch = build_jp_calendar_status(
+            now=datetime(2026, 7, 15, 12, 0, tzinfo=timezone),
+        )
+        before_release = build_jp_calendar_status(
+            now=datetime(2026, 7, 15, 15, 45, tzinfo=timezone),
+        )
+        after_release = build_jp_calendar_status(
+            now=datetime(2026, 7, 15, 16, 20, tzinfo=timezone),
+        )
+
+        self.assertEqual(lunch["market"], "jp")
+        self.assertEqual(lunch["phase"], "lunch_break")
+        self.assertFalse(lunch["session"]["is_polling_window"])
+        self.assertEqual(lunch["session"]["lunch_start_time"], "11:30")
+        self.assertEqual(lunch["session"]["lunch_end_time"], "12:30")
+        self.assertEqual(
+            lunch["session"]["next_session_start_at"],
+            "2026-07-15T12:30:00+09:00",
+        )
+        self.assertEqual(
+            before_release["release_windows"]["jp_daily_price"]["expected_trade_date"],
+            "2026-07-14",
+        )
+        self.assertEqual(
+            expected_jp_daily_price_date(
+                now=datetime(2026, 7, 15, 16, 20, tzinfo=timezone),
+            ),
+            date(2026, 7, 15),
+        )
+        self.assertEqual(
+            after_release["release_windows"]["jp_daily_price"]["expected_trade_date"],
+            "2026-07-15",
+        )
+        self.assertIsNone(after_release["calendar_limit"])
+
     def test_market_calendar_status_can_filter_market(self) -> None:
         timezone = ZoneInfo("Asia/Taipei")
         status = build_market_calendar_status(
@@ -203,6 +260,18 @@ class MarketCalendarStatusTests(unittest.TestCase):
 
         self.assertEqual(status["kind"], "market_calendar_status")
         self.assertEqual(set(status["markets"]), {"tw"})
+
+        jp_status = build_market_calendar_status(
+            market="jp",
+            now=datetime(2026, 7, 15, 16, 20, tzinfo=ZoneInfo("Asia/Tokyo")),
+        )
+        self.assertEqual(set(jp_status["markets"]), {"jp"})
+        self.assertEqual(
+            jp_status["markets"]["jp"]["release_windows"]["jp_daily_price"][
+                "expected_trade_date"
+            ],
+            "2026-07-15",
+        )
 
 
 if __name__ == "__main__":

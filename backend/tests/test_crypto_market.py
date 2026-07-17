@@ -21,6 +21,7 @@ from app.crypto_market.contract import (
     BINANCE_PROVIDER,
     BITOPRO_PROVIDER,
     BYBIT_PROVIDER,
+    COINGECKO_PROVIDER,
     COINGLASS_PROVIDER,
     OKX_PROVIDER,
     OMI_LOCAL_PROVIDER,
@@ -70,6 +71,12 @@ from app.crypto_market.service import (
     upsert_crypto_long_short_ratio_history,
 )
 from app.crypto_market.source_health import build_crypto_source_health
+from app.crypto_market.workspace import (
+    CORE_SLOT_SPECS,
+    _build_slot,
+    build_crypto_workspace_summary,
+)
+from app.crypto_market.assets import get_crypto_asset
 from app.crypto_market.watchlist import (
     CryptoWatchlistAssetNotFoundError,
     CryptoWatchlistDuplicateItemError,
@@ -88,6 +95,7 @@ from app.db.models import (
     CryptoLiquidationHeatmapCell,
     CryptoLiquidityHistory,
     CryptoLongShortRatioHistory,
+    CryptoMarketCapSnapshot,
     CryptoOrderBookSnapshot,
     CryptoOhlcvBar,
     CryptoSpreadHistory,
@@ -108,6 +116,7 @@ from app.crypto_market.schemas import (
     CryptoLiquidityHistoryRead,
     CryptoLongShortRatioHistoryRead,
     CryptoRealtimeStatusRead,
+    CryptoWorkspaceSummaryRead,
     CryptoWatchlistGroupCreate,
     CryptoWatchlistItemCreate,
 )
@@ -942,6 +951,98 @@ class CryptoMarketBackendTests(unittest.TestCase):
 
         self.assertEqual(sol_ticker["latest_event_status"], "success")
         self.assertIsNotNone(sol_ticker["latest_event_id"])
+
+    def test_source_health_uses_registry_identity_and_omits_non_applicable_resources(self) -> None:
+        now = _utc("2026-06-24T00:00:00Z")
+        self.db.add(
+            CryptoMarketCapSnapshot(
+                provider=COINGECKO_PROVIDER,
+                coin_id="the-open-network",
+                symbol="gram",
+                name="Toncoin",
+                vs_currency="usd",
+                current_price=2.5,
+                fetched_at=now,
+            )
+        )
+        self.db.commit()
+
+        ton_report = build_crypto_source_health(self.db, base="TON", now=now)
+        ton_market_cap = next(
+            entry
+            for entry in ton_report["entries"]
+            if entry["resource"] == "crypto_market_cap"
+        )
+        sol_report = build_crypto_source_health(self.db, base="SOL", now=now)
+
+        self.assertEqual(ton_market_cap["target"], "TON")
+        self.assertEqual(ton_market_cap["latest_data_key"], "the-open-network")
+        self.assertEqual(ton_market_cap["status"], "live")
+        self.assertNotIn("crypto_spread", {entry["resource"] for entry in sol_report["entries"]})
+        self.assertNotIn(
+            "crypto_long_short_ratio",
+            {entry["resource"] for entry in ton_report["entries"]},
+        )
+
+    def test_workspace_summary_separates_registry_watchlist_and_slot_maturity(self) -> None:
+        now = _utc("2026-06-24T00:00:00Z")
+        self.db.add(
+            CryptoMarketCapSnapshot(
+                provider=COINGECKO_PROVIDER,
+                coin_id="the-open-network",
+                symbol="gram",
+                name="Toncoin",
+                vs_currency="usd",
+                current_price=2.5,
+                fetched_at=now,
+            )
+        )
+        self.db.commit()
+
+        result = build_crypto_workspace_summary(self.db, now=now)
+        assets = {row["asset"]: row for row in result["assets"]}
+        ton_slots = {slot["key"]: slot for slot in assets["TON"]["slots"]}
+        sol_slots = {slot["key"]: slot for slot in assets["SOL"]["slots"]}
+        btc_slots = {slot["key"]: slot for slot in assets["BTC"]["slots"]}
+
+        self.assertEqual(result["registry_count"], 9)
+        self.assertEqual(result["watchlist_count"], 8)
+        self.assertFalse(assets["USDT"]["watchlisted"])
+        self.assertTrue(assets["LINK"]["watchlisted"])
+        self.assertEqual(assets["BTC"]["subscription_mode"], "always_on")
+        self.assertEqual(assets["ETH"]["subscription_mode"], "on_select")
+        self.assertEqual(result["summary"]["always_on_count"], 1)
+        self.assertEqual(result["summary"]["on_select_count"], 8)
+        self.assertEqual(assets["TON"]["maturity"], "partial")
+        self.assertEqual(ton_slots["market_cap"]["status"], "ready")
+        self.assertEqual(sol_slots["taiwan_spread"]["status"], "not_applicable")
+        self.assertEqual(btc_slots["liquidation_event"]["status"], "event_quiet")
+        self.assertEqual(btc_slots["cvd"]["status"], "provider_pending")
+        CryptoWorkspaceSummaryRead.model_validate(result)
+
+    def test_workspace_ohlcv_slot_requires_minimum_cached_coverage(self) -> None:
+        btc = get_crypto_asset("BTC")
+        ohlcv_spec = next(spec for spec in CORE_SLOT_SPECS if spec.key == "ohlcv")
+
+        self.assertIsNotNone(btc)
+        slot = _build_slot(
+            btc,
+            ohlcv_spec,
+            [
+                {
+                    "resource": "crypto_ohlcv",
+                    "provider": provider,
+                    "target": "BTC-USDT" if provider != BITOPRO_PROVIDER else "BTC-TWD",
+                    "status": "live",
+                    "ok": True,
+                    "row_count": 10,
+                    "latest_fetched_at": "2026-06-24T00:00:00+00:00",
+                }
+                for provider in (BITOPRO_PROVIDER, BINANCE_PROVIDER, OKX_PROVIDER)
+            ],
+        )
+
+        self.assertEqual(slot["status"], "partial")
 
     def test_bitopro_realtime_ticker_updates_latest_store(self) -> None:
         store = CryptoRealtimeStore()

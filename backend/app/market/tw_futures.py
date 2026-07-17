@@ -23,6 +23,7 @@ from app.http_client import new_session
 
 TAIWAN_TZ = ZoneInfo("Asia/Taipei")
 TAIFEX_MIS_QUOTE_URL = "https://mis.taifex.com.tw/futures/api/getQuoteList"
+TAIFEX_MIS_CHART_1M_URL = "https://mis.taifex.com.tw/futures/api/getChartData1M"
 TAIFEX_MIS_REFERER = "https://mis.taifex.com.tw/futures/"
 TAIFEX_DAILY_REPORT_URL = "https://www.taifex.com.tw/cht/3/futDailyMarketReport"
 TAIFEX_PROVIDER = "taifex_mis"
@@ -40,6 +41,10 @@ TAIWAN_FUTURES_LIVE_QUOTE_MAX_AGE_SECONDS = 180
 TAIFEX_MARKET_TYPE_BY_SESSION = {
     "regular": "0",
     "after_hours": "1",
+}
+TAIFEX_CONTRACT_SUFFIX_BY_SESSION = {
+    "regular": "-F",
+    "after_hours": "-M",
 }
 
 
@@ -348,9 +353,14 @@ def _build_taifex_daily_report_url(*, product: TaiwanFuturesProduct, trade_date:
     return f"{TAIFEX_DAILY_REPORT_URL}?{query}"
 
 
-def _is_monthly_contract(item: dict[str, Any], product: TaiwanFuturesProduct) -> bool:
+def _is_monthly_contract(
+    item: dict[str, Any],
+    product: TaiwanFuturesProduct,
+    session: str,
+) -> bool:
     symbol_id = str(item.get("SymbolID") or "").upper()
-    if not symbol_id.endswith("-F"):
+    expected_suffix = TAIFEX_CONTRACT_SUFFIX_BY_SESSION[session]
+    if not symbol_id.endswith(expected_suffix):
         return False
     return symbol_id.startswith(product.monthly_symbol_prefix)
 
@@ -377,7 +387,11 @@ def parse_taifex_mis_quote_payload(
 
     quotes: list[dict[str, Any]] = []
     for item in quote_list:
-        if not isinstance(item, dict) or not _is_monthly_contract(item, product):
+        if not isinstance(item, dict) or not _is_monthly_contract(
+            item,
+            product,
+            resolved_session,
+        ):
             continue
 
         quote_time = _parse_taifex_datetime(item.get("CDate"), item.get("CTime"))
@@ -605,6 +619,184 @@ def fetch_taifex_mis_quote_payload(
         raise TaiwanFuturesFetchError("TAIFEX MIS quote response is not valid JSON.") from exc
 
 
+def fetch_taifex_mis_intraday_payload(
+    *,
+    contract_symbol: str,
+    timeout: float = 8.0,
+) -> dict[str, Any]:
+    normalized_contract_symbol = str(contract_symbol or "").strip().upper()
+    if not normalized_contract_symbol:
+        raise ValueError("TAIFEX MIS intraday chart requires a contract symbol.")
+
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+        "Referer": TAIFEX_MIS_REFERER,
+        "User-Agent": "Mozilla/5.0",
+    }
+
+    try:
+        with new_session() as session_client:
+            response = session_client.post(
+                TAIFEX_MIS_CHART_1M_URL,
+                data=json.dumps({"SymbolID": normalized_contract_symbol}),
+                headers=headers,
+                timeout=timeout,
+            )
+            response.raise_for_status()
+    except requests.RequestException as exc:
+        raise TaiwanFuturesFetchError(
+            f"TAIFEX MIS 1-minute chart request failed: {exc}"
+        ) from exc
+
+    try:
+        return json.loads(response.content.decode("utf-8-sig"))
+    except ValueError as exc:
+        raise TaiwanFuturesFetchError(
+            "TAIFEX MIS 1-minute chart response is not valid JSON."
+        ) from exc
+
+
+def _parse_taifex_hhmm(value: Any) -> time | None:
+    text = str(value or "").strip()
+    if not re.fullmatch(r"\d{4}", text):
+        return None
+    try:
+        return time(int(text[:2]), int(text[2:4]))
+    except ValueError:
+        return None
+
+
+def parse_taifex_mis_intraday_payload(
+    *,
+    symbol: str,
+    session: str,
+    contract_symbol: str,
+    contract_month: str,
+    payload: dict[str, Any],
+    fetched_at: datetime | None = None,
+) -> list[dict[str, Any]]:
+    normalized_symbol = normalize_taiwan_futures_symbols([symbol])[0]
+    resolved_session = resolve_taiwan_futures_session(session)
+    normalized_contract_symbol = str(contract_symbol or "").strip().upper()
+    normalized_contract_month = str(contract_month or "").strip()
+    expected_suffix = TAIFEX_CONTRACT_SUFFIX_BY_SESSION[resolved_session]
+    if not normalized_contract_symbol.endswith(expected_suffix):
+        raise TaiwanFuturesFetchError(
+            f"TAIFEX MIS contract {normalized_contract_symbol or '<empty>'} does not match "
+            f"the {resolved_session} session."
+        )
+    if not re.fullmatch(r"\d{6}", normalized_contract_month):
+        raise TaiwanFuturesFetchError(
+            "TAIFEX MIS 1-minute chart contract month is missing or malformed."
+        )
+    if str(payload.get("RtCode")) != "0":
+        message = str(
+            payload.get("RtMsg") or "TAIFEX MIS 1-minute chart returned a non-success response."
+        )
+        raise TaiwanFuturesFetchError(message)
+
+    data = payload.get("RtData")
+    if not isinstance(data, dict):
+        raise TaiwanFuturesFetchError("TAIFEX MIS 1-minute chart data has unexpected shape.")
+
+    returned_contract = str(data.get("SymbolID") or "").strip().upper()
+    if returned_contract and returned_contract != normalized_contract_symbol:
+        raise TaiwanFuturesFetchError(
+            "TAIFEX MIS 1-minute chart returned a different contract symbol."
+        )
+
+    quote = data.get("Quote")
+    info = data.get("Info")
+    sessions = info.get("Sessions") if isinstance(info, dict) else None
+    session_info = sessions[0] if isinstance(sessions, list) and sessions else None
+    session_start = _parse_taifex_hhmm(
+        session_info.get("Start") if isinstance(session_info, dict) else None
+    )
+    session_end = _parse_taifex_hhmm(
+        session_info.get("End") if isinstance(session_info, dict) else None
+    )
+    chart_date = _parse_taifex_date(quote.get("CDate") if isinstance(quote, dict) else None)
+    if chart_date is None or session_start is None or session_end is None:
+        raise TaiwanFuturesFetchError(
+            "TAIFEX MIS 1-minute chart is missing a valid chart date or session range."
+        )
+
+    ticks = data.get("Ticks")
+    if not isinstance(ticks, list):
+        raise TaiwanFuturesFetchError("TAIFEX MIS 1-minute ticks have unexpected shape.")
+
+    product = TAIWAN_FUTURES_PRODUCTS[normalized_symbol]
+    fetched_time = fetched_at or datetime.now(TAIWAN_TZ)
+    crosses_midnight = session_start > session_end
+    bars: list[dict[str, Any]] = []
+    for tick in ticks:
+        if not isinstance(tick, list) or len(tick) < 6:
+            continue
+
+        tick_time_text = str(tick[0] or "").strip()
+        if not re.fullmatch(r"\d{6}", tick_time_text):
+            continue
+        try:
+            tick_clock = time(
+                int(tick_time_text[:2]),
+                int(tick_time_text[2:4]),
+                int(tick_time_text[4:6]),
+            )
+        except ValueError:
+            continue
+
+        in_session = (
+            tick_clock >= session_start or tick_clock <= session_end
+            if crosses_midnight
+            else session_start <= tick_clock <= session_end
+        )
+        if not in_session:
+            continue
+
+        open_price = _parse_float(tick[1])
+        high_price = _parse_float(tick[2])
+        low_price = _parse_float(tick[3])
+        close_price = _parse_float(tick[4])
+        minute_volume = _parse_int(tick[5])
+        if None in {open_price, high_price, low_price, close_price, minute_volume}:
+            continue
+
+        bar_date = chart_date
+        if crosses_midnight and tick_clock <= session_end:
+            bar_date += timedelta(days=1)
+        bar_time = datetime.combine(bar_date, tick_clock, tzinfo=TAIWAN_TZ)
+        bars.append(
+            {
+                "provider": TAIFEX_PROVIDER,
+                "market": "TAIFEX",
+                "symbol": normalized_symbol,
+                "product_code": product.product_code,
+                "product_name": product.product_name,
+                "contract_symbol": normalized_contract_symbol,
+                "contract_month": normalized_contract_month,
+                "session": resolved_session,
+                "interval": "1m",
+                "bar_time": bar_time,
+                "open_price": open_price,
+                "high_price": high_price,
+                "low_price": low_price,
+                "close_price": close_price,
+                "total_volume": minute_volume,
+                "open_interest": None,
+                "source": "TAIFEX MIS 1-minute chart",
+                "source_url": TAIFEX_MIS_CHART_1M_URL,
+                "fetched_at": fetched_time,
+            }
+        )
+
+    if ticks and not bars:
+        raise TaiwanFuturesFetchError(
+            "TAIFEX MIS 1-minute chart returned no usable bars for the requested session."
+        )
+    return bars
+
+
 def _configured_kgi_settings() -> list[str]:
     fields = {
         "KGI_API_KEY": settings.kgi_api_key,
@@ -646,11 +838,12 @@ def fetch_taiwan_futures_quotes(
     provider: str | None = None,
 ) -> list[dict[str, Any]]:
     normalized_symbols = normalize_taiwan_futures_symbols(symbols)
+    resolved_session = resolve_taiwan_futures_session(session)
     resolved_provider = resolve_taiwan_futures_quote_provider(provider)
     if resolved_provider == KGI_PROVIDER:
         return fetch_kgi_taiwan_futures_quotes(
             symbols=normalized_symbols,
-            session=session,
+            session=resolved_session,
             active_only=active_only,
         )
 
@@ -660,15 +853,24 @@ def fetch_taiwan_futures_quotes(
 
     for symbol in normalized_symbols:
         try:
-            payload = fetch_taifex_mis_quote_payload(symbol=symbol, session=session)
+            payload = fetch_taifex_mis_quote_payload(
+                symbol=symbol,
+                session=resolved_session,
+            )
             quotes = parse_taifex_mis_quote_payload(
                 symbol=symbol,
-                session=session,
+                session=resolved_session,
                 payload=payload,
                 fetched_at=fetched_at,
             )
         except TaiwanFuturesFetchError as exc:
             errors.append(f"{symbol}: {exc}")
+            continue
+
+        if not quotes:
+            errors.append(
+                f"{symbol}: TAIFEX MIS returned no usable {resolved_session} monthly quote."
+            )
             continue
 
         if active_only:
@@ -678,8 +880,11 @@ def fetch_taiwan_futures_quotes(
         else:
             parsed.extend(quotes)
 
-    if not parsed and errors:
-        raise TaiwanFuturesFetchError("; ".join(errors))
+    if not parsed:
+        message = "; ".join(errors) or (
+            f"TAIFEX MIS returned no usable {resolved_session} monthly quotes."
+        )
+        raise TaiwanFuturesFetchError(message)
 
     return parsed
 
@@ -783,7 +988,7 @@ def _upsert_one_minute_bar(
             high_price=last_price,
             low_price=last_price,
             close_price=last_price,
-            total_volume=quote.get("total_volume"),
+            total_volume=None,
             open_interest=quote.get("open_interest"),
             source=quote["source"],
             source_url=quote.get("source_url"),
@@ -803,10 +1008,61 @@ def _upsert_one_minute_bar(
 
     existing.session = quote["session"]
     existing.contract_symbol = quote["contract_symbol"]
-    existing.total_volume = quote.get("total_volume")
     existing.open_interest = quote.get("open_interest")
-    existing.source = quote["source"]
-    existing.source_url = quote.get("source_url")
+    if existing.total_volume is None:
+        existing.source = quote["source"]
+        existing.source_url = quote.get("source_url")
+    return existing
+
+
+def _upsert_intraday_bar(
+    db: Session,
+    *,
+    bar: dict[str, Any],
+) -> TaiwanFuturesIntradayBar:
+    existing = (
+        db.query(TaiwanFuturesIntradayBar)
+        .filter(TaiwanFuturesIntradayBar.provider == bar["provider"])
+        .filter(TaiwanFuturesIntradayBar.symbol == bar["symbol"])
+        .filter(TaiwanFuturesIntradayBar.contract_month == bar["contract_month"])
+        .filter(TaiwanFuturesIntradayBar.interval == bar["interval"])
+        .filter(TaiwanFuturesIntradayBar.bar_time == bar["bar_time"])
+        .first()
+    )
+    values = {
+        key: value
+        for key, value in bar.items()
+        if key
+        in {
+            "market",
+            "product_code",
+            "product_name",
+            "contract_symbol",
+            "session",
+            "open_price",
+            "high_price",
+            "low_price",
+            "close_price",
+            "total_volume",
+            "open_interest",
+            "source",
+            "source_url",
+        }
+    }
+
+    if existing is None:
+        existing = TaiwanFuturesIntradayBar(
+            provider=bar["provider"],
+            symbol=bar["symbol"],
+            contract_month=bar["contract_month"],
+            interval=bar["interval"],
+            bar_time=bar["bar_time"],
+            **values,
+        )
+        db.add(existing)
+    else:
+        for key, value in values.items():
+            setattr(existing, key, value)
     return existing
 
 
@@ -893,6 +1149,72 @@ def refresh_taiwan_futures_quotes(
             _upsert_one_minute_bar(db=db, quote=quote)
             rows.append(row)
 
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    for row in rows:
+        db.refresh(row)
+    return rows
+
+
+def refresh_taiwan_futures_intraday_bars(
+    db: Session,
+    *,
+    symbol: str,
+    session: str = "auto",
+    provider: str | None = None,
+) -> list[TaiwanFuturesIntradayBar]:
+    normalized_symbol = normalize_taiwan_futures_symbols([symbol])[0]
+    resolved_session = resolve_taiwan_futures_session(session)
+    resolved_provider = resolve_taiwan_futures_quote_provider(provider)
+    if resolved_provider != TAIFEX_PROVIDER:
+        raise TaiwanFuturesFetchError(
+            "Taiwan futures 1-minute chart currently supports the TAIFEX MIS provider only."
+        )
+
+    quote = (
+        db.query(TaiwanFuturesQuoteSnapshot)
+        .filter(TaiwanFuturesQuoteSnapshot.provider == resolved_provider)
+        .filter(TaiwanFuturesQuoteSnapshot.symbol == normalized_symbol)
+        .filter(TaiwanFuturesQuoteSnapshot.session == resolved_session)
+        .order_by(TaiwanFuturesQuoteSnapshot.quote_time.desc())
+        .first()
+    )
+    expected_suffix = TAIFEX_CONTRACT_SUFFIX_BY_SESSION[resolved_session]
+    if quote is None or not str(quote.contract_symbol or "").upper().endswith(expected_suffix):
+        quote_rows = refresh_taiwan_futures_quotes(
+            db=db,
+            symbols=[normalized_symbol],
+            session=resolved_session,
+            active_only=True,
+            provider=resolved_provider,
+        )
+        quote = quote_rows[0] if quote_rows else None
+
+    if quote is None or quote.contract_month is None:
+        raise TaiwanFuturesFetchError(
+            f"No active {resolved_session} contract is available for {normalized_symbol}."
+        )
+
+    payload = fetch_taifex_mis_intraday_payload(
+        contract_symbol=quote.contract_symbol,
+    )
+    bars = parse_taifex_mis_intraday_payload(
+        symbol=normalized_symbol,
+        session=resolved_session,
+        contract_symbol=quote.contract_symbol,
+        contract_month=quote.contract_month,
+        payload=payload,
+    )
+    if not bars:
+        raise TaiwanFuturesFetchError(
+            f"TAIFEX MIS returned no {resolved_session} 1-minute bars for {normalized_symbol}."
+        )
+
+    try:
+        rows = [_upsert_intraday_bar(db=db, bar=bar) for bar in bars]
         db.commit()
     except Exception:
         db.rollback()
@@ -1041,9 +1363,11 @@ def list_taiwan_futures_intraday_bars(
     interval: str = "1m",
     limit: int = 390,
     trade_date: date | None = None,
+    session: str = "auto",
     provider: str | None = None,
 ) -> list[TaiwanFuturesIntradayBar]:
     normalized_symbol = normalize_taiwan_futures_symbols([symbol])[0]
+    resolved_session = resolve_taiwan_futures_session(session)
     resolved_provider = normalize_taiwan_futures_quote_provider(provider)
     if interval != "1m":
         raise ValueError("Taiwan futures intraday bars currently support interval='1m' only.")
@@ -1053,6 +1377,7 @@ def list_taiwan_futures_intraday_bars(
         db.query(TaiwanFuturesIntradayBar)
         .filter(TaiwanFuturesIntradayBar.symbol == normalized_symbol)
         .filter(TaiwanFuturesIntradayBar.interval == interval)
+        .filter(TaiwanFuturesIntradayBar.session == resolved_session)
     )
     if resolved_provider != "auto":
         query = query.filter(TaiwanFuturesIntradayBar.provider == resolved_provider)
@@ -1072,7 +1397,11 @@ def list_taiwan_futures_intraday_bars(
         value = row.bar_time
         if value.tzinfo is None:
             value = value.replace(tzinfo=TAIWAN_TZ)
-        return value.astimezone(TAIWAN_TZ).date()
+        local_value = value.astimezone(TAIWAN_TZ)
+        logical_date = local_value.date()
+        if row.session == "after_hours" and local_value.time() <= time(5, 0):
+            logical_date -= timedelta(days=1)
+        return logical_date
 
     resolved_trade_date = trade_date or row_trade_date(rows[-1])
     filtered_rows = [row for row in rows if row_trade_date(row) == resolved_trade_date]

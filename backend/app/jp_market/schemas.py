@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -117,7 +118,7 @@ class JPSourceHealthRead(BaseModel):
     generated_at: datetime
     filters: dict[str, str | None] = Field(default_factory=dict)
     expected_daily_price_date: date | None = None
-    freshness_policy: dict[str, str | None] = Field(default_factory=dict)
+    freshness_policy: dict[str, Any] = Field(default_factory=dict)
     summary: JPSourceHealthSummaryRead
     entries: list[JPSourceHealthEntryRead] = Field(default_factory=list)
 
@@ -222,6 +223,11 @@ class JPOhlcChartRead(BaseModel):
     point_count: int
     points: list[JPOhlcPointRead]
     backfill: dict | None = None
+    latest_data_date: date | None = None
+    expected_data_date: date | None = None
+    freshness_status: str = "unknown"
+    is_current: bool = False
+    refresh_recommended: bool = False
 
 
 class JPIntradayTrendPointRead(BaseModel):
@@ -252,6 +258,88 @@ class JPIntradayTrendRead(BaseModel):
     point_count: int
     points: list[JPIntradayTrendPointRead]
     source_url: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
+class JPMarketCoverageRead(BaseModel):
+    scope: str
+    active_stock_count: int
+    observed_symbol_count: int
+    current_symbol_count: int
+    stale_symbol_count: int
+    missing_symbol_count: int
+    active_coverage_ratio: float
+    observed_current_ratio: float
+    status: str
+    is_partial: bool
+
+
+class JPMarketBreadthRead(BaseModel):
+    trade_date: date | None = None
+    advance_count: int
+    decline_count: int
+    unchanged_count: int
+    no_comparison_count: int
+    total_count: int
+    coverage_count: int
+    source: str
+    is_partial: bool
+
+
+class JPMarketSectorBreadthRead(BaseModel):
+    sector: str
+    covered_count: int
+    advance_count: int
+    decline_count: int
+    unchanged_count: int
+    average_change_pct: float | None = None
+
+
+class JPMarketMoverRead(BaseModel):
+    symbol: str
+    security_name: str | None = None
+    sector: str | None = None
+    trade_date: date
+    close: float
+    previous_close: float
+    change: float
+    change_pct: float
+    volume: int | None = None
+    provider: str
+
+
+class JPMarketIndexSnapshotRead(BaseModel):
+    symbol: str
+    label: str
+    role: str
+    latest_data_date: date | None = None
+    expected_data_date: date | None = None
+    freshness_status: str
+    is_current: bool
+    close: float | None = None
+    previous_close: float | None = None
+    change: float | None = None
+    change_pct: float | None = None
+    volume: int | None = None
+    provider: str | None = None
+    point_count: int = 0
+
+
+class JPMarketOverviewRead(BaseModel):
+    kind: str
+    generated_at: datetime
+    expected_trade_date: date
+    calendar_status: dict[str, Any]
+    coverage: JPMarketCoverageRead
+    watchlist_coverage: dict[str, Any]
+    breadth: JPMarketBreadthRead
+    sectors: list[JPMarketSectorBreadthRead]
+    indices: list[JPMarketIndexSnapshotRead]
+    top_gainers: list[JPMarketMoverRead]
+    top_losers: list[JPMarketMoverRead]
+    source_health: dict[str, Any]
+    refresh_recommended: bool
+    refresh_scope: str
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -369,6 +457,8 @@ class JPWatchlistRankingItemRead(BaseModel):
     status: str
     source: str | None = None
     error_message: str | None = None
+    latest_fetched_at: datetime | None = None
+    freshness_status: str = "unknown"
 
 
 class JPWatchlistRankingRead(BaseModel):
@@ -385,4 +475,8 @@ class JPWatchlistRankingRead(BaseModel):
     is_current: bool = True
     current_symbol_count: int = 0
     stale_symbol_count: int = 0
+    missing_symbol_count: int = 0
+    future_symbol_count: int = 0
+    coverage_status: str = "unknown"
+    refresh_recommended: bool = False
     results: list[JPWatchlistRankingItemRead]

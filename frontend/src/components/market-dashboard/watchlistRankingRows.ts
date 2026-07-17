@@ -301,6 +301,8 @@ export function buildJpWatchlistRows(
         change_pct: null,
         volume: null,
         status: "pending",
+        latest_fetched_at: null,
+        freshness_status: "missing",
         source: null,
         error_message: null,
       });

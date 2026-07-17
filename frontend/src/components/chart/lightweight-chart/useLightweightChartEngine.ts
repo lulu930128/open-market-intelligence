@@ -56,6 +56,7 @@ type UseLightweightChartEngineArgs = {
   };
   omiChartColors: OmiChartColors;
   params: IndicatorParameters;
+  pricePrecision?: number;
   resolvedVolumePanelLabel: string;
   seriesData: BuiltSeriesData;
   timeMode: ChartTimeMode;
@@ -71,6 +72,7 @@ export function useLightweightChartEngine({
   maColors,
   omiChartColors,
   params,
+  pricePrecision,
   resolvedVolumePanelLabel,
   seriesData,
   timeMode,
@@ -90,6 +92,10 @@ export function useLightweightChartEngine({
   const [overlayRevision, setOverlayRevision] = useState(0);
   const upColor = omiChartColors.marketUp;
   const downColor = omiChartColors.marketDown;
+  const resolvedPricePrecision = Number.isInteger(pricePrecision)
+    ? Math.min(8, Math.max(0, pricePrecision as number))
+    : 2;
+  const priceMinMove = 10 ** -resolvedPricePrecision;
 
   useEffect(() => {
     latestSeriesDataRef.current = seriesData;
@@ -356,7 +362,7 @@ export function useLightweightChartEngine({
         locale: "zh-TW",
         dateFormat: "yyyy/MM/dd",
         timeFormatter: (time: Time) => formatChartDateTime(time, timeMode),
-        priceFormatter: (price: number) => formatPrice(price),
+        priceFormatter: (price: number) => formatPrice(price, pricePrecision),
       },
     });
 
@@ -378,8 +384,8 @@ export function useLightweightChartEngine({
         lastValueVisible: true,
         priceFormat: {
           type: "price",
-          precision: 2,
-          minMove: 0.01,
+          precision: resolvedPricePrecision,
+          minMove: priceMinMove,
         },
       });
       registerSeriesDataUpdater((nextData) => mainLineSeries.setData(nextData.line));
@@ -395,8 +401,8 @@ export function useLightweightChartEngine({
         wickDownColor: downColor,
         priceFormat: {
           type: "price",
-          precision: 2,
-          minMove: 0.01,
+          precision: resolvedPricePrecision,
+          minMove: priceMinMove,
         },
       });
       registerSeriesDataUpdater((nextData) => candleSeries.setData(nextData.candles));
@@ -875,6 +881,9 @@ export function useLightweightChartEngine({
     maColors,
     omiChartColors,
     params,
+    priceMinMove,
+    pricePrecision,
+    resolvedPricePrecision,
     scheduleOverlayRevision,
     timeMode,
     upColor,

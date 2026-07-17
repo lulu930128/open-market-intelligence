@@ -26,6 +26,7 @@ from app.jp_market.schemas import (
     JPDailyPriceRead,
     JPDailyPriceRefreshResultRead,
     JPIntradayTrendRead,
+    JPMarketOverviewRead,
     JPOhlcChartRead,
     JPResourceSummaryRead,
     JPResourceRefreshResultRead,
@@ -61,6 +62,7 @@ from app.jp_market.service import (
     get_jp_watchlist_ranking,
     get_jp_watchlist_technical_radar,
     get_jp_intraday_trend,
+    get_jp_market_overview,
     get_jp_stock,
     get_jp_resource_summary,
     list_jp_daily_prices,
@@ -106,12 +108,27 @@ def _item_error(exc: Exception) -> HTTPException:
 def get_jp_source_health(
     symbol: str | None = None,
     expected_daily_price_date: date | None = None,
+    use_expected_date: bool = True,
     db: Session = Depends(get_db),
 ):
     return build_jp_source_health(
         db=db,
         symbol=symbol,
         expected_daily_price_date=expected_daily_price_date,
+        use_expected_date=use_expected_date,
+    )
+
+
+@router.get("/overview", response_model=JPMarketOverviewRead)
+def get_jp_market_overview_api(
+    sector_limit: int = Query(default=10, ge=1, le=33),
+    mover_limit: int = Query(default=5, ge=1, le=20),
+    db: Session = Depends(get_db),
+):
+    return get_jp_market_overview(
+        db=db,
+        sector_limit=sector_limit,
+        mover_limit=mover_limit,
     )
 
 

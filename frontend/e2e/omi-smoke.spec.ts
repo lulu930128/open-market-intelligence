@@ -450,6 +450,81 @@ function seededKrRankingRows() {
   ];
 }
 
+function seededCryptoWatchlistTree() {
+  return [
+    {
+      id: 1,
+      parent_id: null,
+      group_name: "主流幣",
+      description: "Playwright crypto workspace fixture",
+      sort_order: 100,
+      is_active: true,
+      children: [],
+    },
+  ];
+}
+
+function seededCryptoWatchlistItems() {
+  const timestamp = "2026-06-15T09:30:00Z";
+  return ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "TON", "LINK"].map(
+    (asset, index) => ({
+      id: index + 1,
+      group_id: 1,
+      asset,
+      asset_name: asset === "BTC" ? "Bitcoin" : asset,
+      note: null,
+      priority: (index + 1) * 10,
+      tags: null,
+      enabled: true,
+      created_at: timestamp,
+      updated_at: timestamp,
+    })
+  );
+}
+
+function seededCryptoWorkspaceSummary() {
+  const watchlisted = new Set(["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "TON", "LINK"]);
+  const assets = ["BTC", "ETH", "USDT", "SOL", "BNB", "XRP", "DOGE", "TON", "LINK"].map(
+    (asset) => ({
+      asset,
+      name: asset === "BTC" ? "Bitcoin" : asset,
+      priority: asset === "BTC" ? "core" : "major",
+      default_subscription_mode: asset === "BTC" ? "always_on" : "on_select",
+      subscription_mode: asset === "BTC" ? "always_on" : "on_select",
+      subscription_resources: {},
+      watchlisted: watchlisted.has(asset),
+      instrument_count: asset === "USDT" ? 1 : 4,
+      spot_instrument_count: asset === "USDT" ? 1 : 2,
+      derivative_instrument_count: asset === "USDT" ? 0 : 2,
+      maturity: asset === "BTC" ? "ready" : "stale",
+      as_of: "2026-06-15T09:30:00Z",
+      core_summary: {},
+      context_summary: {},
+      advanced_summary: {},
+      slots: [],
+    })
+  );
+  return {
+    kind: "crypto_workspace_summary",
+    generated_at: "2026-06-15T09:30:00Z",
+    registry_count: 9,
+    watchlist_count: 8,
+    summary: {
+      asset_count: 9,
+      watchlist_count: 8,
+      always_on_count: 1,
+      on_select_count: 8,
+      ready_count: 1,
+      partial_count: 0,
+      stale_count: 8,
+      missing_count: 0,
+    },
+    runtime: { realtime: { running: true }, auto_refresh: { running: true } },
+    assets,
+    warnings: [],
+  };
+}
+
 function ohlcResponse(stockId: string) {
   return {
     stock_id: stockId,
@@ -1848,6 +1923,21 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
       return;
     }
 
+    if (path.endsWith("/crypto-market/watchlists/tree")) {
+      await fulfillJson(route, seededCryptoWatchlistTree());
+      return;
+    }
+
+    if (path.endsWith("/crypto-market/watchlists/items")) {
+      await fulfillJson(route, seededCryptoWatchlistItems());
+      return;
+    }
+
+    if (path.endsWith("/crypto-market/workspace-summary")) {
+      await fulfillJson(route, seededCryptoWorkspaceSummary());
+      return;
+    }
+
     if (path.endsWith("/crypto-market/provider-contract")) {
       await fulfillJson(route, {
         kind: "crypto_provider_contract",
@@ -2523,6 +2613,40 @@ test.describe("OMI dashboard smoke", () => {
     await expect(tape.getByText("S&P 500", { exact: true })).toBeVisible();
   });
 
+  test("US stock detail routes intraday failures into the update status center", async ({
+    page,
+  }) => {
+    const timeoutDetail = "fixture intraday timeout";
+
+    await page.clock.setFixedTime(new Date("2026-07-14T15:00:00Z"));
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(),
+      usWatchlistItems: seededUsWatchlistItems(),
+      apiResponder: ({ path, requestNumber }) => {
+        if (path.endsWith("/us-market/intraday/AAPL") && requestNumber >= 2) {
+          return { body: { detail: timeoutDetail }, status: 504 };
+        }
+        return null;
+      },
+    });
+    await page.goto("/?market=us&group_id=17&symbol=AAPL", {
+      waitUntil: "domcontentloaded",
+    });
+
+    await page.getByRole("button", { name: "今日", exact: true }).first().click();
+
+    const sidebar = page.getByRole("complementary").first();
+    const statusToggle = sidebar.getByRole("button", { name: /更新狀態/ });
+    await expect(statusToggle.locator(".omi-job-status-pill-attention")).toContainText("1", {
+      timeout: 10_000,
+    });
+    await expect(page.getByText(new RegExp(timeoutDetail))).toHaveCount(0);
+
+    await statusToggle.click();
+    await expect(sidebar.getByText(new RegExp(timeoutDetail))).toBeVisible();
+    await expect(page.getByRole("heading", { name: /^AAPL(?:\s|$)/ })).toBeVisible();
+  });
+
   test("Taiwan index professional chart shell renders", async ({ page }) => {
     await mockOmiApi(page);
     await page.goto("/?stock_id=TAIEX", { waitUntil: "domcontentloaded" });
@@ -2939,24 +3063,140 @@ test.describe("OMI dashboard smoke", () => {
 
   test("crypto and resource selections stay inside the crypto route", async ({ page }) => {
     const pageErrors: string[] = [];
+    let resourceAutoRefreshRequests = 0;
     page.on("pageerror", (error) => pageErrors.push(error.message));
     await mockOmiApi(page);
+    await page.route("**/settings/market-data-subscriptions", async (route) => {
+      await fulfillJson(route, {
+        kind: "market_data_subscriptions",
+        version: "v1",
+        source: "playwright.fixture",
+        items: [
+          {
+            key: "currency:twd_to_foreign:TWD-USD",
+            market: "resource",
+            group: "twd_to_foreign",
+            label: "台幣／美元",
+            mode: "on_select",
+            resources: { quote: true, ohlcv: true },
+            intervals: {
+              quote_seconds: 60,
+              ohlcv_seconds: 300,
+              selected_quote_seconds: 5,
+              background_quote_seconds: 300,
+            },
+          },
+        ],
+      });
+    });
+    await page.route("**/resource-market/refresh?**", async (route) => {
+      resourceAutoRefreshRequests += 1;
+      await fulfillJson(route, {
+        status: "success",
+        resource: "snapshot",
+        requested_count: 1,
+        refreshed_count: 2,
+        skipped_count: 0,
+        error_count: 0,
+        results: [
+          {
+            status: "success",
+            resource: "quote",
+            requested_count: 1,
+            refreshed_count: 1,
+            skipped_count: 0,
+            error_count: 0,
+          },
+          {
+            status: "success",
+            resource: "ohlcv",
+            interval: "1m",
+            requested_count: 1,
+            refreshed_count: 1,
+            skipped_count: 0,
+            error_count: 0,
+          },
+        ],
+      });
+    });
+    await page.route("**/resource-market/quotes/latest?**", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.searchParams.get("symbols") !== "TWD-USD") {
+        await route.fallback();
+        return;
+      }
+
+      await fulfillJson(route, [
+        {
+          id: 1,
+          provider: "yahoo_chart",
+          exchange: "FX",
+          symbol: "TWD-USD",
+          provider_symbol: "TWDUSD=X",
+          name: "台幣／美元",
+          root_folder: "currency",
+          group: "twd_to_foreign",
+          asset_class: "foreign_exchange",
+          base_asset: "TWD",
+          quote_asset: "USD",
+          instrument_type: "spot",
+          contract_key: "spot",
+          contract_month: null,
+          last_price: 0.031087,
+          bid_price: null,
+          ask_price: null,
+          open_price: 0.03102,
+          high_price: 0.031095,
+          low_price: 0.030998,
+          previous_close: 0.031,
+          price_change: 0.000087,
+          price_change_pct: 0.280645,
+          volume: null,
+          open_interest: null,
+          event_time: "2026-07-15T11:30:00+08:00",
+          source_url: null,
+          fetched_at: "2026-07-15T11:30:01+08:00",
+          created_at: "2026-07-15T11:30:01+08:00",
+          updated_at: "2026-07-15T11:30:01+08:00",
+        },
+      ]);
+    });
     await page.goto("/", { waitUntil: "domcontentloaded" });
 
     await page.locator('a[href="/?market=crypto"]').click();
     await expect(page).toHaveURL(/\?market=crypto$/);
     const cryptoHistoryLength = await page.evaluate(() => window.history.length);
 
-    const currencyButton = page
-      .locator('[data-testid^="currency-sidebar-instrument-"]')
-      .first();
+    await expect(page.getByTestId("crypto-sidebar-workspace-summary")).toContainText(
+      "資產庫 9 · 即時 1 · 待更新 8"
+    );
+    await expect(page.getByTestId("crypto-sidebar-maturity-BTC")).toHaveText("即時");
+    await expect(page.getByTestId("crypto-sidebar-maturity-ETH")).toHaveText("待更");
+    await expect(page.getByTestId("crypto-sidebar-maturity-BTC")).toBeVisible();
+    await expect(page.getByTestId("crypto-sidebar-maturity-ETH")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Reload" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "重載" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "刷新核心資料" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "更新報價/K線" })).toHaveCount(0);
+
+    await expect(page.getByTestId("currency-sidebar-group-twd_to_foreign")).toBeVisible();
+    await expect(page.getByTestId("currency-sidebar-group-foreign_to_twd")).toBeVisible();
+    await expect(page.getByTestId("currency-sidebar-group-foreign_to_foreign")).toBeVisible();
+    await expect(page.getByTestId("currency-sidebar-instrument-TWD-JPY")).toBeVisible();
+    await expect(page.getByTestId("currency-sidebar-instrument-USD-TWD")).toBeVisible();
+    await expect(page.getByTestId("currency-sidebar-instrument-EUR-USD")).toBeVisible();
+
+    const currencyButton = page.getByTestId("currency-sidebar-instrument-TWD-USD");
     await expect(currencyButton).toBeVisible();
-    const currencySymbol = (await currencyButton.innerText()).split("\n")[0].trim();
+    await expect(currencyButton.locator("div").nth(1)).toHaveCSS("font-size", "14px");
+    const currencySymbol = "TWD-USD";
     await currencyButton.click();
     await expect(currencyButton).toHaveClass(/omi-sidebar-selected/);
     await expect(
       page.getByRole("heading", { level: 2 }).filter({ hasText: currencySymbol }).first()
     ).toBeVisible();
+    await expect(page.getByText("0.031087", { exact: true }).first()).toBeVisible();
+    await expect.poll(() => resourceAutoRefreshRequests).toBeGreaterThanOrEqual(1);
     await expect(page).toHaveURL(/\?market=crypto$/);
 
     const resourceButton = page

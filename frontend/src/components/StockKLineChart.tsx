@@ -38,6 +38,7 @@ type Props = {
   volumeTooltipLabel?: string;
   volumeValueKey?: "volume" | "trade_value";
   volumeValueFormatter?: (value: number | null | undefined) => string;
+  priceMaximumFractionDigits?: number;
   latestPreviousClose?: number | null;
 };
 
@@ -87,12 +88,12 @@ const DEFAULT_VISIBLE_BARS = 80;
 const MIN_VISIBLE_BARS = 20;
 const PRICE_GUIDE_SNAP_DISTANCE = 10;
 
-function formatPrice(value: number | null | undefined) {
+function formatPrice(value: number | null | undefined, maximumFractionDigits = 2) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
 
   return value.toLocaleString("zh-TW", {
     minimumFractionDigits: 0,
-    maximumFractionDigits: 2,
+    maximumFractionDigits,
   });
 }
 
@@ -260,9 +261,12 @@ export default function StockKLineChart({
   volumeTooltipLabel,
   volumeValueKey = "volume",
   volumeValueFormatter = formatLots,
+  priceMaximumFractionDigits = 2,
   latestPreviousClose = null,
 }: Props) {
   const t = useT();
+  const formatChartPrice = (value: number | null | undefined) =>
+    formatPrice(value, priceMaximumFractionDigits);
   const resolvedVolumePanelLabel = volumePanelLabel ?? t("chart.kline.volumeLots");
   const resolvedVolumeTooltipLabel = volumeTooltipLabel ?? resolvedVolumePanelLabel;
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
@@ -795,10 +799,10 @@ export default function StockKLineChart({
   const hoverPriceGuideLabel =
     hoverPriceGuideValue !== null
       ? hoverPriceGuideSnap === "high"
-        ? t("chart.kline.highGuide", { value: formatPrice(hoverPriceGuideValue) })
+        ? t("chart.kline.highGuide", { value: formatChartPrice(hoverPriceGuideValue) })
         : hoverPriceGuideSnap === "low"
-          ? t("chart.kline.lowGuide", { value: formatPrice(hoverPriceGuideValue) })
-          : formatPrice(hoverPriceGuideValue)
+          ? t("chart.kline.lowGuide", { value: formatChartPrice(hoverPriceGuideValue) })
+          : formatChartPrice(hoverPriceGuideValue)
       : null;
   const hoverPriceGuideStrokeClass =
     hoverPriceGuideSnap === "high"
@@ -834,7 +838,7 @@ export default function StockKLineChart({
               <div>
                 <span className="text-omi-text-subtle">{t("chart.kline.close")}</span>
                 <div className="font-semibold text-omi-text">
-                  {formatPrice(hoveredPoint.close)}
+                  {formatChartPrice(hoveredPoint.close)}
                 </div>
               </div>
               <div>
@@ -862,8 +866,8 @@ export default function StockKLineChart({
                   MA{params.maShort}/{params.maMiddle}/{params.maLong}
                 </span>
                 <div className="font-semibold text-omi-text">
-                  {formatPrice(hoveredPoint.ma5)} / {formatPrice(hoveredPoint.ma20)} /{" "}
-                  {formatPrice(hoveredPoint.ma60)}
+                  {formatChartPrice(hoveredPoint.ma5)} / {formatChartPrice(hoveredPoint.ma20)} /{" "}
+                  {formatChartPrice(hoveredPoint.ma60)}
                 </div>
               </div>
               {indicators.ema ? (
@@ -872,7 +876,7 @@ export default function StockKLineChart({
                     EMA{params.emaFast}/{params.emaSlow}
                   </span>
                   <div className="font-semibold text-omi-text">
-                    {formatPrice(hoveredPoint.ema12)} / {formatPrice(hoveredPoint.ema26)}
+                    {formatChartPrice(hoveredPoint.ema12)} / {formatChartPrice(hoveredPoint.ema26)}
                   </div>
                 </div>
               ) : null}
@@ -880,7 +884,7 @@ export default function StockKLineChart({
                 <div>
                   <span className="text-omi-text-subtle">VWAP</span>
                   <div className="font-semibold text-omi-text">
-                    {formatPrice(hoveredPoint.vwap)}
+                    {formatChartPrice(hoveredPoint.vwap)}
                   </div>
                 </div>
               ) : null}
@@ -888,7 +892,7 @@ export default function StockKLineChart({
                 <div>
                   <span className="text-omi-text-subtle">SAR</span>
                   <div className="font-semibold text-omi-text">
-                    {formatPrice(hoveredPoint.psar)}
+                    {formatChartPrice(hoveredPoint.psar)}
                   </div>
                 </div>
               ) : null}
@@ -1123,7 +1127,7 @@ export default function StockKLineChart({
                 textAnchor="end"
                 className="fill-omi-text-muted text-[12px] font-medium"
               >
-                {formatPrice(price)}
+                {formatChartPrice(price)}
               </text>
             </g>
           );
@@ -1308,7 +1312,7 @@ export default function StockKLineChart({
                     className="fill-omi-market-up text-[11px] font-semibold"
                   >
                     {t("chart.kline.highMarker", {
-                      value: formatPrice(rangeHigh.value),
+                      value: formatChartPrice(rangeHigh.value),
                     })}
                   </text>
                 </>
@@ -1343,7 +1347,7 @@ export default function StockKLineChart({
                     className="fill-omi-market-down text-[11px] font-semibold"
                   >
                     {t("chart.kline.lowMarker", {
-                      value: formatPrice(rangeLow.value),
+                      value: formatChartPrice(rangeLow.value),
                     })}
                   </text>
                 </>

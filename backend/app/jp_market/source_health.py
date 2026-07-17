@@ -14,6 +14,12 @@ from app.db.models import (
     JPStockMaster,
 )
 from app.jp_market.sources import normalize_jp_symbol
+from app.jp_market.trading_calendar import (
+    JPX_CALENDAR_SOURCE,
+    JPX_VERIFIED_CALENDAR_YEARS,
+    expected_jp_daily_price_date,
+    jp_calendar_limit,
+)
 from app.observability.provider_health import (
     enrich_source_health_entries,
     sync_source_health_snapshots,
@@ -277,8 +283,13 @@ def build_jp_source_health(
     *,
     symbol: str | None = None,
     expected_daily_price_date: date | None = None,
+    use_expected_date: bool = True,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     normalized_symbol = normalize_jp_symbol(symbol) if symbol else None
+    resolved_expected_date = expected_daily_price_date
+    if resolved_expected_date is None and use_expected_date:
+        resolved_expected_date = expected_jp_daily_price_date(now=now)
     stock = (
         db.query(JPStockMaster)
         .filter(JPStockMaster.symbol == normalized_symbol)
@@ -291,7 +302,7 @@ def build_jp_source_health(
         *_daily_price_entries(
             db,
             symbol=normalized_symbol,
-            expected_daily_price_date=expected_daily_price_date,
+            expected_daily_price_date=resolved_expected_date,
         ),
         *_fundamental_entries(db, symbol=normalized_symbol),
         _margin_interest_entry(db, symbol=normalized_symbol),
@@ -318,14 +329,16 @@ def build_jp_source_health(
         "generated_at": checked_at.isoformat(),
         "filters": {"symbol": normalized_symbol},
         "expected_daily_price_date": (
-            expected_daily_price_date.isoformat() if expected_daily_price_date else None
+            resolved_expected_date.isoformat() if resolved_expected_date else None
         ),
         "freshness_policy": {
-            "mode": "expected_date" if expected_daily_price_date else "availability_only",
+            "mode": "expected_date" if resolved_expected_date else "availability_only",
+            "calendar_source": JPX_CALENDAR_SOURCE,
+            "calendar_verified_years": sorted(JPX_VERIFIED_CALENDAR_YEARS),
             "calendar_limit": (
-                None
-                if expected_daily_price_date
-                else "Japan exchange holidays are not yet modeled; daily rows are not marked current or stale without an explicit expected date."
+                jp_calendar_limit(resolved_expected_date.year)
+                if resolved_expected_date
+                else "Expected-date enforcement was disabled for this diagnostic request."
             ),
         },
         "summary": summarize_source_health(

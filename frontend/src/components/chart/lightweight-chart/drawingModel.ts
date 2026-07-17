@@ -82,6 +82,7 @@ export type LightweightKLineChartProps = {
   benchmarkLabel?: string;
   volumePanelLabel?: string;
   volumeValueKey?: "volume" | "trade_value";
+  pricePrecision?: number;
   drawingTool?: ChartDrawingTool;
   drawings?: ChartDrawing[];
   selectedDrawingId?: string | null;

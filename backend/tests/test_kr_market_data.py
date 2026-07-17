@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 import unittest
 from unittest.mock import patch
@@ -8,10 +9,12 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.db.models import Base, KRDailyPrice, KRIndexDailyPrice
+from app.kr_market import service as kr_market_service
 from app.kr_market.schemas import (
     KRIndexOhlcChartRead,
     KRIndexIntradayTrendRead,
     KRIndexSummaryRead,
+    KRStockIntradayTrendRead,
     KRWatchlistGroupCreate,
     KRWatchlistItemCreate,
     KRWatchlistReadinessRead,
@@ -23,6 +26,7 @@ from app.kr_market.service import (
     get_kr_index_intraday_trend,
     get_kr_market_breadth,
     get_kr_resource_summary,
+    get_kr_stock_intraday_trend,
     get_kr_watchlist_readiness,
     get_kr_watchlist_ranking,
     list_kr_index_ohlc_chart_data,
@@ -43,6 +47,7 @@ from app.kr_market.sources import (
     normalize_kr_symbol,
     normalize_kr_index_id,
     parse_naver_index_daily_prices,
+    parse_naver_index_intraday_last_page,
     parse_naver_index_intraday_points,
     parse_naver_index_realtime_quote,
     parse_krx_daily_price_records,
@@ -50,6 +55,7 @@ from app.kr_market.sources import (
     parse_krx_stock_records,
     parse_opendart_company_fundamental_records,
     parse_yahoo_daily_prices,
+    parse_yahoo_intraday_prices,
     parse_yahoo_stock_record,
 )
 from app.main import app
@@ -57,6 +63,19 @@ from app.main import app
 
 def _seoul_timestamp(year: int, month: int, day: int) -> int:
     return int(datetime(year, month, day, 15, 30, tzinfo=timezone(timedelta(hours=9))).timestamp())
+
+
+def _seoul_intraday_timestamp(year: int, month: int, day: int, hour: int, minute: int) -> int:
+    return int(
+        datetime(
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            tzinfo=timezone(timedelta(hours=9)),
+        ).timestamp()
+    )
 
 
 YAHOO_KR_CHART_SAMPLE = {
@@ -92,6 +111,40 @@ YAHOO_KR_CHART_SAMPLE = {
                             "adjclose": [72500.0, 73200.0],
                         }
                     ],
+                },
+            }
+        ],
+        "error": None,
+    }
+}
+
+
+YAHOO_KR_INTRADAY_SAMPLE = {
+    "chart": {
+        "result": [
+            {
+                "meta": {
+                    "symbol": "005930.KS",
+                    "currency": "KRW",
+                    "exchangeTimezoneName": "Asia/Seoul",
+                    "gmtoffset": 32400,
+                    "chartPreviousClose": 73200.0,
+                },
+                "timestamp": [
+                    _seoul_intraday_timestamp(2026, 7, 15, 8, 59),
+                    _seoul_intraday_timestamp(2026, 7, 15, 9, 0),
+                    _seoul_intraday_timestamp(2026, 7, 15, 9, 1),
+                ],
+                "indicators": {
+                    "quote": [
+                        {
+                            "open": [73100.0, 73300.0, 73400.0],
+                            "high": [73200.0, 73500.0, 73600.0],
+                            "low": [73000.0, 73200.0, 73300.0],
+                            "close": [73150.0, 73400.0, 73500.0],
+                            "volume": [50, 1200, 800],
+                        }
+                    ]
                 },
             }
         ],
@@ -298,6 +351,9 @@ NAVER_KR_INDEX_REALTIME_SAMPLE = {
 
 class KRMarketDataTests(unittest.TestCase):
     def setUp(self) -> None:
+        kr_market_service._KR_INDEX_INTRADAY_CACHE.clear()
+        kr_market_service._KR_STOCK_INTRADAY_CACHE.clear()
+        kr_market_service._KR_DAILY_REFRESH_ATTEMPTS.clear()
         self.engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(self.engine)
         self.db = Session(self.engine)
@@ -345,6 +401,113 @@ class KRMarketDataTests(unittest.TestCase):
         self.assertEqual(records[-1].close_price, 73200.0)
         self.assertEqual(records[-1].trade_volume, 14900000)
 
+    def test_parse_yahoo_intraday_prices_filters_regular_session_and_sums_volume(self) -> None:
+        result = parse_yahoo_intraday_prices(
+            YAHOO_KR_INTRADAY_SAMPLE,
+            symbol="005930",
+            source_url="https://query1.finance.yahoo.com/v8/finance/chart/005930.KS",
+        )
+
+        self.assertEqual(result["stock_id"], "005930.KS")
+        self.assertEqual(result["point_count"], 2)
+        self.assertEqual(result["points"][0]["time"], "2026-07-15T09:00:00+09:00")
+        self.assertEqual(result["points"][-1]["cumulative_volume"], 2000)
+        self.assertEqual(result["total_volume"], 2000)
+        self.assertEqual(result["volume_unit"], "shares")
+        self.assertEqual(result["previous_close"], 73200.0)
+        self.assertFalse(result["is_partial"])
+        self.assertEqual(KRStockIntradayTrendRead.model_validate(result).point_count, 2)
+
+    def test_get_kr_stock_intraday_trend_uses_bounded_cache_and_failure_contract(self) -> None:
+        with patch(
+            "app.kr_market.service.fetch_yahoo_chart_payload",
+            return_value=(
+                YAHOO_KR_INTRADAY_SAMPLE,
+                "https://query1.finance.yahoo.com/v8/finance/chart/005930.KS",
+            ),
+        ) as fetch_chart:
+            first = get_kr_stock_intraday_trend(self.db, symbol="005930")
+            second = get_kr_stock_intraday_trend(self.db, symbol="005930")
+
+        self.assertEqual(first["point_count"], 2)
+        self.assertEqual(second["point_count"], 2)
+        self.assertEqual(fetch_chart.call_count, 1)
+
+        kr_market_service._KR_STOCK_INTRADAY_CACHE.clear()
+        with patch(
+            "app.kr_market.service.fetch_yahoo_chart_payload",
+            side_effect=KRMarketDataFetchError("rate limited"),
+        ):
+            unavailable = get_kr_stock_intraday_trend(self.db, symbol="005930")
+
+        self.assertEqual(unavailable["source"], "unavailable")
+        self.assertEqual(unavailable["point_count"], 0)
+        self.assertTrue(unavailable["is_partial"])
+        self.assertIn("rate limited", unavailable["warnings"][0])
+
+    def test_get_kr_stock_intraday_trend_reconciles_after_close_daily_auction(self) -> None:
+        upsert_kr_daily_price_records(
+            self.db,
+            [
+                KRDailyPriceRecord(
+                    provider="yahoo_chart",
+                    symbol="005930.KS",
+                    trade_date=date(2026, 7, 15),
+                    currency="KRW",
+                    open_price=73300.0,
+                    high_price=74500.0,
+                    low_price=73200.0,
+                    close_price=74000.0,
+                    adjusted_close=74000.0,
+                    price_change=None,
+                    change_pct=None,
+                    trade_volume=2600,
+                    trade_value=None,
+                    market_cap=None,
+                    listed_shares=None,
+                    source_url="https://query1.finance.yahoo.com/v8/finance/chart/005930.KS",
+                    raw_payload_hash="intraday-close",
+                )
+            ],
+        )
+
+        with (
+            patch(
+                "app.kr_market.service.fetch_yahoo_chart_payload",
+                return_value=(
+                    YAHOO_KR_INTRADAY_SAMPLE,
+                    "https://query1.finance.yahoo.com/v8/finance/chart/005930.KS",
+                ),
+            ),
+            patch(
+                "app.kr_market.service._seoul_now",
+                return_value=datetime(
+                    2026,
+                    7,
+                    15,
+                    16,
+                    0,
+                    tzinfo=timezone(timedelta(hours=9)),
+                ),
+            ),
+        ):
+            result = get_kr_stock_intraday_trend(
+                self.db,
+                symbol="005930",
+                refresh=True,
+            )
+
+        self.assertEqual(result["point_count"], 3)
+        self.assertEqual(result["points"][-1]["time"], "2026-07-15T15:30:00+09:00")
+        self.assertEqual(result["points"][-1]["price"], 74000.0)
+        self.assertEqual(result["points"][-1]["volume"], 600)
+        self.assertEqual(result["points"][-1]["cumulative_volume"], 2600)
+        self.assertEqual(result["total_volume"], 2600)
+        self.assertEqual(result["regular_session_close_source"], "kr_daily_price")
+        self.assertEqual(result["regular_session_close_provider"], "yahoo_chart")
+        self.assertFalse(result["is_partial"])
+        self.assertEqual(KRStockIntradayTrendRead.model_validate(result).point_count, 3)
+
     def test_parse_naver_index_daily_prices(self) -> None:
         records = parse_naver_index_daily_prices(
             NAVER_KR_INDEX_SAMPLE,
@@ -379,7 +542,56 @@ class KRMarketDataTests(unittest.TestCase):
         self.assertEqual(quote.price, 7656.31)
         self.assertEqual(quote.change, -395.02)
         self.assertEqual(quote.open_value, 7919.2)
+        self.assertEqual(quote.cumulative_volume, 516366)
         self.assertEqual(quote.polling_interval_seconds, 70)
+
+    def test_parse_naver_index_intraday_last_page_supports_html_entities(self) -> None:
+        payload = """
+        <a href="/sise/sise_index_time.naver?code=KOSPI&amp;page=2">2</a>
+        <a href="/sise/sise_index_time.naver?code=KOSPI&amp;page=63">Last</a>
+        """
+
+        self.assertEqual(parse_naver_index_intraday_last_page(payload), 63)
+        self.assertIsNone(parse_naver_index_intraday_last_page("<html></html>"))
+
+    def test_get_kr_index_intraday_trend_fetches_advertised_pages(self) -> None:
+        sync_kr_index_master(self.db)
+        paginated_payload = (
+            NAVER_KR_INDEX_INTRADAY_SAMPLE
+            + '<a href="/sise/sise_index_time.naver?code=KOSPI&amp;page=3">Last</a>'
+        )
+
+        with (
+            patch(
+                "app.kr_market.service.fetch_naver_index_intraday_page_payload",
+                return_value=(
+                    paginated_payload,
+                    "https://finance.naver.com/sise/sise_index_time.naver?code=KOSPI",
+                ),
+            ) as intraday_fetch,
+            patch(
+                "app.kr_market.service.fetch_naver_index_realtime_payload",
+                return_value=(
+                    NAVER_KR_INDEX_REALTIME_SAMPLE,
+                    "https://polling.finance.naver.com/api/realtime",
+                ),
+            ),
+            patch(
+                "app.kr_market.service._kr_index_intraday_thistime",
+                return_value="20260707184700",
+            ),
+        ):
+            result = get_kr_index_intraday_trend(
+                self.db,
+                index_id="KOSPI",
+                reload_all=True,
+                max_pages=3,
+            )
+
+        self.assertEqual(intraday_fetch.call_count, 3)
+        self.assertEqual(result["fetched_pages"], 3)
+        self.assertFalse(result["is_partial"])
+        self.assertEqual(result["point_count"], 3)
 
     def test_get_kr_index_intraday_trend_uses_naver_points_and_realtime_reference(self) -> None:
         sync_kr_index_master(self.db)
@@ -415,9 +627,65 @@ class KRMarketDataTests(unittest.TestCase):
         self.assertEqual(result["source"], "naver_index_time")
         self.assertEqual(result["point_count"], 3)
         self.assertAlmostEqual(result["previous_close"] or 0, 8051.33)
+        self.assertEqual(result["points"][-1]["time"], "2026-07-07T18:47:00+09:00")
+        self.assertEqual(result["points"][-1]["volume"], 4072)
+        self.assertEqual(result["points"][-1]["cumulative_volume"], 516366)
+        self.assertEqual(result["total_volume"], 516366)
+        self.assertEqual(result["volume_unit"], "thousand_shares")
+        self.assertEqual(result["volume_semantics"], "interval_with_cumulative_total")
+        self.assertTrue(result["is_partial"])
         self.assertEqual(result["polling_interval_seconds"], 70)
         self.assertEqual(intraday_fetch.call_count, 1)
         self.assertEqual(KRIndexIntradayTrendRead.model_validate(result).point_count, 3)
+
+    def test_kr_index_intraday_refresh_recovers_partial_cache_and_replaces_realtime_point(self) -> None:
+        sync_kr_index_master(self.db)
+        first_realtime = deepcopy(NAVER_KR_INDEX_REALTIME_SAMPLE)
+        second_realtime = deepcopy(NAVER_KR_INDEX_REALTIME_SAMPLE)
+        second_realtime["result"]["time"] = 1783417670003
+        second_realtime["result"]["areas"][0]["datas"][0]["aq"] = 516500
+
+        with (
+            patch(
+                "app.kr_market.service.fetch_naver_index_intraday_page_payload",
+                return_value=(
+                    NAVER_KR_INDEX_INTRADAY_SAMPLE,
+                    "https://finance.naver.com/sise/sise_index_time.naver?code=KOSPI",
+                ),
+            ) as intraday_fetch,
+            patch(
+                "app.kr_market.service.fetch_naver_index_realtime_payload",
+                side_effect=[
+                    (first_realtime, "https://polling.finance.naver.com/api/realtime"),
+                    (second_realtime, "https://polling.finance.naver.com/api/realtime"),
+                ],
+            ),
+            patch(
+                "app.kr_market.service._kr_index_intraday_thistime",
+                return_value="20260707184700",
+            ),
+        ):
+            first = get_kr_index_intraday_trend(
+                self.db,
+                index_id="KOSPI",
+                reload_all=True,
+                max_pages=1,
+            )
+            second = get_kr_index_intraday_trend(
+                self.db,
+                index_id="KOSPI",
+                refresh=True,
+                max_pages=3,
+            )
+
+        self.assertEqual(first["point_count"], 3)
+        self.assertEqual(second["point_count"], 3)
+        self.assertEqual(second["points"][-1]["time"], "2026-07-07T18:47:00+09:00")
+        self.assertEqual(second["points"][-1]["volume"], 4206)
+        self.assertEqual(second["points"][-1]["cumulative_volume"], 516500)
+        self.assertEqual(second["total_volume"], 516500)
+        self.assertFalse(second["is_partial"])
+        self.assertEqual(intraday_fetch.call_count, 3)
 
     def test_upsert_index_prices_summary_and_ohlc(self) -> None:
         sync_kr_index_master(self.db)
@@ -525,6 +793,80 @@ class KRMarketDataTests(unittest.TestCase):
         self.assertTrue(summary["slots"][0]["available"])
         self.assertEqual(chart["point_count"], 1)
         self.assertEqual(chart["points"][0]["close"], 73200.0)
+
+    def test_kr_daily_ohlc_uses_range_provider_when_full_window_is_stale(self) -> None:
+        self.db.add_all(
+            [
+                KRDailyPrice(
+                    provider="krx_data",
+                    symbol="005930.KS",
+                    trade_date=trade_date,
+                    open_price=73000.0 + index,
+                    high_price=74000.0 + index,
+                    low_price=72000.0 + index,
+                    close_price=73500.0 + index,
+                    adjusted_close=73500.0 + index,
+                    trade_volume=1000000 + index,
+                )
+                for index, trade_date in enumerate(
+                    [date(2026, 7, 13), date(2026, 7, 14)],
+                    start=1,
+                )
+            ]
+        )
+        self.db.commit()
+
+        with patch(
+            "app.kr_market.service.refresh_kr_daily_prices",
+            side_effect=[
+                {
+                    "status": "success",
+                    "provider": "yahoo_chart",
+                    "symbol": "005930.KS",
+                    "fetched_count": 0,
+                    "inserted_count": 0,
+                    "updated_count": 0,
+                    "message": "history mocked",
+                },
+                {
+                    "status": "success",
+                    "provider": "krx_data",
+                    "symbol": "005930.KS",
+                    "fetched_count": 0,
+                    "inserted_count": 0,
+                    "updated_count": 0,
+                    "message": "latest day mocked",
+                },
+            ],
+        ) as refresh_mock:
+            chart = list_kr_ohlc_chart_data(
+                self.db,
+                symbol="005930",
+                bars=2,
+                ensure_history=True,
+                provider="auto",
+                to_date=date(2026, 7, 16),
+            )
+
+            cooldown_chart = list_kr_ohlc_chart_data(
+                self.db,
+                symbol="005930",
+                bars=2,
+                ensure_history=True,
+                provider="auto",
+                to_date=date(2026, 7, 16),
+            )
+
+        self.assertEqual(refresh_mock.call_count, 2)
+        self.assertEqual(refresh_mock.call_args_list[0].kwargs["provider"], "yahoo_chart")
+        self.assertEqual(refresh_mock.call_args_list[1].kwargs["provider"], "krx_data")
+        self.assertEqual(
+            refresh_mock.call_args_list[1].kwargs["trade_date"],
+            date(2026, 7, 16),
+        )
+        self.assertEqual(chart["freshness_status"], "stale")
+        self.assertIn("stale_latest_date", chart["backfill"]["refresh_reasons"])
+        self.assertEqual(cooldown_chart["backfill"]["status"], "skipped")
 
     def test_kr_source_health_summarizes_provider_freshness(self) -> None:
         upsert_kr_stock_records(self.db, parse_krx_stock_records(KRX_STOCK_SAMPLE))
@@ -755,6 +1097,7 @@ class KRMarketDataTests(unittest.TestCase):
         self.assertIn("/api/kr-market/indices/{index_id}/intraday", matching_paths)
         self.assertIn("/api/kr-market/indices/{index_id}/ohlc", matching_paths)
         self.assertIn("/api/kr-market/indices/{index_id}/refresh", matching_paths)
+        self.assertIn("/api/kr-market/stocks/{symbol}/intraday", matching_paths)
         self.assertIn("/api/kr-market/daily/{symbol}/refresh", matching_paths)
         self.assertIn("/api/kr-market/watchlists/readiness", matching_paths)
         self.assertIn("/api/kr-market/watchlists/resources/refresh", matching_paths)

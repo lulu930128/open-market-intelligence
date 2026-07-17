@@ -43,6 +43,12 @@ class DatabaseMigrationTests(unittest.TestCase):
                     resource_instrument_count = connection.execute(
                         text("SELECT COUNT(*) FROM resource_market_instrument")
                     ).scalar_one()
+                    currency_instrument_count = connection.execute(
+                        text(
+                            "SELECT COUNT(*) FROM resource_market_instrument "
+                            "WHERE root_folder = 'currency'"
+                        )
+                    ).scalar_one()
             finally:
                 engine.dispose()
 
@@ -111,6 +117,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("sector_17_name", jp_master_columns)
             self.assertIn("size_name", jp_master_columns)
             self.assertGreaterEqual(resource_instrument_count, 6)
+            self.assertEqual(currency_instrument_count, 9)
             self.assertEqual(get_database_revision(database_url), get_head_revision())
 
     def test_upgrade_legacy_create_all_database_preserves_rows(self) -> None:

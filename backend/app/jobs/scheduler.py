@@ -12,6 +12,7 @@ from app.jobs.job_types import (
     WATCHLIST_RADAR_AUTO_SNAPSHOT_JOB_TYPE,
 )
 from app.market.calendar_status import (
+    build_jp_calendar_status,
     build_taiwan_calendar_status,
     build_us_calendar_status,
     expected_trade_date_from_calendar,
@@ -46,6 +47,7 @@ TAIWAN_REFRESH_CATEGORY_DATASET_KEYS = {
     TAIWAN_REFRESH_MARGIN_TRADING: TAIWAN_DATASET_MARGIN_TRADING,
 }
 _LAST_TAIWAN_FUTURES_SUCCESS_EVENT_AT: datetime | None = None
+_LAST_TAIWAN_FUTURES_FAILURE_AT: datetime | None = None
 
 
 def _parse_hour_minute(value: str) -> tuple[int, int]:
@@ -109,6 +111,28 @@ def _should_record_taiwan_futures_success(now: datetime) -> bool:
         return True
 
     return False
+
+
+def _should_attempt_taiwan_futures_refresh(now: datetime) -> bool:
+    if _LAST_TAIWAN_FUTURES_FAILURE_AT is None:
+        return True
+
+    backoff_seconds = max(
+        int(settings.scheduler_taiwan_futures_failure_backoff_seconds),
+        0,
+    )
+    return (now - _LAST_TAIWAN_FUTURES_FAILURE_AT).total_seconds() >= backoff_seconds
+
+
+def _taiwan_futures_failure_retry_at() -> datetime | None:
+    if _LAST_TAIWAN_FUTURES_FAILURE_AT is None:
+        return None
+
+    backoff_seconds = max(
+        int(settings.scheduler_taiwan_futures_failure_backoff_seconds),
+        0,
+    )
+    return _LAST_TAIWAN_FUTURES_FAILURE_AT + timedelta(seconds=backoff_seconds)
 
 
 def _record_taiwan_futures_provider_event(
@@ -478,10 +502,31 @@ def enqueue_us_market_daily_refresh() -> None:
 
 def enqueue_jp_market_watchlist_resource_refresh() -> None:
     now = datetime.now(_timezone())
+    calendar_status = build_jp_calendar_status(now=now)
+
+    if not calendar_status.get("is_trading_day"):
+        logger.info(
+            "Skipped scheduled JP market refresh because %s is not a trading day phase=%s reason=%s.",
+            calendar_status.get("date"),
+            calendar_status.get("phase"),
+            calendar_status.get("reason"),
+        )
+        return
+
     sleep_seconds = resolve_market_refresh_interval_seconds(market="jp")
     request = {
         "schedule": "jp_market_watchlist_resource_refresh",
         "run_date": now.date().isoformat(),
+        "market_date": calendar_status.get("date"),
+        "expected_trade_date": expected_trade_date_from_calendar(
+            calendar_status,
+            market="jp",
+            key="jp_daily_price",
+        ),
+        "calendar_phase": calendar_status.get("phase"),
+        "calendar_release_window": calendar_status.get("release_windows", {}).get(
+            "jp_daily_price"
+        ),
         "group_id": None,
         "include_children": True,
         "enabled_only": True,
@@ -572,12 +617,22 @@ def enqueue_kr_market_watchlist_resource_refresh() -> None:
 
 
 def collect_taiwan_futures_quotes() -> None:
+    global _LAST_TAIWAN_FUTURES_FAILURE_AT
+
     now = datetime.now(_timezone())
 
     if not _is_taiwan_futures_live_window(now):
         logger.debug(
             "Skipped Taiwan futures quote collector outside live window now=%s.",
             now.isoformat(),
+        )
+        return
+
+    if not _should_attempt_taiwan_futures_refresh(now):
+        retry_at = _taiwan_futures_failure_retry_at()
+        logger.debug(
+            "Skipped Taiwan futures quote collector during provider failure backoff retry_at=%s.",
+            retry_at.isoformat() if retry_at else None,
         )
         return
 
@@ -598,6 +653,7 @@ def collect_taiwan_futures_quotes() -> None:
             active_only=True,
             provider=provider,
         )
+        _LAST_TAIWAN_FUTURES_FAILURE_AT = None
         if _should_record_taiwan_futures_success(now):
             _record_taiwan_futures_provider_event(
                 db,
@@ -619,6 +675,8 @@ def collect_taiwan_futures_quotes() -> None:
         )
     except (TaiwanFuturesFetchError, ValueError) as exc:
         db.rollback()
+        _LAST_TAIWAN_FUTURES_FAILURE_AT = now
+        retry_at = _taiwan_futures_failure_retry_at()
         _record_taiwan_futures_provider_event(
             db,
             provider=provider,
@@ -629,9 +687,14 @@ def collect_taiwan_futures_quotes() -> None:
                 "symbols": symbols,
                 "session": settings.scheduler_taiwan_futures_session,
                 "provider": provider,
+                "retry_at": retry_at.isoformat() if retry_at else None,
             },
         )
-        logger.warning("Taiwan futures quote collector failed: %s", exc)
+        logger.warning(
+            "Taiwan futures quote collector failed; retry_at=%s: %s",
+            retry_at.isoformat() if retry_at else None,
+            exc,
+        )
     finally:
         db.close()
 

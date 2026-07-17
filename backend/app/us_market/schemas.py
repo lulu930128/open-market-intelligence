@@ -124,6 +124,11 @@ class USOhlcChartRead(BaseModel):
     points: list[USOhlcPointRead]
     backfill: dict | None = None
     intraday_overlay: dict | None = None
+    latest_data_date: date | None = None
+    expected_data_date: date | None = None
+    freshness_status: str = "missing"
+    is_current: bool = False
+    refresh_recommended: bool = True
 
 
 class USIntradayTrendPointRead(BaseModel):

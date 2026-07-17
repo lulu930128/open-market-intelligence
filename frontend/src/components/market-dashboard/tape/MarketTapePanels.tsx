@@ -23,6 +23,7 @@ import {
 import { useT, type TranslationFunction } from "@/i18n";
 import type {
   JPStockMasterRead,
+  JPMarketSectorBreadthRead,
   KRStockMasterRead,
   MarketIndexSnapshot,
   MarketIndexSummary,
@@ -337,7 +338,11 @@ function JPMarketTapeCard({
           </div>
           <div className="mt-1 text-xs text-omi-text-muted">
             {snapshot
-              ? `${snapshot.displaySymbol} · ${snapshot.exchange} · ${t("dashboard.marketIndex.daily")}`
+              ? `${snapshot.displaySymbol} · ${snapshot.exchange} · ${
+                  snapshot.source === "intraday"
+                    ? t("statusLabels.intraday")
+                    : t("dashboard.marketIndex.daily")
+                }`
               : t("dashboard.marketIndex.waitingData")}
           </div>
         </div>
@@ -365,7 +370,7 @@ function JPMarketTapeCard({
         <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
           <div className="text-omi-text-muted">{t("common.update")}</div>
           <div className="mt-1 truncate font-semibold text-omi-text">
-            {snapshot?.asOf ? snapshot.asOf.slice(0, 10) : "-"}
+            {snapshot?.asOf ? formatRowTime(snapshot.asOf) ?? snapshot.asOf.slice(0, 10) : "-"}
           </div>
         </div>
       </div>
@@ -391,6 +396,24 @@ export function JPMarketTape({
     selectedGroupName,
     onError,
   });
+  const overview = state.overview;
+  const breadth = overview?.breadth ?? null;
+  const breadthComparisonCount = breadth
+    ? breadth.advance_count + breadth.decline_count + breadth.unchanged_count
+    : 0;
+  const advanceRatio =
+    breadth && breadthComparisonCount > 0
+      ? (breadth.advance_count / breadthComparisonCount) * 100
+      : null;
+  const strongestSector = (overview?.sectors ?? []).reduce<JPMarketSectorBreadthRead | null>(
+    (current, sector) => {
+    if (sector.average_change_pct === null) return current;
+    if (current?.average_change_pct === null || current === null) return sector;
+    return sector.average_change_pct > current.average_change_pct ? sector : current;
+    },
+    null
+  );
+  const primaryIndexOverview = overview?.indices.find((item) => item.symbol === "^N225") ?? null;
 
   return (
     <section
@@ -410,10 +433,86 @@ export function JPMarketTape({
           loadState={state.loadState}
         />
       </div>
+      {overview ? (
+        <div
+          className="grid gap-px border-t border-omi-border-subtle bg-omi-surface-strong sm:grid-cols-2 lg:grid-cols-4"
+          data-testid="market-overview-jp"
+          data-coverage-status={overview.coverage.status}
+        >
+          <div className="bg-omi-surface px-4 py-3 text-xs">
+            <div className="text-omi-text-muted">
+              {t("dashboard.marketIndex.advanceDecline")}
+            </div>
+            <div className="mt-1 font-semibold">
+              <span className="text-omi-market-up">{breadth?.advance_count ?? "-"}</span>
+              <span className="px-1 text-omi-text-subtle">/</span>
+              <span className="text-omi-market-down">{breadth?.decline_count ?? "-"}</span>
+            </div>
+          </div>
+          <div className="bg-omi-surface px-4 py-3 text-xs">
+            <div className="text-omi-text-muted">{t("dashboard.marketIndex.breadth")}</div>
+            <div className={`mt-1 font-semibold ${valueTone((advanceRatio ?? 50) - 50)}`}>
+              {advanceRatio === null
+                ? "-"
+                : t("dashboard.marketIndex.advancePct", {
+                    value: advanceRatio.toFixed(0),
+                  })}
+            </div>
+          </div>
+          <div className="bg-omi-surface px-4 py-3 text-xs">
+            <div className="text-omi-text-muted">{t("dashboard.marketIndex.coverage")}</div>
+            <div className="mt-1 font-semibold text-omi-text">
+              {t("dashboard.marketIndex.coverageValue", {
+                current: overview.coverage.current_symbol_count,
+                active: overview.coverage.active_stock_count,
+              })}
+            </div>
+            <div className={overview.coverage.is_partial ? "text-omi-warning" : "text-omi-text-muted"}>
+              {t(
+                overview.coverage.is_partial
+                  ? "dashboard.marketIndex.partialCoverage"
+                  : "dashboard.marketIndex.currentCoverage"
+              )}
+            </div>
+          </div>
+          <div className="bg-omi-surface px-4 py-3 text-xs">
+            <div className="text-omi-text-muted">
+              {t("dashboard.marketIndex.strongestSector")}
+            </div>
+            <div className="mt-1 truncate font-semibold text-omi-text">
+              {strongestSector?.sector ?? "-"}
+            </div>
+            <div className={valueTone(strongestSector?.average_change_pct)}>
+              {formatPct(strongestSector?.average_change_pct)}
+            </div>
+          </div>
+        </div>
+      ) : null}
       <div className="border-t border-omi-border-subtle px-4 py-2 text-xs text-omi-text-muted">
         {state.asOf
-          ? t("dashboard.marketIndex.jpUpdated", { asOf: state.asOf.slice(0, 10) })
+          ? t("dashboard.marketIndex.jpUpdated", {
+              asOf: formatRowTime(state.asOf) ?? state.asOf.slice(0, 10),
+            })
           : t("dashboard.marketIndex.jpWaiting")}
+        {state.primarySnapshot?.isCurrent === false ? (
+          <span className="ml-2 text-omi-warning">
+            {`資料日期 ${state.primarySnapshot.asOf?.slice(0, 10) ?? "-"}，預期 ${
+              state.primarySnapshot.expectedTradeDate ?? "-"
+            }`}
+          </span>
+        ) : null}
+        {overview ? (
+          <span className="ml-2">
+            {t("dashboard.marketIndex.expectedDate", {
+              date: overview.expected_trade_date,
+            })}
+          </span>
+        ) : null}
+        {primaryIndexOverview?.is_current === false ? (
+          <span className="ml-2 text-omi-warning">
+            {`${primaryIndexOverview.label} ${primaryIndexOverview.latest_data_date ?? "-"}`}
+          </span>
+        ) : null}
       </div>
     </section>
   );

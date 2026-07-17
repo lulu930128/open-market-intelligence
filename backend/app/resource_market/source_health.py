@@ -229,11 +229,11 @@ def _matching_resource_instruments(
 ):
     symbol_values = _split_symbols(symbols)
     if not symbol_values:
-        return list_resource_instruments(root_folder="commodity", group=group)
+        return list_resource_instruments(group=group)
 
     instruments = []
     for symbol in symbol_values:
-        instruments.extend(list_resource_instruments(root_folder="commodity", group=group, symbol=symbol))
+        instruments.extend(list_resource_instruments(group=group, symbol=symbol))
     return instruments
 
 

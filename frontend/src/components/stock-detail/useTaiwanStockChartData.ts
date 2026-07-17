@@ -482,7 +482,7 @@ export function useTaiwanStockChartData({
         const ohlcParams = {
           timeframe: requestedTimeframe,
           bars: chartBars,
-          ensure_history: false,
+          ensure_history: !isIndexProduct,
           ...(includeIntraday ? { include_intraday: true } : {}),
         };
         let ohlc = await fetchJson<OhlcChartResponse>(

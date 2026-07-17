@@ -156,7 +156,7 @@ class KRIndexRealtimeQuoteRecord:
     open_value: float | None
     high_value: float | None
     low_value: float | None
-    volume: int | None
+    cumulative_volume: int | None
     trade_value: int | None
     market_status: str | None
     polling_interval_seconds: int | None
@@ -649,6 +649,113 @@ def parse_yahoo_daily_prices(
     return sorted(records, key=lambda item: item.trade_date)
 
 
+def parse_yahoo_intraday_prices(
+    payload: dict[str, Any],
+    *,
+    symbol: str,
+    source_url: str | None = None,
+) -> dict:
+    normalized_symbol = normalize_kr_symbol(symbol)
+    result = _chart_result(payload)
+    meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
+    discovered_symbol = normalize_kr_symbol(meta.get("symbol") or normalized_symbol)
+    if normalized_symbol and discovered_symbol != normalized_symbol:
+        raise KRMarketDataFetchError(
+            f"Yahoo chart symbol mismatch. requested={normalized_symbol} discovered={discovered_symbol}."
+        )
+
+    timestamps = result.get("timestamp") or []
+    indicators = result.get("indicators") if isinstance(result.get("indicators"), dict) else {}
+    quote_values = (indicators.get("quote") or [{}])[0] or {}
+    offset = _parse_int(meta.get("gmtoffset"))
+    tz = timezone(timedelta(seconds=offset)) if offset is not None else timezone(timedelta(hours=9))
+    opens = quote_values.get("open") or []
+    highs = quote_values.get("high") or []
+    lows = quote_values.get("low") or []
+    closes = quote_values.get("close") or []
+    volumes = quote_values.get("volume") or []
+    points: list[dict] = []
+    cumulative_volume = 0
+    has_volume = False
+
+    for index, timestamp in enumerate(timestamps):
+        price = _parse_float(_list_value(closes, index))
+        if price is None:
+            continue
+
+        point_time = datetime.fromtimestamp(int(timestamp), tz=tz)
+        minutes = point_time.hour * 60 + point_time.minute + point_time.second / 60
+        if not 9 * 60 <= minutes <= 15 * 60 + 30:
+            continue
+
+        volume = _parse_int(_list_value(volumes, index))
+        if volume is not None and volume >= 0:
+            cumulative_volume += volume
+            has_volume = True
+
+        points.append(
+            {
+                "time": point_time.isoformat(),
+                "session": "regular",
+                "price": price,
+                "volume": volume,
+                "open": _parse_float(_list_value(opens, index)),
+                "high": _parse_float(_list_value(highs, index)),
+                "low": _parse_float(_list_value(lows, index)),
+                "cumulative_volume": cumulative_volume if has_volume else None,
+                "trade_value": None,
+            }
+        )
+
+    previous_close = next(
+        (
+            value
+            for value in (
+                _parse_float(meta.get("chartPreviousClose")),
+                _parse_float(meta.get("previousClose")),
+                _parse_float(meta.get("regularMarketPreviousClose")),
+            )
+            if value is not None
+        ),
+        None,
+    )
+    latest_point = points[-1] if points else None
+    warnings: list[str] = []
+    if not points:
+        warnings.append("Yahoo chart returned no KR regular-session intraday points.")
+
+    return {
+        "stock_id": discovered_symbol,
+        "symbol": discovered_symbol,
+        "source": "yahoo_finance_chart" if points else "unavailable",
+        "session_scope": "regular",
+        "session_phase": "regular" if points else None,
+        "has_extended_hours": False,
+        "regular_point_count": len(points),
+        "extended_point_count": 0,
+        "previous_close": previous_close,
+        "previous_close_source": "yahoo_finance_chart" if previous_close is not None else None,
+        "previous_close_trade_date": None,
+        "previous_close_provider": "yahoo_chart" if previous_close is not None else None,
+        "regular_session_close": latest_point.get("price") if latest_point else None,
+        "regular_session_close_time": latest_point.get("time") if latest_point else None,
+        "regular_session_close_source": "yahoo_finance_chart" if latest_point else None,
+        "regular_session_close_provider": "yahoo_chart" if latest_point else None,
+        "point_count": len(points),
+        "points": points,
+        "as_of": latest_point.get("time") if latest_point else None,
+        "total_volume": cumulative_volume if has_volume else None,
+        "volume_unit": "shares",
+        "volume_semantics": "interval_with_cumulative_total",
+        "trade_value_unit": "krw",
+        "is_partial": bool(warnings),
+        "source_url": source_url,
+        "warnings": warnings,
+        "fetched_pages": 1,
+        "polling_interval_seconds": 60,
+    }
+
+
 def _parse_naver_index_rows(payload_text: str) -> list[list[Any]]:
     text = payload_text.strip()
     if not text:
@@ -826,6 +933,14 @@ def parse_naver_index_intraday_points(
     return sorted(records, key=lambda item: item.time)
 
 
+def parse_naver_index_intraday_last_page(payload_text: str) -> int | None:
+    pages = [
+        int(value)
+        for value in re.findall(r"(?:[?&]|&amp;)page=(\d+)", payload_text or "")
+    ]
+    return max(pages) if pages else None
+
+
 def parse_naver_index_realtime_quote(
     payload: dict[str, Any],
     *,
@@ -871,7 +986,7 @@ def parse_naver_index_realtime_quote(
         open_value=_kr_index_scaled_float(data.get("ov")),
         high_value=_kr_index_scaled_float(data.get("hv")),
         low_value=_kr_index_scaled_float(data.get("lv")),
-        volume=_parse_int(data.get("aq")),
+        cumulative_volume=_parse_int(data.get("aq")),
         trade_value=_parse_int(data.get("aa")),
         market_status=_clean_text(data.get("ms")),
         polling_interval_seconds=(
@@ -1012,12 +1127,14 @@ def fetch_yahoo_chart_payload(
     range_value: str,
     interval: str,
     timeout_seconds: int,
+    resource: str = "daily_price",
 ) -> tuple[dict[str, Any], str]:
     return yahoo.fetch_yahoo_chart_payload(
         symbol=symbol,
         range_value=range_value,
         interval=interval,
         timeout_seconds=timeout_seconds,
+        resource=resource,
     )
 
 

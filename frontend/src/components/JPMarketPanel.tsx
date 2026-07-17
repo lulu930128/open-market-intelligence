@@ -2,6 +2,8 @@
 
 import IntradayTrendChart, {
   defaultIntradayIndicators,
+  intradayIndicatorOptions,
+  type IntradayIndicatorKey,
   type IntradayIndicatorSettings,
   type IntradaySessionConfig,
 } from "@/components/IntradayTrendChart";
@@ -77,11 +79,9 @@ type Props = {
   watchlistRankingPanel?: ReactNode;
   onChartFocusModeChange?: (enabled: boolean) => void;
   onSelectStock: (stock: JPStockMasterRead | null) => void;
-  onStatusMessage?: (message: Message) => void;
 };
 
-const indexTimeframeOptions: JPChartTimeframe[] = ["today", "daily", "weekly", "monthly"];
-const stockTimeframeOptions: JPHistoricalTimeframe[] = ["daily", "weekly", "monthly"];
+const timeframeOptions: JPChartTimeframe[] = ["today", "daily", "weekly", "monthly"];
 const professionalTimeframeOptions: JPProfessionalTimeframe[] = ["daily", "weekly", "monthly"];
 const barsByTimeframe: Record<JPHistoricalTimeframe, number> = {
   daily: 180,
@@ -385,11 +385,9 @@ export default function JPMarketPanel({
   watchlistRankingPanel,
   onChartFocusModeChange,
   onSelectStock,
-  onStatusMessage,
 }: Props) {
   const t = useT();
   const onSelectStockRef = useRef(onSelectStock);
-  const onStatusMessageRef = useRef(onStatusMessage);
   const fundamentalAutoRefreshAttemptedRef = useRef<Set<string>>(new Set());
   const resourceAutoRefreshAttemptedRef = useRef<Set<string>>(new Set());
   const [selectedStock, setSelectedStock] = useState<JPStockMasterRead | null>(null);
@@ -405,7 +403,7 @@ export default function JPMarketPanel({
     useState<ProfessionalChartStyle>("candlestick");
   const [chartIndicators, setChartIndicators] =
     useState<IndicatorSettings>(jpChartIndicators);
-  const [intradayIndicators] =
+  const [intradayIndicators, setIntradayIndicators] =
     useState<IntradayIndicatorSettings>(defaultIntradayIndicators);
   const [activeIndicatorTemplate, setActiveIndicatorTemplate] =
     useState<IndicatorTemplateKey | null>("basic");
@@ -442,6 +440,21 @@ export default function JPMarketPanel({
   const change = changeValue(chartData);
   const pct = changePct(chartData);
   const todayLatest = todayTrend[todayTrend.length - 1] ?? null;
+  const todayVolume = useMemo(() => {
+    if (todayTrend.length === 0) return null;
+
+    return (
+      todayLatest?.cumulative_volume ??
+      todayTrend.reduce(
+        (total, point) =>
+          total +
+          (point.volume !== null && point.volume !== undefined && Number.isFinite(point.volume)
+            ? point.volume
+            : 0),
+        0
+      )
+    );
+  }, [todayLatest?.cumulative_volume, todayTrend]);
   const ma20 = useMemo(() => movingAverage(chartData, "close", 20), [chartData]);
   const volumeMa20 = useMemo(() => movingAverage(chartData, "volume", 20), [chartData]);
   const priceVsMa20 =
@@ -460,9 +473,8 @@ export default function JPMarketPanel({
       : null;
   const selectedIndexConfig = getJpMarketIndexConfig(selectedStock?.symbol ?? initialSymbol);
   const isSelectedIndex = selectedIndexConfig !== null;
-  const selectedIndexSymbol = selectedIndexConfig?.symbol ?? null;
-  const timeframeOptions = isSelectedIndex ? indexTimeframeOptions : stockTimeframeOptions;
-  const isIntradayTimeframe = isSelectedIndex && timeframe === "today";
+  const selectedChartSymbol = selectedStock?.symbol ?? selectedIndexConfig?.symbol ?? initialSymbol;
+  const isIntradayTimeframe = timeframe === "today";
   const displayPrice =
     isIntradayTimeframe && todayLatest ? todayLatest.price : latest?.close ?? null;
   const displayChange =
@@ -790,10 +802,6 @@ export default function JPMarketPanel({
   }, [onSelectStock]);
 
   useEffect(() => {
-    onStatusMessageRef.current = onStatusMessage;
-  }, [onStatusMessage]);
-
-  useEffect(() => {
     if (!initialSymbol) return;
 
     setDataStatusFocus({
@@ -814,26 +822,21 @@ export default function JPMarketPanel({
     return () => onChartFocusModeChange?.(false);
   }, [onChartFocusModeChange]);
 
-  useEffect(() => {
-    if (!isSelectedIndex && timeframe === "today") {
-      const resetTimer = window.setTimeout(() => setTimeframe("daily"), 0);
-      return () => window.clearTimeout(resetTimer);
-    }
-  }, [isSelectedIndex, timeframe]);
-
   const headerMetrics = useMemo(
     () => [
       {
         label: t("jpMarket.metrics.date"),
-        value: formatDate(latest?.time),
+        value: isIntradayTimeframe
+          ? todayUpdatedAt ?? formatJapanDateTime(todayLatest?.time)
+          : formatDate(latest?.time),
       },
       {
         label: t("jpMarket.metrics.close"),
-        value: formatNumber(latest?.close, 2),
+        value: formatNumber(isIntradayTimeframe ? displayPrice : latest?.close, 2),
       },
       {
         label: t("jpMarket.metrics.volume"),
-        value: formatVolume(latest?.volume),
+        value: formatVolume(isIntradayTimeframe ? todayVolume : latest?.volume),
       },
       {
         label: t("jpMarket.metrics.segment"),
@@ -848,7 +851,19 @@ export default function JPMarketPanel({
         value: chart?.backfill?.provider ? String(chart.backfill.provider) : "Yahoo chart",
       },
     ],
-    [chart, latest?.close, latest?.time, latest?.volume, selectedStock, t]
+    [
+      chart,
+      displayPrice,
+      isIntradayTimeframe,
+      latest?.close,
+      latest?.time,
+      latest?.volume,
+      selectedStock,
+      t,
+      todayLatest?.time,
+      todayUpdatedAt,
+      todayVolume,
+    ]
   );
 
   const indexDataMetrics = useMemo(
@@ -947,7 +962,6 @@ export default function JPMarketPanel({
     [displayChange, displayPct, ma20, priceVsMa20, t, timeframe, volumeMa20, volumeVsMa20]
   );
 
-  const selectedChartSymbol = selectedStock?.symbol ?? initialSymbol;
   const professionalTimeframeLabel = timeframeLabel(t, professionalTimeframe);
   const professionalChartReady =
     chartFocusMode && chartData.length > 0 && dataState !== "loading";
@@ -982,7 +996,6 @@ export default function JPMarketPanel({
 
   const publishStatus = useCallback(
     (nextMessage: Message, title = dataStatusContextLabel) => {
-      onStatusMessageRef.current?.(nextMessage);
       if (!nextMessage) return;
 
       emitDataStatusEvent({
@@ -1039,6 +1052,13 @@ export default function JPMarketPanel({
       [key]: !current[key],
     }));
     setActiveIndicatorTemplate(null);
+  }
+
+  function toggleIntradayIndicator(key: IntradayIndicatorKey) {
+    setIntradayIndicators((current) => ({
+      ...current,
+      [key]: !current[key],
+    }));
   }
 
   function applyIndicatorTemplate(templateKey: IndicatorTemplateKey) {
@@ -1191,7 +1211,7 @@ export default function JPMarketPanel({
             {
               timeframe: requestTimeframe,
               bars: barsByTimeframe[requestTimeframe],
-              ensure_history: !isIndexSymbol,
+              ensure_history: true,
             }
           ),
           isIndexSymbol
@@ -1474,11 +1494,11 @@ export default function JPMarketPanel({
   }, [initialSymbol, loadStockBySymbol, refreshNonce, timeframe]);
 
   useEffect(() => {
-    if (!selectedIndexSymbol || timeframe !== "today") {
+    if (!selectedChartSymbol || timeframe !== "today") {
       return;
     }
 
-    const effectSymbol = selectedIndexSymbol;
+    const effectSymbol = selectedChartSymbol;
 
     let cancelled = false;
     let intradayTimer: number | undefined;
@@ -1585,7 +1605,7 @@ export default function JPMarketPanel({
       cancelled = true;
       clearIntradayTimer();
     };
-  }, [applyTodayTrend, publishStatus, selectedIndexSymbol, t, timeframe]);
+  }, [applyTodayTrend, publishStatus, selectedChartSymbol, t, timeframe]);
 
   if (!initialSymbol) {
     return watchlistRankingPanel ? (
@@ -1752,9 +1772,8 @@ export default function JPMarketPanel({
                   </button>
                 ))}
               </div>
-              {!isIntradayTimeframe ? (
-              <div className="mt-2 flex items-start justify-end gap-2">
-                <div className="relative">
+              {isIntradayTimeframe ? (
+                <div className="relative mt-2">
                   <button
                     type="button"
                     onClick={() => setIndicatorMenuOpen((value) => !value)}
@@ -1763,26 +1782,63 @@ export default function JPMarketPanel({
                     {t("stockDetail.indicators")}
                   </button>
                   {indicatorMenuOpen ? (
-                    <TechnicalIndicatorMenu
-                      indicators={chartIndicators}
-                      activeTemplate={activeIndicatorTemplate}
-                      onApplyTemplate={applyIndicatorTemplate}
-                      onToggleIndicator={toggleChartIndicator}
-                      includeParameters
-                      parameters={indicatorParameters}
-                      onUpdateParameter={handleIndicatorParameterChange}
-                    />
+                    <div className="absolute right-0 z-20 mt-2 w-56 border border-omi-border-subtle bg-omi-surface p-3 text-left shadow-lg">
+                      <div className="mb-2 text-xs font-bold text-omi-text-muted">
+                        {t("stockDetail.displayItems")}
+                      </div>
+                      {intradayIndicatorOptions.map((option) => (
+                        <label
+                          key={option.key}
+                          className="flex cursor-pointer items-start gap-2 px-2 py-2 text-xs hover:bg-omi-surface-subtle"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={intradayIndicators[option.key]}
+                            onChange={() => toggleIntradayIndicator(option.key)}
+                            className="mt-0.5"
+                          />
+                          <span>
+                            <span className="block font-semibold text-omi-text">{option.label}</span>
+                            <span className="block text-omi-text-muted">
+                              {t(option.descriptionKey)}
+                            </span>
+                          </span>
+                        </label>
+                      ))}
+                    </div>
                   ) : null}
                 </div>
-                <button
-                  type="button"
-                  onClick={enterChartFocusMode}
-                  className="h-8 border border-omi-control bg-omi-surface px-3 text-sm font-semibold text-omi-text hover:border-omi-accent hover:text-omi-danger"
-                >
-                  {t("stockDetail.expand")}
-                </button>
-              </div>
-              ) : null}
+              ) : (
+                <div className="mt-2 flex items-start justify-end gap-2">
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setIndicatorMenuOpen((value) => !value)}
+                      className="h-8 border border-omi-control bg-omi-surface px-3 text-sm font-semibold text-omi-text hover:border-omi-accent hover:text-omi-danger"
+                    >
+                      {t("stockDetail.indicators")}
+                    </button>
+                    {indicatorMenuOpen ? (
+                      <TechnicalIndicatorMenu
+                        indicators={chartIndicators}
+                        activeTemplate={activeIndicatorTemplate}
+                        onApplyTemplate={applyIndicatorTemplate}
+                        onToggleIndicator={toggleChartIndicator}
+                        includeParameters
+                        parameters={indicatorParameters}
+                        onUpdateParameter={handleIndicatorParameterChange}
+                      />
+                    ) : null}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={enterChartFocusMode}
+                    className="h-8 border border-omi-control bg-omi-surface px-3 text-sm font-semibold text-omi-text hover:border-omi-accent hover:text-omi-danger"
+                  >
+                    {t("stockDetail.expand")}
+                  </button>
+                </div>
+              )}
             </div>
           </div>
 
@@ -1800,7 +1856,7 @@ export default function JPMarketPanel({
                 source={todaySource}
                 indicators={intradayIndicators}
                 session={jpIndexIntradaySession}
-                revealKey={`${selectedIndexSymbol ?? "empty"}-${timeframe}-${todayTrend.length}`}
+                revealKey={`${selectedChartSymbol ?? "empty"}-${timeframe}-${todayTrend.length}`}
                 refreshIntervalMs={JAPAN_INTRADAY_REFRESH_MS}
                 updatedAt={todayUpdatedAt}
                 priceLimitEnabled={false}
