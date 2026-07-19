@@ -88,7 +88,9 @@ Core fields:
 - `analysis_horizon`
   - `auto`, `intraday`, `short`, `swing`, `long`.
 - `conversation_context`
-  - Caller context such as Kuro route text or last OMI resolution.
+  - Caller context such as Kuro route text or the previous OMI target.
+  - Canonical follow-up field: `last_target`.
+  - Compatibility aliases: `last_resolution`, `previous_resolution`, `previous_target`, and `target`.
 
 ## Response Contract
 
@@ -98,6 +100,7 @@ Top-level fields that downstream callers should treat as stable:
 
 - `kind`
 - `contract_version`
+- `ok`
 - `question`
 - `target`
 - `mode`
@@ -105,6 +108,7 @@ Top-level fields that downstream callers should treat as stable:
 - `strategy_profile`
 - `caller_profile`
 - `resolution`
+- `next_context`
 - `clarification`
 - `next_actions`
 - `answer_ready`
@@ -119,6 +123,14 @@ Top-level fields that downstream callers should treat as stable:
 - `warnings`
 - `source_refs`
 - `evidence_passport`
+- `error`
+
+Target safety rule:
+
+- A Taiwan stock must resolve to an active `stock_master` row before evidence tools run.
+- Unknown targets return `ok=false`, `answer_ready=false`, and `error.code=TARGET_NOT_FOUND` without refresh actions or analysis.
+- Successful responses expose `next_context.last_target` for the next follow-up turn.
+- Directional price levels expose backend validation; executable decision answers are blocked when valid entry and risk guardrails are not both available.
 
 Backward compatibility rule:
 

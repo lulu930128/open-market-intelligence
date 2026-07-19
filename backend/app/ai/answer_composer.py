@@ -80,6 +80,63 @@ decision_evidence_data_lines = answer_evidence.decision_evidence_data_lines
 build_position_decision_consumer_answer = answer_question.build_position_decision_consumer_answer
 build_question_aware_consumer_answer = answer_question.build_question_aware_consumer_answer
 
+
+def build_price_level_safety_answer(
+    *,
+    target: dict[str, Any],
+    validation: dict[str, Any],
+    missing: list[Any],
+    warnings: list[Any],
+    response_preferences: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    english = response_is_english(response_preferences)
+    japanese = response_is_japanese(response_preferences)
+    target_label = text_value(target.get("label")) or text_value(target.get("id")) or target_fallback_label(response_preferences)
+    if english:
+        headline = f"{target_label}: price levels did not pass the execution safety check"
+        summary = [
+            "Latest price can still be described, but entry and risk levels are not simultaneously valid."
+        ]
+        risks = ["Do not treat omitted or reclassified levels as an executable entry, stop, or invalidation price."]
+        counter_evidence = ["Recalculate after a valid entry condition and a risk guardrail are both available."]
+    elif japanese:
+        headline = f"{target_label}：価格水準が実行安全チェックを通過していません"
+        summary = ["現在値の説明は可能ですが、エントリー水準とリスク水準が同時に有効ではありません。"]
+        risks = ["除外または上値抵抗へ再分類された水準を、売買可能な価格として扱わないでください。"]
+        counter_evidence = ["有効なエントリー条件とリスク基準が揃ってから再計算してください。"]
+    else:
+        headline = f"{target_label} 的技術價位未通過執行安全檢查"
+        summary = ["現價仍可描述，但進場條件與風控線沒有同時形成有效組合。"]
+        risks = ["被移除或改列為上方壓力的價位，不得當成可執行的進場、停損或失效價。"]
+        counter_evidence = ["等有效進場條件與風控線同時可用後再重新計算。"]
+
+    data_limits = generic_data_limits(
+        missing=missing,
+        warnings=warnings,
+        response_preferences=response_preferences,
+    )
+    answer = {
+        "kind": "consumer_market_answer",
+        "style": "safety_block",
+        "source": "backend_price_level_validator",
+        "headline": headline,
+        "stance": "insufficient_data",
+        "confidence": "low",
+        "summary": summary,
+        "action_plan": [],
+        "scenarios": [],
+        "counter_evidence": counter_evidence,
+        "risks": risks,
+        "data_limits": data_limits,
+        "price_level_validation": validation,
+    }
+    answer["text"] = consumer_text(
+        answer,
+        summary_limit=SUMMARY_LIMIT_DEFAULT,
+        response_preferences=response_preferences,
+    )
+    return answer
+
 def build_llm_consumer_answer(
     *,
     report: dict[str, Any],

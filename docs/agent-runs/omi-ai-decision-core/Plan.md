@@ -55,3 +55,4 @@
 - 2026-06-21：第一個長任務選 OMI AI decision core，而不是 Kuro OMI briefing。理由：Kuro 是 OMI 市場分析的下游；先穩定 backend decision contract，Kuro 後續只需呈現、語音化與任務牆整合。
 - 2026-06-21：本任務不從零重寫 AI。理由：repo 已有 `decision_core.py`、`answer_composer.py`、`ask_*` stages、freshness guard、agentic tools 與 tests；正確方向是補 contract map、regression 與缺口，而不是大改架構。
 - 2026-06-21：bounded external refresh 是 OMI 能力的一部分，但必須由 backend allowlisted tools 和 `tool_budget` 管控；MCP/Kuro 不直接打市場資料 API。
+- 2026-07-19：P0 先以獨立 checkpoint 處理 target identity、follow-up context 與 directional price invariants；未知標的和無效價位不得進入可執行 answer contract，完成驗證後先 commit 再推進 freshness/P1。

@@ -443,6 +443,167 @@ def _price_level(price: Any, *, label: str, basis: str) -> dict[str, Any] | None
     }
 
 
+def _validate_long_price_levels(levels: dict[str, Any]) -> dict[str, Any]:
+    latest_price = _finite_number(levels.get("latest_price"))
+    if latest_price is None or latest_price <= 0:
+        return {
+            **levels,
+            "entry": {},
+            "risk": {},
+            "validation": {
+                "status": "unavailable",
+                "position_side": "long",
+                "decision_ready": False,
+                "violations": [
+                    {
+                        "code": "LATEST_PRICE_UNAVAILABLE",
+                        "field": "latest_price",
+                        "reason": "Latest price is required before directional price levels can be exposed.",
+                    }
+                ],
+            },
+        }
+
+    entry = dict(levels.get("entry") or {})
+    risk = dict(levels.get("risk") or {})
+    resistance: dict[str, Any] = {}
+    violations: list[dict[str, str]] = []
+    reclassified_fields: list[str] = []
+
+    for field in ("aggressive_zone", "preferred_zone", "conservative_zone"):
+        zone = entry.get(field)
+        if not isinstance(zone, dict):
+            continue
+        low = _finite_number(zone.get("low"))
+        high = _finite_number(zone.get("high"))
+        if low is None or high is None:
+            entry.pop(field, None)
+            violations.append(
+                {
+                    "code": "ENTRY_ZONE_INVALID",
+                    "field": f"entry.{field}",
+                    "reason": "Entry zone was omitted because its bounds were incomplete.",
+                }
+            )
+            continue
+        if low > high:
+            low, high = high, low
+        if low >= latest_price:
+            resistance[field] = {
+                **zone,
+                "low": _round_price(low),
+                "high": _round_price(high),
+                "label": "上方壓力區" if field != "aggressive_zone" else "反彈確認區",
+                "basis": f"{zone.get('basis') or field}; reclassified because the full zone is above latest price",
+            }
+            entry.pop(field, None)
+            reclassified_fields.append(f"entry.{field}")
+            violations.append(
+                {
+                    "code": "ENTRY_ZONE_ABOVE_LATEST",
+                    "field": f"entry.{field}",
+                    "reason": "A zone fully above latest price cannot be labeled as a long pullback entry zone.",
+                }
+            )
+            continue
+        if high > latest_price:
+            entry[field] = {
+                **zone,
+                "low": _round_price(low),
+                "high": _round_price(latest_price),
+                "basis": f"{zone.get('basis') or field}; capped at latest price by long-side invariant",
+            }
+            violations.append(
+                {
+                    "code": "ENTRY_ZONE_CAPPED_AT_LATEST",
+                    "field": f"entry.{field}",
+                    "reason": "The upper bound was capped so a long pullback zone does not extend above latest price.",
+                }
+            )
+
+    for field in ("breakout_confirm_above", "do_not_chase_above"):
+        level = entry.get(field)
+        if not isinstance(level, dict):
+            continue
+        price = _finite_number(level.get("price"))
+        if price is None or price <= latest_price:
+            entry.pop(field, None)
+            violations.append(
+                {
+                    "code": "UPSIDE_LEVEL_NOT_ABOVE_LATEST",
+                    "field": f"entry.{field}",
+                    "reason": "Breakout and chase thresholds must be strictly above latest price.",
+                }
+            )
+
+    for field in ("short_stop", "technical_invalidation"):
+        level = risk.get(field)
+        if not isinstance(level, dict):
+            continue
+        price = _finite_number(level.get("price"))
+        if price is None or price >= latest_price:
+            risk.pop(field, None)
+            violations.append(
+                {
+                    "code": "LONG_RISK_LEVEL_NOT_BELOW_LATEST",
+                    "field": f"risk.{field}",
+                    "reason": "A long-side stop or invalidation level must be strictly below latest price.",
+                }
+            )
+
+    has_actionable_entry = any(
+        field in entry
+        for field in (
+            "aggressive_zone",
+            "preferred_zone",
+            "conservative_zone",
+            "breakout_confirm_above",
+        )
+    )
+    has_risk_guardrail = any(field in risk for field in ("short_stop", "technical_invalidation"))
+    decision_ready = has_actionable_entry and has_risk_guardrail
+    if not has_actionable_entry:
+        violations.append(
+            {
+                "code": "ENTRY_LEVELS_UNAVAILABLE",
+                "field": "entry",
+                "reason": "No valid long-side entry or breakout level remains after validation.",
+            }
+        )
+    if not has_risk_guardrail:
+        violations.append(
+            {
+                "code": "RISK_GUARDRAIL_UNAVAILABLE",
+                "field": "risk",
+                "reason": "No valid long-side stop or invalidation level remains after validation.",
+            }
+        )
+
+    status = "ready" if decision_ready and not violations else "adjusted" if decision_ready else "unavailable"
+    validated = {
+        **levels,
+        "entry": entry,
+        "risk": risk,
+        "validation": {
+            "status": status,
+            "position_side": "long",
+            "latest_price": _round_price(latest_price),
+            "decision_ready": decision_ready,
+            "has_actionable_entry": has_actionable_entry,
+            "has_risk_guardrail": has_risk_guardrail,
+            "reclassified_fields": reclassified_fields,
+            "violations": violations,
+        },
+    }
+    if resistance:
+        validated["resistance"] = resistance
+    if not decision_ready:
+        validated["summary"] = list(levels.get("summary") or []) + [
+            "部分價位未通過多方不變量檢查；在有效進場與風控線同時可用前，不形成可執行交易建議。"
+        ]
+    return validated
+
+
 def _indicator_from_report(report: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(report, dict):
         return {}
@@ -589,7 +750,7 @@ def _technical_price_levels(
     if not extended:
         summary[0] = "價格未明顯偏離區間上緣時，可用 MA5/MA20 回測與突破價作為條件式進場。"
 
-    return {
+    levels = {
         "kind": "technical_price_levels",
         "version": "price_levels_v1",
         "as_of": _json_value(_source_value(latest_daily, "trade_date")) or daily_indicator.get("time"),
@@ -617,6 +778,7 @@ def _technical_price_levels(
         "risk": {key: value for key, value in risk.items() if value is not None},
         "summary": summary,
     }
+    return _validate_long_price_levels(levels)
 
 
 def _normalize_technical_points(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

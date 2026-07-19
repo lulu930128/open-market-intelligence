@@ -207,6 +207,8 @@ class ScopeResolution:
     clarification_required: bool = False
     clarification_question: str | None = None
     clarification_reason: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
 
 
 def _contains_hint(question: str, hints: tuple[str, ...]) -> bool:
@@ -342,6 +344,15 @@ def _scope_resolution_dict(resolution: ScopeResolution) -> dict[str, Any]:
         "assumption": resolution.assumption,
         "source": resolution.source,
         "candidates": list(resolution.candidates),
+        "error": (
+            {
+                "code": resolution.error_code,
+                "message": resolution.error_message,
+                "retryable": False,
+            }
+            if resolution.error_code
+            else {}
+        ),
     }
 
 
@@ -353,11 +364,44 @@ def _clarification_dict(resolution: ScopeResolution) -> dict[str, Any]:
     }
 
 
-def _first_stock_id_in_text(text: str) -> str | None:
+def _next_conversation_context(resolution: ScopeResolution) -> dict[str, Any]:
+    if resolution.clarification_required or resolution.error_code:
+        return {}
+    return {
+        "last_target": _resolution_target(resolution),
+        "last_resolution": _scope_resolution_dict(resolution),
+    }
+
+
+def _position_entry_price_spans(text: str) -> tuple[tuple[int, int], ...]:
+    spans: list[tuple[int, int]] = []
+    for pattern in decision_core.POSITION_ENTRY_PRICE_PATTERNS:
+        for match in pattern.finditer(text):
+            try:
+                spans.append(match.span(1))
+            except IndexError:
+                continue
+    return tuple(spans)
+
+
+def _stock_ids_in_text(text: str) -> tuple[str, ...]:
+    position_price_spans = _position_entry_price_spans(text)
+    stock_ids: list[str] = []
     for match in re.finditer(r"(?<!\d)(\d{4,6}[A-Za-z0-9]?)(?!\d)", text):
         value = match.group(1).strip()
-        if _looks_like_stock_id(value):
-            return value
+        value_span = match.span(1)
+        if any(value_span[0] < end and start < value_span[1] for start, end in position_price_spans):
+            continue
+        if _looks_like_stock_id(value) and value not in stock_ids:
+            stock_ids.append(value)
+
+    return tuple(stock_ids)
+
+
+def _first_stock_id_in_text(text: str) -> str | None:
+    stock_ids = _stock_ids_in_text(text)
+    if stock_ids:
+        return stock_ids[0]
 
     return None
 
@@ -386,6 +430,70 @@ def _stock_display_name(db: Session | None, stock_id: str, fallback: str | None 
         return fallback
 
     return stock.stock_name or fallback
+
+
+def _get_tw_stock(db: Session | None, stock_id: str | None) -> StockMaster | None:
+    if db is None or not stock_id:
+        return None
+
+    return (
+        db.query(StockMaster)
+        .filter(StockMaster.stock_id == stock_id)
+        .filter(StockMaster.is_active.is_(True))
+        .first()
+    )
+
+
+def _target_not_found_scope(
+    *,
+    stock_id: str,
+    source: str,
+) -> ScopeResolution:
+    return ScopeResolution(
+        selected_scope_type="stock",
+        selected_scope_id=stock_id,
+        display_name=None,
+        confidence="high",
+        source=source,
+        candidates=(),
+        error_code="TARGET_NOT_FOUND",
+        error_message=f"找不到台股代號 {stock_id}",
+    )
+
+
+def _resolve_tw_stock_id(
+    db: Session | None,
+    stock_id: str | None,
+    *,
+    source: str,
+    confidence: str = "high",
+    fallback_label: str | None = None,
+) -> ScopeResolution | None:
+    normalized_stock_id = str(stock_id or "").strip()
+    if not _looks_like_stock_id(normalized_stock_id):
+        return None
+
+    stock = _get_tw_stock(db, normalized_stock_id)
+    if db is not None and stock is None:
+        return _target_not_found_scope(stock_id=normalized_stock_id, source=source)
+
+    display_name = (stock.stock_name if stock is not None else None) or fallback_label
+    return ScopeResolution(
+        selected_scope_type="stock",
+        selected_scope_id=normalized_stock_id,
+        display_name=display_name,
+        confidence=confidence,
+        source=source,
+        candidates=(
+            _resolution_candidate(
+                scope_type="stock",
+                scope_id=normalized_stock_id,
+                label=display_name,
+                confidence=confidence,
+                source=source,
+            ),
+        ),
+    )
 
 
 def _us_stock_display_name(db: Session | None, symbol: str | None, fallback: str | None = None) -> str | None:
@@ -925,8 +1033,48 @@ def _target_from_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
 
 def _last_omi_resolution(payload: AiAskRequest) -> dict[str, Any]:
     context = payload.conversation_context if isinstance(payload.conversation_context, dict) else {}
-    resolution = context.get("last_resolution")
-    return resolution if isinstance(resolution, dict) else {}
+    for key in ("last_resolution", "previous_resolution", "resolution"):
+        resolution = context.get(key)
+        if isinstance(resolution, dict):
+            return resolution
+    return {}
+
+
+def _last_omi_target(payload: AiAskRequest) -> dict[str, Any]:
+    context = payload.conversation_context if isinstance(payload.conversation_context, dict) else {}
+    for key in ("last_target", "previous_target", "target"):
+        target = context.get(key)
+        if isinstance(target, dict) and target.get("type"):
+            return target
+
+    resolution = _last_omi_resolution(payload)
+    target = resolution.get("target")
+    return target if isinstance(target, dict) else {}
+
+
+def _conversation_target_resolution(
+    db: Session | None,
+    payload: AiAskRequest,
+) -> ScopeResolution | None:
+    target = _last_omi_target(payload)
+    target_type = str(target.get("type") or "").strip().lower()
+    if not target_type or target_type == "auto" or target_type not in VALID_TARGET_TYPES:
+        return None
+
+    inherited_payload = payload.model_copy(update={"target": target})
+    inherited = _resolve_scope(db, inherited_payload)
+    if inherited.clarification_required or inherited.error_code:
+        return None
+
+    return ScopeResolution(
+        selected_scope_type=inherited.selected_scope_type,
+        selected_scope_id=inherited.selected_scope_id,
+        display_name=inherited.display_name,
+        confidence="high",
+        assumption="沿用上一輪 OMI 標的；本句未指定新的 target。",
+        source="conversation_target",
+        candidates=inherited.candidates,
+    )
 
 
 def _last_resolution_us_candidate(payload: AiAskRequest) -> dict[str, Any] | None:
@@ -994,6 +1142,88 @@ def _resolve_stock_name_from_db(db: Session | None, question: str) -> ScopeResol
         source="stock_master_name",
         candidates=candidates,
     )
+
+
+def _stock_target_conflict(
+    *,
+    named_resolution: ScopeResolution | None,
+    stock_ids: tuple[str, ...],
+    db: Session | None,
+) -> ScopeResolution:
+    candidates = (
+        [
+            _resolution_candidate(
+                scope_type=named_resolution.selected_scope_type,
+                scope_id=named_resolution.selected_scope_id,
+                label=named_resolution.display_name,
+                confidence="high",
+                source=named_resolution.source,
+            )
+        ]
+        if named_resolution is not None
+        else []
+    )
+    for stock_id in stock_ids:
+        if any(str((candidate.get("target") or {}).get("id") or "") == stock_id for candidate in candidates):
+            continue
+        candidates.append(
+            _resolution_candidate(
+                scope_type="stock",
+                scope_id=stock_id,
+                label=_stock_display_name(db, stock_id, fallback=stock_id),
+                confidence="medium",
+                source="question_stock_id",
+            )
+        )
+
+    labels = [
+        str((candidate.get("target") or {}).get("label") or (candidate.get("target") or {}).get("id") or "")
+        for candidate in candidates
+    ]
+    labels = [label for label in labels if label]
+    label_text = "、".join(labels[:3]) or "多個台股標的"
+    return ScopeResolution(
+        selected_scope_type="stock",
+        confidence="low",
+        source="target_conflict",
+        candidates=tuple(candidates[:5]),
+        clarification_required=True,
+        clarification_question=f"偵測到不同標的（{label_text}），請明確指定要分析哪一檔。",
+        clarification_reason="Multiple explicit Taiwan stock targets conflict in the same question.",
+    )
+
+
+def _resolve_tw_stock_from_question(
+    db: Session | None,
+    question: str,
+) -> ScopeResolution | None:
+    named_resolution = _resolve_tsmc_alias(db, question) or _resolve_stock_name_from_db(db, question)
+    stock_ids = _stock_ids_in_text(question)
+    named_stock_id = named_resolution.selected_scope_id if named_resolution is not None else None
+    conflicting_ids = tuple(stock_id for stock_id in stock_ids if stock_id != named_stock_id)
+
+    if named_resolution is not None and conflicting_ids:
+        return _stock_target_conflict(
+            named_resolution=named_resolution,
+            stock_ids=conflicting_ids,
+            db=db,
+        )
+    if named_resolution is not None:
+        return named_resolution
+    if len(stock_ids) > 1:
+        return _stock_target_conflict(
+            named_resolution=None,
+            stock_ids=stock_ids,
+            db=db,
+        )
+    if stock_ids:
+        return _resolve_tw_stock_id(
+            db,
+            stock_ids[0],
+            source="question_stock_id",
+            confidence="high",
+        )
+    return None
 
 
 def _resolve_tsmc_alias(db: Session | None, question: str) -> ScopeResolution | None:
@@ -1275,6 +1505,22 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
                 )
             target_id = str(normalized_group_id)
 
+        if scope_type == "stock":
+            stock_resolution = _resolve_tw_stock_id(
+                db,
+                target_id,
+                source="explicit_request",
+                confidence="high",
+                fallback_label=requested_label,
+            )
+            if stock_resolution is not None:
+                return stock_resolution
+            return _clarify_scope(
+                scope_type,
+                question,
+                f"Unsupported Taiwan stock target.id: {target_id}.",
+            )
+
         display_name = (
             _stock_display_name(db, target_id)
             if scope_type == "stock" and target_id
@@ -1462,23 +1708,14 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
                 return jp_symbol_resolution
 
         if _looks_like_stock_id(target_id):
-            display_name = _stock_display_name(db, target_id)
-            return ScopeResolution(
-                selected_scope_type="stock",
-                selected_scope_id=target_id,
-                display_name=display_name,
-                confidence="high",
+            stock_resolution = _resolve_tw_stock_id(
+                db,
+                target_id,
                 source="explicit_scope_id",
-                candidates=(
-                    _resolution_candidate(
-                        scope_type="stock",
-                        scope_id=target_id,
-                        label=display_name,
-                        confidence="high",
-                        source="explicit_scope_id",
-                    ),
-                ),
+                confidence="high",
             )
+            if stock_resolution is not None:
+                return stock_resolution
 
         if target_id.isdecimal():
             return ScopeResolution(
@@ -1664,37 +1901,13 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
             "Question looks like a watchlist request but no group id or group name was resolved.",
         )
 
-    stock_id = _first_stock_id_in_text(question)
-    if stock_id is not None:
-        display_name = _stock_display_name(db, stock_id)
-        return ScopeResolution(
-            selected_scope_type="stock",
-            selected_scope_id=stock_id,
-            display_name=display_name,
-            confidence="high",
-            source="question_stock_id",
-            candidates=(
-                _resolution_candidate(
-                    scope_type="stock",
-                    scope_id=stock_id,
-                    label=display_name,
-                    confidence="high",
-                    source="question_stock_id",
-                ),
-            ),
-        )
-
-    tsmc_resolution = _resolve_tsmc_alias(db, question)
-    if tsmc_resolution is not None:
-        return tsmc_resolution
+    tw_stock_resolution = _resolve_tw_stock_from_question(db, question)
+    if tw_stock_resolution is not None:
+        return tw_stock_resolution
 
     us_symbol_resolution = _resolve_us_stock_symbol_from_question(db, question)
     if us_symbol_resolution is not None:
         return us_symbol_resolution
-
-    stock_name_resolution = _resolve_stock_name_from_db(db, question)
-    if stock_name_resolution is not None:
-        return stock_name_resolution
 
     if _contains_hint(question, MARKET_HINTS):
         return ScopeResolution(
@@ -1704,7 +1917,15 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
             candidates=(),
         )
 
-    if _contains_hint(question, STOCK_REFERENCE_HINTS) or _contains_hint(question, ANALYSIS_HINTS):
+    conversation_resolution = _conversation_target_resolution(db, payload)
+    if conversation_resolution is not None:
+        return conversation_resolution
+
+    if (
+        _contains_hint(question, STOCK_REFERENCE_HINTS)
+        or _contains_hint(question, ANALYSIS_HINTS)
+        or _contains_hint(question, ("分點", "券商分點", "主力買賣", "主要買賣方"))
+    ):
         return _clarify_scope(
             "stock",
             question,

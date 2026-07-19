@@ -84,6 +84,8 @@ def _compact_technical_levels(levels: dict[str, Any]) -> dict[str, Any]:
     entry = levels.get("entry") if isinstance(levels.get("entry"), dict) else {}
     risk = levels.get("risk") if isinstance(levels.get("risk"), dict) else {}
     compact = {
+        "kind": levels.get("kind"),
+        "version": levels.get("version"),
         "latest": _price_display(levels.get("latest_price")),
         "preferred_entry": _zone_display(entry.get("preferred_zone")),
         "aggressive_entry": _zone_display(entry.get("aggressive_zone")),
@@ -93,6 +95,8 @@ def _compact_technical_levels(levels: dict[str, Any]) -> dict[str, Any]:
         "short_stop": _level_price_display(risk.get("short_stop")),
         "technical_invalidation": _level_price_display(risk.get("technical_invalidation")),
         "context": levels.get("context") if isinstance(levels.get("context"), dict) else {},
+        "validation": levels.get("validation") if isinstance(levels.get("validation"), dict) else {},
+        "resistance": levels.get("resistance") if isinstance(levels.get("resistance"), dict) else {},
     }
     return {key: value for key, value in compact.items() if value not in (None, "", {})}
 

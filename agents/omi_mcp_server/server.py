@@ -287,7 +287,10 @@ ASK_TOOL: dict[str, Any] = {
             "enabled_only": {"type": "boolean", "default": True},
             "conversation_context": {
                 "type": "object",
-                "description": "Optional Kuro conversation context, including last OMI resolution for follow-up turns.",
+                "description": (
+                    "Optional conversation context. Prefer last_target for follow-up turns; "
+                    "legacy last_resolution and previous_resolution aliases remain accepted."
+                ),
             },
             "market_data_params": {
                 "type": "object",

@@ -3,7 +3,7 @@
 ## Status
 
 - Current phase: implementation
-- Last updated: 2026-07-07 20:41 +08:00
+- Last updated: 2026-07-19 19:05 +08:00
 
 ## Completed
 
@@ -36,6 +36,10 @@
 - 2026-07-07: Added `backend/app/ai/decision_contract.py` as an additive `analysis.decision_contract` v1 projection.
 - 2026-07-07: Wired `decision_contract` into `ask_response_stage.assemble_response_analysis` after backend `human_answer` is built.
 - 2026-07-07: Added regression coverage confirming `decision_contract` includes intent, target, answer source/style, normalized sections, readiness flags, freshness, missing, and warnings.
+- 2026-07-19: Hardened Taiwan stock resolution so position cost tokens do not become stock ids, conflicting explicit targets require clarification, and inactive/unknown master symbols return `TARGET_NOT_FOUND` before evidence execution.
+- 2026-07-19: Added canonical `next_context.last_target` output while preserving `last_resolution` and related input aliases for existing OMI Dock/MCP callers.
+- 2026-07-19: Added long-side price-level invariants. Above-market pullback zones are reclassified as resistance, invalid stops/invalidation levels are omitted, and executable decision output is blocked when entry and risk guardrails are not both valid.
+- 2026-07-19: Added `backend/tests/test_ai_p0_safety.py` with 15 focused P0 regressions.
 
 ## Validation evidence
 
@@ -45,6 +49,7 @@
 - Static inspection found the downstream Kuro `market_preflight.py` fallback still points to `http://127.0.0.1:8300`; this is recorded as a downstream planning gap and was not changed in this pass.
 - `.\scripts\run-safe-validation.ps1 -Profile backend -BackendPytestArgs @('backend\tests\test_ai_decision_core.py','backend\tests\test_ai_answer_composer.py','backend\tests\test_ai_freshness_guard.py','backend\tests\test_ai_ask_stages.py','backend\tests\test_omi_mcp_server.py')`: passed.
 - `.\scripts\run-safe-validation.ps1 -Profile backend -BackendPytestArgs @('backend\tests\test_ai_ask_stages.py','backend\tests\test_ai_answer_composer.py')`: passed after adding `decision_contract`.
+- `.\scripts\run-safe-validation.ps1 -Profile backend -BackendPytestArgs @('backend/tests/test_ai_p0_safety.py','backend/tests/test_ai_ask_refactor_modules.py','backend/tests/test_ai_decision_core.py','backend/tests/test_ai_technical_analysis.py','backend/tests/test_ai_decision_engine.py','backend/tests/test_ai_answer_composer.py','backend/tests/test_ai_ask_stages.py','backend/tests/test_ai_market_payload_contract.py','backend/tests/test_ai_freshness_guard.py','backend/tests/test_ai_supplemental_contexts.py','backend/tests/test_omi_mcp_server.py')`: 174 passed on 2026-07-19.
 
 ## Decisions made
 
@@ -53,6 +58,8 @@
 - Treat `backend/app/ai/answer_composer.py` as the primary user-facing wording/structured-answer layer; frontend and MCP should consume, not reconstruct, the decision.
 - Treat bounded external refresh as backend-owned OMI behavior through `allow_external_fetch`, `tool_budget`, `refresh_policy`, `tool_plan`, and `tool_runs`.
 - Add `analysis.decision_contract` as a normalized projection instead of moving or rewriting `analysis.human_answer`; this keeps existing callers compatible while giving Kuro/frontend a stable structured surface.
+- Keep P0 response changes additive: `ok`, `error`, and `next_context` extend `omi.ai.ask.v2`; existing response fields remain in place.
+- Treat invalid target identity and invalid directional price levels as hard answer-readiness boundaries, not wording-only warnings.
 - Do not run the baseline test subset as part of this documentation-only pass; record the exact commands in `BaselineTestsAndGaps.md` for the first implementation session.
 
 ## Known issues / risks

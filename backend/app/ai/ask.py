@@ -228,6 +228,7 @@ _check_freshness = ask_execution._check_freshness
 _report_level = ask_response_support._report_level
 _build_next_actions = ask_response_support._build_next_actions
 _clarification_response = ask_response_support._clarification_response
+_target_error_response = ask_response_support._target_error_response
 
 
 
@@ -250,6 +251,18 @@ def ask(
         request_target_type=_request_target_type,
         resolution_target=_resolution_target,
     )
+    if resolution.error_code:
+        policy = _policy(payload, server_policy or AiAskServerPolicy())
+        progress.clarification_required()
+        response = _target_error_response(
+            payload=payload,
+            resolution=resolution,
+            requested_mode=payload.mode,
+            policy=policy,
+        )
+        progress.evidence_passport(response["evidence_passport"])
+        progress.answer_ready(answer_ready=False, report_level="blocked")
+        return response
     warnings: list[str] = []
     if not payload.position_context:
         try:

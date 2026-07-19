@@ -3,12 +3,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from app.ai import decision_contract, decision_core, pipeline_progress
+from app.ai import answer_composer, decision_contract, decision_core, pipeline_progress
 from app.ai.ask_stage_models import ResponseAssembly
 from app.ai.schemas import AiAskRequest
 
 
 POSITION_DECISION_SCOPE_TYPES = {"stock", "us_stock", "jp_stock", "kr_stock"}
+PRICE_LEVEL_DECISION_INTENTS = {"entry_decision", "position_risk_decision", "risk_check"}
 
 
 def assemble_response_analysis(
@@ -40,6 +41,38 @@ def assemble_response_analysis(
     result_missing = extract_list(result, "missing")
     result_source_refs = extract_list(result, "source_refs")
     analysis_digest = extract_analysis_digest(result, policy)
+    technical_levels = (
+        analysis_digest.get("technical_levels")
+        if isinstance(analysis_digest.get("technical_levels"), dict)
+        else {}
+    )
+    price_level_validation = (
+        technical_levels.get("validation")
+        if isinstance(technical_levels.get("validation"), dict)
+        else {}
+    )
+    requested_position_side = str(position_context.get("position_side") or "long").strip().lower()
+    validation_position_side = str(price_level_validation.get("position_side") or "long").strip().lower()
+    price_level_side_mismatch = bool(
+        question_intent in PRICE_LEVEL_DECISION_INTENTS
+        and price_level_validation
+        and requested_position_side != validation_position_side
+    )
+    price_level_blocked = bool(
+        question_intent in PRICE_LEVEL_DECISION_INTENTS
+        and price_level_validation
+        and (
+            price_level_validation.get("decision_ready") is False
+            or price_level_side_mismatch
+        )
+    )
+    if price_level_blocked:
+        result_missing = list(result_missing) + ["technical_price_level_safety"]
+        warnings.append(
+            "Technical price levels were withheld because the position side does not match the validated level model."
+            if price_level_side_mismatch
+            else "Technical price levels were withheld from executable decision output because entry and risk invariants did not both pass."
+        )
     freshness_warnings = extract_list(freshness_result, "warnings")
     freshness_missing = extract_list(freshness_result, "missing")
     clarification = clarification_dict(resolution)
@@ -51,7 +84,7 @@ def assemble_response_analysis(
         policy=policy,
         requested_mode=requested_mode,
     )
-    answer_ready = not clarification.get("required")
+    answer_ready = not clarification.get("required") and not price_level_blocked
     if any(action.get("type") == "connect_us_stock_context" for action in next_actions):
         warnings.append(
             "ADR-specific evidence is available through target.type=us_stock; answered from the resolved Taiwan stock context first."
@@ -60,7 +93,11 @@ def assemble_response_analysis(
     combined_missing = list(dict.fromkeys(result_missing + freshness_missing))
     combined_warnings = list(dict.fromkeys(warnings + freshness_warnings + result_warnings))
     position_decision = {}
-    if question_intent == "position_risk_decision" and scope_type in POSITION_DECISION_SCOPE_TYPES:
+    if (
+        not price_level_blocked
+        and question_intent == "position_risk_decision"
+        and scope_type in POSITION_DECISION_SCOPE_TYPES
+    ):
         position_decision = build_position_decision(
             question=payload.question,
             position_context=position_context,
@@ -81,20 +118,30 @@ def assemble_response_analysis(
             warnings=combined_warnings,
         )
 
-    consumer_human_answer = build_consumer_human_answer(
-        question_intent=question_intent,
-        target=response_target,
-        result=result,
-        analysis_digest=analysis_digest,
-        missing=combined_missing,
-        warnings=combined_warnings,
-        position_decision=position_decision,
-        response_preferences=(
-            policy.get("response_preferences")
-            if isinstance(policy.get("response_preferences"), dict)
-            else {}
-        ),
+    response_preferences = (
+        policy.get("response_preferences")
+        if isinstance(policy.get("response_preferences"), dict)
+        else {}
     )
+    if price_level_blocked:
+        consumer_human_answer = answer_composer.build_price_level_safety_answer(
+            target=response_target,
+            validation=price_level_validation,
+            missing=combined_missing,
+            warnings=combined_warnings,
+            response_preferences=response_preferences,
+        )
+    else:
+        consumer_human_answer = build_consumer_human_answer(
+            question_intent=question_intent,
+            target=response_target,
+            result=result,
+            analysis_digest=analysis_digest,
+            missing=combined_missing,
+            warnings=combined_warnings,
+            position_decision=position_decision,
+            response_preferences=response_preferences,
+        )
     reasoning_steps = build_reasoning_steps(
         question_intent=question_intent,
         position_context=position_context,
@@ -132,6 +179,8 @@ def assemble_response_analysis(
             warnings=combined_warnings,
             answer_ready=answer_ready,
         )
+    if price_level_validation:
+        response_analysis["price_level_validation"] = price_level_validation
 
     return ResponseAssembly(
         response_analysis=response_analysis,

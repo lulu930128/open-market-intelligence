@@ -72,7 +72,7 @@ Protects:
 Useful gap checks:
 
 - Add more Taiwan-first scenario questions before expanding market-specific logic.
-- Add tests for follow-up context from Kuro `last_resolution` if backend starts relying on it more heavily.
+- Keep `backend/tests/test_ai_p0_safety.py` covering canonical `last_target`, legacy `last_resolution`, explicit target override, and missing-context clarification.
 
 ### `backend/tests/test_ai_answer_composer.py`
 
@@ -149,3 +149,4 @@ Useful gap checks:
 - 2026-07-07: minimal AI contract set passed through `.\scripts\run-safe-validation.ps1 -Profile backend -BackendPytestArgs @('backend\tests\test_ai_decision_core.py','backend\tests\test_ai_answer_composer.py','backend\tests\test_ai_freshness_guard.py','backend\tests\test_ai_ask_stages.py','backend\tests\test_omi_mcp_server.py')`.
 - 2026-07-07: `analysis.decision_contract` v1 was added as an additive projection, with targeted regression coverage in `backend/tests/test_ai_ask_stages.py`.
 - Runtime API smoke checks were not run in this implementation slice because the change is response assembly / contract projection and the bounded backend tests covered the affected path.
+- 2026-07-19: Added `test_ai_p0_safety.py` for cost-vs-symbol parsing, target conflicts, `TARGET_NOT_FOUND`, follow-up inheritance, directional price invariants, and action-plan blocking. The focused AI/MCP set passed 174 tests.

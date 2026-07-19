@@ -989,6 +989,7 @@ def _clarification_response(
     return {
         "kind": "ai_ask",
         "contract_version": CONTRACT_VERSION,
+        "ok": True,
         "question": payload.question,
         "target": _resolution_target(resolution),
         "mode": {
@@ -999,6 +1000,7 @@ def _clarification_response(
         "strategy_profile": payload.strategy_profile,
         "caller_profile": payload.caller_profile,
         "resolution": _scope_resolution_dict(resolution),
+        "next_context": {},
         "clarification": clarification,
         "next_actions": next_actions,
         "answer_ready": False,
@@ -1013,4 +1015,64 @@ def _clarification_response(
         "warnings": response_warnings,
         "source_refs": [],
         "evidence_passport": evidence_passport,
+        "error": {},
+    }
+
+
+def _target_error_response(
+    *,
+    payload: AiAskRequest,
+    resolution: ScopeResolution,
+    requested_mode: str,
+    policy: dict[str, Any],
+) -> dict[str, Any]:
+    error = {
+        "code": resolution.error_code or "TARGET_INVALID",
+        "message": resolution.error_message or "The requested target is invalid.",
+        "retryable": False,
+        "target": _resolution_target(resolution),
+    }
+    evidence_passport = build_evidence_passport(
+        kind="ai_ask",
+        missing=["target_scope"],
+        warnings=[error["message"]],
+        confidence="low",
+    )
+    return {
+        "kind": "ai_ask",
+        "contract_version": CONTRACT_VERSION,
+        "ok": False,
+        "question": payload.question,
+        "target": _resolution_target(resolution),
+        "mode": {
+            "requested": requested_mode,
+            "effective": "error",
+        },
+        "action": "omi.ask.reject",
+        "strategy_profile": payload.strategy_profile,
+        "caller_profile": payload.caller_profile,
+        "resolution": _scope_resolution_dict(resolution),
+        "next_context": {},
+        "clarification": {
+            "required": False,
+            "question": None,
+            "reason": None,
+        },
+        "next_actions": [],
+        "answer_ready": False,
+        "report_level": "blocked",
+        "analysis": {},
+        "policy": policy,
+        "tool_plan": {},
+        "tool_runs": [],
+        "result": {
+            "kind": "target_error",
+            "error": error,
+        },
+        "freshness": {},
+        "missing": ["target_scope"],
+        "warnings": [error["message"]],
+        "source_refs": [],
+        "evidence_passport": evidence_passport,
+        "error": error,
     }

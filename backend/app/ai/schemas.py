@@ -101,6 +101,7 @@ class AiAskRequest(BaseModel):
 class AiAskResponse(BaseModel):
     kind: str = "ai_ask"
     contract_version: str = "omi.ai.ask.v2"
+    ok: bool = True
     question: str
     target: dict[str, Any] = Field(default_factory=dict)
     mode: dict[str, Any] = Field(default_factory=dict)
@@ -108,6 +109,7 @@ class AiAskResponse(BaseModel):
     strategy_profile: str
     caller_profile: str
     resolution: dict[str, Any] = Field(default_factory=dict)
+    next_context: dict[str, Any] = Field(default_factory=dict)
     clarification: dict[str, Any] = Field(default_factory=dict)
     next_actions: list[dict[str, Any]] = Field(default_factory=list)
     answer_ready: bool = True
@@ -122,6 +124,7 @@ class AiAskResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     source_refs: list[dict[str, Any]] = Field(default_factory=list)
     evidence_passport: dict[str, Any] = Field(default_factory=dict)
+    error: dict[str, Any] = Field(default_factory=dict)
 
 
 class AiMemoryCreate(BaseModel):

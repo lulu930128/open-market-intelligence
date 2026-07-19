@@ -50,6 +50,7 @@ _COMPACT_ANALYSIS_KEYS = (
     "response_preferences",
     "position_context",
     "position_decision",
+    "price_level_validation",
     "reasoning_steps",
     "human_answer",
     "decision_contract",
@@ -628,6 +629,7 @@ def finalize_ask_response(
     return {
         "kind": "ai_ask",
         "contract_version": ask_response_support.CONTRACT_VERSION,
+        "ok": True,
         "question": payload.question,
         "target": response_target,
         "mode": {
@@ -638,6 +640,7 @@ def finalize_ask_response(
         "strategy_profile": result.get("strategy_profile") or payload.strategy_profile,
         "caller_profile": payload.caller_profile,
         "resolution": scope_resolution._scope_resolution_dict(resolution),
+        "next_context": scope_resolution._next_conversation_context(resolution),
         "clarification": assembled.clarification,
         "next_actions": assembled.next_actions,
         "answer_ready": assembled.answer_ready,
@@ -656,4 +659,5 @@ def finalize_ask_response(
         "warnings": assembled.combined_warnings,
         "source_refs": assembled.result_source_refs,
         "evidence_passport": evidence_passport,
+        "error": {},
     }

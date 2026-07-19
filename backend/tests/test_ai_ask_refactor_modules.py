@@ -149,14 +149,27 @@ class AiAskRefactorModuleTests(unittest.TestCase):
             source="test",
         )
         assembled = SimpleNamespace(
-            analysis_digest={"selected_score": 3, "source": "test"},
+            analysis_digest={
+                "selected_score": 3,
+                "source": "test",
+                "price_level_validation": {
+                    "status": "unavailable",
+                    "decision_ready": False,
+                },
+            },
             result_source_refs=[{"type": "table", "name": "market_daily_price"}],
             combined_missing=[],
             combined_warnings=[],
             answer_ready=True,
             clarification={"required": False},
             next_actions=[],
-            response_analysis={"human_answer": {"text": "結論：觀察。"}},
+            response_analysis={
+                "human_answer": {"text": "結論：觀察。"},
+                "price_level_validation": {
+                    "status": "unavailable",
+                    "decision_ready": False,
+                },
+            },
             reasoning_steps=[{"stage": "decision_synthesis", "message": "已組合回答。"}],
         )
 
@@ -180,6 +193,10 @@ class AiAskRefactorModuleTests(unittest.TestCase):
         self.assertTrue(response["answer_ready"])
         self.assertEqual(response["report_level"], "brief")
         self.assertEqual(response["target"]["id"], "2330")
+        self.assertEqual(
+            response["analysis"]["price_level_validation"]["status"],
+            "unavailable",
+        )
         self.assertIn("evidence_passport", response)
         self.assertEqual(events[0]["stage"], "evidence_passport")
         self.assertEqual(events[1]["stage"], "answer_ready")
