@@ -195,6 +195,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
             <div>
               <button
                 type="button"
+                data-testid="chart-indicator-menu-toggle"
                 onClick={onToggleIndicatorMenu}
                 className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text hover:border-omi-control hover:text-omi-text-strong"
               >
@@ -235,6 +236,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
                     <button
                       key={option.key}
                       type="button"
+                      data-drawing-tool-option={option.key}
                       onClick={() => {
                         onCloseIndicatorMenu?.();
                         onDrawingToolChange(option.key);
@@ -287,6 +289,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
               </button>
               <button
                 type="button"
+                data-testid="chart-drawing-delete"
                 disabled={!selectedDrawingId}
                 onClick={onDeleteSelectedDrawing}
                 className={[

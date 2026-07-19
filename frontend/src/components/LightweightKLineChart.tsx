@@ -239,6 +239,14 @@ export default function LightweightKLineChart({
     () => mergeIndicators(indicators, showMovingAverages),
     [indicators, showMovingAverages]
   );
+  const activeIndicatorKeys = useMemo(
+    () =>
+      Object.entries(activeIndicators)
+        .filter(([, enabled]) => enabled)
+        .map(([key]) => key)
+        .join(","),
+    [activeIndicators]
+  );
   const params = useMemo(
     () => ({
       ...defaultLightweightParameters,
@@ -358,13 +366,21 @@ export default function LightweightKLineChart({
 
     if (!chart || !series) return null;
 
-    const x = chart.timeScale().timeToCoordinate(chartTime(point.time, timeMode));
+    const hasLogical = Number.isFinite(point.logical);
+    const logicalX = hasLogical
+      ? chart.timeScale().logicalToCoordinate(point.logical as Logical)
+      : null;
+    const timeX = chart.timeScale().timeToCoordinate(chartTime(point.time, timeMode));
+    const logicalOutsideData =
+      hasLogical &&
+      ((point.logical as number) < 0 || (point.logical as number) > chartData.length - 1);
+    const x = logicalOutsideData ? logicalX ?? timeX : timeX ?? logicalX;
     const y = series.priceToCoordinate(point.price);
 
     if (x === null || y === null) return null;
 
     return { x, y };
-  }, [chartRef, mainSeriesRef, timeMode]);
+  }, [chartData.length, chartRef, mainSeriesRef, timeMode]);
 
   const riskRewardPointToCoordinate = useCallback(
     (point: ChartDrawingPoint, fallbackX?: number): DrawingCoordinate | null => {
@@ -373,19 +389,23 @@ export default function LightweightKLineChart({
 
       if (!chart || !series) return null;
 
-      const logicalX =
-        Number.isFinite(point.logical)
-          ? chart.timeScale().logicalToCoordinate(point.logical as Logical)
-          : null;
+      const hasLogical = Number.isFinite(point.logical);
+      const logicalX = hasLogical
+        ? chart.timeScale().logicalToCoordinate(point.logical as Logical)
+        : null;
       const timeX = chart.timeScale().timeToCoordinate(chartTime(point.time, timeMode));
-      const x = logicalX ?? timeX ?? fallbackX ?? null;
+      const logicalOutsideData =
+        hasLogical &&
+        ((point.logical as number) < 0 || (point.logical as number) > chartData.length - 1);
+      const x =
+        (logicalOutsideData ? logicalX ?? timeX : timeX ?? logicalX) ?? fallbackX ?? null;
       const y = series.priceToCoordinate(point.price);
 
       if (x === null || y === null) return null;
 
       return { x, y };
     },
-    [chartRef, mainSeriesRef, timeMode]
+    [chartData.length, chartRef, mainSeriesRef, timeMode]
   );
 
   const priceToCoordinateY = useCallback((price: number): number | null => {
@@ -1777,6 +1797,7 @@ export default function LightweightKLineChart({
 
       <div
         data-testid="lightweight-kline-chart"
+        data-active-indicators={activeIndicatorKeys}
         data-drawing-count={activeDrawings.length}
         data-drawing-tool={drawingTool}
         data-selected-drawing-id={selectedDrawingId ?? ""}

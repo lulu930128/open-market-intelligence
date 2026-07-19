@@ -27,6 +27,7 @@ from app.db.models import (
     WatchlistItem,
 )
 from app.us_market.schemas import USWatchlistGroupCreate, USWatchlistItemCreate
+from app.us_market.price_store import list_us_daily_prices
 from app.us_market.service import (
     USStockNotFoundError,
     build_us_source_health,
@@ -441,6 +442,10 @@ class USMarketSourceParsingTests(unittest.TestCase):
         self.assertEqual(normalize_us_symbol("AAPL / Apple"), "AAPL")
         self.assertEqual(normalize_us_symbol("nasdaq:mu"), "MU")
         self.assertEqual(normalize_us_symbol("brk.b - Berkshire"), "BRK.B")
+        self.assertEqual(normalize_us_symbol("SOX"), "^SOX")
+        self.assertEqual(normalize_us_symbol("SPX"), "^GSPC")
+        self.assertEqual(normalize_us_symbol("DJI"), "^DJI")
+        self.assertEqual(normalize_us_symbol("^SOX"), "^SOX")
 
     def test_parse_symbol_directories_merges_sec_cik_without_taiwan_fields(self) -> None:
         records = parse_symbol_directories(
@@ -654,6 +659,27 @@ class USMarketStorageIsolationTests(unittest.TestCase):
         self.db.close()
         self.engine.dispose()
 
+    def test_us_daily_prices_read_legacy_index_alias_rows(self) -> None:
+        self.db.add(
+            USDailyPrice(
+                provider="yahoo_chart",
+                symbol="SOX",
+                trade_date=date(2026, 7, 14),
+                close_price=102.0,
+                raw_payload_hash="legacy-sox",
+            )
+        )
+        self.db.commit()
+
+        rows = list_us_daily_prices(
+            self.db,
+            symbol="^SOX",
+            provider="yahoo_chart",
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].symbol, "SOX")
+
     @patch("app.ai.agentic_tools.us_market_service.get_us_intraday_trend")
     def test_read_us_stock_context_fetches_intraday_when_requested(self, mock_intraday) -> None:
         upsert_us_daily_price_records(
@@ -702,22 +728,35 @@ class USMarketStorageIsolationTests(unittest.TestCase):
             "source_url": "https://example.test/chart/MU?range=1d&interval=1m",
         }
 
-        context = agentic_tools.read_us_stock_context(
-            db=self.db,
-            symbol="mu",
-            market_data_params={
-                "include_intraday": True,
-                "payload_level": "summary",
-                "intraday_limit": 1,
-                "session_scope": "all",
+        with patch(
+            "app.ai.market_context.us_context.build_us_calendar_status",
+            return_value={
+                "checked_at": "2026-06-06T12:00:00-04:00",
+                "date": "2026-06-06",
+                "is_trading_day": False,
+                "phase": "closed",
+                "previous_trading_day": "2026-06-05",
             },
-        )
+        ):
+            context = agentic_tools.read_us_stock_context(
+                db=self.db,
+                symbol="mu",
+                market_data_params={
+                    "include_intraday": True,
+                    "payload_level": "summary",
+                    "intraday_limit": 1,
+                    "session_scope": "all",
+                },
+            )
 
-        mock_intraday.assert_called_once_with(symbol="MU", session_scope="all")
+        mock_intraday.assert_called_once_with(symbol="MU", session_scope="all", db=self.db)
         compact = context["data"]["compact"]
         self.assertEqual(context["as_of"], "2026-06-02T09:31:00-04:00")
         self.assertEqual(compact["quote"]["price"], 91.35)
-        self.assertTrue(compact["quote"]["is_realtime"])
+        self.assertTrue(compact["quote"]["source_is_intraday"])
+        self.assertFalse(compact["quote"]["is_realtime"])
+        self.assertFalse(compact["quote"]["is_latest_session_quote"])
+        self.assertEqual(compact["quote"]["market_status"], "closed")
         self.assertEqual(compact["slots"]["intraday"]["status"], "ready")
         self.assertTrue(compact["resources"]["include_intraday"])
         self.assertEqual(

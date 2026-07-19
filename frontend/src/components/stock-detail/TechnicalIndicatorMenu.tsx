@@ -246,6 +246,7 @@ export default function TechnicalIndicatorMenu({
                   >
                     <input
                       type="checkbox"
+                      data-indicator-option={option.key}
                       checked={indicators[option.key]}
                       onChange={() => onToggleIndicator(option.key)}
                       className="mt-0.5"

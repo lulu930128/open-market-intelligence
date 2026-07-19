@@ -211,7 +211,7 @@ def _execute_tool(db: Session, tool_name: str, args: dict[str, Any]) -> dict[str
         )
 
     if tool_name == "us.read_intraday_trend":
-        return us_market_service.get_us_intraday_trend(symbol=symbol)
+        return us_market_service.get_us_intraday_trend(symbol=symbol, db=db)
 
     if tool_name == "us.refresh_daily_price":
         return us_market_service.refresh_us_daily_prices(

@@ -673,30 +673,84 @@ def _technical_report_from_points(
     change_5 = _pct_change(closes[-(short_window + 1)], latest) if len(closes) >= short_window + 1 else None
     change_20 = _pct_change(closes[-(medium_window + 1)], latest) if len(closes) >= medium_window + 1 else None
 
-    score = 0
-    if ma5 is not None:
-        score += 1 if latest >= ma5 else -1
-    if ma20 is not None:
-        score += 1 if latest >= ma20 else -1
-    if ma60 is not None:
-        score += 1 if latest >= ma60 else -1
-    if change_5 is not None:
-        score += 1 if change_5 > 0 else -1 if change_5 < 0 else 0
-    if change_20 is not None:
-        score += 1 if change_20 > 0 else -1 if change_20 < 0 else 0
+    is_intraday = timeframe == "today"
+    change_deadband_pct = 0.15 if is_intraday else 0.0
+    ma_deadband_pct = 0.10 if is_intraday else 0.0
+    range_signal_min_span_pct = 0.30 if is_intraday else 0.0
+
+    def direction_score(value: float | None, *, deadband: float) -> int:
+        if value is None or abs(value) <= deadband:
+            return 0
+        return 1 if value > 0 else -1
+
+    def ma_distance_pct(average: float | None) -> float | None:
+        return _pct_change(average, latest)
+
+    ma5_distance = ma_distance_pct(ma5)
+    ma20_distance = ma_distance_pct(ma20)
+    ma60_distance = ma_distance_pct(ma60)
+    factor_scores: dict[str, dict[str, Any]] = {
+        "ma_short": {
+            "observed_pct": ma5_distance,
+            "deadband_pct": ma_deadband_pct,
+            "score": direction_score(ma5_distance, deadband=ma_deadband_pct),
+        },
+        "ma_medium": {
+            "observed_pct": ma20_distance,
+            "deadband_pct": ma_deadband_pct,
+            "score": direction_score(ma20_distance, deadband=ma_deadband_pct),
+        },
+        "ma_long": {
+            "observed_pct": ma60_distance,
+            "deadband_pct": ma_deadband_pct,
+            "score": direction_score(ma60_distance, deadband=ma_deadband_pct),
+        },
+        "change_short": {
+            "observed_pct": change_5,
+            "deadband_pct": change_deadband_pct,
+            "score": direction_score(change_5, deadband=change_deadband_pct),
+        },
+        "change_medium": {
+            "observed_pct": change_20,
+            "deadband_pct": change_deadband_pct,
+            "score": direction_score(change_20, deadband=change_deadband_pct),
+        },
+    }
 
     recent_range = closes[-structure_window:] if len(closes) >= structure_window else closes
     recent_high = max(recent_range)
     recent_low = min(recent_range)
+    range_span_pct = _pct_change(recent_low, recent_high)
+    range_position_score = 0
+    position = None
     if recent_high > recent_low:
         position = (latest - recent_low) / (recent_high - recent_low)
-        if position >= 0.75:
-            score += 1
-        elif position <= 0.25:
-            score -= 1
+        if range_span_pct is not None and range_span_pct >= range_signal_min_span_pct:
+            if position >= 0.75:
+                range_position_score = 1
+            elif position <= 0.25:
+                range_position_score = -1
 
-    score = max(-5, min(5, score))
-    if score >= 4:
+    factor_scores["range_position"] = {
+        "position": position,
+        "range_span_pct": range_span_pct,
+        "minimum_span_pct": range_signal_min_span_pct,
+        "score": range_position_score,
+    }
+    raw_score = sum(int(factor["score"]) for factor in factor_scores.values())
+
+    score = max(-5, min(5, raw_score))
+    if is_intraday and score >= 4:
+        title = "盤中偏強"
+    elif is_intraday and score >= 1:
+        title = "盤中震盪偏強"
+    elif is_intraday and score <= -4:
+        title = "盤中偏弱"
+    elif is_intraday and score <= -1:
+        title = "盤中震盪偏弱"
+    elif is_intraday:
+        title = "盤中震盪"
+    elif score >= 4:
         title = "波段偏多"
     elif score >= 1:
         title = "偏多觀察"
@@ -708,11 +762,33 @@ def _technical_report_from_points(
         title = "方向未定"
 
     confidence = "high" if len(closes) >= long_window else "medium" if len(closes) >= medium_window else "low"
+    effect_size_pct = max(
+        (abs(value) for value in (change_1, change_5, change_20) if value is not None),
+        default=0.0,
+    )
+    confidence_reasons = [
+        f"point_count={len(closes)}",
+        f"max_observed_change={effect_size_pct:.4f}%",
+    ]
+    if is_intraday and effect_size_pct <= change_deadband_pct:
+        confidence = "low"
+        confidence_reasons.append(
+            f"盤中變動未超過 {change_deadband_pct:.2f}% deadband，不支持高信心方向判定。"
+        )
+    elif is_intraday and effect_size_pct <= change_deadband_pct * 2 and confidence == "high":
+        confidence = "medium"
+        confidence_reasons.append("盤中變動幅度有限，信心上限調降為 medium。")
+    else:
+        confidence_reasons.append("樣本數與變動幅度支持目前信心等級。")
     relation_parts = []
-    if ma20 is not None:
-        relation_parts.append(f"{'站上' if latest >= ma20 else '跌破'} MA{medium_window}")
-    if ma60 is not None:
-        relation_parts.append(f"{'站上' if latest >= ma60 else '跌破'} MA{long_window}")
+    if ma20_distance is not None:
+        relation_parts.append(
+            f"{'貼近' if abs(ma20_distance) <= ma_deadband_pct else '站上' if ma20_distance > 0 else '跌破'} MA{medium_window}"
+        )
+    if ma60_distance is not None:
+        relation_parts.append(
+            f"{'貼近' if abs(ma60_distance) <= ma_deadband_pct else '站上' if ma60_distance > 0 else '跌破'} MA{long_window}"
+        )
     relation_text = "、".join(relation_parts) if relation_parts else "均線資料有限"
     summary = (
         f"最新 {_format_number(latest)}，單期 {_format_pct(change_1)}、"
@@ -725,6 +801,7 @@ def _technical_report_from_points(
         "title": title,
         "summary": summary,
         "confidence": confidence,
+        "confidence_reasons": confidence_reasons,
         "point_count": len(closes),
         "latest_close": latest,
         "ma5": ma5,
@@ -733,6 +810,14 @@ def _technical_report_from_points(
         "change_1_pct": change_1,
         "change_5_pct": change_5,
         "change_20_pct": change_20,
+        "effect_size": {
+            "max_observed_change_pct": effect_size_pct,
+            "range_span_pct": range_span_pct,
+            "change_deadband_pct": change_deadband_pct,
+            "ma_deadband_pct": ma_deadband_pct,
+        },
+        "factor_scores": factor_scores,
+        "raw_score": raw_score,
     }
 
 

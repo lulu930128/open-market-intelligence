@@ -19,6 +19,14 @@ from app.db.models import (
     TaiwanFuturesQuoteSnapshot,
 )
 from app.http_client import new_session
+from app.market.trading_calendar import (
+    is_taiwan_trading_day,
+    latest_released_trading_day,
+    next_taiwan_trading_day,
+    previous_taiwan_trading_day,
+    taiwan_now,
+    taiwan_market_holiday_name,
+)
 
 
 TAIWAN_TZ = ZoneInfo("Asia/Taipei")
@@ -38,6 +46,14 @@ TAIWAN_FUTURES_SESSION_LABELS = {
     "after_hours": "夜盤",
 }
 TAIWAN_FUTURES_LIVE_QUOTE_MAX_AGE_SECONDS = 180
+TAIWAN_FUTURES_REGULAR_SESSION_START = time(8, 45)
+TAIWAN_FUTURES_REGULAR_SESSION_END = time(13, 45)
+TAIWAN_FUTURES_AFTER_HOURS_SESSION_START = time(15, 0)
+TAIWAN_FUTURES_AFTER_HOURS_SESSION_END = time(5, 0)
+TAIWAN_FUTURES_CLOSED_QUOTE_TOLERANCE_SECONDS = 15 * 60
+# TAIFEX regular trading closes at 13:45.  Keep a conservative publication
+# buffer before treating the current trade date's daily report as final.
+TAIWAN_FUTURES_DAILY_RELEASE_TIME = time(14, 30)
 TAIFEX_MARKET_TYPE_BY_SESSION = {
     "regular": "0",
     "after_hours": "1",
@@ -63,6 +79,13 @@ class TaiwanFuturesProduct:
     multiplier: int
     tick_size: float
     underlying_index_id: str = "TAIEX"
+
+
+@dataclass(frozen=True)
+class TaiwanFuturesSessionWindow:
+    session: str
+    starts_at: datetime
+    ends_at: datetime
 
 
 TAIWAN_FUTURES_PRODUCTS: dict[str, TaiwanFuturesProduct] = {
@@ -139,6 +162,42 @@ def normalize_taiwan_futures_quote_provider(provider: str | None = None) -> str:
     return normalized
 
 
+def resolve_taiwan_futures_daily_refresh_window(
+    *,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    lookback_days: int = 45,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Resolve a daily refresh range that contains released trade dates only."""
+
+    local_now = taiwan_now(now)
+    requested_end_date = end_date or local_now.date()
+    latest_released_trade_date = latest_released_trading_day(
+        release_time=TAIWAN_FUTURES_DAILY_RELEASE_TIME,
+        now=local_now,
+    )
+    effective_end_date = min(requested_end_date, latest_released_trade_date)
+    effective_start_date = start_date or (
+        effective_end_date - timedelta(days=max(lookback_days, 1))
+    )
+
+    if effective_start_date > effective_end_date:
+        raise ValueError(
+            "Taiwan futures daily data has not reached its official release window; "
+            f"latest released trade date is {latest_released_trade_date.isoformat()}."
+        )
+
+    return {
+        "requested_end_date": requested_end_date,
+        "effective_start_date": effective_start_date,
+        "effective_end_date": effective_end_date,
+        "latest_released_trade_date": latest_released_trade_date,
+        "skipped_unreleased_end_date": requested_end_date > effective_end_date,
+        "release_time": TAIWAN_FUTURES_DAILY_RELEASE_TIME.strftime("%H:%M"),
+    }
+
+
 def resolve_taiwan_futures_quote_provider(provider: str | None = None) -> str:
     normalized = normalize_taiwan_futures_quote_provider(provider)
     if normalized == "auto":
@@ -151,10 +210,12 @@ def resolve_taiwan_futures_session(session: str | None = None) -> str:
     if normalized != "auto":
         return normalized
 
-    now_time = datetime.now(TAIWAN_TZ).time()
-    if now_time >= time(15, 0) or now_time <= time(5, 0):
-        return "after_hours"
-    return "regular"
+    market_status = build_taiwan_futures_market_status()
+    return str(
+        market_status.get("current_session")
+        or market_status.get("last_session")
+        or "regular"
+    )
 
 
 def _ensure_taiwan_datetime(value: datetime | None) -> datetime | None:
@@ -165,8 +226,168 @@ def _ensure_taiwan_datetime(value: datetime | None) -> datetime | None:
     return value.astimezone(TAIWAN_TZ)
 
 
+def _canonical_taiwan_futures_quote_time(
+    quote_time: datetime | None,
+    *,
+    provider: str | None,
+    session: str | None,
+    trade_date: date | None,
+) -> datetime | None:
+    resolved_time = _ensure_taiwan_datetime(quote_time)
+    if resolved_time is None:
+        return None
+
+    # TAIFEX MIS keeps CDate on the calendar date when the night session began.
+    # After midnight, CTime is 00:00-05:00 but the real timestamp is the next day.
+    if (
+        provider == TAIFEX_PROVIDER
+        and session == "after_hours"
+        and resolved_time.time() <= TAIWAN_FUTURES_AFTER_HOURS_SESSION_END
+        and trade_date is not None
+        and resolved_time.date() == trade_date
+    ):
+        resolved_time += timedelta(days=1)
+    return resolved_time
+
+
 def _session_label(session: str | None) -> str:
     return TAIWAN_FUTURES_SESSION_LABELS.get(str(session or ""), str(session or "未知時段"))
+
+
+def _taiwan_futures_session_windows_for_trading_day(
+    trading_day: date,
+) -> tuple[TaiwanFuturesSessionWindow, TaiwanFuturesSessionWindow]:
+    regular_start = datetime.combine(
+        trading_day,
+        TAIWAN_FUTURES_REGULAR_SESSION_START,
+        tzinfo=TAIWAN_TZ,
+    )
+    regular_end = datetime.combine(
+        trading_day,
+        TAIWAN_FUTURES_REGULAR_SESSION_END,
+        tzinfo=TAIWAN_TZ,
+    )
+    after_hours_start = datetime.combine(
+        trading_day,
+        TAIWAN_FUTURES_AFTER_HOURS_SESSION_START,
+        tzinfo=TAIWAN_TZ,
+    )
+    after_hours_end = datetime.combine(
+        trading_day + timedelta(days=1),
+        TAIWAN_FUTURES_AFTER_HOURS_SESSION_END,
+        tzinfo=TAIWAN_TZ,
+    )
+    return (
+        TaiwanFuturesSessionWindow(
+            session="regular",
+            starts_at=regular_start,
+            ends_at=regular_end,
+        ),
+        TaiwanFuturesSessionWindow(
+            session="after_hours",
+            starts_at=after_hours_start,
+            ends_at=after_hours_end,
+        ),
+    )
+
+
+def _taiwan_futures_candidate_session_windows(
+    current_date: date,
+) -> list[TaiwanFuturesSessionWindow]:
+    trading_days = {
+        previous_taiwan_trading_day(current_date, include_value=False),
+        previous_taiwan_trading_day(current_date, include_value=True),
+        next_taiwan_trading_day(current_date, include_value=True),
+        next_taiwan_trading_day(current_date, include_value=False),
+    }
+    windows = [
+        window
+        for trading_day in trading_days
+        if is_taiwan_trading_day(trading_day)
+        for window in _taiwan_futures_session_windows_for_trading_day(trading_day)
+    ]
+    return sorted(windows, key=lambda window: window.starts_at)
+
+
+def _session_window_fields(
+    prefix: str,
+    window: TaiwanFuturesSessionWindow | None,
+) -> dict[str, Any]:
+    return {
+        f"{prefix}_session": window.session if window else None,
+        f"{prefix}_session_start_at": window.starts_at if window else None,
+        f"{prefix}_session_end_at": window.ends_at if window else None,
+    }
+
+
+def build_taiwan_futures_market_status(
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    current_time = _ensure_taiwan_datetime(now) or datetime.now(TAIWAN_TZ)
+    current_date = current_time.date()
+    windows = _taiwan_futures_candidate_session_windows(current_date)
+    current_window = next(
+        (
+            window
+            for window in windows
+            if window.starts_at <= current_time <= window.ends_at
+        ),
+        None,
+    )
+    last_window = max(
+        (window for window in windows if window.ends_at < current_time),
+        key=lambda window: window.ends_at,
+        default=None,
+    )
+    next_window = min(
+        (window for window in windows if window.starts_at > current_time),
+        key=lambda window: window.starts_at,
+        default=None,
+    )
+
+    holiday_name = taiwan_market_holiday_name(current_date)
+    if current_window is not None:
+        phase = current_window.session
+        reason = "trading"
+    elif holiday_name:
+        phase = "market_closed"
+        reason = "holiday"
+    elif current_date.weekday() >= 5:
+        phase = "market_closed"
+        reason = "weekend"
+    elif (
+        TAIWAN_FUTURES_AFTER_HOURS_SESSION_END
+        < current_time.time()
+        < TAIWAN_FUTURES_REGULAR_SESSION_START
+    ):
+        phase = "preopen"
+        reason = "preopen"
+    elif (
+        TAIWAN_FUTURES_REGULAR_SESSION_END
+        < current_time.time()
+        < TAIWAN_FUTURES_AFTER_HOURS_SESSION_START
+    ):
+        phase = "between_sessions"
+        reason = "between_sessions"
+    else:
+        phase = "market_closed"
+        reason = "market_closed"
+
+    return {
+        "status": "open" if current_window is not None else "closed",
+        "is_open": current_window is not None,
+        "phase": phase,
+        "reason": reason,
+        "timezone": str(TAIWAN_TZ),
+        "checked_at": current_time,
+        "holiday_name": holiday_name,
+        "regular_session": "08:45-13:45",
+        "after_hours_session": "15:00-05:00",
+        **_session_window_fields("current", current_window),
+        **_session_window_fields("last", last_window),
+        **_session_window_fields("next", next_window),
+    }
 
 
 def _format_age_message(age_seconds: int | None) -> str:
@@ -179,6 +400,30 @@ def _format_age_message(age_seconds: int | None) -> str:
     return f"報價已 {age_seconds // 3600} 小時未更新。"
 
 
+def _format_market_closed_message(market_status: dict[str, Any]) -> str:
+    reason = market_status.get("reason")
+    if reason == "weekend":
+        prefix = "目前週末休市"
+    elif reason == "holiday":
+        holiday_name = market_status.get("holiday_name")
+        prefix = f"目前因 {holiday_name} 休市" if holiday_name else "目前國定假日休市"
+    elif reason == "between_sessions":
+        prefix = "目前日盤與夜盤交接休市"
+    elif reason == "preopen":
+        prefix = "目前尚未開盤"
+    else:
+        prefix = "目前休市"
+
+    next_open = market_status.get("next_session_start_at")
+    next_session = market_status.get("next_session")
+    if isinstance(next_open, datetime):
+        return (
+            f"{prefix}；下次開盤 {next_open.strftime('%m/%d %H:%M')}"
+            f"（{_session_label(str(next_session or ''))}）。"
+        )
+    return f"{prefix}。"
+
+
 def build_taiwan_futures_quote_freshness(
     row: TaiwanFuturesQuoteSnapshot,
     *,
@@ -186,18 +431,62 @@ def build_taiwan_futures_quote_freshness(
     source_error: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    resolved_expected_session = resolve_taiwan_futures_session(expected_session or "auto")
-    quote_time = _ensure_taiwan_datetime(row.quote_time)
+    quote_time = _canonical_taiwan_futures_quote_time(
+        row.quote_time,
+        provider=row.provider,
+        session=row.session,
+        trade_date=row.trade_date,
+    )
     current_time = _ensure_taiwan_datetime(now) or datetime.now(TAIWAN_TZ)
+    market_status = build_taiwan_futures_market_status(now=current_time)
+    normalized_expected_session = normalize_taiwan_futures_session(expected_session or "auto")
+    resolved_expected_session = (
+        normalized_expected_session
+        if normalized_expected_session != "auto"
+        else str(
+            market_status.get("current_session")
+            or market_status.get("last_session")
+            or row.session
+        )
+    )
     age_seconds = (
         max(int((current_time - quote_time).total_seconds()), 0)
         if quote_time is not None
         else None
     )
     is_session_mismatch = row.session != resolved_expected_session
+    last_session_start_at = market_status.get("last_session_start_at")
+    last_session_end_at = market_status.get("last_session_end_at")
+    belongs_to_last_session = (
+        quote_time is not None
+        and isinstance(last_session_start_at, datetime)
+        and isinstance(last_session_end_at, datetime)
+        and last_session_start_at <= quote_time <= last_session_end_at
+        and row.session == market_status.get("last_session")
+    )
+    last_session_quote_lag_seconds = (
+        max(int((last_session_end_at - quote_time).total_seconds()), 0)
+        if belongs_to_last_session
+        and quote_time is not None
+        and isinstance(last_session_end_at, datetime)
+        else None
+    )
+    is_latest_completed_session_quote = (
+        belongs_to_last_session
+        and last_session_quote_lag_seconds is not None
+        and last_session_quote_lag_seconds
+        <= TAIWAN_FUTURES_CLOSED_QUOTE_TOLERANCE_SECONDS
+    )
     is_stale = (
         age_seconds is None
-        or age_seconds > TAIWAN_FUTURES_LIVE_QUOTE_MAX_AGE_SECONDS
+        or (
+            bool(market_status.get("is_open"))
+            and age_seconds > TAIWAN_FUTURES_LIVE_QUOTE_MAX_AGE_SECONDS
+        )
+        or (
+            not bool(market_status.get("is_open"))
+            and not is_latest_completed_session_quote
+        )
     )
 
     if source_error:
@@ -209,9 +498,22 @@ def build_taiwan_futures_quote_freshness(
             f"預期{_session_label(resolved_expected_session)}，"
             f"目前顯示{_session_label(row.session)}快取。"
         )
+    elif not market_status.get("is_open") and is_latest_completed_session_quote:
+        status_value = "closed"
+        message = _format_market_closed_message(market_status)
     elif is_stale:
         status_value = "stale"
-        message = _format_age_message(age_seconds)
+        if not market_status.get("is_open"):
+            market_message = _format_market_closed_message(market_status).rstrip("。")
+            if last_session_quote_lag_seconds is not None:
+                message = (
+                    f"{market_message}；最後報價距最近時段收盤"
+                    f" {last_session_quote_lag_seconds // 60} 分鐘。"
+                )
+            else:
+                message = f"{market_message}；最後報價未涵蓋最近完成的交易時段。"
+        else:
+            message = _format_age_message(age_seconds)
     else:
         status_value = "live"
         message = "即時報價已同步。"
@@ -225,6 +527,8 @@ def build_taiwan_futures_quote_freshness(
         "age_seconds": age_seconds,
         "message": message,
         "source_error": source_error,
+        "last_session_quote_lag_seconds": last_session_quote_lag_seconds,
+        "market_status": market_status,
     }
 
 
@@ -394,7 +698,13 @@ def parse_taifex_mis_quote_payload(
         ):
             continue
 
-        quote_time = _parse_taifex_datetime(item.get("CDate"), item.get("CTime"))
+        raw_trade_date = _parse_taifex_date(item.get("CDate"))
+        quote_time = _canonical_taiwan_futures_quote_time(
+            _parse_taifex_datetime(item.get("CDate"), item.get("CTime")),
+            provider=TAIFEX_PROVIDER,
+            session=resolved_session,
+            trade_date=raw_trade_date,
+        )
         last_price = _parse_float(item.get("CLastPrice"))
         if quote_time is None or last_price is None:
             continue
@@ -416,7 +726,7 @@ def parse_taifex_mis_quote_payload(
             "contract_symbol": str(item.get("SymbolID") or "").strip(),
             "contract_month": contract_month,
             "session": quote_session,
-            "trade_date": quote_time.date(),
+            "trade_date": raw_trade_date or quote_time.date(),
             "quote_time": quote_time,
             "open_price": _parse_float(item.get("COpenPrice")),
             "high_price": _parse_float(item.get("CHighPrice")),
@@ -1233,12 +1543,17 @@ def refresh_taiwan_futures_daily_bars(
     end_date: date | None = None,
     lookback_days: int = 45,
     force: bool = False,
+    now: datetime | None = None,
 ) -> list[TaiwanFuturesDailyBar]:
     normalized_symbols = normalize_taiwan_futures_symbols(symbols)
-    resolved_end_date = end_date or datetime.now(TAIWAN_TZ).date()
-    resolved_start_date = start_date or (resolved_end_date - timedelta(days=max(lookback_days, 1)))
-    if resolved_start_date > resolved_end_date:
-        raise ValueError("Taiwan futures daily start_date cannot be after end_date.")
+    refresh_window = resolve_taiwan_futures_daily_refresh_window(
+        start_date=start_date,
+        end_date=end_date,
+        lookback_days=lookback_days,
+        now=now,
+    )
+    resolved_start_date = refresh_window["effective_start_date"]
+    resolved_end_date = refresh_window["effective_end_date"]
 
     rows: list[TaiwanFuturesDailyBar] = []
     errors: list[str] = []
@@ -1316,7 +1631,22 @@ def get_latest_taiwan_futures_quotes(
         if resolved_provider != "auto":
             query = query.filter(TaiwanFuturesQuoteSnapshot.provider == resolved_provider)
 
-        row = query.order_by(TaiwanFuturesQuoteSnapshot.quote_time.desc()).first()
+        candidates = (
+            query.order_by(TaiwanFuturesQuoteSnapshot.fetched_at.desc())
+            .limit(512)
+            .all()
+        )
+        row = max(
+            candidates,
+            key=lambda candidate: _canonical_taiwan_futures_quote_time(
+                candidate.quote_time,
+                provider=candidate.provider,
+                session=candidate.session,
+                trade_date=candidate.trade_date,
+            )
+            or datetime.min.replace(tzinfo=TAIWAN_TZ),
+            default=None,
+        )
         if row is not None:
             rows.append(row)
     return rows
@@ -1425,7 +1755,12 @@ def taiwan_futures_quote_to_dict(
         "contract_month": row.contract_month,
         "session": row.session,
         "trade_date": row.trade_date,
-        "quote_time": row.quote_time,
+        "quote_time": _canonical_taiwan_futures_quote_time(
+            row.quote_time,
+            provider=row.provider,
+            session=row.session,
+            trade_date=row.trade_date,
+        ),
         "open_price": row.open_price,
         "high_price": row.high_price,
         "low_price": row.low_price,

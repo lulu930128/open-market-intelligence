@@ -46,6 +46,7 @@ import type {
   IntradayTrendPoint,
   MarketIndexSummary,
   TaiwanFuturesDailyBar,
+  TaiwanFuturesDailyRefresh,
   TaiwanFuturesIntradayBar,
   TaiwanFuturesQuote,
 } from "@/types/market";
@@ -206,6 +207,7 @@ function formatDateTime(value: string | null | undefined) {
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+    second: "2-digit",
     hour12: false,
   }).format(date);
 }
@@ -266,6 +268,7 @@ function formatFuturesVolume(value: number | null | undefined) {
 
 function quoteFreshnessToneClass(status: string | null | undefined) {
   if (status === "live") return "text-omi-success";
+  if (status === "closed") return "text-omi-info";
   if (status === "cached" || status === "session_mismatch" || status === "stale") {
     return "text-omi-warning";
   }
@@ -281,6 +284,7 @@ function quoteFreshnessBannerClass(status: string | null | undefined) {
 
 function quoteFreshnessLabel(t: TranslationFunction, status: string | null | undefined) {
   if (status === "live") return t("futures.freshness.live");
+  if (status === "closed") return t("futures.freshness.closed");
   if (status === "cached") return t("futures.freshness.cached");
   if (status === "session_mismatch") return t("futures.freshness.sessionMismatch");
   if (status === "stale") return t("futures.freshness.stale");
@@ -694,19 +698,20 @@ export default function TaiwanFuturesDetailPanel({
     const symbolKey = normalizedSymbol;
     let cancelled = false;
 
-    async function loadQuotes(silent = false) {
+    async function loadQuotes(silent = false): Promise<TaiwanFuturesQuote[] | null> {
       if (!silent) {
         setQuoteState("loading");
       }
 
       try {
         const nextQuotes = await fetchLatestQuotes(FUTURES_ORDER);
-        if (cancelled) return;
+        if (cancelled) return null;
 
         setQuotes(nextQuotes);
         setQuoteState("success");
+        return nextQuotes;
       } catch (error) {
-        if (cancelled) return;
+        if (cancelled) return null;
 
         setQuoteState("error");
         publishFuturesDataStatus({
@@ -714,6 +719,7 @@ export default function TaiwanFuturesDetailPanel({
           message: error instanceof Error ? error.message : "台指期報價讀取失敗",
           source: "台指期報價",
         });
+        return null;
       }
     }
 
@@ -782,13 +788,23 @@ export default function TaiwanFuturesDetailPanel({
           setDailyBars(cachedDailyBars);
         }
 
-        const refreshedDailyBars = await fetchJson<TaiwanFuturesDailyBar[]>(
-          `/api/market/tw-futures/${encodeURIComponent(symbolKey)}/daily`,
-          { limit: 180, refresh: true, lookback_days: 90, active_only: true }
+        const refreshResult = await requestJson<TaiwanFuturesDailyRefresh>(
+          `/api/market/tw-futures/${encodeURIComponent(symbolKey)}/daily/refresh`,
+          { method: "POST" },
+          { limit: 180, lookback_days: 90, active_only: true }
         );
         if (cancelled) return;
 
-        setDailyBars(refreshedDailyBars.length > 0 ? refreshedDailyBars : cachedDailyBars);
+        if (refreshResult.warning) {
+          publishFuturesDataStatus({
+            title: "期貨日 K 更新範圍受限",
+            message: refreshResult.warning,
+            source: "TAIFEX 日成交行情",
+            level: "warning",
+          });
+        }
+
+        setDailyBars(refreshResult.rows.length > 0 ? refreshResult.rows : cachedDailyBars);
         setDailyState("success");
       } catch (error) {
         if (cancelled) return;
@@ -822,12 +838,28 @@ export default function TaiwanFuturesDetailPanel({
       }
     }
 
-    void loadQuotes();
+    async function loadInitialData() {
+      const nextQuotes = await loadQuotes();
+      if (cancelled) return;
+
+      const selectedQuote = nextQuotes?.find((item) => item.symbol === symbolKey) ?? null;
+      const shouldRefreshIntraday =
+        selectedQuote?.freshness.market_status?.is_open ?? false;
+      await loadBars(false, shouldRefreshIntraday);
+    }
+
+    void loadInitialData();
     void loadDailyBars();
-    void loadBars(false, true);
     const liveRefreshTimer = window.setInterval(() => {
-      void loadQuotes(true);
-      void loadBars(true, false);
+      void (async () => {
+        const nextQuotes = await loadQuotes(true);
+        if (cancelled) return;
+
+        const selectedQuote = nextQuotes?.find((item) => item.symbol === symbolKey) ?? null;
+        if (selectedQuote?.freshness.market_status?.is_open) {
+          await loadBars(true, true);
+        }
+      })();
     }, FUTURES_INTRADAY_REFRESH_MS);
 
     return () => {
@@ -907,6 +939,7 @@ export default function TaiwanFuturesDetailPanel({
   const displayChangePct = quote?.change_pct ?? latestDailyBar?.change_pct ?? null;
   const quoteDirection = displayChange ?? displayChangePct;
   const quoteFreshness = quote?.freshness ?? null;
+  const futuresMarketStatus = quoteFreshness?.market_status ?? null;
   const quoteFreshnessStatus =
     quoteState === "loading" ? "loading" : quoteFreshness?.status ?? null;
   const quoteFreshnessMessage =
@@ -918,6 +951,14 @@ export default function TaiwanFuturesDetailPanel({
     quoteState === "loading" ? "text-omi-info" : quoteFreshnessToneClass(quoteFreshnessStatus);
   const quoteFreshnessBanner =
     quoteFreshness && quoteFreshness.status !== "live" ? quoteFreshness : null;
+  const displaySession = futuresMarketStatus?.is_open
+    ? futuresMarketStatus.current_session
+    : null;
+  const displaySessionLabel = futuresMarketStatus
+    ? futuresMarketStatus.is_open
+      ? formatSessionLabel(t, displaySession)
+      : t("futures.sessions.closed")
+    : formatSessionLabel(t, quote?.session);
   const recentBars = useMemo(() => bars.slice(-6).reverse(), [bars]);
   const chartLoading =
     chartTimeframe === "today" ? barsState === "loading" : dailyState === "loading";
@@ -1371,7 +1412,7 @@ export default function TaiwanFuturesDetailPanel({
                 <h2 className="mt-2 text-2xl font-black text-omi-text-strong">{t("futures.productTitle")}</h2>
                 <div className="mt-2 text-sm text-omi-text-muted">
                   TAIFEX · {displayProductName} ·{" "}
-                  {formatSessionLabel(t, quote?.session)} ·{" "}
+                  {displaySessionLabel} ·{" "}
                   {quote?.contract_month ?? latestDailyBar?.contract_month ?? t("futures.frontMonth")}
                 </div>
               </div>
@@ -1456,6 +1497,13 @@ export default function TaiwanFuturesDetailPanel({
                     : quoteFreshnessLabel(t, quoteFreshnessStatus)}
                 </div>
                 <div className="mt-1 text-xs text-omi-text-muted">{quoteFreshnessMessage}</div>
+                {futuresMarketStatus?.checked_at ? (
+                  <div className="mt-1 text-xs text-omi-text-muted">
+                    {t("futures.marketCheckedAt", {
+                      time: formatDateTime(futuresMarketStatus.checked_at),
+                    })}
+                  </div>
+                ) : null}
               </div>
               <div className="px-5 py-4">
                 <div className="text-xs font-semibold text-omi-text-muted">{t("futures.dailyK")}</div>

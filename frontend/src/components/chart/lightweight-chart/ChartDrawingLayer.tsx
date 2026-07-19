@@ -85,6 +85,10 @@ export default function ChartDrawingLayer({
     projectedDraftDrawing?.type === "priceRange"
       ? rectangleBounds(projectedDraftDrawing.anchorPoints ?? projectedDraftDrawing.points)
       : null;
+  const draftFibonacciBox =
+    projectedDraftDrawing?.type === "fibonacci"
+      ? rectangleBounds(projectedDraftDrawing.anchorPoints ?? projectedDraftDrawing.points)
+      : null;
 
   return (
     <>
@@ -870,29 +874,39 @@ export default function ChartDrawingLayer({
             }
 
             if (drawing.type === "fibonacci" && fibonacciLevels) {
+              const minX = Math.min(handles[0].x, handles[1].x);
+              const maxX = Math.max(handles[0].x, handles[1].x);
               const minY = Math.min(handles[0].y, handles[1].y);
               const maxY = Math.max(handles[0].y, handles[1].y);
+              const fibonacciWidth = Math.max(1, maxX - minX);
+              const levelLabelX = Math.max(
+                minX + 8,
+                Math.min(maxX - 104, overlaySize.width - 104)
+              );
 
               return (
                 <g
                   key={drawing.id}
+                  data-drawing-type="fibonacci"
+                  data-fibonacci-left={minX}
+                  data-fibonacci-right={maxX}
                   onContextMenu={(event) => handleDrawingContextMenu(event, drawing.id)}
                   onPointerEnter={() => handleDrawingPointerEnter(drawing.id)}
                   onPointerLeave={() => handleDrawingPointerLeave(drawing.id)}
                 >
                   <rect
-                    x={0}
+                    x={minX}
                     y={minY}
-                    width={overlaySize.width}
+                    width={fibonacciWidth}
                     height={Math.max(1, maxY - minY)}
                     fill={stroke}
                     opacity={active ? 0.07 : 0.04}
                     pointerEvents="none"
                   />
                   <rect
-                    x={0}
+                    x={minX}
                     y={minY}
-                    width={overlaySize.width}
+                    width={fibonacciWidth}
                     height={Math.max(12, maxY - minY)}
                     fill="transparent"
                     className="cursor-move"
@@ -907,9 +921,9 @@ export default function ChartDrawingLayer({
                     return (
                     <g key={`${drawing.id}-fib-${level.ratio}`} pointerEvents="none">
                       <line
-                        x1={0}
+                        x1={minX}
                         y1={level.y}
-                        x2={overlaySize.width}
+                        x2={maxX}
                         y2={level.y}
                         stroke={stroke}
                         strokeWidth={
@@ -922,7 +936,7 @@ export default function ChartDrawingLayer({
                         strokeDasharray={level.ratio === 0 || level.ratio === 1 ? undefined : "5 4"}
                         opacity={nearest && active ? 0.96 : level.ratio === 0 || level.ratio === 1 ? 0.95 : 0.72}
                       />
-                      <g transform={`translate(${Math.max(8, overlaySize.width - 104)}, ${Math.max(14, level.y - 9)})`}>
+                      <g transform={`translate(${levelLabelX}, ${Math.max(14, level.y - 9)})`}>
                         <rect
                           width={96}
                           height={18}
@@ -1143,14 +1157,16 @@ export default function ChartDrawingLayer({
                   </text>
                 </g>
               </g>
-            ) : projectedDraftDrawing.type === "fibonacci" && projectedDraftDrawing.fibonacciLevels ? (
+            ) : projectedDraftDrawing.type === "fibonacci" &&
+              projectedDraftDrawing.fibonacciLevels &&
+              draftFibonacciBox ? (
               <g pointerEvents="none">
                 {projectedDraftDrawing.fibonacciLevels.map((level) => (
                   <line
                     key={`draft-fib-${level.ratio}`}
-                    x1={0}
+                    x1={draftFibonacciBox.x}
                     y1={level.y}
-                    x2={overlaySize.width}
+                    x2={draftFibonacciBox.x + draftFibonacciBox.width}
                     y2={level.y}
                     stroke={omiChartColors.marketUp}
                     strokeWidth={1.25}

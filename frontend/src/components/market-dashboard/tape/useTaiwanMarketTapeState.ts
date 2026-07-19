@@ -56,6 +56,7 @@ export function useTaiwanMarketTapeState({
     initialSummary ? "success" : "idle"
   );
   const requestSeqRef = useRef(0);
+  const indexSummaryRefreshKeysRef = useRef(new Set<string>());
   const chipRefreshRequestKeysRef = useRef(new Set<string>());
   const onErrorRef = useRef(onError);
 
@@ -124,6 +125,27 @@ export function useTaiwanMarketTapeState({
     [load]
   );
 
+  const refreshIndexSummary = useCallback(
+    async (refreshKey: string) => {
+      if (indexSummaryRefreshKeysRef.current.has(refreshKey)) return;
+      indexSummaryRefreshKeysRef.current.add(refreshKey);
+
+      try {
+        await requestBackfillJob(
+          "/api/market/indices/summary/refresh-job",
+          { method: "POST" },
+          undefined,
+          { intervalMs: 1_000, timeoutMs: 120_000 }
+        );
+        await load({ silent: true });
+      } catch (error) {
+        indexSummaryRefreshKeysRef.current.delete(refreshKey);
+        onErrorRef.current("summary", error);
+      }
+    },
+    [load]
+  );
+
   useEffect(() => {
     if (!active) return;
 
@@ -155,6 +177,23 @@ export function useTaiwanMarketTapeState({
       }
     };
   }, [active, load]);
+
+  useEffect(() => {
+    if (!active || !summary) return;
+    if (
+      summary.refresh_recommended !== true &&
+      summary.cache_status !== "local_cache" &&
+      summary.cache_status !== "stale_memory_cache"
+    ) {
+      return;
+    }
+
+    const refreshKey = `${summary.cache_status ?? "unknown"}:${summary.as_of}`;
+    const timer = window.setTimeout(() => {
+      void refreshIndexSummary(refreshKey);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [active, refreshIndexSummary, summary]);
 
   useEffect(() => {
     if (!active) return;

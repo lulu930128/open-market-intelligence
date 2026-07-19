@@ -22,7 +22,10 @@ from app.ai.market_payload_contract import (
     payload_level as _market_payload_level,
 )
 from app.db.models import USDailyPrice, USSecCompanyFact, USStockMaster
+from app.market.calendar_status import build_us_calendar_status
+from app.observability.source_health_contract import summarize_source_health
 from app.us_market.sources import normalize_us_symbol
+from app.us_market.symbols import us_instrument_type
 
 
 @dataclass(frozen=True)
@@ -106,7 +109,23 @@ def _us_intraday_compact(
     }
 
 
-def _us_intraday_quote(intraday_summary: dict[str, Any] | None) -> dict[str, Any]:
+def _parse_market_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _us_intraday_quote(
+    intraday_summary: dict[str, Any] | None,
+    *,
+    calendar_status: dict[str, Any] | None = None,
+    instrument_type: str = "stock",
+) -> dict[str, Any]:
     if not isinstance(intraday_summary, dict) or not intraday_summary:
         return {}
 
@@ -125,19 +144,64 @@ def _us_intraday_quote(intraday_summary: dict[str, Any] | None) -> dict[str, Any
         change = float(price) - float(previous_close)
         change_pct = change / float(previous_close) * 100
 
+    market_calendar = calendar_status or build_us_calendar_status()
+    current_phase = str(market_calendar.get("phase") or "closed")
+    checked_at = _parse_market_datetime(market_calendar.get("checked_at"))
+    quote_time = _parse_market_datetime(latest.get("time"))
+    quote_trade_date = quote_time.date().isoformat() if quote_time is not None else None
+    latest_session_date = str(market_calendar.get("previous_trading_day") or "") or None
+    is_latest_session_quote = bool(
+        quote_trade_date and latest_session_date and quote_trade_date == latest_session_date
+    )
+    last_quote_session = str(
+        latest.get("session") or intraday_summary.get("session_phase") or ""
+    ) or None
+    open_phases = {"pre_market", "regular", "after_hours"}
+    quote_age_seconds = None
+    if checked_at is not None and quote_time is not None:
+        quote_age_seconds = max(0.0, (checked_at - quote_time).total_seconds())
+    is_live = bool(
+        is_latest_session_quote
+        and current_phase in open_phases
+        and last_quote_session == current_phase
+        and quote_age_seconds is not None
+        and quote_age_seconds <= 300
+    )
+
+    volume = latest.get("volume")
+    volume_status = "ready"
+    if instrument_type == "index":
+        volume = None
+        volume_status = "provider_unavailable"
+
     return {
         "source": intraday_summary.get("source") or "yahoo_finance_chart",
         "price": price,
         "change": change,
         "change_pct": change_pct,
-        "volume": latest.get("volume"),
+        "volume": volume,
+        "volume_status": volume_status,
+        "instrument_type": instrument_type,
         "quote_time": latest.get("time"),
-        "is_realtime": True,
+        # Compatibility alias.  It now means that this quote is live in the
+        # current market session, not merely that it came from a minute source.
+        "is_realtime": is_live,
+        "is_live": is_live,
+        "is_latest_session_quote": is_latest_session_quote,
+        "market_status": "open" if current_phase in open_phases else "closed",
+        "current_session_phase": current_phase,
+        "last_quote_session": last_quote_session,
+        "source_is_intraday": True,
+        "quote_age_seconds": quote_age_seconds,
         "latency_ms": None,
         "session_phase": intraday_summary.get("session_phase") or latest.get("session"),
         "provider": "yahoo_chart",
         "previous_close": previous_close,
         "previous_close_source": intraday_summary.get("previous_close_source"),
+        "previous_close_trade_date": intraday_summary.get("previous_close_trade_date"),
+        "previous_close_provider": intraday_summary.get("previous_close_provider"),
+        "regular_session_close": intraday_summary.get("regular_session_close"),
+        "regular_session_close_time": intraday_summary.get("regular_session_close_time"),
         "point_count": intraday_summary.get("point_count"),
     }
 
@@ -158,11 +222,23 @@ def _us_intraday_latest_time(intraday_summary: dict[str, Any] | None) -> str | N
     return str(time_value) if time_value else None
 
 
-def _us_daily_quote(latest_daily: USDailyPrice | None, *, intraday_requested: bool) -> dict[str, Any]:
+def _us_daily_quote(
+    latest_daily: USDailyPrice | None,
+    *,
+    intraday_requested: bool,
+    instrument_type: str = "stock",
+) -> dict[str, Any]:
+    volume = latest_daily.trade_volume if latest_daily else None
+    volume_status = "ready" if volume is not None else "missing"
+    if instrument_type == "index":
+        volume = None
+        volume_status = "provider_unavailable"
     quote = {
         "source": "us_daily_price",
         "price": latest_daily.close_price if latest_daily else None,
-        "volume": latest_daily.trade_volume if latest_daily else None,
+        "volume": volume,
+        "volume_status": volume_status,
+        "instrument_type": instrument_type,
         "quote_time": latest_daily.trade_date.isoformat() if latest_daily else None,
         "is_realtime": False,
         "latency_ms": None,
@@ -174,6 +250,36 @@ def _us_daily_quote(latest_daily: USDailyPrice | None, *, intraday_requested: bo
     return quote
 
 
+def _project_source_health_for_instrument(
+    source_health: dict[str, Any],
+    *,
+    instrument_type: str,
+) -> dict[str, Any]:
+    if instrument_type != "index":
+        return source_health
+
+    applicable_resources = {"symbol_master", "daily_price"}
+    entries = [
+        entry
+        for entry in source_health.get("entries") or []
+        if isinstance(entry, dict) and entry.get("resource") in applicable_resources
+    ]
+    projected = dict(source_health)
+    projected["entries"] = entries
+    projected["summary"] = summarize_source_health(
+        entries,
+        counted_statuses=("empty", "stale", "error"),
+    )
+    projected["not_applicable_resources"] = [
+        "profile",
+        "sec_facts",
+        "corporate_actions",
+        "short_volume",
+        "macro_series",
+    ]
+    return projected
+
+
 def read_us_stock_context(
     db: Session,
     *,
@@ -183,6 +289,8 @@ def read_us_stock_context(
     dependencies: USContextDependencies,
 ) -> dict[str, Any]:
     normalized_symbol = normalize_us_symbol(symbol)
+    instrument_type = us_instrument_type(normalized_symbol)
+    is_index = instrument_type == "index"
     tool_runs = tool_runs or []
     daily_limit = _market_data_int(market_data_params, "daily_limit", 10, minimum=1, maximum=200)
     timeframe = _market_data_str(market_data_params, "timeframe", "daily") or "daily"
@@ -202,23 +310,24 @@ def read_us_stock_context(
         symbol=normalized_symbol,
         limit=daily_limit,
     )
-    profile = dependencies.latest_profile(db, normalized_symbol)
+    profile = None if is_index else dependencies.latest_profile(db, normalized_symbol)
     sec_summary: dict[str, Any] | None = None
     sec_warning: str | None = None
-    try:
-        sec_summary = dependencies.us_market_service.get_us_sec_fundamental_summary(
-            db=db,
-            symbol=normalized_symbol,
-        )
-    except Exception as exc:
-        sec_warning = str(exc)
+    if not is_index:
+        try:
+            sec_summary = dependencies.us_market_service.get_us_sec_fundamental_summary(
+                db=db,
+                symbol=normalized_symbol,
+            )
+        except Exception as exc:
+            sec_warning = str(exc)
 
-    corporate_actions = dependencies.us_market_service.list_us_corporate_actions(
+    corporate_actions = [] if is_index else dependencies.us_market_service.list_us_corporate_actions(
         db=db,
         symbol=normalized_symbol,
         limit=10,
     )
-    short_volume_rows = dependencies.us_market_service.list_us_short_volumes(
+    short_volume_rows = [] if is_index else dependencies.us_market_service.list_us_short_volumes(
         db=db,
         symbol=normalized_symbol,
         limit=10,
@@ -228,9 +337,17 @@ def read_us_stock_context(
         db=db,
         symbol=normalized_symbol,
     )
+    source_health = _project_source_health_for_instrument(
+        source_health,
+        instrument_type=instrument_type,
+    )
     latest_daily = daily_rows[0] if daily_rows else None
     warnings = list(gaps.get("warnings") or [])
     missing = list(gaps.get("missing") or [])
+    if is_index:
+        warnings.append(
+            "Yahoo index volume is not a tradable-instrument volume series; volume is returned as unavailable."
+        )
     if sec_warning and "us_sec_company_fact" not in missing:
         missing.append("us_sec_company_fact")
     if sec_warning:
@@ -241,6 +358,7 @@ def read_us_stock_context(
             intraday_summary = dependencies.us_market_service.get_us_intraday_trend(
                 symbol=normalized_symbol,
                 session_scope=session_scope,
+                db=db,
             )
         except Exception as exc:
             if "us_intraday_trend" not in missing:
@@ -301,8 +419,9 @@ def read_us_stock_context(
         )
 
     _append_source_ref_once(source_refs, {"type": "table", "name": "us_daily_price"})
-    _append_source_ref_once(source_refs, {"type": "table", "name": "us_company_profile"})
-    _append_source_ref_once(source_refs, {"type": "table", "name": "us_sec_company_fact"})
+    if not is_index:
+        _append_source_ref_once(source_refs, {"type": "table", "name": "us_company_profile"})
+        _append_source_ref_once(source_refs, {"type": "table", "name": "us_sec_company_fact"})
     if corporate_actions:
         _append_source_ref_once(source_refs, {"type": "table", "name": "us_corporate_action"})
     if short_volume_rows:
@@ -311,13 +430,23 @@ def read_us_stock_context(
     if intraday_summary:
         _append_source_ref_once(source_refs, {"type": "external_or_cache", "name": "yahoo_finance_chart"})
 
-    intraday_quote = _us_intraday_quote(intraday_summary)
-    quote = intraday_quote or _us_daily_quote(latest_daily, intraday_requested=intraday_requested)
+    context_now = dependencies.now()
+    us_calendar_status = build_us_calendar_status(now=context_now)
+    intraday_quote = _us_intraday_quote(
+        intraday_summary,
+        calendar_status=us_calendar_status,
+        instrument_type=instrument_type,
+    )
+    quote = intraday_quote or _us_daily_quote(
+        latest_daily,
+        intraday_requested=intraday_requested,
+        instrument_type=instrument_type,
+    )
     intraday_bars = _us_intraday_compact(intraday_summary, market_data_params=market_data_params)
     intraday_as_of = _us_intraday_latest_time(intraday_summary)
     envelope = {
         "kind": "us_stock_context",
-        "generated_at": dependencies.now().isoformat(),
+        "generated_at": context_now.isoformat(),
         "as_of": intraday_as_of or (latest_daily.trade_date.isoformat() if latest_daily else None),
         "scope": {
             "target": {
@@ -325,12 +454,22 @@ def read_us_stock_context(
                 "id": normalized_symbol,
                 "label": (profile.company_name if profile else None) or (stock.security_name if stock else None),
                 "market": "US",
+                "instrument_type": instrument_type,
             }
         },
         "summary": {
             "latest_close": latest_daily.close_price if latest_daily else None,
             "latest_trade_date": latest_daily.trade_date.isoformat() if latest_daily else None,
-            "latest_volume": latest_daily.trade_volume if latest_daily else None,
+            "latest_volume": (
+                None if is_index else latest_daily.trade_volume if latest_daily else None
+            ),
+            "latest_volume_status": (
+                "provider_unavailable"
+                if is_index
+                else "ready"
+                if latest_daily and latest_daily.trade_volume is not None
+                else "missing"
+            ),
             "intraday": intraday_summary,
             "profile": _row_dict(
                 profile,
@@ -421,12 +560,20 @@ def read_us_stock_context(
             "source_health": source_health,
             "tool_runs": tool_runs,
         },
+        "data_limitations": (
+            [
+                "This target is an index; company profile, SEC company facts, corporate actions, and company short volume are not applicable.",
+                "Yahoo index volume is unavailable and is not replaced with ETF proxy volume or zero.",
+            ]
+            if is_index
+            else []
+        ),
         "missing": list(dict.fromkeys(missing)),
         "warnings": list(dict.fromkeys(warnings)),
         "source_refs": source_refs,
     }
     envelope["data"]["compact"] = _compact_market_context(
-        kind="us_stock_compact_evidence",
+        kind="us_index_compact_evidence" if is_index else "us_stock_compact_evidence",
         target=envelope["scope"]["target"],
         quote=quote,
         resources={

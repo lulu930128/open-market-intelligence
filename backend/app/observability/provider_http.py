@@ -173,6 +173,7 @@ def request(
     url: str,
     *,
     timeout_seconds: float | tuple[float, float],
+    request_callable: Callable[..., requests.Response] | None = None,
     **kwargs: Any,
 ) -> requests.Response:
     _validate_timeout(timeout_seconds)
@@ -181,8 +182,9 @@ def request(
 
     normalized_method = str(method or "GET").strip().upper() or "GET"
     source_url = str(url)
+    transport = request_callable or http_client.request
     try:
-        response = http_client.request(
+        response = transport(
             normalized_method,
             source_url,
             timeout=timeout_seconds,
@@ -243,9 +245,17 @@ def get(
     url: str,
     *,
     timeout_seconds: float | tuple[float, float],
+    request_callable: Callable[..., requests.Response] | None = None,
     **kwargs: Any,
 ) -> requests.Response:
-    return request(context, "GET", url, timeout_seconds=timeout_seconds, **kwargs)
+    return request(
+        context,
+        "GET",
+        url,
+        timeout_seconds=timeout_seconds,
+        request_callable=request_callable,
+        **kwargs,
+    )
 
 
 def post(
@@ -253,9 +263,17 @@ def post(
     url: str,
     *,
     timeout_seconds: float | tuple[float, float],
+    request_callable: Callable[..., requests.Response] | None = None,
     **kwargs: Any,
 ) -> requests.Response:
-    return request(context, "POST", url, timeout_seconds=timeout_seconds, **kwargs)
+    return request(
+        context,
+        "POST",
+        url,
+        timeout_seconds=timeout_seconds,
+        request_callable=request_callable,
+        **kwargs,
+    )
 
 
 def provider_http_failure(exc: BaseException) -> ProviderHttpFailure | None:

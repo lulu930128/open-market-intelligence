@@ -131,7 +131,7 @@ export function useTaiwanDataPanel({
   const [dataPanelLoading, setDataPanelLoading] = useState<DataPanelTab | null>(null);
   const [dataPanelMessage, setDataPanelMessage] = useState<string | null>(null);
   const [branchDays, setBranchDays] = useState(1);
-  const [chartReloadNonce, setChartReloadNonce] = useState(0);
+  const chartReloadNonce = 0;
   const activeStockIdRef = useRef(stockId);
   const activeDataTabRef = useRef(activeDataTab);
   const branchDaysRef = useRef(branchDays);
@@ -315,8 +315,9 @@ export function useTaiwanDataPanel({
         return false;
       }
       return (
-        latestMarginDate !== null ||
-        shareholding.some((row) => row.stock_id === targetStockId)
+        resolvedKeysRef.current.has(dataPanelCacheKey(targetStockId, "chips")) &&
+        (latestMarginDate !== null ||
+          shareholding.some((row) => row.stock_id === targetStockId))
       );
     }
 
@@ -364,7 +365,10 @@ export function useTaiwanDataPanel({
     );
   }
 
-  async function refreshDataTab(tab: DataPanelTab) {
+  async function refreshDataTab(
+    tab: DataPanelTab,
+    options?: { allowProviderRefresh?: boolean }
+  ) {
     if (!stockId) return;
 
     const targetStockId = stockId;
@@ -377,6 +381,7 @@ export function useTaiwanDataPanel({
     setDataPanelMessage(null);
     const panelRefreshProfile = getTaiwanDataPanelRefreshProfile(tab);
     const panelRefreshLabel = t(`stockDetail.tabs.${tab}`);
+    const allowProviderRefresh = options?.allowProviderRefresh === true;
 
     const runPanelRefresh = async (profile: TaiwanRefreshProfile, label: string) => {
       const job = await requestBackfillJob(
@@ -494,6 +499,22 @@ export function useTaiwanDataPanel({
 
     try {
       if (tab === "branch") {
+        const cachedBranchSummary = await fetchOptional<BrokerBranchTradeDailySummaryRead>(
+          `/api/market/broker-branches/${targetStockId}/daily`,
+          { ensure_daily: false, days: targetBranchDays }
+        );
+        if (activeStockIdRef.current !== targetStockId) return;
+
+        resolvedKeysRef.current.add(requestKey);
+        if (cachedBranchSummary) {
+          branchSummaryCacheRef.current.set(requestKey, cachedBranchSummary);
+        }
+        setBrokerBranchSummary(cachedBranchSummary);
+        if (!allowProviderRefresh) {
+          setDataPanelMessage(t("stockDetail.dataPanel.cache.localShown"));
+          return;
+        }
+
         const refreshJob = await runPanelRefresh(panelRefreshProfile, panelRefreshLabel);
         const branchSummary = await fetchJson<BrokerBranchTradeDailySummaryRead>(
           `/api/market/broker-branches/${targetStockId}/daily`,
@@ -529,6 +550,10 @@ export function useTaiwanDataPanel({
         if (initialCache.hasShareholding || initialCache.hasMargin) {
           resolvedKeysRef.current.add(requestKey);
         }
+        if (!allowProviderRefresh) {
+          resolvedKeysRef.current.add(requestKey);
+          return;
+        }
 
         try {
           const refreshJob = await runPanelRefresh(panelRefreshProfile, panelRefreshLabel);
@@ -552,6 +577,24 @@ export function useTaiwanDataPanel({
       }
 
       if (tab === "institutional") {
+        const cachedRows = await fetchJson<InstitutionalTradeDailyRead[]>(
+          `/api/market/institutional/${targetStockId}/history`,
+          {
+            lookback_days: institutionalLookbackDays,
+            limit: institutionalHistoryLimit,
+            ensure_history: false,
+          }
+        );
+        if (activeStockIdRef.current !== targetStockId) return;
+
+        resolvedKeysRef.current.add(requestKey);
+        setInstitutional(cachedRows[cachedRows.length - 1] ?? null);
+        setInstitutionalHistory(cachedRows);
+        if (!allowProviderRefresh) {
+          setDataPanelMessage(t("stockDetail.dataPanel.cache.localShown"));
+          return;
+        }
+
         const refreshJob = await runPanelRefresh(panelRefreshProfile, panelRefreshLabel);
         const rows = await fetchJson<InstitutionalTradeDailyRead[]>(
           `/api/market/institutional/${targetStockId}/history`,
@@ -571,6 +614,20 @@ export function useTaiwanDataPanel({
       }
 
       if (tab === "revenue") {
+        const cachedRows = await fetchJson<MonthlyRevenueRead[]>(
+          `/api/market/revenue/${targetStockId}/history`,
+          { limit: revenueHistoryLimit, ensure_history: false }
+        );
+        if (activeStockIdRef.current !== targetStockId) return;
+
+        resolvedKeysRef.current.add(requestKey);
+        setMonthlyRevenue(cachedRows[cachedRows.length - 1] ?? null);
+        setMonthlyRevenueHistory(cachedRows);
+        if (!allowProviderRefresh) {
+          setDataPanelMessage(t("stockDetail.dataPanel.cache.localShown"));
+          return;
+        }
+
         const refreshJob = await runPanelRefresh(panelRefreshProfile, panelRefreshLabel);
         const rows = await fetchJson<MonthlyRevenueRead[]>(
           `/api/market/revenue/${targetStockId}/history`,
@@ -582,6 +639,20 @@ export function useTaiwanDataPanel({
         setMonthlyRevenue(rows[rows.length - 1] ?? null);
         setMonthlyRevenueHistory(rows);
         setDataPanelMessage(formatBackfillOutcome(refreshJob, panelRefreshLabel, t));
+        return;
+      }
+
+      const cachedRows = await fetchJson<FinancialMetricQuarterlyRead[]>(
+        `/api/market/financials/${targetStockId}/history`,
+        { limit: financialHistoryLimit, ensure_history: false }
+      );
+      if (activeStockIdRef.current !== targetStockId) return;
+
+      resolvedKeysRef.current.add(requestKey);
+      setFinancialMetric(cachedRows[cachedRows.length - 1] ?? null);
+      setFinancialMetricHistory(cachedRows);
+      if (!allowProviderRefresh) {
+        setDataPanelMessage(t("stockDetail.dataPanel.cache.localShown"));
         return;
       }
 
@@ -607,63 +678,6 @@ export function useTaiwanDataPanel({
       }
     }
   }
-
-  useEffect(() => {
-    if (!stockId || isIndexProduct) return;
-
-    let cancelled = false;
-    const targetStockId = stockId;
-    const timer = window.setTimeout(() => {
-      void requestBackfillJob(
-        taiwanSelectionRefreshPath(targetStockId),
-        { method: "POST" },
-        { profile: "basic", sleep_seconds: subresourceRefreshSecondsRef.current },
-        {
-          intervalMs: 1_500,
-          timeoutMs: 600_000,
-          onUpdate: (job) => {
-            if (!cancelled && activeStockIdRef.current === targetStockId) {
-              const translate = tRef.current;
-              setDataPanelMessage(
-                formatPanelJobProgress(
-                  translate("stockDetail.jobs.fallbackLabels.basicAutoRefresh"),
-                  job,
-                  translate
-                )
-              );
-            }
-          },
-        }
-      )
-        .then((job) => {
-          if (cancelled || activeStockIdRef.current !== targetStockId) return;
-
-          const resultStatus = getJobResultStatus(job);
-          const translate = tRef.current;
-          if (resultStatus !== "error") {
-            setChartReloadNonce((value) => value + 1);
-          }
-          setDataPanelMessage(
-            resultStatus === "partial_success"
-              ? translate("stockDetail.dataPanel.basicAutoRefresh.partial")
-              : resultStatus === "error"
-                ? translate("stockDetail.dataPanel.basicAutoRefresh.error")
-                : translate("stockDetail.dataPanel.basicAutoRefresh.success")
-          );
-        })
-        .catch(() => {
-          if (cancelled || activeStockIdRef.current !== targetStockId) return;
-          setDataPanelMessage(
-            tRef.current("stockDetail.dataPanel.basicAutoRefresh.failedWithStatus")
-          );
-        });
-    }, 0);
-
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [isIndexProduct, stockId]);
 
   useEffect(() => {
     if (!stockId || isIndexProduct) return;
@@ -724,6 +738,8 @@ export function useTaiwanDataPanel({
 
   return {
     actions: {
+      refreshDataTab: (tab: DataPanelTab) =>
+        refreshDataTab(tab, { allowProviderRefresh: true }),
       selectDataTab: setActiveDataTab,
       setBranchDays,
       setStockInfo,

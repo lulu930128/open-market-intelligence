@@ -6,15 +6,19 @@ from typing import Any, Callable
 
 from sqlalchemy.orm import Session
 
-from app.ai.agentic_common import _json_ready, _json_value, _list_rows, _row_dict
+from app.ai.agentic_common import _json_ready, _json_value, _list_rows, _row_dict, _safe_int
 from app.ai.evidence_passport import build_evidence_passport
 from app.ai.market_context.common import (
     append_source_ref_once as _append_source_ref_once,
     compact_market_context as _compact_market_context,
 )
-from app.ai.market_context.regional_params import _market_data_int, _market_data_str
-from app.ai.market_payload_contract import payload_level as _market_payload_level
+from app.ai.market_context.regional_params import _market_data_bool, _market_data_int, _market_data_str
+from app.ai.market_payload_contract import (
+    intraday_point_limit as _market_intraday_point_limit,
+    payload_level as _market_payload_level,
+)
 from app.db.models import KRStockMaster
+from app.market.calendar_status import build_kr_calendar_status
 from app.kr_market.sources import (
     KR_INDEX_CONFIG_BY_ID,
     normalize_kr_index_id,
@@ -26,6 +30,124 @@ from app.kr_market.sources import (
 class KRContextDependencies:
     kr_market_service: Any
     now: Callable[[], datetime]
+
+
+def _latest_tool_result(
+    tool_runs: list[dict[str, Any]],
+    tool_name: str,
+) -> dict[str, Any] | None:
+    for run in reversed(tool_runs):
+        if run.get("tool") != tool_name or run.get("status") != "success":
+            continue
+        summary = run.get("result_summary")
+        if isinstance(summary, dict):
+            return summary
+    return None
+
+
+def _kr_intraday_latest(
+    intraday_summary: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(intraday_summary, dict) or not intraday_summary:
+        return None
+    latest = intraday_summary.get("latest_point")
+    if isinstance(latest, dict):
+        return latest
+    points = intraday_summary.get("points")
+    if isinstance(points, list) and points and isinstance(points[-1], dict):
+        return points[-1]
+    return None
+
+
+def _kr_intraday_quote(
+    intraday_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    latest = _kr_intraday_latest(intraday_summary)
+    if latest is None:
+        return {}
+    price = latest.get("price")
+    previous_close = intraday_summary.get("previous_close") if intraday_summary else None
+    change = None
+    change_pct = None
+    if isinstance(price, (int, float)) and isinstance(previous_close, (int, float)) and previous_close:
+        change = float(price) - float(previous_close)
+        change_pct = change / float(previous_close) * 100
+    return {
+        "source": intraday_summary.get("source") or "unavailable",
+        "price": price,
+        "change": change,
+        "change_pct": change_pct,
+        "volume": latest.get("cumulative_volume", latest.get("volume")),
+        "quote_time": latest.get("time"),
+        "is_realtime": True,
+        "session_phase": intraday_summary.get("session_phase"),
+        "previous_close": previous_close,
+        "previous_close_source": intraday_summary.get("previous_close_source"),
+        "point_count": intraday_summary.get("point_count"),
+    }
+
+
+def _kr_intraday_compact(
+    intraday_summary: dict[str, Any] | None,
+    *,
+    market_data_params: dict[str, Any] | None,
+) -> dict[str, Any]:
+    payload_level = _market_payload_level(market_data_params)
+    point_limit = _market_intraday_point_limit(market_data_params)
+    raw_points = (
+        intraday_summary.get("points")
+        if isinstance(intraday_summary, dict) and isinstance(intraday_summary.get("points"), list)
+        else []
+    )
+    points = [point for point in raw_points if isinstance(point, dict)]
+    latest = _kr_intraday_latest(intraday_summary)
+    if not isinstance(intraday_summary, dict) or not intraday_summary:
+        return {
+            "enabled": False,
+            "payload_level": payload_level,
+            "bar_limit": point_limit,
+            "series": {},
+            "warnings": ["KR intraday trend was not requested or did not return data."],
+        }
+    compact_points = points[-point_limit:]
+    point_count = _safe_int(
+        intraday_summary.get("point_count"),
+        len(points),
+        minimum=0,
+        maximum=100000,
+    )
+    return {
+        "enabled": True,
+        "payload_level": payload_level,
+        "bar_limit": point_limit,
+        "series": {
+            "1m": {
+                "interval": "1m",
+                "source": intraday_summary.get("source") or "unavailable",
+                "session_scope": intraday_summary.get("session_scope") or "regular",
+                "session_phase": intraday_summary.get("session_phase"),
+                "point_count": point_count,
+                "returned_point_count": len(compact_points),
+                "latest": latest,
+                "points": compact_points,
+                "to_time": latest.get("time") if latest else None,
+                "previous_close": intraday_summary.get("previous_close"),
+                "previous_close_source": intraday_summary.get("previous_close_source"),
+                "previous_close_trade_date": intraday_summary.get("previous_close_trade_date"),
+                "source_url": intraday_summary.get("source_url"),
+                "is_partial": bool(intraday_summary.get("is_partial")),
+            }
+        },
+        "warnings": list(intraday_summary.get("warnings") or []),
+    }
+
+
+def _kr_expected_intraday_date(calendar_status: dict[str, Any]) -> str | None:
+    if calendar_status.get("is_trading_day") and calendar_status.get("phase") != "pre_market_pending":
+        value = calendar_status.get("date")
+    else:
+        value = calendar_status.get("previous_trading_day")
+    return str(value) if value else None
 
 
 def read_kr_stock_context(
@@ -41,7 +163,10 @@ def read_kr_stock_context(
     timeframe = _market_data_str(market_data_params, "timeframe", "daily") or "daily"
     bars = _market_data_int(market_data_params, "bars", 90, minimum=1, maximum=5000)
     provider = _market_data_str(market_data_params, "provider", "auto") or "auto"
+    include_intraday = _market_data_bool(market_data_params, "include_intraday", False)
     payload_level = _market_payload_level(market_data_params)
+    intraday_summary = _latest_tool_result(tool_runs, "kr.read_intraday_trend")
+    calendar_status = build_kr_calendar_status(now=dependencies.now())
     warnings: list[str] = [
         "Korea AI context is local-cache only; it does not fetch external data on the read path.",
     ]
@@ -54,6 +179,7 @@ def read_kr_stock_context(
     investor_rows: list[Any] = []
     resource_summary: dict[str, Any] | None = None
     source_health: dict[str, Any] = {}
+    normalized_id = ""
 
     if is_index:
         normalized_id = normalize_kr_index_id(symbol)
@@ -304,15 +430,73 @@ def read_kr_stock_context(
             "tool_runs": tool_runs,
         }
 
+    if include_intraday and intraday_summary is None:
+        try:
+            if is_index:
+                intraday_summary = dependencies.kr_market_service.get_kr_index_intraday_trend(
+                    db=db,
+                    index_id=normalized_id,
+                )
+            else:
+                intraday_summary = dependencies.kr_market_service.get_kr_stock_intraday_trend(
+                    db=db,
+                    symbol=normalized_id,
+                )
+        except Exception as exc:
+            missing.append("kr_intraday_trend")
+            warnings.append(f"KR intraday trend unavailable: {exc}")
+
+    intraday_requested = include_intraday or intraday_summary is not None
+    intraday_quote = _kr_intraday_quote(intraday_summary)
+    intraday_bars = _kr_intraday_compact(
+        intraday_summary,
+        market_data_params=market_data_params,
+    )
+    intraday_latest = _kr_intraday_latest(intraday_summary)
+    intraday_as_of = (
+        str(intraday_latest.get("time"))
+        if isinstance(intraday_latest, dict) and intraday_latest.get("time")
+        else None
+    )
+    intraday_trade_date = intraday_as_of[:10] if intraday_as_of else None
+    expected_intraday_date = _kr_expected_intraday_date(calendar_status)
+    intraday_is_current = bool(
+        intraday_trade_date
+        and expected_intraday_date
+        and intraday_trade_date == expected_intraday_date
+    )
+    if intraday_requested and not intraday_quote:
+        if "kr_intraday_trend" not in missing:
+            missing.append("kr_intraday_trend")
+    elif intraday_requested and not intraday_is_current:
+        warnings.append(
+            "KR intraday trend is stale: "
+            f"latest={intraday_trade_date or 'missing'}, "
+            f"expected={expected_intraday_date or 'unknown'}."
+        )
+    for warning in (intraday_summary or {}).get("warnings") or []:
+        warnings.append(str(warning))
+    if intraday_quote:
+        _append_source_ref_once(
+            source_refs,
+            {
+                "type": "external_or_cache",
+                "name": intraday_summary.get("source") or "kr_intraday",
+                "symbol": normalized_id,
+                "url": intraday_summary.get("source_url"),
+            },
+        )
+    data["intraday"] = _json_ready(intraday_summary)
+
     data["compact"] = _compact_market_context(
         kind="kr_index_compact_evidence" if is_index else "kr_stock_compact_evidence",
         target=target,
         quote={
-            "source": "kr_index_daily_price" if is_index else "kr_daily_price",
-            "price": latest_close,
-            "volume": latest_volume,
-            "quote_time": latest_trade_date,
-            "is_realtime": False,
+            "source": intraday_quote.get("source") or ("kr_index_daily_price" if is_index else "kr_daily_price"),
+            "price": intraday_quote.get("price", latest_close),
+            "volume": intraday_quote.get("volume", latest_volume),
+            "quote_time": intraday_quote.get("quote_time", latest_trade_date),
+            "is_realtime": bool(intraday_quote),
             "provider": provider,
         },
         resources={
@@ -324,29 +508,50 @@ def read_kr_stock_context(
             "fundamental_rows": len(fundamentals),
             "investor_trade_rows": len(investor_rows),
             "source_health": (source_health.get("summary") if isinstance(source_health, dict) else {}),
+            "include_intraday": intraday_requested,
+            "intraday_available": bool(intraday_quote),
         },
         freshness={
-            "price": "current" if latest_trade_date else "missing",
+            "price": "current" if intraday_is_current or latest_trade_date else "missing",
+            "intraday": (
+                "current"
+                if intraday_is_current
+                else "stale"
+                if intraday_quote and intraday_requested
+                else "missing"
+                if intraday_requested
+                else "not_requested"
+            ),
             "fundamentals": "current" if fundamentals else "missing" if not is_index else "not_applicable",
             "investor_trading": "current" if investor_rows else "missing" if not is_index else "not_applicable",
         },
         payload_level=payload_level,
     )
+    data["compact"]["intraday_bars"] = intraday_bars
     envelope = {
         "kind": "kr_index_context" if is_index else "kr_stock_context",
         "generated_at": dependencies.now().isoformat(),
-        "as_of": latest_trade_date,
+        "as_of": intraday_as_of or latest_trade_date,
         "scope": {"target": target},
         "summary": {
-            "latest_close": latest_close,
+            "latest_close": intraday_quote.get("price", latest_close),
             "latest_trade_date": latest_trade_date,
-            "latest_volume": latest_volume,
+            "latest_volume": intraday_quote.get("volume", latest_volume),
+            "intraday": {
+                "requested": intraday_requested,
+                "available": bool(intraday_quote),
+                "is_current": intraday_is_current if intraday_requested else None,
+                "expected_trade_date": expected_intraday_date,
+                "latest": intraday_latest,
+                "point_count": (intraday_summary or {}).get("point_count"),
+                "source": (intraday_summary or {}).get("source"),
+            },
             "source_health": source_health.get("summary") if isinstance(source_health, dict) else {},
         },
         "data": data,
         "data_limitations": [
             "No KR-specific AI decision adapter or persisted LLM report path is enabled yet.",
-            "KR context is based on bounded local-cache evidence unless a separate refresh endpoint is called.",
+            "KR daily/fundamental context uses local cache; optional intraday is a bounded provider read only when server policy allows external fetch.",
         ],
         "missing": list(dict.fromkeys(missing)),
         "warnings": list(dict.fromkeys(warnings)),
@@ -355,11 +560,24 @@ def read_kr_stock_context(
     freshness_result = {
         "kind": "kr_index_freshness" if is_index else "kr_stock_freshness",
         "scope": {"target": target},
-        "is_current": latest_trade_date is not None,
-        "refresh_recommended": latest_trade_date is None,
+        "is_current": bool(intraday_is_current or latest_trade_date),
+        "refresh_recommended": not bool(intraday_is_current or latest_trade_date),
         "missing": envelope["missing"],
         "warnings": envelope["warnings"],
-        "as_of": latest_trade_date,
+        "as_of": intraday_as_of or latest_trade_date,
+        "intraday": {
+            "status": (
+                "current"
+                if intraday_is_current
+                else "stale"
+                if intraday_quote and intraday_requested
+                else "missing"
+                if intraday_requested
+                else "not_requested"
+            ),
+            "latest_trade_date": intraday_trade_date,
+            "expected_trade_date": expected_intraday_date,
+        },
     }
     envelope["evidence_passport"] = build_evidence_passport(
         kind=envelope["kind"],

@@ -98,6 +98,20 @@ export const jaJP = {
   },
   dashboard: {
     ...zhTW.dashboard,
+    connection: {
+      offlineTitle: "OMI backend の接続が切れています",
+      offlineMessage:
+        "読み込み済みの内容は保持しています。launcher の復旧を待つか、launcher/backend log を確認してください。",
+      operationFailedTitle: "操作は完了していません",
+      partialTitle: "一部の初期データを読み込めませんでした",
+      partialMessage:
+        "初期リクエスト {count} 件が失敗しました。{reason} 再読み込みして再試行できます。",
+      issueTimeout: "Backend の応答がタイムアウトしました。",
+      issueUnavailable: "現在 backend に接続できません。",
+      issueRequestFailed: "Backend がリクエストを拒否したか、完了できませんでした。",
+      issueInvalidResponse: "Backend から解析できないデータが返されました。",
+      reload: "再読み込み",
+    },
     freshness: {
       waitingMarket: "{marketLabel}データ状態",
       waitingMarketDate: "{targetDate} {marketLabel}データ状態",
@@ -109,6 +123,13 @@ export const jaJP = {
       tradeValueYi: "売買代金(億)",
       advanceDecline: "上昇 / 下落",
       breadth: "市場幅",
+      twseFullBreadth: "上場全市場の市場幅",
+      tpexFullBreadth: "店頭全市場の市場幅",
+      registeredBreadth: "上場リアルタイム市場幅（登録銘柄範囲）",
+      sampleBreadth: "OMI サンプル銘柄の市場幅",
+      localDatasetBreadth: "ローカルデータセットの市場幅",
+      breadthFailed: "市場幅データの取得に失敗",
+      breadthPartial: "市場幅データが一部欠落",
       advancePct: "{value}% 上昇",
       coverage: "データカバレッジ",
       coverageValue: "{current} / {active}",
@@ -723,6 +744,7 @@ export const jaJP = {
     },
     types: {
       ...zhTW.jobs.types,
+      "scheduler.taiwan_derivatives_refresh": "台湾先物の引け後デリバティブ更新",
       "jp_market.watchlist_resource_refresh": "日本株ウォッチリストデータ補完",
       "jp_market.scheduler.watchlist_resource_refresh":
         "定期日本株ウォッチリストデータ補完",
@@ -1612,6 +1634,7 @@ export const jaJP = {
     tradeDate: "取引日",
     quoteTime: "気配時刻",
     dataStatus: "データ状態",
+    marketCheckedAt: "市場状態の判定 {time}",
     dailyK: "日足データ",
     backfilling: "補完中",
     bars: "{count} 本",
@@ -1641,9 +1664,11 @@ export const jaJP = {
       unknown: "不明セッション",
       regular: "日中",
       afterHours: "夜間",
+      closed: "休場",
     },
     freshness: {
       live: "同期済み",
+      closed: "休場中",
       cached: "キャッシュ使用",
       sessionMismatch: "セッション不一致",
       stale: "データ古い",

@@ -14,6 +14,7 @@ from app.db.models import (
     InstitutionalTradeDaily,
     MarketChipDaily,
     MarketDailyPrice,
+    ShareholdingDistributionWeekly,
     SourceHealthSnapshot,
     StockMaster,
 )
@@ -135,6 +136,40 @@ class TaiwanSourceHealthTests(unittest.TestCase):
         )
         self.assertEqual(snapshot.latest_event_id, event.id)
         self.assertEqual(snapshot.status, "stale")
+
+    def test_weekly_shareholding_uses_latest_conservative_friday(self) -> None:
+        self.db.add(
+            StockMaster(
+                stock_id="2330",
+                stock_name="TSMC",
+                market="TWSE",
+                instrument_type="stock",
+            )
+        )
+        self.db.add(
+            ShareholdingDistributionWeekly(
+                source_id=1,
+                raw_result_id=1,
+                data_date=date(2026, 7, 10),
+                stock_id="2330",
+                stock_name="TSMC",
+                holding_level="1",
+                holding_level_order=1,
+            )
+        )
+        self.db.commit()
+
+        health = build_taiwan_source_health(
+            self.db,
+            stock_id="2330",
+            dataset="shareholding_distribution_weekly",
+            now=datetime(2026, 7, 18, 12, 0, tzinfo=ZoneInfo("Asia/Taipei")),
+        )
+
+        entry = health["entries"][0]
+        self.assertEqual(entry["expected_data_date"], "2026-07-17")
+        self.assertEqual(entry["latest_data_date"], "2026-07-10")
+        self.assertEqual(entry["status"], "stale")
 
     def test_source_health_marks_equity_only_resources_not_applicable_for_etf(self) -> None:
         self.db.add(

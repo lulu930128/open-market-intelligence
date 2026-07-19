@@ -7,6 +7,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.ai.evidence_passport import build_evidence_passport
+from app.ai.market_payload_contract import slot_envelope
 from app.db.models import (
     BrokerBranchTradeDaily,
     FinancialMetricQuarterly,
@@ -108,12 +109,45 @@ def read_data_freshness(
     warnings = [
         "Freshness is based on the local OMI database, not direct exchange availability.",
     ]
+    slots = {
+        name: slot_envelope(
+            status="ready" if info["latest"] and info["row_count"] else "missing",
+            capability=f"local_table_{name}",
+            payload_ref=f"tables.{name}",
+            payload_level="compact",
+            as_of=info["latest"],
+            missing=[name] if not info["latest"] or not info["row_count"] else None,
+        )
+        for name, info in tables.items()
+    }
+    slots["data_quality"] = slot_envelope(
+        status="partial" if missing else "ready",
+        capability="local_database_coverage",
+        payload_ref="tables",
+        payload_level="compact",
+        priority="core",
+        missing=missing,
+        warnings=["table availability does not prove exchange-current freshness"],
+    )
+    compact = {
+        "kind": "data_freshness_compact_evidence",
+        "version": "market_compact_evidence.v1",
+        "payload_level": "compact",
+        "target": {"type": "data_freshness", "id": stock_id, "market": "TW"},
+        "tables": tables,
+        "freshness_by_domain": {
+            name: slot["status"]
+            for name, slot in slots.items()
+            if name != "data_quality"
+        },
+        "slots": slots,
+    }
     envelope = {
         "kind": "data_freshness",
         "generated_at": now(),
         "as_of": _latest_date_string([info["latest"] for info in tables.values()]),
         "scope": {"stock_id": stock_id},
-        "data": {"tables": tables},
+        "data": {"tables": tables, "compact": compact, "slots": slots},
         "missing": missing,
         "warnings": warnings,
         "source_refs": [{"type": "database", "name": "open_market_intelligence.db"}],

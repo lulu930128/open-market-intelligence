@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
+from app.ai.question_capabilities import tool_capability
+
 
 SOURCE_GRADE_ORDER = {
     "official": 0,
@@ -191,7 +193,11 @@ def _freshness_status(
     return "unknown"
 
 
-def _tool_run_penalty(tool_runs: list[dict[str, Any]] | None) -> tuple[int, list[str]]:
+def _tool_run_penalty(
+    tool_runs: list[dict[str, Any]] | None,
+    *,
+    required_capabilities: set[str] | None = None,
+) -> tuple[int, list[str]]:
     penalty = 0
     flags: list[str] = []
     for run in tool_runs or []:
@@ -199,6 +205,9 @@ def _tool_run_penalty(tool_runs: list[dict[str, Any]] | None) -> tuple[int, list
             continue
         status = str(run.get("status") or "").lower()
         tool = str(run.get("tool") or run.get("name") or "tool")
+        capability = tool_capability(tool)
+        if required_capabilities is not None and capability not in required_capabilities:
+            continue
         if status in {"failed", "error"}:
             penalty += 10
             flags.append(f"{tool} 執行失敗")
@@ -273,19 +282,60 @@ def build_evidence_passport(
     tool_runs: list[dict[str, Any]] | None = None,
     analysis: dict[str, Any] | None = None,
     confidence: str | None = None,
+    required_capabilities: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> dict[str, Any]:
-    compact_missing = _compact_strings(missing)
-    compact_warnings = _compact_strings(warnings)
+    all_missing = _compact_strings(missing)
+    all_warnings = _compact_strings(warnings)
+    required_set = (
+        {str(value) for value in required_capabilities if str(value).strip()}
+        if required_capabilities is not None
+        else None
+    )
+    compact_missing = (
+        [value for value in all_missing if value in required_set]
+        if required_set is not None
+        else all_missing
+    )
+    warning_hints = {
+        "us_daily_price": ("daily price", "daily cache", "日線"),
+        "us_intraday_trend": ("intraday", "minute", "即時", "盤中", "行情"),
+        "us_company_profile": ("company profile", "公司資料"),
+        "us_sec_company_fact": ("sec", "fundamental", "財報", "基本面"),
+        "us_corporate_action": ("dividend", "split", "股利", "拆股", "除息"),
+    }
+    if required_set is None:
+        compact_warnings = all_warnings
+    else:
+        relevant_hints = tuple(
+            hint.casefold()
+            for capability in required_set
+            for hint in warning_hints.get(capability, ())
+        )
+        compact_warnings = [
+            warning
+            for warning in all_warnings
+            if any(hint in warning.casefold() for hint in relevant_hints)
+        ]
+    scoped_freshness = freshness
+    if required_set is not None and isinstance(freshness, dict):
+        scoped_freshness = dict(freshness)
+        scoped_freshness["missing"] = compact_missing
+        scoped_freshness["warnings"] = compact_warnings
+        scoped_freshness["is_current"] = not compact_missing
+        scoped_freshness["refresh_recommended"] = bool(compact_missing)
     breakdown = _source_breakdown(source_refs)
     source_grade = _combined_source_grade(breakdown)
     data_freshness = _freshness_status(
-        freshness=freshness,
+        freshness=scoped_freshness,
         missing=compact_missing,
         warnings=compact_warnings,
         as_of=as_of,
     )
     selected_confidence = _analysis_confidence(analysis, confidence)
-    tool_penalty, tool_flags = _tool_run_penalty(tool_runs)
+    tool_penalty, tool_flags = _tool_run_penalty(
+        tool_runs,
+        required_capabilities=required_set,
+    )
 
     score = 100
     score -= {
@@ -352,4 +402,7 @@ def build_evidence_passport(
         "source_breakdown": breakdown,
         "missing": compact_missing,
         "warnings": compact_warnings,
+        "required_capabilities": sorted(required_set) if required_set is not None else None,
+        "ignored_missing": [value for value in all_missing if value not in compact_missing],
+        "ignored_warnings": [value for value in all_warnings if value not in compact_warnings],
     }

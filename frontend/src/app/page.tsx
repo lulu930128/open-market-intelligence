@@ -1,6 +1,9 @@
 import MarketDashboardClient from "@/components/MarketDashboardClient";
 import { normalizeDashboardRadarMode } from "@/components/market-dashboard/selection/dashboardRoutes";
-import { getApiProxyTarget } from "@/lib/serverApiConfig";
+import {
+  backendConnectionIssueCode,
+  fetchServerBackendJson,
+} from "@/lib/serverBackend";
 import type {
   ChartPoint,
   JPWatchlistGroupNode,
@@ -17,10 +20,9 @@ import type {
   WatchlistGroupRadarRead,
   WatchlistGroupNode,
   WatchlistItemRead,
-  WatchlistRadarMode,
 } from "@/types/market";
+import type { BackendConnectionIssueCode } from "@/types/runtime";
 
-const apiProxyTarget = getApiProxyTarget();
 const indexProductIds = new Set(["TAIEX", "TPEX"]);
 const futuresProductIds = new Set(["TXF", "MXF", "TMF"]);
 
@@ -57,23 +59,6 @@ function normalizeQuoteDepthPreviewMode(
   return null;
 }
 
-function watchlistRadarPath(groupId: number, mode: WatchlistRadarMode) {
-  const params = new URLSearchParams({
-    include_children: "true",
-    enabled_only: "true",
-    mode,
-    max_results: "20",
-    ma_windows: "5,20,60",
-    volume_ma_windows: "5,20",
-    calculation_limit: "100",
-    volume_ratio_threshold: "1.5",
-    use_intraday: "false",
-    intraday_limit: "30",
-  });
-
-  return `/api/watchlists/groups/${groupId}/radar?${params.toString()}`;
-}
-
 function shouldUseTaiwanOhlcIntraday(calendarStatus: MarketCalendarStatusEnvelope | null) {
   const twStatus = calendarStatus?.markets?.tw;
   const dailyRelease = twStatus?.release_windows?.market_daily_price;
@@ -102,19 +87,41 @@ function flattenGroups(nodes: WatchlistGroupNode[]): WatchlistGroupNode[] {
   return nodes.flatMap((node) => [node, ...flattenGroups(node.children)]);
 }
 
-async function fetchBackendJson<T>(path: string, fallback: T): Promise<T> {
+type InitialBackendIssue = {
+  code: BackendConnectionIssueCode;
+  path: string;
+};
+
+function normalizeBackendIssueCode(
+  value: string | undefined
+): BackendConnectionIssueCode | null {
+  if (
+    value === "timeout" ||
+    value === "unavailable" ||
+    value === "request_failed" ||
+    value === "invalid_response"
+  ) {
+    return value;
+  }
+  return null;
+}
+
+async function fetchInitialBackendJson<T>(
+  path: string,
+  fallback: T,
+  issues: InitialBackendIssue[]
+): Promise<T> {
   try {
-    const response = await fetch(`${apiProxyTarget}${path}`, {
+    return await fetchServerBackendJson<T>(path, {
       cache: "no-store",
-      headers: {
-        Accept: "application/json",
-      },
     });
-
-    if (!response.ok) return fallback;
-
-    return (await response.json()) as T;
-  } catch {
+  } catch (error) {
+    const code = backendConnectionIssueCode(error);
+    issues.push({ code, path });
+    console.error(
+      `[initial-backend] path=${path} code=${code}`,
+      error instanceof Error ? error.message : error
+    );
     return fallback;
   }
 }
@@ -125,6 +132,9 @@ export default async function Page({
   searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const resolvedSearchParams = await searchParams;
+  const initialBackendIssues: InitialBackendIssue[] = [];
+  const fetchInitial = <T,>(path: string, fallback: T) =>
+    fetchInitialBackendJson(path, fallback, initialBackendIssues);
   const [
     initialTree,
     initialItems,
@@ -137,25 +147,25 @@ export default async function Page({
     initialKrWatchlistItems,
     initialCalendarStatus,
   ] = await Promise.all([
-    fetchBackendJson<WatchlistGroupNode[]>("/api/watchlists/tree", []),
-    fetchBackendJson<WatchlistItemRead[]>("/api/watchlists/items?limit=5000&offset=0", []),
-    fetchBackendJson<MarketIndexSummary | null>("/api/market/indices/summary", null),
-    fetchBackendJson<USWatchlistGroupNode[]>("/api/us-market/watchlists/tree", []),
-    fetchBackendJson<USWatchlistItemRead[]>(
+    fetchInitial<WatchlistGroupNode[]>("/api/watchlists/tree", []),
+    fetchInitial<WatchlistItemRead[]>("/api/watchlists/items?limit=5000&offset=0", []),
+    fetchInitial<MarketIndexSummary | null>("/api/market/indices/summary", null),
+    fetchInitial<USWatchlistGroupNode[]>("/api/us-market/watchlists/tree", []),
+    fetchInitial<USWatchlistItemRead[]>(
       "/api/us-market/watchlists/items?limit=5000&offset=0",
       []
     ),
-    fetchBackendJson<JPWatchlistGroupNode[]>("/api/jp-market/watchlists/tree", []),
-    fetchBackendJson<JPWatchlistItemRead[]>(
+    fetchInitial<JPWatchlistGroupNode[]>("/api/jp-market/watchlists/tree", []),
+    fetchInitial<JPWatchlistItemRead[]>(
       "/api/jp-market/watchlists/items?limit=5000&offset=0",
       []
     ),
-    fetchBackendJson<KRWatchlistGroupNode[]>("/api/kr-market/watchlists/tree", []),
-    fetchBackendJson<KRWatchlistItemRead[]>(
+    fetchInitial<KRWatchlistGroupNode[]>("/api/kr-market/watchlists/tree", []),
+    fetchInitial<KRWatchlistItemRead[]>(
       "/api/kr-market/watchlists/items?limit=5000&offset=0",
       []
     ),
-    fetchBackendJson<MarketCalendarStatusEnvelope | null>(
+    fetchInitial<MarketCalendarStatusEnvelope | null>(
       "/api/market/calendar-status?market=tw",
       null
     ),
@@ -177,6 +187,9 @@ export default async function Page({
   );
   const quoteDepthPreviewMode = normalizeQuoteDepthPreviewMode(
     firstSearchParam(resolvedSearchParams, "quote_depth_preview")
+  );
+  const formBackendIssueCode = normalizeBackendIssueCode(
+    firstSearchParam(resolvedSearchParams, "omi_error")
   );
   const requestedGroupId = Number(groupIdParam);
   const requestedFuturesSymbol = futuresParam?.trim().toUpperCase() || null;
@@ -230,16 +243,13 @@ export default async function Page({
     initialSelectedStockId !== null && indexProductIds.has(initialSelectedStockId);
   const includeInitialStockIntraday =
     !isIndexProduct && shouldUseTaiwanOhlcIntraday(initialCalendarStatus);
-  const initialRadarPromise =
-    initialMarket === "tw" && initialSelectedGroupId !== null
-      ? fetchBackendJson<WatchlistGroupRadarRead | null>(
-          watchlistRadarPath(initialSelectedGroupId, initialRadarMode),
-          null
-        )
-      : Promise.resolve<WatchlistGroupRadarRead | null>(null);
+  // Radar can require a full watchlist calculation when no persisted snapshot
+  // exists. Keep it out of the server-rendered critical path; the client loads
+  // the latest snapshot first and progressively computes only as a fallback.
+  const initialRadarPromise = Promise.resolve<WatchlistGroupRadarRead | null>(null);
   const initialOhlcPromise =
     initialMarket === "tw" && initialSelectedStockId
-      ? fetchBackendJson<OhlcChartResponse | null>(
+      ? fetchInitial<OhlcChartResponse | null>(
           isIndexProduct
             ? `/api/market/indices/${encodeURIComponent(
                 initialSelectedStockId
@@ -250,7 +260,7 @@ export default async function Page({
       : Promise.resolve<OhlcChartResponse | null>(null);
   const initialIndicatorDataPromise =
     initialMarket === "tw" && initialSelectedStockId && !isIndexProduct
-      ? fetchBackendJson<StockIndicatorPoint[]>(
+      ? fetchInitial<StockIndicatorPoint[]>(
           `/api/market/indicators/${encodeURIComponent(
             initialSelectedStockId
           )}/daily?limit=240&ma_windows=5,20,60&volume_ma_windows=5,20`,
@@ -297,6 +307,9 @@ export default async function Page({
       initialKrWatchlistTree={initialKrWatchlistTree}
       initialKrWatchlistItems={initialKrWatchlistItems}
       quoteDepthPreviewMode={quoteDepthPreviewMode}
+      initialBackendIssueCount={initialBackendIssues.length}
+      initialBackendIssueCode={initialBackendIssues[0]?.code ?? null}
+      formBackendIssueCode={formBackendIssueCode}
     />
   );
 }

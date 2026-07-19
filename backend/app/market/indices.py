@@ -4,12 +4,16 @@ from collections import defaultdict
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, time, timedelta, timezone
+import json
 import logging
+from os import getpid
+from threading import Lock, get_ident
 from time import monotonic
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.db.models import MarketDailyPrice, MarketIndexDailyStat, SourceRegistry, StockMaster
 from app.market.index_parsers import as_float as _as_float
 from app.market.index_parsers import as_int as _as_int
@@ -25,6 +29,8 @@ from app.market.index_parsers import signed_change as _signed_change
 from app.market.providers import fetch_json as provider_fetch_json
 from app.market.providers import http_get
 from app.market.providers import tpex, twse, twse_mis, yahoo
+from app.market.taiwan_rules import expected_daily_price_date
+from app.market.trading_calendar import is_taiwan_trading_day
 from app.observability.provider_fallback import observe_provider_fallback
 from app.sources.defaults import (
     TPEX_DAILY_QUOTES_SOURCE_NAME,
@@ -84,6 +90,8 @@ _CACHE: dict[str, object] = {
     "expires_at": 0.0,
     "payload": None,
 }
+_SUMMARY_REFRESH_LOCK = Lock()
+MARKET_INDEX_SUMMARY_CACHE_PATH = settings.runtime_lock_dir / "market-index-summary.json"
 _QUOTE_STATS_CACHE: dict[str, dict[str, object]] = {}
 _INDEX_LIST_CACHE: dict[str, dict[str, object]] = {}
 _SHARES_CACHE: dict[str, dict[str, object]] = {}
@@ -94,6 +102,143 @@ _TWSE_MIS_STOCK_STATE: dict[str, dict[str, object]] = {}
 TWSE_INDEX_5S_FIELD_BY_INDEX_ID = {
     "TAIEX": "發行量加權股價指數",
 }
+
+
+def is_taiwan_index_live_refresh_window(now: datetime | None = None) -> bool:
+    local_now = now or datetime.now(TAIPEI_TZ)
+    if local_now.tzinfo is None:
+        local_now = local_now.replace(tzinfo=TAIPEI_TZ)
+    else:
+        local_now = local_now.astimezone(TAIPEI_TZ)
+    return (
+        is_taiwan_trading_day(local_now.date())
+        and time(8, 55) <= local_now.time() <= time(13, 40)
+    )
+
+
+def _summary_cache_json_default(value: object) -> str:
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        return str(isoformat())
+    raise TypeError(f"Unsupported market index cache value: {type(value).__name__}")
+
+
+def _persist_shared_market_index_summary(payload: dict) -> None:
+    path = MARKET_INDEX_SUMMARY_CACHE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_name(
+        f".{path.name}.{getpid()}.{get_ident()}.tmp"
+    )
+    try:
+        temporary_path.write_text(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                default=_summary_cache_json_default,
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        temporary_path.replace(path)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
+
+
+def _load_shared_market_index_summary() -> tuple[dict | None, str | None]:
+    path = MARKET_INDEX_SUMMARY_CACHE_PATH
+    if not path.exists():
+        return None, None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Shared market index summary cache is unreadable: %s", exc)
+        return None, f"Shared market index summary cache is unreadable: {exc}"
+    if not isinstance(payload, dict) or not isinstance(payload.get("indices"), list):
+        return None, "Shared market index summary cache has an invalid payload shape."
+    return payload, None
+
+
+def _summary_payload_as_of(payload: dict | None) -> datetime | None:
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("as_of")
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+    return None
+
+
+def _sqlite_utc_datetime(value: datetime | None) -> datetime | None:
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=timezone.utc)
+
+
+def _newer_summary_payload(
+    memory_payload: dict | None,
+    shared_payload: dict | None,
+) -> tuple[dict | None, str]:
+    if shared_payload is None:
+        return memory_payload, "memory_cache"
+    if memory_payload is None:
+        return shared_payload, "shared_cache"
+    memory_as_of = _summary_payload_as_of(memory_payload)
+    shared_as_of = _summary_payload_as_of(shared_payload)
+    if shared_as_of is not None and (
+        memory_as_of is None or shared_as_of > memory_as_of
+    ):
+        return shared_payload, "shared_cache"
+    return memory_payload, "memory_cache"
+
+
+def _summary_cache_view(payload: dict, *, origin: str) -> dict:
+    expected_date = expected_daily_price_date()
+    trade_dates = [
+        parsed
+        for item in payload.get("indices") or []
+        if isinstance(item, dict)
+        for parsed in [_parse_trade_date(item.get("time"))]
+        if parsed is not None
+    ]
+    latest_trade_date = max(trade_dates, default=None)
+    now = datetime.now(TAIPEI_TZ)
+    as_of = _summary_payload_as_of(payload)
+    live_age_seconds = (
+        max((now - as_of.astimezone(TAIPEI_TZ)).total_seconds(), 0)
+        if as_of is not None
+        else None
+    )
+    live_stale_after = max(
+        int(settings.scheduler_taiwan_market_index_interval_seconds) * 3,
+        15,
+    )
+    date_is_stale = latest_trade_date is None or latest_trade_date < expected_date
+    live_is_stale = (
+        is_taiwan_index_live_refresh_window(now)
+        and (live_age_seconds is None or live_age_seconds > live_stale_after)
+    )
+    refresh_recommended = date_is_stale or live_is_stale
+    warnings = list(payload.get("warnings") or [])
+    if date_is_stale:
+        warnings.append(
+            "Index summary cache is missing or older than the expected Taiwan trading date."
+        )
+    if live_is_stale:
+        warnings.append(
+            "Index summary shared cache is stale during the Taiwan live polling window."
+        )
+    return _with_breadth_status_contract({
+        **payload,
+        "cache_status": f"stale_{origin}" if refresh_recommended else origin,
+        "refresh_recommended": refresh_recommended,
+        "warnings": list(dict.fromkeys(str(item) for item in warnings if item)),
+    })
 
 
 def _fetch_json(url: str):
@@ -114,6 +259,84 @@ def _market_source_name(market: str) -> str:
         return TPEX_DAILY_QUOTES_SOURCE_NAME
 
     return TWSE_DAILY_TRADING_SOURCE_NAME
+
+
+def _market_breadth_label(market: str, scope: str | None) -> str:
+    normalized_market = str(market or "").upper()
+    normalized_scope = str(scope or "local_dataset")
+    market_label = "上市" if normalized_market == "TWSE" else "上櫃" if normalized_market == "TPEX" else normalized_market
+
+    if normalized_scope == "full_market":
+        return f"{market_label}全市場廣度"
+    if normalized_scope == "registered_universe":
+        return f"{market_label}即時廣度（註冊範圍）"
+    if normalized_scope == "omi_sample":
+        return "OMI 樣本股廣度"
+    return f"{market_label}本機資料集廣度"
+
+
+def _breadth_status_contract(index_payload: dict) -> dict:
+    market = str(index_payload.get("market") or "unknown")
+    breadth = index_payload.get("breadth")
+    if not isinstance(breadth, dict):
+        return {
+            "slot": "market_breadth",
+            "status": "failed",
+            "scope": None,
+            "source": None,
+            "reason": (
+                f"Current {market} market breadth is unavailable; "
+                "OMI sample movers must not be substituted for this slot."
+            ),
+            "warnings": [],
+        }
+
+    warnings = [str(item) for item in breadth.get("warnings") or [] if item]
+    source = str(breadth.get("source") or "") or None
+    unknown_count = _as_int(breadth.get("unknown_count")) or 0
+    missing_count = _as_int(breadth.get("missing_count")) or 0
+    is_partial = bool(
+        warnings
+        or unknown_count > 0
+        or missing_count > 0
+        or (source and "partial" in source)
+    )
+    return {
+        "slot": "market_breadth",
+        "status": "partial" if is_partial else "ready",
+        "scope": breadth.get("scope"),
+        "source": source,
+        "reason": (
+            "Market breadth has incomplete quote coverage; inspect warnings and coverage fields."
+            if is_partial
+            else None
+        ),
+        "warnings": warnings,
+    }
+
+
+def _with_breadth_status_contract(payload: dict) -> dict:
+    warnings = [str(item) for item in payload.get("warnings") or [] if item]
+    contract_indices: list[dict] = []
+    for raw_item in payload.get("indices") or []:
+        if not isinstance(raw_item, dict):
+            continue
+        item = dict(raw_item)
+        breadth_status = _breadth_status_contract(item)
+        item["breadth_status"] = breadth_status
+        identity = item.get("index_id") or item.get("market") or "Index"
+        if breadth_status["status"] == "failed":
+            warnings.append(
+                f"{identity} market breadth failed: {breadth_status['reason']}"
+            )
+        elif breadth_status["status"] == "partial":
+            warnings.append(f"{identity} market breadth is partial.")
+        contract_indices.append(item)
+    return {
+        **payload,
+        "indices": contract_indices,
+        "warnings": list(dict.fromkeys(warnings)),
+    }
 
 
 def _latest_market_breadth(db: Session, market: str) -> dict | None:
@@ -139,6 +362,8 @@ def _latest_market_breadth(db: Session, market: str) -> dict | None:
 
     return {
         "market": market,
+        "scope": "local_dataset",
+        "label": _market_breadth_label(market, "local_dataset"),
         "trade_date": latest_trade_date,
         "advance_count": sum(1 for value in changes if value is not None and value > 0),
         "decline_count": sum(1 for value in changes if value is not None and value < 0),
@@ -397,6 +622,8 @@ def _fetch_twse_mis_live_market_breadth(db: Session, market: str) -> dict | None
 
     payload = {
         "market": "TWSE",
+        "scope": "registered_universe",
+        "label": _market_breadth_label("TWSE", "registered_universe"),
         "trade_date": max(trade_dates) if trade_dates else None,
         "advance_count": advance_count,
         "decline_count": decline_count,
@@ -485,6 +712,8 @@ def _market_quote_breadth_from_rows(
 
     return {
         "market": market,
+        "scope": "full_market",
+        "label": _market_breadth_label(market, "full_market"),
         "trade_date": trade_date,
         "advance_count": advance_count,
         "decline_count": decline_count,
@@ -572,6 +801,8 @@ def _fetch_twse_rwd_market_quote_breadth(trade_date: date | None = None) -> dict
 
     return {
         "market": "TWSE",
+        "scope": "full_market",
+        "label": _market_breadth_label("TWSE", "full_market"),
         "trade_date": payload_date,
         "advance_count": advance_count or 0,
         "decline_count": decline_count or 0,
@@ -2540,22 +2771,11 @@ def get_market_index_ohlc_chart_data(
     backfill_result = None
 
     if db is not None and selected_points:
-        try:
-            backfill_result = _ensure_market_index_daily_stat_coverage(
-                db=db,
-                index_id=normalized_index_id,
-                market=str(config["market"]),
-                from_date=stat_from_date,
-                to_date=coverage_to_date,
-            )
-        except Exception as exc:
-            db.rollback()
-            backfill_result = {
-                "status": "error",
-                "index_id": normalized_index_id,
-                "market": str(config["market"]),
-                "message": f"Index daily stat refresh failed: {exc}",
-            }
+        backfill_result = {
+            "status": "not_requested",
+            "reason": "read_path_is_side_effect_free",
+            "refresh_route": f"POST /api/market/indices/{normalized_index_id}/daily-stats/refresh",
+        }
 
         values_by_period = _load_market_index_stat_values(
             db=db,
@@ -2603,12 +2823,138 @@ def get_market_index_ohlc_chart_data(
     }
 
 
-def get_market_index_summary(db: Session, force_refresh: bool = False) -> dict:
-    if not force_refresh and monotonic() < float(_CACHE["expires_at"]):
-        cached_payload = _CACHE["payload"]
+def _market_index_summary(
+    db: Session,
+    *,
+    force_refresh: bool,
+    refresh_daily_stats: bool = False,
+) -> dict:
+    if not force_refresh:
+        memory_payload = _CACHE["payload"]
+        memory_payload = memory_payload if isinstance(memory_payload, dict) else None
+        shared_payload, shared_cache_error = _load_shared_market_index_summary()
+        cached_payload, cache_origin = _newer_summary_payload(
+            memory_payload,
+            shared_payload,
+        )
 
         if isinstance(cached_payload, dict):
-            return cached_payload
+            _CACHE["payload"] = cached_payload
+            _CACHE["expires_at"] = monotonic() + _market_index_summary_cache_ttl(
+                cached_payload.get("indices") or []
+            )
+            view = _summary_cache_view(cached_payload, origin=cache_origin)
+            if shared_cache_error:
+                view["warnings"] = list(
+                    dict.fromkeys([*view.get("warnings", []), shared_cache_error])
+                )
+            return view
+
+        expected_date = expected_daily_price_date()
+        local_indices: list[dict] = []
+        local_dates: list[date] = []
+        local_updated_at: list[datetime] = []
+
+        for config in INDEX_CONFIGS:
+            rows = (
+                db.query(MarketIndexDailyStat)
+                .filter(MarketIndexDailyStat.index_id == str(config["index_id"]))
+                .filter(MarketIndexDailyStat.close_value.isnot(None))
+                .order_by(MarketIndexDailyStat.trade_date.desc())
+                .limit(90)
+                .all()
+            )
+            rows.reverse()
+            points: list[dict] = []
+            previous_close: float | None = None
+            for row in rows:
+                point = _market_index_point_from_daily_stat(
+                    row,
+                    previous_close=previous_close,
+                )
+                if point is None:
+                    continue
+                points.append(point)
+                previous_close = _as_float(point.get("close"))
+
+            if not rows or not points:
+                local_indices.append(
+                    _unavailable_index(
+                        config,
+                        ValueError("No cached index summary is available."),
+                    )
+                )
+                continue
+
+            latest_row = rows[-1]
+            latest_point = points[-1]
+            close = _as_float(latest_point.get("close"))
+            change = _as_float(latest_row.price_change)
+            prior_close = close - change if close is not None and change is not None else None
+            change_pct = (
+                (change / prior_close) * 100
+                if change is not None and prior_close not in (None, 0)
+                else None
+            )
+            ma20 = _moving_average([_as_float(point.get("close")) for point in points], 20)
+            price_vs_ma20 = (
+                ((close - ma20) / ma20) * 100
+                if close is not None and ma20 not in (None, 0)
+                else None
+            )
+            breadth = _latest_market_breadth(db=db, market=str(config["market"]))
+            if _breadth_trade_date(breadth) != latest_row.trade_date:
+                breadth = None
+
+            local_dates.append(latest_row.trade_date)
+            aware_updated_at = _sqlite_utc_datetime(latest_row.updated_at)
+            if aware_updated_at is not None:
+                local_updated_at.append(aware_updated_at)
+            local_indices.append(
+                {
+                    "index_id": config["index_id"],
+                    "label": config["label"],
+                    "short_label": config["short_label"],
+                    "market": config["market"],
+                    "symbol": config["symbol"],
+                    "source": latest_row.source or "market_index_daily_stat",
+                    "as_of": aware_updated_at,
+                    "time": latest_row.trade_date,
+                    "open": latest_point.get("open"),
+                    "high": latest_point.get("high"),
+                    "low": latest_point.get("low"),
+                    "close": close,
+                    "previous_close": prior_close,
+                    "change": change,
+                    "change_pct": change_pct,
+                    "volume": latest_row.trade_volume,
+                    "estimated_volume": None,
+                    "trade_value": latest_row.trade_value,
+                    "estimated_trade_value": None,
+                    "ma20": ma20,
+                    "price_vs_ma20": price_vs_ma20,
+                    "point_count": len(points),
+                    "points": points,
+                    "breadth": breadth,
+                    "error_message": None,
+                }
+            )
+
+        latest_local_date = max(local_dates, default=None)
+        refresh_recommended = latest_local_date is None or latest_local_date < expected_date
+        warnings = [shared_cache_error] if shared_cache_error else []
+        if refresh_recommended:
+            warnings.append(
+                "Local index cache is missing or older than the expected Taiwan trading date."
+            )
+        return _with_breadth_status_contract({
+            "as_of": max(local_updated_at, default=datetime.now(TAIPEI_TZ)),
+            "source": "market_index_daily_stat",
+            "indices": local_indices,
+            "cache_status": "local_cache",
+            "refresh_recommended": refresh_recommended,
+            "warnings": warnings,
+        })
 
     indices: list[dict] = []
 
@@ -2626,13 +2972,14 @@ def get_market_index_summary(db: Session, force_refresh: bool = False) -> dict:
                 if isinstance(latest_yahoo_date, date)
                 else datetime.now(TAIPEI_TZ).date() - timedelta(days=14)
             )
-            _ensure_market_index_daily_stat_coverage(
-                db=db,
-                index_id=str(config["index_id"]),
-                market=str(config["market"]),
-                from_date=coverage_start,
-                to_date=datetime.now(TAIPEI_TZ).date(),
-            )
+            if refresh_daily_stats:
+                _ensure_market_index_daily_stat_coverage(
+                    db=db,
+                    index_id=str(config["index_id"]),
+                    market=str(config["market"]),
+                    from_date=coverage_start,
+                    to_date=datetime.now(TAIPEI_TZ).date(),
+                )
             _apply_latest_official_market_index_stat(
                 db=db,
                 config=config,
@@ -2678,11 +3025,85 @@ def get_market_index_summary(db: Session, force_refresh: bool = False) -> dict:
         )
         indices.append(index_payload)
 
-    payload = {
+    payload = _with_breadth_status_contract({
         "as_of": datetime.now(TAIPEI_TZ),
         "source": "yahoo_finance_chart",
         "indices": indices,
-    }
+        "cache_status": "live",
+        "refresh_recommended": False,
+        "warnings": [],
+    })
     _CACHE["payload"] = payload
     _CACHE["expires_at"] = monotonic() + _market_index_summary_cache_ttl(indices)
+    try:
+        _persist_shared_market_index_summary(payload)
+    except Exception as exc:
+        logger.warning("Failed to persist shared market index summary cache: %s", exc)
+        payload["warnings"] = [
+            *payload["warnings"],
+            f"Shared market index summary cache persistence failed: {exc}",
+        ]
     return payload
+
+
+def get_market_index_summary(db: Session, force_refresh: bool = False) -> dict:
+    if force_refresh:
+        logger.warning(
+            "Deprecated force_refresh on GET market index summary was ignored; use the explicit POST refresh route."
+        )
+    return _market_index_summary(db=db, force_refresh=False)
+
+
+def refresh_market_index_summary(
+    db: Session,
+    *,
+    refresh_daily_stats: bool = False,
+) -> dict:
+    with _SUMMARY_REFRESH_LOCK:
+        return _market_index_summary(
+            db=db,
+            force_refresh=True,
+            refresh_daily_stats=refresh_daily_stats,
+        )
+
+
+def refresh_market_index_daily_stats(
+    db: Session,
+    *,
+    index_id: str,
+    from_date: date,
+    to_date: date,
+) -> dict:
+    normalized_index_id = index_id.upper()
+    config = INDEX_CONFIG_BY_ID.get(normalized_index_id)
+    if config is None:
+        supported = ", ".join(sorted(INDEX_CONFIG_BY_ID))
+        raise ValueError(f"index_id must be one of: {supported}.")
+    if from_date > to_date:
+        raise ValueError("from_date must be on or before to_date.")
+    result = ensure_market_index_daily_stat_coverage(
+        db=db,
+        index_id=normalized_index_id,
+        market=str(config["market"]),
+        from_date=from_date,
+        to_date=to_date,
+    )
+    if result is not None:
+        return result
+    return {
+        "status": "no_changes",
+        "index_id": normalized_index_id,
+        "market": str(config["market"]),
+        "source": None,
+        "requested_month_count": len(
+            _month_starts_between(from_date=from_date, to_date=to_date)
+        ),
+        "fetched_month_count": 0,
+        "skipped_existing_month_count": len(
+            _month_starts_between(from_date=from_date, to_date=to_date)
+        ),
+        "inserted_count": 0,
+        "updated_count": 0,
+        "errors": [],
+        "message": "Index daily stats are already current for the requested range.",
+    }

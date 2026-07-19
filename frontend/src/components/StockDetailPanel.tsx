@@ -249,6 +249,7 @@ export default function StockDetailPanel({
       stockInfo,
     },
     actions: {
+      refreshDataTab,
       selectDataTab,
       setBranchDays,
       setStockInfo,
@@ -1296,6 +1297,16 @@ export default function StockDetailPanel({
                     {t(`stockDetail.tabs.${activeDataTab}`)} {t("stockDetail.data")}
                   </div>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => void refreshDataTab(activeDataTab)}
+                  disabled={dataPanelLoading !== null}
+                  className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text-muted hover:border-omi-accent hover:text-omi-accent disabled:cursor-wait disabled:border-omi-border-subtle disabled:text-omi-text-subtle"
+                >
+                  {dataPanelLoading === activeDataTab
+                    ? t("stockDetail.dataPanel.refreshing")
+                    : t("stockDetail.dataPanel.refresh")}
+                </button>
               </div>
 
               <div className="mt-4">

@@ -299,6 +299,7 @@ INTRADAY_HINTS = (
     "今日",
     "今天",
     "開盤",
+    "夜盤",
     "最新",
 )
 SHORT_HORIZON_HINTS = (

@@ -362,6 +362,10 @@ class WatchlistGroupRadarRead(BaseModel):
 
     buckets: list[WatchlistRadarBucketRead]
     results: list[WatchlistRadarItemRead]
+    cache_status: str = "computed"
+    snapshot_id: int | None = None
+    snapshot_date: date | None = None
+    calculated_at: datetime | None = None
 
 
 class WatchlistRadarSnapshotRead(BaseModel):

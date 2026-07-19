@@ -72,6 +72,20 @@ function normalizeIsoDate(value: string | null | undefined) {
   return value ? value.slice(0, 10) : null;
 }
 
+function normalizeChartPoints(points: ChartPoint[]) {
+  const pointsByTime = new Map<string, ChartPoint>();
+
+  for (const point of points) {
+    const time = String(point.time ?? "").trim();
+    if (!time) continue;
+    pointsByTime.set(time, point);
+  }
+
+  return [...pointsByTime.values()].sort((left, right) =>
+    String(left.time).localeCompare(String(right.time))
+  );
+}
+
 function shouldIncludeTaiwanOhlcIntraday() {
   const marketState = getTaiwanMarketRefreshState();
   return (
@@ -109,7 +123,9 @@ export function useTaiwanStockChartData({
   subresourceRefreshSeconds,
   t,
 }: UseTaiwanStockChartDataOptions) {
-  const [chartData, setChartData] = useState<ChartPoint[]>(initialChartData);
+  const [chartData, setChartData] = useState<ChartPoint[]>(
+    normalizeChartPoints(initialChartData)
+  );
   const [chartIntradayOverlay, setChartIntradayOverlay] =
     useState<OhlcIntradayOverlay | null>(initialChartIntradayOverlay);
   const [chartStockId, setChartStockId] = useState<string | null>(stockId);
@@ -433,7 +449,7 @@ export function useTaiwanStockChartData({
 
         if (cancelled || activeStockIdRef.current !== targetStockId) return;
 
-        setChartData(refreshedOhlc.points);
+        setChartData(normalizeChartPoints(refreshedOhlc.points));
         setChartIntradayOverlay(refreshedOhlc.intraday_overlay);
         setIndicatorData(refreshedIndicators);
         setChartStockId(targetStockId);
@@ -482,7 +498,7 @@ export function useTaiwanStockChartData({
         const ohlcParams = {
           timeframe: requestedTimeframe,
           bars: chartBars,
-          ensure_history: !isIndexProduct,
+          ensure_history: false,
           ...(includeIntraday ? { include_intraday: true } : {}),
         };
         let ohlc = await fetchJson<OhlcChartResponse>(
@@ -521,7 +537,7 @@ export function useTaiwanStockChartData({
             );
         if (cancelled) return;
 
-        setChartData(ohlc.points);
+        setChartData(normalizeChartPoints(ohlc.points));
         setChartIntradayOverlay(ohlc.intraday_overlay);
         setIndicatorData(indicators);
         setChartStockId(effectStockId);
@@ -583,7 +599,7 @@ export function useTaiwanStockChartData({
         );
         if (cancelled) return;
 
-        setBenchmarkChartData(ohlc.points);
+        setBenchmarkChartData(normalizeChartPoints(ohlc.points));
         setBenchmarkChartKey(requestedKey);
       } catch {
         if (cancelled) return;

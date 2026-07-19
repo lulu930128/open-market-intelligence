@@ -19,6 +19,9 @@ CRITICAL_TABLES = {
     "crypto_ohlcv_bar",
     "resource_ohlcv_bar",
     "portfolio_holding",
+    "taiwan_option_chain_daily",
+    "taiwan_derivatives_large_trader_daily",
+    "taiwan_futures_term_structure_daily",
 }
 
 
@@ -26,8 +29,8 @@ class DatabaseModelContractTests(unittest.TestCase):
     def test_single_registry_configures_all_current_mappers(self) -> None:
         configure_mappers()
 
-        self.assertEqual(len(Base.metadata.tables), 78)
-        self.assertEqual(len(list(Base.registry.mappers)), 78)
+        self.assertEqual(len(Base.metadata.tables), 81)
+        self.assertEqual(len(list(Base.registry.mappers)), 81)
         self.assertTrue(CRITICAL_TABLES.issubset(Base.metadata.tables))
 
     def test_all_foreign_keys_resolve_inside_shared_metadata(self) -> None:

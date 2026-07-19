@@ -56,6 +56,33 @@ class EvidencePassportTests(unittest.TestCase):
         self.assertIn(passport["trust_level"], {"low", "blocked"})
         self.assertEqual(passport["data_freshness"], "missing")
 
+    def test_question_required_capabilities_ignore_unrelated_failures(self) -> None:
+        passport = build_evidence_passport(
+            kind="us_index_context",
+            as_of="2026-07-17",
+            source_refs=[{"type": "table", "name": "us_daily_price"}],
+            missing=["us_company_profile", "us_sec_company_fact"],
+            warnings=[
+                "US company profile cache is stale.",
+                "SEC fundamental refresh failed.",
+            ],
+            freshness={"is_current": False, "refresh_recommended": True},
+            tool_runs=[
+                {"tool": "us.refresh_company_profile", "status": "failed"},
+                {"tool": "us.refresh_sec_facts", "status": "blocked"},
+            ],
+            required_capabilities={"us_daily_price"},
+        )
+
+        self.assertEqual(passport["missing"], [])
+        self.assertEqual(passport["warnings"], [])
+        self.assertEqual(
+            passport["ignored_missing"],
+            ["us_company_profile", "us_sec_company_fact"],
+        )
+        self.assertEqual(passport["data_freshness"], "current")
+        self.assertNotEqual(passport["trust_level"], "blocked")
+
 
 if __name__ == "__main__":
     unittest.main()

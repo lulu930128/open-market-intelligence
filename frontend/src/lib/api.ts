@@ -13,6 +13,40 @@ function buildSameOriginPath(path: string) {
 
 type ApiParams = Record<string, string | number | boolean>;
 
+export type ApiErrorKind = "timeout" | "network" | "http" | "invalid_response";
+
+export class ApiError extends Error {
+  readonly kind: ApiErrorKind;
+  readonly path: string;
+  readonly status: number | null;
+  readonly code: string | null;
+  readonly requestId: string | null;
+
+  constructor({
+    kind,
+    message,
+    path,
+    status = null,
+    code = null,
+    requestId = null,
+  }: {
+    kind: ApiErrorKind;
+    message: string;
+    path: string;
+    status?: number | null;
+    code?: string | null;
+    requestId?: string | null;
+  }) {
+    super(message);
+    this.name = "ApiError";
+    this.kind = kind;
+    this.path = path;
+    this.status = status;
+    this.code = code;
+    this.requestId = requestId;
+  }
+}
+
 export type ApiRequestOptions = {
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -31,6 +65,23 @@ export function requireJsonArray<T>(
 }
 
 const DEFAULT_GET_TIMEOUT_MS = 20_000;
+const DEFAULT_MUTATION_TIMEOUT_MS = 120_000;
+
+export function createApiRequestId() {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function withRequestContext(headers: HeadersInit | undefined) {
+  const requestHeaders = new Headers(headers);
+  if (!requestHeaders.has("x-request-id")) {
+    requestHeaders.set("x-request-id", createApiRequestId());
+  }
+  return requestHeaders;
+}
 
 export function buildApiUrl(path: string, params?: ApiParams) {
   const sameOriginPath = buildSameOriginPath(path);
@@ -56,9 +107,24 @@ async function fetchWithOptionalTimeout(
 ) {
   const timeoutMs = options?.timeoutMs ?? defaultTimeoutMs;
   const externalSignal = options?.signal ?? init.signal ?? null;
+  const requestHeaders = withRequestContext(init.headers);
+  const requestId = requestHeaders.get("x-request-id");
+  const requestInit = {
+    ...init,
+    headers: requestHeaders,
+  };
 
   if (timeoutMs <= 0 && !externalSignal) {
-    return fetch(buildApiUrl(path, params), init);
+    try {
+      return await fetch(buildApiUrl(path, params), requestInit);
+    } catch (error) {
+      throw new ApiError({
+        kind: "network",
+        message: error instanceof Error ? error.message : `API network error: ${path}`,
+        path,
+        requestId,
+      });
+    }
   }
 
   const controller = new AbortController();
@@ -82,14 +148,27 @@ async function fetchWithOptionalTimeout(
 
   try {
     return await fetch(buildApiUrl(path, params), {
-      ...init,
+      ...requestInit,
       signal: controller.signal,
     });
   } catch (error) {
     if (timedOut) {
-      throw new Error(`API timeout after ${timeoutMs}ms: ${path}`);
+      throw new ApiError({
+        kind: "timeout",
+        message: `API timeout after ${timeoutMs}ms: ${path}`,
+        path,
+        requestId,
+      });
     }
-    throw error;
+    if (externalSignal?.aborted) {
+      throw error;
+    }
+    throw new ApiError({
+      kind: "network",
+      message: error instanceof Error ? error.message : `API network error: ${path}`,
+      path,
+      requestId,
+    });
   } finally {
     if (timeoutId) {
       clearTimeout(timeoutId);
@@ -102,9 +181,14 @@ async function fetchWithOptionalTimeout(
 
 async function readApiError(response: Response) {
   const text = await response.text();
+  const responseRequestId = response.headers.get("x-request-id");
 
   if (!text) {
-    return response.statusText || "Request failed.";
+    return {
+      message: response.statusText || "Request failed.",
+      code: null,
+      requestId: responseRequestId,
+    };
   }
 
   try {
@@ -117,11 +201,45 @@ async function readApiError(response: Response) {
       detail?: string;
     };
     const message = payload.error?.message || payload.detail || text;
-    const requestId = payload.error?.request_id;
+    const requestId = payload.error?.request_id || responseRequestId;
 
-    return requestId ? `${message} (request ${requestId})` : message;
+    return {
+      message: requestId ? `${message} (request ${requestId})` : message,
+      code: payload.error?.code ?? null,
+      requestId,
+    };
   } catch {
-    return text;
+    return {
+      message: text,
+      code: null,
+      requestId: responseRequestId,
+    };
+  }
+}
+
+export async function createHttpApiError(response: Response, path: string) {
+  const detail = await readApiError(response);
+  return new ApiError({
+    kind: "http",
+    message: `API ${response.status}: ${detail.message}`,
+    path,
+    status: response.status,
+    code: detail.code,
+    requestId: detail.requestId,
+  });
+}
+
+async function readJsonResponse<T>(response: Response, path: string): Promise<T> {
+  try {
+    return (await response.json()) as T;
+  } catch {
+    throw new ApiError({
+      kind: "invalid_response",
+      message: `API returned invalid JSON: ${path}`,
+      path,
+      status: response.status,
+      requestId: response.headers.get("x-request-id"),
+    });
   }
 }
 
@@ -144,10 +262,10 @@ export async function fetchJson<T>(
   );
 
   if (!response.ok) {
-    throw new Error(`API ${response.status}: ${await readApiError(response)}`);
+    throw await createHttpApiError(response, path);
   }
 
-  return response.json() as Promise<T>;
+  return readJsonResponse<T>(response, path);
 }
 
 export async function requestJson<T>(
@@ -169,18 +287,18 @@ export async function requestJson<T>(
       cache: "no-store",
     },
     apiOptions,
-    0
+    DEFAULT_MUTATION_TIMEOUT_MS
   );
 
   if (!response.ok) {
-    throw new Error(`API ${response.status}: ${await readApiError(response)}`);
+    throw await createHttpApiError(response, path);
   }
 
   if (response.status === 204) {
     return null as T;
   }
 
-  return response.json() as Promise<T>;
+  return readJsonResponse<T>(response, path);
 }
 
 export async function deleteRequest(
@@ -203,6 +321,6 @@ export async function deleteRequest(
   );
 
   if (!response.ok) {
-    throw new Error(`API ${response.status}: ${await readApiError(response)}`);
+    throw await createHttpApiError(response, path);
   }
 }

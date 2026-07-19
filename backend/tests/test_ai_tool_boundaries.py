@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.ai import agentic_tools, llm, tools
 from app.ai.market_context import common as market_context_common
+from app.ai.market_context.taiwan_futures import _build_tw_futures_compact
 from app.db.models import Base
 from app.market import stock_selection_refresh
 from app.watchlists import backfill_service as watchlist_backfill_service
@@ -49,7 +50,7 @@ EXPECTED_INTERNAL_TOOL_NAMES = (
 )
 
 EXPECTED_INTERNAL_TOOL_CATALOG_SHA256 = (
-    "d0d3caff07ff1af7f3fb280a153a1349bdf7b46f2c0e0c16a3be2db50f8dc5e3"
+    "64b8b54acdb863e6412a31eaa701abcdfa54f6d560b1f0b3a8027611b10fe97b"
 )
 
 
@@ -152,6 +153,54 @@ class AIToolBoundaryTests(unittest.TestCase):
                 "get_market_index_intraday",
                 return_value=intraday_payload,
             ) as get_intraday,
+            patch.object(
+                tools,
+                "get_market_index_summary",
+                return_value={
+                    "indices": [
+                        {
+                            "index_id": "TAIEX",
+                            "breadth": {
+                                "market": "TWSE",
+                                "scope": "full_market",
+                                "trade_date": date(2026, 7, 14),
+                                "advance_count": 700,
+                                "decline_count": 300,
+                                "unchanged_count": 50,
+                                "total_count": 1050,
+                                "source": "test_full_market",
+                            },
+                        }
+                    ]
+                },
+            ) as get_summary,
+            patch.object(
+                tools.tw_cross_market,
+                "read_tw_cross_market_context",
+                return_value={
+                    "kind": "tw_cross_market_context",
+                    "status": "partial",
+                    "as_of": "2026-07-14",
+                    "markets": {},
+                    "missing": ["us.^GSPC"],
+                    "warnings": [],
+                    "source_refs": [],
+                },
+            ) as read_cross_market,
+            patch.object(
+                tools.tw_market_chips,
+                "read_tw_market_chips_context",
+                return_value={
+                    "kind": "tw_market_chips_context",
+                    "status": "partial",
+                    "official_market_aggregate": {"trade_dates": ["2026-07-14"]},
+                    "institutional_per_stock": {},
+                    "margin_per_stock": {},
+                    "missing": [],
+                    "warnings": [],
+                    "source_refs": [],
+                },
+            ) as read_market_chips,
         ):
             envelope = tools.read_market_overview(db=db, include_intraday=True)
 
@@ -161,11 +210,19 @@ class AIToolBoundaryTests(unittest.TestCase):
             ["TAIEX", "TPEX"],
         )
         self.assertTrue(envelope["data"]["index_intraday"]["enabled"])
+        get_summary.assert_called_once_with(db, force_refresh=False)
+        self.assertEqual(envelope["data"]["breadth"]["scope"], "full_market")
+        self.assertEqual(envelope["data"]["breadth"]["total_count"], 1050)
+        read_cross_market.assert_called_once_with(db=db, now=fixed_now)
+        read_market_chips.assert_called_once_with(db=db, limit=10)
+        self.assertEqual(envelope["data"]["slots"]["cross_market"]["status"], "partial")
+        self.assertEqual(envelope["data"]["slots"]["market_chips"]["status"], "partial")
         self.assertIn("market_daily_price", envelope["missing"])
 
     def test_futures_facade_hands_off_runtime_dependencies(self) -> None:
         fixed_now = datetime(2026, 7, 14, 13, 0, tzinfo=timezone.utc)
         db = MagicMock(spec=Session)
+        market_chip_row = object()
 
         with (
             patch.object(tools, "_now", return_value=fixed_now),
@@ -184,6 +241,46 @@ class AIToolBoundaryTests(unittest.TestCase):
                 "list_taiwan_futures_intraday_bars",
                 return_value=[],
             ) as get_intraday,
+            patch.object(
+                tools,
+                "get_latest_market_chip_daily",
+                return_value=market_chip_row,
+            ) as get_market_chip,
+            patch.object(
+                tools,
+                "list_market_chip_daily",
+                return_value=[market_chip_row],
+            ) as list_market_chips,
+            patch.object(
+                tools,
+                "build_taiwan_derivatives_summary",
+                return_value={
+                    "status": "ready",
+                    "as_of": date(2026, 7, 14),
+                    "missing": [],
+                    "warnings": [],
+                    "options_chain": {"status": "ready"},
+                    "large_traders": {"status": "ready"},
+                    "term_structure": {"status": "ready"},
+                },
+            ) as build_derivatives,
+            patch.object(
+                tools.taiwan_futures,
+                "market_chip_daily_to_dict",
+                return_value={
+                    "trade_date": date(2026, 7, 14),
+                    "foreign_futures_net_oi": -86_189,
+                    "foreign_futures_net_oi_change": -1_736,
+                    "retail_futures_net_oi": 11_776,
+                    "retail_futures_net_oi_change": 828,
+                    "put_volume": 377_448,
+                    "call_volume": 451_306,
+                    "put_call_volume_ratio_pct": 83.63,
+                    "put_open_interest": 42_516,
+                    "call_open_interest": 45_745,
+                    "put_call_open_interest_ratio_pct": 92.94,
+                },
+            ),
         ):
             envelope = tools.read_tw_futures_context(
                 db=db,
@@ -199,6 +296,13 @@ class AIToolBoundaryTests(unittest.TestCase):
             active_only=True,
         )
         get_intraday.assert_called_once_with(db=db, symbol="TXF", limit=390)
+        get_market_chip.assert_called_once_with(db, index_id="TAIEX")
+        list_market_chips.assert_called_once_with(db, index_id="TAIEX", limit=20)
+        build_derivatives.assert_called_once_with(
+            db,
+            option_contract_month=None,
+            option_strike_limit=11,
+        )
         self.assertEqual(envelope["kind"], "tw_futures_context")
         self.assertEqual(envelope["generated_at"], fixed_now)
         self.assertEqual(
@@ -209,6 +313,83 @@ class AIToolBoundaryTests(unittest.TestCase):
                 "taiwan_futures_intraday_bar",
             ],
         )
+        self.assertEqual(
+            envelope["data"]["institutional_position"]["foreign_futures_net_oi"],
+            -86_189,
+        )
+        self.assertEqual(
+            envelope["data"]["options_sentiment"]["put_call_open_interest_ratio_pct"],
+            92.94,
+        )
+        self.assertEqual(envelope["data"]["market_chip_trend"]["status"], "partial")
+        self.assertEqual(envelope["data"]["derivatives"]["status"], "ready")
+        self.assertEqual(
+            envelope["data"]["market_chip_trend"]["coverage"]["available_days"],
+            1,
+        )
+        self.assertEqual(
+            envelope["data"]["slots"]["institutional_position"]["status"],
+            "ready",
+        )
+        self.assertEqual(
+            envelope["data"]["slots"]["options_sentiment"]["status"],
+            "ready",
+        )
+
+    def test_futures_compact_separates_night_quote_daily_close_and_post_close_chips(self) -> None:
+        compact = _build_tw_futures_compact(
+            symbol="TXF",
+            latest_quote={
+                "symbol": "TXF",
+                "session": "after_hours",
+                "quote_time": "2026-07-18T04:59:58+08:00",
+                "last_price": 43_481,
+                "reference_price": 42_604,
+                "settlement_price": 0,
+                "open_interest": 0,
+                "freshness": {"status": "live", "is_stale": False},
+            },
+            latest_daily={
+                "trade_date": "2026-07-17",
+                "close_price": 42_725,
+                "source": "taifex_daily_market",
+            },
+            daily_chart={"points": [{"date": "2026-07-17", "close": 42_725}]},
+            intraday_chart=None,
+            analysis={"selected_title": "波段偏空"},
+            institutional_position={
+                "trade_date": "2026-07-17",
+                "foreign_futures_net_oi": -86_189,
+                "foreign_futures_net_oi_change": -1_736,
+            },
+            options_sentiment={
+                "trade_date": "2026-07-17",
+                "put_call_volume_ratio_pct": 83.63,
+                "put_call_open_interest_ratio_pct": 92.94,
+            },
+            market_chip_trend={
+                "status": "partial",
+                "as_of": "2026-07-17",
+                "latest": {"foreign_futures_net_oi": -86_189},
+                "coverage": {"available_days": 20, "complete_days": 1},
+                "windows": {},
+            },
+            derivatives={"status": "partial", "as_of": "2026-07-17"},
+            payload_level_value="compact",
+        )
+
+        self.assertEqual(compact["quote"]["last_price"], 43_481)
+        self.assertEqual(compact["daily_close"]["close_price"], 42_725)
+        self.assertIsNone(compact["quote"]["settlement_price"])
+        self.assertIsNone(compact["quote"]["open_interest"])
+        self.assertEqual(compact["quote"]["field_status"]["open_interest"], "missing")
+        self.assertEqual(compact["slots"]["latest_session_quote"]["status"], "ready")
+        self.assertEqual(compact["slots"]["institutional_position"]["status"], "ready")
+        self.assertIn(
+            "official_daily_post_close_not_live_night_session",
+            compact["slots"]["options_sentiment"]["warnings"],
+        )
+        self.assertEqual(compact["slots"]["data_quality"]["status"], "partial")
 
 
 if __name__ == "__main__":

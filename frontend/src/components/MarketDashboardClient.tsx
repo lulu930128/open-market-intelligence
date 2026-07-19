@@ -1,6 +1,7 @@
 "use client";
 
 import SidebarWatchlistExplorer from "@/components/SidebarWatchlistExplorer";
+import BackendConnectionBanner from "@/components/BackendConnectionBanner";
 import CryptoMarketPanel from "@/components/CryptoMarketPanel";
 import JPMarketPanel from "@/components/JPMarketPanel";
 import JPMarketSidebar from "@/components/JPMarketSidebar";
@@ -130,6 +131,7 @@ import type {
   WatchlistItemRead,
   WatchlistRadarMode,
 } from "@/types/market";
+import type { BackendConnectionIssueCode } from "@/types/runtime";
 import { useMemo, useState } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
@@ -207,6 +209,9 @@ type Props = {
   initialKrWatchlistTree: KRWatchlistGroupNode[];
   initialKrWatchlistItems: KRWatchlistItemRead[];
   quoteDepthPreviewMode: TaiwanStockQuoteDepthPreviewMode | null;
+  initialBackendIssueCount: number;
+  initialBackendIssueCode: BackendConnectionIssueCode | null;
+  formBackendIssueCode: BackendConnectionIssueCode | null;
 };
 
 function isRankingItemPending(row: RankingItem) {
@@ -251,6 +256,9 @@ export default function MarketDashboardClient({
   initialKrWatchlistTree,
   initialKrWatchlistItems,
   quoteDepthPreviewMode,
+  initialBackendIssueCount,
+  initialBackendIssueCode,
+  formBackendIssueCode,
 }: Props) {
   const t = useT();
   const refreshExecutionSettings = useRefreshExecutionSettings();
@@ -293,10 +301,10 @@ export default function MarketDashboardClient({
     jpItems: jpWatchlistItems,
     krTree: krWatchlistTree,
     krItems: krWatchlistItems,
-    onHistoryNavigation: () => {
-      setTwChartFocusMode(false);
-      setUsChartFocusMode(false);
-      setJpChartFocusMode(false);
+    onHistoryNavigation: (route) => {
+      if (route.market !== "tw") setTwChartFocusMode(false);
+      if (route.market !== "us") setUsChartFocusMode(false);
+      if (route.market !== "jp") setJpChartFocusMode(false);
     },
   });
   const {
@@ -912,7 +920,6 @@ export default function MarketDashboardClient({
 
   function onTaiwanStockChange(stockId: string, stockName: string | null) {
     marketSelection.selectTaiwanStock(stockId, stockName, radarMode);
-    setTwChartFocusMode(false);
   }
 
   function onTaiwanFuturesChange(symbol: string) {
@@ -1628,6 +1635,11 @@ export default function MarketDashboardClient({
   return (
     <main className="h-screen overflow-hidden bg-omi-canvas text-omi-text-strong">
       <div className="flex h-full w-full flex-col lg:min-w-[1180px]">
+        <BackendConnectionBanner
+          initialIssueCount={initialBackendIssueCount}
+          initialIssueCode={initialBackendIssueCode}
+          formIssueCode={formBackendIssueCode}
+        />
         <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
           {activeMarket === "us" ? (
             <USWatchlistSidebar

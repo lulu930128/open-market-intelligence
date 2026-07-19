@@ -11,6 +11,8 @@ from app.ai.market_context import (
     taiwan_projection,
     taiwan_stock,
     taiwan_watchlist,
+    tw_cross_market,
+    tw_market_chips,
 )
 from app.ai.market_context.common import append_source_ref_once as _append_source_ref_once
 from app.ai.market_payload_contract import has_payload_value as _has_payload_value
@@ -26,7 +28,7 @@ from app.market.indices import (
     get_market_index_ohlc_chart_data,
     get_market_index_summary,
 )
-from app.market.market_chips import get_latest_market_chip_daily
+from app.market.market_chips import get_latest_market_chip_daily, list_market_chip_daily
 from app.market.overnight_impact import build_us_overnight_impact_report
 from app.market.source_health import build_taiwan_source_health
 from app.market.tw_futures import (
@@ -34,6 +36,7 @@ from app.market.tw_futures import (
     list_taiwan_futures_daily_bars,
     list_taiwan_futures_intraday_bars,
 )
+from app.market.tw_derivatives import build_taiwan_derivatives_summary
 from app.stocks import service as stock_service
 from app.watchlists import radar_service, ranking_service
 from app.watchlists import service as watchlist_service
@@ -68,6 +71,9 @@ def read_market_overview(
         dependencies=taiwan_market.TaiwanMarketDependencies(
             market_service=market_service,
             get_market_index_intraday=get_market_index_intraday,
+            get_market_index_summary=get_market_index_summary,
+            read_cross_market_context=tw_cross_market.read_tw_cross_market_context,
+            read_market_chips_context=tw_market_chips.read_tw_market_chips_context,
             now=_now,
         ),
     )
@@ -107,6 +113,7 @@ def read_tw_futures_context(
     bars: int = 120,
     include_intraday: bool = False,
     analysis_horizon: str = "swing",
+    market_data_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return taiwan_futures.read_tw_futures_context(
         db=db,
@@ -114,11 +121,15 @@ def read_tw_futures_context(
         bars=bars,
         include_intraday=include_intraday,
         analysis_horizon=analysis_horizon,
+        market_data_params=market_data_params,
         dependencies=taiwan_futures.TaiwanFuturesDependencies(
             get_latest_taiwan_futures_quotes=get_latest_taiwan_futures_quotes,
             list_taiwan_futures_daily_bars=list_taiwan_futures_daily_bars,
             list_taiwan_futures_intraday_bars=list_taiwan_futures_intraday_bars,
+            get_latest_market_chip_daily=get_latest_market_chip_daily,
+            list_market_chip_daily=list_market_chip_daily,
             now=_now,
+            build_taiwan_derivatives_summary=build_taiwan_derivatives_summary,
         ),
     )
 
@@ -171,6 +182,7 @@ def read_watchlist_context(
     limit: int = 100,
     radar_mode: str = "action",
     radar_limit: int = 12,
+    market_data_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return taiwan_watchlist.read_watchlist_context(
         db=db,
@@ -182,6 +194,7 @@ def read_watchlist_context(
         limit=limit,
         radar_mode=radar_mode,
         radar_limit=radar_limit,
+        market_data_params=market_data_params,
         dependencies=taiwan_watchlist.TaiwanWatchlistDependencies(
             watchlist_service=watchlist_service,
             ranking_service=ranking_service,

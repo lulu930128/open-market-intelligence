@@ -68,6 +68,20 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("broker_branch_trade_daily", table_names)
             self.assertIn("market_index_daily_stat", table_names)
             self.assertIn("market_chip_daily", table_names)
+            market_chip_columns = {
+                column["name"]
+                for column in inspect(engine).get_columns("market_chip_daily")
+            }
+            self.assertTrue(
+                {
+                    "put_volume",
+                    "call_volume",
+                    "put_call_volume_ratio_pct",
+                    "put_open_interest",
+                    "call_open_interest",
+                    "put_call_open_interest_ratio_pct",
+                }.issubset(market_chip_columns)
+            )
             self.assertIn("market_intraday_bar", table_names)
             self.assertIn("taiwan_stock_quote_snapshot", table_names)
             self.assertIn("chart_drawing_snapshot", table_names)

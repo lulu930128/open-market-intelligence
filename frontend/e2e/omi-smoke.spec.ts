@@ -1456,6 +1456,19 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
       return;
     }
 
+    if (path.endsWith("/system/readyz")) {
+      await fulfillJson(route, {
+        status: "ready",
+        checks: { runtime: "ok", database: "ok" },
+      });
+      return;
+    }
+
+    if (path.endsWith("/system/health")) {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+
     if (path.endsWith("/ai/ask/stream")) {
       options.omiAskRequests?.push(route.request().postDataJSON());
       await fulfillOmiStream(route);
@@ -2388,6 +2401,24 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
 }
 
 test.describe("OMI dashboard smoke", () => {
+  test("backend mutation failure remains visible after redirect", async ({ page }) => {
+    await mockOmiApi(page, {
+      apiResponder: ({ path }) =>
+        path.endsWith("/system/readyz")
+          ? { status: 404, body: { detail: "Not Found" } }
+          : null,
+    });
+    await page.goto("/?omi_error=timeout", { waitUntil: "domcontentloaded" });
+
+    const banner = page.getByTestId("backend-connection-banner");
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText("操作未完成");
+    await expect(banner.getByRole("button", { name: "重新整理" })).toBeVisible();
+    await expect
+      .poll(() => new URL(page.url()).searchParams.has("omi_error"))
+      .toBe(false);
+  });
+
   test("OMI dock streams a mocked answer", async ({ page }) => {
     await mockOmiApi(page);
     await page.goto("/", { waitUntil: "domcontentloaded" });
@@ -2659,6 +2690,35 @@ test.describe("OMI dashboard smoke", () => {
     await expect(page.locator("canvas").first()).toBeVisible();
   });
 
+  test("Taiwan professional mode stays focused when selecting another security", async ({
+    page,
+  }) => {
+    await mockOmiApi(page, {
+      taiwanWatchlistTree: seededTaiwanWatchlistTree(),
+      taiwanWatchlistItems: seededTaiwanWatchlistItems(),
+      taiwanRankingRows: seededTaiwanRankingRows(),
+    });
+    await page.goto("/?market=tw&group_id=7&stock_id=2330", {
+      waitUntil: "domcontentloaded",
+    });
+
+    await expect(page.getByTestId("stock-detail-expand")).toBeEnabled();
+    await page.getByTestId("stock-detail-expand").click();
+    await expect(page.getByTestId("professional-chart-panel")).toBeVisible();
+    await expect(page.getByTestId("market-tape-tw")).toBeHidden();
+
+    const indexButton = page.getByRole("button", { name: /TAIEX 加權指數/ }).first();
+    if (!(await indexButton.isVisible())) {
+      await page.getByRole("button", { name: "切換加權指數資料夾" }).click();
+    }
+    await indexButton.click();
+
+    await expect(page).toHaveURL(/stock_id=TAIEX/);
+    await expect(page.getByTestId("professional-chart-panel")).toBeVisible();
+    await expect(page.getByRole("button", { name: "總覽" })).toBeVisible();
+    await expect(page.getByTestId("market-tape-tw")).toBeHidden();
+  });
+
   test("Taiwan stock detail ignores stale chart and quote responses after selection changes", async ({
     page,
   }) => {
@@ -2786,6 +2846,214 @@ test.describe("OMI dashboard smoke", () => {
     await expect(chart).toHaveAttribute("data-drawing-count", "0");
     await expect.poll(() => drawingWrites().length).toBe(2);
     expect((drawingWrites()[1].body as { drawings: unknown[] }).drawings).toHaveLength(0);
+  });
+
+  test("Taiwan professional chart removes and restores an active technical indicator", async ({
+    page,
+  }) => {
+    await mockOmiApi(page);
+    await page.goto("/?market=tw&stock_id=2330", { waitUntil: "domcontentloaded" });
+
+    await expect(page.getByTestId("stock-detail-panel")).toHaveAttribute(
+      "data-chart-load-state",
+      "success"
+    );
+    await page.getByTestId("stock-detail-expand").click();
+
+    const chart = page.getByTestId("lightweight-kline-chart");
+    const activeIndicators = async () =>
+      (await chart.getAttribute("data-active-indicators"))?.split(",") ?? [];
+    expect(await activeIndicators()).toContain("ma");
+
+    await page.getByTestId("chart-indicator-menu-toggle").click();
+    const movingAverageToggle = page.locator('[data-indicator-option="ma"]');
+    await expect(movingAverageToggle).toBeChecked();
+
+    await movingAverageToggle.uncheck();
+    await expect(movingAverageToggle).not.toBeChecked();
+    await expect.poll(async () => (await activeIndicators()).includes("ma")).toBe(false);
+
+    await movingAverageToggle.check();
+    await expect(movingAverageToggle).toBeChecked();
+    await expect.poll(async () => (await activeIndicators()).includes("ma")).toBe(true);
+  });
+
+  test("Taiwan professional chart keeps the last drawing deleted while remote sync is stale", async ({
+    page,
+  }) => {
+    const apiRequests: NonNullable<MockOmiApiOptions["apiRequests"]> = [];
+    let remoteDrawings: unknown[] = [];
+    await mockOmiApi(page, {
+      apiRequests,
+      apiResponder: ({ method, path }) =>
+        method === "GET" && path.includes("/market/chart-drawings/")
+          ? {
+              body: {
+                id: 1,
+                market: "TW",
+                symbol: "2330",
+                timeframe: "daily",
+                label: "台積電",
+                time_mode: "date",
+                selected_drawing_id: null,
+                drawing_count: remoteDrawings.length,
+                drawings: remoteDrawings,
+                summary: null,
+                source: "playwright-stale-snapshot",
+                created_at: "2026-06-15T09:30:00+08:00",
+                updated_at: "2026-06-15T09:30:00+08:00",
+              },
+            }
+          : null,
+    });
+    await page.goto("/?market=tw&stock_id=2330", { waitUntil: "domcontentloaded" });
+
+    await expect(page.getByTestId("stock-detail-panel")).toHaveAttribute(
+      "data-chart-load-state",
+      "success"
+    );
+    await page.getByTestId("stock-detail-expand").click();
+
+    const chart = page.getByTestId("lightweight-kline-chart");
+    const overlay = page.getByTestId("lightweight-chart-overlay");
+    await expect(chart).toHaveAttribute("data-drawing-count", "0");
+    await expect.poll(
+      () =>
+        apiRequests.filter(
+          (request) =>
+            request.method === "GET" && request.path.includes("/market/chart-drawings/")
+        ).length
+    ).toBe(1);
+
+    const overlayBox = await overlay.boundingBox();
+    expect(overlayBox).not.toBeNull();
+    await page.locator('[data-drawing-tool-option="riskReward"]').click();
+    await page.mouse.move(
+      (overlayBox?.x ?? 0) + (overlayBox?.width ?? 600) * 0.48,
+      (overlayBox?.y ?? 0) + (overlayBox?.height ?? 600) * 0.42
+    );
+    await page.mouse.down();
+    await page.mouse.move(
+      (overlayBox?.x ?? 0) + (overlayBox?.width ?? 600) * 0.64,
+      (overlayBox?.y ?? 0) + (overlayBox?.height ?? 600) * 0.42,
+      { steps: 6 }
+    );
+    await page.mouse.up();
+    await expect(chart).toHaveAttribute("data-drawing-count", "1");
+
+    const drawingWrites = () =>
+      apiRequests.filter(
+        (request) =>
+          request.method === "PUT" && request.path.includes("/market/chart-drawings/")
+      );
+    await expect.poll(() => drawingWrites().length).toBe(1);
+    remoteDrawings = (drawingWrites()[0].body as { drawings: unknown[] }).drawings;
+    expect(remoteDrawings).toHaveLength(1);
+
+    await expect(page.getByTestId("chart-drawing-delete")).toBeEnabled();
+    await page.getByTestId("chart-drawing-delete").click();
+    await expect(chart).toHaveAttribute("data-drawing-count", "0");
+    await page.waitForTimeout(1_000);
+    await expect(chart).toHaveAttribute("data-drawing-count", "0");
+    await expect.poll(() => drawingWrites().length).toBe(2);
+    expect((drawingWrites()[1].body as { drawings: unknown[] }).drawings).toHaveLength(0);
+  });
+
+  test("Taiwan professional Fib follows chart panning and price scaling", async ({
+    page,
+  }) => {
+    await mockOmiApi(page);
+    await page.goto("/?market=tw&stock_id=2330", { waitUntil: "domcontentloaded" });
+
+    await expect(page.getByTestId("stock-detail-panel")).toHaveAttribute(
+      "data-chart-load-state",
+      "success"
+    );
+    await page.getByTestId("stock-detail-expand").click();
+
+    const chart = page.getByTestId("lightweight-kline-chart");
+    const overlay = page.getByTestId("lightweight-chart-overlay");
+    const overlayBox = await overlay.boundingBox();
+    expect(overlayBox).not.toBeNull();
+
+    await page.locator('[data-drawing-tool-option="fibonacci"]').click();
+    await overlay.click({
+      position: {
+        x: Math.round((overlayBox?.width ?? 600) * 0.28),
+        y: Math.round((overlayBox?.height ?? 600) * 0.3),
+      },
+    });
+    await overlay.click({
+      position: {
+        x: Math.round((overlayBox?.width ?? 600) * 0.66),
+        y: Math.round((overlayBox?.height ?? 600) * 0.62),
+      },
+    });
+    await expect(chart).toHaveAttribute("data-drawing-count", "1");
+
+    const fibonacci = overlay.locator('[data-drawing-type="fibonacci"]');
+    await expect(fibonacci).toBeVisible();
+    const fibonacciLeft = Number(await fibonacci.getAttribute("data-fibonacci-left"));
+    const fibonacciRight = Number(await fibonacci.getAttribute("data-fibonacci-right"));
+    expect(fibonacciLeft).toBeGreaterThan(0);
+    expect(fibonacciRight).toBeLessThan(overlayBox?.width ?? 600);
+    expect(fibonacciRight - fibonacciLeft).toBeGreaterThan(100);
+
+    const fibonacciLineXs = await fibonacci.locator("line").evaluateAll((lines) =>
+      lines.map((line) => ({
+        x1: Number(line.getAttribute("x1")),
+        x2: Number(line.getAttribute("x2")),
+      }))
+    );
+    expect(fibonacciLineXs).toHaveLength(7);
+    fibonacciLineXs.forEach(({ x1, x2 }) => {
+      expect(x1).toBeCloseTo(fibonacciLeft, 1);
+      expect(x2).toBeCloseTo(fibonacciRight, 1);
+    });
+
+    await page.locator('[data-drawing-tool-option="cursor"]').click();
+    await page.mouse.move(
+      (overlayBox?.x ?? 0) + (overlayBox?.width ?? 600) * 0.65,
+      (overlayBox?.y ?? 0) + (overlayBox?.height ?? 600) * 0.55
+    );
+    await page.mouse.down();
+    await page.mouse.move(
+      (overlayBox?.x ?? 0) + (overlayBox?.width ?? 600) * 0.78,
+      (overlayBox?.y ?? 0) + (overlayBox?.height ?? 600) * 0.55,
+      { steps: 8 }
+    );
+    await page.mouse.up();
+
+    await expect.poll(async () => {
+      const nextLeft = Number(await fibonacci.getAttribute("data-fibonacci-left"));
+      return Math.abs(nextLeft - fibonacciLeft);
+    }).toBeGreaterThan(5);
+
+    const fibonacciLineYsBeforePriceDrag = await fibonacci
+      .locator("line")
+      .evaluateAll((lines) => lines.map((line) => Number(line.getAttribute("y1"))));
+    await page.mouse.move(
+      (overlayBox?.x ?? 0) + (overlayBox?.width ?? 600) - 18,
+      (overlayBox?.y ?? 0) + (overlayBox?.height ?? 600) * 0.3
+    );
+    await page.mouse.down();
+    await page.mouse.move(
+      (overlayBox?.x ?? 0) + (overlayBox?.width ?? 600) - 18,
+      (overlayBox?.y ?? 0) + (overlayBox?.height ?? 600) * 0.44,
+      { steps: 8 }
+    );
+    await page.mouse.up();
+
+    await expect.poll(async () => {
+      const nextLineYs = await fibonacci
+        .locator("line")
+        .evaluateAll((lines) => lines.map((line) => Number(line.getAttribute("y1"))));
+      return Math.max(
+        ...nextLineYs.map((nextY, index) =>
+          Math.abs(nextY - fibonacciLineYsBeforePriceDrag[index])
+        )
+      );
+    }).toBeGreaterThan(5);
   });
 
   test("Taiwan branch data tab reuses each days cache key", async ({ page }) => {

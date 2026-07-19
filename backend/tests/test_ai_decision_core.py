@@ -59,6 +59,15 @@ class AiDecisionCoreTests(unittest.TestCase):
         self.assertEqual(understanding.analysis_horizon, "intraday")
         self.assertEqual(understanding.analysis_horizon_source, "question_intraday_hint")
 
+    def test_taiwan_futures_night_session_question_sets_intraday_horizon(self) -> None:
+        horizon, source = decision_core.infer_analysis_horizon(
+            question="TXF 夜盤大跌，所以外資現在一定又加空了嗎？",
+            requested_horizon="auto",
+            strategy_profile="technical_swing",
+        )
+
+        self.assertEqual((horizon, source), ("intraday", "question_intraday_hint"))
+
     def test_swing_and_long_horizon_are_inferred_from_question(self) -> None:
         swing_horizon, swing_source = decision_core.infer_analysis_horizon(
             question="TSLA 這幾週走勢怎麼看？",

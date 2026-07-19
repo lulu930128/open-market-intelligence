@@ -38,7 +38,68 @@ class MarketService(Protocol):
 class TaiwanMarketDependencies:
     market_service: MarketService
     get_market_index_intraday: Callable[[str], dict[str, Any]]
+    get_market_index_summary: Callable[..., dict[str, Any]]
+    read_cross_market_context: Callable[..., dict[str, Any]]
+    read_market_chips_context: Callable[..., dict[str, Any]]
     now: Callable[[], datetime]
+
+
+def _compact_auxiliary_context(value: dict[str, Any]) -> dict[str, Any]:
+    compact = ((value.get("data") or {}).get("compact")) if isinstance(value.get("data"), dict) else None
+    if isinstance(compact, dict):
+        return compact
+    return {
+        key: value.get(key)
+        for key in ("kind", "status", "as_of", "scope", "summary", "missing", "warnings", "slots")
+        if key in value
+    }
+
+
+def _build_tw_market_compact(
+    *,
+    as_of: str | None,
+    payload_level: str,
+    breadth: dict[str, Any],
+    sample_breadth: dict[str, Any],
+    distribution: dict[str, Any],
+    top_gainers: list[dict[str, Any]],
+    top_losers: list[dict[str, Any]],
+    value_leaders: list[dict[str, Any]],
+    top_industries: list[dict[str, Any]],
+    weak_industries: list[dict[str, Any]],
+    industry_strength_label: str,
+    index_intraday: dict[str, Any],
+    cross_market: dict[str, Any],
+    market_chips: dict[str, Any],
+    slots: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "kind": "tw_market_compact_evidence",
+        "version": "market_compact_evidence.v1",
+        "payload_level": payload_level,
+        "target": {"type": "market", "id": "TW", "label": "台股市場", "market": "TW"},
+        "as_of": as_of,
+        "breadth": breadth,
+        "sample_breadth": sample_breadth,
+        "distribution": distribution,
+        "top_gainers": top_gainers,
+        "top_losers": top_losers,
+        "value_leaders": value_leaders,
+        "top_industries": top_industries,
+        "weak_industries": weak_industries,
+        "industry_strength_label": industry_strength_label,
+        "index_intraday": index_intraday,
+        "cross_market": _compact_auxiliary_context(cross_market),
+        "market_chips": _compact_auxiliary_context(market_chips),
+        "freshness_by_domain": {
+            "breadth": (slots.get("market_breadth") or {}).get("status"),
+            "sample_ranking": (slots.get("sample_distribution") or {}).get("status"),
+            "index_intraday": (slots.get("index_intraday") or {}).get("status"),
+            "cross_market": (slots.get("cross_market") or {}).get("status"),
+            "market_chips": (slots.get("market_chips") or {}).get("status"),
+        },
+        "slots": slots,
+    }
 
 
 def _market_index_ids_from_params(params: dict[str, Any] | None) -> list[str]:
@@ -124,6 +185,83 @@ def _market_index_intraday_pack(
     }
 
 
+def _json_scalar(value: Any) -> Any:
+    isoformat = getattr(value, "isoformat", None)
+    return isoformat() if callable(isoformat) else value
+
+
+def _market_breadth_label(market: str | None, scope: str) -> str:
+    normalized_market = str(market or "TWSE").upper()
+    market_label = "上市" if normalized_market == "TWSE" else "上櫃" if normalized_market == "TPEX" else normalized_market
+    if scope == "full_market":
+        return f"{market_label}全市場廣度"
+    if scope == "registered_universe":
+        return f"{market_label}即時廣度（註冊範圍）"
+    if scope == "omi_sample":
+        return "OMI 樣本股廣度"
+    return f"{market_label}本機資料集廣度"
+
+
+def _industry_strength_label(rows: list[dict[str, Any]]) -> str:
+    leading_change = rows[0].get("average_change_pct") if rows else None
+    if not isinstance(leading_change, (int, float)):
+        return "產業相對表現"
+    if leading_change > 0:
+        return "強勢產業"
+    if leading_change < 0:
+        return "相對抗跌產業"
+    return "產業相對表現"
+
+
+def _market_breadth_from_index_summary(
+    *,
+    db: Session,
+    dependencies: TaiwanMarketDependencies,
+    warnings: list[str],
+    source_refs: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    try:
+        summary = dependencies.get_market_index_summary(db, force_refresh=False)
+    except Exception as exc:
+        warnings.append(f"Taiwan market index breadth unavailable: {exc}")
+        return None
+
+    indices = summary.get("indices") if isinstance(summary, dict) else None
+    taiex = next(
+        (
+            item
+            for item in indices or []
+            if isinstance(item, dict) and item.get("index_id") == "TAIEX"
+        ),
+        None,
+    )
+    raw_breadth = taiex.get("breadth") if isinstance(taiex, dict) else None
+    if not isinstance(raw_breadth, dict) or not raw_breadth.get("total_count"):
+        return None
+
+    scope = str(raw_breadth.get("scope") or "local_dataset")
+    breadth = {key: _json_scalar(value) for key, value in raw_breadth.items()}
+    breadth["scope"] = scope
+    breadth["label"] = str(
+        raw_breadth.get("label")
+        or _market_breadth_label(raw_breadth.get("market"), scope)
+    )
+    advance_count = int(breadth.get("advance_count") or 0)
+    decline_count = int(breadth.get("decline_count") or 0)
+    comparison_count = advance_count + decline_count
+    breadth["positive_ratio"] = (
+        advance_count / comparison_count if comparison_count else None
+    )
+    breadth["advance_decline_ratio"] = (
+        advance_count / decline_count if decline_count else None
+    )
+    _append_source_ref_once(
+        source_refs,
+        {"type": "derived", "name": "app.market.indices.summary"},
+    )
+    return breadth
+
+
 def read_market_overview(
     db: Session,
     limit: int = 10,
@@ -132,11 +270,24 @@ def read_market_overview(
     market_data_params: dict[str, Any] | None = None,
     dependencies: TaiwanMarketDependencies,
 ) -> dict[str, Any]:
+    generated_at = dependencies.now()
     latest_trade_date = dependencies.market_service.get_latest_trade_date(db)
     missing: list[str] = []
     warnings: list[str] = []
     source_refs: list[dict[str, Any]] = [{"type": "table", "name": "market_daily_price"}]
     payload_level = _payload_level(market_data_params)
+    cross_market = dependencies.read_cross_market_context(db=db, now=generated_at)
+    market_chips = dependencies.read_market_chips_context(db=db, limit=limit)
+    for source_ref in cross_market.get("source_refs") or []:
+        if isinstance(source_ref, dict):
+            _append_source_ref_once(source_refs, source_ref)
+    if cross_market.get("status") != "ready":
+        warnings.append(
+            "Cross-market auxiliary context is partial; inspect data.cross_market.missing before using it."
+        )
+    for source_ref in market_chips.get("source_refs") or []:
+        if isinstance(source_ref, dict):
+            _append_source_ref_once(source_refs, source_ref)
     index_intraday = _market_index_intraday_pack(
         dependencies=dependencies,
         include_intraday=include_intraday,
@@ -145,38 +296,69 @@ def read_market_overview(
         warnings=warnings,
         source_refs=source_refs,
     )
+    market_breadth = _market_breadth_from_index_summary(
+        db=db,
+        dependencies=dependencies,
+        warnings=warnings,
+        source_refs=source_refs,
+    )
 
     if latest_trade_date is None:
+        if market_breadth is None:
+            missing.append("market_breadth.full_market")
+        no_daily_warnings = [
+            "No market daily rows are available in the local database; movers and industry distribution are unavailable.",
+            *warnings,
+        ]
+        slots = _build_tw_market_slots(
+            as_of=None,
+            payload_level=payload_level,
+            breadth=market_breadth or {},
+            distribution={},
+            industry_rows=[],
+            index_intraday=index_intraday,
+            cross_market=cross_market,
+            market_chips=market_chips,
+            missing=list(dict.fromkeys(["market_daily_price", *missing])),
+            warnings=no_daily_warnings,
+        )
+        compact = _build_tw_market_compact(
+            as_of=(market_breadth or {}).get("as_of") or (market_breadth or {}).get("trade_date"),
+            payload_level=payload_level,
+            breadth=market_breadth or {},
+            sample_breadth={},
+            distribution={},
+            top_gainers=[],
+            top_losers=[],
+            value_leaders=[],
+            top_industries=[],
+            weak_industries=[],
+            industry_strength_label="產業相對表現",
+            index_intraday=index_intraday,
+            cross_market=cross_market,
+            market_chips=market_chips,
+            slots=slots,
+        )
         envelope = {
             "kind": "market_overview",
-            "generated_at": dependencies.now(),
-            "as_of": None,
+            "generated_at": generated_at,
+            "as_of": (market_breadth or {}).get("as_of")
+            or (market_breadth or {}).get("trade_date"),
             "scope": {},
             "data": {
                 "latest_trade_date": None,
-                "breadth": {},
+                "breadth": market_breadth or {},
+                "sample_breadth": {},
                 "top_gainers": [],
                 "top_losers": [],
                 "index_intraday": index_intraday,
-                "slots": _build_tw_market_slots(
-                    as_of=None,
-                    payload_level=payload_level,
-                    breadth={},
-                    distribution={},
-                    industry_rows=[],
-                    index_intraday=index_intraday,
-                    missing=list(dict.fromkeys(["market_daily_price", *missing])),
-                    warnings=[
-                        "No market daily rows are available in the local database.",
-                        *warnings,
-                    ],
-                ),
+                "cross_market": cross_market,
+                "market_chips": market_chips,
+                "slots": slots,
+                "compact": compact,
             },
             "missing": list(dict.fromkeys(["market_daily_price", *missing])),
-            "warnings": [
-                "No market daily rows are available in the local database.",
-                *warnings,
-            ],
+            "warnings": no_daily_warnings,
             "source_refs": source_refs,
         }
         return _with_evidence_passport(
@@ -223,8 +405,15 @@ def read_market_overview(
         for row in rows
     ]
     ranked_with_change = [row for row in ranked if row["change_pct"] is not None]
-    top_gainers = sorted(ranked_with_change, key=lambda row: row["change_pct"], reverse=True)[:limit]
-    top_losers = sorted(ranked_with_change, key=lambda row: row["change_pct"])[:limit]
+    top_gainers = sorted(
+        [row for row in ranked_with_change if row["change_pct"] > 0],
+        key=lambda row: row["change_pct"],
+        reverse=True,
+    )[:limit]
+    top_losers = sorted(
+        [row for row in ranked_with_change if row["change_pct"] < 0],
+        key=lambda row: row["change_pct"],
+    )[:limit]
     value_leaders = sorted(
         [row for row in ranked if row["trade_value"] is not None],
         key=lambda row: row["trade_value"] or 0,
@@ -249,7 +438,12 @@ def read_market_overview(
         if total_trade_value and value_leaders
         else None
     )
-    breadth = {
+    sample_breadth = {
+        "market": "TW",
+        "scope": "omi_sample",
+        "label": "OMI 樣本股廣度",
+        "trade_date": latest_trade_date.isoformat(),
+        "source": "market_daily_price",
         "advance_count": advance_count,
         "decline_count": decline_count,
         "unchanged_count": unchanged_count,
@@ -330,45 +524,75 @@ def read_market_overview(
             -(row.get("trade_value") or 0),
         ),
     )[:6]
+    industry_strength_label = _industry_strength_label(top_industries)
 
     if not ranked_with_change:
         missing.append("market_daily_price.change_pct")
 
-    warnings.extend(
-        [
-            (
-                "This overview includes bounded Taiwan index intraday data, but stock breadth still uses latest local daily rows."
-                if include_intraday
-                else "This overview uses the latest local daily market rows and does not fetch live quotes."
-            )
-        ]
+    if market_breadth is None:
+        market_breadth = sample_breadth
+        missing.append("market_breadth.full_market")
+        warnings.append(
+            "Full-market breadth is unavailable; breadth falls back to a clearly labeled OMI local sample."
+        )
+    else:
+        warnings.append(
+            "Market breadth comes from the market-index summary and is independent of the selected watchlist."
+        )
+    warnings.append(
+        "Top movers, value leaders, distribution, and industry rankings still use the latest OMI local daily sample."
     )
 
+    slots = _build_tw_market_slots(
+        as_of=latest_trade_date.isoformat(),
+        payload_level=payload_level,
+        breadth=market_breadth,
+        distribution=distribution,
+        industry_rows=[*top_industries, *weak_industries],
+        index_intraday=index_intraday,
+        cross_market=cross_market,
+        market_chips=market_chips,
+        missing=missing,
+        warnings=warnings,
+    )
+    compact = _build_tw_market_compact(
+        as_of=latest_trade_date.isoformat(),
+        payload_level=payload_level,
+        breadth=market_breadth,
+        sample_breadth=sample_breadth,
+        distribution=distribution,
+        top_gainers=top_gainers,
+        top_losers=top_losers,
+        value_leaders=value_leaders,
+        top_industries=top_industries,
+        weak_industries=weak_industries,
+        industry_strength_label=industry_strength_label,
+        index_intraday=index_intraday,
+        cross_market=cross_market,
+        market_chips=market_chips,
+        slots=slots,
+    )
     envelope = {
         "kind": "market_overview",
-        "generated_at": dependencies.now(),
+        "generated_at": generated_at,
         "as_of": latest_trade_date.isoformat(),
         "scope": {},
         "data": {
             "latest_trade_date": latest_trade_date.isoformat(),
-            "breadth": breadth,
+            "breadth": market_breadth,
+            "sample_breadth": sample_breadth,
             "distribution": distribution,
             "top_gainers": top_gainers,
             "top_losers": top_losers,
             "value_leaders": value_leaders,
             "top_industries": top_industries,
             "weak_industries": weak_industries,
+            "industry_strength_label": industry_strength_label,
             "index_intraday": index_intraday,
-            "slots": _build_tw_market_slots(
-                as_of=latest_trade_date.isoformat(),
-                payload_level=payload_level,
-                breadth=breadth,
-                distribution=distribution,
-                industry_rows=[*top_industries, *weak_industries],
-                index_intraday=index_intraday,
-                missing=missing,
-                warnings=warnings,
-            ),
+            "cross_market": cross_market,
+            "market_chips": market_chips,
+            "slots": slots,
+            "compact": compact,
         },
         "missing": missing,
         "warnings": warnings,

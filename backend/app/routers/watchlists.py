@@ -146,6 +146,7 @@ def _queue_group_refresh_latest_job(
             sleep_seconds,
             skip_existing_months,
         ),
+        reuse_success_within_seconds=300,
     )
     return job_service.serialize_job(job)
 
@@ -604,10 +605,38 @@ def get_watchlist_group_radar(
     volume_ratio_threshold: float | None = Query(default=None, ge=1.0, le=5.0),
     use_intraday: bool = False,
     intraday_limit: int = Query(default=30, ge=1, le=100),
+    prefer_snapshot: bool = True,
+    snapshot_only: bool = False,
     db: Session = Depends(get_db),
 ):
     try:
-        return radar_service.get_watchlist_group_radar(
+        snapshot_matches_default_calculation = (
+            ma_windows is None
+            and volume_ma_windows is None
+            and calculation_limit == 100
+            and volume_ratio_threshold is None
+        )
+        if (
+            prefer_snapshot
+            and not use_intraday
+            and snapshot_matches_default_calculation
+        ) or snapshot_only:
+            snapshot = radar_outcome_service.get_latest_watchlist_radar_snapshot_payload(
+                db=db,
+                group_id=group_id,
+                include_children=include_children,
+                enabled_only=enabled_only,
+                mode=mode,
+                max_results=max_results,
+            )
+            if snapshot is not None:
+                return snapshot
+            if snapshot_only:
+                raise radar_outcome_service.WatchlistRadarSnapshotNotFoundError(
+                    f"No Radar snapshot is available for group id={group_id}, mode={mode}."
+                )
+
+        radar = radar_service.get_watchlist_group_radar(
             db=db,
             group_id=group_id,
             include_children=include_children,
@@ -621,7 +650,10 @@ def get_watchlist_group_radar(
             use_intraday=use_intraday,
             intraday_limit=intraday_limit,
         )
+        return {**radar, "cache_status": "computed"}
     except service.WatchlistGroupNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except radar_outcome_service.WatchlistRadarSnapshotNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

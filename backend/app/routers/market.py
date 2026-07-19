@@ -133,9 +133,14 @@ from app.routers.tw_market_indices import (
 )
 from app.routers.tw_market_futures import (
     get_latest_taiwan_futures_quotes_api,
+    list_taiwan_large_traders_api,
+    list_taiwan_option_chain_api,
+    list_taiwan_term_structure_api,
     list_taiwan_futures_daily_bars_api,
     list_taiwan_futures_intraday_bars_api,
     list_taiwan_futures_products_api,
+    refresh_taiwan_derivatives_api,
+    refresh_taiwan_futures_daily_bars_api,
     refresh_taiwan_futures_quotes_api,
     router as market_futures_router,
 )
@@ -249,6 +254,7 @@ def _queue_backfill_job(
     progress_total: int = 1,
     task,
     task_args: tuple,
+    reuse_success_within_seconds: float = 0,
 ):
     del background_tasks
 
@@ -261,6 +267,7 @@ def _queue_backfill_job(
         message="Queued.",
         task=task,
         task_args=task_args,
+        reuse_success_within_seconds=reuse_success_within_seconds,
     )
     return job_service.serialize_job(job)
 
@@ -401,6 +408,7 @@ def refresh_selected_stock_data_api(
         progress_total=progress_total,
         task=backfill_tasks.run_stock_selection_refresh_job,
         task_args=(stock_id, include_today, resolved_sleep_seconds, refresh_profile),
+        reuse_success_within_seconds=120,
     )
 
 

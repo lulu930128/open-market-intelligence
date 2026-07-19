@@ -41,7 +41,8 @@ function getJobMarket(jobType: string): "tw" | "us" | "jp" | "kr" | "crypto" | "
     jobType.startsWith("market.") ||
     jobType.startsWith("watchlist.") ||
     jobType === "scheduler.market_daily_refresh" ||
-    jobType === "scheduler.market_chip_daily_refresh"
+    jobType === "scheduler.market_chip_daily_refresh" ||
+    jobType === "scheduler.taiwan_derivatives_refresh"
   ) {
     return "tw";
   }
@@ -57,6 +58,21 @@ function getJobTypeLabel(t: TranslationFunction, jobType: string) {
 
 function isActiveJob(job: JobRunRead) {
   return ACTIVE_STATUSES.has(job.status);
+}
+
+function getLatestJobsByScope(jobs: JobRunRead[]) {
+  const latestByScope = new Map<string, JobRunRead>();
+
+  for (const job of jobs) {
+    const scopeKey = `${job.job_type}\u0000${job.target ?? ""}`;
+    const current = latestByScope.get(scopeKey);
+
+    if (!current || job.id > current.id) {
+      latestByScope.set(scopeKey, job);
+    }
+  }
+
+  return Array.from(latestByScope.values());
 }
 
 function getResultObject(job: JobRunRead) {
@@ -123,10 +139,11 @@ function getFailedResultItems(job: JobRunRead) {
 
 function getFailedUnitCount(job: JobRunRead) {
   const failedItems = getFailedResultItems(job).length;
-  if (failedItems > 0) return failedItems;
-
   const errorCount = getFirstResultNumber(job, ["error_count", "failed_count"]);
-  if (errorCount !== null && errorCount > 0) return errorCount;
+  const reportedErrorCount = errorCount !== null && errorCount > 0 ? errorCount : 0;
+  const knownFailureCount = Math.max(failedItems, reportedErrorCount);
+
+  if (knownFailureCount > 0) return knownFailureCount;
 
   const effectiveStatus = getEffectiveStatus(job);
   if (effectiveStatus === "error" || effectiveStatus === "partial_success") return 1;
@@ -573,7 +590,8 @@ export default function JobStatusCenter({
     };
   }, [open]);
 
-  const activeCount = useMemo(() => jobs.filter(isActiveJob).length, [jobs]);
+  const latestJobs = useMemo(() => getLatestJobsByScope(jobs), [jobs]);
+  const activeCount = useMemo(() => latestJobs.filter(isActiveJob).length, [latestJobs]);
   const focusedDataStatusEvents = useMemo(
     () =>
       dataStatusFocus
@@ -599,9 +617,9 @@ export default function JobStatusCenter({
     () =>
       dataStatusFocus
         ? focusedDataStatusEvents.filter(isAttentionDataStatus).length
-        : jobs.reduce((count, job) => count + getFailedUnitCount(job), 0) +
+        : latestJobs.reduce((count, job) => count + getFailedUnitCount(job), 0) +
           backgroundDataStatusEvents.filter(isAttentionDataStatus).length,
-    [backgroundDataStatusEvents, dataStatusFocus, focusedDataStatusEvents, jobs]
+    [backgroundDataStatusEvents, dataStatusFocus, focusedDataStatusEvents, latestJobs]
   );
   const summaryActiveCount = useMemo(
     () =>

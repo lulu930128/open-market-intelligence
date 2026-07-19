@@ -1,17 +1,24 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from datetime import date, timedelta
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.jobs import backfill_tasks, service as job_service
+from app.jobs.schemas import JobRunRead
 from app.market.indices import (
     get_market_index_contributions,
     get_market_index_intraday,
     get_market_index_list,
     get_market_index_ohlc_chart_data,
     get_market_index_summary,
+    refresh_market_index_daily_stats,
+    refresh_market_index_summary,
 )
 from app.market.schemas import (
     IntradayTrendRead,
     MarketIndexContributionRead,
+    MarketIndexDailyStatRefreshRead,
     MarketIndexListRead,
     MarketIndexSummaryRead,
     MarketOhlcChartRead,
@@ -27,6 +34,78 @@ def get_indices_summary(
     db: Session = Depends(get_db),
 ):
     return get_market_index_summary(db=db, force_refresh=force_refresh)
+
+
+@router.post(
+    "/indices/summary/refresh-job",
+    response_model=JobRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def queue_indices_summary_refresh(
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    del background_tasks
+    request = {"scope": "tw_market_indices"}
+    job, _created = job_service.enqueue_job(
+        db=db,
+        job_type="market.index_summary_refresh",
+        target="all",
+        request=request,
+        progress_total=1,
+        message="Queued.",
+        task=backfill_tasks.run_market_index_summary_refresh_job,
+        reuse_success_within_seconds=45,
+    )
+    return job_service.serialize_job(job)
+
+
+@router.post("/indices/summary/refresh", response_model=MarketIndexSummaryRead)
+def refresh_indices_summary(
+    refresh_daily_stats: bool = False,
+    db: Session = Depends(get_db),
+):
+    try:
+        return refresh_market_index_summary(
+            db=db,
+            refresh_daily_stats=refresh_daily_stats,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Index summary refresh failed: {exc}",
+        ) from exc
+
+
+@router.post(
+    "/indices/{index_id}/daily-stats/refresh",
+    response_model=MarketIndexDailyStatRefreshRead,
+)
+def refresh_index_daily_stats(
+    index_id: str,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    db: Session = Depends(get_db),
+):
+    normalized_to_date = to_date or date.today()
+    normalized_from_date = from_date or normalized_to_date - timedelta(days=90)
+    try:
+        return refresh_market_index_daily_stats(
+            db=db,
+            index_id=index_id,
+            from_date=normalized_from_date,
+            to_date=normalized_to_date,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Index daily stat refresh failed: {exc}",
+        ) from exc
 
 
 @router.get("/indices/list", response_model=MarketIndexListRead)
@@ -116,5 +195,8 @@ __all__ = [
     "get_index_ohlc_chart_data",
     "get_indices_list",
     "get_indices_summary",
+    "queue_indices_summary_refresh",
+    "refresh_indices_summary",
+    "refresh_index_daily_stats",
     "router",
 ]

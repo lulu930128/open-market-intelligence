@@ -42,7 +42,9 @@ function shouldUseIntraday() {
 
 function radarParams(mode: WatchlistRadarMode, useIntraday: boolean) {
   return {
-    ...WATCHLIST_ANALYSIS_PARAMS,
+    // Closed-session reads should match the backend's default calculation contract so
+    // the saved daily snapshot can satisfy the request without recomputing the group.
+    ...(useIntraday ? WATCHLIST_ANALYSIS_PARAMS : {}),
     mode,
     max_results: WATCHLIST_RADAR_MAX_RESULTS,
     calculation_limit: 100,

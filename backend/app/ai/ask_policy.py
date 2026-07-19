@@ -11,6 +11,7 @@ VALID_MODES = {"auto", "data_only", "brief", "analysis", "report", "full"}
 VALID_RANK_BY = {"watchlist", "score", "change_pct", "volume"}
 VALID_SORT_ORDER = {"asc", "desc"}
 VALID_ANALYSIS_HORIZONS = {"auto", "intraday", "short", "swing", "long"}
+SUPPORTED_CONTRACT_VERSIONS = {"omi.ai.ask.v2"}
 VALID_TARGET_TYPES = scope_resolution.VALID_TARGET_TYPES
 REPORT_HINTS = decision_core.REPORT_HINTS
 ANALYSIS_HINTS = decision_core.ANALYSIS_HINTS
@@ -34,6 +35,11 @@ _resolve_scope = scope_resolution._resolve_scope
 
 
 def _validate_request(payload: AiAskRequest) -> None:
+    if payload.contract_version not in SUPPORTED_CONTRACT_VERSIONS:
+        raise ValueError(
+            "contract_version must be one of: "
+            + ", ".join(sorted(SUPPORTED_CONTRACT_VERSIONS))
+        )
     target = _request_target(payload)
     target_type = _request_target_type(payload)
     if target_type not in VALID_TARGET_TYPES:
@@ -110,7 +116,18 @@ def _infer_mode(payload: AiAskRequest, scope_type: str, policy: dict[str, Any]) 
     if payload.mode != "auto":
         return payload.mode
 
-    if scope_type in {"market", "data_freshness"}:
+    if scope_type in {
+        "market",
+        "data_freshness",
+        "resource_asset",
+        "portfolio",
+        "us_macro",
+        "us_watchlist",
+        "jp_watchlist",
+        "kr_watchlist",
+        "source_health",
+        "capability_status",
+    }:
         return "data_only"
 
     if policy["can_generate_report"] and _contains_hint(payload.question, REPORT_HINTS):
@@ -150,9 +167,32 @@ def _effective_mode(
         "crypto_asset",
         "tw_index",
         "tw_futures",
+        "resource_asset",
+        "portfolio",
+        "us_macro",
+        "us_watchlist",
+        "jp_watchlist",
+        "kr_watchlist",
+        "source_health",
+        "capability_status",
     }
     report_capable_scopes = {"stock", "watchlist", "us_stock"}
-    data_context_only_scopes = {"jp_stock", "jp_index", "kr_stock", "kr_index", "crypto_market", "crypto_asset"}
+    data_context_only_scopes = {
+        "jp_stock",
+        "jp_index",
+        "kr_stock",
+        "kr_index",
+        "crypto_market",
+        "crypto_asset",
+        "resource_asset",
+        "portfolio",
+        "us_macro",
+        "us_watchlist",
+        "jp_watchlist",
+        "kr_watchlist",
+        "source_health",
+        "capability_status",
+    }
 
     if requested_mode == "full":
         return "full"

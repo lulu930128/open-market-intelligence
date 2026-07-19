@@ -7,11 +7,6 @@ import {
 import { fetchJson } from "@/lib/api";
 import { requestBackfillJob } from "@/lib/jobs";
 import {
-  getMarketCalendarStatusSnapshot,
-  msUntilIsoTime,
-  refreshMarketCalendarStatus,
-} from "@/lib/marketCalendarStatus";
-import {
   getRefreshExecutionSeconds,
   type RefreshExecutionSettingsRead,
 } from "@/lib/refreshExecutionSettings";
@@ -50,9 +45,7 @@ type UseTaiwanRankingStateOptions = {
 };
 
 const WATCHLIST_INTRADAY_LIMIT = 30;
-const WATCHLIST_RANKING_BATCH_SIZE = 3;
-const WATCHLIST_DAILY_RELEASE_CHECK_MIN_MS = 5_000;
-const WATCHLIST_DAILY_RELEASE_CHECK_MAX_MS = 300_000;
+const WATCHLIST_RANKING_BATCH_SIZE = 20;
 const WATCHLIST_ANALYSIS_PARAMS = {
   include_children: true,
   enabled_only: true,
@@ -67,24 +60,6 @@ function shouldUseIntraday(marketState: TaiwanMarketRefreshState) {
   return (
     marketState.isPollingWindow ||
     (marketState.isAfterClose && !marketState.isDailyPriceReleased)
-  );
-}
-
-function getDailyReleaseCheckDelay() {
-  const marketState = getTaiwanMarketRefreshState();
-  const dailyRelease =
-    getMarketCalendarStatusSnapshot("tw")?.release_windows.market_daily_price;
-  const releaseDelay = marketState.isDailyPriceReleased
-    ? msUntilIsoTime(dailyRelease?.next_release_at)
-    : msUntilIsoTime(dailyRelease?.release_at);
-  const fallbackDelay = marketState.isDailyPriceReleased
-    ? marketState.msUntilNextPollingStart
-    : 60_000;
-  const delay = releaseDelay ?? fallbackDelay;
-
-  return Math.min(
-    Math.max(delay, WATCHLIST_DAILY_RELEASE_CHECK_MIN_MS),
-    WATCHLIST_DAILY_RELEASE_CHECK_MAX_MS
   );
 }
 
@@ -183,6 +158,12 @@ export function useTaiwanRankingState({
         if (companionLoadQueued) return;
         companionLoadQueued = true;
         queueCompanionLoad();
+      }
+
+      // The closed-session Radar is a cheap snapshot read, so expose it without
+      // waiting for the first ranking batch to finish.
+      if (!useIntraday) {
+        ensureCompanionLoadQueued();
       }
 
       if (!options?.silent) {
@@ -421,7 +402,6 @@ export function useTaiwanRankingState({
         }
 
         scheduleRefresh();
-        void refreshDailyPrices(currentGroupId, rankBy);
       });
     }, 120);
 
@@ -430,64 +410,7 @@ export function useTaiwanRankingState({
       window.clearTimeout(initialTimer);
       clearRefreshTimer();
     };
-  }, [active, groupId, load, rankBy, refreshDailyPrices]);
-
-  useEffect(() => {
-    if (!active || groupId === null) return;
-
-    const currentGroupId = groupId;
-    let disposed = false;
-    let refreshTimer: number | undefined;
-
-    function clearRefreshTimer() {
-      if (refreshTimer === undefined) return;
-      window.clearTimeout(refreshTimer);
-      refreshTimer = undefined;
-    }
-
-    function scheduleReleaseCheck(delay = getDailyReleaseCheckDelay()) {
-      if (disposed) return;
-
-      refreshTimer = window.setTimeout(() => {
-        void checkDailyPriceRelease().finally(() => {
-          if (!disposed) scheduleReleaseCheck();
-        });
-      }, delay);
-    }
-
-    async function checkDailyPriceRelease() {
-      try {
-        await refreshMarketCalendarStatus("tw");
-      } catch (error) {
-        console.warn("Taiwan calendar status refresh failed.", error);
-      }
-
-      if (disposed) return;
-
-      if (getTaiwanMarketRefreshState().isDailyPriceReleased) {
-        await refreshDailyPrices(currentGroupId, rankBy);
-      }
-    }
-
-    scheduleReleaseCheck(0);
-
-    return () => {
-      disposed = true;
-      clearRefreshTimer();
-    };
-  }, [active, groupId, rankBy, refreshDailyPrices]);
-
-  useEffect(() => {
-    if (!active || groupId === null || ranking?.is_current !== false) return;
-
-    const refreshTimer = window.setTimeout(() => {
-      void refreshDailyPrices(groupId, rankBy);
-    }, 0);
-
-    return () => {
-      window.clearTimeout(refreshTimer);
-    };
-  }, [active, groupId, rankBy, ranking?.is_current, ranking?.target_trade_date, refreshDailyPrices]);
+  }, [active, groupId, load, rankBy]);
 
   return {
     state: {

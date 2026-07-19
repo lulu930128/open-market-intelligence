@@ -124,6 +124,7 @@ def _read_data_only(
             symbol=symbol,
             include_intraday=_include_tw_intraday(payload, policy=policy),
             analysis_horizon=payload.analysis_horizon,
+            market_data_params=payload.market_data_params,
         )
 
     if scope_type == "us_stock":
@@ -162,7 +163,10 @@ def _read_data_only(
             symbol=symbol,
             is_index=scope_type == "kr_index",
             tool_runs=tool_runs,
-            market_data_params=payload.market_data_params,
+            market_data_params=_external_intraday_market_data_params(
+                payload,
+                policy=policy,
+            ),
         )
 
     if scope_type in {"crypto_market", "crypto_asset"}:
@@ -177,6 +181,71 @@ def _read_data_only(
             context_limit=payload.context_limit,
         )
 
+    if scope_type == "resource_asset":
+        symbol = _require_scope_id(payload, scope_type)
+        return "omi.read_resource_asset_context", agentic_tools.read_resource_asset_context(
+            db=db,
+            symbol=symbol,
+            market_data_params=payload.market_data_params,
+        )
+
+    if scope_type == "us_macro":
+        series_id = _require_scope_id(payload, scope_type)
+        return "omi.read_us_macro_context", agentic_tools.read_us_macro_context(
+            db=db,
+            series_id=series_id,
+            market_data_params=payload.market_data_params,
+        )
+
+    if scope_type == "portfolio":
+        trust_source = str((policy or {}).get("server_trust_source") or "untrusted")
+        return "omi.read_portfolio_context", agentic_tools.read_portfolio_context(
+            db=db,
+            market_data_params=payload.market_data_params,
+            trusted=trust_source != "untrusted",
+        )
+
+    if scope_type == "source_health":
+        params = dict(payload.market_data_params)
+        target_id = _request_target_id(payload)
+        if target_id and "market" not in params:
+            params["market"] = target_id
+        return "omi.read_unified_source_health_context", agentic_tools.read_unified_source_health_context(
+            db=db,
+            market_data_params=params,
+        )
+
+    if scope_type == "capability_status":
+        return "omi.read_capability_status", agentic_tools.read_capability_status(
+            capability_id=_request_target_id(payload),
+            market_data_params=payload.market_data_params,
+        )
+
+    if scope_type in {"us_watchlist", "jp_watchlist", "kr_watchlist"}:
+        group_id_text = _require_scope_id(payload, scope_type)
+        try:
+            group_id = int(group_id_text)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"target.id must be a positive integer for {scope_type}.") from exc
+        market = scope_type.split("_", 1)[0]
+        params = (
+            _external_intraday_market_data_params(payload, policy=policy)
+            if market == "us"
+            else payload.market_data_params
+        )
+        return f"omi.read_{scope_type}_context", agentic_tools.read_regional_watchlist_context(
+            db=db,
+            market=market,
+            group_id=group_id,
+            include_children=payload.include_children,
+            enabled_only=payload.enabled_only,
+            rank_by=payload.rank_by,
+            sort_order=payload.sort_order,
+            radar_mode=_watchlist_radar_mode(question_intent),
+            market_data_params=params,
+            context_limit=payload.context_limit,
+        )
+
     group_id = _require_group_id(payload)
     return "omi.read_watchlist_context", tools.read_watchlist_context(
         db=db,
@@ -187,6 +256,7 @@ def _read_data_only(
         sort_order=payload.sort_order,
         limit=payload.context_limit,
         radar_mode=_watchlist_radar_mode(question_intent),
+        market_data_params=payload.market_data_params,
     )
 
 
@@ -276,7 +346,10 @@ def _build_brief(
             is_index=scope_type == "kr_index",
             strategy_profile=payload.strategy_profile,
             tool_runs=tool_runs,
-            market_data_params=payload.market_data_params,
+            market_data_params=_external_intraday_market_data_params(
+                payload,
+                policy=policy,
+            ),
             response_preferences=_response_preferences(payload),
         )
 

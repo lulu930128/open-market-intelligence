@@ -209,6 +209,36 @@ class WatchlistRadarOutcomeTests(unittest.TestCase):
         self.assertEqual(self.db.query(WatchlistRadarSnapshotRun).count(), 1)
         self.assertEqual(self.db.query(WatchlistRadarSnapshotItem).count(), 1)
 
+    def test_latest_snapshot_rebuilds_full_radar_read_contract(self) -> None:
+        group = self.add_group()
+        first = self.radar_item(
+            rank=1,
+            stock_id="2330",
+            bucket="volume_up",
+            close=100,
+        )
+        second = self.radar_item(
+            rank=2,
+            stock_id="2317",
+            bucket="support_break",
+            close=50,
+        )
+        snapshot = self.save_snapshot(group.id, [first, second])
+
+        payload = radar_outcome_service.get_latest_watchlist_radar_snapshot_payload(
+            db=self.db,
+            group_id=group.id,
+            mode="action",
+            max_results=1,
+        )
+
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["cache_status"], "snapshot")
+        self.assertEqual(payload["snapshot_id"], snapshot["id"])
+        self.assertEqual(payload["snapshot_date"], date(2026, 7, 6))
+        self.assertEqual(payload["radar_count"], 1)
+        self.assertEqual(payload["results"][0]["stock_id"], "2330")
+
     def test_evaluate_snapshot_scores_bucket_aware_hits(self) -> None:
         group = self.add_group()
         source_id, raw_result_id = self.add_source()

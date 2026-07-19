@@ -144,6 +144,7 @@ def _build_tw_stock_slots(
     technical: dict[str, Any],
     chips: dict[str, Any],
     fundamentals: dict[str, Any],
+    cross_market: dict[str, Any] | None,
     missing: list[str],
     warnings: list[str],
 ) -> dict[str, Any]:
@@ -216,10 +217,28 @@ def _build_tw_stock_slots(
             as_of=as_of,
         ),
         "cross_market": _slot_envelope(
-            status="planned",
+            status=(
+                "missing"
+                if not isinstance(cross_market, dict)
+                else "partial"
+                if cross_market.get("missing") or cross_market.get("warnings")
+                else "ready"
+            ),
             capability="cross_market_context",
+            payload_ref="cross_market",
             payload_level=payload_level,
-            next_fill="Attach US/JP/KR/crypto context as bounded auxiliary evidence, not as Taiwan-core replacement.",
+            as_of=cross_market.get("as_of") if isinstance(cross_market, dict) else None,
+            missing=(
+                list(cross_market.get("missing") or [])
+                if isinstance(cross_market, dict)
+                else ["us_overnight_tw_impact"]
+            ),
+            warnings=(
+                list(cross_market.get("warnings") or [])
+                if isinstance(cross_market, dict)
+                else []
+            ),
+            next_fill="Refresh the bounded US overnight mapping when its local evidence is missing or stale.",
         ),
         "news_events": _slot_envelope(
             status="planned",
@@ -334,6 +353,8 @@ def _build_tw_market_slots(
     distribution: dict[str, Any],
     industry_rows: list[dict[str, Any]],
     index_intraday: dict[str, Any],
+    cross_market: dict[str, Any],
+    market_chips: dict[str, Any],
     missing: list[str],
     warnings: list[str],
 ) -> dict[str, Any]:
@@ -351,7 +372,7 @@ def _build_tw_market_slots(
         "market_breadth": _slot_envelope(
             status=_payload_slot_status(
                 breadth,
-                missing=[key for key in missing if key.startswith("market_daily_price")],
+                missing=[key for key in missing if key.startswith("market_breadth")],
             ),
             capability="tw_market_breadth",
             payload_ref="breadth",
@@ -389,11 +410,28 @@ def _build_tw_market_slots(
             missing=intraday_missing,
             warnings=index_intraday.get("warnings") if isinstance(index_intraday.get("warnings"), list) else [],
         ),
-        "cross_market": _slot_envelope(
-            status="planned",
-            capability="cross_market_context",
+        "market_chips": _slot_envelope(
+            status=str(market_chips.get("status") or "missing"),
+            capability="tw_market_chips_and_rankings",
+            payload_ref="market_chips",
             payload_level=payload_level,
-            next_fill="Attach overseas index and crypto risk context as auxiliary evidence after provider boundaries are finalized.",
+            as_of=(
+                (market_chips.get("official_market_aggregate") or {}).get("trade_dates", [None])[-1]
+                if (market_chips.get("official_market_aggregate") or {}).get("trade_dates")
+                else None
+            ),
+            missing=list(market_chips.get("missing") or []),
+            warnings=list(market_chips.get("warnings") or []),
+        ),
+        "cross_market": _slot_envelope(
+            status=str(cross_market.get("status") or "missing"),
+            capability="cross_market_context",
+            payload_ref="cross_market",
+            payload_level=payload_level,
+            as_of=cross_market.get("as_of"),
+            missing=list(cross_market.get("missing") or []),
+            warnings=list(cross_market.get("warnings") or []),
+            next_fill="Refresh only the missing provider caches through their bounded write endpoints.",
         ),
         "news_events": _slot_envelope(
             status="planned",
@@ -1235,6 +1273,7 @@ def _build_stock_compact_evidence(
         "technical": technical,
         "chips": chips,
         "fundamentals": fundamentals,
+        "cross_market": overnight_impact,
         "freshness_by_domain": _build_freshness_by_domain(
             quote=quote,
             intraday_bars=intraday_bars,
@@ -1252,6 +1291,7 @@ def _build_stock_compact_evidence(
             technical=technical,
             chips=chips,
             fundamentals=fundamentals,
+            cross_market=overnight_impact,
             missing=data_quality["missing"],
             warnings=data_quality["warnings"],
         ),

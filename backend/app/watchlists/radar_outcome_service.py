@@ -193,6 +193,8 @@ def _latest_snapshot(
     mode: str,
     snapshot_date: date | None = None,
     radar_rule_version: str = RADAR_RULE_VERSION,
+    include_children: bool | None = None,
+    enabled_only: bool | None = None,
 ) -> WatchlistRadarSnapshotRun | None:
     query = (
         db.query(WatchlistRadarSnapshotRun)
@@ -202,6 +204,10 @@ def _latest_snapshot(
     )
     if snapshot_date is not None:
         query = query.filter(WatchlistRadarSnapshotRun.snapshot_date == snapshot_date)
+    if include_children is not None:
+        query = query.filter(WatchlistRadarSnapshotRun.include_children.is_(include_children))
+    if enabled_only is not None:
+        query = query.filter(WatchlistRadarSnapshotRun.enabled_only.is_(enabled_only))
     return (
         query.order_by(
             WatchlistRadarSnapshotRun.snapshot_date.desc(),
@@ -395,6 +401,65 @@ def get_latest_watchlist_radar_snapshot(
         radar_rule_version=radar_rule_version,
     )
     return _snapshot_to_read(run) if run is not None else None
+
+
+def get_latest_watchlist_radar_snapshot_payload(
+    *,
+    db: Session,
+    group_id: int,
+    mode: str = "action",
+    include_children: bool = True,
+    enabled_only: bool = True,
+    max_results: int = 30,
+    radar_rule_version: str = RADAR_RULE_VERSION,
+) -> dict[str, Any] | None:
+    """Rebuild the read-only Radar contract from the latest persisted snapshot."""
+    watchlist_service.get_group(db=db, group_id=group_id)
+    run = _latest_snapshot(
+        db=db,
+        group_id=group_id,
+        mode=mode,
+        radar_rule_version=radar_rule_version,
+        include_children=include_children,
+        enabled_only=enabled_only,
+    )
+    if run is None:
+        return None
+
+    result_limit = max(1, min(int(max_results), 200))
+    results: list[dict[str, Any]] = []
+    for item in _snapshot_items(db, run.id):
+        payload = _json_loads(item.raw_item_json, {})
+        if not isinstance(payload, dict):
+            continue
+        results.append(payload)
+        if len(results) >= result_limit:
+            break
+
+    return {
+        "group_id": run.group_id,
+        "include_children": run.include_children,
+        "mode": run.mode,
+        "max_results": result_limit,
+        "data_limitations": _json_loads(run.data_limitations_json, []),
+        "requested_stock_count": run.requested_stock_count,
+        "ranked_count": run.ranked_count,
+        "matched_count": run.matched_count,
+        "radar_count": len(results),
+        "no_data_count": run.no_data_count,
+        "error_count": run.error_count,
+        "trade_date": run.trade_date,
+        "target_trade_date": run.target_trade_date,
+        "is_current": run.is_current,
+        "current_stock_count": run.current_stock_count,
+        "stale_stock_count": run.stale_stock_count,
+        "buckets": _json_loads(run.buckets_json, []),
+        "results": results,
+        "cache_status": "snapshot",
+        "snapshot_id": run.id,
+        "snapshot_date": run.snapshot_date,
+        "calculated_at": run.updated_at,
+    }
 
 
 def _next_intraday_outcome_bar(

@@ -626,6 +626,62 @@ def _build_consumer_human_answer(
 def _extract_analysis_digest(result: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
     data = result.get("data")
     analysis = (data or {}).get("analysis") if isinstance(data, dict) else None
+    if result.get("kind") == "tw_futures_context" and isinstance(data, dict):
+        compact = data.get("compact") if isinstance(data.get("compact"), dict) else {}
+        quote = compact.get("quote") if isinstance(compact.get("quote"), dict) else (
+            data.get("latest_quote") if isinstance(data.get("latest_quote"), dict) else {}
+        )
+        daily_close = compact.get("daily_close") if isinstance(compact.get("daily_close"), dict) else {}
+        if not daily_close:
+            daily_bars = data.get("daily_bars") if isinstance(data.get("daily_bars"), list) else []
+            latest_daily = daily_bars[-1] if daily_bars and isinstance(daily_bars[-1], dict) else {}
+            daily_close = {
+                "trade_date": latest_daily.get("trade_date"),
+                "close_price": latest_daily.get("close_price"),
+                "change": latest_daily.get("change"),
+                "change_pct": latest_daily.get("change_pct"),
+            }
+        technical = analysis if isinstance(analysis, dict) else {}
+        target = compact.get("target") if isinstance(compact.get("target"), dict) else {}
+        label = target.get("label") or ((result.get("scope") or {}).get("symbol")) or "台指期"
+        quote_price = quote.get("last_price") or quote.get("price")
+        daily_price = daily_close.get("close_price")
+        display_parts = [str(label)]
+        if quote_price is not None:
+            display_parts.append(f"latest-session {quote_price}")
+        if daily_price is not None:
+            display_parts.append(f"daily close {daily_price}")
+        if technical.get("selected_title"):
+            display_parts.append(str(technical["selected_title"]))
+        return {
+            "kind": "tw_futures_digest",
+            "as_of": result.get("as_of"),
+            "target": target,
+            "quote": quote,
+            "quote_semantics": compact.get("quote_semantics") or {},
+            "daily_close": daily_close,
+            "institutional_position": compact.get("institutional_position")
+            if isinstance(compact.get("institutional_position"), dict)
+            else data.get("institutional_position") or {},
+            "options_sentiment": compact.get("options_sentiment")
+            if isinstance(compact.get("options_sentiment"), dict)
+            else data.get("options_sentiment") or {},
+            "market_chip_trend": compact.get("market_chip_trend")
+            if isinstance(compact.get("market_chip_trend"), dict)
+            else data.get("market_chip_trend") or {},
+            "slots": compact.get("slots") or data.get("slots") or {},
+            "requested_horizon": technical.get("requested_horizon"),
+            "selected_horizon": technical.get("selected_horizon"),
+            "selected_timeframe": technical.get("selected_timeframe"),
+            "selected_score": technical.get("selected_score"),
+            "selected_title": technical.get("selected_title"),
+            "selected_summary": technical.get("selected_summary"),
+            "selected_confidence": technical.get("selected_confidence"),
+            "scores": technical.get("scores") or {},
+            "display": "｜".join(display_parts),
+            "source_refs": result.get("source_refs") or [],
+            "source": "result.data.compact.tw_futures",
+        }
     if isinstance(analysis, dict) and analysis:
         policy_horizon = policy.get("analysis_horizon") if isinstance(policy, dict) else {}
         selected_horizon = (
@@ -744,6 +800,70 @@ def _extract_analysis_digest(result: dict[str, Any], policy: dict[str, Any]) -> 
             "weak_industries": summary.get("weak_industries") or [],
             "source_refs": result.get("source_refs") or [],
             "source": "result.summary",
+        }
+
+    compact = (data or {}).get("compact") if isinstance(data, dict) and isinstance((data or {}).get("compact"), dict) else {}
+    if compact:
+        target = compact.get("target") if isinstance(compact.get("target"), dict) else {}
+        slots = compact.get("slots") if isinstance(compact.get("slots"), dict) else {}
+        status_counts: dict[str, int] = {}
+        ready_slots: list[str] = []
+        problem_slots: list[dict[str, Any]] = []
+        for key, slot in slots.items():
+            if not isinstance(slot, dict):
+                continue
+            status = str(slot.get("status") or "unknown")
+            status_counts[status] = status_counts.get(status, 0) + 1
+            if status == "ready":
+                ready_slots.append(str(key))
+            elif status not in {"not_applicable", "not_requested"}:
+                problem_slots.append(
+                    {
+                        "key": str(key),
+                        "status": status,
+                        "capability": slot.get("capability"),
+                        "as_of": slot.get("as_of"),
+                        "missing": list(slot.get("missing") or []),
+                        "warnings": list(slot.get("warnings") or []),
+                        "next_fill": slot.get("next_fill"),
+                    }
+                )
+        resources = compact.get("resources") if isinstance(compact.get("resources"), dict) else {}
+        key_numbers = {
+            str(key): value
+            for key, value in resources.items()
+            if isinstance(value, (str, int, float, bool)) or value is None
+        }
+        quote = compact.get("quote") if isinstance(compact.get("quote"), dict) else {}
+        for source_key, output_key in (
+            ("price", "price"),
+            ("last_price", "price"),
+            ("quote_time", "quote_time"),
+            ("change_pct", "change_pct"),
+            ("change_pct_24h", "change_pct_24h"),
+        ):
+            if source_key in quote and output_key not in key_numbers:
+                key_numbers[output_key] = quote.get(source_key)
+        label = target.get("label") or target.get("id") or result.get("kind") or "OMI context"
+        status_text = ", ".join(f"{key}={value}" for key, value in sorted(status_counts.items())) or "no slots"
+        return {
+            "kind": "compact_context_status_digest",
+            "as_of": result.get("as_of"),
+            "target": target,
+            "display": f"{label}｜{status_text}",
+            "slot_status_counts": status_counts,
+            "ready_slots": ready_slots,
+            "problem_slots": problem_slots,
+            "key_numbers": key_numbers,
+            "selected_confidence": (
+                "low"
+                if any(item["status"] in {"failed", "blocked"} for item in problem_slots)
+                else "medium"
+                if problem_slots
+                else "high"
+            ),
+            "source_refs": result.get("source_refs") or [],
+            "source": "result.data.compact.slots",
         }
 
     return {}

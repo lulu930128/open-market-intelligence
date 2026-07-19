@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -126,18 +127,43 @@ class OmiMcpServerPayloadTests(unittest.TestCase):
         properties = self.server.ASK_TOOL["inputSchema"]["properties"]
         target_enum = properties["target"]["properties"]["type"]["enum"]
 
-        for target_type in (
-            "tw_index",
-            "tw_futures",
-            "jp_stock",
-            "jp_index",
-            "kr_stock",
-            "kr_index",
-            "crypto_market",
-            "crypto_asset",
-        ):
-            self.assertIn(target_type, target_enum)
+        self.assertEqual(target_enum, self.server.ASK_TARGET_TYPES)
+        self.assertEqual(
+            set(target_enum),
+            {
+                "auto",
+                "market",
+                "data_freshness",
+                "tw_stock",
+                "tw_watchlist",
+                "tw_index",
+                "tw_futures",
+                "us_stock",
+                "jp_stock",
+                "jp_index",
+                "kr_stock",
+                "kr_index",
+                "crypto_market",
+                "crypto_asset",
+                "resource_asset",
+                "portfolio",
+                "us_macro",
+                "us_watchlist",
+                "jp_watchlist",
+                "kr_watchlist",
+                "source_health",
+                "capability_status",
+            },
+        )
         self.assertIn("market_data_params", properties)
+
+    def test_tool_result_exposes_matching_structured_content(self) -> None:
+        payload = {"kind": "omi_answer", "result": {"data": {"status": "ready"}}}
+
+        result = self.server._tool_result(payload)
+
+        self.assertEqual(result["structuredContent"], payload)
+        self.assertEqual(json.loads(result["content"][0]["text"]), payload)
 
     def test_payload_forwards_market_data_params(self) -> None:
         payload = self.server._ask_payload(

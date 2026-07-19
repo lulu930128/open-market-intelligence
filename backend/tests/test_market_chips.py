@@ -17,6 +17,7 @@ from app.market.market_chips import (
     normalize_market_chip_index_ids,
     parse_institutional_amount_summary,
     parse_taifex_futures_institutional_html,
+    parse_taifex_put_call_ratio_html,
     parse_tpex_margin_summary,
     parse_twse_margin_summary,
     refresh_market_chip_daily,
@@ -76,8 +77,39 @@ TAIFEX_HTML = """
 </html>
 """
 
+TAIFEX_PUT_CALL_HTML = """
+<html>
+  <body>
+    <table>
+      <tr>
+        <th>日期</th><th>賣權成交量</th><th>買權成交量</th><th>買賣權成交量比率%</th>
+        <th>賣權未平倉量</th><th>買權未平倉量</th><th>買賣權未平倉量比率%</th>
+      </tr>
+      <tr>
+        <td>2026/7/17</td><td>377,448</td><td>451,306</td><td>83.63</td>
+        <td>42,516</td><td>45,745</td><td>92.94</td>
+      </tr>
+    </table>
+  </body>
+</html>
+"""
+
 
 class MarketChipParserTests(unittest.TestCase):
+    def test_parse_taifex_put_call_ratio_html(self) -> None:
+        result = parse_taifex_put_call_ratio_html(
+            TAIFEX_PUT_CALL_HTML,
+            target_trade_date=date(2026, 7, 17),
+        )
+
+        self.assertEqual(result["trade_date"], date(2026, 7, 17))
+        self.assertEqual(result["put_volume"], 377_448)
+        self.assertEqual(result["call_volume"], 451_306)
+        self.assertEqual(result["put_call_volume_ratio_pct"], 83.63)
+        self.assertEqual(result["put_open_interest"], 42_516)
+        self.assertEqual(result["call_open_interest"], 45_745)
+        self.assertEqual(result["put_call_open_interest_ratio_pct"], 92.94)
+
     def test_parse_twse_institutional_amount_summary(self) -> None:
         payload = {
             "date": "115年06月09日",
@@ -263,6 +295,12 @@ class MarketChipPersistenceTests(unittest.TestCase):
                 "trade_date": date(2026, 6, 9),
                 "foreign_futures_net_oi": -61871,
                 "retail_futures_net_oi": 10252,
+                "put_volume": 377_448,
+                "call_volume": 451_306,
+                "put_call_volume_ratio_pct": 83.63,
+                "put_open_interest": 42_516,
+                "call_open_interest": 45_745,
+                "put_call_open_interest_ratio_pct": 92.94,
                 "source_details": {"sources": []},
             },
         )
@@ -270,6 +308,8 @@ class MarketChipPersistenceTests(unittest.TestCase):
 
         self.assertEqual(result["foreign_futures_net_oi_change"], 3630)
         self.assertEqual(result["retail_futures_net_oi_change"], 262)
+        self.assertEqual(result["put_call_volume_ratio_pct"], 83.63)
+        self.assertEqual(result["put_call_open_interest_ratio_pct"], 92.94)
         self.assertEqual(result["source_details"], {"sources": []})
 
     def test_ensure_refreshes_existing_row_after_margin_release(self) -> None:

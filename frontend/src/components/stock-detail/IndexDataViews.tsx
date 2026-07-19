@@ -51,6 +51,34 @@ export function marketRegimeLabel(
   return t?.("dashboard.marketIndex.neutral") ?? "Rangebound";
 }
 
+function taiwanBreadthScopeLabel(
+  index: MarketIndexSnapshot | null | undefined,
+  t: TranslationFunction
+) {
+  const breadth = index?.breadth;
+  if (!breadth) {
+    return t(
+      index?.index_id === "TPEX"
+        ? "dashboard.marketIndex.tpexFullBreadth"
+        : "dashboard.marketIndex.twseFullBreadth"
+    );
+  }
+  if (breadth.scope === "registered_universe") {
+    return t("dashboard.marketIndex.registeredBreadth");
+  }
+  if (breadth.scope === "full_market") {
+    return t(
+      breadth.market === "TPEX" || index?.index_id === "TPEX"
+        ? "dashboard.marketIndex.tpexFullBreadth"
+        : "dashboard.marketIndex.twseFullBreadth"
+    );
+  }
+  if (breadth.scope === "omi_sample") {
+    return t("dashboard.marketIndex.sampleBreadth");
+  }
+  return t("dashboard.marketIndex.localDatasetBreadth");
+}
+
 const marketIndexListNameKeys: Record<string, string> = {
   加權指數: "taiex",
   櫃買指數: "tpex",
@@ -241,6 +269,7 @@ export function IndexDetailDataPanel({
   const reference = todayPreviousClose ?? index?.previous_close ?? null;
   const tradeValue = index?.trade_value ?? breadth?.trade_value ?? latestChart?.trade_value ?? null;
   const estimatedTradeValue = index?.estimated_trade_value ?? tradeValue;
+  const breadthScopeLabel = taiwanBreadthScopeLabel(index, t);
   const breadthCoverageText =
     breadth?.coverage_count !== null &&
     breadth?.coverage_count !== undefined &&
@@ -401,8 +430,13 @@ export function IndexDetailDataPanel({
       />
 
       <div className="space-y-1 px-5 py-3 text-xs text-omi-text-muted">
+        <div className="font-semibold text-omi-text">{breadthScopeLabel}</div>
         <div>
-          {breadth?.source
+          {index?.breadth_status.status === "failed"
+            ? t("dashboard.marketIndex.breadthFailed")
+            : index?.breadth_status.status === "partial"
+              ? t("dashboard.marketIndex.breadthPartial")
+              : breadth?.source
             ? t("stockDetail.dataViews.indexDetail.breadthSource", {
                 source: breadth.source,
               })

@@ -4,7 +4,10 @@ param(
     [Parameter(Mandatory = $true)][string]$WorkingDirectory,
     [Parameter(Mandatory = $true)][string]$FilePath,
     [Parameter(Mandatory = $true)][string]$ArgumentsJsonBase64,
-    [int]$LauncherPid = 0
+    [int]$LauncherPid = 0,
+    [ValidateRange(0, 20)][int]$MaxRestartAttempts = 3,
+    [string]$RestartBackoffSecondsCsv = "2,10,30",
+    [ValidateRange(1, 86400)][int]$StableRunResetSeconds = 600
 )
 
 $ErrorActionPreference = "Stop"
@@ -100,6 +103,40 @@ function Test-LauncherAlive {
     return $null -ne (Get-Process -Id $LauncherPid -ErrorAction SilentlyContinue)
 }
 
+function ConvertTo-RestartBackoffSeconds {
+    param([Parameter(Mandatory = $true)][string]$Value)
+
+    $seconds = @()
+    foreach ($rawSegment in $Value.Split(",")) {
+        $segment = $rawSegment.Trim()
+        $parsed = 0
+        if ((-not [int]::TryParse($segment, [ref]$parsed)) -or $parsed -lt 0) {
+            throw "Invalid restart backoff '$segment'. Expected comma-separated non-negative seconds."
+        }
+        $seconds += $parsed
+    }
+
+    if ($seconds.Count -eq 0) {
+        throw "At least one restart backoff value is required."
+    }
+
+    return $seconds
+}
+
+function Wait-RestartBackoff {
+    param([ValidateRange(0, 86400)][int]$Seconds)
+
+    for ($elapsed = 0; $elapsed -lt $Seconds; $elapsed += 1) {
+        if (-not (Test-LauncherAlive)) {
+            Write-ServiceLog "Service restart cancelled because launcher process is gone. launcher_pid=$LauncherPid" "WARN"
+            return $false
+        }
+        Start-Sleep -Seconds 1
+    }
+
+    return (Test-LauncherAlive)
+}
+
 try {
     $argumentsJson = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($ArgumentsJsonBase64))
     $parsedArguments = ConvertFrom-Json -InputObject $argumentsJson
@@ -124,41 +161,82 @@ try {
         throw "Executable does not exist: $FilePath"
     }
 
-    $serviceLogPath = Get-ServiceLogPath
+    $restartBackoffSeconds = @(ConvertTo-RestartBackoffSeconds -Value $RestartBackoffSecondsCsv)
     $processFilePath = Join-Path $env:SystemRoot "System32\cmd.exe"
-    $innerCommand = ((@($FilePath) + $arguments) | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join " "
-    $innerCommand = "$innerCommand >> $(ConvertTo-ProcessArgument $serviceLogPath) 2>&1"
-    $processArguments = "/d /s /c `"$innerCommand`""
+    $restartAttempt = 0
+    $instanceId = [Guid]::NewGuid().ToString("N")
 
-    Write-ServiceLog "Starting service. file=$FilePath args=$($arguments -join ' ') cwd=$WorkingDirectory launcher_pid=$LauncherPid" "SYSTEM"
-    Write-ServiceLog "Process runner. file=$processFilePath args=$processArguments" "SYSTEM"
-
-    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $startInfo.FileName = $processFilePath
-    $startInfo.Arguments = $processArguments
-    $startInfo.WorkingDirectory = $WorkingDirectory
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-
-    $process = New-Object System.Diagnostics.Process
-    $process.StartInfo = $startInfo
-
-    [void]$process.Start()
-    while (-not $process.HasExited) {
+    while ($true) {
         if (-not (Test-LauncherAlive)) {
-            Stop-ServiceProcessTree -ProcessId $process.Id -Reason "launcher process exited"
-            Write-ServiceLog "Service runner exiting because launcher process is gone. launcher_pid=$LauncherPid" "WARN"
+            Write-ServiceLog "Service runner exiting before child start because launcher process is gone. launcher_pid=$LauncherPid instance_id=$instanceId" "WARN"
             exit 0
         }
 
-        Start-Sleep -Seconds 2
-        $process.Refresh()
-    }
+        $serviceLogPath = Get-ServiceLogPath
+        $innerCommand = ((@($FilePath) + $arguments) | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join " "
+        $innerCommand = "$innerCommand >> $(ConvertTo-ProcessArgument $serviceLogPath) 2>&1"
+        $processArguments = "/d /s /c `"$innerCommand`""
 
-    $exitCode = $process.ExitCode
-    Write-ServiceLog "Service exited. exit_code=$exitCode" "SYSTEM"
-    exit $exitCode
+        Write-ServiceLog "Starting service. file=$FilePath args=$($arguments -join ' ') cwd=$WorkingDirectory launcher_pid=$LauncherPid instance_id=$instanceId restart_attempt=$restartAttempt" "SYSTEM"
+        Write-ServiceLog "Process runner. file=$processFilePath args=$processArguments" "SYSTEM"
+
+        $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $startInfo.FileName = $processFilePath
+        $startInfo.Arguments = $processArguments
+        $startInfo.WorkingDirectory = $WorkingDirectory
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+        if ($ServiceName -eq "backend") {
+            $startInfo.EnvironmentVariables["PYTHONFAULTHANDLER"] = "1"
+            $startInfo.EnvironmentVariables["PYTHONUNBUFFERED"] = "1"
+        }
+
+        $process = New-Object System.Diagnostics.Process
+        $process.StartInfo = $startInfo
+        $startedAt = Get-Date
+
+        [void]$process.Start()
+        Write-ServiceLog "Service child started. child_pid=$($process.Id) instance_id=$instanceId restart_attempt=$restartAttempt" "SYSTEM"
+        while (-not $process.HasExited) {
+            if (-not (Test-LauncherAlive)) {
+                Stop-ServiceProcessTree -ProcessId $process.Id -Reason "launcher process exited"
+                Write-ServiceLog "Service runner exiting because launcher process is gone. launcher_pid=$LauncherPid instance_id=$instanceId" "WARN"
+                exit 0
+            }
+
+            Start-Sleep -Seconds 2
+            $process.Refresh()
+        }
+
+        $exitCode = $process.ExitCode
+        $runtimeSeconds = [int][Math]::Max(0, ((Get-Date) - $startedAt).TotalSeconds)
+        $process.Dispose()
+        Write-ServiceLog "Service exited. exit_code=$exitCode runtime_seconds=$runtimeSeconds instance_id=$instanceId restart_attempt=$restartAttempt" "SYSTEM"
+
+        if ($exitCode -eq 0) {
+            exit 0
+        }
+
+        if ($runtimeSeconds -ge $StableRunResetSeconds) {
+            Write-ServiceLog "Service ran past the stable reset threshold; clearing prior restart count. runtime_seconds=$runtimeSeconds threshold_seconds=$StableRunResetSeconds instance_id=$instanceId" "SYSTEM"
+            $restartAttempt = 0
+        }
+
+        if ($restartAttempt -ge $MaxRestartAttempts) {
+            Write-ServiceLog "Service crash-loop protection stopped recovery. exit_code=$exitCode max_restart_attempts=$MaxRestartAttempts instance_id=$instanceId" "ERROR"
+            exit $exitCode
+        }
+
+        $backoffIndex = [Math]::Min($restartAttempt, $restartBackoffSeconds.Count - 1)
+        $backoffSeconds = [int]$restartBackoffSeconds[$backoffIndex]
+        $restartAttempt += 1
+        Write-ServiceLog "Service restart scheduled. attempt=$restartAttempt/$MaxRestartAttempts backoff_seconds=$backoffSeconds exit_code=$exitCode instance_id=$instanceId" "WARN"
+
+        if (-not (Wait-RestartBackoff -Seconds $backoffSeconds)) {
+            exit 0
+        }
+    }
 }
 catch {
     Write-ServiceLog "Service runner failed. error=$($_.Exception.Message)" "ERROR"

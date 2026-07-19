@@ -8,6 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.db.models import Base, MarketDailyPrice, StockMaster, USDailyPrice
+from app.market.ohlc_overlay import aggregate_ohlc_points
 from app.market.service import list_stock_ohlc_chart_data
 from app.us_market.service import list_us_ohlc_chart_data
 
@@ -24,6 +25,22 @@ class OhlcIntradayOverlayTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.db.close()
+
+    def test_chart_projection_sorts_and_dedupes_trading_dates(self) -> None:
+        points = aggregate_ohlc_points(
+            timeframe="daily",
+            points=[
+                {"time": date(2026, 7, 16), "close": 100, "volume": 10},
+                {"time": date(2026, 7, 15), "close": 90, "volume": 5},
+                {"time": date(2026, 7, 16), "close": 101, "volume": 12},
+            ],
+        )
+
+        self.assertEqual([point["time"] for point in points], [
+            date(2026, 7, 15),
+            date(2026, 7, 16),
+        ])
+        self.assertEqual(points[-1]["close"], 101)
 
     def test_taiwan_daily_ohlc_appends_provisional_intraday_candle(self) -> None:
         self.db.add(

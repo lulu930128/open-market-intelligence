@@ -1,6 +1,8 @@
 import sys
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.config import PROJECT_ROOT, settings
@@ -27,6 +29,46 @@ def health_check():
             "python_version": sys.version.split()[0],
         },
     }
+
+
+@router.get("/livez")
+def liveness_check():
+    return {
+        "status": "ok",
+        "app_name": settings.app_name,
+        "checks": {
+            "process": "ok",
+        },
+    }
+
+
+@router.get("/readyz")
+def readiness_check(request: Request, db: Session = Depends(get_db)):
+    runtime = getattr(request.app.state, "runtime", None)
+    runtime_ready = bool(runtime is not None and getattr(runtime, "started", False))
+    database_ready = False
+
+    try:
+        db.execute(text("SELECT 1")).scalar_one()
+        database_ready = True
+    except Exception:
+        database_ready = False
+
+    checks = {
+        "runtime": "ok" if runtime_ready else "not_ready",
+        "database": "ok" if database_ready else "not_ready",
+    }
+    ready = runtime_ready and database_ready
+    payload = {
+        "status": "ready" if ready else "not_ready",
+        "app_name": settings.app_name,
+        "checks": checks,
+    }
+
+    if ready:
+        return payload
+
+    return JSONResponse(status_code=503, content=payload)
 
 
 @router.get("/provider-events", response_model=list[ProviderEventRead])

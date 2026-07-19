@@ -94,6 +94,20 @@ export const enUS = {
     month: "Month",
   },
   dashboard: {
+    connection: {
+      offlineTitle: "OMI backend disconnected",
+      offlineMessage:
+        "The workbench is preserving loaded content. Wait for launcher recovery or inspect launcher/backend logs.",
+      operationFailedTitle: "Operation not completed",
+      partialTitle: "Some initial data did not load",
+      partialMessage:
+        "{count} initial requests failed. {reason} Reload the workbench to retry.",
+      issueTimeout: "The backend response timed out.",
+      issueUnavailable: "The backend is currently unreachable.",
+      issueRequestFailed: "The backend rejected or could not complete the request.",
+      issueInvalidResponse: "The backend returned data that could not be parsed.",
+      reload: "Reload",
+    },
     freshness: {
       waitingMarket: "{marketLabel} data status",
       waitingMarketDate: "{targetDate} {marketLabel} data status",
@@ -104,6 +118,13 @@ export const enUS = {
       tradeValueYi: "Trade value (100M)",
       advanceDecline: "Advancers / decliners",
       breadth: "Breadth",
+      twseFullBreadth: "TWSE full-market breadth",
+      tpexFullBreadth: "TPEx full-market breadth",
+      registeredBreadth: "TWSE live breadth (registered universe)",
+      sampleBreadth: "OMI sample breadth",
+      localDatasetBreadth: "Local-dataset breadth",
+      breadthFailed: "Breadth data failed",
+      breadthPartial: "Breadth data is partial",
       advancePct: "{value}% advancing",
       coverage: "Data coverage",
       coverageValue: "{current} / {active}",
@@ -115,6 +136,8 @@ export const enUS = {
       empty: "No market index data",
       updated: "Market context updated {asOf}",
       waiting: "Market context waiting for update",
+      cacheReady: "Showing local cache",
+      cacheStale: "Cache refresh pending in the background",
       insufficient: "Insufficient data",
       aboveMa20: "Above MA20",
       belowMa20: "Below MA20",
@@ -252,6 +275,7 @@ export const enUS = {
     reload: "Reload",
     loadError: "Failed to load radar data",
     dateLabel: "Data date {date}",
+    snapshotLabel: "Snapshot {date}",
     notLoaded: "Not loaded",
     technicalOnly: {
       usScope: "US Technical Radar Lite",
@@ -780,6 +804,7 @@ export const enUS = {
       "scheduler.market_chip_daily_refresh": "Scheduled market chip-flow daily report",
       "dispatch.mail_delivery": "Mail dispatch delivery",
       "market.tw_futures_quote_refresh": "Taiwan futures quote refresh",
+      "scheduler.taiwan_derivatives_refresh": "Scheduled Taiwan post-close derivatives",
       "market.stock_daily_metrics_history_backfill": "Stock chip-flow history",
       "market.stock_shareholding_history_backfill": "Shareholding distribution history",
       "market.stock_monthly_revenue_history_backfill": "Revenue history",
@@ -1195,6 +1220,8 @@ export const enUS = {
     points: "points",
     marketFallback: "market",
     dataPanel: {
+      refresh: "Refresh data",
+      refreshing: "Refreshing…",
       empty: {
         chips: "No chip-flow or margin/short data",
         institutional: "No institutional net buy/sell data",
@@ -2251,6 +2278,7 @@ export const enUS = {
     tradeDate: "Trade date",
     quoteTime: "Quote time",
     dataStatus: "Data status",
+    marketCheckedAt: "Market status checked {time}",
     dailyK: "Daily K data",
     backfilling: "Backfilling",
     bars: "{count} bars",
@@ -2280,9 +2308,11 @@ export const enUS = {
       unknown: "Unknown session",
       regular: "Regular",
       afterHours: "After-hours",
+      closed: "Closed",
     },
     freshness: {
       live: "Synced",
+      closed: "Market closed",
       cached: "Using cache",
       sessionMismatch: "Session mismatch",
       stale: "Stale data",

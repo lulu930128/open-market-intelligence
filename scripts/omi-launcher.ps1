@@ -29,6 +29,7 @@ $script:PackagedNode = Join-Path $script:RepoRoot "runtime\node\node.exe"
 $script:BackendProcess = $null
 $script:FrontendProcess = $null
 $script:LastStatusText = $null
+$script:BackendStopExpected = $false
 $script:IsShuttingDown = $false
 $script:DashboardAutoOpened = $false
 $script:DefaultFrontendHost = "127.0.0.1"
@@ -51,6 +52,7 @@ $script:BackendPort = $script:DefaultBackendPort
 $script:ApiProxyPath = $script:DefaultApiProxyPath
 $script:BackendBaseUrl = "http://$($script:DefaultBackendHost):$($script:DefaultBackendPort)"
 $script:BackendHealthUrl = "$($script:BackendBaseUrl)/api/system/health"
+$script:BackendReadyUrl = "$($script:BackendBaseUrl)/api/system/readyz"
 
 New-Item -ItemType Directory -Force -Path $script:LogRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $script:DataRoot | Out-Null
@@ -273,6 +275,7 @@ function Update-BackendServiceUrls {
     $urlHost = Format-UrlHost -HostName $script:BackendHost
     $script:BackendBaseUrl = "http://$urlHost`:$($script:BackendPort)"
     $script:BackendHealthUrl = "$($script:BackendBaseUrl)/api/system/health"
+    $script:BackendReadyUrl = "$($script:BackendBaseUrl)/api/system/readyz"
 
     Set-ProcessEnvironmentValue -Name "APP_HOST" -Value $script:BackendHost
     Set-ProcessEnvironmentValue -Name "APP_PORT" -Value ([string]$script:BackendPort)
@@ -1184,6 +1187,8 @@ function Start-LoggedService {
 }
 
 function Start-Backend {
+    $script:BackendStopExpected = $false
+
     if (Test-ProcessRunning $script:BackendProcess) {
         Write-LauncherLog "Backend process is already tracked pid=$($script:BackendProcess.Id)."
         return
@@ -1311,6 +1316,7 @@ function Start-Services {
 }
 
 function Stop-BackendService {
+    $script:BackendStopExpected = $true
     Stop-ProcessTree $script:BackendProcess "backend"
     $script:BackendProcess = $null
 
@@ -1456,7 +1462,7 @@ $script:NotifyIcon.add_DoubleClick({ Open-Url $script:DashboardUrl })
 $script:Timer = New-Object System.Windows.Forms.Timer
 $script:Timer.Interval = 5000
 $script:Timer.add_Tick({
-    $backendHttp = Test-HttpOk $script:BackendHealthUrl
+    $backendHttp = Test-HttpOk $script:BackendReadyUrl
     $frontendHttp = Test-FrontendOk
     $backendProc = Test-ProcessRunning $script:BackendProcess
     $frontendProc = Test-ProcessRunning $script:FrontendProcess
@@ -1470,6 +1476,17 @@ $script:Timer.add_Tick({
 
     if ($script:LastStatusText -ne $statusText) {
         Write-LauncherLog "Status changed: $statusText"
+        if ($null -ne $script:LastStatusText -and
+            $backendState -eq "API stopped" -and
+            (-not $script:BackendStopExpected) -and
+            (-not $script:LastStatusText.StartsWith("API stopped"))) {
+            $script:NotifyIcon.ShowBalloonTip(
+                5000,
+                $script:AppDisplayName,
+                "Backend recovery stopped. Open launcher logs for crash details, then use Restart Services.",
+                [System.Windows.Forms.ToolTipIcon]::Warning
+            )
+        }
         $script:LastStatusText = $statusText
     }
 

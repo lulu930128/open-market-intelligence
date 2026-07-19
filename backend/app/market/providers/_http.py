@@ -7,6 +7,7 @@ import requests
 
 from app.observability.provider_http import ProviderRequestContext
 from app.observability.provider_http import get as provider_get
+from app.observability.provider_http import post as provider_post
 
 
 DEFAULT_HEADERS = {
@@ -26,6 +27,28 @@ def get(
     **kwargs: Any,
 ) -> requests.Response:
     return provider_get(
+        ProviderRequestContext(
+            market="tw",
+            provider=provider,
+            resource=resource,
+            target=target,
+        ),
+        url,
+        timeout_seconds=timeout_seconds,
+        **kwargs,
+    )
+
+
+def post(
+    url: str,
+    *,
+    provider: str,
+    resource: str,
+    target: str = "all",
+    timeout_seconds: int = 20,
+    **kwargs: Any,
+) -> requests.Response:
+    return provider_post(
         ProviderRequestContext(
             market="tw",
             provider=provider,

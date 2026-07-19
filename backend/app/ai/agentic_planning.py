@@ -11,6 +11,7 @@ TW_STOCK_REFRESH_KEYS = agentic_policy.TW_STOCK_REFRESH_KEYS
 
 def _fallback_plan(*, symbol: str, gaps: dict[str, Any], question: str) -> dict[str, Any]:
     missing = set(gaps.get("missing") or [])
+    required = set(gaps.get("required_capabilities") or missing)
     lowered_question = question.lower()
     steps: list[dict[str, Any]] = []
 
@@ -37,7 +38,7 @@ def _fallback_plan(*, symbol: str, gaps: dict[str, Any], question: str) -> dict[
             }
         )
 
-    if "us_company_profile" in missing:
+    if "us_company_profile" in missing and "us_company_profile" in required:
         steps.append(
             {
                 "tool": "us.refresh_company_profile",
@@ -46,9 +47,7 @@ def _fallback_plan(*, symbol: str, gaps: dict[str, Any], question: str) -> dict[
             }
         )
 
-    if "us_sec_company_fact" in missing or any(
-        hint in lowered_question for hint in ("fundamental", "sec", "財報", "基本面")
-    ):
+    if "us_sec_company_fact" in missing and "us_sec_company_fact" in required:
         steps.append(
             {
                 "tool": "us.refresh_sec_facts",

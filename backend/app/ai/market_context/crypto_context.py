@@ -11,6 +11,7 @@ from app.ai.evidence_passport import build_evidence_passport
 from app.ai.market_context.common import (
     append_source_ref_once as _append_source_ref_once,
     compact_market_context as _compact_market_context,
+    freshness_effective_status,
     latest_timestamp_from_rows as _latest_timestamp_from_rows,
 )
 from app.ai.market_context.regional_params import (
@@ -90,6 +91,60 @@ def _crypto_market_cap_matches_asset(row: Any, asset_definition: Any) -> bool:
     if coin_id and str(getattr(row, "coin_id", "") or "").strip() == coin_id:
         return True
     return str(getattr(row, "symbol", "") or "").strip().upper() == asset_definition.asset
+
+
+_EVENT_DRIVEN_CRYPTO_RESOURCES = {
+    "crypto_cvd_perpetual",
+    "crypto_cvd_spot",
+    "crypto_liquidation_event",
+    "crypto_liquidation_heatmap",
+    "crypto_realtime_liquidation_event",
+}
+
+
+def _crypto_health_status(
+    source_health: dict[str, Any],
+    *,
+    resources: set[str],
+    available: bool,
+) -> str:
+    entries = [
+        entry
+        for entry in (source_health.get("entries") or [])
+        if isinstance(entry, dict) and entry.get("resource") in resources
+    ]
+    if any(entry.get("ok") is True for entry in entries):
+        return "current"
+    problem_statuses = [
+        status
+        for entry in entries
+        if (status := freshness_effective_status(entry.get("status") or entry.get("data_quality")))
+        in {"partial", "missing", "stale", "blocked", "failed"}
+    ]
+    for status in ("failed", "blocked", "stale", "missing", "partial"):
+        if status in problem_statuses:
+            return status
+    return "partial" if available else "missing"
+
+
+def _crypto_core_source_health_status(source_health: dict[str, Any]) -> str:
+    problem_statuses: list[str] = []
+    current_count = 0
+    for entry in source_health.get("entries") or []:
+        if not isinstance(entry, dict) or not entry.get("required"):
+            continue
+        resource = str(entry.get("resource") or "")
+        status = freshness_effective_status(entry.get("status") or entry.get("data_quality"))
+        if resource in _EVENT_DRIVEN_CRYPTO_RESOURCES and status == "missing":
+            continue
+        if entry.get("ok") is True:
+            current_count += 1
+        elif status in {"partial", "missing", "stale", "blocked", "failed"}:
+            problem_statuses.append(status)
+    for status in ("failed", "blocked", "stale", "missing", "partial"):
+        if status in problem_statuses:
+            return status
+    return "current" if current_count else "partial"
 
 
 def read_crypto_context(
@@ -264,7 +319,14 @@ def read_crypto_context(
         missing.append("crypto_market_cap")
 
     for entry in source_health.get("entries") or []:
-        if isinstance(entry, dict) and not entry.get("ok", True):
+        if (
+            isinstance(entry, dict)
+            and not entry.get("ok", True)
+            and not (
+                entry.get("resource") in _EVENT_DRIVEN_CRYPTO_RESOURCES
+                and freshness_effective_status(entry.get("status")) == "missing"
+            )
+        ):
             warnings.append(
                 f"Crypto source health {entry.get('status')}: {entry.get('resource')} {entry.get('provider')} {entry.get('target')} - {entry.get('reason')}"
             )
@@ -278,6 +340,27 @@ def read_crypto_context(
     target_label = asset_definition.name if asset_definition else "Crypto Market"
     target_type = "crypto_asset" if normalized_asset else "crypto_market"
     target = {"type": target_type, "id": target_id, "label": target_label, "market": "crypto"}
+    quote_freshness_status = _crypto_health_status(
+        source_health,
+        resources={"crypto_ticker", "crypto_realtime_ticker"},
+        available=bool(tickers),
+    )
+    order_book_freshness_status = _crypto_health_status(
+        source_health,
+        resources={"crypto_order_book", "crypto_realtime_order_book"},
+        available=bool(order_books),
+    )
+    ohlcv_freshness_status = _crypto_health_status(
+        source_health,
+        resources={"crypto_ohlcv", "crypto_realtime_ohlcv"},
+        available=bool(ohlcv_rows),
+    )
+    market_cap_freshness_status = _crypto_health_status(
+        source_health,
+        resources={"crypto_market_cap"},
+        available=bool(market_caps),
+    )
+    core_source_health_status = _crypto_core_source_health_status(source_health)
 
     _append_source_ref_once(source_refs, {"type": "table", "name": "crypto_ticker_snapshot"})
     _append_source_ref_once(source_refs, {"type": "table", "name": "crypto_order_book_snapshot"})
@@ -525,10 +608,11 @@ def read_crypto_context(
             "payload_level": payload_level,
         },
         freshness={
-            "quote": "current" if tickers else "missing",
-            "order_book": "current" if order_books else "missing",
-            "ohlcv": "current" if ohlcv_rows else "missing",
-            "source_health": source_health.get("summary"),
+            "quote": quote_freshness_status,
+            "order_book": order_book_freshness_status,
+            "ohlcv": ohlcv_freshness_status,
+            "market_cap": market_cap_freshness_status,
+            "source_health": core_source_health_status,
         },
         payload_level=payload_level,
     )
@@ -554,15 +638,30 @@ def read_crypto_context(
         "warnings": list(dict.fromkeys(warnings)),
         "source_refs": source_refs,
     }
+    core_statuses = [
+        quote_freshness_status,
+        ohlcv_freshness_status,
+        core_source_health_status,
+    ]
+    if normalized_asset and asset_definition and asset_definition.market_cap:
+        core_statuses.append(market_cap_freshness_status)
+    context_is_current = all(status == "current" for status in core_statuses)
     freshness_result = {
         "kind": "crypto_asset_freshness" if normalized_asset else "crypto_market_freshness",
         "scope": {"target": target},
-        "is_current": bool(tickers or ohlcv_rows or market_caps),
-        "refresh_recommended": bool(missing),
+        "is_current": context_is_current,
+        "refresh_recommended": bool(missing) or not context_is_current,
         "missing": envelope["missing"],
         "warnings": envelope["warnings"],
         "as_of": as_of,
         "source_health": source_health.get("summary"),
+        "domains": {
+            "quote": quote_freshness_status,
+            "order_book": order_book_freshness_status,
+            "ohlcv": ohlcv_freshness_status,
+            "market_cap": market_cap_freshness_status,
+            "source_health": core_source_health_status,
+        },
     }
     envelope["evidence_passport"] = build_evidence_passport(
         kind=envelope["kind"],

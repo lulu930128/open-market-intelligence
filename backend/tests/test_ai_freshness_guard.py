@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from itertools import count
+import json
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -14,6 +15,7 @@ from app.ai import ask as ai_ask
 from app.ai import freshness
 from app.ai import reports as ai_reports
 from app.ai import tools as ai_tools
+from app.ai.market_context import taiwan_market
 from app.ai.schemas import AiAskRequest
 from app.db.models import (
     Base,
@@ -341,7 +343,8 @@ class AiFreshnessGuardTests(unittest.TestCase):
             ):
                 response = ai_ask.ask(db=db, payload=payload)
 
-            self.assertEqual(response["analysis"]["compact_evidence"], compact)
+            self.assertNotIn("compact_evidence", response["analysis"])
+            self.assertEqual(response["analysis"]["compact_evidence_ref"], "result.data.compact")
             self.assertEqual(response["result"]["data"]["compact"], compact)
             self.assertEqual(response["result"]["result_view"]["mode"], "data_only")
             self.assertNotIn("latest_daily", response["result"]["data"])
@@ -350,6 +353,8 @@ class AiFreshnessGuardTests(unittest.TestCase):
             self.assertEqual(response["result"]["quote"], compact["quote"])
             self.assertEqual(response["result"]["intraday"]["status"], "ok")
             self.assertEqual(response["result"]["intraday"]["latest_point"]["close"], 101.0)
+            self.assertFalse(response["result"]["live_summary"]["is_live"])
+            self.assertEqual(response["result"]["live_summary"]["intraday_latest_price"], 101.0)
             self.assertEqual(response["result"]["freshness"], compact["freshness_by_domain"])
         finally:
             db.close()
@@ -444,6 +449,17 @@ class AiFreshnessGuardTests(unittest.TestCase):
                         "points": [],
                     },
                 ) as list_chart,
+                patch.object(
+                    agentic_tools.us_context,
+                    "build_us_calendar_status",
+                    return_value={
+                        "checked_at": "2026-07-06T13:31:00-04:00",
+                        "date": "2026-07-06",
+                        "is_trading_day": True,
+                        "phase": "regular",
+                        "previous_trading_day": "2026-07-06",
+                    },
+                ),
             ):
                 context = agentic_tools.read_us_stock_context(
                     db=db,
@@ -457,6 +473,8 @@ class AiFreshnessGuardTests(unittest.TestCase):
             compact = context["data"]["compact"]
             self.assertEqual(compact["quote"]["source"], "yahoo_finance_chart")
             self.assertTrue(compact["quote"]["is_realtime"])
+            self.assertEqual(compact["quote"]["previous_close_trade_date"], "2026-07-02")
+            self.assertEqual(compact["quote"]["previous_close_provider"], "alphavantage")
             self.assertEqual(compact["quote"]["quote_time"], "2026-07-06T13:30:00-04:00")
             self.assertEqual(compact["quote"]["price"], 435.5)
             self.assertEqual(compact["payload_level"], "summary")
@@ -513,6 +531,38 @@ class AiFreshnessGuardTests(unittest.TestCase):
             self.assertEqual(response["result"]["data"]["latest_daily"]["close_price"], 100.0)
             self.assertEqual(response["result"]["data"]["technical_reports"]["daily"]["title"], "test")
             self.assertNotIn("result_view", response["result"])
+        finally:
+            db.close()
+
+    def test_data_only_without_compact_returns_bounded_explicit_failure(self) -> None:
+        db = make_session()
+        try:
+            add_stock(db)
+            context = {
+                "kind": "stock_context",
+                "as_of": "2026-06-04",
+                "scope": {"stock_id": "2330"},
+                "data": {"large_legacy_rows": [{"value": "x" * 1000}] * 100},
+                "missing": [],
+                "warnings": [],
+                "source_refs": [],
+            }
+            payload = AiAskRequest(
+                question="2330 data",
+                target={"type": "tw_stock", "id": "2330"},
+                mode="data_only",
+            )
+
+            with (
+                patch.object(ai_ask, "_check_freshness", return_value={"is_current": True, "missing": [], "warnings": []}),
+                patch.object(ai_ask.tools, "read_stock_context", return_value=context),
+            ):
+                response = ai_ask.ask(db=db, payload=payload)
+
+            self.assertEqual(response["result"]["data"]["compact"]["status"], "failed")
+            self.assertEqual(response["result"]["result_view"]["detail"], "compact_projection_failure")
+            self.assertNotIn("large_legacy_rows", response["result"]["data"])
+            self.assertLess(len(json.dumps(response, ensure_ascii=False)), 20_000)
         finally:
             db.close()
 
@@ -664,16 +714,34 @@ class AiFreshnessGuardTests(unittest.TestCase):
             self.assertEqual(response["analysis"]["kind"], "market_brief_digest")
             self.assertEqual(response["result"]["latest_trade_date"], "2026-06-04")
             self.assertEqual(len(response["result"]["top_gainers"]), 2)
-            self.assertEqual(len(response["result"]["top_losers"]), 2)
+            self.assertEqual(len(response["result"]["top_losers"]), 1)
             self.assertEqual(len(response["result"]["value_leaders"]), 2)
             self.assertEqual(len(response["result"]["data"]["top_gainers"]), 2)
-            self.assertEqual(len(response["result"]["data"]["top_losers"]), 2)
+            self.assertEqual(len(response["result"]["data"]["top_losers"]), 1)
+            self.assertTrue(
+                all(row["change_pct"] > 0 for row in response["result"]["top_gainers"])
+            )
+            self.assertTrue(
+                all(row["change_pct"] < 0 for row in response["result"]["top_losers"])
+            )
+            self.assertEqual(
+                response["result"]["data"]["compact"]["sample_breadth"]["label"],
+                "OMI 樣本股廣度",
+            )
             self.assertTrue(response["analysis"]["human_answer"]["summary"])
             self.assertFalse(
                 any("does not have a brief" in warning for warning in response["warnings"])
             )
         finally:
             db.close()
+
+    def test_negative_leading_industry_is_labeled_relative_resilience(self) -> None:
+        self.assertEqual(
+            taiwan_market._industry_strength_label(
+                [{"industry": "Semiconductor", "average_change_pct": -6.28}]
+            ),
+            "相對抗跌產業",
+        )
 
     def test_market_brief_can_include_bounded_index_intraday(self) -> None:
         db = make_session()
@@ -1278,6 +1346,13 @@ class AiFreshnessGuardTests(unittest.TestCase):
         self.assertEqual(radar["radar_count"], 1)
         self.assertEqual(radar["results"][0]["stock_id"], "2330")
         self.assertEqual(radar["results"][0]["bucket"], "breakout_high")
+        compact = context["data"]["compact"]
+        self.assertEqual(compact["kind"], "tw_watchlist_compact_evidence")
+        self.assertEqual(compact["ranking"]["returned_count"], 1)
+        self.assertEqual(compact["slots"]["ranking"]["status"], "ready")
+        self.assertEqual(compact["slots"]["institutional"]["status"], "missing")
+        self.assertEqual(compact["slots"]["broker_branch"]["status"], "missing")
+        self.assertEqual(compact["slots"]["data_quality"]["status"], "partial")
 
     def test_watchlist_human_answer_masks_raw_dataset_keys(self) -> None:
         db = make_session()
@@ -2345,7 +2420,45 @@ class AiFreshnessGuardTests(unittest.TestCase):
                         "selected_confidence": "medium",
                         "scores": {"short": -2, "swing": -2},
                         "components": [],
-                    }
+                    },
+                    "compact": {
+                        "kind": "tw_futures_compact_evidence",
+                        "version": "market_compact_evidence.v1",
+                        "target": {"type": "tw_futures", "id": "TXF", "label": "TXF 台指期", "market": "TW"},
+                        "quote": {
+                            "session": "after_hours",
+                            "quote_time": "2026-07-18T04:59:58+08:00",
+                            "last_price": 43_481,
+                            "freshness": {
+                                "status": "closed",
+                                "is_live": False,
+                                "market_status": {
+                                    "is_open": False,
+                                    "last_session": "after_hours",
+                                },
+                            },
+                        },
+                        "intraday_chart": {
+                            "timeframe": "today",
+                            "point_count": 390,
+                            "to_date": "2026-07-18T05:00:00+08:00",
+                            "points": [
+                                {"time": "2026-07-18T04:59:00+08:00", "close": 43_481}
+                            ],
+                        },
+                        "daily_close": {"trade_date": "2026-07-17", "close_price": 42_725},
+                        "institutional_position": {
+                            "trade_date": "2026-07-17",
+                            "foreign_futures_net_oi": -86_189,
+                            "foreign_futures_net_oi_change": -1_736,
+                        },
+                        "options_sentiment": {
+                            "trade_date": "2026-07-17",
+                            "put_call_volume_ratio_pct": 83.63,
+                            "put_call_open_interest_ratio_pct": 92.94,
+                        },
+                        "slots": {},
+                    },
                 },
                 "missing": [],
                 "warnings": [],
@@ -2360,8 +2473,18 @@ class AiFreshnessGuardTests(unittest.TestCase):
             self.assertEqual(response["target"]["id"], "TXF")
             self.assertEqual(response["action"], "omi.read_tw_futures_context")
             self.assertEqual(response["analysis"]["question_intent"], "trend_view")
-            self.assertEqual(response["analysis"]["human_answer"]["source"], "question_intent")
+            self.assertEqual(response["analysis"]["human_answer"]["source"], "tw_futures_contract")
+            human_text = response["analysis"]["human_answer"]["text"]
+            self.assertIn("夜盤最後成交：43,481", human_text)
+            self.assertIn("日 K 收盤：42,725", human_text)
+            self.assertIn("外資期貨淨未平倉 -86,189", human_text)
+            self.assertIn("PCR 成交量 83.63%", human_text)
+            self.assertIn("不代表目前夜盤的即時加空或回補", "\n".join(response["analysis"]["human_answer"]["data_limits"]))
             self.assertNotIn("stock_master", response["missing"])
+            self.assertEqual(response["result"]["live_summary"]["quote_price"], 43_481)
+            self.assertFalse(response["result"]["live_summary"]["is_live"])
+            self.assertTrue(response["result"]["live_summary"]["intraday_available"])
+            self.assertEqual(response["result"]["live_summary"]["intraday_point_count"], 390)
         finally:
             db.close()
 
@@ -2908,7 +3031,7 @@ class AiFreshnessGuardTests(unittest.TestCase):
                 response = ai_ask.ask(db=db, payload=payload, server_policy=server_policy)
 
             planner.assert_called_once()
-            intraday.assert_called_once_with(symbol="TSM")
+            intraday.assert_called_once_with(symbol="TSM", db=db)
             refresh_daily.assert_called_once()
             self.assertEqual(response["target"]["type"], "us_stock")
             self.assertEqual(response["tool_plan"]["provider"], "openai")
@@ -3211,6 +3334,203 @@ class AiFreshnessGuardTests(unittest.TestCase):
             self.assertEqual(response["evidence_passport"]["trust_level"], "blocked")
             self.assertIn("target_scope", response["evidence_passport"]["missing"])
             self.assertTrue(any(action["type"] == "ask_clarification" for action in response["next_actions"]))
+        finally:
+            db.close()
+
+    def test_auto_target_symbol_precedes_generic_freshness_wording(self) -> None:
+        payload = AiAskRequest(
+            question="SOX 最新資料 freshness",
+            target={"type": "auto", "id": "SOX"},
+            mode="data_only",
+        )
+
+        resolution = ai_ask._resolve_scope(db=None, payload=payload)
+
+        self.assertEqual(resolution.selected_scope_type, "us_stock")
+        self.assertEqual(resolution.selected_scope_id, "^SOX")
+
+    def test_auto_target_resolves_known_us_index_alias_from_question_without_context_hint(self) -> None:
+        payload = AiAskRequest(
+            question="SOX 半導體指數最新行情與資料時間",
+            target={"type": "auto"},
+            mode="data_only",
+        )
+
+        resolution = ai_ask._resolve_scope(db=None, payload=payload)
+
+        self.assertEqual(resolution.selected_scope_type, "us_stock")
+        self.assertEqual(resolution.selected_scope_id, "^SOX")
+        self.assertEqual(resolution.confidence, "high")
+        self.assertIsNone(resolution.assumption)
+
+    def test_sox_latest_only_requires_index_price_capabilities(self) -> None:
+        db = make_session()
+        try:
+            gaps = agentic_tools.scan_us_stock_gaps(
+                db,
+                "SOX",
+                question="SOX 最新行情是否還在即時交易？",
+            )
+
+            self.assertEqual(gaps["scope"]["target"]["id"], "^SOX")
+            self.assertEqual(gaps["instrument_type"], "index")
+            self.assertEqual(
+                gaps["required_capabilities"],
+                ["us_daily_price", "us_intraday_trend"],
+            )
+            self.assertNotIn("us_company_profile", gaps["missing"])
+            self.assertNotIn("us_sec_company_fact", gaps["missing"])
+            self.assertIn("us_company_profile", gaps["not_applicable"])
+        finally:
+            db.close()
+
+    def test_successful_intraday_tool_satisfies_rescan_capability(self) -> None:
+        db = make_session()
+        try:
+            gaps = agentic_tools.scan_us_stock_gaps(
+                db,
+                "SOX",
+                question="SOX 最新行情",
+                satisfied_capabilities={"us_intraday_trend"},
+            )
+
+            self.assertNotIn("us_intraday_trend", gaps["missing"])
+            self.assertIn("us_daily_price", gaps["missing"])
+        finally:
+            db.close()
+
+    def test_us_index_context_skips_company_resources_and_projects_source_health(self) -> None:
+        db = make_session()
+        try:
+            with (
+                patch.object(agentic_tools.us_market_service, "list_us_daily_prices", return_value=[]),
+                patch.object(agentic_tools, "_latest_profile", return_value=None) as latest_profile,
+                patch.object(
+                    agentic_tools.us_market_service,
+                    "get_us_sec_fundamental_summary",
+                    return_value=None,
+                ) as get_sec,
+                patch.object(
+                    agentic_tools.us_market_service,
+                    "list_us_corporate_actions",
+                    return_value=[],
+                ) as list_actions,
+                patch.object(
+                    agentic_tools.us_market_service,
+                    "list_us_short_volumes",
+                    return_value=[],
+                ) as list_short,
+                patch.object(
+                    agentic_tools,
+                    "scan_us_stock_gaps",
+                    return_value={"missing": ["us_daily_price"], "warnings": []},
+                ),
+                patch.object(
+                    agentic_tools.us_market_service,
+                    "build_us_source_health",
+                    return_value={
+                        "summary": {"entry_count": 4, "stale_count": 2},
+                        "entries": [
+                            {"resource": "symbol_master", "status": "current", "ok": True},
+                            {"resource": "daily_price", "status": "stale", "ok": False},
+                            {"resource": "profile", "status": "stale", "ok": False},
+                            {"resource": "sec_facts", "status": "stale", "ok": False},
+                        ],
+                    },
+                ),
+                patch.object(
+                    agentic_tools.us_market_service,
+                    "list_us_ohlc_chart_data",
+                    return_value={"point_count": 1, "points": []},
+                ),
+            ):
+                context = agentic_tools.read_us_stock_context(db=db, symbol="SOX")
+
+            latest_profile.assert_not_called()
+            get_sec.assert_not_called()
+            list_actions.assert_not_called()
+            list_short.assert_not_called()
+            self.assertEqual(context["scope"]["target"]["instrument_type"], "index")
+            self.assertEqual(context["summary"]["latest_volume_status"], "provider_unavailable")
+            self.assertEqual(
+                {entry["resource"] for entry in context["data"]["source_health"]["entries"]},
+                {"symbol_master", "daily_price"},
+            )
+            self.assertIn(
+                "profile",
+                context["data"]["source_health"]["not_applicable_resources"],
+            )
+            self.assertEqual(context["data"]["compact"]["slots"]["fundamentals"]["status"], "not_applicable")
+            self.assertEqual(context["data"]["compact"]["slots"]["flows_liquidity"]["status"], "not_applicable")
+        finally:
+            db.close()
+
+    def test_explicit_us_target_normalizes_known_index_alias(self) -> None:
+        payload = AiAskRequest(
+            question="SOX latest",
+            target={"type": "us_stock", "id": "SOX"},
+            mode="data_only",
+        )
+
+        resolution = ai_ask._resolve_scope(db=None, payload=payload)
+
+        self.assertEqual(resolution.selected_scope_type, "us_stock")
+        self.assertEqual(resolution.selected_scope_id, "^SOX")
+
+    def test_unknown_contract_version_is_rejected(self) -> None:
+        payload = AiAskRequest(
+            question="market",
+            contract_version="made.up.v99",
+            target={"type": "market"},
+        )
+
+        with self.assertRaisesRegex(ValueError, "contract_version must be one of"):
+            ai_ask._validate_request(payload)
+
+    def test_context_only_brief_returns_human_status_summary(self) -> None:
+        db = make_session()
+        try:
+            payload = AiAskRequest(
+                question="黃金資料狀態",
+                target={"type": "resource_asset", "id": "GC", "label": "黃金"},
+                mode="brief",
+            )
+            context = {
+                "kind": "resource_asset_context",
+                "as_of": "2026-07-17",
+                "scope": {"target": {"type": "resource_asset", "id": "GC"}},
+                "data": {
+                    "compact": {
+                        "kind": "resource_asset_compact_evidence",
+                        "version": "market_compact_evidence.v1",
+                        "target": {"type": "resource_asset", "id": "GC", "label": "黃金"},
+                        "resources": {"ohlcv_rows": 20, "watch_only": True},
+                        "freshness_by_domain": {"quote": "stale", "chart": "missing"},
+                        "slots": {
+                            "quote": {"status": "stale", "capability": "quote_snapshot"},
+                            "daily_chart": {"status": "missing", "capability": "daily_chart"},
+                            "trade_execution": {"status": "not_applicable", "capability": "trade_execution"},
+                        },
+                    }
+                },
+                "missing": ["resource_ohlcv"],
+                "warnings": ["Resource quote is stale."],
+                "source_refs": [],
+            }
+
+            with patch.object(
+                ai_ask.agentic_tools,
+                "read_resource_asset_context",
+                return_value=context,
+            ):
+                response = ai_ask.ask(db=db, payload=payload)
+
+            self.assertEqual(response["mode"]["effective"], "brief")
+            self.assertEqual(response["analysis"]["kind"], "compact_context_status_digest")
+            self.assertEqual(response["analysis"]["human_answer"]["source"], "compact_context_contract")
+            self.assertIn("quote=stale", response["analysis"]["human_answer"]["text"])
+            self.assertIn("daily_chart=missing", response["analysis"]["human_answer"]["text"])
+            self.assertEqual(response["result"]["human_answer"]["source"], "compact_context_contract")
         finally:
             db.close()
 

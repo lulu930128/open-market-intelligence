@@ -12,7 +12,9 @@ from app.crypto_market.assets import crypto_asset_codes, get_crypto_asset
 from app.db.models import JPStockMaster, KRStockMaster, StockMaster, USStockMaster, WatchlistGroup
 from app.jp_market.sources import normalize_jp_symbol
 from app.kr_market.sources import KR_INDEX_CONFIG_BY_ID, normalize_kr_index_id, normalize_kr_symbol
+from app.resource_market.contract import list_resource_instruments, normalize_resource_symbol
 from app.us_market.sources import normalize_us_symbol
+from app.us_market.symbols import us_instrument_type
 
 
 VALID_TARGET_TYPES = {
@@ -30,6 +32,14 @@ VALID_TARGET_TYPES = {
     "kr_index",
     "crypto_market",
     "crypto_asset",
+    "resource_asset",
+    "portfolio",
+    "us_macro",
+    "us_watchlist",
+    "jp_watchlist",
+    "kr_watchlist",
+    "source_health",
+    "capability_status",
 }
 TAIWAN_INDEX_TARGET_IDS = {"TAIEX", "TPEX"}
 TAIWAN_FUTURES_TARGET_IDS = {"TXF", "MXF", "TMF"}
@@ -81,6 +91,45 @@ CRYPTO_MARKET_CONTEXT_HINTS = (
     "比特幣",
     "以太坊",
 )
+PORTFOLIO_CONTEXT_HINTS = (
+    "portfolio",
+    "投資組合",
+    "持倉總覽",
+    "庫存總覽",
+    "全部持倉",
+)
+SOURCE_HEALTH_CONTEXT_HINTS = (
+    "source health",
+    "provider health",
+    "資料源健康",
+    "資料來源健康",
+    "資料源狀態",
+    "provider 狀態",
+)
+CAPABILITY_STATUS_CONTEXT_HINTS = (
+    "capability status",
+    "provider contract",
+    "能力清單",
+    "資料能力",
+    "哪些資料還沒接",
+    "還沒接的資料",
+    "provider 缺口",
+)
+RESOURCE_QUESTION_ALIASES = (
+    (("usd/twd", "usd-twd", "美元台幣", "美元兌台幣"), "USD-TWD"),
+    (("twd/usd", "twd-usd", "台幣美元", "台幣兌美元"), "TWD-USD"),
+    (("usd/jpy", "usd-jpy", "美元日圓", "美元兌日圓"), "USD-JPY"),
+    (("usd/krw", "usd-krw", "美元韓元", "美元兌韓元"), "USD-KRW"),
+    (("gold", "黃金", "金價"), "GC"),
+    (("wti", "原油", "油價"), "CL"),
+    (("copper", "銅價"), "HG"),
+)
+US_MACRO_QUESTION_ALIASES = (
+    (("dgs10", "10-year treasury", "10 year treasury", "美國十年債", "美國10年債"), "DGS10"),
+    (("fedfunds", "federal funds rate", "聯邦基金利率"), "FEDFUNDS"),
+    (("cpi", "美國消費者物價", "美國消費者價格"), "CPIAUCSL"),
+    (("unrate", "u.s. unemployment", "us unemployment", "美國失業率"), "UNRATE"),
+)
 INTERNAL_SCOPE_TO_TARGET_TYPE = {
     "market": "market",
     "data_freshness": "data_freshness",
@@ -95,6 +144,14 @@ INTERNAL_SCOPE_TO_TARGET_TYPE = {
     "kr_index": "kr_index",
     "crypto_market": "crypto_market",
     "crypto_asset": "crypto_asset",
+    "resource_asset": "resource_asset",
+    "portfolio": "portfolio",
+    "us_macro": "us_macro",
+    "us_watchlist": "us_watchlist",
+    "jp_watchlist": "jp_watchlist",
+    "kr_watchlist": "kr_watchlist",
+    "source_health": "source_health",
+    "capability_status": "capability_status",
 }
 TARGET_TYPE_TO_INTERNAL_SCOPE = {
     "market": "market",
@@ -110,6 +167,14 @@ TARGET_TYPE_TO_INTERNAL_SCOPE = {
     "kr_index": "kr_index",
     "crypto_market": "crypto_market",
     "crypto_asset": "crypto_asset",
+    "resource_asset": "resource_asset",
+    "portfolio": "portfolio",
+    "us_macro": "us_macro",
+    "us_watchlist": "us_watchlist",
+    "jp_watchlist": "jp_watchlist",
+    "kr_watchlist": "kr_watchlist",
+    "source_health": "source_health",
+    "capability_status": "capability_status",
 }
 REPORT_HINTS = decision_core.REPORT_HINTS
 ANALYSIS_HINTS = decision_core.ANALYSIS_HINTS
@@ -146,6 +211,14 @@ class ScopeResolution:
 
 def _contains_hint(question: str, hints: tuple[str, ...]) -> bool:
     return decision_core.contains_hint(question, hints)
+
+
+def _alias_target(question: str, aliases: tuple[tuple[tuple[str, ...], str], ...]) -> str | None:
+    lowered = question.casefold()
+    for hints, target in aliases:
+        if any(hint.casefold() in lowered for hint in hints):
+            return target
+    return None
 
 
 def _normalize_text(value: str | None) -> str | None:
@@ -196,6 +269,14 @@ def _target_dict(
             market = "KR"
         elif target_type.startswith("crypto_"):
             market = "crypto"
+        elif target_type == "resource_asset":
+            market = "resource"
+        elif target_type == "portfolio":
+            market = "multi"
+        elif target_type == "source_health":
+            market = "all"
+        elif target_type == "capability_status":
+            market = "all"
 
     return {
         "type": target_type,
@@ -206,11 +287,14 @@ def _target_dict(
 
 
 def _resolution_target(resolution: ScopeResolution) -> dict[str, Any]:
-    return _target_dict(
+    target = _target_dict(
         scope_type=resolution.selected_scope_type,
         scope_id=resolution.selected_scope_id,
         label=resolution.display_name,
     )
+    if resolution.selected_scope_type == "us_stock":
+        target["instrument_type"] = us_instrument_type(resolution.selected_scope_id)
+    return target
 
 
 def _looks_like_stock_id(value: str | None) -> bool:
@@ -225,7 +309,7 @@ def _looks_like_us_symbol(value: str | None) -> bool:
     if not normalized:
         return False
 
-    return bool(re.fullmatch(r"[A-Z][A-Z0-9.$-]{0,15}", normalized))
+    return bool(re.fullmatch(r"(?:\^[A-Z0-9]+|[A-Z][A-Z0-9.$-]{0,15})", normalized))
 
 
 def _looks_like_jp_symbol(value: str | None) -> bool:
@@ -711,24 +795,26 @@ def _resolve_us_stock_symbol(
         return None
 
     stock = _get_us_stock(db, normalized_symbol)
-    if stock is None and not allow_unknown:
+    is_known_index = us_instrument_type(normalized_symbol) == "index"
+    if stock is None and not allow_unknown and not is_known_index:
         return None
 
+    is_verified_target = stock is not None or is_known_index
     label = _us_stock_label(stock, normalized_symbol)
     return ScopeResolution(
         selected_scope_type="us_stock",
         selected_scope_id=normalized_symbol,
         display_name=label,
-        confidence=confidence if stock is not None else "medium",
-        assumption=None if stock is not None else "未在 us_stock_master 找到完整主檔，先以 ticker 作為美股目標並回報資料缺口。",
-        source=source if stock is not None else f"{source}_unverified_symbol",
+        confidence=confidence if is_verified_target else "medium",
+        assumption=None if is_verified_target else "未在 us_stock_master 找到完整主檔，先以 ticker 作為美股目標並回報資料缺口。",
+        source=source if is_verified_target else f"{source}_unverified_symbol",
         candidates=(
             _resolution_candidate(
                 scope_type="us_stock",
                 scope_id=normalized_symbol,
                 label=label,
-                confidence=confidence if stock is not None else "medium",
-                source=source if stock is not None else f"{source}_unverified_symbol",
+                confidence=confidence if is_verified_target else "medium",
+                source=source if is_verified_target else f"{source}_unverified_symbol",
             ),
         ),
     )
@@ -782,27 +868,29 @@ def _resolve_us_stock_symbol_from_question(db: Session | None, question: str) ->
     candidates: list[tuple[ScopeResolution, bool]] = []
 
     for symbol, source, explicit_marker in _iter_us_symbol_mentions(question):
+        is_known_index = us_instrument_type(symbol) == "index"
         if (
             not explicit_marker
+            and not is_known_index
             and symbol in US_SYMBOL_STOPWORDS
             and not _contains_hint(question, US_SYMBOL_CONTEXT_HINTS)
         ):
             continue
 
-        allow_unknown = explicit_marker or (
+        allow_unknown = explicit_marker or is_known_index or (
             has_context and _contains_hint(question, US_SYMBOL_CONTEXT_HINTS)
         )
         resolution = _resolve_us_stock_symbol(
             db,
             symbol,
             source=source,
-            confidence="high" if explicit_marker else "medium",
+            confidence="high" if explicit_marker or is_known_index else "medium",
             allow_unknown=allow_unknown,
         )
         if resolution is None:
             continue
 
-        if explicit_marker or has_context:
+        if explicit_marker or has_context or is_known_index:
             candidates.append((resolution, explicit_marker))
 
     if not candidates:
@@ -1058,6 +1146,11 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
                 "kr_stock",
                 "kr_index",
                 "crypto_asset",
+                "resource_asset",
+                "us_macro",
+                "us_watchlist",
+                "jp_watchlist",
+                "kr_watchlist",
                 "tw_index",
                 "tw_futures",
             }
@@ -1099,6 +1192,16 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
                 )
             target_id = normalized_jp_symbol
 
+        if scope_type == "us_stock":
+            normalized_us_symbol = normalize_us_symbol(target_id)
+            if not _looks_like_us_symbol(normalized_us_symbol):
+                return _clarify_scope(
+                    scope_type,
+                    question,
+                    f"Unsupported US stock/index target.id: {target_id}.",
+                )
+            target_id = normalized_us_symbol
+
         if scope_type == "jp_index":
             normalized_jp_index = normalize_jp_symbol(target_id)
             if normalized_jp_index not in JP_INDEX_TARGET_IDS:
@@ -1139,6 +1242,39 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
                 )
             target_id = normalized_crypto_asset
 
+        if scope_type == "resource_asset":
+            normalized_resource_symbol = normalize_resource_symbol(target_id)
+            if not list_resource_instruments(symbol=normalized_resource_symbol):
+                return _clarify_scope(
+                    scope_type,
+                    question,
+                    f"Unsupported resource asset target.id: {target_id}.",
+                )
+            target_id = normalized_resource_symbol
+
+        if scope_type == "us_macro":
+            normalized_series_id = str(target_id or "").strip().upper()
+            if not re.fullmatch(r"[A-Z0-9._-]{1,80}", normalized_series_id):
+                return _clarify_scope(
+                    scope_type,
+                    question,
+                    f"Unsupported FRED series target.id: {target_id}.",
+                )
+            target_id = normalized_series_id
+
+        if scope_type in {"us_watchlist", "jp_watchlist", "kr_watchlist"}:
+            try:
+                normalized_group_id = int(str(target_id or "").strip())
+            except (TypeError, ValueError):
+                normalized_group_id = 0
+            if normalized_group_id <= 0:
+                return _clarify_scope(
+                    scope_type,
+                    question,
+                    f"Regional watchlist target.id must be a positive integer: {target_id}.",
+                )
+            target_id = str(normalized_group_id)
+
         display_name = (
             _stock_display_name(db, target_id)
             if scope_type == "stock" and target_id
@@ -1152,6 +1288,21 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
             if scope_type == "kr_index" and target_id
             else _crypto_asset_label(target_id)
             if scope_type == "crypto_asset" and target_id
+            else (
+                list_resource_instruments(symbol=target_id)[0].display_name
+                or list_resource_instruments(symbol=target_id)[0].name
+            )
+            if scope_type == "resource_asset" and target_id
+            else requested_label or target_id
+            if scope_type == "us_macro" and target_id
+            else requested_label or f"{scope_type.removesuffix('_watchlist').upper()} watchlist {target_id}"
+            if scope_type in {"us_watchlist", "jp_watchlist", "kr_watchlist"} and target_id
+            else requested_label or "Active portfolio"
+            if scope_type == "portfolio"
+            else requested_label or "Unified source health"
+            if scope_type == "source_health"
+            else requested_label or "Market capability status"
+            if scope_type == "capability_status"
             else requested_label or "Crypto Market"
             if scope_type == "crypto_market"
             else requested_label
@@ -1266,7 +1417,10 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
                 ),
             )
 
-        if _contains_hint(question, FRESHNESS_HINTS):
+        if _contains_hint(question, FRESHNESS_HINTS) and (
+            _looks_like_stock_id(target_id)
+            or normalized_target_id in {"ALL", "GLOBAL", "MARKET", "TW"}
+        ):
             stock_id = target_id if _looks_like_stock_id(target_id) else None
             return ScopeResolution(
                 selected_scope_type="data_freshness",
@@ -1347,7 +1501,10 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
             target_id,
             source="explicit_scope_id",
             confidence="high",
-            allow_unknown=_contains_hint(question, US_SYMBOL_CONTEXT_HINTS),
+            allow_unknown=(
+                _contains_hint(question, US_SYMBOL_CONTEXT_HINTS)
+                or normalize_us_symbol(target_id).startswith("^")
+            ),
         )
         if us_symbol_resolution is not None:
             return us_symbol_resolution
@@ -1359,6 +1516,56 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
     kr_symbol_resolution = _resolve_kr_stock_symbol_from_question(db, question)
     if kr_symbol_resolution is not None:
         return kr_symbol_resolution
+
+    if _contains_hint(question, SOURCE_HEALTH_CONTEXT_HINTS):
+        return ScopeResolution(
+            selected_scope_type="source_health",
+            display_name="Unified source health",
+            confidence="high",
+            source="question_source_health",
+            candidates=(),
+        )
+
+    if _contains_hint(question, CAPABILITY_STATUS_CONTEXT_HINTS):
+        return ScopeResolution(
+            selected_scope_type="capability_status",
+            display_name="Market capability status",
+            confidence="high",
+            source="question_capability_status",
+            candidates=(),
+        )
+
+    if _contains_hint(question, PORTFOLIO_CONTEXT_HINTS):
+        return ScopeResolution(
+            selected_scope_type="portfolio",
+            display_name="Active portfolio",
+            confidence="high",
+            source="question_portfolio",
+            candidates=(),
+        )
+
+    resource_target = _alias_target(question, RESOURCE_QUESTION_ALIASES)
+    if resource_target is not None:
+        instrument = list_resource_instruments(symbol=resource_target)[0]
+        return ScopeResolution(
+            selected_scope_type="resource_asset",
+            selected_scope_id=resource_target,
+            display_name=instrument.display_name or instrument.name,
+            confidence="high",
+            source="question_resource_alias",
+            candidates=(),
+        )
+
+    macro_target = _alias_target(question, US_MACRO_QUESTION_ALIASES)
+    if macro_target is not None:
+        return ScopeResolution(
+            selected_scope_type="us_macro",
+            selected_scope_id=macro_target,
+            display_name=macro_target,
+            confidence="high",
+            source="question_us_macro_alias",
+            candidates=(),
+        )
 
     if _question_has_crypto_context(question):
         crypto_asset_resolution = _resolve_crypto_asset_from_question(question)
@@ -1372,6 +1579,10 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
             source="question_crypto_market",
             candidates=(),
         )
+
+    us_entity_resolution = _resolve_us_stock_symbol_from_question(db, question)
+    if us_entity_resolution is not None:
+        return us_entity_resolution
 
     if _contains_hint(question, FRESHNESS_HINTS):
         stock_id = _first_stock_id_in_text(question)
@@ -1398,7 +1609,36 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
 
     if _contains_hint(question, WATCHLIST_HINTS):
         group_id = _first_watchlist_group_id_in_text(question)
+        if group_id is None:
+            regional_group_match = re.search(
+                r"(?:watchlist|group|群組|自選群組)\s*#?\s*(\d+)",
+                question,
+                flags=re.IGNORECASE,
+            )
+            if regional_group_match is not None:
+                group_id = regional_group_match.group(1)
         if group_id is not None:
+            lowered_question = question.casefold()
+            regional_scope = (
+                "jp_watchlist"
+                if _question_has_jp_context(question)
+                or any(hint in lowered_question for hint in ("日股", "日本", "japan", "jp watchlist"))
+                else "kr_watchlist"
+                if _question_has_kr_context(question)
+                or any(hint in lowered_question for hint in ("韓股", "韓國", "korea", "krx", "kospi", "kosdaq"))
+                else "us_watchlist"
+                if any(hint in lowered_question for hint in ("美股", "美國", "us watchlist", "u.s. watchlist"))
+                else None
+            )
+            if regional_scope is not None:
+                return ScopeResolution(
+                    selected_scope_type=regional_scope,
+                    selected_scope_id=group_id,
+                    display_name=f"{regional_scope.removesuffix('_watchlist').upper()} watchlist {group_id}",
+                    confidence="high",
+                    source="question_regional_watchlist_group_id",
+                    candidates=(),
+                )
             return ScopeResolution(
                 selected_scope_type="watchlist",
                 selected_scope_id=group_id,

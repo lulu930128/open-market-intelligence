@@ -1,36 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { getApiProxyTarget } from "@/lib/serverApiConfig";
+import {
+  backendConnectionIssueCode,
+  fetchServerBackendJson,
+} from "@/lib/serverBackend";
+import type { BackendConnectionIssueCode } from "@/types/runtime";
 
-const apiProxyTarget = getApiProxyTarget();
-
-function redirectHome(request: NextRequest, groupId?: string | number | null) {
+function redirectHome(
+  request: NextRequest,
+  groupId?: string | number | null,
+  errorCode?: BackendConnectionIssueCode | null
+) {
   const url = new URL("/", request.url);
 
   if (groupId !== undefined && groupId !== null && String(groupId) !== "") {
     url.searchParams.set("group_id", String(groupId));
   }
+  if (errorCode) url.searchParams.set("omi_error", errorCode);
 
   return NextResponse.redirect(url, 303);
-}
-
-async function backendJson(path: string, init: RequestInit) {
-  const response = await fetch(`${apiProxyTarget}${path}`, {
-    ...init,
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      ...(init.headers ?? {}),
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(await response.text());
-  }
-
-  if (response.status === 204) return null;
-
-  return response.json();
 }
 
 export async function POST(request: NextRequest) {
@@ -42,23 +30,28 @@ export async function POST(request: NextRequest) {
 
   try {
     if (intent === "create_root" || intent === "create_child") {
-      const created = await backendJson("/api/watchlists/groups", {
-        method: "POST",
-        body: JSON.stringify({
-          parent_id: intent === "create_child" && parentId ? Number(parentId) : null,
-          group_name: groupName,
-          description: null,
-          sort_order: 100,
-          is_active: true,
-        }),
-      });
+      const created = await fetchServerBackendJson<{ id?: number }>(
+        "/api/watchlists/groups",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            parent_id: intent === "create_child" && parentId ? Number(parentId) : null,
+            group_name: groupName,
+            description: null,
+            sort_order: 100,
+            is_active: true,
+          }),
+        }
+      );
 
       return redirectHome(request, created?.id);
     }
 
     if (intent === "rename" && groupId) {
-      await backendJson(`/api/watchlists/groups/${groupId}`, {
+      await fetchServerBackendJson(`/api/watchlists/groups/${groupId}`, {
         method: "PATCH",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ group_name: groupName }),
       });
 
@@ -66,14 +59,19 @@ export async function POST(request: NextRequest) {
     }
 
     if (intent === "delete" && groupId) {
-      await backendJson(`/api/watchlists/groups/${groupId}?recursive=true`, {
+      await fetchServerBackendJson(`/api/watchlists/groups/${groupId}?recursive=true`, {
         method: "DELETE",
       });
 
       return redirectHome(request);
     }
-  } catch {
-    return redirectHome(request, groupId);
+  } catch (error) {
+    const errorCode = backendConnectionIssueCode(error);
+    console.error(
+      `[watchlist-group-form] intent=${intent} code=${errorCode}`,
+      error instanceof Error ? error.message : error
+    );
+    return redirectHome(request, groupId, errorCode);
   }
 
   return redirectHome(request, groupId);

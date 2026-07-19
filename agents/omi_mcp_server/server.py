@@ -133,6 +133,14 @@ ASK_TARGET_TYPES = [
     "kr_index",
     "crypto_market",
     "crypto_asset",
+    "resource_asset",
+    "portfolio",
+    "us_macro",
+    "us_watchlist",
+    "jp_watchlist",
+    "kr_watchlist",
+    "source_health",
+    "capability_status",
 ]
 
 PAYLOAD_LEVEL_SCHEMA: dict[str, Any] = {
@@ -313,13 +321,35 @@ MARKET_DATA_PARAMS_SCHEMA: dict[str, Any] = {
         "Optional bounded market-data parameters forwarded to OMI readers, "
         "for example provider, providers, symbol, symbols, instrument_type, "
         "interval, timeframe, bars, daily_limit, include_intraday, payload_level, "
-        "intraday_limit, session_scope, or limit."
+        "intraday_limit, session_scope, observations, holding_limit, health_limit, "
+        "radar_limit, market, resource, target, or limit."
     ),
     "properties": {
         "include_intraday": INCLUDE_INTRADAY_SCHEMA,
         "payload_level": PAYLOAD_LEVEL_SCHEMA,
         "intraday_limit": INTRADAY_LIMIT_SCHEMA,
         "session_scope": SESSION_SCOPE_SCHEMA,
+        "observations": {"type": "integer", "minimum": 1, "maximum": 240},
+        "holding_limit": {"type": "integer", "minimum": 1, "maximum": 500},
+        "health_limit": {"type": "integer", "minimum": 1, "maximum": 500},
+        "radar_limit": {"type": "integer", "minimum": 1, "maximum": 100},
+        "option_contract_month": {
+            "type": "string",
+            "pattern": "^[0-9A-Z]+$",
+            "description": "Optional TXO month/week bucket such as 202608 or 202607W4.",
+        },
+        "option_strike_limit": {
+            "type": "integer",
+            "minimum": 3,
+            "maximum": 25,
+            "default": 11,
+            "description": "Maximum number of TXO strikes projected around the selected expiry.",
+        },
+        "market": {"type": "string"},
+        "resource": {"type": "string"},
+        "target": {"type": "string"},
+        "capability_id": {"type": "string"},
+        "status": {"type": "string"},
     },
     "additionalProperties": True,
 }

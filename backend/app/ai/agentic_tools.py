@@ -7,7 +7,20 @@ from sqlalchemy.orm import Session
 
 from app.ai import agentic_common, agentic_execution, agentic_planning, agentic_policy, freshness, llm
 from app.ai import progress_events
-from app.ai.market_context import crypto_context, jp_context, kr_context, regional_params, us_context
+from app.ai.question_capabilities import required_us_capabilities, tool_capability
+from app.ai.market_context import (
+    capability_context,
+    crypto_context,
+    jp_context,
+    kr_context,
+    macro_context,
+    portfolio_context,
+    regional_params,
+    regional_watchlist_context,
+    resource_context,
+    source_health_context,
+    us_context,
+)
 from app.ai.market_context import common as market_context_common
 from app.db.models import (
     USDailyPrice,
@@ -21,8 +34,12 @@ from app.jp_market import service as jp_market_service
 from app.kr_market import service as kr_market_service
 from app.market import stock_selection_refresh
 from app.market.overnight_impact import scan_us_overnight_impact_gaps
+from app.portfolio import service as portfolio_service
+from app.resource_market import service as resource_market_service
+from app.resource_market.source_health import build_resource_source_health
 from app.us_market import service as us_market_service
 from app.us_market.sources import normalize_us_symbol
+from app.us_market.symbols import us_instrument_type
 from app.watchlists import backfill_service as watchlist_backfill_service
 
 
@@ -76,8 +93,19 @@ def _sec_metric_count(db: Session, symbol: str) -> int:
     )
 
 
-def scan_us_stock_gaps(db: Session, symbol: str, *, question: str = "") -> dict[str, Any]:
+def scan_us_stock_gaps(
+    db: Session,
+    symbol: str,
+    *,
+    question: str = "",
+    satisfied_capabilities: set[str] | None = None,
+) -> dict[str, Any]:
     normalized_symbol = normalize_us_symbol(symbol)
+    instrument_type = us_instrument_type(normalized_symbol)
+    required_capabilities = set(
+        required_us_capabilities(question, instrument_type=instrument_type)
+    )
+    satisfied_capabilities = satisfied_capabilities or set()
     latest_daily = _latest_us_daily_price(db, normalized_symbol)
     profile = _latest_profile(db, normalized_symbol)
     sec_metric_count = _sec_metric_count(db, normalized_symbol)
@@ -88,32 +116,61 @@ def scan_us_stock_gaps(db: Session, symbol: str, *, question: str = "") -> dict[
     today = _today()
     latest_daily_date = latest_daily.trade_date if latest_daily else None
     expected_dates["us_daily_price_latest"] = _json_value(latest_daily_date)
-    if latest_daily_date is None:
+    if "us_daily_price" in required_capabilities and latest_daily_date is None:
         missing.append("us_daily_price")
-    elif (today - latest_daily_date).days > US_DAILY_STALE_DAYS:
+    elif (
+        "us_daily_price" in required_capabilities
+        and latest_daily_date is not None
+        and (today - latest_daily_date).days > US_DAILY_STALE_DAYS
+    ):
         missing.append("us_daily_price")
         warnings.append("US daily price cache is stale for the requested symbol.")
 
     profile_fetched_at = profile.fetched_at if profile else None
     expected_dates["us_company_profile_fetched_at"] = _json_value(profile_fetched_at)
-    if profile is None:
+    if instrument_type != "index" and "us_company_profile" in required_capabilities and profile is None:
         missing.append("us_company_profile")
-    elif profile_fetched_at and _age_days(profile_fetched_at) > PROFILE_STALE_DAYS:
+    elif (
+        instrument_type != "index"
+        and "us_company_profile" in required_capabilities
+        and profile_fetched_at
+        and _age_days(profile_fetched_at) > PROFILE_STALE_DAYS
+    ):
         missing.append("us_company_profile")
         warnings.append("US company profile cache is older than the configured freshness window.")
 
     expected_dates["us_sec_fact_count"] = sec_metric_count
-    if sec_metric_count <= 0:
+    if (
+        instrument_type != "index"
+        and "us_sec_company_fact" in required_capabilities
+        and sec_metric_count <= 0
+    ):
         missing.append("us_sec_company_fact")
 
-    lowered_question = question.lower()
-    if any(hint in lowered_question for hint in ("intraday", "premarket", "after-hours", "盤中", "即時", "最新", "adr")):
+    if (
+        "us_intraday_trend" in required_capabilities
+        and "us_intraday_trend" not in satisfied_capabilities
+    ):
         missing.append("us_intraday_trend")
 
-    is_current = "us_daily_price" not in missing and "us_company_profile" not in missing and "us_sec_company_fact" not in missing
+    is_current = not missing
     return {
         "kind": "us_stock_freshness",
-        "scope": {"target": {"type": "us_stock", "id": normalized_symbol, "market": "US"}},
+        "scope": {
+            "target": {
+                "type": "us_stock",
+                "id": normalized_symbol,
+                "market": "US",
+                "instrument_type": instrument_type,
+            }
+        },
+        "instrument_type": instrument_type,
+        "required_capabilities": sorted(required_capabilities),
+        "not_applicable": (
+            ["us_company_profile", "us_sec_company_fact", "us_corporate_action", "us_short_volume"]
+            if instrument_type == "index"
+            else []
+        ),
         "is_current": is_current,
         "stale_stock_count": 0 if is_current else 1,
         "missing": list(dict.fromkeys(missing)),
@@ -226,7 +283,18 @@ def run_us_stock_tool_session(
         can_external_fetch=bool(policy.get("can_external_fetch")),
         progress_callback=progress_callback,
     )
-    refreshed_gaps = scan_us_stock_gaps(db, normalized_symbol, question=question)
+    satisfied_capabilities = {
+        capability
+        for run in runs
+        if run.get("status") == "success"
+        and (capability := tool_capability(run.get("tool"))) is not None
+    }
+    refreshed_gaps = scan_us_stock_gaps(
+        db,
+        normalized_symbol,
+        question=question,
+        satisfied_capabilities=satisfied_capabilities,
+    )
     return {
         "tool_plan": plan,
         "tool_runs": runs,
@@ -482,4 +550,113 @@ def read_crypto_context(
             build_crypto_source_health=build_crypto_source_health,
             now=_now,
         ),
+    )
+
+
+def read_resource_asset_context(
+    db: Session,
+    *,
+    symbol: str,
+    market_data_params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return resource_context.read_resource_asset_context(
+        db=db,
+        symbol=symbol,
+        market_data_params=market_data_params,
+        dependencies=resource_context.ResourceContextDependencies(
+            resource_service=resource_market_service,
+            build_resource_source_health=build_resource_source_health,
+            now=_now,
+        ),
+    )
+
+
+def read_us_macro_context(
+    db: Session,
+    *,
+    series_id: str,
+    market_data_params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return macro_context.read_us_macro_context(
+        db=db,
+        series_id=series_id,
+        market_data_params=market_data_params,
+        dependencies=macro_context.MacroContextDependencies(
+            us_market_service=us_market_service,
+            now=_now,
+        ),
+    )
+
+
+def read_portfolio_context(
+    db: Session,
+    *,
+    market_data_params: dict[str, Any] | None = None,
+    trusted: bool = False,
+) -> dict[str, Any]:
+    return portfolio_context.read_portfolio_context(
+        db=db,
+        market_data_params=market_data_params,
+        trusted=trusted,
+        dependencies=portfolio_context.PortfolioContextDependencies(
+            portfolio_service=portfolio_service,
+            now=_now,
+        ),
+    )
+
+
+def read_regional_watchlist_context(
+    db: Session,
+    *,
+    market: str,
+    group_id: int,
+    include_children: bool = True,
+    enabled_only: bool = True,
+    rank_by: str = "watchlist",
+    sort_order: str = "desc",
+    radar_mode: str = "action",
+    market_data_params: dict[str, Any] | None = None,
+    context_limit: int = 100,
+) -> dict[str, Any]:
+    return regional_watchlist_context.read_regional_watchlist_context(
+        db=db,
+        market=market,
+        group_id=group_id,
+        include_children=include_children,
+        enabled_only=enabled_only,
+        rank_by=rank_by,
+        sort_order=sort_order,
+        radar_mode=radar_mode,
+        market_data_params=market_data_params,
+        context_limit=context_limit,
+        dependencies=regional_watchlist_context.RegionalWatchlistDependencies(
+            us_market_service=us_market_service,
+            jp_market_service=jp_market_service,
+            kr_market_service=kr_market_service,
+            now=_now,
+        ),
+    )
+
+
+def read_unified_source_health_context(
+    db: Session,
+    *,
+    market_data_params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return source_health_context.read_unified_source_health_context(
+        db=db,
+        market_data_params=market_data_params,
+        now=_now,
+    )
+
+
+def read_capability_status(
+    *,
+    capability_id: str | None = None,
+    market_data_params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return capability_context.read_capability_status(
+        capability_id=capability_id,
+        market_data_params=market_data_params,
+        now=_now(),
     )

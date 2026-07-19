@@ -74,6 +74,31 @@ function regionalMarketRegimeLabel(
   return t("dashboard.marketIndex.neutral");
 }
 
+function taiwanBreadthLabel(t: TranslationFunction, index: MarketIndexSnapshot) {
+  const breadth = index.breadth;
+  if (!breadth) {
+    return t(
+      index.index_id === "TPEX"
+        ? "dashboard.marketIndex.tpexFullBreadth"
+        : "dashboard.marketIndex.twseFullBreadth"
+    );
+  }
+  if (breadth.scope === "registered_universe") {
+    return t("dashboard.marketIndex.registeredBreadth");
+  }
+  if (breadth.scope === "full_market") {
+    return t(
+      breadth.market === "TPEX" || index.index_id === "TPEX"
+        ? "dashboard.marketIndex.tpexFullBreadth"
+        : "dashboard.marketIndex.twseFullBreadth"
+    );
+  }
+  if (breadth.scope === "omi_sample") {
+    return t("dashboard.marketIndex.sampleBreadth");
+  }
+  return t("dashboard.marketIndex.localDatasetBreadth");
+}
+
 export function TaiwanMarketTape({
   summary,
   loadState,
@@ -84,6 +109,11 @@ export function TaiwanMarketTape({
   const t = useT();
   const indices = summary?.indices ?? [];
   const asOf = summary?.as_of ? formatDashboardTime(new Date(summary.as_of)) : null;
+  const cacheLabel = summary?.refresh_recommended
+    ? t("dashboard.marketIndex.cacheStale")
+    : summary?.cache_status && summary.cache_status !== "live"
+      ? t("dashboard.marketIndex.cacheReady")
+      : null;
 
   return (
     <section
@@ -95,6 +125,7 @@ export function TaiwanMarketTape({
         {indices.length > 0 ? (
           indices.map((index) => {
             const breadth = index.breadth;
+            const breadthStatus = index.breadth_status?.status ?? "ready";
             const advanceRatio =
               breadth && breadth.total_count > 0
                 ? (breadth.advance_count / breadth.total_count) * 100
@@ -148,14 +179,19 @@ export function TaiwanMarketTape({
                   </div>
                   <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
                     <div className="text-omi-text-muted">
-                      {t("dashboard.marketIndex.breadth")}
+                      {taiwanBreadthLabel(t, index)}
                     </div>
                     <div className={`mt-1 font-semibold ${valueTone((advanceRatio ?? 50) - 50)}`}>
-                      {advanceRatio === null
-                        ? "-"
+                      {breadthStatus === "failed"
+                        ? t("dashboard.marketIndex.breadthFailed")
+                        : advanceRatio === null
+                          ? "-"
                         : t("dashboard.marketIndex.advancePct", {
                             value: advanceRatio.toFixed(0),
                           })}
+                      {breadthStatus === "partial"
+                        ? ` · ${t("dashboard.marketIndex.breadthPartial")}`
+                        : ""}
                     </div>
                   </div>
                 </div>
@@ -180,6 +216,7 @@ export function TaiwanMarketTape({
         {asOf
           ? t("dashboard.marketIndex.updated", { asOf })
           : t("dashboard.marketIndex.waiting")}
+        {cacheLabel ? ` · ${cacheLabel}` : ""}
       </div>
     </section>
   );

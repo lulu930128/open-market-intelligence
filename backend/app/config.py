@@ -102,6 +102,8 @@ class Settings(BaseSettings):
     scheduler_market_margin_refresh_time: str = "21:10"
     scheduler_market_chip_refresh_index_ids: str = "TAIEX,TPEX"
     scheduler_market_chip_refresh_force: bool = False
+    enable_taiwan_market_index_scheduler: bool = True
+    scheduler_taiwan_market_index_interval_seconds: int = 5
     enable_taiwan_futures_scheduler: bool = True
     taiwan_futures_quote_provider: str = "taifex_mis"
     scheduler_taiwan_futures_symbols: str = "TXF,MXF,TMF"
@@ -109,6 +111,10 @@ class Settings(BaseSettings):
     scheduler_taiwan_futures_interval_seconds: int = 30
     scheduler_taiwan_futures_failure_backoff_seconds: int = 300
     scheduler_taiwan_futures_success_event_interval_seconds: int = 300
+    enable_taiwan_derivatives_scheduler: bool = True
+    scheduler_taiwan_derivatives_refresh_time: str = "16:20"
+    scheduler_taiwan_derivatives_refresh_day_of_week: str = "mon-fri"
+    scheduler_taiwan_derivatives_success_cooldown_seconds: int = 43200
     enable_us_market_scheduler: bool = False
     scheduler_us_market_refresh_time: str = "06:30"
     scheduler_us_market_refresh_day_of_week: str = "tue-sat"

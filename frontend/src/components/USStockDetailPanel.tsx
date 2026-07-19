@@ -31,6 +31,7 @@ import {
   chartDrawingSnapshotsEqual,
   chartDrawingSyncDelayMs,
   createChartDrawingSnapshot,
+  hasChartDrawingSnapshot,
   loadChartDrawings,
   normalizeChartDrawingSelection,
   normalizeStoredChartDrawings,
@@ -958,6 +959,7 @@ export default function USStockDetailPanel({
   const requestSeq = useRef(0);
   const finalIntradayRefreshDate = useRef<string | null>(null);
   const chartDrawingSyncTimerRef = useRef<number | null>(null);
+  const chartDrawingLocalRevisionRef = useRef(0);
 
   useEffect(() => {
     tRef.current = t;
@@ -1636,6 +1638,7 @@ export default function USStockDetailPanel({
     drawingsToSave: ChartDrawing[],
     selectedDrawingIdToSave = activeSelectedChartDrawingId
   ) => {
+    chartDrawingLocalRevisionRef.current += 1;
     setChartDrawingState({
       key: chartDrawingKey,
       drawings: drawingsToSave,
@@ -1660,17 +1663,33 @@ export default function USStockDetailPanel({
     if (!chartFocusMode || !selectedSymbol) {
       return;
     }
+    if (chartDrawingState.key === chartDrawingKey) return;
 
     let cancelled = false;
     const remoteSymbol = selectedSymbol;
+    const loadRevision = chartDrawingLocalRevisionRef.current;
+    const hasLocalSnapshot = hasChartDrawingSnapshot(chartDrawingKey);
     const localDrawings = loadChartDrawings(chartDrawingKey);
     const normalizedLocalSelection = normalizeChartDrawingSelection(
       localDrawings,
       activeSelectedChartDrawingId
     );
 
-    if (localDrawings.length > 0) {
-      queueChartDrawingRemoteSave(localDrawings, normalizedLocalSelection);
+    if (hasLocalSnapshot) {
+      void Promise.resolve().then(() => {
+        if (cancelled || chartDrawingLocalRevisionRef.current !== loadRevision) return;
+
+        setChartDrawingState({
+          key: chartDrawingKey,
+          drawings: localDrawings,
+        });
+        setSelectedChartDrawingId(normalizedLocalSelection);
+
+        if (localDrawings.length > 0) {
+          queueChartDrawingRemoteSave(localDrawings, normalizedLocalSelection);
+        }
+      });
+
       return () => {
         cancelled = true;
       };
@@ -1682,10 +1701,17 @@ export default function USStockDetailPanel({
           chartDrawingApiPath("US", remoteSymbol, professionalTimeframe)
         );
 
-        if (cancelled) return;
+        if (cancelled || chartDrawingLocalRevisionRef.current !== loadRevision) return;
 
         const remoteDrawings = normalizeStoredChartDrawings(snapshot.drawings);
-        if (remoteDrawings.length === 0) return;
+        if (remoteDrawings.length === 0) {
+          setChartDrawingState({
+            key: chartDrawingKey,
+            drawings: [],
+          });
+          setSelectedChartDrawingId(null);
+          return;
+        }
 
         const remoteSelection = normalizeChartDrawingSelection(
           remoteDrawings,
@@ -1710,6 +1736,7 @@ export default function USStockDetailPanel({
     };
   }, [
     activeSelectedChartDrawingId,
+    chartDrawingState.key,
     chartDrawingKey,
     chartFocusMode,
     professionalTimeframe,

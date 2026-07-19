@@ -11,6 +11,7 @@ from app.market.calendar_status import build_taiwan_calendar_status
 from app.market.taiwan_rules import (
     TAIWAN_DATASET_SPECS,
     TaiwanDatasetSpec,
+    expected_date_for_dataset,
     is_equity_only_dataset_required,
 )
 from app.observability.provider_health import (
@@ -178,11 +179,16 @@ def _dataset_entry(
     stock: StockMaster | None,
     stock_id: str | None,
     calendar_status: dict[str, Any],
+    now: datetime | None,
 ) -> TaiwanSourceHealthEntry:
     required = is_equity_only_dataset_required(spec, stock)
     target = _target(stock_id=stock_id)
     window = _release_window(calendar_status, spec.key)
-    expected_data_date = _expected_date(window) if spec.has_expected_date else None
+    expected_data_date = (
+        _expected_date(window) or expected_date_for_dataset(spec.key, now=now)
+        if spec.has_expected_date
+        else None
+    )
 
     if not required:
         return TaiwanSourceHealthEntry(
@@ -322,6 +328,7 @@ def build_taiwan_source_health(
                 stock=stock,
                 stock_id=normalized_stock_id,
                 calendar_status=calendar_status,
+                now=now,
             )
             for spec in TAIWAN_DATASET_SPECS
         ],

@@ -450,6 +450,108 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
         self.assertEqual(kwargs["seconds"], 30)
         self.assertEqual(kwargs["id"], "taiwan_futures_quote_collector")
 
+    def test_taiwan_derivatives_release_guard_requires_trading_day_and_1620(self) -> None:
+        timezone = ZoneInfo("Asia/Taipei")
+
+        self.assertFalse(
+            scheduler._is_taiwan_derivatives_refresh_ready(
+                datetime(2026, 7, 17, 16, 19, tzinfo=timezone)
+            )
+        )
+        self.assertTrue(
+            scheduler._is_taiwan_derivatives_refresh_ready(
+                datetime(2026, 7, 17, 16, 20, tzinfo=timezone)
+            )
+        )
+        self.assertFalse(
+            scheduler._is_taiwan_derivatives_refresh_ready(
+                datetime(2026, 7, 19, 16, 20, tzinfo=timezone)
+            )
+        )
+
+    def test_taiwan_derivatives_scheduler_queues_bounded_deduped_job(self) -> None:
+        timezone = ZoneInfo("Asia/Taipei")
+        now = datetime(2026, 7, 17, 16, 20, tzinfo=timezone)
+        fake_db = SimpleNamespace(close=Mock())
+
+        with (
+            patch.object(scheduler, "datetime") as datetime_mock,
+            patch.object(scheduler, "SessionLocal", return_value=fake_db),
+            patch.object(
+                scheduler.settings,
+                "scheduler_taiwan_derivatives_success_cooldown_seconds",
+                43200,
+            ),
+            patch.object(
+                scheduler.job_service,
+                "enqueue_job",
+                return_value=(SimpleNamespace(id=51), True),
+            ) as enqueue,
+        ):
+            datetime_mock.now.return_value = now
+            scheduler.enqueue_taiwan_derivatives_refresh()
+
+        kwargs = enqueue.call_args.kwargs
+        self.assertEqual(kwargs["job_type"], "scheduler.taiwan_derivatives_refresh")
+        self.assertEqual(kwargs["target"], "TXF/TXO")
+        self.assertEqual(kwargs["progress_total"], 5)
+        self.assertEqual(kwargs["request"]["provider_request_limit"], 5)
+        self.assertEqual(kwargs["request"]["expected_trade_date"], "2026-07-17")
+        self.assertEqual(kwargs["task_args"], (date(2026, 7, 17),))
+        self.assertEqual(kwargs["reuse_success_within_seconds"], 43200)
+        fake_db.close.assert_called_once()
+
+    def test_taiwan_derivatives_scheduler_skips_before_release(self) -> None:
+        timezone = ZoneInfo("Asia/Taipei")
+        with (
+            patch.object(scheduler, "datetime") as datetime_mock,
+            patch.object(scheduler, "SessionLocal") as session_local,
+            patch.object(scheduler.job_service, "enqueue_job") as enqueue,
+        ):
+            datetime_mock.now.return_value = datetime(
+                2026,
+                7,
+                17,
+                16,
+                19,
+                tzinfo=timezone,
+            )
+            scheduler.enqueue_taiwan_derivatives_refresh()
+
+        session_local.assert_not_called()
+        enqueue.assert_not_called()
+
+    def test_taiwan_derivatives_refresh_job_is_registered_as_cron_job(self) -> None:
+        fake_scheduler = SimpleNamespace(add_job=Mock())
+
+        with (
+            patch.object(scheduler.settings, "enable_taiwan_derivatives_scheduler", True),
+            patch.object(
+                scheduler.settings,
+                "scheduler_taiwan_derivatives_refresh_time",
+                "16:20",
+            ),
+            patch.object(
+                scheduler.settings,
+                "scheduler_taiwan_derivatives_refresh_day_of_week",
+                "mon-fri",
+            ),
+        ):
+            added = scheduler._add_taiwan_derivatives_refresh_job(fake_scheduler)
+
+        self.assertTrue(added)
+        fake_scheduler.add_job.assert_called_once()
+        kwargs = fake_scheduler.add_job.call_args.kwargs
+        self.assertIs(
+            fake_scheduler.add_job.call_args.args[0],
+            scheduler.enqueue_taiwan_derivatives_refresh,
+        )
+        self.assertEqual(kwargs["trigger"], "cron")
+        self.assertEqual(kwargs["day_of_week"], "mon-fri")
+        self.assertEqual(kwargs["hour"], 16)
+        self.assertEqual(kwargs["minute"], 20)
+        self.assertEqual(kwargs["id"], "taiwan_derivatives_refresh")
+
     def test_jp_market_refresh_job_is_registered_as_cron_job(self) -> None:
         fake_scheduler = SimpleNamespace(add_job=Mock())
 

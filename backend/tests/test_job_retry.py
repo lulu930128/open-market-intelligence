@@ -109,6 +109,35 @@ class JobRetryTests(unittest.TestCase):
         self.assertEqual(task_args, ("2330", None, 0.05, "basic"))
         self.assertEqual(request["profile"], "basic")
 
+    def test_retry_config_recreates_taiwan_derivatives_refresh_task(self) -> None:
+        job = SimpleNamespace(
+            id=16,
+            job_type="scheduler.taiwan_derivatives_refresh",
+            status="error",
+            target="TXF/TXO",
+            progress_current=4,
+            progress_total=5,
+            message="Job failed.",
+            error_message="delta unavailable",
+            request_json=json.dumps(
+                {
+                    "expected_trade_date": "2026-07-17",
+                    "provider_request_limit": 5,
+                }
+            ),
+            result_json=None,
+            created_at=None,
+            started_at=None,
+            ended_at=None,
+            updated_at=None,
+        )
+
+        task, task_args, request = _retry_config(job)
+
+        self.assertIs(task, backfill_tasks.run_taiwan_derivatives_refresh_job)
+        self.assertEqual(task_args, (date(2026, 7, 17),))
+        self.assertEqual(request["provider_request_limit"], 5)
+
     def test_parse_date_rejects_invalid_values(self) -> None:
         with self.assertRaises(ValueError):
             _parse_date("not-a-date")

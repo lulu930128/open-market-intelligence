@@ -40,6 +40,14 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                                         "kr_index",
                                         "crypto_market",
                                         "crypto_asset",
+                                        "resource_asset",
+                                        "portfolio",
+                                        "us_macro",
+                                        "us_watchlist",
+                                        "jp_watchlist",
+                                        "kr_watchlist",
+                                        "source_health",
+                                        "capability_status",
                                     ],
                                     "default": "auto",
                                 },
@@ -118,8 +126,38 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                             "description": (
                                 "Optional bounded market-data parameters for readers, for example "
                                 "provider, providers, symbols, symbol, instrument_type, interval, timeframe, bars, "
-                                "include_intraday, payload_level, intraday_limit, or limit."
+                                "include_intraday, payload_level, intraday_limit, observations, holding_limit, "
+                                "health_limit, radar_limit, market, resource, target, or limit."
                             ),
+                            "properties": {
+                                "include_intraday": {"type": "boolean", "default": False},
+                                "payload_level": {
+                                    "type": "string",
+                                    "enum": ["summary", "compact", "standard", "full"],
+                                    "default": "compact",
+                                },
+                                "intraday_limit": {"type": "integer", "minimum": 1, "maximum": 500},
+                                "observations": {"type": "integer", "minimum": 1, "maximum": 240},
+                                "holding_limit": {"type": "integer", "minimum": 1, "maximum": 500},
+                                "health_limit": {"type": "integer", "minimum": 1, "maximum": 500},
+                                "radar_limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                                "option_contract_month": {
+                                    "type": "string",
+                                    "pattern": "^[0-9A-Z]+$",
+                                    "description": "Optional TXO month/week bucket such as 202608 or 202607W4.",
+                                },
+                                "option_strike_limit": {
+                                    "type": "integer",
+                                    "minimum": 3,
+                                    "maximum": 25,
+                                    "default": 11,
+                                    "description": "Maximum number of strikes projected around the selected TXO expiry.",
+                                },
+                                "market": {"type": "string"},
+                                "resource": {"type": "string"},
+                                "target": {"type": "string"},
+                            },
+                            "additionalProperties": True,
                         },
                     },
                     "required": ["question"],
@@ -185,6 +223,22 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                             "type": "string",
                             "enum": ["auto", "intraday", "short", "swing", "long"],
                             "default": "auto",
+                        },
+                        "market_data_params": {
+                            "type": "object",
+                            "properties": {
+                                "option_contract_month": {
+                                    "type": "string",
+                                    "pattern": "^[0-9A-Z]+$",
+                                },
+                                "option_strike_limit": {
+                                    "type": "integer",
+                                    "minimum": 3,
+                                    "maximum": 25,
+                                    "default": 11,
+                                },
+                            },
+                            "additionalProperties": True,
                         },
                     },
                     "required": ["symbol"],

@@ -18,6 +18,18 @@ export type OmiAskTarget = {
     | "us_stock"
     | "jp_stock"
     | "jp_index"
+    | "kr_stock"
+    | "kr_index"
+    | "crypto_market"
+    | "crypto_asset"
+    | "resource_asset"
+    | "portfolio"
+    | "us_macro"
+    | "us_watchlist"
+    | "jp_watchlist"
+    | "kr_watchlist"
+    | "source_health"
+    | "capability_status"
     | string;
   id?: string | null;
   label?: string | null;

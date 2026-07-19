@@ -829,6 +829,18 @@ export function useLightweightChartEngine({
 
     chart.timeScale().subscribeVisibleLogicalRangeChange(syncOverlay);
 
+    const syncOverlayFromPointerGesture = (event: PointerEvent) => {
+      if (event.buttons !== 0) {
+        scheduleOverlayRevision();
+      }
+    };
+    const syncOverlayFromWheel = () => scheduleOverlayRevision();
+    const syncOverlayFromDoubleClick = () => scheduleOverlayRevision();
+
+    container.addEventListener("pointermove", syncOverlayFromPointerGesture);
+    container.addEventListener("wheel", syncOverlayFromWheel, { passive: true });
+    container.addEventListener("dblclick", syncOverlayFromDoubleClick);
+
     const resizeObserver = new ResizeObserver(() => {
       const nextHeight = container.clientHeight || height;
       chart.applyOptions({
@@ -865,6 +877,9 @@ export function useLightweightChartEngine({
       }
 
       chart.timeScale().unsubscribeVisibleLogicalRangeChange(syncOverlay);
+      container.removeEventListener("pointermove", syncOverlayFromPointerGesture);
+      container.removeEventListener("wheel", syncOverlayFromWheel);
+      container.removeEventListener("dblclick", syncOverlayFromDoubleClick);
       resizeObserver.disconnect();
       chart.remove();
       chartRef.current = null;

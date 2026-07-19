@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from app.db.models import (
@@ -14,7 +14,7 @@ from app.db.models import (
     MonthlyRevenue,
     ShareholdingDistributionWeekly,
 )
-from app.market.trading_calendar import latest_released_trading_day
+from app.market.trading_calendar import TAIWAN_TZ, latest_released_trading_day
 
 
 TAIWAN_DAILY_PRICE_RELEASE_TIME = time(hour=15, minute=15)
@@ -146,6 +146,25 @@ def expected_broker_branch_date(
     )
 
 
+def expected_shareholding_distribution_date(
+    *,
+    include_today: bool | None = None,
+    now: datetime | None = None,
+) -> date:
+    """Return the latest conservatively expected Friday TDCC snapshot date."""
+    del include_today
+    local_now = now or datetime.now(TAIWAN_TZ)
+    if local_now.tzinfo is not None:
+        local_now = local_now.astimezone(TAIWAN_TZ)
+    current_date = local_now.date()
+    days_since_friday = (
+        current_date.weekday() - 4
+        if current_date.weekday() >= 5
+        else current_date.weekday() + 3
+    )
+    return current_date - timedelta(days=days_since_friday)
+
+
 TAIWAN_DATASET_DAILY_PRICE = "market_daily_price"
 TAIWAN_DATASET_INSTITUTIONAL_TRADE = "institutional_trade_daily"
 TAIWAN_DATASET_MARGIN_TRADING = "margin_trading_daily"
@@ -203,6 +222,7 @@ TAIWAN_DATASET_SPECS: tuple[TaiwanDatasetSpec, ...] = (
         frequency="weekly",
         model=ShareholdingDistributionWeekly,
         latest_column=ShareholdingDistributionWeekly.data_date,
+        has_expected_date=True,
         equity_only=True,
         refresh_step=TAIWAN_REFRESH_SHAREHOLDING_DISTRIBUTION,
     ),
@@ -257,6 +277,12 @@ _EXPECTED_DATE_BY_DATASET: dict[
     TAIWAN_DATASET_BROKER_BRANCH: lambda include_today, now: expected_broker_branch_date(
         include_today=include_today,
         now=now,
+    ),
+    TAIWAN_DATASET_SHAREHOLDING_DISTRIBUTION: (
+        lambda include_today, now: expected_shareholding_distribution_date(
+            include_today=include_today,
+            now=now,
+        )
     ),
 }
 
@@ -344,6 +370,7 @@ __all__ = [
     "expected_date_for_dataset",
     "expected_institutional_trade_date",
     "expected_margin_trade_date",
+    "expected_shareholding_distribution_date",
     "is_equity_only_dataset_required",
     "normalize_refresh_profile",
     "refresh_profile_step_count",

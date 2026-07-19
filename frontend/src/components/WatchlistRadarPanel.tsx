@@ -768,6 +768,10 @@ export default function WatchlistRadarPanel({
   const radarDateLabel = radar?.trade_date
     ? t("radar.dateLabel", { date: formatRadarDate(radar.trade_date) })
     : t("radar.notLoaded");
+  const radarSnapshotLabel =
+    radar?.cache_status === "snapshot" && radar.snapshot_date
+      ? t("radar.snapshotLabel", { date: formatRadarDate(radar.snapshot_date) })
+      : null;
 
   return (
     <section className="border border-omi-border-subtle bg-omi-surface" data-testid="watchlist-radar-panel">
@@ -787,6 +791,7 @@ export default function WatchlistRadarPanel({
         <div className="flex flex-wrap items-center gap-2">
           <div className="mr-1 text-xs font-medium text-omi-text-muted">
             {radarDateLabel}
+            {radarSnapshotLabel ? ` · ${radarSnapshotLabel}` : ""}
           </div>
           <div className="inline-flex border border-omi-border bg-omi-surface">
             {RADAR_MODE_OPTIONS.map((option) => (

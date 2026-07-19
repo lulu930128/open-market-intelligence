@@ -9,6 +9,7 @@ import {
   chartDrawingSnapshotsEqual,
   chartDrawingSyncDelayMs,
   createChartDrawingSnapshot,
+  hasChartDrawingSnapshot,
   loadChartDrawings,
   normalizeChartDrawingSelection,
   normalizeStoredChartDrawings,
@@ -62,6 +63,7 @@ export function useChartDrawingPersistence({
     future: [],
   });
   const syncTimerRef = useRef<number | null>(null);
+  const localRevisionRef = useRef(0);
   const storageKey = chartDrawingStorageKey(market, stockId, timeframe);
   const storedDrawings = useMemo(() => loadChartDrawings(storageKey), [storageKey]);
   const drawings = drawingState.key === storageKey ? drawingState.drawings : storedDrawings;
@@ -113,6 +115,7 @@ export function useChartDrawingPersistence({
       drawingsToSave: ChartDrawing[],
       selectedDrawingIdToSave = activeSelectedDrawingId
     ) => {
+      localRevisionRef.current += 1;
       setDrawingState({ key: storageKey, drawings: drawingsToSave });
       saveChartDrawings(storageKey, drawingsToSave);
       queueRemoteSave(drawingsToSave, selectedDrawingIdToSave);
@@ -130,18 +133,31 @@ export function useChartDrawingPersistence({
 
   useEffect(() => {
     if (!active || !stockId || !market) return;
+    if (drawingState.key === storageKey) return;
 
     let cancelled = false;
     const remoteMarket = market;
     const remoteStockId = stockId;
+    const loadRevision = localRevisionRef.current;
+    const hasLocalSnapshot = hasChartDrawingSnapshot(storageKey);
     const localDrawings = loadChartDrawings(storageKey);
     const normalizedLocalSelection = normalizeChartDrawingSelection(
       localDrawings,
       activeSelectedDrawingId
     );
 
-    if (localDrawings.length > 0) {
-      queueRemoteSave(localDrawings, normalizedLocalSelection);
+    if (hasLocalSnapshot) {
+      void Promise.resolve().then(() => {
+        if (cancelled || localRevisionRef.current !== loadRevision) return;
+
+        setDrawingState({ key: storageKey, drawings: localDrawings });
+        setSelectedDrawingId(normalizedLocalSelection);
+
+        if (localDrawings.length > 0) {
+          queueRemoteSave(localDrawings, normalizedLocalSelection);
+        }
+      });
+
       return () => {
         cancelled = true;
       };
@@ -152,10 +168,14 @@ export function useChartDrawingPersistence({
         const snapshot = await fetchJson<ChartDrawingSnapshotRead>(
           chartDrawingApiPath(remoteMarket, remoteStockId, timeframe)
         );
-        if (cancelled) return;
+        if (cancelled || localRevisionRef.current !== loadRevision) return;
 
         const remoteDrawings = normalizeStoredChartDrawings(snapshot.drawings);
-        if (remoteDrawings.length === 0) return;
+        if (remoteDrawings.length === 0) {
+          setDrawingState({ key: storageKey, drawings: [] });
+          setSelectedDrawingId(null);
+          return;
+        }
 
         const remoteSelection = normalizeChartDrawingSelection(
           remoteDrawings,
@@ -177,6 +197,7 @@ export function useChartDrawingPersistence({
   }, [
     active,
     activeSelectedDrawingId,
+    drawingState.key,
     market,
     queueRemoteSave,
     stockId,

@@ -45,9 +45,20 @@ def http_get(url: str, *args: Any, **kwargs: Any):
     raise ValueError(f"Unsupported Taiwan index provider URL: {url}")
 
 
+def http_post(url: str, *args: Any, **kwargs: Any):
+    if args:
+        raise TypeError("Taiwan provider compatibility POST accepts keyword arguments only.")
+    timeout_seconds = kwargs.pop("timeout", 20)
+    host = urlsplit(url).hostname or ""
+    if host.endswith("taifex.com.tw"):
+        return taifex.post_response(url, timeout_seconds=timeout_seconds, **kwargs)
+    raise ValueError(f"Unsupported Taiwan index provider POST URL: {url}")
+
+
 __all__ = [
     "fetch_json",
     "http_get",
+    "http_post",
     "nstock",
     "taifex",
     "tpex",

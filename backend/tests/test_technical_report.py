@@ -302,7 +302,8 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(compact["slots"]["quote"]["payload_ref"], "quote")
         self.assertEqual(compact["slots"]["intraday"]["status"], "not_requested")
         self.assertEqual(compact["slots"]["intraday"]["payload_ref"], "intraday_bars")
-        self.assertEqual(compact["slots"]["cross_market"]["status"], "planned")
+        self.assertIn(compact["slots"]["cross_market"]["status"], {"ready", "partial", "missing"})
+        self.assertEqual(compact["slots"]["cross_market"]["payload_ref"], "cross_market")
 
     def test_stock_context_compact_slots_follow_consumer_contract(self) -> None:
         context = ai_tools.read_stock_context(
@@ -339,6 +340,7 @@ class TechnicalReportTests(unittest.TestCase):
             "technical": "technical",
             "chips_flows": "chips",
             "fundamentals": "fundamentals",
+            "cross_market": "cross_market",
             "data_quality": "data_quality",
         }
         for slot_key, payload_ref in payload_ref_by_slot.items():

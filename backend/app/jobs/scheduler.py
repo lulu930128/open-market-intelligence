@@ -9,6 +9,7 @@ from app.jobs import backfill_tasks, service as job_service
 from app.jobs.job_types import (
     JP_SCHEDULED_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
     KR_SCHEDULED_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
+    TAIWAN_DERIVATIVES_SCHEDULED_REFRESH_JOB_TYPE,
     WATCHLIST_RADAR_AUTO_SNAPSHOT_JOB_TYPE,
 )
 from app.market.calendar_status import (
@@ -19,6 +20,10 @@ from app.market.calendar_status import (
     is_release_released_from_calendar,
 )
 from app.market.market_chips import normalize_market_chip_index_ids
+from app.market.indices import (
+    is_taiwan_index_live_refresh_window,
+    refresh_market_index_summary,
+)
 from app.market.taiwan_rules import (
     TAIWAN_DATASET_DAILY_PRICE,
     TAIWAN_DATASET_INSTITUTIONAL_TRADE,
@@ -27,6 +32,10 @@ from app.market.taiwan_rules import (
     TAIWAN_REFRESH_MARGIN_TRADING,
 )
 from app.market.trading_calendar import is_taiwan_trading_day
+from app.market.tw_derivatives import (
+    DERIVATIVES_RELEASE_TIME,
+    expected_taiwan_derivatives_date,
+)
 from app.market.tw_futures import (
     TaiwanFuturesFetchError,
     refresh_taiwan_futures_quotes,
@@ -71,6 +80,30 @@ def _timezone() -> ZoneInfo:
 
 def _split_csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _resolved_taiwan_derivatives_schedule_time() -> time:
+    hour, minute = _parse_hour_minute(
+        settings.scheduler_taiwan_derivatives_refresh_time
+    )
+    configured = time(hour, minute)
+    if configured < DERIVATIVES_RELEASE_TIME:
+        logger.warning(
+            "Taiwan derivatives scheduler time %s is before the conservative "
+            "TAIFEX release guard %s; using the release guard time.",
+            configured.strftime("%H:%M"),
+            DERIVATIVES_RELEASE_TIME.strftime("%H:%M"),
+        )
+        return DERIVATIVES_RELEASE_TIME
+    return configured
+
+
+def _is_taiwan_derivatives_refresh_ready(now: datetime) -> bool:
+    local_now = now.astimezone(_timezone()) if now.tzinfo else now.replace(tzinfo=_timezone())
+    return (
+        is_taiwan_trading_day(local_now.date())
+        and local_now.time() >= DERIVATIVES_RELEASE_TIME
+    )
 
 
 def _is_taiwan_futures_live_window(now: datetime) -> bool:
@@ -717,6 +750,114 @@ def _add_taiwan_futures_collector_job(scheduler: Any) -> bool:
     return True
 
 
+def enqueue_taiwan_derivatives_refresh() -> None:
+    now = datetime.now(_timezone())
+    if not _is_taiwan_derivatives_refresh_ready(now):
+        logger.info(
+            "Skipped scheduled TAIFEX derivatives refresh before the official "
+            "release window or on a non-trading day now=%s release_time=%s.",
+            now.isoformat(),
+            DERIVATIVES_RELEASE_TIME.strftime("%H:%M"),
+        )
+        return
+
+    expected_trade_date = expected_taiwan_derivatives_date(now=now)
+    request = {
+        "schedule": "taiwan_derivatives_refresh",
+        "run_date": now.date().isoformat(),
+        "expected_trade_date": expected_trade_date.isoformat(),
+        "release_time": DERIVATIVES_RELEASE_TIME.strftime("%H:%M"),
+        "provider": "taifex_openapi",
+        "provider_request_limit": 5,
+    }
+    db = SessionLocal()
+    try:
+        job, created = job_service.enqueue_job(
+            db=db,
+            job_type=TAIWAN_DERIVATIVES_SCHEDULED_REFRESH_JOB_TYPE,
+            target="TXF/TXO",
+            request=request,
+            progress_total=5,
+            message="Queued by scheduler after the TAIFEX post-close release guard.",
+            task=backfill_tasks.run_taiwan_derivatives_refresh_job,
+            task_args=(expected_trade_date,),
+            reuse_success_within_seconds=max(
+                int(settings.scheduler_taiwan_derivatives_success_cooldown_seconds),
+                0,
+            ),
+        )
+        logger.info(
+            "Scheduled TAIFEX derivatives refresh created=%s job_id=%s "
+            "expected_trade_date=%s.",
+            created,
+            job.id,
+            expected_trade_date.isoformat(),
+        )
+    finally:
+        db.close()
+
+
+def _add_taiwan_derivatives_refresh_job(scheduler: Any) -> bool:
+    if not settings.enable_taiwan_derivatives_scheduler:
+        return False
+
+    schedule_time = _resolved_taiwan_derivatives_schedule_time()
+    scheduler.add_job(
+        enqueue_taiwan_derivatives_refresh,
+        trigger="cron",
+        day_of_week=settings.scheduler_taiwan_derivatives_refresh_day_of_week,
+        hour=schedule_time.hour,
+        minute=schedule_time.minute,
+        id="taiwan_derivatives_refresh",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+    return True
+
+
+def collect_taiwan_market_index_summary() -> None:
+    now = datetime.now(_timezone())
+    if not is_taiwan_index_live_refresh_window(now):
+        return
+    db = SessionLocal()
+    try:
+        payload = refresh_market_index_summary(
+            db=db,
+            refresh_daily_stats=False,
+        )
+        logger.debug(
+            "Taiwan market index summary cache refreshed as_of=%s indices=%s.",
+            payload.get("as_of"),
+            len(payload.get("indices") or []),
+        )
+    except Exception:
+        db.rollback()
+        logger.exception("Taiwan market index summary cache refresh failed.")
+    finally:
+        db.close()
+
+
+def _add_taiwan_market_index_collector_job(scheduler: Any) -> bool:
+    if not settings.enable_taiwan_market_index_scheduler:
+        return False
+    interval_seconds = max(
+        int(settings.scheduler_taiwan_market_index_interval_seconds),
+        5,
+    )
+    scheduler.add_job(
+        collect_taiwan_market_index_summary,
+        trigger="interval",
+        seconds=interval_seconds,
+        id="taiwan_market_index_summary_collector",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        next_run_time=datetime.now(_timezone()),
+    )
+    return True
+
+
 def _add_jp_market_refresh_job(scheduler: Any) -> bool:
     if not settings.enable_scheduler or not settings.enable_jp_market_scheduler:
         return False
@@ -956,7 +1097,9 @@ def _add_dispatch_schedule_tick_job(scheduler: Any) -> bool:
 def start_scheduler() -> Any | None:
     if (
         not settings.enable_scheduler
+        and not settings.enable_taiwan_market_index_scheduler
         and not settings.enable_taiwan_futures_scheduler
+        and not settings.enable_taiwan_derivatives_scheduler
         and not settings.enable_dispatch_scheduler
         and not settings.enable_watchlist_radar_scheduler
     ):
@@ -1043,11 +1186,20 @@ def start_scheduler() -> Any | None:
     jp_market_refresh_enabled = _add_jp_market_refresh_job(scheduler)
     kr_market_refresh_enabled = _add_kr_market_refresh_job(scheduler)
     watchlist_radar_snapshot_enabled = _add_watchlist_radar_auto_snapshot_job(scheduler)
+    taiwan_market_index_collector_enabled = _add_taiwan_market_index_collector_job(
+        scheduler
+    )
     taiwan_futures_collector_enabled = _add_taiwan_futures_collector_job(scheduler)
+    taiwan_derivatives_refresh_enabled = _add_taiwan_derivatives_refresh_job(scheduler)
     dispatch_schedule_tick_enabled = _add_dispatch_schedule_tick_job(scheduler)
     scheduler.start()
     logger.info(
-        "Job scheduler started. core_scheduler_enabled=%s; market_daily_refresh=%s %s weekdays; market_margin_daily_refresh=%s %s weekdays; market_chip_daily_refresh=%s %s weekdays; market_chip_margin_daily_refresh=%s %s weekdays; us_market_daily_refresh=%s %s %s enabled=%s; jp_market_watchlist_resource_refresh=%s %s %s enabled=%s; kr_market_watchlist_resource_refresh=%s %s %s enabled=%s; watchlist_radar_auto_snapshot=%s %s %s reconcile_interval=%sm reconcile_until=%s enabled=%s; taiwan_futures_quote_collector interval=%ss enabled=%s; dispatch_schedule_tick interval=%ss enabled=%s.",
+        "Taiwan market index summary collector interval=%ss enabled=%s.",
+        max(int(settings.scheduler_taiwan_market_index_interval_seconds), 5),
+        taiwan_market_index_collector_enabled,
+    )
+    logger.info(
+        "Job scheduler started. core_scheduler_enabled=%s; market_daily_refresh=%s %s weekdays; market_margin_daily_refresh=%s %s weekdays; market_chip_daily_refresh=%s %s weekdays; market_chip_margin_daily_refresh=%s %s weekdays; us_market_daily_refresh=%s %s %s enabled=%s; jp_market_watchlist_resource_refresh=%s %s %s enabled=%s; kr_market_watchlist_resource_refresh=%s %s %s enabled=%s; watchlist_radar_auto_snapshot=%s %s %s reconcile_interval=%sm reconcile_until=%s enabled=%s; taiwan_futures_quote_collector interval=%ss enabled=%s; taiwan_derivatives_refresh=%s %s %s enabled=%s; dispatch_schedule_tick interval=%ss enabled=%s.",
         settings.enable_scheduler,
         settings.scheduler_market_refresh_time,
         settings.timezone,
@@ -1077,6 +1229,10 @@ def start_scheduler() -> Any | None:
         watchlist_radar_snapshot_enabled,
         max(int(settings.scheduler_taiwan_futures_interval_seconds), 10),
         taiwan_futures_collector_enabled,
+        _resolved_taiwan_derivatives_schedule_time().strftime("%H:%M"),
+        settings.scheduler_taiwan_derivatives_refresh_day_of_week,
+        settings.timezone,
+        taiwan_derivatives_refresh_enabled,
         max(int(settings.scheduler_dispatch_tick_interval_seconds), 10),
         dispatch_schedule_tick_enabled,
     )

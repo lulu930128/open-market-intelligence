@@ -160,10 +160,20 @@ def aggregate_ohlc_points(
     timeframe: str,
     sum_fields: tuple[str, ...] = ("volume",),
 ) -> list[dict]:
-    sorted_points = sorted(
+    points_by_date: "OrderedDict[date, dict]" = OrderedDict()
+    for point in sorted(
         points,
-        key=lambda point: point_date(point.get("time")) or date.min,
-    )
+        key=lambda item: point_date(item.get("time")) or date.min,
+    ):
+        normalized_date = point_date(point.get("time"))
+        if normalized_date is None:
+            continue
+        # A chart contract must contain at most one OHLC row per trading date.
+        # Queries are ordered oldest-to-newest, so a later/more recently written
+        # row replaces an older duplicate deterministically.
+        points_by_date[normalized_date] = point
+
+    sorted_points = list(points_by_date.values())
 
     if timeframe == "daily":
         return sorted_points

@@ -285,6 +285,10 @@ export type WatchlistGroupRadarRead = {
   stale_stock_count: number;
   buckets: WatchlistRadarBucketRead[];
   results: WatchlistRadarItemRead[];
+  cache_status?: "computed" | "snapshot";
+  snapshot_id?: number | null;
+  snapshot_date?: string | null;
+  calculated_at?: string | null;
 };
 
 export type WatchlistRadarSnapshotRead = {
@@ -481,6 +485,8 @@ export type OhlcChartResponse = {
 
 export type MarketBreadth = {
   market: string;
+  scope?: "full_market" | "registered_universe" | "local_dataset" | string | null;
+  label?: string | null;
   trade_date: string | null;
   as_of?: string | null;
   advance_count: number;
@@ -496,6 +502,15 @@ export type MarketBreadth = {
   missing_count?: number | null;
   warnings?: string[];
   source: string | null;
+};
+
+export type MarketBreadthStatus = {
+  slot: "market_breadth" | string;
+  status: "ready" | "partial" | "failed" | string;
+  scope: string | null;
+  source: string | null;
+  reason: string | null;
+  warnings: string[];
 };
 
 export type MarketIndexSnapshot = {
@@ -523,6 +538,7 @@ export type MarketIndexSnapshot = {
   point_count: number;
   points: ChartPoint[];
   breadth: MarketBreadth | null;
+  breadth_status: MarketBreadthStatus;
   error_message: string | null;
 };
 
@@ -530,6 +546,16 @@ export type MarketIndexSummary = {
   as_of: string;
   source: string;
   indices: MarketIndexSnapshot[];
+  cache_status?:
+    | "live"
+    | "memory_cache"
+    | "shared_cache"
+    | "stale_memory_cache"
+    | "stale_shared_cache"
+    | "local_cache"
+    | "unknown";
+  refresh_recommended?: boolean;
+  warnings?: string[];
 };
 
 export type MarketChipDaily = {
@@ -545,6 +571,12 @@ export type MarketChipDaily = {
   foreign_futures_net_oi_change: number | null;
   retail_futures_net_oi: number | null;
   retail_futures_net_oi_change: number | null;
+  put_volume: number | null;
+  call_volume: number | null;
+  put_call_volume_ratio_pct: number | null;
+  put_open_interest: number | null;
+  call_open_interest: number | null;
+  put_call_open_interest_ratio_pct: number | null;
   total_institutional_net_value: number | null;
   foreign_investor_net_value: number | null;
   investment_trust_net_value: number | null;
@@ -559,6 +591,27 @@ export type MarketChipDaily = {
   source_details: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
+};
+
+export type TaiwanFuturesMarketStatus = {
+  status: "open" | "closed" | string;
+  is_open: boolean;
+  phase: string;
+  reason: string;
+  timezone: string;
+  checked_at: string;
+  holiday_name: string | null;
+  regular_session: string;
+  after_hours_session: string;
+  current_session: string | null;
+  current_session_start_at: string | null;
+  current_session_end_at: string | null;
+  last_session: string | null;
+  last_session_start_at: string | null;
+  last_session_end_at: string | null;
+  next_session: string | null;
+  next_session_start_at: string | null;
+  next_session_end_at: string | null;
 };
 
 export type TaiwanFuturesQuote = {
@@ -592,7 +645,7 @@ export type TaiwanFuturesQuote = {
   source_url: string | null;
   fetched_at: string;
   freshness: {
-    status: "live" | "cached" | "session_mismatch" | "stale" | string;
+    status: "live" | "closed" | "cached" | "session_mismatch" | "stale" | string;
     is_live: boolean;
     is_stale: boolean;
     is_session_mismatch: boolean;
@@ -600,6 +653,8 @@ export type TaiwanFuturesQuote = {
     age_seconds: number | null;
     message: string;
     source_error: string | null;
+    last_session_quote_lag_seconds: number | null;
+    market_status: TaiwanFuturesMarketStatus;
   };
   created_at: string;
   updated_at: string;
@@ -635,6 +690,19 @@ export type TaiwanFuturesDailyBar = {
   fetched_at: string;
   created_at: string;
   updated_at: string;
+};
+
+export type TaiwanFuturesDailyRefresh = {
+  status: "success" | "partial" | "failed";
+  symbol: string;
+  requested_end_date: string;
+  effective_end_date: string;
+  latest_released_trade_date: string;
+  release_time: string;
+  skipped_unreleased_end_date: boolean;
+  refreshed_row_count: number;
+  warning: string | null;
+  rows: TaiwanFuturesDailyBar[];
 };
 
 export type TaiwanFuturesIntradayBar = {

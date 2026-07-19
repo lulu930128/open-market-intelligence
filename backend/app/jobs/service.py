@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import json
 import logging
 from threading import Lock
@@ -54,6 +54,7 @@ FAILED_RESULT_ITEM_LIMIT = 4
 
 _executor: ThreadPoolExecutor | None = None
 _executor_lock = Lock()
+_enqueue_lock = Lock()
 
 
 class JobRunNotFoundError(Exception):
@@ -339,6 +340,33 @@ def find_active_job(
     return query.order_by(JobRun.created_at.desc(), JobRun.id.desc()).first()
 
 
+def find_recent_successful_job(
+    db: Session,
+    job_type: str,
+    target: str | None = None,
+    request: Any = None,
+    *,
+    within_seconds: float,
+) -> JobRun | None:
+    if within_seconds <= 0:
+        return None
+
+    request_json = _to_json(request)
+    query = db.query(JobRun).filter(
+        JobRun.job_type == job_type,
+        JobRun.status == "success",
+        JobRun.target == target,
+        JobRun.ended_at.isnot(None),
+        JobRun.ended_at >= utc_now() - timedelta(seconds=within_seconds),
+    )
+    if request_json is None:
+        query = query.filter(JobRun.request_json.is_(None))
+    else:
+        query = query.filter(JobRun.request_json == request_json)
+
+    return query.order_by(JobRun.ended_at.desc(), JobRun.id.desc()).first()
+
+
 def create_job(
     db: Session,
     job_type: str,
@@ -409,28 +437,41 @@ def enqueue_job(
     task: JobTask,
     task_args: tuple[Any, ...] = (),
     dedupe_active: bool | None = None,
+    reuse_success_within_seconds: float = 0,
 ) -> tuple[JobRun, bool]:
     should_dedupe = settings.job_dedupe_active if dedupe_active is None else dedupe_active
 
-    if should_dedupe:
-        existing = find_active_job(
+    # Keep the read-then-create decision atomic inside one application process.
+    # This closes the common duplicate-submit race caused by concurrent React
+    # effects or multiple UI panels requesting the exact same refresh.
+    with _enqueue_lock:
+        if should_dedupe:
+            existing = find_active_job(
+                db=db,
+                job_type=job_type,
+                target=target,
+                request=request,
+            )
+            if existing is None:
+                existing = find_recent_successful_job(
+                    db=db,
+                    job_type=job_type,
+                    target=target,
+                    request=request,
+                    within_seconds=reuse_success_within_seconds,
+                )
+
+            if existing is not None:
+                return existing, False
+
+        job = create_job(
             db=db,
             job_type=job_type,
             target=target,
             request=request,
+            progress_total=progress_total,
+            message=message,
         )
-
-        if existing is not None:
-            return existing, False
-
-    job = create_job(
-        db=db,
-        job_type=job_type,
-        target=target,
-        request=request,
-        progress_total=progress_total,
-        message=message,
-    )
 
     try:
         submit_job_task(task, job.id, *task_args)

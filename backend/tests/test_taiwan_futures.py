@@ -16,6 +16,8 @@ from app.db.models import (
 )
 from app.market.tw_futures import (
     TaiwanFuturesFetchError,
+    build_taiwan_futures_market_status,
+    build_taiwan_futures_quote_freshness,
     fetch_taiwan_futures_quotes,
     get_latest_taiwan_futures_quotes,
     list_taiwan_futures_intraday_bars,
@@ -26,6 +28,7 @@ from app.market.tw_futures import (
     refresh_taiwan_futures_daily_bars,
     refresh_taiwan_futures_intraday_bars,
     refresh_taiwan_futures_quotes,
+    resolve_taiwan_futures_daily_refresh_window,
     select_active_taiwan_futures_quote,
     taiwan_futures_quote_to_dict,
 )
@@ -234,6 +237,24 @@ class TaiwanFuturesParserTests(unittest.TestCase):
         self.assertEqual(quote["last_price"], 42901.0)
         self.assertEqual(quote["total_volume"], 76688)
 
+    def test_parse_after_hours_quote_advances_calendar_date_after_midnight(self) -> None:
+        payload = sample_mxf_after_hours_payload()
+        payload["RtData"]["QuoteList"][2]["CTime"] = "045958"
+
+        quotes = parse_taifex_mis_quote_payload(
+            symbol="MXF",
+            session="after_hours",
+            payload=payload,
+            fetched_at=datetime(2026, 7, 18, 5, 0, tzinfo=TAIWAN_TZ),
+        )
+
+        self.assertEqual(len(quotes), 1)
+        self.assertEqual(quotes[0]["trade_date"], date(2026, 7, 17))
+        self.assertEqual(
+            quotes[0]["quote_time"],
+            datetime(2026, 7, 18, 4, 59, 58, tzinfo=TAIWAN_TZ),
+        )
+
     def test_fetch_rejects_empty_after_hours_projection(self) -> None:
         with patch(
             "app.market.tw_futures.fetch_taifex_mis_quote_payload",
@@ -325,7 +346,165 @@ class TaiwanFuturesParserTests(unittest.TestCase):
         self.assertEqual(row["open_interest"], 25847)
 
 
+class TaiwanFuturesMarketStatusTests(unittest.TestCase):
+    def test_weekend_status_reports_last_session_and_next_regular_open(self) -> None:
+        status = build_taiwan_futures_market_status(
+            now=datetime(2026, 7, 18, 17, 3, tzinfo=TAIWAN_TZ)
+        )
+
+        self.assertFalse(status["is_open"])
+        self.assertEqual(status["status"], "closed")
+        self.assertEqual(status["reason"], "weekend")
+        self.assertEqual(status["last_session"], "after_hours")
+        self.assertEqual(
+            status["last_session_end_at"],
+            datetime(2026, 7, 18, 5, 0, tzinfo=TAIWAN_TZ),
+        )
+        self.assertEqual(status["next_session"], "regular")
+        self.assertEqual(
+            status["next_session_start_at"],
+            datetime(2026, 7, 20, 8, 45, tzinfo=TAIWAN_TZ),
+        )
+
+    def test_after_hours_session_remains_open_after_midnight(self) -> None:
+        status = build_taiwan_futures_market_status(
+            now=datetime(2026, 7, 18, 4, 0, tzinfo=TAIWAN_TZ)
+        )
+
+        self.assertTrue(status["is_open"])
+        self.assertEqual(status["current_session"], "after_hours")
+        self.assertEqual(
+            status["current_session_start_at"],
+            datetime(2026, 7, 17, 15, 0, tzinfo=TAIWAN_TZ),
+        )
+        self.assertEqual(
+            status["current_session_end_at"],
+            datetime(2026, 7, 18, 5, 0, tzinfo=TAIWAN_TZ),
+        )
+
+    def test_weekday_between_sessions_reports_next_after_hours_open(self) -> None:
+        status = build_taiwan_futures_market_status(
+            now=datetime(2026, 7, 20, 14, 15, tzinfo=TAIWAN_TZ)
+        )
+
+        self.assertFalse(status["is_open"])
+        self.assertEqual(status["phase"], "between_sessions")
+        self.assertEqual(status["next_session"], "after_hours")
+        self.assertEqual(
+            status["next_session_start_at"],
+            datetime(2026, 7, 20, 15, 0, tzinfo=TAIWAN_TZ),
+        )
+
+    def test_latest_completed_session_quote_is_closed_not_stale(self) -> None:
+        row = TaiwanFuturesQuoteSnapshot(
+            provider="taifex_mis",
+            market="TAIFEX",
+            symbol="TXF",
+            product_code="TX",
+            product_name="大台 台指期",
+            contract_symbol="TXFH6-M",
+            contract_month="202608",
+            session="after_hours",
+            trade_date=date(2026, 7, 17),
+            quote_time=datetime(2026, 7, 17, 4, 59, 58, tzinfo=TAIWAN_TZ),
+            last_price=43481,
+            source="test",
+        )
+
+        freshness = build_taiwan_futures_quote_freshness(
+            row,
+            expected_session="auto",
+            now=datetime(2026, 7, 18, 17, 3, tzinfo=TAIWAN_TZ),
+        )
+
+        self.assertEqual(freshness["status"], "closed")
+        self.assertFalse(freshness["is_live"])
+        self.assertFalse(freshness["is_stale"])
+        self.assertEqual(freshness["last_session_quote_lag_seconds"], 2)
+        self.assertFalse(freshness["market_status"]["is_open"])
+        self.assertIn("週末休市", freshness["message"])
+        self.assertIn("07/20 08:45", freshness["message"])
+
+    def test_older_quote_remains_stale_while_market_is_closed(self) -> None:
+        row = TaiwanFuturesQuoteSnapshot(
+            provider="taifex_mis",
+            market="TAIFEX",
+            symbol="TXF",
+            product_code="TX",
+            product_name="大台 台指期",
+            contract_symbol="TXFH6-M",
+            contract_month="202608",
+            session="after_hours",
+            trade_date=date(2026, 7, 16),
+            quote_time=datetime(2026, 7, 16, 23, 59, 30, tzinfo=TAIWAN_TZ),
+            last_price=42604,
+            source="test",
+        )
+
+        freshness = build_taiwan_futures_quote_freshness(
+            row,
+            expected_session="auto",
+            now=datetime(2026, 7, 18, 17, 3, tzinfo=TAIWAN_TZ),
+        )
+
+        self.assertEqual(freshness["status"], "stale")
+        self.assertTrue(freshness["is_stale"])
+
+
 class TaiwanFuturesPersistenceTests(unittest.TestCase):
+    def test_latest_quote_recovers_legacy_after_midnight_taifex_timestamp(self) -> None:
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(bind=engine)
+        try:
+            with Session(engine) as db:
+                db.add_all(
+                    [
+                        TaiwanFuturesQuoteSnapshot(
+                            provider="taifex_mis",
+                            market="TAIFEX",
+                            symbol="TXF",
+                            product_code="TX",
+                            product_name="大台 台指期",
+                            contract_symbol="TXFH6-M",
+                            contract_month="202608",
+                            session="after_hours",
+                            trade_date=date(2026, 7, 17),
+                            quote_time=datetime(2026, 7, 17, 23, 59, 30),
+                            last_price=43576,
+                            source="test",
+                            fetched_at=datetime(2026, 7, 17, 23, 59, 34),
+                        ),
+                        TaiwanFuturesQuoteSnapshot(
+                            provider="taifex_mis",
+                            market="TAIFEX",
+                            symbol="TXF",
+                            product_code="TX",
+                            product_name="大台 台指期",
+                            contract_symbol="TXFH6-M",
+                            contract_month="202608",
+                            session="after_hours",
+                            trade_date=date(2026, 7, 17),
+                            quote_time=datetime(2026, 7, 17, 4, 59, 58),
+                            last_price=43481,
+                            source="test",
+                            fetched_at=datetime(2026, 7, 18, 5, 0, 4),
+                        ),
+                    ]
+                )
+                db.commit()
+
+                rows = get_latest_taiwan_futures_quotes(db=db, symbols=["TXF"])
+
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0].last_price, 43481)
+                payload = taiwan_futures_quote_to_dict(rows[0])
+                self.assertEqual(
+                    payload["quote_time"],
+                    datetime(2026, 7, 18, 4, 59, 58, tzinfo=TAIWAN_TZ),
+                )
+        finally:
+            engine.dispose()
+
     def test_quote_dict_marks_session_mismatch_cache(self) -> None:
         row = TaiwanFuturesQuoteSnapshot(
             id=1,
@@ -684,6 +863,44 @@ class TaiwanFuturesPersistenceTests(unittest.TestCase):
                 self.assertEqual(len(listed_rows), 1)
                 self.assertEqual(listed_rows[0].contract_month, "202606")
                 self.assertEqual(listed_rows[0].close_price, 44199.0)
+        finally:
+            engine.dispose()
+
+    def test_daily_refresh_window_excludes_current_trade_date_before_release(self) -> None:
+        window = resolve_taiwan_futures_daily_refresh_window(
+            start_date=date(2026, 7, 17),
+            end_date=date(2026, 7, 20),
+            now=datetime(2026, 7, 20, 13, 50, tzinfo=TAIWAN_TZ),
+        )
+
+        self.assertEqual(window["latest_released_trade_date"], date(2026, 7, 17))
+        self.assertEqual(window["effective_end_date"], date(2026, 7, 17))
+        self.assertTrue(window["skipped_unreleased_end_date"])
+
+    def test_daily_refresh_window_allows_current_trade_date_after_release(self) -> None:
+        window = resolve_taiwan_futures_daily_refresh_window(
+            start_date=date(2026, 7, 17),
+            end_date=date(2026, 7, 20),
+            now=datetime(2026, 7, 20, 14, 31, tzinfo=TAIWAN_TZ),
+        )
+
+        self.assertEqual(window["latest_released_trade_date"], date(2026, 7, 20))
+        self.assertEqual(window["effective_end_date"], date(2026, 7, 20))
+        self.assertFalse(window["skipped_unreleased_end_date"])
+
+    def test_daily_refresh_rejects_only_unreleased_trade_date(self) -> None:
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(bind=engine)
+        try:
+            with Session(engine) as db:
+                with self.assertRaisesRegex(ValueError, "official release window"):
+                    refresh_taiwan_futures_daily_bars(
+                        db=db,
+                        symbols=["TXF"],
+                        start_date=date(2026, 7, 20),
+                        end_date=date(2026, 7, 20),
+                        now=datetime(2026, 7, 20, 13, 50, tzinfo=TAIWAN_TZ),
+                    )
         finally:
             engine.dispose()
 

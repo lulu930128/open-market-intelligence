@@ -143,7 +143,14 @@ export function isProjectedDrawingHit(
   }
 
   if (projectedDrawing.drawing.type === "fibonacci" && projectedDrawing.fibonacciLevels) {
-    return projectedDrawing.fibonacciLevels.some((level) => Math.abs(point.y - level.y) <= padding);
+    const bounds = rectangleBounds(points);
+    const insideHorizontalRange =
+      point.x >= bounds.x - padding && point.x <= bounds.x + bounds.width + padding;
+
+    return (
+      insideHorizontalRange &&
+      projectedDrawing.fibonacciLevels.some((level) => Math.abs(point.y - level.y) <= padding)
+    );
   }
 
   return distanceToSegment(point, projectedDrawing.points[0], projectedDrawing.points[1]) <= padding;
@@ -219,6 +226,7 @@ export function applyDrawingDragToDrawings(
           {
             time: basePoint.time,
             price: anchor.price,
+            logical: basePoint.logical,
           },
         ],
       };
@@ -274,7 +282,9 @@ export function applyDrawingDragToDrawings(
     return {
       ...drawing,
       points: drawing.points.map((point, index) =>
-        index === dragState.pointIndex ? { time: anchor.time, price: anchor.price } : point
+        index === dragState.pointIndex
+          ? { time: anchor.time, price: anchor.price, logical: anchor.logical }
+          : point
       ),
     };
   });

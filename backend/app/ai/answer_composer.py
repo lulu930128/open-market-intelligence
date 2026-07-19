@@ -392,6 +392,259 @@ def build_digest_consumer_answer(
     return answer
 
 
+def _futures_number(value: Any, *, signed: bool = False, suffix: str = "") -> str | None:
+    if not isinstance(value, (int, float)):
+        return None
+    prefix = "+" if signed and value > 0 else ""
+    if float(value).is_integer():
+        rendered = f"{int(value):,}"
+    else:
+        rendered = f"{float(value):,.2f}".rstrip("0").rstrip(".")
+    return f"{prefix}{rendered}{suffix}"
+
+
+def build_tw_futures_consumer_answer(
+    *,
+    target: dict[str, Any],
+    analysis_digest: dict[str, Any],
+    missing: list[Any],
+    warnings: list[Any],
+    summary_limit: int = SUMMARY_LIMIT_DEFAULT,
+    response_preferences: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    english = response_is_english(response_preferences)
+    japanese = response_is_japanese(response_preferences)
+    quote = analysis_digest.get("quote") if isinstance(analysis_digest.get("quote"), dict) else {}
+    daily_close = analysis_digest.get("daily_close") if isinstance(analysis_digest.get("daily_close"), dict) else {}
+    institutional = (
+        analysis_digest.get("institutional_position")
+        if isinstance(analysis_digest.get("institutional_position"), dict)
+        else {}
+    )
+    options = (
+        analysis_digest.get("options_sentiment")
+        if isinstance(analysis_digest.get("options_sentiment"), dict)
+        else {}
+    )
+    quote_price = _futures_number(quote.get("last_price") or quote.get("price"))
+    quote_time = text_value(quote.get("quote_time"))
+    session = text_value(quote.get("session"))
+    daily_price = _futures_number(daily_close.get("close_price"))
+    daily_date = text_value(daily_close.get("trade_date"))
+    foreign_oi = _futures_number(institutional.get("foreign_futures_net_oi"), signed=True)
+    foreign_oi_change = _futures_number(
+        institutional.get("foreign_futures_net_oi_change"),
+        signed=True,
+    )
+    pcr_volume = _futures_number(options.get("put_call_volume_ratio_pct"), suffix="%")
+    pcr_oi = _futures_number(options.get("put_call_open_interest_ratio_pct"), suffix="%")
+
+    if english:
+        quote_label = "After-hours last trade" if session == "after_hours" else "Latest session trade"
+        quote_line = f"{quote_label}: {quote_price or 'missing'}" + (f" ({quote_time})" if quote_time else "")
+        daily_line = f"Daily K close: {daily_price or 'missing'}" + (f" ({daily_date})" if daily_date else "")
+        chips_line = (
+            f"Official post-close chips: foreign futures net OI {foreign_oi or 'missing'}"
+            f", daily change {foreign_oi_change or 'missing'}; PCR volume {pcr_volume or 'missing'}, OI {pcr_oi or 'missing'}."
+        )
+        post_close_limit = "Foreign OI and Put/Call Ratio are official daily post-close data, not live night-session changes."
+    elif japanese:
+        quote_label = "夜間最終約定" if session == "after_hours" else "最新セッション約定"
+        quote_line = f"{quote_label}：{quote_price or '欠損'}" + (f"（{quote_time}）" if quote_time else "")
+        daily_line = f"日足終値：{daily_price or '欠損'}" + (f"（{daily_date}）" if daily_date else "")
+        chips_line = (
+            f"公式引け後需給：海外投資家先物ネットOI {foreign_oi or '欠損'}"
+            f"、前日差 {foreign_oi_change or '欠損'}；PCR出来高 {pcr_volume or '欠損'}、OI {pcr_oi or '欠損'}。"
+        )
+        post_close_limit = "海外投資家OIとPut/Call Ratioは公式の日次引け後データで、夜間取引中のリアルタイム変化ではありません。"
+    else:
+        quote_label = "夜盤最後成交" if session == "after_hours" else "最新交易時段成交"
+        quote_line = f"{quote_label}：{quote_price or '缺資料'}" + (f"（{quote_time}）" if quote_time else "")
+        daily_line = f"日 K 收盤：{daily_price or '缺資料'}" + (f"（{daily_date}）" if daily_date else "")
+        chips_line = (
+            f"官方盤後籌碼：外資期貨淨未平倉 {foreign_oi or '缺資料'}"
+            f"、單日變化 {foreign_oi_change or '缺資料'}；PCR 成交量 {pcr_volume or '缺資料'}、未平倉 {pcr_oi or '缺資料'}。"
+        )
+        post_close_limit = "外資未平倉與 Put/Call Ratio 是官方每日盤後資料，不代表目前夜盤的即時加空或回補。"
+
+    selected_title = text_value(analysis_digest.get("selected_title"))
+    selected_summary = text_value(analysis_digest.get("selected_summary"))
+    label = text_value(target.get("label")) or text_value(target.get("id")) or "TXF"
+    headline = f"{label}｜{selected_title}" if selected_title else label
+    generic_limits = generic_data_limits(
+        missing=missing,
+        warnings=warnings,
+        response_preferences=response_preferences,
+    )
+    data_limits = list(dict.fromkeys([post_close_limit, *generic_limits]))[:4]
+    summary = [quote_line, daily_line, chips_line]
+    action_plan = [
+        {
+            "label": "Technical" if english else "テクニカル" if japanese else "技術面",
+            "text": selected_summary
+            or (
+                "Use the daily trend as background and the latest-session quote as the current price axis."
+                if english
+                else "日足トレンドを背景、最新セッション約定を現在の価格軸として扱います。"
+                if japanese
+                else "以日 K 趨勢作背景，並以最新交易時段成交作為目前價格軸。"
+            ),
+        },
+        {
+            "label": "Positioning" if english else "需給" if japanese else "籌碼",
+            "text": chips_line,
+        },
+        {
+            "label": "Invalidation" if english else "失効" if japanese else "失效",
+            "text": (
+                "Reassess when the latest-session quote and daily technical structure stop confirming each other."
+                if english
+                else "最新セッション約定と日足テクニカルが一致しなくなった場合は再評価します。"
+                if japanese
+                else "若最新交易時段成交與日 K 技術結構不再互相確認，需重新評估。"
+            ),
+        },
+    ]
+    confidence = text_value(analysis_digest.get("selected_confidence"))
+    answer = {
+        "kind": "consumer_market_answer",
+        "style": "layered_summary",
+        "source": "tw_futures_contract",
+        "headline": headline,
+        "stance": None,
+        "stance_label": undecided_label(response_preferences),
+        "confidence": confidence,
+        "confidence_label": confidence_label(confidence, response_preferences),
+        "summary": summary[:summary_limit],
+        "action_plan": action_plan,
+        "risks": [],
+        "data_limits": data_limits,
+        "detail": "\n".join(summary),
+    }
+    answer["text"] = consumer_text(
+        answer,
+        summary_limit=summary_limit,
+        response_preferences=response_preferences,
+    )
+    return answer
+
+
+def build_compact_context_consumer_answer(
+    *,
+    target: dict[str, Any],
+    analysis_digest: dict[str, Any],
+    missing: list[Any],
+    warnings: list[Any],
+    summary_limit: int = SUMMARY_LIMIT_DEFAULT,
+    response_preferences: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    english = response_is_english(response_preferences)
+    japanese = response_is_japanese(response_preferences)
+    label = text_value(target.get("label")) or text_value(target.get("id")) or "OMI"
+    counts = analysis_digest.get("slot_status_counts") if isinstance(analysis_digest.get("slot_status_counts"), dict) else {}
+    ready_slots = text_list(analysis_digest.get("ready_slots"))
+    problem_slots = [
+        item
+        for item in (analysis_digest.get("problem_slots") or [])
+        if isinstance(item, dict)
+    ]
+    key_numbers = analysis_digest.get("key_numbers") if isinstance(analysis_digest.get("key_numbers"), dict) else {}
+
+    status_order = ("ready", "partial", "stale", "missing", "blocked", "failed", "planned")
+    status_line = "、".join(
+        f"{status} {counts[status]}"
+        for status in status_order
+        if counts.get(status)
+    )
+    if english:
+        status_summary = f"Slot status: {status_line or 'no declared slots'}."
+        ready_summary = "Ready: " + (", ".join(ready_slots[:6]) if ready_slots else "none") + "."
+        problem_summary = "Needs attention: " + (
+            ", ".join(f"{item.get('key')}={item.get('status')}" for item in problem_slots[:6])
+            if problem_slots
+            else "none"
+        ) + "."
+        headline = f"{label} data status"
+    elif japanese:
+        status_summary = f"スロット状態：{status_line or '宣言済みスロットなし'}。"
+        ready_summary = "利用可能：" + ("、".join(ready_slots[:6]) if ready_slots else "なし") + "。"
+        problem_summary = "要確認：" + (
+            "、".join(f"{item.get('key')}={item.get('status')}" for item in problem_slots[:6])
+            if problem_slots
+            else "なし"
+        ) + "。"
+        headline = f"{label} データ状態"
+    else:
+        status_summary = f"欄位狀態：{status_line or '尚未宣告欄位'}。"
+        ready_summary = "可用：" + ("、".join(ready_slots[:6]) if ready_slots else "無") + "。"
+        problem_summary = "需處理：" + (
+            "、".join(f"{item.get('key')}={item.get('status')}" for item in problem_slots[:6])
+            if problem_slots
+            else "無"
+        ) + "。"
+        headline = f"{label} 資料狀態"
+
+    number_parts = [
+        f"{key}={value}"
+        for key, value in list(key_numbers.items())[:8]
+        if value is not None
+    ]
+    summary = [status_summary, ready_summary, problem_summary]
+    if number_parts:
+        summary.insert(1, " / ".join(number_parts))
+    problem_limit = problem_summary if problem_slots else None
+    generic_limits = generic_data_limits(
+        missing=missing,
+        warnings=warnings,
+        response_preferences=response_preferences,
+    )
+    data_limits = list(dict.fromkeys([item for item in [problem_limit, *generic_limits] if item]))[:4]
+    next_fill = next(
+        (text_value(item.get("next_fill")) for item in problem_slots if text_value(item.get("next_fill"))),
+        "",
+    )
+    if english:
+        action_plan = [
+            {"label": "Available", "text": ready_summary},
+            {"label": "Gaps", "text": problem_summary},
+            {"label": "Next", "text": next_fill or "Use the declared refresh/provider path for missing or stale slots."},
+        ]
+    elif japanese:
+        action_plan = [
+            {"label": "利用可能", "text": ready_summary},
+            {"label": "不足", "text": problem_summary},
+            {"label": "次", "text": next_fill or "欠損または遅延スロットは宣言済みのrefresh/provider経路で補完します。"},
+        ]
+    else:
+        action_plan = [
+            {"label": "可用", "text": ready_summary},
+            {"label": "缺口", "text": problem_summary},
+            {"label": "下一步", "text": next_fill or "缺失或過期欄位應走已宣告的 refresh/provider 路徑補齊。"},
+        ]
+    confidence = text_value(analysis_digest.get("selected_confidence"))
+    answer = {
+        "kind": "consumer_market_answer",
+        "style": "context_status_summary",
+        "source": "compact_context_contract",
+        "headline": headline,
+        "stance": None,
+        "stance_label": undecided_label(response_preferences),
+        "confidence": confidence,
+        "confidence_label": confidence_label(confidence, response_preferences),
+        "summary": summary[:summary_limit],
+        "action_plan": action_plan,
+        "risks": [],
+        "data_limits": data_limits,
+        "detail": "\n".join(summary),
+    }
+    answer["text"] = consumer_text(
+        answer,
+        summary_limit=summary_limit,
+        response_preferences=response_preferences,
+    )
+    return answer
+
+
 def build_consumer_human_answer(
     *,
     question_intent: str,
@@ -407,6 +660,40 @@ def build_consumer_human_answer(
     if position_decision:
         answer = build_position_decision_consumer_answer(
             position_decision=position_decision,
+            missing=missing,
+            warnings=warnings,
+            summary_limit=summary_limit,
+            response_preferences=response_preferences,
+        )
+        return append_source_health_data_limits(
+            answer,
+            analysis_digest=analysis_digest,
+            missing=missing,
+            warnings=warnings,
+            response_preferences=response_preferences,
+        )
+
+    if analysis_digest.get("kind") == "tw_futures_digest":
+        answer = build_tw_futures_consumer_answer(
+            target=target,
+            analysis_digest=analysis_digest,
+            missing=missing,
+            warnings=warnings,
+            summary_limit=summary_limit,
+            response_preferences=response_preferences,
+        )
+        return append_source_health_data_limits(
+            answer,
+            analysis_digest=analysis_digest,
+            missing=missing,
+            warnings=warnings,
+            response_preferences=response_preferences,
+        )
+
+    if analysis_digest.get("kind") == "compact_context_status_digest":
+        answer = build_compact_context_consumer_answer(
+            target=target,
+            analysis_digest=analysis_digest,
             missing=missing,
             warnings=warnings,
             summary_limit=summary_limit,

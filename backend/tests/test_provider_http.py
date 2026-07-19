@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import requests
 
@@ -54,6 +54,26 @@ class ProviderHttpTests(unittest.TestCase):
             "https://provider.test/data",
             timeout=12,
             params={"symbol": "AAPL"},
+        )
+
+    def test_request_can_use_a_scoped_session_transport(self) -> None:
+        response = _response(200)
+        transport = Mock(return_value=response)
+
+        result = provider_http.get(
+            self.context,
+            "https://provider.test/data",
+            timeout_seconds=12,
+            request_callable=transport,
+            headers={"Accept": "application/json"},
+        )
+
+        self.assertIs(result, response)
+        transport.assert_called_once_with(
+            "GET",
+            "https://provider.test/data",
+            timeout=12,
+            headers={"Accept": "application/json"},
         )
 
     def test_rate_limit_response_exposes_provider_event_fields(self) -> None:

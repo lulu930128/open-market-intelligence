@@ -509,6 +509,9 @@ def _compact_market_summary(overview: dict[str, Any]) -> dict[str, Any]:
         for row in data.get("weak_industries", [])
         if isinstance(row, dict)
     ]
+    industry_strength_label = str(
+        data.get("industry_strength_label") or "產業相對表現"
+    )
 
     advance_count = breadth.get("advance_count")
     decline_count = breadth.get("decline_count")
@@ -519,6 +522,7 @@ def _compact_market_summary(overview: dict[str, Any]) -> dict[str, Any]:
         else None
     )
     average_change_text = _pct_display(breadth.get("average_change_pct"))
+    breadth_label = str(breadth.get("label") or "市場廣度")
     breadth_line = (
         f"上漲 {advance_count}、下跌 {decline_count}、持平 {unchanged_count}"
         if advance_count is not None and decline_count is not None
@@ -535,11 +539,11 @@ def _compact_market_summary(overview: dict[str, Any]) -> dict[str, Any]:
         if row.get("industry")
     ]
     human_sections = [
-        {"label": "市場廣度", "text": breadth_line},
-        {"label": "強勢股", "text": _market_row_labels(top_gainers)},
+        {"label": breadth_label, "text": breadth_line},
+        {"label": "上漲股", "text": _market_row_labels(top_gainers)},
         {"label": "弱勢股", "text": _market_row_labels(top_losers)},
         {"label": "成交值", "text": _market_row_labels(value_leaders, include_pct=False)},
-        {"label": "強勢產業", "text": "、".join(industry_labels) or "無可用資料"},
+        {"label": industry_strength_label, "text": "、".join(industry_labels) or "無可用資料"},
     ]
     if index_intraday.get("enabled"):
         index_labels = []
@@ -579,6 +583,7 @@ def _compact_market_summary(overview: dict[str, Any]) -> dict[str, Any]:
         "value_leaders": value_leaders,
         "top_industries": top_industries,
         "weak_industries": weak_industries,
+        "industry_strength_label": industry_strength_label,
         "index_intraday": index_intraday,
         "slots": slots,
         "next_checks": overview.get("missing", []),
@@ -601,6 +606,7 @@ def build_market_brief(
         market_data_params=market_data_params,
     )
     summary = _compact_market_summary(overview)
+    overview_data = overview.get("data") if isinstance(overview.get("data"), dict) else {}
     return {
         **overview,
         "kind": "market_brief",
@@ -615,6 +621,7 @@ def build_market_brief(
             "weak_industries": summary["weak_industries"],
             "index_intraday": summary["index_intraday"],
             "slots": summary["slots"],
+            "compact": overview_data.get("compact") or {},
         },
         "summary": summary,
         "response_preferences": response_preferences or {},
@@ -1479,6 +1486,11 @@ def build_watchlist_brief(
         context,
         radar_limit=normalized_radar_limit,
     )
+    context_data = context.get("data") if isinstance(context.get("data"), dict) else {}
+    if isinstance(context_data.get("compact"), dict):
+        scan_data["compact"] = context_data["compact"]
+    if isinstance(context_data.get("slots"), dict):
+        scan_data["slots"] = context_data["slots"]
     overview = _build_watchlist_overview(context, scan_data)
     scan_data["overview"] = overview
     warnings = list(context.get("warnings") or [])

@@ -32,7 +32,8 @@ Public tool:
 `omi.ask` is read-only by default. It accepts a question plus optional v2
 `target` object, then the OMI backend resolves `target.type=auto` into a Taiwan
 stock/watchlist/index/futures, US stock, Japan stock/index, Korea stock/index,
-crypto market/asset, market, or freshness context and chooses `data_only`,
+crypto market/asset, resource asset, portfolio, FRED macro, US/JP/KR watchlist,
+source health, capability status, market, or freshness context and chooses `data_only`,
 `brief`, `full`, `analysis`, or `report` mode. `brief` returns a compact human
 summary plus key numbers; `data_only` returns compact structured core data when
 available; `full` returns the complete backend evidence pack. Analysis mode calls OpenAI for a
@@ -55,6 +56,16 @@ bounded reader selection such as:
 - Japan/Korea stock or index: `provider`, `timeframe`, `bars`.
 - Crypto market/asset: `provider`, `providers`, `symbol`, `symbols`,
   `instrument_type`, `interval`, `limit`.
+- Resource asset: `interval`, `bars`, `payload_level`.
+- FRED macro: `observations` or `limit`.
+- Portfolio: `holding_limit` (server-trusted callers only).
+- Regional watchlists: `radar_limit`, `context_limit`, and optional trusted US intraday.
+- Taiwan TXF derivatives: `option_contract_month` and bounded
+  `option_strike_limit` for the cached TXO chain projection. Chain/Delta and
+  large-trader rows are official post-close data; IV/Greeks and term-structure
+  measures are explicitly marked OMI-derived.
+- Source health/capability status: `market`, `resource`, `target`, `status`,
+  `health_limit`, or `capability_id`.
 
 `payload_level` supports `summary`, `compact`, `standard`, and `full`.
 Use `summary` for voice/desktop-pet answers, `compact` for default ChatGPT/MCP
@@ -91,10 +102,19 @@ external fetch is allowed, run the backend `tw.refresh_stock_evidence` tool
 before rebuilding the evidence pack.
 `caller_profile` is only a label and is not trusted for permissions.
 
-Japan, Korea, and Crypto ask paths are local-cache evidence paths today. They
-support compact `data_only`, `brief`, and `full` evidence packs, but
+Japan/Korea daily evidence and Crypto ask paths use local cache. Japan and Korea
+stock/index contexts can additionally request bounded intraday evidence when the
+server trust policy permits external fetch. These markets support compact
+`data_only`, `brief`, and `full` evidence packs, but
 OpenAI-backed `analysis` / persisted `report` mode still downgrade to
 `data_only` until dedicated decision/report paths are implemented.
+
+`target.type=capability_status` lists both connected capabilities and explicit
+`provider_not_connected` contracts for News, US options flow/earnings, TDnet,
+OpenDART, and HK. Taiwan TXO chain/Greeks, large traders, and TX term structure
+are connected through the TAIFEX post-close cache contract. This is
+implementation readiness; use `target.type=source_health` for current runtime
+freshness and provider incidents.
 
 OpenAI-backed analysis/report mode requires the OMI backend process to have
 `OPENAI_API_KEY`, `OPENAI_LLM_API_KEY`, or `OMI_OPENAI_ENV_FILE` configured.

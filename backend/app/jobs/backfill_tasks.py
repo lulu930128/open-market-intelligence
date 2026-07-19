@@ -18,8 +18,13 @@ from app.market.fundamental_metrics_backfill import (
 )
 from app.market.monthly_revenue_history_backfill import ensure_stock_monthly_revenue_history
 from app.market.market_chips import refresh_market_chip_daily
+from app.market.indices import refresh_market_index_summary
 from app.market.shareholding_history_backfill import ensure_stock_shareholding_history
 from app.market.stock_selection_refresh import refresh_selected_stock_data
+from app.market.tw_derivatives import (
+    TaiwanDerivativesFetchError,
+    refresh_taiwan_derivatives,
+)
 from app.us_market import service as us_market_service
 from app.watchlists.backfill_service import (
     backfill_watchlist_group_twse,
@@ -129,6 +134,59 @@ def run_market_chip_daily_refresh_job(
             force=force,
             progress=progress,
         )
+
+    run_tracked_job(job_id, worker)
+
+
+def run_market_index_summary_refresh_job(job_id: int) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        progress(0, 1, "Refreshing Taiwan market index summary.")
+        payload = refresh_market_index_summary(db=db)
+        progress(1, 1, "Taiwan market index summary refreshed.")
+        return {
+            "status": "success",
+            "as_of": payload.get("as_of"),
+            "source": payload.get("source"),
+            "index_count": len(payload.get("indices") or []),
+        }
+
+    run_tracked_job(job_id, worker)
+
+
+def run_taiwan_derivatives_refresh_job(
+    job_id: int,
+    expected_trade_date: date,
+) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        progress(0, 5, "Refreshing TAIFEX post-close derivatives datasets.")
+        result = refresh_taiwan_derivatives(db)
+        result["expected_trade_date"] = expected_trade_date
+        result["is_stale"] = (
+            bool(result.get("is_stale"))
+            or result.get("as_of") != expected_trade_date
+        )
+        progress(
+            int(result.get("successful_request_count") or 0),
+            5,
+            "TAIFEX post-close derivatives refresh completed provider requests.",
+        )
+
+        if result["is_stale"]:
+            raise TaiwanDerivativesFetchError(
+                "TAIFEX derivatives refresh did not reach the expected trade date: "
+                f"expected={expected_trade_date.isoformat()} "
+                f"actual={result.get('as_of') or 'missing'}."
+            )
+        if result.get("status") != "ready":
+            errors = result.get("errors") or {}
+            detail = "; ".join(f"{key}: {value}" for key, value in errors.items())
+            raise TaiwanDerivativesFetchError(
+                "TAIFEX derivatives refresh was incomplete"
+                + (f": {detail}" if detail else ".")
+            )
+
+        progress(5, 5, "TAIFEX post-close derivatives data is ready.")
+        return result
 
     run_tracked_job(job_id, worker)
 
