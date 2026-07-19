@@ -71,6 +71,40 @@ normalize_tool_budget = agentic_policy.normalize_tool_budget
 tool_definitions_for_llm = agentic_policy.tool_definitions_for_llm
 
 
+def _fallback_to_cached(policy: dict[str, Any]) -> bool:
+    refresh_policy = policy.get("refresh_policy")
+    if not isinstance(refresh_policy, dict):
+        return True
+    return bool(refresh_policy.get("fallback_to_cached", True))
+
+
+def _freshness_has_cached_data(value: dict[str, Any]) -> bool:
+    for dataset in value.get("datasets") or []:
+        if isinstance(dataset, dict) and dataset.get("latest") is not None:
+            return True
+    return False
+
+
+def _annotate_timeout_fallback(
+    runs: list[dict[str, Any]],
+    *,
+    cached_data_available: bool,
+) -> None:
+    for run in runs:
+        if run.get("status") != "timeout" or not run.get("fallback_used"):
+            continue
+        run["cached_data_returned"] = cached_data_available
+        summary = run.get("result_summary") if isinstance(run.get("result_summary"), dict) else {}
+        summary.update(
+            {
+                "status": "timeout",
+                "fallback_used": True,
+                "cached_data_returned": cached_data_available,
+            }
+        )
+        run["result_summary"] = summary
+
+
 def _latest_us_daily_price(db: Session, symbol: str) -> USDailyPrice | None:
     return (
         db.query(USDailyPrice)
@@ -281,7 +315,12 @@ def run_us_stock_tool_session(
         plan=plan,
         budget=budget,
         can_external_fetch=bool(policy.get("can_external_fetch")),
+        fallback_to_cached=_fallback_to_cached(policy),
         progress_callback=progress_callback,
+    )
+    _annotate_timeout_fallback(
+        runs,
+        cached_data_available=_freshness_has_cached_data(gaps),
     )
     satisfied_capabilities = {
         capability
@@ -359,7 +398,12 @@ def run_tw_stock_tool_session(
         plan=plan,
         budget=budget,
         can_external_fetch=bool(policy.get("can_external_fetch")),
+        fallback_to_cached=_fallback_to_cached(policy),
         progress_callback=progress_callback,
+    )
+    _annotate_timeout_fallback(
+        runs,
+        cached_data_available=_freshness_has_cached_data(gaps),
     )
     refreshed_gaps = freshness.check_stock_data_freshness(
         db=db,
@@ -427,7 +471,12 @@ def run_tw_watchlist_tool_session(
         plan=plan,
         budget=budget,
         can_external_fetch=bool(policy.get("can_external_fetch")),
+        fallback_to_cached=_fallback_to_cached(policy),
         progress_callback=progress_callback,
+    )
+    _annotate_timeout_fallback(
+        runs,
+        cached_data_available=_freshness_has_cached_data(gaps),
     )
     refreshed_gaps = freshness.check_watchlist_data_freshness(
         db=db,

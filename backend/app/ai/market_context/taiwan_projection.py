@@ -613,7 +613,14 @@ def _compact_intraday_history(
     compact_points = [_compact_intraday_point(point) for point in points[-point_limit:]]
     first_point = points[0] if points else {}
     latest_point = compact_points[-1] if compact_points else None
+    refreshed_count = history.get("refreshed_count")
+    empty_warning = (
+        f"Provider refresh reported refreshed_count={refreshed_count} but returned no intraday points."
+        if refreshed_count and not compact_points
+        else None
+    )
     return {
+        "status": "current" if compact_points else "empty",
         "interval": history.get("interval"),
         "range": history.get("range"),
         "provider": history.get("provider"),
@@ -623,9 +630,10 @@ def _compact_intraday_history(
         "point_count": history.get("point_count") if history.get("point_count") is not None else len(points),
         "returned_point_count": len(compact_points),
         "cached_count": history.get("cached_count"),
-        "refreshed_count": history.get("refreshed_count"),
+        "refreshed_count": refreshed_count,
         "latest": latest_point,
         "points": compact_points,
+        "warnings": [empty_warning] if empty_warning else [],
     }
 
 def _compact_single_intraday_series(
@@ -1217,6 +1225,8 @@ def _build_stock_compact_evidence(
             (
                 "period",
                 "report_date",
+                "released_at",
+                "filed_at",
                 "revenue",
                 "gross_profit",
                 "operating_income",
@@ -1247,6 +1257,8 @@ def _build_stock_compact_evidence(
                 (
                     "period",
                     "report_date",
+                    "released_at",
+                    "filed_at",
                     "eps",
                     "book_value_per_share",
                     "roe",

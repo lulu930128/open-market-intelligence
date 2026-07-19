@@ -72,6 +72,15 @@ KR_MARKET_CONTEXT_HINTS = (
     "^kq11",
     "^ks200",
 )
+DATA_FRESHNESS_MARKET_ALIASES: dict[str, tuple[str, ...]] = {
+    "TW": ("tw", "taiwan", "台股", "台灣"),
+    "US": ("us", "usa", "美股", "美國"),
+    "JP": ("jp", "japan", "日股", "日本"),
+    "KR": ("kr", "korea", "韓股", "韓國", "南韓"),
+    "CRYPTO": ("crypto", "cryptocurrency", "加密", "幣圈", "虛擬貨幣"),
+    "ALL": ("all", "global", "全部市場", "所有市場", "跨市場"),
+}
+SUPPORTED_DATA_FRESHNESS_MARKETS = set(DATA_FRESHNESS_MARKET_ALIASES)
 CRYPTO_MARKET_CONTEXT_HINTS = (
     "crypto",
     "cryptocurrency",
@@ -199,6 +208,7 @@ US_PLAIN_SYMBOL_PATTERN = decision_core.US_PLAIN_SYMBOL_PATTERN
 class ScopeResolution:
     selected_scope_type: str
     selected_scope_id: str | None = None
+    selected_market: str | None = None
     display_name: str | None = None
     confidence: str = "low"
     assumption: str | None = None
@@ -293,6 +303,7 @@ def _resolution_target(resolution: ScopeResolution) -> dict[str, Any]:
         scope_type=resolution.selected_scope_type,
         scope_id=resolution.selected_scope_id,
         label=resolution.display_name,
+        market=resolution.selected_market,
     )
     if resolution.selected_scope_type == "us_stock":
         target["instrument_type"] = us_instrument_type(resolution.selected_scope_id)
@@ -304,6 +315,47 @@ def _looks_like_stock_id(value: str | None) -> bool:
         return False
 
     return bool(re.fullmatch(r"\d{4,6}[A-Za-z0-9]?", value.strip()))
+
+
+def _normalize_data_freshness_market(value: Any) -> str | None:
+    normalized = str(value or "").strip().casefold()
+    if not normalized:
+        return None
+    for market, aliases in DATA_FRESHNESS_MARKET_ALIASES.items():
+        normalized_aliases = {alias.casefold() for alias in aliases}
+        if normalized == market.casefold() or normalized in normalized_aliases:
+            return market
+    return None
+
+
+def _market_alias_in_text(text: str, alias: str) -> bool:
+    normalized_alias = alias.casefold()
+    if normalized_alias.isascii() and normalized_alias.isalpha() and len(normalized_alias) <= 3:
+        return bool(
+            re.search(
+                rf"(?<![a-z0-9]){re.escape(normalized_alias)}(?![a-z0-9])",
+                text,
+            )
+        )
+    return normalized_alias in text
+
+
+def _data_freshness_market_from_question(question: str) -> str | None:
+    lowered = question.casefold()
+    if any(
+        _market_alias_in_text(lowered, alias)
+        for alias in DATA_FRESHNESS_MARKET_ALIASES["ALL"]
+    ):
+        return "ALL"
+    markets = {
+        market
+        for market, aliases in DATA_FRESHNESS_MARKET_ALIASES.items()
+        if market != "ALL"
+        if any(_market_alias_in_text(lowered, alias) for alias in aliases)
+    }
+    if len(markets) > 1:
+        return "ALL"
+    return next(iter(markets), None)
 
 
 def _looks_like_us_symbol(value: str | None) -> bool:
@@ -1392,6 +1444,34 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
                 f"target.id is required for target.type={requested_target_type}.",
             )
 
+        if scope_type == "data_freshness":
+            requested_market = (
+                target_market
+                or _data_freshness_market_from_question(question)
+                or "TW"
+            )
+            normalized_market = _normalize_data_freshness_market(requested_market)
+            if normalized_market is None:
+                return ScopeResolution(
+                    selected_scope_type="data_freshness",
+                    selected_scope_id=target_id,
+                    selected_market=str(requested_market).upper(),
+                    display_name="Data freshness",
+                    confidence="high",
+                    source="explicit_request",
+                    error_code="UNSUPPORTED_MARKET",
+                    error_message=f"尚未支援 {requested_market} 市場的 data freshness。",
+                )
+            return ScopeResolution(
+                selected_scope_type="data_freshness",
+                selected_scope_id=target_id,
+                selected_market=normalized_market,
+                display_name=f"{normalized_market} data freshness",
+                confidence="high",
+                source="explicit_request",
+                candidates=(),
+            )
+
         if scope_type == "tw_index":
             normalized_index_id = str(target_id or "").strip().upper()
             if normalized_index_id not in TAIWAN_INDEX_TARGET_IDS:
@@ -1671,6 +1751,7 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
             return ScopeResolution(
                 selected_scope_type="data_freshness",
                 selected_scope_id=stock_id,
+                selected_market=_data_freshness_market_from_question(question) or "TW",
                 display_name=_stock_display_name(db, stock_id) if stock_id else None,
                 confidence="high",
                 source="explicit_scope_id",
@@ -1830,6 +1911,7 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
         return ScopeResolution(
             selected_scope_type="data_freshness",
             selected_scope_id=stock_id,
+            selected_market=_data_freshness_market_from_question(question) or "TW",
             display_name=_stock_display_name(db, stock_id) if stock_id else None,
             confidence="high" if stock_id else "medium",
             source="freshness_hint",

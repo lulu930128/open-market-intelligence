@@ -282,12 +282,42 @@ def _weighted_score(
     return int(round(weighted_total / total_weight)), used
 
 
+def _intraday_report_is_scoreable(report: dict[str, Any] | None) -> bool:
+    if not isinstance(report, dict) or report.get("phase") != "intraday":
+        return False
+    data = report.get("data") if isinstance(report.get("data"), dict) else {}
+    intraday = data.get("intraday") if isinstance(data.get("intraday"), dict) else {}
+    latest_point = intraday.get("latest_point")
+    point_count = intraday.get("point_count") if intraday else report.get("point_count")
+    if intraday.get("is_current_session") is False:
+        return False
+    return bool(
+        _report_score(report) is not None
+        and (
+            not intraday
+            or (
+                isinstance(latest_point, dict)
+                and latest_point.get("time")
+                and intraday.get("is_current_session") is True
+            )
+        )
+        and isinstance(point_count, int)
+        and point_count >= 5
+    )
+
+
 def _technical_analysis_summary(
     *,
     technical_reports: dict[str, Any],
     requested_horizon: str,
 ) -> dict[str, Any]:
-    selected_horizon = normalize_analysis_horizon(requested_horizon)
+    requested_selected_horizon = normalize_analysis_horizon(requested_horizon)
+    intraday_scoreable = _intraday_report_is_scoreable(technical_reports.get("today"))
+    selected_horizon = (
+        "short"
+        if requested_selected_horizon == "intraday" and not intraday_scoreable
+        else requested_selected_horizon
+    )
     weights_by_horizon = {
         "intraday": [("today", 1.0), ("daily", 0.35)],
         "short": [("daily", 1.0)],
@@ -350,6 +380,12 @@ def _technical_analysis_summary(
         )
         for horizon in weights_by_horizon
     }
+    if not intraday_scoreable:
+        scores_by_horizon["intraday"] = None
+        if isinstance(score_model.get("scores"), dict):
+            score_model["scores"]["intraday"] = None
+        if isinstance(score_model.get("base_scores"), dict):
+            score_model["base_scores"]["intraday"] = None
 
     return {
         "requested_horizon": requested_horizon,
@@ -360,6 +396,12 @@ def _technical_analysis_summary(
         "selected_summary": selected_report.get("summary"),
         "selected_confidence": selected_report.get("confidence"),
         "scores": scores_by_horizon,
+        "intraday_score": scores_by_horizon.get("intraday"),
+        "horizon_fallback_reason": (
+            "intraday_evidence_unavailable"
+            if requested_selected_horizon == "intraday" and selected_horizon == "short"
+            else None
+        ),
         "base_selected_score": base_selected_score,
         "base_scores": base_scores_by_horizon,
         "score_model": score_model,
@@ -959,6 +1001,7 @@ def _technical_report_from_points(
 
     return {
         "timeframe": timeframe,
+        "phase": "intraday" if is_intraday else "historical",
         "score": score,
         "title": title,
         "summary": summary,

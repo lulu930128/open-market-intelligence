@@ -212,6 +212,14 @@ ASK_TOOL: dict[str, Any] = {
                 "enum": ["auto", "data_only", "brief", "full", "analysis", "report"],
                 "default": "auto",
             },
+            "include_raw": {
+                "type": "boolean",
+                "default": True,
+                "description": (
+                    "MCP transport projection only. Set false to return a bounded answer summary "
+                    "without raw result packs, source references, prompts, or full evidence arrays."
+                ),
+            },
             "strategy_profile": {
                 "type": "string",
                 "enum": [
@@ -626,6 +634,11 @@ INTERNAL_TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "stock_id": {"type": "string"},
+                "market": {
+                    "type": "string",
+                    "enum": ["TW", "US", "JP", "KR", "CRYPTO", "ALL"],
+                    "default": "TW",
+                },
             },
         },
     },
@@ -1481,12 +1494,184 @@ def _post_targeted_ask(
     )
 
 
+def _bounded_summary_value(value: Any, *, depth: int = 0) -> Any:
+    if depth >= 4:
+        if isinstance(value, list):
+            return {"item_count": len(value), "truncated": True}
+        if isinstance(value, dict):
+            return {"field_count": len(value), "truncated": True}
+        return value
+    if isinstance(value, list):
+        return [_bounded_summary_value(item, depth=depth + 1) for item in value[:5]]
+    if isinstance(value, dict):
+        omitted_keys = {
+            "bars",
+            "chart",
+            "components",
+            "data",
+            "detail",
+            "events",
+            "financial_history",
+            "history",
+            "points",
+            "prompt",
+            "raw",
+            "raw_response",
+            "revenue_history",
+            "rows",
+            "source_refs",
+            "technical_reports",
+        }
+        output: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in omitted_keys or len(output) >= 24:
+                continue
+            output[str(key)] = _bounded_summary_value(item, depth=depth + 1)
+        return output
+    return value
+
+
+def _summarize_ask_response(response: Any) -> Any:
+    if not isinstance(response, dict):
+        return response
+
+    output: dict[str, Any] = {
+        "kind": "omi_ask_summary",
+        "raw_included": False,
+    }
+    for key in (
+        "contract_version",
+        "ok",
+        "requested_mode",
+        "effective_mode",
+        "answer_ready",
+        "target",
+        "resolution",
+        "clarification",
+        "next_context",
+        "next_actions",
+        "error",
+    ):
+        if response.get(key) not in (None, {}, []):
+            output[key] = _bounded_summary_value(response[key])
+
+    analysis = response.get("analysis") if isinstance(response.get("analysis"), dict) else {}
+    if analysis:
+        output["analysis"] = _bounded_summary_value(
+            {
+                key: analysis[key]
+                for key in (
+                    "kind",
+                    "question_intent",
+                    "requested_horizon",
+                    "selected_horizon",
+                    "selected_timeframe",
+                    "selected_score",
+                    "selected_title",
+                    "selected_summary",
+                    "selected_confidence",
+                    "display",
+                    "human_answer",
+                    "decision_contract",
+                    "price_level_validation",
+                )
+                if key in analysis
+            }
+        )
+
+    result = response.get("result") if isinstance(response.get("result"), dict) else {}
+    result_data = result.get("data") if isinstance(result.get("data"), dict) else {}
+    compact = result_data.get("compact") if isinstance(result_data.get("compact"), dict) else {}
+    if result:
+        output["result_summary"] = _bounded_summary_value(
+            {
+                key: result[key]
+                for key in ("kind", "as_of", "status", "scope", "summary", "human_answer")
+                if key in result
+            }
+        )
+    if compact:
+        output["compact_evidence"] = _bounded_summary_value(
+            {
+                key: compact[key]
+                for key in (
+                    "kind",
+                    "version",
+                    "payload_level",
+                    "status",
+                    "target",
+                    "as_of",
+                    "quote",
+                    "technical",
+                    "breadth",
+                    "sample_breadth",
+                    "sample_top_gainers",
+                    "sample_top_losers",
+                    "sample_value_leaders",
+                    "freshness_by_domain",
+                    "data_quality",
+                    "slots",
+                )
+                if key in compact
+            }
+        )
+
+    freshness = response.get("freshness")
+    if isinstance(freshness, dict) and freshness:
+        output["freshness"] = _bounded_summary_value(freshness)
+    passport = response.get("evidence_passport")
+    if isinstance(passport, dict) and passport:
+        output["evidence_passport"] = _bounded_summary_value(
+            {
+                key: passport[key]
+                for key in (
+                    "kind",
+                    "data_freshness",
+                    "coverage",
+                    "completeness",
+                    "confidence",
+                    "decision_readiness",
+                )
+                if key in passport
+            }
+        )
+    tool_runs = response.get("tool_runs") if isinstance(response.get("tool_runs"), list) else []
+    notable_runs = [
+        run
+        for run in tool_runs
+        if isinstance(run, dict)
+        and (
+            run.get("status") not in {None, "completed", "success"}
+            or run.get("fallback_used")
+            or run.get("cached_data_returned")
+        )
+    ]
+    if notable_runs:
+        output["notable_tool_runs"] = _bounded_summary_value(notable_runs)
+    for key in ("missing", "warnings"):
+        if isinstance(response.get(key), list) and response[key]:
+            output[key] = _bounded_summary_value(response[key])
+    return output
+
+
 def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
     if name == "omi.ask":
-        return _api_post("/api/ai/ask", payload=_ask_payload(arguments))
+        response = _api_post("/api/ai/ask", payload=_ask_payload(arguments))
+        return response if _bool_arg(arguments, "include_raw", True) else _summarize_ask_response(response)
 
     if name == "omi.ask_stream":
-        return _api_stream_post("/api/ai/ask/stream", payload=_ask_payload(arguments))
+        response = _api_stream_post("/api/ai/ask/stream", payload=_ask_payload(arguments))
+        if _bool_arg(arguments, "include_raw", True) or not isinstance(response, dict):
+            return response
+        final = response.get("final")
+        return {
+            "kind": "omi_stream_summary",
+            "raw_included": False,
+            "ok": bool(response.get("ok")),
+            "delta_text": response.get("delta_text") or "",
+            "final": _summarize_ask_response(final) if isinstance(final, dict) else None,
+            "error": _bounded_summary_value(response.get("error")),
+        }
 
     if name == "omi.read_market_overview":
         return _api_get(
@@ -1549,7 +1734,13 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
         )
 
     if name == "omi.read_data_freshness":
-        return _api_get("/api/ai/data-freshness", {"stock_id": arguments.get("stock_id")})
+        return _api_get(
+            "/api/ai/data-freshness",
+            {
+                "stock_id": arguments.get("stock_id"),
+                "market": arguments.get("market", "TW"),
+            },
+        )
 
     if name == "omi.generate_stock_brief":
         stock_id = quote(str(_require(arguments, "stock_id")), safe="")

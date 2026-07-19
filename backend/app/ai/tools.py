@@ -3,7 +3,9 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.ai import tool_catalog
+from app.ai.evidence_passport import build_evidence_passport
 from app.ai.market_context import (
+    regional_freshness,
     taiwan_freshness,
     taiwan_futures,
     taiwan_index,
@@ -48,12 +50,131 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
     return tool_catalog.list_ai_tools(include_internal=include_internal)
 
 
-def read_data_freshness(db: Session, stock_id: str | None = None) -> dict[str, Any]:
-    return taiwan_freshness.read_data_freshness(
-        db=db,
-        stock_id=stock_id,
-        now=_now,
+SUPPORTED_DATA_FRESHNESS_MARKETS = {
+    "TW",
+    *regional_freshness.SUPPORTED_REGIONAL_FRESHNESS_MARKETS,
+    "ALL",
+}
+
+
+def read_data_freshness(
+    db: Session,
+    stock_id: str | None = None,
+    *,
+    market: str = "TW",
+) -> dict[str, Any]:
+    normalized_market = str(market or "TW").strip().upper()
+    if normalized_market not in SUPPORTED_DATA_FRESHNESS_MARKETS:
+        raise ValueError(f"Unsupported data freshness market: {market}")
+    if normalized_market == "TW":
+        return taiwan_freshness.read_data_freshness(
+            db=db,
+            stock_id=stock_id,
+            now=_now,
+        )
+    if normalized_market != "ALL":
+        return regional_freshness.read_regional_data_freshness(
+            db,
+            market=normalized_market,
+            symbol=stock_id,
+            now=_now,
+        )
+
+    markets = {
+        market_key: read_data_freshness(db, market=market_key)
+        for market_key in ("TW", "US", "JP", "KR", "CRYPTO")
+    }
+    missing = [
+        f"{market_key}:{item}"
+        for market_key, envelope in markets.items()
+        for item in envelope.get("missing") or []
+    ]
+    warnings = [
+        f"{market_key}: {warning}"
+        for market_key, envelope in markets.items()
+        for warning in envelope.get("warnings") or []
+    ]
+    current_by_market = {
+        market_key: (envelope.get("evidence_passport") or {}).get("data_freshness")
+        for market_key, envelope in markets.items()
+    }
+    overall_freshness = (
+        "missing"
+        if "missing" in current_by_market.values()
+        else "stale"
+        if "stale" in current_by_market.values()
+        else "partial"
+        if "partial" in current_by_market.values()
+        else "unknown"
+        if any(status in {None, "unknown"} for status in current_by_market.values())
+        else "current"
     )
+    generated_at = _now()
+    source_refs = [{"type": "database", "name": "open_market_intelligence.db"}]
+    envelope = {
+        "kind": "data_freshness",
+        "generated_at": generated_at,
+        "as_of": max(
+            (str(item.get("as_of")) for item in markets.values() if item.get("as_of")),
+            default=None,
+        ),
+        "scope": {"market": "ALL", "stock_id": None},
+        "data": {
+            "status": overall_freshness,
+            "markets": {
+                market_key: item.get("data") or {}
+                for market_key, item in markets.items()
+            },
+            "compact": {
+                "kind": "data_freshness_compact_evidence",
+                "version": "market_compact_evidence.v1",
+                "payload_level": "compact",
+                "status": overall_freshness,
+                "target": {
+                    "type": "data_freshness",
+                    "id": None,
+                    "label": "All market data freshness",
+                    "market": "ALL",
+                },
+                "resources": {"market_count": len(markets)},
+                "freshness_by_domain": current_by_market,
+                "slots": {
+                    market_key.lower(): {
+                        "status": (
+                            "ready"
+                            if status == "current"
+                            else "stale"
+                            if status == "stale"
+                            else "missing"
+                            if status == "missing"
+                            else "partial"
+                        ),
+                        "capability": f"{market_key.lower()}_data_freshness",
+                        "payload_ref": f"data.markets.{market_key}",
+                        "payload_level": "compact",
+                    }
+                    for market_key, status in current_by_market.items()
+                },
+            },
+        },
+        "missing": missing,
+        "warnings": warnings,
+        "source_refs": source_refs,
+    }
+    envelope["evidence_passport"] = build_evidence_passport(
+        kind="data_freshness",
+        as_of=envelope["as_of"],
+        source_refs=source_refs,
+        missing=missing,
+        warnings=warnings,
+        freshness={
+            "status": overall_freshness,
+            "is_current": all(status == "current" for status in current_by_market.values()),
+            "missing": missing,
+            "warnings": warnings,
+        },
+    )
+    return envelope
 
 
 def read_market_overview(

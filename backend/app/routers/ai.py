@@ -1,4 +1,5 @@
 from secrets import compare_digest
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
@@ -186,9 +187,10 @@ def list_strategy_profiles():
 @router.get("/data-freshness", response_model=AiDataEnvelope)
 def read_data_freshness(
     stock_id: str | None = None,
+    market: Literal["TW", "US", "JP", "KR", "CRYPTO", "ALL"] = Query(default="TW"),
     db: Session = Depends(get_db),
 ):
-    return tools.read_data_freshness(db=db, stock_id=stock_id)
+    return tools.read_data_freshness(db=db, stock_id=stock_id, market=market)
 
 
 @router.get("/market-overview", response_model=AiDataEnvelope)

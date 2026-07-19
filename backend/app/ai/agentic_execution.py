@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from queue import Empty, Queue
+from threading import Event, Thread
 from time import perf_counter
 from typing import Any
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.ai import agentic_common, agentic_policy, progress_events
 from app.market import stock_selection_refresh
@@ -33,6 +35,7 @@ def _emit_tool_progress(
         "blocked": "已阻擋",
         "skipped": "已略過",
         "error": "失敗",
+        "timeout": "逾時",
     }.get(status, status)
     progress_events.emit_progress(
         progress_callback,
@@ -44,6 +47,7 @@ def _emit_tool_progress(
             "blocked": "blocked",
             "skipped": "skipped",
             "error": "failed",
+            "timeout": "failed",
         }.get(status, "completed"),
         dedupe_key=f"tool:{tool_name}:{status}",
         tool=tool_name,
@@ -148,6 +152,8 @@ def _empty_tool_run(
         "arguments": step.get("args") or {},
         "external_fetch": bool(definition.external_fetch) if definition else False,
         "writes_cache": bool(definition.writes_cache) if definition else False,
+        "writes_market_cache": bool(definition.writes_cache) if definition else False,
+        "writes_user_data": False,
         "result_summary": {},
         "error": error,
         "started_at": now,
@@ -156,7 +162,13 @@ def _empty_tool_run(
     }
 
 
-def _execute_tool(db: Session, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+def _execute_tool(
+    db: Session,
+    tool_name: str,
+    args: dict[str, Any],
+    *,
+    cancel_event: Event | None = None,
+) -> dict[str, Any]:
     symbol = normalize_us_symbol(args.get("symbol"))
     stock_id = str(args.get("stock_id") or "").strip()
     group_id_text = str(args.get("group_id") or "").strip()
@@ -180,6 +192,7 @@ def _execute_tool(db: Session, tool_name: str, args: dict[str, Any]) -> dict[str
             stock_id=stock_id,
             include_today=agentic_common._optional_bool(args.get("include_today")),
             sleep_seconds=sleep_seconds,
+            should_cancel=cancel_event.is_set if cancel_event is not None else None,
         )
 
     if tool_name == "tw.refresh_watchlist_evidence":
@@ -208,6 +221,7 @@ def _execute_tool(db: Session, tool_name: str, args: dict[str, Any]) -> dict[str
             enabled_only=enabled_only if enabled_only is not None else True,
             sleep_seconds=sleep_seconds,
             skip_existing_months=skip_existing_months if skip_existing_months is not None else True,
+            should_cancel=cancel_event.is_set if cancel_event is not None else None,
         )
 
     if tool_name == "us.read_intraday_trend":
@@ -243,12 +257,65 @@ def _execute_tool(db: Session, tool_name: str, args: dict[str, Any]) -> dict[str
     raise ValueError(f"Unsupported OMI tool: {tool_name}")
 
 
+def _worker_session(db: Session) -> tuple[Session, bool]:
+    bind = db.get_bind()
+    database = str(getattr(getattr(bind, "url", None), "database", "") or "")
+    if database in {"", ":memory:"}:
+        return db, False
+    return sessionmaker(autocommit=False, autoflush=False, bind=bind)(), True
+
+
+def _execute_tool_with_deadline(
+    *,
+    db: Session,
+    tool_name: str,
+    args: dict[str, Any],
+    timeout_seconds: float,
+) -> tuple[dict[str, Any], str, str | None]:
+    outcome: Queue[tuple[str, Any]] = Queue(maxsize=1)
+    cancel_event = Event()
+
+    def worker() -> None:
+        worker_db: Session | None = None
+        owns_session = False
+        try:
+            worker_db, owns_session = _worker_session(db)
+            result = _execute_tool(
+                worker_db,
+                tool_name,
+                args,
+                cancel_event=cancel_event,
+            )
+            outcome.put(("success", result))
+        except Exception as exc:
+            outcome.put(("error", str(exc)))
+        finally:
+            if owns_session and worker_db is not None:
+                worker_db.close()
+
+    thread = Thread(target=worker, name=f"omi-tool-{tool_name}", daemon=True)
+    thread.start()
+    thread.join(max(0.0, timeout_seconds))
+    if thread.is_alive():
+        cancel_event.set()
+        return {}, "timeout", f"Tool exceeded the remaining wall-clock budget ({timeout_seconds:.2f}s)."
+
+    try:
+        status, value = outcome.get_nowait()
+    except Empty:
+        return {}, "error", "Tool worker ended without returning a result."
+    if status == "error":
+        return {}, "error", str(value)
+    return value if isinstance(value, dict) else {}, "success", None
+
+
 def execute_tool_plan(
     *,
     db: Session,
     plan: dict[str, Any],
     budget: dict[str, int],
     can_external_fetch: bool,
+    fallback_to_cached: bool = True,
     progress_callback: progress_events.ProgressCallback | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     runs: list[dict[str, Any]] = []
@@ -347,7 +414,8 @@ def execute_tool_plan(
             )
             continue
 
-        if perf_counter() - started > budget["max_total_seconds"]:
+        elapsed_seconds = perf_counter() - started
+        if elapsed_seconds >= budget["max_total_seconds"]:
             warnings.append(
                 "OMI tool budget reached max_total_seconds; remaining planned tools were skipped."
             )
@@ -367,9 +435,12 @@ def execute_tool_plan(
             writes_cache=definition.writes_cache,
         )
         try:
-            result = _execute_tool(db, tool_name, args)
-            status = "success"
-            error = None
+            result, status, error = _execute_tool_with_deadline(
+                db=db,
+                tool_name=tool_name,
+                args=args,
+                timeout_seconds=max(0.0, budget["max_total_seconds"] - elapsed_seconds),
+            )
         except Exception as exc:
             result = {}
             status = "error"
@@ -384,13 +455,28 @@ def execute_tool_plan(
             "arguments": args,
             "external_fetch": definition.external_fetch,
             "writes_cache": definition.writes_cache,
+            "writes_market_cache": definition.writes_cache,
+            "writes_user_data": False,
             "result_summary": _compact_result(result),
             "error": error,
             "started_at": started_at.isoformat(),
             "ended_at": ended_at.isoformat(),
             "duration_ms": duration_ms,
+            "fallback_used": bool(status == "timeout" and fallback_to_cached),
+            "cached_data_returned": False,
+            "cancellation_requested": status == "timeout",
+            "background_completion_possible": status == "timeout",
         }
         runs.append(run)
+        if status == "timeout":
+            warnings.append(
+                f"{tool_name} timed out at the OMI wall-clock deadline; "
+                + (
+                    "the answer will fall back to local cached evidence."
+                    if fallback_to_cached
+                    else "cached fallback was disabled by refresh_policy."
+                )
+            )
         _emit_tool_progress(
             progress_callback,
             tool_name=tool_name,

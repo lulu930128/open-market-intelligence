@@ -3,7 +3,7 @@
 ## Status
 
 - Current phase: implementation
-- Last updated: 2026-07-19 19:05 +08:00
+- Last updated: 2026-07-19 21:20 +08:00
 
 ## Completed
 
@@ -40,6 +40,18 @@
 - 2026-07-19: Added canonical `next_context.last_target` output while preserving `last_resolution` and related input aliases for existing OMI Dock/MCP callers.
 - 2026-07-19: Added long-side price-level invariants. Above-market pullback zones are reclassified as resistance, invalid stops/invalidation levels are omitted, and executable decision output is blocked when entry and risk guardrails are not both valid.
 - 2026-07-19: Added `backend/tests/test_ai_p0_safety.py` with 15 focused P0 regressions.
+- 2026-07-19: Saved the completed P0 safety slice as commit `d863b14` (`fix(ai): harden P0 decision safety`).
+- 2026-07-19: Separated table availability from release-calendar freshness. Taiwan monthly revenue now uses a conservative market-wide filing boundary, and table evidence exposes `availability`, `freshness`, `expected`, and `row_count` independently.
+- 2026-07-19: Preserved `target.market` for `data_freshness` across Ask normalization, backend execution, the public API, tool catalog, and MCP. TW/US/JP/KR/CRYPTO/ALL now route to market-owned readers; unsupported explicit markets return `UNSUPPORTED_MARKET` instead of silently falling back to TW.
+- 2026-07-19: Split US selected-provider freshness from fallback-provider health. Canonical daily selection reuses the existing chart provider rule; a stale Alpha Vantage fallback remains visible without downgrading current Yahoo evidence to stale.
+- 2026-07-19: Enforced `max_total_seconds` as a response wall-clock deadline. Timeout runs return `status=timeout`, request cooperative cancellation, distinguish market-cache writes from user-data writes, and explicitly report cached fallback state.
+- 2026-07-19: Added `backend/tests/test_ai_p1_reliability.py` for P1 freshness, market routing, provider selection, and timeout/fallback regressions.
+- 2026-07-19: Closed P2 intraday semantics: closed, waiting, opening, stale-session, or zero-point evidence no longer produces a valid intraday score; an intraday request falls back explicitly to `short` / `daily` with `horizon_fallback_reason`.
+- 2026-07-19: Separated full-market breadth from OMI sample rankings in both field names and human labels. Sample leaders now expose additive `sample_*` aliases and include the tracked sample count in user-facing sections.
+- 2026-07-19: Added MCP `include_raw=false` as a bounded transport projection while preserving `include_raw=true` as the backward-compatible default.
+- 2026-07-19: Split quarterly financial accounting period, source-declared release/filing dates, and raw fetch time. Migration `20260719_0037` clears known MOPS history rows whose fetch date polluted `report_date`.
+- 2026-07-19: Added dedicated `broker_branch` and `data_freshness` intents, removed duplicated status labels, changed empty target fallback to `市場`, and aligned US bearish titles with the shared negative-score threshold.
+- 2026-07-19: Added `backend/tests/test_ai_p2_semantics.py` and expanded MCP, market-brief, and migration regression assertions.
 
 ## Validation evidence
 
@@ -50,6 +62,10 @@
 - `.\scripts\run-safe-validation.ps1 -Profile backend -BackendPytestArgs @('backend\tests\test_ai_decision_core.py','backend\tests\test_ai_answer_composer.py','backend\tests\test_ai_freshness_guard.py','backend\tests\test_ai_ask_stages.py','backend\tests\test_omi_mcp_server.py')`: passed.
 - `.\scripts\run-safe-validation.ps1 -Profile backend -BackendPytestArgs @('backend\tests\test_ai_ask_stages.py','backend\tests\test_ai_answer_composer.py')`: passed after adding `decision_contract`.
 - `.\scripts\run-safe-validation.ps1 -Profile backend -BackendPytestArgs @('backend/tests/test_ai_p0_safety.py','backend/tests/test_ai_ask_refactor_modules.py','backend/tests/test_ai_decision_core.py','backend/tests/test_ai_technical_analysis.py','backend/tests/test_ai_decision_engine.py','backend/tests/test_ai_answer_composer.py','backend/tests/test_ai_ask_stages.py','backend/tests/test_ai_market_payload_contract.py','backend/tests/test_ai_freshness_guard.py','backend/tests/test_ai_supplemental_contexts.py','backend/tests/test_omi_mcp_server.py')`: 174 passed on 2026-07-19.
+- `.\scripts\run-safe-validation.ps1 -Profile backend -BackendPytestArgs <P0/P1 + decision core + MCP + TW/US/JP/KR market set>`: compileall passed, 321 tests passed, and `git diff --check` passed on 2026-07-19; logs: `.tmp/validation/20260719-194941`.
+- Current-code local DB smoke (no external refresh): TW 2330 monthly revenue `2026-04-01` is `availability=available`, `freshness=stale`, expected `2026-06-01`, and the human answer names the stale domain; US freshness keeps `market=US`; NVDA selects `yahoo_chart/current` while Alpha Vantage remains a stale fallback and the main passport remains `current`; ALL returns distinct TW/US/JP/KR/CRYPTO market states.
+- `run-safe-validation.ps1 -Profile backend` passed compileall, 230 targeted P0/P1/P2 tests, and `git diff --check`; logs: `.tmp/validation/20260719-202149`.
+- Migration regression explicitly downgraded a temporary SQLite database to `20260718_0036`, inserted one contaminated MOPS-history row and one legitimate source-date row, then upgraded to head and verified only the known fetch-date pollution was cleared.
 
 ## Decisions made
 
@@ -60,16 +76,21 @@
 - Add `analysis.decision_contract` as a normalized projection instead of moving or rewriting `analysis.human_answer`; this keeps existing callers compatible while giving Kuro/frontend a stable structured surface.
 - Keep P0 response changes additive: `ok`, `error`, and `next_context` extend `omi.ai.ask.v2`; existing response fields remain in place.
 - Treat invalid target identity and invalid directional price levels as hard answer-readiness boundaries, not wording-only warnings.
+- Treat availability, release-calendar freshness, and provider health as separate facts. A row existing in SQLite does not make it current, and an unused fallback provider does not define selected-evidence freshness.
+- Treat full-market breadth and OMI sample rankings as separate scopes. Legacy ranking keys remain for compatibility, but new consumers should prefer `sample_*` fields and display the sample count.
+- Treat `include_raw` as an MCP transport concern only. It may reduce payload size but may not bypass backend evidence construction, freshness checks, or trust policy.
+- Treat financial `period`, `released_at`, `filed_at`, and `raw_fetch_result.fetched_at` as distinct clocks; unknown source dates remain `null` rather than borrowing fetch time.
+- `allow_write` continues to gate report/memory or other user-data persistence. Allowed bounded external refresh may write market cache independently and is exposed as `writes_market_cache`, not as a user-data write.
+- A hard response deadline may return while a currently blocking provider call finishes in a daemon worker; the run exposes `cancellation_requested` and `background_completion_possible`, while Taiwan multi-step refreshes stop cooperatively at the next cancellation boundary.
 - Do not run the baseline test subset as part of this documentation-only pass; record the exact commands in `BaselineTestsAndGaps.md` for the first implementation session.
 
 ## Known issues / risks
 
-- Runtime API smoke checks were not run in this planning scaffold; backend liveness on `127.0.0.1:8400` must be verified before runtime-dependent milestones.
+- The listener already running on `127.0.0.1:8400` was not restarted, so HTTP smoke would exercise pre-change code. P1 used current-code direct DB smoke instead; restart and live API verification remain before publishing.
 - The first implementation milestone may reveal existing test failures unrelated to the decision-core work; those must be isolated before code changes continue.
 - Kuro still has a downstream fallback URL gap recorded in `ContractMap.md`; this implementation slice does not modify Kuro.
 - `decision_contract` v1 is intentionally a projection. Consumer adoption in OMI Ask UI and Kuro remains a follow-up.
 
 ## Next step
 
-- Run the full minimal AI contract set again after the docs update.
-- Next implementation slice: teach OMI Ask / Kuro consumers to prefer `analysis.decision_contract` when they need structured cards or spoken briefs, while preserving `analysis.human_answer.text` as direct reply text.
+- Continue with the reported P2 answer-quality and output-semantics issues while preserving the P0/P1 contract boundaries.

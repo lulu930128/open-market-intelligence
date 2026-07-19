@@ -50,7 +50,28 @@ class TaiwanRulesTests(unittest.TestCase):
             ),
             date(2026, 6, 4),
         )
-        self.assertIsNone(taiwan_rules.expected_date_for_dataset("monthly_revenue", now=now))
+        self.assertEqual(
+            taiwan_rules.expected_date_for_dataset("monthly_revenue", now=now),
+            date(2026, 4, 1),
+        )
+
+        insurance_extension_window = datetime(2026, 6, 11, 0, 1, tzinfo=TAIWAN_TZ)
+        self.assertEqual(
+            taiwan_rules.expected_date_for_dataset(
+                "monthly_revenue",
+                now=insurance_extension_window,
+            ),
+            date(2026, 4, 1),
+        )
+
+        after_conservative_deadline = datetime(2026, 6, 16, 0, 1, tzinfo=TAIWAN_TZ)
+        self.assertEqual(
+            taiwan_rules.expected_date_for_dataset(
+                "monthly_revenue",
+                now=after_conservative_deadline,
+            ),
+            date(2026, 5, 1),
+        )
 
     def test_equity_only_datasets_skip_etfs_and_warrants(self) -> None:
         spec = taiwan_rules.TAIWAN_DATASET_BY_KEY[taiwan_rules.TAIWAN_DATASET_MONTHLY_REVENUE]

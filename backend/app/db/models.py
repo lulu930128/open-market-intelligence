@@ -2066,7 +2066,10 @@ class FinancialMetricQuarterly(Base):
         index=True,
     )
 
+    # Compatibility alias for source-declared publication dates. Never use fetch time here.
     report_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    released_at: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    filed_at: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     fiscal_year: Mapped[int] = mapped_column(Integer, index=True)
     quarter: Mapped[int] = mapped_column(Integer, index=True)
     period: Mapped[str] = mapped_column(String(12), index=True)

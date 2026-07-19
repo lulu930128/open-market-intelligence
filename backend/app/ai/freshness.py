@@ -18,6 +18,7 @@ from app.market.taiwan_rules import (
     TAIWAN_DATASET_SPECS,
     TAIWAN_STOCK_MASTER_DATASET,
     TaiwanDatasetSpec,
+    expected_date_for_dataset as expected_taiwan_dataset_date,
     is_equity_only_dataset_required as _is_equity_only_dataset_required,
 )
 from app.market.calendar_status import expected_taiwan_trade_date
@@ -69,7 +70,7 @@ def _expected_date_for_dataset(key: str) -> date | None:
     if key == TAIWAN_DATASET_BROKER_BRANCH:
         return expected_broker_branch_date()
 
-    return None
+    return expected_taiwan_dataset_date(key)
 
 
 

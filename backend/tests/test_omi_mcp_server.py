@@ -123,6 +123,78 @@ class OmiMcpServerPayloadTests(unittest.TestCase):
 
         self.assertEqual(payload["mode"], "full")
 
+    def test_ask_include_raw_false_returns_bounded_transport_summary(self) -> None:
+        raw_response = {
+            "contract_version": "omi.ai.ask.v2",
+            "ok": True,
+            "analysis": {
+                "question_intent": "trend_view",
+                "selected_score": -5,
+                "selected_title": "偏弱",
+                "human_answer": {"headline": "NVDA 偏弱", "text": "結論：NVDA 偏弱"},
+            },
+            "result": {
+                "kind": "ai_data_envelope",
+                "data": {
+                    "compact": {
+                        "kind": "stock_compact_evidence",
+                        "target": {"type": "us_stock", "id": "NVDA"},
+                        "quote": {"price": 170},
+                        "technical": {"selected_score": -5},
+                        "financial_history": [{"period": f"202{i}Q1"} for i in range(20)],
+                    },
+                    "chart": [{"close": index} for index in range(500)],
+                },
+                "source_refs": [{"url": "https://example.invalid"}],
+            },
+            "tool_runs": [{"status": "completed", "raw_response": "x" * 10000}],
+        }
+
+        with patch.object(self.server, "_api_post", return_value=raw_response):
+            summary = self.server._call_tool(
+                "omi.ask",
+                {"question": "NVDA 怎麼看", "include_raw": False},
+            )
+
+        self.assertEqual(summary["kind"], "omi_ask_summary")
+        self.assertFalse(summary["raw_included"])
+        self.assertEqual(summary["analysis"]["human_answer"]["headline"], "NVDA 偏弱")
+        self.assertNotIn("result", summary)
+        self.assertNotIn("financial_history", summary["compact_evidence"])
+        self.assertLess(len(json.dumps(summary)), len(json.dumps(raw_response)) / 2)
+
+    def test_ask_include_raw_true_preserves_legacy_response(self) -> None:
+        raw_response = {"ok": True, "result": {"data": {"raw": [1, 2, 3]}}}
+        with patch.object(self.server, "_api_post", return_value=raw_response):
+            response = self.server._call_tool(
+                "omi.ask",
+                {"question": "2330", "include_raw": True},
+            )
+
+        self.assertIs(response, raw_response)
+
+    def test_ask_stream_include_raw_false_omits_event_and_evidence_arrays(self) -> None:
+        raw_response = {
+            "kind": "omi_stream_result",
+            "ok": True,
+            "events": [{"event": "delta", "data": {"text": "ready"}}],
+            "evidence": {"rows": list(range(100))},
+            "delta_text": "ready",
+            "final": {"ok": True, "analysis": {"human_answer": {"text": "ready"}}},
+            "error": None,
+        }
+        with patch.object(self.server, "_api_stream_post", return_value=raw_response):
+            response = self.server._call_tool(
+                "omi.ask_stream",
+                {"question": "2330", "include_raw": False},
+            )
+
+        self.assertEqual(response["kind"], "omi_stream_summary")
+        self.assertFalse(response["raw_included"])
+        self.assertNotIn("events", response)
+        self.assertNotIn("evidence", response)
+        self.assertEqual(response["final"]["analysis"]["human_answer"]["text"], "ready")
+
     def test_ask_schema_supports_cross_market_targets_and_market_data_params(self) -> None:
         properties = self.server.ASK_TOOL["inputSchema"]["properties"]
         target_enum = properties["target"]["properties"]["type"]["enum"]
@@ -210,6 +282,7 @@ class OmiMcpServerPayloadTests(unittest.TestCase):
         self.assertEqual(properties["payload_level"]["enum"], ["summary", "compact", "standard", "full"])
         self.assertEqual(properties["intraday_limit"]["maximum"], 500)
         self.assertEqual(properties["session_scope"]["enum"], ["regular", "extended", "all"])
+        self.assertTrue(properties["include_raw"]["default"])
         self.assertIn("payload_level", properties["market_data_params"]["properties"])
         self.assertIn("session_scope", properties["market_data_params"]["properties"])
 

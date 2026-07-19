@@ -1085,6 +1085,8 @@ class FinancialMetricQuarterlyRead(BaseModel):
     source_id: int
     raw_result_id: int
     report_date: date | None = None
+    released_at: date | None = None
+    filed_at: date | None = None
     fiscal_year: int
     quarter: int
     period: str

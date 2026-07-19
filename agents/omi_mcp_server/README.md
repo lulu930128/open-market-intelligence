@@ -73,7 +73,14 @@ answers, and `standard` or `full` only when the user explicitly needs a richer
 chart/evidence view. `intraday_limit` is bounded by the backend and should stay
 small for ChatGPT Web or voice use.
 
-The MCP schema also accepts `include_intraday`, `payload_level`, and
+`include_raw` controls the MCP transport response and defaults to `true` for
+backward compatibility. Set `include_raw=false` when a caller only needs the
+bounded human answer, selected decision fields, compact evidence status, and
+notable timeout/fallback tool runs. This projection omits full result packs,
+prompts, source-reference arrays, chart points, and raw provider responses; it
+does not change backend reasoning or freshness checks.
+
+The MCP schema also accepts `include_intraday`, `payload_level`, `include_raw`, and
 `intraday_limit` as top-level tool arguments. The server merges those values into
 `market_data_params` before calling OMI so ChatGPT clients do not need to build a
 nested JSON object for simple bounded requests.

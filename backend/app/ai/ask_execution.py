@@ -93,8 +93,13 @@ def _read_data_only(
 
     if scope_type == "data_freshness":
         target_id = _request_target_id(payload)
-        stock_id = target_id if _looks_like_stock_id(target_id) else None
-        return "omi.read_data_freshness", tools.read_data_freshness(db=db, stock_id=stock_id)
+        target = payload.target if isinstance(payload.target, dict) else {}
+        market = str(target.get("market") or "TW").strip().upper()
+        return "omi.read_data_freshness", tools.read_data_freshness(
+            db=db,
+            stock_id=target_id,
+            market=market,
+        )
 
     if scope_type == "stock":
         stock_id = _require_scope_id(payload, "stock")

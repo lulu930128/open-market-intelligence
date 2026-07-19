@@ -24,6 +24,7 @@ from app.ai.market_payload_contract import (
 from app.db.models import USDailyPrice, USSecCompanyFact, USStockMaster
 from app.market.calendar_status import build_us_calendar_status
 from app.observability.source_health_contract import summarize_source_health
+from app.us_market.chart_projection import filter_ohlc_source_rows
 from app.us_market.sources import normalize_us_symbol
 from app.us_market.symbols import us_instrument_type
 
@@ -34,6 +35,11 @@ class USContextDependencies:
     latest_profile: Callable[..., Any]
     scan_us_stock_gaps: Callable[..., dict[str, Any]]
     now: Callable[[], datetime]
+
+
+def _select_latest_daily(rows: list[USDailyPrice]) -> USDailyPrice | None:
+    canonical_rows = filter_ohlc_source_rows(rows)
+    return canonical_rows[-1] if canonical_rows else None
 
 
 def _latest_tool_result(tool_runs: list[dict[str, Any]], tool_name: str) -> dict[str, Any] | None:
@@ -280,6 +286,46 @@ def _project_source_health_for_instrument(
     return projected
 
 
+def _annotate_daily_provider_roles(
+    source_health: dict[str, Any],
+    *,
+    selected_provider: str | None,
+) -> dict[str, Any]:
+    entries: list[dict[str, Any]] = []
+    selected_entries: list[dict[str, Any]] = []
+    fallback_entries: list[dict[str, Any]] = []
+    for raw_entry in source_health.get("entries") or []:
+        if not isinstance(raw_entry, dict):
+            continue
+        entry = dict(raw_entry)
+        if entry.get("resource") == "daily_price":
+            role = "selected" if entry.get("provider") == selected_provider else "fallback"
+            entry["provider_role"] = role
+            if role == "selected":
+                selected_entries.append(entry)
+            else:
+                fallback_entries.append(entry)
+        else:
+            entry["provider_role"] = "supporting"
+        entries.append(entry)
+
+    annotated = dict(source_health)
+    annotated["entries"] = entries
+    annotated["selected_provider"] = selected_provider
+    annotated["selected_provider_status"] = (
+        selected_entries[0].get("status") if selected_entries else "missing"
+    )
+    annotated["selected_evidence_summary"] = summarize_source_health(
+        selected_entries,
+        counted_statuses=("empty", "stale", "error"),
+    )
+    annotated["fallback_provider_summary"] = summarize_source_health(
+        fallback_entries,
+        counted_statuses=("empty", "stale", "error"),
+    )
+    return annotated
+
+
 def read_us_stock_context(
     db: Session,
     *,
@@ -310,6 +356,8 @@ def read_us_stock_context(
         symbol=normalized_symbol,
         limit=daily_limit,
     )
+    latest_daily = _select_latest_daily(daily_rows)
+    selected_daily_provider = latest_daily.provider if latest_daily else None
     profile = None if is_index else dependencies.latest_profile(db, normalized_symbol)
     sec_summary: dict[str, Any] | None = None
     sec_warning: str | None = None
@@ -341,7 +389,10 @@ def read_us_stock_context(
         source_health,
         instrument_type=instrument_type,
     )
-    latest_daily = daily_rows[0] if daily_rows else None
+    source_health = _annotate_daily_provider_roles(
+        source_health,
+        selected_provider=selected_daily_provider,
+    )
     warnings = list(gaps.get("warnings") or [])
     missing = list(gaps.get("missing") or [])
     if is_index:
@@ -391,9 +442,19 @@ def read_us_stock_context(
     for entry in source_health.get("entries") or []:
         if not isinstance(entry, dict) or entry.get("status") != "stale":
             continue
-        warnings.append(
-            f"US source health stale: {entry.get('resource')} via {entry.get('provider')} - {entry.get('reason')}"
-        )
+        provider_role = entry.get("provider_role")
+        if entry.get("resource") == "daily_price" and provider_role == "fallback":
+            warnings.append(
+                f"US fallback provider stale: daily_price via {entry.get('provider')} - {entry.get('reason')}"
+            )
+        elif entry.get("resource") == "daily_price" and provider_role == "selected":
+            warnings.append(
+                f"US selected provider stale: daily_price via {entry.get('provider')} - {entry.get('reason')}"
+            )
+        else:
+            warnings.append(
+                f"US source health stale: {entry.get('resource')} via {entry.get('provider')} - {entry.get('reason')}"
+            )
 
     source_refs: list[dict[str, Any]] = []
     for row in daily_rows[:3]:
@@ -498,6 +559,9 @@ def read_us_stock_context(
                 "requested_include_intraday": intraday_requested,
             } if chart else {},
             "source_health": source_health.get("summary"),
+            "selected_provider": selected_daily_provider,
+            "selected_provider_status": source_health.get("selected_provider_status"),
+            "fallback_provider_summary": source_health.get("fallback_provider_summary"),
         },
         "data": {
             "stock": _row_dict(
@@ -587,6 +651,7 @@ def read_us_stock_context(
             "bars": bars,
             "payload_level": payload_level,
             "requested_provider": provider,
+            "selected_provider": selected_daily_provider,
             "intraday": intraday_summary or {},
             "include_intraday": intraday_requested,
             "intraday_available": bool(intraday_quote),
@@ -602,10 +667,18 @@ def read_us_stock_context(
                 if intraday_requested
                 else "not_requested"
             ),
-            "source_health": source_health.get("summary"),
+            "source_health": source_health.get("selected_evidence_summary"),
         },
         payload_level=payload_level,
     )
+    envelope["data"]["compact"]["provider_selection"] = {
+        "selected_provider": {
+            "name": selected_daily_provider,
+            "status": source_health.get("selected_provider_status"),
+        },
+        "fallback_providers": source_health.get("fallback_provider_summary"),
+        "provider_health": source_health.get("summary"),
+    }
     envelope["data"]["compact"]["intraday_bars"] = intraday_bars
     envelope["evidence_passport"] = build_evidence_passport(
         kind="us_stock_context",

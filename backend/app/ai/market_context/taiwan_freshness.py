@@ -17,6 +17,7 @@ from app.db.models import (
     MonthlyRevenue,
     ShareholdingDistributionWeekly,
 )
+from app.market.taiwan_rules import expected_date_for_dataset
 
 
 def _json_value(value: Any) -> Any:
@@ -38,12 +39,38 @@ def _latest_financial_period(row: FinancialMetricQuarterly | None) -> str | None
     return row.period or f"{row.fiscal_year}Q{row.quarter}"
 
 
+def _table_state(
+    *,
+    latest: Any,
+    row_count: int,
+    expected: date | None,
+) -> dict[str, Any]:
+    availability = "available" if latest is not None and row_count > 0 else "missing"
+    if availability == "missing":
+        freshness = "missing"
+    elif expected is None:
+        freshness = "unknown"
+    elif isinstance(latest, date) and latest >= expected:
+        freshness = "current"
+    else:
+        freshness = "stale"
+    return {
+        "latest": _json_value(latest),
+        "row_count": row_count,
+        "availability": availability,
+        "freshness": freshness,
+        "expected": _json_value(expected),
+    }
+
+
 def read_data_freshness(
     db: Session,
     stock_id: str | None = None,
     *,
     now: Callable[[], datetime],
 ) -> dict[str, Any]:
+    checked_at = now()
+
     def latest(model: Any, column: Any) -> Any:
         query = db.query(func.max(column))
         if stock_id and hasattr(model, "stock_id"):
@@ -73,81 +100,118 @@ def read_data_freshness(
         .first()
     )
 
-    tables = {
-        "market_daily_price": {
-            "latest": _json_value(latest(MarketDailyPrice, MarketDailyPrice.trade_date)),
-            "row_count": count(MarketDailyPrice),
-        },
-        "institutional_trade_daily": {
-            "latest": _json_value(latest(InstitutionalTradeDaily, InstitutionalTradeDaily.trade_date)),
-            "row_count": count(InstitutionalTradeDaily),
-        },
-        "margin_trading_daily": {
-            "latest": _json_value(latest(MarginTradingDaily, MarginTradingDaily.trade_date)),
-            "row_count": count(MarginTradingDaily),
-        },
-        "broker_branch_trade_daily": {
-            "latest": _json_value(latest(BrokerBranchTradeDaily, BrokerBranchTradeDaily.trade_date)),
-            "row_count": count(BrokerBranchTradeDaily),
-        },
-        "shareholding_distribution_weekly": {
-            "latest": _json_value(
-                latest(ShareholdingDistributionWeekly, ShareholdingDistributionWeekly.data_date)
-            ),
-            "row_count": count(ShareholdingDistributionWeekly),
-        },
-        "monthly_revenue": {
-            "latest": _json_value(latest(MonthlyRevenue, MonthlyRevenue.period)),
-            "row_count": count(MonthlyRevenue),
-        },
-        "financial_metric_quarterly": {
-            "latest": _latest_financial_period(financial_latest),
-            "row_count": count(FinancialMetricQuarterly),
-        },
+    table_values = {
+        "market_daily_price": (
+            latest(MarketDailyPrice, MarketDailyPrice.trade_date),
+            count(MarketDailyPrice),
+        ),
+        "institutional_trade_daily": (
+            latest(InstitutionalTradeDaily, InstitutionalTradeDaily.trade_date),
+            count(InstitutionalTradeDaily),
+        ),
+        "margin_trading_daily": (
+            latest(MarginTradingDaily, MarginTradingDaily.trade_date),
+            count(MarginTradingDaily),
+        ),
+        "broker_branch_trade_daily": (
+            latest(BrokerBranchTradeDaily, BrokerBranchTradeDaily.trade_date),
+            count(BrokerBranchTradeDaily),
+        ),
+        "shareholding_distribution_weekly": (
+            latest(ShareholdingDistributionWeekly, ShareholdingDistributionWeekly.data_date),
+            count(ShareholdingDistributionWeekly),
+        ),
+        "monthly_revenue": (
+            latest(MonthlyRevenue, MonthlyRevenue.period),
+            count(MonthlyRevenue),
+        ),
+        "financial_metric_quarterly": (
+            _latest_financial_period(financial_latest),
+            count(FinancialMetricQuarterly),
+        ),
     }
-    missing = [name for name, info in tables.items() if not info["latest"] or info["row_count"] == 0]
+    tables = {
+        name: _table_state(
+            latest=latest_value,
+            row_count=row_count,
+            expected=expected_date_for_dataset(name, now=checked_at),
+        )
+        for name, (latest_value, row_count) in table_values.items()
+    }
+    missing = [name for name, info in tables.items() if info["availability"] == "missing"]
+    stale = [name for name, info in tables.items() if info["freshness"] == "stale"]
+    unknown = [name for name, info in tables.items() if info["freshness"] == "unknown"]
+    overall_freshness = (
+        "missing"
+        if missing
+        else "stale"
+        if stale
+        else "unknown"
+        if unknown
+        else "current"
+    )
     warnings = [
         "Freshness is based on the local OMI database, not direct exchange availability.",
     ]
+    if stale:
+        warnings.append(f"Stale local datasets: {', '.join(stale)}.")
+    if unknown:
+        warnings.append(f"Freshness calendar is not defined for: {', '.join(unknown)}.")
+    slot_status = {
+        "current": "ready",
+        "stale": "stale",
+        "unknown": "partial",
+        "missing": "missing",
+    }
     slots = {
         name: slot_envelope(
-            status="ready" if info["latest"] and info["row_count"] else "missing",
+            status=slot_status[info["freshness"]],
             capability=f"local_table_{name}",
             payload_ref=f"tables.{name}",
             payload_level="compact",
             as_of=info["latest"],
-            missing=[name] if not info["latest"] or not info["row_count"] else None,
+            missing=[name] if info["availability"] == "missing" else None,
+            warnings=(
+                [f"availability={info['availability']}; freshness={info['freshness']}"]
+                if info["freshness"] != "current"
+                else None
+            ),
         )
         for name, info in tables.items()
     }
     slots["data_quality"] = slot_envelope(
-        status="partial" if missing else "ready",
+        status="partial" if missing or stale or unknown else "ready",
         capability="local_database_coverage",
         payload_ref="tables",
         payload_level="compact",
         priority="core",
         missing=missing,
-        warnings=["table availability does not prove exchange-current freshness"],
+        warnings=["table availability does not prove exchange-current freshness", *warnings[1:]],
     )
     compact = {
         "kind": "data_freshness_compact_evidence",
         "version": "market_compact_evidence.v1",
         "payload_level": "compact",
         "target": {"type": "data_freshness", "id": stock_id, "market": "TW"},
+        "status": overall_freshness,
         "tables": tables,
         "freshness_by_domain": {
-            name: slot["status"]
-            for name, slot in slots.items()
-            if name != "data_quality"
+            name: info["freshness"]
+            for name, info in tables.items()
         },
         "slots": slots,
     }
     envelope = {
         "kind": "data_freshness",
-        "generated_at": now(),
+        "generated_at": checked_at,
         "as_of": _latest_date_string([info["latest"] for info in tables.values()]),
         "scope": {"stock_id": stock_id},
-        "data": {"tables": tables, "compact": compact, "slots": slots},
+        "data": {
+            "status": overall_freshness,
+            "tables": tables,
+            "compact": compact,
+            "slots": slots,
+        },
         "missing": missing,
         "warnings": warnings,
         "source_refs": [{"type": "database", "name": "open_market_intelligence.db"}],
@@ -159,7 +223,8 @@ def read_data_freshness(
         missing=missing,
         warnings=warnings,
         freshness={
-            "is_current": not missing,
+            "status": overall_freshness,
+            "is_current": False if stale else True if not missing and not unknown else None,
             "missing": missing,
             "warnings": warnings,
         },

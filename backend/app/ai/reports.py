@@ -485,6 +485,7 @@ def _market_row_labels(rows: list[dict[str, Any]], *, include_pct: bool = True) 
 def _compact_market_summary(overview: dict[str, Any]) -> dict[str, Any]:
     data = overview.get("data") if isinstance(overview.get("data"), dict) else {}
     breadth = data.get("breadth") if isinstance(data.get("breadth"), dict) else {}
+    sample_breadth = data.get("sample_breadth") if isinstance(data.get("sample_breadth"), dict) else {}
     distribution = data.get("distribution") if isinstance(data.get("distribution"), dict) else {}
     index_intraday = data.get("index_intraday") if isinstance(data.get("index_intraday"), dict) else {}
     slots = data.get("slots") if isinstance(data.get("slots"), dict) else {}
@@ -516,6 +517,12 @@ def _compact_market_summary(overview: dict[str, Any]) -> dict[str, Any]:
     industry_strength_label = str(
         data.get("industry_strength_label") or "產業相對表現"
     )
+    sample_count = sample_breadth.get("total_count")
+    sample_scope_label = (
+        f"OMI {sample_count} 檔追蹤樣本"
+        if isinstance(sample_count, int)
+        else "OMI 追蹤樣本"
+    )
 
     advance_count = breadth.get("advance_count")
     decline_count = breadth.get("decline_count")
@@ -544,10 +551,16 @@ def _compact_market_summary(overview: dict[str, Any]) -> dict[str, Any]:
     ]
     human_sections = [
         {"label": breadth_label, "text": breadth_line},
-        {"label": "上漲股", "text": _market_row_labels(top_gainers)},
-        {"label": "弱勢股", "text": _market_row_labels(top_losers)},
-        {"label": "成交值", "text": _market_row_labels(value_leaders, include_pct=False)},
-        {"label": industry_strength_label, "text": "、".join(industry_labels) or "無可用資料"},
+        {"label": f"{sample_scope_label}上漲股", "text": _market_row_labels(top_gainers)},
+        {"label": f"{sample_scope_label}弱勢股", "text": _market_row_labels(top_losers)},
+        {
+            "label": f"{sample_scope_label}成交值",
+            "text": _market_row_labels(value_leaders, include_pct=False),
+        },
+        {
+            "label": f"{sample_scope_label}{industry_strength_label}",
+            "text": "、".join(industry_labels) or "無可用資料",
+        },
     ]
     if index_intraday.get("enabled"):
         index_labels = []
@@ -581,12 +594,18 @@ def _compact_market_summary(overview: dict[str, Any]) -> dict[str, Any]:
             "text": "\n".join(human_lines),
         },
         "breadth": breadth,
+        "sample_breadth": sample_breadth,
         "distribution": distribution,
         "top_gainers": top_gainers,
         "top_losers": top_losers,
         "value_leaders": value_leaders,
         "top_industries": top_industries,
         "weak_industries": weak_industries,
+        "sample_top_gainers": top_gainers,
+        "sample_top_losers": top_losers,
+        "sample_value_leaders": value_leaders,
+        "sample_top_industries": top_industries,
+        "sample_weak_industries": weak_industries,
         "industry_strength_label": industry_strength_label,
         "index_intraday": index_intraday,
         "slots": slots,

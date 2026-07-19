@@ -246,6 +246,11 @@ class AiFreshnessGuardTests(unittest.TestCase):
                 patch.object(freshness, "expected_institutional_trade_date", return_value=date(2026, 5, 29)),
                 patch.object(freshness, "expected_margin_trade_date", return_value=date(2026, 5, 29)),
                 patch.object(freshness, "expected_broker_branch_date", return_value=date(2026, 5, 29)),
+                patch.object(
+                    freshness,
+                    "expected_taiwan_dataset_date",
+                    side_effect=lambda key: date(2026, 4, 1) if key == "monthly_revenue" else None,
+                ),
             ):
                 result = freshness.check_stock_data_freshness(db=db, stock_id="2330")
 
@@ -274,6 +279,11 @@ class AiFreshnessGuardTests(unittest.TestCase):
                 patch.object(freshness, "expected_institutional_trade_date", return_value=date(2026, 5, 29)),
                 patch.object(freshness, "expected_margin_trade_date", return_value=date(2026, 5, 29)),
                 patch.object(freshness, "expected_broker_branch_date", return_value=date(2026, 5, 29)),
+                patch.object(
+                    freshness,
+                    "expected_taiwan_dataset_date",
+                    side_effect=lambda key: date(2026, 4, 1) if key == "monthly_revenue" else None,
+                ),
             ):
                 result = freshness.check_stock_data_freshness(db=db, stock_id="2330")
 
@@ -728,6 +738,17 @@ class AiFreshnessGuardTests(unittest.TestCase):
                 response["result"]["data"]["compact"]["sample_breadth"]["label"],
                 "OMI 樣本股廣度",
             )
+            self.assertEqual(
+                response["result"]["data"]["compact"]["sample_breadth"]["total_count"],
+                3,
+            )
+            self.assertEqual(
+                response["result"]["sample_top_gainers"],
+                response["result"]["top_gainers"],
+            )
+            human_text = response["analysis"]["human_answer"]["text"]
+            self.assertIn("OMI 3 檔追蹤樣本上漲股", human_text)
+            self.assertNotIn("\n上漲股：", human_text)
             self.assertTrue(response["analysis"]["human_answer"]["summary"])
             self.assertFalse(
                 any("does not have a brief" in warning for warning in response["warnings"])

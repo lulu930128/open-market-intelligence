@@ -597,7 +597,11 @@ def build_compact_context_consumer_answer(
 ) -> dict[str, Any]:
     english = response_is_english(response_preferences)
     japanese = response_is_japanese(response_preferences)
-    label = text_value(target.get("label")) or text_value(target.get("id")) or "OMI"
+    label = (
+        text_value(target.get("label"))
+        or text_value(target.get("id"))
+        or target_fallback_label(response_preferences)
+    )
     counts = analysis_digest.get("slot_status_counts") if isinstance(analysis_digest.get("slot_status_counts"), dict) else {}
     ready_slots = text_list(analysis_digest.get("ready_slots"))
     problem_slots = [
@@ -615,30 +619,36 @@ def build_compact_context_consumer_answer(
     )
     if english:
         status_summary = f"Slot status: {status_line or 'no declared slots'}."
-        ready_summary = "Ready: " + (", ".join(ready_slots[:6]) if ready_slots else "none") + "."
-        problem_summary = "Needs attention: " + (
+        ready_text = ", ".join(ready_slots[:6]) if ready_slots else "none"
+        problem_text = (
             ", ".join(f"{item.get('key')}={item.get('status')}" for item in problem_slots[:6])
             if problem_slots
             else "none"
-        ) + "."
+        )
+        ready_summary = f"Ready: {ready_text}."
+        problem_summary = f"Needs attention: {problem_text}."
         headline = f"{label} data status"
     elif japanese:
         status_summary = f"スロット状態：{status_line or '宣言済みスロットなし'}。"
-        ready_summary = "利用可能：" + ("、".join(ready_slots[:6]) if ready_slots else "なし") + "。"
-        problem_summary = "要確認：" + (
+        ready_text = "、".join(ready_slots[:6]) if ready_slots else "なし"
+        problem_text = (
             "、".join(f"{item.get('key')}={item.get('status')}" for item in problem_slots[:6])
             if problem_slots
             else "なし"
-        ) + "。"
+        )
+        ready_summary = f"利用可能：{ready_text}。"
+        problem_summary = f"要確認：{problem_text}。"
         headline = f"{label} データ状態"
     else:
         status_summary = f"欄位狀態：{status_line or '尚未宣告欄位'}。"
-        ready_summary = "可用：" + ("、".join(ready_slots[:6]) if ready_slots else "無") + "。"
-        problem_summary = "需處理：" + (
+        ready_text = "、".join(ready_slots[:6]) if ready_slots else "無"
+        problem_text = (
             "、".join(f"{item.get('key')}={item.get('status')}" for item in problem_slots[:6])
             if problem_slots
             else "無"
-        ) + "。"
+        )
+        ready_summary = f"可用：{ready_text}。"
+        problem_summary = f"需處理：{problem_text}。"
         headline = f"{label} 資料狀態"
 
     number_parts = [
@@ -662,20 +672,20 @@ def build_compact_context_consumer_answer(
     )
     if english:
         action_plan = [
-            {"label": "Available", "text": ready_summary},
-            {"label": "Gaps", "text": problem_summary},
+            {"label": "Available", "text": ready_text},
+            {"label": "Gaps", "text": problem_text},
             {"label": "Next", "text": next_fill or "Use the declared refresh/provider path for missing or stale slots."},
         ]
     elif japanese:
         action_plan = [
-            {"label": "利用可能", "text": ready_summary},
-            {"label": "不足", "text": problem_summary},
+            {"label": "利用可能", "text": ready_text},
+            {"label": "不足", "text": problem_text},
             {"label": "次", "text": next_fill or "欠損または遅延スロットは宣言済みのrefresh/provider経路で補完します。"},
         ]
     else:
         action_plan = [
-            {"label": "可用", "text": ready_summary},
-            {"label": "缺口", "text": problem_summary},
+            {"label": "可用", "text": ready_text},
+            {"label": "缺口", "text": problem_text},
             {"label": "下一步", "text": next_fill or "缺失或過期欄位應走已宣告的 refresh/provider 路徑補齊。"},
         ]
     confidence = text_value(analysis_digest.get("selected_confidence"))
@@ -702,6 +712,85 @@ def build_compact_context_consumer_answer(
     return answer
 
 
+def _broker_branch_rows_text(rows: Any, *, empty_text: str) -> str:
+    if not isinstance(rows, list):
+        return empty_text
+    labels: list[str] = []
+    for row in rows[:3]:
+        if not isinstance(row, dict):
+            continue
+        branch = text_value(row.get("branch_name")) or text_value(row.get("branch_code"))
+        net_lots = row.get("net_lots")
+        if branch:
+            labels.append(f"{branch}（淨額 {net_lots} 張）" if net_lots is not None else branch)
+    return "、".join(labels) or empty_text
+
+
+def build_broker_branch_consumer_answer(
+    *,
+    target: dict[str, Any],
+    analysis_digest: dict[str, Any],
+    missing: list[Any],
+    warnings: list[Any],
+    summary_limit: int,
+    response_preferences: dict[str, Any] | None,
+) -> dict[str, Any]:
+    compact = analysis_digest.get("compact_evidence") if isinstance(analysis_digest.get("compact_evidence"), dict) else {}
+    chips = compact.get("chips") if isinstance(compact.get("chips"), dict) else {}
+    broker = chips.get("broker_branch") if isinstance(chips.get("broker_branch"), dict) else {}
+    label = text_value(target.get("label")) or text_value(target.get("id")) or target_fallback_label(response_preferences)
+    available_days = broker.get("available_days")
+    requested_days = broker.get("requested_days")
+    trade_date = broker.get("trade_date")
+    english = response_is_english(response_preferences)
+    japanese = response_is_japanese(response_preferences)
+    if english:
+        headline = f"{label} broker-branch flow"
+        coverage = f"Coverage: {available_days or 0}/{requested_days or 0} trading days; latest {trade_date or 'unavailable'}."
+        empty_text = "No branch rows available"
+        buy_label, sell_label = "Top net buyers", "Top net sellers"
+    elif japanese:
+        headline = f"{label} 証券会社支店別フロー"
+        coverage = f"対象期間：{available_days or 0}/{requested_days or 0}営業日、最新 {trade_date or 'データなし'}。"
+        empty_text = "支店データなし"
+        buy_label, sell_label = "主要買い越し支店", "主要売り越し支店"
+    else:
+        headline = f"{label} 分點主要買賣方"
+        coverage = f"涵蓋 {available_days or 0}/{requested_days or 0} 個交易日；最新日期 {trade_date or '無資料'}。"
+        empty_text = "無可用分點資料"
+        buy_label, sell_label = "主要買超分點", "主要賣超分點"
+    buy_text = _broker_branch_rows_text(broker.get("buy_top"), empty_text=empty_text)
+    sell_text = _broker_branch_rows_text(broker.get("sell_top"), empty_text=empty_text)
+    answer = {
+        "kind": "consumer_market_answer",
+        "style": "broker_branch_summary",
+        "source": "compact_evidence.chips.broker_branch",
+        "headline": headline,
+        "stance": None,
+        "stance_label": undecided_label(response_preferences),
+        "confidence": "medium" if broker.get("buy_top") or broker.get("sell_top") else "low",
+        "confidence_label": confidence_label(
+            "medium" if broker.get("buy_top") or broker.get("sell_top") else "low",
+            response_preferences,
+        ),
+        "summary": [coverage, f"{buy_label}：{buy_text}", f"{sell_label}：{sell_text}"][:summary_limit],
+        "action_plan": [],
+        "risks": [],
+        "data_limits": generic_data_limits(
+            missing=missing,
+            warnings=warnings,
+            response_preferences=response_preferences,
+        ),
+        "detail": "\n".join([coverage, f"{buy_label}：{buy_text}", f"{sell_label}：{sell_text}"]),
+    }
+    answer["text"] = consumer_text(
+        answer,
+        summary_limit=summary_limit,
+        response_preferences=response_preferences,
+    )
+    return answer
+
+
 def build_consumer_human_answer(
     *,
     question_intent: str,
@@ -714,6 +803,23 @@ def build_consumer_human_answer(
     summary_limit: int = SUMMARY_LIMIT_DEFAULT,
     response_preferences: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if question_intent == "broker_branch":
+        answer = build_broker_branch_consumer_answer(
+            target=target,
+            analysis_digest=analysis_digest,
+            missing=missing,
+            warnings=warnings,
+            summary_limit=summary_limit,
+            response_preferences=response_preferences,
+        )
+        return append_source_health_data_limits(
+            answer,
+            analysis_digest=analysis_digest,
+            missing=missing,
+            warnings=warnings,
+            response_preferences=response_preferences,
+        )
+
     if position_decision:
         answer = build_position_decision_consumer_answer(
             position_decision=position_decision,

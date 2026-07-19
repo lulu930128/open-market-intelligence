@@ -77,7 +77,8 @@ Core fields:
   - Does not authorize frontend/MCP/Kuro to call market APIs directly.
 - `market_data_params`
   - Optional bounded market-data shape controls.
-  - Current shared controls include `include_intraday`, `payload_level`, and `intraday_limit`.
+  - Current shared controls include `include_intraday`, `payload_level`, `intraday_limit`, and MCP transport-only `include_raw`.
+  - `include_raw=false` returns a bounded MCP projection with the human answer, selected decision fields, compact evidence status, and notable timeout/fallback runs; it omits full result packs and raw provider payloads.
   - Frontend/MCP/Kuro may request a smaller or richer payload, but backend owns freshness, slot status, provider policy, and final projection.
 - `tool_budget`
   - Controls maximum calls, external fetches, and total seconds.
@@ -142,6 +143,13 @@ Related productized payload design:
 
 - `docs/agent-runs/productized-market-payload-contract/ContractDesign.md`
   - Defines `payload_level`, canonical market data slots, slot status values, and the migration path for ChatGPT Web / MCP / Kuro consumers.
+
+## 財務日期語意
+
+- `financial_metric_quarterly.period` / `fiscal_year` / `quarter` identify the accounting period.
+- `released_at` and `filed_at` are source-declared dates only; `report_date` remains a deprecated compatibility alias for `released_at`.
+- Fetch time stays on `raw_fetch_result.fetched_at` and must never be projected as a report release date.
+- Full rules and migration behavior are documented in `docs/architecture/FinancialDateSemantics.md`.
 
 ## Analysis Contract
 
@@ -266,6 +274,16 @@ Taiwan-first rule:
 
 - Data freshness must respect Taiwan trading day, dataset frequency, holidays, session status, and partial provider coverage.
 
+P1 freshness semantics:
+
+- `availability`: whether local rows exist for the requested scope.
+- `freshness`: `current`, `stale`, `unknown`, or `missing` according to a dataset release calendar or an explicit TTL policy.
+- `expected`: the latest conservatively expected dataset date/period; it must not be inferred from row existence.
+- Taiwan monthly revenue uses a market-wide conservative deadline of the 15th because 2026 rules allow insurers and public companies with an insurance subsidiary to file by then.
+- Official basis: [TWSE public-company filing schedule](https://twse-regulation.twse.com.tw/m/Controls/GetFile.ashx?FID=0000366147) and the [FSC special filing rules](https://law.fsc.gov.tw/EngLawContent.aspx?id=2800&lan=C).
+- `data_freshness.target.market` is preserved end to end. Supported outward values are `TW`, `US`, `JP`, `KR`, `CRYPTO`, and `ALL`; unsupported explicit markets must not fall back to TW.
+- US daily evidence names `selected_provider`, `selected_provider_status`, `fallback_provider_summary`, and overall `provider_health` separately. Only selected-evidence staleness controls the main freshness judgment.
+
 ## Tool Refresh Contract
 
 Responsible module:
@@ -281,12 +299,22 @@ Current tool concepts:
 - `tool_runs`
 - external fetch marker
 - cache-write marker
+- market-cache versus user-data-write markers
+- timeout/cancellation/fallback markers
 
 Default budget:
 
 - `max_calls`: 5
 - `max_external_fetches`: 3
 - `max_total_seconds`: 25
+
+Wall-clock rule:
+
+- `max_total_seconds` is a response deadline, not only a planning hint.
+- A tool that crosses the remaining deadline returns `status=timeout`; it must not be labeled success.
+- `fallback_to_cached=true` is reflected by `fallback_used` and `cached_data_returned`.
+- `cancellation_requested` and `background_completion_possible` make the worker boundary explicit for consumers.
+- `writes_market_cache` does not imply `writes_user_data`; report/memory writes remain behind the separate write policy.
 
 Hard rules:
 

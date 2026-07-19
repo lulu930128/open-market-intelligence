@@ -105,6 +105,16 @@ Useful gap checks:
 - Verify Taiwan holiday/session behavior against real recent dates before changing date logic.
 - Keep expected-date tests deterministic; avoid relying on live provider state.
 
+### `backend/tests/test_ai_p1_reliability.py`
+
+Protects:
+
+- `available` does not imply `current` for monthly revenue.
+- `data_freshness` preserves US/JP/KR/CRYPTO/ALL market scope and rejects unsupported markets.
+- Existing canonical US provider selection is reused, while stale fallback health remains separate.
+- The wall-clock deadline returns `timeout` and exposes cached fallback/cancellation state.
+- Expected dates alone are not counted as cached evidence.
+
 ### `backend/tests/test_omi_mcp_server.py`
 
 Protects:
@@ -150,3 +160,4 @@ Useful gap checks:
 - 2026-07-07: `analysis.decision_contract` v1 was added as an additive projection, with targeted regression coverage in `backend/tests/test_ai_ask_stages.py`.
 - Runtime API smoke checks were not run in this implementation slice because the change is response assembly / contract projection and the bounded backend tests covered the affected path.
 - 2026-07-19: Added `test_ai_p0_safety.py` for cost-vs-symbol parsing, target conflicts, `TARGET_NOT_FOUND`, follow-up inheritance, directional price invariants, and action-plan blocking. The focused AI/MCP set passed 174 tests.
+- 2026-07-19: Added `test_ai_p1_reliability.py`; the bounded P0/P1, decision-core, MCP, and TW/US/JP/KR market suite passed 321 tests through the safe-validation wrapper.

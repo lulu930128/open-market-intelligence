@@ -165,6 +165,33 @@ def expected_shareholding_distribution_date(
     return current_date - timedelta(days=days_since_friday)
 
 
+def expected_monthly_revenue_period(
+    *,
+    include_today: bool | None = None,
+    now: datetime | None = None,
+) -> date:
+    """Return the latest revenue month whose filing deadline has passed.
+
+    Most Taiwan public companies file by the 10th day of the following month.
+    From 2026, insurers and public companies with an insurance subsidiary can
+    file by the 15th.  Because this table-level check does not know the issuer's
+    exemption status, use the 15th as the conservative market-wide deadline.
+    ``MonthlyRevenue.period`` stores the first day of the revenue month.
+    """
+    del include_today
+    local_now = now or datetime.now(TAIWAN_TZ)
+    if local_now.tzinfo is not None:
+        local_now = local_now.astimezone(TAIWAN_TZ)
+
+    month_offset = 1 if local_now.day > 15 else 2
+    year = local_now.year
+    month = local_now.month - month_offset
+    while month <= 0:
+        year -= 1
+        month += 12
+    return date(year, month, 1)
+
+
 TAIWAN_DATASET_DAILY_PRICE = "market_daily_price"
 TAIWAN_DATASET_INSTITUTIONAL_TRADE = "institutional_trade_daily"
 TAIWAN_DATASET_MARGIN_TRADING = "margin_trading_daily"
@@ -232,6 +259,7 @@ TAIWAN_DATASET_SPECS: tuple[TaiwanDatasetSpec, ...] = (
         frequency="monthly",
         model=MonthlyRevenue,
         latest_column=MonthlyRevenue.period,
+        has_expected_date=True,
         equity_only=True,
         refresh_step=TAIWAN_REFRESH_MONTHLY_REVENUE,
     ),
@@ -280,6 +308,12 @@ _EXPECTED_DATE_BY_DATASET: dict[
     ),
     TAIWAN_DATASET_SHAREHOLDING_DISTRIBUTION: (
         lambda include_today, now: expected_shareholding_distribution_date(
+            include_today=include_today,
+            now=now,
+        )
+    ),
+    TAIWAN_DATASET_MONTHLY_REVENUE: (
+        lambda include_today, now: expected_monthly_revenue_period(
             include_today=include_today,
             now=now,
         )
@@ -370,6 +404,7 @@ __all__ = [
     "expected_date_for_dataset",
     "expected_institutional_trade_date",
     "expected_margin_trade_date",
+    "expected_monthly_revenue_period",
     "expected_shareholding_distribution_date",
     "is_equity_only_dataset_required",
     "normalize_refresh_profile",

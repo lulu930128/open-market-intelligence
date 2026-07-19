@@ -135,9 +135,9 @@ UNDECIDED_LABELS = {
     "ja-JP": "未定",
 }
 TARGET_FALLBACK_LABELS = {
-    "zh-TW": "目前標的",
-    "en-US": "Current target",
-    "ja-JP": "現在の対象",
+    "zh-TW": "市場",
+    "en-US": "Market",
+    "ja-JP": "市場",
 }
 SUMMARY_LIMIT_DEFAULT = 3
 

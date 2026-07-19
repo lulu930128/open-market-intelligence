@@ -78,7 +78,9 @@ def _compact_intraday_bars(
                 range_value="1d",
                 refresh=True,
             )
-            series[interval] = _compact_intraday_history(history, point_limit=point_limit)
+            compact_history = _compact_intraday_history(history, point_limit=point_limit)
+            series[interval] = compact_history
+            warnings.extend(str(item) for item in compact_history.get("warnings") or [])
         except Exception as exc:
             warnings.append(f"{interval} intraday bars unavailable: {exc}")
             series[interval] = {
@@ -292,7 +294,8 @@ def read_stock_context(
             getattr(latest_margin, "trade_date", None),
             branch_summary.get("trade_date"),
             getattr(latest_revenue, "period", None),
-            getattr(latest_financial, "report_date", None),
+            getattr(latest_financial, "released_at", None)
+            or getattr(latest_financial, "report_date", None),
             overnight_impact.get("as_of") if isinstance(overnight_impact, dict) else None,
         ]
     )
@@ -515,6 +518,8 @@ def read_stock_context(
                 (
                     "period",
                     "report_date",
+                    "released_at",
+                    "filed_at",
                     "revenue",
                     "gross_profit",
                     "operating_income",
@@ -531,6 +536,8 @@ def read_stock_context(
                     (
                         "period",
                         "report_date",
+                        "released_at",
+                        "filed_at",
                         "revenue",
                         "gross_profit",
                         "operating_income",

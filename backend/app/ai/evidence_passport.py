@@ -175,6 +175,9 @@ def _freshness_status(
     if missing and any(key in CRITICAL_MISSING_KEYS for key in missing):
         return "missing"
     if isinstance(freshness, dict):
+        explicit_status = str(freshness.get("status") or "").strip().lower()
+        if explicit_status in {"current", "unknown", "partial", "stale", "missing"}:
+            return explicit_status
         if freshness.get("is_current") is False:
             return "stale"
         if freshness.get("refresh_recommended"):
@@ -208,9 +211,9 @@ def _tool_run_penalty(
         capability = tool_capability(tool)
         if required_capabilities is not None and capability not in required_capabilities:
             continue
-        if status in {"failed", "error"}:
+        if status in {"failed", "error", "timeout"}:
             penalty += 10
-            flags.append(f"{tool} 執行失敗")
+            flags.append(f"{tool} 執行逾時" if status == "timeout" else f"{tool} 執行失敗")
         elif status in {"blocked", "skipped"}:
             penalty += 6
             flags.append(f"{tool} 未執行")

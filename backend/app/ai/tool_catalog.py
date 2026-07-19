@@ -381,6 +381,11 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                     "type": "object",
                     "properties": {
                         "stock_id": {"type": "string"},
+                        "market": {
+                            "type": "string",
+                            "enum": ["TW", "US", "JP", "KR", "CRYPTO", "ALL"],
+                            "default": "TW",
+                        },
                     },
                 },
             },

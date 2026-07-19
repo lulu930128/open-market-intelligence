@@ -97,12 +97,18 @@ def _brief_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "decision_evidence",
         "human_answer",
         "breadth",
+        "sample_breadth",
         "distribution",
         "top_gainers",
         "top_losers",
         "value_leaders",
         "top_industries",
         "weak_industries",
+        "sample_top_gainers",
+        "sample_top_losers",
+        "sample_value_leaders",
+        "sample_top_industries",
+        "sample_weak_industries",
         "index_intraday",
         "slots",
         "compact",
@@ -153,6 +159,9 @@ def _compact_result_data(
     payload_level = compact.get("payload_level")
     if payload_level:
         output["payload_level"] = payload_level
+    compact_status = compact.get("status")
+    if compact_status:
+        output["status"] = compact_status
     quote = compact.get("quote") if isinstance(compact.get("quote"), dict) else {}
     if quote:
         output["quote"] = quote
@@ -184,6 +193,11 @@ def _compact_result_data(
         "value_leaders",
         "top_industries",
         "weak_industries",
+        "sample_top_gainers",
+        "sample_top_losers",
+        "sample_value_leaders",
+        "sample_top_industries",
+        "sample_weak_industries",
         "index_intraday",
         "cross_market",
         "market_chips",
@@ -444,12 +458,18 @@ def _apply_market_brief_fields(output: dict[str, Any], result: dict[str, Any]) -
     output["latest_trade_date"] = result.get("as_of") or summary_source.get("as_of")
     for key in (
         "breadth",
+        "sample_breadth",
         "distribution",
         "top_gainers",
         "top_losers",
         "value_leaders",
         "top_industries",
         "weak_industries",
+        "sample_top_gainers",
+        "sample_top_losers",
+        "sample_value_leaders",
+        "sample_top_industries",
+        "sample_weak_industries",
         "index_intraday",
         "slots",
     ):

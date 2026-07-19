@@ -286,6 +286,15 @@ FRESHNESS_HINTS = (
     "更新到",
     "缺資料",
 )
+BROKER_BRANCH_QUERY_HINTS = (
+    "broker branch",
+    "branch flow",
+    "分點",
+    "券商分點",
+    "主要買賣方",
+    "分點買賣方",
+    "主力買賣",
+)
 INTRADAY_HINTS = (
     "intraday",
     "live",
@@ -604,6 +613,10 @@ def infer_question_intent(
         return "trend_view"
     if ui_ask_intent in UI_RISK_INTENTS and looks_like_analysis_request(question):
         return "risk_check"
+    if contains_hint(question, FRESHNESS_HINTS):
+        return "data_freshness"
+    if contains_hint(question, BROKER_BRANCH_QUERY_HINTS):
+        return "broker_branch"
     if contains_hint(question, RISK_PRIORITY_HINTS):
         return "risk_check"
     if contains_hint(question, ENTRY_DECISION_HINTS):
@@ -696,6 +709,8 @@ def understand_question(
         RISK_DECISION_HINTS,
         TREND_VIEW_HINTS,
         POSITION_CONTEXT_HINTS,
+        FRESHNESS_HINTS,
+        BROKER_BRANCH_QUERY_HINTS,
     ):
         hint_matches.extend(matched_hints(question, hints))
 

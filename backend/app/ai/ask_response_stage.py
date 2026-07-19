@@ -41,6 +41,14 @@ def assemble_response_analysis(
     result_missing = extract_list(result, "missing")
     result_source_refs = extract_list(result, "source_refs")
     analysis_digest = extract_analysis_digest(result, policy)
+    result_data = result.get("data") if isinstance(result.get("data"), dict) else {}
+    compact_evidence = (
+        result_data.get("compact")
+        if isinstance(result_data.get("compact"), dict)
+        else {}
+    )
+    if compact_evidence:
+        analysis_digest["compact_evidence"] = compact_evidence
     technical_levels = (
         analysis_digest.get("technical_levels")
         if isinstance(analysis_digest.get("technical_levels"), dict)
@@ -149,8 +157,6 @@ def assemble_response_analysis(
         analysis_digest=analysis_digest,
     )
     response_analysis = dict(analysis_digest)
-    result_data = result.get("data") if isinstance(result.get("data"), dict) else {}
-    compact_evidence = result_data.get("compact") if isinstance(result_data.get("compact"), dict) else {}
     if compact_evidence:
         response_analysis["compact_evidence"] = compact_evidence
     question_understanding_payload = question_understanding.as_policy_payload()

@@ -245,6 +245,21 @@ def _intraday_minutes(value: str | None) -> float | None:
     return local.hour * 60 + local.minute + local.second / 60
 
 
+def _intraday_point_is_current_session(value: Any, session_date: date) -> bool:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.strip())
+        except ValueError:
+            return False
+    else:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=TAIPEI_TZ)
+    return parsed.astimezone(TAIPEI_TZ).date() == session_date
+
+
 def _intraday_stats(points: list[dict[str, Any]]) -> dict[str, Any]:
     valid_points = [point for point in points if _finite(point.get("price"))]
     if not valid_points:
@@ -758,13 +773,23 @@ def _build_today_report(
     latest_minutes = _intraday_minutes(latest_point.get("time"))
     minutes_from_open = latest_minutes - SESSION_START_MINUTES if _finite(latest_minutes) else None
     point_count = len(points)
+    latest_in_current_session = _intraday_point_is_current_session(
+        latest_point.get("time"),
+        market_session["date"],
+    )
     opening_phase = (
         minutes_from_open is None
         or minutes_from_open < OPENING_OBSERVATION_MINUTES
         or point_count < OPENING_OBSERVATION_MIN_POINTS
     )
-    phase = "opening" if opening_phase else "intraday"
-    confidence = "low" if opening_phase else ("high" if point_count >= 20 else "medium")
+    phase = (
+        "stale_intraday"
+        if not latest_in_current_session
+        else "opening"
+        if opening_phase
+        else "intraday"
+    )
+    confidence = "low" if phase != "intraday" else ("high" if point_count >= 20 else "medium")
     open_price = stats["open"]
     high_price = stats["high"]
     low_price = stats["low"]
@@ -873,11 +898,21 @@ def _build_today_report(
     if _finite(rsi14) and rsi14 >= technical_parameters.rsi_overheated_at:
         badges.append(_badge("日線 RSI 過熱", "warning"))
 
-    title = (
-        _title_from_score(score, positive="開盤偏強", neutral="開盤觀察", negative="開盤偏弱")
-        if opening_phase
-        else _title_from_score(score, positive="盤中偏多", neutral="盤中觀察", negative="盤中偏弱")
-    )
+    if phase == "stale_intraday":
+        title = "盤中資料非當前交易時段"
+        warnings.append("Latest intraday point is not from the current Taiwan trading session.")
+    elif phase == "opening":
+        title = "開盤資料尚不足"
+        warnings.append(
+            f"Intraday scoring requires at least {OPENING_OBSERVATION_MIN_POINTS} current-session points after the opening observation window."
+        )
+    else:
+        title = _title_from_score(
+            score,
+            positive="盤中偏多",
+            neutral="盤中觀察",
+            negative="盤中偏弱",
+        )
     summary_parts = [
         f"{point_count} 筆盤中資料",
         "現價高於昨收" if _finite(change_pct) and change_pct >= 0 else "現價低於昨收" if _finite(change_pct) else "漲跌資料不足",
@@ -894,7 +929,7 @@ def _build_today_report(
         "generated_at": _now(),
         "title": title,
         "summary": "，".join(summary_parts),
-        "score": score,
+        "score": score if phase == "intraday" else None,
         "value": change_pct,
         "value_label": "vs 昨收",
         "rows": rows,
@@ -905,6 +940,8 @@ def _build_today_report(
                 "point_count": point_count,
                 "previous_close": reference_close,
                 "latest_point": latest_point,
+                "is_current_session": latest_in_current_session,
+                "score_eligible": phase == "intraday",
                 "stats": stats,
                 "change": change,
                 "change_pct": change_pct,
@@ -913,6 +950,10 @@ def _build_today_report(
                 "volume_vs_daily_average_pct": volume_vs_daily_average_pct,
             },
             "daily_background": indicator,
+            "market_session": {
+                **{key: _json_value(value) for key, value in market_session.items()},
+                "latest_daily_date": _json_value(latest_daily_date),
+            },
         },
         "missing": list(dict.fromkeys(missing)),
         "warnings": list(dict.fromkeys(warnings)),

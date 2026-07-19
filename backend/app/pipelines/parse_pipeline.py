@@ -546,6 +546,11 @@ def parse_financial_metrics_raw_result(db: Session, raw_result_id: int) -> dict:
 
     for row in parsed_rows:
         row["market"] = source_market
+        released_at = row.get("released_at") or row.get("report_date")
+        row["released_at"] = released_at
+        if released_at is not None:
+            row["report_date"] = released_at
+        row.setdefault("filed_at", None)
 
     (
         db.query(FinancialMetricQuarterly)

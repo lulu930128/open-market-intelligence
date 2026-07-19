@@ -6,10 +6,16 @@ import shutil
 import unittest
 import uuid
 
+from alembic import command
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import Session
 
-from app.db.migrations import get_database_revision, get_head_revision, run_database_migrations
+from app.db.migrations import (
+    create_alembic_config,
+    get_database_revision,
+    get_head_revision,
+    run_database_migrations,
+)
 from app.db.models import Base, StockMaster
 
 
@@ -82,6 +88,11 @@ class DatabaseMigrationTests(unittest.TestCase):
                     "put_call_open_interest_ratio_pct",
                 }.issubset(market_chip_columns)
             )
+            financial_columns = {
+                column["name"]
+                for column in inspect(engine).get_columns("financial_metric_quarterly")
+            }
+            self.assertTrue({"report_date", "released_at", "filed_at"}.issubset(financial_columns))
             self.assertIn("market_intraday_bar", table_names)
             self.assertIn("taiwan_stock_quote_snapshot", table_names)
             self.assertIn("chart_drawing_snapshot", table_names)
@@ -164,6 +175,65 @@ class DatabaseMigrationTests(unittest.TestCase):
 
             self.assertEqual(stock_name, "台積電")
             self.assertEqual(get_database_revision(database_url), get_head_revision())
+
+    def test_financial_date_migration_clears_known_fetch_date_pollution(self) -> None:
+        with migration_test_directory() as directory:
+            database_url = sqlite_url(directory / "financial_dates.db")
+            config = create_alembic_config(database_url)
+            command.upgrade(config, "head")
+            command.downgrade(config, "20260718_0036")
+
+            engine = create_engine(database_url)
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "INSERT INTO source_registry "
+                            "(id, source_name, source_type, category, enabled, priority, auth_type, reliability_level, created_at, updated_at) "
+                            "VALUES (1, 'financial-test', 'official', 'financial', 1, 100, 'none', 'official', "
+                            "'2026-07-19 00:00:00', '2026-07-19 00:00:00')"
+                        )
+                    )
+                    connection.execute(
+                        text(
+                            "INSERT INTO raw_fetch_result "
+                            "(id, source_id, fetched_at, method, parser_version) VALUES "
+                            "(1, 1, '2026-07-19 00:00:00', 'GET', 'mops-financial-metrics-history-v1'), "
+                            "(2, 1, '2026-05-15 00:00:00', 'GET', 'financial-metrics-v2')"
+                        )
+                    )
+                    connection.execute(
+                        text(
+                            "INSERT INTO financial_metric_quarterly "
+                            "(id, source_id, raw_result_id, report_date, fiscal_year, quarter, period, stock_id, created_at, updated_at) VALUES "
+                            "(1, 1, 1, '2026-07-19', 2026, 1, '2026Q1', '2330', '2026-07-19 00:00:00', '2026-07-19 00:00:00'), "
+                            "(2, 1, 2, '2026-05-15', 2026, 1, '2026Q1', '2303', '2026-05-15 00:00:00', '2026-05-15 00:00:00')"
+                        )
+                    )
+            finally:
+                engine.dispose()
+
+            command.upgrade(config, "head")
+            engine = create_engine(database_url)
+            try:
+                with engine.connect() as connection:
+                    rows = connection.execute(
+                        text(
+                            "SELECT stock_id, report_date, released_at, filed_at "
+                            "FROM financial_metric_quarterly ORDER BY stock_id"
+                        )
+                    ).mappings().all()
+            finally:
+                engine.dispose()
+
+            self.assertEqual(rows[0]["stock_id"], "2303")
+            self.assertEqual(str(rows[0]["report_date"]), "2026-05-15")
+            self.assertEqual(str(rows[0]["released_at"]), "2026-05-15")
+            self.assertIsNone(rows[0]["filed_at"])
+            self.assertEqual(rows[1]["stock_id"], "2330")
+            self.assertIsNone(rows[1]["report_date"])
+            self.assertIsNone(rows[1]["released_at"])
+            self.assertIsNone(rows[1]["filed_at"])
 
 
     def test_repair_partial_jp_master_table_at_0016(self) -> None:

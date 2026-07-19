@@ -93,11 +93,18 @@ def normalize_payload_for_resolution(
     request_target_type: Callable[[AiAskRequest], str],
     resolution_target: Callable[[Any], dict[str, Any]],
 ) -> AiAskRequest:
+    resolved_target = resolution_target(resolution)
+    requested_target = payload.target if isinstance(payload.target, dict) else {}
     if (
         resolution.selected_scope_id != request_target_id(payload)
         or request_target_type(payload) == "auto"
+        or (
+            resolution.selected_scope_type == "data_freshness"
+            and str(requested_target.get("market") or "").strip().upper()
+            != str(resolved_target.get("market") or "").strip().upper()
+        )
     ):
-        return payload.model_copy(update={"target": resolution_target(resolution)})
+        return payload.model_copy(update={"target": resolved_target})
     return payload
 
 
@@ -129,6 +136,8 @@ def build_question_stage(
         payload.position_context,
     )
     question_intent = question_understanding.intent
+    if scope_type == "data_freshness":
+        question_intent = "data_freshness"
     if (
         position_context.get("has_position_context")
         and question_intent in POSITION_CONTEXT_PROMOTABLE_INTENTS

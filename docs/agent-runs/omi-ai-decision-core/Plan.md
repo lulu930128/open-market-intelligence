@@ -56,3 +56,5 @@
 - 2026-06-21：本任務不從零重寫 AI。理由：repo 已有 `decision_core.py`、`answer_composer.py`、`ask_*` stages、freshness guard、agentic tools 與 tests；正確方向是補 contract map、regression 與缺口，而不是大改架構。
 - 2026-06-21：bounded external refresh 是 OMI 能力的一部分，但必須由 backend allowlisted tools 和 `tool_budget` 管控；MCP/Kuro 不直接打市場資料 API。
 - 2026-07-19：P0 先以獨立 checkpoint 處理 target identity、follow-up context 與 directional price invariants；未知標的和無效價位不得進入可執行 answer contract，完成驗證後先 commit 再推進 freshness/P1。
+- 2026-07-19：P1 以 additive contract 分離 availability/freshness、selected/fallback provider 與 market-cache/user-data write semantics；`max_total_seconds` 改為實際 response deadline，超時必須回傳可供 UI/MCP 判讀的 timeout/cached-fallback 狀態。
+- 2026-07-19：P2 以 answer/data semantics 收斂對外窗口：盤中證據不足改走明示日線 fallback、全市場與 OMI 樣本分開標示、MCP 提供 bounded transport projection、財報日期不得用 fetch time 代填、資訊查詢不得誤入交易建議。

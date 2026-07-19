@@ -27,6 +27,9 @@ from app.market.taiwan_rules import (
 
 
 ProgressCallback = Callable[[int | None, int | None, str | None], None]
+CancellationCheck = Callable[[], bool]
+
+
 def expected_daily_price_date(*, include_today: bool | None = None) -> date | None:
     return expected_taiwan_trade_date(
         TAIWAN_DATASET_DAILY_PRICE,
@@ -168,6 +171,7 @@ def refresh_selected_stock_data(
     sleep_seconds: float = 0.05,
     profile: str | None = "full",
     progress: ProgressCallback | None = None,
+    should_cancel: CancellationCheck | None = None,
 ) -> dict:
     refresh_profile = normalize_refresh_profile(profile)
     requested_steps = refresh_profile_steps(refresh_profile)
@@ -262,7 +266,11 @@ def refresh_selected_stock_data(
         ),
     }
 
+    cancelled = False
     for step_index, step_key in enumerate(requested_steps, start=1):
+        if should_cancel is not None and should_cancel():
+            cancelled = True
+            break
         label = TAIWAN_REFRESH_STEP_LABELS[step_key]
         action = refresh_steps[step_key]
         _run_refresh_step(
@@ -274,12 +282,17 @@ def refresh_selected_stock_data(
             results=results,
             action=action,
         )
+        if should_cancel is not None and should_cancel():
+            cancelled = True
+            break
 
     error_count = sum(1 for result in results.values() if result["status"] == "error")
     skipped_count = sum(1 for result in results.values() if result["status"] == "skipped")
     refreshed_count = len(results) - error_count - skipped_count
 
-    if error_count == len(results):
+    if cancelled:
+        status = "timeout"
+    elif error_count == len(results):
         status = "error"
     elif error_count:
         status = "partial_success"
@@ -290,7 +303,11 @@ def refresh_selected_stock_data(
 
     return {
         "status": status,
-        "message": "Selected stock data refresh completed.",
+        "message": (
+            "Selected stock data refresh stopped at the wall-clock deadline."
+            if cancelled
+            else "Selected stock data refresh completed."
+        ),
         "stock_id": stock_id,
         "include_today": include_today,
         "profile": refresh_profile,
@@ -302,6 +319,7 @@ def refresh_selected_stock_data(
         "refreshed_count": refreshed_count,
         "skipped_count": skipped_count,
         "error_count": error_count,
+        "cancelled": cancelled,
         "results": results,
     }
 
