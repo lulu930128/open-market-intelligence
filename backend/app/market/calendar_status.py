@@ -23,12 +23,14 @@ from app.market.taiwan_rules import (
     expected_date_for_dataset,
 )
 from app.market.trading_calendar import (
+    TAIWAN_MARKET_HOLIDAYS,
     TAIWAN_TZ,
     is_taiwan_trading_day,
     next_taiwan_trading_day,
     previous_taiwan_trading_day,
     taiwan_market_holiday_name,
 )
+from app.market.exchange_calendar_cache import market_calendar_cache_metadata
 from app.us_market.trading_calendar import (
     US_DAILY_PRICE_RELEASE_TIME,
     US_MARKET_TIMEZONE,
@@ -83,6 +85,10 @@ TAIWAN_RELEASE_DATASETS = (
     (TAIWAN_DATASET_BROKER_BRANCH, TAIWAN_BROKER_BRANCH_RELEASE_TIME),
 )
 
+TAIWAN_CALENDAR_FALLBACK_SOURCE = "TWSE verified holiday snapshot with weekday fallback"
+US_CALENDAR_FALLBACK_SOURCE = "NYSE holiday rules with weekday fallback"
+KR_CALENDAR_FALLBACK_SOURCE = "KRX fixed-holiday rules with weekday fallback"
+
 
 def _json_value(value: Any) -> Any:
     if isinstance(value, (date, datetime)):
@@ -129,6 +135,29 @@ def _market_reason(
     if holiday_name:
         return "holiday"
     return "weekend"
+
+
+def _calendar_contract(
+    *,
+    market: MarketCode,
+    year: int,
+    now: datetime,
+    fallback_source: str,
+    fallback_verified_years: set[int] | frozenset[int],
+    fallback_limit: str | None,
+) -> dict[str, Any]:
+    metadata = market_calendar_cache_metadata(market, year=year, now=now)
+    cached_years = set(metadata.pop("cached_verified_years", []))
+    cached_source = metadata.pop("cached_calendar_source", None)
+    uses_cached_year = year in cached_years
+    return {
+        "calendar_source": cached_source if uses_cached_year else fallback_source,
+        "calendar_verified_years": sorted(
+            set(fallback_verified_years) | cached_years
+        ),
+        "calendar_limit": None if uses_cached_year else fallback_limit,
+        **metadata,
+    }
 
 
 def _session_phase(
@@ -345,6 +374,18 @@ def build_taiwan_calendar_status(now: datetime | None = None) -> dict[str, Any]:
             "is_after_close": phase == "post_close",
         },
         "release_windows": release_windows,
+        **_calendar_contract(
+            market="tw",
+            year=current_date.year,
+            now=local_now,
+            fallback_source=TAIWAN_CALENDAR_FALLBACK_SOURCE,
+            fallback_verified_years=set(TAIWAN_MARKET_HOLIDAYS),
+            fallback_limit=(
+                None
+                if current_date.year in TAIWAN_MARKET_HOLIDAYS
+                else "TWSE fallback snapshot does not cover this year; weekdays are treated as trading days until the official cache refresh succeeds."
+            ),
+        ),
     }
 
 
@@ -410,6 +451,14 @@ def build_us_calendar_status(now: datetime | None = None) -> dict[str, Any]:
             "is_after_close": phase in {"after_hours", "post_close"},
         },
         "release_windows": release_windows,
+        **_calendar_contract(
+            market="us",
+            year=current_date.year,
+            now=local_now,
+            fallback_source=US_CALENDAR_FALLBACK_SOURCE,
+            fallback_verified_years=set(),
+            fallback_limit="Rule-based NYSE fallback does not model emergency closures or special sessions.",
+        ),
     }
 
 
@@ -475,7 +524,14 @@ def build_kr_calendar_status(now: datetime | None = None) -> dict[str, Any]:
             "is_after_close": phase == "post_close",
         },
         "release_windows": release_windows,
-        "calendar_limit": "Fixed-date holidays and weekends only; lunar and ad hoc KRX holidays require a future official calendar source.",
+        **_calendar_contract(
+            market="kr",
+            year=current_date.year,
+            now=local_now,
+            fallback_source=KR_CALENDAR_FALLBACK_SOURCE,
+            fallback_verified_years=set(),
+            fallback_limit="Fixed-date holidays and weekends only; lunar and ad hoc KRX holidays require a successful official calendar refresh.",
+        ),
     }
 
 
@@ -546,9 +602,14 @@ def build_jp_calendar_status(now: datetime | None = None) -> dict[str, Any]:
             "is_after_close": phase == "post_close",
         },
         "release_windows": release_windows,
-        "calendar_source": JPX_CALENDAR_SOURCE,
-        "calendar_verified_years": sorted(JPX_VERIFIED_CALENDAR_YEARS),
-        "calendar_limit": jp_calendar_limit(current_date.year),
+        **_calendar_contract(
+            market="jp",
+            year=current_date.year,
+            now=local_now,
+            fallback_source=JPX_CALENDAR_SOURCE,
+            fallback_verified_years=JPX_VERIFIED_CALENDAR_YEARS,
+            fallback_limit=jp_calendar_limit(current_date.year),
+        ),
     }
 
 

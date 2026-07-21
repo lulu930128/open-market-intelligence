@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.db.models import StockMaster
+from app.db.models import BrokerBranchTradeDaily, MarketDailyPrice, StockMaster
 from app.market.taiwan_rules import (
     TAIWAN_DATASET_BROKER_BRANCH,
     TAIWAN_DATASET_DAILY_PRICE,
@@ -443,7 +443,144 @@ def check_watchlist_data_freshness(
 
 
 def check_stock_daily_price_freshness(db: Session, stock_id: str) -> dict[str, Any]:
-    return check_stock_data_freshness(db=db, stock_id=stock_id)
+    normalized_stock_id = stock_id.strip()
+    stock = (
+        db.query(StockMaster)
+        .filter(StockMaster.stock_id == normalized_stock_id)
+        .first()
+    )
+    latest = (
+        db.query(func.max(MarketDailyPrice.trade_date))
+        .filter(MarketDailyPrice.stock_id == normalized_stock_id)
+        .scalar()
+    )
+    expected = expected_daily_price_date()
+    daily_spec = next(
+        spec for spec in DATASET_SPECS if spec.key == TAIWAN_DATASET_DAILY_PRICE
+    )
+    candidate = StockCandidate(
+        stock_id=normalized_stock_id,
+        stock_name=stock.stock_name if stock is not None else None,
+    )
+    datasets = [
+        _stock_master_check(candidate, stock),
+        _dataset_check(
+            spec=daily_spec,
+            stock_id=normalized_stock_id,
+            latest_value=latest,
+            expected_date=expected,
+            required=True,
+        ),
+    ]
+    issues = [dataset for dataset in datasets if not dataset["is_current"]]
+    missing = [dataset["key"] for dataset in issues]
+    warnings = (
+        [
+            "Latest quote evidence is unavailable or stale for "
+            f"{normalized_stock_id}: {', '.join(missing)}."
+        ]
+        if issues
+        else []
+    )
+    return {
+        "kind": "ai_scope_freshness",
+        "scope_type": "stock",
+        "scope_id": normalized_stock_id,
+        "scope_profile": "quote_only",
+        "expected_trade_date": _json_value(expected),
+        "expected_dates": {
+            TAIWAN_DATASET_DAILY_PRICE: _json_value(expected),
+        },
+        "is_current": not issues,
+        "checked_stock_count": 1,
+        "stale_stock_count": 1 if issues else 0,
+        "stale_stock_ids": [normalized_stock_id] if issues else [],
+        "stale_stock_ids_truncated": False,
+        "stale_stocks": (
+            [
+                {
+                    "stock_id": normalized_stock_id,
+                    "stock_name": candidate.stock_name,
+                    "market": stock.market if stock is not None else None,
+                    "instrument_type": stock.instrument_type if stock is not None else None,
+                    "issue_count": len(issues),
+                    "issues": issues,
+                }
+            ]
+            if issues
+            else []
+        ),
+        "datasets": datasets,
+        "missing": missing,
+        "warnings": warnings,
+        "refresh_recommended": False,
+        "refresh_endpoint": None,
+        "refresh_params": {},
+    }
+
+
+def check_stock_broker_branch_freshness(db: Session, stock_id: str) -> dict[str, Any]:
+    normalized_stock_id = stock_id.strip()
+    stock = (
+        db.query(StockMaster)
+        .filter(StockMaster.stock_id == normalized_stock_id)
+        .first()
+    )
+    latest = (
+        db.query(func.max(BrokerBranchTradeDaily.trade_date))
+        .filter(BrokerBranchTradeDaily.stock_id == normalized_stock_id)
+        .scalar()
+    )
+    expected = expected_broker_branch_date()
+    branch_spec = next(
+        spec for spec in DATASET_SPECS if spec.key == TAIWAN_DATASET_BROKER_BRANCH
+    )
+    candidate = StockCandidate(
+        stock_id=normalized_stock_id,
+        stock_name=stock.stock_name if stock is not None else None,
+    )
+    datasets = [
+        _stock_master_check(candidate, stock),
+        _dataset_check(
+            spec=branch_spec,
+            stock_id=normalized_stock_id,
+            latest_value=latest,
+            expected_date=expected,
+            required=True,
+        ),
+    ]
+    issues = [dataset for dataset in datasets if not dataset["is_current"]]
+    missing = [dataset["key"] for dataset in issues]
+    warnings = (
+        [
+            "Broker branch evidence is unavailable or stale for "
+            f"{normalized_stock_id}: {', '.join(missing)}."
+        ]
+        if issues
+        else []
+    )
+    return {
+        "kind": "ai_scope_freshness",
+        "scope_type": "stock",
+        "scope_id": normalized_stock_id,
+        "scope_profile": "broker_branch_only",
+        "expected_trade_date": _json_value(expected),
+        "expected_dates": {
+            TAIWAN_DATASET_BROKER_BRANCH: _json_value(expected),
+        },
+        "is_current": not issues,
+        "checked_stock_count": 1,
+        "stale_stock_count": 1 if issues else 0,
+        "stale_stock_ids": [normalized_stock_id] if issues else [],
+        "stale_stock_ids_truncated": False,
+        "stale_stocks": [],
+        "datasets": datasets,
+        "missing": missing,
+        "warnings": warnings,
+        "refresh_recommended": False,
+        "refresh_endpoint": None,
+        "refresh_params": {},
+    }
 
 
 def check_watchlist_daily_price_freshness(

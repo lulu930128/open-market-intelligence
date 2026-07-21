@@ -289,6 +289,12 @@ ASK_TOOL: dict[str, Any] = {
             "context_limit": {"type": "integer", "minimum": 20, "maximum": 500, "default": 100},
             "include_intraday": INCLUDE_INTRADAY_SCHEMA,
             "payload_level": PAYLOAD_LEVEL_SCHEMA,
+            "diagnostics_level": {
+                "type": "string",
+                "enum": ["none", "basic", "debug"],
+                "default": "none",
+                "description": "Independent diagnostic projection; it does not change answer mode.",
+            },
             "intraday_limit": INTRADAY_LIMIT_SCHEMA,
             "session_scope": SESSION_SCOPE_SCHEMA,
             "include_children": {"type": "boolean", "default": True},
@@ -1422,11 +1428,14 @@ def _tool_budget_arg(arguments: dict[str, Any], *, allow_external_fetch: bool) -
 
 def _ask_payload(arguments: dict[str, Any]) -> dict[str, Any]:
     allow_external_fetch = _default_allow_external_fetch(arguments)
+    market_data_params = _merge_market_data_params(arguments)
     return {
         "contract_version": arguments.get("contract_version", "omi.ai.ask.v2"),
         "question": _require(arguments, "question"),
         "target": arguments.get("target") or {"type": "auto"},
         "mode": arguments.get("mode", "auto"),
+        "payload_level": market_data_params.get("payload_level"),
+        "diagnostics_level": arguments.get("diagnostics_level", "none"),
         "caller_profile": arguments.get("caller_profile", "kuro_readonly"),
         "allow_llm": _bool_arg(arguments, "allow_llm", False),
         "allow_write": _bool_arg(arguments, "allow_write", False),
@@ -1447,7 +1456,7 @@ def _ask_payload(arguments: dict[str, Any]) -> dict[str, Any]:
         "include_children": _bool_arg(arguments, "include_children", True),
         "enabled_only": _bool_arg(arguments, "enabled_only", True),
         "conversation_context": arguments.get("conversation_context") or {},
-        "market_data_params": _merge_market_data_params(arguments),
+        "market_data_params": market_data_params,
     }
 
 
@@ -1542,9 +1551,18 @@ def _summarize_ask_response(response: Any) -> Any:
     for key in (
         "contract_version",
         "ok",
-        "requested_mode",
-        "effective_mode",
+        "mode",
         "answer_ready",
+        "facts_ready",
+        "analysis_ready",
+        "decision_ready",
+        "blocked_sections",
+        "available_sections",
+        "request_status",
+        "fallback_used",
+        "cached_data_returned",
+        "job",
+        "cancellation",
         "target",
         "resolution",
         "clarification",
@@ -1958,7 +1976,15 @@ def _handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
             )
 
         try:
-            return _response(request_id, _tool_result(_call_tool(name, arguments)))
+            tool_payload = _call_tool(name, arguments)
+            business_error = bool(
+                isinstance(tool_payload, dict)
+                and tool_payload.get("ok") is False
+            )
+            return _response(
+                request_id,
+                _tool_result(tool_payload, is_error=business_error),
+            )
         except KeyError as exc:
             return _error(request_id, -32602, str(exc))
         except Exception as exc:

@@ -6,6 +6,9 @@ from app.jobs.service import ProgressCallback, run_tracked_job
 from app.jp_market import service as jp_market_service
 from app.kr_market import service as kr_market_service
 from app.market.backfill import backfill_tpex_trading_stock, backfill_twse_stock_day
+from app.market.broker_branch_market_refresh import (
+    refresh_taiwan_broker_branch_market,
+)
 from app.market.daily_metrics_backfill import (
     ensure_daily_metrics,
     ensure_latest_daily_metrics,
@@ -187,6 +190,28 @@ def run_taiwan_derivatives_refresh_job(
 
         progress(5, 5, "TAIFEX post-close derivatives data is ready.")
         return result
+
+    run_tracked_job(job_id, worker)
+
+
+def run_taiwan_broker_branch_market_refresh_job(
+    job_id: int,
+    trade_date: date,
+    sleep_seconds: float,
+    max_stocks: int,
+    max_runtime_seconds: int,
+) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        progress(0, 1, "Preparing Taiwan all-market broker-branch collection.")
+        return refresh_taiwan_broker_branch_market(
+            db,
+            trade_date=trade_date,
+            sleep_seconds=sleep_seconds,
+            max_stocks=max_stocks,
+            max_runtime_seconds=max_runtime_seconds,
+            progress=progress,
+            job_run_id=job_id,
+        )
 
     run_tracked_job(job_id, worker)
 

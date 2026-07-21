@@ -1736,13 +1736,15 @@ class JPMarketDataTests(unittest.TestCase):
         intraday_reader.assert_called_once_with(symbol="7203.T", db=self.db)
         compact = context["data"]["compact"]
         self.assertEqual(context["as_of"], "2026-07-15T10:00:00+09:00")
-        self.assertTrue(compact["quote"]["is_realtime"])
+        self.assertFalse(compact["quote"]["is_realtime"])
+        self.assertEqual(compact["quote"]["freshness"]["status"], "delayed")
+        self.assertEqual(compact["quote"]["freshness"]["age_seconds"], 300)
         self.assertEqual(compact["quote"]["price"], 3080.0)
         self.assertTrue(compact["resources"]["include_intraday"])
         self.assertTrue(compact["resources"]["intraday_available"])
         self.assertEqual(
             compact["freshness_by_domain"]["intraday"],
-            "current",
+            "delayed",
         )
         intraday_bars = compact["intraday_bars"]
         self.assertTrue(intraday_bars["enabled"])

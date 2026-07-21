@@ -171,6 +171,37 @@ def _parse_branch_rows(payload_data: dict) -> list[dict]:
     return list(rows_by_branch.values())
 
 
+def probe_broker_branch_release(stock_id: str = "2330") -> dict:
+    """Read the provider's latest release date without mutating local storage."""
+    fetch_result = _fetch_nstock_branch_top15(stock_id=stock_id)
+    payload_data = (
+        fetch_result.payload.get("data")
+        if isinstance(fetch_result.payload, dict)
+        else None
+    )
+
+    if not isinstance(payload_data, dict):
+        raise BrokerBranchFetchError("分點資料來源回傳格式缺少 data 物件。")
+
+    fetched_trade_date = parse_date(payload_data.get("更新日期"))
+    if fetched_trade_date is None:
+        raise BrokerBranchFetchError(
+            "Broker branch payload does not contain a valid update date."
+        )
+
+    try:
+        rows = _parse_branch_rows(payload_data)
+    except ValueError as exc:
+        raise BrokerBranchFetchError(str(exc)) from exc
+
+    return {
+        "stock_id": stock_id,
+        "trade_date": fetched_trade_date,
+        "row_count": len(rows),
+        "source_url": fetch_result.url,
+    }
+
+
 def fetch_and_store_broker_branch_daily(
     db: Session,
     *,

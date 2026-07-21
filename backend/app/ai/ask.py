@@ -18,6 +18,7 @@ from app.ai import (
     llm,
     orchestrator,
     pipeline_progress,
+    query_plan,
     reports,
     scope_resolution,
     tools,
@@ -302,15 +303,40 @@ def ask(
         )
 
     effective_mode = _effective_mode(requested_mode, scope_type, policy, warnings)
+    execution_plan = query_plan.build_query_plan(
+        payload=payload,
+        scope_type=scope_type,
+        question_intent=question_intent,
+        effective_mode=effective_mode,
+    )
+    payload = payload.model_copy(
+        update={
+            "market_data_params": {
+                **payload.market_data_params,
+                "payload_level": execution_plan.payload_level,
+                "requested_domains": list(execution_plan.requested_domains),
+                "excluded_domains": list(execution_plan.excluded_domains),
+                "external_fetch_allowed": bool(policy.get("can_external_fetch")),
+            }
+        }
+    )
+    query_plan_payload = execution_plan.as_dict()
+    policy["query_plan"] = query_plan_payload
     freshness_result = progress.run_freshness_check(
         scope_type=scope_type,
-        operation=lambda: _check_freshness(db, payload, scope_type),
+        operation=lambda: _check_freshness(
+            db,
+            payload,
+            scope_type,
+            question_intent=question_intent,
+        ),
     )
     tool_stage = ask_stages.execute_tool_stages(
         scope_type=scope_type,
         payload=payload,
         resolution=resolution,
         policy=policy,
+        query_plan=query_plan_payload,
         freshness_result=freshness_result,
         progress=progress,
         progress_callback=progress_callback,
@@ -404,4 +430,5 @@ def ask(
         tool_runs=tool_runs,
         freshness_result=freshness_result,
         progress=progress,
+        query_plan=query_plan_payload,
     )

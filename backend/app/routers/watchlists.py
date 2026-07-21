@@ -628,6 +628,7 @@ def get_watchlist_group_radar(
                 enabled_only=enabled_only,
                 mode=mode,
                 max_results=max_results,
+                minimum_target_trade_date=ranking_service.expected_daily_price_date(),
             )
             if snapshot is not None:
                 return snapshot

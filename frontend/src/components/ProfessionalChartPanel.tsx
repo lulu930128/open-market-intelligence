@@ -333,6 +333,12 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
 
       {chartReady ? (
         <LightweightKLineChart
+          key={[
+            timeMode,
+            drawingContext.market ?? "",
+            drawingContext.symbol ?? label,
+            drawingContext.timeframe,
+          ].join(":")}
           chartData={chartData}
           indicatorData={indicatorData}
           label={label}

@@ -29,6 +29,7 @@ def execute_tool_stages(
     payload: AiAskRequest,
     resolution: Any,
     policy: dict[str, Any],
+    query_plan: dict[str, Any] | None = None,
     freshness_result: dict[str, Any],
     progress: pipeline_progress.OmiPipelineProgress,
     progress_callback: pipeline_progress.ProgressCallback | None,
@@ -40,6 +41,7 @@ def execute_tool_stages(
     run_tw_stock_tool_session: Callable[..., dict[str, Any]],
     run_tw_watchlist_tool_session: Callable[..., dict[str, Any]],
 ) -> ToolStageState:
+    query_plan = query_plan or {}
     tool_plan: dict[str, Any] = {}
     tool_runs: list[dict[str, Any]] = []
     current_freshness = freshness_result
@@ -68,6 +70,7 @@ def execute_tool_stages(
         and payload.allow_external_fetch
         and current_freshness
         and current_freshness.get("refresh_recommended")
+        and query_plan.get("external_refresh_allowed", True)
     ):
         tool_session = progress.run_tool_session(
             scope_type=scope_type,

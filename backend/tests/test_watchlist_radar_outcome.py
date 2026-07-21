@@ -239,6 +239,25 @@ class WatchlistRadarOutcomeTests(unittest.TestCase):
         self.assertEqual(payload["radar_count"], 1)
         self.assertEqual(payload["results"][0]["stock_id"], "2330")
 
+    def test_latest_snapshot_is_skipped_when_target_date_is_outdated(self) -> None:
+        group = self.add_group()
+        item = self.radar_item(
+            rank=1,
+            stock_id="2330",
+            bucket="volume_up",
+            close=100,
+        )
+        self.save_snapshot(group.id, [item], trade_date="2026-07-06")
+
+        payload = radar_outcome_service.get_latest_watchlist_radar_snapshot_payload(
+            db=self.db,
+            group_id=group.id,
+            mode="action",
+            minimum_target_trade_date=date(2026, 7, 7),
+        )
+
+        self.assertIsNone(payload)
+
     def test_evaluate_snapshot_scores_bucket_aware_hits(self) -> None:
         group = self.add_group()
         source_id, raw_result_id = self.add_source()

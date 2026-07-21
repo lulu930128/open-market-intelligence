@@ -412,6 +412,7 @@ def get_latest_watchlist_radar_snapshot_payload(
     enabled_only: bool = True,
     max_results: int = 30,
     radar_rule_version: str = RADAR_RULE_VERSION,
+    minimum_target_trade_date: date | None = None,
 ) -> dict[str, Any] | None:
     """Rebuild the read-only Radar contract from the latest persisted snapshot."""
     watchlist_service.get_group(db=db, group_id=group_id)
@@ -424,6 +425,11 @@ def get_latest_watchlist_radar_snapshot_payload(
         enabled_only=enabled_only,
     )
     if run is None:
+        return None
+    if minimum_target_trade_date is not None and (
+        run.target_trade_date is None
+        or run.target_trade_date < minimum_target_trade_date
+    ):
         return None
 
     result_limit = max(1, min(int(max_results), 200))

@@ -453,6 +453,10 @@ def refresh_watchlist_group_daily_prices(
             parsed_count = int(_get_result_field(result, "parsed_count", 0) or 0)
             inserted_count = int(_get_result_field(result, "inserted_count", 0) or 0)
             skipped = int(_get_result_field(result, "skipped_count", 0) or 0)
+            refreshed_latest_trade_date = _get_latest_trade_date(
+                db=db,
+                stock_id=stock_id,
+            )
 
             if status == "success":
                 success_count += 1
@@ -468,7 +472,7 @@ def refresh_watchlist_group_daily_prices(
                     "stock_id": stock_id,
                     "stock_name": stock_name,
                     "market": market,
-                    "latest_trade_date": latest_trade_date,
+                    "latest_trade_date": refreshed_latest_trade_date,
                     "target_date": target_date,
                     "start_date": start_date,
                     "status": status,

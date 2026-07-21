@@ -25,6 +25,47 @@ def _ranking_payload(rows: list[dict]) -> dict:
 
 
 class WatchlistRadarServiceTests(unittest.TestCase):
+    def test_ma60_break_is_structural_risk_with_nearest_reclaim_level(self):
+        rows = [
+            {
+                "rank": 1,
+                "stock_id": "2327",
+                "stock_name": "國巨",
+                "time": "2026-07-20T13:30:00+08:00",
+                "close": 630.0,
+                "volume": 30_727_000,
+                "change": -69.0,
+                "previous_close": 699.0,
+                "change_pct": -9.87,
+                "limit_status": "limit_down",
+                "score": -9,
+                "status": "strong_bearish",
+                "signal_count": 3,
+                "signal_keys": ["below_ma20", "below_ma60", "cross_below_ma60"],
+                "primary_signal_key": "cross_below_ma60",
+                "primary_signal_label": "跌破 MA60",
+                "indicator_snapshot": {
+                    "ma": {"ma5": 773.4, "ma20": 967.15, "ma60": 710.77},
+                    "support_resistance": {"support20": 700.0, "resistance20": 1220.0},
+                    "bollinger": {"lower20": 680.0, "upper20": 1180.0},
+                },
+                "error_message": None,
+            }
+        ]
+
+        result = radar_service.build_watchlist_radar_from_ranking(
+            ranking=_ranking_payload(rows),
+            mode="all",
+        )
+        item = result["results"][0]
+
+        self.assertEqual(item["bucket"], "limit_down_liquidity")
+        self.assertIn("cross_below_ma60", item["matched_signal_keys"])
+        self.assertLess(item["factor_scores"]["trend"], 0)
+        self.assertEqual(item["price_levels"]["ma60"], 710.77)
+        self.assertEqual(item["price_levels"]["key_level"], 680.0)
+        self.assertEqual(item["price_levels"]["key_level_label"], "回收壓力")
+
     def test_action_mode_prioritizes_large_move_and_risk(self):
         rows = [
             {

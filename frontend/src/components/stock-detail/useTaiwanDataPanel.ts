@@ -27,6 +27,7 @@ import type { TranslationFunction } from "@/i18n";
 import type {
   BrokerBranchTradeDailySummaryRead,
   FinancialMetricQuarterlyRead,
+  InstitutionalHoldingRatioRead,
   InstitutionalTradeDailyRead,
   MarginTradingDailyRead,
   MonthlyRevenueRead,
@@ -96,11 +97,13 @@ function taiwanCalendarStatusRefreshKey(
 
 export function useTaiwanDataPanel({
   isIndexProduct,
+  onDailyPricesChanged,
   stockId,
   subresourceRefreshSeconds,
   t,
 }: {
   isIndexProduct: boolean;
+  onDailyPricesChanged?: () => void;
   stockId: string | null;
   subresourceRefreshSeconds: number;
   t: TranslationFunction;
@@ -113,6 +116,8 @@ export function useTaiwanDataPanel({
     useState<InstitutionalTradeDailyRead | null>(null);
   const [institutionalHistory, setInstitutionalHistory] =
     useState<InstitutionalTradeDailyRead[]>([]);
+  const [institutionalHoldingRatio, setInstitutionalHoldingRatio] =
+    useState<InstitutionalHoldingRatioRead | null>(null);
   const [margin, setMargin] = useState<MarginTradingDailyRead | null>(null);
   const [brokerBranchSummary, setBrokerBranchSummary] =
     useState<BrokerBranchTradeDailySummaryRead | null>(null);
@@ -141,6 +146,7 @@ export function useTaiwanDataPanel({
     new Map<string, BrokerBranchTradeDailySummaryRead>()
   );
   const subresourceRefreshSecondsRef = useRef(subresourceRefreshSeconds);
+  const onDailyPricesChangedRef = useRef(onDailyPricesChanged);
   const tRef = useRef(t);
 
   useEffect(() => {
@@ -209,6 +215,10 @@ export function useTaiwanDataPanel({
   }, [subresourceRefreshSeconds]);
 
   useEffect(() => {
+    onDailyPricesChangedRef.current = onDailyPricesChanged;
+  }, [onDailyPricesChanged]);
+
+  useEffect(() => {
     tRef.current = t;
   }, [t]);
 
@@ -220,6 +230,7 @@ export function useTaiwanDataPanel({
       const timer = window.setTimeout(() => {
         setInstitutional(null);
         setInstitutionalHistory([]);
+        setInstitutionalHoldingRatio(null);
         setMargin(null);
         setBrokerBranchSummary(null);
         setShareholding([]);
@@ -243,6 +254,7 @@ export function useTaiwanDataPanel({
       if (cancelled) return;
       setInstitutional(null);
       setInstitutionalHistory([]);
+      setInstitutionalHoldingRatio(null);
       setMargin(null);
       setBrokerBranchSummary(null);
       setShareholding([]);
@@ -400,6 +412,9 @@ export function useTaiwanDataPanel({
       );
       if (getJobResultStatus(job) === "error") {
         throw new Error(formatBackfillOutcome(job, label, t));
+      }
+      if (profile === "basic" || profile === "full") {
+        onDailyPricesChangedRef.current?.();
       }
       return job;
     };
@@ -577,6 +592,43 @@ export function useTaiwanDataPanel({
       }
 
       if (tab === "institutional") {
+        if (!allowProviderRefresh) {
+          const [cachedRowsResult, holdingRatioResult] = await Promise.allSettled([
+            fetchJson<InstitutionalTradeDailyRead[]>(
+              `/api/market/institutional/${targetStockId}/history`,
+              {
+                lookback_days: institutionalLookbackDays,
+                limit: institutionalHistoryLimit,
+                ensure_history: false,
+              }
+            ),
+            fetchJson<InstitutionalHoldingRatioRead>(
+              `/api/market/institutional/${targetStockId}/holding-ratios`
+            ),
+          ]);
+          if (activeStockIdRef.current !== targetStockId) return;
+
+          if (holdingRatioResult.status === "fulfilled") {
+            setInstitutionalHoldingRatio(holdingRatioResult.value);
+          } else {
+            setInstitutionalHoldingRatio(null);
+          }
+          if (cachedRowsResult.status === "rejected") {
+            throw cachedRowsResult.reason;
+          }
+
+          const cachedRows = cachedRowsResult.value;
+          resolvedKeysRef.current.add(requestKey);
+          setInstitutional(cachedRows[cachedRows.length - 1] ?? null);
+          setInstitutionalHistory(cachedRows);
+          setDataPanelMessage(
+            holdingRatioResult.status === "fulfilled"
+              ? t("stockDetail.dataPanel.cache.localShown")
+              : t("stockDetail.dataPanel.holdingRatioUnavailable")
+          );
+          return;
+        }
+
         const cachedRows = await fetchJson<InstitutionalTradeDailyRead[]>(
           `/api/market/institutional/${targetStockId}/history`,
           {
@@ -590,26 +642,40 @@ export function useTaiwanDataPanel({
         resolvedKeysRef.current.add(requestKey);
         setInstitutional(cachedRows[cachedRows.length - 1] ?? null);
         setInstitutionalHistory(cachedRows);
-        if (!allowProviderRefresh) {
-          setDataPanelMessage(t("stockDetail.dataPanel.cache.localShown"));
-          return;
-        }
 
         const refreshJob = await runPanelRefresh(panelRefreshProfile, panelRefreshLabel);
-        const rows = await fetchJson<InstitutionalTradeDailyRead[]>(
-          `/api/market/institutional/${targetStockId}/history`,
-          {
-            lookback_days: institutionalLookbackDays,
-            limit: institutionalHistoryLimit,
-            ensure_history: false,
-          }
-        );
+        const [rowsResult, holdingRatioResult] = await Promise.allSettled([
+          fetchJson<InstitutionalTradeDailyRead[]>(
+            `/api/market/institutional/${targetStockId}/history`,
+            {
+              lookback_days: institutionalLookbackDays,
+              limit: institutionalHistoryLimit,
+              ensure_history: false,
+            }
+          ),
+          fetchJson<InstitutionalHoldingRatioRead>(
+            `/api/market/institutional/${targetStockId}/holding-ratios`
+          ),
+        ]);
         if (activeStockIdRef.current !== targetStockId) return;
 
+        if (holdingRatioResult.status === "fulfilled") {
+          setInstitutionalHoldingRatio(holdingRatioResult.value);
+        }
+        if (rowsResult.status === "rejected") {
+          throw rowsResult.reason;
+        }
+
+        const rows = rowsResult.value;
         resolvedKeysRef.current.add(requestKey);
         setInstitutional(rows[rows.length - 1] ?? null);
         setInstitutionalHistory(rows);
-        setDataPanelMessage(formatBackfillOutcome(refreshJob, panelRefreshLabel, t));
+        const refreshOutcome = formatBackfillOutcome(refreshJob, panelRefreshLabel, t);
+        setDataPanelMessage(
+          holdingRatioResult.status === "fulfilled"
+            ? refreshOutcome
+            : `${refreshOutcome}；${t("stockDetail.dataPanel.holdingRatioUnavailable")}`
+        );
         return;
       }
 
@@ -755,6 +821,7 @@ export function useTaiwanDataPanel({
       financialMetric,
       financialMetricHistory,
       institutional,
+      institutionalHoldingRatio,
       institutionalHistory,
       margin,
       monthlyRevenue,

@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -61,6 +61,17 @@ from app.market.calendar_status import (
     expected_taiwan_trade_date,
     is_release_released_from_calendar,
 )
+from app.market.exchange_calendar_refresh import refresh_exchange_calendars
+from app.market.tw_disposition import (
+    list_taiwan_dispositions,
+    refresh_taiwan_dispositions,
+)
+from app.market.tw_corporate_events import (
+    backfill_taiwan_corporate_event_history,
+    get_taiwan_stock_event_history,
+    list_taiwan_corporate_events,
+    refresh_taiwan_corporate_events,
+)
 from app.market.source_health import build_taiwan_source_health
 from app.market.chart_drawings import (
     ChartDrawingSnapshotNotFoundError,
@@ -80,6 +91,7 @@ from app.market.schemas import (
     ChartDrawingSnapshotWrite,
     FinancialMetricQuarterlyRead,
     IntradayTrendRead,
+    MarketCalendarRefreshRead,
     MarketCalendarStatusRead,
     MarketIntradayChartRead,
     InstitutionalHoldingRatioRead,
@@ -94,6 +106,11 @@ from app.market.schemas import (
     ShareholdingDistributionWeeklyRead,
     StockChipCoverageRead,
     TaiwanStockQuoteDepthRead,
+    TaiwanDispositionListRead,
+    TaiwanDispositionRefreshRead,
+    TaiwanCorporateEventListRead,
+    TaiwanCorporateEventRefreshRead,
+    TaiwanStockEventHistoryRead,
     TaiwanSourceHealthRead,
     TechnicalReportRead,
 )
@@ -174,6 +191,134 @@ def get_market_calendar_status(
         return build_market_calendar_status(market=market, now=now)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/calendar-refresh", response_model=MarketCalendarRefreshRead)
+def refresh_market_calendar(
+    market: str = Query(default="all", pattern="^(all|tw|us|jp|kr)$"),
+    db: Session = Depends(get_db),
+):
+    try:
+        return refresh_exchange_calendars(
+            markets=None if market == "all" else [market],
+            db=db,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/tw-dispositions", response_model=TaiwanDispositionListRead)
+def get_taiwan_disposition_securities(
+    include_upcoming: bool = Query(default=True),
+    include_expired: bool = Query(default=False),
+    now: datetime | None = Query(default=None),
+):
+    return list_taiwan_dispositions(
+        include_upcoming=include_upcoming,
+        include_expired=include_expired,
+        now=now,
+    )
+
+
+@router.post("/tw-dispositions/refresh", response_model=TaiwanDispositionRefreshRead)
+def refresh_taiwan_disposition_securities(
+    db: Session = Depends(get_db),
+):
+    return refresh_taiwan_dispositions(db=db)
+
+
+@router.get("/tw-corporate-events", response_model=TaiwanCorporateEventListRead)
+def get_taiwan_corporate_events(
+    stock_id: str | None = Query(default=None, min_length=1, max_length=20),
+    market: str | None = Query(default=None, pattern="^(TWSE|TPEX|twse|tpex)$"),
+    event_types: str | None = Query(default=None),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    limit: int = Query(default=500, ge=1, le=1000),
+    now: datetime | None = Query(default=None),
+):
+    reference_now = now or datetime.now(TAIWAN_TZ)
+    if reference_now.tzinfo is None:
+        reference_now = reference_now.replace(tzinfo=timezone.utc)
+    calendar_today = reference_now.astimezone(TAIWAN_TZ).date()
+    effective_date_from = max(date_from or calendar_today, calendar_today)
+    if date_to and date_to < calendar_today:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The market calendar only serves today and future events.",
+        )
+    allowed_types = {"ex_dividend", "financial_report", "investor_conference"}
+    requested_types = set(_split_categories(event_types or ""))
+    invalid_types = sorted(requested_types - allowed_types)
+    if invalid_types:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported event_types: {', '.join(invalid_types)}",
+        )
+    if date_to and date_to < effective_date_from:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="date_to must be on or after date_from.",
+        )
+    if date_to and (date_to - effective_date_from).days > 366:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Corporate-event date range cannot exceed 366 days.",
+        )
+    return list_taiwan_corporate_events(
+        stock_id=stock_id,
+        market=market,
+        event_types=requested_types,
+        date_from=effective_date_from,
+        date_to=date_to,
+        limit=limit,
+        now=now,
+    )
+
+
+@router.get(
+    "/tw-corporate-events/history/{stock_id}",
+    response_model=TaiwanStockEventHistoryRead,
+)
+def get_taiwan_corporate_event_history(
+    stock_id: str,
+    market: str | None = Query(default=None, pattern="^(TWSE|TPEX|twse|tpex)$"),
+    years: int = Query(default=5, ge=1, le=10),
+    limit: int = Query(default=200, ge=1, le=200),
+    now: datetime | None = Query(default=None),
+):
+    return get_taiwan_stock_event_history(
+        stock_id,
+        market=market,
+        years=years,
+        max_results=limit,
+        now=now,
+    )
+
+
+@router.post(
+    "/tw-corporate-events/refresh",
+    response_model=TaiwanCorporateEventRefreshRead,
+)
+def refresh_taiwan_corporate_event_calendar(
+    db: Session = Depends(get_db),
+):
+    return refresh_taiwan_corporate_events(db=db)
+
+
+@router.post(
+    "/tw-corporate-events/history/backfill",
+    response_model=TaiwanCorporateEventRefreshRead,
+)
+def backfill_taiwan_corporate_event_calendar_history(
+    years: int = Query(default=5, ge=1, le=10),
+    db: Session = Depends(get_db),
+):
+    return backfill_taiwan_corporate_event_history(
+        years=years,
+        force=True,
+        db=db,
+    )
 
 
 @router.get("/source-health", response_model=TaiwanSourceHealthRead)

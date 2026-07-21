@@ -103,6 +103,19 @@ def _read_data_only(
 
     if scope_type == "stock":
         stock_id = _require_scope_id(payload, "stock")
+        if question_intent == "quote":
+            return "omi.read_stock_quote", tools.read_stock_quote_context(
+                db=db,
+                stock_id=stock_id,
+                market_data_params=payload.market_data_params,
+            )
+        if question_intent == "broker_branch":
+            return "omi.read_stock_broker_branch", tools.read_stock_broker_branch_context(
+                db=db,
+                stock_id=stock_id,
+                branch_days=payload.branch_days,
+                market_data_params=payload.market_data_params,
+            )
         return "omi.read_stock_context", tools.read_stock_context(
             db=db,
             stock_id=stock_id,
@@ -274,6 +287,23 @@ def _build_brief(
     tool_runs: list[dict[str, Any]] | None = None,
     policy: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
+    if scope_type == "stock" and question_intent == "quote":
+        stock_id = _require_scope_id(payload, "stock")
+        return "omi.read_stock_quote", tools.read_stock_quote_context(
+            db=db,
+            stock_id=stock_id,
+            market_data_params=payload.market_data_params,
+        )
+
+    if scope_type == "stock" and question_intent == "broker_branch":
+        stock_id = _require_scope_id(payload, "stock")
+        return "omi.read_stock_broker_branch", tools.read_stock_broker_branch_context(
+            db=db,
+            stock_id=stock_id,
+            branch_days=payload.branch_days,
+            market_data_params=payload.market_data_params,
+        )
+
     if scope_type == "market":
         return "omi.generate_market_brief", reports.build_market_brief(
             db=db,
@@ -384,6 +414,16 @@ def _generate_report(
     tool_runs: list[dict[str, Any]] | None = None,
     policy: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
+    if scope_type == "stock" and question_intent in {"quote", "broker_branch"}:
+        return _read_data_only(
+            db,
+            payload,
+            scope_type,
+            question_intent=question_intent,
+            tool_runs=tool_runs,
+            policy=policy,
+        )
+
     if scope_type == "stock":
         stock_id = _require_scope_id(payload, "stock")
         return "omi.generate_stock_llm_report", orchestrator.generate_stock_llm_report(
@@ -431,6 +471,16 @@ def _generate_analysis(
     tool_runs: list[dict[str, Any]] | None = None,
     policy: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
+    if scope_type == "stock" and question_intent in {"quote", "broker_branch"}:
+        return _read_data_only(
+            db,
+            payload,
+            scope_type,
+            question_intent=question_intent,
+            tool_runs=tool_runs,
+            policy=policy,
+        )
+
     if scope_type == "stock":
         stock_id = _require_scope_id(payload, "stock")
         return "omi.generate_stock_llm_analysis", orchestrator.generate_stock_llm_analysis(
@@ -469,9 +519,25 @@ def _generate_analysis(
     return _read_data_only(db, payload, scope_type, tool_runs=tool_runs, policy=policy)
 
 
-def _check_freshness(db: Session, payload: AiAskRequest, scope_type: str) -> dict[str, Any]:
+def _check_freshness(
+    db: Session,
+    payload: AiAskRequest,
+    scope_type: str,
+    *,
+    question_intent: str = "general",
+) -> dict[str, Any]:
     if scope_type == "stock":
         stock_id = _require_scope_id(payload, "stock")
+        if question_intent == "quote":
+            return freshness.check_stock_daily_price_freshness(
+                db=db,
+                stock_id=stock_id,
+            )
+        if question_intent == "broker_branch":
+            return freshness.check_stock_broker_branch_freshness(
+                db=db,
+                stock_id=stock_id,
+            )
         stock_freshness = freshness.check_stock_data_freshness(
             db=db,
             stock_id=stock_id,

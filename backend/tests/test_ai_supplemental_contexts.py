@@ -358,7 +358,7 @@ class AiSupplementalContextTests(unittest.TestCase):
             list_kr_index_ohlc_chart_data=lambda *args, **kwargs: {
                 "points": [
                     {
-                        "time": "2026-07-17",
+                        "time": "2026-07-16",
                         "close": 3200.0,
                         "volume": 1000,
                     }
@@ -372,8 +372,8 @@ class AiSupplementalContextTests(unittest.TestCase):
                 "previous_close_source": "kr_index_daily_price",
                 "point_count": 2,
                 "points": [
-                    {"time": "2026-07-17T09:00:00+09:00", "price": 3201.0, "cumulative_volume": 10},
-                    {"time": "2026-07-17T15:30:00+09:00", "price": 3210.0, "cumulative_volume": 500},
+                    {"time": "2026-07-16T09:00:00+09:00", "price": 3201.0, "cumulative_volume": 10},
+                    {"time": "2026-07-16T15:30:00+09:00", "price": 3210.0, "cumulative_volume": 500},
                 ],
                 "source_url": "https://example.test/kr-index",
                 "is_partial": False,

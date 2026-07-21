@@ -86,11 +86,50 @@ def slot_envelope(
     missing: list[str] | None = None,
     warnings: list[str] | None = None,
     next_fill: str | None = None,
+    availability: str | None = None,
+    freshness_status: str | None = None,
+    usability: str | None = None,
 ) -> dict[str, Any]:
+    derived_availability = availability or (
+        "missing"
+        if status == "missing"
+        else "not_requested"
+        if status == "not_requested"
+        else "not_applicable"
+        if status == "not_applicable"
+        else "available"
+    )
+    derived_freshness = freshness_status or (
+        "stale"
+        if status == "stale"
+        else "not_requested"
+        if status == "not_requested"
+        else "not_applicable"
+        if status == "not_applicable"
+        else "missing"
+        if status == "missing"
+        else "unknown"
+    )
+    derived_usability = usability or (
+        "not_requested"
+        if derived_availability == "not_requested"
+        else "not_applicable"
+        if derived_availability == "not_applicable"
+        else "unavailable"
+        if derived_availability == "missing" or status in {"missing", "failed", "error"}
+        else "blocked"
+        if status == "blocked"
+        else "limited"
+        if derived_freshness == "stale" or status == "partial"
+        else "usable"
+    )
     slot: dict[str, Any] = {
         "status": status,
         "capability": capability,
         "priority": priority,
+        "availability": derived_availability,
+        "freshness": {"status": derived_freshness},
+        "usability": derived_usability,
     }
     if payload_ref:
         slot["payload_ref"] = payload_ref

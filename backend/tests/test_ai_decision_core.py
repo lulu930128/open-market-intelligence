@@ -9,6 +9,12 @@ from app.ai.schemas import AiAskRequest
 
 
 class AiDecisionCoreTests(unittest.TestCase):
+    def test_market_breadth_intent_precedes_generic_market_analysis(self) -> None:
+        self.assertEqual(
+            decision_core.infer_question_intent("今天漲跌家數與跌停家數如何？"),
+            "market_breadth",
+        )
+
     def test_entry_question_understanding_handles_pullback_wording(self) -> None:
         understanding = decision_core.understand_question(
             question="以現在來說，2327 國巨適合買入嗎？如果要等回檔，價格大概看哪裡？",
@@ -299,7 +305,9 @@ class AiDecisionCoreTests(unittest.TestCase):
                 ),
             )
 
-        self.assertEqual(response["mode"], {"requested": "analysis", "effective": "brief"})
+        self.assertEqual(response["mode"]["requested"], "analysis")
+        self.assertEqual(response["mode"]["effective"], "brief")
+        self.assertEqual(response["mode"]["response"], "brief")
         self.assertIn("Auto analysis skipped", response["warnings"][0])
         self.assertEqual(response["action"], "omi.generate_stock_brief")
 

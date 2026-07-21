@@ -9,6 +9,7 @@ from app.jobs import backfill_tasks, service as job_service
 from app.jobs.job_types import (
     JP_SCHEDULED_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
     KR_SCHEDULED_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
+    TAIWAN_BROKER_BRANCH_MARKET_REFRESH_JOB_TYPE,
     TAIWAN_DERIVATIVES_SCHEDULED_REFRESH_JOB_TYPE,
     WATCHLIST_RADAR_AUTO_SNAPSHOT_JOB_TYPE,
 )
@@ -19,12 +20,26 @@ from app.market.calendar_status import (
     expected_trade_date_from_calendar,
     is_release_released_from_calendar,
 )
+from app.market.exchange_calendar_refresh import refresh_exchange_calendars
+from app.market.tw_disposition import refresh_taiwan_dispositions
+from app.market.tw_corporate_events import (
+    backfill_taiwan_corporate_event_history,
+    refresh_taiwan_corporate_events,
+)
+from app.market.broker_branch_market_refresh import (
+    get_taiwan_broker_branch_market_coverage,
+)
 from app.market.market_chips import normalize_market_chip_index_ids
 from app.market.indices import (
+    TAIWAN_INDEX_RECONCILIATION_END_TIME,
+    TAIWAN_INDEX_RECONCILIATION_RETRY_SECONDS,
+    get_market_index_summary,
     is_taiwan_index_live_refresh_window,
+    market_index_summary_needs_reconciliation,
     refresh_market_index_summary,
 )
 from app.market.taiwan_rules import (
+    TAIWAN_DATASET_BROKER_BRANCH,
     TAIWAN_DATASET_DAILY_PRICE,
     TAIWAN_DATASET_INSTITUTIONAL_TRADE,
     TAIWAN_DATASET_MARGIN_TRADING,
@@ -816,6 +831,192 @@ def _add_taiwan_derivatives_refresh_job(scheduler: Any) -> bool:
     return True
 
 
+def enqueue_taiwan_broker_branch_market_refresh() -> None:
+    now = datetime.now(_timezone())
+    calendar_status = build_taiwan_calendar_status(now=now)
+    release_window = calendar_status.get("release_windows", {}).get(
+        TAIWAN_DATASET_BROKER_BRANCH
+    )
+
+    expected_trade_date = (
+        expected_trade_date_from_calendar(
+            calendar_status,
+            market="tw",
+            key=TAIWAN_DATASET_BROKER_BRANCH,
+        )
+        or now.date()
+    )
+    current_date_release_ready = (
+        calendar_status.get("is_trading_day")
+        and is_release_released_from_calendar(
+            calendar_status,
+            market="tw",
+            key=TAIWAN_DATASET_BROKER_BRANCH,
+        )
+    )
+    if expected_trade_date >= now.date() and not current_date_release_ready:
+        logger.info(
+            "Skipped Taiwan all-market broker-branch refresh before the current "
+            "trade-date release date=%s phase=%s reason=%s window=%s.",
+            calendar_status.get("date"),
+            calendar_status.get("phase"),
+            calendar_status.get("reason"),
+            release_window,
+        )
+        return
+
+    if expected_trade_date > now.date():
+        logger.warning(
+            "Skipped Taiwan all-market broker-branch refresh because calendar "
+            "returned a future expected date=%s now=%s.",
+            expected_trade_date,
+            now.date(),
+        )
+        return
+
+    if expected_trade_date < now.date():
+        logger.info(
+            "Running Taiwan all-market broker-branch catch-up date=%s now=%s.",
+            expected_trade_date,
+            now.date(),
+        )
+
+    sleep_seconds = max(
+        float(settings.scheduler_tw_broker_branch_sleep_seconds),
+        0.0,
+    )
+    max_stocks = max(int(settings.scheduler_tw_broker_branch_max_stocks), 1)
+    max_runtime_seconds = max(
+        int(settings.scheduler_tw_broker_branch_max_runtime_seconds),
+        1,
+    )
+    db = SessionLocal()
+    try:
+        coverage = get_taiwan_broker_branch_market_coverage(
+            db,
+            trade_date=expected_trade_date,
+        )
+        if coverage["complete"]:
+            logger.info(
+                "Skipped Taiwan all-market broker-branch refresh because daily "
+                "coverage is complete date=%s covered=%s expected=%s.",
+                expected_trade_date,
+                coverage["covered_count"],
+                coverage["expected_count"],
+            )
+            return
+
+        request = {
+            "schedule": "tw_broker_branch_market_refresh",
+            "collection_mode": (
+                "current_release"
+                if expected_trade_date == now.date()
+                else "startup_catchup"
+            ),
+            "run_date": now.date().isoformat(),
+            "expected_trade_date": expected_trade_date.isoformat(),
+            "markets": ["TWSE", "TPEX"],
+            "instrument_type": "stock",
+            "provider": "nstock",
+            "provider_request_limit": max_stocks + 1,
+            "max_stocks": max_stocks,
+            "sleep_seconds": sleep_seconds,
+            "max_runtime_seconds": max_runtime_seconds,
+            "calendar_phase": calendar_status.get("phase"),
+            "calendar_release_window": release_window,
+        }
+        progress_total = max(
+            min(int(coverage["missing_count"]), max_stocks),
+            1,
+        )
+        job, created = job_service.enqueue_job(
+            db=db,
+            job_type=TAIWAN_BROKER_BRANCH_MARKET_REFRESH_JOB_TYPE,
+            target=expected_trade_date.isoformat(),
+            request=request,
+            progress_total=progress_total,
+            message="Queued by scheduler for Taiwan all-market broker-branch collection.",
+            task=backfill_tasks.run_taiwan_broker_branch_market_refresh_job,
+            task_args=(
+                expected_trade_date,
+                sleep_seconds,
+                max_stocks,
+                max_runtime_seconds,
+            ),
+        )
+        logger.info(
+            "Taiwan all-market broker-branch refresh %s job_id=%s date=%s "
+            "covered=%s expected=%s missing=%s.",
+            "queued" if created else "deduped",
+            job.id,
+            expected_trade_date,
+            coverage["covered_count"],
+            coverage["expected_count"],
+            coverage["missing_count"],
+        )
+    finally:
+        db.close()
+
+
+def reconcile_taiwan_broker_branch_market_refresh() -> None:
+    now = datetime.now(_timezone())
+    hour, minute = _parse_hour_minute(
+        settings.scheduler_tw_broker_branch_refresh_time
+    )
+    end_hour, end_minute = _parse_hour_minute(
+        settings.scheduler_tw_broker_branch_reconcile_until
+    )
+    if (now.hour, now.minute) < (hour, minute):
+        return
+    if (now.hour, now.minute) > (end_hour, end_minute):
+        return
+
+    enqueue_taiwan_broker_branch_market_refresh()
+
+
+def _add_taiwan_broker_branch_market_refresh_job(scheduler: Any) -> bool:
+    if not settings.enable_tw_broker_branch_scheduler:
+        return False
+
+    hour, minute = _parse_hour_minute(
+        settings.scheduler_tw_broker_branch_refresh_time
+    )
+    scheduler.add_job(
+        enqueue_taiwan_broker_branch_market_refresh,
+        trigger="cron",
+        day_of_week=settings.scheduler_tw_broker_branch_refresh_day_of_week,
+        hour=hour,
+        minute=minute,
+        id="tw_broker_branch_market_refresh",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+    scheduler.add_job(
+        reconcile_taiwan_broker_branch_market_refresh,
+        trigger="interval",
+        minutes=max(
+            int(settings.scheduler_tw_broker_branch_reconcile_interval_minutes),
+            5,
+        ),
+        id="tw_broker_branch_market_refresh_reconcile",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        next_run_time=datetime.now(_timezone()),
+    )
+    scheduler.add_job(
+        enqueue_taiwan_broker_branch_market_refresh,
+        trigger="date",
+        run_date=datetime.now(_timezone()),
+        id="tw_broker_branch_market_refresh_startup_catchup",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+    return True
+
+
 def collect_taiwan_market_index_summary() -> None:
     now = datetime.now(_timezone())
     if not is_taiwan_index_live_refresh_window(now):
@@ -838,6 +1039,43 @@ def collect_taiwan_market_index_summary() -> None:
         db.close()
 
 
+def reconcile_taiwan_market_index_summary(
+    *,
+    allow_late: bool = False,
+    now: datetime | None = None,
+) -> None:
+    local_now = now or datetime.now(_timezone())
+    db = SessionLocal()
+    try:
+        cached_payload = get_market_index_summary(db=db)
+        if not market_index_summary_needs_reconciliation(
+            cached_payload,
+            now=local_now,
+            allow_late=allow_late,
+        ):
+            return
+        payload = refresh_market_index_summary(
+            db=db,
+            refresh_daily_stats=True,
+        )
+        logger.info(
+            "Taiwan market index summary post-close reconciliation completed "
+            "as_of=%s indices=%s startup_catchup=%s.",
+            payload.get("as_of"),
+            len(payload.get("indices") or []),
+            allow_late,
+        )
+    except Exception:
+        db.rollback()
+        logger.exception("Taiwan market index summary post-close reconciliation failed.")
+    finally:
+        db.close()
+
+
+def reconcile_taiwan_market_index_summary_startup() -> None:
+    reconcile_taiwan_market_index_summary(allow_late=True)
+
+
 def _add_taiwan_market_index_collector_job(scheduler: Any) -> bool:
     if not settings.enable_taiwan_market_index_scheduler:
         return False
@@ -854,6 +1092,29 @@ def _add_taiwan_market_index_collector_job(scheduler: Any) -> bool:
         coalesce=True,
         max_instances=1,
         next_run_time=datetime.now(_timezone()),
+    )
+    reconciliation_minutes = max(
+        TAIWAN_INDEX_RECONCILIATION_RETRY_SECONDS // 60,
+        5,
+    )
+    scheduler.add_job(
+        reconcile_taiwan_market_index_summary,
+        trigger="interval",
+        minutes=reconciliation_minutes,
+        id="taiwan_market_index_summary_reconcile",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        next_run_time=datetime.now(_timezone()) + timedelta(minutes=reconciliation_minutes),
+    )
+    scheduler.add_job(
+        reconcile_taiwan_market_index_summary_startup,
+        trigger="date",
+        run_date=datetime.now(_timezone()),
+        id="taiwan_market_index_summary_startup_catchup",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
     )
     return True
 
@@ -873,6 +1134,167 @@ def _add_jp_market_refresh_job(scheduler: Any) -> bool:
         replace_existing=True,
         coalesce=True,
         max_instances=1,
+    )
+    return True
+
+
+def refresh_market_calendars() -> None:
+    db = SessionLocal()
+    try:
+        result = refresh_exchange_calendars(db=db)
+        logger.info(
+            "Scheduled exchange-calendar refresh completed success=%s errors=%s markets=%s.",
+            result.get("success_count"),
+            result.get("error_count"),
+            ",".join(result.get("requested_markets") or []),
+        )
+    except Exception:
+        db.rollback()
+        logger.exception("Scheduled exchange-calendar refresh failed.")
+    finally:
+        db.close()
+
+
+def _add_market_calendar_refresh_job(scheduler: Any) -> bool:
+    if not settings.enable_market_calendar_scheduler:
+        return False
+
+    hour, minute = _parse_hour_minute(
+        settings.scheduler_market_calendar_refresh_time
+    )
+    scheduler.add_job(
+        refresh_market_calendars,
+        trigger="cron",
+        hour=hour,
+        minute=minute,
+        id="market_calendar_refresh",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        next_run_time=datetime.now(_timezone()),
+    )
+    return True
+
+
+def refresh_taiwan_disposition_securities() -> None:
+    db = SessionLocal()
+    try:
+        result = refresh_taiwan_dispositions(db=db)
+        logger.info(
+            "Scheduled Taiwan disposition refresh completed success=%s errors=%s active=%s upcoming=%s.",
+            result.get("success_count"),
+            result.get("error_count"),
+            result.get("active_count"),
+            result.get("upcoming_count"),
+        )
+    except Exception:
+        db.rollback()
+        logger.exception("Scheduled Taiwan disposition refresh failed.")
+    finally:
+        db.close()
+
+
+def _add_taiwan_disposition_refresh_job(scheduler: Any) -> bool:
+    if not settings.enable_tw_disposition_scheduler:
+        return False
+
+    hour, minute = _parse_hour_minute(
+        settings.scheduler_tw_disposition_refresh_time
+    )
+    scheduler.add_job(
+        refresh_taiwan_disposition_securities,
+        trigger="cron",
+        hour=hour,
+        minute=minute,
+        id="taiwan_disposition_refresh",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        next_run_time=datetime.now(_timezone()),
+    )
+    return True
+
+
+def refresh_taiwan_corporate_event_calendar() -> None:
+    db = SessionLocal()
+    try:
+        result = refresh_taiwan_corporate_events(db=db)
+        logger.info(
+            "Scheduled Taiwan corporate-event refresh completed success=%s errors=%s events=%s requests=%s/%s.",
+            result.get("success_count"),
+            result.get("error_count"),
+            result.get("event_count"),
+            result.get("request_count"),
+            result.get("request_limit"),
+        )
+    except Exception:
+        db.rollback()
+        logger.exception("Scheduled Taiwan corporate-event refresh failed.")
+    finally:
+        db.close()
+
+
+def _add_taiwan_corporate_event_refresh_job(scheduler: Any) -> bool:
+    if not settings.enable_tw_corporate_event_scheduler:
+        return False
+
+    hour, minute = _parse_hour_minute(
+        settings.scheduler_tw_corporate_event_refresh_time
+    )
+    scheduler.add_job(
+        refresh_taiwan_corporate_event_calendar,
+        trigger="cron",
+        hour=hour,
+        minute=minute,
+        id="taiwan_corporate_event_refresh",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        next_run_time=datetime.now(_timezone()),
+    )
+    return True
+
+
+def refresh_taiwan_corporate_event_history() -> None:
+    db = SessionLocal()
+    try:
+        result = backfill_taiwan_corporate_event_history(
+            force=False,
+            db=db,
+        )
+        logger.info(
+            "Scheduled Taiwan corporate-event history reconciliation completed success=%s errors=%s events=%s requests=%s/%s.",
+            result.get("success_count"),
+            result.get("error_count"),
+            result.get("event_count"),
+            result.get("request_count"),
+            result.get("request_limit"),
+        )
+    except Exception:
+        db.rollback()
+        logger.exception("Scheduled Taiwan corporate-event history reconciliation failed.")
+    finally:
+        db.close()
+
+
+def _add_taiwan_corporate_event_history_refresh_job(scheduler: Any) -> bool:
+    if not settings.enable_tw_corporate_event_scheduler:
+        return False
+
+    hour, minute = _parse_hour_minute(
+        settings.scheduler_tw_corporate_event_history_refresh_time
+    )
+    scheduler.add_job(
+        refresh_taiwan_corporate_event_history,
+        trigger="cron",
+        day_of_week=settings.scheduler_tw_corporate_event_history_refresh_day_of_week,
+        hour=hour,
+        minute=minute,
+        id="taiwan_corporate_event_history_refresh",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        next_run_time=datetime.now(_timezone()) + timedelta(seconds=15),
     )
     return True
 
@@ -1097,6 +1519,10 @@ def _add_dispatch_schedule_tick_job(scheduler: Any) -> bool:
 def start_scheduler() -> Any | None:
     if (
         not settings.enable_scheduler
+        and not settings.enable_market_calendar_scheduler
+        and not settings.enable_tw_disposition_scheduler
+        and not settings.enable_tw_corporate_event_scheduler
+        and not settings.enable_tw_broker_branch_scheduler
         and not settings.enable_taiwan_market_index_scheduler
         and not settings.enable_taiwan_futures_scheduler
         and not settings.enable_taiwan_derivatives_scheduler
@@ -1185,6 +1611,19 @@ def start_scheduler() -> Any | None:
         )
     jp_market_refresh_enabled = _add_jp_market_refresh_job(scheduler)
     kr_market_refresh_enabled = _add_kr_market_refresh_job(scheduler)
+    market_calendar_refresh_enabled = _add_market_calendar_refresh_job(scheduler)
+    taiwan_disposition_refresh_enabled = _add_taiwan_disposition_refresh_job(
+        scheduler
+    )
+    taiwan_corporate_event_refresh_enabled = (
+        _add_taiwan_corporate_event_refresh_job(scheduler)
+    )
+    taiwan_corporate_event_history_refresh_enabled = (
+        _add_taiwan_corporate_event_history_refresh_job(scheduler)
+    )
+    taiwan_broker_branch_refresh_enabled = (
+        _add_taiwan_broker_branch_market_refresh_job(scheduler)
+    )
     watchlist_radar_snapshot_enabled = _add_watchlist_radar_auto_snapshot_job(scheduler)
     taiwan_market_index_collector_enabled = _add_taiwan_market_index_collector_job(
         scheduler
@@ -1194,9 +1633,49 @@ def start_scheduler() -> Any | None:
     dispatch_schedule_tick_enabled = _add_dispatch_schedule_tick_job(scheduler)
     scheduler.start()
     logger.info(
-        "Taiwan market index summary collector interval=%ss enabled=%s.",
+        "Taiwan market index summary collector interval=%ss; post-close "
+        "reconciliation=%sm until=%s; enabled=%s.",
         max(int(settings.scheduler_taiwan_market_index_interval_seconds), 5),
+        max(TAIWAN_INDEX_RECONCILIATION_RETRY_SECONDS // 60, 5),
+        TAIWAN_INDEX_RECONCILIATION_END_TIME.strftime("%H:%M"),
         taiwan_market_index_collector_enabled,
+    )
+    logger.info(
+        "Exchange-calendar refresh=%s %s enabled=%s.",
+        settings.scheduler_market_calendar_refresh_time,
+        settings.timezone,
+        market_calendar_refresh_enabled,
+    )
+    logger.info(
+        "Taiwan disposition refresh=%s %s enabled=%s.",
+        settings.scheduler_tw_disposition_refresh_time,
+        settings.timezone,
+        taiwan_disposition_refresh_enabled,
+    )
+    logger.info(
+        "Taiwan corporate-event refresh=%s %s enabled=%s.",
+        settings.scheduler_tw_corporate_event_refresh_time,
+        settings.timezone,
+        taiwan_corporate_event_refresh_enabled,
+    )
+    logger.info(
+        "Taiwan corporate-event history reconciliation=%s %s %s enabled=%s.",
+        settings.scheduler_tw_corporate_event_history_refresh_time,
+        settings.scheduler_tw_corporate_event_history_refresh_day_of_week,
+        settings.timezone,
+        taiwan_corporate_event_history_refresh_enabled,
+    )
+    logger.info(
+        "Taiwan all-market broker-branch refresh=%s %s %s; reconcile_interval=%sm "
+        "until=%s; max_stocks=%s; sleep=%ss; enabled=%s.",
+        settings.scheduler_tw_broker_branch_refresh_time,
+        settings.scheduler_tw_broker_branch_refresh_day_of_week,
+        settings.timezone,
+        max(int(settings.scheduler_tw_broker_branch_reconcile_interval_minutes), 5),
+        settings.scheduler_tw_broker_branch_reconcile_until,
+        max(int(settings.scheduler_tw_broker_branch_max_stocks), 1),
+        max(float(settings.scheduler_tw_broker_branch_sleep_seconds), 0.0),
+        taiwan_broker_branch_refresh_enabled,
     )
     logger.info(
         "Job scheduler started. core_scheduler_enabled=%s; market_daily_refresh=%s %s weekdays; market_margin_daily_refresh=%s %s weekdays; market_chip_daily_refresh=%s %s weekdays; market_chip_margin_daily_refresh=%s %s weekdays; us_market_daily_refresh=%s %s %s enabled=%s; jp_market_watchlist_resource_refresh=%s %s %s enabled=%s; kr_market_watchlist_resource_refresh=%s %s %s enabled=%s; watchlist_radar_auto_snapshot=%s %s %s reconcile_interval=%sm reconcile_until=%s enabled=%s; taiwan_futures_quote_collector interval=%ss enabled=%s; taiwan_derivatives_refresh=%s %s %s enabled=%s; dispatch_schedule_tick interval=%ss enabled=%s.",

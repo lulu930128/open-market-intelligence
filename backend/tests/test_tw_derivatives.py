@@ -318,10 +318,15 @@ class TaiwanDerivativesPersistenceTests(unittest.TestCase):
             )
             db.commit()
 
-            summary = tw_derivatives.build_taiwan_derivatives_summary(
-                db,
-                option_strike_limit=3,
-            )
+            with patch.object(
+                tw_derivatives,
+                "expected_taiwan_derivatives_date",
+                return_value=TRADE_DATE,
+            ):
+                summary = tw_derivatives.build_taiwan_derivatives_summary(
+                    db,
+                    option_strike_limit=3,
+                )
             self.assertEqual(summary["as_of"], TRADE_DATE)
             self.assertEqual(summary["stale"], [])
             self.assertEqual(summary["options_chain"]["contract_month"], "202608")

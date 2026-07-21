@@ -2,6 +2,7 @@ from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from app.config import settings
+from app.market.exchange_calendar_cache import cached_market_holiday
 
 
 TAIWAN_TZ = ZoneInfo(settings.timezone)
@@ -59,6 +60,9 @@ def taiwan_today(now: datetime | None = None) -> date:
 
 
 def taiwan_market_holiday_name(value: date) -> str | None:
+    cached = cached_market_holiday("tw", value)
+    if cached.covered:
+        return cached.name
     return TAIWAN_MARKET_HOLIDAYS.get(value.year, {}).get(value)
 
 

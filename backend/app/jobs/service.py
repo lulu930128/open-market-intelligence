@@ -251,10 +251,24 @@ def serialize_job(job: JobRun, *, include_payload: bool = True) -> dict[str, Any
             result_json = _loaded_attr(job, "result_json")
             result = _summarize_result(_from_json(result_json)) if result_json is not None else None
 
+    result_dict = result if isinstance(result, dict) else {}
+    result_status = str(result_dict.get("status") or "").strip().lower()
+    public_status = (
+        result_status
+        if result_status in {"completed", "partial", "failed", "cancelled", "expired"}
+        else {
+            "queued": "queued",
+            "running": "running",
+            "success": "completed",
+            "error": "failed",
+        }.get(str(job.status), str(job.status))
+    )
+
     return {
         "id": job.id,
         "job_type": job.job_type,
         "status": job.status,
+        "public_status": public_status,
         "target": job.target,
         "progress_current": job.progress_current,
         "progress_total": job.progress_total,

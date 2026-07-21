@@ -192,6 +192,55 @@ class TechnicalReportTests(unittest.TestCase):
             )
         )
 
+    def test_daily_report_can_overlay_current_price_without_relabeling_daily_indicators(self) -> None:
+        with (
+            patch(
+                "app.market.technical_report._now",
+                return_value=datetime(2026, 3, 23, 10, 0, tzinfo=TAIPEI_TZ),
+            ),
+            patch(
+                "app.market.technical_report.get_intraday_trend",
+                return_value={
+                    "source": "test_intraday",
+                    "previous_close": 179.0,
+                    "points": [
+                        {
+                            "time": "2026-03-23T10:00:00+08:00",
+                            "price": 130.0,
+                            "volume": 5000,
+                        }
+                    ],
+                },
+            ),
+        ):
+            report = build_stock_technical_report(
+                db=self.db,
+                stock_id="2330",
+                timeframe="daily",
+                include_intraday=True,
+            )
+
+        price_context = report["data"]["price_context"]
+        self.assertEqual(report["phase"], "daily_intraday")
+        self.assertEqual(report["confidence"], "medium")
+        self.assertEqual(price_context["price"], 130.0)
+        self.assertTrue(price_context["is_provisional"])
+        self.assertEqual(price_context["daily_indicator_time"], "2026-03-21")
+        self.assertEqual(
+            price_context["moving_average_structure"]["price_state"],
+            "below_all",
+        )
+        self.assertTrue(any(row["key"] == "price_position" for row in report["rows"]))
+        self.assertTrue(any(badge["label"] == "失守 MA60" for badge in report["badges"]))
+        self.assertTrue(report["data"]["price_context"]["range_signals"])
+        self.assertTrue(
+            any(badge["label"] == "盤中價 × 已收盤指標" for badge in report["badges"])
+        )
+        self.assertEqual(
+            report["evidence_passport"]["as_of"],
+            "2026-03-23T10:00:00+08:00",
+        )
+
     def test_weekly_and_monthly_reports_return_scored_rows(self) -> None:
         weekly = build_stock_technical_report(
             db=self.db,

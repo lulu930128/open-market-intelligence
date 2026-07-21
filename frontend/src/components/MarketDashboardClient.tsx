@@ -132,13 +132,23 @@ import type {
   WatchlistRadarMode,
 } from "@/types/market";
 import type { BackendConnectionIssueCode } from "@/types/runtime";
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
 type RankBy = TaiwanRankBy;
 type USRankBy = UsRankBy;
 type JPRankBy = JpRankBy;
 type KRRankBy = KrRankBy;
+
+function isTaiwanMarketWideRank(rankBy: RankBy) {
+  return rankBy === "foreign_net" || rankBy === "margin_balance_change_pct";
+}
+
+function formatTaiwanRankValue(row: RankingItem, rankBy: RankBy) {
+  if (rankBy === "foreign_net") return formatLots(row.rank_value);
+  if (rankBy === "margin_balance_change_pct") return formatPct(row.rank_value);
+  return formatLots(row.volume);
+}
 
 function regionalRadarRouteMode(mode: WatchlistRadarMode) {
   return mode === "action" ? null : mode;
@@ -518,16 +528,35 @@ export default function MarketDashboardClient({
     onError: handleKrRankingError,
   });
   const loadKrDashboard = krRankingActions.load;
+  const refreshTaiwanOverviewAfterDetailUpdate = useCallback(() => {
+    if (activeGroupId === null) return;
+    void loadDashboard(activeGroupId, rankBy, {
+      silent: true,
+      preferCompanionSnapshot: false,
+    });
+  }, [activeGroupId, loadDashboard, rankBy]);
+  const refreshUsOverviewAfterDetailUpdate = useCallback(() => {
+    if (selectedUsGroupId === null) return;
+    void loadUsDashboard(selectedUsGroupId, usRankBy, { silent: true });
+  }, [loadUsDashboard, selectedUsGroupId, usRankBy]);
+  const refreshJpOverviewAfterDetailUpdate = useCallback(() => {
+    if (selectedJpGroupId === null) return;
+    void loadJpDashboard(selectedJpGroupId, jpRankBy, { silent: true });
+  }, [jpRankBy, loadJpDashboard, selectedJpGroupId]);
+  const refreshKrOverviewAfterDetailUpdate = useCallback(() => {
+    if (selectedKrGroupId === null) return;
+    void loadKrDashboard(selectedKrGroupId, krRankBy, { silent: true });
+  }, [krRankBy, loadKrDashboard, selectedKrGroupId]);
   const baseRows = useMemo(
     () => buildWatchlistRows(selectedGroup, watchlistItems),
     [selectedGroup, watchlistItems]
   );
   const rows = useMemo(() => {
-    if (rankBy === "none" || ranking?.is_current === false) {
+    if (rankBy === "none") {
       return mergeWatchlistRows(baseRows, ranking);
     }
 
-    return ranking?.results ?? baseRows;
+    return Array.isArray(ranking?.results) ? ranking.results : [];
   }, [baseRows, rankBy, ranking]);
   const rankingFreshnessPending = ranking?.is_current === false;
   const displayRows = rows;
@@ -1058,6 +1087,9 @@ export default function MarketDashboardClient({
     const selected = row.stock_id === selectedStockId;
     const loading = isRankingItemPending(row);
     const trendLoading = loading || rankingTrendPending;
+    const marketWideRank = isTaiwanMarketWideRank(rankBy);
+    const displayedRank = marketWideRank ? row.market_rank : row.rank;
+    const displayedMetric = marketWideRank ? row.rank_value : row.volume;
 
     return (
       <a
@@ -1081,13 +1113,17 @@ export default function MarketDashboardClient({
           onTaiwanStockChange(row.stock_id, row.stock_name);
         }}
         className={[
-          "omi-ranking-row grid w-full grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-omi-border-subtle px-4 py-2 text-left text-sm",
+          "omi-ranking-row grid w-full grid-cols-[56px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-omi-border-subtle px-4 py-2 text-left text-sm",
           selected
             ? "omi-ranking-row-selected relative z-10 bg-omi-surface text-omi-text ring-1 ring-omi-market-up-border"
             : "bg-omi-surface text-omi-text hover:bg-omi-surface-subtle",
         ].join(" ")}
       >
-        <span className={selected ? "font-semibold text-omi-market-up" : "text-omi-text-muted"}>#{row.rank}</span>
+        <span className={selected ? "font-semibold text-omi-market-up" : "text-omi-text-muted"}>
+          {displayedRank === null || displayedRank === undefined
+            ? "-"
+            : `#${displayedRank}`}
+        </span>
         <span className="min-w-0">
           <span className="block truncate font-semibold">
             {row.stock_id} {row.stock_name ?? ""}
@@ -1156,12 +1192,12 @@ export default function MarketDashboardClient({
             <RankingCellSkeleton className="h-3 w-16" />
           ) : (
             <PriceUpdatePulse
-              value={row.volume}
-              direction={null}
-              resetKey={`${activeGroupId ?? "all"}:${row.stock_id}`}
+              value={displayedMetric}
+              direction={marketWideRank ? displayedMetric : null}
+              resetKey={`${activeGroupId ?? "all"}:${row.stock_id}:${rankBy}`}
               className="justify-end tabular-nums"
             >
-              {formatLots(row.volume)}
+              {formatTaiwanRankValue(row, rankBy)}
             </PriceUpdatePulse>
           )}
         </span>
@@ -1202,6 +1238,10 @@ export default function MarketDashboardClient({
             <option value="change_pct">{t("rank.changePct")}</option>
             <option value="score">{t("rank.score")}</option>
             <option value="volume">{t("rank.volume")}</option>
+            <option value="foreign_net">{t("rank.foreignNet")}</option>
+            <option value="margin_balance_change_pct">
+              {t("rank.marginBalanceChangePct")}
+            </option>
           </select>
           <button
             type="button"
@@ -1301,7 +1341,14 @@ export default function MarketDashboardClient({
             </span>
           ) : (
             <span className="text-xs text-omi-text-muted">
-              {rankBy === "none"
+              {isTaiwanMarketWideRank(rankBy) && ranking?.rank_scope === "tw_market"
+                ? t("dashboard.ranking.rowSummaryMarketRanked", {
+                    count: displayRows.length,
+                    rankLabel: rankLabel(t, ranking.rank_by),
+                    universeCount: ranking.rank_universe_count ?? 0,
+                    date: ranking.rank_trade_date ?? "-",
+                  })
+                : rankBy === "none"
                 ? t("dashboard.ranking.rowSummaryNormal", { count: displayRows.length })
                 : t("dashboard.ranking.rowSummaryRanked", {
                     count: displayRows.length,
@@ -1311,19 +1358,33 @@ export default function MarketDashboardClient({
           )}
         </div>
 
-        <div className="grid grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
-          <span>{t("dashboard.ranking.rank")}</span>
+        <div className="grid grid-cols-[56px_minmax(120px,1fr)_104px_80px_82px_72px_90px] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
+          <span>
+            {isTaiwanMarketWideRank(rankBy)
+              ? t("dashboard.ranking.marketRank")
+              : t("dashboard.ranking.rank")}
+          </span>
           <span>{t("dashboard.ranking.stock")}</span>
           <span className="text-center">{t("dashboard.ranking.trend")}</span>
           <span className="text-right">{t("dashboard.ranking.close")}</span>
           <span className="text-right">{t("dashboard.ranking.changePct")}</span>
           <span className="text-right">{t("dashboard.ranking.status")}</span>
-          <span className="text-right">{t("dashboard.ranking.volumeLots")}</span>
+          <span className="text-right">
+            {rankBy === "foreign_net"
+              ? t("dashboard.ranking.foreignNetLots")
+              : rankBy === "margin_balance_change_pct"
+                ? t("dashboard.ranking.marginBalanceChangePct")
+                : t("dashboard.ranking.volumeLots")}
+          </span>
         </div>
         {displayRows.length > 0 ? (
           displayRows.map(renderRankingRow)
         ) : rankingListLoading ? (
           <RankingLoadingRows />
+        ) : rankingLoadState === "error" ? (
+          <div className="border-t border-omi-border-subtle p-3">
+            <StateSurface title={t("dashboard.ranking.readError")} tone="danger" compact />
+          </div>
         ) : (
           <div className="border-t border-omi-border-subtle p-3">
             <StateSurface title={t("dashboard.ranking.empty")} tone="empty" compact />
@@ -1774,6 +1835,7 @@ export default function MarketDashboardClient({
                     watchlistRankingPanel={rankingPanel}
                     marketIndexSummary={marketIndexSummary}
                     onChartFocusModeChange={setTwChartFocusMode}
+                    onDailyPricesChanged={refreshTaiwanOverviewAfterDetailUpdate}
                     quoteDepthPreviewMode={quoteDepthPreviewMode}
                   />
                 )}
@@ -1796,6 +1858,7 @@ export default function MarketDashboardClient({
                   watchlistRankingPanel={isSelectedUsIndex ? undefined : usRankingPanel}
                   onCompanyProfileChange={setSelectedUsCompanyProfile}
                   onChartFocusModeChange={setUsChartFocusMode}
+                  onDailyPricesChanged={refreshUsOverviewAfterDetailUpdate}
                 />
               </>
             ) : activeMarket === "jp" ? (
@@ -1813,6 +1876,7 @@ export default function MarketDashboardClient({
                   refreshNonce={jpDataRefreshNonce}
                   watchlistRankingPanel={isSelectedJpIndex ? undefined : jpRankingPanel}
                   onChartFocusModeChange={setJpChartFocusMode}
+                  onDailyPricesChanged={refreshJpOverviewAfterDetailUpdate}
                   onSelectStock={onJpStockChange}
                 />
               </>
@@ -1832,6 +1896,7 @@ export default function MarketDashboardClient({
                   refreshNonce={krDataRefreshNonce}
                   watchlistRankingPanel={krRankingPanel}
                   onChartFocusModeChange={setKrChartFocusMode}
+                  onDailyPricesChanged={refreshKrOverviewAfterDetailUpdate}
                   onSelectStock={onKrStockChange}
                 />
               </>

@@ -197,8 +197,8 @@ class APIContractInventoryTests(unittest.TestCase):
             if method in methods
         ]
 
-        self.assertEqual(len(operations), 339)
-        self.assertEqual(sum(1 for _, path in operations if path.startswith("/api/")), 338)
+        self.assertEqual(len(operations), 346)
+        self.assertEqual(sum(1 for _, path in operations if path.startswith("/api/")), 345)
 
     def test_system_health_contracts_are_exposed(self) -> None:
         schema = app.openapi()

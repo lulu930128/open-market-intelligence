@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.ai import ask_response_support, scope_resolution
+from app.ai import ask_response_support, query_plan as query_plan_module, scope_resolution
 from app.ai.evidence_passport import build_evidence_passport
 from app.ai.question_capabilities import required_capabilities_for_question
 from app.ai.schemas import AiAskRequest
@@ -49,11 +49,26 @@ _COMPACT_ANALYSIS_KEYS = (
     "question_understanding",
     "response_preferences",
     "position_context",
+    "position_math",
     "position_decision",
     "price_level_validation",
     "reasoning_steps",
     "human_answer",
     "decision_contract",
+)
+
+_DATA_ONLY_ANALYSIS_KEYS = (
+    "kind",
+    "as_of",
+    "slot_status_counts",
+    "ready_slots",
+    "problem_slots",
+    "key_numbers",
+    "scores",
+    "source",
+    "question_intent",
+    "question_understanding",
+    "price_level_validation",
 )
 
 
@@ -68,9 +83,14 @@ def _public_analysis_for_mode(
 ) -> dict[str, Any]:
     if effective_mode not in {"brief", "data_only"}:
         return analysis
+    allowed_keys = (
+        _DATA_ONLY_ANALYSIS_KEYS
+        if effective_mode == "data_only"
+        else _COMPACT_ANALYSIS_KEYS
+    )
     output = {
         key: analysis[key]
-        for key in _COMPACT_ANALYSIS_KEYS
+        for key in allowed_keys
         if key in analysis
     }
     if analysis.get("compact_evidence"):
@@ -215,6 +235,10 @@ def _compact_result_data(
         "tables",
         "summary",
         "capabilities",
+        "provider_contract",
+        "refresh_summary",
+        "health_dimensions",
+        "as_of_by_domain",
     ):
         value = compact.get(key)
         if value not in (None, {}, []):
@@ -295,6 +319,9 @@ def _intraday_summary_from_compact(
         "returned_point_count": returned_count,
         "latest_point": latest,
         "last_update": selected.get("to_time") or latest_time,
+        "freshness_status": selected.get("freshness_status"),
+        "age_seconds": selected.get("age_seconds"),
+        "market_status": selected.get("market_status"),
         "is_realtime": bool((quote or {}).get("is_live") or (quote or {}).get("is_realtime")),
         "bars": points,
         "warnings": intraday_bars.get("warnings") or [],
@@ -358,7 +385,9 @@ def _market_live_summary(
         "close_price",
         "last_price",
     )
-    is_live = bool(
+    quote_time = _first_present(quote, "quote_time", "time", "as_of", "fetched_at")
+    intraday_time = intraday.get("last_update") or latest_point.get("time")
+    quote_is_live = bool(
         quote.get("is_live")
         if quote.get("is_live") is not None
         else freshness.get("is_live")
@@ -368,12 +397,71 @@ def _market_live_summary(
     freshness_status = str(freshness.get("status") or "")
     market_status = quote.get("market_status")
     if not isinstance(market_status, str):
-        market_status = "open" if market_status_payload.get("is_open") else "closed"
+        phase = str(
+            quote.get("current_session_phase")
+            or quote.get("session_phase")
+            or market_status_payload.get("current_session")
+            or ""
+        )
+        market_status = {
+            "regular": "open",
+            "regular_live": "open",
+            "preopen": "preopen",
+            "preopen_auction": "preopen",
+            "lunch_break": "lunch_break",
+            "closing_auction": "closing_auction",
+            "post_close": "latest_session_close",
+            "post_close_snapshot": "latest_session_close",
+            "market_closed": "closed_holiday"
+            if market_status_payload.get("holiday_name")
+            else "closed",
+        }.get(phase, "open" if market_status_payload.get("is_open") else "closed")
     is_latest_session_quote = quote.get("is_latest_session_quote")
     if not isinstance(is_latest_session_quote, bool):
-        is_latest_session_quote = freshness_status in {"live", "closed"}
+        is_latest_session_quote = freshness_status in {
+            "live",
+            "closed",
+            "latest_completed_session",
+        }
     intraday_available = intraday.get("status") == "ok"
     has_quote = quote_price is not None or bool(quote)
+    quote_is_stale = bool(freshness.get("is_stale")) or freshness_status in {
+        "cached",
+        "stale",
+        "source_unavailable",
+        "unavailable",
+    }
+    latest_point_freshness = (
+        latest_point.get("freshness")
+        if isinstance(latest_point.get("freshness"), dict)
+        else {}
+    )
+    intraday_freshness = str(
+        intraday.get("freshness_status")
+        or latest_point_freshness.get("status")
+        or ""
+    )
+    intraday_is_usable = bool(
+        intraday_available
+        and intraday_latest_price is not None
+        and intraday_freshness not in {"stale", "missing", "unavailable"}
+    )
+    if intraday_is_usable:
+        display_price = intraday_latest_price
+        display_price_source = "intraday"
+        display_price_time = intraday_time
+        display_price_freshness = intraday_freshness or "unknown"
+    elif quote_price is not None:
+        display_price = quote_price
+        display_price_source = "quote"
+        display_price_time = quote_time
+        display_price_freshness = freshness_status or ("live" if quote_is_live else "cached")
+    else:
+        display_price = None
+        display_price_source = None
+        display_price_time = None
+        display_price_freshness = "missing"
+    quote_depth_available = bool(quote.get("depth_available")) and not quote_is_stale
 
     return {
         "version": "market_live_summary.v1",
@@ -381,12 +469,12 @@ def _market_live_summary(
         "target_type": target.get("type"),
         "symbol": target.get("id") or target.get("symbol"),
         "quote_price": quote_price,
-        "quote_time": _first_present(quote, "quote_time", "time", "as_of", "fetched_at"),
+        "quote_time": quote_time,
         "quote_source": quote.get("source"),
         "quote_provider": quote.get("provider"),
         "source_is_intraday": bool(quote.get("source_is_intraday") or intraday_available),
-        "is_realtime": is_live,
-        "is_live": is_live,
+        "is_realtime": display_price_freshness in {"live", "current"},
+        "is_live": display_price_freshness in {"live", "current"},
         "is_latest_session_quote": is_latest_session_quote,
         "market_status": market_status,
         "current_session_phase": quote.get("current_session_phase") or market_status_payload.get("current_session"),
@@ -396,6 +484,13 @@ def _market_live_summary(
         "intraday_latest": intraday.get("last_update") or latest_point.get("time"),
         "intraday_latest_price": intraday_latest_price,
         "intraday_point_count": intraday.get("point_count"),
+        "display_price": display_price,
+        "display_price_source": display_price_source,
+        "display_price_time": display_price_time,
+        "display_price_freshness": display_price_freshness,
+        "quote_is_live": quote_is_live,
+        "quote_depth_available": quote_depth_available,
+        "quote_depth_status": freshness_status or "missing",
     }
 
 
@@ -595,6 +690,84 @@ def _public_result_for_mode(
     return result
 
 
+def _domain_passport(
+    *,
+    compact: dict[str, Any],
+    query_plan: dict[str, Any],
+) -> dict[str, Any]:
+    raw_domains = (
+        compact.get("freshness_by_domain")
+        if isinstance(compact.get("freshness_by_domain"), dict)
+        else {}
+    )
+    domains: dict[str, dict[str, Any]] = {}
+    for domain, raw_status in raw_domains.items():
+        status_value = (
+            raw_status.get("status")
+            if isinstance(raw_status, dict)
+            else raw_status
+        )
+        status = str(status_value or "unknown").lower()
+        trust_level = (
+            "high"
+            if status in {"ready", "current", "live", "latest_completed_session"}
+            else "medium"
+            if status in {"partial", "delayed", "cached", "waiting", "not_requested", "not_applicable"}
+            else "low"
+            if status in {"stale", "missing", "unavailable", "blocked"}
+            else "unknown"
+        )
+        domains[str(domain)] = {
+            "status": status,
+            "trust_level": trust_level,
+            "usable": trust_level in {"high", "medium"},
+        }
+
+    requested_domains = [
+        str(value)
+        for value in query_plan.get("requested_domains") or []
+        if str(value)
+    ]
+    required_domains = requested_domains or list(domains)
+    blocked_domains = [
+        domain
+        for domain in required_domains
+        if domain in domains and not domains[domain]["usable"]
+    ]
+    missing_domains = [domain for domain in required_domains if domain not in domains]
+    decision_status = (
+        "blocked"
+        if required_domains and len(blocked_domains) + len(missing_domains) == len(required_domains)
+        else "partial"
+        if blocked_domains or missing_domains
+        else "ready"
+    )
+    explicit_trust = {
+        f"{domain}_trust": domains.get(
+            domain,
+            {"status": "not_requested", "trust_level": "medium", "usable": True},
+        )
+        for domain in (
+            "quote",
+            "intraday",
+            "technical",
+            "chips",
+            "fundamentals",
+            "cross_market",
+        )
+    }
+    return {
+        "domains": domains,
+        **explicit_trust,
+        "decision_readiness": {
+            "status": decision_status,
+            "required_domains": required_domains,
+            "blocked_domains": blocked_domains,
+            "missing_domains": missing_domains,
+        },
+    }
+
+
 def finalize_ask_response(
     *,
     payload: AiAskRequest,
@@ -610,7 +783,13 @@ def finalize_ask_response(
     tool_runs: list[dict[str, Any]],
     freshness_result: dict[str, Any],
     progress: Any,
+    query_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    query_plan = query_plan or {
+        "payload_level": "compact",
+        "diagnostics_level": "none",
+    }
+    planned_required_capabilities = query_plan.get("required_capabilities") or []
     evidence_passport = build_evidence_passport(
         kind="ai_ask",
         as_of=ask_response_support._result_as_of(result, assembled.analysis_digest),
@@ -620,10 +799,26 @@ def finalize_ask_response(
         freshness=freshness_result,
         tool_runs=tool_runs,
         analysis=assembled.analysis_digest,
-        required_capabilities=required_capabilities_for_question(
-            payload.question,
-            response_target,
+        required_capabilities=(
+            tuple(str(value) for value in planned_required_capabilities)
+            if planned_required_capabilities
+            else required_capabilities_for_question(
+                payload.question,
+                response_target,
+            )
         ),
+    )
+    result_data_for_passport = result.get("data") if isinstance(result.get("data"), dict) else {}
+    compact_for_passport = (
+        result_data_for_passport.get("compact")
+        if isinstance(result_data_for_passport.get("compact"), dict)
+        else {}
+    )
+    evidence_passport.update(
+        _domain_passport(
+            compact=compact_for_passport,
+            query_plan=query_plan,
+        )
     )
     report_level = ask_response_support._report_level(effective_mode, freshness_result)
     progress.evidence_passport(evidence_passport)
@@ -646,6 +841,72 @@ def finalize_ask_response(
         if result_compact:
             _apply_stock_compact_fields(public_result, result_compact)
 
+    result_kind = str(public_result.get("kind") or result.get("kind") or "")
+    compact_result = (
+        public_result.get("data", {}).get("compact", {})
+        if isinstance(public_result.get("data"), dict)
+        and isinstance(public_result.get("data", {}).get("compact"), dict)
+        else {}
+    )
+    facts_ready = bool(
+        not assembled.clarification.get("required")
+        and result_kind not in {"target_error", "clarification_required"}
+        and compact_result.get("status") not in {"failed", "missing"}
+    )
+    response_mode = query_plan_module.canonical_response_mode(effective_mode)
+    legacy_analysis_ready = bool(
+        getattr(assembled, "answer_ready", False)
+        and isinstance(getattr(assembled, "response_analysis", None), dict)
+        and getattr(assembled, "response_analysis", {}).get("human_answer")
+    )
+    analysis_ready = bool(
+        (getattr(assembled, "analysis_ready", False) or legacy_analysis_ready)
+        and response_mode != "data_only"
+    )
+    decision_ready = bool(
+        getattr(assembled, "decision_ready", False)
+        and response_mode != "data_only"
+    )
+    answer_ready = facts_ready if response_mode == "data_only" else analysis_ready
+    available_sections = list(
+        dict.fromkeys(
+            list(getattr(assembled, "available_sections", []) or [])
+            + ["evidence"]
+            + (["human_answer"] if analysis_ready else [])
+            + (["decision_contract"] if decision_ready else [])
+        )
+    )
+    diagnostics = query_plan_module.diagnostics_projection(
+        level=str(query_plan.get("diagnostics_level") or "none"),
+        query_plan=query_plan,
+        tool_plan=tool_plan,
+        tool_runs=tool_runs,
+    )
+    timeout_run = next(
+        (
+            run
+            for run in tool_runs
+            if str(run.get("status") or "") in {"timeout", "background_running"}
+        ),
+        None,
+    )
+    request_status = (
+        str(timeout_run.get("request_status") or "deadline_exceeded")
+        if isinstance(timeout_run, dict)
+        else "completed"
+    )
+    job = (
+        timeout_run.get("job")
+        if isinstance(timeout_run, dict) and isinstance(timeout_run.get("job"), dict)
+        else {}
+    )
+    cancellation = (
+        timeout_run.get("cancellation")
+        if isinstance(timeout_run, dict)
+        and isinstance(timeout_run.get("cancellation"), dict)
+        else {}
+    )
+
     return {
         "kind": "ai_ask",
         "contract_version": ask_response_support.CONTRACT_VERSION,
@@ -655,6 +916,9 @@ def finalize_ask_response(
         "mode": {
             "requested": requested_mode,
             "effective": effective_mode,
+            "response": response_mode,
+            "payload_level": query_plan.get("payload_level"),
+            "diagnostics_level": query_plan.get("diagnostics_level"),
         },
         "action": action,
         "strategy_profile": result.get("strategy_profile") or payload.strategy_profile,
@@ -663,16 +927,32 @@ def finalize_ask_response(
         "next_context": scope_resolution._next_conversation_context(resolution),
         "clarification": assembled.clarification,
         "next_actions": assembled.next_actions,
-        "answer_ready": assembled.answer_ready,
+        "answer_ready": answer_ready,
+        "facts_ready": facts_ready,
+        "analysis_ready": analysis_ready,
+        "decision_ready": decision_ready,
+        "blocked_sections": getattr(assembled, "blocked_sections", []) or [],
+        "available_sections": available_sections,
+        "request_status": request_status,
+        "fallback_used": bool(
+            isinstance(timeout_run, dict) and timeout_run.get("fallback_used")
+        ),
+        "cached_data_returned": bool(
+            isinstance(timeout_run, dict) and timeout_run.get("cached_data_returned")
+        ),
+        "job": job,
+        "cancellation": cancellation,
         "report_level": report_level,
         "analysis": _public_analysis_for_mode(
             assembled.response_analysis,
             effective_mode=effective_mode,
         ),
-        "reasoning_steps": assembled.reasoning_steps,
+        "reasoning_steps": assembled.reasoning_steps if response_mode != "data_only" else [],
         "policy": policy,
         "tool_plan": tool_plan,
         "tool_runs": tool_runs,
+        "query_plan": query_plan,
+        "diagnostics": diagnostics,
         "result": public_result,
         "freshness": freshness_result,
         "missing": assembled.combined_missing,

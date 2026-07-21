@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
+from app.market.exchange_calendar_cache import cached_market_holiday
+
 
 KR_MARKET_TIMEZONE = ZoneInfo("Asia/Seoul")
 KR_DAILY_PRICE_RELEASE_TIME = time(hour=16, minute=10)
@@ -19,6 +21,9 @@ KR_MARKET_FIXED_HOLIDAYS = {
 
 
 def kr_market_holiday_name(value: date) -> str | None:
+    cached = cached_market_holiday("kr", value)
+    if cached.covered:
+        return cached.name
     if value.month == 12 and value.day == 31:
         return "Year-end market close"
 

@@ -44,6 +44,14 @@ VALID_TARGET_TYPES = {
 TAIWAN_INDEX_TARGET_IDS = {"TAIEX", "TPEX"}
 TAIWAN_FUTURES_TARGET_IDS = {"TXF", "MXF", "TMF"}
 JP_INDEX_TARGET_IDS = {"^N225", "1306.T"}
+JP_INDEX_TARGET_ALIASES = {
+    "N225": "^N225",
+    "^N225": "^N225",
+    "NIKKEI225": "^N225",
+    "日經225": "^N225",
+    "日経225": "^N225",
+    "1306.T": "1306.T",
+}
 KR_INDEX_TARGET_IDS = set(KR_INDEX_CONFIG_BY_ID)
 JP_MARKET_CONTEXT_HINTS = (
     "\u65e5\u80a1",
@@ -239,6 +247,11 @@ def _normalize_text(value: str | None) -> str | None:
 
     normalized = value.strip()
     return normalized or None
+
+
+def normalize_jp_index_id(value: Any) -> str:
+    normalized = str(value or "").strip().upper().replace(" ", "")
+    return JP_INDEX_TARGET_ALIASES.get(normalized, normalize_jp_symbol(value))
 
 
 def _string_from_dict(value: dict[str, Any], key: str) -> str | None:
@@ -1513,7 +1526,7 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
             target_id = normalized_us_symbol
 
         if scope_type == "jp_index":
-            normalized_jp_index = normalize_jp_symbol(target_id)
+            normalized_jp_index = normalize_jp_index_id(target_id)
             if normalized_jp_index not in JP_INDEX_TARGET_IDS:
                 return _clarify_scope(
                     scope_type,
@@ -1636,6 +1649,13 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
         return ScopeResolution(
             selected_scope_type=scope_type,
             selected_scope_id=target_id,
+            selected_market=(
+                str(target_market).upper()
+                if target_market
+                else "TW"
+                if scope_type == "market"
+                else None
+            ),
             display_name=display_name,
             confidence="high",
             source="explicit_request",
@@ -1759,18 +1779,19 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
             )
 
         if _question_has_jp_context(question):
-            if normalized_target_id in JP_INDEX_TARGET_IDS:
+            normalized_jp_index = normalize_jp_index_id(target_id)
+            if normalized_jp_index in JP_INDEX_TARGET_IDS:
                 label = requested_label or normalized_target_id
                 return ScopeResolution(
                     selected_scope_type="jp_index",
-                    selected_scope_id=normalized_target_id,
+                    selected_scope_id=normalized_jp_index,
                     display_name=label,
                     confidence="high",
                     source="explicit_scope_id",
                     candidates=(
                         _resolution_candidate(
                             scope_type="jp_index",
-                            scope_id=normalized_target_id,
+                            scope_id=normalized_jp_index,
                             label=label,
                             confidence="high",
                             source="explicit_scope_id",

@@ -48,6 +48,18 @@ class AiAskRequest(BaseModel):
     contract_version: str = Field(default="omi.ai.ask.v2", min_length=1, max_length=80)
     target: dict[str, Any] = Field(default_factory=lambda: {"type": "auto"})
     mode: str = Field(default="auto", min_length=1, max_length=50)
+    payload_level: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=20,
+        description="summary, compact, standard, or full. Kept separate from answer mode.",
+    )
+    diagnostics_level: str = Field(
+        default="none",
+        min_length=1,
+        max_length=20,
+        description="none, basic, or debug. Diagnostics do not change answer semantics.",
+    )
     caller_profile: str = Field(
         default="kuro_readonly",
         min_length=1,
@@ -113,11 +125,23 @@ class AiAskResponse(BaseModel):
     clarification: dict[str, Any] = Field(default_factory=dict)
     next_actions: list[dict[str, Any]] = Field(default_factory=list)
     answer_ready: bool = True
+    facts_ready: bool = True
+    analysis_ready: bool = False
+    decision_ready: bool = False
+    blocked_sections: list[str] = Field(default_factory=list)
+    available_sections: list[str] = Field(default_factory=list)
+    request_status: str = "completed"
+    fallback_used: bool = False
+    cached_data_returned: bool = False
+    job: dict[str, Any] = Field(default_factory=dict)
+    cancellation: dict[str, Any] = Field(default_factory=dict)
     report_level: str = "data_only"
     analysis: dict[str, Any] = Field(default_factory=dict)
     policy: dict[str, Any] = Field(default_factory=dict)
     tool_plan: dict[str, Any] = Field(default_factory=dict)
     tool_runs: list[dict[str, Any]] = Field(default_factory=list)
+    query_plan: dict[str, Any] = Field(default_factory=dict)
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
     result: dict[str, Any] = Field(default_factory=dict)
     freshness: dict[str, Any] = Field(default_factory=dict)
     missing: list[str] = Field(default_factory=list)

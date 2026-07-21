@@ -237,6 +237,46 @@ class OmiMcpServerPayloadTests(unittest.TestCase):
         self.assertEqual(result["structuredContent"], payload)
         self.assertEqual(json.loads(result["content"][0]["text"]), payload)
 
+    def test_business_failure_sets_mcp_is_error_true(self) -> None:
+        payload = {
+            "kind": "ai_ask",
+            "ok": False,
+            "answer_ready": False,
+            "error": {"code": "TARGET_NOT_FOUND"},
+        }
+        with patch.object(self.server, "_call_tool", return_value=payload):
+            response = self.server._handle_request(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 7,
+                    "method": "tools/call",
+                    "params": {"name": "omi.ask", "arguments": {"question": "9999"}},
+                }
+            )
+
+        self.assertTrue(response["result"]["isError"])
+        self.assertFalse(response["result"]["structuredContent"]["ok"])
+
+    def test_normal_empty_result_keeps_mcp_is_error_false(self) -> None:
+        payload = {
+            "kind": "search_results",
+            "ok": True,
+            "answer_ready": True,
+            "results": [],
+        }
+        with patch.object(self.server, "_call_tool", return_value=payload):
+            response = self.server._handle_request(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 8,
+                    "method": "tools/call",
+                    "params": {"name": "omi.ask", "arguments": {"question": "empty"}},
+                }
+            )
+
+        self.assertFalse(response["result"]["isError"])
+        self.assertEqual(response["result"]["structuredContent"]["results"], [])
+
     def test_payload_forwards_market_data_params(self) -> None:
         payload = self.server._ask_payload(
             {

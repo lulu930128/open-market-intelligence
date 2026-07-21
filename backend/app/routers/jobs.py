@@ -9,6 +9,7 @@ from app.jobs import backfill_tasks, service
 from app.jobs.job_types import (
     JP_SCHEDULED_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
     JP_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
+    TAIWAN_BROKER_BRANCH_MARKET_REFRESH_JOB_TYPE,
     TAIWAN_DERIVATIVES_SCHEDULED_REFRESH_JOB_TYPE,
     WATCHLIST_RADAR_AUTO_SNAPSHOT_JOB_TYPE,
 )
@@ -112,6 +113,23 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
         return (
             backfill_tasks.run_taiwan_derivatives_refresh_job,
             (expected_trade_date,),
+            request,
+        )
+
+    if job_type == TAIWAN_BROKER_BRANCH_MARKET_REFRESH_JOB_TYPE:
+        expected_trade_date = _parse_date(request.get("expected_trade_date"))
+        if expected_trade_date is None:
+            raise ValueError(
+                "Taiwan broker-branch retry requires expected_trade_date."
+            )
+        return (
+            backfill_tasks.run_taiwan_broker_branch_market_refresh_job,
+            (
+                expected_trade_date,
+                float(request.get("sleep_seconds", 0.5)),
+                int(request.get("max_stocks", 2500)),
+                int(request.get("max_runtime_seconds", 7200)),
+            ),
             request,
         )
 

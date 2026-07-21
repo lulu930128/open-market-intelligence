@@ -43,6 +43,10 @@ export type MarketCalendarMarketStatus = {
   calendar_source?: string | null;
   calendar_verified_years?: number[];
   calendar_limit?: string | null;
+  calendar_cache_status?: "current" | "degraded" | "stale" | "fallback" | string;
+  calendar_last_refreshed_at?: string | null;
+  calendar_source_url?: string | null;
+  calendar_warning?: string | null;
 };
 
 export type MarketCalendarStatusEnvelope = {

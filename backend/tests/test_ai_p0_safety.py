@@ -259,7 +259,7 @@ class AiP0TechnicalSafetyTests(unittest.TestCase):
         self.assertLess(levels["risk"]["short_stop"]["price"], levels["latest_price"])
         self.assertLess(levels["risk"]["technical_invalidation"]["price"], levels["latest_price"])
 
-    def test_unavailable_price_levels_block_action_plan_and_answer_readiness(self) -> None:
+    def test_unavailable_price_levels_block_only_unsafe_decision_sections(self) -> None:
         levels = self.build_levels(
             latest=100,
             ma5=120,
@@ -273,7 +273,19 @@ class AiP0TechnicalSafetyTests(unittest.TestCase):
         understanding = SimpleNamespace(as_policy_payload=lambda: {"intent": "position_risk_decision"})
 
         assembled = ask_stages.assemble_response_analysis(
-            result={"warnings": [], "missing": [], "source_refs": []},
+            result={
+                "warnings": [],
+                "missing": [],
+                "source_refs": [],
+                "data": {
+                    "compact": {
+                        "quote": {
+                            "latest_price": 2290,
+                            "trade_date": "2026-07-17",
+                        }
+                    }
+                },
+            },
             freshness_result={"is_current": True},
             warnings=[],
             resolution=SimpleNamespace(),
@@ -282,7 +294,7 @@ class AiP0TechnicalSafetyTests(unittest.TestCase):
             requested_mode="brief",
             question_understanding=understanding,
             question_intent="position_risk_decision",
-            position_context={"has_position_context": True, "entry_price": 120},
+            position_context={"has_position_context": True, "entry_price": 2380},
             scope_type="stock",
             response_target={"type": "tw_stock", "id": "2330", "label": "台積電"},
             progress=pipeline_progress.OmiPipelineProgress(lambda event: None),
@@ -297,16 +309,29 @@ class AiP0TechnicalSafetyTests(unittest.TestCase):
             try_attach_position_decision_llm=lambda **kwargs: kwargs["position_decision"],
             build_consumer_human_answer=lambda **kwargs: {"action_plan": [{"label": "進場"}]},
             build_reasoning_steps=lambda **kwargs: [],
-            payload=AiAskRequest(question="台積電成本 120，要不要減碼？"),
+            payload=AiAskRequest(question="台積電成本 2380，要不要減碼？"),
         )
 
-        self.assertFalse(assembled.answer_ready)
+        self.assertTrue(assembled.answer_ready)
+        self.assertTrue(assembled.analysis_ready)
+        self.assertFalse(assembled.decision_ready)
         self.assertIn("technical_price_level_safety", assembled.combined_missing)
         self.assertEqual(assembled.consumer_human_answer["action_plan"], [])
+        self.assertIn("stop_loss", assembled.blocked_sections)
+        self.assertIn("technical_invalidation", assembled.blocked_sections)
+        self.assertIn("trade_recommendation", assembled.blocked_sections)
+        self.assertEqual(assembled.response_analysis["position_math"]["latest_price"], 2290)
         self.assertEqual(
-            assembled.consumer_human_answer["source"],
-            "backend_price_level_validator",
+            assembled.response_analysis["position_math"]["latest_price_source"],
+            "data.compact.quote.latest_price",
         )
+        self.assertAlmostEqual(
+            assembled.response_analysis["position_math"]["unrealized_return_pct"],
+            -3.7815,
+            places=4,
+        )
+        self.assertIn("成本 2,380", assembled.consumer_human_answer["text"])
+        self.assertIn("-3.78%", assembled.consumer_human_answer["text"])
         position_builder.assert_not_called()
 
     def test_long_only_level_model_blocks_short_position_actions(self) -> None:
@@ -353,8 +378,11 @@ class AiP0TechnicalSafetyTests(unittest.TestCase):
             payload=AiAskRequest(question="空單停損怎麼設？"),
         )
 
-        self.assertFalse(assembled.answer_ready)
+        self.assertTrue(assembled.answer_ready)
+        self.assertTrue(assembled.analysis_ready)
+        self.assertFalse(assembled.decision_ready)
         self.assertEqual(assembled.consumer_human_answer["action_plan"], [])
+        self.assertIn("trade_recommendation", assembled.blocked_sections)
         self.assertTrue(any("position side" in warning for warning in assembled.combined_warnings))
 
 

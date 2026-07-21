@@ -14,6 +14,8 @@ from app.ai.market_payload_contract import (
     slot_envelope as _slot_envelope,
 )
 from app.db.models import FinancialMetricQuarterly, StockMaster
+from app.market.calendar_status import build_taiwan_calendar_status
+from app.market.live_snapshot import classify_market_snapshot
 
 
 def _now() -> datetime:
@@ -554,10 +556,12 @@ def _compact_quote_snapshot(
         "provider": quote_depth.get("provider"),
         "status": freshness.get("status") or quote_depth.get("session_phase") or "quote",
         "session_phase": quote_depth.get("session_phase"),
+        "market_status": quote_depth.get("market_status"),
         "phase_label": quote_depth.get("phase_label"),
         "trade_date": _json_value(quote_depth.get("trade_date")),
         "quote_time": _json_value(quote_depth.get("quote_time")),
         "fetched_at": _json_value(quote_depth.get("fetched_at")),
+        "refresh_outcome": quote_depth.get("refresh_outcome"),
         "latest_price": latest_price,
         "price": latest_price,
         "last_price": latest_price,
@@ -585,6 +589,8 @@ def _compact_quote_snapshot(
             "expected_trade_date": _json_value(freshness.get("expected_trade_date")),
             "message": freshness.get("message"),
             "source_error": freshness.get("source_error"),
+            "source_error_detail": freshness.get("source_error_detail"),
+            "fetch_age_seconds": freshness.get("fetch_age_seconds"),
         },
     }
 
@@ -949,9 +955,15 @@ def _compact_index_quote(
     index_id: str,
     index_snapshot: dict[str, Any] | None,
     intraday: dict[str, Any] | None,
+    calendar_status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     snapshot = index_snapshot if isinstance(index_snapshot, dict) else {}
     latest_point = _latest_intraday_point(intraday)
+    intraday_points = (
+        [point for point in intraday.get("points", []) if isinstance(point, dict)]
+        if isinstance(intraday, dict)
+        else []
+    )
     source = (
         str(intraday.get("source"))
         if isinstance(intraday, dict) and intraday.get("source")
@@ -977,14 +989,56 @@ def _compact_index_quote(
         if isinstance(change, (int, float)) and isinstance(previous_close, (int, float)) and previous_close != 0
         else snapshot.get("change_pct")
     )
-    is_live = bool(latest_point) and _intraday_source_is_live(source)
     quote_time = latest_point.get("time") if latest_point else snapshot.get("as_of") or snapshot.get("time")
+    freshness = classify_market_snapshot(
+        calendar_status=calendar_status or build_taiwan_calendar_status(),
+        quote_time=quote_time,
+    )
+    source_supports_intraday = bool(latest_point) and _intraday_source_is_live(source)
+    if not source_supports_intraday and freshness["status"] in {"live", "delayed"}:
+        freshness = {
+            **freshness,
+            "status": "delayed",
+            "is_live": False,
+            "is_realtime": False,
+        }
+    open_values = [
+        value
+        for point in intraday_points
+        for value in [point.get("open") if point.get("open") is not None else point.get("price")]
+        if isinstance(value, (int, float))
+    ]
+    high_values = [
+        value
+        for point in intraday_points
+        for value in [point.get("high") if point.get("high") is not None else point.get("price")]
+        if isinstance(value, (int, float))
+    ]
+    low_values = [
+        value
+        for point in intraday_points
+        for value in [point.get("low") if point.get("low") is not None else point.get("price")]
+        if isinstance(value, (int, float))
+    ]
+    volume_values = [
+        int(point["volume"])
+        for point in intraday_points
+        if isinstance(point.get("volume"), (int, float)) and point["volume"] > 0
+    ]
+    snapshot_volume = snapshot.get("volume")
+    volume = (
+        sum(volume_values)
+        if volume_values
+        else snapshot_volume
+        if isinstance(snapshot_volume, (int, float)) and snapshot_volume > 0
+        else None
+    )
 
     return {
         "kind": "quote_snapshot",
         "source": source,
         "provider": source,
-        "status": "live_intraday" if is_live else "delayed_index_summary",
+        "status": freshness["status"],
         "index_id": index_id,
         "trade_date": snapshot.get("time"),
         "quote_time": _json_value(quote_time),
@@ -992,21 +1046,26 @@ def _compact_index_quote(
         "price": latest_price,
         "last_price": latest_price,
         "previous_close": previous_close,
-        "open_price": (latest_point or {}).get("open") or snapshot.get("open"),
-        "high_price": (latest_point or {}).get("high") or snapshot.get("high"),
-        "low_price": (latest_point or {}).get("low") or snapshot.get("low"),
+        "open_price": open_values[0] if open_values else snapshot.get("open"),
+        "high_price": max(high_values) if high_values else snapshot.get("high"),
+        "low_price": min(low_values) if low_values else snapshot.get("low"),
         "change": change,
         "change_pct": change_pct,
-        "volume": (latest_point or {}).get("volume") or snapshot.get("volume"),
+        "volume": volume,
+        "volume_status": "available" if volume is not None else "missing",
         "trade_value": snapshot.get("trade_value") or snapshot.get("estimated_trade_value"),
-        "is_realtime": is_live,
+        "is_realtime": freshness["is_realtime"],
+        "is_live": freshness["is_live"],
+        "is_latest_session_quote": freshness["is_latest_session_quote"],
+        "market_status": freshness["market_status"],
+        "current_session_phase": freshness["current_session_phase"],
+        "last_quote_session": freshness["last_quote_session"],
+        "quote_semantics": freshness["quote_semantics"],
         "latency_ms": None,
         "freshness": {
-            "status": "live" if is_live else "delayed",
-            "is_live": is_live,
-            "is_stale": False,
+            **freshness,
             "message": (
-                "Index intraday point is included."
+                "Index intraday freshness is derived from quote time and the Taiwan trading calendar."
                 if latest_point
                 else "Index intraday was not requested or not available; using latest index summary."
             ),

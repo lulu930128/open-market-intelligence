@@ -59,6 +59,7 @@ type UseTaiwanStockChartDataOptions = {
   initialChartIntradayOverlay: OhlcIntradayOverlay | null;
   initialIndicatorData: StockIndicatorPoint[];
   isIndexProduct: boolean;
+  onDailyPricesChanged?: () => void;
   onStockInfoResolved: (stock: StockMasterRead) => void;
   professionalTimeframe: ProfessionalTimeframe;
   publishDataStatus: PublishDataStatus;
@@ -115,6 +116,7 @@ export function useTaiwanStockChartData({
   initialChartIntradayOverlay,
   initialIndicatorData,
   isIndexProduct,
+  onDailyPricesChanged,
   onStockInfoResolved,
   professionalTimeframe,
   publishDataStatus,
@@ -152,6 +154,7 @@ export function useTaiwanStockChartData({
   const finalIntradayRefreshDateRef = useRef<string | null>(null);
   const activeStockIdRef = useRef(stockId);
   const chartHistoryBackfillKeysRef = useRef(new Set<string>());
+  const onDailyPricesChangedRef = useRef(onDailyPricesChanged);
   const subresourceRefreshSecondsRef = useRef(subresourceRefreshSeconds);
   const tRef = useRef(t);
 
@@ -170,6 +173,10 @@ export function useTaiwanStockChartData({
   useEffect(() => {
     subresourceRefreshSecondsRef.current = subresourceRefreshSeconds;
   }, [subresourceRefreshSeconds]);
+
+  useEffect(() => {
+    onDailyPricesChangedRef.current = onDailyPricesChanged;
+  }, [onDailyPricesChanged]);
 
   useEffect(() => {
     tRef.current = t;
@@ -454,6 +461,7 @@ export function useTaiwanStockChartData({
         setIndicatorData(refreshedIndicators);
         setChartStockId(targetStockId);
         setChartTimeframe(requestedTimeframe);
+        onDailyPricesChangedRef.current?.();
         setChartHistoryMessage(
           refreshedOhlc.point_count >= requirement.minPoints
             ? tRef.current("stockDetail.chartHistory.complete", { label: requirementLabel })

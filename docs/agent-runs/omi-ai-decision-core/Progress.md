@@ -2,8 +2,8 @@
 
 ## Status
 
-- Current phase: implementation
-- Last updated: 2026-07-19 21:20 +08:00
+- Current phase: outward contract implemented and regression-validated; live restart and fixed-condition performance benchmark pending
+- Last updated: 2026-07-19 22:49 +08:00
 
 ## Completed
 
@@ -93,4 +93,29 @@
 
 ## Next step
 
-- Continue with the reported P2 answer-quality and output-semantics issues while preserving the P0/P1 contract boundaries.
+- Continue outward-contract implementation with cross-consumer regression and live runtime smoke after restart.
+
+## 2026-07-19 outward-contract implementation
+
+- Added `query_plan.py` and a true Taiwan quote-only reader. Quote-only execution now calls identity, latest daily quote, and scoped quote freshness only; technical, broker, fundamentals, chips, cross-market, intraday, and provider refresh paths are explicitly excluded.
+- Added independent `payload_level` and `diagnostics_level` request/response dimensions while preserving legacy request modes.
+- Added layered readiness fields and changed price-level safety handling from whole-answer blocking to unsafe-section blocking.
+- Removed Human Answer, reasoning, position decision, and decision contract from public `data_only` projections; deterministic derived evidence remains available.
+- Fixed explicit market resolution to preserve `target.market`.
+- Split slot availability from freshness additively while keeping the legacy slot `status` field.
+- Made selected technical score/title/summary derive from the same aggregate score model; original timeframe title/summary remain available as additive detail.
+- Updated both MCP adapters so backend business failure drives `isError`; successful empty results remain non-errors. Removed the external `OMI_search` hardcoded success projection.
+- Added detached timeout job metadata, a capability-aware dedupe request, request deadline/cancellation fields, and public job status projection.
+- Added canonical position math that reads the scoped compact quote, preserves cost/latest/return through safety blocking, and blocks only unsafe price-level or trading-action sections.
+- Added a dedicated broker-branch reader and freshness path so broker queries do not load or inherit warnings from monthly revenue, fundamentals, technicals, chips, or unrelated providers.
+- Added market-breadth answer semantics, selected-provider/fallback-provider separation, slot `usability`, stable float display, and response-finalizer preservation of assembly-declared sections.
+- Hardened detached job completion so production file-backed SQLite uses an independent worker session while in-memory regression sessions are finalized on the owning thread; this removed cross-thread `no such table: job_run` warnings.
+- Focused regression: 105 outward-contract, timeout, freshness, semantics, overnight-impact, and slot tests passed.
+- Full backend validation: compileall passed, all 790 backend tests passed without unhandled-thread warnings, and `git diff --check` passed; logs: `.tmp/validation/20260719-224639`.
+- Main-repo MCP behavior is covered by the full backend suite. External `C:\GPT_MCPtool\OMI_search` discovery tests passed 23/23, and downstream Kuro `market_preflight` plus `tool_policy_omi` tests passed 12/12.
+
+## Remaining verification boundary
+
+- The 70% serialized-byte reduction and 50% warm-cache p50 latency reduction remain experimental targets, not completed claims. They still require a fixed query, target, date range, DB snapshot, cache state, run count, reader/provider counters, p50, and p95 measurement after the updated runtime is restarted.
+- The currently listening backend on port 8400 predates these changes, so HTTP smoke against it would not validate the new code. No running service was restarted in this implementation pass.
+- ChatGPT MCP and Kuro contract compatibility are covered by adapter/downstream regression tests; a final live consumer smoke remains appropriate after restart.

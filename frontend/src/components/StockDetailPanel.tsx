@@ -92,13 +92,14 @@ import {
   getRefreshExecutionSeconds,
   useRefreshExecutionSettings,
 } from "@/lib/refreshExecutionSettings";
-import { timeframeLabel, useT } from "@/i18n";
+import { timeframeLabel, useT, type TranslationFunction } from "@/i18n";
 import { TAIWAN_INTRADAY_REFRESH_MS } from "@/lib/taiwanMarketTime";
 import type {
   ChartPoint,
   MarketIndexSummary,
   OhlcIntradayOverlay,
   StockIndicatorPoint,
+  TaiwanCorporateEventRead,
   TaiwanStockQuoteDepthPreviewMode,
 } from "@/types/market";
 import {
@@ -118,11 +119,39 @@ type Props = {
   watchlistRankingPanel?: ReactNode;
   marketIndexSummary?: MarketIndexSummary | null;
   onChartFocusModeChange?: (active: boolean) => void;
+  onDailyPricesChanged?: () => void;
   quoteDepthPreviewMode?: TaiwanStockQuoteDepthPreviewMode | null;
 };
 
 function normalizeIsoDate(value: string | null | undefined) {
   return value ? value.slice(0, 10) : null;
+}
+
+function corporateEventTone(eventType: string) {
+  if (eventType === "ex_dividend") {
+    return "border-omi-market-up/40 bg-omi-market-up/10 text-omi-market-up";
+  }
+  if (eventType === "financial_report") {
+    return "border-amber-400/50 bg-amber-400/10 text-amber-200";
+  }
+  return "border-sky-400/50 bg-sky-400/10 text-sky-200";
+}
+
+function corporateEventBadgeLabel(
+  event: TaiwanCorporateEventRead,
+  t: TranslationFunction
+) {
+  const eventLabel = t(`stockDetail.corporateEvents.types.${event.event_type}`);
+  if (event.days_until === 0) {
+    return t("stockDetail.corporateEvents.today", { event: eventLabel });
+  }
+  if (event.days_until === 1) {
+    return t("stockDetail.corporateEvents.tomorrow", { event: eventLabel });
+  }
+  return t("stockDetail.corporateEvents.inDays", {
+    days: event.days_until,
+    event: eventLabel,
+  });
 }
 
 const allTimeframes: Timeframe[] = ["today", "daily", "weekly", "monthly"];
@@ -188,6 +217,7 @@ export default function StockDetailPanel({
   watchlistRankingPanel,
   marketIndexSummary,
   onChartFocusModeChange,
+  onDailyPricesChanged,
   quoteDepthPreviewMode = null,
 }: Props) {
   const t = useT();
@@ -241,6 +271,7 @@ export default function StockDetailPanel({
       financialMetric,
       financialMetricHistory,
       institutional,
+      institutionalHoldingRatio,
       institutionalHistory,
       margin,
       monthlyRevenue,
@@ -256,6 +287,7 @@ export default function StockDetailPanel({
     },
   } = useTaiwanDataPanel({
     isIndexProduct,
+    onDailyPricesChanged,
     stockId,
     subresourceRefreshSeconds: taiwanSubresourceRefreshSeconds,
     t,
@@ -339,6 +371,32 @@ export default function StockDetailPanel({
   );
   const currentStockInfoId = stockInfo?.stock_id ?? null;
   const currentStockInfoMarket = stockInfo?.market ?? null;
+  const dispositionStatus = !isIndexProduct ? stockInfo?.disposition ?? null : null;
+  const dispositionVisible = Boolean(
+    dispositionStatus?.is_disposition &&
+      (dispositionStatus.status === "active" || dispositionStatus.status === "upcoming")
+  );
+  const dispositionSourceUncertain = Boolean(
+    dispositionStatus &&
+      !dispositionStatus.is_disposition &&
+      dispositionStatus.cache_status !== "current"
+  );
+  const upcomingCorporateEvents = !isIndexProduct
+    ? stockInfo?.upcoming_events?.results ?? []
+    : [];
+  const historicalCorporateEvents = !isIndexProduct
+    ? stockInfo?.event_history?.results ?? []
+    : [];
+  const corporateEventSourceUncertain = Boolean(
+    !upcomingCorporateEvents.length &&
+      stockInfo?.upcoming_events &&
+      stockInfo.upcoming_events.cache_status !== "current"
+  );
+  const corporateEventHistorySourceUncertain = Boolean(
+    !historicalCorporateEvents.length &&
+      stockInfo?.event_history &&
+      stockInfo.event_history.cache_status !== "current"
+  );
   const effectiveTimeframe = timeframe;
   const availableTimeframes = isIndexProduct ? indexTimeframes : allTimeframes;
   const {
@@ -372,6 +430,7 @@ export default function StockDetailPanel({
     initialChartIntradayOverlay,
     initialIndicatorData,
     isIndexProduct,
+    onDailyPricesChanged,
     onStockInfoResolved: setStockInfo,
     professionalTimeframe,
     publishDataStatus: publishDetailDataStatus,
@@ -825,9 +884,73 @@ export default function StockDetailPanel({
                   ? t("stockDetail.entity.index")
                   : t("stockDetail.entity.stock")}
               </div>
-              <h2 className="mt-1 text-2xl font-bold text-omi-text-strong">
-                {stockId} {indexProduct?.stockName ?? stockName ?? stockInfo?.stock_name ?? ""}
-              </h2>
+              <div className="mt-1 flex flex-wrap items-center gap-2">
+                <h2 className="text-2xl font-bold text-omi-text-strong">
+                  {stockId} {indexProduct?.stockName ?? stockName ?? stockInfo?.stock_name ?? ""}
+                </h2>
+                {dispositionVisible ? (
+                  <span
+                    className={[
+                      "inline-flex items-center border px-2 py-1 text-xs font-bold",
+                      dispositionStatus?.is_active
+                        ? "border-omi-market-down/50 bg-omi-market-down/10 text-omi-market-down"
+                        : "border-amber-400/50 bg-amber-400/10 text-amber-200",
+                    ].join(" ")}
+                    title={[
+                      dispositionStatus?.reason,
+                      dispositionStatus?.start_date && dispositionStatus?.end_date
+                        ? `${dispositionStatus.start_date} – ${dispositionStatus.end_date}`
+                        : null,
+                      dispositionStatus?.warning,
+                    ]
+                      .filter(Boolean)
+                      .join("\n")}
+                  >
+                    {dispositionStatus?.is_active
+                      ? t("stockDetail.disposition.active")
+                      : t("stockDetail.disposition.upcoming")}
+                    {dispositionStatus?.matching_interval_minutes
+                      ? ` · ${t("stockDetail.disposition.interval", {
+                          minutes: dispositionStatus.matching_interval_minutes,
+                        })}`
+                      : null}
+                  </span>
+                ) : dispositionSourceUncertain ? (
+                  <span
+                    className="inline-flex items-center border border-amber-400/40 bg-amber-400/10 px-2 py-1 text-xs font-semibold text-amber-200"
+                    title={dispositionStatus?.warning ?? undefined}
+                  >
+                    {t("stockDetail.disposition.sourceUncertain")}
+                  </span>
+                ) : null}
+                {upcomingCorporateEvents.map((event) => (
+                  <span
+                    key={event.event_id}
+                    className={[
+                      "inline-flex items-center border px-2 py-1 text-xs font-bold",
+                      corporateEventTone(event.event_type),
+                    ].join(" ")}
+                    title={[
+                      `${event.start_date}${event.start_time ? ` ${event.start_time}` : ""}`,
+                      event.summary,
+                      event.location,
+                      event.source_name,
+                    ]
+                      .filter(Boolean)
+                      .join("\n")}
+                  >
+                    {corporateEventBadgeLabel(event, t)}
+                  </span>
+                ))}
+                {corporateEventSourceUncertain ? (
+                  <span
+                    className="inline-flex items-center border border-amber-400/40 bg-amber-400/10 px-2 py-1 text-xs font-semibold text-amber-200"
+                    title={stockInfo?.upcoming_events?.warning ?? undefined}
+                  >
+                    {t("stockDetail.corporateEvents.sourceUncertain")}
+                  </span>
+                ) : null}
+              </div>
               <div className="mt-1 text-sm text-omi-text-muted">
                 {indexProduct
                   ? `${indexProduct.market} · 指數 · ${indexProduct.symbol}`
@@ -837,6 +960,55 @@ export default function StockDetailPanel({
                 ·{" "}
                 {displayTime}
               </div>
+              {historicalCorporateEvents.length ? (
+                <details className="group mt-3 max-w-[720px] text-sm">
+                  <summary className="inline-flex cursor-pointer list-none items-center gap-2 border border-omi-border bg-omi-surface-subtle px-3 py-1.5 text-xs font-bold text-omi-text-muted hover:border-omi-control hover:text-omi-text">
+                    <span>{t("stockDetail.corporateEvents.historyTitle")}</span>
+                    <span className="text-omi-text-strong">
+                      {stockInfo?.event_history?.total_count ?? historicalCorporateEvents.length}
+                    </span>
+                    <span aria-hidden="true" className="transition group-open:rotate-180">⌄</span>
+                  </summary>
+                  <div className="mt-2 max-h-56 overflow-y-auto border border-omi-border-subtle bg-omi-surface-subtle">
+                    {historicalCorporateEvents.map((event) => (
+                      <div
+                        key={event.event_id}
+                        className="grid gap-2 border-b border-omi-border-subtle px-3 py-2 last:border-b-0 sm:grid-cols-[92px_88px_minmax(0,1fr)_auto] sm:items-center"
+                      >
+                        <span className="font-mono text-xs text-omi-text-muted">
+                          {event.start_date}
+                        </span>
+                        <span className={`w-fit border px-2 py-0.5 text-[11px] font-bold ${corporateEventTone(event.event_type)}`}>
+                          {t(`stockDetail.corporateEvents.types.${event.event_type}`)}
+                        </span>
+                        <span className="min-w-0 truncate text-xs text-omi-text" title={event.summary ?? event.title}>
+                          {event.title}
+                          {event.cash_dividend !== null
+                            ? ` · ${t("settings.calendar.cashDividend", { amount: event.cash_dividend })}`
+                            : ""}
+                        </span>
+                        <a
+                          href={event.source_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-xs font-semibold text-omi-accent hover:underline"
+                        >
+                          {t("settings.calendar.sourceLink")}
+                        </a>
+                      </div>
+                    ))}
+                  </div>
+                  {stockInfo?.event_history?.warning ? (
+                    <div className="mt-1 text-xs text-omi-warning">
+                      {stockInfo.event_history.warning}
+                    </div>
+                  ) : null}
+                </details>
+              ) : corporateEventHistorySourceUncertain ? (
+                <div className="mt-2 text-xs font-semibold text-omi-warning">
+                  {t("stockDetail.corporateEvents.historyUnavailable")}
+                </div>
+              ) : null}
             </div>
 
             <div className="flex items-start gap-5">
@@ -1191,6 +1363,18 @@ export default function StockDetailPanel({
                 <div className="min-w-0">
                   <div className="text-xl font-bold text-omi-text-strong">{technicalStatus}</div>
                   <div className="mt-0.5 text-xs leading-4 text-omi-text-muted">{technicalSummaryText}</div>
+                  {technicalReport.basisLabel ? (
+                    <div className="mt-1 text-[11px] leading-4 text-omi-text-muted">
+                      {technicalReport.basisLabel}
+                      {technicalReport.warningCount ? (
+                        <span className="ml-1 text-omi-warning">
+                          · {t("stockDetail.dataViews.technical.basis.warningCount", {
+                            count: technicalReport.warningCount,
+                          })}
+                        </span>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
                 <div className={`omi-technical-score shrink-0 text-right text-lg font-bold ${valueTone(technicalReport.value)}`}>
                   <PriceUpdatePulse
@@ -1322,7 +1506,7 @@ export default function StockDetailPanel({
                   earningsView={earningsView}
                   financialMetric={financialMetric}
                   financialMetricHistory={financialMetricHistory}
-                  institutionalHoldingRatio={null}
+                  institutionalHoldingRatio={institutionalHoldingRatio}
                   institutionalHistory={institutionalHistory}
                   institutionalHoverDate={institutionalHoverDate}
                   institutionalSeries={institutionalSeries}

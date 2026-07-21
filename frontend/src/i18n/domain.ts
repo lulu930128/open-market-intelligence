@@ -25,6 +25,8 @@ export function rankByLabel(t: TranslationFunction, rankBy: string) {
   if (rankBy === "change_pct") return t("rank.changePct");
   if (rankBy === "score") return t("rank.score");
   if (rankBy === "volume") return t("rank.volume");
+  if (rankBy === "foreign_net") return t("rank.foreignNet");
+  if (rankBy === "margin_balance_change_pct") return t("rank.marginBalanceChangePct");
   if (rankBy === "close") return t("rank.close");
   return rankBy;
 }

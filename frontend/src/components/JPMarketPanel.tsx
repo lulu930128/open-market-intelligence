@@ -78,6 +78,7 @@ type Props = {
   refreshNonce?: number;
   watchlistRankingPanel?: ReactNode;
   onChartFocusModeChange?: (enabled: boolean) => void;
+  onDailyPricesChanged?: () => void;
   onSelectStock: (stock: JPStockMasterRead | null) => void;
 };
 
@@ -384,10 +385,12 @@ export default function JPMarketPanel({
   refreshNonce = 0,
   watchlistRankingPanel,
   onChartFocusModeChange,
+  onDailyPricesChanged,
   onSelectStock,
 }: Props) {
   const t = useT();
   const onSelectStockRef = useRef(onSelectStock);
+  const onDailyPricesChangedRef = useRef(onDailyPricesChanged);
   const fundamentalAutoRefreshAttemptedRef = useRef<Set<string>>(new Set());
   const resourceAutoRefreshAttemptedRef = useRef<Set<string>>(new Set());
   const [selectedStock, setSelectedStock] = useState<JPStockMasterRead | null>(null);
@@ -800,6 +803,10 @@ export default function JPMarketPanel({
   useEffect(() => {
     onSelectStockRef.current = onSelectStock;
   }, [onSelectStock]);
+
+  useEffect(() => {
+    onDailyPricesChangedRef.current = onDailyPricesChanged;
+  }, [onDailyPricesChanged]);
 
   useEffect(() => {
     if (!initialSymbol) return;
@@ -1228,6 +1235,9 @@ export default function JPMarketPanel({
 
         if (chartResult.status === "rejected") {
           throw chartResult.reason;
+        }
+        if (chartResult.value.backfill) {
+          onDailyPricesChangedRef.current?.();
         }
 
         let nextResourceSummary =

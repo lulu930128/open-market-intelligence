@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from app.market.exchange_calendar_cache import cached_market_holiday
+
 
 JP_MARKET_TIMEZONE = ZoneInfo("Asia/Tokyo")
 JP_SESSION_OPEN_TIME = time(hour=9, minute=0)
@@ -97,6 +99,13 @@ def jp_market_holiday_names(year: int) -> dict[date, str]:
 
 
 def jp_market_holiday_name(value: date) -> str | None:
+    cached = cached_market_holiday("jp", value)
+    if cached.covered:
+        if cached.name and (
+            cached.name == "Holiday" or cached.name.startswith("Holiday ")
+        ):
+            return jp_market_holiday_names(value.year).get(value, cached.name)
+        return cached.name
     return jp_market_holiday_names(value.year).get(value)
 
 
@@ -147,6 +156,8 @@ def expected_jp_daily_price_date(
 
 
 def jp_calendar_limit(year: int) -> str | None:
+    if cached_market_holiday("jp", date(year, 1, 1)).covered:
+        return None
     if year in JPX_VERIFIED_CALENDAR_YEARS:
         return None
     return (

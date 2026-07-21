@@ -15,6 +15,10 @@ from app.market.technical_parameters import (
     TechnicalAnalysisParameters,
     get_technical_analysis_parameters,
 )
+from app.market.technical_structure import (
+    build_moving_average_structure,
+    build_price_range_signals,
+)
 from app.market.trading_calendar import (
     is_taiwan_trading_day,
     next_taiwan_trading_day,
@@ -298,13 +302,17 @@ def _technical_source_refs(*, timeframe: str, include_intraday: bool) -> list[di
         {"type": "table", "name": "market_daily_price"},
         {"type": "derived", "name": "app.market.indicator_service"},
     ]
-    if timeframe == "today" and include_intraday:
+    if include_intraday:
         refs.append({"type": "external_or_cache", "name": "taiwan_intraday_trend"})
     return refs
 
 
 def _report_as_of(report: dict[str, Any]) -> Any:
     data = report.get("data") if isinstance(report.get("data"), dict) else {}
+    price_context = data.get("price_context")
+    if isinstance(price_context, dict) and price_context.get("price_time"):
+        return price_context.get("price_time")
+
     for key in ("indicator", "daily_indicator", "daily_background"):
         value = data.get(key)
         if isinstance(value, dict) and value.get("time"):
@@ -965,6 +973,7 @@ def _build_daily_report(
     *,
     db: Session,
     stock_id: str,
+    include_intraday: bool = False,
     parameters: TechnicalAnalysisParameters | None = None,
 ) -> dict[str, Any]:
     technical_parameters = parameters or get_technical_analysis_parameters()
@@ -1018,10 +1027,106 @@ def _build_daily_report(
     roc = indicator.get("roc") or {}
     mfi = indicator.get("mfi") or {}
     donchian = indicator.get("donchian") or {}
+    bollinger = indicator.get("bollinger") or {}
+    support_resistance = indicator.get("support_resistance") or {}
     ma5 = _indicator_value(ma, technical_parameters.ma_short_key, "ma5")
     ma20 = _indicator_value(ma, technical_parameters.ma_medium_key, "ma20")
     ma60 = _indicator_value(ma, technical_parameters.ma_long_key, "ma60")
-    price_vs_ma20 = _pct_change(close, ma20)
+    analysis_price = close
+    analysis_price_time = indicator.get("time")
+    analysis_price_source = "market_daily_price"
+    analysis_is_intraday = False
+    intraday_context: dict[str, Any] | None = None
+    market_session = _today_market_session()
+
+    if include_intraday and market_session["is_trading_day"]:
+        intraday = get_intraday_trend(db=db, stock_id=stock_id)
+        intraday_points = intraday.get("points") or []
+        latest_intraday_point = intraday_points[-1] if intraday_points else None
+        latest_intraday_price = (
+            latest_intraday_point.get("price")
+            if isinstance(latest_intraday_point, dict)
+            else None
+        )
+        latest_intraday_time = (
+            latest_intraday_point.get("time")
+            if isinstance(latest_intraday_point, dict)
+            else None
+        )
+        is_current_session = _intraday_point_is_current_session(
+            latest_intraday_time,
+            market_session["date"],
+        )
+        intraday_context = {
+            "source": intraday.get("source"),
+            "point_count": len(intraday_points),
+            "previous_close": intraday.get("previous_close"),
+            "latest_point": latest_intraday_point,
+            "is_current_session": is_current_session,
+        }
+        if _finite(latest_intraday_price) and is_current_session:
+            analysis_price = latest_intraday_price
+            analysis_price_time = latest_intraday_time
+            analysis_price_source = str(intraday.get("source") or "intraday")
+            analysis_is_intraday = True
+        elif latest_intraday_point is not None:
+            warnings.append(
+                "Latest intraday point is not from the current Taiwan trading session; daily close remains the analysis price."
+            )
+        else:
+            missing.append("intraday_trend.points")
+            warnings.append(
+                "No current-session intraday price is available; daily close remains the analysis price."
+            )
+    elif include_intraday:
+        warnings.append(
+            f"{market_session['date']} is not a Taiwan trading day; daily close remains the analysis price."
+        )
+
+    moving_average_structure = build_moving_average_structure(
+        price=analysis_price,
+        ma5=ma5,
+        ma20=ma20,
+        ma60=ma60,
+    )
+    distance_pct = moving_average_structure["distance_pct"]
+    price_vs_ma5 = distance_pct.get("ma5")
+    price_vs_ma20 = distance_pct.get("ma20")
+    price_vs_ma60 = distance_pct.get("ma60")
+    range_signals, range_signal_score = build_price_range_signals(
+        price=analysis_price,
+        support=_indicator_value(
+            support_resistance,
+            technical_parameters.support_key,
+            "support20",
+        ),
+        resistance=_indicator_value(
+            support_resistance,
+            technical_parameters.resistance_key,
+            "resistance20",
+        ),
+        donchian_upper=_indicator_value(
+            donchian,
+            technical_parameters.donchian_upper_key,
+            "upper20",
+        ),
+        donchian_lower=_indicator_value(
+            donchian,
+            technical_parameters.donchian_lower_key,
+            "lower20",
+        ),
+        bollinger_upper=_indicator_value(
+            bollinger,
+            technical_parameters.bollinger_upper_key,
+            "upper20",
+        ),
+        bollinger_lower=_indicator_value(
+            bollinger,
+            technical_parameters.bollinger_lower_key,
+            "lower20",
+        ),
+        near_threshold_pct=technical_parameters.near_level_threshold_pct,
+    )
     volume_ratio = _safe_ratio(
         volume,
         _indicator_value(volume_ma, technical_parameters.volume_ma_medium_key, "volume_ma20"),
@@ -1039,7 +1144,11 @@ def _build_daily_report(
     donchian_lower = _indicator_value(donchian, technical_parameters.donchian_lower_key, "lower20")
     donchian_position = None
     if _finite(donchian_upper) and _finite(donchian_lower) and donchian_upper != donchian_lower:
-        donchian_position = (close - donchian_lower) / (donchian_upper - donchian_lower) * 100
+        donchian_position = (
+            (analysis_price - donchian_lower)
+            / (donchian_upper - donchian_lower)
+            * 100
+        )
     latest_institutional = daily["institutional"]
     institutional_net = (
         getattr(latest_institutional, "total_institutional_net", None)
@@ -1047,10 +1156,21 @@ def _build_daily_report(
         else None
     )
     margin_change = _margin_balance_change(daily["margin"])
-    score = 0
+    score = range_signal_score
 
+    if _finite(price_vs_ma5):
+        score += 1 if price_vs_ma5 >= 0 else -1
     if _finite(price_vs_ma20):
         score += 1 if price_vs_ma20 >= 0 else -1
+    for range_signal in range_signals[:2]:
+        badges.append(
+            _badge(
+                str(range_signal["label"]),
+                "positive" if range_signal["direction"] == "bullish" else "negative",
+            )
+        )
+    if _finite(price_vs_ma60):
+        score += 2 if price_vs_ma60 >= 0 else -2
     if _finite(ma5) and _finite(ma20):
         score += 1 if ma5 >= ma20 else -1
     if _finite(ma20) and _finite(ma60):
@@ -1075,13 +1195,36 @@ def _build_daily_report(
     rows.extend(
         [
             _row(
+                key="price_position",
+                label="價格位置",
+                description=(
+                    f"{'盤中現價' if analysis_is_intraday else '收盤價'} {_fmt_price(analysis_price)}；"
+                    f"vs MA5/20/60 {_fmt_pct(price_vs_ma5)} / {_fmt_pct(price_vs_ma20)} / "
+                    f"{_fmt_pct(price_vs_ma60)}"
+                ),
+                value=price_vs_ma60,
+                display_value=_fmt_pct(price_vs_ma60),
+                direction=price_vs_ma60,
+                basis=(
+                    "current-session intraday price vs finalized daily moving averages"
+                    if analysis_is_intraday
+                    else "daily close vs finalized daily moving averages"
+                ),
+                source=analysis_price_source,
+            ),
+            _row(
                 key="trend_structure",
                 label="趨勢結構",
-                description=f"MA5/20/60 {_fmt_price(ma5)} / {_fmt_price(ma20)} / {_fmt_price(ma60)}，ADX {_fmt_number(adx14, 2)}",
-                value=price_vs_ma20,
-                display_value=_fmt_pct(price_vs_ma20),
-                direction=price_vs_ma20,
-                basis="close vs MA20 and moving average alignment",
+                description=(
+                    f"{moving_average_structure['price_state_label']}，"
+                    f"{moving_average_structure['alignment_label']}；"
+                    f"MA5/20/60 {_fmt_price(ma5)} / {_fmt_price(ma20)} / {_fmt_price(ma60)}，"
+                    f"ADX {_fmt_number(adx14, 2)}"
+                ),
+                value=score,
+                display_value=moving_average_structure["alignment_label"],
+                direction=score,
+                basis="price position, moving average alignment, and ADX direction",
                 source="market_daily_price",
             ),
             _row(
@@ -1109,12 +1252,19 @@ def _build_daily_report(
             _row(
                 key="volatility_risk",
                 label="波動風險",
-                description=f"ATR {_fmt_pct(atr_pct)}，Donchian 位置 {_fmt_pct(donchian_position)}",
+                description=(
+                    f"ATR {_fmt_pct(atr_pct)}，Donchian 位置 {_fmt_pct(donchian_position)}"
+                    + (
+                        f"；{' / '.join(str(signal['label']) for signal in range_signals)}"
+                        if range_signals
+                        else ""
+                    )
+                ),
                 value=atr_pct,
                 display_value=_fmt_pct(atr_pct),
                 direction=1 if _finite(atr_pct) and atr_pct > technical_parameters.atr_high_volatility_pct else 0,
                 tone="warning" if _finite(atr_pct) and atr_pct > technical_parameters.atr_high_volatility_pct else "neutral",
-                basis="daily ATR and 20-day Donchian range position",
+                basis="finalized daily ATR and analysis price vs finalized 20-day Donchian range",
                 source="market_daily_price",
             ),
             _row(
@@ -1147,12 +1297,45 @@ def _build_daily_report(
     if indicator.get("time") is None:
         missing.append("market_daily_price.time")
 
+    if _finite(price_vs_ma60):
+        badges.append(
+            _badge(
+                "站上 MA60" if price_vs_ma60 >= 0 else "失守 MA60",
+                "positive" if price_vs_ma60 >= 0 else "negative",
+            )
+        )
+    if moving_average_structure["price_state"] in {"above_all", "below_all"}:
+        badges.append(
+            _badge(
+                moving_average_structure["price_state_label"],
+                "positive"
+                if moving_average_structure["price_state"] == "above_all"
+                else "negative",
+            )
+        )
+    if analysis_is_intraday:
+        badges.append(_badge("盤中價 × 已收盤指標", "warning"))
+        warnings.append(
+            "Current-session price is provisional; MA, RSI, MACD, ADX, volume, and flow indicators remain finalized daily values."
+        )
+    summary_parts = [
+        moving_average_structure["price_state_label"],
+        moving_average_structure["alignment_label"],
+        *(
+            [" / ".join(str(signal["label"]) for signal in range_signals[:2])]
+            if range_signals
+            else []
+        ),
+        "MACD 偏多" if _finite(macd_histogram) and macd_histogram >= 0 else "MACD 偏弱" if _finite(macd_histogram) else "動能資料不足",
+        "放量" if _finite(volume_ratio) and volume_ratio >= technical_parameters.volume_ratio_threshold else "量能一般" if _finite(volume_ratio) else "量能資料不足",
+    ]
+
     return {
         "kind": "tw_stock_technical_report",
         "stock_id": stock_id,
         "timeframe": "daily",
-        "phase": "daily",
-        "confidence": "high" if not missing else "medium",
+        "phase": "daily_intraday" if analysis_is_intraday else "daily",
+        "confidence": "medium" if analysis_is_intraday or missing else "high",
         "generated_at": _now(),
         "title": _title_from_score(score, positive="短線偏多", neutral="短線整理", negative="短線偏弱"),
         "summary": "，".join(summary_parts),
@@ -1164,11 +1347,33 @@ def _build_daily_report(
         "data": {
             "daily_indicator": indicator,
             "market": _stock_market(db=db, stock_id=stock_id),
-            "change_pct": change_pct,
+            "change_pct": (
+                _pct_change(analysis_price, intraday_context.get("previous_close"))
+                if analysis_is_intraday and intraday_context
+                else change_pct
+            ),
+            "price_context": {
+                "price": analysis_price,
+                "price_time": _json_value(analysis_price_time),
+                "price_source": analysis_price_source,
+                "is_intraday": analysis_is_intraday,
+                "is_provisional": analysis_is_intraday,
+                "daily_indicator_time": _json_value(indicator.get("time")),
+                "moving_average_structure": moving_average_structure,
+                "range_signals": range_signals,
+            },
+            "intraday": intraday_context,
+            "market_session": {
+                key: _json_value(value)
+                for key, value in market_session.items()
+            },
         },
         "missing": list(dict.fromkeys(missing)),
-        "warnings": warnings,
-        "source_refs": _technical_source_refs(timeframe="daily", include_intraday=False),
+        "warnings": list(dict.fromkeys(warnings)),
+        "source_refs": _technical_source_refs(
+            timeframe="daily",
+            include_intraday=include_intraday and market_session["is_trading_day"],
+        ),
     }
 
 
@@ -1222,6 +1427,7 @@ def build_stock_technical_report(
             _build_daily_report(
                 db=db,
                 stock_id=normalized_stock_id,
+                include_intraday=include_intraday,
                 parameters=technical_parameters,
             )
         )

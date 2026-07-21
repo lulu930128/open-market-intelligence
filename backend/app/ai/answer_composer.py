@@ -87,6 +87,8 @@ def build_price_level_safety_answer(
     validation: dict[str, Any],
     missing: list[Any],
     warnings: list[Any],
+    position_math: dict[str, Any] | None = None,
+    analysis_digest: dict[str, Any] | None = None,
     response_preferences: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     english = response_is_english(response_preferences)
@@ -110,6 +112,37 @@ def build_price_level_safety_answer(
         risks = ["被移除或改列為上方壓力的價位，不得當成可執行的進場、停損或失效價。"]
         counter_evidence = ["等有效進場條件與風控線同時可用後再重新計算。"]
 
+    position_math = position_math if isinstance(position_math, dict) else {}
+    analysis_digest = analysis_digest if isinstance(analysis_digest, dict) else {}
+    entry_price = decision_engine.numeric_data_value(position_math.get("entry_price"))
+    latest_price = decision_engine.numeric_data_value(position_math.get("latest_price"))
+    pnl_pct = position_math.get("unrealized_return_pct")
+    if position_math.get("ready"):
+        if english:
+            math_line = (
+                f"Cost {decision_engine.format_price(entry_price)} / latest "
+                f"{decision_engine.format_price(latest_price)}; unrealized return "
+                f"{decision_engine.format_pct_value(pnl_pct)}."
+            )
+        elif japanese:
+            math_line = (
+                f"取得価格 {decision_engine.format_price(entry_price)} / 最新 "
+                f"{decision_engine.format_price(latest_price)}、含み損益 "
+                f"{decision_engine.format_pct_value(pnl_pct)}。"
+            )
+        else:
+            math_line = (
+                f"成本 {decision_engine.format_price(entry_price)} / 最近收盤 "
+                f"{decision_engine.format_price(latest_price)}，目前約 "
+                f"{decision_engine.format_pct_value(pnl_pct)}。"
+            )
+        summary.insert(0, math_line)
+
+    selected_summary = text_value(analysis_digest.get("selected_summary"))
+    if selected_summary:
+        summary.insert(1 if position_math.get("ready") else 0, selected_summary)
+    summary = list(dict.fromkeys(summary))[:SUMMARY_LIMIT_DEFAULT]
+
     data_limits = generic_data_limits(
         missing=missing,
         warnings=warnings,
@@ -129,6 +162,7 @@ def build_price_level_safety_answer(
         "risks": risks,
         "data_limits": data_limits,
         "price_level_validation": validation,
+        "position_math": position_math or None,
     }
     answer["text"] = consumer_text(
         answer,
@@ -726,6 +760,93 @@ def _broker_branch_rows_text(rows: Any, *, empty_text: str) -> str:
     return "、".join(labels) or empty_text
 
 
+def _quote_price_text(value: Any, *, market: str, english: bool, japanese: bool) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "unavailable" if english else "データなし" if japanese else "無資料"
+    decimals = 2 if market.upper() in {"US", "NYSE", "NASDAQ"} else 2
+    rendered = f"{number:,.{decimals}f}".rstrip("0").rstrip(".")
+    if english:
+        return f"{rendered} USD" if market.upper() in {"US", "NYSE", "NASDAQ"} else f"TWD {rendered}"
+    if japanese:
+        return f"{rendered}米ドル" if market.upper() in {"US", "NYSE", "NASDAQ"} else f"{rendered}台湾ドル"
+    return f"{rendered} 美元" if market.upper() in {"US", "NYSE", "NASDAQ"} else f"{rendered} 元"
+
+
+def build_quote_consumer_answer(
+    *,
+    target: dict[str, Any],
+    analysis_digest: dict[str, Any],
+    missing: list[Any],
+    warnings: list[Any],
+    summary_limit: int,
+    response_preferences: dict[str, Any] | None,
+) -> dict[str, Any]:
+    compact = (
+        analysis_digest.get("compact_evidence")
+        if isinstance(analysis_digest.get("compact_evidence"), dict)
+        else {}
+    )
+    quote = compact.get("quote") if isinstance(compact.get("quote"), dict) else {}
+    label = text_value(target.get("label")) or text_value(target.get("id")) or target_fallback_label(response_preferences)
+    market = str(target.get("market") or compact.get("target", {}).get("market") or "TW")
+    price = quote.get("price") if quote.get("price") is not None else quote.get("last_price")
+    trade_date = quote.get("trade_date") or quote.get("quote_time") or analysis_digest.get("as_of")
+    freshness = quote.get("freshness") if isinstance(quote.get("freshness"), dict) else {}
+    is_realtime = bool(quote.get("is_realtime"))
+    english = response_is_english(response_preferences)
+    japanese = response_is_japanese(response_preferences)
+    price_text = _quote_price_text(price, market=market, english=english, japanese=japanese)
+    if english:
+        headline = f"{label} latest quote: {price_text}"
+        snapshot = (
+            f"As of {trade_date or 'unknown'}; {'real-time quote' if is_realtime else 'market snapshot, not a real-time quote'}."
+        )
+    elif japanese:
+        headline = f"{label} 最新価格：{price_text}"
+        snapshot = f"時点：{trade_date or '不明'}。{'リアルタイム' if is_realtime else '市場スナップショット（リアルタイムではありません）'}。"
+    else:
+        headline = f"{label} 最近價格為 {price_text}"
+        snapshot = f"資料時間 {trade_date or '不明'}；目前為{'即時報價' if is_realtime else '市場快照，非即時報價'}。"
+    data_limits = generic_data_limits(
+        missing=missing,
+        warnings=warnings,
+        response_preferences=response_preferences,
+    )
+    if freshness.get("status") == "stale":
+        data_limits = [
+            *data_limits,
+            "Quote evidence is stale." if english else "報價データは古くなっています。" if japanese else "報價資料已過期。",
+        ]
+    answer = {
+        "kind": "consumer_market_answer",
+        "style": "quote_summary",
+        "source": "compact_evidence.quote",
+        "headline": headline,
+        "stance": None,
+        "stance_label": undecided_label(response_preferences),
+        "confidence": "high" if price is not None and freshness.get("status") != "stale" else "low",
+        "confidence_label": confidence_label(
+            "high" if price is not None and freshness.get("status") != "stale" else "low",
+            response_preferences,
+        ),
+        "summary": [snapshot][:summary_limit],
+        "action_plan": [],
+        "scenarios": [],
+        "counter_evidence": [],
+        "risks": [],
+        "data_limits": list(dict.fromkeys(data_limits)),
+        "detail": snapshot,
+    }
+    answer["text"] = consumer_text(
+        answer,
+        summary_limit=summary_limit,
+        response_preferences=response_preferences,
+    )
+    return answer
+
+
 def build_broker_branch_consumer_answer(
     *,
     target: dict[str, Any],
@@ -791,6 +912,114 @@ def build_broker_branch_consumer_answer(
     return answer
 
 
+def build_market_breadth_consumer_answer(
+    *,
+    target: dict[str, Any],
+    analysis_digest: dict[str, Any],
+    missing: list[Any],
+    warnings: list[Any],
+    summary_limit: int,
+    response_preferences: dict[str, Any] | None,
+) -> dict[str, Any]:
+    breadth = (
+        analysis_digest.get("breadth")
+        if isinstance(analysis_digest.get("breadth"), dict)
+        else {}
+    )
+    advance = breadth.get("advance_count")
+    decline = breadth.get("decline_count")
+    unchanged = breadth.get("unchanged_count")
+    limit_up = breadth.get("limit_up_count")
+    limit_down = breadth.get("limit_down_count")
+    directional_total = (
+        advance + decline
+        if isinstance(advance, int) and isinstance(decline, int)
+        else 0
+    )
+    decline_ratio = decline / directional_total if directional_total else None
+    advance_ratio = advance / directional_total if directional_total else None
+    if decline_ratio is not None and decline_ratio >= 0.6:
+        stance = "bearish"
+        direction_key = "weak"
+    elif advance_ratio is not None and advance_ratio >= 0.6:
+        stance = "bullish"
+        direction_key = "strong"
+    elif directional_total:
+        stance = "mixed"
+        direction_key = "mixed"
+    else:
+        stance = "insufficient_data"
+        direction_key = "missing"
+
+    english = response_is_english(response_preferences)
+    japanese = response_is_japanese(response_preferences)
+    label = text_value(target.get("label")) or "台股市場"
+    if english:
+        direction = {
+            "weak": "clearly weak",
+            "strong": "clearly strong",
+            "mixed": "mixed",
+            "missing": "unavailable",
+        }[direction_key]
+        headline = f"{label} breadth is {direction}"
+        counts = f"Advancers {advance}, decliners {decline}, unchanged {unchanged}."
+        limits_line = f"Limit-up {limit_up}, limit-down {limit_down}."
+    elif japanese:
+        direction = {
+            "weak": "明確に弱い",
+            "strong": "明確に強い",
+            "mixed": "まちまち",
+            "missing": "データ不足",
+        }[direction_key]
+        headline = f"{label}の市場の広がりは{direction}です"
+        counts = f"上昇 {advance}、下落 {decline}、変わらず {unchanged}。"
+        limits_line = f"ストップ高 {limit_up}、ストップ安 {limit_down}。"
+    else:
+        direction = {
+            "weak": "明顯偏弱",
+            "strong": "明顯偏強",
+            "mixed": "多空分歧",
+            "missing": "資料不足",
+        }[direction_key]
+        headline = f"{label}市場廣度{direction}"
+        counts = f"上漲 {advance}、下跌 {decline}、持平 {unchanged}。"
+        limits_line = f"漲停 {limit_up}、跌停 {limit_down}。"
+    summary = [counts]
+    if limit_up is not None or limit_down is not None:
+        summary.append(limits_line)
+    scope_label = text_value(breadth.get("label"))
+    if scope_label:
+        summary.append(scope_label)
+    confidence = "high" if directional_total else "low"
+    answer = {
+        "kind": "consumer_market_answer",
+        "style": "market_breadth_summary",
+        "source": "analysis_digest.breadth",
+        "headline": headline,
+        "stance": stance,
+        "stance_label": stance_label(stance, response_preferences),
+        "confidence": confidence,
+        "confidence_label": confidence_label(confidence, response_preferences),
+        "summary": summary[:summary_limit],
+        "action_plan": [],
+        "scenarios": [],
+        "counter_evidence": [],
+        "risks": [],
+        "data_limits": generic_data_limits(
+            missing=missing,
+            warnings=warnings,
+            response_preferences=response_preferences,
+        ),
+        "detail": "\n".join(summary),
+    }
+    answer["text"] = consumer_text(
+        answer,
+        summary_limit=summary_limit,
+        response_preferences=response_preferences,
+    )
+    return answer
+
+
 def build_consumer_human_answer(
     *,
     question_intent: str,
@@ -803,6 +1032,16 @@ def build_consumer_human_answer(
     summary_limit: int = SUMMARY_LIMIT_DEFAULT,
     response_preferences: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if question_intent == "quote":
+        return build_quote_consumer_answer(
+            target=target,
+            analysis_digest=analysis_digest,
+            missing=missing,
+            warnings=warnings,
+            summary_limit=summary_limit,
+            response_preferences=response_preferences,
+        )
+
     if question_intent == "broker_branch":
         answer = build_broker_branch_consumer_answer(
             target=target,
@@ -817,6 +1056,16 @@ def build_consumer_human_answer(
             analysis_digest=analysis_digest,
             missing=missing,
             warnings=warnings,
+            response_preferences=response_preferences,
+        )
+
+    if question_intent == "market_breadth":
+        return build_market_breadth_consumer_answer(
+            target=target,
+            analysis_digest=analysis_digest,
+            missing=missing,
+            warnings=warnings,
+            summary_limit=summary_limit,
             response_preferences=response_preferences,
         )
 

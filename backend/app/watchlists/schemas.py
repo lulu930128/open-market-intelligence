@@ -196,6 +196,9 @@ class WatchlistGroupLatestSignalsRead(BaseModel):
 
 class WatchlistRankingItemRead(BaseModel):
     rank: int
+    market_rank: int | None = None
+    rank_value: float | int | None = None
+    rank_trade_date: date | None = None
 
     stock_id: str
     stock_name: str | None = None
@@ -232,6 +235,9 @@ class WatchlistGroupRankingRead(BaseModel):
 
     rank_by: str
     sort_order: str
+    rank_scope: str = "watchlist"
+    rank_trade_date: date | None = None
+    rank_universe_count: int = 0
 
     requested_stock_count: int
     ranked_count: int

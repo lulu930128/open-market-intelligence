@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from concurrent.futures import Future
 from datetime import date, datetime, time, timezone
 import json
+from threading import RLock
 import time as monotonic_time
 from typing import Any
 
@@ -10,6 +12,9 @@ from sqlalchemy.orm import Session
 
 from app.db.models import StockMaster, TaiwanStockQuoteSnapshot, utc_now
 from app.market.providers import http_get
+from app.market.calendar_status import build_taiwan_calendar_status
+from app.market.live_snapshot import market_status_from_session
+from app.observability.provider_http import provider_http_failure
 from app.market.trading_calendar import (
     TAIWAN_TZ,
     is_taiwan_trading_day,
@@ -23,6 +28,9 @@ TWSE_MIS_STOCK_INFO_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 TWSE_MIS_REFERER_URL = "https://mis.twse.com.tw/stock/fibest.jsp"
 QUOTE_DEPTH_CACHE_TTL_SECONDS = 4.75
 TAIWAN_STOCK_QUOTE_DEPTH_LIVE_MAX_AGE_SECONDS = 180
+TWSE_MIS_CIRCUIT_FAILURE_THRESHOLD = 3
+TWSE_MIS_CIRCUIT_COOLDOWN_SECONDS = 90
+TWSE_MIS_COALESCE_WINDOW_SECONDS = 2.5
 TAIWAN_QUOTE_DEPTH_WAIT_START = time(5, 0)
 TAIWAN_QUOTE_DEPTH_PREOPEN = time(8, 30)
 TAIWAN_QUOTE_DEPTH_OPEN = time(9, 0)
@@ -40,10 +48,45 @@ PHASE_LABELS = {
 }
 
 _QUOTE_DEPTH_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_TWSE_MIS_GUARD_LOCK = RLock()
+_TWSE_MIS_INFLIGHT: dict[str, Future[tuple[dict[str, Any], str | None, dict[str, Any]]]] = {}
+_TWSE_MIS_RESULT_CACHE: dict[
+    str,
+    tuple[float, tuple[dict[str, Any], str | None, dict[str, Any]]],
+] = {}
+_TWSE_MIS_CIRCUIT_FAILURES = 0
+_TWSE_MIS_CIRCUIT_OPEN_UNTIL = 0.0
+_TWSE_MIS_CIRCUIT_LAST_ERROR: str | None = None
 
 
 class TaiwanStockQuoteDepthFetchError(RuntimeError):
     """Raised when Taiwan stock quote depth cannot be fetched safely."""
+
+
+class TaiwanStockQuoteDepthCircuitOpenError(TaiwanStockQuoteDepthFetchError):
+    """Raised while the TWSE MIS quote-depth circuit is cooling down."""
+
+    def __init__(self, *, retry_after_seconds: int, last_error: str | None) -> None:
+        message = (
+            "TWSE MIS quote-depth circuit is open; "
+            f"retry after {retry_after_seconds}s."
+        )
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
+        self.last_error = last_error
+
+
+def reset_twse_mis_quote_depth_guard() -> None:
+    global _TWSE_MIS_CIRCUIT_FAILURES
+    global _TWSE_MIS_CIRCUIT_OPEN_UNTIL
+    global _TWSE_MIS_CIRCUIT_LAST_ERROR
+    with _TWSE_MIS_GUARD_LOCK:
+        _QUOTE_DEPTH_CACHE.clear()
+        _TWSE_MIS_INFLIGHT.clear()
+        _TWSE_MIS_RESULT_CACHE.clear()
+        _TWSE_MIS_CIRCUIT_FAILURES = 0
+        _TWSE_MIS_CIRCUIT_OPEN_UNTIL = 0.0
+        _TWSE_MIS_CIRCUIT_LAST_ERROR = None
 
 
 def _cache_get(cache_key: str) -> dict[str, Any] | None:
@@ -56,7 +99,9 @@ def _cache_get(cache_key: str) -> dict[str, Any] | None:
         _QUOTE_DEPTH_CACHE.pop(cache_key, None)
         return None
 
-    return deepcopy(payload)
+    result = deepcopy(payload)
+    result["refresh_outcome"] = "cache_hit"
+    return result
 
 
 def _cache_set(cache_key: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -249,6 +294,8 @@ def _fetch_mis_quote_depth(
             "Referer": f"{TWSE_MIS_REFERER_URL}?stock={stock_id}",
         },
         timeout=10,
+        omi_resource="quote_depth",
+        omi_target=stock_id,
     )
     response.raise_for_status()
     payload = response.json()
@@ -256,6 +303,92 @@ def _fetch_mis_quote_depth(
     if not isinstance(message, dict):
         raise TaiwanStockQuoteDepthFetchError("TWSE MIS did not return quote data.")
     return message, response.url, payload
+
+
+def _guarded_mis_quote_depth_fetch(
+    *,
+    stock_id: str,
+    market: str | None,
+) -> tuple[dict[str, Any], str | None, dict[str, Any]]:
+    global _TWSE_MIS_CIRCUIT_FAILURES
+    global _TWSE_MIS_CIRCUIT_OPEN_UNTIL
+    global _TWSE_MIS_CIRCUIT_LAST_ERROR
+
+    leader = False
+    with _TWSE_MIS_GUARD_LOCK:
+        cached = _TWSE_MIS_RESULT_CACHE.get(stock_id)
+        now_monotonic = monotonic_time.monotonic()
+        if cached is not None:
+            cached_at, cached_result = cached
+            if now_monotonic - cached_at <= TWSE_MIS_COALESCE_WINDOW_SECONDS:
+                return deepcopy(cached_result)
+            _TWSE_MIS_RESULT_CACHE.pop(stock_id, None)
+        future = _TWSE_MIS_INFLIGHT.get(stock_id)
+        if future is None:
+            if now_monotonic < _TWSE_MIS_CIRCUIT_OPEN_UNTIL:
+                raise TaiwanStockQuoteDepthCircuitOpenError(
+                    retry_after_seconds=max(
+                        int(_TWSE_MIS_CIRCUIT_OPEN_UNTIL - now_monotonic),
+                        1,
+                    ),
+                    last_error=_TWSE_MIS_CIRCUIT_LAST_ERROR,
+                )
+            future = Future()
+            _TWSE_MIS_INFLIGHT[stock_id] = future
+            leader = True
+
+    if not leader:
+        return future.result()
+
+    try:
+        result = _fetch_mis_quote_depth(stock_id=stock_id, market=market)
+    except Exception as exc:
+        with _TWSE_MIS_GUARD_LOCK:
+            _TWSE_MIS_CIRCUIT_FAILURES += 1
+            _TWSE_MIS_CIRCUIT_LAST_ERROR = str(exc) or type(exc).__name__
+            if _TWSE_MIS_CIRCUIT_FAILURES >= TWSE_MIS_CIRCUIT_FAILURE_THRESHOLD:
+                _TWSE_MIS_CIRCUIT_OPEN_UNTIL = (
+                    monotonic_time.monotonic() + TWSE_MIS_CIRCUIT_COOLDOWN_SECONDS
+                )
+            future.set_exception(exc)
+            _TWSE_MIS_INFLIGHT.pop(stock_id, None)
+        raise
+    else:
+        with _TWSE_MIS_GUARD_LOCK:
+            _TWSE_MIS_CIRCUIT_FAILURES = 0
+            _TWSE_MIS_CIRCUIT_OPEN_UNTIL = 0.0
+            _TWSE_MIS_CIRCUIT_LAST_ERROR = None
+            _TWSE_MIS_RESULT_CACHE[stock_id] = (
+                monotonic_time.monotonic(),
+                deepcopy(result),
+            )
+            future.set_result(result)
+            _TWSE_MIS_INFLIGHT.pop(stock_id, None)
+        return result
+
+
+def _source_error_detail(exc: BaseException) -> dict[str, Any]:
+    failure = provider_http_failure(exc)
+    if failure is not None:
+        return failure.diagnostic_fields()
+    if isinstance(exc, TaiwanStockQuoteDepthCircuitOpenError):
+        return {
+            "provider": TWSE_MIS_PROVIDER,
+            "resource": "quote_depth",
+            "status": "circuit_open",
+            "exception_type": type(exc).__name__,
+            "retry_after_seconds": exc.retry_after_seconds,
+            "retry_count": 0,
+            "last_error": exc.last_error,
+        }
+    return {
+        "provider": TWSE_MIS_PROVIDER,
+        "resource": "quote_depth",
+        "status": "error",
+        "exception_type": type(exc).__name__,
+        "error_message": str(exc) or type(exc).__name__,
+        "retry_count": 0,
+    }
 
 
 def _snapshot_values_from_message(
@@ -318,7 +451,10 @@ def _snapshot_values_from_message(
     }
 
 
-def _upsert_quote_snapshot(db: Session, values: dict[str, Any]) -> TaiwanStockQuoteSnapshot:
+def _upsert_quote_snapshot(
+    db: Session,
+    values: dict[str, Any],
+) -> tuple[TaiwanStockQuoteSnapshot, str]:
     existing = (
         db.query(TaiwanStockQuoteSnapshot)
         .filter(TaiwanStockQuoteSnapshot.provider == values["provider"])
@@ -330,14 +466,24 @@ def _upsert_quote_snapshot(db: Session, values: dict[str, Any]) -> TaiwanStockQu
     if existing is None:
         row = TaiwanStockQuoteSnapshot(**values)
         db.add(row)
+        refresh_outcome = "updated"
     else:
         row = existing
+        refresh_outcome = (
+            "updated"
+            if any(
+                getattr(existing, key) != value
+                for key, value in values.items()
+                if key not in {"fetched_at", "updated_at"}
+            )
+            else "unchanged"
+        )
         for key, value in values.items():
             setattr(row, key, value)
 
     db.commit()
     db.refresh(row)
-    return row
+    return row, refresh_outcome
 
 
 def _latest_snapshot(db: Session, stock_id: str) -> TaiwanStockQuoteSnapshot | None:
@@ -354,12 +500,19 @@ def _freshness_for_row(
     *,
     phase: str,
     source_error: str | None = None,
+    source_error_detail: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     local_now = _local_now(now)
     expected_trade_date = _expected_trade_date_for_phase(phase, now=local_now)
+    quote_at = _local_now(row.quote_time) if row and row.quote_time else None
     fetched_at = _local_now(row.fetched_at) if row and row.fetched_at else None
     age_seconds = (
+        max(int((local_now - quote_at).total_seconds()), 0)
+        if quote_at is not None
+        else None
+    )
+    fetch_age_seconds = (
         max(int((local_now - fetched_at).total_seconds()), 0)
         if fetched_at is not None
         else None
@@ -384,9 +537,11 @@ def _freshness_for_row(
             "is_live": False,
             "is_stale": False,
             "age_seconds": None,
+            "fetch_age_seconds": None,
             "expected_trade_date": expected_trade_date,
             "message": "05:00-08:30 等待試撮，五檔暫不顯示。",
             "source_error": source_error,
+            "source_error_detail": source_error_detail,
         }
 
     if row is None:
@@ -395,9 +550,11 @@ def _freshness_for_row(
             "is_live": False,
             "is_stale": True,
             "age_seconds": None,
+            "fetch_age_seconds": None,
             "expected_trade_date": expected_trade_date,
             "message": source_error or "尚無五檔快照。",
             "source_error": source_error,
+            "source_error_detail": source_error_detail,
         }
 
     if source_error:
@@ -424,9 +581,11 @@ def _freshness_for_row(
         "is_live": status == "live",
         "is_stale": is_stale,
         "age_seconds": age_seconds,
+        "fetch_age_seconds": fetch_age_seconds,
         "expected_trade_date": expected_trade_date,
         "message": message,
         "source_error": source_error,
+        "source_error_detail": source_error_detail,
     }
 
 
@@ -435,8 +594,13 @@ def _empty_response(
     stock: StockMaster,
     phase: str,
     source_error: str | None = None,
+    source_error_detail: dict[str, Any] | None = None,
     now: datetime | None = None,
+    refresh_outcome: str = "not_attempted",
 ) -> dict[str, Any]:
+    calendar_status = build_taiwan_calendar_status(now=now)
+    market_status = market_status_from_session(calendar_status)
+    session = calendar_status.get("session") if isinstance(calendar_status.get("session"), dict) else {}
     return {
         "stock_id": stock.stock_id,
         "stock_name": stock.stock_name,
@@ -446,6 +610,11 @@ def _empty_response(
         "source_url": None,
         "exchange_channel": None,
         "session_phase": phase,
+        "market_status": market_status,
+        "timezone": calendar_status.get("timezone"),
+        "session_start": session.get("open_time"),
+        "session_end": session.get("close_time"),
+        "holiday_name": calendar_status.get("holiday_name"),
         "phase_label": PHASE_LABELS.get(phase, phase),
         "trade_date": None,
         "quote_time": None,
@@ -469,10 +638,12 @@ def _empty_response(
         "bid_levels": [],
         "ask_levels": [],
         "depth_available": False,
+        "refresh_outcome": refresh_outcome,
         "freshness": _freshness_for_row(
             None,
             phase=phase,
             source_error=source_error,
+            source_error_detail=source_error_detail,
             now=now,
         ),
     }
@@ -483,12 +654,28 @@ def _row_to_response(
     *,
     phase: str,
     source_error: str | None = None,
+    source_error_detail: dict[str, Any] | None = None,
     now: datetime | None = None,
     suppress_depth: bool = False,
+    refresh_outcome: str = "not_attempted",
 ) -> dict[str, Any]:
     bid_levels = [] if suppress_depth else _loads_levels(row.bid_levels_json)
     ask_levels = [] if suppress_depth else _loads_levels(row.ask_levels_json)
-    depth_available = bool((bid_levels or ask_levels) and phase in LIVE_DEPTH_PHASES)
+    freshness = _freshness_for_row(
+        row,
+        phase=phase,
+        source_error=source_error,
+        source_error_detail=source_error_detail,
+        now=now,
+    )
+    depth_available = bool(
+        (bid_levels or ask_levels)
+        and phase in LIVE_DEPTH_PHASES
+        and freshness.get("is_live")
+    )
+    calendar_status = build_taiwan_calendar_status(now=now)
+    market_status = market_status_from_session(calendar_status)
+    session = calendar_status.get("session") if isinstance(calendar_status.get("session"), dict) else {}
 
     return {
         "stock_id": row.stock_id,
@@ -499,6 +686,11 @@ def _row_to_response(
         "source_url": row.source_url,
         "exchange_channel": row.exchange_channel,
         "session_phase": phase,
+        "market_status": market_status,
+        "timezone": calendar_status.get("timezone"),
+        "session_start": session.get("open_time"),
+        "session_end": session.get("close_time"),
+        "holiday_name": calendar_status.get("holiday_name"),
         "phase_label": PHASE_LABELS.get(phase, phase),
         "trade_date": row.trade_date,
         "quote_time": row.quote_time,
@@ -522,12 +714,8 @@ def _row_to_response(
         "bid_levels": bid_levels,
         "ask_levels": ask_levels,
         "depth_available": depth_available,
-        "freshness": _freshness_for_row(
-            row,
-            phase=phase,
-            source_error=source_error,
-            now=now,
-        ),
+        "refresh_outcome": refresh_outcome,
+        "freshness": freshness,
     }
 
 
@@ -551,10 +739,11 @@ def get_taiwan_stock_quote_depth(
         return cached
 
     source_error: str | None = None
+    source_error_detail: dict[str, Any] | None = None
     if refresh:
         try:
             fetched_at = utc_now()
-            message, source_url, payload = _fetch_mis_quote_depth(
+            message, source_url, payload = _guarded_mis_quote_depth_fetch(
                 stock_id=normalized_stock_id,
                 market=stock.market,
             )
@@ -566,10 +755,19 @@ def get_taiwan_stock_quote_depth(
                 payload=payload,
                 fetched_at=fetched_at,
             )
-            row = _upsert_quote_snapshot(db, values)
-            return _cache_set(cache_key, _row_to_response(row, phase=phase, now=now))
+            row, refresh_outcome = _upsert_quote_snapshot(db, values)
+            return _cache_set(
+                cache_key,
+                _row_to_response(
+                    row,
+                    phase=phase,
+                    now=now,
+                    refresh_outcome=refresh_outcome,
+                ),
+            )
         except Exception as exc:
             source_error = str(exc) or exc.__class__.__name__
+            source_error_detail = _source_error_detail(exc)
 
     latest = _latest_snapshot(db, normalized_stock_id)
     if latest is None:
@@ -579,7 +777,9 @@ def get_taiwan_stock_quote_depth(
                 stock=stock,
                 phase=phase,
                 source_error=source_error,
+                source_error_detail=source_error_detail,
                 now=now,
+                refresh_outcome="failed" if source_error else "not_attempted",
             ),
         )
 
@@ -589,7 +789,9 @@ def get_taiwan_stock_quote_depth(
             latest,
             phase=phase,
             source_error=source_error,
+            source_error_detail=source_error_detail,
             now=now,
+            refresh_outcome="failed" if source_error else "not_attempted",
             suppress_depth=phase == "closed_waiting_preopen",
         ),
     )

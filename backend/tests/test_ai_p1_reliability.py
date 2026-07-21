@@ -94,7 +94,11 @@ class AiP1FreshnessContractTests(unittest.TestCase):
                 response["result"]["data"]["status"],
                 response["result"]["data"]["compact"]["status"],
             )
-            self.assertIn("monthly_revenue=stale", response["analysis"]["human_answer"]["text"])
+            self.assertNotIn("human_answer", response["analysis"])
+            self.assertNotIn("monthly_revenue", response["missing"])
+            self.assertTrue(
+                any("monthly_revenue" in warning for warning in response["warnings"])
+            )
         finally:
             db.close()
 

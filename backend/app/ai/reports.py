@@ -389,7 +389,7 @@ def _compact_us_stock_summary(context: dict[str, Any]) -> dict[str, Any]:
         change_text = f" change={_pct_display(change_pct)}" if change_pct is not None else ""
         highlights.append(
             "Latest US close "
-            f"{latest_close} on {latest_daily.get('trade_date')}.{change_text}"
+            f"{_price_display(latest_close)} on {latest_daily.get('trade_date')}.{change_text}"
         )
     else:
         checks.append("US daily price data is missing.")
@@ -431,7 +431,9 @@ def _compact_us_stock_summary(context: dict[str, Any]) -> dict[str, Any]:
         "latest": {
             "trade_date": latest_daily.get("trade_date"),
             "close": latest_close,
+            "close_display": _price_display(latest_close),
             "previous_close": previous_close,
+            "previous_close_display": _price_display(previous_close),
             "change_pct": change_pct,
             "change_pct_text": _pct_display(change_pct),
             "volume": latest_daily.get("trade_volume"),
@@ -664,7 +666,8 @@ def _build_us_stock_analysis(context: dict[str, Any], requested_horizon: str) ->
     summary_parts = []
     if latest.get("close") is not None:
         summary_parts.append(
-            f"收盤 {latest.get('close')}，漲跌幅 {latest.get('change_pct_text') or '-'}"
+            f"收盤 {latest.get('close_display') or _price_display(latest.get('close'))}，"
+            f"漲跌幅 {latest.get('change_pct_text') or '-'}"
         )
     summary_parts.append(
         "覆蓋："
@@ -1298,7 +1301,7 @@ def _compact_cross_market_summary(context: dict[str, Any]) -> dict[str, Any]:
         title = "local-cache evidence with gaps"
     display_parts = [str(label)]
     if price is not None:
-        display_parts.append(f"price {price}")
+        display_parts.append(f"price {_price_display(price) or price}")
     pct_text = _pct_display(change_pct)
     if pct_text:
         display_parts.append(f"24h {pct_text}")

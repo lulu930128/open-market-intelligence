@@ -38,7 +38,7 @@ export function useTaiwanTechnicalReport({
           `/api/market/technical/${requestedStockId}`,
           {
             timeframe: requestedTimeframe,
-            include_intraday: requestedTimeframe === "today",
+            include_intraday: true,
           }
         );
 

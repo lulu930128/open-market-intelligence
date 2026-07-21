@@ -225,14 +225,20 @@ NON_ACTION_GRADE_BUCKETS = {"quiet", "no_data", "error"}
 SIGNAL_LABELS = {
     "price_up": "上漲",
     "price_down": "下跌",
+    "above_ma5": "站在 MA5 之上",
+    "below_ma5": "位於 MA5 下方",
     "above_ma20": "站在 MA20 之上",
     "below_ma20": "跌破 MA20",
+    "above_ma60": "站在 MA60 之上",
+    "below_ma60": "失守 MA60",
     "ma5_above_ma20": "MA5 高於 MA20",
     "ma5_below_ma20": "MA5 低於 MA20",
     "ma20_above_ma60": "MA20 高於 MA60",
     "ma20_below_ma60": "MA20 低於 MA60",
     "cross_above_ma20": "重新站上 MA20",
     "cross_below_ma20": "跌破 MA20",
+    "cross_above_ma60": "重新站上 MA60",
+    "cross_below_ma60": "跌破 MA60",
     "ema_fast_above_slow": "EMA 快線高於慢線",
     "ema_fast_below_slow": "EMA 快線低於慢線",
     "ema_bullish_cross": "EMA 黃金交叉",
@@ -271,10 +277,13 @@ SIGNAL_LABELS = {
 
 RISK_SIGNAL_KEYS = {
     "price_down",
+    "below_ma5",
     "below_ma20",
+    "below_ma60",
     "ma5_below_ma20",
     "ma20_below_ma60",
     "cross_below_ma20",
+    "cross_below_ma60",
     "ema_fast_below_slow",
     "ema_bearish_cross",
     "macd_negative",
@@ -291,7 +300,9 @@ RISK_SIGNAL_KEYS = {
 }
 SUPPORT_BREAK_SIGNAL_KEYS = {
     "below_ma20",
+    "below_ma60",
     "cross_below_ma20",
+    "cross_below_ma60",
     "donchian_breakdown",
     "structure_support_break",
     "bollinger_breakdown",
@@ -307,6 +318,7 @@ BREAKOUT_HIGH_SIGNAL_KEYS = {
 }
 TREND_RECLAIM_SIGNAL_KEYS = {
     "cross_above_ma20",
+    "cross_above_ma60",
     "ema_bullish_cross",
     "adx_bull_trend",
     "kd_bullish_cross",
@@ -346,7 +358,9 @@ COMPRESSION_SIGNAL_KEYS = {
 }
 MOMENTUM_SIGNAL_KEYS = {
     "price_up",
+    "above_ma5",
     "above_ma20",
+    "above_ma60",
     "ma5_above_ma20",
     "ma20_above_ma60",
     "ema_fast_above_slow",
@@ -357,13 +371,16 @@ MOMENTUM_SIGNAL_KEYS = {
     "kd_bullish_cross",
 }
 PULLBACK_CONTEXT_KEYS = {
+    "above_ma5",
     "above_ma20",
+    "above_ma60",
     "ma5_above_ma20",
     "ma20_above_ma60",
     "ema_fast_above_slow",
     "macd_positive",
 }
 HIGH_RISK_SIGNAL_KEYS = {
+    "cross_below_ma60",
     "cross_below_ma20",
     "ema_bearish_cross",
     "adx_bear_trend",
@@ -373,6 +390,7 @@ HIGH_RISK_SIGNAL_KEYS = {
     "volume_price_down",
 }
 HIGH_MOMENTUM_SIGNAL_KEYS = {
+    "cross_above_ma60",
     "cross_above_ma20",
     "ema_bullish_cross",
     "adx_bull_trend",
@@ -382,6 +400,7 @@ HIGH_MOMENTUM_SIGNAL_KEYS = {
     "volume_price_up",
 }
 TECHNICAL_SIGNAL_WEIGHTS = {
+    "cross_below_ma60": 4.2,
     "donchian_breakdown": 3.5,
     "structure_support_break": 3.6,
     "bollinger_breakdown": 3.2,
@@ -398,6 +417,7 @@ TECHNICAL_SIGNAL_WEIGHTS = {
     "atr_expanding": 1.8,
     "mfi_outflow": 2.0,
     "rsi_weak": 1.8,
+    "cross_above_ma60": 3.8,
     "donchian_breakout": 3.2,
     "structure_resistance_breakout": 3.3,
     "bollinger_breakout": 3.0,
@@ -416,8 +436,12 @@ TECHNICAL_SIGNAL_WEIGHTS = {
     "near_support": 1.1,
     "near_resistance": 1.1,
     "kd_oversold": 1.0,
+    "above_ma5": 0.8,
+    "below_ma5": 0.8,
     "above_ma20": 1.4,
     "below_ma20": 1.4,
+    "above_ma60": 1.8,
+    "below_ma60": 2.0,
     "ma5_above_ma20": 1.2,
     "ma5_below_ma20": 1.2,
     "ma20_above_ma60": 1.0,
@@ -530,7 +554,12 @@ def _is_stale(row: dict, target_trade_date: date | None) -> bool:
 
 
 def _matched_keys(signal_keys: list[str], candidates: set[str]) -> list[str]:
-    return [key for key in signal_keys if key in candidates]
+    matched = [key for key in signal_keys if key in candidates]
+    return sorted(
+        matched,
+        key=lambda key: TECHNICAL_SIGNAL_WEIGHTS.get(key, 1.0),
+        reverse=True,
+    )
 
 
 def _technical_evidence_score(row: dict, bucket: str) -> float:
@@ -1276,19 +1305,25 @@ def _factor_scores(row: dict) -> dict[str, float]:
         "trend": _family_score(
             keys,
             {
+                "above_ma5",
                 "above_ma20",
+                "above_ma60",
                 "ma5_above_ma20",
                 "ma20_above_ma60",
                 "cross_above_ma20",
+                "cross_above_ma60",
                 "ema_fast_above_slow",
                 "ema_bullish_cross",
                 "adx_bull_trend",
             },
             {
+                "below_ma5",
                 "below_ma20",
+                "below_ma60",
                 "ma5_below_ma20",
                 "ma20_below_ma60",
                 "cross_below_ma20",
+                "cross_below_ma60",
                 "ema_fast_below_slow",
                 "ema_bearish_cross",
                 "adx_bear_trend",
@@ -1326,6 +1361,26 @@ def _factor_scores(row: dict) -> dict[str, float]:
     }
 
 
+def _nearest_level(
+    close: float | None,
+    candidates: list[float | None],
+    *,
+    direction: str,
+) -> float | None:
+    values = sorted({value for value in candidates if value is not None})
+    if not values:
+        return None
+    if close is None:
+        return values[0] if direction == "above" else values[-1]
+
+    if direction == "above":
+        overhead = [value for value in values if value >= close]
+        return overhead[0] if overhead else None
+
+    below = [value for value in values if value <= close]
+    return below[-1] if below else None
+
+
 def _price_levels(row: dict, bucket: str) -> dict[str, object]:
     close = _number(row.get("close"))
     support = _first_number(
@@ -1340,27 +1395,64 @@ def _price_levels(row: dict, bucket: str) -> dict[str, object]:
         _indicator_number(row, "bollinger", "upper20"),
         _indicator_number(row, "ma", "ma20"),
     )
+    ma5 = _indicator_number(row, "ma", "ma5")
     ma20 = _indicator_number(row, "ma", "ma20")
+    ma60 = _indicator_number(row, "ma", "ma60")
+    previous_close = _number(row.get("previous_close"))
     atr14 = _indicator_number(row, "atr", "atr14")
     atr_pct = (atr14 / close * 100) if atr14 is not None and close not in {None, 0} else None
     bollinger_upper = _indicator_number(row, "bollinger", "upper20")
     bollinger_lower = _indicator_number(row, "bollinger", "lower20")
+    nearest_overhead = _nearest_level(
+        close,
+        [
+            previous_close,
+            ma5,
+            ma20,
+            ma60,
+            support,
+            resistance,
+            bollinger_lower,
+            bollinger_upper,
+        ],
+        direction="above",
+    )
+    nearest_support = _nearest_level(
+        close,
+        [
+            previous_close,
+            ma5,
+            ma20,
+            ma60,
+            support,
+            resistance,
+            bollinger_lower,
+            bollinger_upper,
+        ],
+        direction="below",
+    )
 
     if bucket in RISK_BUCKETS:
         key_level_label = "回收壓力"
-        key_level = _first_number(resistance, ma20)
+        key_level = _first_number(nearest_overhead, resistance, ma60, ma20)
     elif bucket == "compression_watch":
         key_level_label = "突破壓力"
-        key_level = resistance
+        key_level = _first_number(nearest_overhead, resistance)
     else:
         key_level_label = "失效支撐"
-        key_level = _first_number(support, ma20)
+        key_level = _first_number(nearest_support, support, ma20, ma60)
 
     return {
         "close": close,
         "support": support,
+        "support_broken": (
+            close is not None and support is not None and close < support
+        ),
         "resistance": resistance,
+        "ma5": ma5,
         "ma20": ma20,
+        "ma60": ma60,
+        "previous_close": previous_close,
         "atr14": atr14,
         "atr_pct": round(atr_pct, 4) if atr_pct is not None else None,
         "bollinger_upper": bollinger_upper,

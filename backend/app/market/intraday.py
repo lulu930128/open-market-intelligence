@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import MarketIntradayBar, StockMaster, utc_now
 from app.market.providers import http_get
+from app.market.tw_disposition import get_taiwan_disposition_status
 from app.observability.provider_fallback import observe_provider_fallback
 
 
@@ -500,6 +501,24 @@ def _upsert_market_intraday_bars(
         if existing is None:
             db.add(MarketIntradayBar(**values))
         else:
+            changed = any(
+                (
+                    getattr(existing, key).replace(tzinfo=None)
+                    if isinstance(getattr(existing, key), datetime)
+                    else getattr(existing, key)
+                )
+                != (
+                    value.astimezone(TAIPEI_TZ).replace(tzinfo=None)
+                    if isinstance(value, datetime) and value.tzinfo is not None
+                    else value.replace(tzinfo=None)
+                    if isinstance(value, datetime)
+                    else value
+                )
+                for key, value in values.items()
+                if key != "updated_at"
+            )
+            if not changed:
+                continue
             for key, value in values.items():
                 setattr(existing, key, value)
         changed_count += 1
@@ -613,7 +632,66 @@ def _fill_volume_gap(points: list[dict], total_volume: int) -> bool:
     return True
 
 
+def _dedupe_disposition_points(points: list[dict]) -> list[dict]:
+    deduped: list[dict] = []
+    previous_state: tuple[float | None, int | None, str | None] | None = None
+    for point in sorted(points, key=lambda item: str(item.get("time") or "")):
+        state = (
+            _as_float(point.get("price") if point.get("price") is not None else point.get("close")),
+            _as_int(point.get("cumulative_volume") if point.get("cumulative_volume") is not None else point.get("volume")),
+            str(
+                point.get("official_trade_timestamp")
+                or point.get("official_trade_time")
+                or ""
+            )
+            or None,
+        )
+        if previous_state is not None and state == previous_state:
+            continue
+        deduped.append(point)
+        previous_state = state
+    return deduped
+
+
+def _apply_disposition_intraday_contract(
+    result: dict,
+    disposition: dict,
+) -> dict:
+    if not disposition.get("is_active"):
+        return {
+            **result,
+            "trading_mode": "continuous",
+            "analysis_basis": "time_bars",
+        }
+    points = _dedupe_disposition_points(
+        [point for point in result.get("points") or [] if isinstance(point, dict)]
+    )
+    return {
+        **result,
+        "points": points,
+        "point_count": len(points),
+        "trading_mode": "disposition_batch_auction",
+        "analysis_basis": "effective_matches",
+        "effective_match_count": len(points),
+        "batch_interval_minutes": disposition.get("matching_interval_minutes"),
+        "disposition_start_date": disposition.get("start_date"),
+        "disposition_end_date": disposition.get("end_date"),
+    }
+
+
 def _apply_mis_volume_adjustment(result: dict, message: dict | None) -> dict:
+    original_source = str(result.get("source") or "unknown")
+    price_provider = (
+        "nstock" if original_source.startswith("nstock") else "yahoo_finance_chart"
+        if original_source.startswith("yahoo")
+        else original_source
+    )
+    result["price_provider"] = price_provider
+    result["volume_provider"] = price_provider
+    result["provider"] = price_provider
+    result["source_components"] = [
+        {"domain": "price", "provider": price_provider, "source": original_source}
+    ]
     if not message or not result.get("points"):
         return result
 
@@ -681,6 +759,12 @@ def _apply_mis_volume_adjustment(result: dict, message: dict | None) -> dict:
             result["source"] = "nstock_minute_stock_data_twse_mis_volume"
         else:
             result["source"] = "yahoo_finance_chart_twse_mis_volume"
+        result["provider"] = "composite"
+        result["volume_provider"] = "twse_mis"
+        result["source_components"] = [
+            {"domain": "price", "provider": price_provider, "source": original_source},
+            {"domain": "volume", "provider": "twse_mis", "source": "twse_mis_snapshot"},
+        ]
     return result
 
 
@@ -737,6 +821,10 @@ def _load_intraday_trend_uncached(
     market: str | None,
     cache_key: str,
 ) -> dict:
+    disposition = get_taiwan_disposition_status(
+        stock_id,
+        market=market,
+    )
     try:
         nstock_result = _fetch_nstock_intraday(stock_id=stock_id)
 
@@ -749,7 +837,10 @@ def _load_intraday_trend_uncached(
                     operation="intraday.nstock_volume_adjustment",
                 )
                 message = None
-            result = _apply_mis_volume_adjustment(nstock_result, message)
+            result = _apply_disposition_intraday_contract(
+                _apply_mis_volume_adjustment(nstock_result, message),
+                disposition,
+            )
             _upsert_market_intraday_bars(
                 db,
                 stock_id=stock_id,
@@ -776,7 +867,10 @@ def _load_intraday_trend_uncached(
                     operation="intraday.yahoo_volume_adjustment",
                 )
                 message = None
-            result = _apply_mis_volume_adjustment(yahoo_result, message)
+            result = _apply_disposition_intraday_contract(
+                _apply_mis_volume_adjustment(yahoo_result, message),
+                disposition,
+            )
             _upsert_market_intraday_bars(
                 db,
                 stock_id=stock_id,
@@ -792,7 +886,13 @@ def _load_intraday_trend_uncached(
         observe_provider_fallback(exc, operation="intraday.yahoo_secondary")
 
     try:
-        return _cache_set(cache_key, _fetch_mis_snapshot(stock_id=stock_id, market=market))
+        return _cache_set(
+            cache_key,
+            _apply_disposition_intraday_contract(
+                _fetch_mis_snapshot(stock_id=stock_id, market=market),
+                disposition,
+            ),
+        )
     except Exception as exc:
         observe_provider_fallback(exc, operation="intraday.mis_snapshot_final")
         return _cache_set(cache_key, {
@@ -840,6 +940,7 @@ def get_market_intraday_history(
 ) -> dict:
     stock = _get_stock(db=db, stock_id=stock_id)
     market = stock.market.upper() if stock else None
+    disposition = get_taiwan_disposition_status(stock_id, market=market)
     symbol = _yahoo_symbol(stock_id=stock_id, market=market)
     config = _intraday_history_config(interval=interval, range_value=range_value)
     fetch_interval = str(config["fetch_interval"])
@@ -867,6 +968,8 @@ def get_market_intraday_history(
             fetched_points = fetched.get("points") or []
             if interval == "4h":
                 fetched_points = _aggregate_intraday_points(fetched_points, 240)
+            if disposition.get("is_active"):
+                fetched_points = _dedupe_disposition_points(fetched_points)
             refreshed_count = _upsert_market_intraday_bars(
                 db,
                 stock_id=stock_id,
@@ -883,6 +986,38 @@ def get_market_intraday_history(
             observe_provider_fallback(exc, operation="intraday.history_remote_refresh")
             source = "market_intraday_bar_cache"
 
+    if interval == "5m":
+        one_minute_rows = _query_intraday_rows(
+            db,
+            stock_id=stock_id,
+            interval="1m",
+            from_time=from_time,
+        )
+        one_minute_points = [
+            {
+                **_intraday_row_to_point(row),
+                "price": row.close_price,
+            }
+            for row in one_minute_rows
+        ]
+        local_five_minute_points = _aggregate_intraday_points(
+            one_minute_points,
+            5,
+        )
+        if local_five_minute_points:
+            refreshed_count += _upsert_market_intraday_bars(
+                db,
+                stock_id=stock_id,
+                market=market,
+                symbol=symbol,
+                interval="5m",
+                source="local_current_1m_aggregate",
+                source_url=one_minute_rows[-1].source_url if one_minute_rows else None,
+                points=local_five_minute_points,
+            )
+            source = "local_current_1m_aggregate"
+            source_url = one_minute_rows[-1].source_url if one_minute_rows else source_url
+
     rows = _query_intraday_rows(
         db,
         stock_id=stock_id,
@@ -890,6 +1025,8 @@ def get_market_intraday_history(
         from_time=from_time,
     )
     points = [_intraday_row_to_point(row) for row in rows]
+    if disposition.get("is_active"):
+        points = _dedupe_disposition_points(points)
 
     if rows and source_url is None:
         source_url = rows[-1].source_url
@@ -901,7 +1038,15 @@ def get_market_intraday_history(
         "symbol": symbol,
         "interval": interval,
         "range": fetch_range if range_value == "auto" else range_value,
-        "provider": INTRADAY_HISTORY_PROVIDER,
+        "provider": (
+            "local_derived"
+            if source == "local_current_1m_aggregate"
+            else "composite"
+            if "twse_mis_volume" in source
+            else "nstock"
+            if source.startswith("nstock")
+            else INTRADAY_HISTORY_PROVIDER
+        ),
         "source": source,
         "source_url": source_url,
         "from_time": rows[0].bar_time if rows else None,
@@ -909,5 +1054,23 @@ def get_market_intraday_history(
         "point_count": len(points),
         "cached_count": len(cached_rows),
         "refreshed_count": refreshed_count,
+        "trading_mode": "disposition_batch_auction"
+        if disposition.get("is_active")
+        else "continuous",
+        "analysis_basis": "effective_matches"
+        if disposition.get("is_active")
+        else "time_bars",
+        "effective_match_count": len(points)
+        if disposition.get("is_active")
+        else None,
+        "batch_interval_minutes": disposition.get("matching_interval_minutes")
+        if disposition.get("is_active")
+        else None,
+        "disposition_start_date": disposition.get("start_date")
+        if disposition.get("is_active")
+        else None,
+        "disposition_end_date": disposition.get("end_date")
+        if disposition.get("is_active")
+        else None,
         "points": points,
     }

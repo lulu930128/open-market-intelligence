@@ -93,6 +93,8 @@ def build_decision_contract(
     missing: list[Any],
     warnings: list[Any],
     answer_ready: bool,
+    decision_ready: bool | None = None,
+    blocked_sections: list[str] | None = None,
 ) -> dict[str, Any]:
     """Project the backend-owned human answer into a stable consumer contract."""
 
@@ -128,6 +130,9 @@ def build_decision_contract(
         "sections": sections,
         "readiness": {
             "answer_ready": bool(answer_ready),
+            "decision_ready": bool(
+                decision_ready if decision_ready is not None else answer_ready and action_plan
+            ),
             "has_text": bool(text),
             "has_action_plan": bool(action_plan),
             "has_scenarios": bool(scenarios),
@@ -137,6 +142,7 @@ def build_decision_contract(
             "has_missing": bool(missing_keys),
             "has_warnings": bool(warning_texts),
         },
+        "blocked_sections": list(dict.fromkeys(blocked_sections or [])),
         "freshness": _freshness_summary(freshness_result),
         "missing": missing_keys,
         "warnings": warning_texts,

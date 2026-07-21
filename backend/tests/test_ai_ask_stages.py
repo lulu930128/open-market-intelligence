@@ -365,6 +365,7 @@ class AiAskStagesTests(unittest.TestCase):
             decision_contract["readiness"],
             {
                 "answer_ready": True,
+                "decision_ready": True,
                 "has_text": True,
                 "has_action_plan": True,
                 "has_scenarios": True,

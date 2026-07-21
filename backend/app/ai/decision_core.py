@@ -295,6 +295,46 @@ BROKER_BRANCH_QUERY_HINTS = (
     "分點買賣方",
     "主力買賣",
 )
+QUOTE_ONLY_HINTS = (
+    "latest quote",
+    "latest price",
+    "closing price",
+    "close price",
+    "最新報價",
+    "最新股價",
+    "最新價格",
+    "最新收盤價",
+    "即時報價",
+    "現價",
+    "分k",
+    "分 K",
+    "收盤價多少",
+    "股價多少",
+    "現在幾塊",
+    "現在多少錢",
+)
+NEGATION_TERMS = (
+    "不查",
+    "不刷新",
+    "不需要",
+    "不要",
+    "排除",
+    "without",
+    "except",
+)
+MARKET_BREADTH_QUERY_HINTS = (
+    "market breadth",
+    "advance decline",
+    "advancers",
+    "decliners",
+    "市場廣度",
+    "漲跌家數",
+    "上漲家數",
+    "下跌家數",
+    "漲停家數",
+    "跌停家數",
+    "盤面強弱",
+)
 INTRADAY_HINTS = (
     "intraday",
     "live",
@@ -615,8 +655,20 @@ def infer_question_intent(
         return "risk_check"
     if contains_hint(question, FRESHNESS_HINTS):
         return "data_freshness"
-    if contains_hint(question, BROKER_BRANCH_QUERY_HINTS):
+    if contains_hint(question, BROKER_BRANCH_QUERY_HINTS) and not any(
+        re.search(
+            rf"{re.escape(negation)}[^，,。；;!?]{{0,40}}{re.escape(hint)}",
+            question,
+            flags=re.IGNORECASE,
+        )
+        for negation in NEGATION_TERMS
+        for hint in BROKER_BRANCH_QUERY_HINTS
+    ):
         return "broker_branch"
+    if contains_hint(question, MARKET_BREADTH_QUERY_HINTS):
+        return "market_breadth"
+    if contains_hint(question, QUOTE_ONLY_HINTS):
+        return "quote"
     if contains_hint(question, RISK_PRIORITY_HINTS):
         return "risk_check"
     if contains_hint(question, ENTRY_DECISION_HINTS):

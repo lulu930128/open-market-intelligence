@@ -37,6 +37,7 @@ DATA_LIMIT_WARNING_HINTS = (
 NON_DATA_LIMIT_WARNING_PREFIXES = (
     "LLM analysis was generated on demand",
     "Intraday analysis horizon was requested without live intraday access",
+    "US fallback provider stale:",
 )
 LLM_SOFT_DATA_GAP_HINTS = (
     "missing",
@@ -296,7 +297,11 @@ def source_health_data_limits(
         return []
     limits: list[str] = []
     for entry in entries:
-        if not isinstance(entry, dict) or entry.get("required") is False:
+        if (
+            not isinstance(entry, dict)
+            or entry.get("required") is False
+            or entry.get("provider_role") == "fallback"
+        ):
             continue
         status = text_value(entry.get("status"))
         if status not in SOURCE_HEALTH_PROBLEM_STATUSES:
@@ -380,7 +385,11 @@ def confidence_cap_from_evidence(
         critical_entries = []
         if isinstance(entries, list):
             for entry in entries:
-                if not isinstance(entry, dict) or entry.get("required") is False:
+                if (
+                    not isinstance(entry, dict)
+                    or entry.get("required") is False
+                    or entry.get("provider_role") == "fallback"
+                ):
                     continue
                 status = text_value(entry.get("status"))
                 if status not in SOURCE_HEALTH_PROBLEM_STATUSES:

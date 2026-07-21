@@ -401,6 +401,9 @@ export default function StockDetailDataPanel({
               <div className="text-sm font-bold text-omi-text-strong">{t("stockDetail.dataPanel.institutionalHoldingRatio")}</div>
               <div className="mt-1 text-[11px] text-omi-text-muted">
                 {t("stockDetail.dataPanel.actualHoldingRatio")}
+                {currentHoldingRatio?.source_name
+                  ? ` · ${currentHoldingRatio.source_name}`
+                  : ""}
               </div>
             </div>
             <div className="text-sm font-bold text-omi-text">

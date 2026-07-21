@@ -30,6 +30,8 @@ export type TechnicalReport = {
   score: number;
   rows: TechnicalReportRow[];
   badges: TechnicalReportBadge[];
+  basisLabel?: string | null;
+  warningCount?: number;
 };
 
 function translatedValue(
@@ -75,6 +77,7 @@ const technicalTextKeyMap: Record<string, string> = {
   法人籌碼: "institutionalFlow",
   相對市場: "relativeMarket",
   趨勢結構: "trendStructure",
+  價格位置: "pricePosition",
   動能指標: "momentum",
   量價資金: "volumeFlow",
   波動風險: "volatilityRisk",
@@ -90,6 +93,23 @@ const technicalTextKeyMap: Record<string, string> = {
   長期籌碼: "longChipFlow",
   "站上 MA20": "aboveMa20",
   "跌破 MA20": "belowMa20",
+  "站上 MA60": "aboveMa60",
+  "失守 MA60": "belowMa60",
+  "站上 MA5/MA20/MA60": "aboveAllMa",
+  "失守 MA5/MA20/MA60": "belowAllMa",
+  多頭排列: "bullishAlignment",
+  空頭排列: "bearishAlignment",
+  "均線糾結／轉換中": "mixedAlignment",
+  均線排列資料不足: "alignmentInsufficient",
+  "盤中價 × 已收盤指標": "provisionalDailyIndicators",
+  盤中現價: "intradayPrice",
+  收盤價: "closingPrice",
+  "跌破 20 日支撐": "supportBreak",
+  "突破 20 日壓力": "resistanceBreakout",
+  "跌破 20 日低": "donchianBreakdown",
+  "突破 20 日高": "donchianBreakout",
+  跌破布林下緣: "bollingerBreakdown",
+  突破布林上緣: "bollingerBreakout",
   "MACD 偏多": "macdBullish",
   "MACD 偏弱": "macdWeak",
   "RSI 過熱": "rsiOverheated",
@@ -256,6 +276,38 @@ export function mapBackendTechnicalReport(
   report: StockTechnicalReportRead,
   t?: TranslationFunction
 ): TechnicalReport {
+  const priceContext =
+    report.data.price_context &&
+    typeof report.data.price_context === "object" &&
+    !Array.isArray(report.data.price_context)
+      ? (report.data.price_context as Record<string, unknown>)
+      : null;
+  const priceTime =
+    typeof priceContext?.price_time === "string" ? priceContext.price_time : null;
+  const dailyIndicatorTime =
+    typeof priceContext?.daily_indicator_time === "string"
+      ? priceContext.daily_indicator_time
+      : null;
+  const isIntraday = priceContext?.is_intraday === true;
+  const basisLabel = isIntraday
+    ? translatedValue(
+        t,
+        "stockDetail.dataViews.technical.basis.intraday",
+        `盤中價 ${priceTime ?? "-"} · 日線指標 ${dailyIndicatorTime ?? "-"}`,
+        {
+          priceTime: priceTime?.replace("T", " ").slice(0, 16) ?? "-",
+          dailyTime: dailyIndicatorTime?.slice(0, 10) ?? "-",
+        }
+      )
+    : dailyIndicatorTime
+      ? translatedValue(
+          t,
+          "stockDetail.dataViews.technical.basis.daily",
+          `日線指標截至 ${dailyIndicatorTime.slice(0, 10)}`,
+          { dailyTime: dailyIndicatorTime.slice(0, 10) }
+        )
+      : null;
+
   return {
     title: technicalReportPhrase(report.title, t),
     summary: replaceKnownTechnicalTerms(report.summary, t),
@@ -275,6 +327,8 @@ export function mapBackendTechnicalReport(
       label: technicalReportPhrase(badge.label, t),
       tone: semanticBadgeToneClass(badge.tone),
     })),
+    basisLabel,
+    warningCount: report.warnings.length,
   };
 }
 

@@ -1,6 +1,6 @@
 # OMI AI Decision Core Contract Map
 
-Last updated: 2026-06-21 20:20 +08:00
+Last updated: 2026-07-19 +08:00
 
 本文件是後續開工前的 baseline map。它描述目前 OMI AI decision core 的主要 contract、責任邊界與不能破壞的欄位；不是新規格替代品。
 
@@ -67,6 +67,12 @@ Core fields:
   - `auto`, `data_only`, `brief`, `full`, `analysis`, `report`.
   - `brief` is the compact human summary plus key numbers; `data_only` is compact structured core data where available; `full` returns the complete evidence pack.
   - `report` is trusted/write-sensitive and should not be requested by Kuro default policy.
+- `payload_level`
+  - Independent payload-size dimension: `summary`, `compact`, `standard`, `full`.
+  - Legacy `market_data_params.payload_level` remains accepted.
+- `diagnostics_level`
+  - Independent diagnostic projection: `none`, `basic`, `debug`.
+  - It must not promote a `data_only` answer into `brief` or `full`.
 - `allow_llm`
   - Enables non-persistent LLM analysis only when server policy permits.
 - `allow_write`
@@ -113,6 +119,16 @@ Top-level fields that downstream callers should treat as stable:
 - `clarification`
 - `next_actions`
 - `answer_ready`
+- `facts_ready`
+- `analysis_ready`
+- `decision_ready`
+- `blocked_sections`
+- `available_sections`
+- `request_status`
+- `fallback_used`
+- `cached_data_returned`
+- `job`
+- `cancellation`
 - `report_level`
 - `analysis`
 - `policy`
@@ -138,6 +154,27 @@ Backward compatibility rule:
 - New fields should be additive.
 - Existing fields should not change type without a version bump or compatibility shim.
 - Frontend/Kuro should prefer optional-field tolerant parsing.
+
+Mode rule:
+
+- `data_only`: deterministic evidence only; no Human Answer, action plan, position advice, or decision contract.
+- `brief`: Human Answer plus necessary evidence.
+- `full`: Human Answer plus complete required evidence.
+- `auto`, `analysis`, and `report` remain accepted request aliases/legacy execution modes under v2 compatibility.
+
+Readiness rule:
+
+- `facts_ready`: requested evidence facts are available.
+- `analysis_ready`: a Human Answer exists.
+- `answer_ready`: the requested canonical response mode is satisfied.
+- `decision_ready`: executable decision sections passed their local safety invariants.
+- A failed decision invariant blocks only the unsafe sections and does not erase valid facts or analysis.
+
+MCP rule:
+
+- `structuredContent.ok=false` maps to `isError=true`.
+- A valid query with zero matching results keeps `ok=true` and `isError=false`.
+- `transport_ok` is diagnostic-only and is not part of the public tool result contract.
 
 Related productized payload design:
 

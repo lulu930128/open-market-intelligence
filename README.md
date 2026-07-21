@@ -166,7 +166,7 @@ Settings 底部提供來源與責任聲明，把 TWSE/TPEx、TAIFEX、MOPS、SEC
 
 - 籌碼：TDCC 集保分布、融資融券、大盤籌碼日報。
 - 法人：三大法人買賣超、法人持股比例、歷史淨買賣。
-- 分點：nStock 券商分點 Top15，支援單日與多日加總。
+- 分點：nStock 券商分點 Top15，支援單日與多日加總。Backend 會在台股交易日 16:00 對啟用中的 TWSE／TPEx 普通股執行限速全市場收集，16:00–20:00 每 30 分鐘只補缺漏，讓每日 snapshot 能持續累積；ETF、權證等非普通股不列入。
 - 營收：月營收歷史。
 - 盈餘與基本面：MOPS/MOPSOV 季度財務指標。
 
@@ -226,7 +226,7 @@ Settings 底部提供來源與責任聲明，把 TWSE/TPEx、TAIFEX、MOPS、SEC
 
 - 韓股仍是 backend/data foundation，前端完整韓股工作台與 AI 韓股決策稿尚未完成。
 - KRX Data Marketplace live endpoint 仍需後續用實際 refresh smokes harden；v1 parser 與 DB contract 已用 mocked payload 測試。
-- 韓國假期目前只使用週末、固定假日與年末休市的保守近似；農曆與臨時休市需要後續接正式 KRX calendar source。
+- 韓國休市日會由 KRX 官方休市日 OTP/JSON 流程自動更新，包含農曆、補假、選舉臨時休市與年末休市；官方來源失敗時才退回週末、固定假日與年末休市的保守規則。
 - 不預設全市場大量回補；refresh 預設以單檔、watchlist 或明確 resource 為邊界。
 
 ### Crypto 與商品市場
@@ -487,12 +487,32 @@ LLM enabled 時，模型只能基於這些 evidence 補強敘事；如果 freshn
 
 ### Trading-session awareness
 
-`GET /api/market/calendar-status` 是交易日與資料發布窗口的後端單一來源，回傳 `tw` / `us` / `kr` market status：
+`GET /api/market/calendar-status` 是交易日與資料發布窗口的後端單一來源，回傳 `tw` / `us` / `jp` / `kr` market status：
 
 - `is_trading_day`、`phase`、`reason`、`holiday_name`
 - `previous_trading_day`、`next_trading_day`
 - `session.next_session_start_at`、`session.is_polling_window`、`session.is_after_close`
 - `release_windows`，包含日線、法人、融資融券、分點、市場籌碼、美股日線與韓股日線的 `expected_trade_date` / `status`
+- `calendar_source`、`calendar_source_url`、`calendar_last_refreshed_at`、`calendar_cache_status` 與 `calendar_warning`，用來區分 `current`、`degraded`、`stale` 與 fallback 規則
+
+Backend background owner 啟動後會立即做一次 bounded refresh，之後每天依 `SCHEDULER_MARKET_CALENDAR_REFRESH_TIME` 更新。來源為 TWSE Holiday Schedule OpenAPI、NYSE Holidays & Trading Hours、JPX Market Holidays 與 KRX 官方休市日；結果原子寫入本機 `data/market_calendars.json`。`GET` read path 不會觸發網路請求，來源失敗也不會清掉上次成功 cache。可用 `POST /api/market/calendar-refresh?market=all|tw|us|jp|kr` 手動重試。
+
+券商分點的歷史 owner 是 backend scheduler，不依賴使用者先打開某檔股票。`ENABLE_TW_BROKER_BRANCH_SCHEDULER=true` 時，預設在交易日 16:00（晚於 15:10 發布 guard）建立 `scheduler.tw_broker_branch_market_refresh` 工作，先用一個代表性股票驗證 provider 日期，再依 `SCHEDULER_TW_BROKER_BRANCH_SLEEP_SECONDS` 限速收集；既有股票／日期會直接跳過。工作有單次股票數與執行時間上限，並在 20:00 前定期補缺漏；如果 backend 錯過固定時間，下一次啟動也會依 calendar 的 expected trade date 執行一次 bounded catch-up。工作結果與 provider event 會明示 `completed`、`partial`、來源未發布、空資料與錯誤數。由於 nStock 只供應最新日 Top15，scheduler 只能從啟用後逐日累積，不能補回來源已經不再提供的歷史日期。
+
+台股處置／分盤交易狀態使用 TWSE `announcement/punish` 與 TPEx `tpex_disposal_information` 官方 OpenAPI。Background owner 啟動後立即刷新，之後每天依 `SCHEDULER_TW_DISPOSITION_REFRESH_TIME` 更新，最多 2 個 provider request，原子寫入 `data/tw_dispositions.json`。同一證券公告期間重疊時，以當下最新生效的處置公告為準；backend contract 會標示處置起訖日、5／20 分鐘等撮合間隔、預收款券、停融資券、來源 freshness 與 provider failure。前端個股標題會顯示「處置中 · 20 分盤」或「即將處置 · 5 分盤」。
+
+- `GET /api/market/tw-dispositions`：只讀 cache，預設列出目前與即將生效的處置證券。
+- `POST /api/market/tw-dispositions/refresh`：手動 bounded refresh。
+
+台股個股行事曆使用 TWSE／TPEx 官方除權息預告與 MOPS 法人說明會一覽表。Background owner 啟動後立即刷新，之後每天依 `SCHEDULER_TW_CORPORATE_EVENT_REFRESH_TIME` 更新；預設只查上市、上櫃的本月與次月，單次最多 10 個 HTTP request，原子寫入 `data/tw_corporate_events.json`。設定中的行事曆只回傳台北時間的今天與未來事件；過去事件留在各個股的 `event_history` 與專用 history API。
+
+歷史事件預設補最近 5 個曆年：TWSE／TPEx 除權息計算結果以年度區間查詢，MOPS 法說使用官方全年查詢，首次完整 backfill 最多 30 個 HTTP request。之後每週日 07:35 只做必要的 current-year reconciliation；若 7 天內已成功更新則跳過，不會每次啟動重抓 5 年。財報事件只在公司公告文字明確寫出「公布／發布財務報告、業績或營運成果」時建立，不以法定期限或模型推估冒充公司排定日期。讀取 API 不會隱性觸發外部網路，並持續回傳 source freshness、coverage 與 provider failure。
+
+- `GET /api/market/tw-corporate-events`：只讀 cache，可依個股、市場、事件類型與日期區間查詢。
+- `POST /api/market/tw-corporate-events/refresh`：手動 bounded refresh。
+- `GET /api/market/tw-corporate-events/history/{stock_id}`：只讀個股歷史事件 cache，預設最近 5 年。
+- `POST /api/market/tw-corporate-events/history/backfill?years=5`：一次性 bounded 歷史補抓，最多 10 年。
+- `GET /api/stocks/{stock_id}`：`disposition` 欄位提供單一證券狀態；不會在 GET path 呼叫外部 API。
 
 台股 target 會檢查台灣交易日：
 
@@ -504,7 +524,7 @@ LLM enabled 時，模型只能基於這些 evidence 補強敘事；如果 freshn
 
 Scheduler、refresh policy、AI freshness、watchlist ranking freshness 與美股 overnight context 也會從 calendar status helper 推導 expected trade date；低階 parser/backfill helper 仍保留 trading-day function 作為日期區間計算。
 
-韓股 calendar status 目前支援 Asia/Seoul 時區、09:00-15:30 regular session 與保守的週末/固定假日/年底休市判斷；完整 KRX official holiday calendar 是後續強化項目，因此韓股 freshness 仍需在 source health 內保留資料日期與 provider 狀態。
+韓股 calendar status 支援 Asia/Seoul 時區、09:00-15:30 regular session 與 KRX official holiday calendar；若官方抓取失敗，contract 會明示 cache/fallback 狀態，韓股 freshness 仍需同時保留資料日期與 provider 狀態。
 
 ### Price-level logic
 
@@ -659,6 +679,8 @@ APP_HOST=127.0.0.1
 APP_PORT=8400
 TIMEZONE=Asia/Taipei
 ENABLE_SCHEDULER=false
+ENABLE_MARKET_CALENDAR_SCHEDULER=true
+SCHEDULER_MARKET_CALENDAR_REFRESH_TIME=07:15
 ENABLE_WATCHLIST_RADAR_SCHEDULER=true
 SCHEDULER_WATCHLIST_RADAR_TIME=15:45
 SCHEDULER_WATCHLIST_RADAR_GROUP_IDS=
@@ -774,6 +796,10 @@ OpenAI key resolution order：
 相關預設：
 
 ```env
+ENABLE_MARKET_CALENDAR_SCHEDULER=true
+SCHEDULER_MARKET_CALENDAR_REFRESH_TIME=07:15
+MARKET_CALENDAR_HTTP_TIMEOUT_SECONDS=20
+MARKET_CALENDAR_CACHE_STALE_DAYS=14
 SCHEDULER_MARKET_REFRESH_TIME=15:15
 SCHEDULER_MARKET_MARGIN_REFRESH_TIME=21:10
 SCHEDULER_MARKET_CHIP_REFRESH_TIME=15:10

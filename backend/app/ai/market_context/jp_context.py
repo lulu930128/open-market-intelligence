@@ -24,6 +24,7 @@ from app.ai.market_payload_contract import (
 from app.db.models import JPStockMaster
 from app.jp_market.sources import normalize_jp_symbol
 from app.market.calendar_status import build_jp_calendar_status
+from app.market.live_snapshot import classify_market_snapshot
 
 
 @dataclass(frozen=True)
@@ -139,6 +140,8 @@ def _jp_intraday_compact(
 
 def _jp_intraday_quote(
     intraday_summary: dict[str, Any] | None,
+    *,
+    calendar_status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     latest = _jp_intraday_latest(intraday_summary)
     if latest is None:
@@ -156,6 +159,10 @@ def _jp_intraday_quote(
         change = float(price) - float(previous_close)
         change_pct = change / float(previous_close) * 100
 
+    freshness = classify_market_snapshot(
+        calendar_status=calendar_status or build_jp_calendar_status(),
+        quote_time=latest.get("time"),
+    )
     return {
         "source": (
             intraday_summary.get("source") if intraday_summary else None
@@ -166,11 +173,15 @@ def _jp_intraday_quote(
         "change_pct": change_pct,
         "volume": latest.get("volume"),
         "quote_time": latest.get("time"),
-        "is_realtime": True,
+        "is_realtime": freshness["is_realtime"],
+        "is_live": freshness["is_live"],
+        "is_latest_session_quote": freshness["is_latest_session_quote"],
         "latency_ms": None,
-        "session_phase": (
-            intraday_summary.get("session_phase") if intraday_summary else None
-        ),
+        "session_phase": freshness["current_session_phase"],
+        "current_session_phase": freshness["current_session_phase"],
+        "market_status": freshness["market_status"],
+        "quote_semantics": freshness["quote_semantics"],
+        "freshness": freshness,
         "provider": "yahoo_chart",
         "previous_close": previous_close,
         "previous_close_source": (
@@ -292,7 +303,10 @@ def read_jp_stock_context(
             warnings.append(f"JP intraday trend unavailable: {exc}")
 
     intraday_requested = include_intraday or intraday_summary is not None
-    intraday_quote = _jp_intraday_quote(intraday_summary)
+    intraday_quote = _jp_intraday_quote(
+        intraday_summary,
+        calendar_status=calendar_status,
+    )
     intraday_bars = _jp_intraday_compact(
         intraday_summary,
         market_data_params=market_data_params,
@@ -305,11 +319,13 @@ def read_jp_stock_context(
     )
     expected_intraday_date = _jp_expected_intraday_date(calendar_status)
     intraday_trade_date = intraday_as_of[:10] if intraday_as_of else None
-    intraday_is_current = bool(
-        intraday_trade_date
-        and expected_intraday_date
-        and intraday_trade_date == expected_intraday_date
+    intraday_freshness_status = str(
+        (intraday_quote.get("freshness") or {}).get("status") or "missing"
     )
+    intraday_is_current = intraday_freshness_status in {
+        "live",
+        "latest_completed_session",
+    }
     if intraday_requested and not intraday_quote:
         if "jp_intraday_trend" not in missing:
             missing.append("jp_intraday_trend")
@@ -317,7 +333,8 @@ def read_jp_stock_context(
             warnings.append(str(warning))
     elif intraday_requested and not intraday_is_current:
         warnings.append(
-            "JP intraday trend is stale: "
+            "JP intraday trend is not live: "
+            f"status={intraday_freshness_status}, "
             f"latest={intraday_trade_date or 'missing'}, "
             f"expected={expected_intraday_date or 'unknown'}."
         )
@@ -611,16 +628,10 @@ def read_jp_stock_context(
             "intraday_available": bool(intraday_quote),
         },
         freshness={
-            "price": (
-                "current"
-                if intraday_is_current or daily_is_current
-                else chart_freshness_status
-            ),
+            "price": intraday_freshness_status if intraday_quote else chart_freshness_status,
             "daily": chart_freshness_status,
             "intraday": (
-                "current"
-                if intraday_is_current
-                else "stale"
+                intraday_freshness_status
                 if intraday_quote and intraday_requested
                 else "missing"
                 if intraday_requested
@@ -649,9 +660,7 @@ def read_jp_stock_context(
         },
         "intraday": {
             "status": (
-                "current"
-                if intraday_is_current
-                else "stale"
+                intraday_freshness_status
                 if intraday_quote and intraday_requested
                 else "missing"
                 if intraday_requested

@@ -840,6 +840,50 @@ export function chartTime(value: string, timeMode: ChartTimeMode): Time {
   return Math.floor(timestamp / 1000) as UTCTimestamp;
 }
 
+export function normalizeChartPointsForTimeMode(
+  points: ChartPoint[],
+  timeMode: ChartTimeMode
+) {
+  const pointsByChartTime = new Map<
+    string,
+    { point: ChartPoint; sortValue: number | string }
+  >();
+
+  for (const point of points) {
+    const rawTime = String(point.time ?? "").trim();
+    if (!rawTime) continue;
+
+    const projectedTime = chartTime(rawTime, timeMode);
+    if (timeMode === "date") {
+      const dateKey = String(projectedTime);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) continue;
+
+      pointsByChartTime.set(`date:${dateKey}`, {
+        point: rawTime === point.time ? point : { ...point, time: rawTime },
+        sortValue: dateKey,
+      });
+      continue;
+    }
+
+    if (typeof projectedTime !== "number" || !Number.isFinite(projectedTime)) continue;
+
+    pointsByChartTime.set(`timestamp:${projectedTime}`, {
+      point: rawTime === point.time ? point : { ...point, time: rawTime },
+      sortValue: projectedTime,
+    });
+  }
+
+  return [...pointsByChartTime.values()]
+    .sort((left, right) => {
+      if (typeof left.sortValue === "number" && typeof right.sortValue === "number") {
+        return left.sortValue - right.sortValue;
+      }
+
+      return String(left.sortValue).localeCompare(String(right.sortValue));
+    })
+    .map(({ point }) => point);
+}
+
 export function drawingTimeFromChartTime(value: Time, timeMode: ChartTimeMode) {
   const parts = chartTimeParts(value);
 

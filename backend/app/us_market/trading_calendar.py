@@ -1,6 +1,8 @@
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from app.market.exchange_calendar_cache import cached_market_holiday
+
 
 US_MARKET_TIMEZONE = ZoneInfo("America/New_York")
 US_PRE_MARKET_OPEN_TIME = time(hour=4, minute=0)
@@ -86,11 +88,14 @@ def us_market_holiday_names(year: int) -> dict[date, str]:
 
 
 def us_market_holiday_name(value: date) -> str | None:
+    cached = cached_market_holiday("us", value)
+    if cached.covered:
+        return cached.name
     return us_market_holiday_names(value.year).get(value)
 
 
 def is_us_trading_day(value: date) -> bool:
-    return value.weekday() < 5 and value not in us_market_holidays(value.year)
+    return value.weekday() < 5 and us_market_holiday_name(value) is None
 
 
 def previous_us_trading_day(value: date, *, include_value: bool = True) -> date:

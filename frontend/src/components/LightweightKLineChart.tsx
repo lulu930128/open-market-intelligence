@@ -58,6 +58,7 @@ import {
   formatCompactVolume,
   formatDrawingPrice,
   isTwoPointDrawingTool,
+  normalizeChartPointsForTimeMode,
   preserveEmptyProjection,
   rectangleBounds,
 } from "@/components/chart/LightweightKLineChartDrawing";
@@ -155,7 +156,7 @@ function colorContrastRatio(foreground: string, background: string) {
 }
 
 export default function LightweightKLineChart({
-  chartData,
+  chartData: sourceChartData,
   indicatorData = emptyIndicatorData,
   label,
   height = 720,
@@ -166,7 +167,7 @@ export default function LightweightKLineChart({
   showMovingAverages = true,
   indicators,
   indicatorParameters,
-  benchmarkData,
+  benchmarkData: sourceBenchmarkData,
   benchmarkLabel,
   volumePanelLabel,
   volumeValueKey = "volume",
@@ -253,6 +254,17 @@ export default function LightweightKLineChart({
       ...(indicatorParameters ?? {}),
     }),
     [indicatorParameters]
+  );
+  const chartData = useMemo(
+    () => normalizeChartPointsForTimeMode(sourceChartData, timeMode),
+    [sourceChartData, timeMode]
+  );
+  const benchmarkData = useMemo(
+    () =>
+      sourceBenchmarkData
+        ? normalizeChartPointsForTimeMode(sourceBenchmarkData, timeMode)
+        : undefined,
+    [sourceBenchmarkData, timeMode]
   );
   const seriesData = useMemo(
     () => buildSeriesData(chartData, indicatorData, volumeValueKey, timeMode, params, benchmarkData),
@@ -1798,9 +1810,12 @@ export default function LightweightKLineChart({
       <div
         data-testid="lightweight-kline-chart"
         data-active-indicators={activeIndicatorKeys}
+        data-chart-point-count={chartData.length}
         data-drawing-count={activeDrawings.length}
         data-drawing-tool={drawingTool}
         data-selected-drawing-id={selectedDrawingId ?? ""}
+        data-source-point-count={sourceChartData.length}
+        data-time-mode={timeMode}
         className="relative min-h-[520px] w-full overflow-hidden"
         onPointerEnter={() => {
           shortcutActiveRef.current = true;

@@ -508,11 +508,21 @@ function priceLevelDetails(item: WatchlistRadarItemRead, t: TranslationFunction)
 
   const atrValue = priceLevelNumber(item, "atr_pct");
   const atrPct = formatRadarPct(atrValue);
+  const supportBroken = item.price_levels?.support_broken === true;
 
   return [
-    levelDetail(t("radar.detailFields.support"), "support"),
+    levelDetail(
+      t(
+        supportBroken
+          ? "radar.detailFields.brokenSupport"
+          : "radar.detailFields.support"
+      ),
+      "support"
+    ),
     levelDetail(t("radar.detailFields.resistance"), "resistance"),
+    levelDetail(t("radar.detailFields.previousClose"), "previous_close"),
     levelDetail(t("radar.detailFields.ma20"), "ma20"),
+    levelDetail(t("radar.detailFields.ma60"), "ma60"),
     atrPct !== "-" && atrValue !== null
       ? withDetailTone(`${t("radar.detailFields.atrPct")} ${atrPct}`, atrTone(t, atrValue))
       : null,

@@ -38,7 +38,7 @@ import {
   type Time,
   type TickMarkType,
 } from "lightweight-charts";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 type SeriesDataUpdater = (nextSeriesData: BuiltSeriesData) => void;
 
@@ -97,7 +97,7 @@ export function useLightweightChartEngine({
     : 2;
   const priceMinMove = 10 ** -resolvedPricePrecision;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     latestSeriesDataRef.current = seriesData;
   }, [seriesData]);
 

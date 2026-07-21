@@ -1803,22 +1803,26 @@ def get_kr_watchlist_readiness(
     }
 
 
-def _kr_ranking_freshness(rows: list[dict], *, requested_symbol_count: int) -> dict:
-    row_dates = [row.get("trade_date") for row in rows if row.get("trade_date") is not None]
-    latest_trade_date = max(row_dates) if row_dates else None
-    if latest_trade_date is None:
-        return {
-            "trade_date": None,
-            "target_trade_date": None,
-            "is_current": requested_symbol_count == 0,
-            "current_symbol_count": 0,
-            "stale_symbol_count": requested_symbol_count,
-        }
-    current_symbol_count = sum(1 for row_date in row_dates if row_date == latest_trade_date)
+def _kr_ranking_freshness(
+    rows: list[dict],
+    *,
+    requested_symbol_count: int,
+    expected_trade_date: date | None = None,
+) -> dict:
+    target_trade_date = expected_trade_date or expected_kr_daily_price_date()
+    row_dates = [
+        row.get("trade_date")
+        for row in rows
+        if isinstance(row.get("trade_date"), date)
+    ]
+    latest_trade_date = max(row_dates, default=None)
+    current_symbol_count = sum(
+        1 for row_date in row_dates if row_date >= target_trade_date
+    )
     stale_symbol_count = max(requested_symbol_count - current_symbol_count, 0)
     return {
         "trade_date": latest_trade_date,
-        "target_trade_date": latest_trade_date,
+        "target_trade_date": target_trade_date,
         "is_current": requested_symbol_count == 0 or stale_symbol_count == 0,
         "current_symbol_count": current_symbol_count,
         "stale_symbol_count": stale_symbol_count,

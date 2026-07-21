@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from app.ai import answer_composer, decision_contract, decision_core, pipeline_progress
+from app.ai import answer_composer, decision_contract, decision_core, decision_engine, pipeline_progress
 from app.ai.ask_stage_models import ResponseAssembly
 from app.ai.schemas import AiAskRequest
 
@@ -92,7 +92,7 @@ def assemble_response_analysis(
         policy=policy,
         requested_mode=requested_mode,
     )
-    answer_ready = not clarification.get("required") and not price_level_blocked
+    answer_ready = not clarification.get("required")
     if any(action.get("type") == "connect_us_stock_context" for action in next_actions):
         warnings.append(
             "ADR-specific evidence is available through target.type=us_stock; answered from the resolved Taiwan stock context first."
@@ -100,6 +100,15 @@ def assemble_response_analysis(
 
     combined_missing = list(dict.fromkeys(result_missing + freshness_missing))
     combined_warnings = list(dict.fromkeys(warnings + freshness_warnings + result_warnings))
+    position_math = {}
+    if (
+        question_intent == "position_risk_decision"
+        and scope_type in POSITION_DECISION_SCOPE_TYPES
+    ):
+        position_math = decision_engine.build_position_math(
+            position_context=position_context,
+            result=result,
+        )
     position_decision = {}
     if (
         not price_level_blocked
@@ -131,25 +140,56 @@ def assemble_response_analysis(
         if isinstance(policy.get("response_preferences"), dict)
         else {}
     )
-    if price_level_blocked:
-        consumer_human_answer = answer_composer.build_price_level_safety_answer(
+    consumer_human_answer = build_consumer_human_answer(
+        question_intent=question_intent,
+        target=response_target,
+        result=result,
+        analysis_digest=analysis_digest,
+        missing=combined_missing,
+        warnings=combined_warnings,
+        position_decision=position_decision,
+        response_preferences=response_preferences,
+    )
+    blocked_sections: list[str] = []
+    if price_level_blocked and consumer_human_answer:
+        original_answer = dict(consumer_human_answer)
+        safety_answer = answer_composer.build_price_level_safety_answer(
             target=response_target,
             validation=price_level_validation,
             missing=combined_missing,
             warnings=combined_warnings,
-            response_preferences=response_preferences,
-        )
-    else:
-        consumer_human_answer = build_consumer_human_answer(
-            question_intent=question_intent,
-            target=response_target,
-            result=result,
+            position_math=position_math,
             analysis_digest=analysis_digest,
-            missing=combined_missing,
-            warnings=combined_warnings,
-            position_decision=position_decision,
             response_preferences=response_preferences,
         )
+        consumer_human_answer = {
+            **original_answer,
+            "source": safety_answer.get("source") or original_answer.get("source"),
+            "headline": safety_answer.get("headline") or original_answer.get("headline"),
+            "summary": safety_answer.get("summary") or original_answer.get("summary"),
+            "risks": safety_answer.get("risks") or original_answer.get("risks"),
+            "counter_evidence": safety_answer.get("counter_evidence") or [],
+            "data_limits": safety_answer.get("data_limits") or original_answer.get("data_limits"),
+            "position_math": position_math or None,
+            "text": safety_answer.get("text") or original_answer.get("text"),
+        }
+        consumer_human_answer["action_plan"] = []
+        for unsafe_key in (
+            "entry_conditions",
+            "entry_zone",
+            "stop_loss",
+            "take_profit",
+            "position_sizing",
+        ):
+            consumer_human_answer.pop(unsafe_key, None)
+        blocked_sections.extend(
+            [
+                "stop_loss",
+                "technical_invalidation",
+                "trade_recommendation",
+            ]
+        )
+        consumer_human_answer["blocked_sections"] = list(blocked_sections)
     reasoning_steps = build_reasoning_steps(
         question_intent=question_intent,
         position_context=position_context,
@@ -171,6 +211,8 @@ def assemble_response_analysis(
         response_analysis["position_context"] = position_context
     if position_decision:
         response_analysis["position_decision"] = position_decision
+    if position_math:
+        response_analysis["position_math"] = position_math
     if reasoning_steps:
         response_analysis["reasoning_steps"] = reasoning_steps
         progress.reasoning_steps(reasoning_steps)
@@ -184,9 +226,40 @@ def assemble_response_analysis(
             missing=combined_missing,
             warnings=combined_warnings,
             answer_ready=answer_ready,
+            decision_ready=(
+                not price_level_blocked
+                and question_intent
+                in {
+                    "entry_decision",
+                    "exit_decision",
+                    "position_risk_decision",
+                    "risk_check",
+                }
+            ),
+            blocked_sections=blocked_sections,
         )
     if price_level_validation:
         response_analysis["price_level_validation"] = price_level_validation
+
+    analysis_ready = bool(consumer_human_answer) and not clarification.get("required")
+    decision_ready = bool(
+        analysis_ready
+        and not price_level_blocked
+        and question_intent
+        in {
+            "entry_decision",
+            "exit_decision",
+            "position_risk_decision",
+            "risk_check",
+        }
+    )
+    available_sections = ["evidence"]
+    if analysis_ready:
+        available_sections.append("human_answer")
+    if position_math:
+        available_sections.append("position_math")
+    if decision_ready:
+        available_sections.append("decision_contract")
 
     return ResponseAssembly(
         response_analysis=response_analysis,
@@ -198,6 +271,10 @@ def assemble_response_analysis(
         next_actions=next_actions,
         clarification=clarification,
         answer_ready=answer_ready,
+        analysis_ready=analysis_ready,
+        decision_ready=decision_ready,
+        blocked_sections=blocked_sections,
+        available_sections=available_sections,
         position_decision=position_decision,
         consumer_human_answer=consumer_human_answer,
     )

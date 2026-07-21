@@ -1087,6 +1087,23 @@ class KRMarketDataTests(unittest.TestCase):
         self.assertEqual(ranking["results"][0]["symbol"], "005930.KS")
         self.assertAlmostEqual(ranking["results"][0]["change_pct"], 0.9655172413793104)
 
+    def test_kr_ranking_freshness_uses_calendar_target_instead_of_latest_data_date(self) -> None:
+        freshness = kr_market_service._kr_ranking_freshness(
+            [
+                {"trade_date": date(2026, 7, 16)},
+                {"trade_date": date(2026, 7, 16)},
+                {"trade_date": None},
+            ],
+            requested_symbol_count=3,
+            expected_trade_date=date(2026, 7, 21),
+        )
+
+        self.assertEqual(freshness["trade_date"], date(2026, 7, 16))
+        self.assertEqual(freshness["target_trade_date"], date(2026, 7, 21))
+        self.assertFalse(freshness["is_current"])
+        self.assertEqual(freshness["current_symbol_count"], 0)
+        self.assertEqual(freshness["stale_symbol_count"], 3)
+
     def test_kr_routes_are_registered(self) -> None:
         matching_paths = {getattr(route, "path", None) for route in app.routes}
 

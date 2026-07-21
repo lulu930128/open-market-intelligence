@@ -108,6 +108,7 @@ type Props = {
   watchlistRankingPanel?: ReactNode;
   onCompanyProfileChange?: (profile: USCompanyProfileRead | null) => void;
   onChartFocusModeChange?: (active: boolean) => void;
+  onDailyPricesChanged?: () => void;
 };
 
 const timeframeOptions: USChartTimeframe[] = ["today", "daily", "weekly", "monthly"];
@@ -455,6 +456,10 @@ function assetTypeLabel(t: TranslationFunction, stock: USStockMasterRead | null)
 
 function stockName(stock: USStockMasterRead | null, fallback: string | null) {
   return stock?.security_name ?? stock?.sec_company_name ?? fallback ?? "";
+}
+
+function usSymbolKey(value: unknown) {
+  return typeof value === "string" ? value.trim().toUpperCase() : null;
 }
 
 function toChartPoint(point: USOhlcChartRead["points"][number]): ChartPoint {
@@ -906,6 +911,7 @@ export default function USStockDetailPanel({
   watchlistRankingPanel,
   onCompanyProfileChange,
   onChartFocusModeChange,
+  onDailyPricesChanged,
 }: Props) {
   const t = useT();
   const tRef = useRef(t);
@@ -958,12 +964,17 @@ export default function USStockDetailPanel({
   const [successMessage, setSuccessMessage] = useState<SuccessMessage>(null);
   const requestSeq = useRef(0);
   const finalIntradayRefreshDate = useRef<string | null>(null);
+  const onDailyPricesChangedRef = useRef(onDailyPricesChanged);
   const chartDrawingSyncTimerRef = useRef<number | null>(null);
   const chartDrawingLocalRevisionRef = useRef(0);
 
   useEffect(() => {
     tRef.current = t;
   }, [t]);
+
+  useEffect(() => {
+    onDailyPricesChangedRef.current = onDailyPricesChanged;
+  }, [onDailyPricesChanged]);
 
   const chartDrawingKey = chartDrawingStorageKey(selectedSymbol, professionalTimeframe);
   const storedChartDrawings = useMemo(
@@ -986,20 +997,48 @@ export default function USStockDetailPanel({
     ? selectedChartDrawingId
     : null;
 
+  const expectedChartTimeframe = timeframe === "today" ? "daily" : timeframe;
+  const chartMatchesSelection = Boolean(
+    selectedSymbol &&
+      chart &&
+      usSymbolKey(chart.symbol) === usSymbolKey(selectedSymbol) &&
+      chart.timeframe === expectedChartTimeframe
+  );
+  const chartLoadState: LoadState =
+    selectedSymbol && !chartMatchesSelection && loadState !== "error"
+      ? "loading"
+      : loadState;
+  const visibleSelectedStock =
+    usSymbolKey(selectedStock?.symbol) === usSymbolKey(selectedSymbol)
+      ? selectedStock
+      : null;
   const chartData = useMemo(() => {
-    return chart?.points.map(toChartPoint) ?? [];
-  }, [chart]);
+    return chartMatchesSelection ? chart?.points.map(toChartPoint) ?? [] : [];
+  }, [chart, chartMatchesSelection]);
+  const visibleTodayTrend = useMemo(
+    () => (chartMatchesSelection ? todayTrend : []),
+    [chartMatchesSelection, todayTrend]
+  );
+  const visibleTodayPreviousClose = chartMatchesSelection ? todayPreviousClose : null;
+  const visibleTodaySource = chartMatchesSelection ? todaySource : "unavailable";
+  const visibleTodayUpdatedAt = chartMatchesSelection ? todayUpdatedAt : null;
+  const visibleTodayIntradayMeta = chartMatchesSelection
+    ? todayIntradayMeta
+    : emptyUsIntradayMeta;
   const professionalIsIntraday = isUsProfessionalIntradayTimeframe(professionalTimeframe);
   const professionalChartData = useMemo<ChartPoint[]>(() => {
     if (!isUsProfessionalIntradayTimeframe(professionalTimeframe)) return chartData;
 
     return aggregateUsProfessionalIntradayBars(
-      todayTrend,
+      visibleTodayTrend,
       usProfessionalIntradayMinutes[professionalTimeframe]
     );
-  }, [chartData, professionalTimeframe, todayTrend]);
-  const latestToday = todayTrend[todayTrend.length - 1] ?? null;
-  const todayStats = useMemo(() => summarizeUsIntradayPoints(todayTrend), [todayTrend]);
+  }, [chartData, professionalTimeframe, visibleTodayTrend]);
+  const latestToday = visibleTodayTrend[visibleTodayTrend.length - 1] ?? null;
+  const todayStats = useMemo(
+    () => summarizeUsIntradayPoints(visibleTodayTrend),
+    [visibleTodayTrend]
+  );
   const latestPoint = chartData[chartData.length - 1] ?? null;
   const previousPoint = chartData[chartData.length - 2] ?? null;
   const latestProfessionalPoint = professionalChartData[professionalChartData.length - 1] ?? null;
@@ -1010,7 +1049,9 @@ export default function USStockDetailPanel({
   const latestVolume =
     timeframe === "today" ? todayStats.volume ?? latestPoint?.volume ?? null : latestPoint?.volume ?? null;
   const previousClose =
-    timeframe === "today" ? todayPreviousClose ?? previousPoint?.close ?? null : previousPoint?.close ?? null;
+    timeframe === "today"
+      ? visibleTodayPreviousClose ?? previousPoint?.close ?? null
+      : previousPoint?.close ?? null;
   const change =
     latestClose !== null && previousClose !== null
       ? latestClose - previousClose
@@ -1074,7 +1115,7 @@ export default function USStockDetailPanel({
   const selectedIndexConfig = getUsMarketIndexConfig(selectedSymbol);
   const selectedDisplaySymbol = selectedIndexConfig?.displaySymbol ?? selectedSymbol ?? "-";
   const selectedDisplayName =
-    selectedIndexConfig?.name ?? stockName(selectedStock, selectedSecurityName);
+    selectedIndexConfig?.name ?? stockName(visibleSelectedStock, selectedSecurityName);
   const dataStatusContextKey = `us:${selectedSymbol?.toUpperCase() ?? "unknown"}`;
   const dataStatusDisplayName = selectedIndexConfig?.name ?? selectedSecurityName;
   const dataStatusContextLabel = selectedSymbol
@@ -1100,28 +1141,28 @@ export default function USStockDetailPanel({
   );
   const selectedSubtitle = selectedIndexConfig
     ? `${selectedIndexConfig.exchange} · ${usAssetTypeLabel(t, "index")} · ${formatDate(displayDate)}`
-    : selectedStock
-      ? `${selectedStock.exchange ?? "-"} · ${assetTypeLabel(t, selectedStock)} · ${formatDate(displayDate)}`
+    : visibleSelectedStock
+      ? `${visibleSelectedStock.exchange ?? "-"} · ${assetTypeLabel(t, visibleSelectedStock)} · ${formatDate(displayDate)}`
       : selectedSymbol
         ? t("usStockDetail.loadingMaster")
         : t("usStockDetail.selectStockPrompt");
   const activeIntradaySession = usIntradaySessionConfigForScope(intradaySessionScope);
   const intradaySessionMetaLine = t("usStockDetail.extendedHours.meta", {
-    phase: sessionPhaseLabel(t, todayIntradayMeta.sessionPhase),
-    regular: todayIntradayMeta.regularPointCount,
-    extended: todayIntradayMeta.extendedPointCount,
+    phase: sessionPhaseLabel(t, visibleTodayIntradayMeta.sessionPhase),
+    regular: visibleTodayIntradayMeta.regularPointCount,
+    extended: visibleTodayIntradayMeta.extendedPointCount,
   });
   const intradaySessionWarning =
     intradaySessionScope !== "regular" &&
-    loadState === "success" &&
-    !todayIntradayMeta.hasExtendedHours
+    chartLoadState === "success" &&
+    !visibleTodayIntradayMeta.hasExtendedHours
       ? t("usStockDetail.extendedHours.noExtendedData")
-      : todayIntradayMeta.warnings[0] ?? null;
+      : visibleTodayIntradayMeta.warnings[0] ?? null;
   const professionalTimeframeLabel = timeframeLabel(t, professionalTimeframe);
   const professionalChartReady =
     chartFocusMode &&
     professionalChartData.length > 0 &&
-    loadState !== "loading";
+    chartLoadState !== "loading";
   const professionalLatestClose =
     chartFocusMode && professionalIsIntraday
       ? latestProfessionalPoint?.close ?? latestClose
@@ -1164,7 +1205,7 @@ export default function USStockDetailPanel({
     ? [
         {
           label: "OHLC",
-          status: coverageStatus(chartData.length > 0, loadState, latestPoint?.time, 10),
+          status: coverageStatus(chartData.length > 0, chartLoadState, latestPoint?.time, 10),
           detail:
             chartData.length > 0
               ? t("usStockDetail.coverage.details.bars", {
@@ -1177,13 +1218,13 @@ export default function USStockDetailPanel({
           label: t("usStockDetail.coverage.labels.intraday"),
           status:
             timeframe === "today"
-              ? coverageStatus(todayTrend.length > 0, loadState, latestToday?.time, 2)
+              ? coverageStatus(visibleTodayTrend.length > 0, chartLoadState, latestToday?.time, 2)
               : "ready",
           detail:
             timeframe === "today"
               ? t("usStockDetail.coverage.details.points", {
-                  count: todayTrend.length,
-                  time: todayUpdatedAt ?? "-",
+                  count: visibleTodayTrend.length,
+                  time: visibleTodayUpdatedAt ?? "-",
                 })
               : t("usStockDetail.coverage.details.availableToday"),
         },
@@ -1196,7 +1237,7 @@ export default function USStockDetailPanel({
     : [
         {
           label: t("usStockDetail.coverage.labels.price"),
-          status: coverageStatus(chartData.length > 0, loadState, latestPoint?.time, 10),
+          status: coverageStatus(chartData.length > 0, chartLoadState, latestPoint?.time, 10),
           detail:
             chartData.length > 0
               ? t("usStockDetail.coverage.details.bars", {
@@ -1287,6 +1328,7 @@ export default function USStockDetailPanel({
             ]);
 
             if (requestSeq.current !== requestId) return;
+            if (dailyChartData.backfill) onDailyPricesChangedRef.current?.();
 
             const latestIntradayPoint = todayData.points[todayData.points.length - 1] ?? null;
             const marketState = getUsMarketRefreshState();
@@ -1328,6 +1370,7 @@ export default function USStockDetailPanel({
           );
 
           if (requestSeq.current !== requestId) return;
+          if (chartDataResponse.backfill) onDailyPricesChangedRef.current?.();
 
           setSelectedStock(null);
           setChart(chartDataResponse);
@@ -1369,6 +1412,7 @@ export default function USStockDetailPanel({
           ]);
 
           if (requestSeq.current !== requestId) return;
+          if (dailyChartData.backfill) onDailyPricesChangedRef.current?.();
 
           const latestIntradayPoint = todayData.points[todayData.points.length - 1] ?? null;
           const marketState = getUsMarketRefreshState();
@@ -1434,6 +1478,7 @@ export default function USStockDetailPanel({
         ]);
 
         if (requestSeq.current !== requestId) return;
+        if (chartDataResponse.backfill) onDailyPricesChangedRef.current?.();
 
         setSelectedStock(stockData);
         setChart(chartDataResponse);
@@ -2483,7 +2528,10 @@ export default function USStockDetailPanel({
           />
         ) : (
           <>
-        <section className="border border-omi-border-subtle bg-omi-surface">
+        <section
+          className="border border-omi-border-subtle bg-omi-surface"
+          data-testid="us-stock-kline-panel"
+        >
           <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-4 px-5 py-4">
             <div className="min-w-0">
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
@@ -2599,7 +2647,16 @@ export default function USStockDetailPanel({
             </div>
           ) : null}
 
-          {timeframe === "today" ? (
+          {chartLoadState === "loading" ? (
+            <div className="border-t border-omi-border-subtle bg-omi-surface p-4">
+              <StateSurface
+                title={t("usStockDetail.loadingKlineShort")}
+                tone="loading"
+                busy
+                className="h-[428px]"
+              />
+            </div>
+          ) : timeframe === "today" ? (
             <>
               <div className="border-x border-t border-omi-border-subtle bg-omi-surface px-4 py-3">
                 <div className="flex flex-wrap items-center justify-between gap-3">
@@ -2636,19 +2693,19 @@ export default function USStockDetailPanel({
                 ) : null}
               </div>
               <IntradayTrendChart
-                points={todayTrend}
-                previousClose={todayPreviousClose}
+                points={visibleTodayTrend}
+                previousClose={visibleTodayPreviousClose}
                 label={
                   selectedIndexConfig
                     ? `${selectedDisplaySymbol} ${timeframeLabel(t, "today")}`
                     : timeframeLabel(t, timeframe)
                 }
-                source={todaySource}
+                source={visibleTodaySource}
                 indicators={intradayIndicators}
                 session={activeIntradaySession}
-                revealKey={`${selectedSymbol ?? "empty"}-${timeframe}-${intradaySessionScope}-${todayTrend.length}`}
+                revealKey={`${selectedSymbol ?? "empty"}-${timeframe}-${intradaySessionScope}-${visibleTodayTrend.length}`}
                 refreshIntervalMs={US_INTRADAY_REFRESH_MS}
-                updatedAt={todayUpdatedAt}
+                updatedAt={visibleTodayUpdatedAt}
                 priceLimitEnabled={false}
               />
             </>
@@ -2667,16 +2724,13 @@ export default function USStockDetailPanel({
             <div className="border-t border-omi-border-subtle bg-omi-surface p-4">
               <StateSurface
                 title={
-                  loadState === "loading"
-                    ? t("usStockDetail.loadingKlineShort")
-                    : selectedSymbol
-                      ? selectedIndexConfig
-                        ? t("usStockDetail.noIndexKline")
-                        : t("usStockDetail.noKline")
-                      : t("usStockDetail.noStockSelected")
+                  selectedSymbol
+                    ? selectedIndexConfig
+                      ? t("usStockDetail.noIndexKline")
+                      : t("usStockDetail.noKline")
+                    : t("usStockDetail.noStockSelected")
                 }
-                tone={loadState === "loading" ? "loading" : "empty"}
-                busy={loadState === "loading"}
+                tone="empty"
                 className="h-[428px]"
               />
             </div>

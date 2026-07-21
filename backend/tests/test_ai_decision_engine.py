@@ -30,6 +30,34 @@ def _technical_levels(
 
 
 class AiDecisionEngineTests(unittest.TestCase):
+    def test_position_math_prefers_canonical_compact_quote(self) -> None:
+        result = {
+            "data": {
+                "compact": {
+                    "quote": {
+                        "latest_price": 2290,
+                        "trade_date": "2026-07-17",
+                    }
+                },
+                "latest_daily": {
+                    "close_price": 2200,
+                    "trade_date": "2026-07-16",
+                },
+            }
+        }
+
+        position_math = decision_engine.build_position_math(
+            position_context={"has_position_context": True, "entry_price": 2380},
+            result=result,
+        )
+
+        self.assertEqual(position_math["latest_price"], 2290)
+        self.assertEqual(
+            position_math["latest_price_source"],
+            "data.compact.quote.latest_price",
+        )
+        self.assertAlmostEqual(position_math["unrealized_return_pct"], -3.7815, places=4)
+
     def test_technical_level_fields_and_numbers_parse_entry_and_risk_levels(self) -> None:
         levels = _technical_levels()
 

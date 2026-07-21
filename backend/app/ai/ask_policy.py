@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from app.ai import agentic_tools, decision_core, scope_resolution
+from app.ai import agentic_tools, decision_core, query_plan, scope_resolution
 from app.ai.schemas import AiAskRequest
 
 
@@ -54,6 +54,18 @@ def _validate_request(payload: AiAskRequest) -> None:
 
     if payload.mode not in VALID_MODES:
         raise ValueError(f"mode must be one of: {', '.join(sorted(VALID_MODES))}")
+
+    if payload.payload_level is not None and payload.payload_level not in query_plan.PAYLOAD_LEVELS:
+        raise ValueError(
+            "payload_level must be one of: "
+            + ", ".join(sorted(query_plan.PAYLOAD_LEVELS))
+        )
+
+    if payload.diagnostics_level not in query_plan.DIAGNOSTICS_LEVELS:
+        raise ValueError(
+            "diagnostics_level must be one of: "
+            + ", ".join(sorted(query_plan.DIAGNOSTICS_LEVELS))
+        )
 
     if payload.rank_by not in VALID_RANK_BY:
         raise ValueError(f"rank_by must be one of: {', '.join(sorted(VALID_RANK_BY))}")
@@ -121,7 +133,6 @@ def _infer_mode(payload: AiAskRequest, scope_type: str, policy: dict[str, Any]) 
         return payload.mode
 
     if scope_type in {
-        "market",
         "data_freshness",
         "resource_asset",
         "portfolio",

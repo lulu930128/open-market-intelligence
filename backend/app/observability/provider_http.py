@@ -45,6 +45,10 @@ class ProviderHttpFailure:
     rate_limited: bool = False
     retry_after_seconds: int | None = None
     error_message: str | None = None
+    exception_type: str | None = None
+    timeout_stage: str | None = None
+    response_content_type: str | None = None
+    retry_count: int = 0
 
     def provider_event_fields(self) -> dict[str, Any]:
         return {
@@ -58,6 +62,15 @@ class ProviderHttpFailure:
             "retry_after_seconds": self.retry_after_seconds,
             "source_url": self.source_url,
             "error_message": self.error_message,
+        }
+
+    def diagnostic_fields(self) -> dict[str, Any]:
+        return {
+            **self.provider_event_fields(),
+            "exception_type": self.exception_type,
+            "timeout_stage": self.timeout_stage,
+            "response_content_type": self.response_content_type,
+            "retry_count": self.retry_count,
         }
 
 
@@ -202,6 +215,14 @@ def request(
             status="timeout",
             source_url=source_url,
             error_message=message,
+            exception_type=type(exc).__name__,
+            timeout_stage=(
+                "connect"
+                if isinstance(exc, requests.ConnectTimeout)
+                else "read"
+                if isinstance(exc, requests.ReadTimeout)
+                else "request"
+            ),
         )
         raise ProviderHttpError(message, failure=failure) from exc
     except requests.RequestException as exc:
@@ -215,6 +236,7 @@ def request(
             status="error",
             source_url=source_url,
             error_message=message,
+            exception_type=type(exc).__name__,
         )
         raise ProviderHttpError(message, failure=failure) from exc
 
@@ -234,6 +256,8 @@ def request(
             rate_limited=response.status_code == 429,
             retry_after_seconds=retry_after_seconds(response.headers.get("Retry-After")),
             error_message=message,
+            exception_type="HTTPError",
+            response_content_type=response.headers.get("Content-Type"),
         )
         raise ProviderHttpError(message, failure=failure, response=response)
 

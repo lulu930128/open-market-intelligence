@@ -40,7 +40,11 @@ function shouldUseIntraday() {
   );
 }
 
-function radarParams(mode: WatchlistRadarMode, useIntraday: boolean) {
+function radarParams(
+  mode: WatchlistRadarMode,
+  useIntraday: boolean,
+  preferSnapshot = true
+) {
   return {
     // Closed-session reads should match the backend's default calculation contract so
     // the saved daily snapshot can satisfy the request without recomputing the group.
@@ -50,6 +54,7 @@ function radarParams(mode: WatchlistRadarMode, useIntraday: boolean) {
     calculation_limit: 100,
     use_intraday: useIntraday,
     intraday_limit: WATCHLIST_INTRADAY_LIMIT,
+    prefer_snapshot: preferSnapshot,
   };
 }
 
@@ -206,6 +211,7 @@ export function useTaiwanRadarState({
         mode?: WatchlistRadarMode;
         silent?: boolean;
         useIntraday?: boolean;
+        preferSnapshot?: boolean;
         reservedRequestSeq?: number;
         statePrepared?: boolean;
       }
@@ -232,7 +238,11 @@ export function useTaiwanRadarState({
       try {
         const radarData = await fetchJson<WatchlistGroupRadarRead>(
           `/api/watchlists/groups/${currentGroupId}/radar`,
-          radarParams(currentMode, options?.useIntraday ?? shouldUseIntraday()),
+          radarParams(
+            currentMode,
+            options?.useIntraday ?? shouldUseIntraday(),
+            options?.preferSnapshot ?? true
+          ),
           { timeoutMs: WATCHLIST_RADAR_TIMEOUT_MS }
         );
 
@@ -263,10 +273,12 @@ export function useTaiwanRadarState({
       groupId: currentGroupId,
       silent,
       useIntraday,
+      preferSnapshot,
     }: {
       groupId: number;
       silent: boolean;
       useIntraday: boolean;
+      preferSnapshot?: boolean;
     }) => {
       const reservedRequestSeq = radarRequestSeqRef.current + 1;
       radarRequestSeqRef.current = reservedRequestSeq;
@@ -285,6 +297,7 @@ export function useTaiwanRadarState({
           mode: modeRef.current,
           silent,
           useIntraday,
+          preferSnapshot,
           reservedRequestSeq,
           statePrepared: true,
         });

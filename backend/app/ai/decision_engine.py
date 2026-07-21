@@ -586,6 +586,25 @@ def result_data(result: dict[str, Any]) -> dict[str, Any]:
 
 def latest_price_snapshot(result: dict[str, Any]) -> dict[str, Any]:
     data = result_data(result)
+    compact = data.get("compact") if isinstance(data.get("compact"), dict) else {}
+    canonical_quote = (
+        compact.get("quote")
+        if isinstance(compact.get("quote"), dict)
+        else {}
+    )
+    for key in ("latest_price", "price", "close_price", "last_price"):
+        value = numeric_data_value(canonical_quote.get(key))
+        if value is not None:
+            return {
+                "value": value,
+                "source": f"data.compact.quote.{key}",
+                "as_of": (
+                    canonical_quote.get("trade_date")
+                    or canonical_quote.get("quote_time")
+                    or canonical_quote.get("as_of")
+                ),
+            }
+
     latest_daily = data.get("latest_daily") if isinstance(data.get("latest_daily"), dict) else {}
     for key in ("close_price", "close", "last_price", "settlement_price"):
         value = numeric_data_value(latest_daily.get(key))
@@ -622,6 +641,35 @@ def latest_price_snapshot(result: dict[str, Any]) -> dict[str, Any]:
                 }
 
     return {}
+
+
+def build_position_math(
+    *,
+    position_context: dict[str, Any],
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    if not position_context.get("has_position_context"):
+        return {}
+
+    entry_price = numeric_data_value(position_context.get("entry_price"))
+    latest_snapshot = latest_price_snapshot(result)
+    latest_price = numeric_data_value(latest_snapshot.get("value"))
+    pnl_pct = (
+        ((latest_price - entry_price) / entry_price) * 100
+        if entry_price and latest_price
+        else None
+    )
+    pnl_points = latest_price - entry_price if entry_price and latest_price else None
+    return {
+        "kind": "position_math",
+        "entry_price": entry_price,
+        "latest_price": latest_price,
+        "latest_price_source": latest_snapshot.get("source"),
+        "latest_price_as_of": latest_snapshot.get("as_of"),
+        "unrealized_return_pct": round(pnl_pct, 4) if pnl_pct is not None else None,
+        "unrealized_points": round(pnl_points, 4) if pnl_points is not None else None,
+        "ready": entry_price is not None and latest_price is not None,
+    }
 
 
 def chart_points(result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -687,11 +735,14 @@ def build_position_decision(
     if not position_context.get("has_position_context"):
         return {}
 
-    entry_price = numeric_data_value(position_context.get("entry_price"))
-    latest_snapshot = latest_price_snapshot(result)
-    latest_price = numeric_data_value(latest_snapshot.get("value"))
-    pnl_pct = ((latest_price - entry_price) / entry_price) * 100 if entry_price and latest_price else None
-    pnl_points = latest_price - entry_price if entry_price and latest_price else None
+    position_math = build_position_math(
+        position_context=position_context,
+        result=result,
+    )
+    entry_price = position_math.get("entry_price")
+    latest_price = position_math.get("latest_price")
+    pnl_pct = position_math.get("unrealized_return_pct")
+    pnl_points = position_math.get("unrealized_points")
     score = numeric_score(analysis_digest.get("selected_score"))
     confidence = text_value(analysis_digest.get("selected_confidence"))
     stance = stance_from_score(score)
@@ -785,7 +836,7 @@ def build_position_decision(
 
     evidence_used = [
         "user_question.entry_price" if entry_price is not None else "user_question.position_intent",
-        latest_snapshot.get("source") or "latest_price.missing",
+        position_math.get("latest_price_source") or "latest_price.missing",
         "result.data.analysis" if analysis_digest else "analysis.missing",
     ]
 
@@ -797,10 +848,10 @@ def build_position_decision(
         "target_label": target_label,
         "entry_price": entry_price,
         "latest_price": latest_price,
-        "latest_price_source": latest_snapshot.get("source"),
-        "latest_price_as_of": latest_snapshot.get("as_of"),
-        "unrealized_return_pct": round(pnl_pct, 4) if pnl_pct is not None else None,
-        "unrealized_points": round(pnl_points, 4) if pnl_points is not None else None,
+        "latest_price_source": position_math.get("latest_price_source"),
+        "latest_price_as_of": position_math.get("latest_price_as_of"),
+        "unrealized_return_pct": pnl_pct,
+        "unrealized_points": pnl_points,
         "score": score,
         "score_display": score_text,
         "stance": stance,

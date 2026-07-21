@@ -122,6 +122,9 @@ export type ChartDrawingSnapshotWrite = {
 
 export type RankingItem = {
   rank: number;
+  market_rank?: number | null;
+  rank_value?: number | null;
+  rank_trade_date?: string | null;
   stock_id: string;
   stock_name: string | null;
   time: string | null;
@@ -152,6 +155,9 @@ export type RankingResponse = {
   include_children: boolean;
   rank_by: string;
   sort_order: string;
+  rank_scope?: "watchlist" | "tw_market" | string;
+  rank_trade_date?: string | null;
+  rank_universe_count?: number;
   requested_stock_count: number;
   ranked_count: number;
   no_data_count: number;
@@ -202,7 +208,7 @@ export type WatchlistRadarBucketRead = {
   count: number;
 };
 
-export type WatchlistRadarPriceLevels = Record<string, number | string | null>;
+export type WatchlistRadarPriceLevels = Record<string, number | string | boolean | null>;
 
 export type WatchlistRadarContextSignal = {
   key: string;
@@ -1015,6 +1021,111 @@ export type StockIndicatorPoint = {
   support_resistance?: Record<string, number | null>;
 };
 
+export type TaiwanDispositionStatusRead = {
+  stock_id: string;
+  checked_at: string;
+  is_disposition: boolean;
+  is_active: boolean;
+  status: "active" | "upcoming" | "none" | string;
+  cache_status: "current" | "degraded" | "stale" | "missing" | string;
+  cache_fetched_at: string | null;
+  warning: string | null;
+  provider: string | null;
+  market: string | null;
+  source_url: string | null;
+  announced_date: string | null;
+  stock_name: string | null;
+  start_date: string | null;
+  end_date: string | null;
+  matching_interval_minutes: number | null;
+  reason: string | null;
+  measure: string | null;
+  requires_full_precollection: boolean;
+  margin_trading_suspended: boolean;
+  detail: string | null;
+};
+
+export type TaiwanCorporateEventRead = {
+  event_id: string;
+  event_type: "ex_dividend" | "financial_report" | "investor_conference" | string;
+  timing_status: "scheduled" | "actual" | "deadline" | string;
+  provider: string;
+  market: string;
+  source_name: string;
+  source_url: string;
+  stock_id: string;
+  stock_name: string | null;
+  start_date: string;
+  end_date: string;
+  start_time: string | null;
+  title: string;
+  summary: string | null;
+  location: string | null;
+  cash_dividend: number | null;
+  stock_dividend_ratio: number | null;
+  financial_report_related: boolean;
+  related_event_id: string | null;
+  company_url: string | null;
+  video_url: string | null;
+  status: "today" | "ongoing" | "upcoming" | "past" | string;
+  days_until: number;
+};
+
+export type TaiwanCorporateEventSourceStatusRead = {
+  provider: string;
+  market: string;
+  source: string;
+  source_url: string;
+  status: "current" | "degraded" | "stale" | "missing" | string;
+  fetched_at: string | null;
+  last_attempt_at: string | null;
+  last_error: string | null;
+  warning: string | null;
+  coverage_start: string | null;
+  coverage_end: string | null;
+  entry_count: number;
+};
+
+export type TaiwanCorporateEventListRead = {
+  kind: string;
+  generated_at: string;
+  as_of: string;
+  date_from: string;
+  date_to: string;
+  stock_id: string | null;
+  market: string | null;
+  event_types: string[];
+  result_count: number;
+  warning: string | null;
+  sources: Record<string, TaiwanCorporateEventSourceStatusRead>;
+  results: TaiwanCorporateEventRead[];
+};
+
+export type TaiwanStockEventSummaryRead = {
+  stock_id: string;
+  checked_at: string;
+  reminder_days: number;
+  cache_status: "current" | "degraded" | "stale" | "missing" | string;
+  cache_fetched_at: string | null;
+  warning: string | null;
+  result_count: number;
+  results: TaiwanCorporateEventRead[];
+};
+
+export type TaiwanStockEventHistoryRead = {
+  stock_id: string;
+  checked_at: string;
+  history_years: number;
+  cache_status: "current" | "degraded" | "stale" | "missing" | string;
+  cache_fetched_at: string | null;
+  coverage_start: string | null;
+  coverage_end: string | null;
+  warning: string | null;
+  total_count: number;
+  result_count: number;
+  results: TaiwanCorporateEventRead[];
+};
+
 export type StockMasterRead = {
   id: number;
   stock_id: string;
@@ -1025,6 +1136,9 @@ export type StockMasterRead = {
   category: string | null;
   is_active: boolean;
   notes: string | null;
+  disposition: TaiwanDispositionStatusRead | null;
+  upcoming_events: TaiwanStockEventSummaryRead | null;
+  event_history: TaiwanStockEventHistoryRead | null;
   first_seen_at: string;
   last_seen_at: string;
   created_at: string;

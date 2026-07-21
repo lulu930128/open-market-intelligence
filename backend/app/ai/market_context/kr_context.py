@@ -19,6 +19,7 @@ from app.ai.market_payload_contract import (
 )
 from app.db.models import KRStockMaster
 from app.market.calendar_status import build_kr_calendar_status
+from app.market.live_snapshot import classify_market_snapshot
 from app.kr_market.sources import (
     KR_INDEX_CONFIG_BY_ID,
     normalize_kr_index_id,
@@ -61,6 +62,8 @@ def _kr_intraday_latest(
 
 def _kr_intraday_quote(
     intraday_summary: dict[str, Any] | None,
+    *,
+    calendar_status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     latest = _kr_intraday_latest(intraday_summary)
     if latest is None:
@@ -72,15 +75,26 @@ def _kr_intraday_quote(
     if isinstance(price, (int, float)) and isinstance(previous_close, (int, float)) and previous_close:
         change = float(price) - float(previous_close)
         change_pct = change / float(previous_close) * 100
+    freshness = classify_market_snapshot(
+        calendar_status=calendar_status or build_kr_calendar_status(),
+        quote_time=latest.get("time"),
+    )
     return {
         "source": intraday_summary.get("source") or "unavailable",
+        "provider": intraday_summary.get("provider") or intraday_summary.get("source"),
         "price": price,
         "change": change,
         "change_pct": change_pct,
         "volume": latest.get("cumulative_volume", latest.get("volume")),
         "quote_time": latest.get("time"),
-        "is_realtime": True,
-        "session_phase": intraday_summary.get("session_phase"),
+        "is_realtime": freshness["is_realtime"],
+        "is_live": freshness["is_live"],
+        "is_latest_session_quote": freshness["is_latest_session_quote"],
+        "session_phase": freshness["current_session_phase"],
+        "current_session_phase": freshness["current_session_phase"],
+        "market_status": freshness["market_status"],
+        "quote_semantics": freshness["quote_semantics"],
+        "freshness": freshness,
         "previous_close": previous_close,
         "previous_close_source": intraday_summary.get("previous_close_source"),
         "point_count": intraday_summary.get("point_count"),
@@ -447,7 +461,10 @@ def read_kr_stock_context(
             warnings.append(f"KR intraday trend unavailable: {exc}")
 
     intraday_requested = include_intraday or intraday_summary is not None
-    intraday_quote = _kr_intraday_quote(intraday_summary)
+    intraday_quote = _kr_intraday_quote(
+        intraday_summary,
+        calendar_status=calendar_status,
+    )
     intraday_bars = _kr_intraday_compact(
         intraday_summary,
         market_data_params=market_data_params,
@@ -460,17 +477,20 @@ def read_kr_stock_context(
     )
     intraday_trade_date = intraday_as_of[:10] if intraday_as_of else None
     expected_intraday_date = _kr_expected_intraday_date(calendar_status)
-    intraday_is_current = bool(
-        intraday_trade_date
-        and expected_intraday_date
-        and intraday_trade_date == expected_intraday_date
+    intraday_freshness_status = str(
+        (intraday_quote.get("freshness") or {}).get("status") or "missing"
     )
+    intraday_is_current = intraday_freshness_status in {
+        "live",
+        "latest_completed_session",
+    }
     if intraday_requested and not intraday_quote:
         if "kr_intraday_trend" not in missing:
             missing.append("kr_intraday_trend")
     elif intraday_requested and not intraday_is_current:
         warnings.append(
-            "KR intraday trend is stale: "
+            "KR intraday trend is not live: "
+            f"status={intraday_freshness_status}, "
             f"latest={intraday_trade_date or 'missing'}, "
             f"expected={expected_intraday_date or 'unknown'}."
         )
@@ -492,12 +512,21 @@ def read_kr_stock_context(
         kind="kr_index_compact_evidence" if is_index else "kr_stock_compact_evidence",
         target=target,
         quote={
-            "source": intraday_quote.get("source") or ("kr_index_daily_price" if is_index else "kr_daily_price"),
-            "price": intraday_quote.get("price", latest_close),
-            "volume": intraday_quote.get("volume", latest_volume),
-            "quote_time": intraday_quote.get("quote_time", latest_trade_date),
-            "is_realtime": bool(intraday_quote),
-            "provider": provider,
+            **(
+                intraday_quote
+                or {
+                    "source": "kr_index_daily_price" if is_index else "kr_daily_price",
+                    "price": latest_close,
+                    "volume": latest_volume,
+                    "quote_time": latest_trade_date,
+                    "is_realtime": False,
+                    "is_live": False,
+                    "provider": provider,
+                    "fallback_reason": "intraday_not_available"
+                    if intraday_requested
+                    else None,
+                }
+            )
         },
         resources={
             "daily_rows": len(daily_rows),
@@ -512,11 +541,9 @@ def read_kr_stock_context(
             "intraday_available": bool(intraday_quote),
         },
         freshness={
-            "price": "current" if intraday_is_current or latest_trade_date else "missing",
+            "price": intraday_freshness_status if intraday_quote else "current" if latest_trade_date else "missing",
             "intraday": (
-                "current"
-                if intraday_is_current
-                else "stale"
+                intraday_freshness_status
                 if intraday_quote and intraday_requested
                 else "missing"
                 if intraday_requested
@@ -557,19 +584,20 @@ def read_kr_stock_context(
         "warnings": list(dict.fromkeys(warnings)),
         "source_refs": source_refs,
     }
+    context_is_current = bool(latest_trade_date) and (
+        not intraday_requested or intraday_is_current
+    )
     freshness_result = {
         "kind": "kr_index_freshness" if is_index else "kr_stock_freshness",
         "scope": {"target": target},
-        "is_current": bool(intraday_is_current or latest_trade_date),
-        "refresh_recommended": not bool(intraday_is_current or latest_trade_date),
+        "is_current": context_is_current,
+        "refresh_recommended": not context_is_current,
         "missing": envelope["missing"],
         "warnings": envelope["warnings"],
         "as_of": intraday_as_of or latest_trade_date,
         "intraday": {
             "status": (
-                "current"
-                if intraday_is_current
-                else "stale"
+                intraday_freshness_status
                 if intraday_quote and intraday_requested
                 else "missing"
                 if intraday_requested

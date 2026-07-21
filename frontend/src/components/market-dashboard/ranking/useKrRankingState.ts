@@ -51,6 +51,7 @@ export function useKrRankingState({
   const [ranking, setRanking] = useState<KRWatchlistRankingRead | null>(null);
   const [loadState, setLoadState] = useState<KrRankingLoadState>("idle");
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
+  const [rankingRevision, setRankingRevision] = useState(0);
   const [dataRefreshNonce, setDataRefreshNonce] = useState(0);
   const requestSeqRef = useRef(0);
   const freshnessRequestKeysRef = useRef(new Set<string>());
@@ -102,6 +103,7 @@ export function useKrRankingState({
         setRanking(rankingData);
         setLastUpdatedAt(formatDashboardTime(new Date()));
         setLoadState("success");
+        setRankingRevision((revision) => revision + 1);
         return rankingData;
       } catch (error) {
         if (requestSeqRef.current !== requestSeq) return null;
@@ -152,6 +154,7 @@ export function useKrRankingState({
           await load(currentGroupId, currentRankBy, { silent: true });
         }
       } catch (error) {
+        freshnessRequestKeysRef.current.delete(requestKey);
         onErrorRef.current("daily-refresh", error, currentGroupId);
       }
     },
@@ -196,7 +199,14 @@ export function useKrRankingState({
   }, [active, dataRefreshNonce, groupId, load, rankBy]);
 
   useEffect(() => {
-    if (!active || groupId === null || ranking?.is_current !== false) return;
+    if (
+      !active ||
+      groupId === null ||
+      loadState !== "success" ||
+      ranking?.is_current !== false
+    ) {
+      return;
+    }
 
     const refreshTimer = window.setTimeout(() => {
       void refreshDailyPrices(groupId, rankBy, ranking.target_trade_date);
@@ -205,7 +215,16 @@ export function useKrRankingState({
     return () => {
       window.clearTimeout(refreshTimer);
     };
-  }, [active, groupId, rankBy, ranking?.is_current, ranking?.target_trade_date, refreshDailyPrices]);
+  }, [
+    active,
+    groupId,
+    loadState,
+    rankBy,
+    rankingRevision,
+    ranking?.is_current,
+    ranking?.target_trade_date,
+    refreshDailyPrices,
+  ]);
 
   return {
     state: {

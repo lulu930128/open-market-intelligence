@@ -317,7 +317,8 @@ def build_evidence_passport(
         compact_warnings = [
             warning
             for warning in all_warnings
-            if any(hint in warning.casefold() for hint in relevant_hints)
+            if not warning.startswith("US fallback provider stale:")
+            and any(hint in warning.casefold() for hint in relevant_hints)
         ]
     scoped_freshness = freshness
     if required_set is not None and isinstance(freshness, dict):

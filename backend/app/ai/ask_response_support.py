@@ -912,7 +912,11 @@ def _build_next_actions(
         )
         return actions
 
-    if freshness_result and freshness_result.get("refresh_recommended"):
+    if (
+        freshness_result
+        and freshness_result.get("refresh_recommended")
+        and freshness_result.get("refresh_endpoint")
+    ):
         actions.append(
             {
                 "type": "refresh_data",
@@ -1004,11 +1008,23 @@ def _clarification_response(
         "clarification": clarification,
         "next_actions": next_actions,
         "answer_ready": False,
+        "facts_ready": False,
+        "analysis_ready": False,
+        "decision_ready": False,
+        "blocked_sections": ["target_resolution", "human_answer", "decision_contract"],
+        "available_sections": [],
+        "request_status": "clarification_required",
+        "fallback_used": False,
+        "cached_data_returned": False,
+        "job": {},
+        "cancellation": {},
         "report_level": "clarification",
         "analysis": {},
         "policy": policy,
         "tool_plan": {},
         "tool_runs": [],
+        "query_plan": {},
+        "diagnostics": {},
         "result": result,
         "freshness": {},
         "missing": [],
@@ -1060,11 +1076,23 @@ def _target_error_response(
         },
         "next_actions": [],
         "answer_ready": False,
+        "facts_ready": False,
+        "analysis_ready": False,
+        "decision_ready": False,
+        "blocked_sections": ["target_resolution", "human_answer", "decision_contract"],
+        "available_sections": [],
+        "request_status": "rejected",
+        "fallback_used": False,
+        "cached_data_returned": False,
+        "job": {},
+        "cancellation": {},
         "report_level": "blocked",
         "analysis": {},
         "policy": policy,
         "tool_plan": {},
         "tool_runs": [],
+        "query_plan": {},
+        "diagnostics": {},
         "result": {
             "kind": "target_error",
             "error": error,

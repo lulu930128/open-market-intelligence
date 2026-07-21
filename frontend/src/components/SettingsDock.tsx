@@ -8,6 +8,7 @@ import {
   useT,
 } from "@/i18n";
 import DispatchSettingsDialog from "@/components/settings/DispatchSettingsDialog";
+import MarketCalendarDialog from "@/components/settings/MarketCalendarDialog";
 import { fetchJson, requestJson } from "@/lib/api";
 import {
   RESOURCE_BACKGROUND_QUOTE_MAX_SECONDS,
@@ -1474,6 +1475,7 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
   const [parametersOpen, setParametersOpen] = useState(false);
   const [refreshOpen, setRefreshOpen] = useState(false);
   const [subscriptionsOpen, setSubscriptionsOpen] = useState(false);
+  const [calendarOpen, setCalendarOpen] = useState(false);
   const [dispatchOpen, setDispatchOpen] = useState(false);
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const [loadState, setLoadState] = useState<LoadState>("idle");
@@ -1613,7 +1615,7 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
   }, [menuOpen]);
 
   useEffect(() => {
-    if (!parametersOpen && !refreshOpen && !subscriptionsOpen && !dispatchOpen && !sourcesOpen) {
+    if (!parametersOpen && !refreshOpen && !subscriptionsOpen && !calendarOpen && !dispatchOpen && !sourcesOpen) {
       return;
     }
 
@@ -1622,13 +1624,14 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
       setParametersOpen(false);
       setRefreshOpen(false);
       setSubscriptionsOpen(false);
+      setCalendarOpen(false);
       setDispatchOpen(false);
       setSourcesOpen(false);
     }
 
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [parametersOpen, refreshOpen, subscriptionsOpen, dispatchOpen, sourcesOpen]);
+  }, [parametersOpen, refreshOpen, subscriptionsOpen, calendarOpen, dispatchOpen, sourcesOpen]);
 
   function openParameterDialog() {
     setMenuOpen(false);
@@ -1663,6 +1666,11 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
   function openDispatchDialog() {
     setMenuOpen(false);
     setDispatchOpen(true);
+  }
+
+  function openCalendarDialog() {
+    setMenuOpen(false);
+    setCalendarOpen(true);
   }
 
   function openSourceDisclosureDialog() {
@@ -1833,8 +1841,8 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
     ? "relative z-[2147483645]"
     : "fixed bottom-4 left-4 z-[2147483645] sm:left-[206px]";
   const menuClassName = inline
-    ? "absolute bottom-10 right-0 w-64 border border-omi-border bg-omi-surface text-left shadow-2xl"
-    : "absolute bottom-12 right-0 w-64 border border-omi-border bg-omi-surface text-left shadow-2xl";
+    ? "absolute bottom-10 right-0 max-h-[calc(100vh-5rem)] w-64 overflow-y-auto border border-omi-border bg-omi-surface text-left shadow-2xl"
+    : "absolute bottom-12 right-0 max-h-[calc(100vh-5rem)] w-64 overflow-y-auto border border-omi-border bg-omi-surface text-left shadow-2xl";
   const buttonClassName = inline
     ? "inline-flex h-8 items-center gap-2 whitespace-nowrap border border-omi-border bg-omi-surface-muted px-3 text-xs font-semibold text-omi-text-muted transition hover:bg-omi-surface-strong hover:text-omi-text"
     : "inline-flex h-10 items-center gap-2 border border-omi-control bg-omi-control px-3 text-sm font-bold text-omi-text-inverse shadow-lg transition hover:bg-omi-control-hover";
@@ -1918,6 +1926,21 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
                   </span>
                   <span className="block text-xs text-omi-text-muted">
                     {t("settings.dataSubscriptions.menuHint")}
+                  </span>
+                </span>
+                <ChevronIcon />
+              </button>
+              <button
+                type="button"
+                className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-omi-surface-subtle"
+                onClick={openCalendarDialog}
+              >
+                <span>
+                  <span className="block font-semibold text-omi-text">
+                    {t("settings.calendar.menuTitle")}
+                  </span>
+                  <span className="block text-xs text-omi-text-muted">
+                    {t("settings.calendar.menuHint")}
                   </span>
                 </span>
                 <ChevronIcon />
@@ -2473,6 +2496,11 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
       <DispatchSettingsDialog
         open={dispatchOpen}
         onClose={() => setDispatchOpen(false)}
+      />
+
+      <MarketCalendarDialog
+        open={calendarOpen}
+        onClose={() => setCalendarOpen(false)}
       />
 
       {sourcesOpen ? (

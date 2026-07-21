@@ -95,8 +95,14 @@ def get_response(
 ):
     params = kwargs.get("params") if isinstance(kwargs.get("params"), dict) else {}
     channel = str(params.get("ex_ch") or "")
-    resource = "stock_quote_batch" if "|" in channel else "index_snapshot"
-    target = f"count:{channel.count('|') + 1}" if "|" in channel else channel or "all"
+    resource = str(
+        kwargs.pop("omi_resource", None)
+        or ("stock_quote_batch" if "|" in channel else "index_snapshot")
+    )
+    target = str(
+        kwargs.pop("omi_target", None)
+        or (f"count:{channel.count('|') + 1}" if "|" in channel else channel or "all")
+    )
     return get(
         url,
         provider=PROVIDER,

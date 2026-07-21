@@ -51,6 +51,7 @@ export function useJpRankingState({
   const [ranking, setRanking] = useState<JPWatchlistRankingRead | null>(null);
   const [loadState, setLoadState] = useState<JpRankingLoadState>("idle");
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
+  const [rankingRevision, setRankingRevision] = useState(0);
   const [dataRefreshNonce, setDataRefreshNonce] = useState(0);
   const requestSeqRef = useRef(0);
   const freshnessRequestKeysRef = useRef(new Set<string>());
@@ -102,6 +103,7 @@ export function useJpRankingState({
         setRanking(rankingData);
         setLastUpdatedAt(formatDashboardTime(new Date()));
         setLoadState("success");
+        setRankingRevision((revision) => revision + 1);
         return rankingData;
       } catch (error) {
         if (requestSeqRef.current !== requestSeq) return null;
@@ -152,6 +154,7 @@ export function useJpRankingState({
           await load(currentGroupId, currentRankBy, { silent: true });
         }
       } catch (error) {
+        freshnessRequestKeysRef.current.delete(requestKey);
         onErrorRef.current("daily-refresh", error, currentGroupId);
       }
     },
@@ -196,7 +199,14 @@ export function useJpRankingState({
   }, [active, dataRefreshNonce, groupId, load, rankBy]);
 
   useEffect(() => {
-    if (!active || groupId === null || ranking?.refresh_recommended !== true) return;
+    if (
+      !active ||
+      groupId === null ||
+      loadState !== "success" ||
+      ranking?.refresh_recommended !== true
+    ) {
+      return;
+    }
 
     const refreshTimer = window.setTimeout(() => {
       void refreshDailyPrices(groupId, rankBy, ranking.target_trade_date);
@@ -208,7 +218,9 @@ export function useJpRankingState({
   }, [
     active,
     groupId,
+    loadState,
     rankBy,
+    rankingRevision,
     ranking?.refresh_recommended,
     ranking?.target_trade_date,
     refreshDailyPrices,

@@ -8,6 +8,7 @@ class JobRunRead(BaseModel):
     id: int
     job_type: str
     status: str
+    public_status: str | None = None
     target: str | None = None
 
     progress_current: int

@@ -85,6 +85,7 @@ type Props = {
   refreshNonce?: number;
   watchlistRankingPanel?: ReactNode;
   onChartFocusModeChange?: (enabled: boolean) => void;
+  onDailyPricesChanged?: () => void;
   onSelectStock: (stock: KRStockMasterRead | null) => void;
 };
 
@@ -440,10 +441,12 @@ export default function KRMarketPanel({
   refreshNonce = 0,
   watchlistRankingPanel,
   onChartFocusModeChange,
+  onDailyPricesChanged,
   onSelectStock,
 }: Props) {
   const t = useT();
   const onSelectStockRef = useRef(onSelectStock);
+  const onDailyPricesChangedRef = useRef(onDailyPricesChanged);
   const [selectedStock, setSelectedStock] = useState<KRStockMasterRead | null>(null);
   const [chart, setChart] = useState<KRChartRead | null>(null);
   const [resourceSummary, setResourceSummary] = useState<KRResourceSummaryRead | null>(null);
@@ -873,6 +876,10 @@ export default function KRMarketPanel({
   }, [onSelectStock]);
 
   useEffect(() => {
+    onDailyPricesChangedRef.current = onDailyPricesChanged;
+  }, [onDailyPricesChanged]);
+
+  useEffect(() => {
     onChartFocusModeChange?.(chartFocusMode);
   }, [chartFocusMode, onChartFocusModeChange]);
 
@@ -937,6 +944,9 @@ export default function KRMarketPanel({
 
         if (chartResult.status === "rejected") {
           throw chartResult.reason;
+        }
+        if (chartResult.value.backfill) {
+          onDailyPricesChangedRef.current?.();
         }
 
         setChart(chartResult.value);
@@ -1097,6 +1107,7 @@ export default function KRMarketPanel({
       });
       await loadStockData(selectedStock.symbol, timeframe);
       await loadReadiness();
+      onDailyPricesChangedRef.current?.();
     } catch (error) {
       publishStatus({
         type: "error",

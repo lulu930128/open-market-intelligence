@@ -750,6 +750,50 @@ function calendarStatus() {
   };
 }
 
+function taiwanDailyPriceReleaseStatus(isReleased: boolean) {
+  const base = calendarStatus();
+  const checkedAt = isReleased
+    ? "2026-07-21T15:15:01+08:00"
+    : "2026-07-21T15:14:00+08:00";
+
+  return {
+    ...base,
+    generated_at: checkedAt,
+    markets: {
+      ...base.markets,
+      tw: {
+        ...base.markets.tw,
+        checked_at: checkedAt,
+        date: "2026-07-21",
+        phase: "post_close",
+        reason: "post_close",
+        previous_trading_day: "2026-07-20",
+        next_trading_day: "2026-07-22",
+        session: {
+          preopen_time: "2026-07-21T08:30:00+08:00",
+          open_time: "2026-07-21T09:00:00+08:00",
+          close_time: "2026-07-21T13:30:00+08:00",
+          next_session_start_at: "2026-07-22T09:00:00+08:00",
+          is_polling_window: false,
+          is_after_close: true,
+        },
+        release_windows: {
+          market_daily_price: {
+            key: "market_daily_price",
+            label: "Taiwan daily price",
+            release_time: "15:15",
+            release_at: "2026-07-21T15:15:00+08:00",
+            next_release_at: "2026-07-22T15:15:00+08:00",
+            expected_trade_date: "2026-07-21",
+            status: isReleased ? "released" : "pending",
+            is_released: isReleased,
+          },
+        },
+      },
+    },
+  };
+}
+
 function marketIndexSummaryResponse(close: number) {
   const previousClose = close - 10;
 
@@ -1477,6 +1521,11 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
 
     if (path.includes("/market/calendar-status")) {
       await fulfillJson(route, calendarStatus());
+      return;
+    }
+
+    if (path.includes("/market/indices/summary/refresh-job")) {
+      await fulfillJson(route, completedRefreshJob());
       return;
     }
 
@@ -2878,6 +2927,124 @@ test.describe("OMI dashboard smoke", () => {
     await expect.poll(async () => (await activeIndicators()).includes("ma")).toBe(true);
   });
 
+  test("Taiwan professional chart safely switches between intraday and duplicate daily timestamps", async ({
+    page,
+  }) => {
+    const pageErrors: string[] = [];
+    const duplicateDailyPoints = [
+      {
+        time: "2026-07-16",
+        open: 1_000,
+        high: 1_010,
+        low: 995,
+        close: 1_005,
+        volume: 20_000,
+        trade_value: 20_100_000,
+        transaction_count: 1_000,
+      },
+      {
+        time: "2026-07-17",
+        open: 1_005,
+        high: 1_020,
+        low: 1_000,
+        close: 1_015,
+        volume: 21_000,
+        trade_value: 21_315_000,
+        transaction_count: 1_050,
+      },
+      {
+        time: "2026-07-17T13:30:00+08:00",
+        open: 1_006,
+        high: 1_025,
+        low: 1_002,
+        close: 1_020,
+        volume: 22_000,
+        trade_value: 22_440_000,
+        transaction_count: 1_100,
+      },
+    ];
+
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await mockOmiApi(page, {
+      apiResponder: ({ path, url }) => {
+        if (path.endsWith("/market/ohlc/2330")) {
+          return {
+            body: {
+              ...stockOhlcResponse("2330"),
+              from_date: "2026-07-16",
+              to_date: "2026-07-17",
+              point_count: 180,
+              points: duplicateDailyPoints,
+            },
+          };
+        }
+
+        if (path.endsWith("/market/intraday/2330/history")) {
+          const points = [
+            {
+              time: "2026-07-17T09:00:00",
+              open: 1_005,
+              high: 1_008,
+              low: 1_004,
+              close: 1_007,
+              volume: 1_000,
+            },
+            {
+              time: "2026-07-17T09:01:00",
+              open: 1_007,
+              high: 1_010,
+              low: 1_006,
+              close: 1_009,
+              volume: 1_200,
+            },
+          ];
+
+          return {
+            body: {
+              stock_id: "2330",
+              symbol: "2330",
+              interval: url.searchParams.get("interval") ?? "1m",
+              range: "auto",
+              provider: "playwright.fixture",
+              source: "playwright.fixture",
+              from_time: points[0].time,
+              to_time: points[points.length - 1].time,
+              point_count: points.length,
+              cached_count: points.length,
+              refreshed_count: 0,
+              points,
+            },
+          };
+        }
+
+        return null;
+      },
+    });
+    await page.goto("/?market=tw&stock_id=2330", { waitUntil: "domcontentloaded" });
+
+    await expect(page.getByTestId("stock-detail-panel")).toHaveAttribute(
+      "data-chart-load-state",
+      "success"
+    );
+    await page.getByTestId("stock-detail-expand").click();
+
+    const chart = page.getByTestId("lightweight-kline-chart");
+    await expect(chart).toHaveAttribute("data-time-mode", "date");
+    await expect(chart).toHaveAttribute("data-source-point-count", "3");
+    await expect(chart).toHaveAttribute("data-chart-point-count", "2");
+
+    await page.getByRole("button", { name: "1分", exact: true }).click();
+    await expect(chart).toHaveAttribute("data-time-mode", "intraday");
+    await expect(chart).toHaveAttribute("data-source-point-count", "2");
+    await expect(chart).toHaveAttribute("data-chart-point-count", "2");
+
+    await page.getByRole("button", { name: "日K", exact: true }).click();
+    await expect(chart).toHaveAttribute("data-time-mode", "date");
+    await expect(chart).toHaveAttribute("data-source-point-count", "3");
+    await expect(chart).toHaveAttribute("data-chart-point-count", "2");
+    expect(pageErrors).toEqual([]);
+  });
+
   test("Taiwan professional chart keeps the last drawing deleted while remote sync is stale", async ({
     page,
   }) => {
@@ -3085,6 +3252,432 @@ test.describe("OMI dashboard smoke", () => {
     expect(branchRequests()[1].search).toContain("days=5");
   });
 
+  test("Taiwan institutional tab lazily loads and displays holding ratios", async ({
+    page,
+  }) => {
+    const apiRequests: NonNullable<MockOmiApiOptions["apiRequests"]> = [];
+    const institutionalRows = [
+      { tradeDate: "2026-06-13", foreignNet: -2_000_000 },
+      { tradeDate: "2026-06-15", foreignNet: 3_000_000 },
+    ].map(({ tradeDate, foreignNet }, index) => ({
+      id: index + 1,
+      source_id: 1,
+      raw_result_id: index + 1,
+      trade_date: tradeDate,
+      stock_id: "2330",
+      stock_name: "台積電",
+      foreign_investor_buy: 10_000_000,
+      foreign_investor_sell: 10_000_000 - foreignNet,
+      foreign_investor_net: foreignNet,
+      foreign_dealer_buy: null,
+      foreign_dealer_sell: null,
+      foreign_dealer_net: null,
+      investment_trust_buy: 2_000_000,
+      investment_trust_sell: 1_000_000,
+      investment_trust_net: 1_000_000,
+      dealer_self_buy: null,
+      dealer_self_sell: null,
+      dealer_self_net: null,
+      dealer_hedge_buy: null,
+      dealer_hedge_sell: null,
+      dealer_hedge_net: null,
+      dealer_buy: 1_000_000,
+      dealer_sell: 1_500_000,
+      dealer_net: -500_000,
+      total_institutional_net: foreignNet + 500_000,
+      created_at: `${tradeDate}T14:30:00+08:00`,
+      updated_at: `${tradeDate}T14:30:00+08:00`,
+    }));
+    await mockOmiApi(page, {
+      apiRequests,
+      apiResponder: ({ path }) => {
+        if (path.endsWith("/market/institutional/2330/history")) {
+          return { body: institutionalRows };
+        }
+        if (path.endsWith("/market/institutional/2330/holding-ratios")) {
+          return {
+            body: {
+              stock_id: "2330",
+              stock_name: "台積電",
+              trade_date: "2026-06-15",
+              foreign_investor_ratio: 69.33,
+              investment_trust_ratio: 3.61,
+              dealer_ratio: 1.38,
+              source_name: "nStock",
+              source_url: "https://www.nstock.tw/stock_info?status=8&stock_id=2330",
+              fetched_at: "2026-06-15T14:30:00Z",
+              history: [
+                {
+                  trade_date: "2026-06-13",
+                  foreign_investor_ratio: 69.2,
+                  investment_trust_ratio: 3.55,
+                  dealer_ratio: 1.31,
+                },
+                {
+                  trade_date: "2026-06-15",
+                  foreign_investor_ratio: 69.33,
+                  investment_trust_ratio: 3.61,
+                  dealer_ratio: 1.38,
+                },
+              ],
+            },
+          };
+        }
+        return null;
+      },
+    });
+    await page.goto("/?market=tw&stock_id=2330", { waitUntil: "domcontentloaded" });
+
+    await expect(page.getByTestId("stock-detail-panel")).toHaveAttribute(
+      "data-chart-load-state",
+      "success"
+    );
+    const holdingRatioRequests = () =>
+      apiRequests.filter((request) =>
+        request.path.endsWith("/market/institutional/2330/holding-ratios")
+      );
+    expect(holdingRatioRequests()).toHaveLength(0);
+
+    await page.locator('[data-data-tab="institutional"]').click();
+    await expect.poll(() => holdingRatioRequests().length).toBe(1);
+    await expect(page.getByText("69.33%", { exact: true })).toBeVisible();
+    await expect(page.getByText("3.61%", { exact: true })).toBeVisible();
+    await expect(page.getByText("1.38%", { exact: true })).toBeVisible();
+    await expect(page.getByText(/實際持股比例 · nStock/)).toBeVisible();
+
+    await page.locator('[data-data-tab="chips"]').click();
+    await page.locator('[data-data-tab="institutional"]').click();
+    await expect(page.getByText("69.33%", { exact: true })).toBeVisible();
+    expect(holdingRatioRequests()).toHaveLength(1);
+  });
+
+  test("Taiwan watchlist exposes market-wide foreign flow ranking", async ({ page }) => {
+    const apiRequests: NonNullable<MockOmiApiOptions["apiRequests"]> = [];
+    const rankedRows = seededTaiwanRankingRows().map((row, index) => ({
+      ...row,
+      rank: index + 1,
+      market_rank: index === 0 ? 36 : 204,
+      rank_value: index === 0 ? 5_332_894 : -1_250_000,
+      rank_trade_date: "2026-07-17",
+    }));
+    await mockOmiApi(page, {
+      apiRequests,
+      taiwanWatchlistTree: seededTaiwanWatchlistTree(),
+      taiwanWatchlistItems: seededTaiwanWatchlistItems(),
+      taiwanRankingRows: seededTaiwanRankingRows(),
+      apiResponder: ({ path, url }) => {
+        if (
+          /\/(?:wl|watchlists)\/groups\/7\/rankings\/latest$/.test(path) &&
+          url.searchParams.get("rank_by") === "foreign_net"
+        ) {
+          return {
+            body: {
+              group_id: 7,
+              include_children: true,
+              rank_by: "foreign_net",
+              sort_order: "desc",
+              rank_scope: "tw_market",
+              rank_trade_date: "2026-07-17",
+              rank_universe_count: 1846,
+              requested_stock_count: 2,
+              ranked_count: 2,
+              no_data_count: 0,
+              error_count: 0,
+              trade_date: "2026-06-15",
+              target_trade_date: "2026-06-15",
+              is_current: true,
+              current_stock_count: 2,
+              stale_stock_count: 0,
+              results: rankedRows,
+            },
+          };
+        }
+        return null;
+      },
+    });
+    await page.goto("/?market=tw&stock_id=2330", {
+      waitUntil: "domcontentloaded",
+    });
+
+    await page.locator('[data-watchlist-group-id="7"]').click();
+    await expect(page).toHaveURL(/group_id=7/);
+
+    const rankSelect = page.locator('select:has(option[value="foreign_net"])');
+    await rankSelect.selectOption("foreign_net");
+    await expect
+      .poll(
+        () =>
+          apiRequests.filter(
+            (request) =>
+              /\/(?:wl|watchlists)\/groups\/7\/rankings\/latest$/.test(
+                request.path
+              ) &&
+              request.search.includes("rank_by=foreign_net")
+          ).length
+      )
+      .toBe(1);
+
+    await expect(page.getByText(/全市場 外資買賣超 排名/)).toBeVisible();
+    await expect(page.getByText(/有效母體 1846 檔/)).toBeVisible();
+    const firstRow = page.locator('[data-ranking-stock-id="2330"]');
+    await expect(firstRow).toContainText("#36");
+    await expect(firstRow).toContainText("5,333");
+    await expect(page.getByText("外資超(張)", { exact: true })).toBeVisible();
+  });
+
+  test("Taiwan stale ranking keeps the selected sort order visible", async ({ page }) => {
+    const apiRequests: NonNullable<MockOmiApiOptions["apiRequests"]> = [];
+    const sortedRows = seededTaiwanRankingRows()
+      .slice()
+      .reverse()
+      .map((row, index) => ({ ...row, rank: index + 1 }));
+    await page.clock.setFixedTime(new Date("2026-07-21T10:00:00Z"));
+    await mockOmiApi(page, {
+      apiRequests,
+      taiwanWatchlistTree: seededTaiwanWatchlistTree(),
+      taiwanWatchlistItems: seededTaiwanWatchlistItems(),
+      taiwanRankingRows: seededTaiwanRankingRows(),
+      apiResponder: ({ path, url }) => {
+        if (
+          /\/(?:wl|watchlists)\/groups\/7\/rankings\/latest$/.test(path) &&
+          url.searchParams.get("rank_by") === "score"
+        ) {
+          return {
+            body: {
+              group_id: 7,
+              include_children: true,
+              rank_by: "score",
+              sort_order: "desc",
+              requested_stock_count: 2,
+              ranked_count: 2,
+              no_data_count: 0,
+              error_count: 0,
+              trade_date: "2026-06-14",
+              target_trade_date: "2026-06-15",
+              is_current: false,
+              current_stock_count: 0,
+              stale_stock_count: 2,
+              results: sortedRows,
+            },
+          };
+        }
+        return null;
+      },
+    });
+    await page.goto("/?market=tw&stock_id=2330", { waitUntil: "domcontentloaded" });
+
+    await page.locator('[data-watchlist-group-id="7"]').click();
+    const rankSelect = page.locator('select:has(option[value="score"])');
+    await rankSelect.selectOption("score");
+
+    await expect(page.locator("[data-ranking-stock-id]").first()).toHaveAttribute(
+      "data-ranking-stock-id",
+      "2303"
+    );
+    await expect(rankSelect).toHaveValue("score");
+    await expect(page.getByText(/待補 2\/2 檔.*2026-06-15/)).toBeVisible();
+
+    const refreshRequests = () =>
+      apiRequests.filter(
+        (request) =>
+          request.method === "POST" &&
+          /\/wl\/groups\/7\/refresh-latest$/.test(request.path)
+      );
+    await expect.poll(() => refreshRequests().length).toBe(1);
+    const refreshParams = new URLSearchParams(refreshRequests()[0].search);
+    expect(refreshParams.get("include_today")).toBe("true");
+    expect(refreshParams.get("include_children")).toBe("true");
+    expect(refreshParams.get("enabled_only")).toBe("true");
+  });
+
+  test("Taiwan ranking refreshes once when the daily price release becomes ready", async ({
+    page,
+  }) => {
+    const apiRequests: NonNullable<MockOmiApiOptions["apiRequests"]> = [];
+    let dailyPriceReleased = false;
+
+    await page.clock.install({
+      time: new Date("2026-07-21T15:14:00+08:00"),
+    });
+    await mockOmiApi(page, {
+      apiRequests,
+      taiwanWatchlistTree: seededTaiwanWatchlistTree(),
+      taiwanWatchlistItems: seededTaiwanWatchlistItems(),
+      taiwanRankingRows: seededTaiwanRankingRows(),
+      apiResponder: ({ path }) =>
+        path.includes("/market/calendar-status")
+          ? { body: taiwanDailyPriceReleaseStatus(dailyPriceReleased) }
+          : null,
+    });
+    await page.goto("/?market=tw&group_id=7&stock_id=2330", {
+      waitUntil: "domcontentloaded",
+    });
+    await page.clock.runFor(1_000);
+
+    const refreshRequests = () =>
+      apiRequests.filter(
+        (request) =>
+          request.method === "POST" &&
+          /\/wl\/groups\/7\/refresh-latest$/.test(request.path)
+      );
+    await expect(page.locator("[data-ranking-stock-id]").first()).toBeVisible();
+    await expect
+      .poll(
+        () =>
+          apiRequests.filter((request) =>
+            request.path.includes("/market/calendar-status")
+          ).length
+      )
+      .toBeGreaterThan(0);
+    expect(refreshRequests()).toHaveLength(0);
+
+    dailyPriceReleased = true;
+    await page.clock.runFor(61_000);
+
+    await expect.poll(() => refreshRequests().length).toBe(1);
+    const refreshParams = new URLSearchParams(refreshRequests()[0].search);
+    expect(refreshParams.get("include_today")).toBe("true");
+  });
+
+  test("Taiwan detail backfill reloads the parent ranking without the stale Radar snapshot", async ({
+    page,
+  }) => {
+    const apiRequests: NonNullable<MockOmiApiOptions["apiRequests"]> = [];
+    let detailBackfillCompleted = false;
+
+    await mockOmiApi(page, {
+      apiRequests,
+      taiwanWatchlistTree: seededTaiwanWatchlistTree(),
+      taiwanWatchlistItems: seededTaiwanWatchlistItems(),
+      taiwanRankingRows: seededTaiwanRankingRows(),
+      apiResponder: ({ method, path }) => {
+        if (path.endsWith("/market/ohlc/2330")) {
+          const response = stockOhlcResponse("2330");
+          if (!detailBackfillCompleted) {
+            const points = response.points.slice(0, 2);
+            return {
+              body: {
+                ...response,
+                from_date: points[0].time,
+                to_date: points[points.length - 1].time,
+                point_count: points.length,
+                points,
+              },
+            };
+          }
+          return { body: response };
+        }
+
+        if (method === "POST" && path.endsWith("/market/backfill/twse/2330")) {
+          detailBackfillCompleted = true;
+          return { body: completedRefreshJob() };
+        }
+
+        return null;
+      },
+    });
+    await page.goto("/?market=tw&group_id=7&stock_id=2330", {
+      waitUntil: "domcontentloaded",
+    });
+
+    const parentRankingRequests = () =>
+      apiRequests.filter((request) =>
+        /\/(?:wl|watchlists)\/groups\/7\/rankings\/latest-batch$/.test(request.path)
+      );
+    const detailBackfillRequests = () =>
+      apiRequests.filter(
+        (request) =>
+          request.method === "POST" &&
+          request.path.endsWith("/market/backfill/twse/2330")
+      );
+    const uncachedRadarRequests = () =>
+      apiRequests.filter(
+        (request) =>
+          /\/(?:wl|watchlists)\/groups\/7\/radar$/.test(request.path) &&
+          new URLSearchParams(request.search).get("prefer_snapshot") === "false"
+      );
+
+    await expect.poll(() => detailBackfillRequests().length).toBe(1);
+    await expect.poll(() => parentRankingRequests().length).toBeGreaterThanOrEqual(2);
+    await expect.poll(() => uncachedRadarRequests().length).toBeGreaterThanOrEqual(1);
+
+    await page.locator('[data-watchlist-group-id="7"]').click();
+    await expect(page.locator('[data-ranking-stock-id="2330"]')).toBeVisible();
+  });
+
+  test("regional stale refresh can be retried after a failed job", async ({ page }) => {
+    const apiRequests: NonNullable<MockOmiApiOptions["apiRequests"]> = [];
+    const rankingRows = seededUsRankingRows();
+    let refreshAttempt = 0;
+
+    await mockOmiApi(page, {
+      apiRequests,
+      usWatchlistTree: seededUsWatchlistTree(),
+      usWatchlistItems: seededUsWatchlistItems(),
+      usRankingRows: rankingRows,
+      regionalRankingResponder: ({ market, url }) =>
+        market === "us"
+          ? {
+              body: {
+                ...seededUsRankingResponse(url, rankingRows),
+                trade_date: "2026-07-17",
+                target_trade_date: "2026-07-20",
+                is_current: false,
+                current_symbol_count: 0,
+                stale_symbol_count: rankingRows.length,
+              },
+            }
+          : null,
+      apiResponder: ({ method, path }) => {
+        if (
+          method === "POST" &&
+          /\/us-market\/watchlists\/groups\/\d+\/refresh-daily$/.test(path)
+        ) {
+          refreshAttempt += 1;
+          return {
+            body:
+              refreshAttempt === 1
+                ? {
+                    ...completedRefreshJob(),
+                    status: "error",
+                    message: "Playwright refresh fixture failed.",
+                    error_message: "temporary provider failure",
+                    result: { status: "error", error_count: 1 },
+                  }
+                : completedRefreshJob(),
+          };
+        }
+        if (path.endsWith("/jobs/1")) {
+          return {
+            body:
+              refreshAttempt === 1
+                ? {
+                    ...completedRefreshJob(),
+                    status: "error",
+                    message: "Playwright refresh fixture failed.",
+                    error_message: "temporary provider failure",
+                    result: { status: "error", error_count: 1 },
+                  }
+                : completedRefreshJob(),
+          };
+        }
+        return null;
+      },
+    });
+    await page.goto("/?market=us&group_id=17", { waitUntil: "domcontentloaded" });
+
+    const refreshRequests = () =>
+      apiRequests.filter(
+        (request) =>
+          request.method === "POST" &&
+          /\/us-market\/watchlists\/groups\/\d+\/refresh-daily$/.test(request.path)
+      );
+
+    await expect.poll(() => refreshRequests().length).toBe(1);
+    await page.getByTestId("watchlist-ranking-reload").click();
+    await expect.poll(() => refreshRequests().length).toBe(2);
+  });
+
   test("malformed portfolio payload stays contained", async ({ page }) => {
     const pageErrors: string[] = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
@@ -3159,6 +3752,35 @@ test.describe("OMI dashboard smoke", () => {
       "MSFT Microsoft Corp."
     );
     expect(pageErrors).toEqual([]);
+  });
+
+  test("US stock selection clears the previous K-line before the next symbol loads", async ({
+    page,
+  }) => {
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(),
+      usWatchlistItems: seededUsWatchlistItems(),
+      usRankingRows: seededUsRankingRows(),
+      apiResponder: ({ path }) =>
+        path.endsWith("/us-market/ohlc/MSFT")
+          ? { body: usOhlcResponse("MSFT"), delayMs: 1_200 }
+          : null,
+    });
+    await page.goto("/?market=us&group_id=17&symbol=AAPL", {
+      waitUntil: "domcontentloaded",
+    });
+
+    const chartPanel = page.getByTestId("us-stock-kline-panel");
+    await expect(chartPanel.getByRole("img")).toBeVisible();
+
+    await page.locator('[data-ranking-symbol="MSFT"]').click();
+    await expect(page).toHaveURL(/market=us.*symbol=MSFT/);
+    const loadingSurface = chartPanel.locator('.omi-state-surface[aria-busy="true"]');
+    await expect(loadingSurface).toBeVisible();
+    await expect(chartPanel.getByRole("img")).toHaveCount(0);
+
+    await expect(loadingSurface).toHaveCount(0);
+    await expect(chartPanel.getByRole("img")).toBeVisible();
   });
 
   test("market selection keeps the current cross-market query contract", async ({ page }) => {

@@ -53,12 +53,18 @@ TPEX_DAILY_INDEX_URL = tpex.DAILY_INDEX_URL
 TPEX_DAILY_QUOTES_URL = tpex.DAILY_QUOTES_URL
 TAIPEI_TZ = timezone(timedelta(hours=8))
 CACHE_TTL_SECONDS = 45
-TWSE_MIS_LIVE_BREADTH_CACHE_TTL_SECONDS = 10
+TWSE_MIS_LIVE_BREADTH_CACHE_TTL_SECONDS = 30
 TWSE_MIS_LIVE_BREADTH_BATCH_SIZE = 100
 TWSE_MIS_LIVE_BREADTH_MIN_CODES = 500
 INDEX_LIST_CACHE_TTL_SECONDS = 300
 MAX_INDEX_STAT_FETCH_WORKERS = 4
-MAX_TWSE_MIS_BREADTH_FETCH_WORKERS = 4
+MAX_TWSE_MIS_BREADTH_FETCH_WORKERS = 2
+TWSE_MIS_BREADTH_CIRCUIT_FAILURE_THRESHOLD = 3
+TWSE_MIS_BREADTH_CIRCUIT_COOLDOWN_SECONDS = 90
+TAIWAN_INDEX_SESSION_CLOSE_TIME = time(13, 30)
+TAIWAN_INDEX_LIVE_REFRESH_END_TIME = time(13, 40)
+TAIWAN_INDEX_RECONCILIATION_END_TIME = time(16, 0)
+TAIWAN_INDEX_RECONCILIATION_RETRY_SECONDS = 300
 
 INDEX_CONFIGS = (
     {
@@ -98,6 +104,10 @@ _SHARES_CACHE: dict[str, dict[str, object]] = {}
 _CONTRIBUTION_CACHE: dict[str, dict[str, object]] = {}
 _TWSE_INDEX_5S_CACHE: dict[str, dict[str, object]] = {}
 _TWSE_MIS_LIVE_BREADTH_CACHE: dict[str, dict[str, object]] = {}
+_TWSE_MIS_LIVE_BREADTH_LAST_GOOD: dict[str, dict] = {}
+_TWSE_MIS_BREADTH_REFRESH_LOCK = Lock()
+_TWSE_MIS_BREADTH_CIRCUIT_FAILURES = 0
+_TWSE_MIS_BREADTH_CIRCUIT_OPEN_UNTIL = 0.0
 _TWSE_MIS_STOCK_STATE: dict[str, dict[str, object]] = {}
 TWSE_INDEX_5S_FIELD_BY_INDEX_ID = {
     "TAIEX": "發行量加權股價指數",
@@ -112,7 +122,7 @@ def is_taiwan_index_live_refresh_window(now: datetime | None = None) -> bool:
         local_now = local_now.astimezone(TAIPEI_TZ)
     return (
         is_taiwan_trading_day(local_now.date())
-        and time(8, 55) <= local_now.time() <= time(13, 40)
+        and time(8, 55) <= local_now.time() <= TAIWAN_INDEX_LIVE_REFRESH_END_TIME
     )
 
 
@@ -197,8 +207,68 @@ def _newer_summary_payload(
     return memory_payload, "memory_cache"
 
 
-def _summary_cache_view(payload: dict, *, origin: str) -> dict:
-    expected_date = expected_daily_price_date()
+def market_index_summary_needs_reconciliation(
+    payload: dict | None,
+    *,
+    now: datetime | None = None,
+    allow_late: bool = False,
+) -> bool:
+    local_now = now or datetime.now(TAIPEI_TZ)
+    if local_now.tzinfo is None:
+        local_now = local_now.replace(tzinfo=TAIPEI_TZ)
+    else:
+        local_now = local_now.astimezone(TAIPEI_TZ)
+
+    if not is_taiwan_trading_day(local_now.date()):
+        return False
+    if local_now.time() < TAIWAN_INDEX_LIVE_REFRESH_END_TIME:
+        return False
+    if not allow_late and local_now.time() > TAIWAN_INDEX_RECONCILIATION_END_TIME:
+        return False
+    if not isinstance(payload, dict):
+        return True
+
+    items_by_id = {
+        str(item.get("index_id") or "").upper(): item
+        for item in payload.get("indices") or []
+        if isinstance(item, dict)
+    }
+    session_close = datetime.combine(
+        local_now.date(),
+        TAIWAN_INDEX_SESSION_CLOSE_TIME,
+        tzinfo=TAIPEI_TZ,
+    )
+
+    for config in INDEX_CONFIGS:
+        item = items_by_id.get(str(config["index_id"]).upper())
+        if not isinstance(item, dict):
+            return True
+        if _parse_trade_date(item.get("time")) != local_now.date():
+            return True
+
+        item_as_of = _summary_payload_as_of(item)
+        if item_as_of is None or item_as_of.astimezone(TAIPEI_TZ) < session_close:
+            return True
+
+        breadth = item.get("breadth")
+        breadth_status = _breadth_status_contract(item)
+        if (
+            not isinstance(breadth, dict)
+            or _breadth_trade_date(breadth) != local_now.date()
+            or breadth_status.get("status") != "ready"
+            or breadth_status.get("scope") != "full_market"
+        ):
+            return True
+
+    return False
+
+
+def _summary_cache_view(
+    payload: dict,
+    *,
+    origin: str,
+    now: datetime | None = None,
+) -> dict:
     trade_dates = [
         parsed
         for item in payload.get("indices") or []
@@ -207,7 +277,12 @@ def _summary_cache_view(payload: dict, *, origin: str) -> dict:
         if parsed is not None
     ]
     latest_trade_date = max(trade_dates, default=None)
-    now = datetime.now(TAIPEI_TZ)
+    now = now or datetime.now(TAIPEI_TZ)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=TAIPEI_TZ)
+    else:
+        now = now.astimezone(TAIPEI_TZ)
+    expected_date = expected_daily_price_date(now=now)
     as_of = _summary_payload_as_of(payload)
     live_age_seconds = (
         max((now - as_of.astimezone(TAIPEI_TZ)).total_seconds(), 0)
@@ -223,7 +298,15 @@ def _summary_cache_view(payload: dict, *, origin: str) -> dict:
         is_taiwan_index_live_refresh_window(now)
         and (live_age_seconds is None or live_age_seconds > live_stale_after)
     )
-    refresh_recommended = date_is_stale or live_is_stale
+    reconciliation_is_needed = market_index_summary_needs_reconciliation(
+        payload,
+        now=now,
+    )
+    reconciliation_is_due = reconciliation_is_needed and (
+        live_age_seconds is None
+        or live_age_seconds >= TAIWAN_INDEX_RECONCILIATION_RETRY_SECONDS
+    )
+    refresh_recommended = date_is_stale or live_is_stale or reconciliation_is_due
     warnings = list(payload.get("warnings") or [])
     if date_is_stale:
         warnings.append(
@@ -232,6 +315,10 @@ def _summary_cache_view(payload: dict, *, origin: str) -> dict:
     if live_is_stale:
         warnings.append(
             "Index summary shared cache is stale during the Taiwan live polling window."
+        )
+    if reconciliation_is_needed:
+        warnings.append(
+            "Index summary is awaiting bounded post-close reconciliation for the current Taiwan trading date."
         )
     return _with_breadth_status_contract({
         **payload,
@@ -442,6 +529,7 @@ def _fetch_twse_mis_stock_messages(codes: list[str]) -> tuple[list[dict], int]:
 
     messages: list[dict] = []
     failed_batches = 0
+    first_error: Exception | None = None
 
     with ThreadPoolExecutor(max_workers=MAX_TWSE_MIS_BREADTH_FETCH_WORKERS) as executor:
         futures = [
@@ -453,11 +541,15 @@ def _fetch_twse_mis_stock_messages(codes: list[str]) -> tuple[list[dict], int]:
             try:
                 messages.extend(future.result())
             except Exception as exc:
-                observe_provider_fallback(
-                    exc,
-                    operation="indices.twse_mis_breadth_batch",
-                )
+                if first_error is None:
+                    first_error = exc
                 failed_batches += 1
+
+    if first_error is not None:
+        observe_provider_fallback(
+            first_error,
+            operation="indices.twse_mis_breadth_refresh",
+        )
 
     return messages, failed_batches
 
@@ -467,6 +559,8 @@ def _cache_twse_mis_live_breadth(market: str, payload: dict | None) -> dict | No
         "expires_at": monotonic() + TWSE_MIS_LIVE_BREADTH_CACHE_TTL_SECONDS,
         "payload": payload,
     }
+    if isinstance(payload, dict):
+        _TWSE_MIS_LIVE_BREADTH_LAST_GOOD[market] = payload
     return payload
 
 
@@ -558,7 +652,7 @@ def _classify_twse_mis_live_breadth_message(message: dict) -> dict | None:
     }
 
 
-def _fetch_twse_mis_live_market_breadth(db: Session, market: str) -> dict | None:
+def _fetch_twse_mis_live_market_breadth_unguarded(db: Session, market: str) -> dict | None:
     if market != "TWSE":
         return None
 
@@ -638,9 +732,86 @@ def _fetch_twse_mis_live_market_breadth(db: Session, market: str) -> dict | None
         "unknown_count": unknown_count,
         "message_count": len(received_codes),
         "missing_count": missing_count,
+        "failed_batch_count": failed_batches,
         "warnings": warnings,
     }
     return _cache_twse_mis_live_breadth(market, payload)
+
+
+def reset_twse_mis_breadth_guard() -> None:
+    global _TWSE_MIS_BREADTH_CIRCUIT_FAILURES
+    global _TWSE_MIS_BREADTH_CIRCUIT_OPEN_UNTIL
+    _TWSE_MIS_LIVE_BREADTH_CACHE.clear()
+    _TWSE_MIS_LIVE_BREADTH_LAST_GOOD.clear()
+    _TWSE_MIS_BREADTH_CIRCUIT_FAILURES = 0
+    _TWSE_MIS_BREADTH_CIRCUIT_OPEN_UNTIL = 0.0
+
+
+def _stale_twse_mis_breadth(market: str, *, circuit_open: bool) -> dict | None:
+    payload = _TWSE_MIS_LIVE_BREADTH_LAST_GOOD.get(market)
+    if not isinstance(payload, dict):
+        return None
+    return {
+        **payload,
+        "source": "twse_mis_live_breadth_stale",
+        "warnings": [
+            *(payload.get("warnings") or []),
+            "TWSE MIS breadth refresh is temporarily suspended by the provider circuit breaker."
+            if circuit_open
+            else "TWSE MIS breadth refresh failed; returning the last successful snapshot.",
+        ],
+        "provider_guard": {
+            "status": "circuit_open" if circuit_open else "degraded",
+            "retry_after_seconds": max(
+                int(_TWSE_MIS_BREADTH_CIRCUIT_OPEN_UNTIL - monotonic()),
+                0,
+            )
+            if circuit_open
+            else None,
+        },
+    }
+
+
+def _fetch_twse_mis_live_market_breadth(db: Session, market: str) -> dict | None:
+    global _TWSE_MIS_BREADTH_CIRCUIT_FAILURES
+    global _TWSE_MIS_BREADTH_CIRCUIT_OPEN_UNTIL
+
+    if market != "TWSE":
+        return None
+    cached = _TWSE_MIS_LIVE_BREADTH_CACHE.get(market)
+    if cached and monotonic() < float(cached["expires_at"]):
+        payload = cached.get("payload")
+        return payload if isinstance(payload, dict) else None
+
+    with _TWSE_MIS_BREADTH_REFRESH_LOCK:
+        cached = _TWSE_MIS_LIVE_BREADTH_CACHE.get(market)
+        if cached and monotonic() < float(cached["expires_at"]):
+            payload = cached.get("payload")
+            return payload if isinstance(payload, dict) else None
+        if monotonic() < _TWSE_MIS_BREADTH_CIRCUIT_OPEN_UNTIL:
+            return _stale_twse_mis_breadth(market, circuit_open=True)
+
+        payload = _fetch_twse_mis_live_market_breadth_unguarded(db, market)
+        failed_batch_count = (
+            int(payload.get("failed_batch_count") or 0)
+            if isinstance(payload, dict)
+            else 1
+        )
+        if payload is None or failed_batch_count > 0:
+            _TWSE_MIS_BREADTH_CIRCUIT_FAILURES += 1
+            if _TWSE_MIS_BREADTH_CIRCUIT_FAILURES >= TWSE_MIS_BREADTH_CIRCUIT_FAILURE_THRESHOLD:
+                _TWSE_MIS_BREADTH_CIRCUIT_OPEN_UNTIL = (
+                    monotonic() + TWSE_MIS_BREADTH_CIRCUIT_COOLDOWN_SECONDS
+                )
+            if payload is None:
+                return _stale_twse_mis_breadth(
+                    market,
+                    circuit_open=monotonic() < _TWSE_MIS_BREADTH_CIRCUIT_OPEN_UNTIL,
+                )
+        else:
+            _TWSE_MIS_BREADTH_CIRCUIT_FAILURES = 0
+            _TWSE_MIS_BREADTH_CIRCUIT_OPEN_UNTIL = 0.0
+        return payload
 
 
 def _market_index_summary_cache_ttl(indices: list[dict]) -> int:
@@ -1989,6 +2160,170 @@ def _point_datetime(point: dict) -> datetime | None:
         return None
 
 
+def _apply_latest_official_index_snapshot(
+    *,
+    config: dict,
+    payload: dict,
+    now: datetime | None = None,
+) -> bool:
+    index_id = str(config.get("index_id") or "").upper()
+    if index_id not in TWSE_INDEX_5S_FIELD_BY_INDEX_ID:
+        return False
+
+    local_now = now or datetime.now(TAIPEI_TZ)
+    if local_now.tzinfo is None:
+        local_now = local_now.replace(tzinfo=TAIPEI_TZ)
+    else:
+        local_now = local_now.astimezone(TAIPEI_TZ)
+    payload_trade_date = _parse_trade_date(payload.get("time"))
+    target_trade_date = (
+        local_now.date()
+        if is_taiwan_trading_day(local_now.date()) and local_now.time() >= time(8, 55)
+        else payload_trade_date
+    )
+    if target_trade_date is None:
+        return False
+
+    official = _fetch_twse_index_5s_intraday(
+        config,
+        trade_date=target_trade_date,
+    )
+    raw_points = official.get("points") if isinstance(official, dict) else None
+    timestamped_points = sorted(
+        (
+            (point_time, point)
+            for point in raw_points or []
+            if isinstance(point, dict)
+            for point_time in [_point_datetime(point)]
+            if point_time is not None and _as_float(point.get("price")) is not None
+        ),
+        key=lambda item: item[0],
+    )
+    if not timestamped_points:
+        return False
+
+    latest_as_of, latest_point = timestamped_points[-1]
+    if latest_as_of.tzinfo is None:
+        latest_as_of = latest_as_of.replace(tzinfo=TAIPEI_TZ)
+    else:
+        latest_as_of = latest_as_of.astimezone(TAIPEI_TZ)
+    if latest_as_of.date() != target_trade_date:
+        return False
+
+    current_as_of = _summary_payload_as_of(payload)
+    if current_as_of is not None and latest_as_of <= current_as_of.astimezone(TAIPEI_TZ):
+        return False
+
+    session_points = timestamped_points[1:] if len(timestamped_points) > 1 else timestamped_points
+    session_prices = [
+        price
+        for _, point in session_points
+        for price in [_as_float(point.get("price"))]
+        if price is not None
+    ]
+    if not session_prices:
+        return False
+
+    close = _as_float(latest_point.get("price"))
+    if close is None:
+        return False
+    previous_close = _as_float(official.get("previous_close")) or _as_float(
+        payload.get("previous_close")
+    )
+    high_candidates = [
+        value
+        for value in (_as_float(payload.get("high")), max(session_prices))
+        if value is not None
+    ]
+    low_candidates = [
+        value
+        for value in (_as_float(payload.get("low")), min(session_prices))
+        if value is not None
+    ]
+    high = max(high_candidates) if high_candidates else close
+    low = min(low_candidates) if low_candidates else close
+    change = close - previous_close if previous_close is not None else _as_float(payload.get("change"))
+    change_pct = (
+        (change / previous_close) * 100
+        if change is not None and previous_close not in (None, 0)
+        else None
+    )
+
+    points = payload.get("points")
+    if isinstance(points, list):
+        daily_point = next(
+            (
+                point
+                for point in points
+                if isinstance(point, dict)
+                and _parse_trade_date(point.get("time")) == target_trade_date
+            ),
+            None,
+        )
+        snapshot_point = {
+            "time": target_trade_date,
+            "open": _as_float(payload.get("open")) or session_prices[0],
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": payload.get("volume"),
+            "trade_value": payload.get("trade_value"),
+            "transaction_count": (
+                daily_point.get("transaction_count")
+                if isinstance(daily_point, dict)
+                else None
+            ),
+        }
+        if isinstance(daily_point, dict):
+            daily_point.update(snapshot_point)
+        else:
+            points.append(snapshot_point)
+            del points[:-90]
+
+    ma20 = (
+        _moving_average(
+            [
+                _as_float(point.get("close"))
+                for point in points
+                if isinstance(point, dict)
+            ],
+            20,
+        )
+        if isinstance(points, list)
+        else payload.get("ma20")
+    )
+    price_vs_ma20 = (
+        ((close - ma20) / ma20) * 100
+        if ma20 not in (None, 0)
+        else None
+    )
+    source = str(payload.get("source") or "index_chart")
+    if "twse_index_5s_snapshot" not in source:
+        source = f"{source}+twse_index_5s_snapshot"
+
+    payload.update(
+        {
+            "source": source,
+            "as_of": latest_as_of,
+            "time": target_trade_date,
+            "high": high,
+            "low": low,
+            "close": close,
+            "previous_close": previous_close,
+            "change": change,
+            "change_pct": change_pct,
+            "estimated_volume": _estimate_session_volume(
+                volume=payload.get("volume"),
+                as_of=latest_as_of,
+            ),
+            "ma20": ma20,
+            "price_vs_ma20": price_vs_ma20,
+            "point_count": len(points) if isinstance(points, list) else payload.get("point_count"),
+        }
+    )
+    return True
+
+
 def _point_time_key(point: dict) -> tuple[str, str] | None:
     parsed = _point_datetime(point)
     if parsed is None:
@@ -2992,6 +3327,17 @@ def _market_index_summary(
                 config["market"],
             )
             db.rollback()
+
+        try:
+            _apply_latest_official_index_snapshot(
+                config=config,
+                payload=index_payload,
+            )
+        except Exception as exc:
+            observe_provider_fallback(
+                exc,
+                operation="indices.official_index_snapshot_overlay",
+            )
 
         index_trade_date = index_payload.get("time")
         index_trade_date = index_trade_date if isinstance(index_trade_date, date) else None

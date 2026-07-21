@@ -306,6 +306,46 @@ def _intraday_report_is_scoreable(report: dict[str, Any] | None) -> bool:
     )
 
 
+def _selected_score_title(score: int | float | None, *, intraday: bool) -> str:
+    if score is None:
+        return "資料不足"
+    if intraday:
+        if score >= 4:
+            return "盤中偏強"
+        if score >= 1:
+            return "盤中震盪偏強"
+        if score <= -4:
+            return "盤中偏弱"
+        if score <= -1:
+            return "盤中震盪偏弱"
+        return "盤中震盪"
+    if score >= 4:
+        return "波段偏多"
+    if score >= 1:
+        return "偏多觀察"
+    if score <= -4:
+        return "波段偏空"
+    if score <= -1:
+        return "偏弱觀察"
+    return "方向未定"
+
+
+def _selected_score_summary(
+    score: int | float | None,
+    *,
+    selected_horizon: str,
+    components: list[dict[str, Any]],
+) -> str:
+    included = [
+        str(component.get("timeframe"))
+        for component in components
+        if component.get("included")
+    ]
+    score_text = "資料不足" if score is None else f"{int(round(score)):+d}"
+    component_text = "、".join(included) if included else "無可用時間框架"
+    return f"{selected_horizon} 綜合分數 {score_text}，依 {component_text} 證據加權。"
+
+
 def _technical_analysis_summary(
     *,
     technical_reports: dict[str, Any],
@@ -392,8 +432,17 @@ def _technical_analysis_summary(
         "selected_horizon": selected_horizon,
         "selected_timeframe": selected_report.get("timeframe") or preferred_timeframe,
         "selected_score": selected_score,
-        "selected_title": selected_report.get("title"),
-        "selected_summary": selected_report.get("summary"),
+        "selected_title": _selected_score_title(
+            selected_score,
+            intraday=selected_horizon == "intraday",
+        ),
+        "selected_summary": _selected_score_summary(
+            selected_score,
+            selected_horizon=selected_horizon,
+            components=components,
+        ),
+        "selected_timeframe_title": selected_report.get("title"),
+        "selected_timeframe_summary": selected_report.get("summary"),
         "selected_confidence": selected_report.get("confidence"),
         "scores": scores_by_horizon,
         "intraday_score": scores_by_horizon.get("intraday"),

@@ -20,9 +20,11 @@ from app.ai.market_context.common import append_source_ref_once as _append_sourc
 from app.ai.market_payload_contract import has_payload_value as _has_payload_value
 from app.market import service as market_service
 from app.market.broker_branch import get_broker_branch_trade_summary
-from app.market.calendar_status import build_taiwan_calendar_status
+from app.market.calendar_status import build_market_calendar_status, build_taiwan_calendar_status
+from app.market.live_snapshot import market_status_from_session
 from app.market.intraday import get_market_intraday_history
 from app.market.quote_depth import get_taiwan_stock_quote_depth
+from app.market.tw_disposition import get_taiwan_disposition_status
 from app.market.technical_report import build_stock_technical_report
 from app.market.indices import (
     get_market_index_contributions,
@@ -57,6 +59,80 @@ SUPPORTED_DATA_FRESHNESS_MARKETS = {
 }
 
 
+def _health_dimensions(
+    envelope: dict[str, Any],
+    *,
+    market: str,
+) -> dict[str, Any]:
+    calendar_market = market.lower()
+    calendar_status: dict[str, Any] = {}
+    if calendar_market in {"tw", "us", "jp", "kr"}:
+        calendar_payload = build_market_calendar_status(
+            market=calendar_market,
+            now=_now(),
+        )
+        candidate = (calendar_payload.get("markets") or {}).get(calendar_market)
+        calendar_status = candidate if isinstance(candidate, dict) else {}
+    market_status = (
+        market_status_from_session(calendar_status)
+        if calendar_status
+        else "not_applicable"
+    )
+    database_status = str(
+        (envelope.get("evidence_passport") or {}).get("data_freshness")
+        or envelope.get("status")
+        or "unknown"
+    )
+    missing = list(envelope.get("missing") or [])
+    return {
+        "operational_health": {
+            "status": "available",
+            "as_of": envelope.get("generated_at") or envelope.get("as_of"),
+            "meaning": "The freshness reader completed; individual provider health is reported separately.",
+        },
+        "live_feed_health": {
+            "status": market_status
+            if market_status in {"closed", "closed_holiday", "latest_session_close"}
+            else "not_observed",
+            "market_status": market_status,
+            "as_of": calendar_status.get("checked_at"),
+            "holiday_name": calendar_status.get("holiday_name"),
+            "meaning": "Live feed health is independent from local database freshness.",
+        },
+        "database_freshness": {
+            "status": database_status,
+            "as_of": envelope.get("as_of"),
+        },
+        "coverage_completeness": {
+            "status": "complete" if not missing else "partial",
+            "missing_count": len(missing),
+            "missing": missing,
+            "as_of": envelope.get("as_of"),
+        },
+    }
+
+
+def _attach_health_dimensions(
+    envelope: dict[str, Any],
+    *,
+    market: str,
+) -> dict[str, Any]:
+    dimensions = _health_dimensions(envelope, market=market)
+    as_of_by_domain = {
+        domain: dimension.get("as_of")
+        for domain, dimension in dimensions.items()
+        if isinstance(dimension, dict)
+    }
+    envelope["health_dimensions"] = dimensions
+    envelope["as_of_by_domain"] = as_of_by_domain
+    data = envelope.get("data") if isinstance(envelope.get("data"), dict) else {}
+    compact = data.get("compact") if isinstance(data.get("compact"), dict) else {}
+    if compact:
+        compact["health_dimensions"] = dimensions
+        compact["as_of_by_domain"] = as_of_by_domain
+    return envelope
+
+
 def read_data_freshness(
     db: Session,
     stock_id: str | None = None,
@@ -67,18 +143,20 @@ def read_data_freshness(
     if normalized_market not in SUPPORTED_DATA_FRESHNESS_MARKETS:
         raise ValueError(f"Unsupported data freshness market: {market}")
     if normalized_market == "TW":
-        return taiwan_freshness.read_data_freshness(
+        envelope = taiwan_freshness.read_data_freshness(
             db=db,
             stock_id=stock_id,
             now=_now,
         )
+        return _attach_health_dimensions(envelope, market="TW")
     if normalized_market != "ALL":
-        return regional_freshness.read_regional_data_freshness(
+        envelope = regional_freshness.read_regional_data_freshness(
             db,
             market=normalized_market,
             symbol=stock_id,
             now=_now,
         )
+        return _attach_health_dimensions(envelope, market=normalized_market)
 
     markets = {
         market_key: read_data_freshness(db, market=market_key)
@@ -155,11 +233,31 @@ def read_data_freshness(
                     }
                     for market_key, status in current_by_market.items()
                 },
+                "health_dimensions": {
+                    market_key: item.get("health_dimensions") or {}
+                    for market_key, item in markets.items()
+                },
+                "as_of_by_domain": {
+                    market_key: item.get("as_of_by_domain") or {}
+                    for market_key, item in markets.items()
+                },
             },
         },
         "missing": missing,
         "warnings": warnings,
         "source_refs": source_refs,
+        "health_dimensions": {
+            market_key: item.get("health_dimensions") or {}
+            for market_key, item in markets.items()
+        },
+        "as_of_by_domain": {
+            market_key: {
+                domain: dimension.get("as_of")
+                for domain, dimension in (item.get("health_dimensions") or {}).items()
+                if isinstance(dimension, dict)
+            }
+            for market_key, item in markets.items()
+        },
     }
     envelope["evidence_passport"] = build_evidence_passport(
         kind="data_freshness",
@@ -287,6 +385,61 @@ def read_stock_context(
             get_broker_branch_trade_summary=get_broker_branch_trade_summary,
             get_market_intraday_history=get_market_intraday_history,
             get_taiwan_stock_quote_depth=get_taiwan_stock_quote_depth,
+            get_taiwan_disposition_status=get_taiwan_disposition_status,
+            now=_now,
+        ),
+    )
+
+
+def read_stock_quote_context(
+    db: Session,
+    stock_id: str,
+    *,
+    market_data_params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return taiwan_stock.read_stock_quote_context(
+        db=db,
+        stock_id=stock_id,
+        market_data_params=market_data_params,
+        dependencies=taiwan_stock.TaiwanStockDependencies(
+            market_service=market_service,
+            stock_service=stock_service,
+            build_stock_technical_report=build_stock_technical_report,
+            build_taiwan_calendar_status=build_taiwan_calendar_status,
+            build_taiwan_source_health=build_taiwan_source_health,
+            build_us_overnight_impact_report=build_us_overnight_impact_report,
+            get_broker_branch_trade_summary=get_broker_branch_trade_summary,
+            get_market_intraday_history=get_market_intraday_history,
+            get_taiwan_stock_quote_depth=get_taiwan_stock_quote_depth,
+            get_taiwan_disposition_status=get_taiwan_disposition_status,
+            now=_now,
+        ),
+    )
+
+
+def read_stock_broker_branch_context(
+    db: Session,
+    stock_id: str,
+    *,
+    branch_days: int = 5,
+    market_data_params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return taiwan_stock.read_stock_broker_branch_context(
+        db=db,
+        stock_id=stock_id,
+        branch_days=branch_days,
+        market_data_params=market_data_params,
+        dependencies=taiwan_stock.TaiwanStockDependencies(
+            market_service=market_service,
+            stock_service=stock_service,
+            build_stock_technical_report=build_stock_technical_report,
+            build_taiwan_calendar_status=build_taiwan_calendar_status,
+            build_taiwan_source_health=build_taiwan_source_health,
+            build_us_overnight_impact_report=build_us_overnight_impact_report,
+            get_broker_branch_trade_summary=get_broker_branch_trade_summary,
+            get_market_intraday_history=get_market_intraday_history,
+            get_taiwan_stock_quote_depth=get_taiwan_stock_quote_depth,
+            get_taiwan_disposition_status=get_taiwan_disposition_status,
             now=_now,
         ),
     )

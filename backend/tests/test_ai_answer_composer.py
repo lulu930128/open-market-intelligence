@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.ai import answer_composer
+from app.ai import answer_composer, answer_data_limits, reports
 from app.ai import ask as ai_ask
 
 
@@ -23,6 +23,95 @@ def _technical_levels() -> dict[str, object]:
 
 
 class AiAnswerComposerTests(unittest.TestCase):
+    def test_us_price_keeps_raw_number_and_adds_rounded_display_text(self) -> None:
+        summary = reports._compact_us_stock_summary(
+            {
+                "summary": {},
+                "data": {
+                    "daily_prices": [
+                        {
+                            "trade_date": "2026-07-17",
+                            "close_price": 202.80999755859375,
+                        },
+                        {
+                            "trade_date": "2026-07-16",
+                            "close_price": 200.0,
+                        },
+                    ]
+                },
+                "missing": [],
+            }
+        )
+
+        self.assertEqual(summary["latest"]["close"], 202.80999755859375)
+        self.assertEqual(summary["latest"]["close_display"], "202.81")
+        self.assertIn("Latest US close 202.81", summary["highlights"][0])
+        self.assertNotIn("202.80999755859375", summary["highlights"][0])
+
+    def test_market_breadth_answer_calls_clear_weakness_from_decliners(self) -> None:
+        answer = answer_composer.build_consumer_human_answer(
+            question_intent="market_breadth",
+            target={"type": "market", "market": "TW", "label": "台股"},
+            analysis_digest={
+                "kind": "market_brief_digest",
+                "breadth": {
+                    "label": "上市全市場廣度",
+                    "advance_count": 88,
+                    "decline_count": 971,
+                    "unchanged_count": 12,
+                    "limit_up_count": 4,
+                    "limit_down_count": 84,
+                },
+            },
+            missing=[],
+            warnings=[],
+        )
+
+        self.assertEqual(answer["style"], "market_breadth_summary")
+        self.assertEqual(answer["stance"], "bearish")
+        self.assertIn("明顯偏弱", answer["headline"])
+        self.assertIn("上漲 88、下跌 971", answer["text"])
+        self.assertIn("跌停 84", answer["text"])
+        self.assertEqual(answer["action_plan"], [])
+
+    def test_fallback_provider_stale_is_diagnostics_only(self) -> None:
+        source_health = {
+            "entries": [
+                {
+                    "resource": "daily_price",
+                    "provider": "yahoo",
+                    "provider_role": "selected",
+                    "status": "current",
+                    "required": True,
+                },
+                {
+                    "resource": "daily_price",
+                    "provider": "alphavantage",
+                    "provider_role": "fallback",
+                    "status": "stale",
+                    "latest_data_date": "2026-06-18",
+                    "expected_data_date": "2026-07-17",
+                    "required": True,
+                },
+            ]
+        }
+        warning = (
+            "US fallback provider stale: daily_price via alphavantage - "
+            "latest 2026-06-18"
+        )
+
+        limits = answer_data_limits.source_health_data_limits(source_health)
+        cap, reasons = answer_data_limits.confidence_cap_from_evidence(
+            analysis_digest={"source_health": source_health},
+            missing=[],
+            warnings=[warning],
+        )
+
+        self.assertEqual(limits, [])
+        self.assertIsNone(cap)
+        self.assertEqual(reasons, [])
+        self.assertFalse(answer_data_limits.warning_is_data_limit(warning))
+
     def test_entry_answer_uses_price_levels_and_data_limits(self) -> None:
         answer = answer_composer.build_question_aware_consumer_answer(
             question_intent="entry_decision",
