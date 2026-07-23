@@ -9,12 +9,21 @@ from unittest.mock import Mock, patch
 
 from app.jobs import scheduler
 from app.market import tw_corporate_events
+from app.market.providers import tw_corporate_events as corporate_event_provider
 from app.market.providers.tw_corporate_events import (
+    MopsConferenceBatch,
+    MopsConferenceWindowFailure,
+    fetch_mops_conferences,
     parse_mops_conferences,
     parse_tpex_ex_dividend_history,
     parse_tpex_ex_dividends,
     parse_twse_ex_dividend_history,
     parse_twse_ex_dividends,
+)
+from app.observability.provider_http import (
+    ProviderHttpError,
+    ProviderHttpFailure,
+    ProviderRequestContext,
 )
 from app.market.tw_corporate_events import (
     backfill_taiwan_corporate_event_history,
@@ -118,6 +127,93 @@ class TaiwanCorporateEventParserTests(unittest.TestCase):
     def test_mops_parser_rejects_schema_drift(self) -> None:
         with self.assertRaises(ValueError):
             parse_mops_conferences("<html></html>", market="TWSE")
+
+    def test_mops_window_retries_transport_failure_and_reports_recovery(self) -> None:
+        context = ProviderRequestContext(
+            market="tw",
+            provider="mops",
+            resource="tw_corporate_events",
+            target="TWSE:2026-07:result",
+        )
+        failure = ProviderHttpFailure(
+            context=context,
+            status="error",
+            source_url="https://example.test/signed-result",
+            error_message="MOPS signed result connection failed.",
+            exception_type="ConnectionError",
+        )
+        transport_error = ProviderHttpError(
+            failure.error_message or "MOPS request failed.",
+            failure=failure,
+        )
+        rows = parse_mops_conferences(MOPS_HTML, market="TWSE")
+
+        with patch.object(
+            corporate_event_provider,
+            "_fetch_mops_conference_window",
+            side_effect=[transport_error, rows, rows, rows, rows],
+        ):
+            batch = fetch_mops_conferences(
+                as_of=date(2026, 7, 20),
+                month_count=2,
+                timeout_seconds=20,
+                max_attempts=2,
+            )
+
+        self.assertEqual(batch.errors, [])
+        self.assertEqual(batch.request_count, 10)
+        self.assertEqual(batch.retry_count, 1)
+        self.assertEqual(batch.recovered_windows, ["TWSE:2026-07"])
+        self.assertEqual(
+            batch.successful_windows,
+            ["TWSE:2026-07", "TWSE:2026-08", "TPEX:2026-07", "TPEX:2026-08"],
+        )
+
+    def test_mops_window_exhaustion_identifies_market_window_and_stage(self) -> None:
+        rows = parse_mops_conferences(MOPS_HTML, market="TWSE")
+
+        def fetch_window(**kwargs):
+            if kwargs["market"] == "TPEX" and kwargs["month"] == 7:
+                context = ProviderRequestContext(
+                    market="tw",
+                    provider="mops",
+                    resource="tw_corporate_events",
+                    target="TPEX:2026-07:result",
+                )
+                failure = ProviderHttpFailure(
+                    context=context,
+                    status="error",
+                    source_url="https://example.test/signed-result",
+                    error_message="MOPS signed result connection failed.",
+                    exception_type="ConnectionError",
+                )
+                raise ProviderHttpError(
+                    failure.error_message or "MOPS request failed.",
+                    failure=failure,
+                )
+            return rows
+
+        with patch.object(
+            corporate_event_provider,
+            "_fetch_mops_conference_window",
+            side_effect=fetch_window,
+        ):
+            batch = fetch_mops_conferences(
+                as_of=date(2026, 7, 20),
+                month_count=2,
+                timeout_seconds=20,
+                max_attempts=2,
+            )
+
+        self.assertEqual(batch.request_count, 10)
+        self.assertEqual(batch.retry_count, 1)
+        self.assertEqual(len(batch.failures), 1)
+        self.assertEqual(batch.failures[0].market, "TPEX")
+        self.assertEqual(batch.failures[0].window, "2026-07")
+        self.assertEqual(batch.failures[0].stage, "result")
+        self.assertEqual(batch.failures[0].exception_type, "ConnectionError")
+        self.assertEqual(batch.failures[0].attempt_count, 2)
+        self.assertIn("MOPS/TPEX/2026-07/result", batch.errors[0])
 
     def test_historical_ex_dividend_parsers_keep_actual_dates(self) -> None:
         twse = parse_twse_ex_dividend_history(
@@ -237,10 +333,50 @@ class TaiwanCorporateEventRefreshTests(unittest.TestCase):
                 )
 
         self.assertEqual(calls, ["twse_ex_dividend", "tpex_ex_dividend", "mops_conference"])
-        self.assertEqual(refreshed["request_limit"], 10)
+        self.assertEqual(refreshed["request_limit"], 18)
         self.assertEqual(refreshed["request_count"], 10)
         self.assertEqual(summary["result_count"], 2)
         self.assertEqual(summary["results"][0]["days_until"], 8)
+
+    def test_stock_summary_defaults_to_seven_day_reminder_window(self) -> None:
+        within_window = {
+            **self._event("twse_ex_dividend"),
+            "start_date": date(2026, 7, 27),
+            "end_date": date(2026, 7, 27),
+        }
+        outside_window = self._event("mops_conference")
+
+        def fetcher(provider_key: str, **_kwargs):
+            if provider_key == "twse_ex_dividend":
+                return [within_window]
+            if provider_key == "mops_conference":
+                return {
+                    "entries": [outside_window],
+                    "request_count": 8,
+                    "coverage_start": date(2026, 7, 1),
+                    "coverage_end": date(2026, 8, 31),
+                    "errors": [],
+                }
+            return [self._event(provider_key)]
+
+        with _cache_path("seven-day-reminder") as cache_path:
+            with patch.object(tw_corporate_events, "ProcessFileLock", _TestProcessLock):
+                refresh_taiwan_corporate_events(
+                    cache_path=cache_path,
+                    now=datetime(2026, 7, 20, tzinfo=timezone.utc),
+                    fetch_provider=fetcher,
+                )
+                summary = get_taiwan_stock_event_summary(
+                    "2330",
+                    market="TWSE",
+                    now=datetime(2026, 7, 20, tzinfo=timezone.utc),
+                    cache_path=cache_path,
+                )
+
+        self.assertEqual(summary["reminder_days"], 7)
+        self.assertEqual(summary["result_count"], 1)
+        self.assertEqual(summary["results"][0]["event_type"], "ex_dividend")
+        self.assertEqual(summary["results"][0]["days_until"], 7)
 
     def test_failed_provider_keeps_last_successful_cache(self) -> None:
         def success_fetcher(provider_key: str, **_kwargs):
@@ -280,6 +416,116 @@ class TaiwanCorporateEventRefreshTests(unittest.TestCase):
         self.assertEqual(refreshed["error_count"], 1)
         self.assertEqual(listing["result_count"], 2)
         self.assertEqual(listing["sources"]["mops_conference"]["status"], "degraded")
+
+    def test_partial_mops_refresh_updates_successes_and_preserves_failed_window(self) -> None:
+        old_twse = self._event("mops_conference")
+        old_twse["event_id"] = "mops-old-twse"
+        old_twse["market"] = "TWSE"
+        old_twse["stock_id"] = "2330"
+        old_twse["start_date"] = date(2026, 7, 28)
+        old_twse["end_date"] = date(2026, 7, 28)
+        old_tpex = {**old_twse}
+        old_tpex["event_id"] = "mops-old-tpex"
+        old_tpex["market"] = "TPEX"
+        old_tpex["stock_id"] = "8069"
+        old_tpex["start_date"] = date(2026, 7, 29)
+        old_tpex["end_date"] = date(2026, 7, 29)
+        new_twse = {**old_twse}
+        new_twse["event_id"] = "mops-new-twse"
+
+        failure = MopsConferenceWindowFailure(
+            provider="mops",
+            market="TPEX",
+            window="2026-07",
+            stage="result",
+            status="error",
+            exception_type="ConnectionError",
+            attempt_count=2,
+            retryable=True,
+            message="MOPS signed result connection failed.",
+        )
+
+        def initial_fetcher(provider_key: str, **_kwargs):
+            if provider_key == "mops_conference":
+                return MopsConferenceBatch(
+                    entries=[old_twse, old_tpex],
+                    request_count=8,
+                    errors=[],
+                    coverage_start=date(2026, 7, 1),
+                    coverage_end=date(2026, 8, 31),
+                    successful_windows=[
+                        "TWSE:2026-07",
+                        "TWSE:2026-08",
+                        "TPEX:2026-07",
+                        "TPEX:2026-08",
+                    ],
+                )
+            return [self._event(provider_key)]
+
+        def partial_fetcher(provider_key: str, **_kwargs):
+            if provider_key == "mops_conference":
+                return MopsConferenceBatch(
+                    entries=[new_twse],
+                    request_count=10,
+                    errors=[failure.summary()],
+                    coverage_start=date(2026, 7, 1),
+                    coverage_end=date(2026, 8, 31),
+                    failures=[failure],
+                    successful_windows=[
+                        "TWSE:2026-07",
+                        "TWSE:2026-08",
+                        "TPEX:2026-08",
+                    ],
+                    retry_count=1,
+                )
+            return [self._event(provider_key)]
+
+        with _cache_path("partial-window") as cache_path:
+            with patch.object(tw_corporate_events, "ProcessFileLock", _TestProcessLock):
+                refresh_taiwan_corporate_events(
+                    cache_path=cache_path,
+                    now=datetime(2026, 7, 20, tzinfo=timezone.utc),
+                    fetch_provider=initial_fetcher,
+                )
+                with patch.object(
+                    tw_corporate_events,
+                    "record_provider_event",
+                ) as record_event:
+                    refreshed = refresh_taiwan_corporate_events(
+                        cache_path=cache_path,
+                        now=datetime(2026, 7, 21, tzinfo=timezone.utc),
+                        fetch_provider=partial_fetcher,
+                        db=SimpleNamespace(rollback=Mock()),
+                    )
+                cache = tw_corporate_events.read_taiwan_corporate_event_cache(
+                    path=cache_path
+                )
+                listing = list_taiwan_corporate_events(
+                    now=datetime(2026, 7, 21, tzinfo=timezone.utc),
+                    cache_path=cache_path,
+                )
+
+        mops_entries = cache["providers"]["mops_conference"]["entries"]
+        self.assertEqual(
+            {entry["event_id"] for entry in mops_entries},
+            {"mops-new-twse", "mops-old-tpex"},
+        )
+        self.assertEqual(refreshed["results"]["mops_conference"]["status"], "partial")
+        self.assertEqual(refreshed["partial_count"], 1)
+        self.assertEqual(refreshed["error_count"], 1)
+        source = listing["sources"]["mops_conference"]
+        self.assertEqual(source["status"], "degraded")
+        self.assertTrue(source["partial_success"])
+        self.assertEqual(source["last_failure_details"][0]["market"], "TPEX")
+        self.assertEqual(source["last_failure_details"][0]["stage"], "result")
+        self.assertIn("MOPS/TPEX/2026-07/result", source["warning"])
+        mops_event = next(
+            call
+            for call in record_event.call_args_list
+            if call.kwargs["provider"] == "mops"
+        )
+        self.assertEqual(mops_event.kwargs["status"], "partial_success")
+        self.assertEqual(mops_event.kwargs["detail"]["failures"][0]["market"], "TPEX")
 
     def test_manual_refresh_route_uses_transaction_owner(self) -> None:
         db = SimpleNamespace()
@@ -323,7 +569,7 @@ class TaiwanCorporateEventRefreshTests(unittest.TestCase):
                     cache_path=cache_path,
                 )
 
-        self.assertEqual(refreshed["request_limit"], 12)
+        self.assertEqual(refreshed["request_limit"], 20)
         self.assertEqual(refreshed["request_count"], 12)
         self.assertEqual(history["total_count"], 4)
         self.assertTrue(all(event["status"] == "past" for event in history["results"]))

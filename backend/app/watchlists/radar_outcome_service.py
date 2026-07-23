@@ -46,6 +46,7 @@ RISK_BUCKETS = {
 OVERHEAT_BUCKETS = {"overheated", "volatility_risk"}
 STRUCTURE_WATCH_BUCKETS = {"compression_watch", "volume", "watch"}
 NON_SCORING_BUCKETS = {"quiet", "no_data", "error"}
+MAX_OUTCOME_ITEM_LIMIT = 200
 
 
 class WatchlistRadarSnapshotNotFoundError(Exception):
@@ -155,34 +156,169 @@ def _snapshot_to_read(run: WatchlistRadarSnapshotRun) -> dict[str, Any]:
     }
 
 
+def _snapshot_radar_item_to_read(item: WatchlistRadarSnapshotItem) -> dict[str, Any]:
+    payload = _json_loads(item.raw_item_json, {})
+    if not isinstance(payload, dict):
+        payload = {}
+
+    signal_keys = payload.get("signal_keys")
+    if not isinstance(signal_keys, list):
+        signal_keys = _json_loads(item.signal_keys_json, [])
+    matched_signal_keys = payload.get("matched_signal_keys")
+    if not isinstance(matched_signal_keys, list):
+        matched_signal_keys = _json_loads(item.matched_signal_keys_json, [])
+    context_signals = payload.get("context_signals")
+    if not isinstance(context_signals, list):
+        context_signals = _json_loads(item.context_signals_json, [])
+    factor_scores = payload.get("factor_scores")
+    if not isinstance(factor_scores, dict):
+        factor_scores = _json_loads(item.factor_scores_json, {})
+    price_levels = payload.get("price_levels")
+    if not isinstance(price_levels, dict):
+        price_levels = _json_loads(item.price_levels_json, {})
+
+    normalized = {
+        **payload,
+        "rank": item.rank,
+        "source_rank": item.source_rank,
+        "bucket": item.bucket,
+        "bucket_label": item.bucket_label,
+        "urgency": item.urgency,
+        "priority_score": item.priority_score,
+        "technical_evidence_score": item.technical_evidence_score,
+        "technical_score": item.technical_score,
+        "technical_grade": item.technical_grade,
+        "technical_grade_label": str(payload.get("technical_grade_label") or ""),
+        "technical_grade_description": str(
+            payload.get("technical_grade_description") or ""
+        ),
+        "direction": item.direction,
+        "direction_label": str(payload.get("direction_label") or ""),
+        "setup_label": str(payload.get("setup_label") or ""),
+        "timing_label": str(payload.get("timing_label") or ""),
+        "risk_label": str(payload.get("risk_label") or ""),
+        "factor_scores": factor_scores,
+        "price_levels": price_levels,
+        "technical_notes": (
+            payload.get("technical_notes")
+            if isinstance(payload.get("technical_notes"), list)
+            else []
+        ),
+        "action_label": str(payload.get("action_label") or item.action_label or ""),
+        "reason": str(payload.get("reason") or item.reason or ""),
+        "stock_id": item.stock_id,
+        "stock_name": item.stock_name,
+        "trade_date": _as_date(payload.get("trade_date")) or item.signal_trade_date,
+        "close": _number(payload.get("close"))
+        if _number(payload.get("close")) is not None
+        else item.close_price,
+        "volume": (
+            int(payload["volume"])
+            if _number(payload.get("volume")) is not None
+            else item.volume
+        ),
+        "previous_close": (
+            _number(payload.get("previous_close"))
+            if _number(payload.get("previous_close")) is not None
+            else item.previous_close
+        ),
+        "change_pct": (
+            _number(payload.get("change_pct"))
+            if _number(payload.get("change_pct")) is not None
+            else item.change_pct
+        ),
+        "limit_status": payload.get("limit_status") or item.limit_status,
+        "score": int(_number(payload.get("score")) or 0),
+        "status": str(payload.get("status") or "ok"),
+        "signal_count": int(
+            _number(payload.get("signal_count")) or len(signal_keys)
+        ),
+        "signal_keys": signal_keys,
+        "matched_signal_keys": matched_signal_keys,
+        "matched_signal_labels": (
+            payload.get("matched_signal_labels")
+            if isinstance(payload.get("matched_signal_labels"), list)
+            else []
+        ),
+        "signal_labels": (
+            payload.get("signal_labels")
+            if isinstance(payload.get("signal_labels"), list)
+            else []
+        ),
+        "indicator_snapshot": (
+            payload.get("indicator_snapshot")
+            if isinstance(payload.get("indicator_snapshot"), dict)
+            else {}
+        ),
+        "context_snapshot": (
+            payload.get("context_snapshot")
+            if isinstance(payload.get("context_snapshot"), dict)
+            else {}
+        ),
+        "context_signals": context_signals,
+        "context_summary": str(payload.get("context_summary") or ""),
+        "context_score": _number(payload.get("context_score")) or 0,
+        "stale": bool(payload.get("stale", False)),
+        "error_message": payload.get("error_message"),
+    }
+    return normalized
+
+
 def _item_to_read(
     item: WatchlistRadarSnapshotItem,
-    outcome: WatchlistRadarOutcome,
+    outcome: WatchlistRadarOutcome | None,
+    *,
+    snapshot_date: date,
 ) -> dict[str, Any]:
     return {
-        "id": outcome.id,
+        "id": outcome.id if outcome is not None else None,
         "snapshot_item_id": item.id,
         "rank": item.rank,
         "stock_id": item.stock_id,
         "stock_name": item.stock_name,
         "bucket": item.bucket,
         "bucket_label": item.bucket_label,
-        "status": outcome.status,
-        "reason": outcome.reason,
-        "snapshot_date": outcome.snapshot_date,
-        "outcome_trade_date": outcome.outcome_trade_date,
-        "signal_close_price": outcome.signal_close_price,
-        "outcome_open_price": outcome.outcome_open_price,
-        "outcome_high_price": outcome.outcome_high_price,
-        "outcome_low_price": outcome.outcome_low_price,
-        "outcome_close_price": outcome.outcome_close_price,
-        "outcome_volume": outcome.outcome_volume,
-        "open_gap_pct": outcome.open_gap_pct,
-        "close_return_pct": outcome.close_return_pct,
-        "max_favorable_pct": outcome.max_favorable_pct,
-        "max_adverse_pct": outcome.max_adverse_pct,
-        "intraday_range_pct": outcome.intraday_range_pct,
-        "volume_change_pct": outcome.volume_change_pct,
+        "status": outcome.status if outcome is not None else "not_evaluated",
+        "reason": outcome.reason if outcome is not None else "",
+        "snapshot_date": (
+            outcome.snapshot_date if outcome is not None else snapshot_date
+        ),
+        "outcome_trade_date": (
+            outcome.outcome_trade_date if outcome is not None else None
+        ),
+        "signal_close_price": (
+            outcome.signal_close_price if outcome is not None else item.close_price
+        ),
+        "outcome_open_price": (
+            outcome.outcome_open_price if outcome is not None else None
+        ),
+        "outcome_high_price": (
+            outcome.outcome_high_price if outcome is not None else None
+        ),
+        "outcome_low_price": (
+            outcome.outcome_low_price if outcome is not None else None
+        ),
+        "outcome_close_price": (
+            outcome.outcome_close_price if outcome is not None else None
+        ),
+        "outcome_volume": outcome.outcome_volume if outcome is not None else None,
+        "open_gap_pct": outcome.open_gap_pct if outcome is not None else None,
+        "close_return_pct": (
+            outcome.close_return_pct if outcome is not None else None
+        ),
+        "max_favorable_pct": (
+            outcome.max_favorable_pct if outcome is not None else None
+        ),
+        "max_adverse_pct": (
+            outcome.max_adverse_pct if outcome is not None else None
+        ),
+        "intraday_range_pct": (
+            outcome.intraday_range_pct if outcome is not None else None
+        ),
+        "volume_change_pct": (
+            outcome.volume_change_pct if outcome is not None else None
+        ),
+        "radar_item": _snapshot_radar_item_to_read(item),
     }
 
 
@@ -716,6 +852,7 @@ def evaluate_watchlist_radar_outcome(
     mode: str = "action",
     snapshot_run_id: int | None = None,
     snapshot_date: date | None = None,
+    item_limit: int = 12,
     radar_rule_version: str = RADAR_RULE_VERSION,
 ) -> dict[str, Any]:
     if snapshot_run_id is not None:
@@ -743,7 +880,11 @@ def evaluate_watchlist_radar_outcome(
     for item in items:
         _evaluate_item(db=db, run=run, item=item)
     db.commit()
-    return get_watchlist_radar_outcome_summary(db=db, snapshot_run_id=run.id)
+    return get_watchlist_radar_outcome_summary(
+        db=db,
+        snapshot_run_id=run.id,
+        item_limit=item_limit,
+    )
 
 
 def _summary_from_run(
@@ -754,7 +895,7 @@ def _summary_from_run(
 ) -> dict[str, Any]:
     rows = (
         db.query(WatchlistRadarSnapshotItem, WatchlistRadarOutcome)
-        .join(
+        .outerjoin(
             WatchlistRadarOutcome,
             WatchlistRadarOutcome.snapshot_item_id == WatchlistRadarSnapshotItem.id,
         )
@@ -762,10 +903,13 @@ def _summary_from_run(
         .order_by(WatchlistRadarSnapshotItem.rank.asc(), WatchlistRadarSnapshotItem.id.asc())
         .all()
     )
-    outcomes = [outcome for _item, outcome in rows]
+    outcome_rows = [
+        (item, outcome) for item, outcome in rows if outcome is not None
+    ]
+    outcomes = [outcome for _item, outcome in outcome_rows]
     counts = Counter(outcome.status for outcome in outcomes)
     bucket_rows: dict[str, list[tuple[WatchlistRadarSnapshotItem, WatchlistRadarOutcome]]] = defaultdict(list)
-    for item, outcome in rows:
+    for item, outcome in outcome_rows:
         bucket_rows[item.bucket].append((item, outcome))
 
     bucket_summaries: list[dict[str, Any]] = []
@@ -812,8 +956,10 @@ def _summary_from_run(
         "avg_max_adverse_pct": _avg([outcome.max_adverse_pct for outcome in outcomes]),
         "bucket_summaries": bucket_summaries,
         "items": [
-            _item_to_read(item, outcome)
-            for item, outcome in rows[: max(1, min(item_limit, 50))]
+            _item_to_read(item, outcome, snapshot_date=run.snapshot_date)
+            for item, outcome in rows[
+                : max(0, min(item_limit, MAX_OUTCOME_ITEM_LIMIT))
+            ]
         ],
         "data_limitations": data_limitations,
     }
@@ -833,6 +979,30 @@ def get_watchlist_radar_outcome_summary(
     if run is None:
         raise WatchlistRadarSnapshotNotFoundError(
             f"Watchlist radar snapshot id={snapshot_run_id} not found."
+        )
+    return _summary_from_run(db=db, run=run, item_limit=item_limit)
+
+
+def get_watchlist_radar_outcome_summary_for_scope(
+    *,
+    db: Session,
+    group_id: int,
+    mode: str,
+    snapshot_run_id: int,
+    item_limit: int = MAX_OUTCOME_ITEM_LIMIT,
+    radar_rule_version: str = RADAR_RULE_VERSION,
+) -> dict[str, Any]:
+    run = _snapshot_by_id(
+        db=db,
+        snapshot_run_id=snapshot_run_id,
+        group_id=group_id,
+        mode=mode,
+        radar_rule_version=radar_rule_version,
+    )
+    if run is None:
+        raise WatchlistRadarSnapshotNotFoundError(
+            f"Watchlist radar snapshot id={snapshot_run_id} not found "
+            f"for group_id={group_id}, mode={mode}."
         )
     return _summary_from_run(db=db, run=run, item_limit=item_limit)
 

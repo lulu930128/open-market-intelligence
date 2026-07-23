@@ -4,6 +4,7 @@ from app.market.technical_structure import (
     build_moving_average_structure,
     build_price_moving_average_signals,
     build_price_range_signals,
+    build_technical_current_state,
 )
 
 
@@ -61,6 +62,60 @@ class TechnicalStructureTests(unittest.TestCase):
             ["donchian_breakdown", "structure_support_break", "bollinger_breakdown"],
         )
         self.assertEqual(score, -6)
+
+    def test_current_state_explains_oversold_bearish_trend_and_repair_ladder(self):
+        moving_average_structure = build_moving_average_structure(
+            price=138,
+            ma5=139.6,
+            ma20=184.775,
+            ma60=149.2817,
+        )
+
+        state = build_technical_current_state(
+            price=138,
+            moving_average_structure=moving_average_structure,
+            change_pct=-8,
+            volume_ratio=1.557325,
+            rsi14=24.8603,
+            macd_histogram=-8.5439,
+            roc12=-35.814,
+            mfi14=20.5674,
+            adx14=30.0938,
+            plus_di14=22.6319,
+            minus_di14=31.9423,
+            atr_pct=12.4833,
+            donchian_position=7.4219,
+            support20=128.5,
+            resistance20=256.5,
+        )
+
+        self.assertEqual(state["version"], "tw_technical_current_state_v1")
+        self.assertEqual(state["headline"]["key"], "bearish_trend")
+        self.assertEqual(state["headline"]["label"], "空方趨勢延續")
+        self.assertEqual(state["qualifier"]["key"], "oversold_not_reversed")
+        self.assertEqual(state["position"]["label"], "3/3 均線下方")
+        self.assertEqual(state["position"]["order_label"], "MA5 < MA60 < MA20")
+        self.assertEqual(
+            [item["key"] for item in state["levels"]],
+            ["support20", "ma5", "ma60", "ma20"],
+        )
+        self.assertAlmostEqual(
+            next(item for item in state["levels"] if item["key"] == "ma20")[
+                "move_required_pct"
+            ],
+            33.8949,
+            places=4,
+        )
+        self.assertEqual(
+            next(item for item in state["evidence"] if item["key"] == "volume")[
+                "state_key"
+            ],
+            "down_on_high_volume",
+        )
+        self.assertEqual(
+            [item["key"] for item in state["next_conditions"]],
+            ["first_reclaim", "structure_repair", "risk_break"],
+        )
 
 
 if __name__ == "__main__":

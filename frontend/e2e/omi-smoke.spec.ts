@@ -591,6 +591,58 @@ function stockMasterResponse(stockId: string) {
   };
 }
 
+function corporateEventHistoryResponse(stockId: string) {
+  const event = (
+    eventId: string,
+    eventType: "ex_dividend" | "financial_report" | "investor_conference",
+    startDate: string,
+    title: string
+  ) => ({
+    event_id: eventId,
+    event_type: eventType,
+    timing_status: "actual",
+    provider: eventType === "ex_dividend" ? "twse" : "mops",
+    market: "TWSE",
+    source_name: "Playwright fixture",
+    source_url: "https://example.com/corporate-events",
+    stock_id: stockId,
+    stock_name: "TSMC",
+    start_date: startDate,
+    end_date: startDate,
+    start_time: null,
+    title,
+    summary: null,
+    location: null,
+    cash_dividend: eventType === "ex_dividend" ? 5 : null,
+    stock_dividend_ratio: null,
+    financial_report_related: eventType === "financial_report",
+    related_event_id: null,
+    company_url: null,
+    video_url: null,
+    status: "past",
+    days_until: -30,
+  });
+  const results = [
+    event("event-ex-dividend", "ex_dividend", "2026-06-10", "Ex-dividend date"),
+    event("event-financial", "financial_report", "2026-05-08", "Financial report"),
+    event("event-conference", "investor_conference", "2026-06-12", "Investor conference"),
+  ];
+
+  return {
+    stock_id: stockId,
+    checked_at: "2026-07-22T12:00:00+08:00",
+    history_years: 5,
+    cache_status: "current",
+    cache_fetched_at: "2026-07-22T11:55:00+08:00",
+    coverage_start: "2022-01-01",
+    coverage_end: "2026-07-19",
+    warning: null,
+    total_count: results.length,
+    result_count: results.length,
+    results,
+  };
+}
+
 function intradayResponse(stockId: string) {
   const latestPrice = stockId === "2303" ? 52.4 : 1_015;
   const previousClose = stockId === "2303" ? 53 : 1_000;
@@ -1005,6 +1057,107 @@ function radarOutcomeSummary(
   };
 }
 
+function radarOutcomeItem(rank: number, status: "hit" | "miss") {
+  const stockId = `${7000 + rank}`;
+  return {
+    id: rank,
+    snapshot_item_id: rank,
+    rank,
+    stock_id: stockId,
+    stock_name: `測試股 ${rank}`,
+    bucket: "volume_up",
+    bucket_label: "量價轉強",
+    status,
+    reason: status === "miss" ? "隔日明顯反向。" : "隔日維持正向。",
+    snapshot_date: "2026-06-13",
+    outcome_trade_date: "2026-06-14",
+    signal_close_price: 100,
+    outcome_open_price: 100,
+    outcome_high_price: status === "miss" ? 100 : 103,
+    outcome_low_price: status === "miss" ? 96 : 99,
+    outcome_close_price: status === "miss" ? 98 : 102,
+    outcome_volume: 2000,
+    open_gap_pct: 0,
+    close_return_pct: status === "miss" ? -2 : 2,
+    max_favorable_pct: status === "miss" ? 0 : 3,
+    max_adverse_pct: status === "miss" ? -4 : -1,
+    intraday_range_pct: status === "miss" ? 4 : 4,
+    volume_change_pct: 100,
+    radar_item: {
+      rank,
+      source_rank: rank,
+      bucket: "volume_up",
+      bucket_label: "量價轉強",
+      urgency: "high",
+      priority_score: 85,
+      technical_evidence_score: 70,
+      technical_score: 72,
+      technical_grade: "strong",
+      technical_grade_label: "強",
+      technical_grade_description: "多項技術證據一致",
+      direction: "bullish",
+      direction_label: "偏多",
+      setup_label: "量價轉強",
+      timing_label: "等待確認",
+      risk_label: "跌破支撐失效",
+      factor_scores: { trend: 2 },
+      price_levels: { ma20: 98, ma60: 95 },
+      technical_notes: [],
+      action_label: "觀察續強",
+      reason: "量價與 RSI 同步轉強",
+      stock_id: stockId,
+      stock_name: `測試股 ${rank}`,
+      time: "2026-06-13",
+      trade_date: "2026-06-13",
+      close: 100,
+      volume: 1000,
+      change: 1,
+      previous_close: 99,
+      change_pct: 1.01,
+      limit_status: null,
+      score: 72,
+      status: "ok",
+      signal_count: 1,
+      signal_keys: ["volume_up"],
+      matched_signal_keys: ["volume_up"],
+      matched_signal_labels: ["量價轉強"],
+      signal_labels: ["量價轉強"],
+      primary_signal_key: "volume_up",
+      primary_signal_label: "量價轉強",
+      indicator_snapshot: { rsi: { rsi14: 58 } },
+      context_snapshot: {},
+      context_signals: [],
+      context_summary: "",
+      context_score: 0,
+      stale: false,
+      error_message: null,
+    },
+  };
+}
+
+function radarOutcomeDetailSummary(id: number, snapshotDate: string) {
+  const items = Array.from({ length: 30 }, (_, index) =>
+    radarOutcomeItem(index + 1, index === 29 ? "miss" : "hit")
+  );
+  return {
+    ...radarOutcomeSummary(id, snapshotDate),
+    snapshot: {
+      ...radarSnapshot(id, snapshotDate),
+      max_results: 30,
+      current_stock_count: 30,
+      requested_stock_count: 30,
+      ranked_count: 30,
+      matched_count: 30,
+      radar_count: 30,
+    },
+    total_count: 30,
+    hit_count: 29,
+    miss_count: 1,
+    avg_close_return_pct: 1.8667,
+    items,
+  };
+}
+
 function noRadarOutcomeSummary() {
   return {
     status: "no_snapshot",
@@ -1323,23 +1476,53 @@ async function fulfillOmiStream(route: Route) {
     [
       "final",
       {
-        kind: "omi.ai.ask.v2",
-        analysis: {
-          human_answer: {
-            kind: "consumer_market_answer",
-            headline: "測試回答：目前偏多但等待確認",
-            stance_label: "偏多",
-            confidence_label: "中",
-            summary: ["測試資料已讀取", "價位仍需突破確認"],
-            action_plan: [{ label: "現在", text: "先觀察，不追價。" }],
-            risks: ["跌破短線支撐則失效。"],
-            data_limits: [],
+        kind: "omi_decision",
+        contract_version: "omi.decision.v3",
+        ok: true,
+        request_status: "completed",
+        target: { type: "tw_stock", id: "2330", market: "TW" },
+        mode: { requested: "brief", effective: "brief", response: "analysis" },
+        status: {
+          readiness: {
+            facts_ready: true,
+            analysis_ready: true,
+            answer_ready: true,
+            decision_ready: true,
           },
         },
-        source_refs: [{ name: "playwright.fixture" }],
+        answer: {
+          headline: "測試回答：目前偏多但等待確認",
+          stance: "偏多",
+          confidence: "中",
+          summary: ["測試資料已讀取", "價位仍需突破確認"],
+          detail: "測試回答已直接取自 canonical envelope。",
+          source: "playwright.fixture",
+        },
+        decision: {
+          intent: "entry_decision",
+          action_plan: [{ label: "現在", text: "先觀察，不追價。" }],
+          scenarios: [],
+          counter_evidence: [],
+          risks: ["跌破短線支撐則失效。"],
+          data_limits: [],
+        },
+        evidence: {
+          slots: {
+            quote: {
+              status: "ready",
+              freshness: { status: "daily_close" },
+              usability: "usable",
+            },
+          },
+          source_refs: [{ name: "playwright.fixture" }],
+        },
+        limitations: { missing: [], warnings: [], provider_failures: [] },
+        execution: { tool_runs: [] },
+        continuation: { resolution: {}, next_context: {} },
+        error: {},
       },
     ],
-    ["done", { ok: true }],
+    ["done", { ok: true, transport_ok: true, request_status: "completed" }],
   ];
   const body = chunks
     .map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
@@ -1414,6 +1597,7 @@ type MockOmiApiOptions = {
   omiAskRequests?: unknown[];
   taiwanRadarOutcomeLatest?: unknown;
   taiwanRadarOutcomeHistory?: unknown[];
+  taiwanRadarOutcomeSnapshots?: Record<number, unknown>;
   taiwanRadarOutcomeEvaluation?: unknown;
 };
 
@@ -1644,14 +1828,154 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
         phase: "regular",
         confidence: "medium",
         generated_at: "2026-06-15T09:30:00+08:00",
-        title: "Fixture technical report",
-        summary: `Technical fixture for ${stockId}`,
+        title: "空方趨勢延續",
+        summary: "3/3 均線下方，超賣但尚未止跌，放量下跌",
         score: 1,
-        value: 1,
-        value_label: "fixture",
-        rows: [],
+        value: -25.31,
+        value_label: "vs MA20",
+        rows: [
+          {
+            key: "institutional_flow",
+            label: "法人籌碼",
+            description: "最近三大法人合計，融資餘額 -254",
+            display_value: "-165張",
+            value: -165,
+            direction: -165,
+            tone: "negative",
+          },
+        ],
         badges: [],
-        data: {},
+        data: {
+          current_state: {
+            version: "tw_technical_current_state_v1",
+            headline: {
+              key: "bearish_trend",
+              label: "空方趨勢延續",
+              tone: "negative",
+            },
+            qualifier: {
+              key: "oversold_not_reversed",
+              label: "超賣但尚未止跌",
+              tone: "warning",
+            },
+            summary: "失守 3/3 條均線；超賣但尚未止跌；放量下跌",
+            position: {
+              price: 138,
+              label: "失守 MA5/MA20/MA60",
+              below_count: 3,
+              above_count: 0,
+              available_count: 3,
+              order: ["ma5", "ma60", "ma20"],
+              order_label: "MA5 139.6 < MA60 149.28 < MA20 184.78",
+              alignment: "mixed",
+              alignment_label: "均線排列轉換中",
+              distance_pct: {
+                ma5: -1.15,
+                ma20: -25.31,
+                ma60: -7.56,
+              },
+            },
+            levels: [
+              {
+                key: "support20",
+                role: "risk",
+                label: "20 日低點",
+                price: 128.5,
+                move_required_pct: -6.88,
+                reference_distance_pct: 7.42,
+                tone: "negative",
+              },
+              {
+                key: "ma5",
+                role: "reclaim",
+                label: "MA5",
+                price: 139.6,
+                move_required_pct: 1.16,
+                reference_distance_pct: -1.15,
+                tone: "warning",
+              },
+              {
+                key: "ma60",
+                role: "reclaim",
+                label: "MA60",
+                price: 149.28,
+                move_required_pct: 8.17,
+                reference_distance_pct: -7.56,
+                tone: "warning",
+              },
+              {
+                key: "ma20",
+                role: "reclaim",
+                label: "MA20",
+                price: 184.78,
+                move_required_pct: 33.9,
+                reference_distance_pct: -25.31,
+                tone: "warning",
+              },
+            ],
+            evidence: [
+              {
+                key: "trend",
+                label: "趨勢證據",
+                state_key: "bearish_trend",
+                state_label: "空方趨勢延續",
+                tone: "negative",
+                summary: "ADX 30.09，-DI 31.94 高於 +DI 22.63；收盤失守 3/3 條均線。",
+                metrics: { adx14: 30.09, plus_di14: 22.63, minus_di14: 31.94 },
+              },
+              {
+                key: "momentum",
+                label: "動能與超賣",
+                state_key: "oversold_not_reversed",
+                state_label: "超賣但尚未止跌",
+                tone: "warning",
+                summary: "RSI 24.86，MACD 柱 -8.54，ROC12 -35.81%。",
+                metrics: { rsi14: 24.86, macd_hist: -8.54, roc12: -35.81 },
+              },
+              {
+                key: "volume",
+                label: "量價確認",
+                state_key: "down_on_high_volume",
+                state_label: "放量下跌",
+                tone: "negative",
+                summary: "日跌 -8.00%，量能為 20 日均量 1.56 倍。",
+                metrics: { change_pct: -8, volume_ratio20: 1.56 },
+              },
+              {
+                key: "risk",
+                label: "風險與區間",
+                state_key: "near_range_bottom",
+                state_label: "接近20日區間底部",
+                tone: "warning",
+                summary: "位於 20 日區間 7.42% 分位，ATR 12.48%。",
+                metrics: { donchian_position20_pct: 7.42, atr14_pct: 12.48 },
+              },
+            ],
+            next_conditions: [
+              {
+                key: "first_reclaim",
+                label: "先站回 MA5",
+                tone: "warning",
+                level_key: "ma5",
+                price: 139.6,
+              },
+              {
+                key: "structure_repair",
+                label: "站回 MA60",
+                tone: "warning",
+                level_key: "ma60",
+                price: 149.28,
+              },
+              {
+                key: "risk_break",
+                label: "跌破 20 日低點",
+                tone: "negative",
+                level_key: "support20",
+                price: 128.5,
+              },
+            ],
+          },
+        },
         missing: [],
         warnings: [],
         source_refs: [],
@@ -2206,6 +2530,19 @@ async function mockOmiApi(page: Page, options: MockOmiApiOptions = {}) {
       return;
     }
 
+    const radarOutcomeSnapshotMatch = path.match(
+      /\/(?:wl|watchlists)\/groups\/\d+\/radar\/outcomes\/snapshots\/(\d+)$/
+    );
+    if (radarOutcomeSnapshotMatch) {
+      const snapshotId = Number(radarOutcomeSnapshotMatch[1]);
+      await fulfillJson(
+        route,
+        options.taiwanRadarOutcomeSnapshots?.[snapshotId] ??
+          noRadarOutcomeSummary()
+      );
+      return;
+    }
+
     if (/\/(?:wl|watchlists)\/groups\/\d+\/radar\/outcomes\/evaluate$/.test(path)) {
       if (options.taiwanRadarOutcomeEvaluation === undefined) {
         throw new Error(`Unexpected radar outcome evaluation: ${route.request().method()} ${path}`);
@@ -2514,6 +2851,8 @@ test.describe("OMI dashboard smoke", () => {
 
     expect(omiAskRequests).toHaveLength(2);
     expect(omiAskRequests[0]).toMatchObject({
+      contract_version: "omi.decision.v3",
+      caller_profile: "frontend_readonly",
       target: {
         type: "tw_index",
         id: "TAIEX",
@@ -2527,6 +2866,8 @@ test.describe("OMI dashboard smoke", () => {
       },
     });
     expect(omiAskRequests[1]).toMatchObject({
+      contract_version: "omi.decision.v3",
+      caller_profile: "frontend_readonly",
       target: {
         type: "kr_index",
         id: "KOSDAQ",
@@ -2727,6 +3068,32 @@ test.describe("OMI dashboard smoke", () => {
     await expect(page.getByRole("heading", { name: /^AAPL(?:\s|$)/ })).toBeVisible();
   });
 
+  test("US professional indicator menu uses the shared layout and parameter controls", async ({
+    page,
+  }) => {
+    await mockOmiApi(page, {
+      usWatchlistTree: seededUsWatchlistTree(),
+      usWatchlistItems: seededUsWatchlistItems(),
+      usRankingRows: seededUsRankingRows(),
+    });
+    await page.goto("/?market=us&group_id=17&symbol=AAPL", {
+      waitUntil: "domcontentloaded",
+    });
+
+    const overviewPanel = page.getByTestId("us-stock-kline-panel");
+    await expect(overviewPanel).toBeVisible();
+    await overviewPanel.getByRole("button", { name: "放大", exact: true }).click();
+    await expect(page.getByTestId("professional-chart-panel")).toBeVisible();
+
+    await page.getByTestId("chart-indicator-menu-toggle").click();
+    const menu = page.getByTestId("technical-indicator-menu");
+    await expect(menu).toBeVisible();
+    await expect(menu.getByText("快速組合", { exact: true })).toHaveCount(1);
+    await expect(menu.getByText("參數", { exact: true })).toHaveCount(1);
+    await expect(menu.locator('input[type="number"]')).not.toHaveCount(0);
+    await expect(menu.locator('[data-indicator-option="ma"]')).toBeChecked();
+  });
+
   test("Taiwan index professional chart shell renders", async ({ page }) => {
     await mockOmiApi(page);
     await page.goto("/?stock_id=TAIEX", { waitUntil: "domcontentloaded" });
@@ -2737,6 +3104,228 @@ test.describe("OMI dashboard smoke", () => {
 
     await expect(page.getByRole("button", { name: "總覽" })).toBeVisible();
     await expect(page.locator("canvas").first()).toBeVisible();
+  });
+
+  test("Taiwan stock overnight report renders ADR TWD parity", async ({ page }) => {
+    await mockOmiApi(page, {
+      apiResponder: ({ path }) =>
+        path.endsWith("/market/overnight-impact/2330")
+          ? {
+              body: {
+                kind: "us_overnight_tw_impact",
+                stock_id: "2330",
+                stock_name: "台積電",
+                as_of: "2026-06-05",
+                generated_at: "2026-06-08T12:00:00Z",
+                stance: "risk_on",
+                title: "Fixture overnight report",
+                summary: "Fixture overnight summary",
+                score: 20,
+                weighted_change_pct: 1,
+                confidence: "high",
+                tw_mapping: {
+                  stock_id: "2330",
+                  stock_name: "台積電",
+                  market: "TWSE",
+                  industry: "24",
+                  category: null,
+                  profiles: ["semiconductor", "technology"],
+                  reason: "fixture",
+                },
+                adr_parity: {
+                  kind: "tw_adr_parity",
+                  status: "ready",
+                  is_current: true,
+                  stock_id: "2330",
+                  stock_name: "台積電",
+                  mapping: {
+                    stock_id: "2330",
+                    stock_name: "台積電",
+                    adr_symbol: "TSM",
+                    adr_name: "TSMC ADR",
+                    adr_exchange: "NYSE",
+                    local_shares_per_adr: 5,
+                    source_label: "TSMC 2025 Form 20-F",
+                    source_url: "https://www.sec.gov/example",
+                    verified_on: "2026-07-22",
+                  },
+                  formula: "adr_close_usd * usd_twd / local_shares_per_adr",
+                  adr_close_usd: 200,
+                  adr_trade_date: "2026-06-05",
+                  adr_provider: "yahoo_chart",
+                  expected_adr_trade_date: "2026-06-05",
+                  usd_twd: 32.5,
+                  fx_source_symbol: "USD-TWD",
+                  fx_provider: "yahoo_chart",
+                  fx_as_of: "2026-06-08T08:00:00Z",
+                  fx_age_seconds: 14_400,
+                  tw_reference_price_twd: 1_000,
+                  tw_reference_trade_date: "2026-06-05",
+                  target_tw_trade_date: "2026-06-08",
+                  implied_tw_price_twd: 1_300,
+                  implied_gap_pct: 30,
+                  parity_adr_price_usd: 153.8462,
+                  tw_comparison_price_twd: 1_250,
+                  tw_comparison_trade_date: "2026-06-08",
+                  tw_comparison_as_of: null,
+                  tw_comparison_source: "market_daily_price",
+                  tw_session_phase: "daily_close",
+                  comparison_mode: "target_session_review",
+                  remaining_gap_pct: 4,
+                  missing: [],
+                  warnings: [],
+                  source_refs: [],
+                  freshness: {},
+                },
+                fx_flow_context: {
+                  kind: "tw_fx_foreign_flow_context",
+                  status: "ready",
+                  is_current: true,
+                  stock_id: "2330",
+                  signal: "confirmed_outflow",
+                  signal_horizon_days: 5,
+                  causality: "confirmation_not_causation",
+                  fx: {
+                    status: "ready",
+                    source_symbol: "USD-TWD",
+                    provider: "yahoo_chart",
+                    usd_twd: 32.375,
+                    data_date: "2026-06-08",
+                    as_of: "2026-06-08T08:00:00Z",
+                    age_seconds: 14_400,
+                    history_points: 21,
+                    usd_twd_change_1d_pct: 0.31,
+                    usd_twd_change_5d_pct: 0.76,
+                    usd_twd_change_20d_pct: 2.12,
+                    twd_change_1d_pct: -0.31,
+                    twd_change_5d_pct: -0.75,
+                    twd_change_20d_pct: -2.08,
+                    regime: "twd_weakening",
+                  },
+                  market_foreign: {
+                    scope: "market",
+                    status: "ready",
+                    state: "outflow",
+                    state_basis_days: 5,
+                    trade_date: "2026-06-08",
+                    expected_trade_date: "2026-06-08",
+                    windows: [
+                      {
+                        days: 1,
+                        available_days: 1,
+                        net_value_twd: -10_000_000_000,
+                        turnover_twd: 1_000_000_000_000,
+                        turnover_ratio_pct: -1,
+                        net_shares: null,
+                      },
+                      {
+                        days: 5,
+                        available_days: 5,
+                        net_value_twd: -50_000_000_000,
+                        turnover_twd: 5_000_000_000_000,
+                        turnover_ratio_pct: -1,
+                        net_shares: null,
+                      },
+                      {
+                        days: 20,
+                        available_days: 20,
+                        net_value_twd: -200_000_000_000,
+                        turnover_twd: 20_000_000_000_000,
+                        turnover_ratio_pct: -1,
+                        net_shares: null,
+                      },
+                    ],
+                  },
+                  stock_foreign: {
+                    scope: "stock",
+                    status: "ready",
+                    state: "outflow",
+                    state_basis_days: 5,
+                    trade_date: "2026-06-08",
+                    expected_trade_date: "2026-06-08",
+                    windows: [
+                      {
+                        days: 1,
+                        available_days: 1,
+                        net_value_twd: null,
+                        turnover_twd: null,
+                        turnover_ratio_pct: null,
+                        net_shares: -1_100_000,
+                      },
+                      {
+                        days: 5,
+                        available_days: 5,
+                        net_value_twd: null,
+                        turnover_twd: null,
+                        turnover_ratio_pct: null,
+                        net_shares: -5_500_000,
+                      },
+                      {
+                        days: 20,
+                        available_days: 20,
+                        net_value_twd: null,
+                        turnover_twd: null,
+                        turnover_ratio_pct: null,
+                        net_shares: -22_000_000,
+                      },
+                    ],
+                  },
+                  missing: [],
+                  warnings: [],
+                  source_refs: [],
+                  freshness: {},
+                },
+                factors: [],
+                baskets: [],
+                missing: [],
+                warnings: [],
+                source_refs: [],
+                freshness: {},
+                evidence_passport: {},
+              },
+            }
+          : null,
+    });
+    await page.goto("/?market=tw&stock_id=2330", { waitUntil: "domcontentloaded" });
+
+    const parity = page.getByTestId("adr-parity-strip");
+    const parityToggle = page.getByTestId("adr-parity-toggle");
+    const parityDetails = page.getByTestId("adr-parity-details");
+    await expect(parity).toBeVisible();
+    await expect(parity).not.toHaveAttribute("open", "");
+    await expect(parityDetails).toBeHidden();
+    await expect(parity).toContainText("ADR 台幣對照");
+    await expect(parityToggle).toContainText("NT$1,300");
+    await expect(parityToggle).toContainText("高於基準 +30.00%");
+
+    await parityToggle.click();
+
+    await expect(parity).toHaveAttribute("open", "");
+    await expect(parityDetails).toBeVisible();
+    await expect(parity).toContainText("TSM US$200");
+    await expect(parity).toContainText("USD/TWD 32.50");
+    await expect(parity).toContainText("高於台股基準 +30.00%");
+    await expect(parity).toContainText("較台股對照仍高 +4.00%");
+
+    const fxFlow = page.getByTestId("fx-flow-context-strip");
+    const fxFlowToggle = page.getByTestId("fx-flow-context-toggle");
+    const fxFlowDetails = page.getByTestId("fx-flow-context-details");
+    await expect(fxFlow).toBeVisible();
+    await expect(fxFlow).not.toHaveAttribute("open", "");
+    await expect(fxFlowDetails).toBeHidden();
+    await expect(fxFlowToggle).toContainText("匯率與外資");
+    await expect(fxFlowToggle).toContainText("USD/TWD 32.375");
+    await expect(fxFlowToggle).toContainText("台幣偏弱 -0.75%");
+    await expect(fxFlowToggle).toContainText("資金流出確認");
+
+    await fxFlowToggle.click();
+
+    await expect(fxFlow).toHaveAttribute("open", "");
+    await expect(fxFlowDetails).toBeVisible();
+    await expect(fxFlow).toContainText("1日 -0.31% · 5日 -0.75% · 20日 -2.08%");
+    await expect(fxFlow).toContainText("5日 -500億");
+    await expect(fxFlow).toContainText("5日 -5,500張");
+    await expect(fxFlow).toContainText("不代表台幣升貶單向造成外資買賣");
   });
 
   test("Taiwan professional mode stays focused when selecting another security", async ({
@@ -2799,11 +3388,294 @@ test.describe("OMI dashboard smoke", () => {
     await expect(page.getByRole("heading", { level: 2 }).filter({ hasText: "2303" })).toBeVisible();
     await expect(stockDetail).toHaveAttribute("data-chart-stock-id", "2303");
     await expect(stockDetail).toHaveAttribute("data-chart-load-state", "success");
-    await expect(page.getByTestId("quote-depth-panel")).toContainText("52.4");
+    const chartCard = page.getByTestId("stock-chart-card");
+    const quoteDepthPanel = page.getByTestId("quote-depth-panel");
+    const technicalCurrentState = page.getByTestId("tw-technical-current-state");
+    await expect(technicalCurrentState).toBeVisible();
+    await expect(page.getByTestId("tw-technical-position-count")).toContainText("3/3");
+    await expect(technicalCurrentState).toContainText("修復與風險階梯");
+    await expect(technicalCurrentState).toContainText("20 日低點／風險線");
+    await expect(technicalCurrentState).toContainText("站回 MA5");
+    await expect(technicalCurrentState).toContainText("站回 MA60");
+    await expect(technicalCurrentState).toContainText("站回 MA20");
+
+    await expect(quoteDepthPanel).toContainText("52.4");
+    await expect
+      .poll(async () => {
+        const chartBox = await chartCard.boundingBox();
+        const quoteDepthBox = await quoteDepthPanel.boundingBox();
+        if (!chartBox || !quoteDepthBox) return false;
+        return quoteDepthBox.y >= chartBox.y + chartBox.height;
+      })
+      .toBe(true);
 
     await page.waitForTimeout(1_000);
     await expect(stockDetail).toHaveAttribute("data-chart-stock-id", "2303");
-    await expect(page.getByTestId("quote-depth-panel")).toContainText("52.4");
+    await expect(quoteDepthPanel).toContainText("52.4");
+    expect(pageErrors).toEqual([]);
+  });
+
+  test("Taiwan daily technical panel routes signal chips to evidence or source data", async ({
+    page,
+  }) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await mockOmiApi(page, {
+      apiResponder: ({ path }) => {
+        if (path.endsWith("/market/institutional/2478/latest")) {
+          return {
+            body: {
+              trade_date: "2026-07-23",
+              stock_id: "2478",
+              stock_name: "Fixture",
+              total_institutional_net: 434_000,
+            },
+          };
+        }
+        if (path.endsWith("/market/institutional/2478/history")) {
+          return {
+            body: [
+              {
+                id: 1,
+                source_id: 1,
+                raw_result_id: 1,
+                trade_date: "2026-07-23",
+                stock_id: "2478",
+                stock_name: "Fixture",
+                foreign_investor_buy: 1_200_000,
+                foreign_investor_sell: 900_000,
+                foreign_investor_net: 300_000,
+                foreign_dealer_buy: null,
+                foreign_dealer_sell: null,
+                foreign_dealer_net: null,
+                investment_trust_buy: 300_000,
+                investment_trust_sell: 200_000,
+                investment_trust_net: 100_000,
+                dealer_self_buy: null,
+                dealer_self_sell: null,
+                dealer_self_net: null,
+                dealer_hedge_buy: null,
+                dealer_hedge_sell: null,
+                dealer_hedge_net: null,
+                dealer_buy: 84_000,
+                dealer_sell: 50_000,
+                dealer_net: 34_000,
+                total_institutional_net: 434_000,
+                created_at: "2026-07-23T15:00:00+08:00",
+                updated_at: "2026-07-23T15:00:00+08:00",
+              },
+            ],
+          };
+        }
+        if (path.endsWith("/market/institutional/2478/holding-ratios")) {
+          return {
+            body: {
+              stock_id: "2478",
+              stock_name: "Fixture",
+              trade_date: "2026-07-23",
+              foreign_investor_ratio: 12.4,
+              investment_trust_ratio: 1.8,
+              dealer_ratio: 0.6,
+              source_name: "Fixture",
+              source_url: "https://example.com/fixture",
+              fetched_at: "2026-07-23T15:00:00+08:00",
+              history: [],
+            },
+          };
+        }
+        if (path.endsWith("/market/margin/2478/latest")) {
+          return {
+            body: {
+              trade_date: "2026-07-23",
+              stock_id: "2478",
+              stock_name: "Fixture",
+              margin_previous_balance: 1_172,
+              margin_today_balance: 1_000,
+            },
+          };
+        }
+        if (path.endsWith("/market/margin/2478/history")) {
+          return {
+            body: [
+              {
+                trade_date: "2026-07-23",
+                stock_id: "2478",
+                stock_name: "Fixture",
+                margin_previous_balance: 1_172,
+                margin_today_balance: 1_000,
+              },
+            ],
+          };
+        }
+        if (path.endsWith("/market/revenue/2478/latest")) {
+          return {
+            body: {
+              report_date: "2026-07-10",
+              period: "2026-06",
+              stock_id: "2478",
+              stock_name: "Fixture",
+              year_over_year_pct: 28.14,
+            },
+          };
+        }
+        if (path.endsWith("/market/revenue/2478/history")) {
+          return {
+            body: [
+              {
+                id: 1,
+                source_id: 1,
+                raw_result_id: 1,
+                report_date: "2026-06-10",
+                period: "2026-05",
+                stock_id: "2478",
+                stock_name: "Fixture",
+                market: "TWSE",
+                industry: "Semiconductors",
+                monthly_revenue: 900_000_000,
+                previous_month_revenue: 850_000_000,
+                previous_year_month_revenue: 760_000_000,
+                month_over_month_pct: 5.88,
+                year_over_year_pct: 18.42,
+                cumulative_revenue: 4_300_000_000,
+                previous_year_cumulative_revenue: 3_800_000_000,
+                cumulative_year_over_year_pct: 13.16,
+                note: null,
+                created_at: "2026-06-10T10:00:00+08:00",
+                updated_at: "2026-06-10T10:00:00+08:00",
+              },
+              {
+                id: 2,
+                source_id: 1,
+                raw_result_id: 2,
+                report_date: "2026-07-10",
+                period: "2026-06",
+                stock_id: "2478",
+                stock_name: "Fixture",
+                market: "TWSE",
+                industry: "Semiconductors",
+                monthly_revenue: 1_050_000_000,
+                previous_month_revenue: 900_000_000,
+                previous_year_month_revenue: 819_400_000,
+                month_over_month_pct: 16.67,
+                year_over_year_pct: 28.14,
+                cumulative_revenue: 5_350_000_000,
+                previous_year_cumulative_revenue: 4_619_400_000,
+                cumulative_year_over_year_pct: 15.82,
+                note: null,
+                created_at: "2026-07-10T10:00:00+08:00",
+                updated_at: "2026-07-10T10:00:00+08:00",
+              },
+            ],
+          };
+        }
+        if (path.endsWith("/market/overnight-impact/2478")) {
+          return {
+            body: {
+              kind: "us_overnight_tw_impact",
+              stock_id: "2478",
+              stock_name: "Fixture",
+              as_of: "2026-07-22",
+              generated_at: "2026-07-23T08:00:00+08:00",
+              stance: "neutral",
+              title: "美股隔夜中性，科技股方向未明",
+              summary: "2026-07-22 美股隔夜映射為中性，加權變動 -0.10%",
+              score: 0,
+              weighted_change_pct: -0.1,
+              confidence: "high",
+              tw_mapping: {
+                stock_id: "2478",
+                stock_name: "Fixture",
+                market: "TWSE",
+                industry: "Semiconductors",
+                category: null,
+                profiles: ["technology"],
+                reason: "fixture",
+              },
+              factors: [],
+              baskets: [],
+              missing: [],
+              warnings: [],
+              source_refs: [],
+              freshness: {},
+              evidence_passport: {},
+            },
+          };
+        }
+        return null;
+      },
+    });
+    await page.goto("/?market=tw&stock_id=2478", { waitUntil: "domcontentloaded" });
+
+    const technicalCurrentState = page.getByTestId("tw-technical-current-state");
+    await expect(technicalCurrentState).toBeVisible();
+    await expect(page.getByTestId("tw-technical-position-count")).toContainText("3/3");
+    await expect(technicalCurrentState).toContainText("修復與風險階梯");
+    await expect(technicalCurrentState).toContainText("20 日低點／風險線");
+    await expect(technicalCurrentState).toContainText("站回 MA5");
+    await expect(technicalCurrentState).toContainText("站回 MA60");
+    await expect(technicalCurrentState).toContainText("站回 MA20");
+
+    const coreSignals = page.getByTestId("tw-signal-chip-group-technical");
+    const contextSignals = page.getByTestId("tw-signal-chip-group-context");
+    await expect(coreSignals).toContainText("核心訊號");
+    await expect(contextSignals).toContainText("背景脈絡");
+    await expect(page.getByTestId("tw-signal-chip-classification")).toHaveCount(0);
+    await expect(page.getByTestId("tw-signal-chip-structure")).toContainText(
+      "結構：3/3 均線下方"
+    );
+    await expect(page.getByTestId("tw-signal-chip-momentum")).toContainText(
+      "動能：超賣但尚未止跌"
+    );
+    await expect(page.getByTestId("tw-signal-chip-volume")).toContainText(
+      "量價：放量下跌"
+    );
+    await expect(page.getByTestId("tw-signal-chip-risk")).toContainText(
+      "風險：距20日低 -6.88%"
+    );
+    await expect(page.getByTestId("tw-signal-chip-institutional")).toContainText(
+      "籌碼：單日 +434張"
+    );
+    const marginSignal = page.getByTestId("tw-signal-chip-margin");
+    await expect(marginSignal).toContainText("融資：餘額變化 -172");
+    await expect(marginSignal).toHaveClass(/omi-signal-chip-neutral/);
+    await expect(page.getByTestId("tw-signal-chip-revenue")).toContainText(
+      "營收：YoY +28.14%"
+    );
+    await expect(page.getByTestId("tw-signal-chip-overnight")).toContainText(
+      "隔夜：隔夜中性 -0.10%"
+    );
+    await expect(page.getByTestId("tw-signal-chip-market-relative")).toContainText(
+      "pp"
+    );
+
+    const trendEvidence = page.getByTestId("tw-technical-evidence-trend");
+    await expect(trendEvidence).not.toHaveAttribute("open", "");
+    await page.getByTestId("tw-signal-chip-structure").click();
+    await expect(trendEvidence).toHaveAttribute("open", "");
+    await expect(trendEvidence).toContainText("ADX 30.09");
+
+    const technicalContext = page.getByTestId("tw-technical-context");
+    await expect(technicalContext).not.toHaveAttribute("open", "");
+    const dataPanel = page.getByTestId("tw-stock-detail-data-panel");
+    const institutionalTab = dataPanel.locator('[data-data-tab="institutional"]');
+    await page.getByTestId("tw-signal-chip-institutional").click();
+    await expect(technicalContext).not.toHaveAttribute("open", "");
+    await expect(institutionalTab).toHaveClass(/omi-data-tab-active/);
+    await expect(institutionalTab).toBeFocused();
+
+    const chipTab = dataPanel.locator('[data-data-tab="chips"]');
+    await page.getByTestId("tw-signal-chip-margin").click();
+    await expect(chipTab).toHaveClass(/omi-data-tab-active/);
+    await expect(chipTab).toBeFocused();
+
+    const revenueTab = dataPanel.locator('[data-data-tab="revenue"]');
+    await page.getByTestId("tw-signal-chip-revenue").click();
+    await expect(revenueTab).toHaveClass(/omi-data-tab-active/);
+    await expect(revenueTab).toBeFocused();
+
+    await page.getByTestId("tw-signal-chip-overnight").click();
+    await expect(technicalContext).toHaveAttribute("open", "");
+    await expect(technicalContext).toContainText("法人籌碼");
     expect(pageErrors).toEqual([]);
   });
 
@@ -2925,6 +3797,96 @@ test.describe("OMI dashboard smoke", () => {
     await movingAverageToggle.check();
     await expect(movingAverageToggle).toBeChecked();
     await expect.poll(async () => (await activeIndicators()).includes("ma")).toBe(true);
+  });
+
+  test("Taiwan K-line toggles unified corporate event markers in overview and professional mode", async ({
+    page,
+  }) => {
+    const apiRequests: NonNullable<MockOmiApiOptions["apiRequests"]> = [];
+    await mockOmiApi(page, {
+      apiRequests,
+      apiResponder: ({ path }) =>
+        path.endsWith("/market/tw-corporate-events/history/2330")
+          ? { body: corporateEventHistoryResponse("2330") }
+          : null,
+    });
+    await page.goto("/?market=tw&stock_id=2330", { waitUntil: "domcontentloaded" });
+
+    await expect(page.getByTestId("stock-detail-panel")).toHaveAttribute(
+      "data-chart-load-state",
+      "success"
+    );
+    await page.getByTestId("chart-indicator-menu-toggle").click();
+
+    const corporateEventToggle = page.locator(
+      '[data-indicator-option="event:corporate_events"]'
+    );
+    await expect(page.locator('[data-indicator-option^="event:"]')).toHaveCount(1);
+    await expect(corporateEventToggle).not.toBeChecked();
+    await corporateEventToggle.check();
+    await expect(
+      page.locator('[data-chart-event-marker="ex_dividend"]').first()
+    ).toBeVisible();
+    await expect(
+      page.locator('[data-chart-event-marker="financial_report"]').first()
+    ).toBeVisible();
+    await expect(
+      page.locator('[data-chart-event-marker="investor_conference"]').first()
+    ).toBeVisible();
+    const markerGeometry = async () =>
+      page.locator('[data-chart-event-marker]').evaluateAll((groups) =>
+        groups.map((group) => {
+          const line = group.querySelector("line");
+          const rect = group.querySelector("rect");
+
+          return {
+            anchorY: Number(line?.getAttribute("y1")),
+            connectorY: Number(line?.getAttribute("y2")),
+            height: Number(rect?.getAttribute("height")),
+            width: Number(rect?.getAttribute("width")),
+            x: Number(rect?.getAttribute("x")),
+            y: Number(rect?.getAttribute("y")),
+          };
+        })
+      );
+    const expectCompactNonOverlappingMarkers = (
+      markers: Awaited<ReturnType<typeof markerGeometry>>
+    ) => {
+      expect(markers).toHaveLength(3);
+      expect(markers.every((marker) => Math.abs(marker.anchorY - marker.connectorY) < 120))
+        .toBe(true);
+
+      for (let leftIndex = 0; leftIndex < markers.length; leftIndex += 1) {
+        for (let rightIndex = leftIndex + 1; rightIndex < markers.length; rightIndex += 1) {
+          const left = markers[leftIndex];
+          const right = markers[rightIndex];
+          const overlaps =
+            left.x < right.x + right.width &&
+            left.x + left.width > right.x &&
+            left.y < right.y + right.height &&
+            left.y + left.height > right.y;
+          expect(overlaps).toBe(false);
+        }
+      }
+    };
+    expectCompactNonOverlappingMarkers(await markerGeometry());
+
+    await page.getByTestId("stock-detail-expand").click();
+    const professionalChart = page.getByTestId("lightweight-kline-chart");
+    await expect(professionalChart).toHaveAttribute("data-event-marker-count", "3");
+    await expect(
+      page.locator('[data-chart-event-marker="ex_dividend"]').first()
+    ).toBeVisible();
+    expectCompactNonOverlappingMarkers(await markerGeometry());
+
+    await page.getByTestId("chart-indicator-menu-toggle").click();
+    await corporateEventToggle.uncheck();
+    await expect(professionalChart).toHaveAttribute("data-event-marker-count", "0");
+    expect(
+      apiRequests.filter((request) =>
+        request.path.endsWith("/market/tw-corporate-events/history/2330")
+      )
+    ).toHaveLength(1);
   });
 
   test("Taiwan professional chart safely switches between intraday and duplicate daily timestamps", async ({
@@ -4236,7 +5198,11 @@ test.describe("OMI dashboard smoke", () => {
         radarOutcomeSummary(102, "2026-06-14"),
         radarOutcomeSummary(101, "2026-06-13", "pending"),
       ],
-      taiwanRadarOutcomeEvaluation: radarOutcomeSummary(101, "2026-06-13"),
+      taiwanRadarOutcomeSnapshots: {
+        101: radarOutcomeDetailSummary(101, "2026-06-13"),
+        102: radarOutcomeDetailSummary(102, "2026-06-14"),
+      },
+      taiwanRadarOutcomeEvaluation: radarOutcomeDetailSummary(101, "2026-06-13"),
     });
     await page.goto("/", { waitUntil: "domcontentloaded" });
 
@@ -4248,9 +5214,31 @@ test.describe("OMI dashboard smoke", () => {
       )
     );
     await page.getByTestId("watchlist-radar-history-open").click();
-    await historyResponse;
+    const response = await historyResponse;
+    expect(new URL(response.url()).searchParams.get("item_limit")).toBe("0");
     await expect(page.getByTestId("watchlist-radar-history-dialog")).toBeVisible();
+    const detailResponse = page.waitForResponse((candidate) =>
+      /\/(?:wl|watchlists)\/groups\/7\/radar\/outcomes\/snapshots\/101$/.test(
+        new URL(candidate.url()).pathname
+      )
+    );
     await page.getByTestId("watchlist-radar-history-snapshot-101").click();
+    const selectedDetailResponse = await detailResponse;
+    expect(
+      new URL(selectedDetailResponse.url()).searchParams.get("item_limit")
+    ).toBe("200");
+    await expect(
+      page.getByTestId("watchlist-radar-history-items").locator(":scope > article")
+    ).toHaveCount(30);
+    await expect(
+      page.getByTestId("watchlist-radar-history-item-30-7030")
+    ).toContainText("失誤");
+    const collapsedDetails = page.getByTestId(
+      "watchlist-radar-history-item-details-30-7030"
+    );
+    await expect(collapsedDetails).not.toHaveAttribute("open", "");
+    await collapsedDetails.locator("summary").click();
+    await expect(collapsedDetails).toContainText("RSI14 58");
 
     const evaluationRequest = page.waitForRequest((request) =>
       /\/(?:wl|watchlists)\/groups\/7\/radar\/outcomes\/evaluate$/.test(
@@ -4262,6 +5250,7 @@ test.describe("OMI dashboard smoke", () => {
     const evaluationUrl = new URL(request.url());
     expect(evaluationUrl.searchParams.get("mode")).toBe("action");
     expect(evaluationUrl.searchParams.get("snapshot_run_id")).toBe("101");
+    expect(evaluationUrl.searchParams.get("item_limit")).toBe("200");
     expect(request.postData()).toBeNull();
     await expect(page.getByTestId("watchlist-radar-history-dialog")).toBeVisible();
     expect(pageErrors).toEqual([]);

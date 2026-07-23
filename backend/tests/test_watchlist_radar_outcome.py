@@ -18,6 +18,7 @@ from app.db.models import (
     WatchlistRadarSnapshotRun,
 )
 from app.watchlists import radar_outcome_service
+from app.watchlists.schemas import WatchlistRadarOutcomeSummaryRead
 
 
 def make_session() -> Session:
@@ -320,6 +321,109 @@ class WatchlistRadarOutcomeTests(unittest.TestCase):
         self.assertEqual(summary["total_count"], 1)
         self.assertEqual(summary["pending_count"], 1)
         self.assertEqual(summary["hit_count"], 0)
+
+    def test_selected_snapshot_returns_all_items_with_frozen_radar_evidence(self) -> None:
+        group = self.add_group()
+        source_id, raw_result_id = self.add_source()
+        items: list[dict[str, object]] = []
+        for rank in range(1, 31):
+            stock_id = f"{7000 + rank}"
+            item = self.radar_item(
+                rank=rank,
+                stock_id=stock_id,
+                bucket="volume_up",
+                close=100,
+            )
+            item["indicator_snapshot"] = {
+                "momentum": {"rsi_14": 45.0 + rank},
+            }
+            item["factor_scores"] = {"trend": float(rank)}
+            items.append(item)
+            self.add_daily_bar(
+                source_id=source_id,
+                raw_result_id=raw_result_id,
+                stock_id=stock_id,
+                trade_date=date(2026, 7, 7),
+                open_price=100,
+                high_price=100 if rank == 30 else 103,
+                low_price=96 if rank == 30 else 97,
+                close_price=98 if rank == 30 else 102,
+                trade_volume=2000,
+            )
+
+        snapshot = self.save_snapshot(group.id, items)
+        radar_outcome_service.evaluate_watchlist_radar_outcome(
+            db=self.db,
+            group_id=group.id,
+            mode="action",
+            snapshot_run_id=snapshot["id"],
+        )
+
+        summary = radar_outcome_service.get_watchlist_radar_outcome_summary_for_scope(
+            db=self.db,
+            group_id=group.id,
+            mode="action",
+            snapshot_run_id=snapshot["id"],
+            item_limit=200,
+        )
+        summary_without_items = (
+            radar_outcome_service.get_watchlist_radar_outcome_summary_for_scope(
+                db=self.db,
+                group_id=group.id,
+                mode="action",
+                snapshot_run_id=snapshot["id"],
+                item_limit=0,
+            )
+        )
+
+        self.assertEqual(summary["total_count"], 30)
+        self.assertEqual(len(summary["items"]), 30)
+        self.assertEqual(summary["items"][-1]["rank"], 30)
+        self.assertEqual(summary["items"][-1]["status"], "miss")
+        self.assertEqual(
+            summary["items"][-1]["radar_item"]["indicator_snapshot"]["momentum"][
+                "rsi_14"
+            ],
+            75.0,
+        )
+        self.assertEqual(
+            summary["items"][-1]["radar_item"]["factor_scores"]["trend"],
+            30.0,
+        )
+        validated_summary = WatchlistRadarOutcomeSummaryRead.model_validate(summary)
+        self.assertEqual(len(validated_summary.items), 30)
+        self.assertEqual(summary_without_items["total_count"], 30)
+        self.assertEqual(summary_without_items["items"], [])
+
+    def test_selected_snapshot_exposes_evidence_before_evaluation(self) -> None:
+        group = self.add_group()
+        item = self.radar_item(
+            rank=1,
+            stock_id="2330",
+            bucket="volume_up",
+            close=100,
+        )
+        item["indicator_snapshot"] = {"momentum": {"rsi_14": 61.5}}
+        snapshot = self.save_snapshot(group.id, [item])
+
+        summary = radar_outcome_service.get_watchlist_radar_outcome_summary_for_scope(
+            db=self.db,
+            group_id=group.id,
+            mode="action",
+            snapshot_run_id=snapshot["id"],
+            item_limit=200,
+        )
+
+        self.assertEqual(summary["status"], "not_evaluated")
+        self.assertEqual(summary["total_count"], 0)
+        self.assertEqual(len(summary["items"]), 1)
+        self.assertEqual(summary["items"][0]["status"], "not_evaluated")
+        self.assertEqual(
+            summary["items"][0]["radar_item"]["indicator_snapshot"]["momentum"][
+                "rsi_14"
+            ],
+            61.5,
+        )
 
     def test_evaluate_snapshot_uses_complete_intraday_session_fallback(self) -> None:
         group = self.add_group()

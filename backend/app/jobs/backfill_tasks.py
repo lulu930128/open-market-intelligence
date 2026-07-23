@@ -22,6 +22,7 @@ from app.market.fundamental_metrics_backfill import (
 from app.market.monthly_revenue_history_backfill import ensure_stock_monthly_revenue_history
 from app.market.market_chips import refresh_market_chip_daily
 from app.market.indices import refresh_market_index_summary
+from app.market.taiwan_market_state import persist_taiwan_market_minute_state
 from app.market.shareholding_history_backfill import ensure_stock_shareholding_history
 from app.market.stock_selection_refresh import refresh_selected_stock_data
 from app.market.tw_derivatives import (
@@ -145,12 +146,15 @@ def run_market_index_summary_refresh_job(job_id: int) -> None:
     def worker(db: Session, progress: ProgressCallback):
         progress(0, 1, "Refreshing Taiwan market index summary.")
         payload = refresh_market_index_summary(db=db)
+        persistence = persist_taiwan_market_minute_state(db, payload=payload)
         progress(1, 1, "Taiwan market index summary refreshed.")
         return {
             "status": "success",
             "as_of": payload.get("as_of"),
             "source": payload.get("source"),
             "index_count": len(payload.get("indices") or []),
+            "minute_state_rows": persistence.get("inserted_count", 0)
+            + persistence.get("updated_count", 0),
         }
 
     run_tracked_job(job_id, worker)

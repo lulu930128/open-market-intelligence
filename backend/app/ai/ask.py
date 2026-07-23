@@ -13,6 +13,7 @@ from app.ai import (
     ask_response_support,
     ask_stages,
     decision_core,
+    decision_envelope,
     decision_engine,
     freshness,
     llm,
@@ -263,7 +264,10 @@ def ask(
         )
         progress.evidence_passport(response["evidence_passport"])
         progress.answer_ready(answer_ready=False, report_level="blocked")
-        return response
+        return decision_envelope.for_requested_contract(
+            response,
+            requested_contract_version=payload.contract_version,
+        )
     warnings: list[str] = []
     if not payload.position_context:
         try:
@@ -295,11 +299,15 @@ def ask(
     question_understanding = question_stage.question_understanding
     if resolution.clarification_required:
         progress.clarification_required()
-        return _clarification_response(
+        response = _clarification_response(
             payload=payload,
             resolution=resolution,
             requested_mode=requested_mode,
             policy=policy,
+        )
+        return decision_envelope.for_requested_contract(
+            response,
+            requested_contract_version=payload.contract_version,
         )
 
     effective_mode = _effective_mode(requested_mode, scope_type, policy, warnings)
@@ -416,7 +424,7 @@ def ask(
         payload=payload,
     )
 
-    return ask_finalizer.finalize_ask_response(
+    response = ask_finalizer.finalize_ask_response(
         payload=payload,
         resolution=resolution,
         requested_mode=requested_mode,
@@ -431,4 +439,8 @@ def ask(
         freshness_result=freshness_result,
         progress=progress,
         query_plan=query_plan_payload,
+    )
+    return decision_envelope.for_requested_contract(
+        response,
+        requested_contract_version=payload.contract_version,
     )

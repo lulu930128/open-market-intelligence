@@ -7,7 +7,7 @@ import time
 from types import SimpleNamespace
 
 import requests
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
@@ -76,6 +76,13 @@ from app.jp_market.trading_calendar import (
 )
 from app.jp_market.source_health import build_jp_source_health
 from app.market.calendar_status import build_jp_calendar_status
+from app.market.stock_volume_pace import (
+    build_stock_volume_pace,
+    intraday_history_needs_bootstrap,
+    latest_market_trade_date_points,
+    mutate_market_intraday_history,
+    previous_regular_close_from_history,
+)
 from app.market.technical_radar import (
     TechnicalRadarBar,
     build_technical_watchlist_radar,
@@ -3152,6 +3159,112 @@ def _apply_jp_intraday_previous_close_reference(
     return result
 
 
+def _jp_daily_volume_totals(db: Session, *, symbol: str) -> dict[date, int]:
+    rows = (
+        db.query(JPDailyPrice)
+        .filter(JPDailyPrice.symbol == symbol)
+        .filter(JPDailyPrice.trade_volume.isnot(None))
+        .order_by(JPDailyPrice.trade_date.desc(), JPDailyPrice.id.desc())
+        .limit(90)
+        .all()
+    )
+    totals: dict[date, int] = {}
+    for row in rows:
+        if row.trade_volume is None or row.trade_volume <= 0:
+            continue
+        totals[row.trade_date] = max(totals.get(row.trade_date, 0), int(row.trade_volume))
+    return totals
+
+
+def _persist_jp_intraday_history(
+    db: Session,
+    *,
+    symbol: str,
+    payload: dict,
+) -> dict:
+    result = _copy_jp_intraday_payload(payload)
+    if symbol.startswith("^") or not result.get("points"):
+        return result
+    try:
+        changed_count = mutate_market_intraday_history(
+            db,
+            provider="yahoo_finance_chart",
+            stock_id=symbol,
+            market="JP",
+            symbol=symbol,
+            interval="1m",
+            source=str(result.get("source") or "yahoo_finance_chart"),
+            source_url=result.get("source_url"),
+            points=result.get("points") or [],
+            market_timezone=JP_MARKET_TIMEZONE,
+        )
+        if changed_count:
+            db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        result.setdefault("warnings", []).append(
+            "Japan intraday history persistence failed; same-time volume coverage may be partial."
+        )
+    return result
+
+
+def _project_jp_intraday_payload(
+    payload: dict,
+    *,
+    db: Session | None,
+    symbol: str,
+) -> dict:
+    result = _copy_jp_intraday_payload(payload)
+    history_points = [
+        point for point in result.get("points") or [] if isinstance(point, dict)
+    ]
+    current_points = latest_market_trade_date_points(
+        history_points,
+        market_timezone=JP_MARKET_TIMEZONE,
+    )
+    result["points"] = current_points
+    result["point_count"] = len(current_points)
+    result["regular_point_count"] = sum(
+        1 for point in current_points if point.get("session", "regular") == "regular"
+    )
+    result["extended_point_count"] = 0
+    result["has_extended_hours"] = False
+    result["session_phase"] = current_points[-1].get("session") if current_points else None
+    regular_points = [
+        point for point in current_points if point.get("session", "regular") == "regular"
+    ]
+    if regular_points:
+        result["regular_session_close"] = regular_points[-1].get("price")
+        result["regular_session_close_time"] = regular_points[-1].get("time")
+
+    if current_points:
+        current_trade_date = datetime.fromisoformat(str(current_points[-1]["time"])).date()
+        previous_reference = previous_regular_close_from_history(
+            history_points,
+            market_timezone=JP_MARKET_TIMEZONE,
+            current_trade_date=current_trade_date,
+        )
+        if previous_reference is not None:
+            result.update(previous_reference)
+
+    if db is not None and not symbol.startswith("^"):
+        result["volume_pace"] = build_stock_volume_pace(
+            db,
+            stock_id=symbol,
+            market="JP",
+            current_points=regular_points,
+            market_timezone=JP_MARKET_TIMEZONE,
+            daily_totals=_jp_daily_volume_totals(db, symbol=symbol),
+            daily_source_name="jp_daily_price",
+            history_market="JP",
+            complete_day_min_ratio=0.55,
+            minimum_history_points_per_day=300,
+        )
+    else:
+        result["volume_pace"] = None
+    return result
+
+
 def get_jp_intraday_trend(
     *,
     symbol: str,
@@ -3165,15 +3278,31 @@ def get_jp_intraday_trend(
         cached = _get_fresh_jp_intraday_cache(cache_key)
         if cached is not None:
             return _apply_jp_intraday_previous_close_reference(
-                cached,
+                _project_jp_intraday_payload(
+                    cached,
+                    db=db,
+                    symbol=normalized_symbol,
+                ),
                 db=db,
                 symbol=normalized_symbol,
             )
 
     try:
+        range_value = (
+            "1d"
+            if normalized_symbol.startswith("^")
+            or db is None
+            or not intraday_history_needs_bootstrap(
+                db,
+                stock_id=normalized_symbol,
+                market="JP",
+                market_timezone=JP_MARKET_TIMEZONE,
+            )
+            else "5d"
+        )
         yahoo_payload, source_url = fetch_yahoo_chart_payload(
             symbol=normalized_symbol,
-            range_value="1d",
+            range_value=range_value,
             interval="1m",
             timeout_seconds=settings.jp_market_http_timeout_seconds,
         )
@@ -3182,6 +3311,12 @@ def get_jp_intraday_trend(
             symbol=normalized_symbol,
             source_url=source_url,
         )
+        if db is not None:
+            payload = _persist_jp_intraday_history(
+                db,
+                symbol=normalized_symbol,
+                payload=payload,
+            )
     except Exception as exc:
         payload = {
             "stock_id": normalized_symbol,
@@ -3206,7 +3341,11 @@ def get_jp_intraday_trend(
 
     payload = _set_jp_intraday_cache(cache_key, payload)
     return _apply_jp_intraday_previous_close_reference(
-        payload,
+        _project_jp_intraday_payload(
+            payload,
+            db=db,
+            symbol=normalized_symbol,
+        ),
         db=db,
         symbol=normalized_symbol,
     )

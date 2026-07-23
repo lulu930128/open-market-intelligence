@@ -15,6 +15,7 @@ from app.ai import streaming as ai_streaming
 from app.ai.schemas import (
     AiAskRequest,
     AiAskResponse,
+    AiDecisionEnvelope,
     AiDataEnvelope,
     AiMemoryCreate,
     AiMemoryRead,
@@ -213,7 +214,7 @@ def read_market_overview(
     )
 
 
-@router.post("/ask", response_model=AiAskResponse)
+@router.post("/ask", response_model=AiAskResponse | AiDecisionEnvelope)
 def ask_omi(
     request: Request,
     payload: AiAskRequest,

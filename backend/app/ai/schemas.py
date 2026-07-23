@@ -32,6 +32,7 @@ class AiDataEnvelope(BaseModel):
     missing: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     source_refs: list[dict[str, Any]] = Field(default_factory=list)
+    freshness: dict[str, Any] = Field(default_factory=dict)
     evidence_passport: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -149,6 +150,27 @@ class AiAskResponse(BaseModel):
     source_refs: list[dict[str, Any]] = Field(default_factory=list)
     evidence_passport: dict[str, Any] = Field(default_factory=dict)
     error: dict[str, Any] = Field(default_factory=dict)
+
+
+class AiDecisionEnvelope(BaseModel):
+    kind: str = "omi_decision"
+    contract_version: str = "omi.decision.v3"
+    ok: bool = True
+    request_status: str = "completed"
+    question: str
+    target: dict[str, Any] = Field(default_factory=dict)
+    mode: dict[str, Any] = Field(default_factory=dict)
+    action: str = "omi.ask"
+    caller_profile: str = "unknown"
+    status: dict[str, Any] = Field(default_factory=dict)
+    answer: dict[str, Any] = Field(default_factory=dict)
+    decision: dict[str, Any] = Field(default_factory=dict)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    limitations: dict[str, Any] = Field(default_factory=dict)
+    execution: dict[str, Any] = Field(default_factory=dict)
+    continuation: dict[str, Any] = Field(default_factory=dict)
+    error: dict[str, Any] = Field(default_factory=dict)
+    compatibility: dict[str, Any] = Field(default_factory=dict)
 
 
 class AiMemoryCreate(BaseModel):

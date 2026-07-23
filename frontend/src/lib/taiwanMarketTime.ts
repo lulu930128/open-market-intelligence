@@ -9,6 +9,8 @@ export const TAIWAN_SESSION_START_MINUTES = 9 * 60;
 export const TAIWAN_SESSION_END_MINUTES = 13 * 60 + 30;
 export const TAIWAN_DAILY_PRICE_RELEASE_MINUTES = 15 * 60 + 15;
 export const TAIWAN_MARKET_CHIP_REFRESH_MINUTES = 15 * 60 + 10;
+export const TAIWAN_MARKET_CHIP_MARGIN_REFRESH_MINUTES = 21 * 60 + 10;
+export const TAIWAN_MARKET_CHIP_REFRESH_EVENT = "omi:market-chip-refreshed";
 
 const TAIWAN_MARKET_HOLIDAYS = new Set([
   "2025-01-01",
@@ -196,44 +198,86 @@ export function getTaiwanMarketChipRefreshState(now = new Date()) {
 
   if (calendarStatus?.date === dateKey) {
     const marketChipRelease = calendarStatus.release_windows.market_chip_daily;
-    const nextRefreshMs =
-      msUntilIsoTime(marketChipRelease?.next_release_at, now) ?? 60_000;
+    const marginRelease =
+      calendarStatus.release_windows.market_chip_margin_daily;
+    const isReleased = (releaseAt: string | undefined, released: boolean | undefined) =>
+      Boolean(
+        released ||
+          (releaseAt && Date.parse(releaseAt) <= now.getTime())
+      );
+    const mainReleased = isReleased(
+      marketChipRelease?.release_at,
+      marketChipRelease?.is_released
+    );
+    const marginReleased = isReleased(
+      marginRelease?.release_at,
+      marginRelease?.is_released
+    );
+    const stage = marginReleased ? "margin" : "main";
+    const nextReleaseAt = marginReleased
+      ? marketChipRelease?.next_release_at
+      : mainReleased
+        ? marginRelease?.next_release_at
+        : marketChipRelease?.next_release_at;
+    const nextRefreshMs = msUntilIsoTime(nextReleaseAt, now) ?? 60_000;
 
     return {
       dateKey,
+      refreshKey: `${dateKey}:${stage}`,
+      stage,
       isTradingDay: calendarStatus.is_trading_day,
-      shouldRefreshNow: Boolean(marketChipRelease?.is_released),
+      shouldRefreshNow:
+        calendarStatus.is_trading_day && (stage === "margin" ? marginReleased : mainReleased),
       msUntilNextRefresh: nextRefreshMs,
     };
   }
 
   const isTradingDay = isTaiwanTradingDay(parts.year, parts.month, parts.day);
   const nowMs = now.getTime();
-  const releaseHour = Math.floor(TAIWAN_MARKET_CHIP_REFRESH_MINUTES / 60);
-  const releaseMinute = TAIWAN_MARKET_CHIP_REFRESH_MINUTES % 60;
-  const todayRefreshMs = taipeiBoundaryToUtcMs(
+  const mainReleaseHour = Math.floor(TAIWAN_MARKET_CHIP_REFRESH_MINUTES / 60);
+  const mainReleaseMinute = TAIWAN_MARKET_CHIP_REFRESH_MINUTES % 60;
+  const marginReleaseHour = Math.floor(
+    TAIWAN_MARKET_CHIP_MARGIN_REFRESH_MINUTES / 60
+  );
+  const marginReleaseMinute = TAIWAN_MARKET_CHIP_MARGIN_REFRESH_MINUTES % 60;
+  const todayMainRefreshMs = taipeiBoundaryToUtcMs(
     parts.year,
     parts.month,
     parts.day,
-    releaseHour,
-    releaseMinute
+    mainReleaseHour,
+    mainReleaseMinute
+  );
+  const todayMarginRefreshMs = taipeiBoundaryToUtcMs(
+    parts.year,
+    parts.month,
+    parts.day,
+    marginReleaseHour,
+    marginReleaseMinute
   );
   const nextWeekday = nextTaiwanWeekday(parts);
-  const nextRefreshMs =
-    isTradingDay && nowMs < todayRefreshMs
-      ? todayRefreshMs
+  const stage = nowMs >= todayMarginRefreshMs ? "margin" : "main";
+  const nextRefreshMs = isTradingDay && nowMs < todayMainRefreshMs
+    ? todayMainRefreshMs
+    : isTradingDay && nowMs < todayMarginRefreshMs
+      ? todayMarginRefreshMs
       : taipeiBoundaryToUtcMs(
           nextWeekday.year,
           nextWeekday.month,
           nextWeekday.day,
-          releaseHour,
-          releaseMinute
+          mainReleaseHour,
+          mainReleaseMinute
         );
 
   return {
     dateKey,
+    refreshKey: `${dateKey}:${stage}`,
+    stage,
     isTradingDay,
-    shouldRefreshNow: isTradingDay && nowMs >= todayRefreshMs,
+    shouldRefreshNow:
+      isTradingDay &&
+      (stage === "margin"
+        ? nowMs >= todayMarginRefreshMs
+        : nowMs >= todayMainRefreshMs),
     msUntilNextRefresh: Math.max(1_000, nextRefreshMs - nowMs),
   };
 }

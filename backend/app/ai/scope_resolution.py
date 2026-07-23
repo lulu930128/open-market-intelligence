@@ -53,6 +53,13 @@ JP_INDEX_TARGET_ALIASES = {
     "1306.T": "1306.T",
 }
 KR_INDEX_TARGET_IDS = set(KR_INDEX_CONFIG_BY_ID)
+DEFAULT_MARKET_CONTEXTS = {
+    "TW": ("market", None, "Taiwan Market"),
+    "US": ("us_stock", "^GSPC", "S&P 500"),
+    "JP": ("jp_index", "^N225", "Nikkei 225"),
+    "KR": ("kr_index", "KOSPI", "KOSPI"),
+    "CRYPTO": ("crypto_market", None, "Crypto Market"),
+}
 JP_MARKET_CONTEXT_HINTS = (
     "\u65e5\u80a1",
     "\u65e5\u672c",
@@ -227,6 +234,39 @@ class ScopeResolution:
     clarification_reason: str | None = None
     error_code: str | None = None
     error_message: str | None = None
+
+
+def _default_market_context_resolution(
+    market: Any,
+    *,
+    source: str,
+    label: str | None = None,
+    confidence: str = "high",
+) -> ScopeResolution:
+    normalized_market = str(market or "TW").strip().upper()
+    context = DEFAULT_MARKET_CONTEXTS.get(normalized_market)
+    if context is None:
+        return ScopeResolution(
+            selected_scope_type="market",
+            selected_market=normalized_market,
+            display_name=label or normalized_market,
+            confidence=confidence,
+            source=source,
+            error_code="UNSUPPORTED_MARKET_SCOPE",
+            error_message=(
+                f"Market-level OMI context is not supported for {normalized_market}."
+            ),
+        )
+    scope_type, scope_id, default_label = context
+    return ScopeResolution(
+        selected_scope_type=scope_type,
+        selected_scope_id=scope_id,
+        selected_market=normalized_market,
+        display_name=label or default_label,
+        confidence=confidence,
+        source=source,
+        candidates=(),
+    )
 
 
 def _contains_hint(question: str, hints: tuple[str, ...]) -> bool:
@@ -1422,6 +1462,12 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
     question = payload.question
 
     if requested_target_type != "auto":
+        if requested_target_type == "market":
+            return _default_market_context_resolution(
+                target_market or "TW",
+                source="explicit_market_context",
+                label=requested_label,
+            )
         scope_type = TARGET_TYPE_TO_INTERNAL_SCOPE.get(requested_target_type)
         if scope_type is None:
             return _clarify_scope(
@@ -2013,11 +2059,10 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
         return us_symbol_resolution
 
     if _contains_hint(question, MARKET_HINTS):
-        return ScopeResolution(
-            selected_scope_type="market",
-            confidence="medium",
+        return _default_market_context_resolution(
+            target_market or "TW",
             source="market_hint",
-            candidates=(),
+            confidence="medium",
         )
 
     conversation_resolution = _conversation_target_resolution(db, payload)
@@ -2033,6 +2078,13 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
             "stock",
             question,
             "Question looks like a stock analysis request but no stock id or stock name was resolved.",
+        )
+
+    if target_market:
+        return _default_market_context_resolution(
+            target_market,
+            source="ambient_market_context",
+            confidence="medium",
         )
 
     return ScopeResolution(

@@ -336,7 +336,7 @@ export type WatchlistRadarOutcomeStatus =
   | string;
 
 export type WatchlistRadarOutcomeItemRead = {
-  id: number;
+  id: number | null;
   snapshot_item_id: number;
   rank: number;
   stock_id: string;
@@ -359,6 +359,7 @@ export type WatchlistRadarOutcomeItemRead = {
   max_adverse_pct: number | null;
   intraday_range_pct: number | null;
   volume_change_pct: number | null;
+  radar_item: WatchlistRadarItemRead | null;
 };
 
 export type WatchlistRadarOutcomeBucketSummaryRead = {
@@ -564,6 +565,19 @@ export type MarketIndexSummary = {
   warnings?: string[];
 };
 
+export type MarketChipResourceStatus = {
+  resource: string;
+  status: "ready" | "partial" | "stale" | "missing" | "not_available" | string;
+  data_date: string | null;
+  expected_data_date: string | null;
+  pending_trade_date: string | null;
+  source: string | null;
+  reason: string | null;
+  coverage_count: number | null;
+  total_count: number | null;
+  warnings: string[];
+};
+
 export type MarketChipDaily = {
   id: number;
   index_id: string;
@@ -593,6 +607,8 @@ export type MarketChipDaily = {
   margin_balance_change_value: number | null;
   margin_balance_change_shares: number | null;
   short_balance_change_shares: number | null;
+  margin_status: MarketChipResourceStatus;
+  government_bank_status: MarketChipResourceStatus;
   source_grade: string;
   source_details: Record<string, unknown> | null;
   created_at: string;
@@ -791,6 +807,31 @@ export type IntradayTrendPoint = {
   trade_value?: number | null;
 };
 
+export type StockVolumePaceBaseline = {
+  requested_days: number;
+  sample_days: number;
+  minimum_display_sample_days: number;
+  median_cumulative_volume: number | null;
+  pace_ratio: number | null;
+  difference_pct: number | null;
+  history_trade_dates: string[];
+};
+
+export type StockVolumePace = {
+  kind: string;
+  stock_id: string;
+  market: string;
+  session_scope: "regular";
+  status: "ready" | "partial" | "empty";
+  as_of: string | null;
+  trade_date: string | null;
+  comparison_minute: string | null;
+  current_cumulative_volume: number | null;
+  same_time_baseline_5d: StockVolumePaceBaseline;
+  same_time_baseline_20d: StockVolumePaceBaseline;
+  warnings: string[];
+};
+
 export type IntradayTrendResponse = {
   stock_id: string;
   symbol: string | null;
@@ -810,6 +851,7 @@ export type IntradayTrendResponse = {
   regular_session_close_provider?: string | null;
   point_count: number;
   points: IntradayTrendPoint[];
+  volume_pace?: StockVolumePace | null;
   as_of?: string | null;
   total_volume?: number | null;
   volume_unit?: string;
@@ -970,6 +1012,106 @@ export type OvernightImpactBasket = {
   source: string;
 };
 
+export type AdrParityRead = {
+  kind: string;
+  status: "ready" | "partial" | "stale" | string;
+  is_current: boolean;
+  stock_id: string;
+  stock_name: string | null;
+  mapping: {
+    stock_id: string;
+    stock_name: string;
+    adr_symbol: string;
+    adr_name: string;
+    adr_exchange: string;
+    local_shares_per_adr: number;
+    source_label: string;
+    source_url: string;
+    verified_on: string;
+  };
+  formula: string;
+  adr_close_usd: number | null;
+  adr_trade_date: string | null;
+  adr_provider: string | null;
+  expected_adr_trade_date: string | null;
+  usd_twd: number | null;
+  fx_source_symbol: string | null;
+  fx_provider: string | null;
+  fx_as_of: string | null;
+  fx_age_seconds: number | null;
+  tw_reference_price_twd: number | null;
+  tw_reference_trade_date: string | null;
+  target_tw_trade_date: string | null;
+  implied_tw_price_twd: number | null;
+  implied_gap_pct: number | null;
+  parity_adr_price_usd: number | null;
+  tw_comparison_price_twd: number | null;
+  tw_comparison_trade_date: string | null;
+  tw_comparison_as_of: string | null;
+  tw_comparison_source: string | null;
+  tw_session_phase: string | null;
+  comparison_mode: string;
+  remaining_gap_pct: number | null;
+  missing: string[];
+  warnings: string[];
+  source_refs: Array<Record<string, string>>;
+  freshness: Record<string, unknown>;
+};
+
+export type FxTrendRead = {
+  status: string;
+  source_symbol: string | null;
+  provider: string | null;
+  usd_twd: number | null;
+  data_date: string | null;
+  as_of: string | null;
+  age_seconds: number | null;
+  history_points: number;
+  usd_twd_change_1d_pct: number | null;
+  usd_twd_change_5d_pct: number | null;
+  usd_twd_change_20d_pct: number | null;
+  twd_change_1d_pct: number | null;
+  twd_change_5d_pct: number | null;
+  twd_change_20d_pct: number | null;
+  regime: string;
+};
+
+export type ForeignFlowWindowRead = {
+  days: number;
+  available_days: number;
+  net_value_twd: number | null;
+  turnover_twd: number | null;
+  turnover_ratio_pct: number | null;
+  net_shares: number | null;
+};
+
+export type ForeignFlowRead = {
+  scope: string;
+  status: string;
+  state: string;
+  state_basis_days: number | null;
+  trade_date: string | null;
+  expected_trade_date: string;
+  windows: ForeignFlowWindowRead[];
+};
+
+export type FxFlowContextRead = {
+  kind: string;
+  status: "ready" | "partial" | "stale" | string;
+  is_current: boolean;
+  stock_id: string;
+  signal: string;
+  signal_horizon_days: number;
+  causality: string;
+  fx: FxTrendRead;
+  market_foreign: ForeignFlowRead;
+  stock_foreign: ForeignFlowRead;
+  missing: string[];
+  warnings: string[];
+  source_refs: Array<Record<string, string>>;
+  freshness: Record<string, unknown>;
+};
+
 export type OvernightImpactRead = {
   kind: string;
   stock_id: string;
@@ -991,6 +1133,8 @@ export type OvernightImpactRead = {
     profiles: string[];
     reason: string;
   };
+  adr_parity?: AdrParityRead | null;
+  fx_flow_context?: FxFlowContextRead | null;
   factors: OvernightImpactFactor[];
   baskets: OvernightImpactBasket[];
   missing: string[];

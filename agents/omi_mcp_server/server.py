@@ -174,19 +174,23 @@ ASK_TOOL: dict[str, Any] = {
     "name": "omi.ask",
     "title": "Ask OMI",
     "description": (
-        "Open Market Intelligence v2 entry point. Send a natural-language question "
+        "Canonical Open Market Intelligence decision entry point. Send a natural-language question "
         "and optional target; OMI resolves the target, returns clarification when "
         "needed, and provides read-only evidence, brief, or trusted analysis. "
-        "For user-facing watchlist or sector answers, prefer analysis.human_answer "
-        "over raw result/missing/debug fields."
+        "All consumers should read answer, decision, evidence, limitations, and status "
+        "from the omi.decision.v3 envelope."
     ),
     "inputSchema": {
         "type": "object",
         "properties": {
             "contract_version": {
                 "type": "string",
-                "default": "omi.ai.ask.v2",
-                "description": "OMI ask contract version. Use omi.ai.ask.v2.",
+                "enum": ["omi.decision.v3", "omi.ai.ask.v2"],
+                "default": "omi.decision.v3",
+                "description": (
+                    "OMI decision contract. Use omi.decision.v3; "
+                    "omi.ai.ask.v2 remains available for compatibility."
+                ),
             },
             "question": {"type": "string"},
             "target": {
@@ -216,8 +220,8 @@ ASK_TOOL: dict[str, Any] = {
                 "type": "boolean",
                 "default": True,
                 "description": (
-                    "MCP transport projection only. Set false to return a bounded answer summary "
-                    "without raw result packs, source references, prompts, or full evidence arrays."
+                    "Legacy v2 transport projection only. omi.decision.v3 always keeps the "
+                    "canonical envelope so every consumer receives the same semantics."
                 ),
             },
             "strategy_profile": {
@@ -1430,7 +1434,7 @@ def _ask_payload(arguments: dict[str, Any]) -> dict[str, Any]:
     allow_external_fetch = _default_allow_external_fetch(arguments)
     market_data_params = _merge_market_data_params(arguments)
     return {
-        "contract_version": arguments.get("contract_version", "omi.ai.ask.v2"),
+        "contract_version": arguments.get("contract_version", "omi.decision.v3"),
         "question": _require(arguments, "question"),
         "target": arguments.get("target") or {"type": "auto"},
         "mode": arguments.get("mode", "auto"),
@@ -1543,6 +1547,8 @@ def _bounded_summary_value(value: Any, *, depth: int = 0) -> Any:
 def _summarize_ask_response(response: Any) -> Any:
     if not isinstance(response, dict):
         return response
+    if response.get("contract_version") == "omi.decision.v3":
+        return response
 
     output: dict[str, Any] = {
         "kind": "omi_ask_summary",
@@ -1622,7 +1628,10 @@ def _summarize_ask_response(response: Any) -> Any:
                     "quote",
                     "technical",
                     "breadth",
+                    "breadth_by_market",
                     "sample_breadth",
+                    "sample_coverage",
+                    "volume_state",
                     "sample_top_gainers",
                     "sample_top_losers",
                     "sample_value_leaders",
@@ -1954,7 +1963,8 @@ def _handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
                     "Use omi.ask as the public entry point, or omi.ask_stream when collected stream events are useful. "
                     "It is read-only by default; "
                     "report generation requires a server-side trusted request. Do not treat missing data as a conclusion. "
-                    "When omi.ask returns analysis.human_answer, use that concise answer first and do not expose raw dataset keys unless asked."
+                    "Read omi.decision.v3 through answer, decision, evidence, limitations, and status; "
+                    "do not reconstruct market semantics in the MCP client."
                 ),
             },
         )

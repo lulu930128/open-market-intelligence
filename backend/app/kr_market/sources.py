@@ -677,6 +677,7 @@ def parse_yahoo_intraday_prices(
     points: list[dict] = []
     cumulative_volume = 0
     has_volume = False
+    cumulative_trade_date: date | None = None
 
     for index, timestamp in enumerate(timestamps):
         price = _parse_float(_list_value(closes, index))
@@ -687,6 +688,11 @@ def parse_yahoo_intraday_prices(
         minutes = point_time.hour * 60 + point_time.minute + point_time.second / 60
         if not 9 * 60 <= minutes <= 15 * 60 + 30:
             continue
+
+        if cumulative_trade_date != point_time.date():
+            cumulative_trade_date = point_time.date()
+            cumulative_volume = 0
+            has_volume = False
 
         volume = _parse_int(_list_value(volumes, index))
         if volume is not None and volume >= 0:

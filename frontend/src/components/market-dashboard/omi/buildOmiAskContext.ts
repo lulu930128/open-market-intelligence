@@ -1,8 +1,15 @@
 import type { OmiAskDockContext } from "@/components/OmiAskDock";
 import type { MarketRegion } from "@/components/market-dashboard/selection/dashboardRoutes";
 import type { TranslationFunction } from "@/i18n";
-import { getJpMarketIndexConfig } from "@/lib/jpMarketIndices";
-import { getKrMarketIndexConfig } from "@/lib/krMarketIndices";
+import {
+  getJpMarketIndexConfig,
+  getJpPrimaryMarketIndexConfig,
+} from "@/lib/jpMarketIndices";
+import {
+  getKrMarketIndexConfig,
+  getKrPrimaryMarketIndexConfig,
+} from "@/lib/krMarketIndices";
+import { getUsPrimaryMarketIndexConfig } from "@/lib/usMarketIndices";
 import type { JPStockMasterRead, KRStockMasterRead } from "@/types/market";
 
 type BuildOmiAskContextInput = {
@@ -71,20 +78,38 @@ export function buildOmiAskContext({
       };
     }
 
+    if (selectedUsGroupId !== null) {
+      return {
+        market: "us",
+        label: selectedUsGroupName
+          ? t("dashboard.ranking.usLabel", { groupName: selectedUsGroupName })
+          : t("dashboard.ranking.usMarket"),
+        target: {
+          type: "us_watchlist",
+          id: String(selectedUsGroupId),
+          market: "US",
+          label: selectedUsGroupName ?? String(selectedUsGroupId),
+        },
+        uiContext: {
+          market: "us",
+          selected_group_id: selectedUsGroupId,
+          selected_group_name: selectedUsGroupName,
+        },
+      };
+    }
+
+    const primaryUsIndex = getUsPrimaryMarketIndexConfig();
     return {
       market: "us",
-      label: selectedUsGroupName
-        ? t("dashboard.ranking.usLabel", { groupName: selectedUsGroupName })
-        : t("dashboard.ranking.usMarket"),
+      label: primaryUsIndex.name,
       target: {
-        type: "auto",
+        type: "us_stock",
+        id: primaryUsIndex.symbol,
         market: "US",
-        label: selectedUsGroupName ?? t("dashboard.ranking.usMarket"),
+        label: primaryUsIndex.name,
       },
       uiContext: {
         market: "us",
-        selected_group_id: selectedUsGroupId,
-        selected_group_name: selectedUsGroupName,
       },
     };
   }
@@ -119,18 +144,36 @@ export function buildOmiAskContext({
       };
     }
 
+    if (selectedJpGroupId !== null) {
+      return {
+        market: "jp",
+        label: selectedJpGroupName ?? t("jpMarket.askMarketLabel"),
+        target: {
+          type: "jp_watchlist",
+          id: String(selectedJpGroupId),
+          market: "JP",
+          label: selectedJpGroupName ?? String(selectedJpGroupId),
+        },
+        uiContext: {
+          market: "jp",
+          selected_group_id: selectedJpGroupId,
+          selected_group_name: selectedJpGroupName,
+        },
+      };
+    }
+
+    const primaryJpIndex = getJpPrimaryMarketIndexConfig();
     return {
       market: "jp",
-      label: t("jpMarket.askMarketLabel"),
+      label: primaryJpIndex.name,
       target: {
-        type: "market",
+        type: "jp_index",
+        id: primaryJpIndex.symbol,
         market: "JP",
-        label: t("jpMarket.askMarketLabel"),
+        label: primaryJpIndex.name,
       },
       uiContext: {
         market: "jp",
-        selected_group_id: selectedJpGroupId,
-        selected_group_name: selectedJpGroupName,
       },
     };
   }
@@ -164,18 +207,36 @@ export function buildOmiAskContext({
       };
     }
 
+    if (selectedKrGroupId !== null) {
+      return {
+        market: "kr",
+        label: selectedKrGroupName ?? t("krMarket.askMarketLabel"),
+        target: {
+          type: "kr_watchlist",
+          id: String(selectedKrGroupId),
+          market: "KR",
+          label: selectedKrGroupName ?? String(selectedKrGroupId),
+        },
+        uiContext: {
+          market: "kr",
+          selected_group_id: selectedKrGroupId,
+          selected_group_name: selectedKrGroupName,
+        },
+      };
+    }
+
+    const primaryKrIndex = getKrPrimaryMarketIndexConfig();
     return {
       market: "kr",
-      label: t("krMarket.askMarketLabel"),
+      label: primaryKrIndex.name,
       target: {
-        type: "market",
+        type: "kr_index",
+        id: primaryKrIndex.indexId,
         market: "KR",
-        label: t("krMarket.askMarketLabel"),
+        label: primaryKrIndex.name,
       },
       uiContext: {
         market: "kr",
-        selected_group_id: selectedKrGroupId,
-        selected_group_name: selectedKrGroupName,
       },
     };
   }

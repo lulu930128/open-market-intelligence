@@ -136,7 +136,17 @@ def read_tw_index_context(
     market_chip: dict[str, Any] | None = None
     try:
         chip_row = dependencies.get_latest_market_chip_daily(db, index_id=normalized_index_id)
-        market_chip = _json_dict(market_chip_daily_to_dict(chip_row)) if chip_row is not None else None
+        market_chip = (
+            _json_dict(
+                market_chip_daily_to_dict(
+                    chip_row,
+                    db=db,
+                    resolve_expected_margin=True,
+                )
+            )
+            if chip_row is not None
+            else None
+        )
         if market_chip is None:
             missing.append("market_chip_daily")
     except Exception as exc:

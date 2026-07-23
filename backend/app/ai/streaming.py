@@ -82,6 +82,26 @@ def _lines_from_report(report: dict[str, Any]) -> list[str]:
 
 
 def extract_answer_text(response: dict[str, Any]) -> str:
+    canonical_answer = (
+        response.get("answer")
+        if isinstance(response.get("answer"), dict)
+        else {}
+    )
+    canonical_text = _first_text(
+        canonical_answer.get("text"),
+        canonical_answer.get("detail"),
+        canonical_answer.get("headline"),
+    )
+    if canonical_text:
+        return canonical_text
+    canonical_summary = canonical_answer.get("summary")
+    if isinstance(canonical_summary, list) and canonical_summary:
+        return "\n".join(
+            str(line)
+            for line in canonical_summary
+            if str(line).strip()
+        )
+
     analysis = response.get("analysis") if isinstance(response.get("analysis"), dict) else {}
     result = response.get("result") if isinstance(response.get("result"), dict) else {}
     data = result.get("data") if isinstance(result.get("data"), dict) else {}
@@ -247,7 +267,14 @@ def iter_ask_sse_events(
 
             if event_kind == "error":
                 yield sse_event("error", _error_payload(event_payload))
-                yield sse_event("done", {"ok": False})
+                yield sse_event(
+                    "done",
+                    {
+                        "ok": False,
+                        "transport_ok": False,
+                        "request_status": "transport_error",
+                    },
+                )
                 return
 
             if event_kind == "response":
@@ -264,14 +291,32 @@ def iter_ask_sse_events(
             "error",
             {"status_code": 500, "error": "OMI stream worker finished without a response.", "kind": "internal_error"},
         )
-        yield sse_event("done", {"ok": False})
+        yield sse_event(
+            "done",
+            {
+                "ok": False,
+                "transport_ok": False,
+                "request_status": "transport_error",
+            },
+        )
         return
 
-    evidence = response.get("evidence_passport")
+    canonical_evidence = (
+        response.get("evidence")
+        if isinstance(response.get("evidence"), dict)
+        else {}
+    )
+    evidence = response.get("evidence_passport") or canonical_evidence.get("passport")
     if isinstance(evidence, dict) and evidence:
         yield sse_event("evidence", evidence)
 
-    for tool_run in response.get("tool_runs") or []:
+    canonical_execution = (
+        response.get("execution")
+        if isinstance(response.get("execution"), dict)
+        else {}
+    )
+    tool_runs = response.get("tool_runs") or canonical_execution.get("tool_runs") or []
+    for tool_run in tool_runs:
         if isinstance(tool_run, dict):
             yield sse_event("tool_run", _tool_run_event_payload(tool_run))
 
@@ -291,4 +336,12 @@ def iter_ask_sse_events(
         yield sse_event("delta", {"text": chunk})
 
     yield sse_event("final", response)
-    yield sse_event("done", {"ok": True})
+    business_ok = response.get("ok") is not False
+    yield sse_event(
+        "done",
+        {
+            "ok": business_ok,
+            "transport_ok": True,
+            "request_status": response.get("request_status") or "completed",
+        },
+    )

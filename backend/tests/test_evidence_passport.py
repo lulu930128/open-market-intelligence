@@ -43,6 +43,19 @@ class EvidencePassportTests(unittest.TestCase):
         self.assertEqual(passport["source_grade"], "official")
         self.assertTrue(passport["source_breakdown"])
 
+    def test_minute_market_state_is_labeled_as_derived_evidence(self) -> None:
+        passport = build_evidence_passport(
+            kind="market_overview",
+            as_of="2026-07-22T13:30:00+08:00",
+            source_refs=[
+                {"type": "table", "name": "taiwan_market_minute_state"}
+            ],
+            freshness={"is_current": True, "missing": [], "warnings": []},
+        )
+
+        self.assertEqual(passport["source_grade"], "derived")
+        self.assertEqual(passport["source_breakdown"][0]["grade"], "derived")
+
     def test_mixed_stale_evidence_is_downgraded(self) -> None:
         passport = build_evidence_passport(
             kind="stock_context",

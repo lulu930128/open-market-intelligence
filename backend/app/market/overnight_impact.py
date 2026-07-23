@@ -9,7 +9,9 @@ from sqlalchemy.orm import Session
 
 from app.ai.evidence_passport import build_evidence_passport
 from app.db.models import StockMaster, USDailyPrice, USWatchlistGroup, USWatchlistItem
+from app.market.adr_parity import build_adr_parity_report, get_adr_mapping
 from app.market.calendar_status import expected_us_trade_date
+from app.market.fx_flow_context import build_fx_flow_context
 from app.us_market import service as us_market_service
 
 
@@ -411,12 +413,26 @@ def _factor_weights_for_mapping(mapping: dict[str, Any]) -> tuple[dict[str, floa
 
 def _required_factor_symbols(mapping: dict[str, Any], *, max_symbols: int = 8) -> list[dict[str, Any]]:
     factor_weights, _basket_weights = _factor_weights_for_mapping(mapping)
+    limit = max(max_symbols, 1)
     ranked = sorted(
         factor_weights.items(),
         key=lambda item: (-item[1], item[0]),
     )
     symbols: list[dict[str, Any]] = []
-    for symbol, weight in ranked[: max(max_symbols, 1)]:
+    direct_mapping = get_adr_mapping(str(mapping.get("stock_id") or ""))
+    if direct_mapping is not None:
+        symbols.append(
+            {
+                "symbol": direct_mapping.adr_symbol,
+                "label": direct_mapping.adr_name,
+                "role": "direct_adr",
+                "weight": factor_weights.get(direct_mapping.adr_symbol, 0.0),
+            }
+        )
+
+    for symbol, weight in ranked:
+        if any(item["symbol"] == symbol for item in symbols):
+            continue
         spec = INDEX_FACTORS[symbol]
         symbols.append(
             {
@@ -426,7 +442,9 @@ def _required_factor_symbols(mapping: dict[str, Any], *, max_symbols: int = 8) -
                 "weight": weight,
             }
         )
-    return symbols
+        if len(symbols) >= limit:
+            break
+    return symbols[:limit]
 
 
 def scan_us_overnight_impact_gaps(
@@ -702,6 +720,19 @@ def build_us_overnight_impact_report(
     ]
     as_of = max(as_of_values) if as_of_values else None
     expected_trade_date = expected_us_daily_price_date()
+    generated_at = _now()
+    adr_parity = build_adr_parity_report(
+        db,
+        normalized_stock_id,
+        stock_name=stock.stock_name,
+        expected_adr_trade_date=expected_trade_date,
+        generated_at=generated_at,
+    )
+    fx_flow_context = build_fx_flow_context(
+        db,
+        normalized_stock_id,
+        generated_at=generated_at,
+    )
     stale_dates = [
         value
         for value in as_of_values
@@ -737,6 +768,9 @@ def build_us_overnight_impact_report(
         {"type": "table", "name": "us_watchlist_item"},
         {"type": "derived", "name": "app.market.overnight_impact"},
     ]
+    if adr_parity is not None:
+        source_refs.extend(adr_parity.get("source_refs") or [])
+    source_refs.extend(fx_flow_context.get("source_refs") or [])
     is_current = bool(as_of_values) and not stale_dates and not missing
     freshness = {
         "expected_trade_date": expected_trade_date.isoformat(),
@@ -778,7 +812,7 @@ def build_us_overnight_impact_report(
         "stock_id": normalized_stock_id,
         "stock_name": stock.stock_name,
         "as_of": as_of,
-        "generated_at": _now(),
+        "generated_at": generated_at,
         "stance": reported_stance,
         "title": reported_title,
         "summary": reported_summary,
@@ -786,6 +820,8 @@ def build_us_overnight_impact_report(
         "weighted_change_pct": _round(reported_weighted_change_pct),
         "confidence": reported_confidence,
         "tw_mapping": mapping,
+        "adr_parity": adr_parity,
+        "fx_flow_context": fx_flow_context,
         "factors": factors,
         "baskets": baskets,
         "missing": reported_missing,
@@ -805,6 +841,14 @@ def build_us_overnight_impact_report(
             "score": reported_score,
             "weighted_change_pct": reported_weighted_change_pct,
             "mapping_profiles": mapping.get("profiles"),
+            "adr_parity_status": (
+                adr_parity.get("status") if adr_parity is not None else "not_applicable"
+            ),
+            "adr_implied_gap_pct": (
+                adr_parity.get("implied_gap_pct") if adr_parity is not None else None
+            ),
+            "fx_flow_status": fx_flow_context.get("status"),
+            "fx_flow_signal": fx_flow_context.get("signal"),
         },
         confidence=reported_confidence,
     )

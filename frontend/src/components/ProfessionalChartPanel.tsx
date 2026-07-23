@@ -13,6 +13,7 @@ import type {
   ChartTimeMode,
 } from "@/components/LightweightKLineChart";
 import type { ChartPoint, StockIndicatorPoint } from "@/types/market";
+import type { ChartEventMarker } from "@/components/chart/chartEventMarkers";
 import { useT } from "@/i18n";
 import dynamic from "next/dynamic";
 import type { ReactNode } from "react";
@@ -68,6 +69,7 @@ type Props<TTimeframe extends string> = {
   indicatorParameters: IndicatorParameters;
   benchmarkData?: ChartPoint[];
   benchmarkLabel?: string;
+  eventMarkers?: ChartEventMarker[];
   volumePanelLabel?: string;
   volumeValueKey?: "volume" | "trade_value";
   pricePrecision?: number;
@@ -104,6 +106,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
   drawingToolbarStart,
   drawings,
   emptyState,
+  eventMarkers,
   historyCounts,
   indicatorData,
   indicatorMenu,
@@ -352,6 +355,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
           indicatorParameters={indicatorParameters}
           benchmarkData={benchmarkData}
           benchmarkLabel={benchmarkLabel}
+          eventMarkers={eventMarkers}
           volumePanelLabel={volumePanelLabel}
           volumeValueKey={volumeValueKey}
           pricePrecision={pricePrecision}

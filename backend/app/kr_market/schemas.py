@@ -386,6 +386,7 @@ class KRIndexIntradayTrendRead(BaseModel):
 class KRStockIntradayTrendRead(KRIndexIntradayTrendRead):
     volume_unit: str = "shares"
     trade_value_unit: str = "krw"
+    volume_pace: dict | None = None
 
 
 class KRResourceSlotRead(BaseModel):

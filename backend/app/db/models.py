@@ -1729,6 +1729,55 @@ class MarketIndexDailyStat(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class TaiwanMarketMinuteState(Base):
+    __tablename__ = "taiwan_market_minute_state"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "market",
+            "index_id",
+            "minute_at",
+            name="uq_tw_market_minute_state_market_index_time",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    market: Mapped[str] = mapped_column(String(20), index=True)
+    index_id: Mapped[str] = mapped_column(String(20), index=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+    minute_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+    session_status: Mapped[str] = mapped_column(String(30), index=True)
+    breadth_status: Mapped[str] = mapped_column(String(30), index=True)
+    breadth_scope: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    quality_status: Mapped[str] = mapped_column(String(30), index=True)
+
+    index_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    index_change: Mapped[float | None] = mapped_column(Float, nullable=True)
+    index_change_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    advance_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    decline_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    unchanged_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    limit_up_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    limit_down_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    unknown_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    missing_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    cumulative_trade_value: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    estimated_full_day_trade_value: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    source: Mapped[str] = mapped_column(String(120), index=True)
+    source_category: Mapped[str] = mapped_column(String(40), index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    official_flag: Mapped[bool] = mapped_column(Boolean, default=False)
+    derived_flag: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class MarketChipDaily(Base):
     __tablename__ = "market_chip_daily"
 

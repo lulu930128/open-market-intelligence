@@ -19,6 +19,7 @@ from app.db.models import (
     StockMaster,
 )
 from app.market.indicator_service import calculate_indicator_points_from_ohlc_points
+from app.market.schemas import TechnicalReportRead
 from app.market.technical_report import TAIPEI_TZ, build_stock_technical_report
 
 
@@ -183,6 +184,10 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(report["value_label"], "vs MA20")
         self.assertTrue(report["rows"])
         self.assertIn("daily_indicator", report["data"])
+        self.assertEqual(
+            report["data"]["current_state"]["version"],
+            "tw_technical_current_state_v1",
+        )
         self.assertEqual(report["evidence_passport"]["target_kind"], "tw_stock_technical_report")
         self.assertIn(report["evidence_passport"]["trust_level"], {"high", "medium", "low"})
         self.assertTrue(
@@ -239,6 +244,40 @@ class TechnicalReportTests(unittest.TestCase):
         self.assertEqual(
             report["evidence_passport"]["as_of"],
             "2026-03-23T10:00:00+08:00",
+        )
+
+    def test_daily_report_uses_finalized_daily_state_after_close(self) -> None:
+        self.db.query(MarketDailyPrice).filter(
+            MarketDailyPrice.trade_date > date(2026, 3, 20)
+        ).delete(synchronize_session=False)
+        self.db.commit()
+
+        with (
+            patch(
+                "app.market.technical_report._now",
+                return_value=datetime(2026, 3, 20, 19, 0, tzinfo=TAIPEI_TZ),
+            ),
+            patch(
+                "app.market.technical_report.get_intraday_trend"
+            ) as intraday,
+        ):
+            report = build_stock_technical_report(
+                db=self.db,
+                stock_id="2330",
+                timeframe="daily",
+                include_intraday=True,
+            )
+
+        intraday.assert_not_called()
+        self.assertEqual(report["phase"], "daily")
+        self.assertEqual(report["confidence"], "high")
+        self.assertFalse(report["data"]["price_context"]["is_provisional"])
+        self.assertEqual(report["data"]["price_context"]["price_time"], "2026-03-20")
+        self.assertFalse(
+            any(
+                badge["label"] == "盤中價 × 已收盤指標"
+                for badge in report["badges"]
+            )
         )
 
     def test_weekly_and_monthly_reports_return_scored_rows(self) -> None:
@@ -717,9 +756,116 @@ class TechnicalReportTests(unittest.TestCase):
 
         self.assertEqual(report["phase"], "opening")
         self.assertEqual(report["confidence"], "low")
+        self.assertEqual(report["score"], 0)
+        TechnicalReportRead.model_validate(report)
         self.assertEqual(report["value_label"], "vs 昨收")
         self.assertGreater(report["value"], 0)
         self.assertTrue(any(row["key"] == "daily_background" for row in report["rows"]))
+
+    def test_today_report_stale_intraday_preserves_response_score_contract(self) -> None:
+        with (
+            patch(
+                "app.market.technical_report._now",
+                return_value=datetime(2026, 3, 24, 8, 30, tzinfo=TAIPEI_TZ),
+            ),
+            patch(
+                "app.market.technical_report.get_intraday_trend",
+                return_value={
+                    "stock_id": "2330",
+                    "symbol": "2330",
+                    "source": "test_intraday",
+                    "previous_close": 180.0,
+                    "point_count": 1,
+                    "points": [
+                        {
+                            "time": "2026-03-23T13:30:00+08:00",
+                            "price": 183.0,
+                            "volume": 3_000,
+                            "open": 182.0,
+                            "high": 183.0,
+                            "low": 182.0,
+                        }
+                    ],
+                },
+            ),
+        ):
+            report = build_stock_technical_report(
+                db=self.db,
+                stock_id="2330",
+                timeframe="today",
+                include_intraday=True,
+            )
+
+        self.assertEqual(report["phase"], "stale_intraday")
+        self.assertEqual(report["score"], 0)
+        self.assertFalse(report["data"]["intraday"]["score_eligible"])
+        TechnicalReportRead.model_validate(report)
+
+    def test_today_report_uses_same_time_volume_pace_instead_of_daily_average(self) -> None:
+        points = [
+            {
+                "time": f"2026-03-23T10:{minute:02d}:00+08:00",
+                "price": 181.0 + minute / 100,
+                "volume": 1_000,
+                "open": 181.0,
+                "high": 182.0,
+                "low": 180.0,
+            }
+            for minute in range(6)
+        ]
+        volume_pace = {
+            "kind": "tw_stock_same_time_volume_pace",
+            "stock_id": "2330",
+            "status": "ready",
+            "as_of": "2026-03-23T10:05:00+08:00",
+            "trade_date": "2026-03-23",
+            "comparison_minute": "10:05",
+            "calculation_basis": "same-time test baseline",
+            "current_cumulative_volume": 6_000,
+            "same_time_baseline_5d": {
+                "sample_days": 5,
+                "pace_ratio": 1.5,
+            },
+            "same_time_baseline_20d": {
+                "sample_days": 20,
+                "pace_ratio": 1.2,
+            },
+            "warnings": [],
+        }
+
+        with (
+            patch(
+                "app.market.technical_report._now",
+                return_value=datetime(2026, 3, 23, 10, 5, tzinfo=TAIPEI_TZ),
+            ),
+            patch(
+                "app.market.technical_report.get_intraday_trend",
+                return_value={
+                    "stock_id": "2330",
+                    "symbol": "2330",
+                    "source": "test_intraday",
+                    "previous_close": 180.0,
+                    "point_count": len(points),
+                    "points": points,
+                },
+            ),
+            patch(
+                "app.market.technical_report.build_tw_stock_volume_pace",
+                return_value=volume_pace,
+            ),
+        ):
+            report = build_stock_technical_report(
+                db=self.db,
+                stock_id="2330",
+                timeframe="today",
+                include_intraday=True,
+            )
+
+        row = next(item for item in report["rows"] if item["key"] == "volume_pace")
+        self.assertEqual(row["display_value"], "1.50×")
+        self.assertIn("同時段量比 5日 1.50× / 20日 1.20×", row["description"])
+        self.assertNotIn("20日均量占比", row["description"])
+        self.assertEqual(report["data"]["intraday"]["volume_pace"]["status"], "ready")
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ import ResourceSlotTabs from "@/components/market-detail/ResourceSlotTabs";
 import StockKLineChart, {
   defaultIndicatorParameters,
   defaultIndicators,
+  professionalIndicatorCategoryGroups,
   type IndicatorKey,
   type IndicatorParameters,
   type IndicatorSettings,
@@ -40,6 +41,10 @@ import {
   setDataStatusFocus,
 } from "@/lib/dataStatusEvents";
 import { getKrMarketIndexConfig } from "@/lib/krMarketIndices";
+import {
+  formatStockVolumePaceRatio,
+  stockVolumePaceMetric,
+} from "@/lib/stockVolumePace";
 import {
   KOREA_INTRADAY_REFRESH_MS,
   KOREA_SESSION_END_MINUTES,
@@ -69,6 +74,7 @@ import type {
   KRStockMasterRead,
   KRStockMasterSyncResultRead,
   KRWatchlistReadinessRead,
+  StockVolumePace,
 } from "@/types/market";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -476,6 +482,7 @@ export default function KRMarketPanel({
     useState<IndicatorParameters>(defaultIndicatorParameters);
   const [chartDrawingTool, setChartDrawingTool] = useState<ChartDrawingTool>("cursor");
   const [todayTrend, setTodayTrend] = useState<IntradayTrendPoint[]>([]);
+  const [todayVolumePace, setTodayVolumePace] = useState<StockVolumePace | null>(null);
   const [todayPreviousClose, setTodayPreviousClose] = useState<number | null>(null);
   const [todaySource, setTodaySource] = useState("naver_index_time");
   const [todayUpdatedAt, setTodayUpdatedAt] = useState<string | null>(null);
@@ -517,6 +524,10 @@ export default function KRMarketPanel({
     volumeMa20 !== 0
       ? ((latest.volume - volumeMa20) / volumeMa20) * 100
       : null;
+  const intradayVolumePace = useMemo(
+    () => stockVolumePaceMetric(todayVolumePace),
+    [todayVolumePace]
+  );
   const selectedIndexConfig = getKrMarketIndexConfig(selectedStock?.symbol ?? initialSymbol);
   const isSelectedIndex = selectedIndexConfig !== null;
   const selectedIndexId = selectedIndexConfig?.indexId ?? null;
@@ -757,16 +768,45 @@ export default function KRMarketPanel({
         detail: ma20 === null ? t("common.noData") : `MA20 ${formatNumber(ma20, 2)}`,
       },
       {
-        label: t("krMarket.technical.volumeVsMa20"),
-        value: formatSignedPct(volumeVsMa20),
-        tone: volumeVsMa20,
+        label: t(
+          isIntradayTimeframe && !isSelectedIndex
+            ? "krMarket.technical.volumePace"
+            : "krMarket.technical.volumeVsMa20"
+        ),
+        value:
+          isIntradayTimeframe && !isSelectedIndex
+            ? formatStockVolumePaceRatio(intradayVolumePace.ratio) ??
+              `${t("krMarket.technical.volumePaceAccumulating")} ${intradayVolumePace.sampleDays}/5`
+            : formatSignedPct(volumeVsMa20),
+        tone:
+          isIntradayTimeframe && !isSelectedIndex
+            ? intradayVolumePace.differencePct
+            : volumeVsMa20,
         detail:
-          volumeMa20 === null
-            ? t("common.noData")
-            : `${t("krMarket.technical.volumeMa20")} ${formatWholeNumber(volumeMa20)}`,
+          isIntradayTimeframe && !isSelectedIndex
+            ? `${t("krMarket.technical.volumePaceDetail", {
+                time: intradayVolumePace.comparisonMinute ?? "--:--",
+                sample: intradayVolumePace.sampleDays,
+              })}${
+                intradayVolumePace.provisional
+                  ? ` · ${t("krMarket.technical.volumePaceProvisional")}`
+                  : ""
+              }`
+            : volumeMa20 === null
+              ? t("common.noData")
+              : `${t("krMarket.technical.volumeMa20")} ${formatWholeNumber(volumeMa20)}`,
       },
     ],
-    [ma20, priceVsMa20, t, volumeMa20, volumeVsMa20]
+    [
+      intradayVolumePace,
+      isIntradayTimeframe,
+      isSelectedIndex,
+      ma20,
+      priceVsMa20,
+      t,
+      volumeMa20,
+      volumeVsMa20,
+    ]
   );
   const indexBreadthRows = useMemo(
     () => [
@@ -861,6 +901,7 @@ export default function KRMarketPanel({
     const latestIntradayPoint = today.points[today.points.length - 1] ?? null;
 
     setTodayTrend(today.points);
+    setTodayVolumePace(today.volume_pace ?? null);
     setTodayPreviousClose(today.previous_close);
     setTodaySource(today.source);
     setTodayUpdatedAt(
@@ -1360,6 +1401,7 @@ export default function KRMarketPanel({
         setTodayUpdatedAt(null);
         setTodayTotalVolume(null);
         setTodayTrend([]);
+        setTodayVolumePace(null);
       }
 
       try {
@@ -1498,9 +1540,11 @@ export default function KRMarketPanel({
               activeTemplate={activeIndicatorTemplate}
               onApplyTemplate={applyIndicatorTemplate}
               onToggleIndicator={toggleChartIndicator}
+              groups={professionalIndicatorCategoryGroups}
               includeParameters
               parameters={indicatorParameters}
               onUpdateParameter={handleIndicatorParameterChange}
+              className="w-[25rem]"
             />
           }
           onClose={() => {

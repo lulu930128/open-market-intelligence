@@ -50,7 +50,7 @@ EXPECTED_INTERNAL_TOOL_NAMES = (
 )
 
 EXPECTED_INTERNAL_TOOL_CATALOG_SHA256 = (
-    "dedf904d4cb7f2a24a9d7aa4b5a6a94b1ff82fa3dc438fa2636ca327f5590dcd"
+    "6a1c1999d42fdc5306bcc78c2df89d03d8a110c938d773e20d0f58373a6b6c51"
 )
 
 
@@ -201,6 +201,19 @@ class AIToolBoundaryTests(unittest.TestCase):
                     "source_refs": [],
                 },
             ) as read_market_chips,
+            patch.object(
+                tools,
+                "read_taiwan_market_volume_state",
+                return_value={
+                    "kind": "taiwan_market_volume_state",
+                    "status": "partial",
+                    "as_of": None,
+                    "warnings": ["history accumulating"],
+                    "source_refs": [
+                        {"type": "table", "name": "taiwan_market_minute_state"}
+                    ],
+                },
+            ) as read_volume_state,
         ):
             envelope = tools.read_market_overview(db=db, include_intraday=True)
 
@@ -215,9 +228,13 @@ class AIToolBoundaryTests(unittest.TestCase):
         self.assertEqual(envelope["data"]["breadth"]["total_count"], 1050)
         read_cross_market.assert_called_once_with(db=db, now=fixed_now)
         read_market_chips.assert_called_once_with(db=db, limit=10)
+        read_volume_state.assert_called_once_with(db=db)
         self.assertEqual(envelope["data"]["slots"]["cross_market"]["status"], "partial")
         self.assertEqual(envelope["data"]["slots"]["market_chips"]["status"], "partial")
+        self.assertEqual(envelope["data"]["slots"]["market_volume"]["status"], "partial")
         self.assertIn("market_daily_price", envelope["missing"])
+        self.assertIn("market_breadth.tpex", envelope["missing"])
+        self.assertEqual(envelope["freshness"]["missing"], envelope["missing"])
 
     def test_futures_facade_hands_off_runtime_dependencies(self) -> None:
         fixed_now = datetime(2026, 7, 14, 13, 0, tzinfo=timezone.utc)

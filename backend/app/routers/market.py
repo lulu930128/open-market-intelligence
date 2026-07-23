@@ -338,6 +338,24 @@ def get_taiwan_source_health(
     )
 
 
+@router.post("/source-health/snapshot", response_model=TaiwanSourceHealthRead)
+def sync_taiwan_source_health_snapshot(
+    stock_id: str | None = None,
+    dataset: str | None = None,
+    index_id: str | None = None,
+    now: datetime | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    return build_taiwan_source_health(
+        db=db,
+        stock_id=stock_id,
+        dataset=dataset,
+        index_id=index_id,
+        now=now,
+        sync_snapshots=True,
+    )
+
+
 def _resolve_daily_metric_include_today(
     categories: list[str],
     include_today: bool | None,
@@ -1168,7 +1186,7 @@ def get_latest_market_chip_daily_api(
             detail=f"Latest market chip data for index_id='{index_id}' not found.",
         )
 
-    return market_chip_daily_to_dict(row)
+    return market_chip_daily_to_dict(row, db=db, resolve_expected_margin=True)
 
 
 @router.get("/market-chips", response_model=list[MarketChipDailyRead])

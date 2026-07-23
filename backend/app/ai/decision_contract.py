@@ -62,7 +62,16 @@ def _labeled_text_items(value: Any, *, limit: int | None = None) -> list[dict[st
 
 def _target_summary(target: dict[str, Any]) -> dict[str, Any]:
     summary: dict[str, Any] = {}
-    for key in ("type", "id", "symbol", "stock_id", "label", "name"):
+    for key in (
+        "type",
+        "id",
+        "symbol",
+        "stock_id",
+        "market",
+        "exchange",
+        "label",
+        "name",
+    ):
         if key in target and target.get(key) is not None:
             summary[key] = target.get(key)
     return summary

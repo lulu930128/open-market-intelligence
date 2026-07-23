@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.ai import ask_response_support, query_plan as query_plan_module, scope_resolution
+from app.ai import (
+    ask_response_support,
+    decision_envelope,
+    query_plan as query_plan_module,
+    scope_resolution,
+)
 from app.ai.evidence_passport import build_evidence_passport
 from app.ai.question_capabilities import required_capabilities_for_question
 from app.ai.schemas import AiAskRequest
@@ -695,77 +700,10 @@ def _domain_passport(
     compact: dict[str, Any],
     query_plan: dict[str, Any],
 ) -> dict[str, Any]:
-    raw_domains = (
-        compact.get("freshness_by_domain")
-        if isinstance(compact.get("freshness_by_domain"), dict)
-        else {}
+    return decision_envelope.build_domain_passport(
+        compact=compact,
+        query_plan=query_plan,
     )
-    domains: dict[str, dict[str, Any]] = {}
-    for domain, raw_status in raw_domains.items():
-        status_value = (
-            raw_status.get("status")
-            if isinstance(raw_status, dict)
-            else raw_status
-        )
-        status = str(status_value or "unknown").lower()
-        trust_level = (
-            "high"
-            if status in {"ready", "current", "live", "latest_completed_session"}
-            else "medium"
-            if status in {"partial", "delayed", "cached", "waiting", "not_requested", "not_applicable"}
-            else "low"
-            if status in {"stale", "missing", "unavailable", "blocked"}
-            else "unknown"
-        )
-        domains[str(domain)] = {
-            "status": status,
-            "trust_level": trust_level,
-            "usable": trust_level in {"high", "medium"},
-        }
-
-    requested_domains = [
-        str(value)
-        for value in query_plan.get("requested_domains") or []
-        if str(value)
-    ]
-    required_domains = requested_domains or list(domains)
-    blocked_domains = [
-        domain
-        for domain in required_domains
-        if domain in domains and not domains[domain]["usable"]
-    ]
-    missing_domains = [domain for domain in required_domains if domain not in domains]
-    decision_status = (
-        "blocked"
-        if required_domains and len(blocked_domains) + len(missing_domains) == len(required_domains)
-        else "partial"
-        if blocked_domains or missing_domains
-        else "ready"
-    )
-    explicit_trust = {
-        f"{domain}_trust": domains.get(
-            domain,
-            {"status": "not_requested", "trust_level": "medium", "usable": True},
-        )
-        for domain in (
-            "quote",
-            "intraday",
-            "technical",
-            "chips",
-            "fundamentals",
-            "cross_market",
-        )
-    }
-    return {
-        "domains": domains,
-        **explicit_trust,
-        "decision_readiness": {
-            "status": decision_status,
-            "required_domains": required_domains,
-            "blocked_domains": blocked_domains,
-            "missing_domains": missing_domains,
-        },
-    }
 
 
 def finalize_ask_response(

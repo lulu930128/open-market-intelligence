@@ -9,7 +9,7 @@ import time
 
 import requests
 from sqlalchemy import or_
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -76,7 +76,18 @@ from app.kr_market.sources import (
     parse_yahoo_intraday_prices,
     parse_yahoo_stock_record,
 )
-from app.kr_market.trading_calendar import expected_kr_daily_price_date, previous_kr_trading_day
+from app.kr_market.trading_calendar import (
+    KR_MARKET_TIMEZONE,
+    expected_kr_daily_price_date,
+    previous_kr_trading_day,
+)
+from app.market.stock_volume_pace import (
+    build_stock_volume_pace,
+    intraday_history_needs_bootstrap,
+    latest_market_trade_date_points,
+    mutate_market_intraday_history,
+    previous_regular_close_from_history,
+)
 from app.market.technical_radar import (
     TechnicalRadarBar,
     build_technical_watchlist_radar,
@@ -2429,6 +2440,119 @@ def _reconcile_kr_stock_intraday_close(
     return result
 
 
+def _kr_daily_volume_totals(db: Session, *, symbol: str) -> dict[date, int]:
+    rows = (
+        db.query(KRDailyPrice)
+        .filter(KRDailyPrice.symbol == symbol)
+        .filter(KRDailyPrice.trade_volume.isnot(None))
+        .order_by(KRDailyPrice.trade_date.desc(), KRDailyPrice.id.desc())
+        .limit(90)
+        .all()
+    )
+    totals: dict[date, int] = {}
+    for row in rows:
+        if row.trade_volume is None or row.trade_volume <= 0:
+            continue
+        totals[row.trade_date] = max(totals.get(row.trade_date, 0), int(row.trade_volume))
+    return totals
+
+
+def _persist_kr_stock_intraday_history(
+    db: Session,
+    *,
+    symbol: str,
+    payload: dict,
+) -> dict:
+    result = _copy_payload(payload)
+    if not result.get("points"):
+        return result
+    try:
+        changed_count = mutate_market_intraday_history(
+            db,
+            provider="yahoo_finance_chart",
+            stock_id=symbol,
+            market="KR",
+            symbol=symbol,
+            interval="1m",
+            source=str(result.get("source") or "yahoo_finance_chart"),
+            source_url=result.get("source_url"),
+            points=result.get("points") or [],
+            market_timezone=KR_MARKET_TIMEZONE,
+        )
+        if changed_count:
+            db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        result.setdefault("warnings", []).append(
+            "KR intraday history persistence failed; same-time volume coverage may be partial."
+        )
+    return result
+
+
+def _project_kr_stock_intraday_payload(payload: dict) -> dict:
+    result = _copy_payload(payload)
+    history_points = [
+        point for point in result.get("points") or [] if isinstance(point, dict)
+    ]
+    current_points = latest_market_trade_date_points(
+        history_points,
+        market_timezone=KR_MARKET_TIMEZONE,
+    )
+    result["points"] = current_points
+    result["point_count"] = len(current_points)
+    result["regular_point_count"] = len(current_points)
+    result["extended_point_count"] = 0
+    result["has_extended_hours"] = False
+    result["session_phase"] = "regular" if current_points else None
+    if current_points:
+        latest_point = current_points[-1]
+        result["regular_session_close"] = latest_point.get("price")
+        result["regular_session_close_time"] = latest_point.get("time")
+        result["as_of"] = latest_point.get("time")
+        result["total_volume"] = latest_point.get("cumulative_volume")
+        current_trade_date = datetime.fromisoformat(str(latest_point["time"])).date()
+        previous_reference = previous_regular_close_from_history(
+            history_points,
+            market_timezone=KR_MARKET_TIMEZONE,
+            current_trade_date=current_trade_date,
+        )
+        if previous_reference is not None:
+            result.update(previous_reference)
+    return result
+
+
+def _finalize_kr_stock_intraday_payload(
+    payload: dict,
+    *,
+    db: Session,
+    symbol: str,
+) -> dict:
+    projected = _project_kr_stock_intraday_payload(payload)
+    referenced = _apply_kr_stock_previous_close_reference(
+        projected,
+        db=db,
+        symbol=symbol,
+    )
+    reconciled = _reconcile_kr_stock_intraday_close(
+        referenced,
+        db=db,
+        symbol=symbol,
+    )
+    reconciled["volume_pace"] = build_stock_volume_pace(
+        db,
+        stock_id=symbol,
+        market="KR",
+        current_points=reconciled.get("points") or [],
+        market_timezone=KR_MARKET_TIMEZONE,
+        daily_totals=_kr_daily_volume_totals(db, symbol=symbol),
+        daily_source_name="kr_daily_price",
+        history_market="KR",
+        complete_day_min_ratio=0.7,
+        minimum_history_points_per_day=340,
+    )
+    return reconciled
+
+
 def get_kr_stock_intraday_trend(
     db: Session,
     *,
@@ -2441,21 +2565,26 @@ def get_kr_stock_intraday_trend(
     if not refresh:
         cached = _get_fresh_kr_stock_intraday_cache(cache_key)
         if cached is not None:
-            referenced = _apply_kr_stock_previous_close_reference(
+            return _finalize_kr_stock_intraday_payload(
                 cached,
-                db=db,
-                symbol=normalized_symbol,
-            )
-            return _reconcile_kr_stock_intraday_close(
-                referenced,
                 db=db,
                 symbol=normalized_symbol,
             )
 
     try:
+        range_value = (
+            "5d"
+            if intraday_history_needs_bootstrap(
+                db,
+                stock_id=normalized_symbol,
+                market="KR",
+                market_timezone=KR_MARKET_TIMEZONE,
+            )
+            else "1d"
+        )
         yahoo_payload, source_url = fetch_yahoo_chart_payload(
             symbol=normalized_symbol,
-            range_value="1d",
+            range_value=range_value,
             interval="1m",
             timeout_seconds=min(settings.kr_market_http_timeout_seconds, 8),
             resource="intraday",
@@ -2464,6 +2593,11 @@ def get_kr_stock_intraday_trend(
             yahoo_payload,
             symbol=normalized_symbol,
             source_url=source_url,
+        )
+        payload = _persist_kr_stock_intraday_history(
+            db,
+            symbol=normalized_symbol,
+            payload=payload,
         )
     except Exception as exc:
         payload = {
@@ -2496,13 +2630,8 @@ def get_kr_stock_intraday_trend(
         }
 
     cached_payload = _set_kr_stock_intraday_cache(cache_key, payload)
-    referenced = _apply_kr_stock_previous_close_reference(
+    return _finalize_kr_stock_intraday_payload(
         cached_payload,
-        db=db,
-        symbol=normalized_symbol,
-    )
-    return _reconcile_kr_stock_intraday_close(
-        referenced,
         db=db,
         symbol=normalized_symbol,
     )

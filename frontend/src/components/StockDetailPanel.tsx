@@ -31,6 +31,7 @@ import {
 } from "@/components/stock-detail/stockDetailSeriesProjection";
 import {
   buildStockSignalChips,
+  STOCK_DETAIL_DATA_PANEL_ID,
   stockTechnicalTerm,
   stockTechnicalText,
   type StockSignalTone,
@@ -40,12 +41,19 @@ import TechnicalIndicatorMenu, {
   indicatorTemplates,
   type IndicatorTemplateKey,
 } from "@/components/stock-detail/TechnicalIndicatorMenu";
+import {
+  buildCorporateEventChartMarkers,
+  corporateEventMarkerOption,
+  corporateEventMarkerOptionKey,
+  defaultCorporateEventMarkersEnabled,
+} from "@/components/stock-detail/corporateEventChartMarkers";
 import { useChartDrawingPersistence } from "@/components/stock-detail/useChartDrawingPersistence";
 import { useTaiwanDetailContext } from "@/components/stock-detail/useTaiwanDetailContext";
 import { useTaiwanDataPanel } from "@/components/stock-detail/useTaiwanDataPanel";
 import { useTaiwanQuoteDepth } from "@/components/stock-detail/useTaiwanQuoteDepth";
 import { useTaiwanStockChartData } from "@/components/stock-detail/useTaiwanStockChartData";
 import { useTaiwanTechnicalReport } from "@/components/stock-detail/useTaiwanTechnicalReport";
+import { useTaiwanCorporateEventChartHistory } from "@/components/stock-detail/useTaiwanCorporateEventChartHistory";
 import {
   ChipMetricBlock,
   DataTabButton,
@@ -54,6 +62,8 @@ import {
   IndexListPanel,
   MetricRow,
   OvernightImpactPanel,
+  TechnicalCurrentStateEvidence,
+  TechnicalCurrentStateOverview,
   TechnicalLoadingPanel,
   TechnicalSignalRow,
   aggregateProfessionalIntradayBars,
@@ -81,6 +91,7 @@ import {
 import type {
   BranchTableSide,
   ChartTimeframe,
+  DataPanelTab,
   EarningsView,
   LoadState,
   ProfessionalTimeframe,
@@ -129,12 +140,12 @@ function normalizeIsoDate(value: string | null | undefined) {
 
 function corporateEventTone(eventType: string) {
   if (eventType === "ex_dividend") {
-    return "border-omi-market-up/40 bg-omi-market-up/10 text-omi-market-up";
+    return "border-omi-success bg-omi-success-soft text-omi-success-strong";
   }
   if (eventType === "financial_report") {
-    return "border-amber-400/50 bg-amber-400/10 text-amber-200";
+    return "border-omi-warning bg-omi-warning-soft text-omi-warning-strong";
   }
-  return "border-sky-400/50 bg-sky-400/10 text-sky-200";
+  return "border-omi-info bg-omi-info-soft text-omi-info-strong";
 }
 
 function corporateEventBadgeLabel(
@@ -143,7 +154,7 @@ function corporateEventBadgeLabel(
 ) {
   const eventLabel = t(`stockDetail.corporateEvents.types.${event.event_type}`);
   if (event.days_until === 0) {
-    return t("stockDetail.corporateEvents.today", { event: eventLabel });
+    return eventLabel;
   }
   if (event.days_until === 1) {
     return t("stockDetail.corporateEvents.tomorrow", { event: eventLabel });
@@ -208,6 +219,58 @@ function stockSignalToneClass(tone: StockSignalTone) {
   return "omi-signal-chip-neutral";
 }
 
+function technicalMetricBarWidth(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "0%";
+  return `${Math.max(0, Math.min(100, Math.abs(value)))}%`;
+}
+
+function technicalMetricBarClass(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "bg-omi-border";
+  }
+  if (value > 0) return "bg-omi-market-up-flash";
+  if (value < 0) return "bg-omi-market-down-flash";
+  return "bg-omi-border";
+}
+
+function TechnicalMetricBar({
+  displayValue,
+  label,
+  metricValue,
+  resetKey,
+  testId,
+}: {
+  displayValue: string;
+  label: string;
+  metricValue: number | null;
+  resetKey: string;
+  testId: string;
+}) {
+  return (
+    <div data-testid={testId}>
+      <div className="mb-1 flex justify-between gap-3 text-xs text-omi-text-muted">
+        <span>{label}</span>
+        <span className={valueTone(metricValue)}>
+          <PriceUpdatePulse
+            value={metricValue}
+            direction={metricValue}
+            resetKey={resetKey}
+            className="justify-end tabular-nums"
+          >
+            {displayValue}
+          </PriceUpdatePulse>
+        </span>
+      </div>
+      <div className="h-2 bg-omi-surface-muted">
+        <div
+          className={`omi-technical-bar h-2 ${technicalMetricBarClass(metricValue)}`}
+          style={{ width: technicalMetricBarWidth(metricValue) }}
+        />
+      </div>
+    </div>
+  );
+}
+
 export default function StockDetailPanel({
   stockId,
   stockName,
@@ -237,6 +300,8 @@ export default function StockDetailPanel({
     useState<ProfessionalChartStyle>("candlestick");
   const [chartIndicators, setChartIndicators] =
     useState<IndicatorSettings>(defaultIndicators);
+  const [corporateEventMarkersEnabled, setCorporateEventMarkersEnabled] =
+    useState(defaultCorporateEventMarkersEnabled);
   const [chartDrawingTool, setChartDrawingTool] = useState<ChartDrawingTool>("cursor");
   const [intradayIndicators, setIntradayIndicators] =
     useState<IntradayIndicatorSettings>(defaultIntradayIndicators);
@@ -371,6 +436,22 @@ export default function StockDetailPanel({
   );
   const currentStockInfoId = stockInfo?.stock_id ?? null;
   const currentStockInfoMarket = stockInfo?.market ?? null;
+  const { events: corporateEventChartHistory } =
+    useTaiwanCorporateEventChartHistory({
+      contextKey: dataStatusContextKey,
+      contextLabel: dataStatusContextLabel,
+      enabled: !isIndexProduct && corporateEventMarkersEnabled,
+      fallback: stockInfo?.event_history,
+      market: currentStockInfoMarket,
+      stockId: currentStockInfoId,
+    });
+  const corporateEventMenuOptions = useMemo(
+    () =>
+      isIndexProduct
+        ? []
+        : [corporateEventMarkerOption(corporateEventMarkersEnabled, t)],
+    [corporateEventMarkersEnabled, isIndexProduct, t]
+  );
   const dispositionStatus = !isIndexProduct ? stockInfo?.disposition ?? null : null;
   const dispositionVisible = Boolean(
     dispositionStatus?.is_disposition &&
@@ -397,6 +478,47 @@ export default function StockDetailPanel({
       stockInfo?.event_history &&
       stockInfo.event_history.cache_status !== "current"
   );
+  useEffect(() => {
+    if (
+      !stockId ||
+      isIndexProduct ||
+      stockInfo?.stock_id !== stockId ||
+      !stockInfo.upcoming_events
+    ) {
+      return;
+    }
+
+    const warnings = Array.from(new Set([
+      stockInfo.upcoming_events.warning,
+      stockInfo.event_history?.warning,
+    ].filter((value): value is string => Boolean(value))));
+    emitDataStatusEvent({
+      market: "tw",
+      level: warnings.length ? "warning" : "success",
+      title: warnings.length
+        ? t("settings.calendar.status.warningTitle")
+        : t("settings.calendar.status.successTitle"),
+      message: warnings.length
+        ? warnings.join("；")
+        : t("settings.calendar.status.stockSuccessMessage", {
+            count: stockInfo.upcoming_events.result_count,
+            stock: dataStatusContextLabel,
+          }),
+      source: t("settings.calendar.status.source"),
+      contextKey: dataStatusContextKey,
+      contextLabel: dataStatusContextLabel,
+      dedupeKey: `${dataStatusContextKey}:corporate-events`,
+    });
+  }, [
+    dataStatusContextKey,
+    dataStatusContextLabel,
+    isIndexProduct,
+    stockId,
+    stockInfo?.event_history?.warning,
+    stockInfo?.stock_id,
+    stockInfo?.upcoming_events,
+    t,
+  ]);
   const effectiveTimeframe = timeframe;
   const availableTimeframes = isIndexProduct ? indexTimeframes : allTimeframes;
   const {
@@ -471,6 +593,11 @@ export default function StockDetailPanel({
       ...current,
       [key]: !current[key],
     }));
+  }
+
+  function toggleCorporateEventMarker(key: string) {
+    if (key !== corporateEventMarkerOptionKey) return;
+    setCorporateEventMarkersEnabled((current) => !current);
   }
 
   function toggleIntradayIndicator(key: IntradayIndicatorKey) {
@@ -597,6 +724,45 @@ export default function StockDetailPanel({
     stockId,
     todayTrend,
   ]);
+  const chartCorporateEventMarkers = useMemo(
+    () =>
+      effectiveTimeframe === "today"
+        ? []
+        : buildCorporateEventChartMarkers({
+            chartData,
+            enabled: corporateEventMarkersEnabled,
+            events: corporateEventChartHistory,
+            timeframe: effectiveTimeframe,
+            t,
+          }),
+    [
+      chartData,
+      corporateEventChartHistory,
+      corporateEventMarkersEnabled,
+      effectiveTimeframe,
+      t,
+    ]
+  );
+  const professionalCorporateEventMarkers = useMemo(
+    () =>
+      professionalIsIntraday
+        ? []
+        : buildCorporateEventChartMarkers({
+            chartData: professionalChartData,
+            enabled: corporateEventMarkersEnabled,
+            events: corporateEventChartHistory,
+            timeframe: professionalTimeframe,
+            t,
+          }),
+    [
+      corporateEventChartHistory,
+      corporateEventMarkersEnabled,
+      professionalChartData,
+      professionalIsIntraday,
+      professionalTimeframe,
+      t,
+    ]
+  );
   const professionalChartReady =
     chartFocusMode &&
     professionalChartData.length > 0 &&
@@ -791,8 +957,53 @@ export default function StockDetailPanel({
     return mapBackendTechnicalReport(backendTechnicalReport, t);
   }, [backendTechnicalReport, effectiveTimeframe, stockId, t]);
   const technicalReport = backendTechnicalReportView ?? localizedFallbackTechnicalReport;
-  const technicalStatus = technicalReport.title;
+  const technicalCurrentState =
+    effectiveTimeframe === "daily" ? technicalReport.currentState ?? null : null;
+  const technicalStatus = technicalCurrentState?.headline.label ?? technicalReport.title;
   const technicalSummaryText = technicalReport.summary;
+  const technicalPositionUsesBelow =
+    (technicalCurrentState?.position.belowCount ?? 0) > 0;
+  const technicalPositionCount =
+    technicalCurrentState && technicalCurrentState.position.availableCount > 0
+      ? `${
+          technicalPositionUsesBelow
+            ? technicalCurrentState.position.belowCount
+            : technicalCurrentState.position.aboveCount
+        }/${technicalCurrentState.position.availableCount}`
+      : "-";
+  const technicalPositionLabel = technicalCurrentState
+    ? technicalCurrentState.position.availableCount > 0
+      ? t(
+          technicalPositionUsesBelow
+            ? "stockDetail.technicalCurrentState.belowAverages"
+            : "stockDetail.technicalCurrentState.aboveAverages"
+        )
+      : technicalCurrentState.position.label
+    : "";
+  const intradayVolumePaceRow =
+    effectiveTimeframe === "today"
+      ? technicalReport.rows.find((row) => row.key === "volume_pace") ?? null
+      : null;
+  const intradayVolumePaceValue = intradayVolumePaceRow?.pulseValue;
+  const parsedIntradayVolumePaceRatio =
+    typeof intradayVolumePaceValue === "number"
+      ? intradayVolumePaceValue
+      : typeof intradayVolumePaceValue === "string" && intradayVolumePaceValue.trim()
+        ? Number(intradayVolumePaceValue)
+        : Number.NaN;
+  const intradayVolumePaceRatio = Number.isFinite(parsedIntradayVolumePaceRatio)
+    ? parsedIntradayVolumePaceRatio
+    : null;
+  const technicalVolumeMetric =
+    effectiveTimeframe === "today"
+      ? intradayVolumePaceRatio === null
+        ? null
+        : (intradayVolumePaceRatio - 1) * 100
+      : volumeRatioPct;
+  const technicalVolumeDisplay =
+    effectiveTimeframe === "today"
+      ? intradayVolumePaceRow?.value ?? "-"
+      : formatPct(volumeRatioPct);
   const displayOvernightImpact = !stockId || isIndexProduct ? null : overnightImpact;
   const displayOvernightImpactLoadState: LoadState =
     !stockId || isIndexProduct ? "idle" : overnightImpactLoadState;
@@ -818,6 +1029,48 @@ export default function StockDetailPanel({
       t,
       technicalReport,
     ]
+  );
+  const stockSignalChipGroups = [
+    {
+      key: "technical",
+      label: stockTechnicalText(t, "chips.groups.core"),
+      chips: stockSignalChips.filter((chip) => chip.group === "technical"),
+    },
+    {
+      key: "context",
+      label: stockTechnicalText(t, "chips.groups.context"),
+      chips: stockSignalChips.filter((chip) => chip.group === "context"),
+    },
+  ].filter((group) => group.chips.length > 0);
+  const revealStockSignalDetail = useCallback(
+    (targetId: string, dataTabTarget?: DataPanelTab) => {
+      const target = document.getElementById(targetId);
+      if (!(target instanceof HTMLElement)) return;
+
+      if (target instanceof HTMLDetailsElement) {
+        target.open = true;
+      }
+      if (dataTabTarget) {
+        selectDataTab(dataTabTarget);
+      }
+
+      window.requestAnimationFrame(() => {
+        const prefersReducedMotion = window.matchMedia(
+          "(prefers-reduced-motion: reduce)"
+        ).matches;
+        target.scrollIntoView({
+          behavior: prefersReducedMotion ? "auto" : "smooth",
+          block: "nearest",
+        });
+        const focusTarget = dataTabTarget
+          ? target.querySelector(`[data-data-tab="${dataTabTarget}"]`)
+          : target.querySelector("summary");
+        if (focusTarget instanceof HTMLElement) {
+          focusTarget.focus({ preventScroll: true });
+        }
+      });
+    },
+    [selectDataTab]
   );
   const technicalSourceReady =
     effectiveTimeframe === "today" ? todayTrend.length > 0 : currentChartReady;
@@ -875,7 +1128,10 @@ export default function StockDetailPanel({
         .join(" ")}
     >
       <div className={["min-w-0 self-start", chartFocusMode ? "space-y-0" : "space-y-4"].join(" ")}>
-        <div className={chartFocusMode ? "min-w-0" : "min-w-0 border border-omi-border-subtle bg-omi-surface"}>
+        <div
+          data-testid="stock-chart-card"
+          className={chartFocusMode ? "min-w-0" : "min-w-0 border border-omi-border-subtle bg-omi-surface"}
+        >
           {chartFocusMode ? null : (
           <div className="flex flex-wrap items-start justify-between gap-4 border-b border-omi-border-subtle px-5 py-4">
             <div>
@@ -998,11 +1254,6 @@ export default function StockDetailPanel({
                       </div>
                     ))}
                   </div>
-                  {stockInfo?.event_history?.warning ? (
-                    <div className="mt-1 text-xs text-omi-warning">
-                      {stockInfo.event_history.warning}
-                    </div>
-                  ) : null}
                 </details>
               ) : corporateEventHistorySourceUncertain ? (
                 <div className="mt-2 text-xs font-semibold text-omi-warning">
@@ -1105,6 +1356,7 @@ export default function StockDetailPanel({
                     <div className="relative">
                       <button
                         type="button"
+                        data-testid="chart-indicator-menu-toggle"
                         onClick={() => setIndicatorMenuOpen((value) => !value)}
                         className="h-8 border border-omi-control bg-omi-surface px-3 text-sm font-semibold text-omi-text hover:border-omi-accent hover:text-omi-danger"
                       >
@@ -1116,6 +1368,8 @@ export default function StockDetailPanel({
                           activeTemplate={activeIndicatorTemplate}
                           onApplyTemplate={applyIndicatorTemplate}
                           onToggleIndicator={toggleChartIndicator}
+                          supplementalMarkerOptions={corporateEventMenuOptions}
+                          onToggleSupplementalMarker={toggleCorporateEventMarker}
                           includeParameters
                           parameters={indicatorParameters}
                           onUpdateParameter={updateIndicatorParameter}
@@ -1211,6 +1465,8 @@ export default function StockDetailPanel({
                   activeTemplate={activeIndicatorTemplate}
                   onApplyTemplate={applyIndicatorTemplate}
                   onToggleIndicator={toggleChartIndicator}
+                  supplementalMarkerOptions={corporateEventMenuOptions}
+                  onToggleSupplementalMarker={toggleCorporateEventMarker}
                   groups={professionalIndicatorCategoryGroups}
                   includeParameters
                   parameters={indicatorParameters}
@@ -1254,6 +1510,7 @@ export default function StockDetailPanel({
                 professionalIsIntraday ? emptyProfessionalBenchmarkData : benchmarkDataForChart
               }
               benchmarkLabel={benchmarkLabel}
+              eventMarkers={professionalCorporateEventMarkers}
               volumePanelLabel={isIndexProduct ? t("chart.kline.tradeValueYi") : undefined}
               volumeValueKey={isIndexProduct ? "trade_value" : "volume"}
               drawingTool={chartDrawingTool}
@@ -1295,6 +1552,7 @@ export default function StockDetailPanel({
               indicatorParameters={indicatorParameters}
               benchmarkData={benchmarkDataForChart}
               benchmarkLabel={benchmarkLabel}
+              eventMarkers={chartCorporateEventMarkers}
               revealKey={`${stockId}:${effectiveTimeframe}`}
               volumePanelLabel={isIndexProduct ? t("chart.kline.tradeValueYi") : undefined}
               volumeTooltipLabel={isIndexProduct ? t("chart.kline.tradeValueYi") : undefined}
@@ -1313,6 +1571,16 @@ export default function StockDetailPanel({
             />
           )}
         </div>
+
+        {!chartFocusMode && !isIndexProduct && !showTechnicalLoading ? (
+          <div className="min-w-0 border-x border-t border-omi-border-subtle bg-omi-surface">
+            <QuoteDepthPanel
+              quoteDepth={quoteDepth}
+              loadState={quoteDepthLoadState}
+              quoteDepthPreviewMode={quoteDepthPreviewMode}
+            />
+          </div>
+        ) : null}
 
         {!chartFocusMode && isIndexProduct ? (
           <IndexDetailDataPanel
@@ -1349,20 +1617,18 @@ export default function StockDetailPanel({
           <TechnicalLoadingPanel />
         ) : (
           <>
-            <QuoteDepthPanel
-              quoteDepth={quoteDepth}
-              loadState={quoteDepthLoadState}
-              quoteDepthPreviewMode={quoteDepthPreviewMode}
-            />
-
             <div className="omi-technical-summary border-b border-omi-border-subtle px-5 py-3">
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
                 {stockTechnicalText(t, "eyebrow")}
               </div>
               <div className="mt-1.5 flex items-start justify-between gap-4">
                 <div className="min-w-0">
-                  <div className="text-xl font-bold text-omi-text-strong">{technicalStatus}</div>
-                  <div className="mt-0.5 text-xs leading-4 text-omi-text-muted">{technicalSummaryText}</div>
+                  <div className="text-lg font-semibold leading-5 text-omi-text-strong">
+                    {technicalStatus}
+                  </div>
+                  <div className="mt-0.5 text-xs leading-4 text-omi-text-muted">
+                    {technicalSummaryText}
+                  </div>
                   {technicalReport.basisLabel ? (
                     <div className="mt-1 text-[11px] leading-4 text-omi-text-muted">
                       {technicalReport.basisLabel}
@@ -1376,85 +1642,264 @@ export default function StockDetailPanel({
                     </div>
                   ) : null}
                 </div>
-                <div className={`omi-technical-score shrink-0 text-right text-lg font-bold ${valueTone(technicalReport.value)}`}>
-                  <PriceUpdatePulse
-                    value={technicalReport.value}
-                    direction={technicalReport.value}
-                    resetKey={`${stockId ?? "empty"}:technical:${effectiveTimeframe}`}
-                    className="justify-end tabular-nums"
+                {technicalCurrentState ? (
+                  <div
+                    className="omi-technical-score shrink-0 text-right"
+                    data-testid="tw-technical-position-count"
                   >
-                    {formatPct(technicalReport.value)}
-                  </PriceUpdatePulse>
-                  <div className="text-xs font-medium text-omi-text-muted">{technicalReport.valueLabel}</div>
-                </div>
-              </div>
-              {stockSignalChips.length ? (
-                <div
-                  className="mt-3 flex flex-wrap gap-1.5"
-                  aria-label={t("stockDetail.chipMetrics.technicalSignalsAria")}
-                >
-                  {stockSignalChips.map((signal) => (
-                    <span
-                      key={signal.key}
-                      className={[
-                        "omi-technical-badge omi-signal-chip inline-flex items-center gap-1 border px-2 py-1 text-[11px] font-semibold",
-                        stockSignalToneClass(signal.tone),
-                      ].join(" ")}
-                      title={signal.title}
+                    <div className="text-lg font-semibold leading-5 tabular-nums text-omi-text-strong">
+                      {technicalPositionCount}
+                    </div>
+                    <div className="text-xs font-medium text-omi-text-muted">
+                      {technicalPositionLabel}
+                    </div>
+                    <div className="mt-0.5 max-w-44 text-[11px] leading-4 text-omi-text-subtle">
+                      {technicalCurrentState.position.orderLabel}
+                    </div>
+                  </div>
+                ) : (
+                  <div className={`omi-technical-score shrink-0 text-right text-lg font-bold ${valueTone(technicalReport.value)}`}>
+                    <PriceUpdatePulse
+                      value={technicalReport.value}
+                      direction={technicalReport.value}
+                      resetKey={`${stockId ?? "empty"}:technical:${effectiveTimeframe}`}
+                      className="justify-end tabular-nums"
                     >
-                      <span className="text-[10px] opacity-75">{signal.source}：</span>
-                      <span>{signal.label}</span>
-                    </span>
+                      {formatPct(technicalReport.value)}
+                    </PriceUpdatePulse>
+                    <div className="text-xs font-medium text-omi-text-muted">{technicalReport.valueLabel}</div>
+                  </div>
+                )}
+              </div>
+              {stockSignalChipGroups.length ? (
+                <div
+                  className="mt-2 space-y-1"
+                  aria-label={t("stockDetail.chipMetrics.technicalSignalsAria")}
+                  data-testid="tw-signal-chip-groups"
+                >
+                  {stockSignalChipGroups.map((group) => (
+                    <div
+                      key={group.key}
+                      className="flex items-start gap-1.5"
+                      data-testid={`tw-signal-chip-group-${group.key}`}
+                    >
+                      <span className="w-14 shrink-0 pt-0.5 text-[10px] font-semibold leading-4 text-omi-text-muted">
+                        {group.label}
+                      </span>
+                      <div className="flex min-w-0 flex-wrap gap-1">
+                        {group.chips.map((signal) => {
+                          const chipClassName = [
+                            "omi-technical-badge omi-signal-chip omi-technical-signal-chip inline-flex shrink-0 items-center gap-1 border px-1.5 py-0.5 text-[11px] font-semibold leading-4 tabular-nums",
+                            stockSignalToneClass(signal.tone),
+                            signal.detailTarget
+                              ? "cursor-pointer outline-none transition hover:-translate-y-px hover:brightness-95 active:translate-y-0 focus-visible:ring-2 focus-visible:ring-omi-accent"
+                              : "",
+                          ].join(" ");
+                          const content = (
+                            <>
+                              <span className="text-[10px] opacity-75">
+                                {signal.source}：
+                              </span>
+                              <span>{signal.label}</span>
+                            </>
+                          );
+                          const sharedProps = {
+                            className: chipClassName,
+                            title: signal.title,
+                            "data-testid": `tw-signal-chip-${signal.key}`,
+                            "data-horizon": signal.horizon,
+                            "data-as-of": signal.asOf ?? undefined,
+                          };
+
+                          return signal.detailTarget ? (
+                            <button
+                              key={signal.key}
+                              type="button"
+                              {...sharedProps}
+                              aria-controls={signal.detailTarget}
+                              data-data-tab-target={signal.dataTabTarget}
+                              onClick={() =>
+                                revealStockSignalDetail(
+                                  signal.detailTarget ?? "",
+                                  signal.dataTabTarget
+                                )
+                              }
+                            >
+                              {content}
+                            </button>
+                          ) : (
+                            <span key={signal.key} {...sharedProps}>
+                              {content}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    </div>
                   ))}
                 </div>
               ) : null}
             </div>
 
+            {technicalCurrentState ? (
+              <TechnicalCurrentStateOverview state={technicalCurrentState} />
+            ) : (
+              <div
+                className="space-y-3 border-b border-omi-border-subtle px-5 py-4 text-sm"
+                data-testid="tw-technical-metrics"
+              >
+                <TechnicalMetricBar
+                  label={t("stockDetail.technicalMetrics.priceVsMa20")}
+                  displayValue={formatPct(priceVsMa20)}
+                  metricValue={priceVsMa20}
+                  resetKey={`${stockId ?? "empty"}:technical-metric-price`}
+                  testId="tw-technical-metric-price"
+                />
+                <TechnicalMetricBar
+                  label={t(
+                    effectiveTimeframe === "today"
+                      ? "stockDetail.technicalMetrics.volumePace"
+                      : "stockDetail.technicalMetrics.volumeVsMa20"
+                  )}
+                  displayValue={technicalVolumeDisplay}
+                  metricValue={technicalVolumeMetric}
+                  resetKey={`${stockId ?? "empty"}:technical-metric-volume`}
+                  testId="tw-technical-metric-volume"
+                />
+                <TechnicalMetricBar
+                  label={t("stockDetail.technicalMetrics.dayChangePct")}
+                  displayValue={formatPct(latestChangePct)}
+                  metricValue={latestChangePct}
+                  resetKey={`${stockId ?? "empty"}:technical-metric-change`}
+                  testId="tw-technical-metric-change"
+                />
+              </div>
+            )}
+
             <div className="px-5 py-3">
-              <div>
-                {technicalReport.rows.map((row) => (
-                  <TechnicalSignalRow
-                    key={row.title}
-                    title={row.title}
-                    description={row.description}
-                    value={row.value}
-                    pulseValue={row.pulseValue}
-                    direction={row.direction}
-                    tone={row.tone}
-                  />
-                ))}
-              </div>
-
-              <OvernightImpactPanel
-                report={displayOvernightImpact}
-                loadState={displayOvernightImpactLoadState}
-              />
-
-              <div className="mt-3 border-t border-omi-border-subtle pt-3">
-                <div className="omi-technical-market flex items-start justify-between gap-4 text-xs">
+              {technicalCurrentState ? (
+                <>
+                  <TechnicalCurrentStateEvidence state={technicalCurrentState} />
+                  <details
+                    id="tw-technical-context"
+                    className="group mt-3 border border-omi-border-subtle bg-omi-surface-muted"
+                    data-testid="tw-technical-context"
+                  >
+                    <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3.5 py-2.5 outline-none transition hover:bg-omi-surface focus-visible:ring-2 focus-visible:ring-omi-accent [&::-webkit-details-marker]:hidden">
+                      <span className="min-w-0">
+                        <span className="block text-sm font-semibold text-omi-text-strong">
+                          {t("stockDetail.technicalCurrentState.contextTitle")}
+                        </span>
+                        <span className="mt-0.5 block text-xs leading-4 text-omi-text-subtle">
+                          {t("stockDetail.technicalCurrentState.contextHint")}
+                        </span>
+                      </span>
+                      <span
+                        aria-hidden="true"
+                        className="shrink-0 text-base text-omi-text-muted transition-transform group-open:rotate-45"
+                      >
+                        ＋
+                      </span>
+                    </summary>
+                    <div className="border-t border-omi-border-subtle px-3 pb-3">
+                      {technicalReport.rows
+                        .filter((row) => row.key === "institutional_flow")
+                        .map((row) => (
+                          <TechnicalSignalRow
+                            key={row.title}
+                            title={row.title}
+                            description={row.description}
+                            value={row.value}
+                            pulseValue={row.pulseValue}
+                            direction={row.direction}
+                            tone={row.tone}
+                          />
+                        ))}
+                      <OvernightImpactPanel
+                        report={displayOvernightImpact}
+                        loadState={displayOvernightImpactLoadState}
+                      />
+                      <div className="mt-3 border-t border-omi-border-subtle pt-3">
+                        <div className="omi-technical-market flex items-start justify-between gap-4 text-xs">
+                          <div>
+                            <div className="font-bold uppercase tracking-[0.14em] text-omi-text-muted">
+                              {t("dashboard.marketIndex.market")}
+                            </div>
+                            <div className="mt-0.5 text-sm font-bold text-omi-text-strong">
+                              {primaryMarketIndex?.short_label ?? t("stockDetail.marketFallback")}
+                            </div>
+                            <div className="mt-0.5 text-omi-text-muted">
+                              {marketRegimeLabel(primaryMarketIndex, t)}
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <div className="font-bold text-omi-text-strong">
+                              {formatPrice(primaryMarketIndex?.close)}
+                            </div>
+                            <div className={valueTone(primaryMarketIndex?.change_pct)}>
+                              {formatPct(primaryMarketIndex?.change_pct)}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </details>
+                </>
+              ) : (
+                <>
                   <div>
-                    <div className="font-bold uppercase tracking-[0.14em] text-omi-text-muted">
-                      {t("dashboard.marketIndex.market")}
-                    </div>
-                    <div className="mt-0.5 text-sm font-bold text-omi-text-strong">
-                      {primaryMarketIndex?.short_label ?? t("stockDetail.marketFallback")}
-                    </div>
-                    <div className="mt-0.5 text-omi-text-muted">{marketRegimeLabel(primaryMarketIndex, t)}</div>
+                    {technicalReport.rows.map((row) => (
+                      <TechnicalSignalRow
+                        key={row.title}
+                        title={row.title}
+                        description={row.description}
+                        value={row.value}
+                        pulseValue={row.pulseValue}
+                        direction={row.direction}
+                        tone={row.tone}
+                      />
+                    ))}
                   </div>
-                  <div className="text-right">
-                    <div className="font-bold text-omi-text-strong">{formatPrice(primaryMarketIndex?.close)}</div>
-                    <div className={valueTone(primaryMarketIndex?.change_pct)}>
-                      {formatPct(primaryMarketIndex?.change_pct)}
+
+                  <OvernightImpactPanel
+                    report={displayOvernightImpact}
+                    loadState={displayOvernightImpactLoadState}
+                  />
+
+                  <div className="mt-3 border-t border-omi-border-subtle pt-3">
+                    <div className="omi-technical-market flex items-start justify-between gap-4 text-xs">
+                      <div>
+                        <div className="font-bold uppercase tracking-[0.14em] text-omi-text-muted">
+                          {t("dashboard.marketIndex.market")}
+                        </div>
+                        <div className="mt-0.5 text-sm font-bold text-omi-text-strong">
+                          {primaryMarketIndex?.short_label ?? t("stockDetail.marketFallback")}
+                        </div>
+                        <div className="mt-0.5 text-omi-text-muted">
+                          {marketRegimeLabel(primaryMarketIndex, t)}
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className="font-bold text-omi-text-strong">
+                          {formatPrice(primaryMarketIndex?.close)}
+                        </div>
+                        <div className={valueTone(primaryMarketIndex?.change_pct)}>
+                          {formatPct(primaryMarketIndex?.change_pct)}
+                        </div>
+                      </div>
                     </div>
                   </div>
-                </div>
-              </div>
+                </>
+              )}
             </div>
           </>
         )}
 
         {!isIndexProduct ? (
-          <div className="border-t border-omi-border-subtle bg-omi-surface">
+          <div
+            id={STOCK_DETAIL_DATA_PANEL_ID}
+            className="border-t border-omi-border-subtle bg-omi-surface"
+            data-testid={STOCK_DETAIL_DATA_PANEL_ID}
+          >
             <div
               aria-hidden="true"
               className="h-2 border-b border-omi-border-subtle bg-omi-surface-muted shadow-[var(--omi-shadow-surface-inset)]"

@@ -1,4 +1,5 @@
 import type { IndicatorParameters, IndicatorSettings } from "@/components/StockKLineChart";
+import type { ChartEventMarker } from "@/components/chart/chartEventMarkers";
 import { omiChartColors } from "@/lib/themeColors";
 import type { ChartPoint, StockIndicatorPoint } from "@/types/market";
 import type { TranslationFunction, TranslationValues } from "@/i18n";
@@ -80,6 +81,7 @@ export type LightweightKLineChartProps = {
   indicatorParameters?: IndicatorParameters;
   benchmarkData?: ChartPoint[];
   benchmarkLabel?: string;
+  eventMarkers?: ChartEventMarker[];
   volumePanelLabel?: string;
   volumeValueKey?: "volume" | "trade_value";
   pricePrecision?: number;

@@ -9,6 +9,11 @@ import {
 } from "react";
 import { StateSurface } from "@/components/LoadingPlaceholders";
 import {
+  placeChartEventMarker,
+  type ChartEventMarker,
+  type ChartMarkerCollisionRect,
+} from "@/components/chart/chartEventMarkers";
+import {
   defaultIndicatorParameters,
   type IndicatorParameters,
   type IndicatorSettings,
@@ -33,6 +38,7 @@ type Props = {
   indicatorParameters?: IndicatorParameters;
   benchmarkData?: ChartPoint[];
   benchmarkLabel?: string;
+  eventMarkers?: ChartEventMarker[];
   revealKey?: string;
   volumePanelLabel?: string;
   volumeTooltipLabel?: string;
@@ -120,6 +126,10 @@ function formatPct(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
   const sign = value > 0 ? "+" : "";
   return `${sign}${value.toFixed(2)}%`;
+}
+
+function chartDate(value: string) {
+  return value.slice(0, 10);
 }
 
 function formatIndicator(value: number | null | undefined, digits = 2) {
@@ -256,6 +266,7 @@ export default function StockKLineChart({
   indicatorParameters,
   benchmarkData = [],
   benchmarkLabel,
+  eventMarkers = [],
   revealKey,
   volumePanelLabel,
   volumeTooltipLabel,
@@ -634,6 +645,16 @@ export default function StockKLineChart({
         }))
         .slice(-18)
     : [];
+  const chartPointIndexByTime = new Map(
+    data.map((point, index) => [chartDate(point.time), index])
+  );
+  const visibleChartEventMarkerCandidates = eventMarkers.flatMap((marker) => {
+    const index = chartPointIndexByTime.get(chartDate(marker.time));
+
+    if (index === undefined || index < visibleStart || index >= visibleEnd) return [];
+
+    return [{ marker, index: index - visibleStart }];
+  });
 
   function getX(index: number) {
     if (visibleData.length <= 1) return paddingLeft;
@@ -643,6 +664,57 @@ export default function StockKLineChart({
   function getPriceY(value: number) {
     return chartTop + ((yMax - value) / yRange) * priceHeight;
   }
+
+  const occupiedEventMarkerLabels: ChartMarkerCollisionRect[] = visibleChartSignals.map(
+    (signal) => {
+      const x = getX(signal.index);
+      const y = clamp(
+        getPriceY(signal.price) + (signal.direction === "bearish" ? 18 : -18),
+        chartTop + 16,
+        priceBottom - 8
+      );
+      const labelWidth = Math.max(signal.label.length * 12 + 12, 54);
+      const label = labelPosition(x, paddingLeft, paddingRight, width);
+      const labelX = label.anchor === "end" ? x - 10 : x + 10;
+      const rectX = label.anchor === "end" ? labelX - labelWidth : labelX;
+
+      return { x: rectX, y: y - 10, width: labelWidth, height: 18 };
+    }
+  );
+  const visibleChartEventMarkers = visibleChartEventMarkerCandidates
+    .sort((left, right) => left.index - right.index)
+    .flatMap(({ marker, index }) => {
+      const point = visibleData[index];
+      const highPrice = point?.high ?? point?.close ?? point?.low;
+      const lowPrice = point?.low ?? point?.close ?? point?.high;
+
+      if (!validNumber(highPrice) || !validNumber(lowPrice)) return [];
+
+      const x = getX(index);
+      const labelWidth = Math.max(marker.label.length * 11 + 14, 42);
+      const placement = placeChartEventMarker({
+        x,
+        highY: getPriceY(highPrice),
+        lowY: getPriceY(lowPrice),
+        labelWidth,
+        minimumX: paddingLeft,
+        maximumX: width - paddingRight,
+        minimumY: chartTop + 4,
+        maximumY: priceBottom - 4,
+        occupied: occupiedEventMarkerLabels,
+      });
+      occupiedEventMarkerLabels.push(placement.rect);
+
+      return [{
+        ...marker,
+        index,
+        x,
+        anchorY: placement.anchorY,
+        labelX: placement.labelX,
+        labelWidth,
+        y: placement.y,
+      }];
+    });
 
   function getPanelY(panel: Panel, value: number, min: number, max: number) {
     const range = max - min || 1;
@@ -1355,6 +1427,53 @@ export default function StockKLineChart({
             })()}
           </g>
         ) : null}
+
+        {visibleChartEventMarkers.map((marker) => {
+          const connectorX = marker.labelX > marker.x
+            ? marker.labelX
+            : marker.labelX + marker.labelWidth;
+          const tone =
+            marker.tone === "success"
+              ? "fill-omi-success stroke-omi-success"
+              : marker.tone === "warning"
+                ? "fill-omi-warning stroke-omi-warning"
+                : "fill-omi-info stroke-omi-info";
+
+          return (
+            <g
+              key={marker.id}
+              data-chart-event-marker={marker.eventType}
+            >
+              <line
+                x1={marker.x}
+                x2={connectorX}
+                y1={marker.anchorY}
+                y2={marker.y + 9}
+                className={tone}
+                strokeDasharray="3 3"
+                opacity="0.56"
+              />
+              <circle cx={marker.x} cy={marker.anchorY} r="3" className={tone} />
+              <rect
+                x={marker.labelX}
+                y={marker.y}
+                width={marker.labelWidth}
+                height="18"
+                rx="2"
+                className={tone}
+              />
+              <text
+                x={marker.labelX + marker.labelWidth / 2}
+                y={marker.y + 12.5}
+                textAnchor="middle"
+                className="fill-omi-surface text-[10px] font-bold"
+              >
+                {marker.label}
+              </text>
+              <title>{marker.title}</title>
+            </g>
+          );
+        })}
 
         {visibleChartSignals.map((signal) => {
           const x = getX(signal.index);

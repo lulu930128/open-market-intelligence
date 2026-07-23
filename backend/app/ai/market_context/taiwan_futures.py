@@ -560,7 +560,13 @@ def read_tw_futures_context(
     )
     market_chip_trend = _market_chip_trend(market_chip_rows)
     market_chip = (
-        _json_dict(market_chip_daily_to_dict(market_chip_row))
+        _json_dict(
+            market_chip_daily_to_dict(
+                market_chip_row,
+                db=db,
+                resolve_expected_margin=True,
+            )
+        )
         if market_chip_row is not None
         else None
     )

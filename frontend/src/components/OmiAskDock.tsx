@@ -330,6 +330,36 @@ function statusDotClass(tone: StatusTone) {
 }
 
 function consumerAnswer(response: UnknownRecord, t: TranslationFunction) {
+  const canonical = asRecord(response.answer);
+  if (stringValue(canonical.headline) || stringValue(canonical.text)) {
+    const decision = asRecord(response.decision);
+    const limitations = asRecord(response.limitations);
+    const dataLimits = [
+      ...textItems(canonical.data_limits),
+      ...textItems(decision.data_limits),
+      ...textItems(limitations.missing),
+      ...textItems(limitations.warnings),
+    ];
+    return {
+      ...canonical,
+      kind: stringValue(canonical.kind) || "consumer_market_answer",
+      stance_label: stringValue(canonical.stance_label) || stringValue(canonical.stance),
+      confidence_label:
+        stringValue(canonical.confidence_label) || stringValue(canonical.confidence),
+      action_plan: arrayValue(canonical.action_plan).length
+        ? canonical.action_plan
+        : decision.action_plan,
+      scenarios: arrayValue(canonical.scenarios).length
+        ? canonical.scenarios
+        : decision.scenarios,
+      counter_evidence: arrayValue(canonical.counter_evidence).length
+        ? canonical.counter_evidence
+        : decision.counter_evidence,
+      risks: arrayValue(canonical.risks).length ? canonical.risks : decision.risks,
+      data_limits: Array.from(new Set(dataLimits)).slice(0, 8),
+    };
+  }
+
   const analysis = asRecord(response.analysis);
   const direct = asRecord(analysis.human_answer);
   if (stringValue(direct.kind) === "consumer_market_answer" || stringValue(direct.headline)) {
@@ -358,16 +388,32 @@ function consumerAnswer(response: UnknownRecord, t: TranslationFunction) {
 }
 
 function consumerIntent(consumer: UnknownRecord, response: UnknownRecord) {
+  const decision = asRecord(response.decision);
   const analysis = asRecord(response.analysis);
-  return stringValue(consumer.intent) || stringValue(analysis.question_intent);
+  return (
+    stringValue(consumer.intent) ||
+    stringValue(decision.intent) ||
+    stringValue(analysis.question_intent)
+  );
 }
 
 function consumerSource(consumer: UnknownRecord, response: UnknownRecord) {
+  const answer = asRecord(response.answer);
   const analysis = asRecord(response.analysis);
-  return stringValue(consumer.source) || stringValue(analysis.source);
+  return (
+    stringValue(consumer.source) ||
+    stringValue(answer.source) ||
+    stringValue(analysis.source)
+  );
 }
 
 function decisionEvidence(consumer: UnknownRecord, response: UnknownRecord) {
+  const canonicalEvidence = asRecord(response.evidence);
+  const canonicalResult = asRecord(canonicalEvidence.result);
+  const canonicalAnalysis = asRecord(canonicalResult.analysis);
+  const canonicalDecisionEvidence = asRecord(canonicalAnalysis.decision_evidence);
+  if (Object.keys(canonicalDecisionEvidence).length > 0) return canonicalDecisionEvidence;
+
   const analysis = asRecord(response.analysis);
   const direct = asRecord(consumer.decision_evidence);
   if (Object.keys(direct).length > 0) return direct;
@@ -375,6 +421,8 @@ function decisionEvidence(consumer: UnknownRecord, response: UnknownRecord) {
 }
 
 function technicalLevels(response: UnknownRecord) {
+  const canonicalLevels = asRecord(asRecord(response.decision).price_levels);
+  if (Object.keys(canonicalLevels).length > 0) return canonicalLevels;
   return asRecord(asRecord(response.analysis).technical_levels);
 }
 
@@ -405,7 +453,9 @@ function uniqueCount(values: Array<string | null>) {
 }
 
 function responseSourceCount(response: UnknownRecord) {
-  const refs = arrayValue(response.source_refs)
+  const canonicalEvidence = asRecord(response.evidence);
+  const refs = arrayValue(canonicalEvidence.source_refs)
+    .concat(arrayValue(response.source_refs))
     .map((item) => stringValue(asRecord(item).name))
     .filter((value): value is string => Boolean(value));
   const analysis = asRecord(response.analysis);
@@ -443,6 +493,13 @@ function sourceCount(evidence: UnknownRecord | null) {
 }
 
 function fallbackAnswer(response: UnknownRecord, t: TranslationFunction) {
+  const canonical = asRecord(response.answer);
+  const canonicalText =
+    stringValue(canonical.text) ||
+    stringValue(canonical.detail) ||
+    stringValue(canonical.headline);
+  if (canonicalText) return canonicalText;
+
   const analysis = asRecord(response.analysis);
   const result = asRecord(response.result);
   const summary = asRecord(result.summary);
@@ -501,6 +558,9 @@ function slotStatusClass(status: string) {
 }
 
 function responsePayloadLevel(response: UnknownRecord) {
+  const canonicalLevel = stringValue(asRecord(response.mode).payload_level);
+  if (canonicalLevel) return canonicalLevel;
+
   const result = asRecord(response.result);
   const data = asRecord(result.data);
   const compact = asRecord(data.compact);
@@ -512,6 +572,9 @@ function responsePayloadLevel(response: UnknownRecord) {
 }
 
 function responseSlots(response: UnknownRecord) {
+  const canonicalSlots = asRecord(asRecord(response.evidence).slots);
+  if (Object.keys(canonicalSlots).length > 0) return canonicalSlots;
+
   const result = asRecord(response.result);
   const data = asRecord(result.data);
   const directSlots = asRecord(data.slots);
@@ -848,8 +911,9 @@ function buildRequest({
   return {
     question,
     target,
+    contract_version: "omi.decision.v3",
     mode: "brief",
-    caller_profile: "kuro_readonly",
+    caller_profile: "frontend_readonly",
     allow_llm: false,
     allow_write: false,
     allow_external_fetch: asksIntraday,
@@ -1104,22 +1168,31 @@ export default function OmiAskDock({ context }: { context: OmiAskDockContext }) 
       }
 
       if (message.event === "final") {
-        const resolution = asRecord(data.resolution);
+        const resolution = asRecord(
+          asRecord(data.continuation).resolution || data.resolution
+        );
         if (Object.keys(resolution).length > 0) {
           lastResolutionRef.current = resolution;
           setLastResolution(resolution);
         }
 
         setFinalResponse(data);
-        if (!stringValue(asRecord(asRecord(data.analysis).human_answer).headline) && !hasDeltaRef.current) {
+        const canonicalHeadline = stringValue(asRecord(data.answer).headline);
+        const legacyHeadline = stringValue(
+          asRecord(asRecord(data.analysis).human_answer).headline
+        );
+        if (!canonicalHeadline && !legacyHeadline && !hasDeltaRef.current) {
           setAnswerText(fallbackAnswer(data, t));
         }
         appendDecisionSignals(data);
+        const businessOk = data.ok !== false;
         appendSignal({
           stage: "final",
           label: t("ask.stages.final"),
-          message: t("ask.signals.finalReceived"),
-          tone: "done",
+          message: businessOk
+            ? t("ask.signals.finalReceived")
+            : stringValue(asRecord(data.error).message) || t("ask.signals.streamIncomplete"),
+          tone: businessOk ? "done" : "error",
         });
         return;
       }

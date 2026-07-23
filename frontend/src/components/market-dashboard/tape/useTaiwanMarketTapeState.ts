@@ -4,6 +4,7 @@ import { fetchJson } from "@/lib/api";
 import { getJobResultStatus, requestBackfillJob } from "@/lib/jobs";
 import {
   TAIWAN_INTRADAY_REFRESH_MS,
+  TAIWAN_MARKET_CHIP_REFRESH_EVENT,
   getTaiwanMarketChipRefreshState,
   getTaiwanMarketRefreshState,
 } from "@/lib/taiwanMarketTime";
@@ -26,21 +27,21 @@ type UseTaiwanMarketTapeStateOptions = {
 
 const MARKET_CHIP_REFRESH_STORAGE_PREFIX = "omi:market-chip-refresh";
 
-function marketChipRefreshStorageKey(dateKey: string) {
-  return `${MARKET_CHIP_REFRESH_STORAGE_PREFIX}:${dateKey}`;
+function marketChipRefreshStorageKey(refreshKey: string) {
+  return `${MARKET_CHIP_REFRESH_STORAGE_PREFIX}:${refreshKey}`;
 }
 
-function isStoredMarketChipRefreshDone(dateKey: string) {
+function isStoredMarketChipRefreshDone(refreshKey: string) {
   try {
-    return window.localStorage.getItem(marketChipRefreshStorageKey(dateKey)) === "done";
+    return window.localStorage.getItem(marketChipRefreshStorageKey(refreshKey)) === "done";
   } catch {
     return false;
   }
 }
 
-function markStoredMarketChipRefreshDone(dateKey: string) {
+function markStoredMarketChipRefreshDone(refreshKey: string) {
   try {
-    window.localStorage.setItem(marketChipRefreshStorageKey(dateKey), "done");
+    window.localStorage.setItem(marketChipRefreshStorageKey(refreshKey), "done");
   } catch {
     // Job dedupe still prevents identical active refreshes if storage is unavailable.
   }
@@ -92,11 +93,11 @@ export function useTaiwanMarketTapeState({
   }, []);
 
   const refreshMarketChipsForFreshness = useCallback(
-    async (dateKey: string) => {
-      if (isStoredMarketChipRefreshDone(dateKey)) return;
-      if (chipRefreshRequestKeysRef.current.has(dateKey)) return;
+    async (refreshKey: string, dateKey: string) => {
+      if (isStoredMarketChipRefreshDone(refreshKey)) return;
+      if (chipRefreshRequestKeysRef.current.has(refreshKey)) return;
 
-      chipRefreshRequestKeysRef.current.add(dateKey);
+      chipRefreshRequestKeysRef.current.add(refreshKey);
 
       try {
         const job = await requestBackfillJob(
@@ -112,8 +113,16 @@ export function useTaiwanMarketTapeState({
           }
         );
 
-        if (getJobResultStatus(job) === "success") {
-          markStoredMarketChipRefreshDone(dateKey);
+        const resultStatus = getJobResultStatus(job);
+        if (resultStatus === "success") {
+          markStoredMarketChipRefreshDone(refreshKey);
+        }
+        if (resultStatus === "success" || resultStatus === "partial_success") {
+          window.dispatchEvent(
+            new CustomEvent(TAIWAN_MARKET_CHIP_REFRESH_EVENT, {
+              detail: { refreshKey },
+            })
+          );
         }
 
         await load({ silent: true });
@@ -213,21 +222,22 @@ export function useTaiwanMarketTapeState({
 
       const state = getTaiwanMarketChipRefreshState();
       const alreadyQueued =
-        chipRefreshRequestKeysRef.current.has(state.dateKey) ||
-        isStoredMarketChipRefreshDone(state.dateKey);
+        chipRefreshRequestKeysRef.current.has(state.refreshKey) ||
+        isStoredMarketChipRefreshDone(state.refreshKey);
       const delay =
         state.shouldRefreshNow && !alreadyQueued ? 0 : state.msUntilNextRefresh;
 
       refreshTimer = window.setTimeout(() => {
         const nextState = getTaiwanMarketChipRefreshState();
         const nextAlreadyQueued =
-          chipRefreshRequestKeysRef.current.has(nextState.dateKey) ||
-          isStoredMarketChipRefreshDone(nextState.dateKey);
+          chipRefreshRequestKeysRef.current.has(nextState.refreshKey) ||
+          isStoredMarketChipRefreshDone(nextState.refreshKey);
 
         if (nextState.shouldRefreshNow && !nextAlreadyQueued) {
-          void refreshMarketChipsForFreshness(nextState.dateKey).finally(
-            scheduleRefresh
-          );
+          void refreshMarketChipsForFreshness(
+            nextState.refreshKey,
+            nextState.dateKey
+          ).finally(scheduleRefresh);
           return;
         }
 

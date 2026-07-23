@@ -8,7 +8,7 @@ import time
 
 import requests
 from sqlalchemy import case, or_
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -91,9 +91,16 @@ from app.us_market.sources import (
     parse_yahoo_symbol_record,
 )
 from app.us_market.source_health import build_us_source_health
-from app.us_market.trading_calendar import previous_us_trading_day
+from app.us_market.trading_calendar import US_MARKET_TIMEZONE, previous_us_trading_day
 from app.market.calendar_status import expected_us_trade_date
 from app.market.ohlc_overlay import aggregate_ohlc_points, append_intraday_overlay
+from app.market.stock_volume_pace import (
+    build_stock_volume_pace,
+    intraday_history_needs_bootstrap,
+    latest_market_trade_date_points,
+    mutate_market_intraday_history,
+    previous_regular_close_from_history,
+)
 from app.market.technical_radar import (
     TechnicalRadarBar,
     build_technical_watchlist_radar,
@@ -854,6 +861,115 @@ def list_us_ohlc_chart_data(
     }
 
 
+def _us_daily_volume_totals(db: Session, *, symbol: str) -> dict[date, int]:
+    rows = (
+        db.query(USDailyPrice)
+        .filter(USDailyPrice.symbol == symbol)
+        .filter(USDailyPrice.trade_volume.isnot(None))
+        .order_by(USDailyPrice.trade_date.desc(), USDailyPrice.id.desc())
+        .limit(90)
+        .all()
+    )
+    totals: dict[date, int] = {}
+    for row in rows:
+        if row.trade_volume is None or row.trade_volume <= 0:
+            continue
+        totals[row.trade_date] = max(totals.get(row.trade_date, 0), int(row.trade_volume))
+    return totals
+
+
+def _persist_us_intraday_history(
+    db: Session,
+    *,
+    symbol: str,
+    payload: dict,
+) -> dict:
+    result = _copy_us_intraday_payload(payload)
+    if symbol.startswith("^") or not result.get("points"):
+        return result
+    try:
+        changed_count = mutate_market_intraday_history(
+            db,
+            provider="yahoo_finance_chart",
+            stock_id=symbol,
+            market="US",
+            symbol=symbol,
+            interval="1m",
+            source=str(result.get("source") or "yahoo_finance_chart"),
+            source_url=result.get("source_url"),
+            points=result.get("points") or [],
+            market_timezone=US_MARKET_TIMEZONE,
+        )
+        if changed_count:
+            db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        result.setdefault("warnings", []).append(
+            "US intraday history persistence failed; same-time volume coverage may be partial."
+        )
+    return result
+
+
+def _project_us_intraday_payload(
+    payload: dict,
+    *,
+    db: Session | None,
+    symbol: str,
+) -> dict:
+    result = _copy_us_intraday_payload(payload)
+    history_points = [
+        point for point in result.get("points") or [] if isinstance(point, dict)
+    ]
+    current_points = latest_market_trade_date_points(
+        history_points,
+        market_timezone=US_MARKET_TIMEZONE,
+    )
+    result["points"] = current_points
+    result["point_count"] = len(current_points)
+    result["regular_point_count"] = sum(
+        1 for point in current_points if point.get("session", "regular") == "regular"
+    )
+    result["extended_point_count"] = sum(
+        1
+        for point in current_points
+        if point.get("session") in {"pre_market", "after_hours"}
+    )
+    result["has_extended_hours"] = result["extended_point_count"] > 0
+    result["session_phase"] = current_points[-1].get("session") if current_points else None
+    regular_points = [
+        point for point in current_points if point.get("session", "regular") == "regular"
+    ]
+    if regular_points:
+        result["regular_session_close"] = regular_points[-1].get("price")
+        result["regular_session_close_time"] = regular_points[-1].get("time")
+
+    if current_points:
+        current_trade_date = datetime.fromisoformat(str(current_points[-1]["time"])).date()
+        previous_reference = previous_regular_close_from_history(
+            history_points,
+            market_timezone=US_MARKET_TIMEZONE,
+            current_trade_date=current_trade_date,
+        )
+        if previous_reference is not None:
+            result.update(previous_reference)
+
+    if db is not None and not symbol.startswith("^"):
+        result["volume_pace"] = build_stock_volume_pace(
+            db,
+            stock_id=symbol,
+            market="US",
+            current_points=regular_points,
+            market_timezone=US_MARKET_TIMEZONE,
+            daily_totals=_us_daily_volume_totals(db, symbol=symbol),
+            daily_source_name="us_daily_price",
+            history_market="US",
+            minimum_history_points_per_day=300,
+        )
+    else:
+        result["volume_pace"] = None
+    return result
+
+
 def get_us_intraday_trend(
     *,
     symbol: str,
@@ -869,27 +985,46 @@ def get_us_intraday_trend(
 
     if cached is not None:
         return _apply_us_intraday_previous_close_reference(
-            cached,
+            _project_us_intraday_payload(cached, db=db, symbol=normalized_symbol),
             db=db,
             symbol=normalized_symbol,
         )
 
     try:
+        range_value = (
+            "1d"
+            if normalized_symbol.startswith("^")
+            or db is None
+            or not intraday_history_needs_bootstrap(
+                db,
+                stock_id=normalized_symbol,
+                market="US",
+                market_timezone=US_MARKET_TIMEZONE,
+            )
+            else "5d"
+        )
         yahoo_payload, source_url = fetch_yahoo_chart_payload(
             symbol=normalized_symbol,
-            range_value="1d",
+            range_value=range_value,
             interval="1m",
             timeout_seconds=settings.us_market_http_timeout_seconds,
             include_prepost=session_scope != "regular",
         )
+        parsed_payload = parse_yahoo_intraday_prices(
+            yahoo_payload,
+            symbol=normalized_symbol,
+            source_url=source_url,
+            session_scope=session_scope,
+        )
+        if db is not None:
+            parsed_payload = _persist_us_intraday_history(
+                db,
+                symbol=normalized_symbol,
+                payload=parsed_payload,
+            )
         payload = _set_us_intraday_cache(
             cache_key,
-            parse_yahoo_intraday_prices(
-                yahoo_payload,
-                symbol=normalized_symbol,
-                source_url=source_url,
-                session_scope=session_scope,
-            ),
+            parsed_payload,
         )
     except Exception:
         payload = _set_us_intraday_cache(
@@ -914,7 +1049,7 @@ def get_us_intraday_trend(
         )
 
     return _apply_us_intraday_previous_close_reference(
-        payload,
+        _project_us_intraday_payload(payload, db=db, symbol=normalized_symbol),
         db=db,
         symbol=normalized_symbol,
     )

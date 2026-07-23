@@ -152,6 +152,68 @@ class CalendarStatusIntegrationTests(unittest.TestCase):
         self.assertEqual(task_args[1], date(2026, 6, 15))
         self.assertTrue(task_args[2])
 
+    def test_market_chip_margin_scheduler_is_independent_and_has_startup_catchup(self) -> None:
+        fake_scheduler = SimpleNamespace(add_job=Mock())
+
+        with (
+            patch.object(scheduler.settings, "enable_market_chip_margin_scheduler", True),
+            patch.object(
+                scheduler.settings,
+                "scheduler_market_chip_margin_refresh_time",
+                "21:10",
+            ),
+        ):
+            added = scheduler._add_market_chip_margin_refresh_job(fake_scheduler)
+
+        self.assertTrue(added)
+        self.assertEqual(fake_scheduler.add_job.call_count, 2)
+        cron_call, startup_call = fake_scheduler.add_job.call_args_list
+        self.assertIs(
+            cron_call.args[0],
+            scheduler.enqueue_market_chip_margin_daily_refresh,
+        )
+        self.assertEqual(cron_call.kwargs["trigger"], "cron")
+        self.assertEqual(cron_call.kwargs["hour"], 21)
+        self.assertEqual(cron_call.kwargs["minute"], 10)
+        self.assertEqual(cron_call.kwargs["id"], "market_chip_margin_daily_refresh")
+        self.assertIs(
+            startup_call.args[0],
+            scheduler.enqueue_market_chip_margin_daily_startup_catchup,
+        )
+        self.assertEqual(startup_call.kwargs["trigger"], "date")
+
+    def test_market_chip_margin_startup_catchup_uses_previous_release_on_closed_day(self) -> None:
+        fake_db = SimpleNamespace(close=Mock())
+        calendar_status = {
+            "market": "tw",
+            "date": "2026-06-20",
+            "is_trading_day": False,
+            "phase": "market_closed",
+            "reason": "weekend",
+            "release_windows": {
+                "market_chip_margin_daily": {
+                    "expected_trade_date": "2026-06-19",
+                    "is_released": True,
+                }
+            },
+        }
+
+        with (
+            patch.object(scheduler, "build_taiwan_calendar_status", return_value=calendar_status),
+            patch.object(scheduler, "normalize_market_chip_index_ids", return_value=["TAIEX"]),
+            patch.object(scheduler, "SessionLocal", return_value=fake_db),
+            patch.object(
+                scheduler.job_service,
+                "enqueue_job",
+                return_value=(SimpleNamespace(id=22), True),
+            ) as enqueue,
+        ):
+            scheduler.enqueue_market_chip_margin_daily_startup_catchup()
+
+        request = enqueue.call_args.kwargs["request"]
+        self.assertEqual(request["trade_date"], date(2026, 6, 19))
+        self.assertTrue(request["include_today"])
+
     def test_scheduler_skips_us_refresh_when_calendar_is_closed(self) -> None:
         calendar_status = {
             "market": "us",

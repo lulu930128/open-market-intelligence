@@ -154,6 +154,15 @@ def _local_now(now: datetime | None = None) -> datetime:
     return now.astimezone(TAIWAN_TZ)
 
 
+def _taiwan_exchange_datetime(value: datetime | None) -> datetime | None:
+    """Restore exchange-local timestamps after SQLite drops timezone metadata."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=TAIWAN_TZ)
+    return value.astimezone(TAIWAN_TZ)
+
+
 def resolve_taiwan_stock_quote_phase(now: datetime | None = None) -> str:
     local_now = _local_now(now)
     current_date = local_now.date()
@@ -505,7 +514,7 @@ def _freshness_for_row(
 ) -> dict[str, Any]:
     local_now = _local_now(now)
     expected_trade_date = _expected_trade_date_for_phase(phase, now=local_now)
-    quote_at = _local_now(row.quote_time) if row and row.quote_time else None
+    quote_at = _taiwan_exchange_datetime(row.quote_time) if row else None
     fetched_at = _local_now(row.fetched_at) if row and row.fetched_at else None
     age_seconds = (
         max(int((local_now - quote_at).total_seconds()), 0)
@@ -693,7 +702,7 @@ def _row_to_response(
         "holiday_name": calendar_status.get("holiday_name"),
         "phase_label": PHASE_LABELS.get(phase, phase),
         "trade_date": row.trade_date,
-        "quote_time": row.quote_time,
+        "quote_time": _taiwan_exchange_datetime(row.quote_time),
         "fetched_at": row.fetched_at,
         "last_price": row.last_price,
         "previous_close": row.previous_close,

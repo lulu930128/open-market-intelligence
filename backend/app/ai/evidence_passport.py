@@ -35,6 +35,7 @@ TABLE_SOURCE_GRADES = {
     "financial_metric_quarterly": "official",
     "market_index_daily": "official",
     "market_index_daily_stats": "official",
+    "taiwan_market_minute_state": "derived",
     "broker_branch_trade_daily": "third_party",
     "watchlist_group": "user_input",
     "watchlist_item": "user_input",

@@ -15,16 +15,16 @@ import ProfessionalChartPanel, {
 import StockKLineChart, {
   defaultIndicatorParameters,
   defaultIndicators,
-  indicatorCategoryDescription,
-  indicatorCategoryLabel,
-  indicatorOptionDescription,
   professionalIndicatorCategoryGroups,
-  type IndicatorCategoryGroup,
   type IndicatorKey,
   type IndicatorParameters,
   type IndicatorSettings,
 } from "@/components/StockKLineChart";
 import type { ChartDrawing, ChartDrawingTool } from "@/components/LightweightKLineChart";
+import TechnicalIndicatorMenu, {
+  indicatorTemplates,
+  type IndicatorTemplateKey,
+} from "@/components/stock-detail/TechnicalIndicatorMenu";
 import {
   buildChartDrawingSnapshotPayload,
   chartDrawingApiPath,
@@ -67,11 +67,16 @@ import {
   isUsRegularSessionPoint,
 } from "@/lib/usMarketTime";
 import { getUsMarketIndexConfig } from "@/lib/usMarketIndices";
+import {
+  formatStockVolumePaceRatio,
+  stockVolumePaceMetric,
+} from "@/lib/stockVolumePace";
 import type {
   ChartPoint,
   ChartDrawingSnapshotRead,
   IntradayTrendPoint,
   IntradayTrendResponse,
+  StockVolumePace,
   USCompanyProfileRead,
   USCorporateActionRead,
   USOhlcChartRead,
@@ -283,6 +288,7 @@ type USIntradayMeta = {
   extendedPointCount: number;
   hasExtendedHours: boolean;
   warnings: string[];
+  volumePace: StockVolumePace | null;
 };
 
 const emptyUsIntradayMeta: USIntradayMeta = {
@@ -291,6 +297,7 @@ const emptyUsIntradayMeta: USIntradayMeta = {
   extendedPointCount: 0,
   hasExtendedHours: false,
   warnings: [],
+  volumePace: null,
 };
 
 function intradayMetaFromResponse(response: IntradayTrendResponse): USIntradayMeta {
@@ -300,6 +307,7 @@ function intradayMetaFromResponse(response: IntradayTrendResponse): USIntradayMe
     extendedPointCount: response.extended_point_count ?? 0,
     hasExtendedHours: Boolean(response.has_extended_hours),
     warnings: response.warnings ?? [],
+    volumePace: response.volume_pace ?? null,
   };
 }
 
@@ -822,89 +830,6 @@ function FundamentalMetricCell({
   );
 }
 
-function USProfessionalIndicatorMenu({
-  indicators,
-  onToggleIndicator,
-  groups = professionalIndicatorCategoryGroups,
-}: {
-  indicators: IndicatorSettings;
-  onToggleIndicator: (key: IndicatorKey) => void;
-  groups?: IndicatorCategoryGroup[];
-}) {
-  const t = useT();
-
-  return (
-    <div className="absolute right-0 z-30 mt-2 max-h-[560px] w-[25rem] overflow-y-auto border border-omi-border-subtle bg-omi-surface p-3 text-left shadow-xl">
-      <div className="mb-3 flex items-center justify-between border-b border-omi-border-subtle pb-2">
-        <div>
-          <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-omi-text-muted">
-            {t("chart.indicators")}
-          </div>
-          <div className="mt-0.5 text-sm font-bold text-omi-text-strong">{t("chart.indicators")}</div>
-        </div>
-        <div className="text-[11px] font-semibold text-omi-text-subtle">{t("usStockDetail.usDailyWeeklyMonthly")}</div>
-      </div>
-
-      <div className="space-y-3">
-        {groups.map((group) => (
-          <div key={group.key} className="border border-omi-border-subtle">
-            <div className="border-b border-omi-border-subtle bg-omi-surface-subtle px-3 py-2">
-              <div className="text-xs font-bold text-omi-text">
-                {indicatorCategoryLabel(t, group)}
-              </div>
-              <div className="mt-0.5 text-[11px] text-omi-text-muted">
-                {indicatorCategoryDescription(t, group)}
-              </div>
-            </div>
-            <div className="grid grid-cols-1 gap-px bg-omi-surface-muted">
-              {group.options.map((option) => {
-                if (option.status !== "available") {
-                  return (
-                    <div
-                      key={option.key}
-                      className="flex items-start justify-between gap-2 bg-omi-surface px-3 py-2 text-xs text-omi-text-subtle"
-                    >
-                      <span>
-                        <span className="block font-semibold">{option.label}</span>
-                        <span className="block">{indicatorOptionDescription(t, option)}</span>
-                      </span>
-                      <span className="shrink-0 border border-omi-border-subtle px-1.5 py-0.5 text-[10px] font-bold">
-                        {t("indicators.pending")}
-                      </span>
-                    </div>
-                  );
-                }
-
-                return (
-                  <label
-                    key={option.key}
-                    className="flex cursor-pointer items-start gap-2 bg-omi-surface px-3 py-2 text-xs hover:bg-omi-surface-subtle"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={indicators[option.key]}
-                      onChange={() => onToggleIndicator(option.key)}
-                      className="mt-0.5"
-                    />
-                    <span>
-                      <span className="block font-semibold text-omi-text">
-                        {option.label}
-                      </span>
-                      <span className="block text-omi-text-muted">
-                        {indicatorOptionDescription(t, option)}
-                      </span>
-                    </span>
-                  </label>
-                );
-              })}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 export default function USStockDetailPanel({
   selectedSymbol,
   selectedSecurityName,
@@ -924,7 +849,9 @@ export default function USStockDetailPanel({
     useState<USProfessionalChartStyle>("candlestick");
   const [chartIndicators, setChartIndicators] =
     useState<IndicatorSettings>(defaultUsChartIndicators);
-  const [indicatorParameters] =
+  const [activeIndicatorTemplate, setActiveIndicatorTemplate] =
+    useState<IndicatorTemplateKey | null>("basic");
+  const [indicatorParameters, setIndicatorParameters] =
     useState<IndicatorParameters>(defaultIndicatorParameters);
   const [chartDrawingTool, setChartDrawingTool] = useState<ChartDrawingTool>("cursor");
   const [chartDrawingState, setChartDrawingState] = useState<ChartDrawingStorageState>({
@@ -1074,6 +1001,20 @@ export default function USStockDetailPanel({
     latestVolume !== null && volumeMa20 !== null && volumeMa20 !== 0
       ? ((latestVolume - volumeMa20) / volumeMa20) * 100
       : null;
+  const intradayVolumePace = stockVolumePaceMetric(
+    visibleTodayIntradayMeta.volumePace
+  );
+  const useIntradayVolumePace =
+    timeframe === "today" &&
+    selectedSymbol !== null &&
+    getUsMarketIndexConfig(selectedSymbol) === null;
+  const technicalVolumeMetric = useIntradayVolumePace
+    ? intradayVolumePace.differencePct
+    : volumeVsMa20;
+  const technicalVolumeDisplay = useIntradayVolumePace
+    ? formatStockVolumePaceRatio(intradayVolumePace.ratio) ??
+      `${t("usStockDetail.technicalMetrics.volumePaceAccumulating")} ${intradayVolumePace.sampleDays}/5`
+    : formatPct(volumeVsMa20);
   const technicalTitle =
     latestClose === null || ma20 === null
       ? t("usStockDetail.technicalStates.insufficient")
@@ -1947,6 +1888,35 @@ export default function USStockDetailPanel({
       ...current,
       [key]: !current[key],
     }));
+    setActiveIndicatorTemplate(null);
+  }
+
+  function applyIndicatorTemplate(templateKey: IndicatorTemplateKey) {
+    const template = indicatorTemplates.find((item) => item.key === templateKey);
+    if (!template) return;
+
+    setActiveIndicatorTemplate(template.key);
+    setChartIndicators(template.indicators);
+    setIndicatorParameters({
+      ...defaultIndicatorParameters,
+      ...(template.parameters ?? {}),
+    });
+  }
+
+  function handleIndicatorParameterChange(
+    key: keyof IndicatorParameters,
+    value: string,
+    min: number,
+    max: number
+  ) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return;
+
+    setActiveIndicatorTemplate(null);
+    setIndicatorParameters((current) => ({
+      ...current,
+      [key]: Math.max(min, Math.min(max, parsed)),
+    }));
   }
 
   function handleProfessionalTimeframeChange(nextTimeframe: USProfessionalTimeframe) {
@@ -2472,9 +2442,16 @@ export default function USStockDetailPanel({
             onToggleIndicatorMenu={() => setIndicatorMenuOpen((value) => !value)}
             onCloseIndicatorMenu={() => setIndicatorMenuOpen(false)}
             indicatorMenu={
-              <USProfessionalIndicatorMenu
+              <TechnicalIndicatorMenu
                 indicators={chartIndicators}
+                activeTemplate={activeIndicatorTemplate}
+                onApplyTemplate={applyIndicatorTemplate}
                 onToggleIndicator={toggleChartIndicator}
+                groups={professionalIndicatorCategoryGroups}
+                includeParameters
+                parameters={indicatorParameters}
+                onUpdateParameter={handleIndicatorParameterChange}
+                className="w-[25rem]"
               />
             }
             onClose={() => {
@@ -2623,9 +2600,16 @@ export default function USStockDetailPanel({
                       {t("stockDetail.indicators")}
                     </button>
                     {indicatorMenuOpen ? (
-                      <USProfessionalIndicatorMenu
+                      <TechnicalIndicatorMenu
                         indicators={chartIndicators}
+                        activeTemplate={activeIndicatorTemplate}
+                        onApplyTemplate={applyIndicatorTemplate}
                         onToggleIndicator={toggleChartIndicator}
+                        groups={professionalIndicatorCategoryGroups}
+                        includeParameters
+                        parameters={indicatorParameters}
+                        onUpdateParameter={handleIndicatorParameterChange}
+                        className="w-[25rem]"
                       />
                     ) : null}
                   </div>
@@ -2792,22 +2776,31 @@ export default function USStockDetailPanel({
             </div>
             <div>
               <div className="mb-1 flex justify-between text-xs text-omi-text-muted">
-                <span>{t("usStockDetail.technicalMetrics.volumeVsMa20")}</span>
-                <span className={valueTone(volumeVsMa20)}>
+                <span>
+                  {t(
+                    useIntradayVolumePace
+                      ? "usStockDetail.technicalMetrics.volumePace"
+                      : "usStockDetail.technicalMetrics.volumeVsMa20"
+                  )}
+                </span>
+                <span className={valueTone(technicalVolumeMetric)}>
                   <PriceUpdatePulse
-                    value={volumeVsMa20}
-                    direction={volumeVsMa20}
+                    value={technicalVolumeMetric}
+                    direction={technicalVolumeMetric}
                     resetKey={`${selectedSymbol ?? "empty"}:technical-volume`}
                     className="justify-end tabular-nums"
                   >
-                    {formatPct(volumeVsMa20)}
+                    {technicalVolumeDisplay}
+                    {useIntradayVolumePace && intradayVolumePace.provisional
+                      ? ` · ${t("usStockDetail.technicalMetrics.volumePaceProvisional")}`
+                      : ""}
                   </PriceUpdatePulse>
                 </span>
               </div>
               <div className="h-2 bg-omi-surface-muted">
                 <div
-                  className={`omi-technical-bar h-2 ${metricBarClass(volumeVsMa20)}`}
-                  style={{ width: metricBarWidth(volumeVsMa20) }}
+                  className={`omi-technical-bar h-2 ${metricBarClass(technicalVolumeMetric)}`}
+                  style={{ width: metricBarWidth(technicalVolumeMetric) }}
                 />
               </div>
             </div>

@@ -424,6 +424,61 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertEqual(taiex["trade_value"], 1_045_439_448_015)
         self.assertEqual(taiex["close"], 44999.90)
 
+    def test_current_breadth_is_not_rejected_by_stale_index_quote_date(self) -> None:
+        target_date = date(2026, 7, 22)
+        stale_index_date = date(2026, 7, 17)
+        resolved_targets: list[tuple[str, date | None]] = []
+
+        def fake_yahoo_index(config: dict) -> dict:
+            return {
+                "index_id": config["index_id"],
+                "label": config["label"],
+                "short_label": config["short_label"],
+                "market": config["market"],
+                "symbol": config["symbol"],
+                "source": "yahoo_finance_chart",
+                "as_of": datetime(2026, 7, 17, 13, 30, tzinfo=timezone(timedelta(hours=8))),
+                "time": stale_index_date,
+                "close": 378.44,
+                "trade_value": None,
+                "points": [],
+            }
+
+        def fake_resolve(*, db, market: str, target_trade_date: date | None):
+            del db
+            resolved_targets.append((market, target_trade_date))
+            return {
+                "market": market,
+                "scope": "full_market",
+                "trade_date": target_date,
+                "advance_count": 535,
+                "decline_count": 257,
+                "unchanged_count": 74,
+                "total_count": 866,
+                "trade_value": 186_314_449_680,
+                "source": "official_market_breadth",
+            }
+
+        with (
+            patch.object(indices, "_fetch_yahoo_index", side_effect=fake_yahoo_index),
+            patch.object(indices, "_apply_latest_official_market_index_stat"),
+            patch.object(indices, "_apply_latest_official_index_snapshot", return_value=False),
+            patch.object(indices, "_market_breadth_target_date", return_value=target_date),
+            patch.object(indices, "_resolve_market_breadth", side_effect=fake_resolve),
+            patch.object(indices, "_fetch_recent_index_trade_values", return_value={}),
+            patch.object(indices, "_persist_shared_market_index_summary"),
+        ):
+            payload = indices.refresh_market_index_summary(db=self.db)
+
+        self.assertEqual(
+            resolved_targets,
+            [("TWSE", target_date), ("TPEX", target_date)],
+        )
+        tpex = next(item for item in payload["indices"] if item["index_id"] == "TPEX")
+        self.assertEqual(tpex["time"], stale_index_date)
+        self.assertEqual(tpex["breadth"]["trade_date"], target_date)
+        self.assertEqual(tpex["breadth_status"]["status"], "ready")
+
     def test_get_index_summary_never_refreshes_provider_even_with_legacy_flag(self) -> None:
         original_cache = dict(indices._CACHE)
         indices._CACHE["payload"] = None

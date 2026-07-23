@@ -2,6 +2,7 @@
 
 import { useI18n, useT } from "@/i18n";
 import { fetchJson } from "@/lib/api";
+import { emitDataStatusEvent, type DataStatusLevel } from "@/lib/dataStatusEvents";
 import type {
   TaiwanCorporateEventListRead,
   TaiwanCorporateEventRead,
@@ -25,12 +26,12 @@ const eventFilters: EventFilter[] = [
 
 function eventTone(eventType: string) {
   if (eventType === "ex_dividend") {
-    return "border-omi-market-up/40 bg-omi-market-up/10 text-omi-market-up";
+    return "border-omi-success bg-omi-success-soft text-omi-success-strong";
   }
   if (eventType === "financial_report") {
-    return "border-amber-400/50 bg-amber-400/10 text-amber-200";
+    return "border-omi-warning bg-omi-warning-soft text-omi-warning-strong";
   }
-  return "border-sky-400/50 bg-sky-400/10 text-sky-200";
+  return "border-omi-info bg-omi-info-soft text-omi-info-strong";
 }
 
 function sourceTone(status: string) {
@@ -51,6 +52,27 @@ export default function MarketCalendarDialog({
   const [filter, setFilter] = useState<EventFilter>("all");
   const [query, setQuery] = useState("");
 
+  const publishCalendarStatus = useCallback(({
+    level,
+    title,
+    message,
+  }: {
+    level: DataStatusLevel;
+    title: string;
+    message: string;
+  }) => {
+    emitDataStatusEvent({
+      market: "tw",
+      level,
+      title,
+      message,
+      source: t("settings.calendar.status.source"),
+      contextKey: "tw:corporate-events",
+      contextLabel: t("settings.calendar.title"),
+      dedupeKey: "tw:corporate-events:calendar-load",
+    });
+  }, [t]);
+
   const loadCalendar = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
     setErrorMessage(null);
@@ -61,13 +83,34 @@ export default function MarketCalendarDialog({
         { signal }
       );
       setPayload(nextPayload);
+      if (nextPayload.warning) {
+        publishCalendarStatus({
+          level: "warning",
+          title: t("settings.calendar.status.warningTitle"),
+          message: nextPayload.warning,
+        });
+      } else {
+        publishCalendarStatus({
+          level: "success",
+          title: t("settings.calendar.status.successTitle"),
+          message: t("settings.calendar.status.successMessage", {
+            count: nextPayload.result_count,
+          }),
+        });
+      }
     } catch (error) {
       if (signal?.aborted) return;
-      setErrorMessage(error instanceof Error ? error.message : t("settings.calendar.loadError"));
+      const message = error instanceof Error ? error.message : t("settings.calendar.loadError");
+      setErrorMessage(message);
+      publishCalendarStatus({
+        level: "error",
+        title: t("settings.calendar.loadError"),
+        message,
+      });
     } finally {
       if (!signal?.aborted) setLoading(false);
     }
-  }, [t]);
+  }, [publishCalendarStatus, t]);
 
   useEffect(() => {
     if (!open) return;
@@ -203,16 +246,17 @@ export default function MarketCalendarDialog({
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-5">
-          {payload?.warning ? (
-            <div className="mb-4 border border-omi-warning-border bg-omi-warning-soft px-4 py-3 text-sm text-omi-warning-strong">
-              {payload.warning}
-            </div>
-          ) : null}
-
-          {errorMessage ? (
-            <div className="border border-omi-danger-border bg-omi-danger-soft px-4 py-3 text-sm text-omi-danger">
-              <div className="font-bold">{t("settings.calendar.loadError")}</div>
-              <div className="mt-1 break-words text-xs leading-5">{errorMessage}</div>
+          {errorMessage && !payload ? (
+            <div className="border border-dashed border-omi-border px-5 py-12 text-center text-sm text-omi-text-muted">
+              <div>{t("settings.calendar.unavailableWithStatus")}</div>
+              <button
+                type="button"
+                className="mt-3 h-8 border border-omi-border bg-omi-surface px-3 text-xs font-bold text-omi-text hover:border-omi-control"
+                onClick={() => void loadCalendar()}
+                disabled={loading}
+              >
+                {loading ? t("settings.calendar.loading") : t("settings.calendar.reload")}
+              </button>
             </div>
           ) : loading && !payload ? (
             <div className="space-y-3">
@@ -246,7 +290,7 @@ export default function MarketCalendarDialog({
                               <span className={`border px-2 py-0.5 text-[11px] font-bold ${eventTone(event.event_type)}`}>
                                 {t(`settings.calendar.eventTypes.${event.event_type}`)}
                               </span>
-                              {event.status === "today" || event.status === "ongoing" ? (
+                              {event.status === "ongoing" ? (
                                 <span className="border border-omi-accent-border bg-omi-accent-soft px-2 py-0.5 text-[11px] font-bold text-omi-accent">
                                   {t(`settings.calendar.eventStatus.${event.status}`)}
                                 </span>

@@ -29,7 +29,8 @@ Public tool:
 
 - `omi.ask`
 
-`omi.ask` is read-only by default. It accepts a question plus optional v2
+`omi.ask` is read-only by default. It requests the canonical
+`omi.decision.v3` envelope and accepts a question plus optional
 `target` object, then the OMI backend resolves `target.type=auto` into a Taiwan
 stock/watchlist/index/futures, US stock, Japan stock/index, Korea stock/index,
 crypto market/asset, resource asset, portfolio, FRED macro, US/JP/KR watchlist,
@@ -47,6 +48,11 @@ The MCP client does not call market APIs directly; it sends the request to OMI,
 and the backend chooses from allowlisted market-data tools, enforces the budget,
 executes the tools, updates the local evidence cache when allowed by refresh
 policy, and returns `tool_plan` / `tool_runs` evidence.
+
+Consumers should read `answer`, `decision`, `evidence`, `limitations`, `status`,
+and `continuation` directly. The MCP adapter does not create a second answer or
+readiness contract. Explicit `omi.ai.ask.v2` requests remain available during
+the compatibility window.
 
 `market_data_params` is forwarded unchanged to the backend reader. It is for
 bounded reader selection such as:

@@ -98,8 +98,8 @@ class TaiwanStockQuoteDepthTests(unittest.TestCase):
                 self.assertEqual(resolve_taiwan_stock_quote_phase(datetime.fromisoformat(value)), expected)
 
     def test_live_quote_depth_parses_mis_levels_and_persists_snapshot(self) -> None:
-        now = datetime(2026, 6, 30, 9, 5, tzinfo=TAIWAN_TZ)
-        fetched_at = datetime(2026, 6, 30, 1, 5, tzinfo=timezone.utc)
+        now = datetime(2026, 6, 30, 9, 5, 42, tzinfo=TAIWAN_TZ)
+        fetched_at = datetime(2026, 6, 30, 1, 5, 42, tzinfo=timezone.utc)
         payload = sample_payload()
 
         with (
@@ -117,6 +117,9 @@ class TaiwanStockQuoteDepthTests(unittest.TestCase):
         self.assertEqual(http_get.call_args.kwargs["params"]["ex_ch"], "tse_2330.tw")
         self.assertEqual(result["session_phase"], "regular_live")
         self.assertEqual(result["freshness"]["status"], "live")
+        self.assertEqual(result["freshness"]["age_seconds"], 30)
+        self.assertEqual(result["freshness"]["fetch_age_seconds"], 0)
+        self.assertEqual(result["quote_time"].isoformat(), "2026-06-30T09:05:12+08:00")
         self.assertEqual(result["refresh_outcome"], "updated")
         self.assertEqual(cached_result["refresh_outcome"], "cache_hit")
         self.assertTrue(result["depth_available"])

@@ -22,6 +22,11 @@ from app.market.schemas import (
     MarketIndexListRead,
     MarketIndexSummaryRead,
     MarketOhlcChartRead,
+    TaiwanMarketVolumeStateRead,
+)
+from app.market.taiwan_market_state import (
+    persist_taiwan_market_minute_state,
+    read_taiwan_market_volume_state,
 )
 
 
@@ -34,6 +39,14 @@ def get_indices_summary(
     db: Session = Depends(get_db),
 ):
     return get_market_index_summary(db=db, force_refresh=force_refresh)
+
+
+@router.get("/market-state/volume", response_model=TaiwanMarketVolumeStateRead)
+def get_taiwan_market_volume_state(
+    lookback_days: int = Query(default=20, ge=5, le=60),
+    db: Session = Depends(get_db),
+):
+    return read_taiwan_market_volume_state(db, lookback_days=lookback_days)
 
 
 @router.post(
@@ -66,10 +79,12 @@ def refresh_indices_summary(
     db: Session = Depends(get_db),
 ):
     try:
-        return refresh_market_index_summary(
+        payload = refresh_market_index_summary(
             db=db,
             refresh_daily_stats=refresh_daily_stats,
         )
+        persist_taiwan_market_minute_state(db, payload=payload)
+        return payload
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -195,6 +210,7 @@ __all__ = [
     "get_index_ohlc_chart_data",
     "get_indices_list",
     "get_indices_summary",
+    "get_taiwan_market_volume_state",
     "queue_indices_summary_refresh",
     "refresh_indices_summary",
     "refresh_index_daily_stats",

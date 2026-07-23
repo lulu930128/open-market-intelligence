@@ -41,6 +41,7 @@ class TaiwanMarketDependencies:
     get_market_index_summary: Callable[..., dict[str, Any]]
     read_cross_market_context: Callable[..., dict[str, Any]]
     read_market_chips_context: Callable[..., dict[str, Any]]
+    read_market_volume_state: Callable[..., dict[str, Any]]
     now: Callable[[], datetime]
 
 
@@ -60,7 +61,9 @@ def _build_tw_market_compact(
     as_of: str | None,
     payload_level: str,
     breadth: dict[str, Any],
+    breadth_by_market: dict[str, Any],
     sample_breadth: dict[str, Any],
+    sample_coverage: dict[str, Any],
     distribution: dict[str, Any],
     top_gainers: list[dict[str, Any]],
     top_losers: list[dict[str, Any]],
@@ -71,6 +74,7 @@ def _build_tw_market_compact(
     index_intraday: dict[str, Any],
     cross_market: dict[str, Any],
     market_chips: dict[str, Any],
+    volume_state: dict[str, Any],
     slots: dict[str, Any],
 ) -> dict[str, Any]:
     return {
@@ -80,7 +84,9 @@ def _build_tw_market_compact(
         "target": {"type": "market", "id": "TW", "label": "台股市場", "market": "TW"},
         "as_of": as_of,
         "breadth": breadth,
+        "breadth_by_market": breadth_by_market,
         "sample_breadth": sample_breadth,
+        "sample_coverage": sample_coverage,
         "distribution": distribution,
         "top_gainers": top_gainers,
         "top_losers": top_losers,
@@ -96,12 +102,14 @@ def _build_tw_market_compact(
         "index_intraday": index_intraday,
         "cross_market": _compact_auxiliary_context(cross_market),
         "market_chips": _compact_auxiliary_context(market_chips),
+        "volume_state": volume_state,
         "freshness_by_domain": {
             "breadth": (slots.get("market_breadth") or {}).get("status"),
             "sample_ranking": (slots.get("sample_distribution") or {}).get("status"),
             "index_intraday": (slots.get("index_intraday") or {}).get("status"),
             "cross_market": (slots.get("cross_market") or {}).get("status"),
             "market_chips": (slots.get("market_chips") or {}).get("status"),
+            "volume": (slots.get("market_volume") or {}).get("status"),
         },
         "slots": slots,
     }
@@ -232,39 +240,168 @@ def _market_breadth_from_index_summary(
         return None
 
     indices = summary.get("indices") if isinstance(summary, dict) else None
-    taiex = next(
-        (
-            item
-            for item in indices or []
-            if isinstance(item, dict) and item.get("index_id") == "TAIEX"
-        ),
-        None,
-    )
-    raw_breadth = taiex.get("breadth") if isinstance(taiex, dict) else None
-    if not isinstance(raw_breadth, dict) or not raw_breadth.get("total_count"):
+    breadth_by_market: dict[str, dict[str, Any]] = {}
+    for index_id, market in (("TAIEX", "TWSE"), ("TPEX", "TPEX")):
+        index_item = next(
+            (
+                item
+                for item in indices or []
+                if isinstance(item, dict) and item.get("index_id") == index_id
+            ),
+            None,
+        )
+        raw_breadth = index_item.get("breadth") if isinstance(index_item, dict) else None
+        if not isinstance(raw_breadth, dict) or not raw_breadth.get("total_count"):
+            continue
+
+        scope = str(raw_breadth.get("scope") or "local_dataset")
+        breadth = {key: _json_scalar(value) for key, value in raw_breadth.items()}
+        breadth["market"] = str(raw_breadth.get("market") or market).upper()
+        breadth["index_id"] = index_id
+        breadth["scope"] = scope
+        breadth["label"] = str(
+            raw_breadth.get("label")
+            or _market_breadth_label(breadth["market"], scope)
+        )
+        breadth_status = (
+            index_item.get("breadth_status")
+            if isinstance(index_item.get("breadth_status"), dict)
+            else {}
+        )
+        breadth["status"] = str(breadth_status.get("status") or "ready")
+        advance_count = int(breadth.get("advance_count") or 0)
+        decline_count = int(breadth.get("decline_count") or 0)
+        comparison_count = advance_count + decline_count
+        breadth["positive_ratio"] = (
+            advance_count / comparison_count if comparison_count else None
+        )
+        breadth["advance_decline_ratio"] = (
+            advance_count / decline_count if decline_count else None
+        )
+        breadth_by_market[market] = breadth
+
+    if not breadth_by_market:
         return None
 
-    scope = str(raw_breadth.get("scope") or "local_dataset")
-    breadth = {key: _json_scalar(value) for key, value in raw_breadth.items()}
-    breadth["scope"] = scope
-    breadth["label"] = str(
-        raw_breadth.get("label")
-        or _market_breadth_label(raw_breadth.get("market"), scope)
-    )
-    advance_count = int(breadth.get("advance_count") or 0)
-    decline_count = int(breadth.get("decline_count") or 0)
+    missing_markets = [
+        market for market in ("TWSE", "TPEX") if market not in breadth_by_market
+    ]
+    component_statuses = {
+        str(item.get("status") or "ready") for item in breadth_by_market.values()
+    }
+    component_scopes = {
+        str(item.get("scope") or "local_dataset") for item in breadth_by_market.values()
+    }
+
+    def _sum_count(key: str) -> int:
+        return sum(int(item.get(key) or 0) for item in breadth_by_market.values())
+
+    def _sum_optional(key: str) -> int | None:
+        values = [item.get(key) for item in breadth_by_market.values()]
+        return sum(int(value) for value in values if value is not None) if any(
+            value is not None for value in values
+        ) else None
+
+    advance_count = _sum_count("advance_count")
+    decline_count = _sum_count("decline_count")
     comparison_count = advance_count + decline_count
-    breadth["positive_ratio"] = (
-        advance_count / comparison_count if comparison_count else None
+    trade_dates = {
+        str(item.get("trade_date"))
+        for item in breadth_by_market.values()
+        if item.get("trade_date")
+    }
+    status = (
+        "ready"
+        if not missing_markets
+        and component_statuses == {"ready"}
+        and len(trade_dates) <= 1
+        else "partial"
     )
-    breadth["advance_decline_ratio"] = (
-        advance_count / decline_count if decline_count else None
-    )
+    breadth = {
+        "market": "TW",
+        "scope": "full_market" if component_scopes == {"full_market"} else "mixed",
+        "label": "台股上市櫃市場廣度" if not missing_markets else "台股市場廣度（部分市場）",
+        "trade_date": next(iter(trade_dates)) if len(trade_dates) == 1 else None,
+        "as_of": _json_scalar(summary.get("as_of")) if isinstance(summary, dict) else None,
+        "source": "app.market.indices.summary",
+        "status": status,
+        "advance_count": advance_count,
+        "decline_count": decline_count,
+        "unchanged_count": _sum_count("unchanged_count"),
+        "total_count": _sum_count("total_count"),
+        "limit_up_count": _sum_optional("limit_up_count"),
+        "limit_down_count": _sum_optional("limit_down_count"),
+        "trade_value": _sum_optional("trade_value"),
+        "positive_ratio": advance_count / comparison_count if comparison_count else None,
+        "advance_decline_ratio": advance_count / decline_count if decline_count else None,
+        "included_markets": list(breadth_by_market),
+        "missing_markets": missing_markets,
+        "markets": breadth_by_market,
+    }
     _append_source_ref_once(
         source_refs,
         {"type": "derived", "name": "app.market.indices.summary"},
     )
     return breadth
+
+
+def _daily_sample_coverage(
+    db: Session,
+    *,
+    sample_stock_ids: set[str],
+) -> dict[str, Any]:
+    universe_rows = (
+        db.query(StockMaster.stock_id, StockMaster.market)
+        .filter(StockMaster.is_active.is_(True))
+        .filter(StockMaster.instrument_type == "stock")
+        .all()
+    )
+    universe_by_market: dict[str, int] = {"TWSE": 0, "TPEX": 0, "OTHER": 0}
+    sample_by_market: dict[str, int] = {"TWSE": 0, "TPEX": 0, "OTHER": 0}
+
+    def _market_key(value: Any) -> str:
+        normalized = str(value or "").strip().upper()
+        if normalized in {"TWSE", "上市"}:
+            return "TWSE"
+        if normalized in {"TPEX", "上櫃"}:
+            return "TPEX"
+        return "OTHER"
+
+    universe_stock_ids: set[str] = set()
+    known_sample_ids: set[str] = set()
+    for stock_id, market in universe_rows:
+        universe_stock_ids.add(stock_id)
+        key = _market_key(market)
+        universe_by_market[key] += 1
+        if stock_id in sample_stock_ids:
+            sample_by_market[key] += 1
+            known_sample_ids.add(stock_id)
+    sample_by_market["OTHER"] += len(sample_stock_ids - known_sample_ids)
+
+    universe_count = len(universe_rows)
+    sample_count = len(sample_stock_ids)
+    covered_universe_count = len(sample_stock_ids & universe_stock_ids)
+    coverage_ratio = (
+        covered_universe_count / universe_count if universe_count else None
+    )
+    return {
+        "scope": "active_stock_master",
+        "status": (
+            "complete"
+            if universe_count and covered_universe_count >= universe_count
+            else "partial"
+            if universe_count and sample_count
+            else "empty"
+            if universe_count
+            else "unknown"
+        ),
+        "sample_count": sample_count,
+        "covered_universe_count": covered_universe_count,
+        "universe_count": universe_count,
+        "coverage_ratio": coverage_ratio,
+        "sample_count_by_market": sample_by_market,
+        "universe_count_by_market": universe_by_market,
+    }
 
 
 def read_market_overview(
@@ -283,6 +420,7 @@ def read_market_overview(
     payload_level = _payload_level(market_data_params)
     cross_market = dependencies.read_cross_market_context(db=db, now=generated_at)
     market_chips = dependencies.read_market_chips_context(db=db, limit=limit)
+    volume_state = dependencies.read_market_volume_state(db=db)
     for source_ref in cross_market.get("source_refs") or []:
         if isinstance(source_ref, dict):
             _append_source_ref_once(source_refs, source_ref)
@@ -293,6 +431,12 @@ def read_market_overview(
     for source_ref in market_chips.get("source_refs") or []:
         if isinstance(source_ref, dict):
             _append_source_ref_once(source_refs, source_ref)
+    for source_ref in volume_state.get("source_refs") or []:
+        if isinstance(source_ref, dict):
+            _append_source_ref_once(source_refs, source_ref)
+    if volume_state.get("status") != "ready":
+        missing.append("market_volume.same_time_baseline_20d")
+        warnings.extend(str(item) for item in volume_state.get("warnings") or [] if item)
     index_intraday = _market_index_intraday_pack(
         dependencies=dependencies,
         include_intraday=include_intraday,
@@ -307,8 +451,27 @@ def read_market_overview(
         warnings=warnings,
         source_refs=source_refs,
     )
+    breadth_by_market = (
+        market_breadth.get("markets", {})
+        if isinstance(market_breadth, dict)
+        and isinstance(market_breadth.get("markets"), dict)
+        else {}
+    )
+    if isinstance(market_breadth, dict) and market_breadth.get("status") != "ready":
+        missing_markets = [
+            str(market).strip().lower()
+            for market in market_breadth.get("missing_markets") or []
+            if str(market).strip()
+        ]
+        missing.extend(f"market_breadth.{market}" for market in missing_markets)
+        if missing_markets:
+            warnings.append(
+                "Taiwan market breadth is partial; missing full-market coverage for "
+                f"{', '.join(market.upper() for market in missing_markets)}."
+            )
 
     if latest_trade_date is None:
+        sample_coverage = _daily_sample_coverage(db, sample_stock_ids=set())
         if market_breadth is None:
             missing.append("market_breadth.full_market")
         no_daily_warnings = [
@@ -319,11 +482,13 @@ def read_market_overview(
             as_of=None,
             payload_level=payload_level,
             breadth=market_breadth or {},
+            sample_coverage=sample_coverage,
             distribution={},
             industry_rows=[],
             index_intraday=index_intraday,
             cross_market=cross_market,
             market_chips=market_chips,
+            volume_state=volume_state,
             missing=list(dict.fromkeys(["market_daily_price", *missing])),
             warnings=no_daily_warnings,
         )
@@ -331,7 +496,9 @@ def read_market_overview(
             as_of=(market_breadth or {}).get("as_of") or (market_breadth or {}).get("trade_date"),
             payload_level=payload_level,
             breadth=market_breadth or {},
+            breadth_by_market=breadth_by_market,
             sample_breadth={},
+            sample_coverage=sample_coverage,
             distribution={},
             top_gainers=[],
             top_losers=[],
@@ -342,6 +509,7 @@ def read_market_overview(
             index_intraday=index_intraday,
             cross_market=cross_market,
             market_chips=market_chips,
+            volume_state=volume_state,
             slots=slots,
         )
         envelope = {
@@ -353,12 +521,15 @@ def read_market_overview(
             "data": {
                 "latest_trade_date": None,
                 "breadth": market_breadth or {},
+                "breadth_by_market": breadth_by_market,
                 "sample_breadth": {},
+                "sample_coverage": sample_coverage,
                 "top_gainers": [],
                 "top_losers": [],
                 "index_intraday": index_intraday,
                 "cross_market": cross_market,
                 "market_chips": market_chips,
+                "volume_state": volume_state,
                 "slots": slots,
                 "compact": compact,
             },
@@ -381,6 +552,7 @@ def read_market_overview(
         limit=10000,
     )
     stock_ids = sorted({row.stock_id for row in rows if row.stock_id})
+    sample_coverage = _daily_sample_coverage(db, sample_stock_ids=set(stock_ids))
     stock_industries: dict[str, str | None] = {}
     for index in range(0, len(stock_ids), 500):
         chunk = stock_ids[index : index + 500]
@@ -458,6 +630,7 @@ def read_market_overview(
         "positive_ratio": positive_ratio,
         "advance_decline_ratio": advance_decline_ratio,
         "top_value_share": top_value_share,
+        "coverage": sample_coverage,
     }
     distribution = {
         "limit_up_count": sum(
@@ -533,6 +706,13 @@ def read_market_overview(
 
     if not ranked_with_change:
         missing.append("market_daily_price.change_pct")
+    if sample_coverage.get("status") != "complete":
+        missing.append("market_daily_price.full_market_coverage")
+        warnings.append(
+            "Daily ranking and industry sample coverage is "
+            f"{sample_coverage.get('sample_count')}/{sample_coverage.get('universe_count')} "
+            "active stocks; sample-derived rankings must not be treated as full-market results."
+        )
 
     if market_breadth is None:
         market_breadth = sample_breadth
@@ -552,11 +732,13 @@ def read_market_overview(
         as_of=latest_trade_date.isoformat(),
         payload_level=payload_level,
         breadth=market_breadth,
+        sample_coverage=sample_coverage,
         distribution=distribution,
         industry_rows=[*top_industries, *weak_industries],
         index_intraday=index_intraday,
         cross_market=cross_market,
         market_chips=market_chips,
+        volume_state=volume_state,
         missing=missing,
         warnings=warnings,
     )
@@ -564,7 +746,9 @@ def read_market_overview(
         as_of=latest_trade_date.isoformat(),
         payload_level=payload_level,
         breadth=market_breadth,
+        breadth_by_market=breadth_by_market,
         sample_breadth=sample_breadth,
+        sample_coverage=sample_coverage,
         distribution=distribution,
         top_gainers=top_gainers,
         top_losers=top_losers,
@@ -575,6 +759,7 @@ def read_market_overview(
         index_intraday=index_intraday,
         cross_market=cross_market,
         market_chips=market_chips,
+        volume_state=volume_state,
         slots=slots,
     )
     envelope = {
@@ -585,7 +770,9 @@ def read_market_overview(
         "data": {
             "latest_trade_date": latest_trade_date.isoformat(),
             "breadth": market_breadth,
+            "breadth_by_market": breadth_by_market,
             "sample_breadth": sample_breadth,
+            "sample_coverage": sample_coverage,
             "distribution": distribution,
             "top_gainers": top_gainers,
             "top_losers": top_losers,
@@ -601,6 +788,7 @@ def read_market_overview(
             "index_intraday": index_intraday,
             "cross_market": cross_market,
             "market_chips": market_chips,
+            "volume_state": volume_state,
             "slots": slots,
             "compact": compact,
         },

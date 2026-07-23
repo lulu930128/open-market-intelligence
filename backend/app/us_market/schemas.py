@@ -158,6 +158,7 @@ class USIntradayTrendRead(BaseModel):
     regular_session_close_time: str | None = None
     point_count: int
     points: list[USIntradayTrendPointRead]
+    volume_pace: dict | None = None
     source_url: str | None = None
     warnings: list[str] = Field(default_factory=list)
 

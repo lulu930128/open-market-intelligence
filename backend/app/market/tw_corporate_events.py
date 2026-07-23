@@ -93,6 +93,9 @@ HISTORY_PROVIDER_KEYS = (
     "tpex_ex_dividend_history",
     "mops_conference_history",
 )
+STOCK_REMINDER_EVENT_TYPES = frozenset(
+    {"ex_dividend", "financial_report", "investor_conference"}
+)
 
 _CACHE_LOCK = RLock()
 _CACHE_STATE: dict[str, Any] | None = None
@@ -115,6 +118,16 @@ def _resolved_path(path: Path | None = None) -> Path:
         Path("data") / "tw_corporate_events.json",
     )
     return Path(path or configured).expanduser().resolve()
+
+
+def _resolved_mops_max_attempts() -> int:
+    return max(
+        1,
+        min(
+            int(getattr(settings, "tw_corporate_event_mops_max_attempts", 2)),
+            3,
+        ),
+    )
 
 
 def invalidate_taiwan_corporate_event_cache() -> None:
@@ -213,6 +226,7 @@ def _write_refresh(
     errors: Mapping[str, str],
     attempted_at: datetime,
     path: Path | None = None,
+    error_details: Mapping[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     cache_path = _resolved_path(path)
     process_lock = ProcessFileLock(
@@ -236,6 +250,13 @@ def _write_refresh(
                     "fetched_at": attempted_text,
                     "last_attempt_at": attempted_text,
                     "last_error": None,
+                    "last_failure_details": list(
+                        update.get("last_failure_details") or []
+                    ),
+                    "partial_success": bool(update.get("partial_success", False)),
+                    "successful_windows": list(update.get("successful_windows") or []),
+                    "recovered_windows": list(update.get("recovered_windows") or []),
+                    "retry_count": max(int(update.get("retry_count") or 0), 0),
                     "request_count": int(update.get("request_count") or 0),
                     "coverage_start": _json_entry(
                         {"value": update.get("coverage_start")}
@@ -272,6 +293,14 @@ def _write_refresh(
                 }
                 entry["last_attempt_at"] = attempted_text
                 entry["last_error"] = str(error_message).strip() or "Refresh failed."
+                entry["last_failure_details"] = list(
+                    (error_details or {}).get(provider_key) or []
+                )
+                if provider_key not in updates:
+                    entry["partial_success"] = False
+                    entry["successful_windows"] = []
+                    entry["recovered_windows"] = []
+                    entry["retry_count"] = 0
                 providers[provider_key] = entry
 
             written = {
@@ -305,6 +334,44 @@ def _parse_date(value: Any) -> date | None:
         return None
 
 
+def _mops_event_window_key(entry: Mapping[str, Any]) -> str | None:
+    market = str(entry.get("market") or "").strip().upper()
+    event_date = _parse_date(entry.get("start_date"))
+    if not market or event_date is None:
+        return None
+    return f"{market}:{event_date.year}-{event_date.month:02d}"
+
+
+def _merge_partial_mops_entries(
+    batch: MopsConferenceBatch,
+    *,
+    previous_entries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    failed_windows = {
+        f"{failure.market.upper()}:{failure.window}"
+        for failure in batch.failures
+    }
+    preserved = [
+        entry
+        for entry in previous_entries
+        if _mops_event_window_key(entry) in failed_windows
+    ]
+    combined = {
+        str(entry.get("event_id")): entry
+        for entry in [*preserved, *batch.entries]
+        if entry.get("event_id")
+    }
+    return sorted(
+        combined.values(),
+        key=lambda item: (
+            _parse_date(item.get("start_date")) or date.max,
+            str(item.get("start_time") or ""),
+            str(item.get("stock_id") or ""),
+            str(item.get("event_type") or ""),
+        ),
+    )
+
+
 def _local_now(value: datetime | None = None) -> datetime:
     current = value or datetime.now(TAIWAN_TZ)
     if current.tzinfo is None:
@@ -329,6 +396,12 @@ def _provider_cache_status(
     fetched_at = _parse_datetime(entry.get("fetched_at"))
     last_attempt_at = _parse_datetime(entry.get("last_attempt_at"))
     last_error = str(entry.get("last_error") or "").strip() or None
+    last_failure_details = [
+        dict(item)
+        for item in entry.get("last_failure_details") or []
+        if isinstance(item, dict)
+    ]
+    partial_success = bool(entry.get("partial_success"))
     stale_hours = (
         max(
             int(
@@ -364,7 +437,11 @@ def _provider_cache_status(
         status = "current"
     warning = None
     if last_error:
-        warning = f"官方公司事件更新失敗，沿用最近成功 cache：{last_error}"
+        warning = (
+            f"官方公司事件部分更新失敗，已套用成功窗口並保留失敗窗口最近成功 cache：{last_error}"
+            if partial_success
+            else f"官方公司事件更新失敗，沿用最近成功 cache：{last_error}"
+        )
     elif is_stale:
         warning = "官方公司事件 cache 已超過 freshness 門檻。"
     return {
@@ -372,6 +449,11 @@ def _provider_cache_status(
         "fetched_at": fetched_at,
         "last_attempt_at": last_attempt_at,
         "last_error": last_error,
+        "last_failure_details": last_failure_details,
+        "partial_success": partial_success,
+        "successful_windows": list(entry.get("successful_windows") or []),
+        "recovered_windows": list(entry.get("recovered_windows") or []),
+        "retry_count": max(int(entry.get("retry_count") or 0), 0),
         "warning": warning,
     }
 
@@ -542,13 +624,14 @@ def get_taiwan_stock_event_summary(
         int(
             reminder_days
             if reminder_days is not None
-            else getattr(settings, "tw_corporate_event_reminder_days", 14)
+            else getattr(settings, "tw_corporate_event_reminder_days", 7)
         ),
         1,
     )
     listing = list_taiwan_corporate_events(
         stock_id=stock_id,
         market=market,
+        event_types=set(STOCK_REMINDER_EVENT_TYPES),
         date_from=local_now.date(),
         date_to=local_now.date() + timedelta(days=days),
         limit=max(max_results, 1) * 3,
@@ -651,6 +734,44 @@ def get_taiwan_stock_event_history(
     }
 
 
+def _provider_error_detail(
+    provider_key: str,
+    error: BaseException,
+) -> dict[str, Any]:
+    config = PROVIDER_CONFIG[provider_key]
+    failure = provider_http_failure(error)
+    if failure is not None:
+        target_parts = failure.context.target.rsplit(":", 1)
+        return {
+            "provider": config["provider"],
+            "market": config["market"],
+            "window": failure.context.target,
+            "stage": target_parts[-1] if len(target_parts) == 2 else "request",
+            "status": failure.status,
+            "exception_type": failure.exception_type or type(error).__name__,
+            "attempt_count": 1,
+            "retryable": failure.status in {"error", "timeout"},
+            "message": failure.error_message or str(error),
+            "http_status_code": failure.http_status_code,
+            "rate_limited": failure.rate_limited,
+            "retry_after_seconds": failure.retry_after_seconds,
+        }
+    return {
+        "provider": config["provider"],
+        "market": config["market"],
+        "window": "all",
+        "stage": "provider",
+        "status": "error",
+        "exception_type": type(error).__name__,
+        "attempt_count": 1,
+        "retryable": False,
+        "message": str(error).strip() or type(error).__name__,
+        "http_status_code": None,
+        "rate_limited": False,
+        "retry_after_seconds": None,
+    }
+
+
 def _record_event(
     db: Session | None,
     *,
@@ -714,8 +835,12 @@ def refresh_taiwan_corporate_events(
         min(int(getattr(settings, "tw_corporate_event_lookahead_months", 2)), 3),
         1,
     )
+    mops_max_attempts = _resolved_mops_max_attempts()
+    previous_cache = read_taiwan_corporate_event_cache(path=cache_path)
+    previous_providers = previous_cache.get("providers") or {}
     updates: dict[str, dict[str, Any]] = {}
     errors: dict[str, str] = {}
+    error_details: dict[str, list[dict[str, Any]]] = {}
     exceptions: dict[str, BaseException] = {}
     results: dict[str, dict[str, Any]] = {}
 
@@ -728,6 +853,7 @@ def refresh_taiwan_corporate_events(
                     as_of=local_started.date(),
                     month_count=month_count,
                     timeout_seconds=resolved_timeout,
+                    max_attempts=mops_max_attempts,
                 )
             elif provider_key == "twse_ex_dividend":
                 fetched = fetch_twse_ex_dividends(timeout_seconds=resolved_timeout)
@@ -738,17 +864,79 @@ def refresh_taiwan_corporate_events(
                     as_of=local_started.date(),
                     month_count=month_count,
                     timeout_seconds=resolved_timeout,
+                    max_attempts=mops_max_attempts,
                 )
 
             if isinstance(fetched, MopsConferenceBatch):
                 request_count = fetched.request_count
                 if fetched.errors:
-                    raise RuntimeError("; ".join(fetched.errors))
+                    message = "; ".join(fetched.errors)
+                    errors[provider_key] = message
+                    exceptions[provider_key] = RuntimeError(message)
+                    error_details[provider_key] = [
+                        failure.to_dict() for failure in fetched.failures
+                    ]
+                    if fetched.successful_windows and fetched.failures:
+                        previous = previous_providers.get(provider_key)
+                        previous_entries = (
+                            list(previous.get("entries") or [])
+                            if isinstance(previous, dict)
+                            else []
+                        )
+                        merged_entries = _merge_partial_mops_entries(
+                            fetched,
+                            previous_entries=previous_entries,
+                        )
+                        update = {
+                            "entries": merged_entries,
+                            "request_count": request_count,
+                            "coverage_start": fetched.coverage_start,
+                            "coverage_end": fetched.coverage_end,
+                            "partial_success": True,
+                            "successful_windows": fetched.successful_windows,
+                            "recovered_windows": fetched.recovered_windows,
+                            "retry_count": fetched.retry_count,
+                            "last_failure_details": error_details[provider_key],
+                        }
+                        updates[provider_key] = update
+                        results[provider_key] = {
+                            "provider": PROVIDER_CONFIG[provider_key]["provider"],
+                            "market": PROVIDER_CONFIG[provider_key]["market"],
+                            "status": "partial",
+                            "entry_count": len(merged_entries),
+                            "request_count": request_count,
+                            "retry_count": fetched.retry_count,
+                            "successful_windows": fetched.successful_windows,
+                            "recovered_windows": fetched.recovered_windows,
+                            "failure_details": error_details[provider_key],
+                            "source_url": PROVIDER_CONFIG[provider_key]["source_url"],
+                            "error_message": message,
+                        }
+                        continue
+                    results[provider_key] = {
+                        "provider": PROVIDER_CONFIG[provider_key]["provider"],
+                        "market": PROVIDER_CONFIG[provider_key]["market"],
+                        "status": "error",
+                        "entry_count": 0,
+                        "request_count": request_count,
+                        "retry_count": fetched.retry_count,
+                        "successful_windows": [],
+                        "recovered_windows": fetched.recovered_windows,
+                        "failure_details": error_details[provider_key],
+                        "source_url": PROVIDER_CONFIG[provider_key]["source_url"],
+                        "error_message": message,
+                    }
+                    continue
                 update = {
                     "entries": fetched.entries,
                     "request_count": request_count,
                     "coverage_start": fetched.coverage_start,
                     "coverage_end": fetched.coverage_end,
+                    "partial_success": False,
+                    "successful_windows": fetched.successful_windows,
+                    "recovered_windows": fetched.recovered_windows,
+                    "retry_count": fetched.retry_count,
+                    "last_failure_details": [],
                 }
             elif isinstance(fetched, dict) and "entries" in fetched:
                 request_count = int(fetched.get("request_count") or request_count)
@@ -774,6 +962,10 @@ def refresh_taiwan_corporate_events(
                 "status": "success",
                 "entry_count": len(update["entries"]),
                 "request_count": request_count,
+                "retry_count": int(update.get("retry_count") or 0),
+                "successful_windows": list(update.get("successful_windows") or []),
+                "recovered_windows": list(update.get("recovered_windows") or []),
+                "failure_details": [],
                 "source_url": PROVIDER_CONFIG[provider_key]["source_url"],
                 "error_message": None,
             }
@@ -781,12 +973,17 @@ def refresh_taiwan_corporate_events(
             message = str(exc).strip() or type(exc).__name__
             errors[provider_key] = message
             exceptions[provider_key] = exc
+            error_details[provider_key] = [_provider_error_detail(provider_key, exc)]
             results[provider_key] = {
                 "provider": PROVIDER_CONFIG[provider_key]["provider"],
                 "market": PROVIDER_CONFIG[provider_key]["market"],
                 "status": "error",
                 "entry_count": 0,
                 "request_count": request_count,
+                "retry_count": 0,
+                "successful_windows": [],
+                "recovered_windows": [],
+                "failure_details": error_details[provider_key],
                 "source_url": PROVIDER_CONFIG[provider_key]["source_url"],
                 "error_message": message,
             }
@@ -796,19 +993,37 @@ def refresh_taiwan_corporate_events(
         errors=errors,
         attempted_at=started_at,
         path=cache_path,
+        error_details=error_details,
     )
 
     for provider_key, result in results.items():
+        detail = {
+            "entry_count": result["entry_count"],
+            "request_count": result["request_count"],
+            "retry_count": result.get("retry_count", 0),
+            "successful_windows": result.get("successful_windows", []),
+            "recovered_windows": result.get("recovered_windows", []),
+            "failures": result.get("failure_details", []),
+        }
         if result["status"] == "success":
             _record_event(
                 db,
                 provider_key=provider_key,
                 status="success",
                 message="Refreshed official Taiwan corporate events.",
-                detail={
-                    "entry_count": result["entry_count"],
-                    "request_count": result["request_count"],
-                },
+                detail=detail,
+            )
+        elif result["status"] == "partial":
+            _record_event(
+                db,
+                provider_key=provider_key,
+                status="partial_success",
+                message=(
+                    "Taiwan corporate-event refresh was partial; successful windows "
+                    "were updated and failed windows kept their last successful cache."
+                ),
+                error=exceptions.get(provider_key),
+                detail=detail,
             )
         else:
             _record_event(
@@ -817,7 +1032,7 @@ def refresh_taiwan_corporate_events(
                 status="error",
                 message="Official Taiwan corporate-event refresh failed; cached data remains active.",
                 error=exceptions.get(provider_key),
-                detail={"timeout_seconds": resolved_timeout},
+                detail={**detail, "timeout_seconds": resolved_timeout},
             )
 
     completed_at = datetime.now(timezone.utc)
@@ -831,10 +1046,13 @@ def refresh_taiwan_corporate_events(
         "kind": "taiwan_corporate_event_refresh",
         "started_at": started_at,
         "completed_at": completed_at,
-        "request_limit": 2 + month_count * 4,
+        "request_limit": 2 + month_count * 4 * mops_max_attempts,
         "request_count": sum(int(item["request_count"]) for item in results.values()),
         "success_count": sum(1 for item in results.values() if item["status"] == "success"),
-        "error_count": sum(1 for item in results.values() if item["status"] == "error"),
+        "partial_count": sum(1 for item in results.values() if item["status"] == "partial"),
+        "error_count": sum(
+            1 for item in results.values() if item["status"] in {"partial", "error"}
+        ),
         "event_count": snapshot["result_count"],
         "results": results,
     }
@@ -908,6 +1126,7 @@ def backfill_taiwan_corporate_event_history(
         ),
         1,
     )
+    mops_max_attempts = _resolved_mops_max_attempts()
     as_of = local_started.date()
     history_end = as_of - timedelta(days=1)
     target_start = date(as_of.year - history_years + 1, 1, 1)
@@ -1005,6 +1224,7 @@ def backfill_taiwan_corporate_event_history(
 
     updates: dict[str, dict[str, Any]] = {}
     errors: dict[str, str] = {}
+    error_details: dict[str, list[dict[str, Any]]] = {}
     exceptions: dict[str, BaseException] = {}
     results: dict[str, dict[str, Any]] = {}
 
@@ -1034,6 +1254,10 @@ def backfill_taiwan_corporate_event_history(
         fetched_entries: list[dict[str, Any]] = []
         failed_years: set[int] = set()
         provider_errors: list[str] = []
+        provider_failure_details: list[dict[str, Any]] = []
+        successful_windows: list[str] = []
+        recovered_windows: list[str] = []
+        retry_count = 0
         request_count = 0
 
         for year in requested_years:
@@ -1050,6 +1274,7 @@ def backfill_taiwan_corporate_event_history(
                         date_to=year_end,
                         as_of=as_of,
                         timeout_seconds=resolved_timeout,
+                        max_attempts=mops_max_attempts,
                     )
                 elif provider_key == "twse_ex_dividend_history":
                     request_count += 1
@@ -1070,10 +1295,17 @@ def backfill_taiwan_corporate_event_history(
                         year=year,
                         as_of=as_of,
                         timeout_seconds=resolved_timeout,
+                        max_attempts=mops_max_attempts,
                     )
 
                 if isinstance(fetched, MopsConferenceBatch):
                     request_count += fetched.request_count
+                    retry_count += fetched.retry_count
+                    successful_windows.extend(fetched.successful_windows)
+                    recovered_windows.extend(fetched.recovered_windows)
+                    provider_failure_details.extend(
+                        failure.to_dict() for failure in fetched.failures
+                    )
                     fetched_entries.extend(fetched.entries)
                     if fetched.errors:
                         failed_years.add(year)
@@ -1093,6 +1325,9 @@ def backfill_taiwan_corporate_event_history(
             except Exception as exc:
                 failed_years.add(year)
                 provider_errors.append(f"{year}: {str(exc).strip() or type(exc).__name__}")
+                provider_failure_details.append(
+                    _provider_error_detail(provider_key, exc)
+                )
                 exceptions[provider_key] = exc
 
         preserved_entries.extend(
@@ -1189,9 +1424,15 @@ def backfill_taiwan_corporate_event_history(
                 "failed_years": sorted(
                     (previous_failed_years - set(successful_years)) | failed_years
                 ),
+                "partial_success": bool(provider_errors),
+                "successful_windows": successful_windows,
+                "recovered_windows": recovered_windows,
+                "retry_count": retry_count,
+                "last_failure_details": provider_failure_details,
             }
         if provider_errors:
             errors[provider_key] = "; ".join(provider_errors)
+            error_details[provider_key] = provider_failure_details
 
         status = "partial" if provider_errors and updates.get(provider_key) else (
             "error" if provider_errors else "success"
@@ -1202,6 +1443,10 @@ def backfill_taiwan_corporate_event_history(
             "status": status,
             "entry_count": len(combined),
             "request_count": request_count,
+            "retry_count": retry_count,
+            "successful_windows": successful_windows,
+            "recovered_windows": recovered_windows,
+            "failure_details": provider_failure_details,
             "source_url": PROVIDER_CONFIG[provider_key]["source_url"],
             "error_message": errors.get(provider_key),
         }
@@ -1211,6 +1456,7 @@ def backfill_taiwan_corporate_event_history(
         errors=errors,
         attempted_at=started_at,
         path=cache_path,
+        error_details=error_details,
     )
 
     for provider_key, result in results.items():
@@ -1230,6 +1476,10 @@ def backfill_taiwan_corporate_event_history(
                 "full_backfill": full_backfill,
                 "entry_count": result["entry_count"],
                 "request_count": result["request_count"],
+                "retry_count": result.get("retry_count", 0),
+                "successful_windows": result.get("successful_windows", []),
+                "recovered_windows": result.get("recovered_windows", []),
+                "failures": result.get("failure_details", []),
             },
         )
 
@@ -1239,7 +1489,11 @@ def backfill_taiwan_corporate_event_history(
         "completed_at": datetime.now(timezone.utc),
         "request_limit": sum(
             len(requested_years_by_provider[key])
-            * (4 if key == "mops_conference_history" else 1)
+            * (
+                4 * mops_max_attempts
+                if key == "mops_conference_history"
+                else 1
+            )
             for key in HISTORY_PROVIDER_KEYS
         ),
         "request_count": sum(int(item["request_count"]) for item in results.values()),

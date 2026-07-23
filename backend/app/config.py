@@ -99,6 +99,7 @@ class Settings(BaseSettings):
     scheduler_market_refresh_sleep_seconds: float = 0.2
     scheduler_market_chip_refresh_time: str = "15:10"
     scheduler_market_chip_margin_refresh_time: str = "21:10"
+    enable_market_chip_margin_scheduler: bool = True
     scheduler_market_margin_refresh_time: str = "21:10"
     enable_market_calendar_scheduler: bool = True
     scheduler_market_calendar_refresh_time: str = "07:15"
@@ -113,9 +114,10 @@ class Settings(BaseSettings):
     enable_tw_corporate_event_scheduler: bool = True
     scheduler_tw_corporate_event_refresh_time: str = "07:25"
     tw_corporate_event_http_timeout_seconds: int = 20
+    tw_corporate_event_mops_max_attempts: int = 2
     tw_corporate_event_cache_stale_hours: int = 48
     tw_corporate_event_lookahead_months: int = 2
-    tw_corporate_event_reminder_days: int = 14
+    tw_corporate_event_reminder_days: int = 7
     tw_corporate_event_history_years: int = 5
     tw_corporate_event_history_refresh_days: int = 7
     scheduler_tw_corporate_event_history_refresh_time: str = "07:35"

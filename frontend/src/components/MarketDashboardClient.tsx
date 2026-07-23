@@ -389,6 +389,7 @@ export default function MarketDashboardClient({
       outcomeHistory: radarOutcomeHistory,
       outcomeHistoryOpen: radarOutcomeHistoryOpen,
       outcomeHistoryLoadState: radarOutcomeHistoryLoadState,
+      outcomeDetailLoadState: radarOutcomeDetailLoadState,
       selectedOutcomeSnapshotId: selectedRadarOutcomeSnapshotId,
     },
     actions: taiwanRadarActions,
@@ -1307,6 +1308,7 @@ export default function MarketDashboardClient({
         outcomeHistory={radarOutcomeHistory}
         outcomeHistoryOpen={radarOutcomeHistoryOpen}
         outcomeHistoryLoadState={radarOutcomeHistoryLoadState}
+        outcomeDetailLoadState={radarOutcomeDetailLoadState}
         selectedOutcomeSnapshotId={selectedRadarOutcomeSnapshotId}
         getModeHref={(nextMode) =>
           dashboardHref({

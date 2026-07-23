@@ -16,6 +16,7 @@ import ResourceSlotTabs from "@/components/market-detail/ResourceSlotTabs";
 import StockKLineChart, {
   defaultIndicatorParameters,
   defaultIndicators,
+  professionalIndicatorCategoryGroups,
   type IndicatorKey,
   type IndicatorParameters,
   type IndicatorSettings,
@@ -45,6 +46,10 @@ import {
 } from "@/lib/dataStatusEvents";
 import { getJpMarketIndexConfig } from "@/lib/jpMarketIndices";
 import {
+  formatStockVolumePaceRatio,
+  stockVolumePaceMetric,
+} from "@/lib/stockVolumePace";
+import {
   JAPAN_INTRADAY_REFRESH_MS,
   JAPAN_SESSION_END_MINUTES,
   JAPAN_SESSION_START_MINUTES,
@@ -63,6 +68,7 @@ import type {
   JPResourceSummaryRead,
   JPResourceRefreshResultRead,
   JPStockMasterRead,
+  StockVolumePace,
 } from "@/types/market";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -428,6 +434,7 @@ export default function JPMarketPanel({
   const [stockState, setStockState] = useState<LoadState>("idle");
   const [dataState, setDataState] = useState<LoadState>("idle");
   const [todayTrend, setTodayTrend] = useState<IntradayTrendPoint[]>([]);
+  const [todayVolumePace, setTodayVolumePace] = useState<StockVolumePace | null>(null);
   const [todayPreviousClose, setTodayPreviousClose] = useState<number | null>(null);
   const [todaySource, setTodaySource] = useState("yahoo_finance_chart");
   const [todayUpdatedAt, setTodayUpdatedAt] = useState<string | null>(null);
@@ -474,6 +481,10 @@ export default function JPMarketPanel({
     volumeMa20 !== 0
       ? ((latest.volume - volumeMa20) / volumeMa20) * 100
       : null;
+  const intradayVolumePace = useMemo(
+    () => stockVolumePaceMetric(todayVolumePace),
+    [todayVolumePace]
+  );
   const selectedIndexConfig = getJpMarketIndexConfig(selectedStock?.symbol ?? initialSymbol);
   const isSelectedIndex = selectedIndexConfig !== null;
   const selectedChartSymbol = selectedStock?.symbol ?? selectedIndexConfig?.symbol ?? initialSymbol;
@@ -951,13 +962,33 @@ export default function JPMarketPanel({
             : `MA20 ${formatNumber(ma20, 2)}`,
       },
       {
-        label: t("jpMarket.technical.volumeVsMa20"),
-        value: formatSignedPct(volumeVsMa20),
-        tone: volumeVsMa20,
+        label: t(
+          isIntradayTimeframe && !isSelectedIndex
+            ? "jpMarket.technical.volumePace"
+            : "jpMarket.technical.volumeVsMa20"
+        ),
+        value:
+          isIntradayTimeframe && !isSelectedIndex
+            ? formatStockVolumePaceRatio(intradayVolumePace.ratio) ??
+              `${t("jpMarket.technical.volumePaceAccumulating")} ${intradayVolumePace.sampleDays}/5`
+            : formatSignedPct(volumeVsMa20),
+        tone:
+          isIntradayTimeframe && !isSelectedIndex
+            ? intradayVolumePace.differencePct
+            : volumeVsMa20,
         detail:
-          volumeMa20 === null
-            ? t("common.noData")
-            : `${t("jpMarket.technical.volumeMa20")} ${formatVolume(volumeMa20)}`,
+          isIntradayTimeframe && !isSelectedIndex
+            ? `${t("jpMarket.technical.volumePaceDetail", {
+                time: intradayVolumePace.comparisonMinute ?? "--:--",
+                sample: intradayVolumePace.sampleDays,
+              })}${
+                intradayVolumePace.provisional
+                  ? ` · ${t("jpMarket.technical.volumePaceProvisional")}`
+                  : ""
+              }`
+            : volumeMa20 === null
+              ? t("common.noData")
+              : `${t("jpMarket.technical.volumeMa20")} ${formatVolume(volumeMa20)}`,
       },
       {
         label: t("jpMarket.metrics.change"),
@@ -966,7 +997,19 @@ export default function JPMarketPanel({
         detail: timeframeLabel(t, timeframe),
       },
     ],
-    [displayChange, displayPct, ma20, priceVsMa20, t, timeframe, volumeMa20, volumeVsMa20]
+    [
+      displayChange,
+      displayPct,
+      intradayVolumePace,
+      isIntradayTimeframe,
+      isSelectedIndex,
+      ma20,
+      priceVsMa20,
+      t,
+      timeframe,
+      volumeMa20,
+      volumeVsMa20,
+    ]
   );
 
   const professionalTimeframeLabel = timeframeLabel(t, professionalTimeframe);
@@ -1023,6 +1066,7 @@ export default function JPMarketPanel({
     const latestIntradayPoint = today.points[today.points.length - 1] ?? null;
 
     setTodayTrend(today.points);
+    setTodayVolumePace(today.volume_pace ?? null);
     setTodayPreviousClose(today.previous_close);
     setTodaySource(today.source);
     setTodayUpdatedAt(latestIntradayPoint ? formatJapanDateTime(latestIntradayPoint.time) : null);
@@ -1529,6 +1573,7 @@ export default function JPMarketPanel({
         setTodayIntradayState("loading");
         setTodayUpdatedAt(null);
         setTodayTrend([]);
+        setTodayVolumePace(null);
       }
 
       try {
@@ -1685,9 +1730,11 @@ export default function JPMarketPanel({
                 activeTemplate={activeIndicatorTemplate}
                 onApplyTemplate={applyIndicatorTemplate}
                 onToggleIndicator={toggleChartIndicator}
+                groups={professionalIndicatorCategoryGroups}
                 includeParameters
                 parameters={indicatorParameters}
                 onUpdateParameter={handleIndicatorParameterChange}
+                className="w-[25rem]"
               />
             }
             onClose={() => {

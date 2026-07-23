@@ -11,6 +11,7 @@ CRITICAL_TABLES = {
     "stock_master",
     "market_daily_price",
     "market_index_daily_stat",
+    "taiwan_market_minute_state",
     "provider_event",
     "source_health_snapshot",
     "us_daily_price",
@@ -29,8 +30,8 @@ class DatabaseModelContractTests(unittest.TestCase):
     def test_single_registry_configures_all_current_mappers(self) -> None:
         configure_mappers()
 
-        self.assertEqual(len(Base.metadata.tables), 81)
-        self.assertEqual(len(list(Base.registry.mappers)), 81)
+        self.assertEqual(len(Base.metadata.tables), 82)
+        self.assertEqual(len(list(Base.registry.mappers)), 82)
         self.assertTrue(CRITICAL_TABLES.issubset(Base.metadata.tables))
 
     def test_all_foreign_keys_resolve_inside_shared_metadata(self) -> None:

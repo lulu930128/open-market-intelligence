@@ -1340,6 +1340,25 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertEqual(result["previous_close_trade_date"], "2026-06-18")
         self.assertEqual(result["previous_close_provider"], "yahoo_chart")
 
+    def test_jp_stock_intraday_bootstraps_bounded_history_and_exposes_volume_pace(self) -> None:
+        with patch(
+            "app.jp_market.service.fetch_yahoo_chart_payload",
+            return_value=(
+                YAHOO_JP_INTRADAY_SAMPLE,
+                "https://query1.finance.yahoo.com/v8/finance/chart/7203.T?range=5d&interval=1m",
+            ),
+        ) as fetch_mock:
+            result = get_jp_intraday_trend(
+                db=self.db,
+                symbol="7203.T",
+                refresh=True,
+            )
+
+        self.assertEqual(fetch_mock.call_args.kwargs["range_value"], "5d")
+        self.assertEqual(result["point_count"], 5)
+        self.assertEqual(result["volume_pace"]["market"], "JP")
+        self.assertEqual(result["volume_pace"]["status"], "partial")
+
     def test_refresh_jp_watchlist_resources_refreshes_group_symbols(self) -> None:
         with (
             patch(

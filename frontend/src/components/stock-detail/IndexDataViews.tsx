@@ -281,6 +281,40 @@ export function IndexDetailDataPanel({
           unknown: formatNumber(breadth.unknown_count),
         })
       : null;
+  const marginStatusText = (() => {
+    const status = marketChip?.margin_status;
+    if (!status) return null;
+
+    const dataDate = status.data_date ? formatDate(status.data_date) : "-";
+    const expectedDate = status.expected_data_date
+      ? formatDate(status.expected_data_date)
+      : "-";
+    if (status.pending_trade_date) {
+      return t("stockDetail.dataViews.indexDetail.marginPending", {
+        dataDate,
+        pendingDate: formatDate(status.pending_trade_date),
+      });
+    }
+    if (status.status === "partial") {
+      return t("stockDetail.dataViews.indexDetail.marginPartial", {
+        date: dataDate,
+      });
+    }
+    if (status.status === "stale") {
+      return t("stockDetail.dataViews.indexDetail.marginStale", {
+        dataDate,
+        expectedDate,
+      });
+    }
+    if (status.status === "missing") {
+      return t("stockDetail.dataViews.indexDetail.marginMissing", {
+        date: expectedDate,
+      });
+    }
+    return t("stockDetail.dataViews.indexDetail.marginTradeDate", {
+      date: dataDate,
+    });
+  })();
 
   return (
     <section className="border border-omi-border-subtle bg-omi-surface">
@@ -337,10 +371,13 @@ export function IndexDetailDataPanel({
               {t("stockDetail.dataViews.indexDetail.chipDescription")}
             </div>
           </div>
-          <div className="text-xs text-omi-text-muted">
-            {t("stockDetail.dataViews.indexDetail.tradeDate", {
-              date: marketChip?.trade_date ? formatDate(marketChip.trade_date) : "-",
-            })}
+          <div className="space-y-0.5 text-right text-xs text-omi-text-muted">
+            <div>
+              {t("stockDetail.dataViews.indexDetail.tradeDate", {
+                date: marketChip?.trade_date ? formatDate(marketChip.trade_date) : "-",
+              })}
+            </div>
+            {marginStatusText ? <div>{marginStatusText}</div> : null}
           </div>
         </div>
         {marketChipLoadState === "loading" ? (
@@ -402,7 +439,11 @@ export function IndexDetailDataPanel({
             />
             <IndexMetricCard
               label={t("stockDetail.dataViews.indexDetail.governmentBankNetValue")}
-              value={formatSignedTradeValueYi(marketChip?.government_bank_net_value)}
+              value={
+                marketChip?.government_bank_status?.status === "not_available"
+                  ? t("stockDetail.dataViews.indexDetail.notAvailable")
+                  : formatSignedTradeValueYi(marketChip?.government_bank_net_value)
+              }
               tone={valueTone(marketChip?.government_bank_net_value)}
             />
             <IndexMetricCard

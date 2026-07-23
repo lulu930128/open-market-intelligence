@@ -6,6 +6,7 @@ import type {
   WatchlistRadarBucketRead,
   WatchlistRadarItemRead,
   WatchlistRadarMode,
+  WatchlistRadarOutcomeItemRead,
   WatchlistRadarOutcomeSummaryRead,
 } from "@/types/market";
 import {
@@ -42,6 +43,7 @@ type WatchlistRadarPanelProps = {
   outcomeHistory?: WatchlistRadarOutcomeSummaryRead[];
   outcomeHistoryOpen?: boolean;
   outcomeHistoryLoadState?: LoadState;
+  outcomeDetailLoadState?: LoadState;
   selectedOutcomeSnapshotId?: number | null;
   getModeHref?: (mode: WatchlistRadarMode) => string;
   onModeChange: (mode: WatchlistRadarMode) => void;
@@ -181,7 +183,12 @@ function outcomeStatusText(
 }
 
 function outcomeStatusClass(status: string | null | undefined) {
-  if (status === "evaluated") return "border-omi-success-border bg-omi-success-soft text-omi-success";
+  if (status === "evaluated" || status === "hit") {
+    return "border-omi-success-border bg-omi-success-soft text-omi-success";
+  }
+  if (status === "miss") {
+    return "border-omi-danger-border bg-omi-danger-soft text-omi-danger";
+  }
   if (status === "pending") return "border-omi-warning-border bg-omi-warning-soft text-omi-warning";
   if (status === "not_evaluated") return "border-omi-info-border bg-omi-info-soft text-omi-info-strong";
   return "border-omi-border-subtle bg-omi-surface-subtle text-omi-text-muted";
@@ -205,6 +212,77 @@ function outcomeMetricClass(value: number | null | undefined) {
   if (value > 0) return "text-omi-market-up";
   if (value < 0) return "text-omi-market-down";
   return "text-omi-text";
+}
+
+function outcomeReviewDetails(
+  item: WatchlistRadarOutcomeItemRead,
+  t: TranslationFunction
+) {
+  return [
+    item.outcome_trade_date
+      ? `${t("radar.outcome.detailLabels.tradeDate")}：${formatRadarDate(
+          item.outcome_trade_date
+        )}`
+      : null,
+    item.signal_close_price !== null
+      ? `${t("radar.outcome.detailLabels.signalClose")}：${formatRadarPrice(
+          item.signal_close_price
+        )}`
+      : null,
+    item.outcome_open_price !== null
+      ? `${t("radar.outcome.detailLabels.outcomeOpen")}：${formatRadarPrice(
+          item.outcome_open_price
+        )}`
+      : null,
+    item.outcome_high_price !== null
+      ? `${t("radar.outcome.detailLabels.outcomeHigh")}：${formatRadarPrice(
+          item.outcome_high_price
+        )}`
+      : null,
+    item.outcome_low_price !== null
+      ? `${t("radar.outcome.detailLabels.outcomeLow")}：${formatRadarPrice(
+          item.outcome_low_price
+        )}`
+      : null,
+    item.outcome_close_price !== null
+      ? `${t("radar.outcome.detailLabels.outcomeClose")}：${formatRadarPrice(
+          item.outcome_close_price
+        )}`
+      : null,
+    item.open_gap_pct !== null
+      ? `${t("radar.outcome.detailLabels.openGap")}：${formatRadarPct(
+          item.open_gap_pct
+        )}`
+      : null,
+    item.close_return_pct !== null
+      ? `${t("radar.outcome.detailLabels.closeReturn")}：${formatRadarPct(
+          item.close_return_pct
+        )}`
+      : null,
+    item.max_favorable_pct !== null
+      ? `${t("radar.outcome.detailLabels.maxFavorable")}：${formatRadarPct(
+          item.max_favorable_pct
+        )}`
+      : null,
+    item.max_adverse_pct !== null
+      ? `${t("radar.outcome.detailLabels.maxAdverse")}：${formatRadarPct(
+          item.max_adverse_pct
+        )}`
+      : null,
+    item.intraday_range_pct !== null
+      ? `${t("radar.outcome.detailLabels.intradayRange")}：${formatRadarPct(
+          item.intraday_range_pct
+        )}`
+      : null,
+    item.volume_change_pct !== null
+      ? `${t("radar.outcome.detailLabels.volumeChange")}：${formatRadarPct(
+          item.volume_change_pct
+        )}`
+      : null,
+    item.reason
+      ? `${t("radar.outcome.detailLabels.reason")}：${item.reason}`
+      : null,
+  ].filter((detail): detail is string => Boolean(detail));
 }
 
 function formatDistanceFromClose(
@@ -748,6 +826,7 @@ export default function WatchlistRadarPanel({
   outcomeHistory = [],
   outcomeHistoryOpen = false,
   outcomeHistoryLoadState = "idle",
+  outcomeDetailLoadState = "idle",
   selectedOutcomeSnapshotId,
   getModeHref,
   onModeChange,
@@ -767,6 +846,7 @@ export default function WatchlistRadarPanel({
   const showOutcomeTools = Boolean(outcomeSummary || onOpenOutcomeHistory);
   const outcomeBusy = outcomeLoadState === "loading";
   const outcomeHistoryBusy = outcomeHistoryLoadState === "loading";
+  const outcomeDetailBusy = outcomeDetailLoadState === "loading";
   const outcomeBuckets = outcomeSummary?.bucket_summaries.slice(0, 4) ?? [];
   const selectedOutcomeSummary =
     outcomeHistory.find((summary) => summary.snapshot?.id === selectedOutcomeSnapshotId) ??
@@ -1181,42 +1261,157 @@ export default function WatchlistRadarPanel({
                       )}
                     </div>
 
-                    {selectedOutcomeSummary.items.length > 0 ? (
-                      <div>
-                        <div className="mb-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
-                          {t("radar.outcome.itemPreview")}
+                    <div>
+                      <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs">
+                        <div className="font-bold uppercase tracking-wide text-omi-text-muted">
+                          {t("radar.outcome.itemResults", {
+                            count: outcomeSavedCount(selectedOutcomeSummary),
+                          })}
                         </div>
-                        <div className="divide-y divide-omi-border-subtle border border-omi-border-subtle">
-                          {selectedOutcomeSummary.items.map((item) => (
-                            <div
-                              key={`${item.snapshot_item_id}-${item.stock_id}`}
-                              className="grid grid-cols-[minmax(120px,1fr)_90px_90px] gap-3 bg-omi-surface px-3 py-2 text-xs"
-                            >
-                              <div className="min-w-0">
-                                <div className="truncate font-semibold text-omi-text">
-                                  #{item.rank} {item.stock_id} {item.stock_name ?? ""}
-                                </div>
-                                <div className="mt-0.5 truncate text-omi-text-muted">
-                                  {radarBucketLabel(t, item.bucket, item.bucket_label)}
-                                </div>
-                              </div>
-                              <div className="text-right">
-                                <div className="text-omi-text-muted">{t("radar.outcome.closeReturn")}</div>
-                                <div className={outcomeMetricClass(item.close_return_pct)}>
-                                  {formatRadarPct(item.close_return_pct)}
-                                </div>
-                              </div>
-                              <div className="text-right">
-                                <div className="text-omi-text-muted">{t("radar.outcome.result")}</div>
-                                <div className="font-semibold text-omi-text">
-                                  {outcomeStatusLabel(t, item.status)}
-                                </div>
-                              </div>
-                            </div>
-                          ))}
+                        <div className="text-omi-text-muted">
+                          {t("radar.outcome.itemCoverage", {
+                            shown: selectedOutcomeSummary.items.length,
+                            total: outcomeSavedCount(selectedOutcomeSummary),
+                          })}
                         </div>
                       </div>
-                    ) : null}
+                      {outcomeDetailBusy ? (
+                        <StateSurface
+                          title={t("radar.outcome.itemLoading")}
+                          tone="loading"
+                          busy
+                          compact
+                        />
+                      ) : outcomeDetailLoadState === "error" ? (
+                        <StateSurface
+                          title={t("radar.outcome.loadError")}
+                          tone="danger"
+                          compact
+                        />
+                      ) : selectedOutcomeSummary.items.length > 0 ? (
+                        <div
+                          className="divide-y divide-omi-border-subtle border border-omi-border-subtle"
+                          data-testid="watchlist-radar-history-items"
+                        >
+                          {selectedOutcomeSummary.items.map((item) => {
+                            const radarItem = item.radar_item;
+                            const signalDetails = radarItem
+                              ? technicalSignalDetails(radarItem, t)
+                              : [];
+                            const scoreDetails = radarItem
+                              ? factorScoreDetails(radarItem, t)
+                              : [];
+                            const levelDetails = radarItem
+                              ? priceLevelDetails(radarItem, t)
+                              : [];
+                            const rawIndicatorDetails = radarItem
+                              ? indicatorDetails(radarItem, t)
+                              : [];
+                            const indicatorDetailValues = rawIndicatorDetails.filter(
+                              (detail) => !signalDetails.includes(detail)
+                            );
+                            const evaluationDetails = outcomeReviewDetails(item, t);
+                            const collapsedDetailCount = detailCount(
+                              evaluationDetails,
+                              signalDetails,
+                              scoreDetails,
+                              levelDetails,
+                              indicatorDetailValues
+                            );
+
+                            return (
+                              <article
+                                key={`${item.snapshot_item_id}-${item.stock_id}`}
+                                className="bg-omi-surface text-xs"
+                                data-testid={`watchlist-radar-history-item-${item.rank}-${item.stock_id}`}
+                              >
+                                <div className="grid grid-cols-[minmax(120px,1fr)_90px_90px] gap-3 px-3 py-2">
+                                  <div className="min-w-0">
+                                    <div className="truncate font-semibold text-omi-text">
+                                      #{item.rank} {item.stock_id} {item.stock_name ?? ""}
+                                    </div>
+                                    <div className="mt-0.5 truncate text-omi-text-muted">
+                                      {radarBucketLabel(t, item.bucket, item.bucket_label)}
+                                    </div>
+                                  </div>
+                                  <div className="text-right">
+                                    <div className="text-omi-text-muted">
+                                      {t("radar.outcome.closeReturn")}
+                                    </div>
+                                    <div className={outcomeMetricClass(item.close_return_pct)}>
+                                      {formatRadarPct(item.close_return_pct)}
+                                    </div>
+                                  </div>
+                                  <div className="text-right">
+                                    <div className="text-omi-text-muted">
+                                      {t("radar.outcome.result")}
+                                    </div>
+                                    <span
+                                      className={[
+                                        "mt-0.5 inline-flex border px-1.5 py-0.5 font-semibold",
+                                        outcomeStatusClass(item.status),
+                                      ].join(" ")}
+                                    >
+                                      {outcomeStatusLabel(t, item.status)}
+                                    </span>
+                                  </div>
+                                </div>
+                                {collapsedDetailCount > 0 ? (
+                                  <details
+                                    className="group border-t border-omi-border-subtle px-3 pb-3 pt-2"
+                                    data-testid={`watchlist-radar-history-item-details-${item.rank}-${item.stock_id}`}
+                                  >
+                                    <summary className="flex cursor-pointer list-none items-center justify-between gap-3 font-semibold text-omi-text-muted hover:text-omi-accent">
+                                      <span className="min-w-0 truncate">
+                                        {t("radar.outcome.itemDetailToggle", {
+                                          count: collapsedDetailCount,
+                                        })}
+                                      </span>
+                                      <span className="shrink-0 text-[11px] text-omi-text-subtle transition group-open:rotate-45">
+                                        +
+                                      </span>
+                                    </summary>
+                                    <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                                      {detailPanel(
+                                        t("radar.outcome.detailSections.evaluation"),
+                                        t("radar.outcome.detailDescriptions.evaluation"),
+                                        evaluationDetails
+                                      )}
+                                      {detailPanel(
+                                        t("radar.detailSections.signals"),
+                                        t("radar.detailDescriptions.signals"),
+                                        signalDetails
+                                      )}
+                                      {detailPanel(
+                                        t("radar.detailSections.factors"),
+                                        t("radar.detailDescriptions.factors"),
+                                        scoreDetails
+                                      )}
+                                      {detailPanel(
+                                        t("radar.detailSections.levels"),
+                                        t("radar.detailDescriptions.levels"),
+                                        levelDetails
+                                      )}
+                                      {detailPanel(
+                                        t("radar.detailSections.indicators"),
+                                        t("radar.detailDescriptions.indicators"),
+                                        indicatorDetailValues
+                                      )}
+                                    </div>
+                                  </details>
+                                ) : null}
+                              </article>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <StateSurface
+                          title={t("radar.outcome.itemEmpty")}
+                          tone="empty"
+                          compact
+                        />
+                      )}
+                    </div>
                   </div>
                 ) : (
                   <StateSurface

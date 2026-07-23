@@ -11,6 +11,7 @@ from app.ai.evidence_passport import build_evidence_passport
 from app.market import indicator_service
 from app.market import service as market_service
 from app.market.intraday import get_intraday_trend
+from app.market.stock_volume_pace import build_tw_stock_volume_pace
 from app.market.technical_parameters import (
     TechnicalAnalysisParameters,
     get_technical_analysis_parameters,
@@ -18,6 +19,7 @@ from app.market.technical_parameters import (
 from app.market.technical_structure import (
     build_moving_average_structure,
     build_price_range_signals,
+    build_technical_current_state,
 )
 from app.market.trading_calendar import (
     is_taiwan_trading_day,
@@ -29,6 +31,7 @@ from app.market.trading_calendar import (
 
 TAIPEI_TZ = timezone(timedelta(hours=8))
 SESSION_START_MINUTES = 9 * 60
+SESSION_CLOSE_MINUTES = 13 * 60 + 30
 OPENING_OBSERVATION_MINUTES = 5
 OPENING_OBSERVATION_MIN_POINTS = 5
 AGGREGATED_REPORT_BARS = {
@@ -111,6 +114,39 @@ def _fmt_lots(value: Any) -> str:
     if not _finite(value):
         return "-"
     return f"{round(value / 1000):,}"
+
+
+def _fmt_ratio(value: Any) -> str:
+    if not _finite(value):
+        return "-"
+    return f"{value:.2f}×"
+
+
+def _volume_pace_description(volume_pace: dict[str, Any]) -> str:
+    comparison_minute = volume_pace.get("comparison_minute") or "--:--"
+    current_volume = volume_pace.get("current_cumulative_volume")
+    baseline_5d = volume_pace.get("same_time_baseline_5d") or {}
+    baseline_20d = volume_pace.get("same_time_baseline_20d") or {}
+    pace_5d = baseline_5d.get("pace_ratio")
+    pace_20d = baseline_20d.get("pace_ratio")
+    sample_5d = int(baseline_5d.get("sample_days") or 0)
+    sample_20d = int(baseline_20d.get("sample_days") or 0)
+    current_text = "觀察中" if current_volume is None else f"{_fmt_lots(current_volume)}張"
+    if _finite(pace_5d):
+        pace_5d_text = f"5日 {_fmt_ratio(pace_5d)}"
+        if sample_5d < 5:
+            pace_5d_text += f"（n={sample_5d}，暫定）"
+        comparison_parts = [pace_5d_text]
+        if _finite(pace_20d) and sample_20d >= 20:
+            comparison_parts.append(f"20日 {_fmt_ratio(pace_20d)}")
+        return (
+            f"截至 {comparison_minute} 累計 {current_text}；同時段量比 "
+            f"{' / '.join(comparison_parts)}"
+        )
+    return (
+        f"截至 {comparison_minute} 累計 {current_text}；"
+        f"同時段完整分鐘歷史累積中（{sample_5d}/5日）"
+    )
 
 
 def _fmt_signed_lots(value: Any) -> str:
@@ -304,6 +340,8 @@ def _technical_source_refs(*, timeframe: str, include_intraday: bool) -> list[di
     ]
     if include_intraday:
         refs.append({"type": "external_or_cache", "name": "taiwan_intraday_trend"})
+    if timeframe == "today" and include_intraday:
+        refs.append({"type": "table", "name": "market_intraday_bar"})
     return refs
 
 
@@ -330,7 +368,13 @@ def _report_as_of(report: dict[str, Any]) -> Any:
 def _today_market_session() -> dict[str, Any]:
     local_now = _now()
     current_date = local_now.date()
+    current_minutes = local_now.hour * 60 + local_now.minute
     is_trading_day = is_taiwan_trading_day(current_date)
+    is_intraday_window = (
+        is_trading_day
+        and SESSION_START_MINUTES <= current_minutes <= SESSION_CLOSE_MINUTES
+    )
+    is_after_close = is_trading_day and current_minutes > SESSION_CLOSE_MINUTES
     holiday_name = taiwan_market_holiday_name(current_date)
     reason = (
         "trading_day"
@@ -342,6 +386,8 @@ def _today_market_session() -> dict[str, Any]:
     return {
         "date": current_date,
         "is_trading_day": is_trading_day,
+        "is_intraday_window": is_intraday_window,
+        "is_after_close": is_after_close,
         "reason": reason,
         "holiday_name": holiday_name,
         "previous_trading_day": previous_taiwan_trading_day(current_date, include_value=is_trading_day),
@@ -564,9 +610,22 @@ def _build_indicator_report(
         badges.append(_badge("放量", "warning"))
 
     summary_parts = [
-        "站上 MA20" if _finite(price_vs_ma20) and price_vs_ma20 >= 0 else "跌破 MA20" if _finite(price_vs_ma20) else "價格結構不足",
-        "MACD 偏多" if _finite(macd_histogram) and macd_histogram >= 0 else "MACD 偏弱" if _finite(macd_histogram) else "動能資料不足",
-        "放量" if _finite(volume_ratio) and volume_ratio >= technical_parameters.volume_ratio_threshold else "量能一般" if _finite(volume_ratio) else "量能資料不足",
+        "站上 MA20"
+        if _finite(price_vs_ma20) and price_vs_ma20 >= 0
+        else "跌破 MA20"
+        if _finite(price_vs_ma20)
+        else "價格結構不足",
+        "MACD 偏多"
+        if _finite(macd_histogram) and macd_histogram >= 0
+        else "MACD 偏弱"
+        if _finite(macd_histogram)
+        else "動能資料不足",
+        "放量"
+        if _finite(volume_ratio)
+        and volume_ratio >= technical_parameters.volume_ratio_threshold
+        else "量能一般"
+        if _finite(volume_ratio)
+        else "量能資料不足",
     ]
     if indicator.get("time") is None:
         missing.append("market_daily_price.time")
@@ -801,7 +860,17 @@ def _build_today_report(
     open_price = stats["open"]
     high_price = stats["high"]
     low_price = stats["low"]
-    current_volume = stats["volume"] or latest_point.get("volume")
+    volume_pace = build_tw_stock_volume_pace(
+        db,
+        stock_id=stock_id,
+        current_points=points,
+    )
+    pace_current_volume = volume_pace.get("current_cumulative_volume")
+    current_volume = (
+        pace_current_volume
+        if pace_current_volume is not None
+        else stats["volume"] or latest_point.get("volume")
+    )
     change_pct = _pct_change(latest_price, reference_close)
     change = latest_price - reference_close if _finite(latest_price) and _finite(reference_close) else None
     price_vs_open_pct = _pct_change(latest_price, open_price)
@@ -817,6 +886,12 @@ def _build_today_report(
         if _safe_ratio(current_volume, volume_ma20) is not None
         else None
     )
+    volume_pace_5d = volume_pace.get("same_time_baseline_5d") or {}
+    volume_pace_ratio = volume_pace_5d.get("pace_ratio")
+    if volume_pace.get("status") != "ready":
+        warnings.extend(str(item) for item in volume_pace.get("warnings") or [] if item)
+    if not _finite(volume_pace_ratio):
+        missing.append("intraday_volume.same_time_baseline_5d")
     ma20 = _indicator_value(ma, technical_parameters.ma_medium_key, "ma20")
     price_vs_ma20 = _pct_change(latest_price, ma20)
     rsi14 = _indicator_value(rsi, technical_parameters.rsi_key, "rsi14")
@@ -865,13 +940,19 @@ def _build_today_report(
             _row(
                 key="volume_pace",
                 label="量能速度",
-                description=f"目前累計量，20日均量占比 {_fmt_pct(volume_vs_daily_average_pct)}",
-                value=current_volume,
-                display_value="觀察中" if current_volume is None else f"{_fmt_lots(current_volume)}張",
+                description=_volume_pace_description(volume_pace),
+                value=volume_pace_ratio,
+                display_value=(
+                    "累積中" if not _finite(volume_pace_ratio) else _fmt_ratio(volume_pace_ratio)
+                ),
                 direction=None,
-                tone="neutral",
-                basis="current intraday cumulative volume; no same-time baseline yet",
-                source=str(intraday.get("source") or "intraday"),
+                tone=(
+                    "warning"
+                    if _finite(volume_pace_ratio) and volume_pace_ratio >= 1.5
+                    else "neutral"
+                ),
+                basis=str(volume_pace.get("calculation_basis") or "same-time volume history unavailable"),
+                source="market_intraday_bar+market_daily_price",
             ),
             _row(
                 key="daily_background",
@@ -937,7 +1018,7 @@ def _build_today_report(
         "generated_at": _now(),
         "title": title,
         "summary": "，".join(summary_parts),
-        "score": score if phase == "intraday" else None,
+        "score": score if phase == "intraday" else 0,
         "value": change_pct,
         "value_label": "vs 昨收",
         "rows": rows,
@@ -956,6 +1037,8 @@ def _build_today_report(
                 "opening_gap_pct": opening_gap_pct,
                 "price_vs_open_pct": price_vs_open_pct,
                 "volume_vs_daily_average_pct": volume_vs_daily_average_pct,
+                "volume_vs_daily_average_role": "context_only_not_intraday_pace",
+                "volume_pace": volume_pace,
             },
             "daily_background": indicator,
             "market_session": {
@@ -1032,14 +1115,48 @@ def _build_daily_report(
     ma5 = _indicator_value(ma, technical_parameters.ma_short_key, "ma5")
     ma20 = _indicator_value(ma, technical_parameters.ma_medium_key, "ma20")
     ma60 = _indicator_value(ma, technical_parameters.ma_long_key, "ma60")
+    support20 = _indicator_value(
+        support_resistance,
+        technical_parameters.support_key,
+        "support20",
+    )
+    resistance20 = _indicator_value(
+        support_resistance,
+        technical_parameters.resistance_key,
+        "resistance20",
+    )
     analysis_price = close
     analysis_price_time = indicator.get("time")
     analysis_price_source = "market_daily_price"
     analysis_is_intraday = False
     intraday_context: dict[str, Any] | None = None
     market_session = _today_market_session()
+    indicator_time = indicator.get("time")
+    if isinstance(indicator_time, datetime):
+        indicator_date = indicator_time.astimezone(TAIPEI_TZ).date()
+    elif isinstance(indicator_time, date):
+        indicator_date = indicator_time
+    elif isinstance(indicator_time, str):
+        try:
+            indicator_date = date.fromisoformat(indicator_time[:10])
+        except ValueError:
+            indicator_date = None
+    else:
+        indicator_date = None
+    has_current_daily_indicator = indicator_date == market_session["date"]
+    should_load_intraday = (
+        include_intraday
+        and market_session["is_trading_day"]
+        and (
+            market_session["is_intraday_window"]
+            or (
+                market_session["is_after_close"]
+                and not has_current_daily_indicator
+            )
+        )
+    )
 
-    if include_intraday and market_session["is_trading_day"]:
+    if should_load_intraday:
         intraday = get_intraday_trend(db=db, stock_id=stock_id)
         intraday_points = intraday.get("points") or []
         latest_intraday_point = intraday_points[-1] if intraday_points else None
@@ -1078,7 +1195,7 @@ def _build_daily_report(
             warnings.append(
                 "No current-session intraday price is available; daily close remains the analysis price."
             )
-    elif include_intraday:
+    elif include_intraday and not market_session["is_trading_day"]:
         warnings.append(
             f"{market_session['date']} is not a Taiwan trading day; daily close remains the analysis price."
         )
@@ -1095,16 +1212,8 @@ def _build_daily_report(
     price_vs_ma60 = distance_pct.get("ma60")
     range_signals, range_signal_score = build_price_range_signals(
         price=analysis_price,
-        support=_indicator_value(
-            support_resistance,
-            technical_parameters.support_key,
-            "support20",
-        ),
-        resistance=_indicator_value(
-            support_resistance,
-            technical_parameters.resistance_key,
-            "resistance20",
-        ),
+        support=support20,
+        resistance=resistance20,
         donchian_upper=_indicator_value(
             donchian,
             technical_parameters.donchian_upper_key,
@@ -1134,6 +1243,8 @@ def _build_daily_report(
     volume_ratio_pct = (volume_ratio - 1) * 100 if volume_ratio is not None else None
     macd_histogram = macd.get("histogram")
     rsi14 = _indicator_value(rsi, technical_parameters.rsi_key, "rsi14")
+    roc12 = _indicator_value(roc, technical_parameters.roc_key, "roc12")
+    mfi14 = _indicator_value(mfi, technical_parameters.mfi_key, "mfi14")
     adx14 = _indicator_value(adx, technical_parameters.adx_key, "adx14")
     plus_di14 = _indicator_value(adx, technical_parameters.plus_di_key, "plus_di14")
     minus_di14 = _indicator_value(adx, technical_parameters.minus_di_key, "minus_di14")
@@ -1149,6 +1260,36 @@ def _build_daily_report(
             / (donchian_upper - donchian_lower)
             * 100
         )
+    analysis_change_pct = (
+        _pct_change(analysis_price, intraday_context.get("previous_close"))
+        if analysis_is_intraday and intraday_context
+        else change_pct
+    )
+    current_state = build_technical_current_state(
+        price=analysis_price,
+        moving_average_structure=moving_average_structure,
+        change_pct=analysis_change_pct,
+        volume_ratio=volume_ratio,
+        rsi14=rsi14,
+        macd_histogram=macd_histogram,
+        roc12=roc12,
+        mfi14=mfi14,
+        adx14=adx14,
+        plus_di14=plus_di14,
+        minus_di14=minus_di14,
+        atr_pct=atr_pct,
+        donchian_position=donchian_position,
+        support20=support20,
+        resistance20=resistance20,
+        adx_trend_threshold=technical_parameters.adx_trend_threshold,
+        volume_ratio_threshold=technical_parameters.volume_ratio_threshold,
+        rsi_overheated_threshold=technical_parameters.rsi_overheated_at,
+        atr_high_volatility_pct=technical_parameters.atr_high_volatility_pct,
+    )
+    current_evidence = {
+        item["key"]: item
+        for item in current_state["evidence"]
+    }
     latest_institutional = daily["institutional"]
     institutional_net = (
         getattr(latest_institutional, "total_institutional_net", None)
@@ -1203,7 +1344,7 @@ def _build_daily_report(
                     f"{_fmt_pct(price_vs_ma60)}"
                 ),
                 value=price_vs_ma60,
-                display_value=_fmt_pct(price_vs_ma60),
+                display_value=current_state["position"]["label"],
                 direction=price_vs_ma60,
                 basis=(
                     "current-session intraday price vs finalized daily moving averages"
@@ -1217,12 +1358,13 @@ def _build_daily_report(
                 label="趨勢結構",
                 description=(
                     f"{moving_average_structure['price_state_label']}，"
-                    f"{moving_average_structure['alignment_label']}；"
+                    f"{current_state['position']['alignment_label']}；"
                     f"MA5/20/60 {_fmt_price(ma5)} / {_fmt_price(ma20)} / {_fmt_price(ma60)}，"
-                    f"ADX {_fmt_number(adx14, 2)}"
+                    f"ADX {_fmt_number(adx14, 2)}，"
+                    f"+DI {_fmt_number(plus_di14, 2)} / -DI {_fmt_number(minus_di14, 2)}"
                 ),
                 value=score,
-                display_value=moving_average_structure["alignment_label"],
+                display_value=current_state["headline"]["label"],
                 direction=score,
                 basis="price position, moving average alignment, and ADX direction",
                 source="market_daily_price",
@@ -1230,40 +1372,33 @@ def _build_daily_report(
             _row(
                 key="momentum",
                 label="動能指標",
-                description=f"RSI {_fmt_number(rsi14, 2)}，MACD H {_fmt_number(macd_histogram, 2)}，ROC12 {_fmt_pct(_indicator_value(roc, technical_parameters.roc_key, 'roc12'))}",
+                description=current_evidence["momentum"]["summary"],
                 value=rsi14,
-                display_value=_fmt_number(rsi14, 2),
+                display_value=current_state["qualifier"]["label"],
                 direction=macd_histogram,
-                tone="warning" if _finite(rsi14) and rsi14 >= technical_parameters.rsi_overheated_at else _tone(macd_histogram),
+                tone=current_evidence["momentum"]["tone"],
                 basis="daily RSI, MACD histogram, and ROC",
                 source="market_daily_price",
             ),
             _row(
                 key="volume_flow",
                 label="量價資金",
-                description=f"量能 {_fmt_pct(volume_ratio_pct)} vs 20日均量，MFI {_fmt_number(_indicator_value(mfi, technical_parameters.mfi_key, 'mfi14'), 2)}",
+                description=current_evidence["volume"]["summary"],
                 value=volume_ratio_pct,
-                display_value=_fmt_pct(volume_ratio_pct),
+                display_value=current_evidence["volume"]["state_label"],
                 direction=volume_ratio_pct,
-                tone="warning" if _finite(volume_ratio) and volume_ratio >= technical_parameters.volume_ratio_threshold else "neutral",
+                tone=current_evidence["volume"]["tone"],
                 basis="daily volume vs 20-day average volume",
                 source="market_daily_price",
             ),
             _row(
                 key="volatility_risk",
                 label="波動風險",
-                description=(
-                    f"ATR {_fmt_pct(atr_pct)}，Donchian 位置 {_fmt_pct(donchian_position)}"
-                    + (
-                        f"；{' / '.join(str(signal['label']) for signal in range_signals)}"
-                        if range_signals
-                        else ""
-                    )
-                ),
+                description=current_evidence["risk"]["summary"],
                 value=atr_pct,
-                display_value=_fmt_pct(atr_pct),
+                display_value=current_evidence["risk"]["state_label"],
                 direction=1 if _finite(atr_pct) and atr_pct > technical_parameters.atr_high_volatility_pct else 0,
-                tone="warning" if _finite(atr_pct) and atr_pct > technical_parameters.atr_high_volatility_pct else "neutral",
+                tone=current_evidence["risk"]["tone"],
                 basis="finalized daily ATR and analysis price vs finalized 20-day Donchian range",
                 source="market_daily_price",
             ),
@@ -1289,11 +1424,6 @@ def _build_daily_report(
     if _finite(volume_ratio) and volume_ratio >= technical_parameters.volume_ratio_threshold:
         badges.append(_badge("放量", "warning"))
 
-    summary_parts = [
-        "站上 MA20" if _finite(price_vs_ma20) and price_vs_ma20 >= 0 else "跌破 MA20" if _finite(price_vs_ma20) else "價格結構不足",
-        "MACD 偏多" if _finite(macd_histogram) and macd_histogram >= 0 else "MACD 偏弱" if _finite(macd_histogram) else "動能資料不足",
-        "放量" if _finite(volume_ratio) and volume_ratio >= technical_parameters.volume_ratio_threshold else "量能一般" if _finite(volume_ratio) else "量能資料不足",
-    ]
     if indicator.get("time") is None:
         missing.append("market_daily_price.time")
 
@@ -1319,15 +1449,9 @@ def _build_daily_report(
             "Current-session price is provisional; MA, RSI, MACD, ADX, volume, and flow indicators remain finalized daily values."
         )
     summary_parts = [
-        moving_average_structure["price_state_label"],
-        moving_average_structure["alignment_label"],
-        *(
-            [" / ".join(str(signal["label"]) for signal in range_signals[:2])]
-            if range_signals
-            else []
-        ),
-        "MACD 偏多" if _finite(macd_histogram) and macd_histogram >= 0 else "MACD 偏弱" if _finite(macd_histogram) else "動能資料不足",
-        "放量" if _finite(volume_ratio) and volume_ratio >= technical_parameters.volume_ratio_threshold else "量能一般" if _finite(volume_ratio) else "量能資料不足",
+        current_state["position"]["label"],
+        current_state["qualifier"]["label"],
+        current_evidence["volume"]["state_label"],
     ]
 
     return {
@@ -1337,7 +1461,7 @@ def _build_daily_report(
         "phase": "daily_intraday" if analysis_is_intraday else "daily",
         "confidence": "medium" if analysis_is_intraday or missing else "high",
         "generated_at": _now(),
-        "title": _title_from_score(score, positive="短線偏多", neutral="短線整理", negative="短線偏弱"),
+        "title": current_state["headline"]["label"],
         "summary": "，".join(summary_parts),
         "score": score,
         "value": price_vs_ma20,
@@ -1347,11 +1471,8 @@ def _build_daily_report(
         "data": {
             "daily_indicator": indicator,
             "market": _stock_market(db=db, stock_id=stock_id),
-            "change_pct": (
-                _pct_change(analysis_price, intraday_context.get("previous_close"))
-                if analysis_is_intraday and intraday_context
-                else change_pct
-            ),
+            "change_pct": analysis_change_pct,
+            "current_state": current_state,
             "price_context": {
                 "price": analysis_price,
                 "price_time": _json_value(analysis_price_time),
@@ -1372,7 +1493,7 @@ def _build_daily_report(
         "warnings": list(dict.fromkeys(warnings)),
         "source_refs": _technical_source_refs(
             timeframe="daily",
-            include_intraday=include_intraday and market_session["is_trading_day"],
+            include_intraday=intraday_context is not None,
         ),
     }
 

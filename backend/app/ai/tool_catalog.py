@@ -17,7 +17,12 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                     "properties": {
                         "contract_version": {
                             "type": "string",
-                            "default": "omi.ai.ask.v2",
+                            "enum": ["omi.decision.v3", "omi.ai.ask.v2"],
+                            "default": "omi.decision.v3",
+                            "description": (
+                                "Canonical OMI decision envelope. "
+                                "omi.ai.ask.v2 remains available for compatibility."
+                            ),
                         },
                         "question": {"type": "string"},
                         "target": {

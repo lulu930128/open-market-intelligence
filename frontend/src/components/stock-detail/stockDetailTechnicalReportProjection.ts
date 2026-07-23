@@ -111,7 +111,6 @@ export function buildFallbackTechnicalReport({
   todayReferenceClose,
   todayTrendLength,
   totalInstitutionalNet,
-  volumeMa20,
   volumeRatio,
   volumeRatioPct,
 }: FallbackTechnicalReportInput): TechnicalReport {
@@ -260,9 +259,6 @@ export function buildFallbackTechnicalReport({
           ? ((todayStats.high - todayStats.low) / todayReferenceClose) * 100
           : null;
       const currentVolume = todayStats.volume ?? latestToday?.volume ?? null;
-      const currentVolumeVsDailyAverage = safeRatio(currentVolume, volumeMa20);
-      const currentVolumeVsDailyAveragePct =
-        currentVolumeVsDailyAverage === null ? null : currentVolumeVsDailyAverage * 100;
 
 
       if (finiteNumber(latestChangePct)) {
@@ -302,7 +298,7 @@ export function buildFallbackTechnicalReport({
         },
         {
           title: "量能速度",
-          description: `目前累計量，20日均量占比 ${formatPct(currentVolumeVsDailyAveragePct)}`,
+          description: "目前累計量；同時段量比由後端分鐘歷史計算",
           value: currentVolume === null ? "觀察中" : `${formatLots(currentVolume)}張`,
           pulseValue: currentVolume,
           direction: null,

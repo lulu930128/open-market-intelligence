@@ -573,6 +573,30 @@ class USMarketSourceParsingTests(unittest.TestCase):
         self.assertEqual(trend["session_scope"], "all")
         self.assertEqual(trend["point_count"], 3)
 
+    @patch("app.us_market.service.fetch_yahoo_chart_payload")
+    def test_us_stock_intraday_bootstraps_bounded_history_and_exposes_volume_pace(
+        self,
+        mock_fetch,
+    ) -> None:
+        mock_fetch.return_value = (
+            YAHOO_CHART_INTRADAY_SAMPLE,
+            "https://example.test/chart/MU?range=5d&interval=1m",
+        )
+
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(bind=engine)
+        db = Session(engine)
+        try:
+            trend = get_us_intraday_trend(symbol="mu", db=db)
+        finally:
+            db.close()
+            engine.dispose()
+
+        self.assertEqual(mock_fetch.call_args.kwargs["range_value"], "5d")
+        self.assertEqual(trend["point_count"], 2)
+        self.assertEqual(trend["volume_pace"]["market"], "US")
+        self.assertEqual(trend["volume_pace"]["status"], "partial")
+
     def test_parse_sec_companyfacts(self) -> None:
         records = parse_sec_companyfacts(
             SEC_COMPANYFACTS_SAMPLE,

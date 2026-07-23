@@ -1,6 +1,11 @@
 "use client";
 
 import ChartStaticIndicatorLayer from "@/components/chart/ChartStaticIndicatorLayer";
+import {
+  placeChartEventMarker,
+  type ChartMarkerCollisionRect,
+  type ProjectedChartEventMarker,
+} from "@/components/chart/chartEventMarkers";
 import ProfessionalChartHeader from "@/components/chart/ProfessionalChartHeader";
 import SelectedDrawingMetricsCard from "@/components/chart/SelectedDrawingMetricsCard";
 import ChartDrawingLayer from "@/components/chart/lightweight-chart/ChartDrawingLayer";
@@ -169,6 +174,7 @@ export default function LightweightKLineChart({
   indicatorParameters,
   benchmarkData: sourceBenchmarkData,
   benchmarkLabel,
+  eventMarkers = [],
   volumePanelLabel,
   volumeValueKey = "volume",
   pricePrecision,
@@ -191,6 +197,8 @@ export default function LightweightKLineChart({
   const [projectedGapZones, setProjectedGapZones] = useState<ProjectedGapZone[]>([]);
   const [projectedSupportResistance, setProjectedSupportResistance] =
     useState<ProjectedSupportResistanceLevel[]>([]);
+  const [projectedEventMarkers, setProjectedEventMarkers] =
+    useState<ProjectedChartEventMarker[]>([]);
   const [projectedTechnicalSignals, setProjectedTechnicalSignals] =
     useState<ProjectedTechnicalSignal[]>([]);
   const [projectedDrawings, setProjectedDrawings] = useState<ProjectedDrawing[]>([]);
@@ -1243,6 +1251,87 @@ export default function LightweightKLineChart({
     volumeValueKey,
   ]);
 
+  const buildChartEventMarkerProjection = useCallback((
+    reservedSignals: ProjectedTechnicalSignal[] = []
+  ): ProjectedChartEventMarker[] => {
+    const chart = chartRef.current;
+    const series = mainSeriesRef.current;
+
+    if (!chart || !series || overlaySize.width <= 0 || overlaySize.height <= 0) return [];
+
+    const maximumX = overlaySize.width - 68;
+    const occupied: ChartMarkerCollisionRect[] = reservedSignals.map((signal) => {
+      const labelWidth = Math.max(58, signal.label.length * 11 + 14);
+      const preferLeft = signal.x + labelWidth + 14 > maximumX;
+      const labelX = preferLeft ? Math.max(6, signal.x - labelWidth - 10) : signal.x + 10;
+      const labelY = Math.max(12, Math.min(signal.y - 10, overlaySize.height - 22));
+
+      return { x: labelX, y: labelY, width: labelWidth, height: 18 };
+    });
+    const candidates = eventMarkers
+      .flatMap((marker) => {
+        const index = chartDataTimeIndex.get(marker.time);
+        const point = index === undefined ? null : chartData[index];
+
+        if (!point) return [];
+
+        const highPrice = point.high ?? point.close ?? point.low;
+        const lowPrice = point.low ?? point.close ?? point.high;
+        if (!finiteNumber(highPrice) || !finiteNumber(lowPrice)) return [];
+
+        const x = chart.timeScale().timeToCoordinate(chartTime(point.time, timeMode));
+        const highY = series.priceToCoordinate(highPrice);
+        const lowY = series.priceToCoordinate(lowPrice);
+
+        if (
+          x === null ||
+          highY === null ||
+          lowY === null ||
+          x < 44 ||
+          x > overlaySize.width - 62
+        ) {
+          return [];
+        }
+
+        return [{ marker, x, highY, lowY }];
+      })
+      .sort((left, right) => left.x - right.x)
+      .slice(-60);
+
+    return candidates.map(({ marker, x, highY, lowY }) => {
+      const labelWidth = Math.max(42, marker.label.length * 11 + 14);
+      const placement = placeChartEventMarker({
+        x,
+        highY,
+        lowY,
+        labelWidth,
+        minimumX: 6,
+        maximumX,
+        minimumY: 8,
+        maximumY: overlaySize.height - 8,
+        occupied,
+      });
+      occupied.push(placement.rect);
+
+      return {
+        ...marker,
+        x,
+        anchorY: placement.anchorY,
+        labelX: placement.labelX,
+        y: placement.y,
+      };
+    });
+  }, [
+    chartData,
+    chartDataTimeIndex,
+    chartRef,
+    eventMarkers,
+    mainSeriesRef,
+    overlaySize.height,
+    overlaySize.width,
+    timeMode,
+  ]);
+
   const drawingTimeFromCoordinateX = useCallback((coordinateX: number) => {
     const chart = chartRef.current;
 
@@ -1723,6 +1812,7 @@ export default function LightweightKLineChart({
         activeIndicators.divergence
           ? buildTechnicalSignalProjection()
           : [];
+      const nextEventMarkers = buildChartEventMarkerProjection(nextTechnicalSignals);
 
       setProjectedVolumeProfile((current) =>
         preserveEmptyProjection(current, nextVolumeProfile)
@@ -1732,6 +1822,9 @@ export default function LightweightKLineChart({
       );
       setProjectedSupportResistance((current) =>
         preserveEmptyProjection(current, nextSupportResistance)
+      );
+      setProjectedEventMarkers((current) =>
+        preserveEmptyProjection(current, nextEventMarkers)
       );
       setProjectedTechnicalSignals((current) =>
         preserveEmptyProjection(current, nextTechnicalSignals)
@@ -1747,6 +1840,7 @@ export default function LightweightKLineChart({
     activeIndicators.supportResistance,
     activeIndicators.volumeProfile,
     buildGapZoneProjection,
+    buildChartEventMarkerProjection,
     buildSupportResistanceProjection,
     buildTechnicalSignalProjection,
     buildVolumeProfileProjection,
@@ -1811,6 +1905,7 @@ export default function LightweightKLineChart({
         data-testid="lightweight-kline-chart"
         data-active-indicators={activeIndicatorKeys}
         data-chart-point-count={chartData.length}
+        data-event-marker-count={projectedEventMarkers.length}
         data-drawing-count={activeDrawings.length}
         data-drawing-tool={drawingTool}
         data-selected-drawing-id={selectedDrawingId ?? ""}
@@ -1866,6 +1961,7 @@ export default function LightweightKLineChart({
           <ChartStaticIndicatorLayer
             chartColors={omiChartColors}
             cloudPolygons={projectedCloudPolygons}
+            eventMarkers={projectedEventMarkers}
             gapZones={projectedGapZones}
             overlaySize={overlaySize}
             supportResistance={projectedSupportResistance}

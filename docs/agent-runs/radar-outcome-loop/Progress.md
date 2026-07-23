@@ -2,8 +2,8 @@
 
 ## Status
 
-- Current phase: v1 history modal implemented
-- Last updated: 2026-07-07 18:00 Asia/Taipei
+- Current phase: full snapshot review details implemented
+- Last updated: 2026-07-23 Asia/Taipei
 
 ## Completed
 
@@ -17,6 +17,17 @@
 - Added radar outcome history API so multiple snapshot dates can be listed and selected.
 - Added targeted snapshot evaluation by `snapshot_run_id`, so older days can be evaluated without forcing the latest snapshot.
 - Added a modal-style radar snapshot history view from the Taiwan radar panel.
+- Fixed the history modal's hard-coded 12-item preview limit. History dates now
+  load summary-only payloads, while the selected snapshot lazily loads up to 200
+  frozen items so a 30-item run displays every hit, miss, neutral, pending, and
+  unevaluable row.
+- Projected the frozen Radar item evidence stored in `raw_item_json` into the
+  outcome read contract, including signals, factor scores, price levels,
+  indicator snapshots, and context evidence.
+- Reworked each historical stock row into a compact summary with a collapsed
+  detail section for snapshot indicators and next-day evaluation evidence.
+- Kept pre-evaluation snapshots reviewable by returning saved snapshot items
+  with `not_evaluated` status even before outcome rows exist.
 
 ## Validation evidence
 
@@ -25,6 +36,17 @@
 - Direct `npm exec tsc -- --noEmit --incremental false` passed before the safe frontend profile.
 - Direct `$env:PYTHONPATH = 'backend'; .\.venv\Scripts\python.exe -m pytest backend\tests\test_watchlist_radar_outcome.py -q` passed after adding history support.
 - Direct `npm exec tsc -- --noEmit --incremental false` passed after adding the history modal.
+- 2026-07-23 targeted backend regression and API inventory:
+  `21 passed, 30 subtests passed`.
+- 2026-07-23 targeted frontend ESLint and TypeScript no-emit checks passed.
+- 2026-07-23 focused Playwright regression
+  `Taiwan radar history evaluates the selected snapshot` passed against the
+  existing port 3000 dev server. It asserts summary-only history loading,
+  selected-snapshot `item_limit=200`, 30 rendered rows, a visible rank-30 miss,
+  collapsed-by-default detail, and expanded RSI evidence.
+- Read-only local DB/service verification for snapshot run 183
+  (`group_id=3`, `2026-07-20`) returned all 30 items, miss ranks
+  `16, 22, 24, 25`, neutral rank `26`, and indicator snapshots for all 30 rows.
 
 ## Decisions made
 
@@ -38,9 +60,12 @@
 
 - Worktree already contains many unrelated modified files; implementation must avoid broad cleanup or revert.
 - Outcome scoring is intentionally coarse in v1 and should be calibrated with real sample review before changing radar weights.
-- Browser runtime validation was not run in this pass; safe frontend lint/typecheck passed.
 - Main panel still shows the latest snapshot summary by default; older dates are available through the history modal.
+- The currently running backend PID 23484 on port 8400 was started without
+  reload and still exposes the pre-change OpenAPI contract. It must be restarted
+  through the normal OMI launcher before the new selected-snapshot route is live.
 
 ## Next step
 
-- Use the history modal on a Taiwan watchlist group to compare `2026-07-06` and `2026-07-07`, then review bucket-level hit/miss behavior after evaluation.
+- Restart OMI through the normal launcher, then open the 2026-07-20 group 3
+  snapshot and review all 30 rows plus their collapsed indicator evidence.

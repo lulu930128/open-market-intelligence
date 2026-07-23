@@ -1121,6 +1121,17 @@ def _resolve_market_breadth(
     return None
 
 
+def _market_breadth_target_date(now: datetime | None = None) -> date:
+    local_now = now or datetime.now(TAIPEI_TZ)
+    if local_now.tzinfo is None:
+        local_now = local_now.replace(tzinfo=TAIPEI_TZ)
+    else:
+        local_now = local_now.astimezone(TAIPEI_TZ)
+    if is_taiwan_trading_day(local_now.date()) and local_now.time() >= time(8, 55):
+        return local_now.date()
+    return expected_daily_price_date(now=local_now)
+
+
 def _fetch_recent_index_trade_values(market: str) -> dict[date, int]:
     index_id = "TPEX" if market == "TPEX" else "TAIEX"
     return {
@@ -3292,6 +3303,7 @@ def _market_index_summary(
         })
 
     indices: list[dict] = []
+    breadth_target_date = _market_breadth_target_date()
 
     for config in INDEX_CONFIGS:
         try:
@@ -3344,7 +3356,7 @@ def _market_index_summary(
         market_breadth = _resolve_market_breadth(
             db=db,
             market=str(config["market"]),
-            target_trade_date=index_trade_date,
+            target_trade_date=breadth_target_date,
         )
         trade_value = index_payload.get("trade_value")
         if (

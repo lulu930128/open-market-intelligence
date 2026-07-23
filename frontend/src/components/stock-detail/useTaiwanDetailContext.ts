@@ -1,6 +1,7 @@
 "use client";
 
 import { fetchJson } from "@/lib/api";
+import { TAIWAN_MARKET_CHIP_REFRESH_EVENT } from "@/lib/taiwanMarketTime";
 import type {
   MarketChipDaily,
   MarketIndexContributionResponse,
@@ -138,14 +139,16 @@ export function useTaiwanDetailContext({
     let cancelled = false;
     const requestedIndexId = indexId;
 
-    async function loadMarketChip() {
-      setMarketChip(null);
-      setMarketChipLoadState("loading");
+    async function loadMarketChip({ silent = false }: { silent?: boolean } = {}) {
+      if (!silent) {
+        setMarketChip(null);
+        setMarketChipLoadState("loading");
+      }
 
       try {
         const response = await fetchJson<MarketChipDaily>(
           "/api/market/market-chips/latest",
-          { index_id: requestedIndexId, ensure_latest: true }
+          { index_id: requestedIndexId, ensure_latest: false }
         );
         if (cancelled) return;
 
@@ -153,14 +156,28 @@ export function useTaiwanDetailContext({
         setMarketChipLoadState("success");
       } catch {
         if (cancelled) return;
-        setMarketChip(null);
-        setMarketChipLoadState("error");
+        if (!silent) {
+          setMarketChip(null);
+          setMarketChipLoadState("error");
+        }
       }
     }
 
+    function handleMarketChipRefresh() {
+      void loadMarketChip({ silent: true });
+    }
+
+    window.addEventListener(
+      TAIWAN_MARKET_CHIP_REFRESH_EVENT,
+      handleMarketChipRefresh
+    );
     void loadMarketChip();
     return () => {
       cancelled = true;
+      window.removeEventListener(
+        TAIWAN_MARKET_CHIP_REFRESH_EVENT,
+        handleMarketChipRefresh
+      );
     };
   }, [indexId, isIndexProduct]);
 

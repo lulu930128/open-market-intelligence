@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 from app.ai import agentic_tools, tools
 from app.ai.market_context import common, us_context
+from app.ai.market_context import taiwan_market, taiwan_projection
+from app.ai.schemas import AiDataEnvelope
 from app.ai.market_context.crypto_context import (
     _crypto_core_source_health_status,
     _crypto_health_status,
@@ -14,6 +16,128 @@ from app.crypto_market.assets import get_crypto_asset
 
 
 class AIMarketContextProjectionTests(unittest.TestCase):
+    def test_taiwan_market_breadth_combines_twse_and_tpex(self) -> None:
+        summary = {
+            "as_of": "2026-07-22T13:30:00+08:00",
+            "indices": [
+                {
+                    "index_id": "TAIEX",
+                    "breadth": {
+                        "market": "TWSE",
+                        "scope": "full_market",
+                        "trade_date": "2026-07-22",
+                        "advance_count": 530,
+                        "decline_count": 464,
+                        "unchanged_count": 68,
+                        "total_count": 1062,
+                        "limit_up_count": 30,
+                        "limit_down_count": 2,
+                        "trade_value": 1_025_958_396_323,
+                        "source": "twse_rwd_mi_index",
+                    },
+                    "breadth_status": {"status": "ready"},
+                },
+                {
+                    "index_id": "TPEX",
+                    "breadth": {
+                        "market": "TPEX",
+                        "scope": "full_market",
+                        "trade_date": "2026-07-22",
+                        "advance_count": 535,
+                        "decline_count": 257,
+                        "unchanged_count": 74,
+                        "total_count": 866,
+                        "limit_up_count": 28,
+                        "limit_down_count": 2,
+                        "trade_value": 186_314_449_680,
+                        "source": "tpex_openapi_mainboard_quotes",
+                    },
+                    "breadth_status": {"status": "ready"},
+                },
+            ],
+        }
+        refs: list[dict] = []
+        breadth = taiwan_market._market_breadth_from_index_summary(
+            db=SimpleNamespace(),
+            dependencies=SimpleNamespace(
+                get_market_index_summary=lambda *_args, **_kwargs: summary
+            ),
+            warnings=[],
+            source_refs=refs,
+        )
+
+        self.assertIsNotNone(breadth)
+        self.assertEqual(breadth["status"], "ready")
+        self.assertEqual(breadth["included_markets"], ["TWSE", "TPEX"])
+        self.assertEqual(breadth["advance_count"], 1065)
+        self.assertEqual(breadth["decline_count"], 721)
+        self.assertEqual(breadth["total_count"], 1928)
+        self.assertEqual(breadth["trade_value"], 1_212_272_846_003)
+        self.assertEqual(breadth["markets"]["TWSE"]["total_count"], 1062)
+        self.assertEqual(breadth["markets"]["TPEX"]["total_count"], 866)
+        self.assertEqual(refs, [{"type": "derived", "name": "app.market.indices.summary"}])
+
+    def test_sample_derived_market_slots_are_partial_when_coverage_is_partial(self) -> None:
+        slots = taiwan_projection._build_tw_market_slots(
+            as_of="2026-07-22",
+            payload_level="compact",
+            breadth={"status": "ready", "total_count": 1928},
+            sample_coverage={
+                "status": "partial",
+                "sample_count": 84,
+                "universe_count": 1973,
+                "coverage_ratio": 84 / 1973,
+            },
+            distribution={"mild_up_count": 75},
+            industry_rows=[{"industry": "Semiconductor"}],
+            index_intraday={"enabled": False},
+            cross_market={"status": "ready"},
+            market_chips={"status": "ready"},
+            volume_state={"status": "partial", "warnings": ["history accumulating"]},
+            missing=["market_daily_price.full_market_coverage"],
+            warnings=["sample coverage is partial"],
+        )
+
+        self.assertEqual(slots["market_breadth"]["status"], "ready")
+        self.assertEqual(slots["distribution"]["status"], "partial")
+        self.assertEqual(slots["sector_industry"]["status"], "partial")
+
+    def test_ai_data_envelope_preserves_top_level_freshness(self) -> None:
+        envelope = AiDataEnvelope.model_validate(
+            {
+                "kind": "market_overview",
+                "generated_at": "2026-07-22T13:30:00+08:00",
+                "freshness": {"is_current": False, "missing": ["sample_coverage"]},
+            }
+        )
+
+        self.assertEqual(
+            envelope.model_dump(mode="json")["freshness"],
+            {"is_current": False, "missing": ["sample_coverage"]},
+        )
+
+    def test_evidence_passport_projection_keeps_same_top_level_freshness(self) -> None:
+        freshness = {
+            "is_current": False,
+            "missing": ["market_breadth.tpex"],
+            "warnings": ["TPEX breadth is unavailable."],
+        }
+
+        envelope = taiwan_projection._with_evidence_passport(
+            {
+                "kind": "market_overview",
+                "as_of": "2026-07-22",
+                "missing": ["market_breadth.tpex"],
+                "warnings": ["TPEX breadth is unavailable."],
+                "source_refs": [],
+                "data": {},
+            },
+            freshness=freshness,
+        )
+
+        self.assertEqual(envelope["freshness"], freshness)
+        self.assertEqual(envelope["evidence_passport"]["data_freshness"], "stale")
+
     def test_us_intraday_quote_is_not_live_when_market_is_closed(self) -> None:
         quote = us_context._us_intraday_quote(
             {

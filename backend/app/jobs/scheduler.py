@@ -30,6 +30,7 @@ from app.market.broker_branch_market_refresh import (
     get_taiwan_broker_branch_market_coverage,
 )
 from app.market.market_chips import normalize_market_chip_index_ids
+from app.market.taiwan_market_state import persist_taiwan_market_minute_state
 from app.market.indices import (
     TAIWAN_INDEX_RECONCILIATION_END_TIME,
     TAIWAN_INDEX_RECONCILIATION_RETRY_SECONDS,
@@ -416,11 +417,14 @@ def enqueue_market_chip_daily_refresh() -> None:
         db.close()
 
 
-def enqueue_market_chip_margin_daily_refresh() -> None:
+def enqueue_market_chip_margin_daily_refresh(
+    *,
+    allow_non_trading_day: bool = False,
+) -> None:
     now = datetime.now(_timezone())
     calendar_status = build_taiwan_calendar_status(now=now)
 
-    if not calendar_status.get("is_trading_day"):
+    if not calendar_status.get("is_trading_day") and not allow_non_trading_day:
         logger.info(
             "Skipped scheduled market chip margin daily refresh because %s is not a trading day phase=%s reason=%s.",
             calendar_status.get("date"),
@@ -485,6 +489,10 @@ def enqueue_market_chip_margin_daily_refresh() -> None:
         )
     finally:
         db.close()
+
+
+def enqueue_market_chip_margin_daily_startup_catchup() -> None:
+    enqueue_market_chip_margin_daily_refresh(allow_non_trading_day=True)
 
 
 def enqueue_us_market_daily_refresh() -> None:
@@ -1027,10 +1035,17 @@ def collect_taiwan_market_index_summary() -> None:
             db=db,
             refresh_daily_stats=False,
         )
+        persistence = persist_taiwan_market_minute_state(
+            db,
+            payload=payload,
+            finalized=False,
+            now=now,
+        )
         logger.debug(
-            "Taiwan market index summary cache refreshed as_of=%s indices=%s.",
+            "Taiwan market index summary cache refreshed as_of=%s indices=%s minute_rows=%s.",
             payload.get("as_of"),
             len(payload.get("indices") or []),
+            persistence.get("inserted_count", 0) + persistence.get("updated_count", 0),
         )
     except Exception:
         db.rollback()
@@ -1058,11 +1073,18 @@ def reconcile_taiwan_market_index_summary(
             db=db,
             refresh_daily_stats=True,
         )
+        persistence = persist_taiwan_market_minute_state(
+            db,
+            payload=payload,
+            finalized=True,
+            now=local_now,
+        )
         logger.info(
             "Taiwan market index summary post-close reconciliation completed "
-            "as_of=%s indices=%s startup_catchup=%s.",
+            "as_of=%s indices=%s minute_rows=%s startup_catchup=%s.",
             payload.get("as_of"),
             len(payload.get("indices") or []),
+            persistence.get("inserted_count", 0) + persistence.get("updated_count", 0),
             allow_late,
         )
     except Exception:
@@ -1516,9 +1538,40 @@ def _add_dispatch_schedule_tick_job(scheduler: Any) -> bool:
     return True
 
 
+def _add_market_chip_margin_refresh_job(scheduler: Any) -> bool:
+    if not settings.enable_market_chip_margin_scheduler:
+        return False
+
+    hour, minute = _parse_hour_minute(
+        settings.scheduler_market_chip_margin_refresh_time
+    )
+    scheduler.add_job(
+        enqueue_market_chip_margin_daily_refresh,
+        trigger="cron",
+        day_of_week="mon-fri",
+        hour=hour,
+        minute=minute,
+        id="market_chip_margin_daily_refresh",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+    scheduler.add_job(
+        enqueue_market_chip_margin_daily_startup_catchup,
+        trigger="date",
+        id="market_chip_margin_daily_startup_catchup",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        next_run_time=datetime.now(_timezone()),
+    )
+    return True
+
+
 def start_scheduler() -> Any | None:
     if (
         not settings.enable_scheduler
+        and not settings.enable_market_chip_margin_scheduler
         and not settings.enable_market_calendar_scheduler
         and not settings.enable_tw_disposition_scheduler
         and not settings.enable_tw_corporate_event_scheduler
@@ -1547,9 +1600,6 @@ def start_scheduler() -> Any | None:
         )
         chip_hour, chip_minute = _parse_hour_minute(
             settings.scheduler_market_chip_refresh_time
-        )
-        chip_margin_hour, chip_margin_minute = _parse_hour_minute(
-            settings.scheduler_market_chip_margin_refresh_time
         )
         scheduler.add_job(
             enqueue_market_daily_refresh,
@@ -1584,18 +1634,6 @@ def start_scheduler() -> Any | None:
             coalesce=True,
             max_instances=1,
         )
-        scheduler.add_job(
-            enqueue_market_chip_margin_daily_refresh,
-            trigger="cron",
-            day_of_week="mon-fri",
-            hour=chip_margin_hour,
-            minute=chip_margin_minute,
-            id="market_chip_margin_daily_refresh",
-            replace_existing=True,
-            coalesce=True,
-            max_instances=1,
-        )
-
     if settings.enable_scheduler and settings.enable_us_market_scheduler:
         us_hour, us_minute = _parse_hour_minute(settings.scheduler_us_market_refresh_time)
         scheduler.add_job(
@@ -1631,6 +1669,9 @@ def start_scheduler() -> Any | None:
     taiwan_futures_collector_enabled = _add_taiwan_futures_collector_job(scheduler)
     taiwan_derivatives_refresh_enabled = _add_taiwan_derivatives_refresh_job(scheduler)
     dispatch_schedule_tick_enabled = _add_dispatch_schedule_tick_job(scheduler)
+    market_chip_margin_refresh_enabled = _add_market_chip_margin_refresh_job(
+        scheduler
+    )
     scheduler.start()
     logger.info(
         "Taiwan market index summary collector interval=%ss; post-close "
@@ -1678,7 +1719,7 @@ def start_scheduler() -> Any | None:
         taiwan_broker_branch_refresh_enabled,
     )
     logger.info(
-        "Job scheduler started. core_scheduler_enabled=%s; market_daily_refresh=%s %s weekdays; market_margin_daily_refresh=%s %s weekdays; market_chip_daily_refresh=%s %s weekdays; market_chip_margin_daily_refresh=%s %s weekdays; us_market_daily_refresh=%s %s %s enabled=%s; jp_market_watchlist_resource_refresh=%s %s %s enabled=%s; kr_market_watchlist_resource_refresh=%s %s %s enabled=%s; watchlist_radar_auto_snapshot=%s %s %s reconcile_interval=%sm reconcile_until=%s enabled=%s; taiwan_futures_quote_collector interval=%ss enabled=%s; taiwan_derivatives_refresh=%s %s %s enabled=%s; dispatch_schedule_tick interval=%ss enabled=%s.",
+        "Job scheduler started. core_scheduler_enabled=%s; market_daily_refresh=%s %s weekdays; market_margin_daily_refresh=%s %s weekdays; market_chip_daily_refresh=%s %s weekdays; market_chip_margin_daily_refresh=%s %s weekdays enabled=%s; us_market_daily_refresh=%s %s %s enabled=%s; jp_market_watchlist_resource_refresh=%s %s %s enabled=%s; kr_market_watchlist_resource_refresh=%s %s %s enabled=%s; watchlist_radar_auto_snapshot=%s %s %s reconcile_interval=%sm reconcile_until=%s enabled=%s; taiwan_futures_quote_collector interval=%ss enabled=%s; taiwan_derivatives_refresh=%s %s %s enabled=%s; dispatch_schedule_tick interval=%ss enabled=%s.",
         settings.enable_scheduler,
         settings.scheduler_market_refresh_time,
         settings.timezone,
@@ -1688,6 +1729,7 @@ def start_scheduler() -> Any | None:
         settings.timezone,
         settings.scheduler_market_chip_margin_refresh_time,
         settings.timezone,
+        market_chip_margin_refresh_enabled,
         settings.scheduler_us_market_refresh_time,
         settings.scheduler_us_market_refresh_day_of_week,
         settings.timezone,

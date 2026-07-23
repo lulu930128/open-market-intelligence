@@ -406,7 +406,7 @@ class WatchlistRadarSnapshotRead(BaseModel):
 
 
 class WatchlistRadarOutcomeItemRead(BaseModel):
-    id: int
+    id: int | None = None
     snapshot_item_id: int
     rank: int
     stock_id: str
@@ -431,6 +431,7 @@ class WatchlistRadarOutcomeItemRead(BaseModel):
     max_adverse_pct: float | None = None
     intraday_range_pct: float | None = None
     volume_change_pct: float | None = None
+    radar_item: WatchlistRadarItemRead | None = None
 
 
 class WatchlistRadarOutcomeBucketSummaryRead(BaseModel):

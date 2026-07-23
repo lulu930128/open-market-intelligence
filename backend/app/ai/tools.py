@@ -35,6 +35,7 @@ from app.market.indices import (
 from app.market.market_chips import get_latest_market_chip_daily, list_market_chip_daily
 from app.market.overnight_impact import build_us_overnight_impact_report
 from app.market.source_health import build_taiwan_source_health
+from app.market.taiwan_market_state import read_taiwan_market_volume_state
 from app.market.tw_futures import (
     get_latest_taiwan_futures_quotes,
     list_taiwan_futures_daily_bars,
@@ -293,6 +294,7 @@ def read_market_overview(
             get_market_index_summary=get_market_index_summary,
             read_cross_market_context=tw_cross_market.read_tw_cross_market_context,
             read_market_chips_context=tw_market_chips.read_tw_market_chips_context,
+            read_market_volume_state=read_taiwan_market_volume_state,
             now=_now,
         ),
     )

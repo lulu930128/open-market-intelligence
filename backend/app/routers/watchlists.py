@@ -733,6 +733,7 @@ def evaluate_watchlist_group_radar_outcome(
     ),
     snapshot_run_id: int | None = Query(default=None, ge=1),
     snapshot_date: date | None = None,
+    item_limit: int = Query(default=12, ge=0, le=200),
     db: Session = Depends(get_db),
 ):
     try:
@@ -742,6 +743,7 @@ def evaluate_watchlist_group_radar_outcome(
             mode=mode,
             snapshot_run_id=snapshot_run_id,
             snapshot_date=snapshot_date,
+            item_limit=item_limit,
         )
     except radar_outcome_service.WatchlistRadarSnapshotNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -758,7 +760,7 @@ def list_watchlist_group_radar_outcomes(
         pattern="^(action|surge|breakout|volume|overheat|weakness|risk|momentum|all)$",
     ),
     limit: int = Query(default=30, ge=1, le=120),
-    item_limit: int = Query(default=8, ge=1, le=50),
+    item_limit: int = Query(default=8, ge=0, le=200),
     db: Session = Depends(get_db),
 ):
     try:
@@ -774,6 +776,32 @@ def list_watchlist_group_radar_outcomes(
 
 
 @router.get(
+    "/groups/{group_id}/radar/outcomes/snapshots/{snapshot_run_id}",
+    response_model=WatchlistRadarOutcomeSummaryRead,
+)
+def get_watchlist_group_radar_outcome_snapshot(
+    group_id: int,
+    snapshot_run_id: int,
+    mode: str = Query(
+        default="action",
+        pattern="^(action|surge|breakout|volume|overheat|weakness|risk|momentum|all)$",
+    ),
+    item_limit: int = Query(default=200, ge=0, le=200),
+    db: Session = Depends(get_db),
+):
+    try:
+        return radar_outcome_service.get_watchlist_radar_outcome_summary_for_scope(
+            db=db,
+            group_id=group_id,
+            mode=mode,
+            snapshot_run_id=snapshot_run_id,
+            item_limit=item_limit,
+        )
+    except radar_outcome_service.WatchlistRadarSnapshotNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.get(
     "/groups/{group_id}/radar/outcomes/latest",
     response_model=WatchlistRadarOutcomeSummaryRead,
 )
@@ -784,7 +812,7 @@ def get_latest_watchlist_group_radar_outcome(
         pattern="^(action|surge|breakout|volume|overheat|weakness|risk|momentum|all)$",
     ),
     snapshot_date: date | None = None,
-    item_limit: int = Query(default=12, ge=1, le=50),
+    item_limit: int = Query(default=12, ge=0, le=200),
     db: Session = Depends(get_db),
 ):
     return radar_outcome_service.get_latest_watchlist_radar_outcome_summary(

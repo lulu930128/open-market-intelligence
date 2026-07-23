@@ -432,6 +432,9 @@ class KRMarketDataTests(unittest.TestCase):
         self.assertEqual(first["point_count"], 2)
         self.assertEqual(second["point_count"], 2)
         self.assertEqual(fetch_chart.call_count, 1)
+        self.assertEqual(fetch_chart.call_args.kwargs["range_value"], "5d")
+        self.assertEqual(first["volume_pace"]["market"], "KR")
+        self.assertEqual(first["volume_pace"]["status"], "partial")
 
         kr_market_service._KR_STOCK_INTRADAY_CACHE.clear()
         with patch(

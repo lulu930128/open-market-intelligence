@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from calendar import monthrange
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 import hashlib
 import re
 from typing import Any
 
 from bs4 import BeautifulSoup
+
+from app.observability.provider_http import provider_http_failure
 
 from ._http import DEFAULT_HEADERS, get, get_json, post
 
@@ -42,12 +44,62 @@ _FINANCIAL_PUBLICATION = re.compile(
 
 
 @dataclass(frozen=True)
+class MopsConferenceWindowFailure:
+    provider: str
+    market: str
+    window: str
+    stage: str
+    status: str
+    exception_type: str
+    attempt_count: int
+    retryable: bool
+    message: str
+    http_status_code: int | None = None
+    rate_limited: bool = False
+    retry_after_seconds: int | None = None
+
+    def summary(self) -> str:
+        return (
+            f"{self.provider.upper()}/{self.market}/{self.window}/{self.stage}："
+            f"{self.exception_type}（{self.status}），"
+            f"嘗試 {self.attempt_count} 次後仍失敗：{self.message}"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "market": self.market,
+            "window": self.window,
+            "stage": self.stage,
+            "status": self.status,
+            "exception_type": self.exception_type,
+            "attempt_count": self.attempt_count,
+            "retryable": self.retryable,
+            "message": self.message,
+            "http_status_code": self.http_status_code,
+            "rate_limited": self.rate_limited,
+            "retry_after_seconds": self.retry_after_seconds,
+        }
+
+
+class MopsConferenceStageError(RuntimeError):
+    def __init__(self, message: str, *, stage: str, exception_type: str) -> None:
+        super().__init__(message)
+        self.stage = stage
+        self.exception_type = exception_type
+
+
+@dataclass(frozen=True)
 class MopsConferenceBatch:
     entries: list[dict[str, Any]]
     request_count: int
     errors: list[str]
     coverage_start: date
     coverage_end: date
+    failures: list[MopsConferenceWindowFailure] = field(default_factory=list)
+    successful_windows: list[str] = field(default_factory=list)
+    recovered_windows: list[str] = field(default_factory=list)
+    retry_count: int = 0
 
 
 def _parse_market_date(value: Any) -> date | None:
@@ -451,6 +503,62 @@ def _month_windows(as_of: date, count: int) -> list[tuple[int, int]]:
     return windows
 
 
+def _mops_window_label(year: int, month: int | None) -> str:
+    return f"{year}-{month:02d}" if month is not None else str(year)
+
+
+def _mops_failure_from_exception(
+    exc: BaseException,
+    *,
+    market: str,
+    year: int,
+    month: int | None,
+    attempt_count: int,
+) -> MopsConferenceWindowFailure:
+    failure = provider_http_failure(exc)
+    if failure is not None:
+        target_parts = failure.context.target.rsplit(":", 1)
+        stage = target_parts[-1] if len(target_parts) == 2 else "request"
+        status = failure.status
+        exception_type = failure.exception_type or type(exc).__name__
+        message = failure.error_message or str(exc).strip() or exception_type
+        retryable = status in {"error", "timeout"} or (
+            failure.http_status_code is not None
+            and failure.http_status_code >= 500
+        )
+        return MopsConferenceWindowFailure(
+            provider=MOPS_PROVIDER,
+            market=market,
+            window=_mops_window_label(year, month),
+            stage=stage,
+            status=status,
+            exception_type=exception_type,
+            attempt_count=attempt_count,
+            retryable=retryable,
+            message=message,
+            http_status_code=failure.http_status_code,
+            rate_limited=failure.rate_limited,
+            retry_after_seconds=failure.retry_after_seconds,
+        )
+
+    stage = str(getattr(exc, "stage", "parse") or "parse")
+    exception_type = str(
+        getattr(exc, "exception_type", type(exc).__name__)
+        or type(exc).__name__
+    )
+    return MopsConferenceWindowFailure(
+        provider=MOPS_PROVIDER,
+        market=market,
+        window=_mops_window_label(year, month),
+        stage=stage,
+        status="invalid_response",
+        exception_type=exception_type,
+        attempt_count=attempt_count,
+        retryable=False,
+        message=str(exc).strip() or exception_type,
+    )
+
+
 def _fetch_mops_conference_window(
     *,
     market_kind: str,
@@ -489,12 +597,23 @@ def _fetch_mops_conference_window(
     )
     redirect_response.raise_for_status()
     redirect_response.encoding = "utf-8"
-    redirect_payload = redirect_response.json()
+    try:
+        redirect_payload = redirect_response.json()
+    except Exception as exc:
+        raise MopsConferenceStageError(
+            str(exc).strip() or "MOPS redirect response was not valid JSON.",
+            stage="redirect_payload",
+            exception_type=type(exc).__name__,
+        ) from exc
     result_url = str(
         ((redirect_payload.get("result") or {}).get("url")) or ""
     ).strip()
     if redirect_payload.get("code") != 200 or not result_url.startswith("https://"):
-        raise ValueError("MOPS did not return a usable signed result URL.")
+        raise MopsConferenceStageError(
+            "MOPS did not return a usable signed result URL.",
+            stage="redirect_payload",
+            exception_type="InvalidRedirectPayload",
+        )
 
     result_response = get(
         result_url,
@@ -510,7 +629,54 @@ def _fetch_mops_conference_window(
     )
     result_response.raise_for_status()
     result_response.encoding = "utf-8"
-    return parse_mops_conferences(result_response.text, market=market)
+    try:
+        return parse_mops_conferences(result_response.text, market=market)
+    except Exception as exc:
+        raise MopsConferenceStageError(
+            str(exc).strip() or "MOPS result page could not be parsed.",
+            stage="parse",
+            exception_type=type(exc).__name__,
+        ) from exc
+
+
+def _fetch_mops_window_with_retries(
+    *,
+    market_kind: str,
+    market: str,
+    year: int,
+    month: int | None,
+    timeout_seconds: int,
+    max_attempts: int,
+) -> tuple[
+    list[dict[str, Any]],
+    int,
+    MopsConferenceWindowFailure | None,
+    int,
+]:
+    bounded_attempts = max(1, min(int(max_attempts), 3))
+    for attempt in range(1, bounded_attempts + 1):
+        try:
+            entries = _fetch_mops_conference_window(
+                market_kind=market_kind,
+                market=market,
+                year=year,
+                month=month,
+                timeout_seconds=timeout_seconds,
+            )
+            return entries, attempt * 2, None, attempt - 1
+        except Exception as exc:
+            failure = _mops_failure_from_exception(
+                exc,
+                market=market,
+                year=year,
+                month=month,
+                attempt_count=attempt,
+            )
+            if failure.retryable and attempt < bounded_attempts:
+                continue
+            return [], attempt * 2, failure, attempt - 1
+
+    raise AssertionError("Bounded MOPS retry loop exited unexpectedly.")
 
 
 def fetch_mops_conferences(
@@ -518,26 +684,37 @@ def fetch_mops_conferences(
     as_of: date,
     month_count: int = 2,
     timeout_seconds: int = 20,
+    max_attempts: int = 2,
 ) -> MopsConferenceBatch:
     windows = _month_windows(as_of, month_count)
     entries: list[dict[str, Any]] = []
     errors: list[str] = []
+    failures: list[MopsConferenceWindowFailure] = []
+    successful_windows: list[str] = []
+    recovered_windows: list[str] = []
     request_count = 0
+    retry_count = 0
     for market_kind, market in (("sii", "TWSE"), ("otc", "TPEX")):
         for year, month in windows:
-            try:
-                request_count += 2
-                entries.extend(
-                    _fetch_mops_conference_window(
-                        market_kind=market_kind,
-                        market=market,
-                        year=year,
-                        month=month,
-                        timeout_seconds=timeout_seconds,
-                    )
-                )
-            except Exception as exc:
-                errors.append(f"{market} {year}-{month:02d}: {exc}")
+            fetched, requests_used, failure, retries_used = _fetch_mops_window_with_retries(
+                market_kind=market_kind,
+                market=market,
+                year=year,
+                month=month,
+                timeout_seconds=timeout_seconds,
+                max_attempts=max_attempts,
+            )
+            request_count += requests_used
+            retry_count += retries_used
+            window_key = f"{market}:{_mops_window_label(year, month)}"
+            if failure is not None:
+                failures.append(failure)
+                errors.append(failure.summary())
+                continue
+            entries.extend(fetched)
+            successful_windows.append(window_key)
+            if retries_used:
+                recovered_windows.append(window_key)
 
     deduped = {entry["event_id"]: entry for entry in entries}
     coverage_start = date(windows[0][0], windows[0][1], 1)
@@ -557,6 +734,10 @@ def fetch_mops_conferences(
         errors=errors,
         coverage_start=coverage_start,
         coverage_end=coverage_end,
+        failures=failures,
+        successful_windows=successful_windows,
+        recovered_windows=recovered_windows,
+        retry_count=retry_count,
     )
 
 
@@ -565,6 +746,7 @@ def fetch_mops_conference_history(
     year: int,
     as_of: date,
     timeout_seconds: int = 20,
+    max_attempts: int = 2,
 ) -> MopsConferenceBatch:
     coverage_start = date(year, 1, 1)
     coverage_end = min(date(year, 12, 31), as_of - timedelta(days=1))
@@ -579,24 +761,35 @@ def fetch_mops_conference_history(
 
     entries: list[dict[str, Any]] = []
     errors: list[str] = []
+    failures: list[MopsConferenceWindowFailure] = []
+    successful_windows: list[str] = []
+    recovered_windows: list[str] = []
     request_count = 0
+    retry_count = 0
     for market_kind, market in (("sii", "TWSE"), ("otc", "TPEX")):
-        try:
-            request_count += 2
-            fetched = _fetch_mops_conference_window(
-                market_kind=market_kind,
-                market=market,
-                year=year,
-                month=None,
-                timeout_seconds=timeout_seconds,
-            )
-            entries.extend(
-                entry
-                for entry in fetched
-                if coverage_start <= entry["start_date"] <= coverage_end
-            )
-        except Exception as exc:
-            errors.append(f"{market} {year}: {exc}")
+        fetched, requests_used, failure, retries_used = _fetch_mops_window_with_retries(
+            market_kind=market_kind,
+            market=market,
+            year=year,
+            month=None,
+            timeout_seconds=timeout_seconds,
+            max_attempts=max_attempts,
+        )
+        request_count += requests_used
+        retry_count += retries_used
+        window_key = f"{market}:{year}"
+        if failure is not None:
+            failures.append(failure)
+            errors.append(failure.summary())
+            continue
+        entries.extend(
+            entry
+            for entry in fetched
+            if coverage_start <= entry["start_date"] <= coverage_end
+        )
+        successful_windows.append(window_key)
+        if retries_used:
+            recovered_windows.append(window_key)
 
     deduped = {entry["event_id"]: entry for entry in entries}
     return MopsConferenceBatch(
@@ -613,6 +806,10 @@ def fetch_mops_conference_history(
         errors=errors,
         coverage_start=coverage_start,
         coverage_end=coverage_end,
+        failures=failures,
+        successful_windows=successful_windows,
+        recovered_windows=recovered_windows,
+        retry_count=retry_count,
     )
 
 
@@ -620,6 +817,7 @@ __all__ = [
     "MOPS_CONFERENCE_URL",
     "MOPS_PROVIDER",
     "MopsConferenceBatch",
+    "MopsConferenceWindowFailure",
     "TPEX_EX_DIVIDEND_URL",
     "TPEX_EX_DIVIDEND_HISTORY_URL",
     "TPEX_PROVIDER",

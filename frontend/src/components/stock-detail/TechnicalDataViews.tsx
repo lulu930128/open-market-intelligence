@@ -2,6 +2,10 @@
 
 import { LoadingDots } from "@/components/LoadingPlaceholders";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
+import {
+  formatPct,
+  formatPrice,
+} from "@/components/stock-detail/stockDetailFormatters";
 import { useT, type TranslationFunction, type TranslationValues } from "@/i18n";
 import type { StockTechnicalReportRead } from "@/types/market";
 
@@ -22,6 +26,64 @@ export type TechnicalReportBadge = {
   tone: string;
 };
 
+export type TechnicalCurrentStateLevel = {
+  key: string;
+  role: "risk" | "broken_support" | "reclaim" | "support" | "current" | "resistance" | string;
+  label: string;
+  price: number | null;
+  moveRequiredPct: number | null;
+  referenceDistancePct: number | null;
+  tone: TechnicalTone;
+};
+
+export type TechnicalCurrentStateEvidence = {
+  key: string;
+  label: string;
+  stateKey: string;
+  stateLabel: string;
+  tone: TechnicalTone;
+  summary: string;
+  metrics: Record<string, number | null>;
+};
+
+export type TechnicalCurrentStateCondition = {
+  key: string;
+  label: string;
+  tone: TechnicalTone;
+  levelKey: string | null;
+  price: number | null;
+};
+
+export type TechnicalCurrentState = {
+  version: string;
+  headline: {
+    key: string;
+    label: string;
+    tone: TechnicalTone;
+  };
+  qualifier: {
+    key: string;
+    label: string;
+    tone: TechnicalTone;
+  };
+  summary: string;
+  position: {
+    price: number | null;
+    label: string;
+    belowCount: number;
+    aboveCount: number;
+    availableCount: number;
+    order: string[];
+    orderLabel: string;
+    alignment: string;
+    alignmentLabel: string;
+    distancePct: Record<string, number | null>;
+  };
+  levels: TechnicalCurrentStateLevel[];
+  evidence: TechnicalCurrentStateEvidence[];
+  nextConditions: TechnicalCurrentStateCondition[];
+};
+
 export type TechnicalReport = {
   title: string;
   summary: string;
@@ -30,6 +92,7 @@ export type TechnicalReport = {
   score: number;
   rows: TechnicalReportRow[];
   badges: TechnicalReportBadge[];
+  currentState?: TechnicalCurrentState | null;
   basisLabel?: string | null;
   warningCount?: number;
 };
@@ -158,6 +221,29 @@ const technicalTextKeyMap: Record<string, string> = {
   尚無足夠月K資料產生技術報告: "notEnoughMonthlyReport",
   正在整理技術訊號: "organizingSignals",
   觀察中: "observing",
+  空方趨勢延續: "bearishTrend",
+  多方趨勢延續: "bullishTrend",
+  弱勢結構: "bearishStructure",
+  偏多結構: "bullishStructure",
+  均線結構轉換中: "transitioningStructure",
+  結構資料不足: "insufficientStructure",
+  超賣但尚未止跌: "oversoldNotReversed",
+  超賣反彈觀察: "oversoldReboundWatch",
+  "過熱，留意拉回": "overheatedPullbackRisk",
+  動能仍偏弱: "weakMomentum",
+  動能仍偏強: "strongMomentum",
+  等待動能確認: "momentumConfirmationPending",
+  趨勢證據: "trendEvidence",
+  動能與超賣: "momentumOversold",
+  量價確認: "volumeConfirmation",
+  風險與區間: "riskRange",
+  放量下跌: "downOnHighVolume",
+  放量上漲: "upOnHighVolume",
+  量價未明顯確認: "volumeNotConfirmed",
+  接近20日區間底部: "nearRangeBottom",
+  接近20日區間頂部: "nearRangeTop",
+  位於20日區間中段: "rangeMiddle20",
+  均線排列轉換中: "movingAverageTransition",
 };
 
 export function technicalReportPhrase(
@@ -272,6 +358,140 @@ export function numberValue(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function stringValue(value: unknown, fallback = "") {
+  return typeof value === "string" ? value : fallback;
+}
+
+function integerValue(value: unknown) {
+  const parsed = numberValue(value);
+  return parsed === null ? 0 : Math.trunc(parsed);
+}
+
+function numericRecord(value: unknown) {
+  const record = objectValue(value);
+  if (!record) return {};
+  return Object.fromEntries(
+    Object.entries(record).map(([key, item]) => [key, numberValue(item)])
+  );
+}
+
+function mapTechnicalCurrentState(
+  value: unknown,
+  t?: TranslationFunction
+): TechnicalCurrentState | null {
+  const root = objectValue(value);
+  const headline = objectValue(root?.headline);
+  const qualifier = objectValue(root?.qualifier);
+  const position = objectValue(root?.position);
+  if (!root || !headline || !qualifier || !position) return null;
+
+  const levels = Array.isArray(root.levels)
+    ? root.levels
+        .map((item): TechnicalCurrentStateLevel | null => {
+          const level = objectValue(item);
+          if (!level || typeof level.key !== "string") return null;
+          return {
+            key: level.key,
+            role: stringValue(level.role, "current"),
+            label: technicalReportPhrase(stringValue(level.label, level.key), t),
+            price: numberValue(level.price),
+            moveRequiredPct: numberValue(level.move_required_pct),
+            referenceDistancePct: numberValue(level.reference_distance_pct),
+            tone: semanticTechnicalTone(stringValue(level.tone)),
+          };
+        })
+        .filter((item): item is TechnicalCurrentStateLevel => item !== null)
+    : [];
+  const evidence = Array.isArray(root.evidence)
+    ? root.evidence
+        .map((item): TechnicalCurrentStateEvidence | null => {
+          const evidenceItem = objectValue(item);
+          if (!evidenceItem || typeof evidenceItem.key !== "string") return null;
+          return {
+            key: evidenceItem.key,
+            label: technicalReportPhrase(
+              stringValue(evidenceItem.label, evidenceItem.key),
+              t
+            ),
+            stateKey: stringValue(evidenceItem.state_key),
+            stateLabel: technicalReportPhrase(
+              stringValue(evidenceItem.state_label),
+              t
+            ),
+            tone: semanticTechnicalTone(stringValue(evidenceItem.tone)),
+            summary: replaceKnownTechnicalTerms(
+              stringValue(evidenceItem.summary),
+              t
+            ),
+            metrics: numericRecord(evidenceItem.metrics),
+          };
+        })
+        .filter((item): item is TechnicalCurrentStateEvidence => item !== null)
+    : [];
+  const nextConditions = Array.isArray(root.next_conditions)
+    ? root.next_conditions
+        .map((item): TechnicalCurrentStateCondition | null => {
+          const condition = objectValue(item);
+          if (!condition || typeof condition.key !== "string") return null;
+          return {
+            key: condition.key,
+            label: replaceKnownTechnicalTerms(
+              stringValue(condition.label, condition.key),
+              t
+            ),
+            tone: semanticTechnicalTone(stringValue(condition.tone)),
+            levelKey:
+              typeof condition.level_key === "string"
+                ? condition.level_key
+                : null,
+            price: numberValue(condition.price),
+          };
+        })
+        .filter((item): item is TechnicalCurrentStateCondition => item !== null)
+    : [];
+
+  return {
+    version: stringValue(root.version, "tw_technical_current_state_v1"),
+    headline: {
+      key: stringValue(headline.key),
+      label: technicalReportPhrase(stringValue(headline.label), t),
+      tone: semanticTechnicalTone(stringValue(headline.tone)),
+    },
+    qualifier: {
+      key: stringValue(qualifier.key),
+      label: technicalReportPhrase(stringValue(qualifier.label), t),
+      tone: semanticTechnicalTone(stringValue(qualifier.tone)),
+    },
+    summary: replaceKnownTechnicalTerms(stringValue(root.summary), t),
+    position: {
+      price: numberValue(position.price),
+      label: replaceKnownTechnicalTerms(stringValue(position.label), t),
+      belowCount: integerValue(position.below_count),
+      aboveCount: integerValue(position.above_count),
+      availableCount: integerValue(position.available_count),
+      order: Array.isArray(position.order)
+        ? position.order.filter((item): item is string => typeof item === "string")
+        : [],
+      orderLabel: stringValue(position.order_label),
+      alignment: stringValue(position.alignment),
+      alignmentLabel: technicalReportPhrase(
+        stringValue(position.alignment_label),
+        t
+      ),
+      distancePct: numericRecord(position.distance_pct),
+    },
+    levels,
+    evidence,
+    nextConditions,
+  };
+}
+
 export function mapBackendTechnicalReport(
   report: StockTechnicalReportRead,
   t?: TranslationFunction
@@ -327,6 +547,7 @@ export function mapBackendTechnicalReport(
       label: technicalReportPhrase(badge.label, t),
       tone: semanticBadgeToneClass(badge.tone),
     })),
+    currentState: mapTechnicalCurrentState(report.data.current_state, t),
     basisLabel,
     warningCount: report.warnings.length,
   };
@@ -353,6 +574,54 @@ export function localizeTechnicalReport(
       ...badge,
       label: technicalReportPhrase(badge.label, t),
     })),
+    currentState: report.currentState
+      ? mapTechnicalCurrentState(
+          {
+            version: report.currentState.version,
+            headline: report.currentState.headline,
+            qualifier: report.currentState.qualifier,
+            summary: report.currentState.summary,
+            position: {
+              price: report.currentState.position.price,
+              label: report.currentState.position.label,
+              below_count: report.currentState.position.belowCount,
+              above_count: report.currentState.position.aboveCount,
+              available_count: report.currentState.position.availableCount,
+              order: report.currentState.position.order,
+              order_label: report.currentState.position.orderLabel,
+              alignment: report.currentState.position.alignment,
+              alignment_label: report.currentState.position.alignmentLabel,
+              distance_pct: report.currentState.position.distancePct,
+            },
+            levels: report.currentState.levels.map((level) => ({
+              key: level.key,
+              role: level.role,
+              label: level.label,
+              price: level.price,
+              move_required_pct: level.moveRequiredPct,
+              reference_distance_pct: level.referenceDistancePct,
+              tone: level.tone,
+            })),
+            evidence: report.currentState.evidence.map((item) => ({
+              key: item.key,
+              label: item.label,
+              state_key: item.stateKey,
+              state_label: item.stateLabel,
+              tone: item.tone,
+              summary: item.summary,
+              metrics: item.metrics,
+            })),
+            next_conditions: report.currentState.nextConditions.map((item) => ({
+              key: item.key,
+              label: item.label,
+              tone: item.tone,
+              level_key: item.levelKey,
+              price: item.price,
+            })),
+          },
+          t
+        )
+      : null,
   };
 }
 
@@ -388,6 +657,223 @@ export function TechnicalSignalRow({
         </PriceUpdatePulse>
       </div>
     </div>
+  );
+}
+
+function currentStateLevelClass(level: TechnicalCurrentStateLevel) {
+  if (level.role === "risk" || level.role === "broken_support") {
+    return "border-omi-market-down-border bg-omi-market-down-soft";
+  }
+  if (level.role === "reclaim" || level.role === "resistance") {
+    return "border-omi-warning-border bg-omi-warning-soft";
+  }
+  if (level.role === "support") {
+    return "border-omi-success-border bg-omi-success-soft";
+  }
+  return "border-omi-border-subtle bg-omi-surface-muted";
+}
+
+function currentStateLevelLabel(
+  level: TechnicalCurrentStateLevel,
+  t: TranslationFunction
+) {
+  if (level.key === "support20") {
+    return t("stockDetail.technicalCurrentState.levels.risk");
+  }
+  if (level.key === "resistance20") {
+    return t("stockDetail.technicalCurrentState.levels.resistance");
+  }
+  const average = level.key.toUpperCase();
+  if (level.role === "reclaim") {
+    return t("stockDetail.technicalCurrentState.levels.reclaim", { average });
+  }
+  if (level.role === "support") {
+    return t("stockDetail.technicalCurrentState.levels.support", { average });
+  }
+  return level.label;
+}
+
+function currentStateMoveLabel(
+  level: TechnicalCurrentStateLevel,
+  t: TranslationFunction
+) {
+  if (level.moveRequiredPct === null) return "-";
+  if (level.role === "reclaim" || level.role === "resistance") {
+    return t("stockDetail.technicalCurrentState.move.reclaim", {
+      value: formatPct(level.moveRequiredPct),
+    });
+  }
+  if (level.role === "risk" || level.role === "broken_support") {
+    return t("stockDetail.technicalCurrentState.move.risk", {
+      value: formatPct(level.moveRequiredPct),
+    });
+  }
+  if (level.role === "support") {
+    return t("stockDetail.technicalCurrentState.move.support", {
+      value: formatPct(level.moveRequiredPct),
+    });
+  }
+  return formatPct(level.moveRequiredPct);
+}
+
+function currentStateConditionLabel(
+  condition: TechnicalCurrentStateCondition,
+  t: TranslationFunction
+) {
+  const average = condition.levelKey?.toUpperCase() ?? "-";
+  const price = formatPrice(condition.price);
+  if (condition.key === "first_reclaim") {
+    return t("stockDetail.technicalCurrentState.conditions.firstReclaim", {
+      average,
+      price,
+    });
+  }
+  if (condition.key === "structure_repair") {
+    return t("stockDetail.technicalCurrentState.conditions.structureRepair", {
+      average,
+      price,
+    });
+  }
+  if (condition.key === "first_defense") {
+    return t("stockDetail.technicalCurrentState.conditions.firstDefense", {
+      average,
+      price,
+    });
+  }
+  if (condition.key === "risk_break") {
+    return t("stockDetail.technicalCurrentState.conditions.riskBreak", {
+      price,
+    });
+  }
+  return condition.label;
+}
+
+export function TechnicalCurrentStateOverview({
+  state,
+}: {
+  state: TechnicalCurrentState;
+}) {
+  const t = useT();
+
+  return (
+    <section
+      className="border-b border-omi-border-subtle px-5 py-3"
+      data-testid="tw-technical-current-state"
+    >
+      <div className="flex items-end justify-between gap-4">
+        <div>
+          <div className="text-sm font-semibold text-omi-text-strong">
+            {t("stockDetail.technicalCurrentState.ladderTitle")}
+          </div>
+          <div className="mt-0.5 text-xs leading-4 text-omi-text-muted">
+            {t("stockDetail.technicalCurrentState.ladderHint")}
+          </div>
+        </div>
+        <div className="shrink-0 text-right">
+          <div className="text-sm font-semibold tabular-nums text-omi-text-strong">
+            {formatPrice(state.position.price)}
+          </div>
+          <div className="text-xs text-omi-text-muted">
+            {t("stockDetail.technicalCurrentState.currentPrice")}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-2.5 grid grid-cols-2 gap-2 xl:grid-cols-4">
+        {state.levels.map((level) => (
+          <div
+            key={level.key}
+            className={`min-w-0 border px-2.5 py-2 ${currentStateLevelClass(level)}`}
+            data-level-key={level.key}
+          >
+            <div className="truncate text-[11px] font-medium text-omi-text-muted">
+              {currentStateLevelLabel(level, t)}
+            </div>
+            <div className="mt-0.5 text-sm font-semibold tabular-nums text-omi-text-strong">
+              {formatPrice(level.price)}
+            </div>
+            <div className={`mt-0.5 text-[11px] leading-4 tabular-nums ${technicalToneClass(level.tone)}`}>
+              {currentStateMoveLabel(level, t)}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {state.nextConditions.length ? (
+        <div className="mt-3 border-t border-omi-border-subtle pt-2.5">
+          <div className="text-sm font-semibold text-omi-text-strong">
+            {t("stockDetail.technicalCurrentState.nextConditions")}
+          </div>
+          <ol className="mt-2 space-y-1.5">
+            {state.nextConditions.map((condition, index) => (
+              <li
+                key={condition.key}
+                className="flex gap-2 text-xs leading-5 text-omi-text-muted"
+              >
+                <span
+                  className={`shrink-0 font-bold tabular-nums ${technicalToneClass(condition.tone)}`}
+                >
+                  {index + 1}
+                </span>
+                <span>{currentStateConditionLabel(condition, t)}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+export function TechnicalCurrentStateEvidence({
+  state,
+}: {
+  state: TechnicalCurrentState;
+}) {
+  const t = useT();
+
+  return (
+    <section
+      className="space-y-2"
+      aria-label={t("stockDetail.technicalCurrentState.evidenceTitle")}
+    >
+      <div className="mb-2.5">
+        <div className="text-sm font-semibold text-omi-text-strong">
+          {t("stockDetail.technicalCurrentState.evidenceTitle")}
+        </div>
+        <div className="mt-0.5 text-xs leading-4 text-omi-text-muted">
+          {t("stockDetail.technicalCurrentState.evidenceHint")}
+        </div>
+      </div>
+      {state.evidence.map((item) => (
+        <details
+          key={item.key}
+          id={`tw-technical-evidence-${item.key}`}
+          className="group border border-omi-border-subtle bg-omi-surface-muted"
+          data-testid={`tw-technical-evidence-${item.key}`}
+        >
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3.5 py-2.5 outline-none transition hover:bg-omi-surface focus-visible:ring-2 focus-visible:ring-omi-accent [&::-webkit-details-marker]:hidden">
+            <span className="min-w-0">
+              <span className="block text-sm font-semibold text-omi-text-strong">
+                {item.label}
+              </span>
+              <span className={`mt-0.5 block truncate text-xs leading-4 ${technicalToneClass(item.tone)}`}>
+                {item.stateLabel}
+              </span>
+            </span>
+            <span
+              aria-hidden="true"
+              className="shrink-0 text-base text-omi-text-muted transition-transform group-open:rotate-45"
+            >
+              ＋
+            </span>
+          </summary>
+          <div className="border-t border-omi-border-subtle px-3.5 py-2.5 text-sm leading-6 text-omi-text-muted">
+            {item.summary}
+          </div>
+        </details>
+      ))}
+    </section>
   );
 }
 

@@ -352,11 +352,13 @@ def _build_tw_market_slots(
     as_of: str | None,
     payload_level: str,
     breadth: dict[str, Any],
+    sample_coverage: dict[str, Any],
     distribution: dict[str, Any],
     industry_rows: list[dict[str, Any]],
     index_intraday: dict[str, Any],
     cross_market: dict[str, Any],
     market_chips: dict[str, Any],
+    volume_state: dict[str, Any],
     missing: list[str],
     warnings: list[str],
 ) -> dict[str, Any]:
@@ -372,29 +374,57 @@ def _build_tw_market_slots(
             as_of=as_of,
         ),
         "market_breadth": _slot_envelope(
-            status=_payload_slot_status(
-                breadth,
-                missing=[key for key in missing if key.startswith("market_breadth")],
+            status=(
+                str(breadth.get("status"))
+                if breadth.get("status") in {"partial", "stale", "failed"}
+                else _payload_slot_status(
+                    breadth,
+                    missing=[key for key in missing if key.startswith("market_breadth")],
+                )
             ),
             capability="tw_market_breadth",
             payload_ref="breadth",
             payload_level=payload_level,
             priority="core",
-            as_of=as_of,
+            as_of=breadth.get("as_of") or breadth.get("trade_date") or as_of,
+            missing=[
+                f"market_breadth.{market.lower()}"
+                for market in breadth.get("missing_markets", [])
+            ],
         ),
         "distribution": _slot_envelope(
-            status=_payload_slot_status(distribution),
+            status=(
+                "partial"
+                if distribution and sample_coverage.get("status") != "complete"
+                else _payload_slot_status(distribution)
+            ),
             capability="tw_market_distribution",
             payload_ref="distribution",
             payload_level=payload_level,
             as_of=as_of,
+            missing=(
+                ["market_daily_price.full_market_coverage"]
+                if distribution and sample_coverage.get("status") != "complete"
+                else []
+            ),
         ),
         "sector_industry": _slot_envelope(
-            status="ready" if industry_rows else "missing",
+            status=(
+                "partial"
+                if industry_rows and sample_coverage.get("status") != "complete"
+                else "ready"
+                if industry_rows
+                else "missing"
+            ),
             capability="tw_industry_strength",
             payload_ref="top_industries,weak_industries",
             payload_level=payload_level,
             as_of=as_of,
+            missing=(
+                ["market_daily_price.full_market_coverage"]
+                if industry_rows and sample_coverage.get("status") != "complete"
+                else []
+            ),
         ),
         "index_intraday": _slot_envelope(
             status=(
@@ -424,6 +454,25 @@ def _build_tw_market_slots(
             ),
             missing=list(market_chips.get("missing") or []),
             warnings=list(market_chips.get("warnings") or []),
+        ),
+        "market_volume": _slot_envelope(
+            status=str(volume_state.get("status") or "missing"),
+            capability="tw_market_same_time_volume_pace",
+            payload_ref="volume_state",
+            payload_level=payload_level,
+            priority="core",
+            as_of=volume_state.get("as_of"),
+            missing=(
+                ["market_volume.same_time_baseline_20d"]
+                if volume_state.get("status") != "ready"
+                else []
+            ),
+            warnings=list(volume_state.get("warnings") or []),
+            next_fill=(
+                "Minute history accumulates from the existing Taiwan index scheduler without extra provider calls."
+                if volume_state.get("status") != "ready"
+                else None
+            ),
         ),
         "cross_market": _slot_envelope(
             status=str(cross_market.get("status") or "missing"),
@@ -1379,6 +1428,8 @@ def _with_evidence_passport(
     confidence: str | None = None,
 ) -> dict[str, Any]:
     data = envelope.get("data") if isinstance(envelope.get("data"), dict) else {}
+    if freshness is not None:
+        envelope["freshness"] = freshness
     envelope["evidence_passport"] = build_evidence_passport(
         kind=str(envelope.get("kind") or "ai_data"),
         as_of=envelope.get("as_of"),

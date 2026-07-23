@@ -73,6 +73,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("job_run", table_names)
             self.assertIn("broker_branch_trade_daily", table_names)
             self.assertIn("market_index_daily_stat", table_names)
+            self.assertIn("taiwan_market_minute_state", table_names)
             self.assertIn("market_chip_daily", table_names)
             market_chip_columns = {
                 column["name"]
