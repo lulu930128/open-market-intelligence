@@ -3,10 +3,64 @@ from __future__ import annotations
 from typing import Any
 
 from app.ai import agentic_policy, llm
+from app.crypto_market.contract import (
+    BINANCE_PROVIDER,
+    BITOPRO_PROVIDER,
+    OKX_PROVIDER,
+    PERPETUAL,
+    SPOT,
+    list_provider_instruments,
+    normalize_symbol as normalize_crypto_symbol,
+)
 from app.us_market.sources import normalize_us_symbol
 
 
 TW_STOCK_REFRESH_KEYS = agentic_policy.TW_STOCK_REFRESH_KEYS
+TW_CAPABILITY_REFRESH_TOOLS = {
+    "daily.ohlcv": ("market_daily_price", "tw.refresh_daily_price"),
+    "technical.structure": ("market_daily_price", "tw.refresh_daily_price"),
+    "chips.institutional": (
+        "institutional_trade_daily",
+        "tw.refresh_institutional",
+    ),
+    "chips.margin": ("margin_trading_daily", "tw.refresh_margin"),
+    "broker_branch.summary": (
+        "broker_branch_trade_daily",
+        "tw.refresh_broker_branch",
+    ),
+    "ownership.distribution": (
+        "shareholding_distribution_weekly",
+        "tw.refresh_shareholding",
+    ),
+    "fundamentals.revenue": ("monthly_revenue", "tw.refresh_revenue"),
+    "fundamentals.financials": (
+        "financial_metric_quarterly",
+        "tw.refresh_financials",
+    ),
+}
+US_CAPABILITY_REQUIREMENTS = {
+    "quote.snapshot": ("us_intraday_trend",),
+    "intraday.bars": ("us_intraday_trend",),
+    "daily.ohlcv": ("us_daily_price",),
+    "technical.structure": ("us_daily_price",),
+    "fundamentals.financials": ("us_sec_company_fact",),
+}
+CRYPTO_CAPABILITY_REFRESH_TOOLS = {
+    "quote.snapshot": ("ticker", "crypto.refresh_ticker", SPOT),
+    "intraday.bars": ("ohlcv", "crypto.refresh_ohlcv", SPOT),
+    "daily.ohlcv": ("ohlcv", "crypto.refresh_ohlcv", SPOT),
+    "crypto.order_book": ("order_book", "crypto.refresh_order_book", SPOT),
+    "crypto.derivatives": (
+        "derivatives",
+        "crypto.refresh_derivatives",
+        PERPETUAL,
+    ),
+}
+CRYPTO_PROVIDER_PRIORITY = {
+    BINANCE_PROVIDER: 0,
+    OKX_PROVIDER: 1,
+    BITOPRO_PROVIDER: 2,
+}
 
 
 def _fallback_plan(*, symbol: str, gaps: dict[str, Any], question: str) -> dict[str, Any]:
@@ -79,6 +133,198 @@ def _fallback_plan(*, symbol: str, gaps: dict[str, Any], question: str) -> dict[
     }
 
 
+def _selected_us_plan(
+    *,
+    symbol: str,
+    gaps: dict[str, Any],
+    requested_capabilities: tuple[str, ...],
+) -> dict[str, Any]:
+    missing = set(gaps.get("missing") or [])
+    steps: list[dict[str, Any]] = []
+    steps_by_tool: dict[str, dict[str, Any]] = {}
+    for capability in requested_capabilities:
+        for requirement in US_CAPABILITY_REQUIREMENTS.get(capability, ()):
+            if requirement not in missing:
+                continue
+            if requirement == "us_intraday_trend":
+                tool_name = "us.read_intraday_trend"
+                args = {"symbol": symbol}
+            elif requirement == "us_daily_price":
+                tool_name = "us.refresh_daily_price"
+                args = {
+                    "symbol": symbol,
+                    "provider": "auto",
+                    "outputsize": "compact",
+                    "adjusted": False,
+                }
+            elif requirement == "us_sec_company_fact":
+                tool_name = "us.refresh_sec_facts"
+                args = {"symbol": symbol}
+            else:
+                continue
+            existing_step = steps_by_tool.get(tool_name)
+            if existing_step is not None:
+                merged_capabilities = list(
+                    dict.fromkeys(
+                        [
+                            *list(
+                                existing_step["args"].get(
+                                    "requested_capabilities",
+                                    [],
+                                )
+                            ),
+                            capability,
+                        ]
+                    )
+                )
+                existing_step["args"]["requested_capabilities"] = (
+                    merged_capabilities
+                )
+                existing_step["reason"] = (
+                    "Selected capabilities "
+                    f"{', '.join(merged_capabilities)} require missing "
+                    f"US dataset {requirement} through the same bounded tool."
+                )
+                continue
+            step = {
+                "tool": tool_name,
+                "args": {
+                    **args,
+                    "requested_capabilities": [capability],
+                },
+                "reason": (
+                    f"Selected capability {capability} requires missing "
+                    f"US dataset {requirement}."
+                ),
+            }
+            steps_by_tool[tool_name] = step
+            steps.append(step)
+    return {
+        "provider": "capability_registry",
+        "reason": "Deterministic dataset-level refresh for selected US v4 capabilities.",
+        "tool_plan": steps,
+    }
+
+
+def _crypto_refresh_instrument(
+    *,
+    asset: str,
+    resource: str,
+    instrument_type: str,
+) -> Any | None:
+    matches = [
+        instrument
+        for instrument in list_provider_instruments(
+            instrument_type=instrument_type,
+            resource=resource,
+        )
+        if instrument.base_asset == asset
+    ]
+    if not matches:
+        return None
+    matches.sort(
+        key=lambda item: (
+            CRYPTO_PROVIDER_PRIORITY.get(item.provider, 99),
+            item.provider,
+            item.symbol,
+        )
+    )
+    return matches[0]
+
+
+def plan_crypto_asset_tools(
+    *,
+    asset: str,
+    target: dict[str, Any],
+    requested_capabilities: tuple[str, ...],
+    selection: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    del target
+    normalized_asset = str(asset or "").strip().upper()
+    limits = selection.get("limits") if isinstance(selection.get("limits"), dict) else {}
+    warnings: list[str] = []
+    steps: list[dict[str, Any]] = []
+    seen_steps: set[tuple[str, str]] = set()
+
+    for capability in requested_capabilities:
+        mapping = CRYPTO_CAPABILITY_REFRESH_TOOLS.get(capability)
+        if mapping is None:
+            continue
+        resource, tool_name, instrument_type = mapping
+        instrument = _crypto_refresh_instrument(
+            asset=normalized_asset,
+            resource=resource,
+            instrument_type=instrument_type,
+        )
+        if instrument is None:
+            warnings.append(
+                f"No bounded crypto provider instrument supports {capability} "
+                f"for {normalized_asset}."
+            )
+            continue
+        interval = (
+            "1d"
+            if capability == "daily.ohlcv"
+            else "1m"
+            if tool_name == "crypto.refresh_ohlcv"
+            else ""
+        )
+        dedupe_key = (tool_name, interval)
+        if dedupe_key in seen_steps:
+            for step in steps:
+                if (
+                    step["tool"] == tool_name
+                    and str(step["args"].get("interval") or "") == interval
+                ):
+                    step["args"]["requested_capabilities"] = list(
+                        dict.fromkeys(
+                            [
+                                *step["args"]["requested_capabilities"],
+                                capability,
+                            ]
+                        )
+                    )
+                    break
+            continue
+        seen_steps.add(dedupe_key)
+        requested_limit = int(limits.get(capability) or 20)
+        args: dict[str, Any] = {
+            "asset": normalized_asset,
+            "provider": instrument.provider,
+            "symbol": normalize_crypto_symbol(instrument.symbol),
+            "requested_capabilities": [capability],
+        }
+        if tool_name == "crypto.refresh_order_book":
+            args["depth_limit"] = max(1, min(requested_limit, 20))
+        elif tool_name == "crypto.refresh_ohlcv":
+            args.update(
+                {
+                    "interval": interval,
+                    "limit": max(1, min(requested_limit, 100)),
+                }
+            )
+        steps.append(
+            {
+                "tool": tool_name,
+                "args": args,
+                "reason": (
+                    f"Refresh only selected crypto capability {capability} for "
+                    f"{normalized_asset} through {instrument.provider}."
+                ),
+            }
+        )
+
+    return _normalize_plan(
+        {
+            "provider": "capability_registry",
+            "reason": "Deterministic target-level refresh for selected crypto v4 capabilities.",
+            "tool_plan": steps,
+        },
+        default_symbol=normalized_asset,
+        provider="capability_registry",
+    ), warnings
+
+
 def _overnight_daily_refresh_steps(
     overnight_gaps: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
@@ -113,7 +359,7 @@ def _fallback_tw_stock_plan(
     overnight_gaps: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     steps: list[dict[str, Any]] = []
-    missing = set(gaps.get("missing") or [])
+    missing = set(gaps.get("refreshable_missing") or gaps.get("missing") or [])
     tw_refresh_needed = bool(missing & TW_STOCK_REFRESH_KEYS)
     if gaps.get("refresh_recommended") and tw_refresh_needed:
         steps.append(
@@ -232,11 +478,15 @@ def _normalize_plan_step(
     symbol_source = args.get("symbol") or step.get("symbol")
     if not symbol_source and tool_name.startswith("us."):
         symbol_source = default_symbol
-    symbol = normalize_us_symbol(symbol_source)
+    symbol = (
+        normalize_crypto_symbol(symbol_source)
+        if tool_name.startswith("crypto.")
+        else normalize_us_symbol(symbol_source)
+    )
     if symbol:
         args["symbol"] = symbol
     stock_id = str(args.get("stock_id") or step.get("stock_id") or "").strip()
-    if not stock_id and tool_name == "tw.refresh_stock_evidence":
+    if not stock_id and tool_name.startswith("tw.refresh_") and tool_name != "tw.refresh_watchlist_evidence":
         stock_id = str(args.get("symbol") or step.get("symbol") or default_symbol).strip()
     if stock_id:
         args["stock_id"] = stock_id
@@ -295,9 +545,21 @@ def plan_us_stock_tools(
     gaps: dict[str, Any],
     budget: dict[str, int],
     can_call_llm: bool,
+    requested_capabilities: tuple[str, ...] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     warnings: list[str] = []
     normalized_symbol = normalize_us_symbol(symbol)
+
+    if requested_capabilities is not None:
+        return _normalize_plan(
+            _selected_us_plan(
+                symbol=normalized_symbol,
+                gaps=gaps,
+                requested_capabilities=requested_capabilities,
+            ),
+            default_symbol=normalized_symbol,
+            provider="capability_registry",
+        ), warnings
 
     if can_call_llm:
         try:
@@ -334,9 +596,53 @@ def plan_tw_stock_tools(
     overnight_gaps: dict[str, Any] | None = None,
     budget: dict[str, int],
     can_call_llm: bool,
+    requested_capabilities: tuple[str, ...] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     warnings: list[str] = []
     normalized_stock_id = str(stock_id or "").strip()
+
+    if requested_capabilities is not None:
+        missing = set(gaps.get("refreshable_missing") or gaps.get("missing") or [])
+        steps: list[dict[str, Any]] = []
+        seen_tools: set[str] = set()
+        for capability in requested_capabilities:
+            mapping = TW_CAPABILITY_REFRESH_TOOLS.get(capability)
+            if mapping is None:
+                continue
+            dataset, tool_name = mapping
+            if dataset not in missing or tool_name in seen_tools:
+                continue
+            seen_tools.add(tool_name)
+            steps.append(
+                {
+                    "tool": tool_name,
+                    "args": {
+                        "stock_id": normalized_stock_id,
+                        "include_today": None,
+                        "sleep_seconds": 0.05,
+                        "requested_capabilities": [capability],
+                    },
+                    "reason": (
+                        f"Selected capability {capability} is missing or stale; "
+                        f"refresh only dataset {dataset}."
+                    ),
+                }
+            )
+        if (
+            "cross_market.overnight" in requested_capabilities
+            and overnight_gaps
+            and overnight_gaps.get("refresh_recommended")
+        ):
+            steps.extend(_overnight_daily_refresh_steps(overnight_gaps))
+        return _normalize_plan(
+            {
+                "provider": "capability_registry",
+                "reason": "Deterministic dataset-level refresh for selected v4 capabilities.",
+                "tool_plan": steps,
+            },
+            default_symbol=normalized_stock_id,
+            provider="capability_registry",
+        ), warnings
 
     def with_overnight_steps(plan: dict[str, Any]) -> dict[str, Any]:
         overnight_steps = _overnight_daily_refresh_steps(overnight_gaps)

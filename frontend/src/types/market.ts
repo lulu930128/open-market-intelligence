@@ -832,6 +832,25 @@ export type StockVolumePace = {
   warnings: string[];
 };
 
+export type USIntradaySourceStatus = {
+  provider: string;
+  status: "ok" | "degraded" | "unavailable";
+  freshness_status:
+    | "current"
+    | "delayed"
+    | "stale"
+    | "off_session"
+    | "missing"
+    | "provider_error";
+  market_phase: string | null;
+  is_live_window: boolean;
+  as_of: string | null;
+  lag_seconds: number | null;
+  is_fallback: boolean;
+  has_usable_data: boolean;
+  message: string | null;
+};
+
 export type IntradayTrendResponse = {
   stock_id: string;
   symbol: string | null;
@@ -852,6 +871,7 @@ export type IntradayTrendResponse = {
   point_count: number;
   points: IntradayTrendPoint[];
   volume_pace?: StockVolumePace | null;
+  source_status?: USIntradaySourceStatus | null;
   as_of?: string | null;
   total_volume?: number | null;
   volume_unit?: string;

@@ -831,8 +831,31 @@ def _crypto_asset_label(asset_code: str) -> str:
     return asset.name or asset.asset
 
 
+def _normalize_crypto_asset_id(value: str | None) -> str:
+    normalized = str(value or "").strip().upper()
+    if ":" in normalized:
+        normalized = normalized.rsplit(":", maxsplit=1)[-1]
+    normalized = normalized.replace("_", "-").replace("/", "-")
+    if get_crypto_asset(normalized) is not None:
+        return normalized
+
+    if "-" in normalized:
+        base = normalized.split("-", maxsplit=1)[0]
+        if get_crypto_asset(base) is not None:
+            return base
+
+    quote_assets = ("USDT", "USDC", "TWD", "USD", "BTC", "ETH")
+    for asset_code in sorted(crypto_asset_codes(), key=len, reverse=True):
+        if not normalized.startswith(asset_code):
+            continue
+        quote_asset = normalized[len(asset_code) :]
+        if quote_asset in quote_assets:
+            return asset_code
+    return normalized
+
+
 def _resolve_crypto_asset(asset_code: str | None, *, source: str, confidence: str = "high") -> ScopeResolution | None:
-    normalized_asset = str(asset_code or "").strip().upper()
+    normalized_asset = _normalize_crypto_asset_id(asset_code)
     asset = get_crypto_asset(normalized_asset)
     if asset is None:
         return None
@@ -1602,7 +1625,7 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
             target_id = normalized_kr_index
 
         if scope_type == "crypto_asset":
-            normalized_crypto_asset = str(target_id or "").strip().upper()
+            normalized_crypto_asset = _normalize_crypto_asset_id(target_id)
             if get_crypto_asset(normalized_crypto_asset) is None:
                 return _clarify_scope(
                     scope_type,
@@ -1809,9 +1832,13 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
                 ),
             )
 
-        if _contains_hint(question, FRESHNESS_HINTS) and (
+        if (
+            _contains_hint(question, FRESHNESS_HINTS)
+            and not decision_core.looks_like_analysis_request(question)
+            and (
             _looks_like_stock_id(target_id)
             or normalized_target_id in {"ALL", "GLOBAL", "MARKET", "TW"}
+            )
         ):
             stock_id = target_id if _looks_like_stock_id(target_id) else None
             return ScopeResolution(
@@ -1968,6 +1995,14 @@ def _resolve_scope(db: Session | None, payload: AiAskRequest) -> ScopeResolution
     us_entity_resolution = _resolve_us_stock_symbol_from_question(db, question)
     if us_entity_resolution is not None:
         return us_entity_resolution
+
+    if (
+        _contains_hint(question, FRESHNESS_HINTS)
+        and decision_core.looks_like_analysis_request(question)
+    ):
+        tw_stock_resolution = _resolve_tw_stock_from_question(db, question)
+        if tw_stock_resolution is not None:
+            return tw_stock_resolution
 
     if _contains_hint(question, FRESHNESS_HINTS):
         stock_id = _first_stock_id_in_text(question)

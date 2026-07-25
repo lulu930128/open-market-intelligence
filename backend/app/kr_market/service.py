@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 import time
+from typing import Any
 
 import requests
 from sqlalchemy import or_
@@ -2735,6 +2736,42 @@ def _merge_intraday_points(existing: list[dict], updates: list[dict]) -> list[di
     return [by_time[key] for key in sorted(by_time)]
 
 
+def _kr_intraday_continuity(points: list[dict]) -> dict:
+    timestamps: list[datetime] = []
+    for point in points:
+        if str(point.get("session") or "regular") != "regular":
+            continue
+        parsed = _parse_kr_index_intraday_point_time(point.get("time"))
+        if parsed is not None:
+            timestamps.append(parsed)
+    gaps: list[dict[str, Any]] = []
+    for previous, current in zip(timestamps, timestamps[1:]):
+        delta_seconds = int((current - previous).total_seconds())
+        if delta_seconds <= 180:
+            continue
+        gaps.append(
+            {
+                "from": previous.isoformat(),
+                "to": current.isoformat(),
+                "gap_seconds": delta_seconds,
+                "missing_interval_estimate": max(delta_seconds // 60 - 1, 1),
+            }
+        )
+    return {
+        "status": "partial" if gaps else "continuous",
+        "expected_interval": "1m",
+        "missing_interval_count": sum(
+            int(gap["missing_interval_estimate"]) for gap in gaps
+        ),
+        "gap_count": len(gaps),
+        "largest_gap_seconds": max(
+            (int(gap["gap_seconds"]) for gap in gaps),
+            default=0,
+        ),
+        "gaps": gaps[:20],
+    }
+
+
 def _previous_close_from_realtime_or_daily(
     db: Session,
     *,
@@ -2947,6 +2984,25 @@ def get_kr_index_intraday_trend(
         )
     )
     latest_point = merged_points[-1] if merged_points else None
+    continuity = _kr_intraday_continuity(merged_points)
+    if continuity["status"] == "partial":
+        warnings.append(
+            "KR index intraday sequence contains missing one-minute intervals; "
+            "point_count does not imply continuous coverage."
+        )
+    if (
+        previous_close is not None
+        and previous_trade_date is None
+        and isinstance(latest_point, dict)
+    ):
+        latest_point_time = _parse_kr_index_intraday_point_time(
+            latest_point.get("time")
+        )
+        if latest_point_time is not None:
+            previous_trade_date = previous_kr_trading_day(
+                latest_point_time.date(),
+                include_value=False,
+            ).isoformat()
     session_phase = latest_point.get("session") if isinstance(latest_point, dict) else None
     source = KR_INDEX_INTRADAY_PROVIDER if merged_points else "unavailable"
     if not merged_points:
@@ -2987,7 +3043,12 @@ def get_kr_index_intraday_trend(
         "volume_unit": "thousand_shares",
         "volume_semantics": "interval_with_cumulative_total",
         "trade_value_unit": "million_krw",
-        "is_partial": bool(warnings) or (needs_full_history and page_limit_reached),
+        "continuity": continuity,
+        "is_partial": (
+            bool(warnings)
+            or continuity["status"] == "partial"
+            or (needs_full_history and page_limit_reached)
+        ),
         "source_url": source_url or realtime_source_url,
         "warnings": warnings,
         "fetched_pages": fetched_pages,

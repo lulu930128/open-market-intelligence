@@ -586,12 +586,14 @@ def fetch_yahoo_chart_payload(
     interval: str,
     timeout_seconds: int,
     include_prepost: bool = False,
+    resource: str = "daily_price",
 ) -> tuple[dict[str, Any], str]:
     return yahoo.fetch_yahoo_chart_payload(
         symbol=symbol,
         range_value=range_value,
         interval=interval,
         include_prepost=include_prepost,
+        resource=resource,
         timeout_seconds=timeout_seconds,
     )
 

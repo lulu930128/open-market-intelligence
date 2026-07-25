@@ -1229,6 +1229,7 @@ class AdrParityRead(BaseModel):
     fx_age_seconds: int | None = None
     tw_reference_price_twd: float | None = None
     tw_reference_trade_date: date | None = None
+    tw_reference_semantics: str
     target_tw_trade_date: date | None = None
     implied_tw_price_twd: float | None = None
     implied_gap_pct: float | None = None
@@ -1237,6 +1238,7 @@ class AdrParityRead(BaseModel):
     tw_comparison_trade_date: date | None = None
     tw_comparison_as_of: datetime | None = None
     tw_comparison_source: str | None = None
+    tw_comparison_semantics: str
     tw_session_phase: str | None = None
     comparison_mode: str
     remaining_gap_pct: float | None = None

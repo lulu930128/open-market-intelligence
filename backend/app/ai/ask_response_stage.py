@@ -36,6 +36,7 @@ def assemble_response_analysis(
     build_consumer_human_answer: Callable[..., dict[str, Any]],
     build_reasoning_steps: Callable[..., list[dict[str, str]]],
     payload: AiAskRequest,
+    query_plan: dict[str, Any] | None = None,
 ) -> ResponseAssembly:
     result_warnings = extract_list(result, "warnings")
     result_missing = extract_list(result, "missing")
@@ -140,6 +141,20 @@ def assemble_response_analysis(
         if isinstance(policy.get("response_preferences"), dict)
         else {}
     )
+    query_plan_context = query_plan if isinstance(query_plan, dict) else {}
+    selection_context = (
+        query_plan_context.get("selection")
+        if isinstance(query_plan_context.get("selection"), dict)
+        else {}
+    )
+    selected_capabilities = list(
+        dict.fromkeys(
+            [
+                *list(selection_context.get("required") or []),
+                *list(selection_context.get("optional") or []),
+            ]
+        )
+    )
     consumer_human_answer = build_consumer_human_answer(
         question_intent=question_intent,
         target=response_target,
@@ -149,6 +164,10 @@ def assemble_response_analysis(
         warnings=combined_warnings,
         position_decision=position_decision,
         response_preferences=response_preferences,
+        selected_capabilities=selected_capabilities,
+        requested_domains=list(
+            query_plan_context.get("requested_domains") or []
+        ),
     )
     blocked_sections: list[str] = []
     if price_level_blocked and consumer_human_answer:

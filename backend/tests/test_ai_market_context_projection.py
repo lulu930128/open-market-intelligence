@@ -165,6 +165,33 @@ class AIMarketContextProjectionTests(unittest.TestCase):
         self.assertTrue(quote["is_latest_session_quote"])
         self.assertEqual(quote["market_status"], "closed")
         self.assertEqual(quote["last_quote_session"], "regular")
+        self.assertEqual(quote["volume_unit"], "shares")
+        self.assertEqual(quote["volume_semantics"], "interval_shares")
+
+    def test_us_intraday_compact_declares_share_volume_unit(self) -> None:
+        compact = us_context._us_intraday_compact(
+            {
+                "source": "yahoo_finance_chart",
+                "point_count": 2,
+                "points": [
+                    {
+                        "time": "2026-07-24T09:30:00-04:00",
+                        "price": 210.0,
+                        "volume": 100,
+                    },
+                    {
+                        "time": "2026-07-24T09:31:00-04:00",
+                        "price": 210.5,
+                        "volume": 120,
+                    },
+                ],
+            },
+            market_data_params={"intraday_limit": 2},
+        )
+
+        series = compact["series"]["1m"]
+        self.assertEqual(series["volume_unit"], "shares")
+        self.assertEqual(series["volume_semantics"], "interval_shares")
 
     def test_ai_tool_modules_keep_common_projection_facades(self) -> None:
         self.assertIs(agentic_tools._compact_market_context, common.compact_market_context)
@@ -292,6 +319,81 @@ class AIMarketContextProjectionTests(unittest.TestCase):
         common.append_source_ref_once(refs, {"type": "derived", "kind": "freshness"})
 
         self.assertEqual(len(refs), 2)
+
+    def test_stock_capability_freshness_isolated_per_chip_dataset(self) -> None:
+        source_health = {
+            "entries": [
+                {
+                    "resource": "institutional_trade_daily",
+                    "status": "current",
+                    "ok": True,
+                    "latest_data_date": "2026-07-24",
+                    "expected_data_date": "2026-07-24",
+                },
+                {
+                    "resource": "margin_trading_daily",
+                    "status": "current",
+                    "ok": True,
+                    "latest_data_date": "2026-07-24",
+                    "expected_data_date": "2026-07-24",
+                },
+                {
+                    "resource": "shareholding_distribution_weekly",
+                    "status": "stale",
+                    "ok": False,
+                    "latest_data_date": "2026-07-17",
+                    "expected_data_date": "2026-07-24",
+                },
+            ]
+        }
+
+        freshness = taiwan_projection._build_freshness_by_capability(
+            quote={},
+            intraday_bars={"enabled": False},
+            source_health=source_health,
+            overnight_impact=None,
+            missing=[],
+        )
+
+        self.assertEqual(freshness["chips.institutional"]["status"], "current")
+        self.assertFalse(
+            freshness["chips.institutional"]["refresh_recommended"]
+        )
+        self.assertEqual(freshness["chips.margin"]["status"], "current")
+        self.assertFalse(freshness["chips.margin"]["refresh_recommended"])
+        self.assertEqual(
+            freshness["ownership.distribution"]["status"],
+            "stale",
+        )
+        self.assertTrue(
+            freshness["ownership.distribution"]["refresh_recommended"]
+        )
+
+    def test_missing_shareholding_remains_refreshable_during_release_window(
+        self,
+    ) -> None:
+        freshness = taiwan_projection._freshness_for_resource(
+            source_health={
+                "entries": [
+                    {
+                        "resource": "shareholding_distribution_weekly",
+                        "status": "empty",
+                        "ok": False,
+                        "row_count": 0,
+                        "release_status": "pending",
+                        "refresh_eligible": True,
+                        "expected_data_date": "2026-07-17",
+                    }
+                ]
+            },
+            resource="shareholding_distribution_weekly",
+            missing=["shareholding_distribution_weekly"],
+        )
+
+        self.assertEqual(freshness["status"], "empty")
+        self.assertEqual(freshness["release_status"], "pending")
+        self.assertFalse(freshness["is_current"])
+        self.assertTrue(freshness["refresh_recommended"])
 
     def test_crypto_market_cap_identity_prefers_registry_coin_id(self) -> None:
         ton = get_crypto_asset("TON")

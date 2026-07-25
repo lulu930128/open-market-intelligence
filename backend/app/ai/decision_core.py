@@ -524,11 +524,13 @@ class QuestionUnderstanding:
     position_context: PositionContext
     analysis_horizon: str
     analysis_horizon_source: str
+    intents: tuple[str, ...] = ()
     matched_hints: tuple[str, ...] = ()
 
     def as_policy_payload(self) -> dict[str, object]:
         return {
             "intent": self.intent,
+            "intents": list(self.intents),
             "intent_confidence": self.intent_confidence,
             "position_context": self.position_context.as_dict(),
             "analysis_horizon": self.analysis_horizon,
@@ -653,8 +655,6 @@ def infer_question_intent(
         return "trend_view"
     if ui_ask_intent in UI_RISK_INTENTS and looks_like_analysis_request(question):
         return "risk_check"
-    if contains_hint(question, FRESHNESS_HINTS):
-        return "data_freshness"
     if contains_hint(question, BROKER_BRANCH_QUERY_HINTS) and not any(
         re.search(
             rf"{re.escape(negation)}[^，,。；;!?]{{0,40}}{re.escape(hint)}",
@@ -679,7 +679,43 @@ def infer_question_intent(
         return "risk_check"
     if contains_hint(question, TREND_VIEW_HINTS):
         return "trend_view"
+    if contains_hint(question, FRESHNESS_HINTS):
+        if looks_like_analysis_request(question):
+            return "general"
+        return "data_freshness"
     return "general"
+
+
+def infer_question_intents(
+    question: str,
+    *,
+    conversation_context: dict[str, Any] | None = None,
+) -> tuple[str, ...]:
+    primary = infer_question_intent(
+        question,
+        conversation_context=conversation_context,
+    )
+    intents = [primary]
+    intent_hints = (
+        ("broker_branch", BROKER_BRANCH_QUERY_HINTS),
+        ("market_breadth", MARKET_BREADTH_QUERY_HINTS),
+        ("quote", QUOTE_ONLY_HINTS),
+        ("risk_check", (*RISK_PRIORITY_HINTS, *RISK_DECISION_HINTS)),
+        ("entry_decision", ENTRY_DECISION_HINTS),
+        ("exit_decision", EXIT_DECISION_HINTS),
+        ("trend_view", TREND_ANALYSIS_REQUEST_HINTS),
+        ("data_freshness", FRESHNESS_HINTS),
+    )
+    for intent, hints in intent_hints:
+        if (
+            intent in {"risk_check", "entry_decision", "exit_decision"}
+            and intent != primary
+            and not looks_like_analysis_request(question)
+        ):
+            continue
+        if intent != primary and contains_hint(question, hints):
+            intents.append(intent)
+    return tuple(dict.fromkeys(intents))
 
 
 def normalize_analysis_horizon(value: str | None) -> str:
@@ -748,7 +784,11 @@ def understand_question(
     conversation_context: dict[str, Any] | None = None,
 ) -> QuestionUnderstanding:
     position_context = infer_position_context(question)
-    intent = infer_question_intent(question, conversation_context=conversation_context)
+    intents = infer_question_intents(
+        question,
+        conversation_context=conversation_context,
+    )
+    intent = intents[0]
     horizon, horizon_source = infer_analysis_horizon(
         question=question,
         requested_horizon=requested_horizon,
@@ -777,5 +817,6 @@ def understand_question(
         position_context=position_context,
         analysis_horizon=horizon,
         analysis_horizon_source=horizon_source,
+        intents=intents,
         matched_hints=tuple(dict.fromkeys(hint_matches))[:8],
     )

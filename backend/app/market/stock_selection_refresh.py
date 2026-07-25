@@ -1,9 +1,12 @@
-from collections.abc import Callable
-from datetime import date
+import logging
+from collections.abc import Callable, Iterable
+from datetime import date, datetime, timedelta, timezone
+from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.db.models import StockMaster
+from app.db.session import SessionLocal
 from app.market.broker_branch import ensure_broker_branch_daily
 from app.market.backfill import backfill_tpex_trading_stock, backfill_twse_stock_day
 from app.market.daily_metrics_backfill import ensure_stock_daily_metrics
@@ -16,18 +19,24 @@ from app.market.taiwan_rules import (
     TAIWAN_DATASET_DAILY_PRICE,
     TAIWAN_DATASET_INSTITUTIONAL_TRADE,
     TAIWAN_DATASET_MARGIN_TRADING,
+    TAIWAN_DATASET_SHAREHOLDING_DISTRIBUTION,
     TAIWAN_REFRESH_BROKER_BRANCH,
     TAIWAN_REFRESH_DAILY_PRICE,
     TAIWAN_REFRESH_INSTITUTIONAL_TRADE,
     TAIWAN_REFRESH_MARGIN_TRADING,
+    TAIWAN_REFRESH_SHAREHOLDING_DISTRIBUTION,
     TAIWAN_REFRESH_STEP_LABELS,
     normalize_refresh_profile,
     refresh_profile_steps,
 )
+from app.observability.provider_health import record_provider_event
 
 
+logger = logging.getLogger(__name__)
 ProgressCallback = Callable[[int | None, int | None, str | None], None]
 CancellationCheck = Callable[[], bool]
+SessionFactory = Callable[[], Session]
+SHAREHOLDING_NO_CHANGE_COOLDOWN = timedelta(hours=1)
 
 
 def expected_daily_price_date(*, include_today: bool | None = None) -> date | None:
@@ -63,6 +72,21 @@ def _step_status(result: dict) -> str:
     return status if isinstance(status, str) else "success"
 
 
+def _changed_row_count(result: dict) -> int:
+    counts = []
+    for key in ("inserted_count", "updated_count", "created_count"):
+        value = result.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int) and value > 0:
+            counts.append(value)
+    if counts:
+        return sum(counts)
+    if str(result.get("status") or "") in {"inserted", "updated", "created"}:
+        return 1
+    return 0
+
+
 def _run_refresh_step(
     *,
     key: str,
@@ -79,9 +103,18 @@ def _run_refresh_step(
     try:
         result = action()
         status = _step_status(result)
+        changed_rows = _changed_row_count(result)
         results[key] = {
             "label": label,
             "status": status,
+            "refresh_outcome": (
+                "updated"
+                if changed_rows > 0
+                else "skipped"
+                if status == "skipped"
+                else "unchanged"
+            ),
+            "changed_row_count": changed_rows,
             "result": result,
             "error_message": None,
         }
@@ -89,12 +122,87 @@ def _run_refresh_step(
         results[key] = {
             "label": label,
             "status": "error",
+            "refresh_outcome": "failed",
+            "changed_row_count": 0,
             "result": None,
             "error_message": str(exc),
         }
 
     if progress is not None:
         progress(step_index, step_total, f"{label}更新完成。")
+
+
+def _record_shareholding_refresh_outcome(
+    *,
+    stock_id: str,
+    result: dict[str, Any],
+    session_factory: SessionFactory | None = None,
+) -> bool:
+    outcome = str(result.get("refresh_outcome") or "unknown")
+    now = datetime.now(timezone.utc)
+    detail: dict[str, Any] = {
+        "refresh_outcome": outcome,
+        "changed_row_count": int(result.get("changed_row_count") or 0),
+    }
+    if outcome == "unchanged":
+        detail["next_eligible_refresh_at"] = (
+            now + SHAREHOLDING_NO_CHANGE_COOLDOWN
+        ).isoformat()
+    telemetry_db: Session | None = None
+    try:
+        telemetry_db = (session_factory or SessionLocal)()
+        record_provider_event(
+            telemetry_db,
+            market="tw",
+            provider="tdcc",
+            resource=TAIWAN_DATASET_SHAREHOLDING_DISTRIBUTION,
+            target=stock_id,
+            status=(
+                "failed"
+                if str(result.get("status") or "").lower() == "error"
+                else "success"
+            ),
+            event_type=(
+                "refresh_no_change"
+                if outcome == "unchanged"
+                else "refresh_updated"
+                if outcome == "updated"
+                else "refresh_failed"
+            ),
+            event_time=now,
+            observed_at=now,
+            message=(
+                "TDCC shareholding refresh returned no newer rows; cooldown applied."
+                if outcome == "unchanged"
+                else "TDCC shareholding refresh outcome recorded."
+            ),
+            detail=detail,
+        )
+        return True
+    except Exception:
+        if telemetry_db is not None:
+            try:
+                telemetry_db.rollback()
+            except Exception:
+                logger.exception(
+                    "Shareholding refresh telemetry rollback failed stock_id=%s",
+                    stock_id,
+                )
+        logger.exception(
+            "Shareholding refresh telemetry persistence failed stock_id=%s outcome=%s",
+            stock_id,
+            outcome,
+        )
+        return False
+    finally:
+        if telemetry_db is not None:
+            try:
+                telemetry_db.close()
+            except Exception:
+                logger.exception(
+                    "Shareholding refresh telemetry session close failed stock_id=%s",
+                    stock_id,
+                )
 
 
 def _get_stock_market(db: Session, stock_id: str) -> str | None:
@@ -170,36 +278,61 @@ def refresh_selected_stock_data(
     include_today: bool | None = None,
     sleep_seconds: float = 0.05,
     profile: str | None = "full",
+    steps: Iterable[str] | None = None,
     progress: ProgressCallback | None = None,
     should_cancel: CancellationCheck | None = None,
 ) -> dict:
-    refresh_profile = normalize_refresh_profile(profile)
-    requested_steps = refresh_profile_steps(refresh_profile)
+    if steps is None:
+        refresh_profile = normalize_refresh_profile(profile)
+        requested_steps = refresh_profile_steps(refresh_profile)
+    else:
+        refresh_profile = "custom"
+        requested_steps = tuple(
+            dict.fromkeys(
+                str(step or "").strip()
+                for step in steps
+                if str(step or "").strip()
+            )
+        )
+        unknown_steps = [
+            step for step in requested_steps if step not in TAIWAN_REFRESH_STEP_LABELS
+        ]
+        if unknown_steps:
+            raise ValueError(
+                "Unsupported Taiwan refresh step(s): "
+                + ", ".join(unknown_steps)
+            )
+        if not requested_steps:
+            raise ValueError("steps must contain at least one Taiwan refresh step.")
     step_total = len(requested_steps)
     results: dict[str, dict] = {}
-    daily_price_date = _expected_refresh_trade_date(
-        TAIWAN_REFRESH_DAILY_PRICE,
-        include_today=include_today,
+    expected_trade_dates = {
+        step: _expected_refresh_trade_date(
+            step,
+            include_today=include_today,
+        )
+        for step in requested_steps
+        if step
+        in {
+            TAIWAN_REFRESH_DAILY_PRICE,
+            TAIWAN_REFRESH_INSTITUTIONAL_TRADE,
+            TAIWAN_REFRESH_MARGIN_TRADING,
+            TAIWAN_REFRESH_BROKER_BRANCH,
+        }
+    }
+    daily_price_date = expected_trade_dates.get(TAIWAN_REFRESH_DAILY_PRICE)
+    institutional_trade_date = expected_trade_dates.get(
+        TAIWAN_REFRESH_INSTITUTIONAL_TRADE
     )
-    institutional_trade_date = _expected_refresh_trade_date(
-        TAIWAN_REFRESH_INSTITUTIONAL_TRADE,
-        include_today=include_today,
-    )
-    margin_trade_date = _expected_refresh_trade_date(
-        TAIWAN_REFRESH_MARGIN_TRADING,
-        include_today=include_today,
-    )
-    branch_trade_date = _expected_refresh_trade_date(
-        TAIWAN_REFRESH_BROKER_BRANCH,
-        include_today=include_today,
-    )
+    margin_trade_date = expected_trade_dates.get(TAIWAN_REFRESH_MARGIN_TRADING)
+    branch_trade_date = expected_trade_dates.get(TAIWAN_REFRESH_BROKER_BRANCH)
 
     refresh_steps: dict[str, Callable[[], dict]] = {
         "daily_price": (
             lambda: _ensure_current_month_daily_prices(
                 db=db,
                 stock_id=stock_id,
-                target_date=daily_price_date,
+                target_date=expected_trade_dates[TAIWAN_REFRESH_DAILY_PRICE],
                 sleep_seconds=sleep_seconds,
             )
         ),
@@ -207,8 +340,8 @@ def refresh_selected_stock_data(
             lambda: ensure_stock_daily_metrics(
                 db=db,
                 stock_id=stock_id,
-                start_date=institutional_trade_date,
-                end_date=institutional_trade_date,
+                start_date=expected_trade_dates[TAIWAN_REFRESH_INSTITUTIONAL_TRADE],
+                end_date=expected_trade_dates[TAIWAN_REFRESH_INSTITUTIONAL_TRADE],
                 categories=["institutional_trade"],
                 sleep_seconds=sleep_seconds,
                 skip_existing=True,
@@ -218,8 +351,8 @@ def refresh_selected_stock_data(
             lambda: ensure_stock_daily_metrics(
                 db=db,
                 stock_id=stock_id,
-                start_date=margin_trade_date,
-                end_date=margin_trade_date,
+                start_date=expected_trade_dates[TAIWAN_REFRESH_MARGIN_TRADING],
+                end_date=expected_trade_dates[TAIWAN_REFRESH_MARGIN_TRADING],
                 categories=["margin_trading"],
                 sleep_seconds=sleep_seconds,
                 skip_existing=True,
@@ -232,7 +365,7 @@ def refresh_selected_stock_data(
                     ensure_broker_branch_daily(
                         db=db,
                         stock_id=stock_id,
-                        trade_date=branch_trade_date,
+                        trade_date=expected_trade_dates[TAIWAN_REFRESH_BROKER_BRANCH],
                     )
                 ),
             }
@@ -282,13 +415,30 @@ def refresh_selected_stock_data(
             results=results,
             action=action,
         )
+        if (
+            step_key == TAIWAN_REFRESH_SHAREHOLDING_DISTRIBUTION
+            and step_key in results
+        ):
+            _record_shareholding_refresh_outcome(
+                stock_id=stock_id,
+                result=results[step_key],
+            )
         if should_cancel is not None and should_cancel():
             cancelled = True
             break
 
     error_count = sum(1 for result in results.values() if result["status"] == "error")
     skipped_count = sum(1 for result in results.values() if result["status"] == "skipped")
-    refreshed_count = len(results) - error_count - skipped_count
+    completed_count = len(results) - error_count - skipped_count
+    refreshed_count = sum(
+        1 for result in results.values() if result["refresh_outcome"] == "updated"
+    )
+    unchanged_count = sum(
+        1 for result in results.values() if result["refresh_outcome"] == "unchanged"
+    )
+    changed_row_count = sum(
+        int(result["changed_row_count"]) for result in results.values()
+    )
 
     if cancelled:
         status = "timeout"
@@ -296,7 +446,7 @@ def refresh_selected_stock_data(
         status = "error"
     elif error_count:
         status = "partial_success"
-    elif refreshed_count == 0:
+    elif completed_count == 0:
         status = "skipped"
     else:
         status = "success"
@@ -306,7 +456,9 @@ def refresh_selected_stock_data(
         "message": (
             "Selected stock data refresh stopped at the wall-clock deadline."
             if cancelled
-            else "Selected stock data refresh completed."
+            else "Selected stock data refresh completed with updated rows."
+            if refreshed_count
+            else "Selected stock data refresh completed; no newer rows were obtained."
         ),
         "stock_id": stock_id,
         "include_today": include_today,
@@ -317,6 +469,10 @@ def refresh_selected_stock_data(
         "broker_branch_date": branch_trade_date,
         "requested_count": step_total,
         "refreshed_count": refreshed_count,
+        "refreshed_count_semantics": "datasets_with_inserted_or_updated_rows",
+        "completed_count": completed_count,
+        "unchanged_count": unchanged_count,
+        "changed_row_count": changed_row_count,
         "skipped_count": skipped_count,
         "error_count": error_count,
         "cancelled": cancelled,

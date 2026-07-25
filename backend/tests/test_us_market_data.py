@@ -437,6 +437,7 @@ FRED_OBSERVATIONS_SAMPLE = {
 class USMarketSourceParsingTests(unittest.TestCase):
     def setUp(self) -> None:
         us_market_service._US_INTRADAY_CACHE.clear()
+        us_market_service._US_INTRADAY_LAST_GOOD.clear()
 
     def test_normalize_us_symbol_accepts_ui_labels(self) -> None:
         self.assertEqual(normalize_us_symbol("AAPL / Apple"), "AAPL")
@@ -555,9 +556,103 @@ class USMarketSourceParsingTests(unittest.TestCase):
 
         mock_fetch.assert_called_once()
         self.assertFalse(mock_fetch.call_args.kwargs["include_prepost"])
+        self.assertEqual(mock_fetch.call_args.kwargs["resource"], "intraday_price")
         self.assertEqual(trend["stock_id"], "MU")
         self.assertEqual(trend["point_count"], 2)
         self.assertEqual(trend["points"][-1]["price"], 91.35)
+        self.assertIn(trend["source_status"]["status"], {"ok", "degraded"})
+
+    def test_us_intraday_source_status_detects_stopped_live_data(self) -> None:
+        payload = {
+            "points": [
+                {
+                    "time": "2026-07-24T10:29:42-04:00",
+                    "session": "regular",
+                    "price": 406.75,
+                }
+            ]
+        }
+
+        status = us_market_service._build_us_intraday_source_status(
+            payload,
+            session_scope="regular",
+            now=datetime(2026, 7, 24, 15, 6, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(status["status"], "degraded")
+        self.assertEqual(status["freshness_status"], "stale")
+        self.assertTrue(status["is_live_window"])
+        self.assertEqual(status["lag_seconds"], 2178.0)
+
+    def test_us_intraday_source_status_accepts_current_live_data(self) -> None:
+        payload = {
+            "points": [
+                {
+                    "time": "2026-07-24T11:05:00-04:00",
+                    "session": "regular",
+                    "price": 407.0,
+                }
+            ]
+        }
+
+        status = us_market_service._build_us_intraday_source_status(
+            payload,
+            session_scope="regular",
+            now=datetime(2026, 7, 24, 15, 6, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(status["status"], "ok")
+        self.assertEqual(status["freshness_status"], "current")
+        self.assertEqual(status["lag_seconds"], 60.0)
+
+    def test_us_intraday_last_good_cache_is_bounded(self) -> None:
+        with patch.object(
+            us_market_service,
+            "US_INTRADAY_LAST_GOOD_MAX_ENTRIES",
+            2,
+        ):
+            for index, symbol in enumerate(("AAPL", "MSFT", "TSM"), start=1):
+                us_market_service._remember_us_intraday_last_good(
+                    f"US:{symbol}:regular",
+                    {
+                        "points": [
+                            {
+                                "time": f"2026-07-24T10:0{index}:00-04:00",
+                                "price": 100 + index,
+                            }
+                        ]
+                    },
+                )
+
+        self.assertEqual(
+            list(us_market_service._US_INTRADAY_LAST_GOOD),
+            ["US:MSFT:regular", "US:TSM:regular"],
+        )
+
+    @patch("app.us_market.service.fetch_yahoo_chart_payload")
+    def test_us_intraday_provider_failure_preserves_last_usable_payload(
+        self,
+        mock_fetch,
+    ) -> None:
+        mock_fetch.return_value = (
+            YAHOO_CHART_INTRADAY_SAMPLE,
+            "https://example.test/chart/MU",
+        )
+        initial = get_us_intraday_trend(symbol="mu")
+        us_market_service._US_INTRADAY_CACHE.clear()
+        mock_fetch.side_effect = RuntimeError("upstream unavailable")
+
+        fallback = get_us_intraday_trend(symbol="mu")
+
+        self.assertEqual(fallback["points"], initial["points"])
+        self.assertEqual(fallback["source_status"]["status"], "degraded")
+        self.assertEqual(
+            fallback["source_status"]["freshness_status"],
+            "provider_error",
+        )
+        self.assertTrue(fallback["source_status"]["is_fallback"])
+        self.assertTrue(fallback["source_status"]["has_usable_data"])
+        self.assertNotIn("_upstream_error", fallback)
 
     @patch("app.us_market.service.fetch_yahoo_chart_payload")
     def test_get_us_intraday_trend_enables_include_prepost_for_all_scope(self, mock_fetch) -> None:
@@ -675,6 +770,7 @@ class USMarketSourceParsingTests(unittest.TestCase):
 class USMarketStorageIsolationTests(unittest.TestCase):
     def setUp(self) -> None:
         us_market_service._US_INTRADAY_CACHE.clear()
+        us_market_service._US_INTRADAY_LAST_GOOD.clear()
         self.engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(bind=self.engine)
         self.db = Session(self.engine)

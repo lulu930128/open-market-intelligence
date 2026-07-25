@@ -71,6 +71,14 @@ def _us_intraday_compact(
     raw_points = intraday_summary.get("points") if isinstance(intraday_summary.get("points"), list) else []
     points = [point for point in raw_points if isinstance(point, dict)]
     compact_points = points[-point_limit:]
+    volume_unit = (
+        intraday_summary.get("volume_unit")
+        or (
+            "shares"
+            if any(point.get("volume") is not None for point in compact_points)
+            else None
+        )
+    )
     latest = intraday_summary.get("latest_point") if isinstance(intraday_summary.get("latest_point"), dict) else None
     if latest is None and points:
         latest = points[-1]
@@ -85,14 +93,41 @@ def _us_intraday_compact(
     warnings = raw_warnings if isinstance(raw_warnings, list) else []
     status = "ok" if latest or point_count > 0 else "missing"
     source = intraday_summary.get("source") or ("yahoo_finance_chart" if status == "ok" else "not_available")
+    source_interval = str(
+        intraday_summary.get("source_interval")
+        or intraday_summary.get("interval")
+        or "1m"
+    )
+    effective_interval = str(
+        intraday_summary.get("effective_interval")
+        or source_interval
+    )
+    sampling_mode = str(
+        intraday_summary.get("sampling_mode")
+        or (
+            "latest_n"
+            if point_count > len(compact_points)
+            else "complete"
+        )
+    )
+    original_point_count = _safe_int(
+        intraday_summary.get("original_point_count"),
+        point_count,
+        minimum=0,
+        maximum=100000,
+    )
 
     return {
         "enabled": True,
         "payload_level": payload_level,
         "bar_limit": point_limit,
         "series": {
-            "1m": {
-                "interval": "1m",
+            source_interval: {
+                "interval": effective_interval,
+                "source_interval": source_interval,
+                "effective_interval": effective_interval,
+                "sampling_mode": sampling_mode,
+                "original_point_count": original_point_count,
                 "source": source,
                 "provider": "yahoo_chart" if source == "yahoo_finance_chart" else source,
                 "session_scope": intraday_summary.get("session_scope") or "regular",
@@ -109,6 +144,11 @@ def _us_intraday_compact(
                 "regular_session_close_time": intraday_summary.get("regular_session_close_time"),
                 "has_extended_hours": intraday_summary.get("has_extended_hours"),
                 "source_url": intraday_summary.get("source_url"),
+                "volume_unit": volume_unit,
+                "volume_semantics": (
+                    intraday_summary.get("volume_semantics")
+                    or ("interval_shares" if volume_unit else None)
+                ),
             }
         },
         "warnings": warnings,
@@ -186,6 +226,8 @@ def _us_intraday_quote(
         "change": change,
         "change_pct": change_pct,
         "volume": volume,
+        "volume_unit": "shares" if volume is not None else None,
+        "volume_semantics": "interval_shares" if volume is not None else None,
         "volume_status": volume_status,
         "instrument_type": instrument_type,
         "quote_time": latest.get("time"),

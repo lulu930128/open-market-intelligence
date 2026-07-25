@@ -20,7 +20,10 @@ from app.crypto_market.contract import (
     normalize_symbol,
     list_provider_instruments,
 )
-from app.crypto_market.realtime import crypto_realtime_store
+from app.crypto_market.realtime import (
+    build_crypto_realtime_stream_specs,
+    crypto_realtime_store,
+)
 from app.crypto_market.ws_runtime import (
     crypto_realtime_collector_status,
     crypto_realtime_enabled_stream_specs,
@@ -458,8 +461,13 @@ def build_crypto_source_health(
             )
     collector_status = crypto_realtime_collector_status()
     entry_payloads = [entry.to_dict() for entry in entries]
+    realtime_stream_specs = (
+        build_crypto_realtime_stream_specs()
+        if normalized_provider is not None or normalized_symbol is not None
+        else crypto_realtime_enabled_stream_specs()
+    )
     realtime_entries = crypto_realtime_store.health_entries(
-        stream_specs=crypto_realtime_enabled_stream_specs(),
+        stream_specs=realtime_stream_specs,
         now=generated_at,
         stale_seconds=max(stale_seconds, settings.crypto_market_ws_message_stale_seconds),
         collector_enabled=bool(collector_status.get("enabled")),

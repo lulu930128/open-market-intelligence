@@ -94,6 +94,31 @@ def _broker_branch_row(row: Any) -> dict[str, Any]:
     ) or {}
 
 
+def _broker_branch_metadata(summary: dict[str, Any]) -> dict[str, Any]:
+    aggregation = (
+        summary.get("aggregation_window")
+        if isinstance(summary.get("aggregation_window"), dict)
+        else {}
+    )
+    return {
+        "aggregation_window": {
+            **aggregation,
+            "anchor_trade_date": _json_value(
+                aggregation.get("anchor_trade_date")
+            ),
+            "included_trade_dates": [
+                _json_value(value)
+                for value in aggregation.get("included_trade_dates") or []
+            ],
+        },
+        "date_semantics": (
+            dict(summary.get("date_semantics"))
+            if isinstance(summary.get("date_semantics"), dict)
+            else {}
+        ),
+    }
+
+
 def _add_missing(missing: list[str], key: str, value: Any) -> None:
     if value is None or value == []:
         missing.append(key)
@@ -110,6 +135,16 @@ FRESHNESS_DOMAIN_RESOURCES = {
         "market_chip_daily",
     },
     "fundamentals": {"monthly_revenue", "financial_metric_quarterly"},
+}
+CAPABILITY_FRESHNESS_RESOURCES = {
+    "daily.ohlcv": "market_daily_price",
+    "technical.structure": "market_daily_price",
+    "chips.institutional": "institutional_trade_daily",
+    "chips.margin": "margin_trading_daily",
+    "broker_branch.summary": "broker_branch_trade_daily",
+    "ownership.distribution": "shareholding_distribution_weekly",
+    "fundamentals.revenue": "monthly_revenue",
+    "fundamentals.financials": "financial_metric_quarterly",
 }
 
 
@@ -546,7 +581,6 @@ def _compact_latest_daily_quote(
         if previous_close not in {None, 0}
         else None
     )
-
     return {
         "kind": "quote_snapshot",
         "source": "market_daily_price",
@@ -569,13 +603,15 @@ def _compact_latest_daily_quote(
             if getattr(latest_daily, "trade_volume", None) is not None
             else None
         ),
+        "volume_unit": "lots",
         "is_realtime": False,
         "latency_ms": None,
         "freshness": {
             "status": "daily_close",
             "is_live": False,
             "is_stale": False,
-            "message": quote_error or "Live quote was not requested; using latest local daily close.",
+            "message": quote_error
+            or "No live quote was available for this response; using the latest local daily close.",
         },
     }
 
@@ -599,6 +635,7 @@ def _compact_quote_snapshot(
     latency_ms = int(age_seconds * 1000) if isinstance(age_seconds, (int, float)) else None
     is_realtime = bool(freshness.get("is_live")) and not bool(freshness.get("is_stale"))
     latest_price = quote_depth.get("last_price")
+    depth_available = bool(quote_depth.get("depth_available"))
     return {
         "kind": "quote_snapshot",
         "source": quote_depth.get("source"),
@@ -621,13 +658,25 @@ def _compact_quote_snapshot(
         "change": quote_depth.get("change"),
         "change_pct": quote_depth.get("change_pct"),
         "total_volume_lots": quote_depth.get("total_volume_lots"),
-        "best_bid_price": quote_depth.get("best_bid_price"),
-        "best_bid_size_lots": quote_depth.get("best_bid_size_lots"),
-        "best_ask_price": quote_depth.get("best_ask_price"),
-        "best_ask_size_lots": quote_depth.get("best_ask_size_lots"),
-        "spread": quote_depth.get("spread"),
-        "spread_pct": quote_depth.get("spread_pct"),
-        "depth_available": bool(quote_depth.get("depth_available")),
+        "volume_unit": "lots",
+        "best_bid_price": (
+            quote_depth.get("best_bid_price") if depth_available else None
+        ),
+        "best_bid_size_lots": (
+            quote_depth.get("best_bid_size_lots") if depth_available else None
+        ),
+        "best_ask_price": (
+            quote_depth.get("best_ask_price") if depth_available else None
+        ),
+        "best_ask_size_lots": (
+            quote_depth.get("best_ask_size_lots") if depth_available else None
+        ),
+        "spread": quote_depth.get("spread") if depth_available else None,
+        "spread_pct": (
+            quote_depth.get("spread_pct") if depth_available else None
+        ),
+        "depth_available": depth_available,
+        "depth_status": "available" if depth_available else "unavailable",
         "is_realtime": is_realtime,
         "latency_ms": latency_ms,
         "freshness": {
@@ -675,7 +724,13 @@ def _compact_intraday_history(
         else None
     )
     return {
-        "status": "current" if compact_points else "empty",
+        "status": (
+            "partial"
+            if history.get("is_partial") and compact_points
+            else "current"
+            if compact_points
+            else "empty"
+        ),
         "interval": history.get("interval"),
         "range": history.get("range"),
         "provider": history.get("provider"),
@@ -684,6 +739,13 @@ def _compact_intraday_history(
         "to_time": _json_value(history.get("to_time") or (latest_point or {}).get("time")),
         "point_count": history.get("point_count") if history.get("point_count") is not None else len(points),
         "returned_point_count": len(compact_points),
+        "bar_limit": point_limit,
+        "truncated": len(points) > len(compact_points),
+        "coverage_status": history.get("coverage_status"),
+        "is_partial": bool(history.get("is_partial")),
+        "trade_date": _json_value(history.get("trade_date")),
+        "volume_unit": history.get("volume_unit"),
+        "volume_semantics": history.get("volume_semantics"),
         "cached_count": history.get("cached_count"),
         "refreshed_count": refreshed_count,
         "latest": latest_point,
@@ -713,22 +775,33 @@ def _compact_single_intraday_series(
 
     payload = raw_payload if isinstance(raw_payload, dict) else {}
     points = payload.get("points") if isinstance(payload.get("points"), list) else []
+    resolved_interval = str(payload.get("interval") or interval)
     history = {
-        "interval": interval,
+        "interval": resolved_interval,
         "range": payload.get("range") or "1d",
         "provider": payload.get("provider"),
         "source": payload.get("source"),
         "point_count": payload.get("point_count") if payload.get("point_count") is not None else len(points),
+        "trade_date": payload.get("trade_date"),
+        "coverage_status": payload.get("coverage_status"),
+        "is_partial": payload.get("is_partial"),
+        "volume_unit": payload.get("volume_unit"),
+        "volume_semantics": payload.get("volume_semantics"),
         "points": points,
     }
     return {
         "kind": "intraday_bars",
         "enabled": True,
-        "intervals": [interval],
+        "intervals": [resolved_interval],
         "range": "1d",
         "payload_level": payload_level,
         "bar_limit": point_limit,
-        "series": {interval: _compact_intraday_history(history, point_limit=point_limit)},
+        "series": {
+            resolved_interval: _compact_intraday_history(
+                history,
+                point_limit=point_limit,
+            )
+        },
         "warnings": [],
     }
 
@@ -793,6 +866,11 @@ def _source_health_entries(source_health: dict[str, Any] | None) -> list[dict[st
 
 
 def _compact_source_health_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    latest_event_detail = (
+        entry.get("latest_event_detail")
+        if isinstance(entry.get("latest_event_detail"), dict)
+        else {}
+    )
     return {
         "resource": entry.get("resource"),
         "label": entry.get("label"),
@@ -802,6 +880,12 @@ def _compact_source_health_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "latest": _json_value(entry.get("latest_data_date") or entry.get("latest_data_key")),
         "expected": _json_value(entry.get("expected_data_date")),
         "release_status": entry.get("release_status"),
+        "release_at": entry.get("release_at"),
+        "next_release_at": entry.get("next_release_at"),
+        "next_eligible_refresh_at": entry.get("next_eligible_refresh_at"),
+        "refresh_eligible": entry.get("refresh_eligible"),
+        "last_refresh_attempt_at": entry.get("latest_event_at"),
+        "last_refresh_outcome": latest_event_detail.get("refresh_outcome"),
         "freshness_lag_days": entry.get("freshness_lag_days"),
         "reason": entry.get("reason"),
     }
@@ -845,6 +929,118 @@ def _freshness_domain_from_resources(
         "missing": missing_resources,
         "resources": domain_resources,
     }
+
+
+def _freshness_for_resource(
+    *,
+    source_health: dict[str, Any] | None,
+    resource: str,
+    missing: list[str],
+) -> dict[str, Any]:
+    entry = next(
+        (
+            _compact_source_health_entry(item)
+            for item in _source_health_entries(source_health)
+            if item.get("resource") == resource
+        ),
+        None,
+    )
+    if entry is None:
+        status = "missing" if resource in missing else "unknown"
+        return {
+            "status": status,
+            "dataset": resource,
+            "is_current": False,
+            "latest": None,
+            "expected": None,
+            "release_status": None,
+            "refresh_recommended": status == "missing",
+            "reason": (
+                f"{resource} is missing from the selected stock evidence."
+                if status == "missing"
+                else f"No source-health row is available for {resource}."
+            ),
+        }
+    status = str(entry.get("status") or "unknown")
+    release_status = str(entry.get("release_status") or "").strip() or None
+    refresh_recommended = status in {
+        "blocked",
+        "empty",
+        "error",
+        "failed",
+        "missing",
+        "stale",
+    }
+    if release_status == "pending" and bool(entry.get("ok")):
+        refresh_recommended = False
+    if entry.get("refresh_eligible") is False:
+        refresh_recommended = False
+    return {
+        "status": status,
+        "dataset": resource,
+        "is_current": bool(entry.get("ok")),
+        "latest": entry.get("latest"),
+        "expected": entry.get("expected"),
+        "release_status": release_status,
+        "release_at": entry.get("release_at"),
+        "next_release_at": entry.get("next_release_at"),
+        "next_eligible_refresh_at": entry.get("next_eligible_refresh_at"),
+        "refresh_eligible": entry.get("refresh_eligible"),
+        "last_refresh_attempt_at": entry.get("last_refresh_attempt_at"),
+        "last_refresh_outcome": entry.get("last_refresh_outcome"),
+        "refresh_recommended": refresh_recommended,
+        "reason": entry.get("reason"),
+    }
+
+
+def _build_freshness_by_capability(
+    *,
+    quote: dict[str, Any],
+    intraday_bars: dict[str, Any],
+    source_health: dict[str, Any] | None,
+    overnight_impact: dict[str, Any] | None,
+    missing: list[str],
+) -> dict[str, Any]:
+    quote_freshness = _quote_freshness_domain(quote)
+    intraday_resource = _intraday_bar_freshness_resource(intraday_bars)
+    cross_market = _cross_market_freshness_domain(overnight_impact)
+    output = {
+        "target.identity": {
+            "status": "current",
+            "dataset": "stock_master",
+            "is_current": True,
+            "refresh_recommended": False,
+        },
+        "quote.snapshot": {
+            **quote_freshness,
+            "dataset": "quote",
+            "refresh_recommended": quote_freshness.get("status")
+            in {"missing", "stale", "unavailable"},
+        },
+        "intraday.bars": {
+            "status": intraday_resource.get("status"),
+            "dataset": "intraday_bars",
+            "is_current": bool(intraday_resource.get("ok")),
+            "latest": intraday_resource.get("latest"),
+            "expected": intraday_resource.get("expected"),
+            "refresh_recommended": intraday_resource.get("status")
+            in {"missing", "stale", "unavailable"},
+            "reason": intraday_resource.get("reason"),
+        },
+        "cross_market.overnight": {
+            **cross_market,
+            "dataset": "us_overnight_tw_impact",
+            "refresh_recommended": cross_market.get("status")
+            in {"missing", "partial", "stale", "unavailable"},
+        },
+    }
+    for capability_id, resource in CAPABILITY_FRESHNESS_RESOURCES.items():
+        output[capability_id] = _freshness_for_resource(
+            source_health=source_health,
+            resource=resource,
+            missing=missing,
+        )
+    return output
 
 
 def _quote_freshness_domain(quote: dict[str, Any]) -> dict[str, Any]:
@@ -1294,24 +1490,41 @@ def _build_stock_compact_evidence(
                 "short_today_balance",
             ),
         ),
-        "shareholding": [
-            _compact_row(
-                row,
-                (
-                    "data_date",
-                    "holding_level",
-                    "holder_count",
-                    "share_count",
-                    "share_ratio",
-                ),
-            )
-            for row in shareholding[:5]
-        ],
+        "shareholding": {
+            "trade_date": (
+                max(
+                    (
+                        str(getattr(row, "data_date", "") or "")
+                        for row in shareholding
+                        if getattr(row, "data_date", None)
+                    ),
+                    default=None,
+                )
+            ),
+            "distribution": [
+                _compact_row(
+                    row,
+                    (
+                        "data_date",
+                        "holding_level",
+                        "holder_count",
+                        "share_count",
+                        "share_ratio",
+                    ),
+                )
+                for row in shareholding[:5]
+            ],
+            "source": "shareholding_distribution_weekly",
+            "freshness": {
+                "status": "current" if shareholding else "missing",
+            },
+        },
         "broker_branch": {
             "trade_date": _json_value(branch_summary.get("trade_date")),
             "requested_days": branch_summary.get("requested_days"),
             "available_days": branch_summary.get("available_days"),
             "is_partial": branch_summary.get("is_partial"),
+            **_broker_branch_metadata(branch_summary),
             "buy_top": [_broker_branch_row(row) for row in branch_summary.get("buy_top", [])[:5]],
             "sell_top": [_broker_branch_row(row) for row in branch_summary.get("sell_top", [])[:5]],
         },
@@ -1395,6 +1608,13 @@ def _build_stock_compact_evidence(
         "fundamentals": fundamentals,
         "cross_market": overnight_impact,
         "freshness_by_domain": _build_freshness_by_domain(
+            quote=quote,
+            intraday_bars=intraday_bars,
+            source_health=source_health,
+            overnight_impact=overnight_impact,
+            missing=missing,
+        ),
+        "freshness_by_capability": _build_freshness_by_capability(
             quote=quote,
             intraday_bars=intraday_bars,
             source_health=source_health,

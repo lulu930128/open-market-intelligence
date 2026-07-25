@@ -595,6 +595,7 @@ class KRMarketDataTests(unittest.TestCase):
         self.assertEqual(result["fetched_pages"], 3)
         self.assertFalse(result["is_partial"])
         self.assertEqual(result["point_count"], 3)
+        self.assertEqual(result["continuity"]["status"], "continuous")
 
     def test_get_kr_index_intraday_trend_uses_naver_points_and_realtime_reference(self) -> None:
         sync_kr_index_master(self.db)
@@ -637,6 +638,7 @@ class KRMarketDataTests(unittest.TestCase):
         self.assertEqual(result["volume_unit"], "thousand_shares")
         self.assertEqual(result["volume_semantics"], "interval_with_cumulative_total")
         self.assertTrue(result["is_partial"])
+        self.assertEqual(result["previous_close_trade_date"], "2026-07-06")
         self.assertEqual(result["polling_interval_seconds"], 70)
         self.assertEqual(intraday_fetch.call_count, 1)
         self.assertEqual(KRIndexIntradayTrendRead.model_validate(result).point_count, 3)

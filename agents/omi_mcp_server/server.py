@@ -44,6 +44,7 @@ def _env_int(name: str, default: int) -> int:
 
 
 API_TIMEOUT_SECONDS = _env_int("OMI_API_TIMEOUT_SECONDS", 180)
+SCHEMA_TIMEOUT_SECONDS = _env_int("OMI_SCHEMA_TIMEOUT_SECONDS", 2)
 AI_TRUST_TOKEN = (
     os.environ.get("OMI_MCP_AI_TRUST_TOKEN")
     or os.environ.get("OMI_AI_TRUST_TOKEN")
@@ -150,6 +151,88 @@ PAYLOAD_LEVEL_SCHEMA: dict[str, Any] = {
     "description": "Controls bounded market-data density. Use summary for voice/quick answers, compact by default, standard/full only when detail is requested.",
 }
 
+CAPABILITY_IDS = [
+    "broker_branch.summary",
+    "chips.institutional",
+    "chips.margin",
+    "company.profile",
+    "corporate.actions",
+    "cross_market.overnight",
+    "crypto.derivatives",
+    "crypto.order_book",
+    "daily.ohlcv",
+    "data.freshness",
+    "derivatives.positioning",
+    "derivatives.structure",
+    "diagnostics.capabilities",
+    "diagnostics.data_freshness",
+    "diagnostics.source_health",
+    "fundamentals.financials",
+    "fundamentals.revenue",
+    "intraday.bars",
+    "macro.observations",
+    "macro.series",
+    "market.breadth",
+    "market.chips",
+    "market.cross_market",
+    "market.sample_ranking",
+    "market.short_volume",
+    "market.volume_state",
+    "ownership.distribution",
+    "portfolio.holdings",
+    "portfolio.summary",
+    "portfolio.valuation",
+    "quote.snapshot",
+    "resource.metadata",
+    "source.health",
+    "target.identity",
+    "technical.structure",
+    "watchlist.coverage",
+    "watchlist.radar",
+    "watchlist.ranking",
+]
+
+CAPABILITY_ID_SCHEMA: dict[str, Any] = {
+    "type": "string",
+    "enum": CAPABILITY_IDS,
+}
+
+CAPABILITY_SELECTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "Bounded OMI data selection. Choose registered capabilities, field allowlists, "
+        "row/point limits, and a response byte ceiling."
+    ),
+    "properties": {
+        "include": {"type": "array", "items": CAPABILITY_ID_SCHEMA, "uniqueItems": True},
+        "required": {"type": "array", "items": CAPABILITY_ID_SCHEMA, "uniqueItems": True},
+        "optional": {"type": "array", "items": CAPABILITY_ID_SCHEMA, "uniqueItems": True},
+        "exclude": {"type": "array", "items": CAPABILITY_ID_SCHEMA, "uniqueItems": True},
+        "fields": {
+            "type": "object",
+            "additionalProperties": {
+                "type": "array",
+                "items": {"type": "string"},
+                "uniqueItems": True,
+            },
+        },
+        "limits": {
+            "type": "object",
+            "additionalProperties": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 500,
+            },
+        },
+        "max_response_bytes": {
+            "type": "integer",
+            "minimum": 4096,
+            "maximum": 1048576,
+        },
+    },
+    "additionalProperties": False,
+}
+
 INTRADAY_LIMIT_SCHEMA: dict[str, Any] = {
     "type": "integer",
     "minimum": 1,
@@ -178,21 +261,57 @@ ASK_TOOL: dict[str, Any] = {
         "and optional target; OMI resolves the target, returns clarification when "
         "needed, and provides read-only evidence, brief, or trusted analysis. "
         "All consumers should read answer, decision, evidence, limitations, and status "
-        "from the omi.decision.v3 envelope."
+        "from the consumer-neutral omi.decision.v4 envelope."
     ),
     "inputSchema": {
         "type": "object",
         "properties": {
             "contract_version": {
                 "type": "string",
-                "enum": ["omi.decision.v3", "omi.ai.ask.v2"],
-                "default": "omi.decision.v3",
+                "enum": ["omi.decision.v4"],
+                "default": "omi.decision.v4",
                 "description": (
-                    "OMI decision contract. Use omi.decision.v3; "
-                    "omi.ai.ask.v2 remains available for compatibility."
+                    "The only public OMI decision contract. It provides selective evidence, "
+                    "manifest, fill plan, and bounded response size."
                 ),
             },
             "question": {"type": "string"},
+            "intents": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {"type": "string"},
+                "description": "Optional multi-intent request; target identity remains separate.",
+            },
+            "output": {
+                "type": "string",
+                "enum": ["evidence_only", "decision", "decision_with_evidence"],
+                "description": "Requested information purpose, independent of the consumer.",
+            },
+            "realtime_policy": {
+                "type": "string",
+                "enum": ["cache_only", "prefer_live", "require_live"],
+                "default": "prefer_live",
+            },
+            "selection": CAPABILITY_SELECTION_SCHEMA,
+            "continuation": {
+                "type": "object",
+                "description": "Re-submit selected granular fill actions for backend revalidation.",
+                "properties": {
+                    "plan_id": {"type": "string"},
+                    "plan_action_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 32,
+                        "uniqueItems": True,
+                    },
+                    "selected_action_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "uniqueItems": True,
+                    },
+                },
+                "additionalProperties": False,
+            },
             "target": {
                 "type": "object",
                 "description": "Optional resolved or requested target. Use type=auto when Kuro wants OMI to resolve it.",
@@ -220,8 +339,9 @@ ASK_TOOL: dict[str, Any] = {
                 "type": "boolean",
                 "default": True,
                 "description": (
-                    "Legacy v2 transport projection only. omi.decision.v3 always keeps the "
-                    "canonical envelope so every consumer receives the same semantics."
+                    "Deprecated transport flag retained for caller compatibility. v4 always "
+                    "returns the canonical envelope; use selection and max_response_bytes "
+                    "to bound payload size."
                 ),
             },
             "strategy_profile": {
@@ -244,7 +364,7 @@ ASK_TOOL: dict[str, Any] = {
             },
             "caller_profile": {
                 "type": "string",
-                "default": "kuro_readonly",
+                "default": "external_readonly",
                 "description": "Caller label for logs and responses only. The backend does not trust this field.",
             },
             "allow_llm": {
@@ -310,6 +430,10 @@ ASK_TOOL: dict[str, Any] = {
                     "legacy last_resolution and previous_resolution aliases remain accepted."
                 ),
             },
+            "position_context": {
+                "type": "object",
+                "description": "Optional caller-supplied position context; backend owns decision semantics.",
+            },
             "market_data_params": {
                 "type": "object",
                 "description": (
@@ -353,6 +477,18 @@ MARKET_DATA_PARAMS_SCHEMA: dict[str, Any] = {
         "observations": {"type": "integer", "minimum": 1, "maximum": 240},
         "holding_limit": {"type": "integer", "minimum": 1, "maximum": 500},
         "health_limit": {"type": "integer", "minimum": 1, "maximum": 500},
+        "problems_only": {"type": "boolean", "default": False},
+        "include_healthy": {"type": "boolean", "default": True},
+        "status_filter": {
+            "oneOf": [
+                {"type": "string"},
+                {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "uniqueItems": True,
+                },
+            ]
+        },
         "radar_limit": {"type": "integer", "minimum": 1, "maximum": 100},
         "option_contract_month": {
             "type": "string",
@@ -369,6 +505,7 @@ MARKET_DATA_PARAMS_SCHEMA: dict[str, Any] = {
         "market": {"type": "string"},
         "resource": {"type": "string"},
         "target": {"type": "string"},
+        "provider": {"type": "string"},
         "capability_id": {"type": "string"},
         "status": {"type": "string"},
     },
@@ -1128,6 +1265,7 @@ def _api_request(
     path: str,
     params: dict[str, Any] | None = None,
     payload: dict[str, Any] | None = None,
+    timeout_seconds: int | None = None,
 ) -> Any:
     query = ""
     if params:
@@ -1156,7 +1294,10 @@ def _api_request(
     )
 
     try:
-        with urlopen(request, timeout=API_TIMEOUT_SECONDS) as response:
+        with urlopen(
+            request,
+            timeout=timeout_seconds or API_TIMEOUT_SECONDS,
+        ) as response:
             body = response.read().decode("utf-8")
             return json.loads(body) if body else None
     except HTTPError as exc:
@@ -1168,6 +1309,72 @@ def _api_request(
 
 def _api_get(path: str, params: dict[str, Any] | None = None) -> Any:
     return _api_request("GET", path, params=params)
+
+
+def _backend_public_tools() -> list[dict[str, Any]]:
+    payload = _api_request(
+        "GET",
+        "/api/ai/tools",
+        timeout_seconds=SCHEMA_TIMEOUT_SECONDS,
+    )
+    backend_tools = (
+        payload.get("tools")
+        if isinstance(payload, dict) and isinstance(payload.get("tools"), list)
+        else []
+    )
+    ask_source = next(
+        (
+            item
+            for item in backend_tools
+            if isinstance(item, dict) and item.get("name") == "omi.ask"
+        ),
+        None,
+    )
+    if ask_source is None:
+        raise RuntimeError("OMI backend tool catalog did not expose omi.ask.")
+
+    ask_tool = {
+        "name": "omi.ask",
+        "title": str(ask_source.get("title") or "Ask OMI"),
+        "description": str(ask_source.get("description") or ""),
+        "inputSchema": json.loads(
+            json.dumps(ask_source.get("input_schema") or {})
+        ),
+    }
+    properties = ask_tool["inputSchema"].setdefault("properties", {})
+    properties.setdefault(
+        "include_raw",
+        {
+            "type": "boolean",
+            "default": True,
+            "description": (
+                "Deprecated transport flag retained for caller compatibility. "
+                "v4 always returns the canonical backend envelope."
+            ),
+        },
+    )
+    ask_tool = _augment_market_payload_control_schema(ask_tool)
+    stream_tool = json.loads(json.dumps(ask_tool))
+    stream_tool.update(
+        {
+            "name": "omi.ask_stream",
+            "title": "Ask OMI Stream",
+            "description": ASK_STREAM_TOOL["description"],
+        }
+    )
+    public_tools = [ask_tool, stream_tool]
+    return (
+        [*public_tools, *INTERNAL_TOOLS]
+        if EXPOSE_INTERNAL_TOOLS
+        else public_tools
+    )
+
+
+def _tools_for_client() -> list[dict[str, Any]]:
+    try:
+        return _backend_public_tools()
+    except Exception:
+        return TOOLS
 
 
 def _api_post(
@@ -1430,17 +1637,31 @@ def _tool_budget_arg(arguments: dict[str, Any], *, allow_external_fetch: bool) -
     return {}
 
 
+def _public_contract_version(arguments: dict[str, Any]) -> str:
+    contract_version = str(
+        arguments.get("contract_version") or "omi.decision.v4"
+    ).strip()
+    if contract_version != "omi.decision.v4":
+        raise ValueError("contract_version must be omi.decision.v4.")
+    return contract_version
+
+
 def _ask_payload(arguments: dict[str, Any]) -> dict[str, Any]:
     allow_external_fetch = _default_allow_external_fetch(arguments)
     market_data_params = _merge_market_data_params(arguments)
     return {
-        "contract_version": arguments.get("contract_version", "omi.decision.v3"),
+        "contract_version": _public_contract_version(arguments),
         "question": _require(arguments, "question"),
         "target": arguments.get("target") or {"type": "auto"},
         "mode": arguments.get("mode", "auto"),
+        "intents": arguments.get("intents") or [],
+        "output": arguments.get("output"),
+        "realtime_policy": arguments.get("realtime_policy"),
+        "selection": arguments.get("selection") or {},
+        "continuation": arguments.get("continuation") or {},
         "payload_level": market_data_params.get("payload_level"),
         "diagnostics_level": arguments.get("diagnostics_level", "none"),
-        "caller_profile": arguments.get("caller_profile", "kuro_readonly"),
+        "caller_profile": arguments.get("caller_profile", "external_readonly"),
         "allow_llm": _bool_arg(arguments, "allow_llm", False),
         "allow_write": _bool_arg(arguments, "allow_write", False),
         "allow_external_fetch": allow_external_fetch,
@@ -1459,6 +1680,7 @@ def _ask_payload(arguments: dict[str, Any]) -> dict[str, Any]:
         "context_limit": arguments.get("context_limit", 100),
         "include_children": _bool_arg(arguments, "include_children", True),
         "enabled_only": _bool_arg(arguments, "enabled_only", True),
+        "position_context": arguments.get("position_context") or {},
         "conversation_context": arguments.get("conversation_context") or {},
         "market_data_params": market_data_params,
     }
@@ -1547,7 +1769,7 @@ def _bounded_summary_value(value: Any, *, depth: int = 0) -> Any:
 def _summarize_ask_response(response: Any) -> Any:
     if not isinstance(response, dict):
         return response
-    if response.get("contract_version") == "omi.decision.v3":
+    if response.get("contract_version") == "omi.decision.v4":
         return response
 
     output: dict[str, Any] = {
@@ -1684,21 +1906,16 @@ def _summarize_ask_response(response: Any) -> Any:
 def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
     if name == "omi.ask":
         response = _api_post("/api/ai/ask", payload=_ask_payload(arguments))
-        return response if _bool_arg(arguments, "include_raw", True) else _summarize_ask_response(response)
+        if not isinstance(response, dict) or response.get("contract_version") != "omi.decision.v4":
+            raise RuntimeError("OMI backend returned a non-v4 public ask response.")
+        return response
 
     if name == "omi.ask_stream":
         response = _api_stream_post("/api/ai/ask/stream", payload=_ask_payload(arguments))
-        if _bool_arg(arguments, "include_raw", True) or not isinstance(response, dict):
-            return response
-        final = response.get("final")
-        return {
-            "kind": "omi_stream_summary",
-            "raw_included": False,
-            "ok": bool(response.get("ok")),
-            "delta_text": response.get("delta_text") or "",
-            "final": _summarize_ask_response(final) if isinstance(final, dict) else None,
-            "error": _bounded_summary_value(response.get("error")),
-        }
+        final = response.get("final") if isinstance(response, dict) else None
+        if isinstance(final, dict) and final.get("contract_version") != "omi.decision.v4":
+            raise RuntimeError("OMI backend returned a non-v4 public stream response.")
+        return response
 
     if name == "omi.read_market_overview":
         return _api_get(
@@ -1963,7 +2180,8 @@ def _handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
                     "Use omi.ask as the public entry point, or omi.ask_stream when collected stream events are useful. "
                     "It is read-only by default; "
                     "report generation requires a server-side trusted request. Do not treat missing data as a conclusion. "
-                    "Read omi.decision.v3 through answer, decision, evidence, limitations, and status; "
+                    "Read omi.decision.v4 through answer, decision, evidence, limitations, status, "
+                    "and continuation.fill_plan; "
                     "do not reconstruct market semantics in the MCP client."
                 ),
             },
@@ -1973,7 +2191,7 @@ def _handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
         return _response(request_id, {})
 
     if method == "tools/list":
-        return _response(request_id, {"tools": TOOLS})
+        return _response(request_id, {"tools": _tools_for_client()})
 
     if method == "tools/call":
         name = str(params.get("name") or "")
@@ -1987,13 +2205,9 @@ def _handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
 
         try:
             tool_payload = _call_tool(name, arguments)
-            business_error = bool(
-                isinstance(tool_payload, dict)
-                and tool_payload.get("ok") is False
-            )
             return _response(
                 request_id,
-                _tool_result(tool_payload, is_error=business_error),
+                _tool_result(tool_payload, is_error=False),
             )
         except KeyError as exc:
             return _error(request_id, -32602, str(exc))

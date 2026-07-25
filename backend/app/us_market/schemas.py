@@ -141,6 +141,19 @@ class USIntradayTrendPointRead(BaseModel):
     low: float | None = None
 
 
+class USIntradaySourceStatusRead(BaseModel):
+    provider: str = "yahoo_chart"
+    status: str = "unavailable"
+    freshness_status: str = "missing"
+    market_phase: str | None = None
+    is_live_window: bool = False
+    as_of: str | None = None
+    lag_seconds: float | None = None
+    is_fallback: bool = False
+    has_usable_data: bool = False
+    message: str | None = None
+
+
 class USIntradayTrendRead(BaseModel):
     stock_id: str
     symbol: str | None = None
@@ -159,6 +172,7 @@ class USIntradayTrendRead(BaseModel):
     point_count: int
     points: list[USIntradayTrendPointRead]
     volume_pace: dict | None = None
+    source_status: USIntradaySourceStatusRead
     source_url: str | None = None
     warnings: list[str] = Field(default_factory=list)
 

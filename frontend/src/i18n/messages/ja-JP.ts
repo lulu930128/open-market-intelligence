@@ -1655,6 +1655,28 @@ export const jaJP = {
   },
   usStockDetail: {
     ...zhTW.usStockDetail,
+    sourceStatus: {
+      providerErrorTitle: "Yahoo 上流データ障害",
+      delayedTitle: "Yahoo 上流データ遅延",
+      staleTitle: "Yahoo 上流データ更新停止",
+      delayedBadge: "Yahoo 約{minutes}分遅延",
+      staleBadge: "Yahoo 上流異常 · {minutes}分遅延",
+      fallbackBadge: "Yahoo 上流異常 · 最終データを表示",
+      unavailableBadge: "Yahoo 上流に接続できません",
+      delayedMessage:
+        "Yahoo の日中データは約{minutes}分遅れています。最後に利用できたデータを表示し続けます。",
+      staleMessage:
+        "Yahoo の日中データは約{minutes}分更新されていません。最後に利用できたデータを表示し続けます。",
+      fallbackMessage:
+        "Yahoo 上流への接続に失敗しました。最後に利用できたデータを表示しています。",
+      unavailableMessage:
+        "Yahoo 上流への接続に失敗し、利用可能な日中データもありません。",
+      recoveredTitle: "Yahoo 上流が復旧しました",
+      recoveredMessage: "Yahoo の日中データ更新が再開しました。",
+      monitoringEndedTitle: "米国株の日中監視時間が終了しました",
+      monitoringEndedMessage:
+        "現在はリアルタイム更新時間外です。最後に利用できたデータを表示しています。",
+    },
     statusSource: "米国株詳細",
     usDailyWeeklyMonthly: "米国株 日/週/月",
     noStockSelected: "銘柄未選択",

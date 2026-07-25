@@ -16,6 +16,7 @@ from app.ai.market_context import taiwan_stock
 from app.ai.schemas import AiAskRequest
 from app.jobs import service as job_service
 from app.db.models import Base, StockMaster
+from app.market.broker_branch import get_broker_branch_trade_summary
 
 
 def make_session() -> Session:
@@ -128,6 +129,36 @@ def broker_branch_context() -> dict:
         "evidence_passport": {},
     }
 class QueryPlanContractTests(unittest.TestCase):
+    def test_empty_broker_branch_summary_explains_window_and_date_semantics(
+        self,
+    ) -> None:
+        db = make_session()
+        try:
+            summary = get_broker_branch_trade_summary(
+                db,
+                stock_id="2330",
+                days=5,
+            )
+        finally:
+            db.close()
+
+        self.assertEqual(
+            summary["aggregation_window"]["mode"],
+            "multi_session_net",
+        )
+        self.assertEqual(
+            summary["aggregation_window"]["requested_trading_days"],
+            5,
+        )
+        self.assertEqual(
+            summary["date_semantics"]["trade_date"],
+            "market_observation_date",
+        )
+        self.assertIn(
+            "not_market_freshness",
+            summary["date_semantics"]["created_at"],
+        )
+
     def test_timeout_refresh_job_is_reused_before_second_provider_call(self) -> None:
         db = make_session()
         try:
@@ -654,6 +685,108 @@ class QueryPlanContractTests(unittest.TestCase):
                 response["evidence_passport"]["required_capabilities"],
             )
             self.assertFalse(response["query_plan"]["external_refresh_allowed"])
+        finally:
+            db.close()
+
+    def test_multi_intent_broker_request_uses_standard_reader(self) -> None:
+        db = make_session()
+        try:
+            add_stock(db)
+            payload = AiAskRequest(
+                question=(
+                    "2330 latest price, daily chart, technical, institutional, "
+                    "margin, and broker branch"
+                ),
+                contract_version="omi.decision.v4",
+                target={"type": "tw_stock", "id": "2330"},
+                mode="data_only",
+                output="evidence_only",
+            )
+            context = {
+                "kind": "stock_context",
+                "as_of": "2026-07-24",
+                "scope": {"stock_id": "2330"},
+                "data": {
+                    "chart": {
+                        "latest_data_date": "2026-07-24",
+                        "points": [
+                            {
+                                "bar_time": "2026-07-24",
+                                "close_price": 100.0,
+                            }
+                        ],
+                    },
+                    "compact": {
+                        "kind": "stock_compact_evidence",
+                        "status": "ready",
+                        "quote": {
+                            "price": 100.0,
+                            "trade_date": "2026-07-24",
+                        },
+                        "technical": {"analysis": {"selected_score": 1}},
+                        "chips": {
+                            "institutional": {"trade_date": "2026-07-24"},
+                            "margin": {"trade_date": "2026-07-24"},
+                            "broker_branch": {"trade_date": "2026-07-24"},
+                        },
+                        "freshness_by_domain": {
+                            "quote": "current",
+                            "chart": "current",
+                            "technical": "current",
+                            "chips": "current",
+                            "broker_branch": "current",
+                        },
+                    },
+                },
+                "missing": [],
+                "warnings": [],
+                "source_refs": [],
+            }
+            with (
+                patch.object(
+                    ai_ask,
+                    "_check_freshness",
+                    return_value={
+                        "is_current": True,
+                        "missing": [],
+                        "warnings": [],
+                    },
+                ),
+                patch.object(
+                    ai_ask.tools,
+                    "read_stock_context",
+                    return_value=context,
+                ) as full_reader,
+                patch.object(
+                    ai_ask.tools,
+                    "read_stock_broker_branch_context",
+                    side_effect=AssertionError(
+                        "broker-only reader must not run for multi-intent request"
+                    ),
+                ),
+            ):
+                response = ai_ask.ask(db=db, payload=payload)
+
+            full_reader.assert_called_once()
+            self.assertEqual(response["action"], "omi.read_stock_context")
+            self.assertEqual(
+                response["execution"]["query_plan"]["reader_profile"],
+                "standard",
+            )
+            selected = set(
+                response["execution"]["selection"]["required"]
+            )
+            self.assertTrue(
+                {
+                    "quote.snapshot",
+                    "daily.ohlcv",
+                    "technical.structure",
+                    "chips.institutional",
+                    "chips.margin",
+                    "broker_branch.summary",
+                }
+                <= selected
+            )
         finally:
             db.close()
 

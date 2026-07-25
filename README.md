@@ -39,13 +39,18 @@ Dashboard 以台股為主線：大盤卡片、全市場廣度、自選群組、R
 
 台股隔夜 context 可同時檢查直接 ADR 映射、USD/TWD、外資大盤與個股流向；資料較舊時會保留 stale 標示，不把缺值改成 `0`。
 
-### OMI Decision Envelope v3
+### OMI Decision Envelope v4
 
 <p align="center">
   <img src="docs/assets/readme/omi-decision-v3-2026-07.png" alt="OMI 即時問答面板，顯示 2330 的技術結論、回測區、失效條件、資料狀態與限制" width="1120">
 </p>
 
-OMI dock、HTTP、SSE、repo MCP 與外部 consumer 共用 `omi.decision.v3`。回答包含結論、情境、回測區、失效條件、反證、風險與資料限制；transport 成功不會被誤當成 decision-ready。
+OMI dock、HTTP、SSE、repo MCP 與外部 consumer 共用 `omi.decision.v4`。Consumer
+可按 capability、欄位、筆數與總 bytes 選取資料；backend 以
+`evidence.quality` 統一 availability、freshness、completeness、release phase、
+continuity、unit 與 decision usability。Transport 成功不會被誤當成
+decision-ready。目前 registry v1 共有 38 個 capabilities，涵蓋原有 stock、
+market、watchlist、portfolio、macro、derivatives、crypto 與 diagnostics context。
 
 ## 產品定位
 
@@ -86,7 +91,9 @@ OMI 是本機市場研究工作台，不是交易執行系統。
 - 同市場同分鐘量能節奏：TW／US／JP／KR 個股以 regular-session 累積量對比歷史同分鐘中位數；樣本不足時回傳 `partial`。
 - ADR parity：`2330 ↔ TSM`、`2303 ↔ UMC`、`3711 ↔ ASX`、`8150 ↔ IMOS`。
 - 匯率與外資 context：USD/TWD、全市場外資金額與個股外資股數的 1／5／20 日視窗。
-- OMI Decision Envelope v3：統一 HTTP、SSE、Frontend、MCP 與 Kuro-facing answer semantics。
+- OMI Decision Envelope v4：統一 HTTP、SSE、Frontend、MCP 與 Kuro-facing
+  capability selection、資料品質與 answer semantics；v2/v3 僅留在 backend
+  私有實作，不再是公開 consumer contract。
 
 ### 其他市場 context layer
 
@@ -138,11 +145,11 @@ flowchart LR
 
 ## OMI Decision Contract
 
-新 consumer 應明確使用 `omi.decision.v3`：
+所有 public consumer 使用 `omi.decision.v4`：
 
 ```json
 {
-  "contract_version": "omi.decision.v3",
+  "contract_version": "omi.decision.v4",
   "question": "2330 目前技術狀態、回測區與失效條件？",
   "target": {
     "type": "tw_stock",
@@ -151,6 +158,28 @@ flowchart LR
   },
   "mode": "brief",
   "caller_profile": "frontend_readonly",
+  "output": "decision_with_evidence",
+  "realtime_policy": "prefer_live",
+  "selection": {
+    "include": [
+      "quote.snapshot",
+      "technical.structure"
+    ],
+    "fields": {
+      "quote.snapshot": [
+        "price",
+        "trade_date",
+        "quote_time",
+        "currency",
+        "price_unit",
+        "freshness"
+      ]
+    },
+    "limits": {
+      "technical.structure": 10
+    },
+    "max_response_bytes": 32768
+  },
   "allow_llm": false,
   "allow_write": false,
   "allow_external_fetch": false,
@@ -164,25 +193,35 @@ Canonical response 的主要區域：
 
 | 欄位 | 用途 |
 | --- | --- |
-| `status.readiness` | `facts_ready`、`analysis_ready`、`answer_ready`、`decision_ready` 的唯一判定位置。 |
+| `status.readiness` | `response_ready`、`facts_ready`、`analysis_ready`、`decision_ready` 與 `decision_blocked`。 |
 | `answer` | 可直接顯示或語音化的 headline、text、summary、stance。 |
 | `decision` | 情境、action plan、價位、部位、風險、反證與資料限制。 |
-| `evidence` | Passport、domain freshness、slots、bounded result 與 source refs。 |
+| `evidence.quality` | Canonical availability、freshness、completeness、release phase、continuity、unit 與 usability。 |
+| `evidence.manifest` / `evidence.data` | 實際選取的 capability manifest 與 bounded data；未選取資料不會整包回傳。 |
 | `limitations` | Missing、warnings 與 provider failures。 |
 | `execution` | Policy、query/tool plan、budget、runs 與 diagnostics。 |
 | `continuation` | Resolved target、clarification、next context 與 next actions。 |
 | `error` | Business error；不能只看 HTTP status 或 SSE `done`。 |
 
-`omi.ai.ask.v2` 暫時保留作為 compatibility contract。Frontend、repo MCP 與新的 consumer 應優先使用 v3。
+公開 HTTP、SSE、MCP 與 OpenAPI 只接受並回傳 v4。明確傳入
+`omi.decision.v3` 或 `omi.ai.ask.v2` 會被拒絕；backend 內部仍保留舊 builder
+作為回歸與安全實作 seam，不屬於對外承諾。
 
 ### HTTP
 
 ```powershell
 $body = @{
-  contract_version = "omi.decision.v3"
+  contract_version = "omi.decision.v4"
   question = "2330 目前技術狀態、回測區與失效條件？"
   target = @{ type = "tw_stock"; id = "2330"; market = "TW" }
   mode = "brief"
+  output = "decision_with_evidence"
+  realtime_policy = "prefer_live"
+  selection = @{
+    include = @("quote.snapshot", "technical.structure")
+    limits = @{ "technical.structure" = 10 }
+    max_response_bytes = 32768
+  }
   allow_llm = $false
   allow_write = $false
   allow_external_fetch = $false
@@ -417,7 +456,8 @@ Open Market Intelligence/
 - 同分鐘量能基線需要歷史 minute bars 累積；樣本不足時會保持 `partial`，不顯示假精確值。
 - Corporate events、分點、Radar outcome 與 sampled Crypto history 從 collector 啟用後逐步累積，不保證自動回補完整歷史。
 - Crypto ticker／order book／funding／OI／spread history 是 sampled snapshots，不等同交易所逐筆 archive。
-- `omi.ai.ask.v2` 仍保留於 migration window；移除前必須確認所有 consumer 已觀察到 v3。
+- 公開 contract 已只剩 v4；backend 內部 v2/v3 builder 尚未刪除，避免在同一
+  次收斂中破壞既有 evidence 與回歸 seam。
 
 ## 開發與維護原則
 

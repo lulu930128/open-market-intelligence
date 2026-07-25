@@ -318,6 +318,14 @@ def _freshness_by_domain(response: dict[str, Any]) -> dict[str, Any]:
     return deepcopy(_dict(raw))
 
 
+def _freshness_by_capability(response: dict[str, Any]) -> dict[str, Any]:
+    data, compact = _result_data(response)
+    raw = compact.get("freshness_by_capability")
+    if not isinstance(raw, dict):
+        raw = data.get("freshness_by_capability")
+    return deepcopy(_dict(raw))
+
+
 def _slots(response: dict[str, Any]) -> dict[str, Any]:
     data, compact = _result_data(response)
     raw = data.get("slots")
@@ -469,6 +477,7 @@ def _provider_failures(response: dict[str, Any]) -> list[dict[str, Any]]:
             "error",
             "failed",
             "rate_limited",
+            "skipped",
             "timeout",
             "unavailable",
         }:
@@ -489,6 +498,60 @@ def _provider_failures(response: dict[str, Any]) -> list[dict[str, Any]]:
                 if key in run
             }
         )
+    result = _dict(response.get("result"))
+
+    def walk(value: Any, *, depth: int = 0) -> None:
+        if depth > 7 or len(failures) >= 100:
+            return
+        if isinstance(value, dict):
+            entries = value.get("entries")
+            if isinstance(entries, list) and (
+                "source_health" in str(value.get("kind") or "")
+                or "expected_daily_price_date" in value
+            ):
+                for entry in entries[:100]:
+                    if not isinstance(entry, dict):
+                        continue
+                    status = str(entry.get("status") or "").strip().lower()
+                    if status not in {
+                        "blocked",
+                        "degraded",
+                        "empty",
+                        "error",
+                        "failed",
+                        "partial",
+                        "rate_limited",
+                        "stale",
+                        "timeout",
+                        "unavailable",
+                    }:
+                        continue
+                    failures.append(
+                        {
+                            "provider": entry.get("provider"),
+                            "resource": entry.get("resource"),
+                            "target": entry.get("target"),
+                            "status": status,
+                            "reason": entry.get("reason"),
+                            "latest_data_date": entry.get("latest_data_date"),
+                            "expected_data_date": entry.get(
+                                "expected_data_date"
+                            ),
+                            "freshness_lag_days": entry.get(
+                                "freshness_lag_days"
+                            ),
+                            "latest_event": entry.get("latest_event"),
+                        }
+                    )
+            for item in value.values():
+                if isinstance(item, (dict, list)):
+                    walk(item, depth=depth + 1)
+        elif isinstance(value, list):
+            for item in value[:100]:
+                if isinstance(item, (dict, list)):
+                    walk(item, depth=depth + 1)
+
+    walk(result)
     return failures
 
 
@@ -526,6 +589,7 @@ def build(response: dict[str, Any]) -> dict[str, Any]:
             "passport": passport,
             "freshness": deepcopy(_dict(response.get("freshness"))),
             "freshness_by_domain": _freshness_by_domain(response),
+            "freshness_by_capability": _freshness_by_capability(response),
             "slots": canonical_slots(response),
             "result": _evidence_result(response),
             "source_refs": deepcopy(_list(response.get("source_refs"))),
@@ -566,8 +630,16 @@ def for_requested_contract(
     response: dict[str, Any],
     *,
     requested_contract_version: str,
+    canonical_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     response = apply_readiness_to_v2(response)
+    if requested_contract_version == "omi.decision.v4":
+        from app.ai import decision_envelope_v4
+
+        return decision_envelope_v4.build(
+            response,
+            canonical_result=canonical_result,
+        )
     if requested_contract_version == CONTRACT_VERSION:
         return build(response)
     return response

@@ -77,6 +77,7 @@ import type {
   IntradayTrendPoint,
   IntradayTrendResponse,
   StockVolumePace,
+  USIntradaySourceStatus,
   USCompanyProfileRead,
   USCorporateActionRead,
   USOhlcChartRead,
@@ -289,6 +290,7 @@ type USIntradayMeta = {
   hasExtendedHours: boolean;
   warnings: string[];
   volumePace: StockVolumePace | null;
+  sourceStatus: USIntradaySourceStatus | null;
 };
 
 const emptyUsIntradayMeta: USIntradayMeta = {
@@ -298,6 +300,7 @@ const emptyUsIntradayMeta: USIntradayMeta = {
   hasExtendedHours: false,
   warnings: [],
   volumePace: null,
+  sourceStatus: null,
 };
 
 function intradayMetaFromResponse(response: IntradayTrendResponse): USIntradayMeta {
@@ -308,6 +311,66 @@ function intradayMetaFromResponse(response: IntradayTrendResponse): USIntradayMe
     hasExtendedHours: Boolean(response.has_extended_hours),
     warnings: response.warnings ?? [],
     volumePace: response.volume_pace ?? null,
+    sourceStatus: response.source_status ?? null,
+  };
+}
+
+type IntradaySourcePresentation = {
+  level: "warning" | "error";
+  title: string;
+  badge: string;
+  message: string;
+};
+
+function intradaySourcePresentation(
+  t: TranslationFunction,
+  status: USIntradaySourceStatus | null
+): IntradaySourcePresentation | null {
+  if (!status || status.status === "ok") return null;
+
+  const minutes = Math.max(1, Math.ceil((status.lag_seconds ?? 0) / 60));
+
+  if (status.freshness_status === "provider_error" && status.is_fallback) {
+    return {
+      level: "warning",
+      title: t("usStockDetail.sourceStatus.providerErrorTitle"),
+      badge: t("usStockDetail.sourceStatus.fallbackBadge"),
+      message: t("usStockDetail.sourceStatus.fallbackMessage"),
+    };
+  }
+
+  if (status.freshness_status === "provider_error") {
+    return {
+      level: "error",
+      title: t("usStockDetail.sourceStatus.providerErrorTitle"),
+      badge: t("usStockDetail.sourceStatus.unavailableBadge"),
+      message: t("usStockDetail.sourceStatus.unavailableMessage"),
+    };
+  }
+
+  if (status.freshness_status === "stale") {
+    return {
+      level: "warning",
+      title: t("usStockDetail.sourceStatus.staleTitle"),
+      badge: t("usStockDetail.sourceStatus.staleBadge", { minutes }),
+      message: t("usStockDetail.sourceStatus.staleMessage", { minutes }),
+    };
+  }
+
+  if (status.freshness_status === "delayed") {
+    return {
+      level: "warning",
+      title: t("usStockDetail.sourceStatus.delayedTitle"),
+      badge: t("usStockDetail.sourceStatus.delayedBadge", { minutes }),
+      message: t("usStockDetail.sourceStatus.delayedMessage", { minutes }),
+    };
+  }
+
+  return {
+    level: "error",
+    title: t("usStockDetail.sourceStatus.providerErrorTitle"),
+    badge: t("usStockDetail.sourceStatus.unavailableBadge"),
+    message: t("usStockDetail.sourceStatus.unavailableMessage"),
   };
 }
 
@@ -891,6 +954,7 @@ export default function USStockDetailPanel({
   const [successMessage, setSuccessMessage] = useState<SuccessMessage>(null);
   const requestSeq = useRef(0);
   const finalIntradayRefreshDate = useRef<string | null>(null);
+  const intradaySourceEventStateRef = useRef<Map<string, string>>(new Map());
   const onDailyPricesChangedRef = useRef(onDailyPricesChanged);
   const chartDrawingSyncTimerRef = useRef<number | null>(null);
   const chartDrawingLocalRevisionRef = useRef(0);
@@ -1080,6 +1144,64 @@ export default function USStockDetailPanel({
     },
     [dataStatusContextKey, dataStatusContextLabel, dataStatusSource, selectedSymbol]
   );
+  const publishIntradaySourceStatus = useCallback(
+    (symbol: string, response: IntradayTrendResponse) => {
+      const sourceStatus = response.source_status;
+      if (!sourceStatus) return;
+
+      const normalizedSymbol = symbol.toUpperCase();
+      const contextKey = `us:${normalizedSymbol}`;
+      const dedupeKey = `${contextKey}:intraday-source`;
+      const signature = `${sourceStatus.status}:${sourceStatus.freshness_status}:${sourceStatus.is_fallback}`;
+      const previousSignature = intradaySourceEventStateRef.current.get(dedupeKey);
+      if (previousSignature === signature) return;
+
+      intradaySourceEventStateRef.current.set(dedupeKey, signature);
+      const presentation = intradaySourcePresentation(tRef.current, sourceStatus);
+      if (!presentation) {
+        if (previousSignature && !previousSignature.startsWith("ok:")) {
+          const recovered = sourceStatus.freshness_status === "current";
+          emitDataStatusEvent({
+            market: "us",
+            level: recovered ? "success" : "info",
+            title: tRef.current(
+              recovered
+                ? "usStockDetail.sourceStatus.recoveredTitle"
+                : "usStockDetail.sourceStatus.monitoringEndedTitle"
+            ),
+            message: tRef.current(
+              recovered
+                ? "usStockDetail.sourceStatus.recoveredMessage"
+                : "usStockDetail.sourceStatus.monitoringEndedMessage"
+            ),
+            source: "Yahoo chart",
+            contextKey,
+            contextLabel:
+              normalizedSymbol === selectedSymbol?.toUpperCase()
+                ? dataStatusContextLabel
+                : normalizedSymbol,
+            dedupeKey,
+          });
+        }
+        return;
+      }
+
+      emitDataStatusEvent({
+        market: "us",
+        level: presentation.level,
+        title: presentation.title,
+        message: presentation.message,
+        source: "Yahoo chart",
+        contextKey,
+        contextLabel:
+          normalizedSymbol === selectedSymbol?.toUpperCase()
+            ? dataStatusContextLabel
+            : normalizedSymbol,
+        dedupeKey,
+      });
+    },
+    [dataStatusContextLabel, selectedSymbol]
+  );
   const selectedSubtitle = selectedIndexConfig
     ? `${selectedIndexConfig.exchange} · ${usAssetTypeLabel(t, "index")} · ${formatDate(displayDate)}`
     : visibleSelectedStock
@@ -1099,6 +1221,10 @@ export default function USStockDetailPanel({
     !visibleTodayIntradayMeta.hasExtendedHours
       ? t("usStockDetail.extendedHours.noExtendedData")
       : visibleTodayIntradayMeta.warnings[0] ?? null;
+  const visibleIntradaySourcePresentation = intradaySourcePresentation(
+    t,
+    visibleTodayIntradayMeta.sourceStatus
+  );
   const professionalTimeframeLabel = timeframeLabel(t, professionalTimeframe);
   const professionalChartReady =
     chartFocusMode &&
@@ -1284,6 +1410,7 @@ export default function USStockDetailPanel({
             setTodayPreviousClose(todayData.previous_close);
             setTodaySource(todayData.source);
             setTodayIntradayMeta(intradayMetaFromResponse(todayData));
+            publishIntradaySourceStatus(symbol, todayData);
             setTodayUpdatedAt(
               latestIntradayPoint ? formatDateTime(latestIntradayPoint.time) : null
             );
@@ -1368,6 +1495,7 @@ export default function USStockDetailPanel({
           setTodayPreviousClose(todayData.previous_close);
           setTodaySource(todayData.source);
           setTodayIntradayMeta(intradayMetaFromResponse(todayData));
+          publishIntradaySourceStatus(symbol, todayData);
           setTodayUpdatedAt(
             latestIntradayPoint ? formatDateTime(latestIntradayPoint.time) : null
           );
@@ -1474,7 +1602,12 @@ export default function USStockDetailPanel({
         publishDetailDataStatus(tRef.current("usStockDetail.errors.loadFailed"), error);
       }
     },
-    [intradaySessionScope, onCompanyProfileChange, publishDetailDataStatus]
+    [
+      intradaySessionScope,
+      onCompanyProfileChange,
+      publishDetailDataStatus,
+      publishIntradaySourceStatus,
+    ]
   );
 
   useEffect(() => {
@@ -1530,13 +1663,16 @@ export default function USStockDetailPanel({
 
         const latestIntradayPoint = today.points[today.points.length - 1] ?? null;
 
-        setTodayTrend(today.points);
-        setTodayPreviousClose(today.previous_close);
-        setTodaySource(today.source);
+        if (today.points.length > 0 || today.source_status?.has_usable_data) {
+          setTodayTrend(today.points);
+          setTodayPreviousClose(today.previous_close);
+          setTodaySource(today.source);
+          setTodayUpdatedAt(
+            latestIntradayPoint ? formatDateTime(latestIntradayPoint.time) : null
+          );
+        }
         setTodayIntradayMeta(intradayMetaFromResponse(today));
-        setTodayUpdatedAt(
-          latestIntradayPoint ? formatDateTime(latestIntradayPoint.time) : null
-        );
+        publishIntradaySourceStatus(symbol, today);
         setLoadState("success");
       } catch (error) {
         if (cancelled) return;
@@ -1585,7 +1721,14 @@ export default function USStockDetailPanel({
       cancelled = true;
       clearIntradayTimer();
     };
-  }, [intradaySessionScope, loadState, publishDetailDataStatus, selectedSymbol, timeframe]);
+  }, [
+    intradaySessionScope,
+    loadState,
+    publishDetailDataStatus,
+    publishIntradaySourceStatus,
+    selectedSymbol,
+    timeframe,
+  ]);
 
   const queueChartDrawingRemoteSave = useCallback((
     drawingsToSave: ChartDrawing[],
@@ -2460,10 +2603,27 @@ export default function USStockDetailPanel({
               setChartFocusMode(false);
             }}
             message={
-              successMessage ? (
-                <div className="border-b border-omi-success-border bg-omi-success-soft px-5 py-3 text-sm text-omi-success">
-                  {successMessage.text}
-                </div>
+              successMessage ||
+              (professionalIsIntraday && visibleIntradaySourcePresentation) ? (
+                <>
+                  {successMessage ? (
+                    <div className="border-b border-omi-success-border bg-omi-success-soft px-5 py-3 text-sm text-omi-success">
+                      {successMessage.text}
+                    </div>
+                  ) : null}
+                  {professionalIsIntraday && visibleIntradaySourcePresentation ? (
+                    <div
+                      className={[
+                        "border-b px-5 py-3 text-sm",
+                        visibleIntradaySourcePresentation.level === "error"
+                          ? "border-omi-danger-border bg-omi-danger-soft text-omi-danger"
+                          : "border-omi-warning-border bg-omi-warning-soft text-omi-warning-strong",
+                      ].join(" ")}
+                    >
+                      {visibleIntradaySourcePresentation.message}
+                    </div>
+                  ) : null}
+                </>
               ) : null
             }
             chartReady={professionalChartReady}
@@ -2520,6 +2680,20 @@ export default function USStockDetailPanel({
               <div className="mt-1 text-sm text-omi-text-muted">
                 {selectedSubtitle}
               </div>
+              {timeframe === "today" && visibleIntradaySourcePresentation ? (
+                <div
+                  data-testid="us-intraday-source-status"
+                  className={[
+                    "mt-2 inline-flex border px-2 py-1 text-xs font-semibold",
+                    visibleIntradaySourcePresentation.level === "error"
+                      ? "border-omi-danger-border bg-omi-danger-soft text-omi-danger"
+                      : "border-omi-warning-border bg-omi-warning-soft text-omi-warning-strong",
+                  ].join(" ")}
+                  title={visibleIntradaySourcePresentation.message}
+                >
+                  {visibleIntradaySourcePresentation.badge}
+                </div>
+              ) : null}
             </div>
 
             <div className="shrink-0 text-right">

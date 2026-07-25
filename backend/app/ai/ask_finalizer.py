@@ -210,6 +210,7 @@ def _compact_result_data(
     if slots:
         output["slots"] = slots
     for key in (
+        "latest_trade_date",
         "breadth",
         "sample_breadth",
         "distribution",
@@ -236,6 +237,7 @@ def _compact_result_data(
         "institutional_position",
         "options_sentiment",
         "market_chip_trend",
+        "order_book",
         "derivatives",
         "tables",
         "summary",
@@ -426,7 +428,10 @@ def _market_live_summary(
         is_latest_session_quote = freshness_status in {
             "live",
             "closed",
+            "daily_close",
+            "final_snapshot",
             "latest_completed_session",
+            "latest_session_close",
         }
     intraday_available = intraday.get("status") == "ok"
     has_quote = quote_price is not None or bool(quote)
@@ -467,6 +472,13 @@ def _market_live_summary(
         display_price_time = None
         display_price_freshness = "missing"
     quote_depth_available = bool(quote.get("depth_available")) and not quote_is_stale
+    display_is_live = bool(
+        quote_is_live
+        if display_price_source == "quote"
+        else intraday.get("is_realtime")
+        if display_price_source == "intraday"
+        else False
+    )
 
     return {
         "version": "market_live_summary.v1",
@@ -478,8 +490,10 @@ def _market_live_summary(
         "quote_source": quote.get("source"),
         "quote_provider": quote.get("provider"),
         "source_is_intraday": bool(quote.get("source_is_intraday") or intraday_available),
-        "is_realtime": display_price_freshness in {"live", "current"},
-        "is_live": display_price_freshness in {"live", "current"},
+        "is_realtime": display_is_live
+        or display_price_freshness in {"live", "current"},
+        "is_live": display_is_live
+        or display_price_freshness in {"live", "current"},
         "is_latest_session_quote": is_latest_session_quote,
         "market_status": market_status,
         "current_session_phase": quote.get("current_session_phase") or market_status_payload.get("current_session"),
@@ -497,6 +511,44 @@ def _market_live_summary(
         "quote_depth_available": quote_depth_available,
         "quote_depth_status": freshness_status or "missing",
     }
+
+
+def _market_index_intraday_from_compact(
+    compact: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    pack = (
+        compact.get("index_intraday")
+        if isinstance(compact.get("index_intraday"), dict)
+        else {}
+    )
+    raw_indices = pack.get("indices")
+    indices = [
+        item
+        for item in raw_indices
+        if isinstance(item, dict)
+    ] if isinstance(raw_indices, list) else []
+    selected = next(
+        (
+            item
+            for item in indices
+            if str(item.get("index_id") or "").upper() == "TAIEX"
+        ),
+        indices[0] if indices else {},
+    )
+    quote = (
+        selected.get("quote")
+        if isinstance(selected.get("quote"), dict)
+        else {}
+    )
+    intraday_bars = (
+        selected.get("intraday_bars")
+        if isinstance(selected.get("intraday_bars"), dict)
+        else {}
+    )
+    return quote, _intraday_summary_from_compact(
+        intraday_bars,
+        quote=quote,
+    )
 
 
 def _apply_stock_compact_fields(output: dict[str, Any], compact: dict[str, Any]) -> None:
@@ -519,6 +571,10 @@ def _apply_stock_compact_fields(output: dict[str, Any], compact: dict[str, Any])
     if not intraday:
         intraday_chart = compact.get("intraday_chart") if isinstance(compact.get("intraday_chart"), dict) else {}
         intraday = _intraday_chart_summary(intraday_chart)
+    if not quote and not intraday and isinstance(compact.get("index_intraday"), dict):
+        quote, intraday = _market_index_intraday_from_compact(compact)
+        if quote:
+            output["quote"] = quote
     if intraday:
         output["intraday"] = intraday
 
@@ -555,7 +611,12 @@ def _apply_market_brief_fields(output: dict[str, Any], result: dict[str, Any]) -
     data_summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
     summary_source = summary or data_summary
 
-    output["latest_trade_date"] = result.get("as_of") or summary_source.get("as_of")
+    output["latest_trade_date"] = (
+        result.get("latest_trade_date")
+        or data.get("latest_trade_date")
+        or summary_source.get("latest_trade_date")
+    )
+    output["as_of"] = result.get("as_of") or summary_source.get("as_of")
     for key in (
         "breadth",
         "sample_breadth",
@@ -844,6 +905,20 @@ def finalize_ask_response(
         and isinstance(timeout_run.get("cancellation"), dict)
         else {}
     )
+    cache_source_refs = [
+        ref
+        for ref in assembled.result_source_refs
+        if isinstance(ref, dict)
+        and str(ref.get("type") or ref.get("kind") or "").strip().lower()
+        in {"cache", "database", "local_cache", "table"}
+    ]
+    cached_data_returned = bool(
+        (
+            isinstance(timeout_run, dict)
+            and timeout_run.get("cached_data_returned")
+        )
+        or cache_source_refs
+    )
 
     return {
         "kind": "ai_ask",
@@ -875,9 +950,7 @@ def finalize_ask_response(
         "fallback_used": bool(
             isinstance(timeout_run, dict) and timeout_run.get("fallback_used")
         ),
-        "cached_data_returned": bool(
-            isinstance(timeout_run, dict) and timeout_run.get("cached_data_returned")
-        ),
+        "cached_data_returned": cached_data_returned,
         "job": job,
         "cancellation": cancellation,
         "report_level": report_level,

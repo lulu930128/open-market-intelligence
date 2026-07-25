@@ -288,7 +288,11 @@ Explicit/ambient market context 使用 canonical default targets：
 ### MCP
 
 - `omi.ask` forward v3 request/response。
-- `isError=true` 當且僅當 canonical response `ok=false` 或 transport/protocol failure。
+- 已完成的 tool call 即使 canonical response `ok=false`，仍以
+  `structuredContent` 回傳並保持 `isError=false`，讓 caller 能讀取
+  `error.code`、`resolution`、`limitations` 與可恢復動作。
+- `isError=true` 只用於 tool 無法完成呼叫的 execution／transport failure；
+  JSON-RPC protocol failure 則使用 JSON-RPC error object。
 - `omi.ask_stream` 暫時保留 compatibility；不得產生另一種 final response。
 
 ## 9. Reader profiles

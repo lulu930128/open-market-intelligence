@@ -20,12 +20,13 @@ def fetch_yahoo_chart_payload(
     interval: str,
     timeout_seconds: int,
     include_prepost: bool = False,
+    resource: str = "daily_price",
 ) -> tuple[dict[str, Any], str]:
     normalized_symbol = normalize_us_symbol(symbol)
     response = provider_get(
         YAHOO_CHART_URL.format(symbol=quote(normalized_symbol, safe="")),
         provider=PROVIDER_NAME,
-        resource="daily_price",
+        resource=resource,
         target=normalized_symbol,
         params={
             "range": range_value,

@@ -56,6 +56,8 @@ class TaiwanSourceHealthEntry:
     freshness_lag_days: int | None = None
     release_status: str | None = None
     release_is_released: bool | None = None
+    release_at: str | None = None
+    next_release_at: str | None = None
     data_quality: str = "unknown"
     reason: str = ""
     provider: str | None = None
@@ -81,6 +83,8 @@ class TaiwanSourceHealthEntry:
             "freshness_lag_days": self.freshness_lag_days,
             "release_status": self.release_status,
             "release_is_released": self.release_is_released,
+            "release_at": self.release_at,
+            "next_release_at": self.next_release_at,
             "data_quality": self.data_quality,
             "reason": self.reason,
             "provider": self.provider,
@@ -616,6 +620,8 @@ def _dataset_entry(
             expected_data_date=expected_data_date,
             release_status=window.get("status"),
             release_is_released=window.get("is_released"),
+            release_at=window.get("release_at"),
+            next_release_at=window.get("next_release_at"),
             data_quality="not_applicable",
             reason="This resource is equity-only and is not required for this instrument type.",
         )
@@ -640,6 +646,17 @@ def _dataset_entry(
         expected_data_date=expected_data_date,
         freshness_required=spec.has_expected_date,
     )
+    if (
+        spec.key == "shareholding_distribution_weekly"
+        and window.get("status") == "pending"
+        and ok
+    ):
+        status_value = "pending"
+        data_quality = "pending_release"
+        reason = (
+            "Latest local row matches the latest released TDCC observation; "
+            "the next conservative publication window is still pending."
+        )
 
     return TaiwanSourceHealthEntry(
         resource=spec.key,
@@ -656,6 +673,8 @@ def _dataset_entry(
         freshness_lag_days=_freshness_lag(expected_data_date, latest_data_date),
         release_status=window.get("status"),
         release_is_released=window.get("is_released"),
+        release_at=window.get("release_at"),
+        next_release_at=window.get("next_release_at"),
         data_quality=data_quality,
         reason=reason,
     )

@@ -100,7 +100,8 @@ def _fmt_price(value: Any) -> str:
     if not _finite(value):
         return "-"
     digits = 0 if abs(value) >= 1000 else 2
-    return _fmt_number(value, digits).rstrip("0").rstrip(".")
+    formatted = _fmt_number(value, digits)
+    return formatted if digits == 0 else formatted.rstrip("0").rstrip(".")
 
 
 def _fmt_pct(value: Any) -> str:

@@ -14,13 +14,18 @@ from app.db.models import (
     MonthlyRevenue,
     ShareholdingDistributionWeekly,
 )
-from app.market.trading_calendar import TAIWAN_TZ, latest_released_trading_day
+from app.market.trading_calendar import (
+    TAIWAN_TZ,
+    latest_released_trading_day,
+    previous_taiwan_trading_day,
+)
 
 
 TAIWAN_DAILY_PRICE_RELEASE_TIME = time(hour=15, minute=15)
 TAIWAN_INSTITUTIONAL_TRADE_RELEASE_TIME = time(hour=15, minute=10)
 TAIWAN_MARGIN_TRADE_RELEASE_TIME = time(hour=21, minute=10)
 TAIWAN_BROKER_BRANCH_RELEASE_TIME = time(hour=15, minute=10)
+TAIWAN_SHAREHOLDING_RELEASE_TIME = time(hour=12, minute=0)
 TAIWAN_DEFAULT_DAILY_METRIC_RELEASE_TIME = TAIWAN_MARGIN_TRADE_RELEASE_TIME
 
 TAIWAN_REFRESH_DAILY_PRICE = "daily_price"
@@ -151,18 +156,69 @@ def expected_shareholding_distribution_date(
     include_today: bool | None = None,
     now: datetime | None = None,
 ) -> date:
-    """Return the latest conservatively expected Friday TDCC snapshot date."""
+    """Return the latest TDCC observation whose release window has opened."""
     del include_today
+    return shareholding_distribution_release_window(now=now)[
+        "expected_trade_date"
+    ]
+
+
+def shareholding_distribution_release_window(
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Model the conservative weekly TDCC publication boundary.
+
+    TDCC describes the dataset as the final-business-day balance of each week
+    but does not publish an exact availability time. OMI therefore advances
+    the expected observation at Saturday 12:00 Asia/Taipei and exposes the
+    assumption in the returned contract.
+    """
     local_now = now or datetime.now(TAIWAN_TZ)
-    if local_now.tzinfo is not None:
+    if local_now.tzinfo is None:
+        local_now = local_now.replace(tzinfo=TAIWAN_TZ)
+    else:
         local_now = local_now.astimezone(TAIWAN_TZ)
     current_date = local_now.date()
-    days_since_friday = (
-        current_date.weekday() - 4
-        if current_date.weekday() >= 5
-        else current_date.weekday() + 3
+    current_week_friday = current_date + timedelta(
+        days=4 - current_date.weekday()
     )
-    return current_date - timedelta(days=days_since_friday)
+    current_observation_date = previous_taiwan_trading_day(
+        current_week_friday,
+        include_value=True,
+    )
+    release_at = datetime.combine(
+        current_week_friday + timedelta(days=1),
+        TAIWAN_SHAREHOLDING_RELEASE_TIME,
+        tzinfo=TAIWAN_TZ,
+    )
+    is_released = local_now >= release_at
+    if is_released:
+        expected_trade_date = current_observation_date
+        next_friday = current_week_friday + timedelta(days=7)
+        next_release_at = datetime.combine(
+            next_friday + timedelta(days=1),
+            TAIWAN_SHAREHOLDING_RELEASE_TIME,
+            tzinfo=TAIWAN_TZ,
+        )
+    else:
+        previous_friday = current_week_friday - timedelta(days=7)
+        expected_trade_date = previous_taiwan_trading_day(
+            previous_friday,
+            include_value=True,
+        )
+        next_release_at = release_at
+    return {
+        "key": TAIWAN_DATASET_SHAREHOLDING_DISTRIBUTION,
+        "label": "Shareholding distribution",
+        "release_time": TAIWAN_SHAREHOLDING_RELEASE_TIME.strftime("%H:%M"),
+        "release_at": release_at.isoformat(),
+        "next_release_at": next_release_at.isoformat(),
+        "expected_trade_date": expected_trade_date,
+        "status": "released" if is_released else "pending",
+        "is_released": is_released,
+        "assumption": "conservative_saturday_noon_asia_taipei",
+    }
 
 
 def expected_monthly_revenue_period(
@@ -385,6 +441,7 @@ __all__ = [
     "TAIWAN_DEFAULT_DAILY_METRIC_RELEASE_TIME",
     "TAIWAN_INSTITUTIONAL_TRADE_RELEASE_TIME",
     "TAIWAN_MARGIN_TRADE_RELEASE_TIME",
+    "TAIWAN_SHAREHOLDING_RELEASE_TIME",
     "TAIWAN_REFRESH_BROKER_BRANCH",
     "TAIWAN_REFRESH_DAILY_PRICE",
     "TAIWAN_REFRESH_FINANCIAL_METRICS",
@@ -410,4 +467,5 @@ __all__ = [
     "normalize_refresh_profile",
     "refresh_profile_step_count",
     "refresh_profile_steps",
+    "shareholding_distribution_release_window",
 ]

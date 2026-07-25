@@ -74,6 +74,43 @@ def _response_preferences(payload: AiAskRequest) -> dict[str, Any]:
     return response_preferences.build_response_preferences(payload.conversation_context)
 
 
+def _reader_profile(
+    payload: AiAskRequest,
+    *,
+    policy: dict[str, Any] | None = None,
+) -> str:
+    query_plan = (
+        policy.get("query_plan")
+        if isinstance(policy, dict) and isinstance(policy.get("query_plan"), dict)
+        else {}
+    )
+    profile = str(query_plan.get("reader_profile") or "").strip()
+    if profile:
+        return profile
+    params = (
+        payload.market_data_params
+        if isinstance(payload.market_data_params, dict)
+        else {}
+    )
+    return str(params.get("reader_profile") or "").strip()
+
+
+def _uses_reader_profile(
+    payload: AiAskRequest,
+    *,
+    expected: str,
+    question_intent: str,
+    policy: dict[str, Any] | None = None,
+) -> bool:
+    profile = _reader_profile(payload, policy=policy)
+    if profile:
+        return profile == expected
+    return question_intent == {
+        "quote_only": "quote",
+        "broker_branch_only": "broker_branch",
+    }.get(expected)
+
+
 def _read_data_only(
     db: Session,
     payload: AiAskRequest,
@@ -103,13 +140,23 @@ def _read_data_only(
 
     if scope_type == "stock":
         stock_id = _require_scope_id(payload, "stock")
-        if question_intent == "quote":
+        if _uses_reader_profile(
+            payload,
+            expected="quote_only",
+            question_intent=question_intent,
+            policy=policy,
+        ):
             return "omi.read_stock_quote", tools.read_stock_quote_context(
                 db=db,
                 stock_id=stock_id,
                 market_data_params=payload.market_data_params,
             )
-        if question_intent == "broker_branch":
+        if _uses_reader_profile(
+            payload,
+            expected="broker_branch_only",
+            question_intent=question_intent,
+            policy=policy,
+        ):
             return "omi.read_stock_broker_branch", tools.read_stock_broker_branch_context(
                 db=db,
                 stock_id=stock_id,
@@ -287,7 +334,12 @@ def _build_brief(
     tool_runs: list[dict[str, Any]] | None = None,
     policy: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    if scope_type == "stock" and question_intent == "quote":
+    if scope_type == "stock" and _uses_reader_profile(
+        payload,
+        expected="quote_only",
+        question_intent=question_intent,
+        policy=policy,
+    ):
         stock_id = _require_scope_id(payload, "stock")
         return "omi.read_stock_quote", tools.read_stock_quote_context(
             db=db,
@@ -295,7 +347,12 @@ def _build_brief(
             market_data_params=payload.market_data_params,
         )
 
-    if scope_type == "stock" and question_intent == "broker_branch":
+    if scope_type == "stock" and _uses_reader_profile(
+        payload,
+        expected="broker_branch_only",
+        question_intent=question_intent,
+        policy=policy,
+    ):
         stock_id = _require_scope_id(payload, "stock")
         return "omi.read_stock_broker_branch", tools.read_stock_broker_branch_context(
             db=db,
@@ -414,7 +471,20 @@ def _generate_report(
     tool_runs: list[dict[str, Any]] | None = None,
     policy: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    if scope_type == "stock" and question_intent in {"quote", "broker_branch"}:
+    if scope_type == "stock" and (
+        _uses_reader_profile(
+            payload,
+            expected="quote_only",
+            question_intent=question_intent,
+            policy=policy,
+        )
+        or _uses_reader_profile(
+            payload,
+            expected="broker_branch_only",
+            question_intent=question_intent,
+            policy=policy,
+        )
+    ):
         return _read_data_only(
             db,
             payload,
@@ -471,7 +541,20 @@ def _generate_analysis(
     tool_runs: list[dict[str, Any]] | None = None,
     policy: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    if scope_type == "stock" and question_intent in {"quote", "broker_branch"}:
+    if scope_type == "stock" and (
+        _uses_reader_profile(
+            payload,
+            expected="quote_only",
+            question_intent=question_intent,
+            policy=policy,
+        )
+        or _uses_reader_profile(
+            payload,
+            expected="broker_branch_only",
+            question_intent=question_intent,
+            policy=policy,
+        )
+    ):
         return _read_data_only(
             db,
             payload,
@@ -528,12 +611,20 @@ def _check_freshness(
 ) -> dict[str, Any]:
     if scope_type == "stock":
         stock_id = _require_scope_id(payload, "stock")
-        if question_intent == "quote":
+        if _uses_reader_profile(
+            payload,
+            expected="quote_only",
+            question_intent=question_intent,
+        ):
             return freshness.check_stock_daily_price_freshness(
                 db=db,
                 stock_id=stock_id,
             )
-        if question_intent == "broker_branch":
+        if _uses_reader_profile(
+            payload,
+            expected="broker_branch_only",
+            question_intent=question_intent,
+        ):
             return freshness.check_stock_broker_branch_freshness(
                 db=db,
                 stock_id=stock_id,
@@ -561,6 +652,15 @@ def _check_freshness(
             db=db,
             symbol=_require_scope_id(payload, "us_stock"),
             question=payload.question,
+        )
+
+    if scope_type in {"jp_stock", "jp_index", "kr_stock", "kr_index"}:
+        market = "JP" if scope_type.startswith("jp_") else "KR"
+        return agentic_tools.scan_regional_market_gaps(
+            db,
+            market=market,
+            target_id=_require_scope_id(payload, scope_type),
+            is_index=scope_type.endswith("_index"),
         )
 
     return {}

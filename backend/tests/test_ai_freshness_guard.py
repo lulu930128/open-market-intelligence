@@ -17,6 +17,7 @@ from app.ai import reports as ai_reports
 from app.ai import tools as ai_tools
 from app.ai.market_context import taiwan_market
 from app.ai.schemas import AiAskRequest
+from app.observability.provider_health import record_provider_event
 from app.db.models import (
     Base,
     BrokerBranchTradeDaily,
@@ -236,6 +237,79 @@ def add_complete_stock_evidence(
 
 
 class AiFreshnessGuardTests(unittest.TestCase):
+    def test_shareholding_cooldown_keeps_gap_visible_but_not_refreshable(self) -> None:
+        db = make_session()
+        try:
+            add_stock(db)
+            add_shareholding_distribution(db, "2330", date(2026, 7, 17))
+            record_provider_event(
+                db,
+                market="tw",
+                provider="tdcc",
+                resource="shareholding_distribution_weekly",
+                target="2330",
+                status="success",
+                event_type="refresh_no_change",
+                detail={
+                    "refresh_outcome": "unchanged",
+                    "next_eligible_refresh_at": "2099-01-01T00:00:00+00:00",
+                },
+            )
+
+            with (
+                patch.object(
+                    freshness,
+                    "expected_daily_price_date",
+                    return_value=date(2026, 7, 24),
+                ),
+                patch.object(
+                    freshness,
+                    "expected_institutional_trade_date",
+                    return_value=date(2026, 7, 24),
+                ),
+                patch.object(
+                    freshness,
+                    "expected_margin_trade_date",
+                    return_value=date(2026, 7, 24),
+                ),
+                patch.object(
+                    freshness,
+                    "expected_broker_branch_date",
+                    return_value=date(2026, 7, 24),
+                ),
+                patch.object(
+                    freshness,
+                    "expected_taiwan_dataset_date",
+                    side_effect=lambda key: (
+                        date(2026, 7, 24)
+                        if key == "shareholding_distribution_weekly"
+                        else None
+                    ),
+                ),
+            ):
+                result = freshness.check_stock_data_freshness(
+                    db=db,
+                    stock_id="2330",
+                )
+
+            self.assertIn(
+                "shareholding_distribution_weekly",
+                result["missing"],
+            )
+            self.assertNotIn(
+                "shareholding_distribution_weekly",
+                result["refreshable_missing"],
+            )
+            shareholding = next(
+                item
+                for item in result["datasets"]
+                if item["key"] == "shareholding_distribution_weekly"
+            )
+            self.assertEqual(shareholding["stale_stock_count"], 1)
+            self.assertEqual(shareholding["refreshable_stock_count"], 0)
+        finally:
+            db.close()
+
     def test_stock_freshness_reports_missing_evidence_pack(self) -> None:
         db = make_session()
         try:
@@ -3334,6 +3408,24 @@ class AiFreshnessGuardTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_analysis_with_freshness_keeps_stock_scope(self) -> None:
+        db = make_session()
+        try:
+            add_stock(db)
+            payload = AiAskRequest(
+                question="分析台積電 2330，並告訴我各項資料日期與缺資料狀態。",
+                mode="auto",
+                allow_llm=False,
+                allow_write=False,
+            )
+
+            resolution = ai_ask._resolve_scope(db, payload)
+
+            self.assertEqual(resolution.selected_scope_type, "stock")
+            self.assertEqual(resolution.selected_scope_id, "2330")
+        finally:
+            db.close()
+
     def test_ask_returns_clarification_for_watchlist_without_group_id(self) -> None:
         db = make_session()
         try:
@@ -3497,6 +3589,68 @@ class AiFreshnessGuardTests(unittest.TestCase):
 
         self.assertEqual(resolution.selected_scope_type, "us_stock")
         self.assertEqual(resolution.selected_scope_id, "^SOX")
+
+    def test_explicit_crypto_pair_target_normalizes_to_registered_asset(self) -> None:
+        payload = AiAskRequest(
+            question="BTCUSDT 最新報價與 order book",
+            target={"type": "crypto_asset", "id": "BINANCE:BTCUSDT"},
+            mode="data_only",
+        )
+
+        resolution = ai_ask._resolve_scope(db=None, payload=payload)
+
+        self.assertFalse(resolution.clarification_required)
+        self.assertEqual(resolution.selected_scope_type, "crypto_asset")
+        self.assertEqual(resolution.selected_scope_id, "BTC")
+
+    def test_v4_missing_target_preserves_selection_without_fill_actions(self) -> None:
+        db = make_session()
+        try:
+            response = ai_ask.ask(
+                db=db,
+                payload=AiAskRequest(
+                    contract_version="omi.decision.v4",
+                    question="999999 最新報價",
+                    target={"type": "tw_stock", "id": "999999", "market": "TW"},
+                    output="evidence_only",
+                    realtime_policy="cache_only",
+                    selection={
+                        "include": ["quote.snapshot"],
+                        "max_response_bytes": 16_384,
+                    },
+                ),
+            )
+
+            self.assertFalse(response["ok"])
+            self.assertEqual(response["request_status"], "rejected")
+            self.assertEqual(
+                response["execution"]["selection"]["required"],
+                ["target.identity", "quote.snapshot", "data.freshness"],
+            )
+            self.assertEqual(
+                response["continuation"]["fill_plan"]["action_count"],
+                0,
+            )
+            identity = response["evidence"]["manifest"]["capabilities"][0]
+            self.assertEqual(identity["capability"], "target.identity")
+            self.assertEqual(identity["status"], "unresolved")
+            self.assertEqual(identity["status_class"], "blocked")
+            self.assertFalse(identity["facts_usable"])
+            self.assertEqual(response["target"]["identity_status"], "unresolved")
+            self.assertEqual(response["execution"]["tool_runs"], [])
+            self.assertNotIn("quality", response["evidence"])
+            self.assertLess(
+                len(
+                    json.dumps(
+                        response,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ),
+                8_192,
+            )
+        finally:
+            db.close()
 
     def test_unknown_contract_version_is_rejected(self) -> None:
         payload = AiAskRequest(

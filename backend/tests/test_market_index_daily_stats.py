@@ -856,6 +856,13 @@ class MarketIndexDailyStatTests(unittest.TestCase):
         self.assertEqual(payload["message_count"], 5)
         self.assertEqual(payload["missing_count"], 496)
         self.assertEqual(payload["unknown_count"], 497)
+        self.assertEqual(
+            payload["universe_definition"]["missing_quote_policy"],
+            "unknown_not_unchanged",
+        )
+        self.assertFalse(
+            payload["universe_definition"]["official_full_market"]
+        )
         self.assertIsNone(payload["trade_value"])
         self.assertTrue(payload["warnings"])
 

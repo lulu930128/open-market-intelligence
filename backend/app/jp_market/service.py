@@ -3144,10 +3144,25 @@ def _apply_jp_intraday_previous_close_reference(
     result.setdefault("previous_close_trade_date", None)
     result.setdefault("previous_close_provider", None)
 
+    latest_trade_date = _jp_intraday_latest_trade_date(result)
+    if (
+        _valid_float(result.get("previous_close"))
+        and not result.get("previous_close_trade_date")
+        and latest_trade_date is not None
+    ):
+        result["previous_close_trade_date"] = previous_jp_trading_day(
+            latest_trade_date,
+            include_value=False,
+        ).isoformat()
+        result["previous_close_provider"] = (
+            result.get("previous_close_provider")
+            or result.get("previous_close_source")
+            or "unknown"
+        )
+
     if _valid_float(result.get("previous_close")) or db is None:
         return result
 
-    latest_trade_date = _jp_intraday_latest_trade_date(result)
     reference = _latest_jp_daily_close_reference(
         db,
         symbol=symbol,

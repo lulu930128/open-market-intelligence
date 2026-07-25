@@ -13,9 +13,8 @@ from app.ai import orchestrator, prompts, reports, tools
 from app.ai import report_store
 from app.ai import streaming as ai_streaming
 from app.ai.schemas import (
-    AiAskRequest,
-    AiAskResponse,
-    AiDecisionEnvelope,
+    AiAskV4Request,
+    AiDecisionEnvelopeV4,
     AiDataEnvelope,
     AiMemoryCreate,
     AiMemoryRead,
@@ -214,10 +213,13 @@ def read_market_overview(
     )
 
 
-@router.post("/ask", response_model=AiAskResponse | AiDecisionEnvelope)
+@router.post(
+    "/ask",
+    response_model=AiDecisionEnvelopeV4,
+)
 def ask_omi(
     request: Request,
-    payload: AiAskRequest,
+    payload: AiAskV4Request,
     db: Session = Depends(get_db),
 ):
     try:
@@ -233,7 +235,7 @@ def ask_omi(
 @router.post("/ask/stream")
 def ask_omi_stream(
     request: Request,
-    payload: AiAskRequest,
+    payload: AiAskV4Request,
     db: Session = Depends(get_db),
 ):
     return StreamingResponse(

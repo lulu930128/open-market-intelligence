@@ -1,183 +1,158 @@
 # OMI MCP Server
 
-Minimal stdio MCP adapter for Open Market Intelligence.
-
-By default it exposes one public OMI tool and forwards calls to the local
-FastAPI backend:
+OMI 的 stdio MCP thin adapter：
 
 ```text
-MCP client -> agents/omi_mcp_server/server.py -> http://127.0.0.1:8400/api/ai/...
+MCP client -> agents/omi_mcp_server/server.py -> OMI backend /api/ai/*
 ```
 
-Run it after the OMI backend is running:
+Adapter 不讀 OMI DB、不直接呼叫 market provider，也不重做 target、freshness、
+decision readiness 或 answer。預設只公開：
+
+- `omi.ask`
+
+可選公開：
+
+- `omi.ask_stream`
+- backend internal tools（只限明確 trusted debug 情境）
+
+## 啟動
+
+先啟動 OMI backend，再執行：
 
 ```powershell
 python agents/omi_mcp_server/server.py
 ```
 
-Optional environment variable:
+設定：
 
 ```powershell
 $env:OMI_API_BASE_URL = "http://127.0.0.1:8400"
 $env:OMI_API_TIMEOUT_SECONDS = "180"
+$env:OMI_MCP_SCHEMA_TIMEOUT_SECONDS = "2"
 $env:OMI_MCP_EXPOSE_INTERNAL_TOOLS = "false"
 $env:OMI_MCP_AI_TRUST_TOKEN = ""
 $env:OMI_MCP_TRUSTED_DEFAULT_EXTERNAL_FETCH = "true"
 ```
 
-Public tool:
+實際 backend port 以 launcher 的 `selected=` 紀錄為準；`8400` 是預設偏好值，
+不是永久保證。
 
-- `omi.ask`
+## Public contract
 
-`omi.ask` is read-only by default. It requests the canonical
-`omi.decision.v3` envelope and accepts a question plus optional
-`target` object, then the OMI backend resolves `target.type=auto` into a Taiwan
-stock/watchlist/index/futures, US stock, Japan stock/index, Korea stock/index,
-crypto market/asset, resource asset, portfolio, FRED macro, US/JP/KR watchlist,
-source health, capability status, market, or freshness context and chooses `data_only`,
-`brief`, `full`, `analysis`, or `report` mode. `brief` returns a compact human
-summary plus key numbers; `data_only` returns compact structured core data when
-available; `full` returns the complete backend evidence pack. Analysis mode calls OpenAI for a
-non-persistent OMI LLM answer,
-so it requires a backend server-side trusted request and `allow_llm=true`.
-Report mode calls OpenAI and persists an AI report, so it additionally requires
-`allow_write=true`.
-OMI can autonomously refresh external market data through configured external APIs
-when trusted callers set `allow_external_fetch=true` with a bounded `tool_budget`.
-The MCP client does not call market APIs directly; it sends the request to OMI,
-and the backend chooses from allowlisted market-data tools, enforces the budget,
-executes the tools, updates the local evidence cache when allowed by refresh
-policy, and returns `tool_plan` / `tool_runs` evidence.
+`omi.ask` 只接受公開契約 `omi.decision.v4`。v4 讓模型選擇 capability、
+field、limit、output 與 realtime policy：
 
-Consumers should read `answer`, `decision`, `evidence`, `limitations`, `status`,
-and `continuation` directly. The MCP adapter does not create a second answer or
-readiness contract. Explicit `omi.ai.ask.v2` requests remain available during
-the compatibility window.
+```json
+{
+  "question": "NVDA 的即時報價與趨勢",
+  "target": {"type": "us_stock", "id": "NVDA", "market": "US"},
+  "contract_version": "omi.decision.v4",
+  "output": "decision_with_evidence",
+  "realtime_policy": "require_live",
+  "selection": {
+    "include": ["quote.snapshot", "technical.structure"],
+    "fields": {
+      "quote.snapshot": [
+        "price",
+        "change_pct",
+        "quote_time",
+        "fetched_at",
+        "provider"
+      ]
+    },
+    "max_response_bytes": 65536
+  },
+  "allow_external_fetch": true
+}
+```
 
-`market_data_params` is forwarded unchanged to the backend reader. It is for
-bounded reader selection such as:
+完整 schema 與 capability catalog 由 backend `/api/ai/tools` 擁有。MCP
+`tools/list` 會讀取這份 schema，確保 HTTP 與 MCP 不維護兩套欄位；backend
+暫時無法連線時才退回 adapter 內的相容 fallback schema。Adapter 只添加
+transport-local `include_raw`。
 
-- Shared payload controls: `include_intraday`, `payload_level`, `intraday_limit`.
-- US stock: `provider`, `timeframe`, `bars`, `daily_limit`, `include_intraday`.
-- Japan/Korea stock or index: `provider`, `timeframe`, `bars`.
-- Crypto market/asset: `provider`, `providers`, `symbol`, `symbols`,
-  `instrument_type`, `interval`, `limit`.
-- Resource asset: `interval`, `bars`, `payload_level`.
-- FRED macro: `observations` or `limit`.
-- Portfolio: `holding_limit` (server-trusted callers only).
-- Regional watchlists: `radar_limit`, `context_limit`, and optional trusted US intraday.
-- Taiwan TXF derivatives: `option_contract_month` and bounded
-  `option_strike_limit` for the cached TXO chain projection. Chain/Delta and
-  large-trader rows are official post-close data; IV/Greeks and term-structure
-  measures are explicitly marked OMI-derived.
-- Source health/capability status: `market`, `resource`, `target`, `status`,
-  `health_limit`, or `capability_id`.
+Consumer 應直接讀：
 
-`payload_level` supports `summary`, `compact`, `standard`, and `full`.
-Use `summary` for voice/desktop-pet answers, `compact` for default ChatGPT/MCP
-answers, and `standard` or `full` only when the user explicitly needs a richer
-chart/evidence view. `intraday_limit` is bounded by the backend and should stay
-small for ChatGPT Web or voice use.
+- `status` 與 `status.readiness`
+- `answer`
+- `decision`
+- `evidence.manifest`、`evidence.realtime`、`evidence.data`
+- `limitations`
+- `execution.selection`、`execution.tool_runs`
+- `execution.refresh_reconciliation`
+- `continuation.fill_plan`
+- `error`
 
-`include_raw` controls the MCP transport response and defaults to `true` for
-backward compatibility. Set `include_raw=false` when a caller only needs the
-bounded human answer, selected decision fields, compact evidence status, and
-notable timeout/fallback tool runs. This projection omits full result packs,
-prompts, source-reference arrays, chart points, and raw provider responses; it
-does not change backend reasoning or freshness checks.
+`omi.decision.v4` 不含 legacy `evidence.result` 大包。資料量由
+`selection.fields`、`selection.limits` 與 `selection.max_response_bytes`
+限制。舊 `market_data_params`、`payload_level`、`requested_domains` 與
+`excluded_domains` 仍在相容期間保留。
 
-The MCP schema also accepts `include_intraday`, `payload_level`, `include_raw`, and
-`intraday_limit` as top-level tool arguments. The server merges those values into
-`market_data_params` before calling OMI so ChatGPT clients do not need to build a
-nested JSON object for simple bounded requests.
+## 缺資料續補
 
-OMI responses can include `result.data.slots` or
-`result.data.compact.slots`. Consumers should use slot `status` values such as
-`ready`, `partial`, `missing`, `not_requested`, `planned`, and `not_applicable`
-to decide whether to render, speak, or request a richer follow-up payload.
-Slots point to existing payload fields with `payload_ref`; they are not separate
-large data copies.
+Missing/stale capability 會出現在 `continuation.fill_plan.actions`。每個 action
+只對應一個 capability 與 target，並包含 `action_id`、operation、fields、
+limit、timeout、cache write 與 external-fetch metadata。
 
-Unsupported or missing data remains visible through `missing`, `warnings`,
-`freshness`, and `evidence_passport`; callers must not treat fallback daily data
-as live quote data.
+若模型決定補其中一項，使用 action 內的 `invoke.arguments` 再呼叫 `omi.ask`；
+backend 會重新驗證 `plan_id` 與 `selected_action_ids`。Consumer 不得直接呼叫
+內部 refresh function，也不得自行把單一缺口擴成全市場 refresh。
 
-For US/ADR targets, trusted MCP calls default to a small external-fetch budget
-when the request clearly looks like a US stock question, such as `target.type=us_stock`,
-`target.id=MU`, `$MU`, `NASDAQ:MU`, or a question containing US market hints.
-Set `allow_external_fetch=false` per request or
-`OMI_MCP_TRUSTED_DEFAULT_EXTERNAL_FETCH=false` for the MCP process to disable
-that default.
+`allow_external_fetch=true` 表示允許主規劃器在 budget 內嘗試 bounded refresh，
+不保證所有 fill action 都在同一次請求自動執行。Consumer 應讀
+`execution.refresh_reconciliation` 判斷實際 attempt、tool outcome、最終 payload
+是否可用，以及仍保留哪些 fill action。
 
-For Taiwan stock targets, `refresh_policy.mode=stale_first` with
-`before_answer=true` makes OMI check local freshness first and, when trusted
-external fetch is allowed, run the backend `tw.refresh_stock_evidence` tool
-before rebuilding the evidence pack.
-`caller_profile` is only a label and is not trusted for permissions.
+若 capability 尚在正常發布窗口或 no-new-data cooldown，backend 會把它放在
+`continuation.fill_plan.deferred_actions`，並揭露 `release_status` /
+`next_eligible_refresh_at`；adapter 不自行覆寫或提前執行。`source_health`
+查詢可在 `market_data_params` 使用 `problems_only`、`status_filter`、
+`include_healthy`、`market`、`resource`、`target` 與 `provider`。
 
-Japan/Korea daily evidence and Crypto ask paths use local cache. Japan and Korea
-stock/index contexts can additionally request bounded intraday evidence when the
-server trust policy permits external fetch. These markets support compact
-`data_only`, `brief`, and `full` evidence packs, but
-OpenAI-backed `analysis` / persisted `report` mode still downgrade to
-`data_only` until dedicated decision/report paths are implemented.
+## Realtime
 
-`target.type=capability_status` lists both connected capabilities and explicit
-`provider_not_connected` contracts for News, US options flow/earnings, TDnet,
-OpenDART, and HK. Taiwan TXO chain/Greeks, large traders, and TX term structure
-are connected through the TAIFEX post-close cache contract. This is
-implementation readiness; use `target.type=source_health` for current runtime
-freshness and provider incidents.
+`realtime_policy` 支援：
 
-OpenAI-backed analysis/report mode requires the OMI backend process to have
-`OPENAI_API_KEY`, `OPENAI_LLM_API_KEY`, or `OMI_OPENAI_ENV_FILE` configured.
-`OMI_OPENAI_ENV_FILE` may point at another local env file that contains
-`OPENAI_API_KEY` or `OPENAI_LLM_API_KEY`. The MCP server does not read, store,
-or forward API keys.
+- `cache_only`
+- `prefer_live`
+- `require_live`
 
-Set `OMI_MCP_EXPOSE_INTERNAL_TOOLS=true` only for debugging or a trusted local
-agent that needs direct tool selection. If the backend disables local trust or
-runs across a non-loopback boundary, configure `OMI_AI_TRUST_TOKEN` on the
-backend and pass the same value to the MCP process as `OMI_MCP_AI_TRUST_TOKEN`.
-Direct memory writes, brief saves, and LLM analysis/report generation are also
-protected by that backend trust policy; regular external callers should go through
-`omi.ask`.
+OMI 會區分 `live`、`delayed`、`stale`、`latest_completed_session`、
+`final_snapshot` 與 `unavailable`。`current` 標籤不等於 live；event time、
+received/fetched time、timezone、provider、session 與 age 必須一起成立。
+休市最新完成 session 可供分析，但不冒充即時。
 
-Internal tools:
+## Trust、外部 API 與 OpenAI
 
-- `omi.read_market_overview`
-- `omi.read_stock_context`
-- `omi.read_us_stock_context`
-- `omi.read_jp_stock_context`
-- `omi.read_jp_index_context`
-- `omi.read_kr_stock_context`
-- `omi.read_kr_index_context`
-- `omi.read_crypto_market_context`
-- `omi.read_crypto_asset_context`
-- `omi.read_watchlist_context`
-- `omi.read_data_freshness`
-- `omi.generate_stock_brief`
-- `omi.generate_us_stock_brief`
-- `omi.generate_jp_stock_brief`
-- `omi.generate_jp_index_brief`
-- `omi.generate_kr_stock_brief`
-- `omi.generate_kr_index_brief`
-- `omi.generate_crypto_market_brief`
-- `omi.generate_crypto_asset_brief`
-- `omi.generate_watchlist_brief`
-- `omi.generate_stock_llm_report`
-- `omi.generate_us_stock_llm_report`
-- `omi.generate_watchlist_llm_report`
-- `omi.read_memories`
-- `omi.write_memory`
-- `omi.update_memory`
-- `omi.archive_memory`
-- `omi.read_reports`
-- `omi.read_report`
-- `omi.save_stock_brief`
-- `omi.save_us_stock_brief`
-- `omi.save_watchlist_brief`
+`caller_profile` 只是一個 label。下列 caller intent 最終都要通過 backend
+server-side trust：
 
-Memory write tools only change AI research memory rows. They do not modify market,
-watchlist, or source data. Archive incorrect memories instead of deleting them so
-the history remains auditable.
+- `allow_external_fetch`
+- `allow_llm`
+- `allow_write`
+
+外部 refresh 受 allowlisted tool、target、provider policy、call count、timeout
+與 response limit 約束。OpenAI analysis/report 需要 backend process 設定
+`OPENAI_API_KEY`、`OPENAI_LLM_API_KEY` 或 `OMI_OPENAI_ENV_FILE`；MCP server
+不讀、不保存也不轉送 API key。Report/memory persistence 另需 write trust。
+
+若 backend 關閉 loopback trust，請在 backend 設定 `OMI_AI_TRUST_TOKEN`，並以
+`OMI_MCP_AI_TRUST_TOKEN` 傳給 adapter。一般外部 caller 應只使用 `omi.ask`。
+
+## MCP error semantics
+
+Structured business rejection（例如不存在的代碼、缺資料、trust 拒絕）是成功
+傳輸的 canonical result，因此 `isError=false`。只有 MCP protocol、HTTP
+transport、serialization 或 adapter internal failure 使用 `isError=true`。
+
+`include_raw` 是已棄用但仍接受的 caller compatibility flag；v4 下不做 MCP
+transport projection。請以 backend `selection.fields`、`selection.limits` 與
+`selection.max_response_bytes` 控制 payload，確保 HTTP、SSE 與 MCP 讀到同一份
+canonical envelope。
+
+## Internal tools
+
+只有設定 `OMI_MCP_EXPOSE_INTERNAL_TOOLS=true` 才公開 direct internal tools。
+這是 trusted local debug 能力，不是一般 consumer contract。Internal memory
+tools只處理 AI research memory；不得修改 market、watchlist 或 source data。

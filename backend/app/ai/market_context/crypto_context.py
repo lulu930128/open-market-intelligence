@@ -84,6 +84,51 @@ def _crypto_requested_symbols(
     return None
 
 
+def _requested_crypto_capabilities(
+    market_data_params: dict[str, Any] | None,
+) -> set[str]:
+    value = _market_data_param(market_data_params, "requested_capabilities")
+    if isinstance(value, str):
+        return {part.strip() for part in value.split(",") if part.strip()}
+    if isinstance(value, (list, tuple, set)):
+        return {str(part).strip() for part in value if str(part).strip()}
+    return set()
+
+
+def _crypto_capability_limit(
+    market_data_params: dict[str, Any] | None,
+    capability_id: str,
+    *,
+    default: int,
+) -> int:
+    raw_limits = _market_data_param(market_data_params, "capability_limits")
+    raw_value = raw_limits.get(capability_id) if isinstance(raw_limits, dict) else None
+    if isinstance(raw_value, bool) or not isinstance(raw_value, int):
+        return default
+    return max(1, min(raw_value, 500))
+
+
+def _crypto_ohlcv_projection(rows: list[Any]) -> list[dict[str, Any]]:
+    return _list_rows(
+        rows,
+        (
+            "provider",
+            "exchange",
+            "symbol",
+            "instrument_type",
+            "interval",
+            "bar_time",
+            "open_price",
+            "high_price",
+            "low_price",
+            "close_price",
+            "base_volume",
+            "quote_volume",
+            "fetched_at",
+        ),
+    )
+
+
 def _crypto_market_cap_matches_asset(row: Any, asset_definition: Any) -> bool:
     if asset_definition is None:
         return True
@@ -195,6 +240,7 @@ def read_crypto_context(
     interval = _market_data_str(market_data_params, "interval", "1m") or "1m"
     limit = _market_data_int(market_data_params, "limit", min(context_limit, 100), minimum=1, maximum=500)
     payload_level = _market_payload_level(market_data_params)
+    requested_capabilities = _requested_crypto_capabilities(market_data_params)
     history_limit = min(limit, 100)
     requested_symbols = _crypto_requested_symbols(
         asset=normalized_asset,
@@ -237,6 +283,38 @@ def read_crypto_context(
         interval=interval,
         limit=limit,
     )
+    intraday_ohlcv_rows = ohlcv_rows if interval != "1d" else []
+    daily_ohlcv_rows = ohlcv_rows if interval == "1d" else []
+    if "intraday.bars" in requested_capabilities and not intraday_ohlcv_rows:
+        intraday_ohlcv_rows = (
+            dependencies.crypto_market_service.list_latest_crypto_ohlcv_bars(
+                db,
+                provider=provider,
+                symbols=requested_symbols,
+                instrument_type=instrument_type or SPOT,
+                interval="1m",
+                limit=_crypto_capability_limit(
+                    market_data_params,
+                    "intraday.bars",
+                    default=min(limit, 100),
+                ),
+            )
+        )
+    if "daily.ohlcv" in requested_capabilities and not daily_ohlcv_rows:
+        daily_ohlcv_rows = (
+            dependencies.crypto_market_service.list_latest_crypto_ohlcv_bars(
+                db,
+                provider=provider,
+                symbols=requested_symbols,
+                instrument_type=instrument_type or SPOT,
+                interval="1d",
+                limit=_crypto_capability_limit(
+                    market_data_params,
+                    "daily.ohlcv",
+                    default=min(limit, 100),
+                ),
+            )
+        )
     coverage = dependencies.crypto_market_service.list_crypto_ohlcv_coverage(
         db,
         provider=provider,
@@ -333,7 +411,16 @@ def read_crypto_context(
 
     primary_ticker = tickers[0] if tickers else None
     as_of = _latest_timestamp_from_rows(
-        [*tickers, *order_books, *ohlcv_rows, *derivatives, *market_caps, *spreads],
+        [
+            *tickers,
+            *order_books,
+            *ohlcv_rows,
+            *intraday_ohlcv_rows,
+            *daily_ohlcv_rows,
+            *derivatives,
+            *market_caps,
+            *spreads,
+        ],
         ("fetched_at", "event_time", "bar_time", "last_updated", "observed_at"),
     )
     target_id = normalized_asset if normalized_asset else "market"
@@ -584,6 +671,12 @@ def read_crypto_context(
             "ask": primary_ticker.ask_price if primary_ticker else None,
             "change_pct_24h": primary_ticker.price_change_pct_24h if primary_ticker else None,
             "quote_time": primary_ticker.event_time.isoformat() if primary_ticker and primary_ticker.event_time else None,
+            "event_time": primary_ticker.event_time.isoformat() if primary_ticker and primary_ticker.event_time else None,
+            "fetched_at": primary_ticker.fetched_at.isoformat() if primary_ticker else None,
+            "received_at": primary_ticker.fetched_at.isoformat() if primary_ticker else None,
+            "market_status": "continuous",
+            "session_phase": "continuous",
+            "timezone": "UTC",
             "is_realtime": False,
         },
         resources={
@@ -616,6 +709,87 @@ def read_crypto_context(
         },
         payload_level=payload_level,
     )
+    if "crypto.order_book" in requested_capabilities:
+        data["compact"]["order_book"] = _list_rows(
+            order_books[
+                : _crypto_capability_limit(
+                    market_data_params,
+                    "crypto.order_book",
+                    default=10,
+                )
+            ],
+            (
+                "provider",
+                "exchange",
+                "symbol",
+                "instrument_type",
+                "depth_limit",
+                "best_bid_price",
+                "best_bid_size",
+                "best_ask_price",
+                "best_ask_size",
+                "spread",
+                "spread_pct",
+                "event_time",
+                "fetched_at",
+            ),
+        )
+    if "intraday.bars" in requested_capabilities:
+        intraday_limit = _crypto_capability_limit(
+            market_data_params,
+            "intraday.bars",
+            default=20,
+        )
+        intraday_bars = _crypto_ohlcv_projection(
+            intraday_ohlcv_rows[:intraday_limit]
+        )
+        data["compact"]["intraday_bars"] = {
+            "interval": "1m",
+            "point_count": len(intraday_ohlcv_rows),
+            "returned_point_count": len(intraday_bars),
+            "bars": intraday_bars,
+            "provider": provider,
+            "freshness": {"status": ohlcv_freshness_status},
+        }
+    if "daily.ohlcv" in requested_capabilities:
+        daily_limit = _crypto_capability_limit(
+            market_data_params,
+            "daily.ohlcv",
+            default=30,
+        )
+        daily_bars = _crypto_ohlcv_projection(daily_ohlcv_rows[:daily_limit])
+        data["compact"]["daily_chart"] = {
+            "interval": "1d",
+            "point_count": len(daily_ohlcv_rows),
+            "returned_point_count": len(daily_bars),
+            "bars": daily_bars,
+            "provider": provider,
+            "freshness": {"status": ohlcv_freshness_status},
+        }
+    if "crypto.derivatives" in requested_capabilities:
+        data["compact"]["derivatives"] = _list_rows(
+            derivatives[
+                : _crypto_capability_limit(
+                    market_data_params,
+                    "crypto.derivatives",
+                    default=10,
+                )
+            ],
+            (
+                "provider",
+                "exchange",
+                "symbol",
+                "instrument_type",
+                "mark_price",
+                "index_price",
+                "funding_rate",
+                "next_funding_time",
+                "open_interest",
+                "open_interest_value",
+                "event_time",
+                "fetched_at",
+            ),
+        )
     envelope = {
         "kind": "crypto_asset_context" if normalized_asset else "crypto_market_context",
         "generated_at": dependencies.now().isoformat(),

@@ -20,7 +20,7 @@ from app.db.models import (
 )
 from app.market.indicator_service import calculate_indicator_points_from_ohlc_points
 from app.market.schemas import TechnicalReportRead
-from app.market.technical_report import TAIPEI_TZ, build_stock_technical_report
+from app.market.technical_report import TAIPEI_TZ, _fmt_price, build_stock_technical_report
 
 
 def make_session() -> Session:
@@ -118,6 +118,11 @@ def add_chip_rows(db: Session, stock_id: str = "2330") -> None:
 
 
 class TechnicalReportTests(unittest.TestCase):
+    def test_price_display_does_not_strip_integer_trailing_zeroes(self) -> None:
+        self.assertEqual(_fmt_price(2350), "2,350")
+        self.assertEqual(_fmt_price(2350.0), "2,350")
+        self.assertEqual(_fmt_price(235.5), "235.5")
+
     def setUp(self) -> None:
         self.db = make_session()
         add_stock(self.db)

@@ -11,6 +11,7 @@ from app.ai.market_context.common import append_source_ref_once as _append_sourc
 from app.ai.market_context.taiwan_projection import (
     COMPACT_INTRADAY_INTERVALS,
     _add_missing,
+    _broker_branch_metadata,
     _broker_branch_row,
     _build_stock_compact_evidence,
     _compact_intraday_history,
@@ -767,6 +768,7 @@ def read_stock_broker_branch_context(
     }
     branch_payload = {
         **branch_summary,
+        **_broker_branch_metadata(branch_summary),
         "trade_date": latest_trade_date,
         "trade_dates": [
             _json_value(value) for value in branch_summary.get("trade_dates", [])
@@ -1137,6 +1139,9 @@ def read_stock_context(
                 **chart,
                 "from_date": _json_value(chart.get("from_date")),
                 "to_date": _json_value(chart.get("to_date")),
+                "returned_point_count": len(chart.get("points", [])),
+                "volume_unit": "shares",
+                "trade_value_unit": "TWD",
                 "points": [
                     {key: _json_value(value) for key, value in point.items()}
                     for point in chart.get("points", [])
@@ -1210,6 +1215,7 @@ def read_stock_context(
             ],
             "broker_branch": {
                 **branch_summary,
+                **_broker_branch_metadata(branch_summary),
                 "trade_date": _json_value(branch_summary.get("trade_date")),
                 "trade_dates": [_json_value(value) for value in branch_summary.get("trade_dates", [])],
                 "buy_top": [_broker_branch_row(row) for row in branch_summary.get("buy_top", [])],

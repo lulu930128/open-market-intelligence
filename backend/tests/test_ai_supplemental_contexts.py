@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 import unittest
 
@@ -37,6 +37,7 @@ from app.db.models import (
 from app.portfolio import service as portfolio_service
 from app.portfolio.schemas import PortfolioHoldingCreate
 from app.resource_market import service as resource_service
+from app.observability.provider_health import record_provider_event
 from app.us_market import service as us_market_service
 
 
@@ -203,6 +204,59 @@ class AiSupplementalContextTests(unittest.TestCase):
         )
         self.assertTrue(response["result"]["data"]["compact"]["capabilities"])
 
+    def test_v4_capability_status_projects_diagnostics_without_decision(self) -> None:
+        response = ai_ask.ask(
+            db=self.db,
+            payload=AiAskRequest(
+                contract_version="omi.decision.v4",
+                question="目前有哪些能力與已知限制？只要診斷資料。",
+                target={"type": "capability_status"},
+                output="decision_with_evidence",
+            ),
+            server_policy=ai_ask.AiAskServerPolicy(),
+        )
+
+        self.assertEqual(response["contract_version"], "omi.decision.v4")
+        self.assertEqual(response["target"]["type"], "capability_status")
+        self.assertFalse(response["answer"])
+        self.assertFalse(response["decision"])
+        capability_data = response["evidence"]["data"][
+            "diagnostics.capabilities"
+        ]
+        self.assertGreater(capability_data["summary"]["capability_count"], 0)
+        self.assertTrue(capability_data["capabilities"])
+        self.assertEqual(
+            response["execution"]["selection"]["required"],
+            ["target.identity", "diagnostics.capabilities"],
+        )
+
+    def test_v4_data_freshness_does_not_inherit_chips_or_decision_output(self) -> None:
+        response = ai_ask.ask(
+            db=self.db,
+            payload=AiAskRequest(
+                contract_version="omi.decision.v4",
+                question=(
+                    "只檢查 2330 法人、融資與融券資料新鮮度，"
+                    "不要方向、價位或投資建議。"
+                ),
+                target={"type": "data_freshness", "id": "2330", "market": "TW"},
+                output="decision_with_evidence",
+            ),
+            server_policy=ai_ask.AiAskServerPolicy(),
+        )
+
+        self.assertEqual(response["contract_version"], "omi.decision.v4")
+        self.assertEqual(response["target"]["type"], "data_freshness")
+        self.assertFalse(response["answer"])
+        self.assertFalse(response["decision"])
+        self.assertIn(
+            "diagnostics.data_freshness",
+            response["evidence"]["data"],
+        )
+        selected = set(response["execution"]["selection"]["required"])
+        self.assertNotIn("chips.institutional", selected)
+        self.assertNotIn("chips.margin", selected)
+
     def test_macro_context_exposes_cached_observations_and_release_limit(self) -> None:
         self.db.add(
             MacroSeriesObservation(
@@ -313,6 +367,339 @@ class AiSupplementalContextTests(unittest.TestCase):
         self.assertEqual(result["data"]["summary"]["entry_count"], 2)
         self.assertEqual(result["data"]["summary"]["problem_count"], 1)
         self.assertEqual(result["data"]["slots"]["health_entries"]["status"], "partial")
+
+    def test_unified_source_health_separates_total_and_returned_counts(
+        self,
+    ) -> None:
+        self.db.add_all(
+            [
+                SourceHealthSnapshot(
+                    market="tw",
+                    resource="a_quote",
+                    target="all",
+                    provider="provider-a",
+                    status="current",
+                    ok=True,
+                    checked_at=NOW,
+                ),
+                SourceHealthSnapshot(
+                    market="tw",
+                    resource="b_daily",
+                    target="all",
+                    provider="provider-b",
+                    status="stale",
+                    ok=False,
+                    checked_at=NOW,
+                ),
+                SourceHealthSnapshot(
+                    market="tw",
+                    resource="c_fundamental",
+                    target="all",
+                    provider="provider-c",
+                    status="empty",
+                    ok=False,
+                    checked_at=NOW,
+                ),
+            ]
+        )
+        self.db.commit()
+
+        result = source_health_context.read_unified_source_health_context(
+            self.db,
+            market_data_params={"limit": 2},
+            now=lambda: NOW,
+        )
+        summary = result["data"]["summary"]
+
+        self.assertEqual(summary["total_entry_count"], 3)
+        self.assertEqual(summary["matched_entry_count"], 3)
+        self.assertEqual(summary["returned_entry_count"], 2)
+        self.assertEqual(summary["total_problem_count"], 2)
+        self.assertEqual(summary["returned_problem_count"], 1)
+        self.assertTrue(result["data"]["truncated"])
+        self.assertTrue(result["data"]["is_partial"])
+
+    def test_unified_source_health_problem_filter_excludes_healthy_rows(
+        self,
+    ) -> None:
+        self.db.add_all(
+            [
+                SourceHealthSnapshot(
+                    market="tw",
+                    resource="quote",
+                    target="2330",
+                    provider="provider-a",
+                    status="current",
+                    ok=True,
+                    checked_at=NOW,
+                ),
+                SourceHealthSnapshot(
+                    market="tw",
+                    resource="daily",
+                    target="2330",
+                    provider="provider-a",
+                    status="stale",
+                    ok=False,
+                    checked_at=NOW,
+                ),
+                SourceHealthSnapshot(
+                    market="tw",
+                    resource="margin",
+                    target="2330",
+                    provider="provider-b",
+                    status="empty",
+                    ok=False,
+                    checked_at=NOW,
+                ),
+            ]
+        )
+        self.db.commit()
+
+        result = source_health_context.read_unified_source_health_context(
+            self.db,
+            market_data_params={
+                "market": "tw",
+                "problems_only": True,
+                "limit": 20,
+            },
+            now=lambda: NOW,
+        )
+        summary = result["data"]["summary"]
+        filters = result["data"]["filters"]
+
+        self.assertEqual(summary["total_entry_count"], 3)
+        self.assertEqual(summary["matched_entry_count"], 2)
+        self.assertEqual(summary["returned_entry_count"], 2)
+        self.assertEqual(summary["total_problem_count"], 2)
+        self.assertEqual(summary["matched_problem_count"], 2)
+        self.assertTrue(filters["problems_only"])
+        self.assertTrue(filters["include_healthy_requested"])
+        self.assertFalse(filters["include_healthy"])
+        self.assertTrue(
+            all(
+                entry["status"] in source_health_context.PROBLEM_STATUSES
+                for entry in result["data"]["entries"]
+            )
+        )
+        self.assertFalse(result["data"]["truncated"])
+
+    def test_unified_source_health_problem_filter_includes_provider_failures(
+        self,
+    ) -> None:
+        failure_statuses = {
+            "failed",
+            "timeout",
+            "rate_limited",
+            "partial_success",
+        }
+        self.db.add(
+            SourceHealthSnapshot(
+                market="tw",
+                resource="quote",
+                target="2330",
+                provider="provider-a",
+                status="current",
+                ok=True,
+                checked_at=NOW,
+            )
+        )
+        self.db.add_all(
+            [
+                SourceHealthSnapshot(
+                    market="tw",
+                    resource=f"resource-{status}",
+                    target="2330",
+                    provider=f"provider-{status}",
+                    status=status,
+                    ok=False,
+                    checked_at=NOW,
+                )
+                for status in failure_statuses
+            ]
+        )
+        self.db.commit()
+
+        result = source_health_context.read_unified_source_health_context(
+            self.db,
+            market_data_params={
+                "market": "tw",
+                "problems_only": True,
+                "limit": 20,
+            },
+            now=lambda: NOW,
+        )
+        summary = result["data"]["summary"]
+
+        self.assertEqual(summary["total_entry_count"], 5)
+        self.assertEqual(summary["matched_entry_count"], 4)
+        self.assertEqual(summary["returned_entry_count"], 4)
+        self.assertEqual(summary["total_problem_count"], 4)
+        self.assertEqual(summary["matched_problem_count"], 4)
+        self.assertEqual(
+            {entry["status"] for entry in result["data"]["entries"]},
+            failure_statuses,
+        )
+        self.assertTrue(
+            failure_statuses.issubset(source_health_context.PROBLEM_STATUSES)
+        )
+
+    def test_unified_source_health_status_and_provider_filters_intersect(
+        self,
+    ) -> None:
+        self.db.add_all(
+            [
+                SourceHealthSnapshot(
+                    market="tw",
+                    resource="daily",
+                    target="2330",
+                    provider="provider-a",
+                    status="stale",
+                    ok=False,
+                    checked_at=NOW,
+                ),
+                SourceHealthSnapshot(
+                    market="tw",
+                    resource="margin",
+                    target="2330",
+                    provider="provider-b",
+                    status="stale",
+                    ok=False,
+                    checked_at=NOW,
+                ),
+                SourceHealthSnapshot(
+                    market="tw",
+                    resource="quote",
+                    target="2330",
+                    provider="provider-a",
+                    status="current",
+                    ok=True,
+                    checked_at=NOW,
+                ),
+            ]
+        )
+        self.db.commit()
+
+        result = source_health_context.read_unified_source_health_context(
+            self.db,
+            market_data_params={
+                "market": "tw",
+                "provider": "provider-a",
+                "status_filter": ["stale"],
+                "limit": 20,
+            },
+            now=lambda: NOW,
+        )
+
+        self.assertEqual(result["data"]["summary"]["total_entry_count"], 2)
+        self.assertEqual(result["data"]["summary"]["matched_entry_count"], 1)
+        self.assertEqual(len(result["data"]["entries"]), 1)
+        self.assertEqual(result["data"]["entries"][0]["resource"], "daily")
+
+    def test_unified_source_health_expires_old_snapshot(self) -> None:
+        checked_at = NOW - timedelta(days=2)
+        self.db.add(
+            SourceHealthSnapshot(
+                market="tw",
+                resource="market_daily_price",
+                target="all",
+                provider="twse",
+                status="current",
+                ok=True,
+                checked_at=checked_at,
+            )
+        )
+        self.db.commit()
+
+        result = source_health_context.read_unified_source_health_context(
+            self.db,
+            market_data_params={"limit": 20},
+            now=lambda: NOW,
+        )
+
+        self.assertEqual(result["data"]["freshness"]["status"], "expired")
+        self.assertFalse(result["data"]["freshness"]["is_current"])
+        self.assertEqual(
+            result["data"]["compact"]["freshness_by_domain"][
+                "source_health"
+            ],
+            "expired",
+        )
+        self.assertEqual(
+            result["data"]["slots"]["health_entries"]["status"],
+            "expired",
+        )
+        self.assertTrue(
+            any("expired" in warning.lower() for warning in result["warnings"])
+        )
+
+    def test_unified_source_health_includes_bounded_event_and_fallback_diagnostics(self) -> None:
+        self.db.add(
+            SourceHealthSnapshot(
+                market="tw",
+                resource="quote",
+                target="2330",
+                provider="primary",
+                status="stale",
+                ok=False,
+                recent_event_count=3,
+                recent_error_count=2,
+                consecutive_error_count=2,
+                checked_at=NOW,
+            )
+        )
+        self.db.commit()
+        record_provider_event(
+            self.db,
+            market="tw",
+            provider="primary",
+            resource="quote",
+            target="2330",
+            status="success",
+            event_time=NOW,
+            duration_ms=123,
+        )
+        record_provider_event(
+            self.db,
+            market="tw",
+            provider="primary",
+            resource="quote",
+            target="2330",
+            status="timeout",
+            event_type="fallback",
+            event_time=NOW,
+            error_message="primary timeout",
+            detail={
+                "operation": "quote.refresh",
+                "primary_provider": "primary",
+                "fallback_provider": "secondary",
+                "switch_reason": "primary timeout",
+            },
+        )
+
+        result = source_health_context.read_unified_source_health_context(
+            self.db,
+            market_data_params={"limit": 20, "event_scan_limit": 20},
+            now=lambda: NOW,
+        )
+
+        entry = result["data"]["entries"][0]
+        self.assertEqual(entry["recent_error_count"], 2)
+        self.assertEqual(entry["consecutive_error_count"], 2)
+        self.assertEqual(
+            entry["event_diagnostics"]["last_success_at"],
+            NOW.isoformat(),
+        )
+        self.assertTrue(
+            entry["event_diagnostics"]["fallback"]["observed"]
+        )
+        self.assertEqual(
+            entry["event_diagnostics"]["fallback"]["fallback_provider"],
+            "secondary",
+        )
+        self.assertEqual(
+            result["data"]["summary"]["fallback_observed_count"],
+            1,
+        )
 
     def test_regional_watchlist_context_uses_existing_ranking_and_radar_services(self) -> None:
         fake_us = SimpleNamespace(

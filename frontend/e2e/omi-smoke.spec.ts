@@ -1477,7 +1477,7 @@ async function fulfillOmiStream(route: Route) {
       "final",
       {
         kind: "omi_decision",
-        contract_version: "omi.decision.v3",
+        contract_version: "omi.decision.v4",
         ok: true,
         request_status: "completed",
         target: { type: "tw_stock", id: "2330", market: "TW" },
@@ -2851,7 +2851,8 @@ test.describe("OMI dashboard smoke", () => {
 
     expect(omiAskRequests).toHaveLength(2);
     expect(omiAskRequests[0]).toMatchObject({
-      contract_version: "omi.decision.v3",
+      contract_version: "omi.decision.v4",
+      output: "decision_with_evidence",
       caller_profile: "frontend_readonly",
       target: {
         type: "tw_index",
@@ -2866,7 +2867,8 @@ test.describe("OMI dashboard smoke", () => {
       },
     });
     expect(omiAskRequests[1]).toMatchObject({
-      contract_version: "omi.decision.v3",
+      contract_version: "omi.decision.v4",
+      output: "decision_with_evidence",
       caller_profile: "frontend_readonly",
       target: {
         type: "kr_index",

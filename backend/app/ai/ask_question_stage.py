@@ -10,6 +10,28 @@ from app.ai.schemas import AiAskRequest
 
 POSITION_CONTEXT_PROMOTABLE_INTENTS = {"general", "trend_view", "risk_check"}
 POSITION_CONTEXT_TOPIC_INTENTS = {"position", "risk", "stop_loss", "take_profit", "exit", "hold"}
+EVIDENCE_ONLY_HINTS = (
+    "只回資料",
+    "只要資料",
+    "只看資料",
+    "只回狀態",
+    "資料狀態即可",
+    "不要投資建議",
+    "不要投資判斷",
+    "不要操作建議",
+    "不要進場",
+    "不要停損",
+    "data only",
+    "no investment advice",
+    "without investment advice",
+)
+
+
+def _requests_evidence_only(payload: AiAskRequest) -> bool:
+    if payload.output is not None:
+        return payload.output == "evidence_only"
+    question = payload.question.casefold()
+    return any(hint.casefold() in question for hint in EVIDENCE_ONLY_HINTS)
 
 
 def _positive_float(value: Any) -> float | None:
@@ -126,11 +148,6 @@ def build_question_stage(
         conversation_context=payload.conversation_context,
     )
     effective_horizon = question_understanding.analysis_horizon
-    normalized_payload = payload.model_copy(update={"analysis_horizon": effective_horizon})
-    policy = build_policy(normalized_payload, server_policy)
-    response_preference_payload = response_preferences.build_response_preferences(
-        normalized_payload.conversation_context
-    )
     position_context = _merge_position_context(
         question_understanding.position_context.as_dict(),
         payload.position_context,
@@ -143,6 +160,30 @@ def build_question_stage(
         and question_intent in POSITION_CONTEXT_PROMOTABLE_INTENTS
     ):
         question_intent = "position_risk_decision"
+    detected_intents = list(question_understanding.intents)
+    requested_intents = [
+        str(intent).strip().lower()
+        for intent in payload.intents
+        if str(intent).strip()
+    ]
+    merged_intents = list(
+        dict.fromkeys([question_intent, *requested_intents, *detected_intents])
+    )
+    normalized_payload = payload.model_copy(
+        update={
+            "analysis_horizon": effective_horizon,
+            "intents": merged_intents,
+            "output": (
+                "evidence_only"
+                if _requests_evidence_only(payload)
+                else payload.output
+            ),
+        }
+    )
+    policy = build_policy(normalized_payload, server_policy)
+    response_preference_payload = response_preferences.build_response_preferences(
+        normalized_payload.conversation_context
+    )
     progress.question_understood(
         question_intent=question_intent,
         effective_horizon=effective_horizon,
@@ -150,6 +191,7 @@ def build_question_stage(
 
     question_understanding_payload = question_understanding.as_policy_payload()
     question_understanding_payload["intent"] = question_intent
+    question_understanding_payload["intents"] = merged_intents
     question_understanding_payload["position_context"] = position_context
     policy["question_intent"] = question_intent
     policy["question_understanding"] = question_understanding_payload

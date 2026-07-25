@@ -159,8 +159,24 @@ class TaiwanMarketStateTests(unittest.TestCase):
         self.assertEqual(state["status"], "ready")
         self.assertEqual(state["comparison_minute"], "10:30")
         self.assertEqual(state["current_cumulative_trade_value"], 240)
+        self.assertEqual(state["currency"], "TWD")
+        self.assertEqual(state["trade_value_unit"], "TWD")
+        self.assertTrue(
+            all(
+                item["trade_value_unit"] == "TWD"
+                for item in state["markets"]
+            )
+        )
         self.assertEqual(state["previous_minute_cumulative_trade_value"], 180)
         self.assertEqual(state["one_minute_trade_value_change"], 60)
+        self.assertEqual(
+            state["field_status"]["current_cumulative_trade_value"]["status"],
+            "available",
+        )
+        self.assertEqual(
+            state["field_status"]["previous_minute_cumulative_trade_value"]["status"],
+            "available",
+        )
         self.assertEqual(
             state["same_time_baseline_5d"]["median_cumulative_trade_value"],
             156,
@@ -226,6 +242,10 @@ class TaiwanMarketStateTests(unittest.TestCase):
         self.assertEqual(quality_by_market["TPEX"], "ready")
         self.assertEqual(state["status"], "partial")
         self.assertIsNone(state["current_cumulative_trade_value"])
+        self.assertEqual(
+            state["field_status"]["current_cumulative_trade_value"]["status"],
+            "missing",
+        )
 
 
 if __name__ == "__main__":

@@ -44,6 +44,102 @@ from app.ai.answer_scenarios import (
 
 
 SUMMARY_LIMIT_DEFAULT = 3
+
+ANSWER_GAP_DOMAIN_PATTERNS: dict[str, tuple[str, ...]] = {
+    "quote": ("quote", "price", "報價", "價格", "価格"),
+    "chart": ("daily", "ohlcv", "日線", "日 k", "日足"),
+    "technical": ("technical", "技術", "テクニカル"),
+    "chips": (
+        "institutional",
+        "margin",
+        "shareholding",
+        "ownership",
+        "foreign investor",
+        "法人",
+        "融資",
+        "融券",
+        "股權",
+        "持股",
+        "籌碼",
+        "需給",
+        "信用",
+    ),
+    "broker_branch": ("broker", "branch", "分點", "支店"),
+    "fundamentals": (
+        "fundamental",
+        "financial",
+        "monthly_revenue",
+        "quarterly_revenue",
+        "revenue",
+        "eps",
+        "基本面",
+        "財報",
+        "月營收",
+        "營收",
+    ),
+    "cross_market": (
+        "cross_market",
+        "overnight",
+        "us_overnight",
+        "adr",
+        "nvda",
+        "跨市場",
+        "隔夜",
+        "美股",
+    ),
+}
+
+CAPABILITY_ANSWER_DOMAINS: dict[str, str] = {
+    "quote.snapshot": "quote",
+    "daily.ohlcv": "chart",
+    "intraday.bars": "chart",
+    "technical.structure": "technical",
+    "chips.institutional": "chips",
+    "chips.margin": "chips",
+    "ownership.distribution": "chips",
+    "broker_branch.summary": "broker_branch",
+    "fundamentals.revenue": "fundamentals",
+    "fundamentals.financials": "fundamentals",
+    "cross_market.overnight": "cross_market",
+    "market.cross_market": "cross_market",
+}
+
+
+def _answer_gap_domains(value: Any) -> set[str]:
+    normalized = str(value or "").strip().casefold()
+    if not normalized:
+        return set()
+    return {
+        domain
+        for domain, patterns in ANSWER_GAP_DOMAIN_PATTERNS.items()
+        if any(pattern in normalized for pattern in patterns)
+    }
+
+
+def _selected_answer_gaps(
+    values: list[Any],
+    *,
+    selected_capabilities: list[str] | tuple[str, ...] | None,
+    requested_domains: list[str] | tuple[str, ...] | None,
+) -> list[Any]:
+    if not selected_capabilities and not requested_domains:
+        return values
+    selected_domains = {
+        CAPABILITY_ANSWER_DOMAINS[capability_id]
+        for capability_id in selected_capabilities or ()
+        if capability_id in CAPABILITY_ANSWER_DOMAINS
+    }
+    selected_domains.update(
+        str(domain).strip().casefold()
+        for domain in requested_domains or ()
+        if str(domain).strip()
+    )
+    return [
+        value
+        for value in values
+        if not (domains := _answer_gap_domains(value))
+        or bool(domains & selected_domains)
+    ]
 RADAR_BUCKET_LABELS_EN = answer_radar.RADAR_BUCKET_LABELS_EN
 RADAR_BUCKET_LABELS_JA = answer_radar.RADAR_BUCKET_LABELS_JA
 RADAR_ACTION_LABELS_EN = answer_radar.RADAR_ACTION_LABELS_EN
@@ -700,9 +796,16 @@ def build_compact_context_consumer_answer(
         response_preferences=response_preferences,
     )
     data_limits = list(dict.fromkeys([item for item in [problem_limit, *generic_limits] if item]))[:4]
-    next_fill = next(
+    raw_next_fill = next(
         (text_value(item.get("next_fill")) for item in problem_slots if text_value(item.get("next_fill"))),
         "",
+    )
+    next_fill = (
+        raw_next_fill
+        if english
+        else "欠損または遅延スロットは宣言済みのrefresh/provider経路で補完します。"
+        if japanese
+        else "缺失或過期欄位應走已宣告的 refresh/provider 路徑補齊。"
     )
     if english:
         action_plan = [
@@ -912,6 +1015,231 @@ def build_broker_branch_consumer_answer(
     return answer
 
 
+def _nested_price(container: dict[str, Any], *path: str) -> Any:
+    value: Any = container
+    for key in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    if isinstance(value, dict):
+        return value.get("price")
+    return value
+
+
+def _compact_number(value: Any, *, signed: bool = False) -> str | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    prefix = "+" if signed and value > 0 else ""
+    if float(value).is_integer():
+        return f"{prefix}{int(value):,}"
+    return f"{prefix}{float(value):,.2f}".rstrip("0").rstrip(".")
+
+
+def build_multi_domain_stock_consumer_answer(
+    *,
+    target: dict[str, Any],
+    analysis_digest: dict[str, Any],
+    missing: list[Any],
+    warnings: list[Any],
+    summary_limit: int,
+    response_preferences: dict[str, Any] | None,
+) -> dict[str, Any]:
+    compact = (
+        analysis_digest.get("compact_evidence")
+        if isinstance(analysis_digest.get("compact_evidence"), dict)
+        else {}
+    )
+    quote = compact.get("quote") if isinstance(compact.get("quote"), dict) else {}
+    technical = (
+        compact.get("technical")
+        if isinstance(compact.get("technical"), dict)
+        else {}
+    )
+    technical_analysis = (
+        technical.get("analysis")
+        if isinstance(technical.get("analysis"), dict)
+        else {}
+    )
+    levels = (
+        technical.get("levels")
+        if isinstance(technical.get("levels"), dict)
+        else {}
+    )
+    chips = compact.get("chips") if isinstance(compact.get("chips"), dict) else {}
+    institutional = (
+        chips.get("institutional")
+        if isinstance(chips.get("institutional"), dict)
+        else {}
+    )
+    margin = chips.get("margin") if isinstance(chips.get("margin"), dict) else {}
+    broker = (
+        chips.get("broker_branch")
+        if isinstance(chips.get("broker_branch"), dict)
+        else {}
+    )
+    label = (
+        text_value(target.get("label"))
+        or text_value(target.get("id"))
+        or target_fallback_label(response_preferences)
+    )
+    market = str(target.get("market") or "TW")
+    price = (
+        quote.get("price")
+        if quote.get("price") is not None
+        else quote.get("last_price")
+    )
+    quote_time = (
+        quote.get("quote_time")
+        or quote.get("trade_date")
+        or analysis_digest.get("as_of")
+    )
+    technical_summary = (
+        text_value(technical_analysis.get("selected_summary"))
+        or text_value(analysis_digest.get("selected_summary"))
+    )
+    preferred_low = _nested_price(levels, "entry", "preferred_zone", "low")
+    preferred_high = _nested_price(levels, "entry", "preferred_zone", "high")
+    if preferred_low is None or preferred_high is None:
+        preferred_low = _nested_price(
+            levels,
+            "entry",
+            "aggressive_zone",
+            "low",
+        )
+        preferred_high = _nested_price(
+            levels,
+            "entry",
+            "aggressive_zone",
+            "high",
+        )
+    breakout = _nested_price(levels, "entry", "breakout_confirm_above")
+    invalidation = _nested_price(levels, "risk", "technical_invalidation")
+    foreign_net = institutional.get("foreign_investor_net")
+    institutional_net = institutional.get("total_institutional_net")
+    margin_balance = margin.get("margin_today_balance")
+    short_balance = margin.get("short_today_balance")
+    buy_text = _broker_branch_rows_text(
+        broker.get("buy_top"),
+        empty_text="none",
+    )
+    sell_text = _broker_branch_rows_text(
+        broker.get("sell_top"),
+        empty_text="none",
+    )
+    english = response_is_english(response_preferences)
+    japanese = response_is_japanese(response_preferences)
+    price_text = _quote_price_text(
+        price,
+        market=market,
+        english=english,
+        japanese=japanese,
+    )
+    support_text = (
+        f"{_compact_number(preferred_low)}–{_compact_number(preferred_high)}"
+        if preferred_low is not None and preferred_high is not None
+        else None
+    )
+    breakout_text = _compact_number(breakout)
+    invalidation_text = _compact_number(invalidation)
+    foreign_text = _compact_number(foreign_net, signed=True)
+    institutional_text = _compact_number(institutional_net, signed=True)
+    margin_text = _compact_number(margin_balance)
+    short_text = _compact_number(short_balance)
+
+    if english:
+        headline = f"{label} multi-domain summary"
+        price_line = f"Price: {price_text}; data time {quote_time or 'unknown'}."
+        technical_line = (
+            f"Technical: {technical_summary or 'no directional summary'}"
+            f"; pullback zone {support_text or 'unavailable'}"
+            f"; breakout confirmation {breakout_text or 'unavailable'}"
+            f"; invalidation {invalidation_text or 'unavailable'}."
+        )
+        chips_line = (
+            f"Flows: foreign net {foreign_text or 'unavailable'}, total institutional "
+            f"net {institutional_text or 'unavailable'}; margin balance "
+            f"{margin_text or 'unavailable'}, short balance {short_text or 'unavailable'}."
+        )
+        broker_line = (
+            f"Broker branches ({broker.get('trade_date') or 'unknown'}): "
+            f"buyers {buy_text}; sellers {sell_text}."
+        )
+    elif japanese:
+        headline = f"{label} 複合サマリー"
+        price_line = f"価格：{price_text}、データ時刻 {quote_time or '不明'}。"
+        technical_line = (
+            f"テクニカル：{technical_summary or '方向性サマリーなし'}"
+            f"；押し目帯 {support_text or '欠損'}"
+            f"；上抜け確認 {breakout_text or '欠損'}"
+            f"；失効水準 {invalidation_text or '欠損'}。"
+        )
+        chips_line = (
+            f"需給：海外投資家ネット {foreign_text or '欠損'}、機関合計 "
+            f"{institutional_text or '欠損'}；信用買い残 {margin_text or '欠損'}、"
+            f"空売り残 {short_text or '欠損'}。"
+        )
+        broker_line = (
+            f"証券会社支店（{broker.get('trade_date') or '不明'}）："
+            f"買い {buy_text}；売り {sell_text}。"
+        )
+    else:
+        headline = f"{label} 綜合摘要"
+        price_line = f"價格：{price_text}；資料時間 {quote_time or '不明'}。"
+        technical_line = (
+            f"技術面：{technical_summary or '缺方向摘要'}"
+            f"；回測區 {support_text or '缺資料'}"
+            f"；突破確認 {breakout_text or '缺資料'}"
+            f"；技術失效 {invalidation_text or '缺資料'}。"
+        )
+        chips_line = (
+            f"法人與融資券：外資淨額 {foreign_text or '缺資料'}、法人合計 "
+            f"{institutional_text or '缺資料'}；融資餘額 {margin_text or '缺資料'}、"
+            f"融券餘額 {short_text or '缺資料'}。"
+        )
+        broker_line = (
+            f"分點（{broker.get('trade_date') or '不明'}）："
+            f"買方 {buy_text}；賣方 {sell_text}。"
+        )
+
+    summary = [
+        price_line,
+        technical_line,
+        f"{chips_line} {broker_line}",
+    ]
+    confidence = (
+        text_value(technical_analysis.get("selected_confidence"))
+        or text_value(analysis_digest.get("selected_confidence"))
+        or "medium"
+    )
+    answer = {
+        "kind": "consumer_market_answer",
+        "style": "multi_domain_stock_summary",
+        "source": "compact_evidence.multi_domain",
+        "headline": headline,
+        "stance": None,
+        "stance_label": undecided_label(response_preferences),
+        "confidence": confidence,
+        "confidence_label": confidence_label(confidence, response_preferences),
+        "summary": summary[:summary_limit],
+        "action_plan": [],
+        "scenarios": [],
+        "counter_evidence": [],
+        "risks": [],
+        "data_limits": generic_data_limits(
+            missing=missing,
+            warnings=warnings,
+            response_preferences=response_preferences,
+        ),
+        "detail": "\n".join([price_line, technical_line, chips_line, broker_line]),
+    }
+    answer["text"] = consumer_text(
+        answer,
+        summary_limit=summary_limit,
+        response_preferences=response_preferences,
+    )
+    return answer
+
+
 def build_market_breadth_consumer_answer(
     *,
     target: dict[str, Any],
@@ -954,6 +1282,20 @@ def build_market_breadth_consumer_answer(
     english = response_is_english(response_preferences)
     japanese = response_is_japanese(response_preferences)
     label = text_value(target.get("label")) or "台股市場"
+    unavailable = "unavailable" if english else "データなし" if japanese else "無資料"
+
+    def breadth_count(value: Any) -> str:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return unavailable
+        if isinstance(value, float) and not value.is_integer():
+            return f"{value:,.2f}".rstrip("0").rstrip(".")
+        return f"{int(value):,}"
+
+    advance_text = breadth_count(advance)
+    decline_text = breadth_count(decline)
+    unchanged_text = breadth_count(unchanged)
+    limit_up_text = breadth_count(limit_up)
+    limit_down_text = breadth_count(limit_down)
     if english:
         direction = {
             "weak": "clearly weak",
@@ -962,8 +1304,8 @@ def build_market_breadth_consumer_answer(
             "missing": "unavailable",
         }[direction_key]
         headline = f"{label} breadth is {direction}"
-        counts = f"Advancers {advance}, decliners {decline}, unchanged {unchanged}."
-        limits_line = f"Limit-up {limit_up}, limit-down {limit_down}."
+        counts = f"Advancers {advance_text}, decliners {decline_text}, unchanged {unchanged_text}."
+        limits_line = f"Limit-up {limit_up_text}, limit-down {limit_down_text}."
     elif japanese:
         direction = {
             "weak": "明確に弱い",
@@ -972,8 +1314,8 @@ def build_market_breadth_consumer_answer(
             "missing": "データ不足",
         }[direction_key]
         headline = f"{label}の市場の広がりは{direction}です"
-        counts = f"上昇 {advance}、下落 {decline}、変わらず {unchanged}。"
-        limits_line = f"ストップ高 {limit_up}、ストップ安 {limit_down}。"
+        counts = f"上昇 {advance_text}、下落 {decline_text}、変わらず {unchanged_text}。"
+        limits_line = f"ストップ高 {limit_up_text}、ストップ安 {limit_down_text}。"
     else:
         direction = {
             "weak": "明顯偏弱",
@@ -982,8 +1324,8 @@ def build_market_breadth_consumer_answer(
             "missing": "資料不足",
         }[direction_key]
         headline = f"{label}市場廣度{direction}"
-        counts = f"上漲 {advance}、下跌 {decline}、持平 {unchanged}。"
-        limits_line = f"漲停 {limit_up}、跌停 {limit_down}。"
+        counts = f"上漲 {advance_text}、下跌 {decline_text}、持平 {unchanged_text}。"
+        limits_line = f"漲停 {limit_up_text}、跌停 {limit_down_text}。"
     summary = [counts]
     if limit_up is not None or limit_down is not None:
         summary.append(limits_line)
@@ -1031,7 +1373,19 @@ def build_consumer_human_answer(
     llm_report: dict[str, Any] | None = None,
     summary_limit: int = SUMMARY_LIMIT_DEFAULT,
     response_preferences: dict[str, Any] | None = None,
+    selected_capabilities: list[str] | tuple[str, ...] | None = None,
+    requested_domains: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
+    missing = _selected_answer_gaps(
+        missing,
+        selected_capabilities=selected_capabilities,
+        requested_domains=requested_domains,
+    )
+    warnings = _selected_answer_gaps(
+        warnings,
+        selected_capabilities=selected_capabilities,
+        requested_domains=requested_domains,
+    )
     if question_intent == "quote":
         return build_quote_consumer_answer(
             target=target,
@@ -1039,6 +1393,37 @@ def build_consumer_human_answer(
             missing=missing,
             warnings=warnings,
             summary_limit=summary_limit,
+            response_preferences=response_preferences,
+        )
+
+    selected = {
+        str(value)
+        for value in selected_capabilities or ()
+        if str(value).strip()
+    }
+    multi_domain_capabilities = {
+        "daily.ohlcv",
+        "technical.structure",
+        "chips.institutional",
+        "chips.margin",
+        "ownership.distribution",
+    }
+    if question_intent == "broker_branch" and (
+        selected & multi_domain_capabilities
+    ):
+        answer = build_multi_domain_stock_consumer_answer(
+            target=target,
+            analysis_digest=analysis_digest,
+            missing=missing,
+            warnings=warnings,
+            summary_limit=summary_limit,
+            response_preferences=response_preferences,
+        )
+        return append_source_health_data_limits(
+            answer,
+            analysis_digest=analysis_digest,
+            missing=missing,
+            warnings=warnings,
             response_preferences=response_preferences,
         )
 

@@ -1400,63 +1400,78 @@ $script:NotifyIcon.Icon = Get-TrayIcon
 $script:NotifyIcon.Text = "$($script:AppDisplayName): starting"
 $script:NotifyIcon.Visible = $true
 
-$script:Menu = New-Object System.Windows.Forms.ContextMenuStrip
-$script:TitleItem = New-Object System.Windows.Forms.ToolStripMenuItem
+# ContextMenuStrip can be pushed behind the Windows 11 hidden-icons flyout
+# because this tray-only process has no foreground top-level window. The
+# native ContextMenu integration keeps the menu in the tray foreground.
+$script:Menu = New-Object System.Windows.Forms.ContextMenu
+$script:TitleItem = New-Object System.Windows.Forms.MenuItem
 $script:TitleItem.Text = $script:AppDisplayName
 $script:TitleItem.Enabled = $false
 
-$script:StatusItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$script:StatusItem = New-Object System.Windows.Forms.MenuItem
 $script:StatusItem.Text = "Status: starting"
 $script:StatusItem.Enabled = $false
 
-$startItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$startItem = New-Object System.Windows.Forms.MenuItem
 $startItem.Text = "Start Services"
 $startItem.add_Click({ Start-Services })
 
-$restartItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$restartItem = New-Object System.Windows.Forms.MenuItem
 $restartItem.Text = "Restart Services"
 $restartItem.add_Click({ Restart-Services })
 
-$stopItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$stopItem = New-Object System.Windows.Forms.MenuItem
 $stopItem.Text = "Stop Services"
 $stopItem.add_Click({ Stop-Services })
 
-$openDashboardItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$openDashboardItem = New-Object System.Windows.Forms.MenuItem
 $openDashboardItem.Text = "Open Dashboard"
 $openDashboardItem.add_Click({ Open-Url $script:DashboardUrl })
 
-$openApiItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$openApiItem = New-Object System.Windows.Forms.MenuItem
 $openApiItem.Text = "Open API Health"
 $openApiItem.add_Click({ Open-Url $script:BackendHealthUrl })
 
-$openLogsItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$openLogsItem = New-Object System.Windows.Forms.MenuItem
 $openLogsItem.Text = "Open Logs Folder"
 $openLogsItem.add_Click({ Open-LogsFolder })
 
-$exitItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$exitItem = New-Object System.Windows.Forms.MenuItem
 $exitItem.Text = "Exit Launcher"
 $exitItem.add_Click({
+    if ($script:IsShuttingDown) {
+        return
+    }
+
     $script:IsShuttingDown = $true
     Write-LauncherLog "Exit requested from tray menu."
-    Stop-Services
+    $script:Timer.Stop()
     $script:NotifyIcon.Visible = $false
-    [System.Windows.Forms.Application]::Exit()
+    try {
+        Stop-Services
+    }
+    catch {
+        Write-LauncherLog "Service shutdown failed during launcher exit. error=$($_.Exception.Message)" "ERROR"
+    }
+    finally {
+        [System.Windows.Forms.Application]::Exit()
+    }
 })
 
-[void]$script:Menu.Items.Add($script:TitleItem)
-[void]$script:Menu.Items.Add($script:StatusItem)
-[void]$script:Menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
-[void]$script:Menu.Items.Add($openDashboardItem)
-[void]$script:Menu.Items.Add($openApiItem)
-[void]$script:Menu.Items.Add($openLogsItem)
-[void]$script:Menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
-[void]$script:Menu.Items.Add($startItem)
-[void]$script:Menu.Items.Add($restartItem)
-[void]$script:Menu.Items.Add($stopItem)
-[void]$script:Menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
-[void]$script:Menu.Items.Add($exitItem)
+[void]$script:Menu.MenuItems.Add($script:TitleItem)
+[void]$script:Menu.MenuItems.Add($script:StatusItem)
+[void]$script:Menu.MenuItems.Add((New-Object System.Windows.Forms.MenuItem "-"))
+[void]$script:Menu.MenuItems.Add($openDashboardItem)
+[void]$script:Menu.MenuItems.Add($openApiItem)
+[void]$script:Menu.MenuItems.Add($openLogsItem)
+[void]$script:Menu.MenuItems.Add((New-Object System.Windows.Forms.MenuItem "-"))
+[void]$script:Menu.MenuItems.Add($startItem)
+[void]$script:Menu.MenuItems.Add($restartItem)
+[void]$script:Menu.MenuItems.Add($stopItem)
+[void]$script:Menu.MenuItems.Add((New-Object System.Windows.Forms.MenuItem "-"))
+[void]$script:Menu.MenuItems.Add($exitItem)
 
-$script:NotifyIcon.ContextMenuStrip = $script:Menu
+$script:NotifyIcon.ContextMenu = $script:Menu
 $script:NotifyIcon.add_DoubleClick({ Open-Url $script:DashboardUrl })
 
 $script:Timer = New-Object System.Windows.Forms.Timer

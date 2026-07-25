@@ -125,6 +125,9 @@ def _jp_intraday_compact(
                 "previous_close_trade_date": intraday_summary.get(
                     "previous_close_trade_date"
                 ),
+                "volume_unit": intraday_summary.get("volume_unit"),
+                "volume_semantics": intraday_summary.get("volume_semantics"),
+                "volume_status": intraday_summary.get("volume_status"),
                 "regular_session_close": intraday_summary.get(
                     "regular_session_close"
                 ),
@@ -181,6 +184,8 @@ def _jp_intraday_quote(
         "current_session_phase": freshness["current_session_phase"],
         "market_status": freshness["market_status"],
         "quote_semantics": freshness["quote_semantics"],
+        "delivery_status": freshness["delivery_status"],
+        "is_current_session_quote": freshness["is_current_session_quote"],
         "freshness": freshness,
         "provider": "yahoo_chart",
         "previous_close": previous_close,
@@ -188,6 +193,20 @@ def _jp_intraday_quote(
             intraday_summary.get("previous_close_source")
             if intraday_summary
             else None
+        ),
+        "previous_close_trade_date": (
+            intraday_summary.get("previous_close_trade_date")
+            if intraday_summary
+            else None
+        ),
+        "volume_unit": (
+            intraday_summary.get("volume_unit") if intraday_summary else None
+        ),
+        "volume_semantics": (
+            intraday_summary.get("volume_semantics") if intraday_summary else None
+        ),
+        "volume_status": (
+            intraday_summary.get("volume_status") if intraday_summary else None
         ),
         "point_count": (
             intraday_summary.get("point_count") if intraday_summary else None
@@ -239,6 +258,7 @@ def read_jp_stock_context(
     chart: dict[str, Any] = {}
     fundamental: Any = None
     resource_summary: dict[str, Any] | None = None
+    source_health: dict[str, Any] = {}
     warnings: list[str] = [
         "Japan daily, fundamental, and resource evidence uses local cache; optional intraday evidence is a bounded provider read when explicitly enabled.",
     ]
@@ -301,6 +321,16 @@ def read_jp_stock_context(
         except Exception as exc:
             missing.append("jp_intraday_trend")
             warnings.append(f"JP intraday trend unavailable: {exc}")
+
+    try:
+        source_health = dependencies.jp_market_service.build_jp_source_health(
+            db=db,
+            symbol=normalized_symbol,
+            is_index=is_index,
+            now=dependencies.now(),
+        )
+    except Exception as exc:
+        warnings.append(f"JP source health unavailable: {exc}")
 
     intraday_requested = include_intraday or intraday_summary is not None
     intraday_quote = _jp_intraday_quote(
@@ -577,6 +607,7 @@ def read_jp_stock_context(
                 ),
             ),
             "resource_summary": _json_ready(resource_summary),
+            "source_health": _json_ready(source_health),
             "intraday": {
                 "requested": intraday_requested,
                 "available": bool(intraday_quote),
@@ -624,6 +655,11 @@ def read_jp_stock_context(
             "payload_level": payload_level,
             "fundamental_available": fundamental is not None,
             "resource_status": envelope["summary"].get("resource_status"),
+            "source_health": (
+                source_health.get("summary")
+                if isinstance(source_health, dict)
+                else {}
+            ),
             "include_intraday": intraday_requested,
             "intraday_available": bool(intraday_quote),
         },
@@ -669,6 +705,11 @@ def read_jp_stock_context(
             "latest_trade_date": intraday_trade_date,
             "expected_trade_date": expected_intraday_date,
         },
+        "source_health": (
+            source_health.get("summary")
+            if isinstance(source_health, dict)
+            else {}
+        ),
     }
     envelope["evidence_passport"] = build_evidence_passport(
         kind=envelope["kind"],

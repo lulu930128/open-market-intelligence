@@ -282,6 +282,7 @@ def build_jp_source_health(
     db: Session,
     *,
     symbol: str | None = None,
+    is_index: bool = False,
     expected_daily_price_date: date | None = None,
     use_expected_date: bool = True,
     now: datetime | None = None,
@@ -297,21 +298,26 @@ def build_jp_source_health(
         if normalized_symbol is not None
         else None
     )
-    entries = [
-        _symbol_master_entry(db, symbol=normalized_symbol),
-        *_daily_price_entries(
-            db,
-            symbol=normalized_symbol,
-            expected_daily_price_date=resolved_expected_date,
-        ),
-        *_fundamental_entries(db, symbol=normalized_symbol),
-        _margin_interest_entry(db, symbol=normalized_symbol),
-        _investor_types_entry(
-            db,
-            stock=stock,
-            requested_symbol=normalized_symbol,
-        ),
-    ]
+    daily_entries = _daily_price_entries(
+        db,
+        symbol=normalized_symbol,
+        expected_daily_price_date=resolved_expected_date,
+    )
+    entries = (
+        daily_entries
+        if is_index
+        else [
+            _symbol_master_entry(db, symbol=normalized_symbol),
+            *daily_entries,
+            *_fundamental_entries(db, symbol=normalized_symbol),
+            _margin_interest_entry(db, symbol=normalized_symbol),
+            _investor_types_entry(
+                db,
+                stock=stock,
+                requested_symbol=normalized_symbol,
+            ),
+        ]
+    )
     entry_dicts = enrich_source_health_entries(
         db,
         market="jp",
@@ -327,7 +333,10 @@ def build_jp_source_health(
     return {
         "kind": "jp_source_health",
         "generated_at": checked_at.isoformat(),
-        "filters": {"symbol": normalized_symbol},
+        "filters": {
+            "symbol": normalized_symbol,
+            "instrument_type": "index" if is_index else "stock",
+        },
         "expected_daily_price_date": (
             resolved_expected_date.isoformat() if resolved_expected_date else None
         ),

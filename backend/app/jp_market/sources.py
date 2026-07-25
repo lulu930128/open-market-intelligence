@@ -740,6 +740,14 @@ def parse_yahoo_intraday_prices(
     warnings: list[str] = []
     if not points:
         warnings.append("Yahoo chart returned no Japan intraday points.")
+    is_index = normalized_symbol.startswith("^")
+    if is_index:
+        for point in points:
+            point["volume"] = None
+        warnings.append(
+            "Yahoo does not provide a decision-usable traded-volume series for this "
+            "Japan cash index; zero values were normalized to unavailable."
+        )
 
     return {
         "stock_id": normalized_symbol,
@@ -762,6 +770,11 @@ def parse_yahoo_intraday_prices(
         ),
         "point_count": len(points),
         "points": points,
+        "volume_unit": None if is_index else "shares",
+        "volume_semantics": (
+            "not_provided_for_cash_index" if is_index else "interval_volume"
+        ),
+        "volume_status": "not_provided" if is_index else "available",
         "source_url": source_url,
         "warnings": warnings,
     }

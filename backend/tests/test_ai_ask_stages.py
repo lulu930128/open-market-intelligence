@@ -82,6 +82,32 @@ class AiAskStagesTests(unittest.TestCase):
         self.assertEqual(preferences["theme"], "dark")
         self.assertIn("English", preferences["language_instruction"])
 
+    def test_build_question_stage_honors_explicit_no_advice_request(self) -> None:
+        progress = pipeline_progress.OmiPipelineProgress(lambda event: None)
+        payload = AiAskRequest(
+            question="只回資料狀態，不要投資建議",
+            target={"type": "tw_stock", "id": "2330"},
+        )
+
+        stage = ask_stages.build_question_stage(
+            payload=payload,
+            scope_type="stock",
+            server_policy=object(),
+            progress=progress,
+            build_policy=lambda request, server_policy: {
+                "can_generate_analysis": True
+            },
+            infer_mode=lambda request, scope_type, policy: (
+                "data_only"
+                if request.output == "evidence_only"
+                else "analysis"
+            ),
+            normalize_analysis_horizon=lambda value: value,
+        )
+
+        self.assertEqual(stage.payload.output, "evidence_only")
+        self.assertEqual(stage.requested_mode, "data_only")
+
     def test_build_question_stage_promotes_saved_position_context(self) -> None:
         progress = pipeline_progress.OmiPipelineProgress(lambda event: None)
         payload = AiAskRequest(
@@ -153,6 +179,76 @@ class AiAskStagesTests(unittest.TestCase):
         self.assertEqual(state.warnings, ["refreshed with fallback"])
         self.assertTrue(state.freshness_result["is_current"])
         self.assertIn("tool_execution", [event["stage"] for event in events])
+
+    def test_execute_tool_stages_runs_bounded_jp_stale_refresh(self) -> None:
+        progress = pipeline_progress.OmiPipelineProgress(lambda event: None)
+        payload = AiAskRequest(
+            question="日經資料更新後再回答",
+            target={"type": "jp_index", "id": "^N225"},
+            allow_external_fetch=True,
+            contract_version="omi.decision.v4",
+        )
+        captured: dict = {}
+
+        def run_regional(**kwargs):
+            captured.update(kwargs)
+            return {
+                "tool_plan": {
+                    "provider": "deterministic",
+                    "tool_plan": [
+                        {
+                            "tool": "jp.refresh_daily_price",
+                            "args": {"symbol": "^N225"},
+                        }
+                    ],
+                },
+                "tool_runs": [
+                    {"tool": "jp.refresh_daily_price", "status": "success"}
+                ],
+                "warnings": [],
+                "freshness": {
+                    "is_current": True,
+                    "refresh_recommended": False,
+                },
+            }
+
+        state = ask_stages.execute_tool_stages(
+            scope_type="jp_index",
+            payload=payload,
+            resolution=SimpleNamespace(selected_scope_id="^N225"),
+            policy={"can_external_fetch": True},
+            query_plan={
+                "realtime_policy": "prefer_live",
+                "external_refresh_allowed": True,
+                "selected_capabilities": ["daily.ohlcv"],
+            },
+            freshness_result={
+                "is_current": False,
+                "refresh_recommended": True,
+            },
+            progress=progress,
+            progress_callback=None,
+            resolution_target=lambda resolution: {
+                "type": "jp_index",
+                "id": resolution.selected_scope_id,
+            },
+            require_scope_id=lambda request, scope_type: request.target["id"],
+            require_group_id=lambda request: 1,
+            refresh_before_answer_enabled=lambda request: True,
+            run_us_stock_tool_session=lambda **kwargs: {},
+            run_tw_stock_tool_session=lambda **kwargs: {},
+            run_tw_watchlist_tool_session=lambda **kwargs: {},
+            run_regional_market_tool_session=run_regional,
+        )
+
+        self.assertEqual(captured["market"], "JP")
+        self.assertTrue(captured["is_index"])
+        self.assertEqual(captured["target_id"], "^N225")
+        self.assertEqual(
+            state.tool_runs[0]["tool"],
+            "jp.refresh_daily_price",
+        )
+        self.assertTrue(state.freshness_result["is_current"])
 
     def test_execute_mode_stage_falls_back_to_brief_when_auto_analysis_llm_fails(self) -> None:
         events = []

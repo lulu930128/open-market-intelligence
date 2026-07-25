@@ -94,9 +94,16 @@ def _kr_intraday_quote(
         "current_session_phase": freshness["current_session_phase"],
         "market_status": freshness["market_status"],
         "quote_semantics": freshness["quote_semantics"],
+        "delivery_status": freshness["delivery_status"],
+        "is_current_session_quote": freshness["is_current_session_quote"],
         "freshness": freshness,
         "previous_close": previous_close,
         "previous_close_source": intraday_summary.get("previous_close_source"),
+        "previous_close_trade_date": intraday_summary.get(
+            "previous_close_trade_date"
+        ),
+        "volume_unit": intraday_summary.get("volume_unit"),
+        "volume_semantics": intraday_summary.get("volume_semantics"),
         "point_count": intraday_summary.get("point_count"),
     }
 
@@ -150,6 +157,10 @@ def _kr_intraday_compact(
                 "previous_close_trade_date": intraday_summary.get("previous_close_trade_date"),
                 "source_url": intraday_summary.get("source_url"),
                 "is_partial": bool(intraday_summary.get("is_partial")),
+                "continuity": intraday_summary.get("continuity"),
+                "volume_unit": intraday_summary.get("volume_unit"),
+                "volume_semantics": intraday_summary.get("volume_semantics"),
+                "trade_value_unit": intraday_summary.get("trade_value_unit"),
             }
         },
         "warnings": list(intraday_summary.get("warnings") or []),
@@ -227,8 +238,17 @@ def read_kr_stock_context(
             else normalized_id
         )
         target = {"type": "kr_index", "id": normalized_id, "label": label, "market": "KR"}
+        try:
+            source_health = dependencies.kr_market_service.build_kr_source_health(
+                db=db,
+                index_id=normalized_id,
+                now=dependencies.now(),
+            )
+        except Exception as exc:
+            warnings.append(f"KR index source health unavailable: {exc}")
         _append_source_ref_once(source_refs, {"type": "table", "name": "kr_market_index"})
         _append_source_ref_once(source_refs, {"type": "table", "name": "kr_index_daily_price"})
+        _append_source_ref_once(source_refs, {"type": "derived", "name": "app.kr_market.source_health"})
         data = {
             "stock": None,
             "daily_prices": [],
@@ -236,7 +256,7 @@ def read_kr_stock_context(
             "fundamentals": [],
             "investor_trading": [],
             "resource_summary": None,
-            "source_health": {},
+            "source_health": _json_ready(source_health),
             "tool_runs": tool_runs,
         }
     else:
@@ -530,7 +550,10 @@ def read_kr_stock_context(
         },
         resources={
             "daily_rows": len(daily_rows),
+            "daily_rows_semantics": "local_daily_table_rows",
+            "daily_table_rows": len(daily_rows),
             "chart_points": len(chart.get("points") or []) if isinstance(chart, dict) else 0,
+            "daily_chart_points": len(chart.get("points") or []) if isinstance(chart, dict) else 0,
             "timeframe": timeframe,
             "bars": bars,
             "payload_level": payload_level,
@@ -541,7 +564,18 @@ def read_kr_stock_context(
             "intraday_available": bool(intraday_quote),
         },
         freshness={
-            "price": intraday_freshness_status if intraday_quote else "current" if latest_trade_date else "missing",
+            "price": (
+                intraday_freshness_status
+                if intraday_quote
+                else str(chart.get("freshness_status") or "missing")
+                if isinstance(chart, dict)
+                else "missing"
+            ),
+            "daily": (
+                str(chart.get("freshness_status") or "missing")
+                if isinstance(chart, dict)
+                else "missing"
+            ),
             "intraday": (
                 intraday_freshness_status
                 if intraday_quote and intraday_requested
@@ -584,7 +618,10 @@ def read_kr_stock_context(
         "warnings": list(dict.fromkeys(warnings)),
         "source_refs": source_refs,
     }
-    context_is_current = bool(latest_trade_date) and (
+    chart_is_current = bool(
+        isinstance(chart, dict) and chart.get("is_current") is True
+    )
+    context_is_current = chart_is_current and (
         not intraday_requested or intraday_is_current
     )
     freshness_result = {
@@ -595,6 +632,23 @@ def read_kr_stock_context(
         "missing": envelope["missing"],
         "warnings": envelope["warnings"],
         "as_of": intraday_as_of or latest_trade_date,
+        "daily": {
+            "status": (
+                str(chart.get("freshness_status") or "missing")
+                if isinstance(chart, dict)
+                else "missing"
+            ),
+            "latest_data_date": (
+                chart.get("latest_data_date")
+                if isinstance(chart, dict)
+                else None
+            ),
+            "expected_data_date": (
+                chart.get("expected_data_date")
+                if isinstance(chart, dict)
+                else None
+            ),
+        },
         "intraday": {
             "status": (
                 intraday_freshness_status

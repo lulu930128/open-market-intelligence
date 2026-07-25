@@ -500,6 +500,12 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertEqual(trend["regular_session_close"], 40150.0)
         self.assertEqual(trend["points"][0]["time"], "2026-06-19T09:00:00+09:00")
         self.assertEqual(trend["points"][2]["session"], "lunch_break")
+        self.assertTrue(all(point["volume"] is None for point in trend["points"]))
+        self.assertEqual(trend["volume_status"], "not_provided")
+        self.assertEqual(
+            trend["volume_semantics"],
+            "not_provided_for_cash_index",
+        )
 
     def test_parse_yahoo_company_fundamental(self) -> None:
         record = parse_yahoo_company_fundamental(
@@ -1297,6 +1303,8 @@ class JPMarketDataTests(unittest.TestCase):
         self.assertEqual(result["point_count"], 5)
         self.assertEqual(result["regular_point_count"], 4)
         self.assertEqual(result["previous_close"], 39800.0)
+        self.assertEqual(result["previous_close_trade_date"], "2026-06-18")
+        self.assertEqual(result["volume_status"], "not_provided")
 
     def test_get_jp_intraday_trend_falls_back_to_daily_previous_close(self) -> None:
         upsert_jp_daily_price_records(

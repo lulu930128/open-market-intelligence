@@ -8,8 +8,15 @@ from typing import Any
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.ai import agentic_common, agentic_policy, progress_events
+from app.crypto_market import service as crypto_market_service
+from app.crypto_market.contract import normalize_provider as normalize_crypto_provider
+from app.crypto_market.contract import normalize_symbol as normalize_crypto_symbol
 from app.db.session import SessionLocal
 from app.jobs import service as job_service
+from app.jp_market import service as jp_market_service
+from app.jp_market.sources import normalize_jp_symbol
+from app.kr_market import service as kr_market_service
+from app.kr_market.sources import normalize_kr_index_id, normalize_kr_symbol
 from app.market import stock_selection_refresh
 from app.us_market import service as us_market_service
 from app.us_market.sources import normalize_us_symbol
@@ -20,6 +27,15 @@ ToolDefinition = agentic_policy.ToolDefinition
 ALLOWED_TOOLS = agentic_policy.ALLOWED_TOOLS
 BACKGROUND_TOOL_JOB_TYPE = "ai.tool_refresh"
 _BACKGROUND_REFRESH_LOCK = Lock()
+TW_GRANULAR_TOOL_STEPS = {
+    "tw.refresh_daily_price": "daily_price",
+    "tw.refresh_institutional": "institutional_trade",
+    "tw.refresh_margin": "margin_trading",
+    "tw.refresh_broker_branch": "broker_branch",
+    "tw.refresh_shareholding": "shareholding_distribution",
+    "tw.refresh_revenue": "monthly_revenue",
+    "tw.refresh_financials": "financial_metrics",
+}
 
 
 def _background_job_request(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -30,6 +46,7 @@ def _background_job_request(tool_name: str, args: dict[str, Any]) -> dict[str, A
     normalized_target = str(
         args.get("stock_id")
         or args.get("symbol")
+        or args.get("index_id")
         or args.get("group_id")
         or ""
     ).strip().upper()
@@ -182,12 +199,12 @@ def _compact_intraday_points(
 ) -> list[dict[str, Any]]:
     valid_points = [agentic_common._json_ready(point) for point in points if isinstance(point, dict)]
     valid_points = [point for point in valid_points if isinstance(point, dict)]
+    if max_points <= 0:
+        return []
     if len(valid_points) <= max_points:
         return valid_points
 
-    last_index = len(valid_points) - 1
-    indexes = {round(index * last_index / (max_points - 1)) for index in range(max_points)}
-    return [valid_points[index] for index in sorted(indexes)]
+    return valid_points[-max_points:]
 
 
 def _compact_result(value: Any) -> dict[str, Any]:
@@ -210,6 +227,11 @@ def _compact_result(value: Any) -> dict[str, Any]:
         "requested_count",
         "requested_stock_count",
         "refreshed_count",
+        "refreshed_count_semantics",
+        "completed_count",
+        "unchanged_count",
+        "changed_row_count",
+        "refresh_outcome",
         "current_count",
         "success_count",
         "warning_count",
@@ -217,6 +239,12 @@ def _compact_result(value: Any) -> dict[str, Any]:
         "error_count",
         "target_date",
         "lookback_days",
+        "interval",
+        "source_interval",
+        "effective_interval",
+        "sampling_mode",
+        "original_point_count",
+        "returned_point_count",
         "point_count",
         "previous_close",
         "previous_close_source",
@@ -233,6 +261,13 @@ def _compact_result(value: Any) -> dict[str, Any]:
         "source_url",
         "metric_count",
         "message",
+        "volume_unit",
+        "volume_semantics",
+        "volume_status",
+        "trade_value_unit",
+        "is_partial",
+        "continuity",
+        "warnings",
     )
     summary = {
         key: agentic_common._json_value(value.get(key))
@@ -240,8 +275,30 @@ def _compact_result(value: Any) -> dict[str, Any]:
         if key in value
     }
     if "points" in value and isinstance(value["points"], list):
+        original_point_count = len(value["points"])
         points = _compact_intraday_points(value["points"])
+        source_interval = (
+            value.get("source_interval")
+            or value.get("interval")
+        )
+        effective_interval = (
+            value.get("effective_interval")
+            or source_interval
+        )
+        summary["original_point_count"] = original_point_count
         summary["returned_point_count"] = len(points)
+        summary["sampling_mode"] = (
+            value.get("sampling_mode")
+            or (
+                "latest_n"
+                if original_point_count > len(points)
+                else "complete"
+            )
+        )
+        if source_interval is not None:
+            summary["source_interval"] = source_interval
+        if effective_interval is not None:
+            summary["effective_interval"] = effective_interval
         summary["points"] = points
         if points:
             summary["latest_point"] = points[-1]
@@ -285,15 +342,35 @@ def _execute_tool(
     cancel_event: Event | None = None,
 ) -> dict[str, Any]:
     symbol = normalize_us_symbol(args.get("symbol"))
+    crypto_symbol = normalize_crypto_symbol(args.get("symbol"))
+    crypto_provider = normalize_crypto_provider(args.get("provider"))
     stock_id = str(args.get("stock_id") or "").strip()
     group_id_text = str(args.get("group_id") or "").strip()
-    if tool_name == "tw.refresh_stock_evidence" and not stock_id:
+    if (
+        tool_name == "tw.refresh_stock_evidence"
+        or tool_name in TW_GRANULAR_TOOL_STEPS
+    ) and not stock_id:
         raise ValueError("stock_id is required for Taiwan stock tools.")
     if tool_name == "tw.refresh_watchlist_evidence" and not group_id_text:
         raise ValueError("group_id is required for Taiwan watchlist tools.")
 
     if tool_name.startswith("us.") and not symbol and tool_name != "us.refresh_macro_series":
         raise ValueError("symbol is required for US stock tools.")
+    if tool_name.startswith("jp.") and not str(args.get("symbol") or "").strip():
+        raise ValueError("symbol is required for Japan market tools.")
+    if (
+        tool_name in {"kr.read_stock_intraday_trend", "kr.refresh_daily_price"}
+        and not str(args.get("symbol") or "").strip()
+    ):
+        raise ValueError("symbol is required for Korea stock tools.")
+    if (
+        tool_name
+        in {"kr.read_index_intraday_trend", "kr.refresh_index_daily_price"}
+        and not str(args.get("index_id") or "").strip()
+    ):
+        raise ValueError("index_id is required for Korea index tools.")
+    if tool_name.startswith("crypto.") and (not crypto_symbol or not crypto_provider):
+        raise ValueError("provider and symbol are required for crypto refresh tools.")
 
     if tool_name == "tw.refresh_stock_evidence":
         sleep_seconds = agentic_common._safe_float(
@@ -307,6 +384,22 @@ def _execute_tool(
             stock_id=stock_id,
             include_today=agentic_common._optional_bool(args.get("include_today")),
             sleep_seconds=sleep_seconds,
+            should_cancel=cancel_event.is_set if cancel_event is not None else None,
+        )
+
+    if tool_name in TW_GRANULAR_TOOL_STEPS:
+        sleep_seconds = agentic_common._safe_float(
+            args.get("sleep_seconds"),
+            default=0.05,
+            minimum=0.0,
+            maximum=3.0,
+        )
+        return stock_selection_refresh.refresh_selected_stock_data(
+            db=db,
+            stock_id=stock_id,
+            include_today=agentic_common._optional_bool(args.get("include_today")),
+            sleep_seconds=sleep_seconds,
+            steps=(TW_GRANULAR_TOOL_STEPS[tool_name],),
             should_cancel=cancel_event.is_set if cancel_event is not None else None,
         )
 
@@ -367,6 +460,91 @@ def _execute_tool(
         return us_market_service.refresh_us_corporate_actions_from_alphavantage(
             db=db,
             symbol=symbol,
+        )
+
+    if tool_name == "jp.read_intraday_trend":
+        return jp_market_service.get_jp_intraday_trend(
+            symbol=normalize_jp_symbol(str(args.get("symbol") or "")),
+            db=db,
+            refresh=True,
+        )
+
+    if tool_name == "jp.refresh_daily_price":
+        return jp_market_service.refresh_jp_daily_prices(
+            db=db,
+            symbol=normalize_jp_symbol(str(args.get("symbol") or "")),
+            provider=str(args.get("provider") or "auto"),
+            outputsize=str(args.get("outputsize") or "compact"),
+        )
+
+    if tool_name == "kr.read_stock_intraday_trend":
+        return kr_market_service.get_kr_stock_intraday_trend(
+            db=db,
+            symbol=normalize_kr_symbol(str(args.get("symbol") or "")),
+            refresh=True,
+        )
+
+    if tool_name == "kr.read_index_intraday_trend":
+        return kr_market_service.get_kr_index_intraday_trend(
+            db=db,
+            index_id=normalize_kr_index_id(str(args.get("index_id") or "")),
+            refresh=True,
+        )
+
+    if tool_name == "kr.refresh_daily_price":
+        return kr_market_service.refresh_kr_daily_prices(
+            db=db,
+            symbol=normalize_kr_symbol(str(args.get("symbol") or "")),
+            provider=str(args.get("provider") or "auto"),
+            outputsize=str(args.get("outputsize") or "compact"),
+        )
+
+    if tool_name == "kr.refresh_index_daily_price":
+        return kr_market_service.refresh_kr_index_daily_prices(
+            db=db,
+            index_id=normalize_kr_index_id(str(args.get("index_id") or "")),
+            outputsize=str(args.get("outputsize") or "compact"),
+        )
+
+    if tool_name == "crypto.refresh_ticker":
+        return crypto_market_service.refresh_crypto_tickers(
+            db=db,
+            providers=[crypto_provider],
+            symbols=[crypto_symbol],
+        )
+
+    if tool_name == "crypto.refresh_order_book":
+        return crypto_market_service.refresh_crypto_order_books(
+            db=db,
+            providers=[crypto_provider],
+            symbols=[crypto_symbol],
+            depth_limit=agentic_common._safe_int(
+                args.get("depth_limit"),
+                default=5,
+                minimum=1,
+                maximum=20,
+            ),
+        )
+
+    if tool_name == "crypto.refresh_ohlcv":
+        return crypto_market_service.refresh_crypto_ohlcv(
+            db=db,
+            providers=[crypto_provider],
+            symbols=[crypto_symbol],
+            interval=str(args.get("interval") or "1m"),
+            limit=agentic_common._safe_int(
+                args.get("limit"),
+                default=20,
+                minimum=1,
+                maximum=100,
+            ),
+        )
+
+    if tool_name == "crypto.refresh_derivatives":
+        return crypto_market_service.refresh_crypto_derivatives(
+            db=db,
+            providers=[crypto_provider],
+            symbols=[crypto_symbol],
         )
 
     raise ValueError(f"Unsupported OMI tool: {tool_name}")

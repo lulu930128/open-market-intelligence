@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -49,6 +49,39 @@ class AiAskRequest(BaseModel):
     contract_version: str = Field(default="omi.ai.ask.v2", min_length=1, max_length=80)
     target: dict[str, Any] = Field(default_factory=lambda: {"type": "auto"})
     mode: str = Field(default="auto", min_length=1, max_length=50)
+    intents: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Optional multi-intent request for omi.decision.v4. Target identity remains "
+            "independent from analysis, freshness, quote, or risk intents."
+        ),
+    )
+    output: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=40,
+        description="evidence_only, decision, or decision_with_evidence.",
+    )
+    realtime_policy: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=40,
+        description="cache_only, prefer_live, or require_live.",
+    )
+    selection: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Bounded capability selection for omi.decision.v4: include/required, "
+            "optional, exclude, fields, limits, and max_response_bytes."
+        ),
+    )
+    continuation: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Optional v4 continuation input such as a prior fill plan id and selected "
+            "fill action ids. Backend revalidates every action."
+        ),
+    )
     payload_level: str | None = Field(
         default=None,
         min_length=1,
@@ -62,7 +95,7 @@ class AiAskRequest(BaseModel):
         description="none, basic, or debug. Diagnostics do not change answer semantics.",
     )
     caller_profile: str = Field(
-        default="kuro_readonly",
+        default="external_readonly",
         min_length=1,
         max_length=80,
         description="Caller label only. Server-side policy decides trust.",
@@ -109,6 +142,19 @@ class AiAskRequest(BaseModel):
         ),
     )
     conversation_context: dict[str, Any] = Field(default_factory=dict)
+
+
+class AiAskV4Request(AiAskRequest):
+    """Public OMI ask request.
+
+    The broader AiAskRequest remains an internal compatibility seam for the
+    backend pipeline and regression tests. Public transports only accept v4.
+    """
+
+    contract_version: Literal["omi.decision.v4"] = Field(
+        default="omi.decision.v4",
+        description="The only public OMI decision contract.",
+    )
 
 
 class AiAskResponse(BaseModel):
@@ -171,6 +217,11 @@ class AiDecisionEnvelope(BaseModel):
     continuation: dict[str, Any] = Field(default_factory=dict)
     error: dict[str, Any] = Field(default_factory=dict)
     compatibility: dict[str, Any] = Field(default_factory=dict)
+
+
+class AiDecisionEnvelopeV4(AiDecisionEnvelope):
+    contract_version: Literal["omi.decision.v4"] = "omi.decision.v4"
+    projection: dict[str, Any] = Field(default_factory=dict)
 
 
 class AiMemoryCreate(BaseModel):

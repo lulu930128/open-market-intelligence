@@ -9,10 +9,11 @@ from sqlalchemy.orm import Query, Session
 from app.db.models import (
     KRCompanyFundamental,
     KRDailyPrice,
+    KRIndexDailyPrice,
     KRInvestorTradeDaily,
     KRStockMaster,
 )
-from app.kr_market.sources import normalize_kr_symbol
+from app.kr_market.sources import normalize_kr_index_id, normalize_kr_symbol
 from app.kr_market.trading_calendar import expected_kr_daily_price_date
 from app.observability.provider_health import (
     enrich_source_health_entries,
@@ -188,6 +189,32 @@ def _daily_price_entries(
     return entries
 
 
+def _index_daily_price_entry(
+    db: Session,
+    *,
+    index_id: str,
+    expected_daily_price_date: date | None,
+) -> KRSourceHealthEntry:
+    query = db.query(KRIndexDailyPrice).filter(
+        KRIndexDailyPrice.index_id == index_id
+    )
+    return _entry_from_query(
+        query=query,
+        resource="index_daily_price",
+        provider="naver_sise_index",
+        target=index_id,
+        latest_data_attr="trade_date",
+        latest_fetched_attr="fetched_at",
+        expected_data_date=expected_daily_price_date,
+        freshness_required=True,
+        order_by=(
+            KRIndexDailyPrice.trade_date.desc(),
+            KRIndexDailyPrice.fetched_at.desc(),
+            KRIndexDailyPrice.id.desc(),
+        ),
+    )
+
+
 def _fundamentals_entry(db: Session, *, symbol: str | None) -> KRSourceHealthEntry:
     query = db.query(KRCompanyFundamental)
     if symbol is not None:
@@ -239,21 +266,35 @@ def build_kr_source_health(
     db: Session,
     *,
     symbol: str | None = None,
+    index_id: str | None = None,
     now: datetime | None = None,
     expected_daily_price_date: date | None = None,
 ) -> dict[str, Any]:
+    if symbol and index_id:
+        raise ValueError("symbol and index_id are mutually exclusive.")
     normalized_symbol = normalize_kr_symbol(symbol) if symbol else None
+    normalized_index_id = normalize_kr_index_id(index_id) if index_id else None
     expected_date = expected_daily_price_date or expected_kr_daily_price_date(now=now)
-    entries = [
-        _symbol_master_entry(db, symbol=normalized_symbol),
-        *_daily_price_entries(
-            db,
-            symbol=normalized_symbol,
-            expected_daily_price_date=expected_date,
-        ),
-        _fundamentals_entry(db, symbol=normalized_symbol),
-        _investor_trade_entry(db, symbol=normalized_symbol),
-    ]
+    entries = (
+        [
+            _index_daily_price_entry(
+                db,
+                index_id=normalized_index_id,
+                expected_daily_price_date=expected_date,
+            )
+        ]
+        if normalized_index_id
+        else [
+            _symbol_master_entry(db, symbol=normalized_symbol),
+            *_daily_price_entries(
+                db,
+                symbol=normalized_symbol,
+                expected_daily_price_date=expected_date,
+            ),
+            _fundamentals_entry(db, symbol=normalized_symbol),
+            _investor_trade_entry(db, symbol=normalized_symbol),
+        ]
+    )
     generated_at = _generated_at()
     entry_dicts = enrich_source_health_entries(
         db,
@@ -270,7 +311,10 @@ def build_kr_source_health(
     return {
         "kind": "kr_source_health",
         "generated_at": generated_at.isoformat(),
-        "filters": {"symbol": normalized_symbol},
+        "filters": {
+            "symbol": normalized_symbol,
+            "index_id": normalized_index_id,
+        },
         "expected_daily_price_date": expected_date.isoformat() if expected_date else None,
         "summary": _summary(entries),
         "entries": entry_dicts,

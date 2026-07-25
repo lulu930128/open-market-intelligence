@@ -609,6 +609,8 @@ def _build_consumer_human_answer(
     warnings: list[Any],
     position_decision: dict[str, Any] | None = None,
     response_preferences: dict[str, Any] | None = None,
+    selected_capabilities: list[str] | tuple[str, ...] | None = None,
+    requested_domains: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     return answer_composer.build_consumer_human_answer(
         question_intent=question_intent,
@@ -620,6 +622,8 @@ def _build_consumer_human_answer(
         llm_report=_llm_report_from_result(result),
         summary_limit=CONSUMER_SUMMARY_LIMIT,
         response_preferences=response_preferences,
+        selected_capabilities=selected_capabilities,
+        requested_domains=requested_domains,
     )
 
 
@@ -995,6 +999,9 @@ def _clarification_response(
         "contract_version": CONTRACT_VERSION,
         "ok": True,
         "question": payload.question,
+        "selection": payload.selection,
+        "output": payload.output,
+        "realtime_policy": payload.realtime_policy,
         "target": _resolution_target(resolution),
         "mode": {
             "requested": requested_mode,
@@ -1059,6 +1066,9 @@ def _target_error_response(
         "contract_version": CONTRACT_VERSION,
         "ok": False,
         "question": payload.question,
+        "selection": payload.selection,
+        "output": payload.output,
+        "realtime_policy": payload.realtime_policy,
         "target": _resolution_target(resolution),
         "mode": {
             "requested": requested_mode,

@@ -409,6 +409,12 @@ function consumerSource(consumer: UnknownRecord, response: UnknownRecord) {
 
 function decisionEvidence(consumer: UnknownRecord, response: UnknownRecord) {
   const canonicalEvidence = asRecord(response.evidence);
+  const selectedData = asRecord(canonicalEvidence.data);
+  const selectedTechnical = asRecord(selectedData["technical.structure"]);
+  const selectedAnalysis = asRecord(selectedTechnical.analysis);
+  const selectedDecisionEvidence = asRecord(selectedAnalysis.decision_evidence);
+  if (Object.keys(selectedDecisionEvidence).length > 0) return selectedDecisionEvidence;
+
   const canonicalResult = asRecord(canonicalEvidence.result);
   const canonicalAnalysis = asRecord(canonicalResult.analysis);
   const canonicalDecisionEvidence = asRecord(canonicalAnalysis.decision_evidence);
@@ -911,7 +917,9 @@ function buildRequest({
   return {
     question,
     target,
-    contract_version: "omi.decision.v3",
+    contract_version: "omi.decision.v4",
+    output: "decision_with_evidence",
+    realtime_policy: asksIntraday ? "require_live" : "prefer_live",
     mode: "brief",
     caller_profile: "frontend_readonly",
     allow_llm: false,

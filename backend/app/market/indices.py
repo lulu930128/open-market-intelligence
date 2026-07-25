@@ -362,6 +362,44 @@ def _market_breadth_label(market: str, scope: str | None) -> str:
     return f"{market_label}本機資料集廣度"
 
 
+def _market_breadth_universe_definition(scope: str | None) -> dict[str, object]:
+    normalized_scope = str(scope or "local_dataset")
+    if normalized_scope == "registered_universe":
+        return {
+            "authority": "omi_stock_master",
+            "inclusion_rule": (
+                "market=TWSE, is_active=true, instrument_type=stock, "
+                "four_digit_numeric_security_code"
+            ),
+            "instrument_type_policy": (
+                "Non-stock instruments are excluded when StockMaster classifies "
+                "them separately; ETF/ETN treatment therefore depends on registry classification."
+            ),
+            "missing_quote_policy": "unknown_not_unchanged",
+            "official_full_market": False,
+        }
+    if normalized_scope == "full_market":
+        return {
+            "authority": "exchange_published_market_rows",
+            "inclusion_rule": (
+                "provider rows with a four-digit numeric security code; the exchange "
+                "provider's instrument classification is not redefined by OMI"
+            ),
+            "instrument_type_policy": "provider_defined",
+            "missing_quote_policy": (
+                "excluded_from_classified_counts_and_reported_as_coverage_gap"
+            ),
+            "official_full_market": True,
+        }
+    return {
+        "authority": "local_cached_dataset",
+        "inclusion_rule": "rows present in the named local source dataset",
+        "instrument_type_policy": "source_defined",
+        "missing_quote_policy": "reported_by_available_coverage_fields",
+        "official_full_market": False,
+    }
+
+
 def _breadth_status_contract(index_payload: dict) -> dict:
     market = str(index_payload.get("market") or "unknown")
     breadth = index_payload.get("breadth")
@@ -409,6 +447,16 @@ def _with_breadth_status_contract(payload: dict) -> dict:
         if not isinstance(raw_item, dict):
             continue
         item = dict(raw_item)
+        if isinstance(item.get("breadth"), dict):
+            item["breadth"] = {
+                **item["breadth"],
+                "universe_definition": item["breadth"].get(
+                    "universe_definition"
+                )
+                or _market_breadth_universe_definition(
+                    item["breadth"].get("scope")
+                ),
+            }
         breadth_status = _breadth_status_contract(item)
         item["breadth_status"] = breadth_status
         identity = item.get("index_id") or item.get("market") or "Index"
@@ -450,6 +498,9 @@ def _latest_market_breadth(db: Session, market: str) -> dict | None:
     return {
         "market": market,
         "scope": "local_dataset",
+        "universe_definition": _market_breadth_universe_definition(
+            "local_dataset"
+        ),
         "label": _market_breadth_label(market, "local_dataset"),
         "trade_date": latest_trade_date,
         "advance_count": sum(1 for value in changes if value is not None and value > 0),
@@ -717,6 +768,9 @@ def _fetch_twse_mis_live_market_breadth_unguarded(db: Session, market: str) -> d
     payload = {
         "market": "TWSE",
         "scope": "registered_universe",
+        "universe_definition": _market_breadth_universe_definition(
+            "registered_universe"
+        ),
         "label": _market_breadth_label("TWSE", "registered_universe"),
         "trade_date": max(trade_dates) if trade_dates else None,
         "advance_count": advance_count,
@@ -884,6 +938,9 @@ def _market_quote_breadth_from_rows(
     return {
         "market": market,
         "scope": "full_market",
+        "universe_definition": _market_breadth_universe_definition(
+            "full_market"
+        ),
         "label": _market_breadth_label(market, "full_market"),
         "trade_date": trade_date,
         "advance_count": advance_count,
@@ -973,6 +1030,9 @@ def _fetch_twse_rwd_market_quote_breadth(trade_date: date | None = None) -> dict
     return {
         "market": "TWSE",
         "scope": "full_market",
+        "universe_definition": _market_breadth_universe_definition(
+            "full_market"
+        ),
         "label": _market_breadth_label("TWSE", "full_market"),
         "trade_date": payload_date,
         "advance_count": advance_count or 0,
@@ -2010,6 +2070,15 @@ def _fetch_yahoo_index_intraday(config: dict) -> dict:
         "stock_id": config["index_id"],
         "symbol": symbol,
         "source": "yahoo_finance_chart",
+        "provider": "yahoo_chart",
+        "interval": "1m",
+        "trade_date": (
+            intraday_points[-1]["time"][:10] if intraday_points else None
+        ),
+        "coverage_status": "available" if len(intraday_points) > 1 else "partial",
+        "is_partial": len(intraday_points) <= 1,
+        "volume_unit": None,
+        "volume_semantics": "provider_index_volume_not_market_trade_value",
         "previous_close": _as_float(meta.get("chartPreviousClose"))
         or _as_float(meta.get("regularMarketPreviousClose")),
         "point_count": len(intraday_points),
@@ -2096,6 +2165,13 @@ def _fetch_twse_index_5s_intraday(
         "stock_id": config["index_id"],
         "symbol": config["symbol"],
         "source": "twse_index_5s",
+        "provider": "twse_openapi",
+        "interval": "5s",
+        "trade_date": payload_date.isoformat(),
+        "coverage_status": "current_session_series",
+        "is_partial": False,
+        "volume_unit": None,
+        "volume_semantics": "not_provided_for_cash_index",
         "previous_close": points[0]["price"],
         "point_count": len(points),
         "points": points,
@@ -2365,6 +2441,12 @@ def _fetch_mis_index_intraday(config: dict) -> dict:
             "stock_id": config["index_id"],
             "symbol": symbol,
             "source": "twse_mis_index_snapshot",
+            "provider": "twse_mis",
+            "interval": "snapshot",
+            "coverage_status": "missing",
+            "is_partial": True,
+            "volume_unit": None,
+            "volume_semantics": "not_provided_for_cash_index",
             "previous_close": None,
             "point_count": 0,
             "points": [],
@@ -2377,6 +2459,12 @@ def _fetch_mis_index_intraday(config: dict) -> dict:
             "stock_id": config["index_id"],
             "symbol": symbol,
             "source": "twse_mis_index_snapshot",
+            "provider": "twse_mis",
+            "interval": "snapshot",
+            "coverage_status": "missing",
+            "is_partial": True,
+            "volume_unit": None,
+            "volume_semantics": "not_provided_for_cash_index",
             "previous_close": _as_float(message.get("y")),
             "point_count": 0,
             "points": [],
@@ -2395,6 +2483,13 @@ def _fetch_mis_index_intraday(config: dict) -> dict:
         "stock_id": config["index_id"],
         "symbol": symbol,
         "source": "twse_mis_index_snapshot",
+        "provider": "twse_mis",
+        "interval": "snapshot",
+        "trade_date": latest_time[:10],
+        "coverage_status": "single_snapshot",
+        "is_partial": True,
+        "volume_unit": None,
+        "volume_semantics": "snapshot_provider_value_not_market_trade_value",
         "previous_close": _as_float(message.get("y")),
         "point_count": 1,
         "points": [point],
@@ -2477,6 +2572,13 @@ def _index_intraday_fallback_from_list(config: dict) -> dict | None:
         "stock_id": config["index_id"],
         "symbol": config["symbol"],
         "source": source,
+        "provider": source,
+        "interval": "snapshot",
+        "trade_date": trade_date.isoformat(),
+        "coverage_status": "single_official_close_snapshot",
+        "is_partial": True,
+        "volume_unit": None,
+        "volume_semantics": "not_provided_for_cash_index",
         "previous_close": previous_close,
         "point_count": 1,
         "points": [
@@ -2722,6 +2824,13 @@ def get_market_index_intraday(index_id: str) -> dict:
         "stock_id": config["index_id"],
         "symbol": config["symbol"],
         "source": "unavailable",
+        "provider": None,
+        "interval": None,
+        "trade_date": None,
+        "coverage_status": "missing",
+        "is_partial": True,
+        "volume_unit": None,
+        "volume_semantics": "not_available",
         "previous_close": None,
         "point_count": 0,
         "points": [],

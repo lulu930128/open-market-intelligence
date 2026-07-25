@@ -4,7 +4,7 @@ from datetime import date
 from types import SimpleNamespace
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from sqlalchemy import create_engine
 from sqlalchemy import inspect as sqlalchemy_inspect
@@ -13,11 +13,30 @@ from sqlalchemy.orm import Session
 from app.db.models import JobRun, utc_now
 from app.jobs import backfill_tasks
 from app.jobs import service as job_service
-from app.market import stock_selection_refresh
+from app.market import monthly_revenue_history_backfill, stock_selection_refresh
 from app.routers.jobs import _parse_date, _retry_config
 
 
 class JobRetryTests(unittest.TestCase):
+    def test_monthly_revenue_backfill_targets_latest_released_period_not_latest_cache(self) -> None:
+        with patch.object(
+            monthly_revenue_history_backfill,
+            "expected_monthly_revenue_period",
+            return_value=date(2026, 6, 1),
+        ):
+            months = monthly_revenue_history_backfill._target_months(
+                db=SimpleNamespace(),
+                stock_id="2330",
+                from_period=None,
+                to_period=None,
+                lookback_months=3,
+            )
+
+        self.assertEqual(
+            months,
+            [date(2026, 6, 1), date(2026, 5, 1), date(2026, 4, 1)],
+        )
+
     def test_retry_config_recreates_stock_selection_refresh_task(self) -> None:
         job = SimpleNamespace(
             id=12,
@@ -192,6 +211,13 @@ class JobRetryTests(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["profile"], "basic")
         self.assertEqual(result["requested_count"], 2)
+        self.assertEqual(result["completed_count"], 2)
+        self.assertEqual(result["refreshed_count"], 0)
+        self.assertEqual(result["unchanged_count"], 2)
+        self.assertEqual(
+            result["refreshed_count_semantics"],
+            "datasets_with_inserted_or_updated_rows",
+        )
         self.assertEqual(set(result["results"]), {"daily_price", "institutional_trade"})
         daily_price.assert_called_once()
         daily_metrics.assert_called_once()
@@ -200,6 +226,154 @@ class JobRetryTests(unittest.TestCase):
         shareholding.assert_not_called()
         revenue.assert_not_called()
         financials.assert_not_called()
+
+    def test_custom_selection_refresh_runs_only_requested_dataset(self) -> None:
+        with (
+            patch.object(
+                stock_selection_refresh,
+                "ensure_stock_monthly_revenue_history",
+                return_value={
+                    "status": "success",
+                    "inserted_count": 1,
+                    "updated_count": 0,
+                },
+            ) as revenue,
+            patch.object(
+                stock_selection_refresh,
+                "_ensure_current_month_daily_prices",
+            ) as daily_price,
+            patch.object(
+                stock_selection_refresh,
+                "ensure_stock_daily_metrics",
+            ) as daily_metrics,
+            patch.object(
+                stock_selection_refresh,
+                "ensure_broker_branch_daily",
+            ) as branch,
+            patch.object(
+                stock_selection_refresh,
+                "ensure_stock_shareholding_history",
+            ) as shareholding,
+            patch.object(
+                stock_selection_refresh,
+                "ensure_stock_financial_metrics_history",
+            ) as financials,
+        ):
+            result = stock_selection_refresh.refresh_selected_stock_data(
+                db=SimpleNamespace(),
+                stock_id="2330",
+                steps=["monthly_revenue"],
+            )
+
+        self.assertEqual(result["profile"], "custom")
+        self.assertEqual(result["requested_count"], 1)
+        self.assertEqual(result["refreshed_count"], 1)
+        self.assertEqual(result["changed_row_count"], 1)
+        self.assertEqual(
+            result["results"]["monthly_revenue"]["refresh_outcome"],
+            "updated",
+        )
+        self.assertEqual(set(result["results"]), {"monthly_revenue"})
+        revenue.assert_called_once()
+        daily_price.assert_not_called()
+        daily_metrics.assert_not_called()
+        branch.assert_not_called()
+        shareholding.assert_not_called()
+        financials.assert_not_called()
+
+    def test_shareholding_no_change_records_refresh_cooldown(self) -> None:
+        telemetry_db = Mock(spec=Session)
+        with (
+            patch.object(
+                stock_selection_refresh,
+                "ensure_stock_shareholding_history",
+                return_value={"status": "success", "inserted_count": 0},
+            ),
+            patch.object(
+                stock_selection_refresh,
+                "SessionLocal",
+                return_value=telemetry_db,
+            ),
+            patch.object(
+                stock_selection_refresh,
+                "record_provider_event",
+            ) as record_event,
+        ):
+            result = stock_selection_refresh.refresh_selected_stock_data(
+                db=SimpleNamespace(),
+                stock_id="2330",
+                steps=["shareholding_distribution"],
+            )
+
+        self.assertEqual(
+            result["results"]["shareholding_distribution"][
+                "refresh_outcome"
+            ],
+            "unchanged",
+        )
+        record_event.assert_called_once()
+        call = record_event.call_args
+        self.assertIs(call.args[0], telemetry_db)
+        self.assertEqual(call.kwargs["event_type"], "refresh_no_change")
+        self.assertEqual(
+            call.kwargs["detail"]["refresh_outcome"],
+            "unchanged",
+        )
+        self.assertIn(
+            "next_eligible_refresh_at",
+            call.kwargs["detail"],
+        )
+        telemetry_db.rollback.assert_not_called()
+        telemetry_db.close.assert_called_once()
+
+    def test_shareholding_telemetry_failure_does_not_poison_caller_session(
+        self,
+    ) -> None:
+        caller_db = Mock(spec=Session)
+        telemetry_db = Mock(spec=Session)
+        with (
+            patch.object(
+                stock_selection_refresh,
+                "ensure_stock_shareholding_history",
+                return_value={"status": "success", "inserted_count": 0},
+            ),
+            patch.object(
+                stock_selection_refresh,
+                "ensure_stock_monthly_revenue_history",
+                return_value={"status": "success", "inserted_count": 1},
+            ) as revenue,
+            patch.object(
+                stock_selection_refresh,
+                "SessionLocal",
+                return_value=telemetry_db,
+            ),
+            patch.object(
+                stock_selection_refresh,
+                "record_provider_event",
+                side_effect=RuntimeError("telemetry commit failed"),
+            ),
+            patch.object(
+                stock_selection_refresh.logger,
+                "exception",
+            ) as log_exception,
+        ):
+            result = stock_selection_refresh.refresh_selected_stock_data(
+                db=caller_db,
+                stock_id="2330",
+                steps=[
+                    "shareholding_distribution",
+                    "monthly_revenue",
+                ],
+            )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["completed_count"], 2)
+        self.assertEqual(result["refreshed_count"], 1)
+        revenue.assert_called_once()
+        caller_db.rollback.assert_not_called()
+        telemetry_db.rollback.assert_called_once()
+        telemetry_db.close.assert_called_once()
+        log_exception.assert_called()
 
     def test_serialize_job_can_return_compact_polling_summary(self) -> None:
         job = SimpleNamespace(

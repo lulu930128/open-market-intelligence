@@ -123,64 +123,191 @@ class OmiMcpServerPayloadTests(unittest.TestCase):
 
         self.assertEqual(payload["mode"], "full")
 
-    def test_ask_include_raw_false_returns_bounded_transport_summary(self) -> None:
-        raw_response = {
-            "contract_version": "omi.ai.ask.v2",
-            "ok": True,
-            "analysis": {
-                "question_intent": "trend_view",
-                "selected_score": -5,
-                "selected_title": "偏弱",
-                "human_answer": {"headline": "NVDA 偏弱", "text": "結論：NVDA 偏弱"},
+    def test_ask_defaults_to_v4_and_forwards_selective_contract_fields(self) -> None:
+        arguments = {
+            "question": "只要 2330 即時價",
+            "intents": ["quote", "data_freshness"],
+            "output": "evidence_only",
+            "realtime_policy": "require_live",
+            "selection": {
+                "include": ["quote.snapshot"],
+                "fields": {"quote.snapshot": ["price", "quote_time"]},
+                "max_response_bytes": 12_000,
             },
-            "result": {
-                "kind": "ai_data_envelope",
-                "data": {
-                    "compact": {
-                        "kind": "stock_compact_evidence",
-                        "target": {"type": "us_stock", "id": "NVDA"},
-                        "quote": {"price": 170},
-                        "technical": {"selected_score": -5},
-                        "financial_history": [{"period": f"202{i}Q1"} for i in range(20)],
+            "continuation": {
+                "plan_id": "plan_123",
+                "selected_action_ids": ["fill_123"],
+            },
+        }
+
+        payload = self.server._ask_payload(arguments)
+        properties = self.server.ASK_TOOL["inputSchema"]["properties"]
+
+        self.assertEqual(payload["contract_version"], "omi.decision.v4")
+        self.assertEqual(payload["intents"], ["quote", "data_freshness"])
+        self.assertEqual(payload["output"], "evidence_only")
+        self.assertEqual(payload["realtime_policy"], "require_live")
+        self.assertEqual(payload["selection"], arguments["selection"])
+        self.assertEqual(payload["continuation"], arguments["continuation"])
+        self.assertEqual(
+            properties["contract_version"]["enum"],
+            ["omi.decision.v4"],
+        )
+        self.assertIn("selection", properties)
+        self.assertIn("continuation", properties)
+
+    def test_ask_rejects_legacy_contract_before_backend_call(self) -> None:
+        for contract_version in ("omi.decision.v3", "omi.ai.ask.v2"):
+            with self.subTest(contract_version=contract_version):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "contract_version must be omi.decision.v4",
+                ):
+                    self.server._ask_payload(
+                        {
+                            "question": "2330",
+                            "contract_version": contract_version,
+                        }
+                    )
+
+    def test_tools_list_uses_backend_owned_ask_schema_with_local_transport_only_fields(
+        self,
+    ) -> None:
+        backend_schema = {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string"},
+                "selection": {
+                    "type": "object",
+                    "properties": {
+                        "include": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": ["backend.only"],
+                            },
+                        }
                     },
-                    "chart": [{"close": index} for index in range(500)],
                 },
-                "source_refs": [{"url": "https://example.invalid"}],
             },
-            "tool_runs": [{"status": "completed", "raw_response": "x" * 10000}],
+            "required": ["question"],
+        }
+        with patch.object(
+            self.server,
+            "_api_request",
+            return_value={
+                "tools": [
+                    {
+                        "name": "omi.ask",
+                        "title": "Backend Ask OMI",
+                        "description": "Backend-owned contract.",
+                        "input_schema": backend_schema,
+                    }
+                ]
+            },
+        ) as request:
+            response = self.server._handle_request(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 5,
+                    "method": "tools/list",
+                }
+            )
+
+        tools = response["result"]["tools"]
+        ask_tool = next(tool for tool in tools if tool["name"] == "omi.ask")
+        stream_tool = next(
+            tool for tool in tools if tool["name"] == "omi.ask_stream"
+        )
+        self.assertEqual(ask_tool["title"], "Backend Ask OMI")
+        self.assertEqual(
+            ask_tool["inputSchema"]["properties"]["selection"]["properties"][
+                "include"
+            ]["items"]["enum"],
+            ["backend.only"],
+        )
+        self.assertIn("include_raw", ask_tool["inputSchema"]["properties"])
+        self.assertEqual(
+            stream_tool["inputSchema"]["properties"]["selection"],
+            ask_tool["inputSchema"]["properties"]["selection"],
+        )
+        request.assert_called_once_with(
+            "GET",
+            "/api/ai/tools",
+            timeout_seconds=self.server.SCHEMA_TIMEOUT_SECONDS,
+        )
+
+    def test_tools_list_falls_back_to_static_schema_when_backend_is_unavailable(
+        self,
+    ) -> None:
+        with patch.object(
+            self.server,
+            "_api_request",
+            side_effect=RuntimeError("offline"),
+        ):
+            tools = self.server._tools_for_client()
+
+        self.assertEqual(tools, self.server.TOOLS)
+
+    def test_ask_include_raw_false_keeps_canonical_v4_envelope(self) -> None:
+        raw_response = {
+            "kind": "omi_decision",
+            "contract_version": "omi.decision.v4",
+            "ok": True,
+            "answer": {
+                "headline": "NVDA trend",
+                "text": "Canonical backend answer.",
+            },
+            "evidence": {
+                "data": {
+                    "quote.snapshot": {
+                        "price": 170,
+                        "provider": "test",
+                    }
+                }
+            },
+            "projection": {
+                "max_response_bytes": 12_000,
+                "budget_met": True,
+            },
         }
 
         with patch.object(self.server, "_api_post", return_value=raw_response):
-            summary = self.server._call_tool(
-                "omi.ask",
-                {"question": "NVDA 怎麼看", "include_raw": False},
-            )
-
-        self.assertEqual(summary["kind"], "omi_ask_summary")
-        self.assertFalse(summary["raw_included"])
-        self.assertEqual(summary["analysis"]["human_answer"]["headline"], "NVDA 偏弱")
-        self.assertNotIn("result", summary)
-        self.assertNotIn("financial_history", summary["compact_evidence"])
-        self.assertLess(len(json.dumps(summary)), len(json.dumps(raw_response)) / 2)
-
-    def test_ask_include_raw_true_preserves_legacy_response(self) -> None:
-        raw_response = {"ok": True, "result": {"data": {"raw": [1, 2, 3]}}}
-        with patch.object(self.server, "_api_post", return_value=raw_response):
             response = self.server._call_tool(
                 "omi.ask",
-                {"question": "2330", "include_raw": True},
+                {"question": "NVDA", "include_raw": False},
             )
 
         self.assertIs(response, raw_response)
 
-    def test_ask_stream_include_raw_false_omits_event_and_evidence_arrays(self) -> None:
+    def test_ask_rejects_non_v4_backend_response(self) -> None:
+        raw_response = {
+            "contract_version": "omi.decision.v3",
+            "ok": True,
+        }
+        with patch.object(self.server, "_api_post", return_value=raw_response):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "non-v4 public ask response",
+            ):
+                self.server._call_tool(
+                    "omi.ask",
+                    {"question": "2330", "include_raw": True},
+                )
+
+    def test_ask_stream_include_raw_false_keeps_v4_stream_result(self) -> None:
         raw_response = {
             "kind": "omi_stream_result",
             "ok": True,
             "events": [{"event": "delta", "data": {"text": "ready"}}],
             "evidence": {"rows": list(range(100))},
             "delta_text": "ready",
-            "final": {"ok": True, "analysis": {"human_answer": {"text": "ready"}}},
+            "final": {
+                "kind": "omi_decision",
+                "contract_version": "omi.decision.v4",
+                "ok": True,
+                "answer": {"text": "ready"},
+            },
             "error": None,
         }
         with patch.object(self.server, "_api_stream_post", return_value=raw_response):
@@ -189,11 +316,7 @@ class OmiMcpServerPayloadTests(unittest.TestCase):
                 {"question": "2330", "include_raw": False},
             )
 
-        self.assertEqual(response["kind"], "omi_stream_summary")
-        self.assertFalse(response["raw_included"])
-        self.assertNotIn("events", response)
-        self.assertNotIn("evidence", response)
-        self.assertEqual(response["final"]["analysis"]["human_answer"]["text"], "ready")
+        self.assertIs(response, raw_response)
 
     def test_ask_schema_supports_cross_market_targets_and_market_data_params(self) -> None:
         properties = self.server.ASK_TOOL["inputSchema"]["properties"]
@@ -237,7 +360,7 @@ class OmiMcpServerPayloadTests(unittest.TestCase):
         self.assertEqual(result["structuredContent"], payload)
         self.assertEqual(json.loads(result["content"][0]["text"]), payload)
 
-    def test_business_failure_sets_mcp_is_error_true(self) -> None:
+    def test_structured_business_failure_keeps_mcp_is_error_false(self) -> None:
         payload = {
             "kind": "ai_ask",
             "ok": False,
@@ -254,7 +377,7 @@ class OmiMcpServerPayloadTests(unittest.TestCase):
                 }
             )
 
-        self.assertTrue(response["result"]["isError"])
+        self.assertFalse(response["result"]["isError"])
         self.assertFalse(response["result"]["structuredContent"]["ok"])
 
     def test_normal_empty_result_keeps_mcp_is_error_false(self) -> None:

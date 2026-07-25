@@ -1,16 +1,18 @@
 # OMI 對外接口與能力限制說明書
 
 > 契約更新：AI 決策入口的 canonical contract 已收斂為
-> `omi.decision.v3`，完整定義見
+> `omi.decision.v4`，完整定義見
 > [`architecture/OmiDecisionContract.md`](architecture/OmiDecisionContract.md)。
-> 本文件內的 `omi.ai.ask.v2` 欄位與範例僅保留作為 migration compatibility；
-> 新 consumer 不應再依賴 v2 的 `analysis.human_answer` 或 adapter 自製摘要。
+> HTTP、SSE、MCP 與 OpenAPI 只接受並回傳 v4；v2/v3 只存在於 backend
+> 私有實作與回歸 seam，不是 consumer 可選版本。Consumer 應使用 v4 capability
+> selection 與 `evidence.quality`，不應依賴 legacy `analysis.human_answer`
+> 或 adapter 自製摘要。
 
-> 文件基準：2026-07-22（Asia/Taipei）
+> 文件基準：2026-07-24（Asia/Taipei）
 >
 > Backend OpenAPI：`0.1.0`
 >
-> AI 問答 contract：`omi.ai.ask.v2`
+> AI 問答 contract：`omi.decision.v4`
 
 本文件說明 Open Market Intelligence（OMI）目前可供 Frontend、Kuro、MCP、ChatGPT 或其他本機程式使用的接口，以及各接口可以做到、不能做到與必須保留的限制。它不是自動交易 API 規格，也不代表每一條 FastAPI route 都是承諾長期穩定的 public API。
 
@@ -31,7 +33,8 @@
 - 以同一個 AI contract 查詢台股市場、台股個股、自選群組、指數、期貨，以及美股、日股、韓股、Crypto、資源商品、FRED macro、portfolio、source health 與 capability status。
 - 回傳 deterministic `data_only` evidence、可讀的 `brief`、完整 evidence `full`，以及在受信任條件下的部分 LLM `analysis` / persisted `report`。
 - 先讀本機資料與 freshness，再由受信任的 backend 在預算內做 stale-first 外部刷新；失敗時保留 cached、stale、partial、missing 與 provider warning。
-- 透過 `evidence_passport`、`freshness`、`source_refs`、slot status 與 readiness flags 告訴 consumer 資料能信到什麼程度。
+- 透過 `evidence.quality`、manifest、slots、source refs 與 readiness 告訴
+  consumer 每個 capability 的資料能信到什麼程度。
 - 使用 Frontend `/omi-data` proxy、stdio MCP，或本機 `OMI_search` HTTP MCP 將外部 consumer 保持在 Backend contract 之外。
 
 ### 目前不能做到
@@ -115,7 +118,9 @@ Frontend / Kuro / MCP / ChatGPT / local scripts
 | `GET` | `/api/ai/data-freshness` | 直接讀取 freshness | 無 |
 | `GET` | `/api/ai/market-overview` | 直接讀取台股市場 overview | 無 |
 
-外部 consumer 應優先把 `/api/ai/ask` 當成 OMI 的單一能力入口。這個 contract 有獨立版本 `omi.ai.ask.v2`；FastAPI app 的 `0.1.0` 不等同 AI contract version。
+外部 consumer 應優先把 `/api/ai/ask` 當成 OMI 的單一能力入口。Canonical
+contract 是 `omi.decision.v4`；FastAPI app 的 `0.1.0` 不等同 AI contract
+version。
 
 ### B. 專用市場 read APIs
 
@@ -169,11 +174,14 @@ Frontend / Kuro / MCP / ChatGPT / local scripts
 
 | 欄位 | 目前規則 |
 | --- | --- |
-| `contract_version` | 固定使用 `omi.ai.ask.v2` |
+| `contract_version` | 唯一合法 public 值是 `omi.decision.v4`；v2/v3 會被拒絕 |
 | `question` | 必填，1–4000 字元 |
 | `target` | 建議 `{ "type": "auto" }` 或明確 `{ "type", "id" }`；不能再傳 legacy `scope_type/scope_id` |
 | `mode` | `auto`、`data_only`、`brief`、`full`、`analysis`、`report` |
-| `payload_level` | `summary`、`compact`、`standard`、`full`；控制資料密度，與回答 mode 分離 |
+| `selection` | 選擇 required/optional/excluded capability、欄位、筆數與總 bytes |
+| `output` | `evidence_only`、`decision` 或 `decision_with_evidence`；診斷 target 強制 evidence-only |
+| `realtime_policy` | `cache_only`、`prefer_live`、`require_live` |
+| `payload_level` | 舊 caller 的 evidence density 別名；v4 會正規化為 selection limits |
 | `diagnostics_level` | `none`、`basic`、`debug`；只控制診斷資訊，不會提升回答 mode |
 | `strategy_profile` | `balanced`、`technical_swing`、`short_term_momentum`、`chip_flow`、`fundamentals_growth`、`dividend_value` |
 | `analysis_horizon` | `auto`、`intraday`、`short`、`swing`、`long`；`auto` 預設偏 swing |
@@ -222,20 +230,26 @@ Backend public tool schema 的預設/上限：
 
 建議使用：
 
-- 語音/Kuro/短答：`payload_level=summary`
-- 一般 MCP/ChatGPT：`payload_level=compact`
-- UI 詳細卡：`standard`
-- 明確需要完整證據或 debug：`full`
+- Kuro、一般 MCP、Frontend 與外部模型都使用同一份 v4；呈現或可朗讀稿由
+  consumer 自行處理，不建立 Kuro 專用資料 contract。
+- 優先用 `selection.include`、`selection.fields`、`selection.limits` 與
+  `selection.max_response_bytes` 控制資料量。
+- `payload_level` 只供舊 consumer 過渡，不應再作為唯一邊界。
 
 ### Request 範例
 
 ```powershell
 $body = @{
-  contract_version = "omi.ai.ask.v2"
+  contract_version = "omi.decision.v4"
   question = "2330 現在的技術位階、回測區與失效條件"
   target = @{ type = "tw_stock"; id = "2330" }
   mode = "brief"
-  payload_level = "compact"
+  output = "decision_with_evidence"
+  realtime_policy = "prefer_live"
+  selection = @{
+    include = @("quote.snapshot", "technical.structure")
+    max_response_bytes = 32768
+  }
   diagnostics_level = "none"
   allow_llm = $false
   allow_write = $false
@@ -337,6 +351,8 @@ Consumer 不得把 `missing` / `planned` 當作 0，也不得把 daily fallback 
 | `source_health` | 否；可用 id/filter | 跨市場 provider freshness、missing 與 incident context | 反映 runtime 狀態，不等同 capability 是否已實作 |
 | `capability_status` | 否；可指定 capability id | 查詢已接、derived、private、需 key、未接 provider 的 contract | 反映 implementation readiness，不等同資料此刻 current |
 
+`source_health` 的 `market_data_params` 支援 `market`、`resource`、`target`、`provider`、`status_filter`、`problems_only`、`include_healthy` 與 bounded `health_limit`。`total_*` 是套用 market/resource/target/provider 後的基礎集合，`matched_*` 是再套用 status/problem filter 的命中集合，`returned_*` 則是 limit 後實際回傳集合。
+
 ## 8. 目前 capability readiness
 
 以下是 Backend `capability_status` contract 在 2026-07-22 的分類；它與即時 source health 是兩件事。
@@ -402,9 +418,11 @@ Consumer 規則：
 
 特性：
 
-- 支援完整 `omi.ai.ask.v2` request controls。
-- `include_raw=true` 為目前 backward-compatible 預設；外部/語音 consumer 建議設 `false` 限制 payload。
-- `include_raw=false` 只保留 human answer、selected decision fields、compact evidence status 與重要 timeout/fallback runs。
+- 支援完整 `omi.decision.v4` request controls，schema 由 backend
+  `/api/ai/tools` 動態提供。
+- `include_raw` 僅保留為 caller compatibility flag；v4 下不改寫 response。
+  Payload 大小由 backend `selection.fields`、`selection.limits` 與
+  `selection.max_response_bytes` 控制。
 - `OMI_MCP_EXPOSE_INTERNAL_TOOLS=false` 是安全預設。只有 trusted local debug 才能設成 `true`。
 - `OMI_API_BASE_URL` 應指向 launcher 實際選到的 Backend URL。
 - `OMI_MCP_AI_TRUST_TOKEN` 只傳 OMI trust header，不保存 OpenAI key。
@@ -423,11 +441,17 @@ Public tool：`omi.search`
 - `allow_write=false`
 - `mode=data_only`
 - `refresh_if_missing=false`
-- `include_raw=false`
+- `contract_version=omi.decision.v4`
 
-允許的 mode 只有 `data_only`、`brief`、`full`。它不能產生 LLM analysis/report，也不能寫 memory/report。
+允許的 mode 只有 `data_only`、`brief`、`full`。它不能產生 LLM
+analysis/report，也不能寫 memory/report；但可轉送 `selection`、`output`、
+`realtime_policy` 與 granular continuation，並原樣回傳 v4 envelope。
 
-`refresh_if_missing=true` 只會要求 Backend 使用 `allow_external_fetch=true` 與 bounded budget；是否實際 refresh、是否能更新 market cache，仍由 Backend trust/freshness policy 決定。
+`refresh_if_missing=true` 只會要求 Backend 使用 `allow_external_fetch=true` 與
+bounded budget，允許主規劃器嘗試 refresh；不保證所有 fill action 都會在同一
+request 自動執行。實際 attempts、tool outcomes、payload 是否進入 evidence 與
+remaining actions 讀 `execution.refresh_reconciliation`，是否能更新 market
+cache 仍由 Backend trust/freshness policy 決定。
 
 ```json
 {
@@ -436,11 +460,18 @@ Public tool：`omi.search`
   "mode": "data_only",
   "refresh_if_missing": false,
   "payload_level": "compact",
-  "include_raw": false
+  "selection": {
+    "include": ["quote.snapshot", "technical.structure"],
+    "max_response_bytes": 32768
+  }
 }
 ```
 
 HTTP MCP 使用 session：client 先 `initialize`，保存 response 的 `Mcp-Session-Id`，之後用相同 header 呼叫 `tools/list` / `tools/call`。
+
+`TARGET_NOT_FOUND`、trust 拒絕與其他 structured business rejection 都是成功
+傳輸的 canonical result，因此 MCP `isError=false`；只有 protocol、HTTP
+transport、serialization 或 adapter internal failure 使用 `isError=true`。
 
 `OMI_search` v1 不支援任意 dataset query DSL。若未來需要日期區間、欄位選擇、排序、分頁或跨 dataset query，應先在 OMI Backend 新增正式 contract，例如 `/api/ai/search`，再讓 adapter forward。
 

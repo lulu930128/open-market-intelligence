@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 import unittest
@@ -9,16 +9,24 @@ from unittest.mock import patch
 import requests
 
 from app.ai.ask_finalizer import (
+    _apply_stock_compact_fields,
     _domain_passport,
     _intraday_summary_from_compact,
     _market_live_summary,
 )
+from app.ai.agentic_execution import _compact_result
+from app.ai.data_quality_contract import _continuity_summary
 from app.ai.decision_core import infer_question_intent
 from app.ai.market_context.jp_context import _jp_intraday_quote
 from app.ai.market_context.kr_context import _kr_intraday_quote
+from app.ai.market_context.us_context import _us_intraday_compact
 from app.ai.market_context import taiwan_stock
 from app.ai.market_context.taiwan_stock import _apply_disposition_quote_contract
-from app.ai.market_context.taiwan_projection import _compact_index_quote
+from app.ai.market_context.taiwan_projection import (
+    _compact_index_quote,
+    _compact_quote_snapshot,
+    _compact_single_intraday_series,
+)
 from app.ai.tools import _health_dimensions
 from app.ai.schemas import AiAskRequest
 from app.ai.query_plan import build_query_plan
@@ -41,6 +49,112 @@ from app.observability.provider_http import (
 class IntradayContractRemediationTests(unittest.TestCase):
     def tearDown(self) -> None:
         reset_twse_mis_quote_depth_guard()
+
+    def test_index_intraday_projection_preserves_actual_five_second_interval(self) -> None:
+        projected = _compact_single_intraday_series(
+            raw_payload={
+                "interval": "5s",
+                "provider": "twse_openapi",
+                "source": "twse_index_5s",
+                "point_count": 2,
+                "points": [
+                    {
+                        "time": "2026-07-24T09:00:00+08:00",
+                        "price": 44000.0,
+                    },
+                    {
+                        "time": "2026-07-24T09:00:05+08:00",
+                        "price": 44001.0,
+                    },
+                ],
+            },
+            interval="1m",
+            include_intraday=True,
+            market_data_params={"intraday_limit": 1},
+        )
+
+        self.assertEqual(projected["intervals"], ["5s"])
+        series = projected["series"]["5s"]
+        self.assertEqual(series["point_count"], 2)
+        self.assertEqual(series["returned_point_count"], 1)
+        self.assertEqual(series["bar_limit"], 1)
+        self.assertTrue(series["truncated"])
+
+    def test_us_latest_n_intraday_keeps_contiguous_source_interval(self) -> None:
+        start = datetime(2026, 7, 24, 9, 30)
+        source_points = [
+            {
+                "time": (start + timedelta(minutes=index)).isoformat(),
+                "price": 200.0 + index,
+                "volume": 1_000 + index,
+            }
+            for index in range(390)
+        ]
+
+        tool_summary = _compact_result(
+            {
+                "status": "ok",
+                "source": "yahoo_finance_chart",
+                "interval": "1m",
+                "point_count": len(source_points),
+                "points": source_points,
+            }
+        )
+        compact = _us_intraday_compact(
+            tool_summary,
+            market_data_params={"intraday_limit": 30},
+        )
+        series = compact["series"]["1m"]
+        continuity = _continuity_summary(series, market="US")
+
+        self.assertEqual(tool_summary["sampling_mode"], "latest_n")
+        self.assertEqual(tool_summary["original_point_count"], 390)
+        self.assertEqual(tool_summary["returned_point_count"], 80)
+        self.assertEqual(tool_summary["points"][0], source_points[-80])
+        self.assertEqual(series["source_interval"], "1m")
+        self.assertEqual(series["effective_interval"], "1m")
+        self.assertEqual(series["sampling_mode"], "latest_n")
+        self.assertEqual(series["original_point_count"], 390)
+        self.assertEqual(series["returned_point_count"], 30)
+        self.assertEqual(series["points"], source_points[-30:])
+        self.assertEqual(
+            continuity["expected_interval_seconds"],
+            60.0,
+        )
+        self.assertEqual(
+            continuity["observed_median_interval_seconds"],
+            60.0,
+        )
+        self.assertEqual(continuity["status"], "continuous")
+
+    def test_unavailable_depth_does_not_expose_stale_bid_ask(self) -> None:
+        quote = _compact_quote_snapshot(
+            latest_daily=None,
+            quote_depth={
+                "source": "twse_mis_quote_depth",
+                "last_price": 2350.0,
+                "total_volume_lots": 21505,
+                "best_bid_price": 2345.0,
+                "best_ask_price": 2350.0,
+                "spread": 5.0,
+                "depth_available": False,
+                "freshness": {
+                    "status": "final_snapshot",
+                    "is_live": False,
+                    "is_stale": False,
+                },
+            },
+            quote_error=None,
+            session_phase="post_close",
+        )
+
+        self.assertFalse(quote["depth_available"])
+        self.assertEqual(quote["depth_status"], "unavailable")
+        self.assertEqual(quote["total_volume_lots"], 21505)
+        self.assertEqual(quote["volume_unit"], "lots")
+        self.assertIsNone(quote["best_bid_price"])
+        self.assertIsNone(quote["best_ask_price"])
+        self.assertIsNone(quote["spread"])
 
     def test_stale_taiwan_index_point_is_not_live_during_session(self) -> None:
         calendar_status = {
@@ -144,6 +258,71 @@ class IntradayContractRemediationTests(unittest.TestCase):
         self.assertEqual(result["display_price_time"], "2026-07-20T13:17:00+08:00")
         self.assertEqual(result["display_price_freshness"], "current")
         self.assertFalse(result["quote_depth_available"])
+
+    def test_live_summary_respects_explicit_live_quote_flag(self) -> None:
+        result = _market_live_summary(
+            compact={"target": {"type": "kr_stock", "id": "005930"}},
+            quote={
+                "price": 90_000,
+                "quote_time": "2026-07-24T10:00:00+09:00",
+                "is_live": True,
+                "is_realtime": True,
+                "freshness": {"status": "current_session"},
+            },
+            intraday={},
+        )
+
+        self.assertTrue(result["quote_is_live"])
+        self.assertTrue(result["is_live"])
+        self.assertTrue(result["is_realtime"])
+
+    def test_market_compact_live_summary_uses_taiex_intraday_pack(self) -> None:
+        output: dict[str, object] = {}
+        _apply_stock_compact_fields(
+            output,
+            {
+                "target": {"type": "market", "id": "TW", "market": "TW"},
+                "index_intraday": {
+                    "enabled": True,
+                    "indices": [
+                        {
+                            "index_id": "TAIEX",
+                            "quote": {
+                                "price": 23_510,
+                                "quote_time": "2026-07-24T13:30:00+08:00",
+                                "source": "twse_index_5s",
+                                "is_live": True,
+                                "is_realtime": True,
+                                "freshness": {"status": "live"},
+                            },
+                            "intraday_bars": {
+                                "enabled": True,
+                                "series": {
+                                    "1m": {
+                                        "interval": "1m",
+                                        "point_count": 2,
+                                        "returned_point_count": 2,
+                                        "to_time": "2026-07-24T13:30:00+08:00",
+                                        "freshness_status": "live",
+                                        "latest": {
+                                            "time": "2026-07-24T13:30:00+08:00",
+                                            "close": 23_510,
+                                        },
+                                        "points": [],
+                                    }
+                                },
+                            },
+                        }
+                    ],
+                },
+            },
+        )
+
+        live_summary = output["live_summary"]
+        self.assertEqual(live_summary["status"], "ready")
+        self.assertEqual(live_summary["quote_price"], 23_510)
+        self.assertTrue(live_summary["intraday_available"])
+        self.assertTrue(live_summary["is_live"])
 
     def test_intraday_compact_freshness_reaches_live_summary(self) -> None:
         summary = _intraday_summary_from_compact(

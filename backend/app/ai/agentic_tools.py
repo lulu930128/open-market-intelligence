@@ -31,7 +31,9 @@ from app.crypto_market import service as crypto_market_service
 from app.crypto_market.assets import get_crypto_asset
 from app.crypto_market.source_health import build_crypto_source_health
 from app.jp_market import service as jp_market_service
+from app.jp_market.sources import normalize_jp_symbol
 from app.kr_market import service as kr_market_service
+from app.kr_market.sources import normalize_kr_index_id, normalize_kr_symbol
 from app.market import stock_selection_refresh
 from app.market.overnight_impact import scan_us_overnight_impact_gaps
 from app.portfolio import service as portfolio_service
@@ -133,11 +135,21 @@ def scan_us_stock_gaps(
     *,
     question: str = "",
     satisfied_capabilities: set[str] | None = None,
+    requested_capabilities: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     normalized_symbol = normalize_us_symbol(symbol)
     instrument_type = us_instrument_type(normalized_symbol)
-    required_capabilities = set(
-        required_us_capabilities(question, instrument_type=instrument_type)
+    required_capabilities = (
+        {
+            requirement
+            for capability in requested_capabilities
+            for requirement in agentic_planning.US_CAPABILITY_REQUIREMENTS.get(
+                capability,
+                (),
+            )
+        }
+        if requested_capabilities is not None
+        else set(required_us_capabilities(question, instrument_type=instrument_type))
     )
     satisfied_capabilities = satisfied_capabilities or set()
     latest_daily = _latest_us_daily_price(db, normalized_symbol)
@@ -281,11 +293,17 @@ def run_us_stock_tool_session(
     target: dict[str, Any],
     policy: dict[str, Any],
     raw_budget: dict[str, Any] | None,
+    requested_capabilities: tuple[str, ...] | None = None,
     progress_callback: progress_events.ProgressCallback | None = None,
 ) -> dict[str, Any]:
     normalized_symbol = normalize_us_symbol(symbol)
     budget = normalize_tool_budget(raw_budget)
-    gaps = scan_us_stock_gaps(db, normalized_symbol, question=question)
+    gaps = scan_us_stock_gaps(
+        db,
+        normalized_symbol,
+        question=question,
+        requested_capabilities=requested_capabilities,
+    )
     plan_warnings: list[str] = []
 
     if budget["max_calls"] <= 0:
@@ -308,6 +326,7 @@ def run_us_stock_tool_session(
         gaps=gaps,
         budget=budget,
         can_call_llm=bool(policy.get("can_plan_tools")),
+        requested_capabilities=requested_capabilities,
     )
     plan["budget"] = budget
     runs, run_warnings = execute_tool_plan(
@@ -333,12 +352,330 @@ def run_us_stock_tool_session(
         normalized_symbol,
         question=question,
         satisfied_capabilities=satisfied_capabilities,
+        requested_capabilities=requested_capabilities,
     )
     return {
         "tool_plan": plan,
         "tool_runs": runs,
         "warnings": plan_warnings + run_warnings,
         "freshness": refreshed_gaps,
+    }
+
+
+def run_crypto_asset_tool_session(
+    *,
+    db: Session,
+    asset: str,
+    target: dict[str, Any],
+    policy: dict[str, Any],
+    raw_budget: dict[str, Any] | None,
+    requested_capabilities: tuple[str, ...],
+    selection: dict[str, Any],
+    progress_callback: progress_events.ProgressCallback | None = None,
+) -> dict[str, Any]:
+    normalized_asset = str(asset or "").strip().upper()
+    budget = normalize_tool_budget(raw_budget)
+    plan, plan_warnings = agentic_planning.plan_crypto_asset_tools(
+        asset=normalized_asset,
+        target=target,
+        requested_capabilities=requested_capabilities,
+        selection=selection,
+    )
+    plan["budget"] = budget
+
+    if budget["max_calls"] <= 0:
+        plan.update(
+            {
+                "provider": "disabled",
+                "reason": "OMI tool budget max_calls is 0.",
+                "tool_plan": [],
+            }
+        )
+        return {
+            "tool_plan": plan,
+            "tool_runs": [],
+            "warnings": plan_warnings,
+            "freshness": {
+                "kind": "crypto_asset_refresh_freshness",
+                "is_current": False,
+                "missing": list(requested_capabilities),
+                "warnings": ["Crypto refresh was disabled by the tool budget."],
+            },
+        }
+
+    runs, run_warnings = execute_tool_plan(
+        db=db,
+        plan=plan,
+        budget=budget,
+        can_external_fetch=bool(policy.get("can_external_fetch")),
+        fallback_to_cached=_fallback_to_cached(policy),
+        progress_callback=progress_callback,
+    )
+    attempted_capabilities = {
+        str(capability)
+        for run in runs
+        for capability in (
+            (run.get("arguments") or {}).get("requested_capabilities") or []
+        )
+    }
+    successful_capabilities = {
+        str(capability)
+        for run in runs
+        if run.get("status") == "success"
+        for capability in (
+            (run.get("arguments") or {}).get("requested_capabilities") or []
+        )
+    }
+    refresh_capabilities = {
+        capability
+        for capability in requested_capabilities
+        if capability in agentic_planning.CRYPTO_CAPABILITY_REFRESH_TOOLS
+    }
+    missing = sorted(refresh_capabilities - successful_capabilities)
+    if refresh_capabilities - attempted_capabilities:
+        missing = sorted(
+            set(missing) | (refresh_capabilities - attempted_capabilities)
+        )
+    return {
+        "tool_plan": plan,
+        "tool_runs": runs,
+        "warnings": plan_warnings + run_warnings,
+        "freshness": {
+            "kind": "crypto_asset_refresh_freshness",
+            "scope": {
+                "target": {
+                    "type": "crypto_asset",
+                    "id": normalized_asset,
+                    "market": "crypto",
+                }
+            },
+            "is_current": not missing,
+            "missing": missing,
+            "warnings": plan_warnings + run_warnings,
+            "refresh_recommended": bool(missing),
+        },
+    }
+
+
+def scan_regional_market_gaps(
+    db: Session,
+    *,
+    market: str,
+    target_id: str,
+    is_index: bool,
+) -> dict[str, Any]:
+    normalized_market = str(market or "").strip().upper()
+    if normalized_market == "JP":
+        normalized_id = normalize_jp_symbol(target_id)
+        source_health = jp_market_service.build_jp_source_health(
+            db=db,
+            symbol=normalized_id,
+            is_index=is_index,
+            now=_now(),
+        )
+        daily_resources = {"daily_price"}
+    elif normalized_market == "KR":
+        normalized_id = (
+            normalize_kr_index_id(target_id)
+            if is_index
+            else normalize_kr_symbol(target_id)
+        )
+        source_health = kr_market_service.build_kr_source_health(
+            db=db,
+            index_id=normalized_id if is_index else None,
+            symbol=None if is_index else normalized_id,
+            now=_now(),
+        )
+        daily_resources = {"index_daily_price" if is_index else "daily_price"}
+    else:
+        raise ValueError("market must be JP or KR.")
+
+    daily_entries = [
+        entry
+        for entry in source_health.get("entries") or []
+        if isinstance(entry, dict)
+        and str(entry.get("resource") or "") in daily_resources
+    ]
+    ready_statuses = {"available", "current", "fresh", "ready"}
+    daily_current = any(
+        str(entry.get("status") or "").strip().lower() in ready_statuses
+        for entry in daily_entries
+    )
+    latest_dates = [
+        str(entry.get("latest_data_date"))
+        for entry in daily_entries
+        if entry.get("latest_data_date")
+    ]
+    expected_dates = [
+        str(entry.get("expected_data_date"))
+        for entry in daily_entries
+        if entry.get("expected_data_date")
+    ]
+    warnings = [
+        str(entry.get("reason") or "")
+        for entry in daily_entries
+        if str(entry.get("status") or "").strip().lower()
+        not in ready_statuses
+        and str(entry.get("reason") or "").strip()
+    ]
+    return {
+        "kind": f"{normalized_market.lower()}_regional_freshness",
+        "scope": {
+            "target": {
+                "type": (
+                    f"{normalized_market.lower()}_index"
+                    if is_index
+                    else f"{normalized_market.lower()}_stock"
+                ),
+                "id": normalized_id,
+                "market": normalized_market,
+            }
+        },
+        "is_current": daily_current,
+        "refresh_recommended": not daily_current,
+        "missing": [] if daily_entries else ["daily.ohlcv"],
+        "warnings": warnings,
+        "latest_data_date": max(latest_dates) if latest_dates else None,
+        "expected_data_date": max(expected_dates) if expected_dates else None,
+        "source_health": source_health,
+    }
+
+
+def run_regional_market_tool_session(
+    *,
+    db: Session,
+    market: str,
+    target_id: str,
+    is_index: bool,
+    target: dict[str, Any],
+    policy: dict[str, Any],
+    raw_budget: dict[str, Any] | None,
+    existing_freshness: dict[str, Any],
+    requested_capabilities: tuple[str, ...] | None = None,
+    include_intraday: bool = False,
+    force_selected_capabilities: bool = False,
+    progress_callback: progress_events.ProgressCallback | None = None,
+) -> dict[str, Any]:
+    normalized_market = str(market or "").strip().upper()
+    budget = normalize_tool_budget(raw_budget)
+    requested = set(requested_capabilities or ())
+    wants_daily = not requested or "daily.ohlcv" in requested
+    wants_intraday = include_intraday or (
+        force_selected_capabilities
+        and bool(requested & {"quote.snapshot", "intraday.bars"})
+    )
+    steps: list[dict[str, Any]] = []
+    if normalized_market == "JP":
+        normalized_id = normalize_jp_symbol(target_id)
+        if wants_daily and existing_freshness.get("refresh_recommended"):
+            steps.append(
+                {
+                    "tool": "jp.refresh_daily_price",
+                    "args": {
+                        "symbol": normalized_id,
+                        "provider": "auto",
+                        "outputsize": "compact",
+                    },
+                    "reason": "Japan daily evidence is missing or stale.",
+                }
+            )
+        if wants_intraday:
+            steps.append(
+                {
+                    "tool": "jp.read_intraday_trend",
+                    "args": {"symbol": normalized_id},
+                    "reason": "A bounded current-session Japan quote was selected.",
+                }
+            )
+    elif normalized_market == "KR":
+        normalized_id = (
+            normalize_kr_index_id(target_id)
+            if is_index
+            else normalize_kr_symbol(target_id)
+        )
+        if wants_daily and existing_freshness.get("refresh_recommended"):
+            steps.append(
+                {
+                    "tool": (
+                        "kr.refresh_index_daily_price"
+                        if is_index
+                        else "kr.refresh_daily_price"
+                    ),
+                    "args": (
+                        {"index_id": normalized_id, "outputsize": "compact"}
+                        if is_index
+                        else {
+                            "symbol": normalized_id,
+                            "provider": "auto",
+                            "outputsize": "compact",
+                        }
+                    ),
+                    "reason": "Korea daily evidence is missing or stale.",
+                }
+            )
+        if wants_intraday:
+            steps.append(
+                {
+                    "tool": (
+                        "kr.read_index_intraday_trend"
+                        if is_index
+                        else "kr.read_stock_intraday_trend"
+                    ),
+                    "args": (
+                        {"index_id": normalized_id}
+                        if is_index
+                        else {"symbol": normalized_id}
+                    ),
+                    "reason": "A bounded current-session Korea quote was selected.",
+                }
+            )
+    else:
+        raise ValueError("market must be JP or KR.")
+
+    plan = {
+        "provider": "deterministic",
+        "reason": (
+            "Bounded regional refresh selected from canonical freshness and "
+            "capability requirements."
+        ),
+        "target": target,
+        "tool_plan": steps[: budget["max_calls"]],
+        "budget": budget,
+    }
+    if budget["max_calls"] <= 0:
+        plan.update(
+            {
+                "provider": "disabled",
+                "reason": "OMI tool budget max_calls is 0.",
+                "tool_plan": [],
+            }
+        )
+        return {
+            "tool_plan": plan,
+            "tool_runs": [],
+            "warnings": [],
+            "freshness": existing_freshness,
+        }
+
+    runs, run_warnings = execute_tool_plan(
+        db=db,
+        plan=plan,
+        budget=budget,
+        can_external_fetch=bool(policy.get("can_external_fetch")),
+        fallback_to_cached=_fallback_to_cached(policy),
+        progress_callback=progress_callback,
+    )
+    refreshed = scan_regional_market_gaps(
+        db,
+        market=normalized_market,
+        target_id=normalized_id,
+        is_index=is_index,
+    )
+    return {
+        "tool_plan": plan,
+        "tool_runs": runs,
+        "warnings": run_warnings,
+        "freshness": refreshed,
     }
 
 
@@ -351,6 +688,7 @@ def run_tw_stock_tool_session(
     policy: dict[str, Any],
     raw_budget: dict[str, Any] | None,
     existing_freshness: dict[str, Any] | None = None,
+    requested_capabilities: tuple[str, ...] | None = None,
     progress_callback: progress_events.ProgressCallback | None = None,
 ) -> dict[str, Any]:
     normalized_stock_id = str(stock_id or "").strip()
@@ -391,6 +729,7 @@ def run_tw_stock_tool_session(
         overnight_gaps=overnight_gaps,
         budget=budget,
         can_call_llm=bool(policy.get("can_plan_tools")),
+        requested_capabilities=requested_capabilities,
     )
     plan["budget"] = budget
     runs, run_warnings = execute_tool_plan(

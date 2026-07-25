@@ -92,6 +92,7 @@ def classify_market_snapshot(
         semantics = "unavailable"
         is_stale = True
         is_latest_session = False
+        is_current_session = False
     elif is_trading_day and is_live_phase:
         is_current_session = quote_date == current_date
         if not is_current_session:
@@ -106,6 +107,7 @@ def classify_market_snapshot(
         is_stale = status == "stale"
         is_latest_session = is_current_session and status in {"live", "delayed"}
     else:
+        is_current_session = bool(quote_date and quote_date == current_date)
         expected_session_date = (
             current_date
             if is_trading_day
@@ -119,13 +121,28 @@ def classify_market_snapshot(
         is_stale = not is_latest_session
 
     is_live = status == "live"
+    delivery_status = (
+        "live"
+        if status == "live"
+        else "delayed_current_session"
+        if status == "delayed" and is_current_session
+        else "stale_current_session"
+        if status == "stale" and is_current_session
+        else "latest_completed_session"
+        if status == "latest_completed_session"
+        else "stale_previous_session"
+        if status == "stale"
+        else status
+    )
     session = calendar_status.get("session") if isinstance(calendar_status.get("session"), dict) else {}
     return {
         "status": status,
+        "delivery_status": delivery_status,
         "quote_semantics": semantics,
         "is_live": is_live,
         "is_realtime": is_live,
         "is_stale": is_stale,
+        "is_current_session_quote": is_current_session,
         "is_latest_session_quote": is_latest_session,
         "age_seconds": age_seconds,
         "market_status": market_status,

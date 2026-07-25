@@ -248,6 +248,9 @@ def build_adr_parity_report(
         "tw_reference_trade_date": _iso(
             tw_reference.trade_date if tw_reference is not None else None
         ),
+        "tw_reference_semantics": (
+            "taiwan_close_at_or_before_adr_trade_date_used_as_the_aligned_gap_baseline"
+        ),
         "target_tw_trade_date": _iso(target_tw_trade_date),
         "implied_tw_price_twd": _round(implied_tw_price_twd),
         "implied_gap_pct": _round(implied_gap_pct),
@@ -260,6 +263,9 @@ def build_adr_parity_report(
             comparison["as_of"] if comparison is not None else None
         ),
         "tw_comparison_source": comparison["source"] if comparison is not None else None,
+        "tw_comparison_semantics": (
+            "latest_available_taiwan_price_used_only_for_remaining_gap"
+        ),
         "tw_session_phase": comparison.get("session_phase") if comparison is not None else None,
         "comparison_mode": comparison_mode,
         "remaining_gap_pct": _round(remaining_gap_pct),

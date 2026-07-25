@@ -2543,6 +2543,25 @@ export const zhTW = {
     },
   },
   usStockDetail: {
+    sourceStatus: {
+      providerErrorTitle: "Yahoo 上游資料異常",
+      delayedTitle: "Yahoo 上游資料延遲",
+      staleTitle: "Yahoo 上游停止更新",
+      delayedBadge: "Yahoo 延遲約 {minutes} 分",
+      staleBadge: "Yahoo 上游異常 · 延遲 {minutes} 分",
+      fallbackBadge: "Yahoo 上游異常 · 顯示最後資料",
+      unavailableBadge: "Yahoo 上游無法連線",
+      delayedMessage:
+        "Yahoo 盤中資料目前延遲約 {minutes} 分鐘；畫面會持續顯示最後可用資料。",
+      staleMessage:
+        "Yahoo 盤中資料已停止前進約 {minutes} 分鐘；畫面會持續顯示最後可用資料。",
+      fallbackMessage: "Yahoo 上游連線失敗；畫面已保留最後可用資料。",
+      unavailableMessage: "Yahoo 上游連線失敗，且目前沒有可用的盤中資料。",
+      recoveredTitle: "Yahoo 上游已恢復",
+      recoveredMessage: "Yahoo 盤中資料已恢復更新。",
+      monitoringEndedTitle: "美股盤中監控時段已結束",
+      monitoringEndedMessage: "目前不是即時更新時段；畫面保留最後可用資料。",
+    },
     statusSource: "美股詳情",
     usDailyWeeklyMonthly: "美股日/週/月",
     noStockSelected: "尚未選擇股票",

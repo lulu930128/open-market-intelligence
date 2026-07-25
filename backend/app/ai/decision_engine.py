@@ -407,9 +407,19 @@ def trend_view_with_levels(
     if weak_evidence:
         headline = f"{target_label} 方向先保留，等資料與下一筆價量確認"
     elif price_position == "above_chase" and chase:
-        headline = f"{target_label} 波段偏多，但現價 {latest} 已接近追價上限 {chase}"
+        if score_bullish:
+            headline = f"{target_label} 波段偏多，但現價 {latest} 已接近追價上限 {chase}"
+        elif score_bearish:
+            headline = f"{target_label} 波段偏弱，現價 {latest} 又在追價上限 {chase} 之上"
+        else:
+            headline = f"{target_label} 方向未確認，現價 {latest} 已接近追價上限 {chase}"
     elif price_position == "above_preferred" and preferred:
-        headline = f"{target_label} 波段偏多，但現價 {latest} 已離開支撐區 {preferred}"
+        if score_bullish:
+            headline = f"{target_label} 波段偏多，但現價 {latest} 已離開支撐區 {preferred}"
+        elif score_bearish:
+            headline = f"{target_label} 波段偏弱；現價雖高於支撐區 {preferred}，仍未形成轉強"
+        else:
+            headline = f"{target_label} 多空未定，先看回測支撐區 {preferred} 是否守住"
     elif price_position == "in_preferred" and preferred:
         headline = f"{target_label} 回到支撐觀察區，接下來看 {preferred} 能否守穩"
     elif price_position == "below_preferred" and preferred:
@@ -469,13 +479,27 @@ def trend_view_with_levels(
     if weak_evidence:
         trend_text = "先把這次解讀當方向參考，不把單一分數或單日收盤價當成最後結論。"
     elif price_position == "above_chase" and chase:
-        trend_text = f"方向仍偏多，但現價 {latest} 已在偏熱區，追價報酬比不佳。"
+        if score_bullish:
+            trend_text = f"方向偏多，但現價 {latest} 已在偏熱區，追價報酬比不佳。"
+        elif score_bearish:
+            trend_text = f"多週期分數偏弱；即使現價 {latest} 位於高檔，也不能解讀為趨勢轉強。"
+        else:
+            trend_text = f"方向尚未確認；現價 {latest} 位於偏熱區，先避免用價格高度代替趨勢判斷。"
     elif price_position == "above_preferred" and preferred:
-        trend_text = f"方向仍偏多，結構重點從追價轉成回測 {preferred} 是否守住。"
+        if score_bullish:
+            trend_text = f"方向偏多，結構重點從追價轉成回測 {preferred} 是否守住。"
+        elif score_bearish:
+            trend_text = f"多週期分數偏弱；現價高於 {preferred} 只代表價格位置，仍要等量價與動能轉強。"
+        else:
+            trend_text = f"方向尚未確認，先看回測 {preferred} 與量價表現是否形成一致訊號。"
     elif price_position == "in_preferred" and preferred:
         trend_text = f"方向關鍵從追價轉成支撐承接；{preferred} 守住，波段才有續強空間。"
     elif price_position == "below_preferred" and preferred:
-        trend_text = f"方向開始轉弱；若無法收回 {preferred}，原本偏多結構要先降級。"
+        trend_text = (
+            f"方向開始轉弱；若無法收回 {preferred}，原本偏多結構要先降級。"
+            if score_bullish
+            else f"價格已跌破 {preferred}；在收回支撐前，不把反彈解讀為趨勢轉強。"
+        )
     elif price_position == "breakout_confirmed" and breakout:
         trend_text = f"方向重點從支撐承接轉成突破延續；看 {breakout} 之上是否站穩。"
     else:
@@ -509,7 +533,12 @@ def trend_view_with_levels(
         )
     elif price_position == "above_preferred" and preferred:
         observation_text = (
-            f"觀察回測 {preferred} 時量能是否收斂、動能是否守住；若回測不破，波段延續機率較高。"
+            f"觀察回測 {preferred} 時量能是否收斂、動能是否守住；若回測不破，"
+            + (
+                "波段延續條件較完整。"
+                if score_bullish
+                else "只能先視為止穩候選，仍需量價與多週期分數轉強。"
+            )
         )
     elif price_position == "in_preferred" and preferred:
         observation_text = f"觀察 {preferred} 是否止跌守穩，且量能與動能是否同步回升。"
@@ -536,7 +565,11 @@ def trend_view_with_levels(
         else:
             risks.append(f"若續漲接近 {chase} 以上，代表偏熱延伸，不把現價區當新支撐。")
     if invalidation:
-        risks.append(f"跌破 {invalidation} 後，原本波段偏多假設要降級。")
+        risks.append(
+            f"跌破 {invalidation} 後，原本波段偏多假設要降級。"
+            if score_bullish
+            else f"跌破 {invalidation} 後，波段結構將進一步惡化。"
+        )
     elif stop:
         risks.append(f"跌破 {stop} 後，短線結構會明顯轉弱。")
 

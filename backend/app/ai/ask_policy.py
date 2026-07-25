@@ -3,7 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from app.ai import agentic_tools, decision_core, query_plan, scope_resolution
+from app.ai import (
+    agentic_tools,
+    capability_contract,
+    decision_core,
+    query_plan,
+    scope_resolution,
+)
 from app.ai.schemas import AiAskRequest
 
 
@@ -11,7 +17,13 @@ VALID_MODES = {"auto", "data_only", "brief", "analysis", "report", "full"}
 VALID_RANK_BY = {"watchlist", "score", "change_pct", "volume"}
 VALID_SORT_ORDER = {"asc", "desc"}
 VALID_ANALYSIS_HORIZONS = {"auto", "intraday", "short", "swing", "long"}
-SUPPORTED_CONTRACT_VERSIONS = {"omi.ai.ask.v2", "omi.decision.v3"}
+# Internal pipeline compatibility only. Public HTTP/SSE/MCP request models
+# accept omi.decision.v4 exclusively.
+INTERNAL_SUPPORTED_CONTRACT_VERSIONS = {
+    "omi.ai.ask.v2",
+    "omi.decision.v3",
+    "omi.decision.v4",
+}
 VALID_TARGET_TYPES = scope_resolution.VALID_TARGET_TYPES
 REPORT_HINTS = decision_core.REPORT_HINTS
 ANALYSIS_HINTS = decision_core.ANALYSIS_HINTS
@@ -35,10 +47,10 @@ _resolve_scope = scope_resolution._resolve_scope
 
 
 def _validate_request(payload: AiAskRequest) -> None:
-    if payload.contract_version not in SUPPORTED_CONTRACT_VERSIONS:
+    if payload.contract_version not in INTERNAL_SUPPORTED_CONTRACT_VERSIONS:
         raise ValueError(
             "contract_version must be one of: "
-            + ", ".join(sorted(SUPPORTED_CONTRACT_VERSIONS))
+            + ", ".join(sorted(INTERNAL_SUPPORTED_CONTRACT_VERSIONS))
         )
     target = _request_target(payload)
     target_type = _request_target_type(payload)
@@ -86,6 +98,74 @@ def _validate_request(payload: AiAskRequest) -> None:
 
     if not isinstance(payload.market_data_params, dict):
         raise ValueError("market_data_params must be an object.")
+    if not isinstance(payload.selection, dict):
+        raise ValueError("selection must be an object.")
+    if not isinstance(payload.continuation, dict):
+        raise ValueError("continuation must be an object.")
+    unknown_continuation_keys = set(payload.continuation) - {
+        "plan_id",
+        "plan_action_ids",
+        "selected_action_ids",
+    }
+    if unknown_continuation_keys:
+        raise ValueError(
+            "continuation contains unsupported field(s): "
+            + ", ".join(sorted(unknown_continuation_keys))
+        )
+    selected_action_ids = payload.continuation.get("selected_action_ids") or []
+    if not isinstance(selected_action_ids, list):
+        raise ValueError("continuation.selected_action_ids must be an array.")
+    if len(selected_action_ids) > 8:
+        raise ValueError(
+            "continuation.selected_action_ids must contain at most 8 values."
+        )
+    if any(
+        not isinstance(value, str) or not value.strip()
+        for value in selected_action_ids
+    ):
+        raise ValueError(
+            "continuation.selected_action_ids must contain non-empty strings."
+        )
+    if selected_action_ids and payload.contract_version != "omi.decision.v4":
+        raise ValueError("continuation fill actions require omi.decision.v4.")
+    plan_action_ids = payload.continuation.get("plan_action_ids") or []
+    if not isinstance(plan_action_ids, list):
+        raise ValueError("continuation.plan_action_ids must be an array.")
+    if len(plan_action_ids) > 32:
+        raise ValueError(
+            "continuation.plan_action_ids must contain at most 32 values."
+        )
+    if any(
+        not isinstance(value, str) or not value.strip()
+        for value in plan_action_ids
+    ):
+        raise ValueError(
+            "continuation.plan_action_ids must contain non-empty strings."
+        )
+    plan_id = payload.continuation.get("plan_id")
+    if plan_id is not None and (
+        not isinstance(plan_id, str)
+        or not plan_id.startswith("plan_")
+        or len(plan_id) > 80
+    ):
+        raise ValueError("continuation.plan_id must be a bounded OMI plan id.")
+    if len(payload.intents) > 8:
+        raise ValueError("intents must contain at most 8 values.")
+    if any(not str(value or "").strip() for value in payload.intents):
+        raise ValueError("intents must contain non-empty strings.")
+    if payload.output is not None and payload.output not in capability_contract.OUTPUT_MODES:
+        raise ValueError(
+            "output must be one of: "
+            + ", ".join(sorted(capability_contract.OUTPUT_MODES))
+        )
+    if (
+        payload.realtime_policy is not None
+        and payload.realtime_policy not in capability_contract.REALTIME_POLICIES
+    ):
+        raise ValueError(
+            "realtime_policy must be one of: "
+            + ", ".join(sorted(capability_contract.REALTIME_POLICIES))
+        )
 
 
 def _infer_scope_type(payload: AiAskRequest) -> str:
@@ -131,6 +211,8 @@ def _refresh_before_answer_enabled(payload: AiAskRequest) -> bool:
 def _infer_mode(payload: AiAskRequest, scope_type: str, policy: dict[str, Any]) -> str:
     if payload.mode != "auto":
         return payload.mode
+    if payload.output == "evidence_only":
+        return "data_only"
 
     if scope_type in {
         "data_freshness",

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from collections.abc import Callable
 from copy import deepcopy
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import time
 
 import requests
@@ -92,7 +92,7 @@ from app.us_market.sources import (
 )
 from app.us_market.source_health import build_us_source_health
 from app.us_market.trading_calendar import US_MARKET_TIMEZONE, previous_us_trading_day
-from app.market.calendar_status import expected_us_trade_date
+from app.market.calendar_status import build_us_calendar_status, expected_us_trade_date
 from app.market.ohlc_overlay import aggregate_ohlc_points, append_intraday_overlay
 from app.market.stock_volume_pace import (
     build_stock_volume_pace,
@@ -121,6 +121,10 @@ def expected_us_daily_price_date() -> date:
 ProgressCallback = Callable[[int | None, int | None, str | None], None]
 US_INTRADAY_CACHE_TTL_SECONDS = 4.75
 _US_INTRADAY_CACHE: dict[str, tuple[float, dict]] = {}
+US_INTRADAY_LAST_GOOD_MAX_ENTRIES = 256
+_US_INTRADAY_LAST_GOOD: OrderedDict[str, dict] = OrderedDict()
+US_INTRADAY_DELAYED_AFTER_SECONDS = 120
+US_INTRADAY_STALE_AFTER_SECONDS = 900
 US_CHART_LOOKBACK_MULTIPLIER = {
     "daily": 2,
     "weekly": 8,
@@ -194,6 +198,161 @@ def _get_us_intraday_cache(cache_key: str) -> dict | None:
 
 def _set_us_intraday_cache(cache_key: str, payload: dict) -> dict:
     _US_INTRADAY_CACHE[cache_key] = (time.monotonic(), deepcopy(payload))
+    return payload
+
+
+def _us_intraday_latest_point_time(payload: dict) -> datetime | None:
+    for point in reversed(payload.get("points") or []):
+        if not isinstance(point, dict) or not point.get("time"):
+            continue
+        try:
+            point_time = datetime.fromisoformat(str(point["time"]))
+        except (TypeError, ValueError):
+            continue
+        if point_time.tzinfo is None:
+            point_time = point_time.replace(tzinfo=US_MARKET_TIMEZONE)
+        return point_time
+    return None
+
+
+def _remember_us_intraday_last_good(cache_key: str, payload: dict) -> None:
+    latest_time = _us_intraday_latest_point_time(payload)
+    if latest_time is None:
+        return
+
+    previous = _US_INTRADAY_LAST_GOOD.get(cache_key)
+    previous_time = _us_intraday_latest_point_time(previous or {})
+    if previous_time is not None and latest_time < previous_time:
+        return
+
+    _US_INTRADAY_LAST_GOOD[cache_key] = deepcopy(payload)
+    _US_INTRADAY_LAST_GOOD.move_to_end(cache_key)
+    while len(_US_INTRADAY_LAST_GOOD) > US_INTRADAY_LAST_GOOD_MAX_ENTRIES:
+        _US_INTRADAY_LAST_GOOD.popitem(last=False)
+
+
+def _us_intraday_live_window(*, market_phase: str, session_scope: str) -> bool:
+    if session_scope == "regular":
+        return market_phase == "regular"
+    if session_scope == "extended":
+        return market_phase in {"pre_market", "after_hours"}
+    return market_phase in {"pre_market", "regular", "after_hours"}
+
+
+def _build_us_intraday_source_status(
+    payload: dict,
+    *,
+    session_scope: str,
+    now: datetime | None = None,
+) -> dict:
+    checked_at = now or datetime.now(timezone.utc)
+    if checked_at.tzinfo is None:
+        checked_at = checked_at.replace(tzinfo=timezone.utc)
+
+    calendar_status = build_us_calendar_status(checked_at)
+    market_phase = str(calendar_status.get("phase") or "market_closed")
+    is_live_window = _us_intraday_live_window(
+        market_phase=market_phase,
+        session_scope=session_scope,
+    )
+    latest_time = _us_intraday_latest_point_time(payload)
+    has_usable_data = latest_time is not None
+    lag_seconds = (
+        max(
+            0.0,
+            (
+                checked_at.astimezone(timezone.utc)
+                - latest_time.astimezone(timezone.utc)
+            ).total_seconds(),
+        )
+        if latest_time is not None
+        else None
+    )
+    upstream_error = str(payload.get("_upstream_error") or "").strip()
+    is_fallback = bool(payload.get("_is_fallback"))
+
+    if upstream_error:
+        status = "degraded" if has_usable_data else "unavailable"
+        freshness_status = "provider_error"
+        message = upstream_error
+    elif not has_usable_data:
+        status = "unavailable"
+        freshness_status = "missing"
+        message = "Yahoo intraday source returned no usable points."
+    elif not is_live_window:
+        status = "ok"
+        freshness_status = "off_session"
+        message = None
+    elif lag_seconds is not None and lag_seconds > US_INTRADAY_STALE_AFTER_SECONDS:
+        status = "degraded"
+        freshness_status = "stale"
+        message = (
+            "Yahoo intraday data stopped advancing during the active US session."
+        )
+    elif lag_seconds is not None and lag_seconds > US_INTRADAY_DELAYED_AFTER_SECONDS:
+        status = "degraded"
+        freshness_status = "delayed"
+        message = "Yahoo intraday data is delayed during the active US session."
+    else:
+        status = "ok"
+        freshness_status = "current"
+        message = None
+
+    return {
+        "provider": "yahoo_chart",
+        "status": status,
+        "freshness_status": freshness_status,
+        "market_phase": market_phase,
+        "is_live_window": is_live_window,
+        "as_of": latest_time.isoformat() if latest_time is not None else None,
+        "lag_seconds": round(lag_seconds, 3) if lag_seconds is not None else None,
+        "is_fallback": is_fallback,
+        "has_usable_data": has_usable_data,
+        "message": message,
+    }
+
+
+def _us_intraday_fallback_payload(
+    *,
+    cache_key: str,
+    symbol: str,
+    session_scope: str,
+    error_message: str,
+) -> dict:
+    last_good = _US_INTRADAY_LAST_GOOD.get(cache_key)
+    if last_good is not None:
+        _US_INTRADAY_LAST_GOOD.move_to_end(cache_key)
+        payload = deepcopy(last_good)
+        payload["_is_fallback"] = True
+    else:
+        payload = {
+            "stock_id": symbol,
+            "symbol": symbol,
+            "source": "unavailable",
+            "session_scope": session_scope,
+            "session_phase": None,
+            "has_extended_hours": False,
+            "regular_point_count": 0,
+            "extended_point_count": 0,
+            "previous_close": None,
+            "previous_close_source": None,
+            "previous_close_trade_date": None,
+            "previous_close_provider": None,
+            "point_count": 0,
+            "points": [],
+            "warnings": [],
+        }
+        payload["_is_fallback"] = False
+
+    payload["_upstream_error"] = error_message
+    warning = (
+        "Yahoo intraday source failed; showing the last usable payload."
+        if payload["_is_fallback"]
+        else "Yahoo intraday source failed and no last usable payload is available."
+    )
+    warnings = payload.setdefault("warnings", [])
+    if warning not in warnings:
+        warnings.append(warning)
     return payload
 
 
@@ -970,6 +1129,27 @@ def _project_us_intraday_payload(
     return result
 
 
+def _finalize_us_intraday_payload(
+    payload: dict,
+    *,
+    db: Session | None,
+    symbol: str,
+    session_scope: str,
+) -> dict:
+    result = _apply_us_intraday_previous_close_reference(
+        _project_us_intraday_payload(payload, db=db, symbol=symbol),
+        db=db,
+        symbol=symbol,
+    )
+    result["source_status"] = _build_us_intraday_source_status(
+        result,
+        session_scope=session_scope,
+    )
+    result.pop("_upstream_error", None)
+    result.pop("_is_fallback", None)
+    return result
+
+
 def get_us_intraday_trend(
     *,
     symbol: str,
@@ -984,10 +1164,11 @@ def get_us_intraday_trend(
     cached = _get_us_intraday_cache(cache_key)
 
     if cached is not None:
-        return _apply_us_intraday_previous_close_reference(
-            _project_us_intraday_payload(cached, db=db, symbol=normalized_symbol),
+        return _finalize_us_intraday_payload(
+            cached,
             db=db,
             symbol=normalized_symbol,
+            session_scope=session_scope,
         )
 
     try:
@@ -1009,6 +1190,7 @@ def get_us_intraday_trend(
             interval="1m",
             timeout_seconds=settings.us_market_http_timeout_seconds,
             include_prepost=session_scope != "regular",
+            resource="intraday_price",
         )
         parsed_payload = parse_yahoo_intraday_prices(
             yahoo_payload,
@@ -1022,36 +1204,36 @@ def get_us_intraday_trend(
                 symbol=normalized_symbol,
                 payload=parsed_payload,
             )
+        if parsed_payload.get("points"):
+            _remember_us_intraday_last_good(cache_key, parsed_payload)
+            payload = parsed_payload
+        else:
+            payload = _us_intraday_fallback_payload(
+                cache_key=cache_key,
+                symbol=normalized_symbol,
+                session_scope=session_scope,
+                error_message=(
+                    (parsed_payload.get("warnings") or [None])[0]
+                    or "Yahoo intraday source returned no usable points."
+                ),
+            )
+        payload = _set_us_intraday_cache(cache_key, payload)
+    except Exception as exc:
         payload = _set_us_intraday_cache(
             cache_key,
-            parsed_payload,
-        )
-    except Exception:
-        payload = _set_us_intraday_cache(
-            cache_key,
-            {
-                "stock_id": normalized_symbol,
-                "symbol": normalized_symbol,
-                "source": "unavailable",
-                "session_scope": session_scope,
-                "session_phase": None,
-                "has_extended_hours": False,
-                "regular_point_count": 0,
-                "extended_point_count": 0,
-                "previous_close": None,
-                "previous_close_source": None,
-                "previous_close_trade_date": None,
-                "previous_close_provider": None,
-                "point_count": 0,
-                "points": [],
-                "warnings": ["US intraday source is unavailable."],
-            },
+            _us_intraday_fallback_payload(
+                cache_key=cache_key,
+                symbol=normalized_symbol,
+                session_scope=session_scope,
+                error_message=f"Yahoo intraday request failed: {type(exc).__name__}: {str(exc)[:180]}",
+            ),
         )
 
-    return _apply_us_intraday_previous_close_reference(
-        _project_us_intraday_payload(payload, db=db, symbol=normalized_symbol),
+    return _finalize_us_intraday_payload(
+        payload,
         db=db,
         symbol=normalized_symbol,
+        session_scope=session_scope,
     )
 
 

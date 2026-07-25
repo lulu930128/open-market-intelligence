@@ -341,9 +341,25 @@ def read_taiwan_market_volume_state(
             "trade_date": None,
             "status": "empty",
             "session_status": "unavailable",
+            "currency": "TWD",
+            "trade_value_unit": "TWD",
             "current_cumulative_trade_value": None,
             "same_time_baseline_5d": _baseline_payload(None, [], 5),
             "same_time_baseline_20d": _baseline_payload(None, [], 20),
+            "field_status": {
+                "current_cumulative_trade_value": {
+                    "status": "missing",
+                    "reason": "No Taiwan market minute-state row is available.",
+                },
+                "previous_minute_cumulative_trade_value": {
+                    "status": "missing",
+                    "reason": "No prior complete minute is available.",
+                },
+                "one_minute_trade_value_change": {
+                    "status": "missing",
+                    "reason": "Current and previous complete minutes are required.",
+                },
+            },
             "markets": [],
             "warnings": [
                 "Minute-level market state history is empty; same-time volume baselines will accumulate from the scheduler."
@@ -422,6 +438,8 @@ def read_taiwan_market_volume_state(
             {
                 "market": market,
                 "index_id": row.index_id,
+                "currency": "TWD",
+                "trade_value_unit": "TWD",
                 "cumulative_trade_value": row.cumulative_trade_value,
                 "estimated_full_day_trade_value": row.estimated_full_day_trade_value,
                 "advance_count": row.advance_count,
@@ -449,6 +467,37 @@ def read_taiwan_market_volume_state(
         )
     session_statuses = {row.session_status for row in selected_rows.values()}
     session_status = "final" if session_statuses == {"final"} else "provisional"
+    field_status = {
+        "current_cumulative_trade_value": {
+            "status": "available" if current_value is not None else "missing",
+            "source": "taiwan_market_minute_state" if current_value is not None else None,
+            "reason": (
+                None
+                if current_value is not None
+                else "TWSE and TPEX same-minute trade values are not both usable."
+            ),
+        },
+        "previous_minute_cumulative_trade_value": {
+            "status": "available" if previous_value is not None else "missing",
+            "source": "taiwan_market_minute_state" if previous_value is not None else None,
+            "reason": (
+                None
+                if previous_value is not None
+                else "No prior complete TWSE+TPEX minute exists for this session."
+            ),
+        },
+        "one_minute_trade_value_change": {
+            "status": "available" if one_minute_change is not None else "missing",
+            "source": "derived_from_complete_minutes"
+            if one_minute_change is not None
+            else None,
+            "reason": (
+                None
+                if one_minute_change is not None
+                else "Current and previous complete TWSE+TPEX minutes are required."
+            ),
+        },
+    }
     return {
         "kind": "taiwan_market_volume_state",
         "generated_at": generated_at.isoformat(),
@@ -456,11 +505,14 @@ def read_taiwan_market_volume_state(
         "trade_date": latest_trade_date.isoformat(),
         "status": "ready" if len(historical_values) >= 5 and current_value is not None else "partial",
         "session_status": session_status,
+        "currency": "TWD",
+        "trade_value_unit": "TWD",
         "comparison_minute": selected_minute.strftime("%H:%M"),
         "calculation_basis": "TWSE+TPEX cumulative trade value compared with prior sessions at or before the same minute",
         "current_cumulative_trade_value": current_value,
         "previous_minute_cumulative_trade_value": previous_value,
         "one_minute_trade_value_change": one_minute_change,
+        "field_status": field_status,
         "same_time_baseline_5d": _baseline_payload(current_value, historical_values, 5),
         "same_time_baseline_20d": _baseline_payload(current_value, historical_values, 20),
         "history_trade_dates": historical_dates,

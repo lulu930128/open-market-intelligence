@@ -279,6 +279,7 @@ class MarketProviderAdapterTests(unittest.TestCase):
             range_value="1y",
             interval="1d",
             include_prepost=True,
+            resource="daily_price",
             timeout_seconds=8,
         )
 

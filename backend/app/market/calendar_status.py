@@ -18,9 +18,11 @@ from app.market.taiwan_rules import (
     TAIWAN_DATASET_INSTITUTIONAL_TRADE,
     TAIWAN_DATASET_LABELS,
     TAIWAN_DATASET_MARGIN_TRADING,
+    TAIWAN_DATASET_SHAREHOLDING_DISTRIBUTION,
     TAIWAN_INSTITUTIONAL_TRADE_RELEASE_TIME,
     TAIWAN_MARGIN_TRADE_RELEASE_TIME,
     expected_date_for_dataset,
+    shareholding_distribution_release_window,
 )
 from app.market.trading_calendar import (
     TAIWAN_MARKET_HOLIDAYS,
@@ -317,6 +319,13 @@ def build_taiwan_calendar_status(now: datetime | None = None) -> dict[str, Any]:
             timezone_value=TAIWAN_TZ,
         )
         for key, release_time in TAIWAN_RELEASE_DATASETS
+    }
+    release_windows[TAIWAN_DATASET_SHAREHOLDING_DISTRIBUTION] = {
+        **shareholding_distribution_release_window(now=local_now),
+        "expected_trade_date": expected_date_for_dataset(
+            TAIWAN_DATASET_SHAREHOLDING_DISTRIBUTION,
+            now=local_now,
+        ).isoformat(),
     }
     release_windows["market_chip_daily"] = _release_window(
         key="market_chip_daily",

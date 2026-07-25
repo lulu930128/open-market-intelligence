@@ -2,6 +2,74 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.ai import capability_contract
+
+
+CAPABILITY_ID_SCHEMA: dict[str, Any] = {
+    "type": "string",
+    "enum": sorted(capability_contract.CAPABILITIES),
+}
+
+CAPABILITY_SELECTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "OMI v4 bounded data selection. Choose registered capabilities and optional "
+        "field/row limits; backend keeps provider, freshness, and fill policy ownership."
+    ),
+    "properties": {
+        "include": {
+            "type": "array",
+            "items": CAPABILITY_ID_SCHEMA,
+            "uniqueItems": True,
+        },
+        "required": {
+            "type": "array",
+            "items": CAPABILITY_ID_SCHEMA,
+            "uniqueItems": True,
+        },
+        "optional": {
+            "type": "array",
+            "items": CAPABILITY_ID_SCHEMA,
+            "uniqueItems": True,
+        },
+        "exclude": {
+            "type": "array",
+            "items": CAPABILITY_ID_SCHEMA,
+            "uniqueItems": True,
+        },
+        "fields": {
+            "type": "object",
+            "description": (
+                "Capability-keyed field lists. Backend rejects fields outside each "
+                "capability's allowlist."
+            ),
+            "additionalProperties": {
+                "type": "array",
+                "items": {"type": "string"},
+                "uniqueItems": True,
+            },
+        },
+        "limits": {
+            "type": "object",
+            "description": (
+                "Capability-keyed row/point limits. Also accepts intraday.points, "
+                "daily.points, and history.points."
+            ),
+            "additionalProperties": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 500,
+            },
+        },
+        "max_response_bytes": {
+            "type": "integer",
+            "minimum": capability_contract.MIN_RESPONSE_BYTES,
+            "maximum": capability_contract.MAX_RESPONSE_BYTES,
+        },
+    },
+    "additionalProperties": False,
+}
+
 
 def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
     tool_list = [
@@ -17,14 +85,59 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                     "properties": {
                         "contract_version": {
                             "type": "string",
-                            "enum": ["omi.decision.v3", "omi.ai.ask.v2"],
-                            "default": "omi.decision.v3",
+                            "enum": ["omi.decision.v4"],
+                            "default": "omi.decision.v4",
                             "description": (
-                                "Canonical OMI decision envelope. "
-                                "omi.ai.ask.v2 remains available for compatibility."
+                                "The only public OMI decision contract. It provides bounded "
+                                "capability selection, data manifest, fill plan, and response "
+                                "budget."
                             ),
                         },
                         "question": {"type": "string"},
+                        "intents": {
+                            "type": "array",
+                            "maxItems": 8,
+                            "items": {"type": "string"},
+                            "description": (
+                                "Optional multi-intent request. Target remains independent "
+                                "from analysis, freshness, quote, or risk intents."
+                            ),
+                        },
+                        "output": {
+                            "type": "string",
+                            "enum": sorted(capability_contract.OUTPUT_MODES),
+                            "description": (
+                                "Data purpose, independent of consumer identity or presentation."
+                            ),
+                        },
+                        "realtime_policy": {
+                            "type": "string",
+                            "enum": sorted(capability_contract.REALTIME_POLICIES),
+                            "default": "prefer_live",
+                        },
+                        "selection": CAPABILITY_SELECTION_SCHEMA,
+                        "continuation": {
+                            "type": "object",
+                            "description": (
+                                "Optional prior fill plan id and selected action ids. "
+                                "Backend revalidates each action."
+                            ),
+                            "properties": {
+                                "plan_id": {"type": "string"},
+                                "plan_action_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "maxItems": 32,
+                                    "uniqueItems": True,
+                                },
+                                "selected_action_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "uniqueItems": True,
+                                },
+                            },
+                            "additionalProperties": False,
+                        },
                         "target": {
                             "type": "object",
                             "properties": {
@@ -85,9 +198,20 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                             "default": "auto",
                             "description": "Analysis horizon. auto defaults to swing, meaning medium-short-term evidence.",
                         },
+                        "payload_level": {
+                            "type": "string",
+                            "enum": ["summary", "compact", "standard", "full"],
+                            "default": "compact",
+                            "description": "Evidence density, independent of answer mode.",
+                        },
+                        "diagnostics_level": {
+                            "type": "string",
+                            "enum": ["none", "basic", "debug"],
+                            "default": "none",
+                        },
                         "caller_profile": {
                             "type": "string",
-                            "default": "kuro_readonly",
+                            "default": "external_readonly",
                             "description": "Caller label only. Server-side policy decides trust.",
                         },
                         "allow_llm": {
@@ -122,9 +246,52 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                             },
                             "description": "Controls whether OMI should refresh stale local evidence before answering.",
                         },
+                        "branch_days": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 120,
+                            "default": 5,
+                        },
+                        "rank_by": {
+                            "type": "string",
+                            "enum": ["watchlist", "score", "change_pct", "volume"],
+                            "default": "score",
+                        },
+                        "sort_order": {
+                            "type": "string",
+                            "enum": ["asc", "desc"],
+                            "default": "desc",
+                        },
+                        "market_limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 50,
+                            "default": 10,
+                        },
+                        "context_limit": {
+                            "type": "integer",
+                            "minimum": 20,
+                            "maximum": 500,
+                            "default": 100,
+                        },
+                        "include_children": {
+                            "type": "boolean",
+                            "default": True,
+                        },
+                        "enabled_only": {
+                            "type": "boolean",
+                            "default": True,
+                        },
                         "conversation_context": {
                             "type": "object",
                             "description": "Optional caller context such as prior OMI resolution.",
+                        },
+                        "position_context": {
+                            "type": "object",
+                            "description": (
+                                "Optional caller-supplied position context. OMI backend "
+                                "still owns decision semantics."
+                            ),
                         },
                         "market_data_params": {
                             "type": "object",
@@ -145,6 +312,18 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                                 "observations": {"type": "integer", "minimum": 1, "maximum": 240},
                                 "holding_limit": {"type": "integer", "minimum": 1, "maximum": 500},
                                 "health_limit": {"type": "integer", "minimum": 1, "maximum": 500},
+                                "problems_only": {"type": "boolean", "default": False},
+                                "include_healthy": {"type": "boolean", "default": True},
+                                "status_filter": {
+                                    "oneOf": [
+                                        {"type": "string"},
+                                        {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                            "uniqueItems": True,
+                                        },
+                                    ]
+                                },
                                 "radar_limit": {"type": "integer", "minimum": 1, "maximum": 100},
                                 "option_contract_month": {
                                     "type": "string",
@@ -161,11 +340,15 @@ def list_ai_tools(*, include_internal: bool = False) -> dict[str, Any]:
                                 "market": {"type": "string"},
                                 "resource": {"type": "string"},
                                 "target": {"type": "string"},
+                                "provider": {"type": "string"},
                             },
                             "additionalProperties": True,
                         },
                     },
                     "required": ["question"],
+                    "additionalProperties": False,
+                    "x-omi-capability-registry-version": "omi.capability.registry.v1",
+                    "x-omi-capabilities": capability_contract.capability_catalog(),
                 },
             },
             {

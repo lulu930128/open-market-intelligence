@@ -95,6 +95,47 @@ class AiDecisionEngineTests(unittest.TestCase):
         self.assertIn("803-834", action_plan[1]["text"])
         self.assertIn("950", action_plan[1]["text"])
 
+    def test_bearish_trend_does_not_become_bullish_from_price_position(self) -> None:
+        levels = _technical_levels()
+        fields = decision_engine.technical_level_fields(levels)
+        numbers = decision_engine.technical_level_numbers(levels)
+
+        headline, _, action_plan, risks = decision_engine.trend_view_with_levels(
+            target_label="2303 聯電",
+            score=-3,
+            weak_evidence=False,
+            fields=fields,
+            numbers=numbers,
+        )
+
+        combined_text = " ".join(
+            [
+                headline,
+                *(item["text"] for item in action_plan),
+                *risks,
+            ]
+        )
+        self.assertIn("波段偏弱", headline)
+        self.assertNotIn("波段偏多", combined_text)
+        self.assertNotIn("方向偏多", combined_text)
+        self.assertIn("多週期分數偏弱", action_plan[0]["text"])
+
+    def test_neutral_trend_does_not_claim_bullish_above_support(self) -> None:
+        levels = _technical_levels(latest_price=850)
+        fields = decision_engine.technical_level_fields(levels)
+        numbers = decision_engine.technical_level_numbers(levels)
+
+        headline, _, action_plan, _ = decision_engine.trend_view_with_levels(
+            target_label="2303 聯電",
+            score=0,
+            weak_evidence=False,
+            fields=fields,
+            numbers=numbers,
+        )
+
+        self.assertNotIn("偏多", headline)
+        self.assertNotIn("偏多", action_plan[0]["text"])
+
     def test_build_position_decision_calculates_cost_distance_and_data_limits(self) -> None:
         result = {
             "data": {

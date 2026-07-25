@@ -317,13 +317,34 @@ def ask(
         question_intent=question_intent,
         effective_mode=effective_mode,
     )
+    original_market_data_params = (
+        payload.market_data_params
+        if isinstance(payload.market_data_params, dict)
+        else {}
+    )
+    explicit_domain_selection = bool(
+        payload.selection
+        or execution_plan.matched_positive_terms
+        or execution_plan.matched_negative_terms
+        or any(
+            key in original_market_data_params
+            for key in ("refresh_domains", "requested_domains", "excluded_domains")
+        )
+    )
     payload = payload.model_copy(
         update={
             "market_data_params": {
                 **payload.market_data_params,
                 "payload_level": execution_plan.payload_level,
+                "reader_profile": execution_plan.reader_profile,
+                "explicit_domain_selection": explicit_domain_selection,
                 "requested_domains": list(execution_plan.requested_domains),
                 "excluded_domains": list(execution_plan.excluded_domains),
+                "requested_capabilities": [
+                    *execution_plan.selected_capabilities,
+                    *execution_plan.optional_selected_capabilities,
+                ],
+                "capability_limits": dict(execution_plan.selection.get("limits") or {}),
                 "external_fetch_allowed": bool(policy.get("can_external_fetch")),
             }
         }
@@ -361,6 +382,14 @@ def ask(
             **kwargs,
         ),
         run_tw_watchlist_tool_session=lambda **kwargs: agentic_tools.run_tw_watchlist_tool_session(
+            db=db,
+            **kwargs,
+        ),
+        run_crypto_asset_tool_session=lambda **kwargs: agentic_tools.run_crypto_asset_tool_session(
+            db=db,
+            **kwargs,
+        ),
+        run_regional_market_tool_session=lambda **kwargs: agentic_tools.run_regional_market_tool_session(
             db=db,
             **kwargs,
         ),
@@ -422,6 +451,7 @@ def ask(
         build_consumer_human_answer=_build_consumer_human_answer,
         build_reasoning_steps=_build_reasoning_steps,
         payload=payload,
+        query_plan=query_plan_payload,
     )
 
     response = ask_finalizer.finalize_ask_response(
@@ -443,4 +473,5 @@ def ask(
     return decision_envelope.for_requested_contract(
         response,
         requested_contract_version=payload.contract_version,
+        canonical_result=result,
     )

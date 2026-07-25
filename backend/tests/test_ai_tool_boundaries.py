@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.ai import agentic_tools, llm, tools
 from app.ai.market_context import common as market_context_common
+from app.ai.market_context import taiwan_market
 from app.ai.market_context.taiwan_futures import _build_tw_futures_compact
 from app.db.models import Base
 from app.market import stock_selection_refresh
@@ -50,11 +51,66 @@ EXPECTED_INTERNAL_TOOL_NAMES = (
 )
 
 EXPECTED_INTERNAL_TOOL_CATALOG_SHA256 = (
-    "6a1c1999d42fdc5306bcc78c2df89d03d8a110c938d773e20d0f58373a6b6c51"
+    "797afc5f37a70178beb700a7868c9ce02f25012d97c3afe14e4253830bb256f3"
 )
 
 
 class AIToolBoundaryTests(unittest.TestCase):
+    def test_market_volume_uses_same_date_official_breadth_when_minute_cache_is_empty(
+        self,
+    ) -> None:
+        volume_state = taiwan_market._volume_state_with_breadth_current_value(
+            {
+                "kind": "taiwan_market_volume_state",
+                "status": "partial",
+                "currency": "TWD",
+                "trade_value_unit": "TWD",
+                "current_cumulative_trade_value": None,
+                "markets": [],
+                "warnings": ["minute history is still accumulating"],
+            },
+            breadth={
+                "status": "ready",
+                "as_of": "2026-07-24T13:30:00+08:00",
+                "markets": {
+                    "TWSE": {
+                        "market": "TWSE",
+                        "index_id": "TAIEX",
+                        "scope": "full_market",
+                        "status": "ready",
+                        "trade_date": "2026-07-24",
+                        "trade_value": 5_000_000_000_000,
+                        "source": "twse_rwd_mi_index",
+                    },
+                    "TPEX": {
+                        "market": "TPEX",
+                        "index_id": "TPEX",
+                        "scope": "full_market",
+                        "status": "ready",
+                        "trade_date": "2026-07-24",
+                        "trade_value": 500_000_000_000,
+                        "source": "tpex_openapi_mainboard_quotes",
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(
+            volume_state["current_cumulative_trade_value"],
+            5_500_000_000_000,
+        )
+        self.assertEqual(
+            volume_state["current_value_source"],
+            "official_market_breadth_summary",
+        )
+        self.assertEqual(
+            volume_state["field_status"]["current_cumulative_trade_value"][
+                "status"
+            ],
+            "available",
+        )
+        self.assertEqual(volume_state["status"], "partial")
+
     def test_agentic_facade_keeps_runtime_patch_targets(self) -> None:
         self.assertIs(agentic_tools.llm, llm)
         self.assertIs(agentic_tools.stock_selection_refresh, stock_selection_refresh)
@@ -75,6 +131,44 @@ class AIToolBoundaryTests(unittest.TestCase):
         catalog = tools.list_ai_tools()
 
         self.assertEqual([item["name"] for item in catalog["tools"]], ["omi.ask"])
+        schema = catalog["tools"][0]["input_schema"]
+        self.assertEqual(
+            schema["x-omi-capability-registry-version"],
+            "omi.capability.registry.v1",
+        )
+        quote = next(
+            item
+            for item in schema["x-omi-capabilities"]
+            if item["capability_id"] == "quote.snapshot"
+        )
+        self.assertIn("quote_time", quote["fields"])
+        intraday = next(
+            item
+            for item in schema["x-omi-capabilities"]
+            if item["capability_id"] == "intraday.bars"
+        )
+        self.assertTrue(
+            {
+                "source_interval",
+                "effective_interval",
+                "sampling_mode",
+                "original_point_count",
+            }
+            <= set(intraday["fields"])
+        )
+        self.assertIn("selection", schema["properties"])
+        self.assertIn("position_context", schema["properties"])
+        self.assertEqual(
+            schema["properties"]["contract_version"]["enum"],
+            ["omi.decision.v4"],
+        )
+        market_data_params = schema["properties"]["market_data_params"][
+            "properties"
+        ]
+        self.assertIn("problems_only", market_data_params)
+        self.assertIn("include_healthy", market_data_params)
+        self.assertIn("status_filter", market_data_params)
+        self.assertIn("provider", market_data_params)
 
     def test_internal_tool_catalog_contract_remains_stable(self) -> None:
         catalog = tools.list_ai_tools(include_internal=True)

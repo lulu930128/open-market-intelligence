@@ -473,9 +473,9 @@ export function IndexDetailDataPanel({
       <div className="space-y-1 px-5 py-3 text-xs text-omi-text-muted">
         <div className="font-semibold text-omi-text">{breadthScopeLabel}</div>
         <div>
-          {index?.breadth_status.status === "failed"
+          {index?.breadth_status?.status === "failed"
             ? t("dashboard.marketIndex.breadthFailed")
-            : index?.breadth_status.status === "partial"
+            : index?.breadth_status?.status === "partial"
               ? t("dashboard.marketIndex.breadthPartial")
               : breadth?.source
             ? t("stockDetail.dataViews.indexDetail.breadthSource", {

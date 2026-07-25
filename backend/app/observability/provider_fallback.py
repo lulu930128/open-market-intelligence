@@ -18,6 +18,7 @@ def observe_provider_fallback(
     exc: BaseException,
     *,
     operation: str,
+    fallback_provider: str | None = None,
     session_factory: SessionFactory | None = None,
 ) -> bool:
     """Persist canonical provider failures without touching the caller transaction."""
@@ -38,6 +39,15 @@ def observe_provider_fallback(
             db,
             event_type="fallback",
             message=f"Provider fallback activated during {operation}.",
+            detail={
+                "operation": operation,
+                "primary_provider": failure.context.provider,
+                "fallback_provider": fallback_provider,
+                "switch_reason": (
+                    failure.error_message
+                    or f"primary_status={failure.status}"
+                ),
+            },
             **failure.provider_event_fields(),
         )
         logger.warning(
