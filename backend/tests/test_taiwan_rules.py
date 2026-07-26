@@ -50,7 +50,46 @@ class TaiwanRulesTests(unittest.TestCase):
             ),
             date(2026, 6, 4),
         )
-        self.assertIsNone(taiwan_rules.expected_date_for_dataset("monthly_revenue", now=now))
+        self.assertEqual(
+            taiwan_rules.expected_date_for_dataset("monthly_revenue", now=now),
+            date(2026, 4, 1),
+        )
+
+        insurance_extension_window = datetime(2026, 6, 11, 0, 1, tzinfo=TAIWAN_TZ)
+        self.assertEqual(
+            taiwan_rules.expected_date_for_dataset(
+                "monthly_revenue",
+                now=insurance_extension_window,
+            ),
+            date(2026, 4, 1),
+        )
+
+        after_conservative_deadline = datetime(2026, 6, 16, 0, 1, tzinfo=TAIWAN_TZ)
+        self.assertEqual(
+            taiwan_rules.expected_date_for_dataset(
+                "monthly_revenue",
+                now=after_conservative_deadline,
+            ),
+            date(2026, 5, 1),
+        )
+
+    def test_shareholding_expected_date_advances_only_after_release_window(self) -> None:
+        before_release = datetime(2026, 7, 25, 11, 59, tzinfo=TAIWAN_TZ)
+        after_release = datetime(2026, 7, 25, 12, 1, tzinfo=TAIWAN_TZ)
+
+        before = taiwan_rules.shareholding_distribution_release_window(
+            now=before_release
+        )
+        after = taiwan_rules.shareholding_distribution_release_window(
+            now=after_release
+        )
+
+        self.assertEqual(before["status"], "pending")
+        self.assertFalse(before["is_released"])
+        self.assertEqual(before["expected_trade_date"], date(2026, 7, 17))
+        self.assertEqual(after["status"], "released")
+        self.assertTrue(after["is_released"])
+        self.assertEqual(after["expected_trade_date"], date(2026, 7, 24))
 
     def test_equity_only_datasets_skip_etfs_and_warrants(self) -> None:
         spec = taiwan_rules.TAIWAN_DATASET_BY_KEY[taiwan_rules.TAIWAN_DATASET_MONTHLY_REVENUE]

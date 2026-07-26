@@ -1,6 +1,7 @@
 "use client";
 
 import { omiChartColors, type OmiChartColors } from "@/lib/themeColors";
+import type { ProjectedChartEventMarker } from "@/components/chart/chartEventMarkers";
 
 type OverlaySize = {
   height: number;
@@ -60,6 +61,7 @@ type TechnicalSignal = {
 type ChartStaticIndicatorLayerProps = {
   chartColors?: OmiChartColors;
   cloudPolygons: CloudPolygon[];
+  eventMarkers: ProjectedChartEventMarker[];
   gapZones: GapZone[];
   overlaySize: OverlaySize;
   supportResistance: SupportResistanceLevel[];
@@ -73,9 +75,19 @@ function signalColor(tone: TechnicalSignal["tone"], chartColors: OmiChartColors)
   return chartColors.purple;
 }
 
+function eventMarkerColor(
+  tone: ProjectedChartEventMarker["tone"],
+  chartColors: OmiChartColors
+) {
+  if (tone === "success") return chartColors.green;
+  if (tone === "warning") return chartColors.warning;
+  return chartColors.info;
+}
+
 export default function ChartStaticIndicatorLayer({
   chartColors = omiChartColors,
   cloudPolygons,
+  eventMarkers,
   gapZones,
   overlaySize,
   supportResistance,
@@ -222,6 +234,59 @@ export default function ChartStaticIndicatorLayer({
           ) : null}
         </g>
       ))}
+
+      {eventMarkers.map((marker) => {
+        const color = eventMarkerColor(marker.tone, chartColors);
+        const labelWidth = Math.max(42, marker.label.length * 11 + 14);
+        const connectorX = marker.labelX > marker.x
+          ? marker.labelX
+          : marker.labelX + labelWidth;
+
+        return (
+          <g
+            key={marker.id}
+            data-chart-event-marker={marker.eventType}
+            pointerEvents="none"
+          >
+            <title>{marker.title}</title>
+            <line
+              x1={marker.x}
+              y1={marker.anchorY}
+              x2={connectorX}
+              y2={marker.y + 9}
+              stroke={color}
+              strokeDasharray="3 3"
+              strokeWidth={1}
+              opacity={0.56}
+            />
+            <circle
+              cx={marker.x}
+              cy={marker.anchorY}
+              r={3.2}
+              fill={color}
+              stroke={chartColors.surface}
+              strokeWidth={1.1}
+            />
+            <rect
+              x={marker.labelX}
+              y={marker.y}
+              width={labelWidth}
+              height={18}
+              rx={2}
+              fill={color}
+              opacity={0.94}
+            />
+            <text
+              x={marker.labelX + labelWidth / 2}
+              y={marker.y + 12.5}
+              textAnchor="middle"
+              className="fill-omi-surface text-[10px] font-bold"
+            >
+              {marker.label}
+            </text>
+          </g>
+        );
+      })}
 
       {technicalSignals.map((signal) => {
         const color = signalColor(signal.tone, chartColors);

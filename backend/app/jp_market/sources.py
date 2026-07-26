@@ -6,30 +6,12 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
-from urllib.parse import quote
 
-from app.http_client import get as http_get
-from app.http_client import post as http_post
+from app.jp_market.errors import JPMarketDataFetchError
+from app.jp_market.providers import jpx, jquants, yahoo
+from app.jp_market.symbols import local_code_from_symbol, normalize_jp_symbol
 
 
-YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-YAHOO_QUOTE_SUMMARY_URL = "https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
-YAHOO_QUOTE_SUMMARY_MODULES = (
-    "price",
-    "assetProfile",
-    "summaryDetail",
-    "defaultKeyStatistics",
-    "financialData",
-    "calendarEvents",
-)
-JQUANTS_AUTH_USER_PATH = "/token/auth_user"
-JQUANTS_AUTH_REFRESH_PATH = "/token/auth_refresh"
-JQUANTS_STATEMENTS_PATH = "/fins/statements"
-JQUANTS_SUMMARY_PATH = "/fins/summary"
-JQUANTS_MARGIN_INTEREST_PATH = "/markets/margin-interest"
-JQUANTS_INVESTOR_TYPES_PATH = "/equities/investor-types"
-JPX_LISTED_ISSUES_URL = "https://www.jpx.co.jp/english/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_e.xls"
-JP_SYMBOL_TOKEN_PATTERN = re.compile(r"^[0-9A-Z][0-9A-Z.\-]{0,31}")
 YAHOO_INSTRUMENT_TYPES = {
     "EQUITY": "stock",
     "ETF": "ETF",
@@ -37,10 +19,6 @@ YAHOO_INSTRUMENT_TYPES = {
     "MUTUALFUND": "fund",
     "REIT": "REIT",
 }
-
-
-class JPMarketDataFetchError(Exception):
-    pass
 
 
 @dataclass(frozen=True)
@@ -190,37 +168,6 @@ class JPInvestorTypeRecord:
     raw_payload_hash: str | None
 
 
-def normalize_jp_symbol(value: str | None) -> str:
-    if value is None:
-        return ""
-
-    cleaned = str(value).strip().upper()
-    if not cleaned:
-        return ""
-
-    if ":" in cleaned:
-        cleaned = cleaned.rsplit(":", maxsplit=1)[-1].strip()
-
-    if "/" in cleaned:
-        cleaned = cleaned.split("/", maxsplit=1)[0].strip()
-
-    match = JP_SYMBOL_TOKEN_PATTERN.match(cleaned)
-    normalized = match.group(0) if match else cleaned
-
-    if "." in normalized:
-        return normalized
-
-    if re.fullmatch(r"[0-9A-Z]{4}", normalized):
-        return f"{normalized}.T"
-
-    return normalized
-
-
-def local_code_from_symbol(symbol: str) -> str:
-    normalized_symbol = normalize_jp_symbol(symbol)
-    return normalized_symbol.split(".", maxsplit=1)[0]
-
-
 def _clean_text(value: Any) -> str | None:
     if value is None:
         return None
@@ -361,14 +308,6 @@ def _row_value(row: dict[str, Any], *names: str) -> Any:
     return None
 
 
-def _jquants_base_url(base_url: str) -> str:
-    return base_url.rstrip("/")
-
-
-def _jquants_url(base_url: str, path: str) -> str:
-    return f"{_jquants_base_url(base_url)}{path}"
-
-
 def fetch_jquants_refresh_token(
     *,
     base_url: str,
@@ -376,22 +315,12 @@ def fetch_jquants_refresh_token(
     password: str,
     timeout_seconds: int = 30,
 ) -> str:
-    response = http_post(
-        _jquants_url(base_url, JQUANTS_AUTH_USER_PATH),
-        json={"mailaddress": mail_address, "password": password},
-        timeout=timeout_seconds,
+    return jquants.fetch_jquants_refresh_token(
+        base_url=base_url,
+        mail_address=mail_address,
+        password=password,
+        timeout_seconds=timeout_seconds,
     )
-    if response.status_code >= 400:
-        raise JPMarketDataFetchError(
-            f"J-Quants auth_user failed: HTTP {response.status_code}."
-        )
-
-    payload = response.json()
-    refresh_token = _clean_text(payload.get("refreshToken"))
-    if refresh_token is None:
-        raise JPMarketDataFetchError("J-Quants auth_user did not return refreshToken.")
-
-    return refresh_token
 
 
 def fetch_jquants_id_token(
@@ -400,22 +329,11 @@ def fetch_jquants_id_token(
     refresh_token: str,
     timeout_seconds: int = 30,
 ) -> str:
-    response = http_post(
-        _jquants_url(base_url, JQUANTS_AUTH_REFRESH_PATH),
-        params={"refreshtoken": refresh_token},
-        timeout=timeout_seconds,
+    return jquants.fetch_jquants_id_token(
+        base_url=base_url,
+        refresh_token=refresh_token,
+        timeout_seconds=timeout_seconds,
     )
-    if response.status_code >= 400:
-        raise JPMarketDataFetchError(
-            f"J-Quants auth_refresh failed: HTTP {response.status_code}."
-        )
-
-    payload = response.json()
-    id_token = _clean_text(payload.get("idToken"))
-    if id_token is None:
-        raise JPMarketDataFetchError("J-Quants auth_refresh did not return idToken.")
-
-    return id_token
 
 
 def fetch_jquants_statements_payload(
@@ -425,19 +343,12 @@ def fetch_jquants_statements_payload(
     local_code: str,
     timeout_seconds: int = 30,
 ) -> tuple[dict[str, Any], str]:
-    url = _jquants_url(base_url, JQUANTS_STATEMENTS_PATH)
-    response = http_get(
-        url,
-        params={"code": local_code},
-        headers={"Authorization": f"Bearer {id_token}"},
-        timeout=timeout_seconds,
+    return jquants.fetch_jquants_statements_payload(
+        base_url=base_url,
+        id_token=id_token,
+        local_code=local_code,
+        timeout_seconds=timeout_seconds,
     )
-    if response.status_code >= 400:
-        raise JPMarketDataFetchError(
-            f"J-Quants statements failed: HTTP {response.status_code}."
-        )
-
-    return response.json(), response.url
 
 
 def fetch_jquants_summary_payload(
@@ -447,19 +358,12 @@ def fetch_jquants_summary_payload(
     local_code: str,
     timeout_seconds: int = 30,
 ) -> tuple[dict[str, Any], str]:
-    url = _jquants_url(base_url, JQUANTS_SUMMARY_PATH)
-    response = http_get(
-        url,
-        params={"code": local_code},
-        headers={"x-api-key": api_key},
-        timeout=timeout_seconds,
+    return jquants.fetch_jquants_summary_payload(
+        base_url=base_url,
+        api_key=api_key,
+        local_code=local_code,
+        timeout_seconds=timeout_seconds,
     )
-    if response.status_code >= 400:
-        raise JPMarketDataFetchError(
-            f"J-Quants summary failed: HTTP {response.status_code}."
-        )
-
-    return response.json(), response.url
 
 
 def fetch_jquants_margin_interest_payload(
@@ -471,25 +375,14 @@ def fetch_jquants_margin_interest_payload(
     to_date: date | None = None,
     timeout_seconds: int = 30,
 ) -> tuple[dict[str, Any], str]:
-    params: dict[str, str] = {"code": local_code}
-    if from_date is not None:
-        params["from"] = from_date.isoformat()
-    if to_date is not None:
-        params["to"] = to_date.isoformat()
-
-    url = _jquants_url(base_url, JQUANTS_MARGIN_INTEREST_PATH)
-    response = http_get(
-        url,
-        params=params,
-        headers={"x-api-key": api_key},
-        timeout=timeout_seconds,
+    return jquants.fetch_jquants_margin_interest_payload(
+        base_url=base_url,
+        api_key=api_key,
+        local_code=local_code,
+        from_date=from_date,
+        to_date=to_date,
+        timeout_seconds=timeout_seconds,
     )
-    if response.status_code >= 400:
-        raise JPMarketDataFetchError(
-            f"J-Quants margin-interest failed: HTTP {response.status_code}."
-        )
-
-    return response.json(), response.url
 
 
 def fetch_jquants_investor_types_payload(
@@ -501,27 +394,14 @@ def fetch_jquants_investor_types_payload(
     to_date: date | None = None,
     timeout_seconds: int = 30,
 ) -> tuple[dict[str, Any], str]:
-    params: dict[str, str] = {}
-    if section:
-        params["section"] = section
-    if from_date is not None:
-        params["from"] = from_date.isoformat()
-    if to_date is not None:
-        params["to"] = to_date.isoformat()
-
-    url = _jquants_url(base_url, JQUANTS_INVESTOR_TYPES_PATH)
-    response = http_get(
-        url,
-        params=params,
-        headers={"x-api-key": api_key},
-        timeout=timeout_seconds,
+    return jquants.fetch_jquants_investor_types_payload(
+        base_url=base_url,
+        api_key=api_key,
+        section=section,
+        from_date=from_date,
+        to_date=to_date,
+        timeout_seconds=timeout_seconds,
     )
-    if response.status_code >= 400:
-        raise JPMarketDataFetchError(
-            f"J-Quants investor-types failed: HTTP {response.status_code}."
-        )
-
-    return response.json(), response.url
 
 
 def _jquants_statement_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -655,16 +535,9 @@ def fetch_jpx_listed_issues_workbook(
     *,
     timeout_seconds: int,
 ) -> tuple[bytes, str]:
-    response = http_get(
-        JPX_LISTED_ISSUES_URL,
-        headers={
-            "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
-            "Accept": "application/vnd.ms-excel,application/octet-stream,*/*",
-        },
-        timeout=timeout_seconds,
+    return jpx.fetch_jpx_listed_issues_workbook(
+        timeout_seconds=timeout_seconds,
     )
-    response.raise_for_status()
-    return response.content, response.url
 
 
 def fetch_yahoo_chart_payload(
@@ -674,27 +547,12 @@ def fetch_yahoo_chart_payload(
     interval: str,
     timeout_seconds: int,
 ) -> tuple[dict[str, Any], str]:
-    normalized_symbol = normalize_jp_symbol(symbol)
-    response = http_get(
-        YAHOO_CHART_URL.format(symbol=quote(normalized_symbol, safe="")),
-        params={
-            "range": range_value,
-            "interval": interval,
-            "includePrePost": "false",
-        },
-        headers={
-            "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
-            "Accept": "application/json,text/plain,*/*",
-        },
-        timeout=timeout_seconds,
+    return yahoo.fetch_yahoo_chart_payload(
+        symbol=symbol,
+        range_value=range_value,
+        interval=interval,
+        timeout_seconds=timeout_seconds,
     )
-    response.raise_for_status()
-    payload = response.json()
-
-    if not isinstance(payload, dict):
-        raise JPMarketDataFetchError("Yahoo chart returned a non-object JSON payload.")
-
-    return payload, response.url
 
 
 def fetch_yahoo_quote_summary_payload(
@@ -702,23 +560,10 @@ def fetch_yahoo_quote_summary_payload(
     symbol: str,
     timeout_seconds: int,
 ) -> tuple[dict[str, Any], str]:
-    normalized_symbol = normalize_jp_symbol(symbol)
-    response = http_get(
-        YAHOO_QUOTE_SUMMARY_URL.format(symbol=quote(normalized_symbol, safe="")),
-        params={"modules": ",".join(YAHOO_QUOTE_SUMMARY_MODULES)},
-        headers={
-            "User-Agent": "OpenMarketIntelligence/1.1 (+local development)",
-            "Accept": "application/json,text/plain,*/*",
-        },
-        timeout=timeout_seconds,
+    return yahoo.fetch_yahoo_quote_summary_payload(
+        symbol=symbol,
+        timeout_seconds=timeout_seconds,
     )
-    response.raise_for_status()
-    payload = response.json()
-
-    if not isinstance(payload, dict):
-        raise JPMarketDataFetchError("Yahoo quote summary returned a non-object JSON payload.")
-
-    return payload, response.url
 
 
 def parse_yahoo_stock_record(
@@ -827,6 +672,112 @@ def parse_yahoo_daily_prices(
         )
 
     return sorted(records, key=lambda item: item.trade_date)
+
+
+def _jp_intraday_session(value: datetime) -> str:
+    local = value.astimezone(timezone(timedelta(hours=9)))
+    minutes = local.hour * 60 + local.minute + local.second / 60
+
+    if 9 * 60 <= minutes <= 11 * 60 + 30:
+        return "regular"
+    if 12 * 60 + 30 <= minutes <= 15 * 60 + 30:
+        return "regular"
+    if 11 * 60 + 30 < minutes < 12 * 60 + 30:
+        return "lunch_break"
+    if minutes < 9 * 60:
+        return "pre_market"
+    return "post_close"
+
+
+def parse_yahoo_intraday_prices(
+    payload: dict[str, Any],
+    *,
+    symbol: str,
+    source_url: str | None = None,
+) -> dict:
+    normalized_symbol = normalize_jp_symbol(symbol)
+    result = _chart_result(payload)
+    timestamps = result.get("timestamp") or []
+    indicators = result.get("indicators") or {}
+    quote_values = (indicators.get("quote") or [{}])[0] or {}
+    meta = result.get("meta") or {}
+    offset = int(meta.get("gmtoffset") or 32400)
+    tz = timezone(timedelta(seconds=offset))
+
+    opens = quote_values.get("open") or []
+    highs = quote_values.get("high") or []
+    lows = quote_values.get("low") or []
+    closes = quote_values.get("close") or []
+    volumes = quote_values.get("volume") or []
+    points: list[dict] = []
+
+    for index, timestamp in enumerate(timestamps):
+        price = _parse_float(_list_value(closes, index))
+        if price is None:
+            continue
+
+        point_time = datetime.fromtimestamp(int(timestamp), tz=tz)
+        points.append(
+            {
+                "time": point_time.isoformat(),
+                "session": _jp_intraday_session(point_time),
+                "price": price,
+                "volume": _parse_int(_list_value(volumes, index)),
+                "open": _parse_float(_list_value(opens, index)),
+                "high": _parse_float(_list_value(highs, index)),
+                "low": _parse_float(_list_value(lows, index)),
+            }
+        )
+
+    regular_points = [point for point in points if point.get("session") == "regular"]
+    latest_point = points[-1] if points else None
+    latest_regular_point = regular_points[-1] if regular_points else None
+    previous_close = (
+        _parse_float(meta.get("chartPreviousClose"))
+        or _parse_float(meta.get("previousClose"))
+        or _parse_float(meta.get("regularMarketPreviousClose"))
+    )
+    warnings: list[str] = []
+    if not points:
+        warnings.append("Yahoo chart returned no Japan intraday points.")
+    is_index = normalized_symbol.startswith("^")
+    if is_index:
+        for point in points:
+            point["volume"] = None
+        warnings.append(
+            "Yahoo does not provide a decision-usable traded-volume series for this "
+            "Japan cash index; zero values were normalized to unavailable."
+        )
+
+    return {
+        "stock_id": normalized_symbol,
+        "symbol": normalized_symbol,
+        "source": "yahoo_finance_chart" if points else "unavailable",
+        "session_scope": "regular",
+        "session_phase": latest_point.get("session") if latest_point else None,
+        "has_extended_hours": False,
+        "regular_point_count": len(regular_points),
+        "extended_point_count": 0,
+        "previous_close": previous_close,
+        "previous_close_source": "yahoo_finance_chart" if previous_close is not None else None,
+        "previous_close_trade_date": None,
+        "previous_close_provider": "yahoo_chart" if previous_close is not None else None,
+        "regular_session_close": (
+            latest_regular_point.get("price") if latest_regular_point else None
+        ),
+        "regular_session_close_time": (
+            latest_regular_point.get("time") if latest_regular_point else None
+        ),
+        "point_count": len(points),
+        "points": points,
+        "volume_unit": None if is_index else "shares",
+        "volume_semantics": (
+            "not_provided_for_cash_index" if is_index else "interval_volume"
+        ),
+        "volume_status": "not_provided" if is_index else "available",
+        "source_url": source_url,
+        "warnings": warnings,
+    }
 
 
 def _quote_summary_result(payload: dict[str, Any]) -> dict[str, Any]:

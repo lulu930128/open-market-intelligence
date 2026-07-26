@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import ssl
 import unittest
 from unittest.mock import patch
 
@@ -18,6 +19,19 @@ def _response(url: str) -> requests.Response:
 
 
 class HttpClientTests(unittest.TestCase):
+    def test_tpex_adapter_keeps_certificate_and_hostname_verification(self) -> None:
+        with http_client.new_session() as session:
+            adapter = session.get_adapter(
+                "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes"
+            )
+            context = adapter.poolmanager.connection_pool_kw["ssl_context"]
+
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(context.check_hostname)
+        strict_flag = getattr(ssl, "VERIFY_X509_STRICT", None)
+        if strict_flag is not None:
+            self.assertEqual(context.verify_flags & strict_flag, 0)
+
     def test_default_session_ignores_environment_proxy(self) -> None:
         observed_trust_env: list[bool] = []
 

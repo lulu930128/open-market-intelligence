@@ -2,7 +2,14 @@ from datetime import date
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
-from app.watchlists import indicator_service, radar_service, ranking_service, service, signal_service
+from app.watchlists import (
+    indicator_service,
+    radar_outcome_service,
+    radar_service,
+    ranking_service,
+    service,
+    signal_service,
+)
 from app.db.session import get_db
 from app.jobs import backfill_tasks, service as job_service
 from app.jobs.schemas import JobRunRead
@@ -23,6 +30,8 @@ from app.watchlists.schemas import (
     WatchlistItemMove,
     WatchlistItemRead,
     WatchlistItemUpdate,
+    WatchlistRadarOutcomeSummaryRead,
+    WatchlistRadarSnapshotRead,
 )
 
 router = APIRouter()
@@ -137,6 +146,7 @@ def _queue_group_refresh_latest_job(
             sleep_seconds,
             skip_existing_months,
         ),
+        reuse_success_within_seconds=300,
     )
     return job_service.serialize_job(job)
 
@@ -595,10 +605,39 @@ def get_watchlist_group_radar(
     volume_ratio_threshold: float | None = Query(default=None, ge=1.0, le=5.0),
     use_intraday: bool = False,
     intraday_limit: int = Query(default=30, ge=1, le=100),
+    prefer_snapshot: bool = True,
+    snapshot_only: bool = False,
     db: Session = Depends(get_db),
 ):
     try:
-        return radar_service.get_watchlist_group_radar(
+        snapshot_matches_default_calculation = (
+            ma_windows is None
+            and volume_ma_windows is None
+            and calculation_limit == 100
+            and volume_ratio_threshold is None
+        )
+        if (
+            prefer_snapshot
+            and not use_intraday
+            and snapshot_matches_default_calculation
+        ) or snapshot_only:
+            snapshot = radar_outcome_service.get_latest_watchlist_radar_snapshot_payload(
+                db=db,
+                group_id=group_id,
+                include_children=include_children,
+                enabled_only=enabled_only,
+                mode=mode,
+                max_results=max_results,
+                minimum_target_trade_date=ranking_service.expected_daily_price_date(),
+            )
+            if snapshot is not None:
+                return snapshot
+            if snapshot_only:
+                raise radar_outcome_service.WatchlistRadarSnapshotNotFoundError(
+                    f"No Radar snapshot is available for group id={group_id}, mode={mode}."
+                )
+
+        radar = radar_service.get_watchlist_group_radar(
             db=db,
             group_id=group_id,
             include_children=include_children,
@@ -612,7 +651,174 @@ def get_watchlist_group_radar(
             use_intraday=use_intraday,
             intraday_limit=intraday_limit,
         )
+        return {**radar, "cache_status": "computed"}
+    except service.WatchlistGroupNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except radar_outcome_service.WatchlistRadarSnapshotNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post(
+    "/groups/{group_id}/radar/snapshots",
+    response_model=WatchlistRadarSnapshotRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_watchlist_group_radar_snapshot(
+    group_id: int,
+    include_children: bool = True,
+    enabled_only: bool = True,
+    mode: str = Query(
+        default="action",
+        pattern="^(action|surge|breakout|volume|overheat|weakness|risk|momentum|all)$",
+    ),
+    max_results: int = Query(default=30, ge=1, le=200),
+    ma_windows: str | None = None,
+    volume_ma_windows: str | None = None,
+    calculation_limit: int = Query(default=100, ge=20, le=500),
+    volume_ratio_threshold: float | None = Query(default=None, ge=1.0, le=5.0),
+    use_intraday: bool = False,
+    intraday_limit: int = Query(default=30, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    try:
+        radar = radar_service.get_watchlist_group_radar(
+            db=db,
+            group_id=group_id,
+            include_children=include_children,
+            enabled_only=enabled_only,
+            mode=mode,
+            max_results=max_results,
+            ma_windows=ma_windows,
+            volume_ma_windows=volume_ma_windows,
+            calculation_limit=calculation_limit,
+            volume_ratio_threshold=volume_ratio_threshold,
+            use_intraday=use_intraday,
+            intraday_limit=intraday_limit,
+        )
+        return radar_outcome_service.save_watchlist_radar_snapshot(
+            db=db,
+            radar=radar,
+            enabled_only=enabled_only,
+            request={
+                "group_id": group_id,
+                "include_children": include_children,
+                "enabled_only": enabled_only,
+                "mode": mode,
+                "max_results": max_results,
+                "ma_windows": ma_windows,
+                "volume_ma_windows": volume_ma_windows,
+                "calculation_limit": calculation_limit,
+                "volume_ratio_threshold": volume_ratio_threshold,
+                "use_intraday": use_intraday,
+                "intraday_limit": intraday_limit,
+            },
+        )
     except service.WatchlistGroupNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post(
+    "/groups/{group_id}/radar/outcomes/evaluate",
+    response_model=WatchlistRadarOutcomeSummaryRead,
+)
+def evaluate_watchlist_group_radar_outcome(
+    group_id: int,
+    mode: str = Query(
+        default="action",
+        pattern="^(action|surge|breakout|volume|overheat|weakness|risk|momentum|all)$",
+    ),
+    snapshot_run_id: int | None = Query(default=None, ge=1),
+    snapshot_date: date | None = None,
+    item_limit: int = Query(default=12, ge=0, le=200),
+    db: Session = Depends(get_db),
+):
+    try:
+        return radar_outcome_service.evaluate_watchlist_radar_outcome(
+            db=db,
+            group_id=group_id,
+            mode=mode,
+            snapshot_run_id=snapshot_run_id,
+            snapshot_date=snapshot_date,
+            item_limit=item_limit,
+        )
+    except radar_outcome_service.WatchlistRadarSnapshotNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.get(
+    "/groups/{group_id}/radar/outcomes/history",
+    response_model=list[WatchlistRadarOutcomeSummaryRead],
+)
+def list_watchlist_group_radar_outcomes(
+    group_id: int,
+    mode: str = Query(
+        default="action",
+        pattern="^(action|surge|breakout|volume|overheat|weakness|risk|momentum|all)$",
+    ),
+    limit: int = Query(default=30, ge=1, le=120),
+    item_limit: int = Query(default=8, ge=0, le=200),
+    db: Session = Depends(get_db),
+):
+    try:
+        return radar_outcome_service.list_watchlist_radar_outcome_summaries(
+            db=db,
+            group_id=group_id,
+            mode=mode,
+            limit=limit,
+            item_limit=item_limit,
+        )
+    except service.WatchlistGroupNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.get(
+    "/groups/{group_id}/radar/outcomes/snapshots/{snapshot_run_id}",
+    response_model=WatchlistRadarOutcomeSummaryRead,
+)
+def get_watchlist_group_radar_outcome_snapshot(
+    group_id: int,
+    snapshot_run_id: int,
+    mode: str = Query(
+        default="action",
+        pattern="^(action|surge|breakout|volume|overheat|weakness|risk|momentum|all)$",
+    ),
+    item_limit: int = Query(default=200, ge=0, le=200),
+    db: Session = Depends(get_db),
+):
+    try:
+        return radar_outcome_service.get_watchlist_radar_outcome_summary_for_scope(
+            db=db,
+            group_id=group_id,
+            mode=mode,
+            snapshot_run_id=snapshot_run_id,
+            item_limit=item_limit,
+        )
+    except radar_outcome_service.WatchlistRadarSnapshotNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.get(
+    "/groups/{group_id}/radar/outcomes/latest",
+    response_model=WatchlistRadarOutcomeSummaryRead,
+)
+def get_latest_watchlist_group_radar_outcome(
+    group_id: int,
+    mode: str = Query(
+        default="action",
+        pattern="^(action|surge|breakout|volume|overheat|weakness|risk|momentum|all)$",
+    ),
+    snapshot_date: date | None = None,
+    item_limit: int = Query(default=12, ge=0, le=200),
+    db: Session = Depends(get_db),
+):
+    return radar_outcome_service.get_latest_watchlist_radar_outcome_summary(
+        db=db,
+        group_id=group_id,
+        mode=mode,
+        snapshot_date=snapshot_date,
+        item_limit=item_limit,
+    )

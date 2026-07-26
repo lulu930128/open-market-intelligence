@@ -1,9 +1,13 @@
 "use client";
 
+import { StateSurface } from "@/components/LoadingPlaceholders";
 import type {
   WatchlistGroupRadarRead,
+  WatchlistRadarBucketRead,
   WatchlistRadarItemRead,
   WatchlistRadarMode,
+  WatchlistRadarOutcomeItemRead,
+  WatchlistRadarOutcomeSummaryRead,
 } from "@/types/market";
 import {
   radarActionLabel,
@@ -29,16 +33,69 @@ type LoadState = "idle" | "loading" | "success" | "error";
 type WatchlistRadarPanelProps = {
   radar: WatchlistGroupRadarRead | null;
   loadState: LoadState;
-  errorMessage: string | null;
   mode: WatchlistRadarMode;
   selectedStockId: string | null;
   disabled?: boolean;
   scopeLabel?: string | null;
   notice?: string | null;
+  outcomeSummary?: WatchlistRadarOutcomeSummaryRead | null;
+  outcomeLoadState?: LoadState;
+  outcomeHistory?: WatchlistRadarOutcomeSummaryRead[];
+  outcomeHistoryOpen?: boolean;
+  outcomeHistoryLoadState?: LoadState;
+  outcomeDetailLoadState?: LoadState;
+  selectedOutcomeSnapshotId?: number | null;
   getModeHref?: (mode: WatchlistRadarMode) => string;
   onModeChange: (mode: WatchlistRadarMode) => void;
   onReload: () => void;
+  onOpenOutcomeHistory?: () => void;
+  onCloseOutcomeHistory?: () => void;
+  onReloadOutcomeHistory?: () => void;
+  onSelectOutcomeSnapshot?: (snapshotId: number) => void;
+  onEvaluateOutcomeSnapshot?: (snapshotId: number) => void;
   onSelectStock: (stockId: string, stockName: string | null) => void;
+};
+
+type RadarBucketGroupKey =
+  | "price"
+  | "volatility"
+  | "structure"
+  | "volume"
+  | "momentum"
+  | "other";
+
+const RADAR_BUCKET_GROUPS: Array<{
+  key: RadarBucketGroupKey;
+  labelKey: string;
+}> = [
+  { key: "price", labelKey: "radar.bucketGroups.price" },
+  { key: "volatility", labelKey: "radar.bucketGroups.volatility" },
+  { key: "structure", labelKey: "radar.bucketGroups.structure" },
+  { key: "volume", labelKey: "radar.bucketGroups.volume" },
+  { key: "momentum", labelKey: "radar.bucketGroups.momentum" },
+  { key: "other", labelKey: "radar.bucketGroups.other" },
+];
+
+const RADAR_BUCKET_GROUP_BY_KEY: Record<string, RadarBucketGroupKey> = {
+  limit_up_lock: "price",
+  surge_up: "price",
+  limit_down_liquidity: "price",
+  selloff_risk: "price",
+  limit_up_move: "price",
+  limit_down_move: "price",
+  overheated: "volatility",
+  volatility_risk: "volatility",
+  support_break: "structure",
+  breakout_high: "structure",
+  trend_reclaim: "structure",
+  breakout: "structure",
+  compression_watch: "structure",
+  pullback: "structure",
+  volume_up: "volume",
+  volume: "volume",
+  volume_down: "volume",
+  momentum: "momentum",
+  bearish_momentum: "momentum",
 };
 
 const RADAR_MODE_OPTIONS: Array<{
@@ -96,6 +153,136 @@ function formatRadarPct(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
   const sign = value > 0 ? "+" : "";
   return `${sign}${value.toFixed(2)}%`;
+}
+
+function outcomeStatusText(
+  t: TranslationFunction,
+  summary: WatchlistRadarOutcomeSummaryRead | null | undefined
+) {
+  if (!summary || summary.status === "no_snapshot") {
+    return t("radar.outcome.noSnapshot");
+  }
+
+  const date = formatRadarDate(summary.snapshot?.snapshot_date);
+
+  if (summary.status === "not_evaluated") {
+    return t("radar.outcome.notEvaluated", { date });
+  }
+
+  if (summary.status === "pending") {
+    return t("radar.outcome.pending", {
+      date,
+      count: summary.pending_count,
+    });
+  }
+
+  return t("radar.outcome.evaluated", {
+    date,
+    count: summary.total_count,
+  });
+}
+
+function outcomeStatusClass(status: string | null | undefined) {
+  if (status === "evaluated" || status === "hit") {
+    return "border-omi-success-border bg-omi-success-soft text-omi-success";
+  }
+  if (status === "miss") {
+    return "border-omi-danger-border bg-omi-danger-soft text-omi-danger";
+  }
+  if (status === "pending") return "border-omi-warning-border bg-omi-warning-soft text-omi-warning";
+  if (status === "not_evaluated") return "border-omi-info-border bg-omi-info-soft text-omi-info-strong";
+  return "border-omi-border-subtle bg-omi-surface-subtle text-omi-text-muted";
+}
+
+function outcomeStatusLabel(t: TranslationFunction, status: string | null | undefined) {
+  const normalizedStatus = status === "no_snapshot" ? "noSnapshot" : status || "noSnapshot";
+  const key = `radar.outcome.status.${normalizedStatus}`;
+  const label = t(key);
+  return label === key ? status || "-" : label;
+}
+
+function outcomeSavedCount(summary: WatchlistRadarOutcomeSummaryRead | null | undefined) {
+  return summary?.snapshot?.radar_count ?? summary?.total_count ?? 0;
+}
+
+function outcomeMetricClass(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "text-omi-text-muted";
+  }
+  if (value > 0) return "text-omi-market-up";
+  if (value < 0) return "text-omi-market-down";
+  return "text-omi-text";
+}
+
+function outcomeReviewDetails(
+  item: WatchlistRadarOutcomeItemRead,
+  t: TranslationFunction
+) {
+  return [
+    item.outcome_trade_date
+      ? `${t("radar.outcome.detailLabels.tradeDate")}：${formatRadarDate(
+          item.outcome_trade_date
+        )}`
+      : null,
+    item.signal_close_price !== null
+      ? `${t("radar.outcome.detailLabels.signalClose")}：${formatRadarPrice(
+          item.signal_close_price
+        )}`
+      : null,
+    item.outcome_open_price !== null
+      ? `${t("radar.outcome.detailLabels.outcomeOpen")}：${formatRadarPrice(
+          item.outcome_open_price
+        )}`
+      : null,
+    item.outcome_high_price !== null
+      ? `${t("radar.outcome.detailLabels.outcomeHigh")}：${formatRadarPrice(
+          item.outcome_high_price
+        )}`
+      : null,
+    item.outcome_low_price !== null
+      ? `${t("radar.outcome.detailLabels.outcomeLow")}：${formatRadarPrice(
+          item.outcome_low_price
+        )}`
+      : null,
+    item.outcome_close_price !== null
+      ? `${t("radar.outcome.detailLabels.outcomeClose")}：${formatRadarPrice(
+          item.outcome_close_price
+        )}`
+      : null,
+    item.open_gap_pct !== null
+      ? `${t("radar.outcome.detailLabels.openGap")}：${formatRadarPct(
+          item.open_gap_pct
+        )}`
+      : null,
+    item.close_return_pct !== null
+      ? `${t("radar.outcome.detailLabels.closeReturn")}：${formatRadarPct(
+          item.close_return_pct
+        )}`
+      : null,
+    item.max_favorable_pct !== null
+      ? `${t("radar.outcome.detailLabels.maxFavorable")}：${formatRadarPct(
+          item.max_favorable_pct
+        )}`
+      : null,
+    item.max_adverse_pct !== null
+      ? `${t("radar.outcome.detailLabels.maxAdverse")}：${formatRadarPct(
+          item.max_adverse_pct
+        )}`
+      : null,
+    item.intraday_range_pct !== null
+      ? `${t("radar.outcome.detailLabels.intradayRange")}：${formatRadarPct(
+          item.intraday_range_pct
+        )}`
+      : null,
+    item.volume_change_pct !== null
+      ? `${t("radar.outcome.detailLabels.volumeChange")}：${formatRadarPct(
+          item.volume_change_pct
+        )}`
+      : null,
+    item.reason
+      ? `${t("radar.outcome.detailLabels.reason")}：${item.reason}`
+      : null,
+  ].filter((detail): detail is string => Boolean(detail));
 }
 
 function formatDistanceFromClose(
@@ -304,6 +491,24 @@ function bucketClass(bucket: string) {
   return "omi-signal-chip-neutral";
 }
 
+function groupedRadarBuckets(buckets: WatchlistRadarBucketRead[]) {
+  const bucketsByGroup = new Map<RadarBucketGroupKey, WatchlistRadarBucketRead[]>();
+
+  for (const group of RADAR_BUCKET_GROUPS) {
+    bucketsByGroup.set(group.key, []);
+  }
+
+  for (const bucket of buckets) {
+    const groupKey = RADAR_BUCKET_GROUP_BY_KEY[bucket.key] ?? "other";
+    bucketsByGroup.get(groupKey)?.push(bucket);
+  }
+
+  return RADAR_BUCKET_GROUPS.map((group) => ({
+    ...group,
+    buckets: bucketsByGroup.get(group.key) ?? [],
+  })).filter((group) => group.buckets.length > 0);
+}
+
 function itemMeta(item: WatchlistRadarItemRead, t: TranslationFunction) {
   const bucketLabel = radarBucketLabel(t, item.bucket, item.bucket_label);
 
@@ -381,11 +586,21 @@ function priceLevelDetails(item: WatchlistRadarItemRead, t: TranslationFunction)
 
   const atrValue = priceLevelNumber(item, "atr_pct");
   const atrPct = formatRadarPct(atrValue);
+  const supportBroken = item.price_levels?.support_broken === true;
 
   return [
-    levelDetail(t("radar.detailFields.support"), "support"),
+    levelDetail(
+      t(
+        supportBroken
+          ? "radar.detailFields.brokenSupport"
+          : "radar.detailFields.support"
+      ),
+      "support"
+    ),
     levelDetail(t("radar.detailFields.resistance"), "resistance"),
+    levelDetail(t("radar.detailFields.previousClose"), "previous_close"),
     levelDetail(t("radar.detailFields.ma20"), "ma20"),
+    levelDetail(t("radar.detailFields.ma60"), "ma60"),
     atrPct !== "-" && atrValue !== null
       ? withDetailTone(`${t("radar.detailFields.atrPct")} ${atrPct}`, atrTone(t, atrValue))
       : null,
@@ -580,18 +795,18 @@ function detailCount(...detailGroups: string[][]) {
 
 function RadarLoadingRows() {
   return (
-    <div className="divide-y divide-omi-border-subtle">
+    <div className="omi-loading-surface divide-y divide-omi-border-subtle" aria-hidden="true">
       {Array.from({ length: 4 }).map((_, index) => (
         <div
           key={index}
           className="grid grid-cols-[42px_minmax(180px,1fr)_86px] items-center gap-3 px-4 py-3"
         >
-          <span className="h-3 w-7 animate-pulse bg-omi-surface-strong" />
+          <span className="omi-skeleton h-3 w-7" />
           <span className="space-y-2">
-            <span className="block h-3 w-32 animate-pulse bg-omi-surface-strong" />
-            <span className="block h-2.5 w-64 animate-pulse bg-omi-surface-muted" />
+            <span className="omi-skeleton block h-3 w-32" />
+            <span className="omi-skeleton block h-2.5 w-64 max-w-full" />
           </span>
-          <span className="h-3 w-14 animate-pulse bg-omi-surface-muted" />
+          <span className="omi-skeleton h-3 w-14" />
         </div>
       ))}
     </div>
@@ -601,24 +816,52 @@ function RadarLoadingRows() {
 export default function WatchlistRadarPanel({
   radar,
   loadState,
-  errorMessage,
   mode,
   selectedStockId,
   disabled = false,
   scopeLabel,
   notice,
+  outcomeSummary,
+  outcomeLoadState = "idle",
+  outcomeHistory = [],
+  outcomeHistoryOpen = false,
+  outcomeHistoryLoadState = "idle",
+  outcomeDetailLoadState = "idle",
+  selectedOutcomeSnapshotId,
   getModeHref,
   onModeChange,
   onReload,
+  onOpenOutcomeHistory,
+  onCloseOutcomeHistory,
+  onReloadOutcomeHistory,
+  onSelectOutcomeSnapshot,
+  onEvaluateOutcomeSnapshot,
   onSelectStock,
 }: WatchlistRadarPanelProps) {
   const t = useT();
   const isLoading = loadState === "loading" && radar === null;
   const hasResults = (radar?.results.length ?? 0) > 0;
   const activeBuckets = radar?.buckets.filter((bucket) => bucket.count > 0) ?? [];
+  const activeBucketGroups = groupedRadarBuckets(activeBuckets);
+  const showOutcomeTools = Boolean(outcomeSummary || onOpenOutcomeHistory);
+  const outcomeBusy = outcomeLoadState === "loading";
+  const outcomeHistoryBusy = outcomeHistoryLoadState === "loading";
+  const outcomeDetailBusy = outcomeDetailLoadState === "loading";
+  const outcomeBuckets = outcomeSummary?.bucket_summaries.slice(0, 4) ?? [];
+  const selectedOutcomeSummary =
+    outcomeHistory.find((summary) => summary.snapshot?.id === selectedOutcomeSnapshotId) ??
+    outcomeHistory[0] ??
+    outcomeSummary ??
+    null;
+  const selectedOutcomeSnapshotIdValue = selectedOutcomeSummary?.snapshot?.id ?? null;
+  const selectedOutcomeBuckets = selectedOutcomeSummary?.bucket_summaries.slice(0, 8) ?? [];
   const radarDateLabel = radar?.trade_date
     ? t("radar.dateLabel", { date: formatRadarDate(radar.trade_date) })
     : t("radar.notLoaded");
+  const radarSnapshotLabel =
+    radar?.cache_status === "snapshot" && radar.snapshot_date
+      ? t("radar.snapshotLabel", { date: formatRadarDate(radar.snapshot_date) })
+      : null;
 
   return (
     <section className="border border-omi-border-subtle bg-omi-surface" data-testid="watchlist-radar-panel">
@@ -638,6 +881,7 @@ export default function WatchlistRadarPanel({
         <div className="flex flex-wrap items-center gap-2">
           <div className="mr-1 text-xs font-medium text-omi-text-muted">
             {radarDateLabel}
+            {radarSnapshotLabel ? ` · ${radarSnapshotLabel}` : ""}
           </div>
           <div className="inline-flex border border-omi-border bg-omi-surface">
             {RADAR_MODE_OPTIONS.map((option) => (
@@ -667,8 +911,20 @@ export default function WatchlistRadarPanel({
               </a>
             ))}
           </div>
+          {onOpenOutcomeHistory ? (
+            <button
+              type="button"
+              data-testid="watchlist-radar-history-open"
+              onClick={onOpenOutcomeHistory}
+              disabled={disabled || outcomeHistoryBusy}
+              className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text-muted hover:border-omi-accent hover:text-omi-accent disabled:border-omi-border-subtle disabled:text-omi-text-subtle"
+            >
+              {t("radar.outcome.history")}
+            </button>
+          ) : null}
           <button
             type="button"
+            data-testid="watchlist-radar-reload"
             onClick={onReload}
             disabled={disabled || loadState === "loading"}
             className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text-muted hover:border-omi-accent hover:text-omi-accent disabled:border-omi-border-subtle disabled:text-omi-text-subtle"
@@ -678,38 +934,541 @@ export default function WatchlistRadarPanel({
         </div>
       </div>
 
-      {errorMessage ? (
-        <div className="border-b border-omi-warning-border bg-omi-warning-soft px-5 py-3 text-sm text-omi-warning">
-          {errorMessage}
-        </div>
-      ) : null}
-
       {notice ? (
         <div className="border-b border-omi-info-border bg-omi-info-soft px-5 py-3 text-sm text-omi-info-strong">
           {notice}
         </div>
       ) : null}
 
+      {showOutcomeTools ? (
+        <div className="border-b border-omi-border-subtle bg-omi-surface px-5 py-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-bold uppercase tracking-[0.14em] text-omi-text-muted">
+                  {t("radar.outcome.title")}
+                </span>
+                <span
+                  className={[
+                    "inline-flex max-w-full items-center border px-2 py-0.5 text-xs font-semibold",
+                    outcomeStatusClass(outcomeSummary?.status),
+                  ].join(" ")}
+                >
+                  {outcomeBusy
+                    ? t("radar.outcome.loading")
+                    : outcomeStatusText(t, outcomeSummary)}
+                </span>
+              </div>
+              {outcomeSummary?.snapshot ? (
+                <p className="mt-1 text-xs text-omi-text-muted">
+                  {t("radar.outcome.snapshotMeta", {
+                    date: formatRadarDate(outcomeSummary.snapshot.snapshot_date),
+                    version: outcomeSummary.snapshot.radar_rule_version,
+                  })}
+                </p>
+              ) : null}
+            </div>
+          </div>
+
+          {outcomeSummary?.snapshot ? (
+            <div className="mt-3 flex flex-wrap gap-2 text-xs">
+              <span className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-1 text-omi-text-muted">
+                {t("radar.outcome.stats.total", { count: outcomeSummary.total_count })}
+              </span>
+              <span className="border border-omi-success-border bg-omi-success-soft px-2 py-1 font-semibold text-omi-success">
+                {t("radar.outcome.stats.hit", { count: outcomeSummary.hit_count })}
+              </span>
+              <span className="border border-omi-danger-border bg-omi-danger-soft px-2 py-1 font-semibold text-omi-danger">
+                {t("radar.outcome.stats.miss", { count: outcomeSummary.miss_count })}
+              </span>
+              <span className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-1 text-omi-text-muted">
+                {t("radar.outcome.stats.neutral", { count: outcomeSummary.neutral_count })}
+              </span>
+              <span className="border border-omi-warning-border bg-omi-warning-soft px-2 py-1 font-semibold text-omi-warning">
+                {t("radar.outcome.stats.pending", { count: outcomeSummary.pending_count })}
+              </span>
+              <span
+                className={[
+                  "border border-omi-border-subtle bg-omi-surface-subtle px-2 py-1 font-semibold",
+                  outcomeMetricClass(outcomeSummary.avg_close_return_pct),
+                ].join(" ")}
+              >
+                {t("radar.outcome.stats.avgClose", {
+                  value: formatRadarPct(outcomeSummary.avg_close_return_pct),
+                })}
+              </span>
+            </div>
+          ) : null}
+
+          {outcomeBuckets.length > 0 ? (
+            <div className="mt-2 flex flex-wrap gap-2 text-xs text-omi-text-muted">
+              {outcomeBuckets.map((bucket) => (
+                <span
+                  key={bucket.bucket}
+                  className="inline-flex items-center gap-1 border border-omi-border-subtle bg-omi-surface-subtle px-2 py-1"
+                >
+                  <span className="font-semibold text-omi-text">
+                    {radarBucketLabel(t, bucket.bucket, bucket.bucket_label)}
+                  </span>
+                  <span>{t("radar.outcome.bucketStat", {
+                    hit: bucket.hit_count,
+                    miss: bucket.miss_count,
+                    pending: bucket.pending_count,
+                  })}</span>
+                </span>
+              ))}
+            </div>
+          ) : null}
+
+          {outcomeSummary?.data_limitations.length ? (
+            <p className="mt-2 text-xs text-omi-text-muted">
+              {outcomeSummary.data_limitations.join(" / ")}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
+      {outcomeHistoryOpen ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-3"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("radar.outcome.historyTitle")}
+          data-testid="watchlist-radar-history-dialog"
+        >
+          <div className="flex max-h-[88vh] w-full max-w-6xl flex-col overflow-hidden border border-omi-border bg-omi-surface shadow-2xl">
+            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-omi-border-subtle px-5 py-4">
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-[0.16em] text-omi-text-muted">
+                  {t("radar.outcome.title")}
+                </div>
+                <h3 className="mt-1 text-lg font-bold text-omi-text-strong">
+                  {t("radar.outcome.historyTitle")}
+                </h3>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {onReloadOutcomeHistory ? (
+                  <button
+                    type="button"
+                    data-testid="watchlist-radar-history-reload"
+                    onClick={onReloadOutcomeHistory}
+                    disabled={disabled || outcomeHistoryBusy}
+                    className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text-muted hover:border-omi-accent hover:text-omi-accent disabled:border-omi-border-subtle disabled:text-omi-text-subtle"
+                  >
+                    {t("radar.outcome.reload")}
+                  </button>
+                ) : null}
+                {onCloseOutcomeHistory ? (
+                  <button
+                    type="button"
+                    onClick={onCloseOutcomeHistory}
+                    className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text-muted hover:border-omi-accent hover:text-omi-accent"
+                  >
+                    {t("radar.outcome.close")}
+                  </button>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="grid min-h-0 flex-1 grid-cols-1 overflow-hidden md:grid-cols-[280px_minmax(0,1fr)]">
+              <div className="min-h-0 overflow-y-auto border-b border-omi-border-subtle bg-omi-surface-subtle p-3 md:border-b-0 md:border-r">
+                {outcomeHistoryBusy && outcomeHistory.length === 0 ? (
+                  <div className="omi-loading-surface space-y-2">
+                    {Array.from({ length: 4 }).map((_, index) => (
+                      <div
+                        key={index}
+                        className="omi-skeleton h-16 border border-omi-border-subtle bg-omi-surface"
+                      />
+                    ))}
+                  </div>
+                ) : outcomeHistory.length > 0 ? (
+                  <div className="space-y-2">
+                    {outcomeHistory.map((summary) => {
+                      const snapshotId = summary.snapshot?.id;
+                      const selected = snapshotId === selectedOutcomeSnapshotIdValue;
+
+                      return (
+                        <button
+                          key={snapshotId ?? summary.snapshot?.snapshot_date ?? "empty"}
+                          type="button"
+                          data-testid={
+                            snapshotId
+                              ? `watchlist-radar-history-snapshot-${snapshotId}`
+                              : undefined
+                          }
+                          disabled={!snapshotId}
+                          onClick={() => {
+                            if (snapshotId) onSelectOutcomeSnapshot?.(snapshotId);
+                          }}
+                          className={[
+                            "w-full border px-3 py-2 text-left transition",
+                            selected
+                              ? "border-omi-accent bg-omi-surface text-omi-text"
+                              : "border-omi-border-subtle bg-omi-surface text-omi-text-muted hover:border-omi-accent",
+                          ].join(" ")}
+                        >
+                          <span className="flex items-center justify-between gap-2">
+                            <span className="font-semibold text-omi-text">
+                              {formatRadarDate(summary.snapshot?.snapshot_date)}
+                            </span>
+                            <span
+                              className={[
+                                "border px-1.5 py-0.5 text-[11px] font-semibold",
+                                outcomeStatusClass(summary.status),
+                              ].join(" ")}
+                            >
+                              {outcomeStatusLabel(t, summary.status)}
+                            </span>
+                          </span>
+                          <span className="mt-1 block text-xs">
+                            {t("radar.outcome.savedSamples", {
+                              count: outcomeSavedCount(summary),
+                            })}
+                            {" / "}
+                            {t("radar.outcome.evaluatedSamples", {
+                              count: summary.total_count,
+                            })}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <StateSurface
+                    title={t("radar.outcome.historyEmpty")}
+                    tone="empty"
+                    compact
+                  />
+                )}
+              </div>
+
+              <div className="min-h-0 overflow-y-auto p-5">
+                {selectedOutcomeSummary?.snapshot ? (
+                  <div className="space-y-4">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <div className="text-xs font-semibold uppercase tracking-[0.14em] text-omi-text-muted">
+                          {t("radar.outcome.snapshot")}
+                        </div>
+                        <h4 className="mt-1 text-xl font-bold text-omi-text-strong">
+                          {formatRadarDate(selectedOutcomeSummary.snapshot.snapshot_date)}
+                        </h4>
+                        <p className="mt-1 text-xs text-omi-text-muted">
+                          {t("radar.outcome.snapshotMeta", {
+                            date: formatRadarDate(selectedOutcomeSummary.snapshot.snapshot_date),
+                            version: selectedOutcomeSummary.snapshot.radar_rule_version,
+                          })}
+                        </p>
+                      </div>
+                      {selectedOutcomeSnapshotIdValue && onEvaluateOutcomeSnapshot ? (
+                        <button
+                          type="button"
+                          data-testid="watchlist-radar-history-evaluate-selected"
+                          onClick={() => onEvaluateOutcomeSnapshot(selectedOutcomeSnapshotIdValue)}
+                          disabled={disabled || outcomeBusy}
+                          className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text-muted hover:border-omi-accent hover:text-omi-accent disabled:border-omi-border-subtle disabled:text-omi-text-subtle"
+                        >
+                          {t("radar.outcome.evaluateSelected")}
+                        </button>
+                      ) : null}
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 text-xs md:grid-cols-4">
+                      <div className="border border-omi-border-subtle bg-omi-surface-subtle px-3 py-2">
+                        <div className="text-omi-text-muted">{t("radar.outcome.saved")}</div>
+                        <div className="mt-1 text-lg font-bold text-omi-text">
+                          {outcomeSavedCount(selectedOutcomeSummary)}
+                        </div>
+                      </div>
+                      <div className="border border-omi-border-subtle bg-omi-surface-subtle px-3 py-2">
+                        <div className="text-omi-text-muted">{t("radar.outcome.evaluatedCount")}</div>
+                        <div className="mt-1 text-lg font-bold text-omi-text">
+                          {selectedOutcomeSummary.total_count}
+                        </div>
+                      </div>
+                      <div className="border border-omi-success-border bg-omi-success-soft px-3 py-2">
+                        <div className="text-omi-success">{t("radar.outcome.hit")}</div>
+                        <div className="mt-1 text-lg font-bold text-omi-success">
+                          {selectedOutcomeSummary.hit_count}
+                        </div>
+                      </div>
+                      <div className="border border-omi-danger-border bg-omi-danger-soft px-3 py-2">
+                        <div className="text-omi-danger">{t("radar.outcome.miss")}</div>
+                        <div className="mt-1 text-lg font-bold text-omi-danger">
+                          {selectedOutcomeSummary.miss_count}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap gap-2 text-xs">
+                      <span className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-1 text-omi-text-muted">
+                        {t("radar.outcome.stats.neutral", {
+                          count: selectedOutcomeSummary.neutral_count,
+                        })}
+                      </span>
+                      <span className="border border-omi-warning-border bg-omi-warning-soft px-2 py-1 font-semibold text-omi-warning">
+                        {t("radar.outcome.stats.pending", {
+                          count: selectedOutcomeSummary.pending_count,
+                        })}
+                      </span>
+                      <span
+                        className={[
+                          "border border-omi-border-subtle bg-omi-surface-subtle px-2 py-1 font-semibold",
+                          outcomeMetricClass(selectedOutcomeSummary.avg_close_return_pct),
+                        ].join(" ")}
+                      >
+                        {t("radar.outcome.stats.avgClose", {
+                          value: formatRadarPct(selectedOutcomeSummary.avg_close_return_pct),
+                        })}
+                      </span>
+                    </div>
+
+                    <div>
+                      <div className="mb-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
+                        {t("radar.outcome.bucketSummary")}
+                      </div>
+                      {selectedOutcomeBuckets.length > 0 ? (
+                        <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                          {selectedOutcomeBuckets.map((bucket) => (
+                            <div
+                              key={bucket.bucket}
+                              className="border border-omi-border-subtle bg-omi-surface-subtle px-3 py-2 text-xs"
+                            >
+                              <div className="font-semibold text-omi-text">
+                                {radarBucketLabel(t, bucket.bucket, bucket.bucket_label)}
+                              </div>
+                              <div className="mt-1 text-omi-text-muted">
+                                {t("radar.outcome.bucketStat", {
+                                  hit: bucket.hit_count,
+                                  miss: bucket.miss_count,
+                                  pending: bucket.pending_count,
+                                })}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="flex flex-wrap gap-2 text-xs text-omi-text-muted">
+                          {selectedOutcomeSummary.snapshot.buckets.map((bucket) => (
+                            <span
+                              key={bucket.key}
+                              className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-1"
+                            >
+                              {radarBucketLabel(t, bucket.key, bucket.label)} {bucket.count}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <div>
+                      <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs">
+                        <div className="font-bold uppercase tracking-wide text-omi-text-muted">
+                          {t("radar.outcome.itemResults", {
+                            count: outcomeSavedCount(selectedOutcomeSummary),
+                          })}
+                        </div>
+                        <div className="text-omi-text-muted">
+                          {t("radar.outcome.itemCoverage", {
+                            shown: selectedOutcomeSummary.items.length,
+                            total: outcomeSavedCount(selectedOutcomeSummary),
+                          })}
+                        </div>
+                      </div>
+                      {outcomeDetailBusy ? (
+                        <StateSurface
+                          title={t("radar.outcome.itemLoading")}
+                          tone="loading"
+                          busy
+                          compact
+                        />
+                      ) : outcomeDetailLoadState === "error" ? (
+                        <StateSurface
+                          title={t("radar.outcome.loadError")}
+                          tone="danger"
+                          compact
+                        />
+                      ) : selectedOutcomeSummary.items.length > 0 ? (
+                        <div
+                          className="divide-y divide-omi-border-subtle border border-omi-border-subtle"
+                          data-testid="watchlist-radar-history-items"
+                        >
+                          {selectedOutcomeSummary.items.map((item) => {
+                            const radarItem = item.radar_item;
+                            const signalDetails = radarItem
+                              ? technicalSignalDetails(radarItem, t)
+                              : [];
+                            const scoreDetails = radarItem
+                              ? factorScoreDetails(radarItem, t)
+                              : [];
+                            const levelDetails = radarItem
+                              ? priceLevelDetails(radarItem, t)
+                              : [];
+                            const rawIndicatorDetails = radarItem
+                              ? indicatorDetails(radarItem, t)
+                              : [];
+                            const indicatorDetailValues = rawIndicatorDetails.filter(
+                              (detail) => !signalDetails.includes(detail)
+                            );
+                            const evaluationDetails = outcomeReviewDetails(item, t);
+                            const collapsedDetailCount = detailCount(
+                              evaluationDetails,
+                              signalDetails,
+                              scoreDetails,
+                              levelDetails,
+                              indicatorDetailValues
+                            );
+
+                            return (
+                              <article
+                                key={`${item.snapshot_item_id}-${item.stock_id}`}
+                                className="bg-omi-surface text-xs"
+                                data-testid={`watchlist-radar-history-item-${item.rank}-${item.stock_id}`}
+                              >
+                                <div className="grid grid-cols-[minmax(120px,1fr)_90px_90px] gap-3 px-3 py-2">
+                                  <div className="min-w-0">
+                                    <div className="truncate font-semibold text-omi-text">
+                                      #{item.rank} {item.stock_id} {item.stock_name ?? ""}
+                                    </div>
+                                    <div className="mt-0.5 truncate text-omi-text-muted">
+                                      {radarBucketLabel(t, item.bucket, item.bucket_label)}
+                                    </div>
+                                  </div>
+                                  <div className="text-right">
+                                    <div className="text-omi-text-muted">
+                                      {t("radar.outcome.closeReturn")}
+                                    </div>
+                                    <div className={outcomeMetricClass(item.close_return_pct)}>
+                                      {formatRadarPct(item.close_return_pct)}
+                                    </div>
+                                  </div>
+                                  <div className="text-right">
+                                    <div className="text-omi-text-muted">
+                                      {t("radar.outcome.result")}
+                                    </div>
+                                    <span
+                                      className={[
+                                        "mt-0.5 inline-flex border px-1.5 py-0.5 font-semibold",
+                                        outcomeStatusClass(item.status),
+                                      ].join(" ")}
+                                    >
+                                      {outcomeStatusLabel(t, item.status)}
+                                    </span>
+                                  </div>
+                                </div>
+                                {collapsedDetailCount > 0 ? (
+                                  <details
+                                    className="group border-t border-omi-border-subtle px-3 pb-3 pt-2"
+                                    data-testid={`watchlist-radar-history-item-details-${item.rank}-${item.stock_id}`}
+                                  >
+                                    <summary className="flex cursor-pointer list-none items-center justify-between gap-3 font-semibold text-omi-text-muted hover:text-omi-accent">
+                                      <span className="min-w-0 truncate">
+                                        {t("radar.outcome.itemDetailToggle", {
+                                          count: collapsedDetailCount,
+                                        })}
+                                      </span>
+                                      <span className="shrink-0 text-[11px] text-omi-text-subtle transition group-open:rotate-45">
+                                        +
+                                      </span>
+                                    </summary>
+                                    <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                                      {detailPanel(
+                                        t("radar.outcome.detailSections.evaluation"),
+                                        t("radar.outcome.detailDescriptions.evaluation"),
+                                        evaluationDetails
+                                      )}
+                                      {detailPanel(
+                                        t("radar.detailSections.signals"),
+                                        t("radar.detailDescriptions.signals"),
+                                        signalDetails
+                                      )}
+                                      {detailPanel(
+                                        t("radar.detailSections.factors"),
+                                        t("radar.detailDescriptions.factors"),
+                                        scoreDetails
+                                      )}
+                                      {detailPanel(
+                                        t("radar.detailSections.levels"),
+                                        t("radar.detailDescriptions.levels"),
+                                        levelDetails
+                                      )}
+                                      {detailPanel(
+                                        t("radar.detailSections.indicators"),
+                                        t("radar.detailDescriptions.indicators"),
+                                        indicatorDetailValues
+                                      )}
+                                    </div>
+                                  </details>
+                                ) : null}
+                              </article>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <StateSurface
+                          title={t("radar.outcome.itemEmpty")}
+                          tone="empty"
+                          compact
+                        />
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <StateSurface
+                    title={t("radar.outcome.historyEmpty")}
+                    tone="empty"
+                  />
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {activeBuckets.length > 0 ? (
-        <div className="flex flex-wrap gap-2 border-b border-omi-border-subtle px-5 py-3">
-          {activeBuckets.map((bucket) => (
-            <span
-              key={bucket.key}
-              title={radarBucketDescription(t, bucket.key, bucket.description)}
+        <div className="flex flex-wrap items-stretch gap-y-2 border-b border-omi-border-subtle px-5 py-3">
+          {activeBucketGroups.map((group, groupIndex) => (
+            <div
+              key={group.key}
               className={[
-                "omi-signal-chip inline-flex items-center gap-1 border px-2 py-1 text-xs font-semibold",
-                bucketClass(bucket.key),
+                "flex min-w-0 flex-wrap items-center gap-1.5 pr-3",
+                groupIndex > 0 ? "border-l border-omi-border-subtle pl-3" : "",
               ].join(" ")}
             >
-              {radarBucketLabel(t, bucket.key, bucket.label)}
-              <span className="tabular-nums">{bucket.count}</span>
-            </span>
+              <span className="text-[11px] font-bold text-omi-text-muted">
+                {t(group.labelKey)}
+              </span>
+              {group.buckets.map((bucket) => (
+                <span
+                  key={bucket.key}
+                  title={radarBucketDescription(t, bucket.key, bucket.description)}
+                  className={[
+                    "omi-signal-chip inline-flex items-center gap-1 border px-2 py-1 text-xs font-semibold",
+                    bucketClass(bucket.key),
+                  ].join(" ")}
+                >
+                  {radarBucketLabel(t, bucket.key, bucket.label)}
+                  <span className="tabular-nums">{bucket.count}</span>
+                </span>
+              ))}
+            </div>
           ))}
         </div>
       ) : null}
 
       {isLoading ? (
-        <RadarLoadingRows />
+        <div>
+          <div className="border-b border-omi-border-subtle p-3">
+            <StateSurface
+              eyebrow={t("radar.eyebrow")}
+              title={t("common.loading")}
+              tone="loading"
+              busy
+              compact
+            />
+          </div>
+          <RadarLoadingRows />
+        </div>
       ) : hasResults ? (
         <div
           className="max-h-[36rem] space-y-1 overflow-y-auto overscroll-contain bg-omi-surface-subtle p-2"
@@ -760,6 +1519,7 @@ export default function WatchlistRadarPanel({
             return (
               <article
                 key={`${item.rank}-${item.stock_id}-${item.bucket}`}
+                data-testid={`watchlist-radar-result-${item.stock_id}`}
                 className={[
                   "relative border text-sm transition",
                   selected
@@ -893,8 +1653,19 @@ export default function WatchlistRadarPanel({
           })}
         </div>
       ) : (
-        <div className="px-5 py-8 text-center text-sm text-omi-text-muted">
-          {radar ? t("radar.emptyWithRadar") : t("radar.emptyNoGroup")}
+        <div className="p-3">
+          <StateSurface
+            eyebrow={t("radar.eyebrow")}
+            title={
+              loadState === "error"
+                ? t("radar.loadError")
+                : radar
+                  ? t("radar.emptyWithRadar")
+                  : t("radar.emptyNoGroup")
+            }
+            tone={loadState === "error" ? "danger" : "empty"}
+            compact
+          />
         </div>
       )}
     </section>

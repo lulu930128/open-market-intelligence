@@ -7,8 +7,28 @@ import {
   useRef,
   useState,
 } from "react";
-import { useT, type TranslationFunction } from "@/i18n";
+import { StateSurface } from "@/components/LoadingPlaceholders";
+import {
+  placeChartEventMarker,
+  type ChartEventMarker,
+  type ChartMarkerCollisionRect,
+} from "@/components/chart/chartEventMarkers";
+import {
+  defaultIndicatorParameters,
+  type IndicatorParameters,
+  type IndicatorSettings,
+} from "@/components/stock-k-line/indicatorCatalog";
+import {
+  buildChartSignals,
+  clamp,
+  projectStockKLineData,
+  validNumber,
+  type MergedPoint,
+} from "@/components/stock-k-line/indicatorProjection";
+import { useT } from "@/i18n";
 import type { ChartPoint, StockIndicatorPoint } from "@/types/market";
+
+export * from "@/components/stock-k-line/indicatorCatalog";
 
 type Props = {
   chartData: ChartPoint[];
@@ -18,200 +38,14 @@ type Props = {
   indicatorParameters?: IndicatorParameters;
   benchmarkData?: ChartPoint[];
   benchmarkLabel?: string;
+  eventMarkers?: ChartEventMarker[];
   revealKey?: string;
   volumePanelLabel?: string;
   volumeTooltipLabel?: string;
   volumeValueKey?: "volume" | "trade_value";
   volumeValueFormatter?: (value: number | null | undefined) => string;
-};
-
-export type IndicatorSettings = {
-  signals: boolean;
-  ma: boolean;
-  ema: boolean;
-  wma: boolean;
-  hma: boolean;
-  vwma: boolean;
-  bollinger: boolean;
-  bbWidth: boolean;
-  stdDev: boolean;
-  choppiness: boolean;
-  vwap: boolean;
-  psar: boolean;
-  donchian: boolean;
-  ichimoku: boolean;
-  supertrend: boolean;
-  keltner: boolean;
-  volume: boolean;
-  rsi: boolean;
-  macd: boolean;
-  kd: boolean;
-  momentum: boolean;
-  tsi: boolean;
-  awesomeOscillator: boolean;
-  ultimateOscillator: boolean;
-  atr: boolean;
-  adx: boolean;
-  aroon: boolean;
-  obv: boolean;
-  mfi: boolean;
-  cmf: boolean;
-  adLine: boolean;
-  pvt: boolean;
-  cci: boolean;
-  williamsR: boolean;
-  roc: boolean;
-  stochRsi: boolean;
-  trix: boolean;
-  volumeProfile: boolean;
-  pivotPoints: boolean;
-  supportResistance: boolean;
-  gap: boolean;
-  divergence: boolean;
-  candlestickPatterns: boolean;
-  relativeStrength: boolean;
-  beta: boolean;
-  correlation: boolean;
-};
-
-export type IndicatorKey = keyof IndicatorSettings;
-
-export type IndicatorCategoryKey =
-  | "trend"
-  | "volatility"
-  | "momentum"
-  | "volume"
-  | "structure"
-  | "relative"
-  | "signals";
-
-export type IndicatorPlotType = "overlay" | "pane" | "signal" | "context";
-
-export type AvailableIndicatorOption = {
-  status: "available";
-  key: IndicatorKey;
-  label: string;
-  description: string;
-  category: IndicatorCategoryKey;
-  plot: IndicatorPlotType;
-};
-
-export type PlannedIndicatorOption = {
-  status: "planned";
-  key: string;
-  label: string;
-  description: string;
-  category: IndicatorCategoryKey;
-  plot: IndicatorPlotType;
-};
-
-export type ChartIndicatorOption = AvailableIndicatorOption | PlannedIndicatorOption;
-
-export type IndicatorCategoryGroup = {
-  key: IndicatorCategoryKey;
-  label: string;
-  description: string;
-  options: ChartIndicatorOption[];
-};
-
-export type IndicatorParameters = {
-  maShort: number;
-  maMiddle: number;
-  maLong: number;
-  emaFast: number;
-  emaSlow: number;
-  wmaPeriod: number;
-  hmaPeriod: number;
-  vwmaPeriod: number;
-  bollingerPeriod: number;
-  bollingerStdDev: number;
-  bbWidthPeriod: number;
-  stdDevPeriod: number;
-  choppinessPeriod: number;
-  volumeMa: number;
-  rsiPeriod: number;
-  macdFast: number;
-  macdSlow: number;
-  macdSignal: number;
-  kdPeriod: number;
-  momentumPeriod: number;
-  tsiShortPeriod: number;
-  tsiLongPeriod: number;
-  tsiSignalPeriod: number;
-  awesomeFastPeriod: number;
-  awesomeSlowPeriod: number;
-  ultimateShortPeriod: number;
-  ultimateMiddlePeriod: number;
-  ultimateLongPeriod: number;
-  atrPeriod: number;
-  adxPeriod: number;
-  donchianPeriod: number;
-  ichimokuConversionPeriod: number;
-  ichimokuBasePeriod: number;
-  ichimokuSpanBPeriod: number;
-  ichimokuDisplacement: number;
-  supertrendAtrPeriod: number;
-  supertrendMultiplier: number;
-  keltnerPeriod: number;
-  keltnerAtrPeriod: number;
-  keltnerMultiplier: number;
-  aroonPeriod: number;
-  obvMa: number;
-  mfiPeriod: number;
-  cmfPeriod: number;
-  cciPeriod: number;
-  williamsRPeriod: number;
-  rocPeriod: number;
-  stochRsiPeriod: number;
-  stochRsiSmoothK: number;
-  stochRsiSmoothD: number;
-  trixPeriod: number;
-  trixSignal: number;
-  volumeProfileRows: number;
-  pivotLookback: number;
-  supportResistanceLookback: number;
-  gapMinPct: number;
-  relativeStrengthLookback: number;
-  betaPeriod: number;
-  correlationPeriod: number;
-};
-
-type MergedPoint = ChartPoint & {
-  ma5: number | null;
-  ma20: number | null;
-  ma60: number | null;
-  ema12: number | null;
-  ema26: number | null;
-  vwap: number | null;
-  psar: number | null;
-  donchianUpper: number | null;
-  donchianLower: number | null;
-  volumeMa20: number | null;
-  changePct: number | null;
-  bbMiddle: number | null;
-  bbUpper: number | null;
-  bbLower: number | null;
-  rsi14: number | null;
-  macd: number | null;
-  macdSignal: number | null;
-  macdHistogram: number | null;
-  k: number | null;
-  d: number | null;
-  atr14: number | null;
-  plusDi14: number | null;
-  minusDi14: number | null;
-  adx14: number | null;
-  obv: number | null;
-  obvMa10: number | null;
-  mfi14: number | null;
-  cci20: number | null;
-  williamsR14: number | null;
-  roc12: number | null;
-  stochRsiK: number | null;
-  stochRsiD: number | null;
-  relativeStrength: number | null;
-  beta: number | null;
-  correlation: number | null;
+  priceMaximumFractionDigits?: number;
+  latestPreviousClose?: number | null;
 };
 
 type Panel = {
@@ -254,273 +88,18 @@ type HoverPriceGuideState = {
   snap: "high" | "low" | null;
 };
 
-export const indicatorCategoryDefinitions: Array<Omit<IndicatorCategoryGroup, "options">> = [
-  {
-    key: "trend",
-    label: "Trend / Moving Average",
-    description: "Direction, MA alignment, trend strength, and reversals.",
-  },
-  {
-    key: "volatility",
-    label: "Channel / Volatility",
-    description: "Price ranges, volatility expansion, and risk position.",
-  },
-  {
-    key: "momentum",
-    label: "Momentum / Oscillator",
-    description: "Strength, overbought/oversold zones, and short-term turns.",
-  },
-  {
-    key: "volume",
-    label: "Volume / Money Flow",
-    description: "Volume, volume-price divergence, and money flow.",
-  },
-  {
-    key: "structure",
-    label: "Price Structure / Levels",
-    description: "Prior highs/lows, support/resistance, gaps, and pivots.",
-  },
-  {
-    key: "relative",
-    label: "Relative / Market",
-    description: "Relative strength versus the index, group, and external markets.",
-  },
-  {
-    key: "signals",
-    label: "Signals / Markers",
-    description: "Crossovers, breakouts, divergences, and pattern markers.",
-  },
-];
-
-export const indicatorOptions: AvailableIndicatorOption[] = [
-  { status: "available", key: "ma", label: "MA", description: "MA5 / MA20 / MA60", category: "trend", plot: "overlay" },
-  { status: "available", key: "ema", label: "EMA", description: "EMA12 / EMA26", category: "trend", plot: "overlay" },
-  { status: "available", key: "adx", label: "ADX", description: "ADX / +DI / -DI", category: "trend", plot: "pane" },
-  { status: "available", key: "psar", label: "SAR", description: "Parabolic SAR", category: "trend", plot: "overlay" },
-  { status: "available", key: "supertrend", label: "Supertrend", description: "ATR trend band", category: "trend", plot: "overlay" },
-  { status: "available", key: "ichimoku", label: "Ichimoku", description: "Ichimoku 9 / 26 / 52", category: "trend", plot: "overlay" },
-  { status: "available", key: "bollinger", label: "BOLL", description: "20MA +/- 2SD", category: "volatility", plot: "overlay" },
-  { status: "available", key: "donchian", label: "DONCH", description: "20-day channel", category: "volatility", plot: "overlay" },
-  { status: "available", key: "keltner", label: "Keltner", description: "EMA + ATR channel", category: "volatility", plot: "overlay" },
-  { status: "available", key: "atr", label: "ATR", description: "ATR 14", category: "volatility", plot: "pane" },
-  { status: "available", key: "rsi", label: "RSI", description: "RSI 14", category: "momentum", plot: "pane" },
-  { status: "available", key: "macd", label: "MACD", description: "12 / 26 / 9", category: "momentum", plot: "pane" },
-  { status: "available", key: "kd", label: "KD", description: "KD 9 / 3", category: "momentum", plot: "pane" },
-  { status: "available", key: "aroon", label: "Aroon", description: "New-high / new-low trend strength", category: "momentum", plot: "pane" },
-  { status: "available", key: "cci", label: "CCI", description: "CCI 20", category: "momentum", plot: "pane" },
-  { status: "available", key: "williamsR", label: "W%R", description: "Williams %R 14", category: "momentum", plot: "pane" },
-  { status: "available", key: "roc", label: "ROC", description: "ROC 12", category: "momentum", plot: "pane" },
-  { status: "available", key: "stochRsi", label: "StochRSI", description: "RSI stochastic indicator", category: "momentum", plot: "pane" },
-  { status: "available", key: "trix", label: "TRIX", description: "Triple-smoothed momentum", category: "momentum", plot: "pane" },
-  { status: "available", key: "volume", label: "VOL", description: "Volume", category: "volume", plot: "pane" },
-  { status: "available", key: "vwap", label: "VWAP", description: "Volume-weighted average price", category: "volume", plot: "overlay" },
-  { status: "available", key: "obv", label: "OBV", description: "On-balance volume", category: "volume", plot: "pane" },
-  { status: "available", key: "mfi", label: "MFI", description: "Money Flow 14", category: "volume", plot: "pane" },
-  { status: "available", key: "signals", label: "SIGNAL", description: "Crossover / breakout markers", category: "signals", plot: "signal" },
-];
-
-export const professionalIndicatorOptions: AvailableIndicatorOption[] = [
-  { status: "available", key: "wma", label: "WMA", description: "Weighted moving average", category: "trend", plot: "overlay" },
-  { status: "available", key: "hma", label: "HMA", description: "Hull Moving Average", category: "trend", plot: "overlay" },
-  { status: "available", key: "vwma", label: "VWMA", description: "Volume-weighted moving average", category: "trend", plot: "overlay" },
-  { status: "available", key: "bbWidth", label: "BB Width", description: "Bollinger band width", category: "volatility", plot: "pane" },
-  { status: "available", key: "stdDev", label: "StdDev", description: "Standard deviation volatility", category: "volatility", plot: "pane" },
-  { status: "available", key: "choppiness", label: "CHOP", description: "Chop / trend degree", category: "volatility", plot: "pane" },
-  { status: "available", key: "momentum", label: "Momentum", description: "Price momentum", category: "momentum", plot: "pane" },
-  { status: "available", key: "tsi", label: "TSI", description: "True Strength Index", category: "momentum", plot: "pane" },
-  { status: "available", key: "awesomeOscillator", label: "AO", description: "Awesome Oscillator", category: "momentum", plot: "pane" },
-  { status: "available", key: "ultimateOscillator", label: "UO", description: "Ultimate Oscillator", category: "momentum", plot: "pane" },
-  { status: "available", key: "cmf", label: "CMF", description: "Chaikin Money Flow", category: "volume", plot: "pane" },
-  { status: "available", key: "adLine", label: "A/D", description: "Accumulation / Distribution", category: "volume", plot: "pane" },
-  { status: "available", key: "pvt", label: "PVT", description: "Price Volume Trend", category: "volume", plot: "pane" },
-  { status: "available", key: "volumeProfile", label: "VPVR", description: "Approximate visible-range volume profile", category: "volume", plot: "context" },
-  { status: "available", key: "pivotPoints", label: "Pivot", description: "Prior-candle pivot levels", category: "structure", plot: "overlay" },
-  { status: "available", key: "supportResistance", label: "S/R", description: "Range support/resistance", category: "structure", plot: "overlay" },
-  { status: "available", key: "gap", label: "Gap", description: "Gap markers", category: "structure", plot: "overlay" },
-  { status: "available", key: "divergence", label: "Divergence", description: "RSI / MACD price divergence", category: "signals", plot: "signal" },
-  { status: "available", key: "candlestickPatterns", label: "Pattern", description: "Candlestick pattern recognition", category: "signals", plot: "signal" },
-  { status: "available", key: "relativeStrength", label: "RS", description: "Relative strength versus the index", category: "relative", plot: "pane" },
-  { status: "available", key: "beta", label: "Beta", description: "Sensitivity versus the index", category: "relative", plot: "pane" },
-  { status: "available", key: "correlation", label: "Corr", description: "Return correlation with the index", category: "relative", plot: "pane" },
-];
-
-export const plannedIndicatorOptions: PlannedIndicatorOption[] = [];
-
-export const indicatorCategoryGroups: IndicatorCategoryGroup[] =
-  indicatorCategoryDefinitions.map((category) => ({
-    ...category,
-    options: [...indicatorOptions, ...plannedIndicatorOptions].filter(
-      (option) => option.category === category.key
-    ),
-  }));
-
-export const professionalIndicatorCategoryGroups: IndicatorCategoryGroup[] =
-  indicatorCategoryDefinitions.map((category) => ({
-    ...category,
-    options: [
-      ...indicatorOptions,
-      ...professionalIndicatorOptions,
-      ...plannedIndicatorOptions,
-    ].filter((option) => option.category === category.key),
-  }));
-
-function translatedOrFallback(
-  t: TranslationFunction,
-  key: string,
-  fallback: string
-) {
-  const translated = t(key);
-  return translated === key ? fallback : translated;
-}
-
-export function indicatorCategoryLabel(
-  t: TranslationFunction,
-  group: IndicatorCategoryGroup
-) {
-  return translatedOrFallback(t, `indicators.categories.${group.key}.label`, group.label);
-}
-
-export function indicatorCategoryDescription(
-  t: TranslationFunction,
-  group: IndicatorCategoryGroup
-) {
-  return translatedOrFallback(
-    t,
-    `indicators.categories.${group.key}.description`,
-    group.description
-  );
-}
-
-export function indicatorOptionDescription(
-  t: TranslationFunction,
-  option: ChartIndicatorOption
-) {
-  return translatedOrFallback(t, `indicators.options.${option.key}`, option.description);
-}
-
-export const defaultIndicators: IndicatorSettings = {
-  signals: false,
-  ma: true,
-  ema: false,
-  wma: false,
-  hma: false,
-  vwma: false,
-  bollinger: false,
-  bbWidth: false,
-  stdDev: false,
-  choppiness: false,
-  vwap: false,
-  psar: false,
-  donchian: false,
-  ichimoku: false,
-  supertrend: false,
-  keltner: false,
-  volume: true,
-  rsi: false,
-  macd: false,
-  kd: false,
-  momentum: false,
-  tsi: false,
-  awesomeOscillator: false,
-  ultimateOscillator: false,
-  atr: false,
-  adx: false,
-  aroon: false,
-  obv: false,
-  mfi: false,
-  cmf: false,
-  adLine: false,
-  pvt: false,
-  cci: false,
-  williamsR: false,
-  roc: false,
-  stochRsi: false,
-  trix: false,
-  volumeProfile: false,
-  pivotPoints: false,
-  supportResistance: false,
-  gap: false,
-  divergence: false,
-  candlestickPatterns: false,
-  relativeStrength: false,
-  beta: false,
-  correlation: false,
-};
-
 const playedKLineRevealKeys = new Set<string>();
-
-export const defaultIndicatorParameters: IndicatorParameters = {
-  maShort: 5,
-  maMiddle: 20,
-  maLong: 60,
-  emaFast: 12,
-  emaSlow: 26,
-  wmaPeriod: 20,
-  hmaPeriod: 20,
-  vwmaPeriod: 20,
-  bollingerPeriod: 20,
-  bollingerStdDev: 2,
-  bbWidthPeriod: 20,
-  stdDevPeriod: 20,
-  choppinessPeriod: 14,
-  volumeMa: 20,
-  rsiPeriod: 14,
-  macdFast: 12,
-  macdSlow: 26,
-  macdSignal: 9,
-  kdPeriod: 9,
-  momentumPeriod: 10,
-  tsiShortPeriod: 13,
-  tsiLongPeriod: 25,
-  tsiSignalPeriod: 7,
-  awesomeFastPeriod: 5,
-  awesomeSlowPeriod: 34,
-  ultimateShortPeriod: 7,
-  ultimateMiddlePeriod: 14,
-  ultimateLongPeriod: 28,
-  atrPeriod: 14,
-  adxPeriod: 14,
-  donchianPeriod: 20,
-  ichimokuConversionPeriod: 9,
-  ichimokuBasePeriod: 26,
-  ichimokuSpanBPeriod: 52,
-  ichimokuDisplacement: 26,
-  supertrendAtrPeriod: 10,
-  supertrendMultiplier: 3,
-  keltnerPeriod: 20,
-  keltnerAtrPeriod: 10,
-  keltnerMultiplier: 2,
-  aroonPeriod: 25,
-  obvMa: 10,
-  mfiPeriod: 14,
-  cmfPeriod: 20,
-  cciPeriod: 20,
-  williamsRPeriod: 14,
-  rocPeriod: 12,
-  stochRsiPeriod: 14,
-  stochRsiSmoothK: 3,
-  stochRsiSmoothD: 3,
-  trixPeriod: 15,
-  trixSignal: 9,
-  volumeProfileRows: 24,
-  pivotLookback: 1,
-  supportResistanceLookback: 20,
-  gapMinPct: 0.5,
-  relativeStrengthLookback: 20,
-  betaPeriod: 60,
-  correlationPeriod: 60,
-};
 
 const DEFAULT_VISIBLE_BARS = 80;
 const MIN_VISIBLE_BARS = 20;
 const PRICE_GUIDE_SNAP_DISTANCE = 10;
 
-function formatPrice(value: number | null | undefined) {
+function formatPrice(value: number | null | undefined, maximumFractionDigits = 2) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
 
   return value.toLocaleString("zh-TW", {
     minimumFractionDigits: 0,
-    maximumFractionDigits: 2,
+    maximumFractionDigits,
   });
 }
 
@@ -549,713 +128,13 @@ function formatPct(value: number | null | undefined) {
   return `${sign}${value.toFixed(2)}%`;
 }
 
+function chartDate(value: string) {
+  return value.slice(0, 10);
+}
+
 function formatIndicator(value: number | null | undefined, digits = 2) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
   return value.toFixed(digits);
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value));
-}
-
-function validNumber(value: number | null | undefined): value is number {
-  return value !== null && value !== undefined && !Number.isNaN(value);
-}
-
-function average(values: Array<number | null | undefined>) {
-  const valid = values.filter(validNumber);
-
-  if (valid.length === 0) return null;
-
-  return valid.reduce((sum, value) => sum + value, 0) / valid.length;
-}
-
-function movingAverage(
-  values: Array<number | null | undefined>,
-  index: number,
-  windowSize: number
-): number | null {
-  if (index + 1 < windowSize) return null;
-
-  const slice = values.slice(index + 1 - windowSize, index + 1);
-
-  if (slice.some((value) => !validNumber(value))) return null;
-
-  return average(slice);
-}
-
-function standardDeviation(
-  values: Array<number | null | undefined>,
-  index: number,
-  windowSize: number
-): number | null {
-  const mean = movingAverage(values, index, windowSize);
-
-  if (mean === null) return null;
-
-  const meanValue: number = mean;
-  const slice = values.slice(index + 1 - windowSize, index + 1).filter(validNumber);
-
-  if (slice.length < windowSize) return null;
-
-  const variance =
-    slice.reduce((sum, value) => sum + (value - meanValue) ** 2, 0) / windowSize;
-
-  return Math.sqrt(variance);
-}
-
-function calculateChangePct(current: number | null | undefined, previous: number | null | undefined) {
-  if (!validNumber(current) || !validNumber(previous) || previous === 0) return null;
-  return ((current - previous) / previous) * 100;
-}
-
-function calculateRsi(closes: Array<number | null | undefined>, period = 14) {
-  return closes.map((close, index) => {
-    if (!validNumber(close) || index < period) return null;
-
-    let gain = 0;
-    let loss = 0;
-
-    for (let cursor = index - period + 1; cursor <= index; cursor += 1) {
-      const current = closes[cursor];
-      const previous = closes[cursor - 1];
-
-      if (!validNumber(current) || !validNumber(previous)) return null;
-
-      const change = current - previous;
-      if (change >= 0) gain += change;
-      else loss += Math.abs(change);
-    }
-
-    const averageGain = gain / period;
-    const averageLoss = loss / period;
-
-    if (averageLoss === 0) return 100;
-    if (averageGain === 0) return 0;
-
-    const rs = averageGain / averageLoss;
-    return 100 - 100 / (1 + rs);
-  });
-}
-
-function calculateEma(values: Array<number | null | undefined>, period: number) {
-  const multiplier = 2 / (period + 1);
-  let previousEma: number | null = null;
-
-  return values.map((value) => {
-    if (!validNumber(value)) return null;
-
-    if (previousEma === null) {
-      previousEma = value;
-      return value;
-    }
-
-    previousEma = value * multiplier + previousEma * (1 - multiplier);
-    return previousEma;
-  });
-}
-
-function calculateMacd(
-  closes: Array<number | null | undefined>,
-  fastPeriod = 12,
-  slowPeriod = 26,
-  signalPeriod = 9
-) {
-  const ema12 = calculateEma(closes, fastPeriod);
-  const ema26 = calculateEma(closes, slowPeriod);
-  const macd = closes.map((_, index) => {
-    if (!validNumber(ema12[index]) || !validNumber(ema26[index])) return null;
-    return ema12[index] - ema26[index];
-  });
-  const signal = calculateEma(macd, signalPeriod);
-  const histogram = macd.map((value, index) => {
-    if (!validNumber(value) || !validNumber(signal[index])) return null;
-    return value - signal[index];
-  });
-
-  return { macd, signal, histogram };
-}
-
-function calculateKd(points: ChartPoint[], period = 9) {
-  let previousK = 50;
-  let previousD = 50;
-
-  return points.map((point, index) => {
-    if (index + 1 < period || !validNumber(point.close)) {
-      return { k: null, d: null };
-    }
-
-    const slice = points.slice(index + 1 - period, index + 1);
-    const highs = slice.map((item) => item.high).filter(validNumber);
-    const lows = slice.map((item) => item.low).filter(validNumber);
-
-    if (highs.length < period || lows.length < period) {
-      return { k: null, d: null };
-    }
-
-    const highest = Math.max(...highs);
-    const lowest = Math.min(...lows);
-    const rsv = highest === lowest ? 50 : ((point.close - lowest) / (highest - lowest)) * 100;
-    const k = previousK * (2 / 3) + rsv * (1 / 3);
-    const d = previousD * (2 / 3) + k * (1 / 3);
-
-    previousK = k;
-    previousD = d;
-
-    return { k, d };
-  });
-}
-
-function typicalPrice(point: ChartPoint) {
-  if (!validNumber(point.high) || !validNumber(point.low) || !validNumber(point.close)) {
-    return null;
-  }
-
-  return (point.high + point.low + point.close) / 3;
-}
-
-function calculateVwap(points: ChartPoint[]) {
-  let cumulativePriceVolume = 0;
-  let cumulativeVolume = 0;
-
-  return points.map((point) => {
-    const price = typicalPrice(point);
-    const volume = point.volume;
-
-    if (!validNumber(price) || !validNumber(volume) || volume <= 0) {
-      return null;
-    }
-
-    cumulativePriceVolume += price * volume;
-    cumulativeVolume += volume;
-
-    return cumulativeVolume > 0 ? cumulativePriceVolume / cumulativeVolume : null;
-  });
-}
-
-function calculateParabolicSar(points: ChartPoint[], step = 0.02, maxStep = 0.2) {
-  const values: Array<number | null> = points.map(() => null);
-
-  if (points.length < 2) return values;
-
-  const first = points[0];
-  const second = points[1];
-
-  if (
-    !validNumber(first.high) ||
-    !validNumber(first.low) ||
-    !validNumber(first.close) ||
-    !validNumber(second.high) ||
-    !validNumber(second.low) ||
-    !validNumber(second.close)
-  ) {
-    return values;
-  }
-
-  let isUpTrend = second.close >= first.close;
-  let sar = isUpTrend ? Math.min(first.low, second.low) : Math.max(first.high, second.high);
-  let extremePoint = isUpTrend ? Math.max(first.high, second.high) : Math.min(first.low, second.low);
-  let acceleration = step;
-  values[1] = sar;
-
-  for (let index = 2; index < points.length; index += 1) {
-    const point = points[index];
-    const previous = points[index - 1];
-    const previous2 = points[index - 2];
-
-    if (
-      !validNumber(point.high) ||
-      !validNumber(point.low) ||
-      !validNumber(previous.high) ||
-      !validNumber(previous.low) ||
-      !validNumber(previous2.high) ||
-      !validNumber(previous2.low)
-    ) {
-      values[index] = null;
-      continue;
-    }
-
-    let nextSar = sar + acceleration * (extremePoint - sar);
-
-    if (isUpTrend) {
-      nextSar = Math.min(nextSar, previous.low, previous2.low);
-
-      if (point.low < nextSar) {
-        isUpTrend = false;
-        sar = extremePoint;
-        extremePoint = point.low;
-        acceleration = step;
-      } else {
-        sar = nextSar;
-
-        if (point.high > extremePoint) {
-          extremePoint = point.high;
-          acceleration = Math.min(acceleration + step, maxStep);
-        }
-      }
-    } else {
-      nextSar = Math.max(nextSar, previous.high, previous2.high);
-
-      if (point.high > nextSar) {
-        isUpTrend = true;
-        sar = extremePoint;
-        extremePoint = point.high;
-        acceleration = step;
-      } else {
-        sar = nextSar;
-
-        if (point.low < extremePoint) {
-          extremePoint = point.low;
-          acceleration = Math.min(acceleration + step, maxStep);
-        }
-      }
-    }
-
-    values[index] = sar;
-  }
-
-  return values;
-}
-
-function calculateDonchian(points: ChartPoint[], period = 20) {
-  return points.map((_, index) => {
-    if (index + 1 < period) {
-      return { upper: null, lower: null };
-    }
-
-    const slice = points.slice(index + 1 - period, index + 1);
-    const highs = slice.map((point) => point.high).filter(validNumber);
-    const lows = slice.map((point) => point.low).filter(validNumber);
-
-    if (highs.length < period || lows.length < period) {
-      return { upper: null, lower: null };
-    }
-
-    return {
-      upper: Math.max(...highs),
-      lower: Math.min(...lows),
-    };
-  });
-}
-
-function calculateTrueRanges(points: ChartPoint[]) {
-  return points.map((point, index) => {
-    if (!validNumber(point.high) || !validNumber(point.low)) return null;
-
-    const previousClose = points[index - 1]?.close;
-    const highLow = point.high - point.low;
-
-    if (!validNumber(previousClose)) return highLow;
-
-    return Math.max(
-      highLow,
-      Math.abs(point.high - previousClose),
-      Math.abs(point.low - previousClose)
-    );
-  });
-}
-
-function calculateAtr(points: ChartPoint[], period = 14) {
-  const trueRanges = calculateTrueRanges(points);
-  let previousAtr: number | null = null;
-
-  return trueRanges.map((trueRange, index) => {
-    if (!validNumber(trueRange)) return null;
-
-    if (index + 1 < period) return null;
-
-    if (previousAtr === null) {
-      const slice = trueRanges.slice(index + 1 - period, index + 1);
-
-      if (slice.some((value) => !validNumber(value))) return null;
-
-      previousAtr = average(slice);
-      return previousAtr;
-    }
-
-    previousAtr = (previousAtr * (period - 1) + trueRange) / period;
-    return previousAtr;
-  });
-}
-
-function calculateDmi(points: ChartPoint[], period = 14) {
-  const trueRanges = calculateTrueRanges(points);
-  const plusDm: Array<number | null> = points.map(() => null);
-  const minusDm: Array<number | null> = points.map(() => null);
-
-  for (let index = 1; index < points.length; index += 1) {
-    const current = points[index];
-    const previous = points[index - 1];
-
-    if (
-      !validNumber(current.high) ||
-      !validNumber(current.low) ||
-      !validNumber(previous.high) ||
-      !validNumber(previous.low)
-    ) {
-      continue;
-    }
-
-    const upMove = current.high - previous.high;
-    const downMove = previous.low - current.low;
-    plusDm[index] = upMove > downMove && upMove > 0 ? upMove : 0;
-    minusDm[index] = downMove > upMove && downMove > 0 ? downMove : 0;
-  }
-
-  let smoothedTr: number | null = null;
-  let smoothedPlusDm: number | null = null;
-  let smoothedMinusDm: number | null = null;
-  let previousAdx: number | null = null;
-  const dxValues: Array<number | null> = points.map(() => null);
-
-  return points.map((_, index) => {
-    if (index < period) {
-      return { plusDi: null, minusDi: null, adx: null };
-    }
-
-    const trueRange = trueRanges[index];
-    const plus = plusDm[index];
-    const minus = minusDm[index];
-
-    if (!validNumber(trueRange) || !validNumber(plus) || !validNumber(minus)) {
-      return { plusDi: null, minusDi: null, adx: null };
-    }
-
-    if (smoothedTr === null || smoothedPlusDm === null || smoothedMinusDm === null) {
-      const trSlice = trueRanges.slice(index + 1 - period, index + 1);
-      const plusSlice = plusDm.slice(index + 1 - period, index + 1);
-      const minusSlice = minusDm.slice(index + 1 - period, index + 1);
-
-      const trValues = trSlice.filter(validNumber);
-      const plusValues = plusSlice.filter(validNumber);
-      const minusValues = minusSlice.filter(validNumber);
-
-      if (
-        trValues.length < period ||
-        plusValues.length < period ||
-        minusValues.length < period
-      ) {
-        return { plusDi: null, minusDi: null, adx: null };
-      }
-
-      smoothedTr = trValues.reduce((sum, value) => sum + value, 0);
-      smoothedPlusDm = plusValues.reduce((sum, value) => sum + value, 0);
-      smoothedMinusDm = minusValues.reduce((sum, value) => sum + value, 0);
-    } else {
-      smoothedTr = smoothedTr - smoothedTr / period + trueRange;
-      smoothedPlusDm = smoothedPlusDm - smoothedPlusDm / period + plus;
-      smoothedMinusDm = smoothedMinusDm - smoothedMinusDm / period + minus;
-    }
-
-    if (smoothedTr === null || smoothedPlusDm === null || smoothedMinusDm === null || smoothedTr === 0) {
-      return { plusDi: null, minusDi: null, adx: null };
-    }
-
-    const plusDi = (smoothedPlusDm / smoothedTr) * 100;
-    const minusDi = (smoothedMinusDm / smoothedTr) * 100;
-    const diTotal = plusDi + minusDi;
-    const dx = diTotal === 0 ? 0 : (Math.abs(plusDi - minusDi) / diTotal) * 100;
-    dxValues[index] = dx;
-
-    if (index >= period * 2 - 1) {
-      if (previousAdx === null) {
-        const dxSlice = dxValues.slice(index + 1 - period, index + 1);
-
-        if (!dxSlice.some((value) => !validNumber(value))) {
-          previousAdx = average(dxSlice);
-        }
-      } else {
-        previousAdx = (previousAdx * (period - 1) + dx) / period;
-      }
-    }
-
-    return { plusDi, minusDi, adx: previousAdx };
-  });
-}
-
-function calculateObv(points: ChartPoint[]) {
-  let currentObv = 0;
-
-  return points.map((point, index) => {
-    const previousClose = points[index - 1]?.close;
-
-    if (!validNumber(point.close) || !validNumber(point.volume)) {
-      return index === 0 ? 0 : currentObv;
-    }
-
-    if (!validNumber(previousClose)) {
-      return currentObv;
-    }
-
-    if (point.close > previousClose) currentObv += point.volume;
-    else if (point.close < previousClose) currentObv -= point.volume;
-
-    return currentObv;
-  });
-}
-
-function calculateMfi(points: ChartPoint[], period = 14) {
-  const typicalPrices = points.map(typicalPrice);
-  const positiveFlow: Array<number | null> = points.map(() => null);
-  const negativeFlow: Array<number | null> = points.map(() => null);
-
-  for (let index = 1; index < points.length; index += 1) {
-    const price = typicalPrices[index];
-    const previousPrice = typicalPrices[index - 1];
-    const volume = points[index].volume;
-
-    if (!validNumber(price) || !validNumber(previousPrice) || !validNumber(volume)) {
-      continue;
-    }
-
-    const moneyFlow = price * volume;
-    positiveFlow[index] = price > previousPrice ? moneyFlow : 0;
-    negativeFlow[index] = price < previousPrice ? moneyFlow : 0;
-  }
-
-  return points.map((_, index) => {
-    if (index + 1 < period) return null;
-
-    const positiveSlice = positiveFlow.slice(index + 1 - period, index + 1);
-    const negativeSlice = negativeFlow.slice(index + 1 - period, index + 1);
-
-    const positiveValues = positiveSlice.filter(validNumber);
-    const negativeValues = negativeSlice.filter(validNumber);
-
-    if (positiveValues.length < period || negativeValues.length < period) {
-      return null;
-    }
-
-    const positive = positiveValues.reduce((sum, value) => sum + value, 0);
-    const negative = negativeValues.reduce((sum, value) => sum + value, 0);
-
-    if (negative === 0) return 100;
-    if (positive === 0) return 0;
-
-    const moneyRatio = positive / negative;
-    return 100 - 100 / (1 + moneyRatio);
-  });
-}
-
-function calculateCci(points: ChartPoint[], period = 20) {
-  const typicalPrices = points.map(typicalPrice);
-
-  return typicalPrices.map((price, index) => {
-    if (!validNumber(price) || index + 1 < period) return null;
-
-    const slice = typicalPrices.slice(index + 1 - period, index + 1);
-    const values = slice.filter(validNumber);
-
-    if (values.length < period) return null;
-
-    const mean = average(values);
-
-    if (mean === null) return null;
-
-    const meanDeviation =
-      values.reduce((sum, value) => sum + Math.abs(value - mean), 0) / period;
-
-    if (meanDeviation === 0) return 0;
-
-    return (price - mean) / (0.015 * meanDeviation);
-  });
-}
-
-function calculateWilliamsR(points: ChartPoint[], period = 14) {
-  return points.map((point, index) => {
-    if (!validNumber(point.close) || index + 1 < period) return null;
-
-    const slice = points.slice(index + 1 - period, index + 1);
-    const highs = slice.map((item) => item.high).filter(validNumber);
-    const lows = slice.map((item) => item.low).filter(validNumber);
-
-    if (highs.length < period || lows.length < period) return null;
-
-    const highest = Math.max(...highs);
-    const lowest = Math.min(...lows);
-
-    if (highest === lowest) return -50;
-
-    return ((highest - point.close) / (highest - lowest)) * -100;
-  });
-}
-
-function calculateRoc(closes: Array<number | null | undefined>, period = 12) {
-  return closes.map((close, index) => {
-    const previous = closes[index - period];
-
-    if (!validNumber(close) || !validNumber(previous) || previous === 0) {
-      return null;
-    }
-
-    return ((close - previous) / previous) * 100;
-  });
-}
-
-function calculateRelativeMetrics(
-  points: ChartPoint[],
-  benchmarkPoints: ChartPoint[] | undefined,
-  params: IndicatorParameters
-) {
-  const relativeStrength: Array<number | null> = points.map(() => null);
-  const beta: Array<number | null> = points.map(() => null);
-  const correlation: Array<number | null> = points.map(() => null);
-
-  if (!benchmarkPoints || benchmarkPoints.length === 0) {
-    return { relativeStrength, beta, correlation };
-  }
-
-  const benchmarkCloseByDate = new Map<string, number>();
-
-  benchmarkPoints.forEach((point) => {
-    if (validNumber(point.close)) {
-      benchmarkCloseByDate.set(point.time.slice(0, 10), point.close);
-    }
-  });
-
-  const stockReturns: Array<number | null> = points.map(() => null);
-  const benchmarkReturns: Array<number | null> = points.map(() => null);
-
-  points.forEach((point, index) => {
-    const previousPoint = points[index - 1];
-    const previousClose = previousPoint?.close;
-    const benchmarkClose = benchmarkCloseByDate.get(point.time.slice(0, 10));
-    const previousBenchmarkClose = previousPoint
-      ? benchmarkCloseByDate.get(previousPoint.time.slice(0, 10))
-      : undefined;
-
-    if (validNumber(point.close) && validNumber(previousClose) && previousClose !== 0) {
-      stockReturns[index] = point.close / previousClose - 1;
-    }
-
-    if (
-      validNumber(benchmarkClose) &&
-      validNumber(previousBenchmarkClose) &&
-      previousBenchmarkClose !== 0
-    ) {
-      benchmarkReturns[index] = benchmarkClose / previousBenchmarkClose - 1;
-    }
-  });
-
-  points.forEach((point, index) => {
-    const baseIndex = index - params.relativeStrengthLookback;
-    const basePoint = points[baseIndex];
-    const baseClose = basePoint?.close;
-    const benchmarkClose = benchmarkCloseByDate.get(point.time.slice(0, 10));
-    const baseBenchmarkClose = basePoint
-      ? benchmarkCloseByDate.get(basePoint.time.slice(0, 10))
-      : undefined;
-
-    if (
-      baseIndex >= 0 &&
-      validNumber(point.close) &&
-      validNumber(baseClose) &&
-      baseClose !== 0 &&
-      validNumber(benchmarkClose) &&
-      validNumber(baseBenchmarkClose) &&
-      baseBenchmarkClose !== 0
-    ) {
-      const stockReturn = point.close / baseClose - 1;
-      const benchmarkReturn = benchmarkClose / baseBenchmarkClose - 1;
-      relativeStrength[index] = (stockReturn - benchmarkReturn) * 100;
-    }
-  });
-
-  function collectPairedReturns(index: number, period: number) {
-    const startIndex = Math.max(1, index + 1 - period);
-    const pairedReturns: Array<{ stock: number; benchmark: number }> = [];
-
-    for (let cursor = startIndex; cursor <= index; cursor += 1) {
-      const stockReturn = stockReturns[cursor];
-      const benchmarkReturn = benchmarkReturns[cursor];
-
-      if (validNumber(stockReturn) && validNumber(benchmarkReturn)) {
-        pairedReturns.push({ stock: stockReturn, benchmark: benchmarkReturn });
-      }
-    }
-
-    return pairedReturns;
-  }
-
-  points.forEach((_, index) => {
-    const period = Math.max(5, Math.round(params.betaPeriod));
-    const pairedReturns = collectPairedReturns(index, period);
-    const minSamples = Math.max(8, Math.ceil(period * 0.6));
-
-    if (pairedReturns.length < minSamples) return;
-
-    const stockAverage =
-      pairedReturns.reduce((sum, item) => sum + item.stock, 0) / pairedReturns.length;
-    const benchmarkAverage =
-      pairedReturns.reduce((sum, item) => sum + item.benchmark, 0) / pairedReturns.length;
-    const covariance = pairedReturns.reduce(
-      (sum, item) => sum + (item.stock - stockAverage) * (item.benchmark - benchmarkAverage),
-      0
-    );
-    const variance = pairedReturns.reduce(
-      (sum, item) => sum + (item.benchmark - benchmarkAverage) ** 2,
-      0
-    );
-
-    beta[index] = variance > 0 ? covariance / variance : null;
-  });
-
-  points.forEach((_, index) => {
-    const period = Math.max(5, Math.round(params.correlationPeriod));
-    const pairedReturns = collectPairedReturns(index, period);
-    const minSamples = Math.max(8, Math.ceil(period * 0.6));
-
-    if (pairedReturns.length < minSamples) return;
-
-    const stockAverage =
-      pairedReturns.reduce((sum, item) => sum + item.stock, 0) / pairedReturns.length;
-    const benchmarkAverage =
-      pairedReturns.reduce((sum, item) => sum + item.benchmark, 0) / pairedReturns.length;
-    const covariance = pairedReturns.reduce(
-      (sum, item) => sum + (item.stock - stockAverage) * (item.benchmark - benchmarkAverage),
-      0
-    );
-    const stockVariance = pairedReturns.reduce(
-      (sum, item) => sum + (item.stock - stockAverage) ** 2,
-      0
-    );
-    const benchmarkVariance = pairedReturns.reduce(
-      (sum, item) => sum + (item.benchmark - benchmarkAverage) ** 2,
-      0
-    );
-    const denominator = Math.sqrt(stockVariance * benchmarkVariance);
-
-    correlation[index] =
-      denominator > 0 ? clamp(covariance / denominator, -1, 1) : null;
-  });
-
-  return { relativeStrength, beta, correlation };
-}
-
-function calculateStochRsi(
-  rsiValues: Array<number | null>,
-  period = 14,
-  smoothK = 3,
-  smoothD = 3
-) {
-  const rawValues = rsiValues.map((rsi, index) => {
-    if (!validNumber(rsi) || index + 1 < period) return null;
-
-    const slice = rsiValues.slice(index + 1 - period, index + 1);
-
-    if (slice.some((value) => !validNumber(value))) return null;
-
-    const minRsi = Math.min(...slice.filter(validNumber));
-    const maxRsi = Math.max(...slice.filter(validNumber));
-
-    if (maxRsi === minRsi) return 50;
-
-    return ((rsi - minRsi) / (maxRsi - minRsi)) * 100;
-  });
-  const k = rawValues.map((_, index) => movingAverage(rawValues, index, smoothK));
-  const d = k.map((_, index) => movingAverage(k, index, smoothD));
-
-  return { k, d };
 }
 
 function numericRange(
@@ -1379,163 +258,6 @@ function labelPosition(
   } as const;
 }
 
-type ChartSignal = {
-  key: string;
-  index: number;
-  label: string;
-  direction: "bullish" | "bearish" | "neutral";
-  price: number;
-};
-
-function buildChartSignals(data: MergedPoint[]) {
-  const signals: ChartSignal[] = [];
-
-  for (let index = 1; index < data.length; index += 1) {
-    const point = data[index];
-    const previous = data[index - 1];
-    const bullishPrice = point.low ?? point.close;
-    const bearishPrice = point.high ?? point.close;
-
-    if (
-      validNumber(previous.ema12) &&
-      validNumber(previous.ema26) &&
-      validNumber(point.ema12) &&
-      validNumber(point.ema26) &&
-      validNumber(bullishPrice) &&
-      previous.ema12 <= previous.ema26 &&
-      point.ema12 > point.ema26
-    ) {
-      signals.push({
-        key: `${point.time}-ema-up`,
-        index,
-        label: "EMA金叉",
-        direction: "bullish",
-        price: bullishPrice,
-      });
-    }
-
-    if (
-      validNumber(previous.ema12) &&
-      validNumber(previous.ema26) &&
-      validNumber(point.ema12) &&
-      validNumber(point.ema26) &&
-      validNumber(bearishPrice) &&
-      previous.ema12 >= previous.ema26 &&
-      point.ema12 < point.ema26
-    ) {
-      signals.push({
-        key: `${point.time}-ema-down`,
-        index,
-        label: "EMA死叉",
-        direction: "bearish",
-        price: bearishPrice,
-      });
-    }
-
-    if (
-      validNumber(previous.macd) &&
-      validNumber(previous.macdSignal) &&
-      validNumber(point.macd) &&
-      validNumber(point.macdSignal) &&
-      validNumber(bullishPrice) &&
-      previous.macd <= previous.macdSignal &&
-      point.macd > point.macdSignal
-    ) {
-      signals.push({
-        key: `${point.time}-macd-up`,
-        index,
-        label: "MACD翻紅",
-        direction: "bullish",
-        price: bullishPrice,
-      });
-    }
-
-    if (
-      validNumber(previous.macd) &&
-      validNumber(previous.macdSignal) &&
-      validNumber(point.macd) &&
-      validNumber(point.macdSignal) &&
-      validNumber(bearishPrice) &&
-      previous.macd >= previous.macdSignal &&
-      point.macd < point.macdSignal
-    ) {
-      signals.push({
-        key: `${point.time}-macd-down`,
-        index,
-        label: "MACD翻黑",
-        direction: "bearish",
-        price: bearishPrice,
-      });
-    }
-
-    if (
-      validNumber(point.close) &&
-      validNumber(previous.donchianUpper) &&
-      validNumber(bullishPrice) &&
-      point.close > previous.donchianUpper
-    ) {
-      signals.push({
-        key: `${point.time}-donch-up`,
-        index,
-        label: "通道突破",
-        direction: "bullish",
-        price: bullishPrice,
-      });
-    }
-
-    if (
-      validNumber(point.close) &&
-      validNumber(previous.donchianLower) &&
-      validNumber(bearishPrice) &&
-      point.close < previous.donchianLower
-    ) {
-      signals.push({
-        key: `${point.time}-donch-down`,
-        index,
-        label: "通道跌破",
-        direction: "bearish",
-        price: bearishPrice,
-      });
-    }
-
-    if (
-      validNumber(point.volume) &&
-      validNumber(point.volumeMa20) &&
-      validNumber(point.changePct) &&
-      validNumber(bullishPrice) &&
-      point.volumeMa20 > 0 &&
-      point.volume / point.volumeMa20 >= 1.8 &&
-      point.changePct > 0
-    ) {
-      signals.push({
-        key: `${point.time}-volume-up`,
-        index,
-        label: "放量上攻",
-        direction: "bullish",
-        price: bullishPrice,
-      });
-    }
-
-    if (
-      validNumber(previous.adx14) &&
-      validNumber(point.adx14) &&
-      validNumber(point.close) &&
-      previous.adx14 <= 25 &&
-      point.adx14 > 25
-    ) {
-      signals.push({
-        key: `${point.time}-adx-trend`,
-        index,
-        label: "趨勢成形",
-        direction: "neutral",
-        price: point.close,
-      });
-    }
-  }
-
-  return signals;
-}
-
 export default function StockKLineChart({
   chartData,
   indicatorData = [],
@@ -1544,13 +266,18 @@ export default function StockKLineChart({
   indicatorParameters,
   benchmarkData = [],
   benchmarkLabel,
+  eventMarkers = [],
   revealKey,
   volumePanelLabel,
   volumeTooltipLabel,
   volumeValueKey = "volume",
   volumeValueFormatter = formatLots,
+  priceMaximumFractionDigits = 2,
+  latestPreviousClose = null,
 }: Props) {
   const t = useT();
+  const formatChartPrice = (value: number | null | undefined) =>
+    formatPrice(value, priceMaximumFractionDigits);
   const resolvedVolumePanelLabel = volumePanelLabel ?? t("chart.kline.volumeLots");
   const resolvedVolumeTooltipLabel = volumeTooltipLabel ?? resolvedVolumePanelLabel;
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
@@ -1575,104 +302,17 @@ export default function StockKLineChart({
   const getVolumeMetric = (point: ChartPoint | MergedPoint) =>
     volumeValueKey === "trade_value" ? point.trade_value : point.volume;
 
-  const data = useMemo<MergedPoint[]>(() => {
-    const indicatorByTime = new Map<string, StockIndicatorPoint>();
-
-    indicatorData.forEach((point) => {
-      indicatorByTime.set(point.time, point);
-    });
-
-    const closes = chartData.map((point) => point.close);
-    const volumes = chartData.map((point) => point.volume);
-    const rsi = calculateRsi(closes, params.rsiPeriod);
-    const ema12 = calculateEma(closes, params.emaFast);
-    const ema26 = calculateEma(closes, params.emaSlow);
-    const macd = calculateMacd(
-      closes,
-      params.macdFast,
-      params.macdSlow,
-      params.macdSignal
-    );
-    const kd = calculateKd(chartData, params.kdPeriod);
-    const vwap = calculateVwap(chartData);
-    const psar = calculateParabolicSar(chartData);
-    const donchian = calculateDonchian(chartData, params.donchianPeriod);
-    const atr = calculateAtr(chartData, params.atrPeriod);
-    const dmi = calculateDmi(chartData, params.adxPeriod);
-    const obv = calculateObv(chartData);
-    const obvMa10 = obv.map((_, index) => movingAverage(obv, index, params.obvMa));
-    const mfi = calculateMfi(chartData, params.mfiPeriod);
-    const cci = calculateCci(chartData, params.cciPeriod);
-    const williamsR = calculateWilliamsR(chartData, params.williamsRPeriod);
-    const roc = calculateRoc(closes, params.rocPeriod);
-    const stochRsi = calculateStochRsi(
-      rsi,
-      params.stochRsiPeriod,
-      params.stochRsiSmoothK,
-      params.stochRsiSmoothD
-    );
-    const relativeMetrics = calculateRelativeMetrics(chartData, benchmarkData, params);
-
-    return chartData.map((point, index) => {
-      const indicator = indicatorByTime.get(point.time);
-      const previousClose = chartData[index - 1]?.close;
-      const maShort =
-        indicator?.ma?.[`ma${params.maShort}`] ?? movingAverage(closes, index, params.maShort);
-      const maMiddle =
-        indicator?.ma?.[`ma${params.maMiddle}`] ?? movingAverage(closes, index, params.maMiddle);
-      const maLong =
-        indicator?.ma?.[`ma${params.maLong}`] ?? movingAverage(closes, index, params.maLong);
-      const bbMiddle = movingAverage(closes, index, params.bollingerPeriod);
-      const standardDev20 = standardDeviation(closes, index, params.bollingerPeriod);
-
-      return {
-        ...point,
-        ma5: maShort,
-        ma20: maMiddle,
-        ma60: maLong,
-        ema12: ema12[index],
-        ema26: ema26[index],
-        vwap: vwap[index],
-        psar: psar[index],
-        donchianUpper: donchian[index].upper,
-        donchianLower: donchian[index].lower,
-        volumeMa20:
-          indicator?.volume_ma?.[`volume_ma${params.volumeMa}`] ??
-          movingAverage(volumes, index, params.volumeMa),
-        changePct: indicator?.change_pct ?? calculateChangePct(point.close, previousClose),
-        bbMiddle,
-        bbUpper:
-          bbMiddle !== null && standardDev20 !== null
-            ? bbMiddle + standardDev20 * params.bollingerStdDev
-            : null,
-        bbLower:
-          bbMiddle !== null && standardDev20 !== null
-            ? bbMiddle - standardDev20 * params.bollingerStdDev
-            : null,
-        rsi14: rsi[index],
-        macd: macd.macd[index],
-        macdSignal: macd.signal[index],
-        macdHistogram: macd.histogram[index],
-        k: kd[index].k,
-        d: kd[index].d,
-        atr14: atr[index],
-        plusDi14: dmi[index].plusDi,
-        minusDi14: dmi[index].minusDi,
-        adx14: dmi[index].adx,
-        obv: obv[index],
-        obvMa10: obvMa10[index],
-        mfi14: mfi[index],
-        cci20: cci[index],
-        williamsR14: williamsR[index],
-        roc12: roc[index],
-        stochRsiK: stochRsi.k[index],
-        stochRsiD: stochRsi.d[index],
-        relativeStrength: relativeMetrics.relativeStrength[index],
-        beta: relativeMetrics.beta[index],
-        correlation: relativeMetrics.correlation[index],
-      };
-    });
-  }, [benchmarkData, chartData, indicatorData, params]);
+  const data = useMemo(
+    () =>
+      projectStockKLineData({
+        chartData,
+        indicatorData,
+        benchmarkData,
+        params,
+        latestPreviousClose,
+      }),
+    [benchmarkData, chartData, indicatorData, latestPreviousClose, params]
+  );
 
   const dataKey = `${label}:${data.length}:${data[0]?.time ?? ""}:${data[data.length - 1]?.time ?? ""}`;
   const activeVisibleRange =
@@ -1857,8 +497,12 @@ export default function StockKLineChart({
 
   if (data.length < 1) {
     return (
-      <div className="flex h-[420px] items-center justify-center border border-omi-border-subtle bg-omi-surface text-sm text-omi-text-muted">
-        {t("chart.kline.insufficient")}
+      <div className="border border-omi-border-subtle bg-omi-surface p-4">
+        <StateSurface
+          title={t("chart.kline.insufficient")}
+          tone="empty"
+          className="h-[388px]"
+        />
       </div>
     );
   }
@@ -2001,6 +645,16 @@ export default function StockKLineChart({
         }))
         .slice(-18)
     : [];
+  const chartPointIndexByTime = new Map(
+    data.map((point, index) => [chartDate(point.time), index])
+  );
+  const visibleChartEventMarkerCandidates = eventMarkers.flatMap((marker) => {
+    const index = chartPointIndexByTime.get(chartDate(marker.time));
+
+    if (index === undefined || index < visibleStart || index >= visibleEnd) return [];
+
+    return [{ marker, index: index - visibleStart }];
+  });
 
   function getX(index: number) {
     if (visibleData.length <= 1) return paddingLeft;
@@ -2010,6 +664,57 @@ export default function StockKLineChart({
   function getPriceY(value: number) {
     return chartTop + ((yMax - value) / yRange) * priceHeight;
   }
+
+  const occupiedEventMarkerLabels: ChartMarkerCollisionRect[] = visibleChartSignals.map(
+    (signal) => {
+      const x = getX(signal.index);
+      const y = clamp(
+        getPriceY(signal.price) + (signal.direction === "bearish" ? 18 : -18),
+        chartTop + 16,
+        priceBottom - 8
+      );
+      const labelWidth = Math.max(signal.label.length * 12 + 12, 54);
+      const label = labelPosition(x, paddingLeft, paddingRight, width);
+      const labelX = label.anchor === "end" ? x - 10 : x + 10;
+      const rectX = label.anchor === "end" ? labelX - labelWidth : labelX;
+
+      return { x: rectX, y: y - 10, width: labelWidth, height: 18 };
+    }
+  );
+  const visibleChartEventMarkers = visibleChartEventMarkerCandidates
+    .sort((left, right) => left.index - right.index)
+    .flatMap(({ marker, index }) => {
+      const point = visibleData[index];
+      const highPrice = point?.high ?? point?.close ?? point?.low;
+      const lowPrice = point?.low ?? point?.close ?? point?.high;
+
+      if (!validNumber(highPrice) || !validNumber(lowPrice)) return [];
+
+      const x = getX(index);
+      const labelWidth = Math.max(marker.label.length * 11 + 14, 42);
+      const placement = placeChartEventMarker({
+        x,
+        highY: getPriceY(highPrice),
+        lowY: getPriceY(lowPrice),
+        labelWidth,
+        minimumX: paddingLeft,
+        maximumX: width - paddingRight,
+        minimumY: chartTop + 4,
+        maximumY: priceBottom - 4,
+        occupied: occupiedEventMarkerLabels,
+      });
+      occupiedEventMarkerLabels.push(placement.rect);
+
+      return [{
+        ...marker,
+        index,
+        x,
+        anchorY: placement.anchorY,
+        labelX: placement.labelX,
+        labelWidth,
+        y: placement.y,
+      }];
+    });
 
   function getPanelY(panel: Panel, value: number, min: number, max: number) {
     const range = max - min || 1;
@@ -2166,10 +871,10 @@ export default function StockKLineChart({
   const hoverPriceGuideLabel =
     hoverPriceGuideValue !== null
       ? hoverPriceGuideSnap === "high"
-        ? t("chart.kline.highGuide", { value: formatPrice(hoverPriceGuideValue) })
+        ? t("chart.kline.highGuide", { value: formatChartPrice(hoverPriceGuideValue) })
         : hoverPriceGuideSnap === "low"
-          ? t("chart.kline.lowGuide", { value: formatPrice(hoverPriceGuideValue) })
-          : formatPrice(hoverPriceGuideValue)
+          ? t("chart.kline.lowGuide", { value: formatChartPrice(hoverPriceGuideValue) })
+          : formatChartPrice(hoverPriceGuideValue)
       : null;
   const hoverPriceGuideStrokeClass =
     hoverPriceGuideSnap === "high"
@@ -2205,7 +910,7 @@ export default function StockKLineChart({
               <div>
                 <span className="text-omi-text-subtle">{t("chart.kline.close")}</span>
                 <div className="font-semibold text-omi-text">
-                  {formatPrice(hoveredPoint.close)}
+                  {formatChartPrice(hoveredPoint.close)}
                 </div>
               </div>
               <div>
@@ -2233,8 +938,8 @@ export default function StockKLineChart({
                   MA{params.maShort}/{params.maMiddle}/{params.maLong}
                 </span>
                 <div className="font-semibold text-omi-text">
-                  {formatPrice(hoveredPoint.ma5)} / {formatPrice(hoveredPoint.ma20)} /{" "}
-                  {formatPrice(hoveredPoint.ma60)}
+                  {formatChartPrice(hoveredPoint.ma5)} / {formatChartPrice(hoveredPoint.ma20)} /{" "}
+                  {formatChartPrice(hoveredPoint.ma60)}
                 </div>
               </div>
               {indicators.ema ? (
@@ -2243,7 +948,7 @@ export default function StockKLineChart({
                     EMA{params.emaFast}/{params.emaSlow}
                   </span>
                   <div className="font-semibold text-omi-text">
-                    {formatPrice(hoveredPoint.ema12)} / {formatPrice(hoveredPoint.ema26)}
+                    {formatChartPrice(hoveredPoint.ema12)} / {formatChartPrice(hoveredPoint.ema26)}
                   </div>
                 </div>
               ) : null}
@@ -2251,7 +956,7 @@ export default function StockKLineChart({
                 <div>
                   <span className="text-omi-text-subtle">VWAP</span>
                   <div className="font-semibold text-omi-text">
-                    {formatPrice(hoveredPoint.vwap)}
+                    {formatChartPrice(hoveredPoint.vwap)}
                   </div>
                 </div>
               ) : null}
@@ -2259,7 +964,7 @@ export default function StockKLineChart({
                 <div>
                   <span className="text-omi-text-subtle">SAR</span>
                   <div className="font-semibold text-omi-text">
-                    {formatPrice(hoveredPoint.psar)}
+                    {formatChartPrice(hoveredPoint.psar)}
                   </div>
                 </div>
               ) : null}
@@ -2494,7 +1199,7 @@ export default function StockKLineChart({
                 textAnchor="end"
                 className="fill-omi-text-muted text-[12px] font-medium"
               >
-                {formatPrice(price)}
+                {formatChartPrice(price)}
               </text>
             </g>
           );
@@ -2679,7 +1384,7 @@ export default function StockKLineChart({
                     className="fill-omi-market-up text-[11px] font-semibold"
                   >
                     {t("chart.kline.highMarker", {
-                      value: formatPrice(rangeHigh.value),
+                      value: formatChartPrice(rangeHigh.value),
                     })}
                   </text>
                 </>
@@ -2714,7 +1419,7 @@ export default function StockKLineChart({
                     className="fill-omi-market-down text-[11px] font-semibold"
                   >
                     {t("chart.kline.lowMarker", {
-                      value: formatPrice(rangeLow.value),
+                      value: formatChartPrice(rangeLow.value),
                     })}
                   </text>
                 </>
@@ -2722,6 +1427,53 @@ export default function StockKLineChart({
             })()}
           </g>
         ) : null}
+
+        {visibleChartEventMarkers.map((marker) => {
+          const connectorX = marker.labelX > marker.x
+            ? marker.labelX
+            : marker.labelX + marker.labelWidth;
+          const tone =
+            marker.tone === "success"
+              ? "fill-omi-success stroke-omi-success"
+              : marker.tone === "warning"
+                ? "fill-omi-warning stroke-omi-warning"
+                : "fill-omi-info stroke-omi-info";
+
+          return (
+            <g
+              key={marker.id}
+              data-chart-event-marker={marker.eventType}
+            >
+              <line
+                x1={marker.x}
+                x2={connectorX}
+                y1={marker.anchorY}
+                y2={marker.y + 9}
+                className={tone}
+                strokeDasharray="3 3"
+                opacity="0.56"
+              />
+              <circle cx={marker.x} cy={marker.anchorY} r="3" className={tone} />
+              <rect
+                x={marker.labelX}
+                y={marker.y}
+                width={marker.labelWidth}
+                height="18"
+                rx="2"
+                className={tone}
+              />
+              <text
+                x={marker.labelX + marker.labelWidth / 2}
+                y={marker.y + 12.5}
+                textAnchor="middle"
+                className="fill-omi-surface text-[10px] font-bold"
+              >
+                {marker.label}
+              </text>
+              <title>{marker.title}</title>
+            </g>
+          );
+        })}
 
         {visibleChartSignals.map((signal) => {
           const x = getX(signal.index);

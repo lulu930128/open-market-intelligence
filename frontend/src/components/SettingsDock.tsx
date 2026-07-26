@@ -8,8 +8,15 @@ import {
   useT,
 } from "@/i18n";
 import DispatchSettingsDialog from "@/components/settings/DispatchSettingsDialog";
+import MarketCalendarDialog from "@/components/settings/MarketCalendarDialog";
 import { fetchJson, requestJson } from "@/lib/api";
 import {
+  RESOURCE_BACKGROUND_QUOTE_MAX_SECONDS,
+  RESOURCE_BACKGROUND_QUOTE_MIN_SECONDS,
+  RESOURCE_BACKGROUND_QUOTE_SECONDS_KEY,
+  RESOURCE_SELECTED_QUOTE_MAX_SECONDS,
+  RESOURCE_SELECTED_QUOTE_MIN_SECONDS,
+  RESOURCE_SELECTED_QUOTE_SECONDS_KEY,
   loadMarketDataSubscriptionSettings,
   saveMarketDataSubscriptionSettings,
   type MarketDataSubscriptionItem,
@@ -112,6 +119,7 @@ type TechnicalAnalysisSettingsWrite = Pick<
 type ParameterDraft = Record<string, string>;
 type RefreshDraft = Record<string, string>;
 type SubscriptionDraft = Record<string, MarketDataSubscriptionMode>;
+type SubscriptionIntervalDraft = Record<string, Record<string, string>>;
 
 type ParameterField = {
   key: string;
@@ -180,6 +188,7 @@ const sourceDisclosureRowKeys = [
   "usProfileActions",
   "usShortVolume",
   "jpOhlcFundamentals",
+  "krOhlcFundamentals",
   "cryptoTwdSpot",
   "cryptoUsdtSpotPerpetual",
   "cryptoLiquidation",
@@ -260,6 +269,32 @@ const refreshMarketSectionTemplates: RefreshMarketSectionTemplate[] = [
   },
   {
     key: "jp",
+    fields: [
+      {
+        key: "subresource_refresh_interval_seconds",
+        inputMode: "decimal",
+        min: 0.1,
+        step: 0.5,
+        unit: "seconds",
+      },
+      {
+        key: "observed_stock_refresh_interval_seconds",
+        inputMode: "decimal",
+        min: 0.1,
+        step: 0.5,
+        unit: "seconds",
+      },
+      {
+        key: "market_refresh_interval_seconds",
+        inputMode: "decimal",
+        min: 0.1,
+        step: 0.5,
+        unit: "seconds",
+      },
+    ],
+  },
+  {
+    key: "kr",
     fields: [
       {
         key: "subresource_refresh_interval_seconds",
@@ -585,6 +620,15 @@ function buildRefreshDraft(settings: RefreshExecutionSettingsRead): RefreshDraft
     [refreshDraftKey("jp", "market_refresh_interval_seconds")]: stringValue(
       settings.markets.jp.market_refresh_interval_seconds
     ),
+    [refreshDraftKey("kr", "observed_stock_refresh_interval_seconds")]: stringValue(
+      settings.markets.kr.observed_stock_refresh_interval_seconds
+    ),
+    [refreshDraftKey("kr", "subresource_refresh_interval_seconds")]: stringValue(
+      settings.markets.kr.subresource_refresh_interval_seconds
+    ),
+    [refreshDraftKey("kr", "market_refresh_interval_seconds")]: stringValue(
+      settings.markets.kr.market_refresh_interval_seconds
+    ),
   };
 }
 
@@ -768,6 +812,7 @@ function buildRefreshSettingsWritePayload(
       tw: buildRefreshMarketPolicyPayload(draft, "tw", t),
       us: buildRefreshMarketPolicyPayload(draft, "us", t),
       jp: buildRefreshMarketPolicyPayload(draft, "jp", t),
+      kr: buildRefreshMarketPolicyPayload(draft, "kr", t),
     },
   };
 }
@@ -781,17 +826,111 @@ function buildSubscriptionDraft(
   }, {});
 }
 
+function buildSubscriptionIntervalDraft(
+  settings: MarketDataSubscriptionSettingsRead
+): SubscriptionIntervalDraft {
+  return settings.items.reduce<SubscriptionIntervalDraft>((draft, item) => {
+    draft[item.key] = Object.fromEntries(
+      Object.entries(item.intervals).map(([key, value]) => [key, stringValue(value)])
+    );
+    return draft;
+  }, {});
+}
+
+function subscriptionIntervalLabel(key: string, t: TranslationFunction) {
+  const translationKey = `settings.dataSubscriptions.intervalFields.${key}.label`;
+  const label = t(translationKey);
+  return label === translationKey ? key.replaceAll("_", " ") : label;
+}
+
+function subscriptionIntervalBounds(key: string) {
+  if (key === RESOURCE_BACKGROUND_QUOTE_SECONDS_KEY) {
+    return {
+      min: RESOURCE_BACKGROUND_QUOTE_MIN_SECONDS,
+      max: RESOURCE_BACKGROUND_QUOTE_MAX_SECONDS,
+    };
+  }
+  if (key === RESOURCE_SELECTED_QUOTE_SECONDS_KEY) {
+    return {
+      min: RESOURCE_SELECTED_QUOTE_MIN_SECONDS,
+      max: RESOURCE_SELECTED_QUOTE_MAX_SECONDS,
+    };
+  }
+  return { min: 1, max: 86400 };
+}
+
+function parseSubscriptionIntervalValue(
+  intervalDraft: SubscriptionIntervalDraft,
+  item: MarketDataSubscriptionItem,
+  intervalKey: string,
+  t: TranslationFunction
+) {
+  const label = subscriptionIntervalLabel(intervalKey, t);
+  const rawValue =
+    intervalDraft[item.key]?.[intervalKey]?.trim() ??
+    stringValue(item.intervals[intervalKey]);
+
+  if (!rawValue) {
+    throw new Error(t("settings.validation.required", { label }));
+  }
+
+  const value = Number(rawValue);
+  if (!Number.isFinite(value)) {
+    throw new Error(t("settings.validation.number", { label }));
+  }
+  if (value <= 0) {
+    throw new Error(t("settings.validation.positive", { label }));
+  }
+
+  const bounds = subscriptionIntervalBounds(intervalKey);
+  if (value < bounds.min || value > bounds.max) {
+    throw new Error(
+      t("settings.validation.range", {
+        label,
+        min: bounds.min,
+        max: bounds.max,
+      })
+    );
+  }
+
+  return value;
+}
+
+function isResourceQuoteSubscription(item: MarketDataSubscriptionItem) {
+  return item.market === "resource" && item.resources.quote === true;
+}
+
 function buildSubscriptionSettingsWritePayload(
   settings: MarketDataSubscriptionSettingsRead,
-  draft: SubscriptionDraft
+  draft: SubscriptionDraft,
+  intervalDraft: SubscriptionIntervalDraft,
+  t: TranslationFunction
 ): MarketDataSubscriptionSettingsWrite {
   return {
-    items: settings.items.map((item) => ({
-      key: item.key,
-      mode: draft[item.key] ?? item.mode,
-      resources: item.resources,
-      intervals: item.intervals,
-    })),
+    items: settings.items.map((item) => {
+      const intervals = { ...item.intervals };
+      if (isResourceQuoteSubscription(item)) {
+        intervals[RESOURCE_SELECTED_QUOTE_SECONDS_KEY] = parseSubscriptionIntervalValue(
+          intervalDraft,
+          item,
+          RESOURCE_SELECTED_QUOTE_SECONDS_KEY,
+          t
+        );
+        intervals[RESOURCE_BACKGROUND_QUOTE_SECONDS_KEY] = parseSubscriptionIntervalValue(
+          intervalDraft,
+          item,
+          RESOURCE_BACKGROUND_QUOTE_SECONDS_KEY,
+          t
+        );
+      }
+
+      return {
+        key: item.key,
+        mode: draft[item.key] ?? item.mode,
+        resources: item.resources,
+        intervals,
+      };
+    }),
   };
 }
 
@@ -834,7 +973,9 @@ const SUBSCRIPTION_GROUP_ORDER = new Map([
 ]);
 
 function subscriptionGroupKey(item: MarketDataSubscriptionItem) {
-  if (item.key === USDT_SUBSCRIPTION_KEY) return "resource.currency";
+  if (item.key === USDT_SUBSCRIPTION_KEY || item.key.startsWith("currency:")) {
+    return "resource.currency";
+  }
   if (item.market === "crypto") return "crypto";
   return `${item.market}.${item.group}`;
 }
@@ -849,6 +990,20 @@ function subscriptionResourceLabel(resourceKey: string, t: TranslationFunction) 
   const translationKey = `settings.dataSubscriptions.resources.${resourceKey}`;
   const label = t(translationKey);
   return label === translationKey ? resourceKey.replaceAll("_", " ") : label;
+}
+
+function subscriptionProviderStatusLabel(status: string, t: TranslationFunction) {
+  const translationKey =
+    status === "provider_pending"
+      ? "settings.dataSubscriptions.providerPending"
+      : status === "best_effort_delayed" || status === "best_effort"
+        ? "settings.dataSubscriptions.providerBestEffortDelayed"
+        : null;
+
+  if (!translationKey) return status.replaceAll("_", " ");
+
+  const label = t(translationKey);
+  return label === translationKey ? status.replaceAll("_", " ") : label;
 }
 
 function subscriptionItemLabel(item: MarketDataSubscriptionItem) {
@@ -888,20 +1043,34 @@ function groupSubscriptionItems(
 function DataSubscriptionRow({
   item,
   mode,
+  intervalDraft,
   t,
   onModeChange,
+  onIntervalChange,
 }: {
   item: MarketDataSubscriptionItem;
   mode: MarketDataSubscriptionMode;
+  intervalDraft: Record<string, string> | undefined;
   t: TranslationFunction;
   onModeChange: (key: string, mode: MarketDataSubscriptionMode) => void;
+  onIntervalChange: (key: string, intervalKey: string, value: string) => void;
 }) {
   const activeResources = Object.entries(item.resources)
     .filter(([, enabled]) => enabled)
     .map(([resource]) => resource);
+  const availableModeChoices = item.market === "resource"
+    ? subscriptionModeChoices.filter((choice) => choice !== "manual")
+    : subscriptionModeChoices;
+  const showQuoteIntervals = isResourceQuoteSubscription(item);
+  const selectedQuoteInterval =
+    intervalDraft?.[RESOURCE_SELECTED_QUOTE_SECONDS_KEY] ??
+    stringValue(item.intervals[RESOURCE_SELECTED_QUOTE_SECONDS_KEY]);
+  const backgroundQuoteInterval =
+    intervalDraft?.[RESOURCE_BACKGROUND_QUOTE_SECONDS_KEY] ??
+    stringValue(item.intervals[RESOURCE_BACKGROUND_QUOTE_SECONDS_KEY]);
 
   return (
-    <article className="grid gap-3 border-t border-omi-border-subtle px-4 py-3 first:border-t-0 md:grid-cols-[minmax(0,1fr)_180px] md:items-center">
+    <article className="grid gap-3 border-t border-omi-border-subtle px-4 py-3 first:border-t-0 md:grid-cols-[minmax(0,1fr)_260px] md:items-center">
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
           <h4 className="text-sm font-black text-omi-text-strong">
@@ -912,7 +1081,7 @@ function DataSubscriptionRow({
           </span>
           {item.provider_status ? (
             <span className="border border-omi-warning-border bg-omi-warning-soft px-2 py-0.5 text-[11px] font-semibold text-omi-warning">
-              {t("settings.dataSubscriptions.providerPending")}
+              {subscriptionProviderStatusLabel(item.provider_status, t)}
             </span>
           ) : null}
         </div>
@@ -930,24 +1099,73 @@ function DataSubscriptionRow({
           <p className="mt-2 text-xs leading-5 text-omi-text-muted">{item.note}</p>
         ) : null}
       </div>
-      <label className="grid gap-1">
-        <span className="text-[11px] font-bold uppercase tracking-[0.18em] text-omi-text-muted">
-          {t("settings.dataSubscriptions.mode")}
-        </span>
-        <select
-          value={mode}
-          onChange={(event) =>
-            onModeChange(item.key, event.target.value as MarketDataSubscriptionMode)
-          }
-          className="h-9 w-full border border-omi-border bg-omi-surface px-3 text-sm font-bold text-omi-text outline-none hover:border-omi-border-strong focus:border-omi-accent"
-        >
-          {subscriptionModeChoices.map((choice) => (
-            <option key={choice} value={choice}>
-              {t(`settings.dataSubscriptions.modes.${choice}`)}
-            </option>
-          ))}
-        </select>
-      </label>
+      <div className="grid gap-3">
+        <label className="grid gap-1">
+          <span className="text-[11px] font-bold uppercase tracking-[0.18em] text-omi-text-muted">
+            {t("settings.dataSubscriptions.mode")}
+          </span>
+          <select
+            value={mode}
+            onChange={(event) =>
+              onModeChange(item.key, event.target.value as MarketDataSubscriptionMode)
+            }
+            className="h-9 w-full border border-omi-border bg-omi-surface px-3 text-sm font-bold text-omi-text outline-none hover:border-omi-border-strong focus:border-omi-accent"
+          >
+            {availableModeChoices.map((choice) => (
+              <option key={choice} value={choice}>
+                {t(`settings.dataSubscriptions.modes.${choice}`)}
+              </option>
+            ))}
+          </select>
+        </label>
+        {showQuoteIntervals ? (
+          <div className="grid grid-cols-2 gap-2">
+            <label className="grid gap-1">
+              <span className="text-[11px] font-bold uppercase tracking-[0.12em] text-omi-text-muted">
+                {subscriptionIntervalLabel(RESOURCE_SELECTED_QUOTE_SECONDS_KEY, t)}
+              </span>
+              <input
+                type="number"
+                min={RESOURCE_SELECTED_QUOTE_MIN_SECONDS}
+                max={RESOURCE_SELECTED_QUOTE_MAX_SECONDS}
+                step={1}
+                value={selectedQuoteInterval}
+                onChange={(event) =>
+                  onIntervalChange(
+                    item.key,
+                    RESOURCE_SELECTED_QUOTE_SECONDS_KEY,
+                    event.target.value
+                  )
+                }
+                className="h-8 w-full border border-omi-border bg-omi-surface px-2 text-sm font-bold text-omi-text outline-none hover:border-omi-border-strong focus:border-omi-accent"
+              />
+            </label>
+            <label className="grid gap-1">
+              <span className="text-[11px] font-bold uppercase tracking-[0.12em] text-omi-text-muted">
+                {subscriptionIntervalLabel(RESOURCE_BACKGROUND_QUOTE_SECONDS_KEY, t)}
+              </span>
+              <input
+                type="number"
+                min={RESOURCE_BACKGROUND_QUOTE_MIN_SECONDS}
+                max={RESOURCE_BACKGROUND_QUOTE_MAX_SECONDS}
+                step={1}
+                value={backgroundQuoteInterval}
+                onChange={(event) =>
+                  onIntervalChange(
+                    item.key,
+                    RESOURCE_BACKGROUND_QUOTE_SECONDS_KEY,
+                    event.target.value
+                  )
+                }
+                className="h-8 w-full border border-omi-border bg-omi-surface px-2 text-sm font-bold text-omi-text outline-none hover:border-omi-border-strong focus:border-omi-accent"
+              />
+            </label>
+            <div className="col-span-2 text-[11px] font-semibold text-omi-text-muted">
+              {t("settings.dataSubscriptions.intervalUnitSeconds")}
+            </div>
+          </div>
+        ) : null}
+      </div>
     </article>
   );
 }
@@ -1257,6 +1475,7 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
   const [parametersOpen, setParametersOpen] = useState(false);
   const [refreshOpen, setRefreshOpen] = useState(false);
   const [subscriptionsOpen, setSubscriptionsOpen] = useState(false);
+  const [calendarOpen, setCalendarOpen] = useState(false);
   const [dispatchOpen, setDispatchOpen] = useState(false);
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const [loadState, setLoadState] = useState<LoadState>("idle");
@@ -1283,6 +1502,8 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
   const [draft, setDraft] = useState<ParameterDraft>({});
   const [refreshDraft, setRefreshDraft] = useState<RefreshDraft>({});
   const [subscriptionDraft, setSubscriptionDraft] = useState<SubscriptionDraft>({});
+  const [subscriptionIntervalDraft, setSubscriptionIntervalDraft] =
+    useState<SubscriptionIntervalDraft>({});
   const [activeSectionKey, setActiveSectionKey] = useState<ParameterSectionKey>("moving");
   const [activeRefreshMarket, setActiveRefreshMarket] =
     useState<RefreshExecutionMarket>("tw");
@@ -1358,6 +1579,7 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
       const payload = await loadMarketDataSubscriptionSettings();
       setSubscriptionSettings(payload);
       setSubscriptionDraft(buildSubscriptionDraft(payload));
+      setSubscriptionIntervalDraft(buildSubscriptionIntervalDraft(payload));
       setSubscriptionLoadState("success");
       setSubscriptionSaveState("idle");
     } catch (error) {
@@ -1393,7 +1615,7 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
   }, [menuOpen]);
 
   useEffect(() => {
-    if (!parametersOpen && !refreshOpen && !subscriptionsOpen && !dispatchOpen && !sourcesOpen) {
+    if (!parametersOpen && !refreshOpen && !subscriptionsOpen && !calendarOpen && !dispatchOpen && !sourcesOpen) {
       return;
     }
 
@@ -1402,13 +1624,14 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
       setParametersOpen(false);
       setRefreshOpen(false);
       setSubscriptionsOpen(false);
+      setCalendarOpen(false);
       setDispatchOpen(false);
       setSourcesOpen(false);
     }
 
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [parametersOpen, refreshOpen, subscriptionsOpen, dispatchOpen, sourcesOpen]);
+  }, [parametersOpen, refreshOpen, subscriptionsOpen, calendarOpen, dispatchOpen, sourcesOpen]);
 
   function openParameterDialog() {
     setMenuOpen(false);
@@ -1443,6 +1666,11 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
   function openDispatchDialog() {
     setMenuOpen(false);
     setDispatchOpen(true);
+  }
+
+  function openCalendarDialog() {
+    setMenuOpen(false);
+    setCalendarOpen(true);
   }
 
   function openSourceDisclosureDialog() {
@@ -1480,6 +1708,22 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
     }));
   }
 
+  function updateSubscriptionIntervalDraftValue(
+    key: string,
+    intervalKey: string,
+    value: string
+  ) {
+    setSubscriptionSaveState("idle");
+    setSubscriptionSaveMessage(null);
+    setSubscriptionIntervalDraft((current) => ({
+      ...current,
+      [key]: {
+        ...(current[key] ?? {}),
+        [intervalKey]: value,
+      },
+    }));
+  }
+
   function resetDraft() {
     if (settings) {
       setDraft(buildParameterDraft(settings));
@@ -1499,6 +1743,7 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
   function resetSubscriptionDraft() {
     if (subscriptionSettings) {
       setSubscriptionDraft(buildSubscriptionDraft(subscriptionSettings));
+      setSubscriptionIntervalDraft(buildSubscriptionIntervalDraft(subscriptionSettings));
       setSubscriptionSaveState("idle");
       setSubscriptionSaveMessage(null);
     }
@@ -1566,12 +1811,15 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
     try {
       const payload = buildSubscriptionSettingsWritePayload(
         subscriptionSettings,
-        subscriptionDraft
+        subscriptionDraft,
+        subscriptionIntervalDraft,
+        t
       );
       const response = await saveMarketDataSubscriptionSettings(payload);
 
       setSubscriptionSettings(response);
       setSubscriptionDraft(buildSubscriptionDraft(response));
+      setSubscriptionIntervalDraft(buildSubscriptionIntervalDraft(response));
       setSubscriptionLoadState("success");
       setSubscriptionSaveState(
         response.runtime?.crypto_realtime_reload?.status === "error" ||
@@ -1593,8 +1841,8 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
     ? "relative z-[2147483645]"
     : "fixed bottom-4 left-4 z-[2147483645] sm:left-[206px]";
   const menuClassName = inline
-    ? "absolute bottom-10 right-0 w-64 border border-omi-border bg-omi-surface text-left shadow-2xl"
-    : "absolute bottom-12 right-0 w-64 border border-omi-border bg-omi-surface text-left shadow-2xl";
+    ? "absolute bottom-10 right-0 max-h-[calc(100vh-5rem)] w-64 overflow-y-auto border border-omi-border bg-omi-surface text-left shadow-2xl"
+    : "absolute bottom-12 right-0 max-h-[calc(100vh-5rem)] w-64 overflow-y-auto border border-omi-border bg-omi-surface text-left shadow-2xl";
   const buttonClassName = inline
     ? "inline-flex h-8 items-center gap-2 whitespace-nowrap border border-omi-border bg-omi-surface-muted px-3 text-xs font-semibold text-omi-text-muted transition hover:bg-omi-surface-strong hover:text-omi-text"
     : "inline-flex h-10 items-center gap-2 border border-omi-control bg-omi-control px-3 text-sm font-bold text-omi-text-inverse shadow-lg transition hover:bg-omi-control-hover";
@@ -1678,6 +1926,21 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
                   </span>
                   <span className="block text-xs text-omi-text-muted">
                     {t("settings.dataSubscriptions.menuHint")}
+                  </span>
+                </span>
+                <ChevronIcon />
+              </button>
+              <button
+                type="button"
+                className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-omi-surface-subtle"
+                onClick={openCalendarDialog}
+              >
+                <span>
+                  <span className="block font-semibold text-omi-text">
+                    {t("settings.calendar.menuTitle")}
+                  </span>
+                  <span className="block text-xs text-omi-text-muted">
+                    {t("settings.calendar.menuHint")}
                   </span>
                 </span>
                 <ChevronIcon />
@@ -2155,8 +2418,10 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
                             key={item.key}
                             item={item}
                             mode={subscriptionDraft[item.key] ?? item.mode}
+                            intervalDraft={subscriptionIntervalDraft[item.key]}
                             t={t}
                             onModeChange={updateSubscriptionDraftValue}
+                            onIntervalChange={updateSubscriptionIntervalDraftValue}
                           />
                         ))}
                       </div>
@@ -2231,6 +2496,11 @@ export default function SettingsDock({ placement = "fixed" }: SettingsDockProps)
       <DispatchSettingsDialog
         open={dispatchOpen}
         onClose={() => setDispatchOpen(false)}
+      />
+
+      <MarketCalendarDialog
+        open={calendarOpen}
+        onClose={() => setCalendarOpen(false)}
       />
 
       {sourcesOpen ? (

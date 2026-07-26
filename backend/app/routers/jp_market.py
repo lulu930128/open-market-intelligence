@@ -2,25 +2,35 @@ from __future__ import annotations
 
 from datetime import date
 
-import requests
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.jobs import backfill_tasks, service as job_service
+from app.jobs import backfill_tasks
 from app.jobs.job_types import JP_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE
 from app.jobs.schemas import JobRunRead
+from app.routers.market_family_helpers import (
+    enqueue_serialized_job,
+    fetch_error,
+    watchlist_group_error,
+    watchlist_group_target,
+    watchlist_item_error,
+)
 from app.settings.refresh_execution import (
     resolve_observed_stock_refresh_interval_seconds,
     resolve_subresource_refresh_interval_seconds,
 )
+from app.jp_market.errors import JPMarketDataFetchError
 from app.jp_market.schemas import (
     JPCompanyFundamentalRead,
     JPDailyPriceRead,
     JPDailyPriceRefreshResultRead,
+    JPIntradayTrendRead,
+    JPMarketOverviewRead,
     JPOhlcChartRead,
     JPResourceSummaryRead,
     JPResourceRefreshResultRead,
+    JPSourceHealthRead,
     JPStockMasterRead,
     JPStockMasterSyncResultRead,
     JPWatchlistGroupCreate,
@@ -33,6 +43,7 @@ from app.jp_market.schemas import (
     JPWatchlistItemUpdate,
     JPWatchlistRankingRead,
 )
+from app.jp_market.source_health import build_jp_source_health
 from app.watchlists.schemas import WatchlistGroupRadarRead
 from app.jp_market.service import (
     JPWatchlistDuplicateItemError,
@@ -50,6 +61,8 @@ from app.jp_market.service import (
     get_jp_watchlist_group,
     get_jp_watchlist_ranking,
     get_jp_watchlist_technical_radar,
+    get_jp_intraday_trend,
+    get_jp_market_overview,
     get_jp_stock,
     get_jp_resource_summary,
     list_jp_daily_prices,
@@ -66,37 +79,57 @@ from app.jp_market.service import (
     update_jp_watchlist_group,
     update_jp_watchlist_item,
 )
-from app.jp_market.sources import JPMarketDataFetchError
 
 
 router = APIRouter()
 
 
 def _fetch_error(exc: Exception) -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_502_BAD_GATEWAY,
-        detail=str(exc),
-    )
+    return fetch_error(exc)
 
 
 def _group_error(exc: Exception) -> HTTPException:
-    if isinstance(exc, JPWatchlistGroupNotFoundError):
-        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
-
-    if isinstance(exc, (JPWatchlistInvalidTreeError, JPWatchlistGroupNotEmptyError)):
-        return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
-
-    return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return watchlist_group_error(
+        exc,
+        not_found_errors=(JPWatchlistGroupNotFoundError,),
+        bad_request_errors=(JPWatchlistInvalidTreeError, JPWatchlistGroupNotEmptyError),
+    )
 
 
 def _item_error(exc: Exception) -> HTTPException:
-    if isinstance(exc, (JPWatchlistGroupNotFoundError, JPWatchlistItemNotFoundError, JPStockNotFoundError)):
-        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    return watchlist_item_error(
+        exc,
+        not_found_errors=(JPWatchlistGroupNotFoundError, JPWatchlistItemNotFoundError, JPStockNotFoundError),
+        duplicate_errors=(JPWatchlistDuplicateItemError,),
+    )
 
-    if isinstance(exc, JPWatchlistDuplicateItemError):
-        return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
 
-    return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+@router.get("/source-health", response_model=JPSourceHealthRead)
+def get_jp_source_health(
+    symbol: str | None = None,
+    expected_daily_price_date: date | None = None,
+    use_expected_date: bool = True,
+    db: Session = Depends(get_db),
+):
+    return build_jp_source_health(
+        db=db,
+        symbol=symbol,
+        expected_daily_price_date=expected_daily_price_date,
+        use_expected_date=use_expected_date,
+    )
+
+
+@router.get("/overview", response_model=JPMarketOverviewRead)
+def get_jp_market_overview_api(
+    sector_limit: int = Query(default=10, ge=1, le=33),
+    mover_limit: int = Query(default=5, ge=1, le=20),
+    db: Session = Depends(get_db),
+):
+    return get_jp_market_overview(
+        db=db,
+        sector_limit=sector_limit,
+        mover_limit=mover_limit,
+    )
 
 
 def _enqueue_jp_watchlist_resource_refresh(
@@ -111,7 +144,7 @@ def _enqueue_jp_watchlist_resource_refresh(
     provider: str,
     sleep_seconds: float,
 ) -> dict:
-    target = f"group:{group_id}" if group_id is not None else "all"
+    target = watchlist_group_target(group_id)
     request = {
         "group_id": group_id,
         "include_children": include_children,
@@ -122,7 +155,7 @@ def _enqueue_jp_watchlist_resource_refresh(
         "provider": provider,
         "sleep_seconds": sleep_seconds,
     }
-    job, _created = job_service.enqueue_job(
+    return enqueue_serialized_job(
         db=db,
         job_type=JP_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
         target=target,
@@ -141,7 +174,6 @@ def _enqueue_jp_watchlist_resource_refresh(
             sleep_seconds,
         ),
     )
-    return job_service.serialize_job(job)
 
 
 @router.post("/stocks/sync-symbols", response_model=JPStockMasterSyncResultRead)
@@ -154,8 +186,6 @@ def sync_jp_stock_symbols(
             db=db,
             deactivate_missing=deactivate_missing,
         )
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except JPMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -239,8 +269,6 @@ def refresh_jp_market_resource_api(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except JPMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -262,8 +290,6 @@ def refresh_jp_company_fundamental(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except JPMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -329,8 +355,6 @@ def refresh_jp_daily_prices(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except JPMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -710,7 +734,24 @@ def get_jp_ohlc_chart_data(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except JPMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
+
+
+@router.get("/intraday/{symbol}", response_model=JPIntradayTrendRead)
+def get_jp_intraday_trend_api(
+    symbol: str,
+    refresh: bool = False,
+    db: Session = Depends(get_db),
+):
+    try:
+        return get_jp_intraday_trend(
+            db=db,
+            symbol=symbol,
+            refresh=refresh,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc

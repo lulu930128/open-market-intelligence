@@ -7,7 +7,8 @@ from unittest.mock import patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.db.models import Base, MarketDailyPrice, USDailyPrice
+from app.db.models import Base, MarketDailyPrice, StockMaster, USDailyPrice
+from app.market.ohlc_overlay import aggregate_ohlc_points
 from app.market.service import list_stock_ohlc_chart_data
 from app.us_market.service import list_us_ohlc_chart_data
 
@@ -24,6 +25,22 @@ class OhlcIntradayOverlayTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.db.close()
+
+    def test_chart_projection_sorts_and_dedupes_trading_dates(self) -> None:
+        points = aggregate_ohlc_points(
+            timeframe="daily",
+            points=[
+                {"time": date(2026, 7, 16), "close": 100, "volume": 10},
+                {"time": date(2026, 7, 15), "close": 90, "volume": 5},
+                {"time": date(2026, 7, 16), "close": 101, "volume": 12},
+            ],
+        )
+
+        self.assertEqual([point["time"] for point in points], [
+            date(2026, 7, 15),
+            date(2026, 7, 16),
+        ])
+        self.assertEqual(points[-1]["close"], 101)
 
     def test_taiwan_daily_ohlc_appends_provisional_intraday_candle(self) -> None:
         self.db.add(
@@ -86,7 +103,57 @@ class OhlcIntradayOverlayTests(unittest.TestCase):
         self.assertEqual(chart["points"][-1]["close"], 105.0)
         self.assertEqual(chart["points"][-1]["volume"], 30)
         self.assertEqual(chart["intraday_overlay"]["trade_date"], date(2026, 6, 29))
+        self.assertEqual(chart["intraday_overlay"]["previous_close"], 101.0)
         self.assertTrue(chart["intraday_overlay"]["provisional"])
+
+    def test_taiwan_daily_ohlc_refreshes_when_full_window_is_stale(self) -> None:
+        self.db.add(
+            StockMaster(
+                stock_id="2330",
+                stock_name="TSMC",
+                market="TWSE",
+                instrument_type="stock",
+            )
+        )
+        self.db.add_all(
+            [
+                MarketDailyPrice(
+                    source_id=1,
+                    raw_result_id=index,
+                    trade_date=trade_date,
+                    stock_id="2330",
+                    stock_name="TSMC",
+                    open_price=100.0 + index,
+                    high_price=103.0 + index,
+                    low_price=99.0 + index,
+                    close_price=101.0 + index,
+                    trade_volume=1000 + index,
+                )
+                for index, trade_date in enumerate(
+                    [date(2026, 7, 13), date(2026, 7, 14)],
+                    start=1,
+                )
+            ]
+        )
+        self.db.commit()
+
+        with patch(
+            "app.market.service._ensure_stock_history",
+            return_value={"status": "success", "message": "mocked"},
+        ) as refresh_mock:
+            chart = list_stock_ohlc_chart_data(
+                self.db,
+                stock_id="2330",
+                timeframe="daily",
+                bars=2,
+                ensure_history=True,
+                to_date=date(2026, 7, 16),
+            )
+
+        refresh_mock.assert_called_once()
+        self.assertEqual(refresh_mock.call_args.kwargs["end_date"], date(2026, 7, 16))
+        self.assertEqual(chart["freshness_status"], "stale")
+        self.assertIn("stale_latest_date", chart["backfill"]["refresh_reasons"])
 
     def test_us_weekly_ohlc_merges_provisional_intraday_candle(self) -> None:
         self.db.add_all(
@@ -162,6 +229,7 @@ class OhlcIntradayOverlayTests(unittest.TestCase):
         self.assertEqual(chart["points"][0]["close"], 111.0)
         self.assertEqual(chart["points"][0]["volume"], 3300)
         self.assertEqual(chart["intraday_overlay"]["trade_date"], date(2026, 6, 26))
+        self.assertEqual(chart["intraday_overlay"]["previous_close"], 108.0)
         self.assertTrue(chart["intraday_overlay"]["provisional"])
 
 

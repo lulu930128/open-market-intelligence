@@ -145,6 +145,89 @@ class MarketIntradayHistoryTests(unittest.TestCase):
         self.assertEqual(result["point_count"], 1)
         self.assertEqual(result["points"][0]["close"], 101)
 
+    def test_five_minute_history_overlays_current_local_one_minute_aggregate(self) -> None:
+        one_minute_payload = {
+            "stock_id": "2330",
+            "symbol": "2330.TW",
+            "source": "yahoo_finance_chart",
+            "source_url": "https://example.test/one-minute",
+            "points": [
+                point(13, 15, 101, 1000),
+                point(13, 16, 102, 2000),
+                point(13, 17, 103, 3000),
+            ],
+        }
+        stale_five_minute_payload = {
+            "stock_id": "2330",
+            "symbol": "2330.TW",
+            "source": "yahoo_finance_chart",
+            "source_url": "https://example.test/five-minute",
+            "points": [point(12, 55, 99, 500)],
+        }
+
+        with (
+            patch.object(
+                intraday,
+                "get_taiwan_disposition_status",
+                return_value={"is_active": False},
+            ),
+            patch.object(
+                intraday,
+                "_fetch_yahoo_intraday",
+                side_effect=[one_minute_payload, stale_five_minute_payload],
+            ),
+        ):
+            intraday.get_market_intraday_history(
+                self.db,
+                stock_id="2330",
+                interval="1m",
+                range_value="1d",
+            )
+            result = intraday.get_market_intraday_history(
+                self.db,
+                stock_id="2330",
+                interval="5m",
+                range_value="1d",
+            )
+
+        self.assertEqual(result["source"], "local_current_1m_aggregate")
+        self.assertEqual(result["provider"], "local_derived")
+        self.assertEqual(result["points"][-1]["close"], 103)
+        self.assertEqual(result["points"][-1]["volume"], 6000)
+
+    def test_repeated_identical_intraday_refresh_reports_zero_updates(self) -> None:
+        payload = {
+            "stock_id": "2330",
+            "symbol": "2330.TW",
+            "source": "yahoo_finance_chart",
+            "source_url": "https://example.test/chart",
+            "points": [point(9, 0, 101, 1000)],
+        }
+
+        with (
+            patch.object(
+                intraday,
+                "get_taiwan_disposition_status",
+                return_value={"is_active": False},
+            ),
+            patch.object(intraday, "_fetch_yahoo_intraday", return_value=payload),
+        ):
+            first = intraday.get_market_intraday_history(
+                self.db,
+                stock_id="2330",
+                interval="1m",
+                range_value="1d",
+            )
+            second = intraday.get_market_intraday_history(
+                self.db,
+                stock_id="2330",
+                interval="1m",
+                range_value="1d",
+            )
+
+        self.assertEqual(first["refreshed_count"], 1)
+        self.assertEqual(second["refreshed_count"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

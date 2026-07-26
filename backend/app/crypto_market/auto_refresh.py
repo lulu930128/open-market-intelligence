@@ -11,6 +11,7 @@ from app.crypto_market.assets import get_crypto_asset
 from app.crypto_market.contract import PERPETUAL, SPOT, list_provider_instruments
 from app.crypto_market.service import (
     refresh_crypto_derivatives,
+    refresh_crypto_long_short_ratios,
     refresh_crypto_market_caps,
     refresh_crypto_order_books,
     refresh_crypto_ohlcv,
@@ -40,6 +41,7 @@ AUTO_REFRESH_RESOURCES = (
     "order_book",
     "ohlcv",
     "derivatives",
+    "long_short_ratio",
     "market_cap",
     "taiwan_spread",
 )
@@ -48,6 +50,7 @@ INTERVAL_KEY_BY_RESOURCE = {
     "order_book": "order_book_seconds",
     "ohlcv": "ohlcv_seconds",
     "derivatives": "derivatives_seconds",
+    "long_short_ratio": "long_short_ratio_seconds",
     "market_cap": "market_cap_seconds",
     # Spread depends on fresh local/global tickers, so use the quote cadence.
     "taiwan_spread": "quote_seconds",
@@ -132,6 +135,16 @@ def _derivative_symbol_batches_for_assets(
         assets,
         instrument_type=PERPETUAL,
         resource="derivatives",
+    )
+
+
+def _long_short_ratio_symbol_batches_for_assets(
+    assets: tuple[str, ...],
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    return _instrument_symbol_batches_for_assets(
+        assets,
+        instrument_type=PERPETUAL,
+        resource="long_short_ratio",
     )
 
 
@@ -319,6 +332,16 @@ def build_crypto_auto_refresh_plans(
                         symbols=symbols,
                     )
                 )
+        elif resource == "long_short_ratio":
+            for provider, symbols in _long_short_ratio_symbol_batches_for_assets(assets):
+                plans.append(
+                    CryptoAutoRefreshPlan(
+                        resource=resource,
+                        interval_seconds=interval_seconds,
+                        providers=_provider_csv(provider),
+                        symbols=symbols,
+                    )
+                )
         elif resource == "market_cap":
             plans.append(
                 CryptoAutoRefreshPlan(
@@ -384,6 +407,12 @@ def _execute_auto_refresh_plan(plan: CryptoAutoRefreshPlan) -> dict[str, Any]:
             )
         if plan.resource == "derivatives":
             return refresh_crypto_derivatives(
+                db,
+                providers=plan.providers,
+                symbols=",".join(plan.symbols),
+            )
+        if plan.resource == "long_short_ratio":
+            return refresh_crypto_long_short_ratios(
                 db,
                 providers=plan.providers,
                 symbols=",".join(plan.symbols),

@@ -407,9 +407,19 @@ def trend_view_with_levels(
     if weak_evidence:
         headline = f"{target_label} 方向先保留，等資料與下一筆價量確認"
     elif price_position == "above_chase" and chase:
-        headline = f"{target_label} 波段偏多，但現價 {latest} 已接近追價上限 {chase}"
+        if score_bullish:
+            headline = f"{target_label} 波段偏多，但現價 {latest} 已接近追價上限 {chase}"
+        elif score_bearish:
+            headline = f"{target_label} 波段偏弱，現價 {latest} 又在追價上限 {chase} 之上"
+        else:
+            headline = f"{target_label} 方向未確認，現價 {latest} 已接近追價上限 {chase}"
     elif price_position == "above_preferred" and preferred:
-        headline = f"{target_label} 波段偏多，但現價 {latest} 已離開支撐區 {preferred}"
+        if score_bullish:
+            headline = f"{target_label} 波段偏多，但現價 {latest} 已離開支撐區 {preferred}"
+        elif score_bearish:
+            headline = f"{target_label} 波段偏弱；現價雖高於支撐區 {preferred}，仍未形成轉強"
+        else:
+            headline = f"{target_label} 多空未定，先看回測支撐區 {preferred} 是否守住"
     elif price_position == "in_preferred" and preferred:
         headline = f"{target_label} 回到支撐觀察區，接下來看 {preferred} 能否守穩"
     elif price_position == "below_preferred" and preferred:
@@ -469,13 +479,27 @@ def trend_view_with_levels(
     if weak_evidence:
         trend_text = "先把這次解讀當方向參考，不把單一分數或單日收盤價當成最後結論。"
     elif price_position == "above_chase" and chase:
-        trend_text = f"方向仍偏多，但現價 {latest} 已在偏熱區，追價報酬比不佳。"
+        if score_bullish:
+            trend_text = f"方向偏多，但現價 {latest} 已在偏熱區，追價報酬比不佳。"
+        elif score_bearish:
+            trend_text = f"多週期分數偏弱；即使現價 {latest} 位於高檔，也不能解讀為趨勢轉強。"
+        else:
+            trend_text = f"方向尚未確認；現價 {latest} 位於偏熱區，先避免用價格高度代替趨勢判斷。"
     elif price_position == "above_preferred" and preferred:
-        trend_text = f"方向仍偏多，結構重點從追價轉成回測 {preferred} 是否守住。"
+        if score_bullish:
+            trend_text = f"方向偏多，結構重點從追價轉成回測 {preferred} 是否守住。"
+        elif score_bearish:
+            trend_text = f"多週期分數偏弱；現價高於 {preferred} 只代表價格位置，仍要等量價與動能轉強。"
+        else:
+            trend_text = f"方向尚未確認，先看回測 {preferred} 與量價表現是否形成一致訊號。"
     elif price_position == "in_preferred" and preferred:
         trend_text = f"方向關鍵從追價轉成支撐承接；{preferred} 守住，波段才有續強空間。"
     elif price_position == "below_preferred" and preferred:
-        trend_text = f"方向開始轉弱；若無法收回 {preferred}，原本偏多結構要先降級。"
+        trend_text = (
+            f"方向開始轉弱；若無法收回 {preferred}，原本偏多結構要先降級。"
+            if score_bullish
+            else f"價格已跌破 {preferred}；在收回支撐前，不把反彈解讀為趨勢轉強。"
+        )
     elif price_position == "breakout_confirmed" and breakout:
         trend_text = f"方向重點從支撐承接轉成突破延續；看 {breakout} 之上是否站穩。"
     else:
@@ -509,7 +533,12 @@ def trend_view_with_levels(
         )
     elif price_position == "above_preferred" and preferred:
         observation_text = (
-            f"觀察回測 {preferred} 時量能是否收斂、動能是否守住；若回測不破，波段延續機率較高。"
+            f"觀察回測 {preferred} 時量能是否收斂、動能是否守住；若回測不破，"
+            + (
+                "波段延續條件較完整。"
+                if score_bullish
+                else "只能先視為止穩候選，仍需量價與多週期分數轉強。"
+            )
         )
     elif price_position == "in_preferred" and preferred:
         observation_text = f"觀察 {preferred} 是否止跌守穩，且量能與動能是否同步回升。"
@@ -536,7 +565,11 @@ def trend_view_with_levels(
         else:
             risks.append(f"若續漲接近 {chase} 以上，代表偏熱延伸，不把現價區當新支撐。")
     if invalidation:
-        risks.append(f"跌破 {invalidation} 後，原本波段偏多假設要降級。")
+        risks.append(
+            f"跌破 {invalidation} 後，原本波段偏多假設要降級。"
+            if score_bullish
+            else f"跌破 {invalidation} 後，波段結構將進一步惡化。"
+        )
     elif stop:
         risks.append(f"跌破 {stop} 後，短線結構會明顯轉弱。")
 
@@ -586,6 +619,25 @@ def result_data(result: dict[str, Any]) -> dict[str, Any]:
 
 def latest_price_snapshot(result: dict[str, Any]) -> dict[str, Any]:
     data = result_data(result)
+    compact = data.get("compact") if isinstance(data.get("compact"), dict) else {}
+    canonical_quote = (
+        compact.get("quote")
+        if isinstance(compact.get("quote"), dict)
+        else {}
+    )
+    for key in ("latest_price", "price", "close_price", "last_price"):
+        value = numeric_data_value(canonical_quote.get(key))
+        if value is not None:
+            return {
+                "value": value,
+                "source": f"data.compact.quote.{key}",
+                "as_of": (
+                    canonical_quote.get("trade_date")
+                    or canonical_quote.get("quote_time")
+                    or canonical_quote.get("as_of")
+                ),
+            }
+
     latest_daily = data.get("latest_daily") if isinstance(data.get("latest_daily"), dict) else {}
     for key in ("close_price", "close", "last_price", "settlement_price"):
         value = numeric_data_value(latest_daily.get(key))
@@ -622,6 +674,35 @@ def latest_price_snapshot(result: dict[str, Any]) -> dict[str, Any]:
                 }
 
     return {}
+
+
+def build_position_math(
+    *,
+    position_context: dict[str, Any],
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    if not position_context.get("has_position_context"):
+        return {}
+
+    entry_price = numeric_data_value(position_context.get("entry_price"))
+    latest_snapshot = latest_price_snapshot(result)
+    latest_price = numeric_data_value(latest_snapshot.get("value"))
+    pnl_pct = (
+        ((latest_price - entry_price) / entry_price) * 100
+        if entry_price and latest_price
+        else None
+    )
+    pnl_points = latest_price - entry_price if entry_price and latest_price else None
+    return {
+        "kind": "position_math",
+        "entry_price": entry_price,
+        "latest_price": latest_price,
+        "latest_price_source": latest_snapshot.get("source"),
+        "latest_price_as_of": latest_snapshot.get("as_of"),
+        "unrealized_return_pct": round(pnl_pct, 4) if pnl_pct is not None else None,
+        "unrealized_points": round(pnl_points, 4) if pnl_points is not None else None,
+        "ready": entry_price is not None and latest_price is not None,
+    }
 
 
 def chart_points(result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -687,11 +768,14 @@ def build_position_decision(
     if not position_context.get("has_position_context"):
         return {}
 
-    entry_price = numeric_data_value(position_context.get("entry_price"))
-    latest_snapshot = latest_price_snapshot(result)
-    latest_price = numeric_data_value(latest_snapshot.get("value"))
-    pnl_pct = ((latest_price - entry_price) / entry_price) * 100 if entry_price and latest_price else None
-    pnl_points = latest_price - entry_price if entry_price and latest_price else None
+    position_math = build_position_math(
+        position_context=position_context,
+        result=result,
+    )
+    entry_price = position_math.get("entry_price")
+    latest_price = position_math.get("latest_price")
+    pnl_pct = position_math.get("unrealized_return_pct")
+    pnl_points = position_math.get("unrealized_points")
     score = numeric_score(analysis_digest.get("selected_score"))
     confidence = text_value(analysis_digest.get("selected_confidence"))
     stance = stance_from_score(score)
@@ -785,7 +869,7 @@ def build_position_decision(
 
     evidence_used = [
         "user_question.entry_price" if entry_price is not None else "user_question.position_intent",
-        latest_snapshot.get("source") or "latest_price.missing",
+        position_math.get("latest_price_source") or "latest_price.missing",
         "result.data.analysis" if analysis_digest else "analysis.missing",
     ]
 
@@ -797,10 +881,10 @@ def build_position_decision(
         "target_label": target_label,
         "entry_price": entry_price,
         "latest_price": latest_price,
-        "latest_price_source": latest_snapshot.get("source"),
-        "latest_price_as_of": latest_snapshot.get("as_of"),
-        "unrealized_return_pct": round(pnl_pct, 4) if pnl_pct is not None else None,
-        "unrealized_points": round(pnl_points, 4) if pnl_points is not None else None,
+        "latest_price_source": position_math.get("latest_price_source"),
+        "latest_price_as_of": position_math.get("latest_price_as_of"),
+        "unrealized_return_pct": pnl_pct,
+        "unrealized_points": pnl_points,
         "score": score,
         "score_display": score_text,
         "stance": stance,

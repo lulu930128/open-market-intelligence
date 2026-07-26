@@ -11,6 +11,7 @@ from app.db.models import Base, StockMaster, TaiwanStockQuoteSnapshot
 from app.market.quote_depth import (
     _QUOTE_DEPTH_CACHE,
     get_taiwan_stock_quote_depth,
+    reset_twse_mis_quote_depth_guard,
     resolve_taiwan_stock_quote_phase,
 )
 from app.market.trading_calendar import TAIWAN_TZ
@@ -61,6 +62,7 @@ def sample_payload(*, stock_id: str = "2330", channel: str = "tse_2330.tw") -> d
 class TaiwanStockQuoteDepthTests(unittest.TestCase):
     def setUp(self) -> None:
         _QUOTE_DEPTH_CACHE.clear()
+        reset_twse_mis_quote_depth_guard()
         self.db = make_session()
         self.db.add(
             StockMaster(
@@ -74,6 +76,7 @@ class TaiwanStockQuoteDepthTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         _QUOTE_DEPTH_CACHE.clear()
+        reset_twse_mis_quote_depth_guard()
         self.db.close()
 
     def test_session_phase_boundaries_follow_taiwan_stock_depth_rules(self) -> None:
@@ -95,8 +98,8 @@ class TaiwanStockQuoteDepthTests(unittest.TestCase):
                 self.assertEqual(resolve_taiwan_stock_quote_phase(datetime.fromisoformat(value)), expected)
 
     def test_live_quote_depth_parses_mis_levels_and_persists_snapshot(self) -> None:
-        now = datetime(2026, 6, 30, 9, 5, tzinfo=TAIWAN_TZ)
-        fetched_at = datetime(2026, 6, 30, 1, 5, tzinfo=timezone.utc)
+        now = datetime(2026, 6, 30, 9, 5, 42, tzinfo=TAIWAN_TZ)
+        fetched_at = datetime(2026, 6, 30, 1, 5, 42, tzinfo=timezone.utc)
         payload = sample_payload()
 
         with (
@@ -104,11 +107,21 @@ class TaiwanStockQuoteDepthTests(unittest.TestCase):
             patch("app.market.quote_depth.http_get", return_value=FakeResponse(payload)) as http_get,
         ):
             result = get_taiwan_stock_quote_depth(db=self.db, stock_id="2330", now=now)
+            cached_result = get_taiwan_stock_quote_depth(
+                db=self.db,
+                stock_id="2330",
+                now=now,
+            )
 
         http_get.assert_called_once()
         self.assertEqual(http_get.call_args.kwargs["params"]["ex_ch"], "tse_2330.tw")
         self.assertEqual(result["session_phase"], "regular_live")
         self.assertEqual(result["freshness"]["status"], "live")
+        self.assertEqual(result["freshness"]["age_seconds"], 30)
+        self.assertEqual(result["freshness"]["fetch_age_seconds"], 0)
+        self.assertEqual(result["quote_time"].isoformat(), "2026-06-30T09:05:12+08:00")
+        self.assertEqual(result["refresh_outcome"], "updated")
+        self.assertEqual(cached_result["refresh_outcome"], "cache_hit")
         self.assertTrue(result["depth_available"])
         self.assertEqual(result["best_bid_price"], 2410.0)
         self.assertEqual(result["best_bid_size_lots"], 978)
@@ -175,6 +188,7 @@ class TaiwanStockQuoteDepthTests(unittest.TestCase):
             get_taiwan_stock_quote_depth(db=self.db, stock_id="2330", now=now)
 
         _QUOTE_DEPTH_CACHE.clear()
+        reset_twse_mis_quote_depth_guard()
 
         with patch("app.market.quote_depth.http_get", side_effect=RuntimeError("MIS down")):
             result = get_taiwan_stock_quote_depth(db=self.db, stock_id="2330", now=now)

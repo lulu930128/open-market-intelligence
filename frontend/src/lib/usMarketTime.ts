@@ -4,8 +4,12 @@ import {
 } from "@/lib/marketCalendarStatus";
 
 export const US_INTRADAY_REFRESH_MS = 5_000;
+export const US_EXTENDED_SESSION_START_MINUTES = 4 * 60;
 export const US_SESSION_START_MINUTES = 9 * 60 + 30;
 export const US_SESSION_END_MINUTES = 16 * 60;
+export const US_EXTENDED_SESSION_END_MINUTES = 20 * 60;
+
+export type USIntradaySessionScope = "regular" | "extended" | "all";
 
 type NewYorkParts = {
   year: number;
@@ -125,9 +129,17 @@ export function getUsMarketRefreshState(now = new Date()) {
 
     return {
       dateKey,
+      sessionPhase: calendarStatus.phase,
       isPollingWindow: calendarStatus.session.is_polling_window,
+      isExtendedPollingWindow: Boolean(calendarStatus.session.is_extended_polling_window),
+      isLiveWindow:
+        calendarStatus.session.is_polling_window ||
+        Boolean(calendarStatus.session.is_extended_polling_window),
       isAfterClose: calendarStatus.session.is_after_close,
       msUntilNextPollingStart: nextPollingMs,
+      intradaySessionScope: calendarStatus.session.is_extended_polling_window
+        ? "all"
+        : "regular",
     };
   }
 
@@ -135,23 +147,43 @@ export function getUsMarketRefreshState(now = new Date()) {
   const nowMs = now.getTime();
   const openMs = newYorkBoundaryToUtcMs(parts.year, parts.month, parts.day, 9, 30);
   const closeMs = newYorkBoundaryToUtcMs(parts.year, parts.month, parts.day, 16, 0);
+  const preMarketOpenMs = newYorkBoundaryToUtcMs(parts.year, parts.month, parts.day, 4, 0);
+  const afterHoursCloseMs = newYorkBoundaryToUtcMs(parts.year, parts.month, parts.day, 20, 0);
   const nextWeekday = nextUsWeekday(parts);
   const nextOpenMs = newYorkBoundaryToUtcMs(
     nextWeekday.year,
     nextWeekday.month,
     nextWeekday.day,
-    9,
-    30
+    4,
+    0
   );
   const isPollingWindow = isTradingDay && nowMs >= openMs && nowMs < closeMs;
+  const isPreMarketWindow = isTradingDay && nowMs >= preMarketOpenMs && nowMs < openMs;
+  const isAfterHoursWindow = isTradingDay && nowMs >= closeMs && nowMs < afterHoursCloseMs;
+  const isExtendedPollingWindow = isPreMarketWindow || isAfterHoursWindow;
   const isAfterClose = isTradingDay && nowMs >= closeMs;
-  const nextPollingStartMs = isTradingDay && nowMs < openMs ? openMs : nextOpenMs;
+  const nextPollingStartMs = isTradingDay && nowMs < preMarketOpenMs ? preMarketOpenMs : nextOpenMs;
+  const sessionPhase = !isTradingDay
+    ? "market_closed"
+    : nowMs < preMarketOpenMs
+      ? "pre_market_pending"
+      : isPreMarketWindow
+        ? "pre_market"
+        : isPollingWindow
+          ? "regular"
+          : isAfterHoursWindow
+            ? "after_hours"
+            : "post_close";
 
   return {
     dateKey,
+    sessionPhase,
     isPollingWindow,
+    isExtendedPollingWindow,
+    isLiveWindow: isPollingWindow || isExtendedPollingWindow,
     isAfterClose,
     msUntilNextPollingStart: Math.max(1_000, nextPollingStartMs - nowMs),
+    intradaySessionScope: isExtendedPollingWindow ? "all" : "regular",
   };
 }
 
@@ -167,6 +199,18 @@ export function getUsIntradayXRatio(value: string | Date) {
   return Math.max(0, Math.min(1, ratio));
 }
 
+export function getUsExtendedIntradayXRatio(value: string | Date) {
+  const minutes = getNewYorkMinutesOfDay(value);
+
+  if (minutes === null) return 0;
+
+  const ratio =
+    (minutes - US_EXTENDED_SESSION_START_MINUTES) /
+    (US_EXTENDED_SESSION_END_MINUTES - US_EXTENDED_SESSION_START_MINUTES);
+
+  return Math.max(0, Math.min(1, ratio));
+}
+
 export function isUsRegularSessionPoint(value: string | Date) {
   const minutes = getNewYorkMinutesOfDay(value);
 
@@ -174,5 +218,15 @@ export function isUsRegularSessionPoint(value: string | Date) {
     minutes !== null &&
     minutes >= US_SESSION_START_MINUTES &&
     minutes <= US_SESSION_END_MINUTES
+  );
+}
+
+export function isUsExtendedSessionPoint(value: string | Date) {
+  const minutes = getNewYorkMinutesOfDay(value);
+
+  return (
+    minutes !== null &&
+    minutes >= US_EXTENDED_SESSION_START_MINUTES &&
+    minutes <= US_EXTENDED_SESSION_END_MINUTES
   );
 }

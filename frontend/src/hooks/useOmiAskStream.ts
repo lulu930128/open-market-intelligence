@@ -1,5 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import {
+  ApiError,
+  createApiRequestId,
+  createHttpApiError,
+} from "@/lib/api";
+
+const STREAM_CONNECT_TIMEOUT_MS = 20_000;
+const STREAM_IDLE_TIMEOUT_MS = 150_000;
+
 export type OmiSseMessage = {
   event: string;
   data: unknown;
@@ -50,11 +59,6 @@ export function parseOmiSseBuffer(buffer: string) {
   return { messages, remainder };
 }
 
-async function readErrorText(response: Response) {
-  const text = await response.text();
-  return text || response.statusText || "OMI request failed.";
-}
-
 export function useOmiAskStream(streamPath: string) {
   const abortRef = useRef<AbortController | null>(null);
   const requestIdRef = useRef(0);
@@ -77,27 +81,51 @@ export function useOmiAskStream(streamPath: string) {
 
       const requestId = requestIdRef.current;
       const abortController = new AbortController();
+      const apiRequestId = createApiRequestId();
+      let watchdogError: ApiError | null = null;
       abortRef.current = abortController;
       setIsStreaming(true);
 
       try {
-        const response = await fetch(streamPath, {
-          method: "POST",
-          headers: {
-            Accept: "text/event-stream",
-            "Content-Type": "application/json",
-          },
-          cache: "no-store",
-          signal: abortController.signal,
-          body: JSON.stringify(requestBody),
-        });
+        const connectTimeoutId = window.setTimeout(() => {
+          watchdogError = new ApiError({
+            kind: "timeout",
+            message: `OMI stream connection timed out after ${STREAM_CONNECT_TIMEOUT_MS}ms.`,
+            path: streamPath,
+            requestId: apiRequestId,
+          });
+          abortController.abort();
+        }, STREAM_CONNECT_TIMEOUT_MS);
+        let response: Response;
+
+        try {
+          response = await fetch(streamPath, {
+            method: "POST",
+            headers: {
+              Accept: "text/event-stream",
+              "Content-Type": "application/json",
+              "x-request-id": apiRequestId,
+            },
+            cache: "no-store",
+            signal: abortController.signal,
+            body: JSON.stringify(requestBody),
+          });
+        } finally {
+          window.clearTimeout(connectTimeoutId);
+        }
 
         if (!response.ok) {
-          throw new Error(await readErrorText(response));
+          throw await createHttpApiError(response, streamPath);
         }
 
         if (!response.body) {
-          throw new Error("OMI did not return a readable stream.");
+          throw new ApiError({
+            kind: "invalid_response",
+            message: "OMI did not return a readable stream.",
+            path: streamPath,
+            status: response.status,
+            requestId: response.headers.get("x-request-id") || apiRequestId,
+          });
         }
 
         const reader = response.body.getReader();
@@ -105,7 +133,24 @@ export function useOmiAskStream(streamPath: string) {
         let buffer = "";
 
         while (true) {
-          const { done, value } = await reader.read();
+          const idleTimeoutId = window.setTimeout(() => {
+            watchdogError = new ApiError({
+              kind: "timeout",
+              message: `OMI stream was idle for ${STREAM_IDLE_TIMEOUT_MS}ms.`,
+              path: streamPath,
+              requestId: apiRequestId,
+            });
+            abortController.abort();
+          }, STREAM_IDLE_TIMEOUT_MS);
+          let readResult: ReadableStreamReadResult<Uint8Array>;
+
+          try {
+            readResult = await reader.read();
+          } finally {
+            window.clearTimeout(idleTimeoutId);
+          }
+
+          const { done, value } = readResult;
           if (done) break;
           if (requestId !== requestIdRef.current) return;
 
@@ -122,13 +167,25 @@ export function useOmiAskStream(streamPath: string) {
         messages.forEach((message) => handlers.onMessage?.(message));
         handlers.onDone?.();
       } catch (error) {
+        if (watchdogError) {
+          handlers.onError?.(watchdogError);
+          return;
+        }
         if (abortController.signal.aborted) {
           handlers.onAbort?.();
           return;
         }
 
         const normalizedError =
-          error instanceof Error ? error : new Error("OMI request failed.");
+          error instanceof ApiError
+            ? error
+            : new ApiError({
+                kind: "network",
+                message:
+                  error instanceof Error ? error.message : "OMI stream network error.",
+                path: streamPath,
+                requestId: apiRequestId,
+              });
         handlers.onError?.(normalizedError);
       } finally {
         if (requestId === requestIdRef.current) {

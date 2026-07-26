@@ -2,6 +2,8 @@
 
 本檔是 Open Market Intelligence repo-level agent instructions。它放在 repo root，並繼承全域 `~\.codex\AGENTS.md` 與 `C:\project\AGENTS.md` 的基本工作準則。
 
+使用者可見的 Codex 回覆、交付摘要與固定欄位標題預設使用繁體中文；程式碼、指令、log、error、identifier 與市場資料來源名稱保留原文。
+
 ## 專案定位
 
 Open Market Intelligence（OMI）是本機優先的市場情報與交易決策研究工作台。
@@ -15,6 +17,17 @@ Open Market Intelligence（OMI）是本機優先的市場情報與交易決策�
 
 OMI 不是自動交易系統。它只能做研究、情境判斷、技術位階推演、資料補齊與決策輔助；不得設計或暗示自動下單、代替使用者執行交易。
 
+## 最終產品文件
+
+`docs/product/` 是 OMI 的長期產品方向文件區。非平凡功能、產品判斷、重大 UI/API/資料邊界調整開始前，若下列文件已有使用者填寫內容，要先讀取並對齊：
+
+- `docs/product/ProductVision.md`
+- `docs/product/OperatingModel.md`
+- `docs/product/QualityBar.md`
+- `docs/product/Roadmap.md`
+
+空白模板不是產品事實。若文件仍未填寫，以本 `AGENTS.md`、既有程式與使用者當次需求為準；若當次需求和已填寫產品方向衝突，先反駁並提出較穩定方案。
+
 ## 方向保護與反駁責任
 
 - 如果需求會把 OMI 變成「猜漲跌」工具，必須反駁。正確方向是根據 evidence、技術位階、情境、回測區、進場條件、失效條件、停損/停利、續抱/減碼與反證來做決策輔助。
@@ -26,6 +39,7 @@ OMI 不是自動交易系統。它只能做研究、情境判斷、技術位階�
 
 ## 架構邊界
 
+- Backend dependency、provider HTTP、source-health 與 transaction ownership 的完整契約見 `docs/architecture/BackendArchitecture.md`。
 - `backend/app/ai/` 是 AI evidence、question routing、decision core、answer contract 與 OMI AI 行為的主要位置。
 - 使用者可見的 OMI 回答文字與 structured answer contract，優先在 backend AI 層處理；frontend 只負責呈現與互動，不應重做判斷邏輯。
 - `agents/` 只放外部 agent adapter，例如 MCP。Adapter 要保持 thin：呼叫 backend API，不直接 import database、不複製市場邏輯。
@@ -94,6 +108,15 @@ OMI AI 的回答應優先輸出可行的技術決策結構，而不是單句建�
 ## 驗證命令
 
 依修改範圍執行最相關檢查。
+
+驗證預算：
+
+- 只改 docs、prompt、AGENTS、模板：UTF-8 讀回與 `git diff --check` 即可；不要跑 backend/frontend runtime。
+- 只改文案、label、i18n 或小型描述：做相關字串搜尋與 diff 檢查；除非改到可編譯檔案，否則不要跑全套。
+- 改 backend 局部邏輯：跑 compile/syntax 與最接近的 targeted tests。
+- 改 AI answer contract、freshness、DB、scheduler、market data、MCP/API 或跨市場邊界：跑相關 regression、API/data smoke 與安全驗證 profile。
+- 改 frontend 互動、圖表或版面：依風險跑 lint/typecheck/build；只有需要驗證實際 UI 時才加 browser/screenshot/e2e。
+- 觸發外部 API 大量 refresh、付費 quota、寫入報告/記憶、發送/發布或破壞性資料操作：先確認，再驗證。
 
 預設先用安全驗證工具，避免直接啟動長駐 backend runtime、Next dev server、Playwright browser 或 crypto WebSocket collector 導致 Codex 對話卡住：
 

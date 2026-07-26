@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.ai import decision_core
@@ -49,3 +49,7 @@ class ResponseAssembly:
     answer_ready: bool
     position_decision: dict[str, Any]
     consumer_human_answer: dict[str, Any]
+    analysis_ready: bool = False
+    decision_ready: bool = False
+    blocked_sections: list[str] = field(default_factory=list)
+    available_sections: list[str] = field(default_factory=list)

@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 
 from app.market.indicator_service import calculate_daily_indicators
 from app.market.technical_parameters import get_technical_analysis_parameters
+from app.market.technical_structure import build_price_moving_average_signals
 
 
 def _to_dict(value) -> dict:
@@ -290,32 +291,29 @@ def calculate_latest_stock_signals(
                 reference=0,
             )
 
-    # MA20 position
-    if ma20 is not None:
-        if close > ma20:
-            score += 1
-            _add_signal(
-                signals,
-                key="above_ma20",
-                label="站在 MA20 之上",
-                direction="bullish",
-                level="info",
-                message="收盤價高於 MA20，短中期價格位置偏強。",
-                value=close,
-                reference=ma20,
-            )
-        elif close < ma20:
-            score -= 1
-            _add_signal(
-                signals,
-                key="below_ma20",
-                label="跌破 MA20",
-                direction="bearish",
-                level="warning",
-                message="收盤價低於 MA20，短中期價格位置偏弱。",
-                value=close,
-                reference=ma20,
-            )
+    previous_close = _num(previous.get("close")) if previous is not None else None
+    previous_ma = previous.get("ma") or {} if previous is not None else {}
+    previous_ma20 = _indicator_value(
+        previous_ma,
+        technical_parameters.ma_medium_key,
+        "ma20",
+    )
+    previous_ma60 = _indicator_value(
+        previous_ma,
+        technical_parameters.ma_long_key,
+        "ma60",
+    )
+    price_ma_signals, price_ma_score = build_price_moving_average_signals(
+        price=close,
+        ma5=ma5,
+        ma20=ma20,
+        ma60=ma60,
+        previous_price=previous_close,
+        previous_ma20=previous_ma20,
+        previous_ma60=previous_ma60,
+    )
+    signals.extend(price_ma_signals)
+    score += price_ma_score
 
     # MA5 vs MA20
     if ma5 is not None and ma20 is not None:
@@ -370,38 +368,6 @@ def calculate_latest_stock_signals(
                 value=ma20,
                 reference=ma60,
             )
-
-    # Cross MA20
-    if previous is not None:
-        prev_close = _num(previous.get("close"))
-        prev_ma = previous.get("ma") or {}
-        prev_ma20 = _num(prev_ma.get("ma20"))
-
-        if prev_close is not None and prev_ma20 is not None and ma20 is not None:
-            if prev_close <= prev_ma20 and close > ma20:
-                score += 2
-                _add_signal(
-                    signals,
-                    key="cross_above_ma20",
-                    label="重新站上 MA20",
-                    direction="bullish",
-                    level="strong",
-                    message="收盤價由 MA20 下方重新站上 MA20。",
-                    value=close,
-                    reference=ma20,
-                )
-            elif prev_close >= prev_ma20 and close < ma20:
-                score -= 2
-                _add_signal(
-                    signals,
-                    key="cross_below_ma20",
-                    label="跌破 MA20",
-                    direction="bearish",
-                    level="strong",
-                    message="收盤價由 MA20 上方跌破 MA20。",
-                    value=close,
-                    reference=ma20,
-                )
 
     # EMA and MACD momentum
     if ema12 is not None and ema26 is not None:

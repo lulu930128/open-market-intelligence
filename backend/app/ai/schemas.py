@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -32,6 +32,7 @@ class AiDataEnvelope(BaseModel):
     missing: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     source_refs: list[dict[str, Any]] = Field(default_factory=list)
+    freshness: dict[str, Any] = Field(default_factory=dict)
     evidence_passport: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -48,8 +49,53 @@ class AiAskRequest(BaseModel):
     contract_version: str = Field(default="omi.ai.ask.v2", min_length=1, max_length=80)
     target: dict[str, Any] = Field(default_factory=lambda: {"type": "auto"})
     mode: str = Field(default="auto", min_length=1, max_length=50)
+    intents: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Optional multi-intent request for omi.decision.v4. Target identity remains "
+            "independent from analysis, freshness, quote, or risk intents."
+        ),
+    )
+    output: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=40,
+        description="evidence_only, decision, or decision_with_evidence.",
+    )
+    realtime_policy: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=40,
+        description="cache_only, prefer_live, or require_live.",
+    )
+    selection: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Bounded capability selection for omi.decision.v4: include/required, "
+            "optional, exclude, fields, limits, and max_response_bytes."
+        ),
+    )
+    continuation: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Optional v4 continuation input such as a prior fill plan id and selected "
+            "fill action ids. Backend revalidates every action."
+        ),
+    )
+    payload_level: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=20,
+        description="summary, compact, standard, or full. Kept separate from answer mode.",
+    )
+    diagnostics_level: str = Field(
+        default="none",
+        min_length=1,
+        max_length=20,
+        description="none, basic, or debug. Diagnostics do not change answer semantics.",
+    )
     caller_profile: str = Field(
-        default="kuro_readonly",
+        default="external_readonly",
         min_length=1,
         max_length=80,
         description="Caller label only. Server-side policy decides trust.",
@@ -79,12 +125,42 @@ class AiAskRequest(BaseModel):
     context_limit: int = Field(default=100, ge=20, le=500)
     include_children: bool = True
     enabled_only: bool = True
+    market_data_params: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Optional bounded data-shape parameters for market-specific readers, "
+            "for example provider, providers, symbols, interval, timeframe, bars, limit, "
+            "include_intraday, payload_level, or intraday_limit. payload_level supports "
+            "summary, compact, standard, and full."
+        ),
+    )
+    position_context: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Optional caller-supplied position context. The backend may also attach "
+            "saved portfolio context for the resolved stock target."
+        ),
+    )
     conversation_context: dict[str, Any] = Field(default_factory=dict)
+
+
+class AiAskV4Request(AiAskRequest):
+    """Public OMI ask request.
+
+    The broader AiAskRequest remains an internal compatibility seam for the
+    backend pipeline and regression tests. Public transports only accept v4.
+    """
+
+    contract_version: Literal["omi.decision.v4"] = Field(
+        default="omi.decision.v4",
+        description="The only public OMI decision contract.",
+    )
 
 
 class AiAskResponse(BaseModel):
     kind: str = "ai_ask"
     contract_version: str = "omi.ai.ask.v2"
+    ok: bool = True
     question: str
     target: dict[str, Any] = Field(default_factory=dict)
     mode: dict[str, Any] = Field(default_factory=dict)
@@ -92,20 +168,60 @@ class AiAskResponse(BaseModel):
     strategy_profile: str
     caller_profile: str
     resolution: dict[str, Any] = Field(default_factory=dict)
+    next_context: dict[str, Any] = Field(default_factory=dict)
     clarification: dict[str, Any] = Field(default_factory=dict)
     next_actions: list[dict[str, Any]] = Field(default_factory=list)
     answer_ready: bool = True
+    facts_ready: bool = True
+    analysis_ready: bool = False
+    decision_ready: bool = False
+    blocked_sections: list[str] = Field(default_factory=list)
+    available_sections: list[str] = Field(default_factory=list)
+    request_status: str = "completed"
+    fallback_used: bool = False
+    cached_data_returned: bool = False
+    job: dict[str, Any] = Field(default_factory=dict)
+    cancellation: dict[str, Any] = Field(default_factory=dict)
     report_level: str = "data_only"
     analysis: dict[str, Any] = Field(default_factory=dict)
     policy: dict[str, Any] = Field(default_factory=dict)
     tool_plan: dict[str, Any] = Field(default_factory=dict)
     tool_runs: list[dict[str, Any]] = Field(default_factory=list)
+    query_plan: dict[str, Any] = Field(default_factory=dict)
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
     result: dict[str, Any] = Field(default_factory=dict)
     freshness: dict[str, Any] = Field(default_factory=dict)
     missing: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     source_refs: list[dict[str, Any]] = Field(default_factory=list)
     evidence_passport: dict[str, Any] = Field(default_factory=dict)
+    error: dict[str, Any] = Field(default_factory=dict)
+
+
+class AiDecisionEnvelope(BaseModel):
+    kind: str = "omi_decision"
+    contract_version: str = "omi.decision.v3"
+    ok: bool = True
+    request_status: str = "completed"
+    question: str
+    target: dict[str, Any] = Field(default_factory=dict)
+    mode: dict[str, Any] = Field(default_factory=dict)
+    action: str = "omi.ask"
+    caller_profile: str = "unknown"
+    status: dict[str, Any] = Field(default_factory=dict)
+    answer: dict[str, Any] = Field(default_factory=dict)
+    decision: dict[str, Any] = Field(default_factory=dict)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    limitations: dict[str, Any] = Field(default_factory=dict)
+    execution: dict[str, Any] = Field(default_factory=dict)
+    continuation: dict[str, Any] = Field(default_factory=dict)
+    error: dict[str, Any] = Field(default_factory=dict)
+    compatibility: dict[str, Any] = Field(default_factory=dict)
+
+
+class AiDecisionEnvelopeV4(AiDecisionEnvelope):
+    contract_version: Literal["omi.decision.v4"] = "omi.decision.v4"
+    projection: dict[str, Any] = Field(default_factory=dict)
 
 
 class AiMemoryCreate(BaseModel):

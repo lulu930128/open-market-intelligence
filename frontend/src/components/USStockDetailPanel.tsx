@@ -7,6 +7,7 @@ import IntradayTrendChart, {
   type IntradayIndicatorSettings,
   type IntradaySessionConfig,
 } from "@/components/IntradayTrendChart";
+import { StateSurface } from "@/components/LoadingPlaceholders";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
 import ProfessionalChartPanel, {
   type ProfessionalChartStyle,
@@ -14,22 +15,23 @@ import ProfessionalChartPanel, {
 import StockKLineChart, {
   defaultIndicatorParameters,
   defaultIndicators,
-  indicatorCategoryDescription,
-  indicatorCategoryLabel,
-  indicatorOptionDescription,
   professionalIndicatorCategoryGroups,
-  type IndicatorCategoryGroup,
   type IndicatorKey,
   type IndicatorParameters,
   type IndicatorSettings,
 } from "@/components/StockKLineChart";
 import type { ChartDrawing, ChartDrawingTool } from "@/components/LightweightKLineChart";
+import TechnicalIndicatorMenu, {
+  indicatorTemplates,
+  type IndicatorTemplateKey,
+} from "@/components/stock-detail/TechnicalIndicatorMenu";
 import {
   buildChartDrawingSnapshotPayload,
   chartDrawingApiPath,
   chartDrawingSnapshotsEqual,
   chartDrawingSyncDelayMs,
   createChartDrawingSnapshot,
+  hasChartDrawingSnapshot,
   loadChartDrawings,
   normalizeChartDrawingSelection,
   normalizeStoredChartDrawings,
@@ -40,6 +42,11 @@ import {
 } from "@/components/professionalChartDrawing";
 import { fetchJson, requestJson } from "@/lib/api";
 import {
+  clearDataStatusFocus,
+  emitDataStatusEvent,
+  setDataStatusFocus,
+} from "@/lib/dataStatusEvents";
+import {
   timeframeLabel,
   usAssetTypeLabel,
   useT,
@@ -47,19 +54,30 @@ import {
 } from "@/i18n";
 import {
   US_INTRADAY_REFRESH_MS,
+  US_EXTENDED_SESSION_END_MINUTES,
+  US_EXTENDED_SESSION_START_MINUTES,
   US_SESSION_END_MINUTES,
   US_SESSION_START_MINUTES,
+  type USIntradaySessionScope,
+  getUsExtendedIntradayXRatio,
   getNewYorkMinutesOfDay,
   getUsIntradayXRatio,
   getUsMarketRefreshState,
+  isUsExtendedSessionPoint,
   isUsRegularSessionPoint,
 } from "@/lib/usMarketTime";
 import { getUsMarketIndexConfig } from "@/lib/usMarketIndices";
+import {
+  formatStockVolumePaceRatio,
+  stockVolumePaceMetric,
+} from "@/lib/stockVolumePace";
 import type {
   ChartPoint,
   ChartDrawingSnapshotRead,
   IntradayTrendPoint,
   IntradayTrendResponse,
+  StockVolumePace,
+  USIntradaySourceStatus,
   USCompanyProfileRead,
   USCorporateActionRead,
   USOhlcChartRead,
@@ -81,7 +99,7 @@ import {
 } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
-type Message = { type: "success" | "error"; text: string } | null;
+type SuccessMessage = { text: string } | null;
 type USChartTimeframe = "today" | "daily" | "weekly" | "monthly";
 type USHistoricalTimeframe = Exclude<USChartTimeframe, "today">;
 type USProfessionalIntradayTimeframe = "1m" | "5m" | "15m" | "30m" | "1h" | "4h";
@@ -96,9 +114,11 @@ type Props = {
   watchlistRankingPanel?: ReactNode;
   onCompanyProfileChange?: (profile: USCompanyProfileRead | null) => void;
   onChartFocusModeChange?: (active: boolean) => void;
+  onDailyPricesChanged?: () => void;
 };
 
 const timeframeOptions: USChartTimeframe[] = ["today", "daily", "weekly", "monthly"];
+const usIntradaySessionScopeOptions: USIntradaySessionScope[] = ["regular", "extended", "all"];
 
 const usProfessionalTimeframeOptions: USProfessionalTimeframe[] = [
   "1m",
@@ -155,6 +175,31 @@ function shouldIncludeUsOhlcIntraday() {
   const marketState = getUsMarketRefreshState();
 
   return marketState.isPollingWindow || marketState.isAfterClose;
+}
+
+function defaultUsIntradaySessionScope(): USIntradaySessionScope {
+  const marketState = getUsMarketRefreshState();
+
+  return marketState.intradaySessionScope as USIntradaySessionScope;
+}
+
+function sessionScopeLabel(t: TranslationFunction, scope: USIntradaySessionScope) {
+  return t(`usStockDetail.extendedHours.scopes.${scope}`);
+}
+
+function sessionPhaseLabel(t: TranslationFunction, phase: string | null | undefined) {
+  if (!phase) return t("usStockDetail.extendedHours.phases.unknown");
+  return t(`usStockDetail.extendedHours.phases.${phase}`);
+}
+
+async function fetchUsIntradayTrend(
+  symbol: string,
+  sessionScope: USIntradaySessionScope
+) {
+  return fetchJson<IntradayTrendResponse>(
+    `/api/us-market/intraday/${encodeURIComponent(symbol)}`,
+    { session_scope: sessionScope }
+  );
 }
 
 const defaultUsChartIndicators: IndicatorSettings = {
@@ -238,6 +283,97 @@ type USSupplementalData = {
   shortVolumeData: USShortVolumeDailyRead[];
 };
 
+type USIntradayMeta = {
+  sessionPhase: string | null;
+  regularPointCount: number;
+  extendedPointCount: number;
+  hasExtendedHours: boolean;
+  warnings: string[];
+  volumePace: StockVolumePace | null;
+  sourceStatus: USIntradaySourceStatus | null;
+};
+
+const emptyUsIntradayMeta: USIntradayMeta = {
+  sessionPhase: null,
+  regularPointCount: 0,
+  extendedPointCount: 0,
+  hasExtendedHours: false,
+  warnings: [],
+  volumePace: null,
+  sourceStatus: null,
+};
+
+function intradayMetaFromResponse(response: IntradayTrendResponse): USIntradayMeta {
+  return {
+    sessionPhase: response.session_phase ?? null,
+    regularPointCount: response.regular_point_count ?? response.points.length,
+    extendedPointCount: response.extended_point_count ?? 0,
+    hasExtendedHours: Boolean(response.has_extended_hours),
+    warnings: response.warnings ?? [],
+    volumePace: response.volume_pace ?? null,
+    sourceStatus: response.source_status ?? null,
+  };
+}
+
+type IntradaySourcePresentation = {
+  level: "warning" | "error";
+  title: string;
+  badge: string;
+  message: string;
+};
+
+function intradaySourcePresentation(
+  t: TranslationFunction,
+  status: USIntradaySourceStatus | null
+): IntradaySourcePresentation | null {
+  if (!status || status.status === "ok") return null;
+
+  const minutes = Math.max(1, Math.ceil((status.lag_seconds ?? 0) / 60));
+
+  if (status.freshness_status === "provider_error" && status.is_fallback) {
+    return {
+      level: "warning",
+      title: t("usStockDetail.sourceStatus.providerErrorTitle"),
+      badge: t("usStockDetail.sourceStatus.fallbackBadge"),
+      message: t("usStockDetail.sourceStatus.fallbackMessage"),
+    };
+  }
+
+  if (status.freshness_status === "provider_error") {
+    return {
+      level: "error",
+      title: t("usStockDetail.sourceStatus.providerErrorTitle"),
+      badge: t("usStockDetail.sourceStatus.unavailableBadge"),
+      message: t("usStockDetail.sourceStatus.unavailableMessage"),
+    };
+  }
+
+  if (status.freshness_status === "stale") {
+    return {
+      level: "warning",
+      title: t("usStockDetail.sourceStatus.staleTitle"),
+      badge: t("usStockDetail.sourceStatus.staleBadge", { minutes }),
+      message: t("usStockDetail.sourceStatus.staleMessage", { minutes }),
+    };
+  }
+
+  if (status.freshness_status === "delayed") {
+    return {
+      level: "warning",
+      title: t("usStockDetail.sourceStatus.delayedTitle"),
+      badge: t("usStockDetail.sourceStatus.delayedBadge", { minutes }),
+      message: t("usStockDetail.sourceStatus.delayedMessage", { minutes }),
+    };
+  }
+
+  return {
+    level: "error",
+    title: t("usStockDetail.sourceStatus.providerErrorTitle"),
+    badge: t("usStockDetail.sourceStatus.unavailableBadge"),
+    message: t("usStockDetail.sourceStatus.unavailableMessage"),
+  };
+}
+
 async function fetchUsSupplementalData(symbol: string): Promise<USSupplementalData> {
   const encodedSymbol = encodeURIComponent(symbol);
   const [
@@ -301,6 +437,28 @@ const usIntradaySession: IntradaySessionConfig = {
   isRegularSessionPoint: isUsRegularSessionPoint,
   volumeFormatter: formatVolume,
 };
+
+const usExtendedIntradaySession: IntradaySessionConfig = {
+  startMinutes: US_EXTENDED_SESSION_START_MINUTES,
+  endMinutes: US_EXTENDED_SESSION_END_MINUTES,
+  timeTicks: [
+    { label: "04:00", minutes: 4 * 60 },
+    { label: "07:00", minutes: 7 * 60 },
+    { label: "09:30", minutes: 9 * 60 + 30 },
+    { label: "12:00", minutes: 12 * 60 },
+    { label: "16:00", minutes: 16 * 60 },
+    { label: "18:00", minutes: 18 * 60 },
+    { label: "20:00", minutes: 20 * 60 },
+  ],
+  getMinutesOfDay: getNewYorkMinutesOfDay,
+  getXRatio: getUsExtendedIntradayXRatio,
+  isRegularSessionPoint: isUsExtendedSessionPoint,
+  volumeFormatter: formatVolume,
+};
+
+function usIntradaySessionConfigForScope(scope: USIntradaySessionScope) {
+  return scope === "regular" ? usIntradaySession : usExtendedIntradaySession;
+}
 
 function formatDate(value: string | null | undefined) {
   if (!value) return "-";
@@ -369,6 +527,10 @@ function assetTypeLabel(t: TranslationFunction, stock: USStockMasterRead | null)
 
 function stockName(stock: USStockMasterRead | null, fallback: string | null) {
   return stock?.security_name ?? stock?.sec_company_name ?? fallback ?? "";
+}
+
+function usSymbolKey(value: unknown) {
+  return typeof value === "string" ? value.trim().toUpperCase() : null;
 }
 
 function toChartPoint(point: USOhlcChartRead["points"][number]): ChartPoint {
@@ -516,14 +678,6 @@ function formatFundamentalPeriod(metric: USSecFundamentalMetricRead | null | und
   return periodEnd;
 }
 
-function messageClass(message: Message) {
-  if (!message) return "";
-
-  return message.type === "success"
-    ? "border-omi-success-border bg-omi-success-soft text-omi-success"
-    : "border-omi-danger-border bg-omi-danger-soft text-omi-danger";
-}
-
 function daysSince(value: string | null | undefined) {
   if (!value || value === "-") return null;
 
@@ -628,9 +782,7 @@ function safeDivide(
 
 function EmptyDataState({ message }: { message: string }) {
   return (
-    <div className="border border-dashed border-omi-border-subtle px-4 py-8 text-center text-sm text-omi-text-muted">
-      {message}
-    </div>
+    <StateSurface title={message} tone="empty" compact />
   );
 }
 
@@ -741,95 +893,13 @@ function FundamentalMetricCell({
   );
 }
 
-function USProfessionalIndicatorMenu({
-  indicators,
-  onToggleIndicator,
-  groups = professionalIndicatorCategoryGroups,
-}: {
-  indicators: IndicatorSettings;
-  onToggleIndicator: (key: IndicatorKey) => void;
-  groups?: IndicatorCategoryGroup[];
-}) {
-  const t = useT();
-
-  return (
-    <div className="absolute right-0 z-30 mt-2 max-h-[560px] w-[25rem] overflow-y-auto border border-omi-border-subtle bg-omi-surface p-3 text-left shadow-xl">
-      <div className="mb-3 flex items-center justify-between border-b border-omi-border-subtle pb-2">
-        <div>
-          <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-omi-text-muted">
-            {t("chart.indicators")}
-          </div>
-          <div className="mt-0.5 text-sm font-bold text-omi-text-strong">{t("chart.indicators")}</div>
-        </div>
-        <div className="text-[11px] font-semibold text-omi-text-subtle">{t("usStockDetail.usDailyWeeklyMonthly")}</div>
-      </div>
-
-      <div className="space-y-3">
-        {groups.map((group) => (
-          <div key={group.key} className="border border-omi-border-subtle">
-            <div className="border-b border-omi-border-subtle bg-omi-surface-subtle px-3 py-2">
-              <div className="text-xs font-bold text-omi-text">
-                {indicatorCategoryLabel(t, group)}
-              </div>
-              <div className="mt-0.5 text-[11px] text-omi-text-muted">
-                {indicatorCategoryDescription(t, group)}
-              </div>
-            </div>
-            <div className="grid grid-cols-1 gap-px bg-omi-surface-muted">
-              {group.options.map((option) => {
-                if (option.status !== "available") {
-                  return (
-                    <div
-                      key={option.key}
-                      className="flex items-start justify-between gap-2 bg-omi-surface px-3 py-2 text-xs text-omi-text-subtle"
-                    >
-                      <span>
-                        <span className="block font-semibold">{option.label}</span>
-                        <span className="block">{indicatorOptionDescription(t, option)}</span>
-                      </span>
-                      <span className="shrink-0 border border-omi-border-subtle px-1.5 py-0.5 text-[10px] font-bold">
-                        {t("indicators.pending")}
-                      </span>
-                    </div>
-                  );
-                }
-
-                return (
-                  <label
-                    key={option.key}
-                    className="flex cursor-pointer items-start gap-2 bg-omi-surface px-3 py-2 text-xs hover:bg-omi-surface-subtle"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={indicators[option.key]}
-                      onChange={() => onToggleIndicator(option.key)}
-                      className="mt-0.5"
-                    />
-                    <span>
-                      <span className="block font-semibold text-omi-text">
-                        {option.label}
-                      </span>
-                      <span className="block text-omi-text-muted">
-                        {indicatorOptionDescription(t, option)}
-                      </span>
-                    </span>
-                  </label>
-                );
-              })}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 export default function USStockDetailPanel({
   selectedSymbol,
   selectedSecurityName,
   watchlistRankingPanel,
   onCompanyProfileChange,
   onChartFocusModeChange,
+  onDailyPricesChanged,
 }: Props) {
   const t = useT();
   const tRef = useRef(t);
@@ -842,7 +912,9 @@ export default function USStockDetailPanel({
     useState<USProfessionalChartStyle>("candlestick");
   const [chartIndicators, setChartIndicators] =
     useState<IndicatorSettings>(defaultUsChartIndicators);
-  const [indicatorParameters] =
+  const [activeIndicatorTemplate, setActiveIndicatorTemplate] =
+    useState<IndicatorTemplateKey | null>("basic");
+  const [indicatorParameters, setIndicatorParameters] =
     useState<IndicatorParameters>(defaultIndicatorParameters);
   const [chartDrawingTool, setChartDrawingTool] = useState<ChartDrawingTool>("cursor");
   const [chartDrawingState, setChartDrawingState] = useState<ChartDrawingStorageState>({
@@ -866,6 +938,9 @@ export default function USStockDetailPanel({
   const [todayPreviousClose, setTodayPreviousClose] = useState<number | null>(null);
   const [todaySource, setTodaySource] = useState("unavailable");
   const [todayUpdatedAt, setTodayUpdatedAt] = useState<string | null>(null);
+  const [todayIntradayMeta, setTodayIntradayMeta] = useState<USIntradayMeta>(emptyUsIntradayMeta);
+  const [intradaySessionScope, setIntradaySessionScope] =
+    useState<USIntradaySessionScope>(() => defaultUsIntradaySessionScope());
   const [intradayIndicators, setIntradayIndicators] =
     useState<IntradayIndicatorSettings>(defaultIntradayIndicators);
   const [factRows, setFactRows] = useState<USSecCompanyFactRead[]>([]);
@@ -876,14 +951,21 @@ export default function USStockDetailPanel({
   const [refreshingFacts, setRefreshingFacts] = useState(false);
   const [refreshingProfile, setRefreshingProfile] = useState(false);
   const [refreshingActions, setRefreshingActions] = useState(false);
-  const [message, setMessage] = useState<Message>(null);
+  const [successMessage, setSuccessMessage] = useState<SuccessMessage>(null);
   const requestSeq = useRef(0);
   const finalIntradayRefreshDate = useRef<string | null>(null);
+  const intradaySourceEventStateRef = useRef<Map<string, string>>(new Map());
+  const onDailyPricesChangedRef = useRef(onDailyPricesChanged);
   const chartDrawingSyncTimerRef = useRef<number | null>(null);
+  const chartDrawingLocalRevisionRef = useRef(0);
 
   useEffect(() => {
     tRef.current = t;
   }, [t]);
+
+  useEffect(() => {
+    onDailyPricesChangedRef.current = onDailyPricesChanged;
+  }, [onDailyPricesChanged]);
 
   const chartDrawingKey = chartDrawingStorageKey(selectedSymbol, professionalTimeframe);
   const storedChartDrawings = useMemo(
@@ -906,20 +988,48 @@ export default function USStockDetailPanel({
     ? selectedChartDrawingId
     : null;
 
+  const expectedChartTimeframe = timeframe === "today" ? "daily" : timeframe;
+  const chartMatchesSelection = Boolean(
+    selectedSymbol &&
+      chart &&
+      usSymbolKey(chart.symbol) === usSymbolKey(selectedSymbol) &&
+      chart.timeframe === expectedChartTimeframe
+  );
+  const chartLoadState: LoadState =
+    selectedSymbol && !chartMatchesSelection && loadState !== "error"
+      ? "loading"
+      : loadState;
+  const visibleSelectedStock =
+    usSymbolKey(selectedStock?.symbol) === usSymbolKey(selectedSymbol)
+      ? selectedStock
+      : null;
   const chartData = useMemo(() => {
-    return chart?.points.map(toChartPoint) ?? [];
-  }, [chart]);
+    return chartMatchesSelection ? chart?.points.map(toChartPoint) ?? [] : [];
+  }, [chart, chartMatchesSelection]);
+  const visibleTodayTrend = useMemo(
+    () => (chartMatchesSelection ? todayTrend : []),
+    [chartMatchesSelection, todayTrend]
+  );
+  const visibleTodayPreviousClose = chartMatchesSelection ? todayPreviousClose : null;
+  const visibleTodaySource = chartMatchesSelection ? todaySource : "unavailable";
+  const visibleTodayUpdatedAt = chartMatchesSelection ? todayUpdatedAt : null;
+  const visibleTodayIntradayMeta = chartMatchesSelection
+    ? todayIntradayMeta
+    : emptyUsIntradayMeta;
   const professionalIsIntraday = isUsProfessionalIntradayTimeframe(professionalTimeframe);
   const professionalChartData = useMemo<ChartPoint[]>(() => {
     if (!isUsProfessionalIntradayTimeframe(professionalTimeframe)) return chartData;
 
     return aggregateUsProfessionalIntradayBars(
-      todayTrend,
+      visibleTodayTrend,
       usProfessionalIntradayMinutes[professionalTimeframe]
     );
-  }, [chartData, professionalTimeframe, todayTrend]);
-  const latestToday = todayTrend[todayTrend.length - 1] ?? null;
-  const todayStats = useMemo(() => summarizeUsIntradayPoints(todayTrend), [todayTrend]);
+  }, [chartData, professionalTimeframe, visibleTodayTrend]);
+  const latestToday = visibleTodayTrend[visibleTodayTrend.length - 1] ?? null;
+  const todayStats = useMemo(
+    () => summarizeUsIntradayPoints(visibleTodayTrend),
+    [visibleTodayTrend]
+  );
   const latestPoint = chartData[chartData.length - 1] ?? null;
   const previousPoint = chartData[chartData.length - 2] ?? null;
   const latestProfessionalPoint = professionalChartData[professionalChartData.length - 1] ?? null;
@@ -930,7 +1040,9 @@ export default function USStockDetailPanel({
   const latestVolume =
     timeframe === "today" ? todayStats.volume ?? latestPoint?.volume ?? null : latestPoint?.volume ?? null;
   const previousClose =
-    timeframe === "today" ? todayPreviousClose ?? previousPoint?.close ?? null : previousPoint?.close ?? null;
+    timeframe === "today"
+      ? visibleTodayPreviousClose ?? previousPoint?.close ?? null
+      : previousPoint?.close ?? null;
   const change =
     latestClose !== null && previousClose !== null
       ? latestClose - previousClose
@@ -953,6 +1065,20 @@ export default function USStockDetailPanel({
     latestVolume !== null && volumeMa20 !== null && volumeMa20 !== 0
       ? ((latestVolume - volumeMa20) / volumeMa20) * 100
       : null;
+  const intradayVolumePace = stockVolumePaceMetric(
+    visibleTodayIntradayMeta.volumePace
+  );
+  const useIntradayVolumePace =
+    timeframe === "today" &&
+    selectedSymbol !== null &&
+    getUsMarketIndexConfig(selectedSymbol) === null;
+  const technicalVolumeMetric = useIntradayVolumePace
+    ? intradayVolumePace.differencePct
+    : volumeVsMa20;
+  const technicalVolumeDisplay = useIntradayVolumePace
+    ? formatStockVolumePaceRatio(intradayVolumePace.ratio) ??
+      `${t("usStockDetail.technicalMetrics.volumePaceAccumulating")} ${intradayVolumePace.sampleDays}/5`
+    : formatPct(volumeVsMa20);
   const technicalTitle =
     latestClose === null || ma20 === null
       ? t("usStockDetail.technicalStates.insufficient")
@@ -994,19 +1120,116 @@ export default function USStockDetailPanel({
   const selectedIndexConfig = getUsMarketIndexConfig(selectedSymbol);
   const selectedDisplaySymbol = selectedIndexConfig?.displaySymbol ?? selectedSymbol ?? "-";
   const selectedDisplayName =
-    selectedIndexConfig?.name ?? stockName(selectedStock, selectedSecurityName);
+    selectedIndexConfig?.name ?? stockName(visibleSelectedStock, selectedSecurityName);
+  const dataStatusContextKey = `us:${selectedSymbol?.toUpperCase() ?? "unknown"}`;
+  const dataStatusDisplayName = selectedIndexConfig?.name ?? selectedSecurityName;
+  const dataStatusContextLabel = selectedSymbol
+    ? [selectedDisplaySymbol, dataStatusDisplayName].filter(Boolean).join(" ")
+    : t("watchlist.usHeader");
+  const dataStatusSource = t("usStockDetail.statusSource");
+  const publishDetailDataStatus = useCallback(
+    (title: string, error: unknown) => {
+      if (!selectedSymbol) return;
+
+      emitDataStatusEvent({
+        market: "us",
+        level: "error",
+        title,
+        message: error instanceof Error ? error.message : title,
+        source: dataStatusSource,
+        contextKey: dataStatusContextKey,
+        contextLabel: dataStatusContextLabel,
+        dedupeKey: `${dataStatusContextKey}:${title}:error`,
+      });
+    },
+    [dataStatusContextKey, dataStatusContextLabel, dataStatusSource, selectedSymbol]
+  );
+  const publishIntradaySourceStatus = useCallback(
+    (symbol: string, response: IntradayTrendResponse) => {
+      const sourceStatus = response.source_status;
+      if (!sourceStatus) return;
+
+      const normalizedSymbol = symbol.toUpperCase();
+      const contextKey = `us:${normalizedSymbol}`;
+      const dedupeKey = `${contextKey}:intraday-source`;
+      const signature = `${sourceStatus.status}:${sourceStatus.freshness_status}:${sourceStatus.is_fallback}`;
+      const previousSignature = intradaySourceEventStateRef.current.get(dedupeKey);
+      if (previousSignature === signature) return;
+
+      intradaySourceEventStateRef.current.set(dedupeKey, signature);
+      const presentation = intradaySourcePresentation(tRef.current, sourceStatus);
+      if (!presentation) {
+        if (previousSignature && !previousSignature.startsWith("ok:")) {
+          const recovered = sourceStatus.freshness_status === "current";
+          emitDataStatusEvent({
+            market: "us",
+            level: recovered ? "success" : "info",
+            title: tRef.current(
+              recovered
+                ? "usStockDetail.sourceStatus.recoveredTitle"
+                : "usStockDetail.sourceStatus.monitoringEndedTitle"
+            ),
+            message: tRef.current(
+              recovered
+                ? "usStockDetail.sourceStatus.recoveredMessage"
+                : "usStockDetail.sourceStatus.monitoringEndedMessage"
+            ),
+            source: "Yahoo chart",
+            contextKey,
+            contextLabel:
+              normalizedSymbol === selectedSymbol?.toUpperCase()
+                ? dataStatusContextLabel
+                : normalizedSymbol,
+            dedupeKey,
+          });
+        }
+        return;
+      }
+
+      emitDataStatusEvent({
+        market: "us",
+        level: presentation.level,
+        title: presentation.title,
+        message: presentation.message,
+        source: "Yahoo chart",
+        contextKey,
+        contextLabel:
+          normalizedSymbol === selectedSymbol?.toUpperCase()
+            ? dataStatusContextLabel
+            : normalizedSymbol,
+        dedupeKey,
+      });
+    },
+    [dataStatusContextLabel, selectedSymbol]
+  );
   const selectedSubtitle = selectedIndexConfig
     ? `${selectedIndexConfig.exchange} · ${usAssetTypeLabel(t, "index")} · ${formatDate(displayDate)}`
-    : selectedStock
-      ? `${selectedStock.exchange ?? "-"} · ${assetTypeLabel(t, selectedStock)} · ${formatDate(displayDate)}`
+    : visibleSelectedStock
+      ? `${visibleSelectedStock.exchange ?? "-"} · ${assetTypeLabel(t, visibleSelectedStock)} · ${formatDate(displayDate)}`
       : selectedSymbol
         ? t("usStockDetail.loadingMaster")
         : t("usStockDetail.selectStockPrompt");
+  const activeIntradaySession = usIntradaySessionConfigForScope(intradaySessionScope);
+  const intradaySessionMetaLine = t("usStockDetail.extendedHours.meta", {
+    phase: sessionPhaseLabel(t, visibleTodayIntradayMeta.sessionPhase),
+    regular: visibleTodayIntradayMeta.regularPointCount,
+    extended: visibleTodayIntradayMeta.extendedPointCount,
+  });
+  const intradaySessionWarning =
+    intradaySessionScope !== "regular" &&
+    chartLoadState === "success" &&
+    !visibleTodayIntradayMeta.hasExtendedHours
+      ? t("usStockDetail.extendedHours.noExtendedData")
+      : visibleTodayIntradayMeta.warnings[0] ?? null;
+  const visibleIntradaySourcePresentation = intradaySourcePresentation(
+    t,
+    visibleTodayIntradayMeta.sourceStatus
+  );
   const professionalTimeframeLabel = timeframeLabel(t, professionalTimeframe);
   const professionalChartReady =
     chartFocusMode &&
     professionalChartData.length > 0 &&
-    loadState !== "loading";
+    chartLoadState !== "loading";
   const professionalLatestClose =
     chartFocusMode && professionalIsIntraday
       ? latestProfessionalPoint?.close ?? latestClose
@@ -1028,6 +1251,19 @@ export default function USStockDetailPanel({
     return () => onChartFocusModeChange?.(false);
   }, [onChartFocusModeChange]);
 
+  useEffect(() => {
+    if (!selectedSymbol) return;
+
+    setDataStatusFocus({
+      market: "us",
+      contextKey: dataStatusContextKey,
+      label: dataStatusContextLabel,
+      source: dataStatusSource,
+    });
+
+    return () => clearDataStatusFocus(dataStatusContextKey);
+  }, [dataStatusContextKey, dataStatusContextLabel, dataStatusSource, selectedSymbol]);
+
   const dataCoverageItems: Array<{
     label: string;
     status: CoverageStatus;
@@ -1036,7 +1272,7 @@ export default function USStockDetailPanel({
     ? [
         {
           label: "OHLC",
-          status: coverageStatus(chartData.length > 0, loadState, latestPoint?.time, 10),
+          status: coverageStatus(chartData.length > 0, chartLoadState, latestPoint?.time, 10),
           detail:
             chartData.length > 0
               ? t("usStockDetail.coverage.details.bars", {
@@ -1049,13 +1285,13 @@ export default function USStockDetailPanel({
           label: t("usStockDetail.coverage.labels.intraday"),
           status:
             timeframe === "today"
-              ? coverageStatus(todayTrend.length > 0, loadState, latestToday?.time, 2)
+              ? coverageStatus(visibleTodayTrend.length > 0, chartLoadState, latestToday?.time, 2)
               : "ready",
           detail:
             timeframe === "today"
               ? t("usStockDetail.coverage.details.points", {
-                  count: todayTrend.length,
-                  time: todayUpdatedAt ?? "-",
+                  count: visibleTodayTrend.length,
+                  time: visibleTodayUpdatedAt ?? "-",
                 })
               : t("usStockDetail.coverage.details.availableToday"),
         },
@@ -1068,7 +1304,7 @@ export default function USStockDetailPanel({
     : [
         {
           label: t("usStockDetail.coverage.labels.price"),
-          status: coverageStatus(chartData.length > 0, loadState, latestPoint?.time, 10),
+          status: coverageStatus(chartData.length > 0, chartLoadState, latestPoint?.time, 10),
           detail:
             chartData.length > 0
               ? t("usStockDetail.coverage.details.bars", {
@@ -1137,7 +1373,7 @@ export default function USStockDetailPanel({
       requestSeq.current = requestId;
       setLoadState("loading");
       setFactLoadState("loading");
-      setMessage(null);
+      setSuccessMessage(null);
 
       try {
         const indexConfig = getUsMarketIndexConfig(symbol);
@@ -1145,9 +1381,7 @@ export default function USStockDetailPanel({
         if (indexConfig) {
           if (nextTimeframe === "today") {
             const [todayData, dailyChartData] = await Promise.all([
-              fetchJson<IntradayTrendResponse>(
-                `/api/us-market/intraday/${encodeURIComponent(symbol)}`
-              ),
+              fetchUsIntradayTrend(symbol, intradaySessionScope),
               fetchJson<USOhlcChartRead>(
                 `/api/us-market/ohlc/${encodeURIComponent(symbol)}`,
                 {
@@ -1161,6 +1395,7 @@ export default function USStockDetailPanel({
             ]);
 
             if (requestSeq.current !== requestId) return;
+            if (dailyChartData.backfill) onDailyPricesChangedRef.current?.();
 
             const latestIntradayPoint = todayData.points[todayData.points.length - 1] ?? null;
             const marketState = getUsMarketRefreshState();
@@ -1174,6 +1409,8 @@ export default function USStockDetailPanel({
             setTodayTrend(todayData.points);
             setTodayPreviousClose(todayData.previous_close);
             setTodaySource(todayData.source);
+            setTodayIntradayMeta(intradayMetaFromResponse(todayData));
+            publishIntradaySourceStatus(symbol, todayData);
             setTodayUpdatedAt(
               latestIntradayPoint ? formatDateTime(latestIntradayPoint.time) : null
             );
@@ -1201,6 +1438,7 @@ export default function USStockDetailPanel({
           );
 
           if (requestSeq.current !== requestId) return;
+          if (chartDataResponse.backfill) onDailyPricesChangedRef.current?.();
 
           setSelectedStock(null);
           setChart(chartDataResponse);
@@ -1208,6 +1446,7 @@ export default function USStockDetailPanel({
           setTodayPreviousClose(null);
           setTodaySource("unavailable");
           setTodayUpdatedAt(null);
+          setTodayIntradayMeta(emptyUsIntradayMeta);
           setFactRows([]);
           setFundamentalSummary(null);
           setCompanyProfile(null);
@@ -1228,9 +1467,7 @@ export default function USStockDetailPanel({
             fetchJson<USStockMasterRead>(
               `/api/us-market/stocks/${encodeURIComponent(symbol)}`
             ),
-            fetchJson<IntradayTrendResponse>(
-              `/api/us-market/intraday/${encodeURIComponent(symbol)}`
-            ),
+            fetchUsIntradayTrend(symbol, intradaySessionScope),
             fetchJson<USOhlcChartRead>(
               `/api/us-market/ohlc/${encodeURIComponent(symbol)}`,
               {
@@ -1243,6 +1480,7 @@ export default function USStockDetailPanel({
           ]);
 
           if (requestSeq.current !== requestId) return;
+          if (dailyChartData.backfill) onDailyPricesChangedRef.current?.();
 
           const latestIntradayPoint = todayData.points[todayData.points.length - 1] ?? null;
           const marketState = getUsMarketRefreshState();
@@ -1256,6 +1494,8 @@ export default function USStockDetailPanel({
           setTodayTrend(todayData.points);
           setTodayPreviousClose(todayData.previous_close);
           setTodaySource(todayData.source);
+          setTodayIntradayMeta(intradayMetaFromResponse(todayData));
+          publishIntradaySourceStatus(symbol, todayData);
           setTodayUpdatedAt(
             latestIntradayPoint ? formatDateTime(latestIntradayPoint.time) : null
           );
@@ -1279,9 +1519,10 @@ export default function USStockDetailPanel({
               setShortVolumeRows(supplementalData.shortVolumeData);
               setFactLoadState("success");
             })
-            .catch(() => {
+            .catch((error) => {
               if (requestSeq.current !== requestId) return;
               setFactLoadState("error");
+              publishDetailDataStatus(tRef.current("usStockDetail.errors.loadFailed"), error);
             });
           return;
         }
@@ -1306,6 +1547,7 @@ export default function USStockDetailPanel({
         ]);
 
         if (requestSeq.current !== requestId) return;
+        if (chartDataResponse.backfill) onDailyPricesChangedRef.current?.();
 
         setSelectedStock(stockData);
         setChart(chartDataResponse);
@@ -1313,6 +1555,7 @@ export default function USStockDetailPanel({
         setTodayPreviousClose(null);
         setTodaySource("unavailable");
         setTodayUpdatedAt(null);
+        setTodayIntradayMeta(emptyUsIntradayMeta);
         setFactRows([]);
         setFundamentalSummary(null);
         setCompanyProfile(null);
@@ -1333,9 +1576,10 @@ export default function USStockDetailPanel({
             setShortVolumeRows(supplementalData.shortVolumeData);
             setFactLoadState("success");
           })
-          .catch(() => {
+          .catch((error) => {
             if (requestSeq.current !== requestId) return;
             setFactLoadState("error");
+            publishDetailDataStatus(tRef.current("usStockDetail.errors.loadFailed"), error);
           });
       } catch (error) {
         if (requestSeq.current !== requestId) return;
@@ -1346,6 +1590,7 @@ export default function USStockDetailPanel({
         setTodayPreviousClose(null);
         setTodaySource("unavailable");
         setTodayUpdatedAt(null);
+        setTodayIntradayMeta(emptyUsIntradayMeta);
         setFactRows([]);
         setFundamentalSummary(null);
         setCompanyProfile(null);
@@ -1354,13 +1599,15 @@ export default function USStockDetailPanel({
         setShortVolumeRows([]);
         setLoadState("error");
         setFactLoadState("error");
-        setMessage({
-          type: "error",
-          text: error instanceof Error ? error.message : tRef.current("usStockDetail.errors.loadFailed"),
-        });
+        publishDetailDataStatus(tRef.current("usStockDetail.errors.loadFailed"), error);
       }
     },
-    [onCompanyProfileChange]
+    [
+      intradaySessionScope,
+      onCompanyProfileChange,
+      publishDetailDataStatus,
+      publishIntradaySourceStatus,
+    ]
   );
 
   useEffect(() => {
@@ -1376,6 +1623,7 @@ export default function USStockDetailPanel({
         setTodayPreviousClose(null);
         setTodaySource("unavailable");
         setTodayUpdatedAt(null);
+        setTodayIntradayMeta(emptyUsIntradayMeta);
         setFactRows([]);
         setFundamentalSummary(null);
         setLoadState("idle");
@@ -1390,7 +1638,7 @@ export default function USStockDetailPanel({
   }, [loadSymbolData, onCompanyProfileChange, selectedSymbol, timeframe]);
 
   useEffect(() => {
-    if (!selectedSymbol || timeframe !== "today") return;
+    if (!selectedSymbol || timeframe !== "today" || loadState !== "success") return;
 
     let cancelled = false;
     let intradayTimer: number | undefined;
@@ -1409,29 +1657,30 @@ export default function USStockDetailPanel({
       intradayRequestInFlight = true;
 
       try {
-        const today = await fetchJson<IntradayTrendResponse>(
-          `/api/us-market/intraday/${encodeURIComponent(symbol)}`
-        );
+        const today = await fetchUsIntradayTrend(symbol, intradaySessionScope);
 
         if (cancelled) return;
 
         const latestIntradayPoint = today.points[today.points.length - 1] ?? null;
 
-        setTodayTrend(today.points);
-        setTodayPreviousClose(today.previous_close);
-        setTodaySource(today.source);
-        setTodayUpdatedAt(
-          latestIntradayPoint ? formatDateTime(latestIntradayPoint.time) : null
-        );
+        if (today.points.length > 0 || today.source_status?.has_usable_data) {
+          setTodayTrend(today.points);
+          setTodayPreviousClose(today.previous_close);
+          setTodaySource(today.source);
+          setTodayUpdatedAt(
+            latestIntradayPoint ? formatDateTime(latestIntradayPoint.time) : null
+          );
+        }
+        setTodayIntradayMeta(intradayMetaFromResponse(today));
+        publishIntradaySourceStatus(symbol, today);
         setLoadState("success");
       } catch (error) {
         if (cancelled) return;
 
-        setLoadState("error");
-        setMessage({
-          type: "error",
-          text: error instanceof Error ? error.message : tRef.current("usStockDetail.errors.intradayRefreshFailed"),
-        });
+        publishDetailDataStatus(
+          tRef.current("usStockDetail.errors.intradayRefreshFailed"),
+          error
+        );
       } finally {
         intradayRequestInFlight = false;
       }
@@ -1442,7 +1691,7 @@ export default function USStockDetailPanel({
 
       const marketState = getUsMarketRefreshState();
 
-      if (marketState.isPollingWindow) {
+      if (marketState.isLiveWindow) {
         intradayTimer = window.setTimeout(() => {
           void refreshTodayTrend().finally(scheduleTodayRefresh);
         }, US_INTRADAY_REFRESH_MS);
@@ -1472,7 +1721,14 @@ export default function USStockDetailPanel({
       cancelled = true;
       clearIntradayTimer();
     };
-  }, [selectedSymbol, timeframe]);
+  }, [
+    intradaySessionScope,
+    loadState,
+    publishDetailDataStatus,
+    publishIntradaySourceStatus,
+    selectedSymbol,
+    timeframe,
+  ]);
 
   const queueChartDrawingRemoteSave = useCallback((
     drawingsToSave: ChartDrawing[],
@@ -1511,6 +1767,7 @@ export default function USStockDetailPanel({
     drawingsToSave: ChartDrawing[],
     selectedDrawingIdToSave = activeSelectedChartDrawingId
   ) => {
+    chartDrawingLocalRevisionRef.current += 1;
     setChartDrawingState({
       key: chartDrawingKey,
       drawings: drawingsToSave,
@@ -1535,17 +1792,33 @@ export default function USStockDetailPanel({
     if (!chartFocusMode || !selectedSymbol) {
       return;
     }
+    if (chartDrawingState.key === chartDrawingKey) return;
 
     let cancelled = false;
     const remoteSymbol = selectedSymbol;
+    const loadRevision = chartDrawingLocalRevisionRef.current;
+    const hasLocalSnapshot = hasChartDrawingSnapshot(chartDrawingKey);
     const localDrawings = loadChartDrawings(chartDrawingKey);
     const normalizedLocalSelection = normalizeChartDrawingSelection(
       localDrawings,
       activeSelectedChartDrawingId
     );
 
-    if (localDrawings.length > 0) {
-      queueChartDrawingRemoteSave(localDrawings, normalizedLocalSelection);
+    if (hasLocalSnapshot) {
+      void Promise.resolve().then(() => {
+        if (cancelled || chartDrawingLocalRevisionRef.current !== loadRevision) return;
+
+        setChartDrawingState({
+          key: chartDrawingKey,
+          drawings: localDrawings,
+        });
+        setSelectedChartDrawingId(normalizedLocalSelection);
+
+        if (localDrawings.length > 0) {
+          queueChartDrawingRemoteSave(localDrawings, normalizedLocalSelection);
+        }
+      });
+
       return () => {
         cancelled = true;
       };
@@ -1557,10 +1830,17 @@ export default function USStockDetailPanel({
           chartDrawingApiPath("US", remoteSymbol, professionalTimeframe)
         );
 
-        if (cancelled) return;
+        if (cancelled || chartDrawingLocalRevisionRef.current !== loadRevision) return;
 
         const remoteDrawings = normalizeStoredChartDrawings(snapshot.drawings);
-        if (remoteDrawings.length === 0) return;
+        if (remoteDrawings.length === 0) {
+          setChartDrawingState({
+            key: chartDrawingKey,
+            drawings: [],
+          });
+          setSelectedChartDrawingId(null);
+          return;
+        }
 
         const remoteSelection = normalizeChartDrawingSelection(
           remoteDrawings,
@@ -1585,6 +1865,7 @@ export default function USStockDetailPanel({
     };
   }, [
     activeSelectedChartDrawingId,
+    chartDrawingState.key,
     chartDrawingKey,
     chartFocusMode,
     professionalTimeframe,
@@ -1750,6 +2031,35 @@ export default function USStockDetailPanel({
       ...current,
       [key]: !current[key],
     }));
+    setActiveIndicatorTemplate(null);
+  }
+
+  function applyIndicatorTemplate(templateKey: IndicatorTemplateKey) {
+    const template = indicatorTemplates.find((item) => item.key === templateKey);
+    if (!template) return;
+
+    setActiveIndicatorTemplate(template.key);
+    setChartIndicators(template.indicators);
+    setIndicatorParameters({
+      ...defaultIndicatorParameters,
+      ...(template.parameters ?? {}),
+    });
+  }
+
+  function handleIndicatorParameterChange(
+    key: keyof IndicatorParameters,
+    value: string,
+    min: number,
+    max: number
+  ) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return;
+
+    setActiveIndicatorTemplate(null);
+    setIndicatorParameters((current) => ({
+      ...current,
+      [key]: Math.max(min, Math.min(max, parsed)),
+    }));
   }
 
   function handleProfessionalTimeframeChange(nextTimeframe: USProfessionalTimeframe) {
@@ -1789,7 +2099,7 @@ export default function USStockDetailPanel({
     if (!selectedSymbol) return;
 
     setRefreshingFacts(true);
-    setMessage(null);
+    setSuccessMessage(null);
 
     try {
       const result = await requestJson<USSecFactRefreshResultRead>(
@@ -1797,8 +2107,7 @@ export default function USStockDetailPanel({
         { method: "POST" }
       );
 
-      setMessage({
-        type: "success",
+      setSuccessMessage({
         text: t("usStockDetail.messages.secFactsRefreshSuccess", {
           symbol: result.symbol,
           fetched: result.fetched_count,
@@ -1806,10 +2115,7 @@ export default function USStockDetailPanel({
       });
       await loadSymbolData(selectedSymbol, timeframe);
     } catch (error) {
-      setMessage({
-        type: "error",
-        text: error instanceof Error ? error.message : t("usStockDetail.errors.secFactsRefreshFailed"),
-      });
+      publishDetailDataStatus(t("usStockDetail.errors.secFactsRefreshFailed"), error);
     } finally {
       setRefreshingFacts(false);
     }
@@ -1819,7 +2125,7 @@ export default function USStockDetailPanel({
     if (!selectedSymbol) return;
 
     setRefreshingProfile(true);
-    setMessage(null);
+    setSuccessMessage(null);
 
     try {
       const result = await requestJson<USResourceRefreshResultRead>(
@@ -1827,8 +2133,7 @@ export default function USStockDetailPanel({
         { method: "POST" }
       );
 
-      setMessage({
-        type: "success",
+      setSuccessMessage({
         text: t("usStockDetail.messages.profileRefreshSuccess", {
           symbol: result.symbol ?? selectedSymbol,
           fetched: result.fetched_count,
@@ -1836,10 +2141,7 @@ export default function USStockDetailPanel({
       });
       await loadSymbolData(selectedSymbol, timeframe);
     } catch (error) {
-      setMessage({
-        type: "error",
-        text: error instanceof Error ? error.message : t("usStockDetail.errors.profileRefreshFailed"),
-      });
+      publishDetailDataStatus(t("usStockDetail.errors.profileRefreshFailed"), error);
     } finally {
       setRefreshingProfile(false);
     }
@@ -1849,7 +2151,7 @@ export default function USStockDetailPanel({
     if (!selectedSymbol) return;
 
     setRefreshingActions(true);
-    setMessage(null);
+    setSuccessMessage(null);
 
     try {
       const result = await requestJson<USResourceRefreshResultRead>(
@@ -1857,8 +2159,7 @@ export default function USStockDetailPanel({
         { method: "POST" }
       );
 
-      setMessage({
-        type: "success",
+      setSuccessMessage({
         text: t("usStockDetail.messages.actionsRefreshSuccess", {
           symbol: result.symbol ?? selectedSymbol,
           fetched: result.fetched_count,
@@ -1866,10 +2167,7 @@ export default function USStockDetailPanel({
       });
       await loadSymbolData(selectedSymbol, timeframe);
     } catch (error) {
-      setMessage({
-        type: "error",
-        text: error instanceof Error ? error.message : t("usStockDetail.errors.actionsRefreshFailed"),
-      });
+      publishDetailDataStatus(t("usStockDetail.errors.actionsRefreshFailed"), error);
     } finally {
       setRefreshingActions(false);
     }
@@ -2287,9 +2585,16 @@ export default function USStockDetailPanel({
             onToggleIndicatorMenu={() => setIndicatorMenuOpen((value) => !value)}
             onCloseIndicatorMenu={() => setIndicatorMenuOpen(false)}
             indicatorMenu={
-              <USProfessionalIndicatorMenu
+              <TechnicalIndicatorMenu
                 indicators={chartIndicators}
+                activeTemplate={activeIndicatorTemplate}
+                onApplyTemplate={applyIndicatorTemplate}
                 onToggleIndicator={toggleChartIndicator}
+                groups={professionalIndicatorCategoryGroups}
+                includeParameters
+                parameters={indicatorParameters}
+                onUpdateParameter={handleIndicatorParameterChange}
+                className="w-[25rem]"
               />
             }
             onClose={() => {
@@ -2298,16 +2603,38 @@ export default function USStockDetailPanel({
               setChartFocusMode(false);
             }}
             message={
-              message ? (
-                <div className={`border-b px-5 py-3 text-sm ${messageClass(message)}`}>
-                  {message.text}
-                </div>
+              successMessage ||
+              (professionalIsIntraday && visibleIntradaySourcePresentation) ? (
+                <>
+                  {successMessage ? (
+                    <div className="border-b border-omi-success-border bg-omi-success-soft px-5 py-3 text-sm text-omi-success">
+                      {successMessage.text}
+                    </div>
+                  ) : null}
+                  {professionalIsIntraday && visibleIntradaySourcePresentation ? (
+                    <div
+                      className={[
+                        "border-b px-5 py-3 text-sm",
+                        visibleIntradaySourcePresentation.level === "error"
+                          ? "border-omi-danger-border bg-omi-danger-soft text-omi-danger"
+                          : "border-omi-warning-border bg-omi-warning-soft text-omi-warning-strong",
+                      ].join(" ")}
+                    >
+                      {visibleIntradaySourcePresentation.message}
+                    </div>
+                  ) : null}
+                </>
               ) : null
             }
             chartReady={professionalChartReady}
             emptyState={
-              <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle text-sm text-omi-text-muted">
-                {t("usStockDetail.loadingKline", { label: professionalTimeframeLabel })}
+              <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle p-4">
+                <StateSurface
+                  title={t("usStockDetail.loadingKline", { label: professionalTimeframeLabel })}
+                  tone="loading"
+                  busy
+                  className="w-full max-w-xl"
+                />
               </div>
             }
             chartData={professionalChartData}
@@ -2338,7 +2665,10 @@ export default function USStockDetailPanel({
           />
         ) : (
           <>
-        <section className="border border-omi-border-subtle bg-omi-surface">
+        <section
+          className="border border-omi-border-subtle bg-omi-surface"
+          data-testid="us-stock-kline-panel"
+        >
           <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-4 px-5 py-4">
             <div className="min-w-0">
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
@@ -2350,6 +2680,20 @@ export default function USStockDetailPanel({
               <div className="mt-1 text-sm text-omi-text-muted">
                 {selectedSubtitle}
               </div>
+              {timeframe === "today" && visibleIntradaySourcePresentation ? (
+                <div
+                  data-testid="us-intraday-source-status"
+                  className={[
+                    "mt-2 inline-flex border px-2 py-1 text-xs font-semibold",
+                    visibleIntradaySourcePresentation.level === "error"
+                      ? "border-omi-danger-border bg-omi-danger-soft text-omi-danger"
+                      : "border-omi-warning-border bg-omi-warning-soft text-omi-warning-strong",
+                  ].join(" ")}
+                  title={visibleIntradaySourcePresentation.message}
+                >
+                  {visibleIntradaySourcePresentation.badge}
+                </div>
+              ) : null}
             </div>
 
             <div className="shrink-0 text-right">
@@ -2430,9 +2774,16 @@ export default function USStockDetailPanel({
                       {t("stockDetail.indicators")}
                     </button>
                     {indicatorMenuOpen ? (
-                      <USProfessionalIndicatorMenu
+                      <TechnicalIndicatorMenu
                         indicators={chartIndicators}
+                        activeTemplate={activeIndicatorTemplate}
+                        onApplyTemplate={applyIndicatorTemplate}
                         onToggleIndicator={toggleChartIndicator}
+                        groups={professionalIndicatorCategoryGroups}
+                        includeParameters
+                        parameters={indicatorParameters}
+                        onUpdateParameter={handleIndicatorParameterChange}
+                        className="w-[25rem]"
                       />
                     ) : null}
                   </div>
@@ -2448,29 +2799,74 @@ export default function USStockDetailPanel({
             </div>
           </div>
 
-          {message ? (
-            <div className={`border-t px-5 py-3 text-sm ${messageClass(message)}`}>
-              {message.text}
+          {successMessage ? (
+            <div className="border-t border-omi-success-border bg-omi-success-soft px-5 py-3 text-sm text-omi-success">
+              {successMessage.text}
             </div>
           ) : null}
 
-          {timeframe === "today" ? (
-            <IntradayTrendChart
-              points={todayTrend}
-              previousClose={todayPreviousClose}
-              label={
-                selectedIndexConfig
-                  ? `${selectedDisplaySymbol} ${timeframeLabel(t, "today")}`
-                  : timeframeLabel(t, timeframe)
-              }
-              source={todaySource}
-              indicators={intradayIndicators}
-              session={usIntradaySession}
-              revealKey={`${selectedSymbol ?? "empty"}-${timeframe}-${todayTrend.length}`}
-              refreshIntervalMs={US_INTRADAY_REFRESH_MS}
-              updatedAt={todayUpdatedAt}
-              priceLimitEnabled={false}
-            />
+          {chartLoadState === "loading" ? (
+            <div className="border-t border-omi-border-subtle bg-omi-surface p-4">
+              <StateSurface
+                title={t("usStockDetail.loadingKlineShort")}
+                tone="loading"
+                busy
+                className="h-[428px]"
+              />
+            </div>
+          ) : timeframe === "today" ? (
+            <>
+              <div className="border-x border-t border-omi-border-subtle bg-omi-surface px-4 py-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="text-xs font-semibold uppercase text-omi-text-muted">
+                      {t("usStockDetail.extendedHours.title")}
+                    </div>
+                    <div className="mt-1 text-xs text-omi-text-muted">
+                      {intradaySessionMetaLine}
+                    </div>
+                  </div>
+                  <div className="inline-flex border border-omi-border bg-omi-surface">
+                    {usIntradaySessionScopeOptions.map((scope) => (
+                      <button
+                        key={scope}
+                        type="button"
+                        onClick={() => setIntradaySessionScope(scope)}
+                        className={[
+                          "h-8 px-3 text-xs font-semibold transition",
+                          intradaySessionScope === scope
+                            ? "bg-omi-control text-omi-text-inverse"
+                            : "text-omi-text-muted hover:bg-omi-surface-muted",
+                        ].join(" ")}
+                      >
+                        {sessionScopeLabel(t, scope)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {intradaySessionWarning ? (
+                  <div className="mt-2 text-xs text-omi-warning">
+                    {intradaySessionWarning}
+                  </div>
+                ) : null}
+              </div>
+              <IntradayTrendChart
+                points={visibleTodayTrend}
+                previousClose={visibleTodayPreviousClose}
+                label={
+                  selectedIndexConfig
+                    ? `${selectedDisplaySymbol} ${timeframeLabel(t, "today")}`
+                    : timeframeLabel(t, timeframe)
+                }
+                source={visibleTodaySource}
+                indicators={intradayIndicators}
+                session={activeIntradaySession}
+                revealKey={`${selectedSymbol ?? "empty"}-${timeframe}-${intradaySessionScope}-${visibleTodayTrend.length}`}
+                refreshIntervalMs={US_INTRADAY_REFRESH_MS}
+                updatedAt={visibleTodayUpdatedAt}
+                priceLimitEnabled={false}
+              />
+            </>
           ) : chartData.length > 0 ? (
             <StockKLineChart
               chartData={chartData}
@@ -2483,14 +2879,18 @@ export default function USStockDetailPanel({
               volumeValueFormatter={formatVolume}
             />
           ) : (
-            <div className="flex h-[460px] items-center justify-center border-t border-omi-border-subtle text-sm text-omi-text-muted">
-              {loadState === "loading"
-                ? t("usStockDetail.loadingKlineShort")
-                : selectedSymbol
-                  ? selectedIndexConfig
-                    ? t("usStockDetail.noIndexKline")
-                    : t("usStockDetail.noKline")
-                  : t("usStockDetail.noStockSelected")}
+            <div className="border-t border-omi-border-subtle bg-omi-surface p-4">
+              <StateSurface
+                title={
+                  selectedSymbol
+                    ? selectedIndexConfig
+                      ? t("usStockDetail.noIndexKline")
+                      : t("usStockDetail.noKline")
+                    : t("usStockDetail.noStockSelected")
+                }
+                tone="empty"
+                className="h-[428px]"
+              />
             </div>
           )}
         </section>
@@ -2550,22 +2950,31 @@ export default function USStockDetailPanel({
             </div>
             <div>
               <div className="mb-1 flex justify-between text-xs text-omi-text-muted">
-                <span>{t("usStockDetail.technicalMetrics.volumeVsMa20")}</span>
-                <span className={valueTone(volumeVsMa20)}>
+                <span>
+                  {t(
+                    useIntradayVolumePace
+                      ? "usStockDetail.technicalMetrics.volumePace"
+                      : "usStockDetail.technicalMetrics.volumeVsMa20"
+                  )}
+                </span>
+                <span className={valueTone(technicalVolumeMetric)}>
                   <PriceUpdatePulse
-                    value={volumeVsMa20}
-                    direction={volumeVsMa20}
+                    value={technicalVolumeMetric}
+                    direction={technicalVolumeMetric}
                     resetKey={`${selectedSymbol ?? "empty"}:technical-volume`}
                     className="justify-end tabular-nums"
                   >
-                    {formatPct(volumeVsMa20)}
+                    {technicalVolumeDisplay}
+                    {useIntradayVolumePace && intradayVolumePace.provisional
+                      ? ` · ${t("usStockDetail.technicalMetrics.volumePaceProvisional")}`
+                      : ""}
                   </PriceUpdatePulse>
                 </span>
               </div>
               <div className="h-2 bg-omi-surface-muted">
                 <div
-                  className={`omi-technical-bar h-2 ${metricBarClass(volumeVsMa20)}`}
-                  style={{ width: metricBarWidth(volumeVsMa20) }}
+                  className={`omi-technical-bar h-2 ${metricBarClass(technicalVolumeMetric)}`}
+                  style={{ width: metricBarWidth(technicalVolumeMetric) }}
                 />
               </div>
             </div>

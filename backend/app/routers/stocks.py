@@ -2,6 +2,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.market.schemas import (
+    TaiwanDispositionStatusRead,
+    TaiwanStockEventHistoryRead,
+    TaiwanStockEventSummaryRead,
+)
+from app.market.tw_corporate_events import (
+    get_taiwan_stock_event_history,
+    get_taiwan_stock_event_summary,
+)
+from app.market.tw_disposition import get_taiwan_disposition_status
 from app.stocks.schemas import (
     StockMarketCapRead,
     StockMasterRead,
@@ -23,6 +33,29 @@ from app.stocks.service import (
 )
 
 router = APIRouter()
+
+
+def _stock_read(stock) -> StockMasterRead:
+    result = StockMasterRead.model_validate(stock)
+    result.disposition = TaiwanDispositionStatusRead.model_validate(
+        get_taiwan_disposition_status(
+            stock.stock_id,
+            market=stock.market,
+        )
+    )
+    result.upcoming_events = TaiwanStockEventSummaryRead.model_validate(
+        get_taiwan_stock_event_summary(
+            stock.stock_id,
+            market=stock.market,
+        )
+    )
+    result.event_history = TaiwanStockEventHistoryRead.model_validate(
+        get_taiwan_stock_event_history(
+            stock.stock_id,
+            market=stock.market,
+        )
+    )
+    return result
 
 
 @router.post("/sync-from-market", response_model=StockSyncResultRead)
@@ -104,7 +137,7 @@ def get_latest_stock_market_cap_api(stock_id: str, db: Session = Depends(get_db)
 @router.get("/{stock_id}", response_model=StockMasterRead)
 def get_stock_master(stock_id: str, db: Session = Depends(get_db)):
     try:
-        return get_stock(db=db, stock_id=stock_id)
+        return _stock_read(get_stock(db=db, stock_id=stock_id))
     except StockNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -119,10 +152,12 @@ def update_stock_master(
     db: Session = Depends(get_db),
 ):
     try:
-        return update_stock(
-            db=db,
-            stock_id=stock_id,
-            payload=payload,
+        return _stock_read(
+            update_stock(
+                db=db,
+                stock_id=stock_id,
+                payload=payload,
+            )
         )
     except StockNotFoundError as exc:
         raise HTTPException(

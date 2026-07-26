@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from app.db.models import (
@@ -14,13 +14,18 @@ from app.db.models import (
     MonthlyRevenue,
     ShareholdingDistributionWeekly,
 )
-from app.market.trading_calendar import latest_released_trading_day
+from app.market.trading_calendar import (
+    TAIWAN_TZ,
+    latest_released_trading_day,
+    previous_taiwan_trading_day,
+)
 
 
 TAIWAN_DAILY_PRICE_RELEASE_TIME = time(hour=15, minute=15)
 TAIWAN_INSTITUTIONAL_TRADE_RELEASE_TIME = time(hour=15, minute=10)
 TAIWAN_MARGIN_TRADE_RELEASE_TIME = time(hour=21, minute=10)
 TAIWAN_BROKER_BRANCH_RELEASE_TIME = time(hour=15, minute=10)
+TAIWAN_SHAREHOLDING_RELEASE_TIME = time(hour=12, minute=0)
 TAIWAN_DEFAULT_DAILY_METRIC_RELEASE_TIME = TAIWAN_MARGIN_TRADE_RELEASE_TIME
 
 TAIWAN_REFRESH_DAILY_PRICE = "daily_price"
@@ -146,6 +151,103 @@ def expected_broker_branch_date(
     )
 
 
+def expected_shareholding_distribution_date(
+    *,
+    include_today: bool | None = None,
+    now: datetime | None = None,
+) -> date:
+    """Return the latest TDCC observation whose release window has opened."""
+    del include_today
+    return shareholding_distribution_release_window(now=now)[
+        "expected_trade_date"
+    ]
+
+
+def shareholding_distribution_release_window(
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Model the conservative weekly TDCC publication boundary.
+
+    TDCC describes the dataset as the final-business-day balance of each week
+    but does not publish an exact availability time. OMI therefore advances
+    the expected observation at Saturday 12:00 Asia/Taipei and exposes the
+    assumption in the returned contract.
+    """
+    local_now = now or datetime.now(TAIWAN_TZ)
+    if local_now.tzinfo is None:
+        local_now = local_now.replace(tzinfo=TAIWAN_TZ)
+    else:
+        local_now = local_now.astimezone(TAIWAN_TZ)
+    current_date = local_now.date()
+    current_week_friday = current_date + timedelta(
+        days=4 - current_date.weekday()
+    )
+    current_observation_date = previous_taiwan_trading_day(
+        current_week_friday,
+        include_value=True,
+    )
+    release_at = datetime.combine(
+        current_week_friday + timedelta(days=1),
+        TAIWAN_SHAREHOLDING_RELEASE_TIME,
+        tzinfo=TAIWAN_TZ,
+    )
+    is_released = local_now >= release_at
+    if is_released:
+        expected_trade_date = current_observation_date
+        next_friday = current_week_friday + timedelta(days=7)
+        next_release_at = datetime.combine(
+            next_friday + timedelta(days=1),
+            TAIWAN_SHAREHOLDING_RELEASE_TIME,
+            tzinfo=TAIWAN_TZ,
+        )
+    else:
+        previous_friday = current_week_friday - timedelta(days=7)
+        expected_trade_date = previous_taiwan_trading_day(
+            previous_friday,
+            include_value=True,
+        )
+        next_release_at = release_at
+    return {
+        "key": TAIWAN_DATASET_SHAREHOLDING_DISTRIBUTION,
+        "label": "Shareholding distribution",
+        "release_time": TAIWAN_SHAREHOLDING_RELEASE_TIME.strftime("%H:%M"),
+        "release_at": release_at.isoformat(),
+        "next_release_at": next_release_at.isoformat(),
+        "expected_trade_date": expected_trade_date,
+        "status": "released" if is_released else "pending",
+        "is_released": is_released,
+        "assumption": "conservative_saturday_noon_asia_taipei",
+    }
+
+
+def expected_monthly_revenue_period(
+    *,
+    include_today: bool | None = None,
+    now: datetime | None = None,
+) -> date:
+    """Return the latest revenue month whose filing deadline has passed.
+
+    Most Taiwan public companies file by the 10th day of the following month.
+    From 2026, insurers and public companies with an insurance subsidiary can
+    file by the 15th.  Because this table-level check does not know the issuer's
+    exemption status, use the 15th as the conservative market-wide deadline.
+    ``MonthlyRevenue.period`` stores the first day of the revenue month.
+    """
+    del include_today
+    local_now = now or datetime.now(TAIWAN_TZ)
+    if local_now.tzinfo is not None:
+        local_now = local_now.astimezone(TAIWAN_TZ)
+
+    month_offset = 1 if local_now.day > 15 else 2
+    year = local_now.year
+    month = local_now.month - month_offset
+    while month <= 0:
+        year -= 1
+        month += 12
+    return date(year, month, 1)
+
+
 TAIWAN_DATASET_DAILY_PRICE = "market_daily_price"
 TAIWAN_DATASET_INSTITUTIONAL_TRADE = "institutional_trade_daily"
 TAIWAN_DATASET_MARGIN_TRADING = "margin_trading_daily"
@@ -203,6 +305,7 @@ TAIWAN_DATASET_SPECS: tuple[TaiwanDatasetSpec, ...] = (
         frequency="weekly",
         model=ShareholdingDistributionWeekly,
         latest_column=ShareholdingDistributionWeekly.data_date,
+        has_expected_date=True,
         equity_only=True,
         refresh_step=TAIWAN_REFRESH_SHAREHOLDING_DISTRIBUTION,
     ),
@@ -212,6 +315,7 @@ TAIWAN_DATASET_SPECS: tuple[TaiwanDatasetSpec, ...] = (
         frequency="monthly",
         model=MonthlyRevenue,
         latest_column=MonthlyRevenue.period,
+        has_expected_date=True,
         equity_only=True,
         refresh_step=TAIWAN_REFRESH_MONTHLY_REVENUE,
     ),
@@ -257,6 +361,18 @@ _EXPECTED_DATE_BY_DATASET: dict[
     TAIWAN_DATASET_BROKER_BRANCH: lambda include_today, now: expected_broker_branch_date(
         include_today=include_today,
         now=now,
+    ),
+    TAIWAN_DATASET_SHAREHOLDING_DISTRIBUTION: (
+        lambda include_today, now: expected_shareholding_distribution_date(
+            include_today=include_today,
+            now=now,
+        )
+    ),
+    TAIWAN_DATASET_MONTHLY_REVENUE: (
+        lambda include_today, now: expected_monthly_revenue_period(
+            include_today=include_today,
+            now=now,
+        )
     ),
 }
 
@@ -325,6 +441,7 @@ __all__ = [
     "TAIWAN_DEFAULT_DAILY_METRIC_RELEASE_TIME",
     "TAIWAN_INSTITUTIONAL_TRADE_RELEASE_TIME",
     "TAIWAN_MARGIN_TRADE_RELEASE_TIME",
+    "TAIWAN_SHAREHOLDING_RELEASE_TIME",
     "TAIWAN_REFRESH_BROKER_BRANCH",
     "TAIWAN_REFRESH_DAILY_PRICE",
     "TAIWAN_REFRESH_FINANCIAL_METRICS",
@@ -344,8 +461,11 @@ __all__ = [
     "expected_date_for_dataset",
     "expected_institutional_trade_date",
     "expected_margin_trade_date",
+    "expected_monthly_revenue_period",
+    "expected_shareholding_distribution_date",
     "is_equity_only_dataset_required",
     "normalize_refresh_profile",
     "refresh_profile_step_count",
     "refresh_profile_steps",
+    "shareholding_distribution_release_window",
 ]

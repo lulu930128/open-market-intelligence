@@ -331,7 +331,11 @@ def _financial_payload(
     return {
         "source_id": source_id,
         "raw_result_id": raw_result_id,
-        "report_date": datetime.now(TAIWAN_TZ).date(),
+        # The historical statement endpoint does not declare a publication or filing date.
+        # Fetch time remains on RawFetchResult.fetched_at and must not be projected as report_date.
+        "report_date": None,
+        "released_at": None,
+        "filed_at": None,
         "fiscal_year": fiscal_year,
         "quarter": quarter,
         "period": f"{fiscal_year}Q{quarter}",

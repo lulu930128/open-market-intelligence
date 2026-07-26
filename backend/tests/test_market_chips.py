@@ -8,7 +8,7 @@ from unittest.mock import patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.db.models import Base
+from app.db.models import Base, MarginTradingDaily, SourceRegistry
 from app.market.market_chips import (
     MarketChipFetchError,
     ensure_market_chip_daily,
@@ -17,6 +17,7 @@ from app.market.market_chips import (
     normalize_market_chip_index_ids,
     parse_institutional_amount_summary,
     parse_taifex_futures_institutional_html,
+    parse_taifex_put_call_ratio_html,
     parse_tpex_margin_summary,
     parse_twse_margin_summary,
     refresh_market_chip_daily,
@@ -76,8 +77,39 @@ TAIFEX_HTML = """
 </html>
 """
 
+TAIFEX_PUT_CALL_HTML = """
+<html>
+  <body>
+    <table>
+      <tr>
+        <th>日期</th><th>賣權成交量</th><th>買權成交量</th><th>買賣權成交量比率%</th>
+        <th>賣權未平倉量</th><th>買權未平倉量</th><th>買賣權未平倉量比率%</th>
+      </tr>
+      <tr>
+        <td>2026/7/17</td><td>377,448</td><td>451,306</td><td>83.63</td>
+        <td>42,516</td><td>45,745</td><td>92.94</td>
+      </tr>
+    </table>
+  </body>
+</html>
+"""
+
 
 class MarketChipParserTests(unittest.TestCase):
+    def test_parse_taifex_put_call_ratio_html(self) -> None:
+        result = parse_taifex_put_call_ratio_html(
+            TAIFEX_PUT_CALL_HTML,
+            target_trade_date=date(2026, 7, 17),
+        )
+
+        self.assertEqual(result["trade_date"], date(2026, 7, 17))
+        self.assertEqual(result["put_volume"], 377_448)
+        self.assertEqual(result["call_volume"], 451_306)
+        self.assertEqual(result["put_call_volume_ratio_pct"], 83.63)
+        self.assertEqual(result["put_open_interest"], 42_516)
+        self.assertEqual(result["call_open_interest"], 45_745)
+        self.assertEqual(result["put_call_open_interest_ratio_pct"], 92.94)
+
     def test_parse_twse_institutional_amount_summary(self) -> None:
         payload = {
             "date": "115年06月09日",
@@ -263,6 +295,12 @@ class MarketChipPersistenceTests(unittest.TestCase):
                 "trade_date": date(2026, 6, 9),
                 "foreign_futures_net_oi": -61871,
                 "retail_futures_net_oi": 10252,
+                "put_volume": 377_448,
+                "call_volume": 451_306,
+                "put_call_volume_ratio_pct": 83.63,
+                "put_open_interest": 42_516,
+                "call_open_interest": 45_745,
+                "put_call_open_interest_ratio_pct": 92.94,
                 "source_details": {"sources": []},
             },
         )
@@ -270,7 +308,117 @@ class MarketChipPersistenceTests(unittest.TestCase):
 
         self.assertEqual(result["foreign_futures_net_oi_change"], 3630)
         self.assertEqual(result["retail_futures_net_oi_change"], 262)
+        self.assertEqual(result["put_call_volume_ratio_pct"], 83.63)
+        self.assertEqual(result["put_call_open_interest_ratio_pct"], 92.94)
         self.assertEqual(result["source_details"], {"sources": []})
+        self.assertEqual(result["margin_status"]["status"], "missing")
+        self.assertEqual(result["government_bank_status"]["status"], "not_available")
+
+    def test_latest_projection_uses_previous_released_margin_snapshot(self) -> None:
+        released_date = date(2026, 7, 21)
+        latest = upsert_market_chip_daily(
+            self.db,
+            payload={
+                "index_id": "TAIEX",
+                "market": "TWSE",
+                "trade_date": date(2026, 7, 22),
+                "total_institutional_net_value": 100,
+                "source_details": {"sources": []},
+            },
+        )
+        upsert_market_chip_daily(
+            self.db,
+            payload={
+                "index_id": "TAIEX",
+                "market": "TWSE",
+                "trade_date": released_date,
+                "margin_balance_change_value": 1_200_000_000,
+                "margin_balance_change_shares": 30_000,
+                "short_balance_change_shares": 5_000,
+                "source_details": {"sources": []},
+            },
+        )
+
+        with patch(
+            "app.market.market_chips.expected_market_margin_chip_date",
+            return_value=released_date,
+        ):
+            result = market_chip_daily_to_dict(
+                latest,
+                db=self.db,
+                resolve_expected_margin=True,
+            )
+
+        self.assertEqual(result["margin_balance_change_value"], 1_200_000_000)
+        self.assertEqual(result["margin_balance_change_shares"], 30_000)
+        self.assertEqual(result["short_balance_change_shares"], 5_000)
+        self.assertEqual(result["margin_status"]["status"], "ready")
+        self.assertEqual(result["margin_status"]["data_date"], released_date)
+        self.assertEqual(
+            result["margin_status"]["pending_trade_date"],
+            date(2026, 7, 22),
+        )
+
+    def test_latest_projection_aggregates_stored_per_stock_margin_changes(self) -> None:
+        released_date = date(2026, 7, 21)
+        source = SourceRegistry(
+            source_name="TWSE Margin Trading MI_MARGN",
+            source_type="official_api",
+            category="margin_trading",
+        )
+        self.db.add(source)
+        self.db.flush()
+        self.db.add_all(
+            [
+                MarginTradingDaily(
+                    source_id=source.id,
+                    raw_result_id=1,
+                    trade_date=released_date,
+                    stock_id="2330",
+                    margin_previous_balance=1_000,
+                    margin_today_balance=1_050,
+                    short_previous_balance=100,
+                    short_today_balance=110,
+                ),
+                MarginTradingDaily(
+                    source_id=source.id,
+                    raw_result_id=1,
+                    trade_date=released_date,
+                    stock_id="2317",
+                    margin_previous_balance=900,
+                    margin_today_balance=880,
+                    short_previous_balance=80,
+                    short_today_balance=75,
+                ),
+            ]
+        )
+        latest = upsert_market_chip_daily(
+            self.db,
+            payload={
+                "index_id": "TAIEX",
+                "market": "TWSE",
+                "trade_date": date(2026, 7, 22),
+                "source_details": {"sources": []},
+            },
+        )
+
+        with patch(
+            "app.market.market_chips.expected_market_margin_chip_date",
+            return_value=released_date,
+        ):
+            result = market_chip_daily_to_dict(
+                latest,
+                db=self.db,
+                resolve_expected_margin=True,
+            )
+
+        self.assertIsNone(result["margin_balance_change_value"])
+        self.assertEqual(result["margin_balance_change_shares"], 30_000)
+        self.assertEqual(result["short_balance_change_shares"], 5_000)
+        self.assertEqual(result["margin_status"]["status"], "partial")
+        self.assertEqual(result["margin_status"]["coverage_count"], 2)
+        self.assertEqual(result["margin_status"]["total_count"], 2)
+        self.assertEqual(result["margin_status"]["source"], "margin_trading_daily")
 
     def test_ensure_refreshes_existing_row_after_margin_release(self) -> None:
         trade_date = date(2026, 6, 26)

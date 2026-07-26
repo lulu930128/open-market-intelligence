@@ -951,6 +951,21 @@ def _run_refresh_items(
     errors = []
     skipped = []
     fetch_kwargs = fetch_kwargs or {}
+
+    def record_error_event(provider: str, symbol: str, message: str) -> None:
+        try:
+            _record_event(
+                db,
+                provider=provider,
+                resource=f"crypto_{resource}",
+                target=symbol,
+                status="error",
+                error_message=message,
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+
     for provider in providers:
         if provider == COINGECKO_PROVIDER:
             skipped.append({"provider": provider, "reason": f"provider does not support {resource}"})
@@ -999,7 +1014,6 @@ def _run_refresh_items(
             try:
                 record = fetcher(normalized_symbol, **fetch_kwargs)
                 row = upsert(db, record)
-                rows.append(row)
                 _record_event(
                     db,
                     provider=provider,
@@ -1008,21 +1022,14 @@ def _run_refresh_items(
                     status="success",
                     message=f"Refreshed crypto {resource} for {normalized_symbol}.",
                 )
+                db.commit()
+                db.refresh(row)
+                rows.append(row)
             except Exception as exc:
                 db.rollback()
-                errors.append({"provider": provider, "symbol": normalized_symbol, "error": str(exc)})
-                _record_event(
-                    db,
-                    provider=provider,
-                    resource=f"crypto_{resource}",
-                    target=normalized_symbol,
-                    status="error",
-                    error_message=str(exc),
-                )
-
-    db.commit()
-    for row in rows:
-        db.refresh(row)
+                message = str(exc)
+                errors.append({"provider": provider, "symbol": normalized_symbol, "error": message})
+                record_error_event(provider, normalized_symbol, message)
     return {
         "status": _status_for_counts(len(rows), len(errors)),
         "resource": resource,
@@ -1368,6 +1375,21 @@ def refresh_crypto_ohlcv(
     errors = []
     skipped = []
 
+    def record_error_event(provider: str, symbol: str, message: str) -> None:
+        try:
+            _record_event(
+                db,
+                provider=provider,
+                resource="crypto_ohlcv",
+                target=symbol,
+                status="error",
+                error_message=message,
+                detail={"interval": normalized_interval},
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+
     for provider in provider_list:
         if provider == COINGECKO_PROVIDER:
             skipped.append({"provider": provider, "reason": "provider does not support ohlcv"})
@@ -1434,8 +1456,9 @@ def refresh_crypto_ohlcv(
                         interval=normalized_interval,
                         limit=normalized_limit,
                     )
+                item_rows = []
                 for record in records:
-                    rows.append(_upsert_ohlcv_bar(db, record))
+                    item_rows.append(_upsert_ohlcv_bar(db, record))
                 _record_event(
                     db,
                     provider=provider,
@@ -1450,22 +1473,15 @@ def refresh_crypto_ohlcv(
                         "end_time": window_end.isoformat(),
                     },
                 )
+                db.commit()
+                for row in item_rows:
+                    db.refresh(row)
+                rows.extend(item_rows)
             except Exception as exc:
                 db.rollback()
-                errors.append({"provider": provider, "symbol": normalized_symbol, "error": str(exc)})
-                _record_event(
-                    db,
-                    provider=provider,
-                    resource="crypto_ohlcv",
-                    target=normalized_symbol,
-                    status="error",
-                    error_message=str(exc),
-                    detail={"interval": normalized_interval},
-                )
-
-    db.commit()
-    for row in rows:
-        db.refresh(row)
+                message = str(exc)
+                errors.append({"provider": provider, "symbol": normalized_symbol, "error": message})
+                record_error_event(provider, normalized_symbol, message)
     return {
         "status": _status_for_counts(len(rows), len(errors)),
         "resource": "ohlcv",

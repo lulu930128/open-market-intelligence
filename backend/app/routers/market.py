@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -25,7 +25,6 @@ from app.market.taiwan_rules import (
     normalize_refresh_profile,
     refresh_profile_step_count,
 )
-from app.db.models import JobRun, utc_now
 from app.db.session import get_db
 from app.jobs import backfill_tasks, service as job_service
 from app.jobs.schemas import JobRunRead
@@ -36,13 +35,6 @@ from app.settings.refresh_execution import (
 from app.market.institutional_holding_ratios import (
     InstitutionalHoldingRatioFetchError,
     fetch_institutional_holding_ratios,
-)
-from app.market.indices import (
-    get_market_index_contributions,
-    get_market_index_intraday,
-    get_market_index_list,
-    get_market_index_ohlc_chart_data,
-    get_market_index_summary,
 )
 from app.market.intraday import get_intraday_trend, get_market_intraday_history
 from app.market.quote_depth import get_taiwan_stock_quote_depth
@@ -59,20 +51,6 @@ from app.market.overnight_impact import (
     ensure_current_us_overnight_impact_report,
 )
 from app.market.technical_report import build_stock_technical_report
-from app.market.tw_futures import (
-    KGI_PROVIDER,
-    TaiwanFuturesFetchError,
-    get_latest_taiwan_futures_quotes,
-    list_taiwan_futures_daily_bars,
-    list_taiwan_futures_intraday_bars,
-    list_taiwan_futures_products,
-    refresh_taiwan_futures_daily_bars,
-    refresh_taiwan_futures_quotes,
-    resolve_taiwan_futures_quote_provider,
-    taiwan_futures_daily_bar_to_dict,
-    taiwan_futures_intraday_bar_to_dict,
-    taiwan_futures_quote_to_dict,
-)
 from app.market.broker_branch import (
     BrokerBranchFetchError,
     get_broker_branch_trade_summary,
@@ -82,6 +60,17 @@ from app.market.calendar_status import (
     build_taiwan_calendar_status,
     expected_taiwan_trade_date,
     is_release_released_from_calendar,
+)
+from app.market.exchange_calendar_refresh import refresh_exchange_calendars
+from app.market.tw_disposition import (
+    list_taiwan_dispositions,
+    refresh_taiwan_dispositions,
+)
+from app.market.tw_corporate_events import (
+    backfill_taiwan_corporate_event_history,
+    get_taiwan_stock_event_history,
+    list_taiwan_corporate_events,
+    refresh_taiwan_corporate_events,
 )
 from app.market.source_health import build_taiwan_source_health
 from app.market.chart_drawings import (
@@ -101,28 +90,27 @@ from app.market.schemas import (
     ChartDrawingSnapshotRead,
     ChartDrawingSnapshotWrite,
     FinancialMetricQuarterlyRead,
+    IntradayTrendRead,
+    MarketCalendarRefreshRead,
     MarketCalendarStatusRead,
     MarketIntradayChartRead,
-    IntradayTrendRead,
     InstitutionalHoldingRatioRead,
     InstitutionalTradeDailyRead,
     MarginTradingDailyRead,
     MarketDailyChartRead,
-    MarketIndexContributionRead,
-    MarketIndexListRead,
-    MarketIndexSummaryRead,
     MarketChipDailyRead,
-    MarketOhlcChartRead,
     MarketDailyPriceRead,
+    MarketOhlcChartRead,
     MonthlyRevenueRead,
     OvernightImpactRead,
     ShareholdingDistributionWeeklyRead,
     StockChipCoverageRead,
-    TaiwanFuturesIntradayBarRead,
-    TaiwanFuturesDailyBarRead,
-    TaiwanFuturesProductRead,
-    TaiwanFuturesQuoteRead,
     TaiwanStockQuoteDepthRead,
+    TaiwanDispositionListRead,
+    TaiwanDispositionRefreshRead,
+    TaiwanCorporateEventListRead,
+    TaiwanCorporateEventRefreshRead,
+    TaiwanStockEventHistoryRead,
     TaiwanSourceHealthRead,
     TechnicalReportRead,
 )
@@ -152,10 +140,32 @@ from app.market.service import (
     list_stock_monthly_revenue_history,
     list_stock_shareholding_history,
 )
+from app.routers.tw_market_indices import (
+    get_index_contributions,
+    get_index_intraday_trend,
+    get_index_ohlc_chart_data,
+    get_indices_list,
+    get_indices_summary,
+    router as market_indices_router,
+)
+from app.routers.tw_market_futures import (
+    get_latest_taiwan_futures_quotes_api,
+    list_taiwan_large_traders_api,
+    list_taiwan_option_chain_api,
+    list_taiwan_term_structure_api,
+    list_taiwan_futures_daily_bars_api,
+    list_taiwan_futures_intraday_bars_api,
+    list_taiwan_futures_products_api,
+    refresh_taiwan_derivatives_api,
+    refresh_taiwan_futures_daily_bars_api,
+    refresh_taiwan_futures_quotes_api,
+    router as market_futures_router,
+)
 
 router = APIRouter()
+router.include_router(market_indices_router)
+router.include_router(market_futures_router)
 
-TAIWAN_FUTURES_QUOTE_REFRESH_JOB_TYPE = "market.tw_futures_quote_refresh"
 TAIWAN_DAILY_METRIC_CATEGORY_DATASET_KEYS = {
     TAIWAN_REFRESH_DAILY_PRICE: TAIWAN_DATASET_DAILY_PRICE,
     TAIWAN_REFRESH_INSTITUTIONAL_TRADE: TAIWAN_DATASET_INSTITUTIONAL_TRADE,
@@ -174,13 +184,141 @@ def _split_index_ids(value: str) -> list[str]:
 
 @router.get("/calendar-status", response_model=MarketCalendarStatusRead)
 def get_market_calendar_status(
-    market: str = Query(default="all", pattern="^(all|tw|us)$"),
+    market: str = Query(default="all", pattern="^(all|tw|us|jp|kr)$"),
     now: datetime | None = Query(default=None),
 ):
     try:
         return build_market_calendar_status(market=market, now=now)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/calendar-refresh", response_model=MarketCalendarRefreshRead)
+def refresh_market_calendar(
+    market: str = Query(default="all", pattern="^(all|tw|us|jp|kr)$"),
+    db: Session = Depends(get_db),
+):
+    try:
+        return refresh_exchange_calendars(
+            markets=None if market == "all" else [market],
+            db=db,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/tw-dispositions", response_model=TaiwanDispositionListRead)
+def get_taiwan_disposition_securities(
+    include_upcoming: bool = Query(default=True),
+    include_expired: bool = Query(default=False),
+    now: datetime | None = Query(default=None),
+):
+    return list_taiwan_dispositions(
+        include_upcoming=include_upcoming,
+        include_expired=include_expired,
+        now=now,
+    )
+
+
+@router.post("/tw-dispositions/refresh", response_model=TaiwanDispositionRefreshRead)
+def refresh_taiwan_disposition_securities(
+    db: Session = Depends(get_db),
+):
+    return refresh_taiwan_dispositions(db=db)
+
+
+@router.get("/tw-corporate-events", response_model=TaiwanCorporateEventListRead)
+def get_taiwan_corporate_events(
+    stock_id: str | None = Query(default=None, min_length=1, max_length=20),
+    market: str | None = Query(default=None, pattern="^(TWSE|TPEX|twse|tpex)$"),
+    event_types: str | None = Query(default=None),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    limit: int = Query(default=500, ge=1, le=1000),
+    now: datetime | None = Query(default=None),
+):
+    reference_now = now or datetime.now(TAIWAN_TZ)
+    if reference_now.tzinfo is None:
+        reference_now = reference_now.replace(tzinfo=timezone.utc)
+    calendar_today = reference_now.astimezone(TAIWAN_TZ).date()
+    effective_date_from = max(date_from or calendar_today, calendar_today)
+    if date_to and date_to < calendar_today:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The market calendar only serves today and future events.",
+        )
+    allowed_types = {"ex_dividend", "financial_report", "investor_conference"}
+    requested_types = set(_split_categories(event_types or ""))
+    invalid_types = sorted(requested_types - allowed_types)
+    if invalid_types:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported event_types: {', '.join(invalid_types)}",
+        )
+    if date_to and date_to < effective_date_from:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="date_to must be on or after date_from.",
+        )
+    if date_to and (date_to - effective_date_from).days > 366:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Corporate-event date range cannot exceed 366 days.",
+        )
+    return list_taiwan_corporate_events(
+        stock_id=stock_id,
+        market=market,
+        event_types=requested_types,
+        date_from=effective_date_from,
+        date_to=date_to,
+        limit=limit,
+        now=now,
+    )
+
+
+@router.get(
+    "/tw-corporate-events/history/{stock_id}",
+    response_model=TaiwanStockEventHistoryRead,
+)
+def get_taiwan_corporate_event_history(
+    stock_id: str,
+    market: str | None = Query(default=None, pattern="^(TWSE|TPEX|twse|tpex)$"),
+    years: int = Query(default=5, ge=1, le=10),
+    limit: int = Query(default=200, ge=1, le=200),
+    now: datetime | None = Query(default=None),
+):
+    return get_taiwan_stock_event_history(
+        stock_id,
+        market=market,
+        years=years,
+        max_results=limit,
+        now=now,
+    )
+
+
+@router.post(
+    "/tw-corporate-events/refresh",
+    response_model=TaiwanCorporateEventRefreshRead,
+)
+def refresh_taiwan_corporate_event_calendar(
+    db: Session = Depends(get_db),
+):
+    return refresh_taiwan_corporate_events(db=db)
+
+
+@router.post(
+    "/tw-corporate-events/history/backfill",
+    response_model=TaiwanCorporateEventRefreshRead,
+)
+def backfill_taiwan_corporate_event_calendar_history(
+    years: int = Query(default=5, ge=1, le=10),
+    db: Session = Depends(get_db),
+):
+    return backfill_taiwan_corporate_event_history(
+        years=years,
+        force=True,
+        db=db,
+    )
 
 
 @router.get("/source-health", response_model=TaiwanSourceHealthRead)
@@ -200,99 +338,22 @@ def get_taiwan_source_health(
     )
 
 
-def _taiwan_futures_quote_source_name(provider: str | None) -> str:
-    if resolve_taiwan_futures_quote_provider(provider) == KGI_PROVIDER:
-        return "KGI"
-    return "TAIFEX MIS"
-
-
-def _format_taiwan_futures_quote_source_error(
-    exc: TaiwanFuturesFetchError,
-    *,
-    provider: str | None = None,
-) -> str:
-    text = str(exc)
-    source_name = _taiwan_futures_quote_source_name(provider)
-    if "520" in text:
-        return f"{source_name} 即時報價來源暫時回應 520，已改用快取資料。"
-
-    return f"{source_name} 即時報價暫時無法讀取，已改用快取資料。"
-
-
-def _record_taiwan_futures_quote_refresh_issue(
-    db: Session,
-    *,
-    symbols: str,
-    session: str,
-    provider: str | None,
-    exc: TaiwanFuturesFetchError,
-    cached_count: int,
-) -> None:
-    symbol_list = _split_index_ids(symbols) or ["TXF", "MXF", "TMF"]
-    target = ",".join(symbol_list)
-    requested_count = max(len(symbol_list), 1)
-    source_name = _taiwan_futures_quote_source_name(provider)
-    resolved_provider = resolve_taiwan_futures_quote_provider(provider)
-    message = _format_taiwan_futures_quote_source_error(exc, provider=provider)
-    has_cache = cached_count > 0
-    status_value = "partial_success" if has_cache else "error"
-    if not has_cache:
-        message = f"{source_name} 即時報價暫時無法讀取，且目前沒有可用快取。"
-
-    result = {
-        "status": status_value,
-        "message": message,
-        "requested_count": requested_count,
-        "success_count": cached_count if has_cache else 0,
-        "warning_count": requested_count if has_cache else 0,
-        "error_count": 0 if has_cache else requested_count,
-        "results": [
-            {
-                "symbol": symbol,
-                "resource": "台指期即時報價",
-                "source_name": source_name,
-                "status": "partial_success" if has_cache else "error",
-                "message": message,
-                "error_message": message,
-            }
-            for symbol in symbol_list
-        ],
-    }
-
-    cutoff = utc_now() - timedelta(minutes=5)
-    job = (
-        db.query(JobRun)
-        .filter(JobRun.job_type == TAIWAN_FUTURES_QUOTE_REFRESH_JOB_TYPE)
-        .filter(JobRun.target == target)
-        .filter(JobRun.updated_at >= cutoff)
-        .order_by(JobRun.updated_at.desc(), JobRun.id.desc())
-        .first()
+@router.post("/source-health/snapshot", response_model=TaiwanSourceHealthRead)
+def sync_taiwan_source_health_snapshot(
+    stock_id: str | None = None,
+    dataset: str | None = None,
+    index_id: str | None = None,
+    now: datetime | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    return build_taiwan_source_health(
+        db=db,
+        stock_id=stock_id,
+        dataset=dataset,
+        index_id=index_id,
+        now=now,
+        sync_snapshots=True,
     )
-
-    if job is None:
-        job = job_service.create_job(
-            db=db,
-            job_type=TAIWAN_FUTURES_QUOTE_REFRESH_JOB_TYPE,
-            target=target,
-            request={
-                "symbols": symbol_list,
-                "session": session,
-                "source": source_name,
-                "provider": resolved_provider,
-            },
-            progress_total=requested_count,
-            message="Refreshing Taiwan futures quotes.",
-        )
-    else:
-        job.progress_current = cached_count if has_cache else 0
-        job.progress_total = requested_count
-        db.commit()
-        db.refresh(job)
-
-    if has_cache:
-        job_service.complete_job(db=db, job_id=job.id, result=result, message=message)
-    else:
-        job_service.fail_job(db=db, job_id=job.id, error_message=message, result=result)
 
 
 def _resolve_daily_metric_include_today(
@@ -356,6 +417,7 @@ def _queue_backfill_job(
     progress_total: int = 1,
     task,
     task_args: tuple,
+    reuse_success_within_seconds: float = 0,
 ):
     del background_tasks
 
@@ -368,6 +430,7 @@ def _queue_backfill_job(
         message="Queued.",
         task=task,
         task_args=task_args,
+        reuse_success_within_seconds=reuse_success_within_seconds,
     )
     return job_service.serialize_job(job)
 
@@ -508,6 +571,7 @@ def refresh_selected_stock_data_api(
         progress_total=progress_total,
         task=backfill_tasks.run_stock_selection_refresh_job,
         task_args=(stock_id, include_today, resolved_sleep_seconds, refresh_profile),
+        reuse_success_within_seconds=120,
     )
 
 
@@ -1043,235 +1107,6 @@ def get_stock_overnight_impact(
         ) from exc
 
 
-@router.get(
-    "/tw-futures/products",
-    response_model=list[TaiwanFuturesProductRead],
-)
-def list_taiwan_futures_products_api():
-    return list_taiwan_futures_products()
-
-
-@router.post(
-    "/tw-futures/refresh",
-    response_model=list[TaiwanFuturesQuoteRead],
-)
-def refresh_taiwan_futures_quotes_api(
-    symbols: str = Query(default="TXF,MXF,TMF"),
-    session: str = Query(default="auto", pattern="^(auto|regular|after_hours)$"),
-    provider: str | None = Query(default=None, pattern="^(auto|taifex_mis|kgi)$"),
-    active_only: bool = True,
-    db: Session = Depends(get_db),
-):
-    source_error: str | None = None
-    try:
-        rows = refresh_taiwan_futures_quotes(
-            db=db,
-            symbols=symbols,
-            session=session,
-            active_only=active_only,
-            provider=provider,
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
-    except TaiwanFuturesFetchError as exc:
-        source_error = str(exc)
-        rows = get_latest_taiwan_futures_quotes(
-            db=db,
-            symbols=symbols,
-            refresh=False,
-            session=session,
-            provider=provider,
-        )
-        _record_taiwan_futures_quote_refresh_issue(
-            db=db,
-            symbols=symbols,
-            session=session,
-            provider=provider,
-            exc=exc,
-            cached_count=len(rows),
-        )
-
-    return [
-        taiwan_futures_quote_to_dict(
-            row,
-            expected_session=session,
-            source_error=source_error,
-        )
-        for row in rows
-    ]
-
-
-@router.get(
-    "/tw-futures/latest",
-    response_model=list[TaiwanFuturesQuoteRead],
-)
-def get_latest_taiwan_futures_quotes_api(
-    symbols: str = Query(default="TXF,MXF,TMF"),
-    refresh: bool = False,
-    session: str = Query(default="auto", pattern="^(auto|regular|after_hours)$"),
-    provider: str | None = Query(default=None, pattern="^(auto|taifex_mis|kgi)$"),
-    db: Session = Depends(get_db),
-):
-    source_error: str | None = None
-    try:
-        rows = get_latest_taiwan_futures_quotes(
-            db=db,
-            symbols=symbols,
-            refresh=refresh,
-            session=session,
-            provider=provider,
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
-    except TaiwanFuturesFetchError as exc:
-        source_error = str(exc)
-        rows = get_latest_taiwan_futures_quotes(
-            db=db,
-            symbols=symbols,
-            refresh=False,
-            session=session,
-            provider=provider,
-        )
-        _record_taiwan_futures_quote_refresh_issue(
-            db=db,
-            symbols=symbols,
-            session=session,
-            provider=provider,
-            exc=exc,
-            cached_count=len(rows),
-        )
-
-    return [
-        taiwan_futures_quote_to_dict(
-            row,
-            expected_session=session,
-            source_error=source_error,
-        )
-        for row in rows
-    ]
-
-
-@router.get(
-    "/tw-futures/{symbol}/daily",
-    response_model=list[TaiwanFuturesDailyBarRead],
-)
-def list_taiwan_futures_daily_bars_api(
-    symbol: str,
-    limit: int = Query(default=120, ge=1, le=1000),
-    refresh: bool = False,
-    lookback_days: int = Query(default=45, ge=1, le=730),
-    start_date: date | None = None,
-    end_date: date | None = None,
-    active_only: bool = True,
-    db: Session = Depends(get_db),
-):
-    try:
-        if refresh:
-            try:
-                refresh_taiwan_futures_daily_bars(
-                    db=db,
-                    symbols=[symbol],
-                    start_date=start_date,
-                    end_date=end_date,
-                    lookback_days=lookback_days,
-                    force=False,
-                )
-            except TaiwanFuturesFetchError:
-                existing_rows = list_taiwan_futures_daily_bars(
-                    db=db,
-                    symbol=symbol,
-                    limit=limit,
-                    active_only=active_only,
-                )
-                if not existing_rows:
-                    raise
-
-        rows = list_taiwan_futures_daily_bars(
-            db=db,
-            symbol=symbol,
-            limit=limit,
-            active_only=active_only,
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
-    except TaiwanFuturesFetchError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=str(exc),
-        ) from exc
-
-    return [taiwan_futures_daily_bar_to_dict(row) for row in rows]
-
-
-@router.get(
-    "/tw-futures/{symbol}/intraday",
-    response_model=list[TaiwanFuturesIntradayBarRead],
-)
-def list_taiwan_futures_intraday_bars_api(
-    symbol: str,
-    interval: str = Query(default="1m", pattern="^1m$"),
-    limit: int = Query(default=390, ge=1, le=3000),
-    refresh: bool = True,
-    session: str = Query(default="auto", pattern="^(auto|regular|after_hours)$"),
-    provider: str | None = Query(default=None, pattern="^(auto|taifex_mis|kgi)$"),
-    trade_date: date | None = None,
-    db: Session = Depends(get_db),
-):
-    refresh_error: TaiwanFuturesFetchError | None = None
-    try:
-        if refresh:
-            try:
-                refresh_taiwan_futures_quotes(
-                    db=db,
-                    symbols=[symbol],
-                    session=session,
-                    active_only=True,
-                    provider=provider,
-                )
-            except TaiwanFuturesFetchError as exc:
-                db.rollback()
-                refresh_error = exc
-
-        rows = list_taiwan_futures_intraday_bars(
-            db=db,
-            symbol=symbol,
-            interval=interval,
-            limit=limit,
-            trade_date=trade_date,
-            provider=provider,
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
-
-    if not rows and refresh_error is not None:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=str(refresh_error),
-        ) from refresh_error
-
-    return [taiwan_futures_intraday_bar_to_dict(row) for row in rows]
-
-
-@router.get("/indices/summary", response_model=MarketIndexSummaryRead)
-def get_indices_summary(
-    force_refresh: bool = False,
-    db: Session = Depends(get_db),
-):
-    return get_market_index_summary(db=db, force_refresh=force_refresh)
-
-
 @router.post(
     "/market-chips/refresh",
     response_model=JobRunRead,
@@ -1351,7 +1186,7 @@ def get_latest_market_chip_daily_api(
             detail=f"Latest market chip data for index_id='{index_id}' not found.",
         )
 
-    return market_chip_daily_to_dict(row)
+    return market_chip_daily_to_dict(row, db=db, resolve_expected_margin=True)
 
 
 @router.get("/market-chips", response_model=list[MarketChipDailyRead])
@@ -1372,87 +1207,6 @@ def list_market_chip_daily_api(
             limit=limit,
         )
     ]
-
-
-@router.get("/indices/list", response_model=MarketIndexListRead)
-def get_indices_list(
-    market: str = Query(default="TWSE", pattern="^(TWSE|TPEX)$"),
-    limit: int = Query(default=80, ge=1, le=200),
-):
-    try:
-        return get_market_index_list(market=market, limit=limit)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Index list source unavailable: {exc}",
-        ) from exc
-
-
-@router.get("/indices/{index_id}/intraday", response_model=IntradayTrendRead)
-def get_index_intraday_trend(index_id: str):
-    try:
-        return get_market_index_intraday(index_id=index_id)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Index intraday source unavailable: {exc}",
-        ) from exc
-
-
-@router.get("/indices/{index_id}/contributions", response_model=MarketIndexContributionRead)
-def get_index_contributions(
-    index_id: str,
-    limit: int = Query(default=20, ge=1, le=100),
-    db: Session = Depends(get_db),
-):
-    try:
-        return get_market_index_contributions(index_id=index_id, limit=limit, db=db)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Index contribution source unavailable: {exc}",
-        ) from exc
-
-
-@router.get("/indices/{index_id}/ohlc", response_model=MarketOhlcChartRead)
-def get_index_ohlc_chart_data(
-    index_id: str,
-    timeframe: str = Query(default="daily", pattern="^(daily|weekly|monthly)$"),
-    bars: int = Query(default=90, ge=1, le=5000),
-    db: Session = Depends(get_db),
-):
-    try:
-        return get_market_index_ohlc_chart_data(
-            index_id=index_id,
-            timeframe=timeframe,
-            bars=bars,
-            db=db,
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Index chart source unavailable: {exc}",
-        ) from exc
 
 
 @router.get("/institutional/latest", response_model=list[InstitutionalTradeDailyRead])

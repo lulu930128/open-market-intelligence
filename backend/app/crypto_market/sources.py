@@ -25,7 +25,7 @@ from app.crypto_market.contract import (
     provider_supports_ohlcv_interval,
     split_symbol,
 )
-from app.http_client import get as http_get
+from app.crypto_market.providers import request_json as provider_request_json
 
 
 class CryptoMarketDataFetchError(Exception):
@@ -325,14 +325,12 @@ def _coinglass_headers() -> dict[str, str]:
 
 def _request_json(url: str, *, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> Any:
     try:
-        response = http_get(
+        return provider_request_json(
             url,
             params=params,
             headers=headers,
-            timeout=settings.crypto_market_http_timeout_seconds,
+            timeout_seconds=settings.crypto_market_http_timeout_seconds,
         )
-        response.raise_for_status()
-        return response.json()
     except (requests.RequestException, ValueError) as exc:
         raise CryptoMarketDataFetchError(f"Failed to fetch crypto market data from {url}: {exc}") from exc
 

@@ -72,7 +72,7 @@ Protects:
 Useful gap checks:
 
 - Add more Taiwan-first scenario questions before expanding market-specific logic.
-- Add tests for follow-up context from Kuro `last_resolution` if backend starts relying on it more heavily.
+- Keep `backend/tests/test_ai_p0_safety.py` covering canonical `last_target`, legacy `last_resolution`, explicit target override, and missing-context clarification.
 
 ### `backend/tests/test_ai_answer_composer.py`
 
@@ -105,6 +105,16 @@ Useful gap checks:
 - Verify Taiwan holiday/session behavior against real recent dates before changing date logic.
 - Keep expected-date tests deterministic; avoid relying on live provider state.
 
+### `backend/tests/test_ai_p1_reliability.py`
+
+Protects:
+
+- `available` does not imply `current` for monthly revenue.
+- `data_freshness` preserves US/JP/KR/CRYPTO/ALL market scope and rejects unsupported markets.
+- Existing canonical US provider selection is reused, while stale fallback health remains separate.
+- The wall-clock deadline returns `timeout` and exposes cached fallback/cancellation state.
+- Expected dates alone are not counted as cached evidence.
+
 ### `backend/tests/test_omi_mcp_server.py`
 
 Protects:
@@ -134,7 +144,6 @@ Useful gap checks:
 ## Current Known Gaps From Static Inspection
 
 - Kuro still has an OMI API fallback of `8300` in `market_preflight.py`; this is downstream but affects Kuro OMI briefing startup reliability.
-- The OMI decision answer contract is mostly implicit in tests and helper functions. `ContractMap.md` now documents it, but code has no single exported contract object.
 - Runtime API smoke checks were not run during planning; test status must be refreshed before implementation.
 - External refresh behavior crosses backend policy, MCP defaults, Kuro tool policy, and OMI `agentic_tools.py`; changes must be tested on both OMI and Kuro sides.
 - `report` / persisted report behavior must stay separate from non-persistent `analysis`; Kuro default policy should keep `allow_write=false`.
@@ -147,5 +156,8 @@ Useful gap checks:
 
 ## Baseline Status
 
-- Not executed in this planning pass.
-- First implementation session must start by running the minimal AI contract set above and recording results in `Progress.md`.
+- 2026-07-07: minimal AI contract set passed through `.\scripts\run-safe-validation.ps1 -Profile backend -BackendPytestArgs @('backend\tests\test_ai_decision_core.py','backend\tests\test_ai_answer_composer.py','backend\tests\test_ai_freshness_guard.py','backend\tests\test_ai_ask_stages.py','backend\tests\test_omi_mcp_server.py')`.
+- 2026-07-07: `analysis.decision_contract` v1 was added as an additive projection, with targeted regression coverage in `backend/tests/test_ai_ask_stages.py`.
+- Runtime API smoke checks were not run in this implementation slice because the change is response assembly / contract projection and the bounded backend tests covered the affected path.
+- 2026-07-19: Added `test_ai_p0_safety.py` for cost-vs-symbol parsing, target conflicts, `TARGET_NOT_FOUND`, follow-up inheritance, directional price invariants, and action-plan blocking. The focused AI/MCP set passed 174 tests.
+- 2026-07-19: Added `test_ai_p1_reliability.py`; the bounded P0/P1, decision-core, MCP, and TW/US/JP/KR market suite passed 321 tests through the safe-validation wrapper.

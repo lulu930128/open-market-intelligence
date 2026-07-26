@@ -280,11 +280,11 @@ def build_us_stock_decision_adapter(
         stance = "insufficient_data"
         title = "美股資料不足"
         confidence = "low"
-    elif score >= 18:
+    elif score >= 2:
         stance = "bullish"
         title = "美股偏強"
-        confidence = "high" if score >= 30 and not missing else "medium"
-    elif score <= -12:
+        confidence = "high" if score >= 18 and not missing else "medium"
+    elif score <= -2:
         stance = "bearish"
         title = "美股偏弱"
         confidence = "medium" if rows else "low"

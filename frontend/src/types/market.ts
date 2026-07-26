@@ -32,6 +32,27 @@ export type WatchlistItemRead = {
   updated_at: string;
 };
 
+export type PortfolioMarket = "tw" | "us" | "jp" | "kr";
+
+export type PortfolioHoldingRead = {
+  id: number;
+  market: PortfolioMarket;
+  symbol: string;
+  symbol_name: string | null;
+  quantity: number;
+  cost_amount: number;
+  currency: string;
+  average_cost: number | null;
+  note: string | null;
+  tags: string | null;
+  strategy_horizon: string | null;
+  opened_at: string | null;
+  is_active: boolean;
+  position_context: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
 export type WatchlistBackfillStockResult = {
   stock_id: string;
   stock_name: string | null;
@@ -101,6 +122,9 @@ export type ChartDrawingSnapshotWrite = {
 
 export type RankingItem = {
   rank: number;
+  market_rank?: number | null;
+  rank_value?: number | null;
+  rank_trade_date?: string | null;
   stock_id: string;
   stock_name: string | null;
   time: string | null;
@@ -131,6 +155,9 @@ export type RankingResponse = {
   include_children: boolean;
   rank_by: string;
   sort_order: string;
+  rank_scope?: "watchlist" | "tw_market" | string;
+  rank_trade_date?: string | null;
+  rank_universe_count?: number;
   requested_stock_count: number;
   ranked_count: number;
   no_data_count: number;
@@ -181,7 +208,7 @@ export type WatchlistRadarBucketRead = {
   count: number;
 };
 
-export type WatchlistRadarPriceLevels = Record<string, number | string | null>;
+export type WatchlistRadarPriceLevels = Record<string, number | string | boolean | null>;
 
 export type WatchlistRadarContextSignal = {
   key: string;
@@ -264,6 +291,106 @@ export type WatchlistGroupRadarRead = {
   stale_stock_count: number;
   buckets: WatchlistRadarBucketRead[];
   results: WatchlistRadarItemRead[];
+  cache_status?: "computed" | "snapshot";
+  snapshot_id?: number | null;
+  snapshot_date?: string | null;
+  calculated_at?: string | null;
+};
+
+export type WatchlistRadarSnapshotRead = {
+  id: number;
+  group_id: number;
+  include_children: boolean;
+  enabled_only: boolean;
+  mode: string;
+  max_results: number;
+  calculation_limit: number;
+  radar_rule_version: string;
+  snapshot_date: string;
+  trade_date: string | null;
+  target_trade_date: string | null;
+  is_current: boolean;
+  current_stock_count: number;
+  stale_stock_count: number;
+  requested_stock_count: number;
+  ranked_count: number;
+  matched_count: number;
+  radar_count: number;
+  no_data_count: number;
+  error_count: number;
+  buckets: WatchlistRadarBucketRead[];
+  data_limitations: string[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type WatchlistRadarOutcomeStatus =
+  | "no_snapshot"
+  | "not_evaluated"
+  | "evaluated"
+  | "pending"
+  | "hit"
+  | "miss"
+  | "neutral"
+  | "unevaluable"
+  | string;
+
+export type WatchlistRadarOutcomeItemRead = {
+  id: number | null;
+  snapshot_item_id: number;
+  rank: number;
+  stock_id: string;
+  stock_name: string | null;
+  bucket: string;
+  bucket_label: string;
+  status: WatchlistRadarOutcomeStatus;
+  reason: string;
+  snapshot_date: string;
+  outcome_trade_date: string | null;
+  signal_close_price: number | null;
+  outcome_open_price: number | null;
+  outcome_high_price: number | null;
+  outcome_low_price: number | null;
+  outcome_close_price: number | null;
+  outcome_volume: number | null;
+  open_gap_pct: number | null;
+  close_return_pct: number | null;
+  max_favorable_pct: number | null;
+  max_adverse_pct: number | null;
+  intraday_range_pct: number | null;
+  volume_change_pct: number | null;
+  radar_item: WatchlistRadarItemRead | null;
+};
+
+export type WatchlistRadarOutcomeBucketSummaryRead = {
+  bucket: string;
+  bucket_label: string;
+  total_count: number;
+  hit_count: number;
+  miss_count: number;
+  neutral_count: number;
+  unevaluable_count: number;
+  pending_count: number;
+  avg_close_return_pct: number | null;
+  avg_max_adverse_pct: number | null;
+};
+
+export type WatchlistRadarOutcomeSummaryRead = {
+  status: WatchlistRadarOutcomeStatus;
+  snapshot: WatchlistRadarSnapshotRead | null;
+  evaluated_at: string | null;
+  total_count: number;
+  hit_count: number;
+  miss_count: number;
+  neutral_count: number;
+  unevaluable_count: number;
+  pending_count: number;
+  avg_close_return_pct: number | null;
+  avg_max_favorable_pct: number | null;
+  avg_max_adverse_pct: number | null;
+  bucket_summaries: WatchlistRadarOutcomeBucketSummaryRead[];
+  items: WatchlistRadarOutcomeItemRead[];
+  data_limitations: string[];
 };
 
 export type Signal = {
@@ -336,6 +463,15 @@ export type ChartPoint = {
   transaction_count: number | null;
 };
 
+export type OhlcIntradayOverlay = {
+  source: string | null;
+  trade_date: string;
+  point_count: number;
+  latest_time: string | null;
+  previous_close: number | null;
+  provisional: boolean;
+};
+
 export type OhlcChartResponse = {
   stock_id: string;
   timeframe: "daily" | "weekly" | "monthly";
@@ -346,12 +482,20 @@ export type OhlcChartResponse = {
   point_count: number;
   points: ChartPoint[];
   backfill: Record<string, unknown> | null;
-  intraday_overlay: Record<string, unknown> | null;
+  intraday_overlay: OhlcIntradayOverlay | null;
+  latest_data_date: string | null;
+  expected_data_date: string | null;
+  freshness_status: "current" | "stale" | "missing" | "future" | string;
+  is_current: boolean;
+  refresh_recommended: boolean;
 };
 
 export type MarketBreadth = {
   market: string;
+  scope?: "full_market" | "registered_universe" | "local_dataset" | string | null;
+  label?: string | null;
   trade_date: string | null;
+  as_of?: string | null;
   advance_count: number;
   decline_count: number;
   unchanged_count: number;
@@ -359,7 +503,21 @@ export type MarketBreadth = {
   limit_up_count: number | null;
   limit_down_count: number | null;
   trade_value: number | null;
+  coverage_count?: number | null;
+  unknown_count?: number | null;
+  message_count?: number | null;
+  missing_count?: number | null;
+  warnings?: string[];
   source: string | null;
+};
+
+export type MarketBreadthStatus = {
+  slot: "market_breadth" | string;
+  status: "ready" | "partial" | "failed" | string;
+  scope: string | null;
+  source: string | null;
+  reason: string | null;
+  warnings: string[];
 };
 
 export type MarketIndexSnapshot = {
@@ -387,6 +545,7 @@ export type MarketIndexSnapshot = {
   point_count: number;
   points: ChartPoint[];
   breadth: MarketBreadth | null;
+  breadth_status: MarketBreadthStatus;
   error_message: string | null;
 };
 
@@ -394,6 +553,29 @@ export type MarketIndexSummary = {
   as_of: string;
   source: string;
   indices: MarketIndexSnapshot[];
+  cache_status?:
+    | "live"
+    | "memory_cache"
+    | "shared_cache"
+    | "stale_memory_cache"
+    | "stale_shared_cache"
+    | "local_cache"
+    | "unknown";
+  refresh_recommended?: boolean;
+  warnings?: string[];
+};
+
+export type MarketChipResourceStatus = {
+  resource: string;
+  status: "ready" | "partial" | "stale" | "missing" | "not_available" | string;
+  data_date: string | null;
+  expected_data_date: string | null;
+  pending_trade_date: string | null;
+  source: string | null;
+  reason: string | null;
+  coverage_count: number | null;
+  total_count: number | null;
+  warnings: string[];
 };
 
 export type MarketChipDaily = {
@@ -409,6 +591,12 @@ export type MarketChipDaily = {
   foreign_futures_net_oi_change: number | null;
   retail_futures_net_oi: number | null;
   retail_futures_net_oi_change: number | null;
+  put_volume: number | null;
+  call_volume: number | null;
+  put_call_volume_ratio_pct: number | null;
+  put_open_interest: number | null;
+  call_open_interest: number | null;
+  put_call_open_interest_ratio_pct: number | null;
   total_institutional_net_value: number | null;
   foreign_investor_net_value: number | null;
   investment_trust_net_value: number | null;
@@ -419,10 +607,33 @@ export type MarketChipDaily = {
   margin_balance_change_value: number | null;
   margin_balance_change_shares: number | null;
   short_balance_change_shares: number | null;
+  margin_status: MarketChipResourceStatus;
+  government_bank_status: MarketChipResourceStatus;
   source_grade: string;
   source_details: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
+};
+
+export type TaiwanFuturesMarketStatus = {
+  status: "open" | "closed" | string;
+  is_open: boolean;
+  phase: string;
+  reason: string;
+  timezone: string;
+  checked_at: string;
+  holiday_name: string | null;
+  regular_session: string;
+  after_hours_session: string;
+  current_session: string | null;
+  current_session_start_at: string | null;
+  current_session_end_at: string | null;
+  last_session: string | null;
+  last_session_start_at: string | null;
+  last_session_end_at: string | null;
+  next_session: string | null;
+  next_session_start_at: string | null;
+  next_session_end_at: string | null;
 };
 
 export type TaiwanFuturesQuote = {
@@ -456,7 +667,7 @@ export type TaiwanFuturesQuote = {
   source_url: string | null;
   fetched_at: string;
   freshness: {
-    status: "live" | "cached" | "session_mismatch" | "stale" | string;
+    status: "live" | "closed" | "cached" | "session_mismatch" | "stale" | string;
     is_live: boolean;
     is_stale: boolean;
     is_session_mismatch: boolean;
@@ -464,6 +675,8 @@ export type TaiwanFuturesQuote = {
     age_seconds: number | null;
     message: string;
     source_error: string | null;
+    last_session_quote_lag_seconds: number | null;
+    market_status: TaiwanFuturesMarketStatus;
   };
   created_at: string;
   updated_at: string;
@@ -499,6 +712,19 @@ export type TaiwanFuturesDailyBar = {
   fetched_at: string;
   created_at: string;
   updated_at: string;
+};
+
+export type TaiwanFuturesDailyRefresh = {
+  status: "success" | "partial" | "failed";
+  symbol: string;
+  requested_end_date: string;
+  effective_end_date: string;
+  latest_released_trade_date: string;
+  release_time: string;
+  skipped_unreleased_end_date: boolean;
+  refreshed_row_count: number;
+  warning: string | null;
+  rows: TaiwanFuturesDailyBar[];
 };
 
 export type TaiwanFuturesIntradayBar = {
@@ -571,20 +797,91 @@ export type MarketIndexContributionResponse = {
 
 export type IntradayTrendPoint = {
   time: string;
+  session?: string;
   price: number;
   volume: number | null;
   open: number | null;
   high: number | null;
   low: number | null;
+  cumulative_volume?: number | null;
+  trade_value?: number | null;
+};
+
+export type StockVolumePaceBaseline = {
+  requested_days: number;
+  sample_days: number;
+  minimum_display_sample_days: number;
+  median_cumulative_volume: number | null;
+  pace_ratio: number | null;
+  difference_pct: number | null;
+  history_trade_dates: string[];
+};
+
+export type StockVolumePace = {
+  kind: string;
+  stock_id: string;
+  market: string;
+  session_scope: "regular";
+  status: "ready" | "partial" | "empty";
+  as_of: string | null;
+  trade_date: string | null;
+  comparison_minute: string | null;
+  current_cumulative_volume: number | null;
+  same_time_baseline_5d: StockVolumePaceBaseline;
+  same_time_baseline_20d: StockVolumePaceBaseline;
+  warnings: string[];
+};
+
+export type USIntradaySourceStatus = {
+  provider: string;
+  status: "ok" | "degraded" | "unavailable";
+  freshness_status:
+    | "current"
+    | "delayed"
+    | "stale"
+    | "off_session"
+    | "missing"
+    | "provider_error";
+  market_phase: string | null;
+  is_live_window: boolean;
+  as_of: string | null;
+  lag_seconds: number | null;
+  is_fallback: boolean;
+  has_usable_data: boolean;
+  message: string | null;
 };
 
 export type IntradayTrendResponse = {
   stock_id: string;
   symbol: string | null;
   source: string;
+  session_scope?: string;
+  session_phase?: string | null;
+  has_extended_hours?: boolean;
+  regular_point_count?: number;
+  extended_point_count?: number;
   previous_close: number | null;
+  previous_close_source?: string | null;
+  previous_close_trade_date?: string | null;
+  previous_close_provider?: string | null;
+  regular_session_close?: number | null;
+  regular_session_close_time?: string | null;
+  regular_session_close_source?: string | null;
+  regular_session_close_provider?: string | null;
   point_count: number;
   points: IntradayTrendPoint[];
+  volume_pace?: StockVolumePace | null;
+  source_status?: USIntradaySourceStatus | null;
+  as_of?: string | null;
+  total_volume?: number | null;
+  volume_unit?: string;
+  volume_semantics?: string;
+  trade_value_unit?: string;
+  is_partial?: boolean;
+  source_url?: string | null;
+  warnings?: string[];
+  fetched_pages?: number;
+  polling_interval_seconds?: number | null;
 };
 
 export type TaiwanStockQuoteDepthLevel = {
@@ -735,6 +1032,106 @@ export type OvernightImpactBasket = {
   source: string;
 };
 
+export type AdrParityRead = {
+  kind: string;
+  status: "ready" | "partial" | "stale" | string;
+  is_current: boolean;
+  stock_id: string;
+  stock_name: string | null;
+  mapping: {
+    stock_id: string;
+    stock_name: string;
+    adr_symbol: string;
+    adr_name: string;
+    adr_exchange: string;
+    local_shares_per_adr: number;
+    source_label: string;
+    source_url: string;
+    verified_on: string;
+  };
+  formula: string;
+  adr_close_usd: number | null;
+  adr_trade_date: string | null;
+  adr_provider: string | null;
+  expected_adr_trade_date: string | null;
+  usd_twd: number | null;
+  fx_source_symbol: string | null;
+  fx_provider: string | null;
+  fx_as_of: string | null;
+  fx_age_seconds: number | null;
+  tw_reference_price_twd: number | null;
+  tw_reference_trade_date: string | null;
+  target_tw_trade_date: string | null;
+  implied_tw_price_twd: number | null;
+  implied_gap_pct: number | null;
+  parity_adr_price_usd: number | null;
+  tw_comparison_price_twd: number | null;
+  tw_comparison_trade_date: string | null;
+  tw_comparison_as_of: string | null;
+  tw_comparison_source: string | null;
+  tw_session_phase: string | null;
+  comparison_mode: string;
+  remaining_gap_pct: number | null;
+  missing: string[];
+  warnings: string[];
+  source_refs: Array<Record<string, string>>;
+  freshness: Record<string, unknown>;
+};
+
+export type FxTrendRead = {
+  status: string;
+  source_symbol: string | null;
+  provider: string | null;
+  usd_twd: number | null;
+  data_date: string | null;
+  as_of: string | null;
+  age_seconds: number | null;
+  history_points: number;
+  usd_twd_change_1d_pct: number | null;
+  usd_twd_change_5d_pct: number | null;
+  usd_twd_change_20d_pct: number | null;
+  twd_change_1d_pct: number | null;
+  twd_change_5d_pct: number | null;
+  twd_change_20d_pct: number | null;
+  regime: string;
+};
+
+export type ForeignFlowWindowRead = {
+  days: number;
+  available_days: number;
+  net_value_twd: number | null;
+  turnover_twd: number | null;
+  turnover_ratio_pct: number | null;
+  net_shares: number | null;
+};
+
+export type ForeignFlowRead = {
+  scope: string;
+  status: string;
+  state: string;
+  state_basis_days: number | null;
+  trade_date: string | null;
+  expected_trade_date: string;
+  windows: ForeignFlowWindowRead[];
+};
+
+export type FxFlowContextRead = {
+  kind: string;
+  status: "ready" | "partial" | "stale" | string;
+  is_current: boolean;
+  stock_id: string;
+  signal: string;
+  signal_horizon_days: number;
+  causality: string;
+  fx: FxTrendRead;
+  market_foreign: ForeignFlowRead;
+  stock_foreign: ForeignFlowRead;
+  missing: string[];
+  warnings: string[];
+  source_refs: Array<Record<string, string>>;
+  freshness: Record<string, unknown>;
+};
+
 export type OvernightImpactRead = {
   kind: string;
   stock_id: string;
@@ -756,6 +1153,8 @@ export type OvernightImpactRead = {
     profiles: string[];
     reason: string;
   };
+  adr_parity?: AdrParityRead | null;
+  fx_flow_context?: FxFlowContextRead | null;
   factors: OvernightImpactFactor[];
   baskets: OvernightImpactBasket[];
   missing: string[];
@@ -786,6 +1185,111 @@ export type StockIndicatorPoint = {
   support_resistance?: Record<string, number | null>;
 };
 
+export type TaiwanDispositionStatusRead = {
+  stock_id: string;
+  checked_at: string;
+  is_disposition: boolean;
+  is_active: boolean;
+  status: "active" | "upcoming" | "none" | string;
+  cache_status: "current" | "degraded" | "stale" | "missing" | string;
+  cache_fetched_at: string | null;
+  warning: string | null;
+  provider: string | null;
+  market: string | null;
+  source_url: string | null;
+  announced_date: string | null;
+  stock_name: string | null;
+  start_date: string | null;
+  end_date: string | null;
+  matching_interval_minutes: number | null;
+  reason: string | null;
+  measure: string | null;
+  requires_full_precollection: boolean;
+  margin_trading_suspended: boolean;
+  detail: string | null;
+};
+
+export type TaiwanCorporateEventRead = {
+  event_id: string;
+  event_type: "ex_dividend" | "financial_report" | "investor_conference" | string;
+  timing_status: "scheduled" | "actual" | "deadline" | string;
+  provider: string;
+  market: string;
+  source_name: string;
+  source_url: string;
+  stock_id: string;
+  stock_name: string | null;
+  start_date: string;
+  end_date: string;
+  start_time: string | null;
+  title: string;
+  summary: string | null;
+  location: string | null;
+  cash_dividend: number | null;
+  stock_dividend_ratio: number | null;
+  financial_report_related: boolean;
+  related_event_id: string | null;
+  company_url: string | null;
+  video_url: string | null;
+  status: "today" | "ongoing" | "upcoming" | "past" | string;
+  days_until: number;
+};
+
+export type TaiwanCorporateEventSourceStatusRead = {
+  provider: string;
+  market: string;
+  source: string;
+  source_url: string;
+  status: "current" | "degraded" | "stale" | "missing" | string;
+  fetched_at: string | null;
+  last_attempt_at: string | null;
+  last_error: string | null;
+  warning: string | null;
+  coverage_start: string | null;
+  coverage_end: string | null;
+  entry_count: number;
+};
+
+export type TaiwanCorporateEventListRead = {
+  kind: string;
+  generated_at: string;
+  as_of: string;
+  date_from: string;
+  date_to: string;
+  stock_id: string | null;
+  market: string | null;
+  event_types: string[];
+  result_count: number;
+  warning: string | null;
+  sources: Record<string, TaiwanCorporateEventSourceStatusRead>;
+  results: TaiwanCorporateEventRead[];
+};
+
+export type TaiwanStockEventSummaryRead = {
+  stock_id: string;
+  checked_at: string;
+  reminder_days: number;
+  cache_status: "current" | "degraded" | "stale" | "missing" | string;
+  cache_fetched_at: string | null;
+  warning: string | null;
+  result_count: number;
+  results: TaiwanCorporateEventRead[];
+};
+
+export type TaiwanStockEventHistoryRead = {
+  stock_id: string;
+  checked_at: string;
+  history_years: number;
+  cache_status: "current" | "degraded" | "stale" | "missing" | string;
+  cache_fetched_at: string | null;
+  coverage_start: string | null;
+  coverage_end: string | null;
+  warning: string | null;
+  total_count: number;
+  result_count: number;
+  results: TaiwanCorporateEventRead[];
+};
+
 export type StockMasterRead = {
   id: number;
   stock_id: string;
@@ -796,6 +1300,9 @@ export type StockMasterRead = {
   category: string | null;
   is_active: boolean;
   notes: string | null;
+  disposition: TaiwanDispositionStatusRead | null;
+  upcoming_events: TaiwanStockEventSummaryRead | null;
+  event_history: TaiwanStockEventHistoryRead | null;
   first_seen_at: string;
   last_seen_at: string;
   created_at: string;
@@ -1029,6 +1536,8 @@ export type JPWatchlistRankingItemRead = {
   change_pct: number | null;
   volume: number | null;
   status: string;
+  latest_fetched_at: string | null;
+  freshness_status: "current" | "stale" | "missing" | "future" | string;
   source: string | null;
   error_message: string | null;
 };
@@ -1047,6 +1556,10 @@ export type JPWatchlistRankingRead = {
   is_current: boolean;
   current_symbol_count: number;
   stale_symbol_count: number;
+  missing_symbol_count: number;
+  future_symbol_count: number;
+  coverage_status: "current" | "partial" | "missing" | string;
+  refresh_recommended: boolean;
   results: JPWatchlistRankingItemRead[];
 };
 
@@ -1069,6 +1582,93 @@ export type JPOhlcChartRead = {
   point_count: number;
   points: JPOhlcPointRead[];
   backfill: Record<string, unknown> | null;
+  latest_data_date: string | null;
+  expected_data_date: string | null;
+  freshness_status: "current" | "stale" | "missing" | "future" | string;
+  is_current: boolean;
+  refresh_recommended: boolean;
+};
+
+export type JPMarketCoverageRead = {
+  scope: string;
+  active_stock_count: number;
+  observed_symbol_count: number;
+  current_symbol_count: number;
+  stale_symbol_count: number;
+  missing_symbol_count: number;
+  active_coverage_ratio: number;
+  observed_current_ratio: number;
+  status: string;
+  is_partial: boolean;
+};
+
+export type JPMarketBreadthRead = {
+  trade_date: string | null;
+  advance_count: number;
+  decline_count: number;
+  unchanged_count: number;
+  no_comparison_count: number;
+  total_count: number;
+  coverage_count: number;
+  source: string;
+  is_partial: boolean;
+};
+
+export type JPMarketSectorBreadthRead = {
+  sector: string;
+  covered_count: number;
+  advance_count: number;
+  decline_count: number;
+  unchanged_count: number;
+  average_change_pct: number | null;
+};
+
+export type JPMarketIndexSnapshotRead = {
+  symbol: string;
+  label: string;
+  role: string;
+  latest_data_date: string | null;
+  expected_data_date: string | null;
+  freshness_status: string;
+  is_current: boolean;
+  close: number | null;
+  previous_close: number | null;
+  change: number | null;
+  change_pct: number | null;
+  volume: number | null;
+  provider: string | null;
+  point_count: number;
+};
+
+export type JPMarketMoverRead = {
+  symbol: string;
+  security_name: string | null;
+  sector: string | null;
+  trade_date: string;
+  close: number;
+  previous_close: number;
+  change: number;
+  change_pct: number;
+  volume: number | null;
+  provider: string;
+};
+
+export type JPMarketOverviewRead = {
+  kind: "jp_market_overview";
+  generated_at: string;
+  expected_trade_date: string;
+  calendar_status: Record<string, unknown>;
+  coverage: JPMarketCoverageRead;
+  watchlist_coverage: Record<string, unknown>;
+  breadth: JPMarketBreadthRead;
+  sectors: JPMarketSectorBreadthRead[];
+  indices: JPMarketIndexSnapshotRead[];
+  top_gainers: JPMarketMoverRead[];
+  top_losers: JPMarketMoverRead[];
+  source_health: Record<string, unknown>;
+  refresh_recommended: boolean;
+  refresh_scope: string;
+  warnings: string[];
 };
 
 export type JPResourceSlotRead = {
@@ -1084,6 +1684,390 @@ export type JPResourceSlotRead = {
 export type JPResourceSummaryRead = {
   symbol: string;
   slots: JPResourceSlotRead[];
+};
+
+export type KRStockMasterRead = {
+  id: number;
+  symbol: string;
+  local_code: string | null;
+  security_name: string | null;
+  security_name_kr: string | null;
+  exchange: string | null;
+  market_segment: string | null;
+  sector: string | null;
+  industry: string | null;
+  asset_type: string;
+  listing_source: string;
+  currency: string;
+  exchange_timezone_name: string | null;
+  is_active: boolean;
+  first_seen_at: string;
+  last_seen_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type KRWatchlistGroupNode = {
+  id: number;
+  parent_id: number | null;
+  group_name: string;
+  description: string | null;
+  sort_order: number;
+  is_active: boolean;
+  children: KRWatchlistGroupNode[];
+};
+
+export type KRWatchlistGroupRead = {
+  id: number;
+  parent_id: number | null;
+  group_name: string;
+  description: string | null;
+  sort_order: number;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type KRWatchlistItemRead = {
+  id: number;
+  group_id: number;
+  symbol: string;
+  local_code: string | null;
+  security_name: string | null;
+  security_name_kr: string | null;
+  exchange: string | null;
+  market_segment: string | null;
+  sector: string | null;
+  industry: string | null;
+  asset_type: string | null;
+  note: string | null;
+  priority: number;
+  tags: string | null;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type KRStockMasterSyncResultRead = {
+  status: string;
+  provider: string;
+  source_url: string | null;
+  scanned_count: number;
+  created_count: number;
+  updated_count: number;
+  deactivated_count: number;
+  message: string;
+};
+
+export type KRDailyPriceRefreshResultRead = {
+  status: string;
+  provider: string;
+  symbol: string;
+  fetched_count: number;
+  inserted_count: number;
+  updated_count: number;
+  message: string;
+};
+
+export type KRMarketIndexRead = {
+  id: number | null;
+  index_id: string;
+  provider_symbol: string;
+  name: string;
+  short_name: string;
+  name_kr: string | null;
+  market_segment: string;
+  index_family: string;
+  provider: string;
+  currency: string;
+  source_url: string | null;
+  exchange_timezone_name: string;
+  sort_order: number;
+  is_active: boolean;
+};
+
+export type KRIndexRefreshResultRead = {
+  status: string;
+  provider: string;
+  index_id: string;
+  provider_symbol: string | null;
+  from_date: string | null;
+  to_date: string | null;
+  fetched_count: number;
+  inserted_count: number;
+  updated_count: number;
+  message: string;
+};
+
+export type KRMarketBreadthRead = {
+  index_id: string;
+  market_segment: string;
+  trade_date: string | null;
+  advance_count: number;
+  decline_count: number;
+  unchanged_count: number;
+  total_count: number;
+  positive_ratio: number | null;
+  advance_decline_ratio: number | null;
+  average_change_pct: number | null;
+  trade_value: number | null;
+  source: string | null;
+  status: string;
+  coverage_note: string | null;
+};
+
+export type KRMarketBreadthRefreshResultRead = {
+  status: string;
+  provider: string;
+  market_id: string;
+  trade_date: string | null;
+  fetched_count: number;
+  inserted_count: number;
+  updated_count: number;
+  message: string;
+};
+
+export type KRIndexSnapshotRead = KRMarketIndexRead & {
+  latest_date: string | null;
+  close: number | null;
+  change: number | null;
+  change_pct: number | null;
+  volume: number | null;
+  latest_provider: string | null;
+  latest_source_url: string | null;
+  status: string;
+  breadth: KRMarketBreadthRead | null;
+};
+
+export type KRIndexSummaryRead = {
+  kind: string;
+  generated_at: string;
+  expected_daily_price_date: string | null;
+  summary: {
+    index_count: number;
+    current_count: number;
+    stale_count: number;
+    empty_count: number;
+  };
+  indices: KRIndexSnapshotRead[];
+};
+
+export type KRResourceRefreshResultRead = {
+  status: string;
+  provider: string;
+  symbol: string | null;
+  fetched_count: number;
+  inserted_count: number;
+  updated_count: number;
+  message: string;
+};
+
+export type KRCompanyFundamentalRead = {
+  id: number;
+  provider: string;
+  symbol: string;
+  corp_code: string | null;
+  stock_code: string | null;
+  company_name: string | null;
+  fiscal_year: number | null;
+  report_code: string | null;
+  report_name: string | null;
+  statement_name: string | null;
+  account_name: string | null;
+  account_id: string | null;
+  current_amount: number | null;
+  previous_amount: number | null;
+  currency: string | null;
+  disclosed_date: string | null;
+  receipt_no: string | null;
+  source_url: string | null;
+  raw_payload_hash: string | null;
+  fetched_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type KRInvestorTradeDailyRead = {
+  id: number;
+  provider: string;
+  symbol: string;
+  trade_date: string;
+  investor_type: string;
+  buy_value: number | null;
+  sell_value: number | null;
+  net_buy_value: number | null;
+  buy_volume: number | null;
+  sell_volume: number | null;
+  net_buy_volume: number | null;
+  source_url: string | null;
+  raw_payload_hash: string | null;
+  fetched_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type KRWatchlistRankingItemRead = {
+  rank: number;
+  symbol: string;
+  security_name: string | null;
+  exchange: string | null;
+  market_segment: string | null;
+  sector: string | null;
+  industry: string | null;
+  asset_type: string | null;
+  group_id: number;
+  trade_date: string | null;
+  close: number | null;
+  previous_close: number | null;
+  change: number | null;
+  change_pct: number | null;
+  volume: number | null;
+  status: string;
+  source: string | null;
+  error_message: string | null;
+};
+
+export type KRWatchlistRankingRead = {
+  group_id: number | null;
+  include_children: boolean;
+  rank_by: string;
+  sort_order: string;
+  requested_symbol_count: number;
+  ranked_count: number;
+  no_data_count: number;
+  error_count: number;
+  trade_date: string | null;
+  target_trade_date: string | null;
+  is_current: boolean;
+  current_symbol_count: number;
+  stale_symbol_count: number;
+  results: KRWatchlistRankingItemRead[];
+};
+
+export type KRWatchlistReadinessItemRead = {
+  symbol: string;
+  security_name: string | null;
+  group_id: number;
+  market_segment: string | null;
+  latest_daily_date: string | null;
+  latest_daily_provider: string | null;
+  daily_row_count: number;
+  daily_status: string;
+  latest_investor_date: string | null;
+  investor_row_count: number;
+  latest_fundamental_date: string | null;
+  fundamental_row_count: number;
+  readiness_status: string;
+  missing_resources: string[];
+};
+
+export type KRWatchlistReadinessRead = {
+  kind: string;
+  group_id: number | null;
+  include_children: boolean;
+  enabled_only: boolean;
+  expected_daily_price_date: string | null;
+  summary: {
+    requested_symbol_count: number;
+    ready_count: number;
+    partial_count: number;
+    no_data_count: number;
+    daily_current_count: number;
+    daily_stale_count: number;
+    daily_empty_count: number;
+    investor_available_count: number;
+    fundamental_available_count: number;
+  };
+  results: KRWatchlistReadinessItemRead[];
+};
+
+export type KROhlcPointRead = {
+  time: string;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  close: number | null;
+  volume: number | null;
+};
+
+export type KROhlcChartRead = {
+  symbol: string;
+  timeframe: string;
+  bars: number;
+  lookback_days: number;
+  from_date: string;
+  to_date: string;
+  point_count: number;
+  points: KROhlcPointRead[];
+  backfill: Record<string, unknown> | null;
+  latest_data_date: string | null;
+  expected_data_date: string | null;
+  freshness_status: "current" | "stale" | "missing" | "future" | string;
+  is_current: boolean;
+  refresh_recommended: boolean;
+};
+
+export type KRIndexOhlcChartRead = {
+  index_id: string;
+  provider_symbol: string;
+  name: string;
+  short_name: string;
+  timeframe: string;
+  bars: number;
+  lookback_days: number;
+  from_date: string;
+  to_date: string;
+  point_count: number;
+  points: KROhlcPointRead[];
+  backfill: Record<string, unknown> | null;
+  latest_data_date: string | null;
+  expected_data_date: string | null;
+  freshness_status: "current" | "stale" | "missing" | "future" | string;
+  is_current: boolean;
+  refresh_recommended: boolean;
+};
+
+export type KRResourceSlotRead = {
+  key: string;
+  status: "available" | "empty" | "planned" | string;
+  available: boolean;
+  source: string | null;
+  latest_date: string | null;
+  row_count: number;
+  metrics?: Record<string, string | number | null>;
+};
+
+export type KRResourceSummaryRead = {
+  symbol: string;
+  slots: KRResourceSlotRead[];
+};
+
+export type KRSourceHealthEntryRead = {
+  resource: string;
+  provider: string;
+  target: string;
+  status: string;
+  ok: boolean;
+  row_count: number;
+  latest_data_date: string | null;
+  expected_data_date: string | null;
+  data_quality: string;
+  reason: string;
+  error_message: string | null;
+};
+
+export type KRSourceHealthRead = {
+  kind: string;
+  generated_at: string;
+  expected_daily_price_date: string | null;
+  summary: {
+    entry_count: number;
+    ok_count: number;
+    empty_count: number;
+    stale_count: number;
+    error_count: number;
+  };
+  entries: KRSourceHealthEntryRead[];
 };
 
 export type USSymbolSyncResultRead = {
@@ -1146,6 +2130,11 @@ export type USOhlcChartRead = {
   points: USOhlcPointRead[];
   backfill: Record<string, unknown> | null;
   intraday_overlay: Record<string, unknown> | null;
+  latest_data_date: string | null;
+  expected_data_date: string | null;
+  freshness_status: "current" | "stale" | "missing" | "future" | string;
+  is_current: boolean;
+  refresh_recommended: boolean;
 };
 
 export type USSecCompanyFactRead = {
@@ -1333,6 +2322,7 @@ export type USWatchlistRankingItemRead = {
   group_id: number;
   trade_date: string | null;
   time: string | null;
+  session: string | null;
   close: number | null;
   previous_close: number | null;
   change: number | null;
@@ -1340,6 +2330,7 @@ export type USWatchlistRankingItemRead = {
   volume: number | null;
   status: string;
   source: string | null;
+  has_extended_hours: boolean;
   intraday_previous_close: number | null;
   intraday_points: Array<{
     time: string;

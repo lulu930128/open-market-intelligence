@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.ai import answer_composer
+from app.ai import answer_composer, answer_data_limits, reports
 from app.ai import ask as ai_ask
 
 
@@ -23,6 +23,243 @@ def _technical_levels() -> dict[str, object]:
 
 
 class AiAnswerComposerTests(unittest.TestCase):
+    def test_broker_primary_intent_uses_multi_domain_answer_profile(self) -> None:
+        answer = answer_composer.build_consumer_human_answer(
+            question_intent="broker_branch",
+            target={
+                "type": "tw_stock",
+                "id": "2330",
+                "market": "TW",
+                "label": "台積電",
+            },
+            analysis_digest={
+                "kind": "stock_analysis_digest",
+                "selected_summary": "日線偏弱，等待量價重新轉強。",
+                "selected_confidence": "medium",
+                "compact_evidence": {
+                    "quote": {
+                        "price": 2350,
+                        "quote_time": "2026-07-24T13:30:00+08:00",
+                        "is_realtime": False,
+                    },
+                    "technical": {
+                        "analysis": {
+                            "selected_summary": "日線偏弱，等待量價重新轉強。",
+                        },
+                        "levels": {
+                            "entry": {
+                                "breakout_confirm_above": {"price": 2505},
+                            },
+                            "risk": {
+                                "technical_invalidation": {"price": 2290},
+                            },
+                        },
+                    },
+                    "chips": {
+                        "institutional": {
+                            "trade_date": "2026-07-24",
+                            "foreign_investor_net": -12500,
+                            "total_institutional_net": -10300,
+                        },
+                        "margin": {
+                            "trade_date": "2026-07-24",
+                            "margin_today_balance": 21000,
+                            "short_today_balance": 1300,
+                        },
+                        "broker_branch": {
+                            "trade_date": "2026-07-24",
+                            "available_days": 5,
+                            "requested_days": 5,
+                            "buy_top": [
+                                {"branch_name": "分點甲", "net_lots": 120},
+                            ],
+                            "sell_top": [
+                                {"branch_name": "分點乙", "net_lots": -80},
+                            ],
+                        },
+                    },
+                },
+            },
+            missing=[
+                "shareholding_distribution_weekly",
+                "monthly_revenue",
+                "us_overnight_tw_impact",
+            ],
+            warnings=[
+                "shareholding_distribution_weekly is stale",
+                "monthly_revenue is stale",
+                "US overnight context is stale",
+            ],
+            selected_capabilities=[
+                "target.identity",
+                "quote.snapshot",
+                "daily.ohlcv",
+                "technical.structure",
+                "chips.institutional",
+                "chips.margin",
+                "broker_branch.summary",
+                "data.freshness",
+            ],
+            requested_domains=[
+                "quote",
+                "chart",
+                "technical",
+                "chips",
+                "broker_branch",
+                "freshness",
+            ],
+        )
+
+        self.assertEqual(answer["style"], "multi_domain_stock_summary")
+        self.assertIn("2,350", answer["text"])
+        self.assertIn("日線偏弱", answer["text"])
+        self.assertIn("外資", answer["text"])
+        self.assertIn("融資", answer["text"])
+        self.assertIn("分點甲", answer["text"])
+        self.assertIn("2,290", answer["text"])
+        rendered_limits = "\n".join(answer["data_limits"])
+        self.assertIn("shareholding_distribution_weekly", rendered_limits)
+        self.assertNotIn("monthly_revenue", rendered_limits)
+        self.assertNotIn("overnight", rendered_limits.casefold())
+
+    def test_us_price_keeps_raw_number_and_adds_rounded_display_text(self) -> None:
+        summary = reports._compact_us_stock_summary(
+            {
+                "summary": {},
+                "data": {
+                    "daily_prices": [
+                        {
+                            "trade_date": "2026-07-17",
+                            "close_price": 202.80999755859375,
+                        },
+                        {
+                            "trade_date": "2026-07-16",
+                            "close_price": 200.0,
+                        },
+                    ]
+                },
+                "missing": [],
+            }
+        )
+
+        self.assertEqual(summary["latest"]["close"], 202.80999755859375)
+        self.assertEqual(summary["latest"]["close_display"], "202.81")
+        self.assertIn("Latest US close 202.81", summary["highlights"][0])
+        self.assertNotIn("202.80999755859375", summary["highlights"][0])
+
+    def test_market_breadth_answer_calls_clear_weakness_from_decliners(self) -> None:
+        answer = answer_composer.build_consumer_human_answer(
+            question_intent="market_breadth",
+            target={"type": "market", "market": "TW", "label": "台股"},
+            analysis_digest={
+                "kind": "market_brief_digest",
+                "breadth": {
+                    "label": "上市全市場廣度",
+                    "advance_count": 88,
+                    "decline_count": 971,
+                    "unchanged_count": 12,
+                    "limit_up_count": 4,
+                    "limit_down_count": 84,
+                },
+            },
+            missing=[],
+            warnings=[],
+            summary_limit=4,
+            response_preferences=None,
+        )
+
+        self.assertEqual(answer["style"], "market_breadth_summary")
+        self.assertEqual(answer["stance"], "bearish")
+        self.assertIn("明顯偏弱", answer["headline"])
+        self.assertIn("上漲 88、下跌 971", answer["text"])
+        self.assertIn("跌停 84", answer["text"])
+        self.assertEqual(answer["action_plan"], [])
+
+    def test_market_breadth_answer_localizes_missing_counts_without_python_none(self) -> None:
+        answer = answer_composer.build_consumer_human_answer(
+            question_intent="market_breadth",
+            target={"type": "market", "market": "TW", "label": "台股"},
+            analysis_digest={
+                "kind": "market_brief_digest",
+                "breadth": {
+                    "advance_count": None,
+                    "decline_count": None,
+                    "unchanged_count": None,
+                    "limit_up_count": None,
+                    "limit_down_count": None,
+                },
+            },
+            missing=[],
+            warnings=[],
+        )
+
+        self.assertIn("上漲 無資料、下跌 無資料、持平 無資料", answer["text"])
+        self.assertNotIn("None", answer["text"])
+        self.assertNotIn("漲停", answer["text"])
+
+    def test_compact_context_answer_does_not_leak_english_next_fill_into_zh_tw(self) -> None:
+        answer = answer_composer.build_compact_context_consumer_answer(
+            target={"type": "market", "market": "TW", "label": "台股"},
+            analysis_digest={
+                "slot_status_counts": {"missing": 1},
+                "problem_slots": [
+                    {
+                        "key": "derivatives",
+                        "status": "missing",
+                        "next_fill": (
+                            "Keep derivatives as auxiliary risk context unless "
+                            "the target market has a native derivatives workflow."
+                        ),
+                    }
+                ],
+            },
+            missing=[],
+            warnings=[],
+            response_preferences={"effective_locale": "zh-TW"},
+        )
+
+        next_action = answer["action_plan"][-1]["text"]
+        self.assertIn("refresh/provider", next_action)
+        self.assertNotIn("Keep derivatives", next_action)
+
+    def test_fallback_provider_stale_is_diagnostics_only(self) -> None:
+        source_health = {
+            "entries": [
+                {
+                    "resource": "daily_price",
+                    "provider": "yahoo",
+                    "provider_role": "selected",
+                    "status": "current",
+                    "required": True,
+                },
+                {
+                    "resource": "daily_price",
+                    "provider": "alphavantage",
+                    "provider_role": "fallback",
+                    "status": "stale",
+                    "latest_data_date": "2026-06-18",
+                    "expected_data_date": "2026-07-17",
+                    "required": True,
+                },
+            ]
+        }
+        warning = (
+            "US fallback provider stale: daily_price via alphavantage - "
+            "latest 2026-06-18"
+        )
+
+        limits = answer_data_limits.source_health_data_limits(source_health)
+        cap, reasons = answer_data_limits.confidence_cap_from_evidence(
+            analysis_digest={"source_health": source_health},
+            missing=[],
+            warnings=[warning],
+        )
+
+        self.assertEqual(limits, [])
+        self.assertIsNone(cap)
+        self.assertEqual(reasons, [])
+        self.assertFalse(answer_data_limits.warning_is_data_limit(warning))
+
     def test_entry_answer_uses_price_levels_and_data_limits(self) -> None:
         answer = answer_composer.build_question_aware_consumer_answer(
             question_intent="entry_decision",
@@ -202,6 +439,43 @@ class AiAnswerComposerTests(unittest.TestCase):
 
         self.assertIn("法人買賣超資料落後", answer["data_limits"][0])
         self.assertIn("資料限制", answer["text"])
+
+    def test_multi_domain_answer_falls_back_to_aggressive_pullback_zone(self) -> None:
+        answer = answer_composer.build_multi_domain_stock_consumer_answer(
+            target={
+                "type": "tw_stock",
+                "id": "2330",
+                "market": "TW",
+                "label": "台積電",
+            },
+            analysis_digest={
+                "selected_summary": "短線等待回測確認。",
+                "compact_evidence": {
+                    "quote": {
+                        "price": 1000,
+                        "trade_date": "2026-07-24",
+                    },
+                    "technical": {
+                        "analysis": {"selected_summary": "短線等待回測確認。"},
+                        "levels": {
+                            "entry": {
+                                "aggressive_zone": {
+                                    "low": 970,
+                                    "high": 985,
+                                }
+                            }
+                        },
+                    },
+                },
+            },
+            missing=[],
+            warnings=[],
+            summary_limit=4,
+            response_preferences=None,
+        )
+
+        self.assertIn("回測區 970–985", answer["text"])
+        self.assertNotIn("回測區 缺資料", answer["text"])
 
     def test_consumer_answer_caps_high_confidence_when_source_health_has_gaps(self) -> None:
         answer = answer_composer.build_consumer_human_answer(

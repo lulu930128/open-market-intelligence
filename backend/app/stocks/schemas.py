@@ -2,6 +2,12 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict
 
+from app.market.schemas import (
+    TaiwanDispositionStatusRead,
+    TaiwanStockEventHistoryRead,
+    TaiwanStockEventSummaryRead,
+)
+
 
 class StockMasterRead(BaseModel):
     id: int
@@ -16,6 +22,9 @@ class StockMasterRead(BaseModel):
 
     is_active: bool
     notes: str | None = None
+    disposition: TaiwanDispositionStatusRead | None = None
+    upcoming_events: TaiwanStockEventSummaryRead | None = None
+    event_history: TaiwanStockEventHistoryRead | None = None
 
     first_seen_at: datetime
     last_seen_at: datetime

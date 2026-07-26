@@ -8,17 +8,56 @@ from app.db.models import (
     InstitutionalTradeDaily,
     MarginTradingDaily,
     MonthlyRevenue,
+    StockMaster,
 )
 from app.market.calendar_status import expected_taiwan_trade_date
 from app.market.intraday import get_intraday_trend
 from app.market.signal_service import calculate_latest_stock_signals
+from app.market.technical_structure import (
+    MOVING_AVERAGE_SIGNAL_LABELS,
+    PRICE_MOVING_AVERAGE_SIGNAL_KEYS,
+    PRICE_RANGE_SIGNAL_KEYS,
+    build_price_moving_average_signals,
+    build_price_range_signals,
+    moving_average_signal_score,
+    price_range_signal_score,
+)
 from app.market.taiwan_rules import TAIWAN_DATASET_DAILY_PRICE
 from app.watchlists import service as watchlist_service
 
 
-_ALLOWED_RANK_FIELDS = {"watchlist", "score", "change_pct", "volume"}
+_MARKET_WIDE_RANK_FIELDS = {"foreign_net", "margin_balance_change_pct"}
+_ALLOWED_RANK_FIELDS = {
+    "watchlist",
+    "score",
+    "change_pct",
+    "volume",
+    *_MARKET_WIDE_RANK_FIELDS,
+}
 _ALLOWED_SORT_ORDERS = {"asc", "desc"}
 ESTIMATED_LIMIT_PCT_THRESHOLD = 9.5
+_PRIMARY_SIGNAL_PRIORITY = {
+    "cross_below_ma60": 120,
+    "cross_above_ma60": 115,
+    "structure_support_break": 110,
+    "donchian_breakdown": 108,
+    "bollinger_breakdown": 106,
+    "structure_resistance_breakout": 104,
+    "donchian_breakout": 102,
+    "bollinger_breakout": 100,
+    "cross_below_ma20": 96,
+    "cross_above_ma20": 94,
+    "below_ma60": 90,
+    "above_ma60": 88,
+    "volume_price_down": 84,
+    "volume_price_up": 82,
+    "ema_bearish_cross": 80,
+    "ema_bullish_cross": 78,
+    "adx_bear_trend": 70,
+    "adx_bull_trend": 68,
+    "below_ma20": 62,
+    "above_ma20": 60,
+}
 
 
 def _date_text(value) -> str | None:
@@ -46,11 +85,15 @@ def _pick_primary_signal(signals: list[dict]) -> dict | None:
     if not signals:
         return None
 
-    for signal in signals:
-        if signal.get("level") == "strong":
-            return signal
-
-    return signals[0]
+    level_priority = {"strong": 30, "warning": 20, "info": 10}
+    return max(
+        enumerate(signals),
+        key=lambda pair: (
+            _PRIMARY_SIGNAL_PRIORITY.get(str(pair[1].get("key") or ""), 0),
+            level_priority.get(str(pair[1].get("level") or ""), 0),
+            -pair[0],
+        ),
+    )[1]
 
 
 def _get_rank_value(row: dict, rank_by: str):
@@ -286,6 +329,155 @@ def _get_intraday_overlay(db: Session, stock_id: str) -> dict | None:
     }
 
 
+def _intraday_candidate_rows(rows: list[dict], limit: int) -> list[dict]:
+    if limit <= 0:
+        return []
+
+    candidates = [
+        (index, row)
+        for index, row in enumerate(rows)
+        if row.get("status") not in {"error", "no_data"}
+    ]
+
+    def priority(pair: tuple[int, dict]) -> tuple[int, int, int, int, float, int]:
+        index, row = pair
+        signal_keys = [str(key) for key in row.get("signal_keys") or []]
+        structural_priority = max(
+            (_PRIMARY_SIGNAL_PRIORITY.get(key, 0) for key in signal_keys),
+            default=0,
+        )
+        change_pct = row.get("change_pct")
+        return (
+            1 if row.get("limit_status") in {"limit_up", "limit_down"} else 0,
+            structural_priority,
+            abs(int(row.get("score", 0) or 0)),
+            int(row.get("signal_count", 0) or 0),
+            abs(float(change_pct)) if _valid_number(change_pct) else 0.0,
+            -index,
+        )
+
+    candidates.sort(key=priority, reverse=True)
+    return [row for _, row in candidates[:limit]]
+
+
+def _apply_intraday_overlay_to_row(row: dict, overlay: dict) -> None:
+    finalized_close = row.get("close")
+    indicator_snapshot = row.get("indicator_snapshot") or {}
+    ma = indicator_snapshot.get("ma") or {}
+    support_resistance = indicator_snapshot.get("support_resistance") or {}
+    donchian = indicator_snapshot.get("donchian") or {}
+    bollinger = indicator_snapshot.get("bollinger") or {}
+    price_ma_signals, price_ma_score = build_price_moving_average_signals(
+        price=overlay.get("close"),
+        ma5=ma.get("ma5"),
+        ma20=ma.get("ma20"),
+        ma60=ma.get("ma60"),
+        previous_price=finalized_close,
+        previous_ma20=ma.get("ma20"),
+        previous_ma60=ma.get("ma60"),
+    )
+    price_range_signals, price_range_score = build_price_range_signals(
+        price=overlay.get("close"),
+        support=support_resistance.get("support20"),
+        resistance=support_resistance.get("resistance20"),
+        donchian_upper=donchian.get("upper20"),
+        donchian_lower=donchian.get("lower20"),
+        bollinger_upper=bollinger.get("upper20"),
+        bollinger_lower=bollinger.get("lower20"),
+    )
+    dynamic_price_signal_keys = PRICE_MOVING_AVERAGE_SIGNAL_KEYS | PRICE_RANGE_SIGNAL_KEYS
+    old_signal_keys = [str(key) for key in row.get("signal_keys") or []]
+    old_price_ma_keys = [
+        key for key in old_signal_keys if key in PRICE_MOVING_AVERAGE_SIGNAL_KEYS
+    ]
+    old_price_range_keys = [
+        key for key in old_signal_keys if key in PRICE_RANGE_SIGNAL_KEYS
+    ]
+    retained_signal_keys = [
+        key for key in old_signal_keys if key not in dynamic_price_signal_keys
+    ]
+    next_price_signals = price_ma_signals + price_range_signals
+    next_price_keys = [str(signal["key"]) for signal in next_price_signals]
+    signal_details = row.get("signal_details")
+    if isinstance(signal_details, list):
+        retained_signal_details = [
+            signal
+            for signal in signal_details
+            if isinstance(signal, dict)
+            and str(signal.get("key") or "") not in dynamic_price_signal_keys
+        ]
+        next_signal_details = retained_signal_details + next_price_signals
+        row["signal_details"] = next_signal_details
+        row["signal_keys"] = [
+            str(signal["key"])
+            for signal in next_signal_details
+            if signal.get("key")
+        ]
+    else:
+        next_signal_details = None
+        row["signal_keys"] = retained_signal_keys + next_price_keys
+    row["signal_count"] = len(row["signal_keys"])
+    row["score"] = (
+        int(row.get("score", 0) or 0)
+        - moving_average_signal_score(old_price_ma_keys)
+        - price_range_signal_score(old_price_range_keys)
+        + price_ma_score
+        + price_range_score
+    )
+
+    if next_signal_details is not None:
+        next_primary = _pick_primary_signal(next_signal_details)
+        row["primary_signal_key"] = next_primary.get("key") if next_primary else None
+        row["primary_signal_label"] = next_primary.get("label") if next_primary else None
+    else:
+        current_primary_key = str(row.get("primary_signal_key") or "")
+        current_primary_priority = _PRIMARY_SIGNAL_PRIORITY.get(current_primary_key, 0)
+        overlay_primary = _pick_primary_signal(next_price_signals)
+        overlay_primary_priority = _PRIMARY_SIGNAL_PRIORITY.get(
+            str(overlay_primary.get("key") or "") if overlay_primary else "",
+            0,
+        )
+        current_primary_removed = (
+            current_primary_key in PRICE_MOVING_AVERAGE_SIGNAL_KEYS
+            or current_primary_key in PRICE_RANGE_SIGNAL_KEYS
+        )
+        current_primary_removed = (
+            current_primary_removed and current_primary_key not in next_price_keys
+        )
+        if overlay_primary is not None and (
+            current_primary_removed or overlay_primary_priority > current_primary_priority
+        ):
+            row["primary_signal_key"] = overlay_primary["key"]
+            row["primary_signal_label"] = MOVING_AVERAGE_SIGNAL_LABELS.get(
+                str(overlay_primary["key"]),
+                str(overlay_primary["label"]),
+            )
+
+    row["time"] = overlay["time"]
+    row["close"] = overlay["close"]
+    row["change"] = overlay["change"]
+    row["change_pct"] = overlay["change_pct"]
+    row["previous_close"] = overlay["previous_close"]
+    row["limit_status"] = overlay["limit_status"]
+    row["intraday_previous_close"] = overlay["previous_close"]
+    row["intraday_points"] = overlay["points"]
+    row["context_snapshot"] = _with_intraday_context(
+        context_snapshot=row["context_snapshot"],
+        overlay=overlay,
+    )
+    row["context_snapshot"]["technical_overlay"] = {
+        "basis": "current intraday price vs finalized daily indicators",
+        "price_signal_keys": next_price_keys,
+        "is_provisional": True,
+    }
+
+    if overlay["volume"] is not None:
+        row["volume"] = overlay["volume"]
+
+    if row["status"] == "no_data":
+        row["status"] = "intraday"
+
+
 def _latest_rows_by_stock(
     db: Session,
     model,
@@ -330,6 +522,30 @@ def _margin_balance_change(row: MarginTradingDaily | None) -> int | None:
     return current - previous
 
 
+def _margin_balance_change_pct_from_values(
+    current: int | float | None,
+    previous: int | float | None,
+) -> float | None:
+    if not _valid_number(current) or not _valid_number(previous):
+        return None
+
+    previous_value = float(previous)
+    if previous_value <= 0:
+        return None
+
+    return round(((float(current) - previous_value) / previous_value) * 100, 4)
+
+
+def _margin_balance_change_pct(row: MarginTradingDaily | None) -> float | None:
+    if row is None:
+        return None
+
+    return _margin_balance_change_pct_from_values(
+        getattr(row, "margin_today_balance", None),
+        getattr(row, "margin_previous_balance", None),
+    )
+
+
 def _short_balance_change(row: MarginTradingDaily | None) -> int | None:
     if row is None:
         return None
@@ -364,6 +580,7 @@ def _stock_context_snapshot(
         snapshot["margin"] = {
             "trade_date": _date_text(margin.trade_date),
             "margin_balance_change": _margin_balance_change(margin),
+            "margin_balance_change_pct": _margin_balance_change_pct(margin),
             "margin_today_balance": _numeric_or_none(margin.margin_today_balance),
             "short_balance_change": _short_balance_change(margin),
             "short_today_balance": _numeric_or_none(margin.short_today_balance),
@@ -391,6 +608,122 @@ def _stock_context_snapshot(
         }
 
     return snapshot
+
+
+def _rank_market_values(
+    values_by_stock: dict[str, float | int],
+    *,
+    sort_order: str,
+) -> dict[str, dict[str, float | int]]:
+    if sort_order == "desc":
+        ordered = sorted(values_by_stock.items(), key=lambda item: (-item[1], item[0]))
+    else:
+        ordered = sorted(values_by_stock.items(), key=lambda item: (item[1], item[0]))
+
+    ranked: dict[str, dict[str, float | int]] = {}
+    previous_value: float | int | None = None
+    previous_rank = 0
+    for position, (stock_id, value) in enumerate(ordered, start=1):
+        market_rank = previous_rank if previous_value == value else position
+        ranked[stock_id] = {
+            "market_rank": market_rank,
+            "rank_value": value,
+        }
+        previous_value = value
+        previous_rank = market_rank
+
+    return ranked
+
+
+def _market_ranking_snapshot(
+    db: Session,
+    *,
+    rank_by: str,
+    sort_order: str,
+) -> dict[str, object]:
+    universe_filters = (
+        StockMaster.is_active.is_(True),
+        func.upper(StockMaster.market).in_(("TWSE", "TPEX")),
+        func.lower(StockMaster.instrument_type).in_(("stock", "unknown")),
+    )
+
+    values_by_stock: dict[str, float | int] = {}
+    trade_date: date | None = None
+
+    if rank_by == "foreign_net":
+        trade_date = (
+            db.query(func.max(InstitutionalTradeDaily.trade_date))
+            .join(
+                StockMaster,
+                StockMaster.stock_id == InstitutionalTradeDaily.stock_id,
+            )
+            .filter(*universe_filters)
+            .scalar()
+        )
+        if trade_date is not None:
+            records = (
+                db.query(
+                    InstitutionalTradeDaily.stock_id,
+                    InstitutionalTradeDaily.foreign_investor_net,
+                    InstitutionalTradeDaily.id,
+                )
+                .join(
+                    StockMaster,
+                    StockMaster.stock_id == InstitutionalTradeDaily.stock_id,
+                )
+                .filter(
+                    InstitutionalTradeDaily.trade_date == trade_date,
+                    InstitutionalTradeDaily.foreign_investor_net.is_not(None),
+                    *universe_filters,
+                )
+                .order_by(InstitutionalTradeDaily.id.desc())
+                .all()
+            )
+            for stock_id, value, _row_id in records:
+                if stock_id not in values_by_stock and _valid_number(value):
+                    values_by_stock[stock_id] = int(value)
+    elif rank_by == "margin_balance_change_pct":
+        trade_date = (
+            db.query(func.max(MarginTradingDaily.trade_date))
+            .join(
+                StockMaster,
+                StockMaster.stock_id == MarginTradingDaily.stock_id,
+            )
+            .filter(*universe_filters)
+            .scalar()
+        )
+        if trade_date is not None:
+            records = (
+                db.query(
+                    MarginTradingDaily.stock_id,
+                    MarginTradingDaily.margin_today_balance,
+                    MarginTradingDaily.margin_previous_balance,
+                    MarginTradingDaily.id,
+                )
+                .join(
+                    StockMaster,
+                    StockMaster.stock_id == MarginTradingDaily.stock_id,
+                )
+                .filter(
+                    MarginTradingDaily.trade_date == trade_date,
+                    *universe_filters,
+                )
+                .order_by(MarginTradingDaily.id.desc())
+                .all()
+            )
+            for stock_id, current, previous, _row_id in records:
+                if stock_id in values_by_stock:
+                    continue
+                value = _margin_balance_change_pct_from_values(current, previous)
+                if value is not None:
+                    values_by_stock[stock_id] = value
+
+    return {
+        "rank_scope": "tw_market",
+        "rank_trade_date": trade_date,
+        "rank_universe_count": len(values_by_stock),
+        "by_stock": _rank_market_values(values_by_stock, sort_order=sort_order),
+    }
 
 
 def _market_context_by_stock(db: Session, stock_ids: list[str]) -> dict[str, dict[str, dict[str, object]]]:
@@ -476,9 +809,9 @@ def _build_watchlist_ranking_rows(
     volume_ratio_threshold: float | None,
     use_intraday: bool,
     intraday_limit: int,
+    intraday_overlay_cache: dict[str, dict | None] | None = None,
 ) -> list[dict]:
     rows: list[dict] = []
-    intraday_overlay_attempts = 0
     context_by_stock = _market_context_by_stock(
         db=db,
         stock_ids=[item["stock_id"] for item in items],
@@ -522,11 +855,15 @@ def _build_watchlist_ranking_rows(
                 "change_pct": change_pct,
                 "limit_status": _limit_status_from_change_pct(change_pct),
                 "score": int(signal_result.get("score", 0) or 0),
+                "market_rank": None,
+                "rank_value": None,
+                "rank_trade_date": None,
                 "status": status,
                 "signal_count": len(signals),
                 "signal_keys": [
                     signal.get("key") for signal in signals if signal.get("key")
                 ],
+                "signal_details": signals,
                 "primary_signal_key": primary_signal.get("key") if primary_signal else None,
                 "primary_signal_label": primary_signal.get("label") if primary_signal else None,
                 "indicator_snapshot": signal_result.get("indicator_snapshot") or {},
@@ -535,30 +872,6 @@ def _build_watchlist_ranking_rows(
                 "intraday_points": [],
                 "error_message": None,
             }
-
-            if use_intraday and intraday_overlay_attempts < intraday_limit:
-                intraday_overlay_attempts += 1
-                overlay = _get_intraday_overlay(db=db, stock_id=stock_id)
-
-                if overlay is not None:
-                    row["time"] = overlay["time"]
-                    row["close"] = overlay["close"]
-                    row["change"] = overlay["change"]
-                    row["change_pct"] = overlay["change_pct"]
-                    row["previous_close"] = overlay["previous_close"]
-                    row["limit_status"] = overlay["limit_status"]
-                    row["intraday_previous_close"] = overlay["previous_close"]
-                    row["intraday_points"] = overlay["points"]
-                    row["context_snapshot"] = _with_intraday_context(
-                        context_snapshot=row["context_snapshot"],
-                        overlay=overlay,
-                    )
-
-                    if overlay["volume"] is not None:
-                        row["volume"] = overlay["volume"]
-
-                    if row["status"] == "no_data":
-                        row["status"] = "intraday"
 
             rows.append(row)
 
@@ -576,9 +889,13 @@ def _build_watchlist_ranking_rows(
                     "change_pct": None,
                     "limit_status": None,
                     "score": 0,
+                    "market_rank": None,
+                    "rank_value": None,
+                    "rank_trade_date": None,
                     "status": "error",
                     "signal_count": 0,
                     "signal_keys": [],
+                    "signal_details": [],
                     "primary_signal_key": None,
                     "primary_signal_label": None,
                     "indicator_snapshot": {},
@@ -588,6 +905,22 @@ def _build_watchlist_ranking_rows(
                     "error_message": str(exc),
                 }
             )
+
+    if use_intraday:
+        for row in _intraday_candidate_rows(rows, intraday_limit):
+            stock_id = str(row["stock_id"])
+            if intraday_overlay_cache is None:
+                overlay = _get_intraday_overlay(db=db, stock_id=stock_id)
+            else:
+                if stock_id not in intraday_overlay_cache:
+                    intraday_overlay_cache[stock_id] = _get_intraday_overlay(
+                        db=db,
+                        stock_id=stock_id,
+                    )
+                overlay = intraday_overlay_cache[stock_id]
+
+            if overlay is not None:
+                _apply_intraday_overlay_to_row(row, overlay)
 
     return rows
 
@@ -605,6 +938,7 @@ def get_watchlist_group_latest_ranking(
     volume_ratio_threshold: float | None = None,
     use_intraday: bool = False,
     intraday_limit: int = 30,
+    intraday_overlay_cache: dict[str, dict | None] | None = None,
 ) -> dict:
     rank_by = rank_by.lower()
     sort_order = sort_order.lower()
@@ -636,12 +970,43 @@ def get_watchlist_group_latest_ranking(
         volume_ratio_threshold=volume_ratio_threshold,
         use_intraday=use_intraday,
         intraday_limit=intraday_limit,
+        intraday_overlay_cache=intraday_overlay_cache,
     )
 
     no_data_count = sum(1 for row in rows if row["status"] == "no_data")
     error_count = sum(1 for row in rows if row["status"] == "error")
 
-    if rank_by == "watchlist":
+    rank_scope = "watchlist"
+    rank_trade_date = None
+    rank_universe_count = 0
+
+    if rank_by in _MARKET_WIDE_RANK_FIELDS:
+        market_ranking = _market_ranking_snapshot(
+            db,
+            rank_by=rank_by,
+            sort_order=sort_order,
+        )
+        rank_scope = str(market_ranking["rank_scope"])
+        rank_trade_date = market_ranking["rank_trade_date"]
+        rank_universe_count = int(market_ranking["rank_universe_count"])
+        market_rank_by_stock = market_ranking["by_stock"]
+        sortable_rows = []
+        unsortable_rows = []
+
+        for row in rows:
+            market_rank = market_rank_by_stock.get(row["stock_id"])
+            if market_rank is None:
+                unsortable_rows.append(row)
+                continue
+
+            row["market_rank"] = market_rank["market_rank"]
+            row["rank_value"] = market_rank["rank_value"]
+            row["rank_trade_date"] = rank_trade_date
+            sortable_rows.append(row)
+
+        sortable_rows.sort(key=lambda row: row["market_rank"])
+        ranked_results = sortable_rows + unsortable_rows
+    elif rank_by == "watchlist":
         sortable_rows = rows
         ranked_results = rows
     else:
@@ -676,6 +1041,9 @@ def get_watchlist_group_latest_ranking(
         "include_children": include_children,
         "rank_by": rank_by,
         "sort_order": sort_order,
+        "rank_scope": rank_scope,
+        "rank_trade_date": rank_trade_date,
+        "rank_universe_count": rank_universe_count,
         "requested_stock_count": len(unique_items),
         "ranked_count": len(sortable_rows),
         "no_data_count": no_data_count,
@@ -723,6 +1091,7 @@ def get_watchlist_group_latest_ranking_batch(
     )
     total_stock_count = len(unique_items)
     batch_items = unique_items[offset : offset + batch_size]
+    batch_intraday_limit = max(0, int(intraday_limit) - offset)
     rows = _build_watchlist_ranking_rows(
         db=db,
         items=batch_items,
@@ -731,7 +1100,7 @@ def get_watchlist_group_latest_ranking_batch(
         limit=limit,
         volume_ratio_threshold=volume_ratio_threshold,
         use_intraday=use_intraday,
-        intraday_limit=intraday_limit,
+        intraday_limit=batch_intraday_limit,
     )
 
     for index, row in enumerate(rows, start=offset + 1):

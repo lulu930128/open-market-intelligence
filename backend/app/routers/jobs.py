@@ -9,6 +9,9 @@ from app.jobs import backfill_tasks, service
 from app.jobs.job_types import (
     JP_SCHEDULED_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
     JP_WATCHLIST_RESOURCE_REFRESH_JOB_TYPE,
+    TAIWAN_BROKER_BRANCH_MARKET_REFRESH_JOB_TYPE,
+    TAIWAN_DERIVATIVES_SCHEDULED_REFRESH_JOB_TYPE,
+    WATCHLIST_RADAR_AUTO_SNAPSHOT_JOB_TYPE,
 )
 from app.jobs.schemas import JobRunRead
 
@@ -36,6 +39,11 @@ def _parse_string_list(value: Any) -> list[str]:
         return [item.strip() for item in value.split(",") if item.strip()]
 
     return []
+
+
+def _parse_int_list(value: Any) -> list[int]:
+    items = _parse_string_list(value)
+    return [int(item) for item in items]
 
 
 def _request_dict(job: Any) -> dict[str, Any]:
@@ -87,6 +95,40 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
                 bool(request.get("include_today", False)),
                 float(request.get("sleep_seconds", 0.2)),
                 bool(request.get("skip_existing", True)),
+            ),
+            request,
+        )
+
+    if job_type == "market.index_summary_refresh":
+        return (
+            backfill_tasks.run_market_index_summary_refresh_job,
+            (),
+            request,
+        )
+
+    if job_type == TAIWAN_DERIVATIVES_SCHEDULED_REFRESH_JOB_TYPE:
+        expected_trade_date = _parse_date(request.get("expected_trade_date"))
+        if expected_trade_date is None:
+            raise ValueError("Taiwan derivatives retry requires expected_trade_date.")
+        return (
+            backfill_tasks.run_taiwan_derivatives_refresh_job,
+            (expected_trade_date,),
+            request,
+        )
+
+    if job_type == TAIWAN_BROKER_BRANCH_MARKET_REFRESH_JOB_TYPE:
+        expected_trade_date = _parse_date(request.get("expected_trade_date"))
+        if expected_trade_date is None:
+            raise ValueError(
+                "Taiwan broker-branch retry requires expected_trade_date."
+            )
+        return (
+            backfill_tasks.run_taiwan_broker_branch_market_refresh_job,
+            (
+                expected_trade_date,
+                float(request.get("sleep_seconds", 0.5)),
+                int(request.get("max_stocks", 2500)),
+                int(request.get("max_runtime_seconds", 7200)),
             ),
             request,
         )
@@ -231,6 +273,26 @@ def _retry_config(job: Any) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
                 bool(request.get("enabled_only", True)),
                 float(request.get("sleep_seconds", 0.8)),
                 bool(request.get("skip_existing_months", True)),
+            ),
+            request,
+        )
+
+    if job_type == WATCHLIST_RADAR_AUTO_SNAPSHOT_JOB_TYPE:
+        group_ids = request.get("group_ids")
+        return (
+            backfill_tasks.run_watchlist_radar_auto_snapshot_job,
+            (
+                _parse_int_list(group_ids) if group_ids else None,
+                str(request.get("modes") or "action"),
+                bool(request.get("include_children", True)),
+                bool(request.get("enabled_only", True)),
+                int(request.get("max_results", 30)),
+                int(request.get("calculation_limit", 100)),
+                bool(request.get("use_intraday", False)),
+                int(request.get("intraday_limit", 30)),
+                _parse_date(request.get("evaluate_before_date")) or date.today(),
+                int(request.get("evaluate_lookback_days", 10)),
+                bool(request.get("save_snapshots", True)),
             ),
             request,
         )

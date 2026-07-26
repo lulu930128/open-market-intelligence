@@ -14,6 +14,14 @@ import {
 import { useT, type TranslationFunction } from "@/i18n";
 export type IndicatorTemplateKey = "basic" | "short" | "trend" | "swing" | "flow";
 
+export type SupplementalMarkerOption = {
+  key: string;
+  label: string;
+  description: string;
+  checked: boolean;
+  plot: string;
+};
+
 export const indicatorTemplates: Array<{
   key: IndicatorTemplateKey;
   label: string;
@@ -179,6 +187,8 @@ export default function TechnicalIndicatorMenu({
   includeParameters = false,
   parameters,
   onUpdateParameter,
+  supplementalMarkerOptions = [],
+  onToggleSupplementalMarker,
   className = "w-80",
 }: {
   indicators: IndicatorSettings;
@@ -194,12 +204,15 @@ export default function TechnicalIndicatorMenu({
     min: number,
     max: number
   ) => void;
+  supplementalMarkerOptions?: SupplementalMarkerOption[];
+  onToggleSupplementalMarker?: (key: string) => void;
   className?: string;
 }) {
   const t = useT();
 
   return (
     <div
+      data-testid="technical-indicator-menu"
       className={[
         "absolute right-0 z-30 mt-2 max-h-[74vh] overflow-y-auto border border-omi-border-subtle bg-omi-surface p-3 text-left shadow-lg",
         className,
@@ -246,6 +259,7 @@ export default function TechnicalIndicatorMenu({
                   >
                     <input
                       type="checkbox"
+                      data-indicator-option={option.key}
                       checked={indicators[option.key]}
                       onChange={() => onToggleIndicator(option.key)}
                       className="mt-0.5"
@@ -284,6 +298,33 @@ export default function TechnicalIndicatorMenu({
                   </div>
                 )
               )}
+              {group.key === "signals" && onToggleSupplementalMarker
+                ? supplementalMarkerOptions.map((option) => (
+                    <label
+                      key={option.key}
+                      className="flex cursor-pointer items-start gap-2 px-2 py-1.5 text-xs hover:bg-omi-surface-subtle"
+                    >
+                      <input
+                        type="checkbox"
+                        data-indicator-option={`event:${option.key}`}
+                        checked={option.checked}
+                        onChange={() => onToggleSupplementalMarker(option.key)}
+                        className="mt-0.5"
+                      />
+                      <span className="min-w-0">
+                        <span className="flex items-center gap-2 font-semibold text-omi-text">
+                          <span>{option.label}</span>
+                          <span className="text-[10px] font-medium uppercase text-omi-text-subtle">
+                            {option.plot}
+                          </span>
+                        </span>
+                        <span className="block text-omi-text-muted">
+                          {option.description}
+                        </span>
+                      </span>
+                    </label>
+                  ))
+                : null}
             </div>
           </div>
         ))}

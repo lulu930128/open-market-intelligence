@@ -16,6 +16,7 @@ from app.watchlists import service as watchlist_service
 
 
 ProgressCallback = Callable[[int, int, str], None]
+CancellationCheck = Callable[[], bool]
 
 
 def _get_result_field(result, field_name: str, default=None):
@@ -339,6 +340,7 @@ def refresh_watchlist_group_daily_prices(
     sleep_seconds: float = 0.8,
     skip_existing_months: bool = True,
     progress_callback: ProgressCallback | None = None,
+    should_cancel: CancellationCheck | None = None,
 ) -> dict:
     target_date = _expected_latest_trade_date(to_date=to_date, include_today=include_today)
     unique_items = _list_unique_watchlist_items(
@@ -359,7 +361,11 @@ def refresh_watchlist_group_daily_prices(
     if progress_callback is not None:
         progress_callback(0, total_count, "Watchlist freshness check started.")
 
+    cancelled = False
     for index, item in enumerate(unique_items, start=1):
+        if should_cancel is not None and should_cancel():
+            cancelled = True
+            break
         stock_id = item["stock_id"]
         stock_name = item.get("stock_name")
         market = _get_stock_market(db=db, stock_id=stock_id)
@@ -447,6 +453,10 @@ def refresh_watchlist_group_daily_prices(
             parsed_count = int(_get_result_field(result, "parsed_count", 0) or 0)
             inserted_count = int(_get_result_field(result, "inserted_count", 0) or 0)
             skipped = int(_get_result_field(result, "skipped_count", 0) or 0)
+            refreshed_latest_trade_date = _get_latest_trade_date(
+                db=db,
+                stock_id=stock_id,
+            )
 
             if status == "success":
                 success_count += 1
@@ -462,7 +472,7 @@ def refresh_watchlist_group_daily_prices(
                     "stock_id": stock_id,
                     "stock_name": stock_name,
                     "market": market,
-                    "latest_trade_date": latest_trade_date,
+                    "latest_trade_date": refreshed_latest_trade_date,
                     "target_date": target_date,
                     "start_date": start_date,
                     "status": status,
@@ -499,8 +509,14 @@ def refresh_watchlist_group_daily_prices(
             if progress_callback is not None:
                 progress_callback(index, total_count, f"Refresh failed for {stock_id} ({index}/{total_count}).")
 
+        if should_cancel is not None and should_cancel():
+            cancelled = True
+            break
+
     completed_count = current_count + success_count + warning_count + skipped_count
-    if error_count > 0:
+    if cancelled:
+        result_status = "timeout"
+    elif error_count > 0:
         result_status = "partial_success" if completed_count > 0 else "error"
     elif warning_count > 0:
         result_status = "partial_success"
@@ -524,5 +540,6 @@ def refresh_watchlist_group_daily_prices(
         "warning_count": warning_count,
         "error_count": error_count,
         "skipped_count": skipped_count,
+        "cancelled": cancelled,
         "results": results,
     }

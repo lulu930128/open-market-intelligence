@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 import hashlib
+import ssl
 import time
 from datetime import date
 
 import requests
 from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import RawFetchResult, ShareholdingDistributionWeekly, SourceRegistry
 from app.http_client import new_session
+from app.observability.provider_http import (
+    ProviderRequestContext,
+    get as provider_get,
+    post as provider_post,
+)
 
 
 TDCC_SHAREHOLDING_URL = "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock"
@@ -18,6 +25,35 @@ TDCC_HEADERS = {
     "User-Agent": "Mozilla/5.0",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
+
+
+class _TdccVerifiedCompatibilityAdapter(HTTPAdapter):
+    """Keep TLS verification enabled while relaxing only OpenSSL strict mode."""
+
+    def __init__(self, ssl_context: ssl.SSLContext, *args, **kwargs) -> None:
+        self._ssl_context = ssl_context
+        super().__init__(*args, **kwargs)
+
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs) -> None:
+        pool_kwargs["ssl_context"] = self._ssl_context
+        super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
+
+
+def _tdcc_ssl_context() -> ssl.SSLContext:
+    context = ssl.create_default_context()
+    strict_flag = getattr(ssl, "VERIFY_X509_STRICT", 0)
+    if strict_flag:
+        context.verify_flags &= ~strict_flag
+    return context
+
+
+def _new_tdcc_session() -> requests.Session:
+    session = new_session()
+    session.mount(
+        "https://www.tdcc.com.tw/",
+        _TdccVerifiedCompatibilityAdapter(_tdcc_ssl_context()),
+    )
+    return session
 
 
 def _parse_int(value: str | None) -> int | None:
@@ -106,8 +142,18 @@ def _create_raw_result(
 
 
 def _load_query_form(session: requests.Session) -> tuple[list[str], dict[str, str]]:
-    response = session.get(TDCC_SHAREHOLDING_URL, headers=TDCC_HEADERS, timeout=30)
-    response.raise_for_status()
+    response = provider_get(
+        ProviderRequestContext(
+            market="tw",
+            provider="tdcc",
+            resource="shareholding_distribution_weekly",
+            target="query_form",
+        ),
+        TDCC_SHAREHOLDING_URL,
+        timeout_seconds=30,
+        request_callable=session.request,
+        headers=TDCC_HEADERS,
+    )
 
     soup = BeautifulSoup(response.text, "lxml")
     token = soup.find(id="SYNCHRONIZER_TOKEN")
@@ -142,13 +188,19 @@ def _fetch_stock_shareholding_html(
         "stockNo": stock_id,
         "stockName": "",
     }
-    response = session.post(
+    response = provider_post(
+        ProviderRequestContext(
+            market="tw",
+            provider="tdcc",
+            resource="shareholding_distribution_weekly",
+            target=stock_id,
+        ),
         TDCC_SHAREHOLDING_URL,
+        timeout_seconds=30,
+        request_callable=session.request,
         data=payload,
         headers={**TDCC_HEADERS, "Referer": TDCC_SHAREHOLDING_URL},
-        timeout=30,
     )
-    response.raise_for_status()
     return response
 
 
@@ -227,7 +279,7 @@ def ensure_stock_shareholding_history(
     skip_existing: bool = True,
 ) -> dict:
     source = _get_tdcc_source(db)
-    session = new_session()
+    session = _new_tdcc_session()
     dates, form_base = _load_query_form(session)
     selected_dates = []
 

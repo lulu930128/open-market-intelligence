@@ -17,10 +17,15 @@ class MarketCalendarReleaseWindowRead(BaseModel):
 
 class MarketCalendarSessionRead(BaseModel):
     preopen_time: str | None = None
+    pre_market_open_time: str | None = None
     open_time: str
     close_time: str
+    after_hours_close_time: str | None = None
+    lunch_start_time: str | None = None
+    lunch_end_time: str | None = None
     next_session_start_at: datetime
     is_polling_window: bool
+    is_extended_polling_window: bool = False
     is_after_close: bool
 
 
@@ -37,12 +42,261 @@ class MarketCalendarMarketStatusRead(BaseModel):
     next_trading_day: date
     session: MarketCalendarSessionRead
     release_windows: dict[str, MarketCalendarReleaseWindowRead] = Field(default_factory=dict)
+    calendar_source: str | None = None
+    calendar_verified_years: list[int] = Field(default_factory=list)
+    calendar_limit: str | None = None
+    calendar_cache_status: str = "fallback"
+    calendar_last_refreshed_at: datetime | None = None
+    calendar_source_url: str | None = None
+    calendar_warning: str | None = None
 
 
 class MarketCalendarStatusRead(BaseModel):
     kind: str
     generated_at: datetime
     markets: dict[str, MarketCalendarMarketStatusRead] = Field(default_factory=dict)
+
+
+class MarketCalendarRefreshResultRead(BaseModel):
+    market: str
+    status: str
+    provider: str
+    source_url: str | None = None
+    fetched_at: datetime | None = None
+    holiday_count: int = 0
+    verified_years: list[int] = Field(default_factory=list)
+    error_message: str | None = None
+
+
+class MarketCalendarRefreshRead(BaseModel):
+    kind: str
+    started_at: datetime
+    completed_at: datetime
+    requested_markets: list[str] = Field(default_factory=list)
+    request_limit: int
+    success_count: int
+    error_count: int
+    results: dict[str, MarketCalendarRefreshResultRead] = Field(default_factory=dict)
+
+
+class TaiwanDispositionSecurityRead(BaseModel):
+    provider: str
+    market: str
+    source_url: str
+    announced_date: date | None = None
+    stock_id: str
+    stock_name: str | None = None
+    start_date: date
+    end_date: date
+    matching_interval_minutes: int | None = None
+    reason: str | None = None
+    measure: str | None = None
+    requires_full_precollection: bool = False
+    margin_trading_suspended: bool = False
+    detail: str | None = None
+    status: str
+    is_active: bool
+
+
+class TaiwanDispositionStatusRead(BaseModel):
+    stock_id: str
+    checked_at: datetime
+    is_disposition: bool
+    is_active: bool
+    status: str
+    cache_status: str
+    cache_fetched_at: datetime | None = None
+    warning: str | None = None
+    provider: str | None = None
+    market: str | None = None
+    source_url: str | None = None
+    announced_date: date | None = None
+    stock_name: str | None = None
+    start_date: date | None = None
+    end_date: date | None = None
+    matching_interval_minutes: int | None = None
+    reason: str | None = None
+    measure: str | None = None
+    requires_full_precollection: bool = False
+    margin_trading_suspended: bool = False
+    detail: str | None = None
+
+
+class TaiwanDispositionSourceStatusRead(BaseModel):
+    provider: str
+    market: str
+    source: str
+    source_url: str
+    status: str
+    fetched_at: datetime | None = None
+    last_attempt_at: datetime | None = None
+    last_error: str | None = None
+    warning: str | None = None
+    entry_count: int = 0
+
+
+class TaiwanDispositionListRead(BaseModel):
+    kind: str
+    generated_at: datetime
+    as_of: date
+    active_count: int
+    upcoming_count: int
+    result_count: int
+    sources: dict[str, TaiwanDispositionSourceStatusRead] = Field(default_factory=dict)
+    results: list[TaiwanDispositionSecurityRead] = Field(default_factory=list)
+
+
+class TaiwanDispositionRefreshProviderRead(BaseModel):
+    provider: str
+    market: str
+    status: str
+    entry_count: int
+    source_url: str
+    error_message: str | None = None
+
+
+class TaiwanDispositionRefreshRead(BaseModel):
+    kind: str
+    started_at: datetime
+    completed_at: datetime
+    request_limit: int
+    success_count: int
+    error_count: int
+    active_count: int
+    upcoming_count: int
+    results: dict[str, TaiwanDispositionRefreshProviderRead] = Field(default_factory=dict)
+
+
+class TaiwanCorporateEventRead(BaseModel):
+    event_id: str
+    event_type: str
+    timing_status: str
+    provider: str
+    market: str
+    source_name: str
+    source_url: str
+    stock_id: str
+    stock_name: str | None = None
+    start_date: date
+    end_date: date
+    start_time: str | None = None
+    title: str
+    summary: str | None = None
+    location: str | None = None
+    cash_dividend: float | None = None
+    stock_dividend_ratio: float | None = None
+    financial_report_related: bool = False
+    related_event_id: str | None = None
+    company_url: str | None = None
+    video_url: str | None = None
+    status: str
+    days_until: int
+
+
+class TaiwanCorporateEventWindowFailureRead(BaseModel):
+    provider: str
+    market: str
+    window: str
+    stage: str
+    status: str
+    exception_type: str
+    attempt_count: int
+    retryable: bool
+    message: str
+    http_status_code: int | None = None
+    rate_limited: bool = False
+    retry_after_seconds: int | None = None
+
+
+class TaiwanCorporateEventSourceStatusRead(BaseModel):
+    provider: str
+    market: str
+    source: str
+    source_url: str
+    status: str
+    fetched_at: datetime | None = None
+    last_attempt_at: datetime | None = None
+    last_error: str | None = None
+    last_failure_details: list[TaiwanCorporateEventWindowFailureRead] = Field(
+        default_factory=list
+    )
+    partial_success: bool = False
+    successful_windows: list[str] = Field(default_factory=list)
+    recovered_windows: list[str] = Field(default_factory=list)
+    retry_count: int = 0
+    warning: str | None = None
+    coverage_start: date | None = None
+    coverage_end: date | None = None
+    entry_count: int = 0
+
+
+class TaiwanCorporateEventListRead(BaseModel):
+    kind: str
+    generated_at: datetime
+    as_of: date
+    date_from: date
+    date_to: date
+    stock_id: str | None = None
+    market: str | None = None
+    event_types: list[str] = Field(default_factory=list)
+    result_count: int
+    warning: str | None = None
+    sources: dict[str, TaiwanCorporateEventSourceStatusRead] = Field(default_factory=dict)
+    results: list[TaiwanCorporateEventRead] = Field(default_factory=list)
+
+
+class TaiwanStockEventSummaryRead(BaseModel):
+    stock_id: str
+    checked_at: datetime
+    reminder_days: int
+    cache_status: str
+    cache_fetched_at: datetime | None = None
+    warning: str | None = None
+    result_count: int
+    results: list[TaiwanCorporateEventRead] = Field(default_factory=list)
+
+
+class TaiwanStockEventHistoryRead(BaseModel):
+    stock_id: str
+    checked_at: datetime
+    history_years: int
+    cache_status: str
+    cache_fetched_at: datetime | None = None
+    coverage_start: date | None = None
+    coverage_end: date | None = None
+    warning: str | None = None
+    total_count: int
+    result_count: int
+    results: list[TaiwanCorporateEventRead] = Field(default_factory=list)
+
+
+class TaiwanCorporateEventRefreshProviderRead(BaseModel):
+    provider: str
+    market: str
+    status: str
+    entry_count: int
+    request_count: int
+    retry_count: int = 0
+    successful_windows: list[str] = Field(default_factory=list)
+    recovered_windows: list[str] = Field(default_factory=list)
+    failure_details: list[TaiwanCorporateEventWindowFailureRead] = Field(
+        default_factory=list
+    )
+    source_url: str
+    error_message: str | None = None
+
+
+class TaiwanCorporateEventRefreshRead(BaseModel):
+    kind: str
+    started_at: datetime
+    completed_at: datetime
+    request_limit: int
+    request_count: int
+    success_count: int
+    partial_count: int = 0
+    error_count: int
+    event_count: int
+    results: dict[str, TaiwanCorporateEventRefreshProviderRead] = Field(default_factory=dict)
 
 
 class TaiwanSourceHealthEntryRead(BaseModel):
@@ -63,6 +317,11 @@ class TaiwanSourceHealthEntryRead(BaseModel):
     release_is_released: bool | None = None
     data_quality: str
     reason: str
+    provider: str | None = None
+    source: str | None = None
+    latest_observed_at: datetime | None = None
+    age_seconds: int | None = None
+    stale_after_seconds: int | None = None
     latest_event_id: int | None = None
     latest_event_at: datetime | None = None
     latest_event_status: str | None = None
@@ -198,6 +457,11 @@ class MarketOhlcChartRead(BaseModel):
     points: list[MarketDailyChartRead]
     backfill: dict | None = None
     intraday_overlay: dict[str, Any] | None = None
+    latest_data_date: date | None = None
+    expected_data_date: date | None = None
+    freshness_status: str = "missing"
+    is_current: bool = False
+    refresh_recommended: bool = True
 
 
 class ChartDrawingSnapshotWrite(BaseModel):
@@ -227,7 +491,10 @@ class ChartDrawingSnapshotRead(BaseModel):
 
 class MarketBreadthRead(BaseModel):
     market: str
+    scope: str | None = None
+    label: str | None = None
     trade_date: date | None = None
+    as_of: datetime | None = None
     advance_count: int
     decline_count: int
     unchanged_count: int
@@ -235,7 +502,21 @@ class MarketBreadthRead(BaseModel):
     limit_up_count: int | None = None
     limit_down_count: int | None = None
     trade_value: int | None = None
+    coverage_count: int | None = None
+    unknown_count: int | None = None
+    message_count: int | None = None
+    missing_count: int | None = None
+    warnings: list[str] = Field(default_factory=list)
     source: str | None = None
+
+
+class MarketBreadthStatusRead(BaseModel):
+    slot: str = "market_breadth"
+    status: str
+    scope: str | None = None
+    source: str | None = None
+    reason: str | None = None
+    warnings: list[str] = Field(default_factory=list)
 
 
 class MarketIndexSnapshotRead(BaseModel):
@@ -265,6 +546,7 @@ class MarketIndexSnapshotRead(BaseModel):
     point_count: int = 0
     points: list[MarketDailyChartRead] = Field(default_factory=list)
     breadth: MarketBreadthRead | None = None
+    breadth_status: MarketBreadthStatusRead
     error_message: str | None = None
 
 
@@ -272,6 +554,81 @@ class MarketIndexSummaryRead(BaseModel):
     as_of: datetime
     source: str
     indices: list[MarketIndexSnapshotRead]
+    cache_status: str = "unknown"
+    refresh_recommended: bool = False
+    warnings: list[str] = Field(default_factory=list)
+
+
+class TaiwanMarketVolumeBaselineRead(BaseModel):
+    requested_days: int
+    sample_days: int
+    median_cumulative_trade_value: int | None = None
+    pace_ratio: float | None = None
+
+
+class TaiwanMarketVolumeMarketRead(BaseModel):
+    market: str
+    index_id: str
+    cumulative_trade_value: int | None = None
+    estimated_full_day_trade_value: int | None = None
+    advance_count: int | None = None
+    decline_count: int | None = None
+    unchanged_count: int | None = None
+    total_count: int | None = None
+    session_status: str
+    quality_status: str
+    source: str
+    source_category: str
+    official_flag: bool
+    derived_flag: bool
+
+
+class TaiwanMarketVolumeStateRead(BaseModel):
+    kind: str
+    generated_at: datetime
+    as_of: datetime | None = None
+    trade_date: date | None = None
+    status: str
+    session_status: str
+    comparison_minute: str | None = None
+    calculation_basis: str | None = None
+    current_cumulative_trade_value: int | None = None
+    previous_minute_cumulative_trade_value: int | None = None
+    one_minute_trade_value_change: int | None = None
+    same_time_baseline_5d: TaiwanMarketVolumeBaselineRead
+    same_time_baseline_20d: TaiwanMarketVolumeBaselineRead
+    history_trade_dates: list[str] = Field(default_factory=list)
+    markets: list[TaiwanMarketVolumeMarketRead] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    source_refs: list[dict[str, Any]] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class MarketIndexDailyStatRefreshRead(BaseModel):
+    status: str
+    index_id: str
+    market: str
+    source: str | None = None
+    requested_month_count: int
+    fetched_month_count: int
+    skipped_existing_month_count: int
+    inserted_count: int
+    updated_count: int
+    errors: list[dict[str, Any]] = Field(default_factory=list)
+    message: str
+
+
+class MarketChipResourceStatusRead(BaseModel):
+    resource: str
+    status: str
+    data_date: date | None = None
+    expected_data_date: date | None = None
+    pending_trade_date: date | None = None
+    source: str | None = None
+    reason: str | None = None
+    coverage_count: int | None = None
+    total_count: int | None = None
+    warnings: list[str] = Field(default_factory=list)
 
 
 class MarketChipDailyRead(BaseModel):
@@ -290,6 +647,13 @@ class MarketChipDailyRead(BaseModel):
     retail_futures_net_oi: int | None = None
     retail_futures_net_oi_change: int | None = None
 
+    put_volume: int | None = None
+    call_volume: int | None = None
+    put_call_volume_ratio_pct: float | None = None
+    put_open_interest: int | None = None
+    call_open_interest: int | None = None
+    put_call_open_interest_ratio_pct: float | None = None
+
     total_institutional_net_value: int | None = None
     foreign_investor_net_value: int | None = None
     investment_trust_net_value: int | None = None
@@ -301,6 +665,8 @@ class MarketChipDailyRead(BaseModel):
     margin_balance_change_value: int | None = None
     margin_balance_change_shares: int | None = None
     short_balance_change_shares: int | None = None
+    margin_status: MarketChipResourceStatusRead
+    government_bank_status: MarketChipResourceStatusRead
 
     source_grade: str
     source_details: dict[str, Any] | None = None
@@ -366,8 +732,15 @@ class IntradayTrendRead(BaseModel):
     stock_id: str
     symbol: str | None = None
     source: str
+    source_provenance: dict[str, Any] | None = None
     previous_close: float | None = None
     point_count: int
+    trading_mode: str = "continuous"
+    analysis_basis: str = "time_bars"
+    batch_interval_minutes: int | None = None
+    disposition_start_date: date | None = None
+    disposition_end_date: date | None = None
+    effective_match_count: int | None = None
     points: list[IntradayTrendPointRead]
 
 
@@ -382,9 +755,11 @@ class TaiwanStockQuoteDepthFreshnessRead(BaseModel):
     is_live: bool
     is_stale: bool
     age_seconds: int | None = None
+    fetch_age_seconds: int | None = None
     expected_trade_date: date | None = None
     message: str
     source_error: str | None = None
+    source_error_detail: dict[str, Any] | None = None
 
 
 class TaiwanStockQuoteDepthRead(BaseModel):
@@ -396,7 +771,12 @@ class TaiwanStockQuoteDepthRead(BaseModel):
     source_url: str | None = None
     exchange_channel: str | None = None
     session_phase: str
+    market_status: str
     phase_label: str
+    timezone: str | None = None
+    session_start: str | None = None
+    session_end: str | None = None
+    holiday_name: str | None = None
     trade_date: date | None = None
     quote_time: datetime | None = None
     fetched_at: datetime | None = None
@@ -422,6 +802,7 @@ class TaiwanStockQuoteDepthRead(BaseModel):
     bid_levels: list[TaiwanStockQuoteDepthLevelRead]
     ask_levels: list[TaiwanStockQuoteDepthLevelRead]
     depth_available: bool
+    refresh_outcome: str = "not_attempted"
     freshness: TaiwanStockQuoteDepthFreshnessRead
 
 
@@ -450,6 +831,12 @@ class MarketIntradayChartRead(BaseModel):
     point_count: int
     cached_count: int
     refreshed_count: int
+    trading_mode: str = "continuous"
+    analysis_basis: str = "time_bars"
+    batch_interval_minutes: int | None = None
+    disposition_start_date: date | None = None
+    disposition_end_date: date | None = None
+    effective_match_count: int | None = None
     points: list[MarketIntradayChartPointRead]
 
 
@@ -466,6 +853,27 @@ class TaiwanFuturesProductRead(BaseModel):
     after_hours_session: str
 
 
+class TaiwanFuturesMarketStatusRead(BaseModel):
+    status: str
+    is_open: bool
+    phase: str
+    reason: str
+    timezone: str
+    checked_at: datetime
+    holiday_name: str | None = None
+    regular_session: str
+    after_hours_session: str
+    current_session: str | None = None
+    current_session_start_at: datetime | None = None
+    current_session_end_at: datetime | None = None
+    last_session: str | None = None
+    last_session_start_at: datetime | None = None
+    last_session_end_at: datetime | None = None
+    next_session: str | None = None
+    next_session_start_at: datetime | None = None
+    next_session_end_at: datetime | None = None
+
+
 class TaiwanFuturesQuoteFreshnessRead(BaseModel):
     status: str
     is_live: bool
@@ -475,6 +883,8 @@ class TaiwanFuturesQuoteFreshnessRead(BaseModel):
     age_seconds: int | None = None
     message: str
     source_error: str | None = None
+    last_session_quote_lag_seconds: int | None = None
+    market_status: TaiwanFuturesMarketStatusRead
 
 
 class TaiwanFuturesQuoteRead(BaseModel):
@@ -576,6 +986,128 @@ class TaiwanFuturesDailyBarRead(BaseModel):
     updated_at: datetime
 
 
+class TaiwanFuturesDailyRefreshRead(BaseModel):
+    status: str
+    symbol: str
+    requested_end_date: date
+    effective_end_date: date
+    latest_released_trade_date: date
+    release_time: str
+    skipped_unreleased_end_date: bool = False
+    refreshed_row_count: int = 0
+    warning: str | None = None
+    rows: list[TaiwanFuturesDailyBarRead] = Field(default_factory=list)
+
+
+class TaiwanOptionChainDailyRead(BaseModel):
+    id: int
+    provider: str
+    trade_date: date
+    product_code: str
+    contract_month: str
+    expiry_date: date | None = None
+    strike_price: float
+    option_type: str
+    session: str
+    open_price: float | None = None
+    high_price: float | None = None
+    low_price: float | None = None
+    close_price: float | None = None
+    settlement_price: float | None = None
+    volume: int | None = None
+    open_interest: int | None = None
+    bid_price: float | None = None
+    ask_price: float | None = None
+    historical_high_price: float | None = None
+    historical_low_price: float | None = None
+    official_delta: float | None = None
+    implied_volatility_pct: float | None = None
+    gamma: float | None = None
+    vega_per_vol_pct: float | None = None
+    theta_per_day: float | None = None
+    spot_reference: float | None = None
+    pricing_source: str | None = None
+    calculation_model: str | None = None
+    calculation_status: str
+    risk_free_rate: float | None = None
+    dividend_yield: float | None = None
+    source: str
+    source_url: str | None = None
+    delta_source_url: str | None = None
+    fetched_at: datetime
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TaiwanDerivativesLargeTraderDailyRead(BaseModel):
+    id: int
+    provider: str
+    trade_date: date
+    instrument_type: str
+    contract_code: str
+    contract_name: str | None = None
+    option_type: str
+    settlement_bucket: str
+    trader_type: str
+    top5_buy: int | None = None
+    top5_sell: int | None = None
+    top10_buy: int | None = None
+    top10_sell: int | None = None
+    market_open_interest: int | None = None
+    top5_buy_concentration_pct: float | None = None
+    top5_sell_concentration_pct: float | None = None
+    top10_buy_concentration_pct: float | None = None
+    top10_sell_concentration_pct: float | None = None
+    source: str
+    source_url: str | None = None
+    fetched_at: datetime
+    created_at: datetime
+    updated_at: datetime
+
+
+class TaiwanFuturesTermStructureDailyRead(BaseModel):
+    id: int
+    provider: str
+    trade_date: date
+    symbol: str
+    product_code: str
+    contract_month: str
+    expiry_date: date | None = None
+    last_price: float | None = None
+    settlement_price: float | None = None
+    open_interest: int | None = None
+    spot_close: float | None = None
+    basis_points: float | None = None
+    basis_pct: float | None = None
+    annualized_basis_pct: float | None = None
+    calculation_status: str
+    source: str
+    source_url: str | None = None
+    fetched_at: datetime
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TaiwanDerivativesRefreshRead(BaseModel):
+    status: str
+    as_of: date | None = None
+    expected_trade_date: date
+    is_stale: bool
+    dataset_trade_dates: dict[str, date | None] = Field(default_factory=dict)
+    stale_datasets: list[str] = Field(default_factory=list)
+    unverified_date_datasets: list[str] = Field(default_factory=list)
+    provider: str
+    provider_request_count: int
+    successful_request_count: int
+    failed_request_count: int
+    counts: dict[str, int]
+    calculation: dict[str, Any]
+    errors: dict[str, str] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class TechnicalReportRowRead(BaseModel):
     key: str
     label: str
@@ -666,6 +1198,110 @@ class OvernightImpactMappingRead(BaseModel):
     reason: str
 
 
+class AdrParityMappingRead(BaseModel):
+    stock_id: str
+    stock_name: str
+    adr_symbol: str
+    adr_name: str
+    adr_exchange: str
+    local_shares_per_adr: int
+    source_label: str
+    source_url: str
+    verified_on: date
+
+
+class AdrParityRead(BaseModel):
+    kind: str
+    status: str
+    is_current: bool
+    stock_id: str
+    stock_name: str | None = None
+    mapping: AdrParityMappingRead
+    formula: str
+    adr_close_usd: float | None = None
+    adr_trade_date: date | None = None
+    adr_provider: str | None = None
+    expected_adr_trade_date: date | None = None
+    usd_twd: float | None = None
+    fx_source_symbol: str | None = None
+    fx_provider: str | None = None
+    fx_as_of: datetime | None = None
+    fx_age_seconds: int | None = None
+    tw_reference_price_twd: float | None = None
+    tw_reference_trade_date: date | None = None
+    tw_reference_semantics: str
+    target_tw_trade_date: date | None = None
+    implied_tw_price_twd: float | None = None
+    implied_gap_pct: float | None = None
+    parity_adr_price_usd: float | None = None
+    tw_comparison_price_twd: float | None = None
+    tw_comparison_trade_date: date | None = None
+    tw_comparison_as_of: datetime | None = None
+    tw_comparison_source: str | None = None
+    tw_comparison_semantics: str
+    tw_session_phase: str | None = None
+    comparison_mode: str
+    remaining_gap_pct: float | None = None
+    missing: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    source_refs: list[dict[str, str]] = Field(default_factory=list)
+    freshness: dict[str, Any] = Field(default_factory=dict)
+
+
+class FxTrendRead(BaseModel):
+    status: str
+    source_symbol: str | None = None
+    provider: str | None = None
+    usd_twd: float | None = None
+    data_date: date | None = None
+    as_of: datetime | None = None
+    age_seconds: int | None = None
+    history_points: int = 0
+    usd_twd_change_1d_pct: float | None = None
+    usd_twd_change_5d_pct: float | None = None
+    usd_twd_change_20d_pct: float | None = None
+    twd_change_1d_pct: float | None = None
+    twd_change_5d_pct: float | None = None
+    twd_change_20d_pct: float | None = None
+    regime: str
+
+
+class ForeignFlowWindowRead(BaseModel):
+    days: int
+    available_days: int
+    net_value_twd: int | None = None
+    turnover_twd: int | None = None
+    turnover_ratio_pct: float | None = None
+    net_shares: int | None = None
+
+
+class ForeignFlowRead(BaseModel):
+    scope: str
+    status: str
+    state: str
+    state_basis_days: int | None = None
+    trade_date: date | None = None
+    expected_trade_date: date
+    windows: list[ForeignFlowWindowRead] = Field(default_factory=list)
+
+
+class FxFlowContextRead(BaseModel):
+    kind: str
+    status: str
+    is_current: bool
+    stock_id: str
+    signal: str
+    signal_horizon_days: int
+    causality: str
+    fx: FxTrendRead
+    market_foreign: ForeignFlowRead
+    stock_foreign: ForeignFlowRead
+    missing: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    source_refs: list[dict[str, str]] = Field(default_factory=list)
+    freshness: dict[str, Any] = Field(default_factory=dict)
+
+
 class OvernightImpactRead(BaseModel):
     kind: str
     stock_id: str
@@ -679,6 +1315,8 @@ class OvernightImpactRead(BaseModel):
     weighted_change_pct: float | None = None
     confidence: str
     tw_mapping: OvernightImpactMappingRead
+    adr_parity: AdrParityRead | None = None
+    fx_flow_context: FxFlowContextRead | None = None
     factors: list[OvernightImpactFactorRead] = Field(default_factory=list)
     baskets: list[OvernightImpactBasketRead] = Field(default_factory=list)
     missing: list[str] = Field(default_factory=list)
@@ -885,6 +1523,8 @@ class FinancialMetricQuarterlyRead(BaseModel):
     source_id: int
     raw_result_id: int
     report_date: date | None = None
+    released_at: date | None = None
+    filed_at: date | None = None
     fiscal_year: int
     quarter: int
     period: str

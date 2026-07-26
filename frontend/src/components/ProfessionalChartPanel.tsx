@@ -4,6 +4,7 @@ import {
   professionalChartDrawingToolGroups,
   professionalChartDrawingToolOptionMap,
 } from "@/components/professionalChartDrawing";
+import { LoadingStateSurface } from "@/components/LoadingPlaceholders";
 import type { IndicatorParameters, IndicatorSettings } from "@/components/StockKLineChart";
 import type {
   ChartDrawing,
@@ -12,6 +13,7 @@ import type {
   ChartTimeMode,
 } from "@/components/LightweightKLineChart";
 import type { ChartPoint, StockIndicatorPoint } from "@/types/market";
+import type { ChartEventMarker } from "@/components/chart/chartEventMarkers";
 import { useT } from "@/i18n";
 import dynamic from "next/dynamic";
 import type { ReactNode } from "react";
@@ -20,8 +22,8 @@ function ChartEngineLoading() {
   const t = useT();
 
   return (
-    <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle bg-omi-surface text-sm text-omi-text-muted">
-      {t("chart.engineLoading")}
+    <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle bg-omi-surface p-4">
+      <LoadingStateSurface title={t("chart.engineLoading")} className="w-full max-w-xl" />
     </div>
   );
 }
@@ -67,8 +69,10 @@ type Props<TTimeframe extends string> = {
   indicatorParameters: IndicatorParameters;
   benchmarkData?: ChartPoint[];
   benchmarkLabel?: string;
+  eventMarkers?: ChartEventMarker[];
   volumePanelLabel?: string;
   volumeValueKey?: "volume" | "trade_value";
+  pricePrecision?: number;
   drawingTool: ChartDrawingTool;
   drawings: ChartDrawing[];
   selectedDrawingId: string | null;
@@ -102,6 +106,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
   drawingToolbarStart,
   drawings,
   emptyState,
+  eventMarkers,
   historyCounts,
   indicatorData,
   indicatorMenu,
@@ -123,6 +128,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
   onTimeframeChange,
   onToggleIndicatorMenu,
   onUndoDrawing,
+  pricePrecision,
   priceSummary,
   selectedDrawingId,
   showMovingAverages,
@@ -136,7 +142,10 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
   const t = useT();
 
   return (
-    <section className="border border-omi-border-subtle bg-omi-surface">
+    <section
+      className="border border-omi-border-subtle bg-omi-surface"
+      data-testid="professional-chart-panel"
+    >
       <div className="border-b border-omi-border-subtle px-4 py-2">
         <div className="flex min-h-9 flex-wrap items-center justify-between gap-x-4 gap-y-2">
           <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
@@ -189,6 +198,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
             <div>
               <button
                 type="button"
+                data-testid="chart-indicator-menu-toggle"
                 onClick={onToggleIndicatorMenu}
                 className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text hover:border-omi-control hover:text-omi-text-strong"
               >
@@ -229,6 +239,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
                     <button
                       key={option.key}
                       type="button"
+                      data-drawing-tool-option={option.key}
                       onClick={() => {
                         onCloseIndicatorMenu?.();
                         onDrawingToolChange(option.key);
@@ -253,6 +264,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
               <button
                 type="button"
                 title="Undo (Ctrl+Z)"
+                data-testid="chart-drawing-undo"
                 disabled={!canUndoDrawing}
                 onClick={onUndoDrawing}
                 className={[
@@ -280,6 +292,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
               </button>
               <button
                 type="button"
+                data-testid="chart-drawing-delete"
                 disabled={!selectedDrawingId}
                 onClick={onDeleteSelectedDrawing}
                 className={[
@@ -294,6 +307,7 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
               <button
                 type="button"
                 disabled={drawings.length === 0}
+                data-testid="chart-drawing-clear"
                 onClick={onClearDrawings}
                 className={[
                   "h-7 px-2 text-xs font-semibold transition",
@@ -322,6 +336,12 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
 
       {chartReady ? (
         <LightweightKLineChart
+          key={[
+            timeMode,
+            drawingContext.market ?? "",
+            drawingContext.symbol ?? label,
+            drawingContext.timeframe,
+          ].join(":")}
           chartData={chartData}
           indicatorData={indicatorData}
           label={label}
@@ -335,8 +355,10 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
           indicatorParameters={indicatorParameters}
           benchmarkData={benchmarkData}
           benchmarkLabel={benchmarkLabel}
+          eventMarkers={eventMarkers}
           volumePanelLabel={volumePanelLabel}
           volumeValueKey={volumeValueKey}
+          pricePrecision={pricePrecision}
           drawingTool={drawingTool}
           drawings={drawings}
           selectedDrawingId={selectedDrawingId}
@@ -347,8 +369,11 @@ export default function ProfessionalChartPanel<TTimeframe extends string>({
         />
       ) : (
         emptyState ?? (
-          <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle text-sm text-omi-text-muted">
-            {t("chart.loadingKline", { label })}
+          <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle p-4">
+            <LoadingStateSurface
+              title={t("chart.loadingKline", { label })}
+              className="w-full max-w-xl"
+            />
           </div>
         )
       )}

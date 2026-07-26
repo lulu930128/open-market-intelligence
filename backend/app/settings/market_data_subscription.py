@@ -12,6 +12,7 @@ from app.crypto_market.assets import (
     SUBSCRIPTION_ALWAYS_ON,
     list_crypto_assets,
 )
+from app.resource_market.contract import list_resource_instruments
 from app.settings.schemas import (
     MarketDataSubscriptionItemRead,
     MarketDataSubscriptionSettingsRead,
@@ -31,8 +32,12 @@ MANUAL_REFRESH_SUBSCRIPTION_MODES = frozenset({"always_on", "on_select", "manual
 ALWAYS_ON_SUBSCRIPTION_MODES = frozenset({"always_on"})
 MIN_INTERVAL_SECONDS = 1.0
 MAX_INTERVAL_SECONDS = 86400.0
-
-
+RESOURCE_QUOTE_INTERVALS = {
+    "quote_seconds": 60.0,
+    "ohlcv_seconds": 300.0,
+    "selected_quote_seconds": 5.0,
+    "background_quote_seconds": 300.0,
+}
 def _crypto_resources(asset: CryptoAssetDefinition) -> dict[str, bool]:
     resources = {
         "quote": True,
@@ -105,73 +110,25 @@ def _crypto_subscription_payloads() -> tuple[dict[str, Any], ...]:
     )
 
 
+def _resource_subscription_payloads() -> tuple[dict[str, Any], ...]:
+    return tuple(
+        {
+            "key": instrument.key,
+            "market": "resource",
+            "group": instrument.group,
+            "label": instrument.display_name,
+            "mode": "on_select",
+            "resources": {resource: True for resource in instrument.resources},
+            "intervals": RESOURCE_QUOTE_INTERVALS,
+            "provider_status": instrument.provider_status,
+            "note": instrument.role,
+        }
+        for instrument in list_resource_instruments()
+    )
+
+
 DEFAULT_RESOURCE_MARKET_DATA_SUBSCRIPTIONS: tuple[dict[str, Any], ...] = (
-    {
-        "key": "commodity:metals:GC",
-        "market": "resource",
-        "group": "metals",
-        "label": "黃金",
-        "mode": "manual",
-        "resources": {"quote": True, "ohlcv": True},
-        "intervals": {"quote_seconds": 60.0, "ohlcv_seconds": 300.0},
-        "provider_status": "provider_pending",
-        "note": "Watch-only commodity context; provider refresh is not wired yet.",
-    },
-    {
-        "key": "commodity:metals:SI",
-        "market": "resource",
-        "group": "metals",
-        "label": "白銀",
-        "mode": "manual",
-        "resources": {"quote": True, "ohlcv": True},
-        "intervals": {"quote_seconds": 60.0, "ohlcv_seconds": 300.0},
-        "provider_status": "provider_pending",
-        "note": "Watch-only commodity context; provider refresh is not wired yet.",
-    },
-    {
-        "key": "commodity:metals:HG",
-        "market": "resource",
-        "group": "metals",
-        "label": "銅",
-        "mode": "manual",
-        "resources": {"quote": True, "ohlcv": True},
-        "intervals": {"quote_seconds": 60.0, "ohlcv_seconds": 300.0},
-        "provider_status": "provider_pending",
-        "note": "Watch-only commodity context; provider refresh is not wired yet.",
-    },
-    {
-        "key": "commodity:energy:CL",
-        "market": "resource",
-        "group": "energy",
-        "label": "WTI 原油",
-        "mode": "manual",
-        "resources": {"quote": True, "ohlcv": True},
-        "intervals": {"quote_seconds": 60.0, "ohlcv_seconds": 300.0},
-        "provider_status": "provider_pending",
-        "note": "Watch-only commodity context; provider refresh is not wired yet.",
-    },
-    {
-        "key": "commodity:energy:BZ",
-        "market": "resource",
-        "group": "energy",
-        "label": "Brent 原油",
-        "mode": "manual",
-        "resources": {"quote": True, "ohlcv": True},
-        "intervals": {"quote_seconds": 60.0, "ohlcv_seconds": 300.0},
-        "provider_status": "provider_pending",
-        "note": "Watch-only commodity context; provider refresh is not wired yet.",
-    },
-    {
-        "key": "commodity:energy:NG",
-        "market": "resource",
-        "group": "energy",
-        "label": "天然氣",
-        "mode": "manual",
-        "resources": {"quote": True, "ohlcv": True},
-        "intervals": {"quote_seconds": 60.0, "ohlcv_seconds": 300.0},
-        "provider_status": "provider_pending",
-        "note": "Watch-only commodity context; provider refresh is not wired yet.",
-    },
+    _resource_subscription_payloads()
 )
 
 DEFAULT_MARKET_DATA_SUBSCRIPTIONS: tuple[dict[str, Any], ...] = (
@@ -284,6 +241,8 @@ def _resolve_subscription_items(
             mode = str(item_payload.get("mode", merged_item["mode"])).strip()
             if mode not in SUBSCRIPTION_MODES:
                 raise ValueError(f"Unsupported subscription mode '{mode}' for '{key}'.")
+            if merged_item["market"] == "resource" and mode == "manual":
+                mode = merged_item["mode"]
             merged_item["mode"] = mode
 
             resources = item_payload.get("resources")

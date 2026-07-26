@@ -1,6 +1,7 @@
 "use client";
 
 import type { ChartDrawing, ChartDrawingTool } from "@/components/LightweightKLineChart";
+import { StateSurface } from "@/components/LoadingPlaceholders";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
 import ProfessionalChartPanel, {
   type ProfessionalChartStyle,
@@ -52,7 +53,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
 type CryptoInterval = CryptoOhlcvInterval;
-type CryptoOhlcvRefreshReason = "manual" | "auto_empty" | "auto_stale" | "auto_poll";
+type CryptoOhlcvRefreshReason = "auto_empty" | "auto_stale" | "auto_poll";
 type SummaryTimeframe = "today" | "daily" | "weekly" | "monthly";
 type VolumeMetric = "base" | "quote";
 
@@ -125,6 +126,22 @@ type LiveChartUpdate = {
   receivedAt: string;
   sequence: number | null;
   lastMessageAgeMs: number;
+};
+
+type ProviderFetchIssue = {
+  provider?: string;
+  resource: "ohlcv" | "coverage";
+  message: string;
+};
+
+type BarsFetchResult = {
+  rows: CryptoOhlcvBar[];
+  issues: ProviderFetchIssue[];
+};
+
+type CoverageFetchResult = {
+  rows: CryptoOhlcvCoverage[];
+  issues: ProviderFetchIssue[];
 };
 
 const OHLCV_REFRESH_LIMIT_MAX = 1000;
@@ -776,6 +793,16 @@ function coverageKey(provider: string, interval: string) {
   return `${provider}:${interval}`;
 }
 
+function compactIssueMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || "Request failed");
+  return message.length > 140 ? `${message.slice(0, 137)}...` : message;
+}
+
+function formatProviderIssue(issue: ProviderFetchIssue) {
+  const source = issue.provider ? compactProviderLabel(issue.provider) : issue.resource;
+  return `${source}: ${issue.message}`;
+}
+
 function autoRefreshReasonForBars(
   rows: CryptoOhlcvBar[],
   interval: CryptoInterval
@@ -854,6 +881,7 @@ export default function CryptoKLinePanel({
   const [refreshing, setRefreshing] = useState(false);
   const [bars, setBars] = useState<CryptoOhlcvBar[]>([]);
   const [coverageRows, setCoverageRows] = useState<CryptoOhlcvCoverage[]>([]);
+  const [loadIssues, setLoadIssues] = useState<ProviderFetchIssue[]>([]);
   const [liveChartUpdate, setLiveChartUpdate] = useState<LiveChartUpdate | null>(null);
   const chartDrawingSyncTimerRef = useRef<number | null>(null);
   const chartDrawingLocalRevisionRef = useRef(0);
@@ -1018,27 +1046,57 @@ export default function CryptoKLinePanel({
       : t("crypto.kline.coverageEmpty");
   }, [coverageByProviderInterval, effectiveInterval, selectedSourceProviders, t]);
   const latestCoverageFetchedAt = latestFetchedAtForCoverage(currentIntervalCoverageRows);
+  const loadIssueLabels = loadIssues.slice(0, 4).map(formatProviderIssue);
+  const loadIssueBanner = loadIssueLabels.length ? (
+    <div className="border-b border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs text-amber-100">
+      <span className="font-semibold">{t("crypto.kline.status.loadPartial")}</span>
+      <span className="ml-2 text-amber-100/80">{loadIssueLabels.join(" / ")}</span>
+    </div>
+  ) : null;
 
-  const fetchBars = useCallback(async () => {
-    const providerRows = await Promise.all(
-      selectedSourceProviders.map((provider) =>
-        fetchJson<CryptoOhlcvBar[]>("/api/crypto-market/ohlcv/latest", {
+  const fetchBars = useCallback(async (): Promise<BarsFetchResult> => {
+    const providerResults = await Promise.allSettled(
+      selectedSourceProviders.map(async (provider) => ({
+        provider,
+        rows: await fetchJson<CryptoOhlcvBar[]>("/api/crypto-market/ohlcv/latest", {
           provider,
           symbols: selectedInstrument.symbol,
           instrument_type: selectedInstrument.instrumentType,
           interval: effectiveInterval,
           limit: chartLimit,
-        })
-      )
+        }),
+      }))
     );
+    const successfulRows: CryptoOhlcvBar[] = [];
+    const issues: ProviderFetchIssue[] = [];
 
-    return mergeProviderBars(
-      providerRows.flat(),
-      selectedSourceProviders,
-      selectedPrimaryProvider,
-      effectiveInterval,
-      chartLimit
-    );
+    providerResults.forEach((result, index) => {
+      const provider = selectedSourceProviders[index];
+      if (result.status === "fulfilled") {
+        successfulRows.push(...result.value.rows);
+        return;
+      }
+      issues.push({
+        provider,
+        resource: "ohlcv",
+        message: compactIssueMessage(result.reason),
+      });
+    });
+
+    if (successfulRows.length === 0 && issues.length > 0) {
+      throw new Error(issues.map(formatProviderIssue).join(" / "));
+    }
+
+    return {
+      rows: mergeProviderBars(
+        successfulRows,
+        selectedSourceProviders,
+        selectedPrimaryProvider,
+        effectiveInterval,
+        chartLimit
+      ),
+      issues,
+    };
   }, [
     chartLimit,
     effectiveInterval,
@@ -1048,14 +1106,29 @@ export default function CryptoKLinePanel({
     selectedSourceProviders,
   ]);
 
-  const fetchCoverageRows = useCallback(async () => {
-    const rows = await fetchJson<CryptoOhlcvCoverage[]>("/api/crypto-market/ohlcv/coverage", {
-      symbols: selectedInstrument.symbol,
-      instrument_type: selectedInstrument.instrumentType,
-    });
-    return rows.filter((row) =>
-      selectedSourceProviders.includes(row.provider as CryptoProvider)
-    );
+  const fetchCoverageRows = useCallback(async (): Promise<CoverageFetchResult> => {
+    try {
+      const rows = await fetchJson<CryptoOhlcvCoverage[]>("/api/crypto-market/ohlcv/coverage", {
+        symbols: selectedInstrument.symbol,
+        instrument_type: selectedInstrument.instrumentType,
+      });
+      return {
+        rows: rows.filter((row) =>
+          selectedSourceProviders.includes(row.provider as CryptoProvider)
+        ),
+        issues: [],
+      };
+    } catch (error) {
+      return {
+        rows: [],
+        issues: [
+          {
+            resource: "coverage",
+            message: compactIssueMessage(error),
+          },
+        ],
+      };
+    }
   }, [
     selectedInstrument.instrumentType,
     selectedInstrument.symbol,
@@ -1079,21 +1152,14 @@ export default function CryptoKLinePanel({
   const fetchLiveChartUpdate = useCallback(async (signal?: AbortSignal) => {
     if (!LIVE_CHART_RENDER_INTERVALS.has(effectiveInterval)) return null;
 
-    const response = await fetch(buildApiUrl("/api/crypto-market/realtime/latest", {
+    const rows = await fetchJson<CryptoRealtimeLatest[]>("/api/crypto-market/realtime/latest", {
       provider: liveRealtimeParams.provider,
       symbol: liveRealtimeParams.symbol,
       instrument_type: liveRealtimeParams.instrument_type,
-    }), {
-      headers: { Accept: "application/json" },
-      cache: "no-store",
+    }, {
       signal,
+      timeoutMs: LIVE_CHART_STREAM_WATCHDOG_MS,
     });
-
-    if (!response.ok) {
-      throw new Error(`API ${response.status}: ${response.statusText || "Request failed"}`);
-    }
-
-    const rows = await response.json() as CryptoRealtimeLatest[];
     return liveChartUpdateFromRealtimeRows(rows, effectiveInterval);
   }, [
     effectiveInterval,
@@ -1101,21 +1167,10 @@ export default function CryptoKLinePanel({
   ]);
 
   const refreshBars = useCallback(async (
-    reason: CryptoOhlcvRefreshReason = "manual",
+    reason: CryptoOhlcvRefreshReason,
     options?: { reloadAfter?: boolean; updateRefreshing?: boolean }
   ) => {
     if (!ohlcvRefreshEnabled) {
-      if (reason === "manual") {
-        emitDataStatusEvent({
-          market: "crypto",
-          level: "warning",
-          title: t("crypto.kline.status.refreshDisabled"),
-          message: t("crypto.kline.status.refreshDisabledMessage", {
-            asset: selectedInstrument.baseAsset,
-          }),
-          source: chartStatusSource,
-        });
-      }
       return null;
     }
 
@@ -1140,7 +1195,7 @@ export default function CryptoKLinePanel({
           limit: Math.min(chartLimit, OHLCV_REFRESH_LIMIT_MAX),
         }
       );
-      const shouldShowSuccess = reason === "manual" || reason === "auto_empty";
+      const shouldShowSuccess = reason === "auto_empty";
       if (result.error_count > 0 || shouldShowSuccess) {
         const reasonLabel = autoRefreshReasonLabel(reason, t);
         emitDataStatusEvent({
@@ -1161,12 +1216,13 @@ export default function CryptoKLinePanel({
 
       if (options?.reloadAfter !== false) {
         const requestId = ++barsRequestIdRef.current;
-        const [rows, nextCoverageRows] = await Promise.all([fetchBars(), fetchCoverageRows()]);
+        const [barsResult, coverageResult] = await Promise.all([fetchBars(), fetchCoverageRows()]);
 
         if (barsRequestIdRef.current !== requestId) return result;
 
-        setBars(rows);
-        setCoverageRows(nextCoverageRows);
+        setBars(barsResult.rows);
+        setCoverageRows(coverageResult.rows);
+        setLoadIssues([...barsResult.issues, ...coverageResult.issues]);
         setLoadState("success");
       }
       return result;
@@ -1192,7 +1248,6 @@ export default function CryptoKLinePanel({
     fetchBars,
     fetchCoverageRows,
     ohlcvRefreshEnabled,
-    selectedInstrument.baseAsset,
     selectedInstrument.symbol,
     selectedSourceProviders,
     t,
@@ -1203,18 +1258,32 @@ export default function CryptoKLinePanel({
     const requestId = ++barsRequestIdRef.current;
     if (!silent) {
       setLoadState("loading");
+      setLoadIssues([]);
     }
 
     try {
-      const [rows, nextCoverageRows] = await Promise.all([fetchBars(), fetchCoverageRows()]);
+      const [barsResult, coverageResult] = await Promise.all([fetchBars(), fetchCoverageRows()]);
 
       if (barsRequestIdRef.current !== requestId) return;
 
-      setBars(rows);
-      setCoverageRows(nextCoverageRows);
+      const issues = [...barsResult.issues, ...coverageResult.issues];
+      setBars(barsResult.rows);
+      setCoverageRows(coverageResult.rows);
+      setLoadIssues(issues);
       setLoadState("success");
+      if (!silent && issues.length) {
+        emitDataStatusEvent({
+          market: "crypto",
+          level: "warning",
+          title: t("crypto.kline.status.loadPartial"),
+          message: t("crypto.kline.status.loadPartialMessage", {
+            resources: issues.slice(0, 4).map(formatProviderIssue).join(", "),
+          }),
+          source: chartStatusSource,
+        });
+      }
 
-      const staleRefreshReason = autoRefreshReasonForBars(rows, effectiveInterval);
+      const staleRefreshReason = autoRefreshReasonForBars(barsResult.rows, effectiveInterval);
       const autoRefreshReason =
         staleRefreshReason ??
         (LIVE_OHLCV_REFRESH_INTERVALS.has(effectiveInterval) ? "auto_poll" : null);
@@ -1239,15 +1308,16 @@ export default function CryptoKLinePanel({
           updateRefreshing: autoRefreshReason !== "auto_poll",
         });
         if (result !== null) {
-          const [refreshedRows, refreshedCoverageRows] = await Promise.all([
+          const [refreshedBarsResult, refreshedCoverageResult] = await Promise.all([
             fetchBars(),
             fetchCoverageRows(),
           ]);
 
           if (barsRequestIdRef.current !== requestId) return;
 
-          setBars(refreshedRows);
-          setCoverageRows(refreshedCoverageRows);
+          setBars(refreshedBarsResult.rows);
+          setCoverageRows(refreshedCoverageResult.rows);
+          setLoadIssues([...refreshedBarsResult.issues, ...refreshedCoverageResult.issues]);
           setLoadState("success");
         }
       } finally {
@@ -1257,6 +1327,12 @@ export default function CryptoKLinePanel({
       }
     } catch (error) {
       if (!silent && barsRequestIdRef.current === requestId) {
+        setLoadIssues([
+          {
+            resource: "ohlcv",
+            message: compactIssueMessage(error),
+          },
+        ]);
         emitDataStatusEvent({
           market: "crypto",
           level: "error",
@@ -1869,30 +1945,21 @@ export default function CryptoKLinePanel({
             >
               {t("crypto.kline.quoteVolume")}
             </button>
-            <button
-              type="button"
-              className="h-7 px-2 text-xs font-semibold text-omi-text-muted transition hover:bg-omi-surface hover:text-omi-text-strong disabled:cursor-not-allowed disabled:text-omi-text-inverse-muted"
-              onClick={() => void loadBars()}
-              disabled={loadState === "loading" || refreshing}
-            >
-              {t("crypto.kline.reload")}
-            </button>
-            <button
-              type="button"
-              className="h-7 px-2 text-xs font-semibold text-omi-accent transition hover:bg-omi-surface hover:text-omi-text-strong disabled:cursor-not-allowed disabled:text-omi-text-inverse-muted"
-              onClick={() => void refreshBars()}
-              disabled={refreshing || !ohlcvRefreshEnabled}
-            >
-              {refreshing ? t("crypto.kline.refreshing") : t("crypto.kline.refreshOhlcv")}
-            </button>
           </>
         }
         chartReady={displayChartData.length > 0}
         emptyState={
-          <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle px-4 text-center text-sm text-omi-text-muted">
-            {loadState === "loading" || refreshing
-              ? t("crypto.kline.loadingBars")
-              : t("crypto.kline.emptyBars")}
+          <div className="flex h-[640px] items-center justify-center border-t border-omi-border-subtle p-4">
+            <StateSurface
+              title={
+                loadState === "loading" || refreshing
+                  ? t("crypto.kline.loadingBars")
+                  : t("crypto.kline.emptyBars")
+              }
+              tone={loadState === "loading" || refreshing ? "loading" : "empty"}
+              busy={loadState === "loading" || refreshing}
+              className="w-full max-w-xl"
+            />
           </div>
         }
         chartData={displayChartData}
@@ -1907,6 +1974,7 @@ export default function CryptoKLinePanel({
         drawings={chartDrawings}
         selectedDrawingId={activeSelectedChartDrawingId}
         drawingContext={professionalDrawingContext}
+        message={loadIssueBanner}
         onDrawingToolChange={setChartDrawingTool}
         onDrawingsChange={updateChartDrawings}
         onDrawingStateChange={updateChartDrawingState}
@@ -2030,22 +2098,6 @@ export default function CryptoKLinePanel({
                   <span className={`border px-2 py-1 text-xs font-semibold ${statusClass(loadState)}`}>
                     {loadState}
                   </span>
-                  <button
-                    type="button"
-                    className="h-8 border border-omi-border bg-omi-surface px-3 text-xs font-semibold text-omi-text-muted transition hover:border-omi-accent hover:text-omi-accent disabled:cursor-not-allowed disabled:opacity-60"
-                    onClick={() => void loadBars()}
-                    disabled={loadState === "loading" || refreshing}
-                  >
-                    {t("crypto.kline.reload")}
-                  </button>
-                  <button
-                    type="button"
-                    className="h-8 border border-omi-accent-border bg-omi-accent-soft px-3 text-xs font-semibold text-omi-accent transition hover:border-omi-accent hover:bg-omi-surface-subtle disabled:cursor-not-allowed disabled:opacity-60"
-                    onClick={() => void refreshBars()}
-                    disabled={refreshing || !ohlcvRefreshEnabled}
-                  >
-                    {refreshing ? t("crypto.kline.refreshing") : t("crypto.kline.refreshOhlcv")}
-                  </button>
                 </>
               ) : null}
               <div className="relative">
@@ -2116,6 +2168,8 @@ export default function CryptoKLinePanel({
         ) : null}
       </header>
 
+      {loadIssueBanner}
+
       <div className={`${chartMinHeight} px-3 py-3`}>
         {displayChartData.length > 0 ? (
           <StockKLineChart
@@ -2130,10 +2184,17 @@ export default function CryptoKLinePanel({
             volumeValueFormatter={formatCryptoVolume}
           />
         ) : (
-          <div className={`flex ${emptyHeight} items-center justify-center border border-dashed border-omi-border-subtle bg-omi-surface-subtle px-4 text-center text-sm text-omi-text-muted`}>
-            {loadState === "loading" || refreshing
-              ? t("crypto.kline.loadingBars")
-              : t("crypto.kline.emptyBars")}
+          <div className={`flex ${emptyHeight} items-center justify-center border border-omi-border-subtle bg-omi-surface p-4`}>
+            <StateSurface
+              title={
+                loadState === "loading" || refreshing
+                  ? t("crypto.kline.loadingBars")
+                  : t("crypto.kline.emptyBars")
+              }
+              tone={loadState === "loading" || refreshing ? "loading" : "empty"}
+              busy={loadState === "loading" || refreshing}
+              className="w-full max-w-xl"
+            />
           </div>
         )}
       </div>

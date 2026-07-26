@@ -2,17 +2,24 @@ from __future__ import annotations
 
 from datetime import date
 
-import requests
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.jobs import backfill_tasks, service as job_service
+from app.jobs import backfill_tasks
 from app.jobs.schemas import JobRunRead
+from app.routers.market_family_helpers import (
+    enqueue_serialized_job,
+    fetch_error,
+    watchlist_group_error,
+    watchlist_group_target,
+    watchlist_item_error,
+)
 from app.settings.refresh_execution import (
     resolve_observed_stock_refresh_interval_seconds,
     resolve_subresource_refresh_interval_seconds,
 )
+from app.us_market.errors import USMarketDataFetchError
 from app.us_market.schemas import (
     MacroSeriesObservationRead,
     USDailyPriceRead,
@@ -43,7 +50,6 @@ from app.us_market.schemas import (
 from app.watchlists.schemas import WatchlistGroupRadarRead
 from app.us_market.service import (
     USMarketConfigurationError,
-    USMarketDataFetchError,
     USStockNotFoundError,
     USWatchlistDuplicateItemError,
     USWatchlistGroupNotEmptyError,
@@ -92,30 +98,23 @@ router = APIRouter()
 
 
 def _fetch_error(exc: Exception) -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_502_BAD_GATEWAY,
-        detail=str(exc),
-    )
+    return fetch_error(exc)
 
 
 def _group_error(exc: Exception) -> HTTPException:
-    if isinstance(exc, USWatchlistGroupNotFoundError):
-        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
-
-    if isinstance(exc, (USWatchlistInvalidTreeError, USWatchlistGroupNotEmptyError)):
-        return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
-
-    return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return watchlist_group_error(
+        exc,
+        not_found_errors=(USWatchlistGroupNotFoundError,),
+        bad_request_errors=(USWatchlistInvalidTreeError, USWatchlistGroupNotEmptyError),
+    )
 
 
 def _item_error(exc: Exception) -> HTTPException:
-    if isinstance(exc, (USWatchlistGroupNotFoundError, USWatchlistItemNotFoundError, USStockNotFoundError)):
-        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
-
-    if isinstance(exc, USWatchlistDuplicateItemError):
-        return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
-
-    return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return watchlist_item_error(
+        exc,
+        not_found_errors=(USWatchlistGroupNotFoundError, USWatchlistItemNotFoundError, USStockNotFoundError),
+        duplicate_errors=(USWatchlistDuplicateItemError,),
+    )
 
 
 def _enqueue_us_watchlist_daily_refresh(
@@ -129,7 +128,7 @@ def _enqueue_us_watchlist_daily_refresh(
     sleep_seconds: float,
     job_type: str = "us_market.watchlist_daily_refresh",
 ) -> dict:
-    target = f"group:{group_id}" if group_id is not None else "all"
+    target = watchlist_group_target(group_id)
     request = {
         "group_id": group_id,
         "include_children": include_children,
@@ -138,7 +137,7 @@ def _enqueue_us_watchlist_daily_refresh(
         "adjusted": adjusted,
         "sleep_seconds": sleep_seconds,
     }
-    job, _created = job_service.enqueue_job(
+    return enqueue_serialized_job(
         db=db,
         job_type=job_type,
         target=target,
@@ -155,7 +154,6 @@ def _enqueue_us_watchlist_daily_refresh(
             sleep_seconds,
         ),
     )
-    return job_service.serialize_job(job)
 
 
 def _enqueue_us_watchlist_resource_refresh(
@@ -172,7 +170,7 @@ def _enqueue_us_watchlist_resource_refresh(
     adjusted: bool,
     sleep_seconds: float,
 ) -> dict:
-    target = f"group:{group_id}" if group_id is not None else "all"
+    target = watchlist_group_target(group_id)
     request = {
         "group_id": group_id,
         "include_children": include_children,
@@ -185,7 +183,7 @@ def _enqueue_us_watchlist_resource_refresh(
         "adjusted": adjusted,
         "sleep_seconds": sleep_seconds,
     }
-    job, _created = job_service.enqueue_job(
+    return enqueue_serialized_job(
         db=db,
         job_type="us_market.watchlist_resource_refresh",
         target=target,
@@ -206,7 +204,6 @@ def _enqueue_us_watchlist_resource_refresh(
             sleep_seconds,
         ),
     )
-    return job_service.serialize_job(job)
 
 
 def _enqueue_us_daily_price_quality_repair(
@@ -231,7 +228,7 @@ def _enqueue_us_daily_price_quality_repair(
         "adjusted": adjusted,
         "sleep_seconds": sleep_seconds,
     }
-    job, _created = job_service.enqueue_job(
+    return enqueue_serialized_job(
         db=db,
         job_type="us_market.daily_price_quality_repair",
         target=target,
@@ -249,7 +246,6 @@ def _enqueue_us_daily_price_quality_repair(
             sleep_seconds,
         ),
     )
-    return job_service.serialize_job(job)
 
 
 @router.post(
@@ -358,6 +354,7 @@ def get_us_watchlist_ranking_api(
     sort_order: str = Query(default="asc", pattern="^(asc|desc)$"),
     use_intraday: bool = False,
     intraday_limit: int = Query(default=30, ge=1, le=100),
+    intraday_session_scope: str = Query(default="regular", pattern="^(regular|extended|all)$"),
     db: Session = Depends(get_db),
 ):
     try:
@@ -370,6 +367,7 @@ def get_us_watchlist_ranking_api(
             sort_order=sort_order,
             use_intraday=use_intraday,
             intraday_limit=intraday_limit,
+            intraday_session_scope=intraday_session_scope,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -602,8 +600,6 @@ def sync_us_stock_symbols(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except USMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -617,8 +613,6 @@ def sync_us_stock_sec_company_data(db: Session = Depends(get_db)):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except USMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -765,8 +759,6 @@ def refresh_us_daily_prices(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except USMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -828,15 +820,17 @@ def get_us_ohlc_chart_data(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except USMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
 
 @router.get("/intraday/{symbol}", response_model=USIntradayTrendRead)
-def get_us_intraday_trend_api(symbol: str):
-    return get_us_intraday_trend(symbol=symbol)
+def get_us_intraday_trend_api(
+    symbol: str,
+    session_scope: str = Query(default="regular", pattern="^(regular|extended|all)$"),
+    db: Session = Depends(get_db),
+):
+    return get_us_intraday_trend(symbol=symbol, session_scope=session_scope, db=db)
 
 
 @router.post("/sec/{symbol}/refresh-facts", response_model=USSecFactRefreshResultRead)
@@ -853,8 +847,6 @@ def refresh_us_sec_facts(symbol: str, db: Session = Depends(get_db)):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except USMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -902,8 +894,6 @@ def refresh_us_company_profile(symbol: str, db: Session = Depends(get_db)):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except USMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -951,8 +941,6 @@ def refresh_us_corporate_actions(symbol: str, db: Session = Depends(get_db)):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except USMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -984,8 +972,6 @@ def list_us_actions(
 def refresh_us_short_volume(trade_date: date, db: Session = Depends(get_db)):
     try:
         return refresh_us_short_volume_from_finra(db=db, trade_date=trade_date)
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except USMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 
@@ -1030,8 +1016,6 @@ def refresh_us_macro_series(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except requests.RequestException as exc:
-        raise _fetch_error(exc) from exc
     except USMarketDataFetchError as exc:
         raise _fetch_error(exc) from exc
 

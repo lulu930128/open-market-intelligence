@@ -9,6 +9,7 @@ $script:RepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Pa
 $script:BackendDir = Join-Path $script:RepoRoot "backend"
 $script:FrontendDir = Join-Path $script:RepoRoot "frontend"
 $script:TrayIconPath = Join-Path $script:RepoRoot "ATRI-MyDearMoments.ico"
+$script:AppDisplayName = "OMI_search"
 $script:TrayIcon = $null
 $script:IsPackagedRelease = Test-Path -LiteralPath (Join-Path $script:RepoRoot "release-manifest.json")
 $script:AppDataRoot = if ($script:IsPackagedRelease) {
@@ -28,6 +29,7 @@ $script:PackagedNode = Join-Path $script:RepoRoot "runtime\node\node.exe"
 $script:BackendProcess = $null
 $script:FrontendProcess = $null
 $script:LastStatusText = $null
+$script:BackendStopExpected = $false
 $script:IsShuttingDown = $false
 $script:DashboardAutoOpened = $false
 $script:DefaultFrontendHost = "127.0.0.1"
@@ -37,6 +39,10 @@ $script:DefaultBackendHost = "127.0.0.1"
 $script:DefaultBackendPort = 8400
 $script:BackendPortSearchSpan = 1000
 $script:DefaultApiProxyPath = "/omi-data"
+$script:BackendReload = $false
+$script:BackendSourceStaleToleranceSeconds = 2
+$script:ExpectedAskSchemaProperties = @("market_data_params")
+$script:ExpectedAskTargetTypes = @("kr_stock", "crypto_asset")
 $script:FrontendHost = $script:DefaultFrontendHost
 $script:FrontendPort = $script:DefaultFrontendPort
 $script:DashboardUrl = "http://$($script:DefaultFrontendHost):$($script:DefaultFrontendPort)"
@@ -46,6 +52,7 @@ $script:BackendPort = $script:DefaultBackendPort
 $script:ApiProxyPath = $script:DefaultApiProxyPath
 $script:BackendBaseUrl = "http://$($script:DefaultBackendHost):$($script:DefaultBackendPort)"
 $script:BackendHealthUrl = "$($script:BackendBaseUrl)/api/system/health"
+$script:BackendReadyUrl = "$($script:BackendBaseUrl)/api/system/readyz"
 
 New-Item -ItemType Directory -Force -Path $script:LogRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $script:DataRoot | Out-Null
@@ -75,7 +82,7 @@ function Write-LauncherLog {
 function Show-Message {
     param(
         [Parameter(Mandatory = $true)][string]$Message,
-        [string]$Title = "Open Market Intelligence"
+        [string]$Title = $script:AppDisplayName
     )
 
     [System.Windows.Forms.MessageBox]::Show(
@@ -88,7 +95,8 @@ function Show-Message {
 
 $script:Mutex = New-Object System.Threading.Mutex($false, "OpenMarketIntelligenceLauncher")
 if (-not $script:Mutex.WaitOne(0, $false)) {
-    Show-Message "OMI Launcher is already running."
+    Write-LauncherLog "$($script:AppDisplayName) launcher start requested but an existing tray instance is already running; services were not restarted." "WARN"
+    Show-Message "$($script:AppDisplayName) is already running in the system tray. Use Restart Services from the tray menu to restart backend/frontend services."
     exit 0
 }
 
@@ -191,6 +199,25 @@ function Get-ConfigurationValue {
     return $DefaultValue
 }
 
+function Get-BooleanConfigurationValue {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Names,
+        [bool]$DefaultValue = $false
+    )
+
+    $rawValue = Get-ConfigurationValue -Names $Names -DefaultValue ([string]$DefaultValue)
+    $normalized = ([string]$rawValue).Trim().ToLowerInvariant()
+    if ($normalized -in @("1", "true", "yes", "y", "on")) {
+        return $true
+    }
+    if ($normalized -in @("0", "false", "no", "n", "off")) {
+        return $false
+    }
+
+    Write-LauncherLog "Invalid boolean config '$rawValue' for $($Names -join '/'); using default=$DefaultValue." "WARN"
+    return $DefaultValue
+}
+
 function Format-UrlHost {
     param([Parameter(Mandatory = $true)][string]$HostName)
 
@@ -248,6 +275,7 @@ function Update-BackendServiceUrls {
     $urlHost = Format-UrlHost -HostName $script:BackendHost
     $script:BackendBaseUrl = "http://$urlHost`:$($script:BackendPort)"
     $script:BackendHealthUrl = "$($script:BackendBaseUrl)/api/system/health"
+    $script:BackendReadyUrl = "$($script:BackendBaseUrl)/api/system/readyz"
 
     Set-ProcessEnvironmentValue -Name "APP_HOST" -Value $script:BackendHost
     Set-ProcessEnvironmentValue -Name "APP_PORT" -Value ([string]$script:BackendPort)
@@ -270,6 +298,9 @@ function Initialize-ServiceEnvironment {
     $script:ApiProxyPath = Get-ConfigurationValue `
         -Names @("API_PROXY_PATH", "NEXT_PUBLIC_API_PROXY_PATH") `
         -DefaultValue $script:DefaultApiProxyPath
+    $script:BackendReload = Get-BooleanConfigurationValue `
+        -Names @("OMI_BACKEND_RELOAD", "BACKEND_RELOAD") `
+        -DefaultValue $false
 
     if (-not $script:ApiProxyPath.StartsWith("/")) {
         $script:ApiProxyPath = "/$($script:ApiProxyPath)"
@@ -282,7 +313,7 @@ function Initialize-ServiceEnvironment {
         Set-ProcessEnvironmentValue -Name "NEXT_PUBLIC_API_BASE_URL" -Value ""
     }
 
-    Write-LauncherLog "Service environment initialized. backend=$($script:BackendBaseUrl) frontend=$($script:DashboardUrl) proxy_path=$($script:ApiProxyPath)"
+    Write-LauncherLog "Service environment initialized. backend=$($script:BackendBaseUrl) frontend=$($script:DashboardUrl) proxy_path=$($script:ApiProxyPath) backend_reload=$($script:BackendReload)"
 }
 
 function Invoke-StockMasterSeed {
@@ -440,6 +471,95 @@ function Get-BackendHealth {
     }
 }
 
+function Get-BackendAiTools {
+    param([string]$Url = "$($script:BackendBaseUrl)/api/ai/tools")
+
+    $response = $null
+    $reader = $null
+
+    try {
+        $request = [System.Net.HttpWebRequest]::Create($Url)
+        $request.Method = "GET"
+        $request.Timeout = 1500
+        $request.ReadWriteTimeout = 1500
+        $response = $request.GetResponse()
+        $statusCode = [int]$response.StatusCode
+
+        if ($statusCode -lt 200 -or $statusCode -ge 400) {
+            return $null
+        }
+
+        $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+        $content = $reader.ReadToEnd()
+        return ($content | ConvertFrom-Json)
+    }
+    catch {
+        return $null
+    }
+    finally {
+        if ($null -ne $reader) {
+            $reader.Dispose()
+        }
+
+        if ($null -ne $response) {
+            $response.Close()
+        }
+    }
+}
+
+function Test-BackendPublicContractMatchesExpected {
+    $toolsResponse = Get-BackendAiTools
+    if ($null -eq $toolsResponse) {
+        Write-LauncherLog "Backend /api/ai/tools did not return a parseable response; treating backend contract as stale." "WARN"
+        return $false
+    }
+
+    $askTool = @($toolsResponse.tools) |
+        Where-Object { $_.name -eq "omi.ask" } |
+        Select-Object -First 1
+    if ($null -eq $askTool) {
+        Write-LauncherLog "Backend /api/ai/tools is missing omi.ask; treating backend contract as stale." "WARN"
+        return $false
+    }
+
+    $schemaProperties = $askTool.input_schema.properties
+    $propertyNames = if ($null -ne $schemaProperties) {
+        @($schemaProperties.PSObject.Properties.Name)
+    }
+    else {
+        @()
+    }
+
+    $targetTypes = @()
+    try {
+        $targetTypes = @($askTool.input_schema.properties.target.properties.type.enum)
+    }
+    catch {
+        $targetTypes = @()
+    }
+
+    $missingProperties = @()
+    foreach ($propertyName in $script:ExpectedAskSchemaProperties) {
+        if ($propertyNames -notcontains $propertyName) {
+            $missingProperties += $propertyName
+        }
+    }
+
+    $missingTargetTypes = @()
+    foreach ($targetType in $script:ExpectedAskTargetTypes) {
+        if ($targetTypes -notcontains $targetType) {
+            $missingTargetTypes += $targetType
+        }
+    }
+
+    if ($missingProperties.Count -gt 0 -or $missingTargetTypes.Count -gt 0) {
+        Write-LauncherLog "Backend public AI contract is stale. missing_properties=$($missingProperties -join ',') missing_target_types=$($missingTargetTypes -join ',')" "WARN"
+        return $false
+    }
+
+    return $true
+}
+
 function Get-FrontendHealth {
     param([string]$Url = $script:FrontendHealthUrl)
 
@@ -504,6 +624,65 @@ function Test-BackendHealthMatchesExpected {
     }
 
     return $true
+}
+
+function Get-LatestBackendSourceWriteTimeUtc {
+    $sourceRoots = @(
+        (Join-Path $script:BackendDir "app"),
+        (Join-Path $script:BackendDir "alembic"),
+        (Join-Path $script:BackendDir "scripts")
+    )
+    $latest = [DateTime]::MinValue
+
+    foreach ($root in $sourceRoots) {
+        if (-not (Test-Path -LiteralPath $root)) {
+            continue
+        }
+
+        try {
+            $files = Get-ChildItem -LiteralPath $root -Recurse -File -Filter "*.py" -ErrorAction SilentlyContinue
+            foreach ($file in $files) {
+                if ($file.LastWriteTimeUtc -gt $latest) {
+                    $latest = $file.LastWriteTimeUtc
+                }
+            }
+        }
+        catch {
+            Write-LauncherLog "Unable to inspect backend source timestamps under $root. error=$($_.Exception.Message)" "WARN"
+        }
+    }
+
+    return $latest
+}
+
+function Test-BackendPortOwnersOlderThanSource {
+    param([Parameter(Mandatory = $true)][int]$Port)
+
+    if ($script:IsPackagedRelease) {
+        return $false
+    }
+
+    $sourceStamp = Get-LatestBackendSourceWriteTimeUtc
+    if ($sourceStamp -eq [DateTime]::MinValue) {
+        return $false
+    }
+
+    $processIds = @(Get-ListeningProcessIdsOnPort -Port $Port)
+    foreach ($processId in $processIds) {
+        try {
+            $process = Get-Process -Id $processId -ErrorAction Stop
+            $startedAtUtc = $process.StartTime.ToUniversalTime()
+            if ($startedAtUtc.AddSeconds($script:BackendSourceStaleToleranceSeconds) -lt $sourceStamp) {
+                Write-LauncherLog "Backend process is older than backend source. pid=$processId started_at=$($startedAtUtc.ToString("o")) source_stamp=$($sourceStamp.ToString("o"))" "WARN"
+                return $true
+            }
+        }
+        catch {
+            Write-LauncherLog "Unable to inspect backend port owner pid=$processId. error=$($_.Exception.Message)" "WARN"
+        }
+    }
+
+    return $false
 }
 
 function Test-FrontendHealthMatchesExpected {
@@ -740,11 +919,33 @@ function Select-AvailableBackendPortForStart {
         $backendHealth = Get-BackendHealth
         if ($null -ne $backendHealth) {
             if (Test-BackendHealthMatchesExpected -Health $backendHealth -ExpectedPythonPath $ExpectedPythonPath) {
-                Write-LauncherLog "Backend health endpoint already responds with the expected project/runtime; skipping backend start."
-                return $true
-            }
+                $restartReasons = @()
+                if (Test-BackendPortOwnersOlderThanSource -Port $script:BackendPort) {
+                    $restartReasons += "backend source changed"
+                }
+                if (-not (Test-BackendPublicContractMatchesExpected)) {
+                    $restartReasons += "backend public contract stale"
+                }
 
-            if ([string]$backendHealth.app_name -eq "Open Market Intelligence") {
+                if ($restartReasons.Count -gt 0) {
+                    $restartReason = $restartReasons -join "; "
+                    Write-LauncherLog "Existing OMI backend matches this project but must be restarted. reason=$restartReason" "WARN"
+                    Stop-BackendPortOwners -Port $script:BackendPort -Reason $restartReason
+                    Start-Sleep -Milliseconds 750
+
+                    if (Test-HttpOk $script:BackendHealthUrl) {
+                        $reasons += "stale OMI runtime still responded after backend restart cleanup"
+                    }
+                    else {
+                        return $false
+                    }
+                }
+                else {
+                    Write-LauncherLog "Backend health endpoint already responds with the expected project/runtime; skipping backend start."
+                    return $true
+                }
+            }
+            elseif ([string]$backendHealth.app_name -eq "Open Market Intelligence") {
                 Write-LauncherLog "Existing OMI backend did not match the expected project/runtime. Clearing stale backend before start." "WARN"
                 Stop-BackendPortOwners -Port $script:BackendPort -Reason "runtime mismatch"
                 Start-Sleep -Milliseconds 750
@@ -811,6 +1012,36 @@ function Stop-BackendPortOwners {
         }
         catch {
             throw "Failed to stop stale backend port owner pid=$processId on port $Port. error=$($_.Exception.Message)"
+        }
+    }
+}
+
+function Stop-FrontendPortOwners {
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+
+    $processIds = @(Get-ListeningProcessIdsOnPort -Port $Port)
+    if ($processIds.Count -eq 0) {
+        Write-LauncherLog "No listening process was found on frontend port $Port."
+        return
+    }
+
+    $taskkill = Join-Path $env:SystemRoot "System32\taskkill.exe"
+    foreach ($processId in $processIds) {
+        if ($processId -eq $PID) {
+            Write-LauncherLog "Skipping current launcher process while clearing frontend port $Port." "WARN"
+            continue
+        }
+
+        try {
+            $process = Get-Process -Id $processId -ErrorAction Stop
+            Write-LauncherLog "Stopping OMI frontend port owner. port=$Port pid=$processId process=$($process.ProcessName) reason=$Reason" "WARN"
+            Start-Process -FilePath $taskkill -ArgumentList @("/PID", "$processId", "/T", "/F") -Wait -WindowStyle Hidden | Out-Null
+        }
+        catch {
+            throw "Failed to stop frontend port owner pid=$processId on port $Port. error=$($_.Exception.Message)"
         }
     }
 }
@@ -943,7 +1174,8 @@ function Start-LoggedService {
         "-RepoRoot `"$($script:RepoRoot)`"",
         "-WorkingDirectory `"$WorkingDirectory`"",
         "-FilePath `"$FilePath`"",
-        "-ArgumentsJsonBase64 $argumentsJsonBase64"
+        "-ArgumentsJsonBase64 $argumentsJsonBase64",
+        "-LauncherPid $PID"
     ) -join " "
 
     return Start-Process `
@@ -955,6 +1187,8 @@ function Start-LoggedService {
 }
 
 function Start-Backend {
+    $script:BackendStopExpected = $false
+
     if (Test-ProcessRunning $script:BackendProcess) {
         Write-LauncherLog "Backend process is already tracked pid=$($script:BackendProcess.Id)."
         return
@@ -976,13 +1210,12 @@ function Start-Backend {
 
     Invoke-BackendPythonRuntimeCheck -PythonPath $python
 
-    Write-LauncherLog "Starting backend with $python on $($script:BackendBaseUrl)."
-    $backendArguments = if ($script:IsPackagedRelease) {
-        @("-m", "uvicorn", "app.main:app", "--host", $script:BackendHost, "--port", ([string]$script:BackendPort))
+    Write-LauncherLog "Starting backend with $python on $($script:BackendBaseUrl). reload=$($script:BackendReload)"
+    $backendArguments = @("-m", "uvicorn", "app.main:app")
+    if ((-not $script:IsPackagedRelease) -and $script:BackendReload) {
+        $backendArguments += "--reload"
     }
-    else {
-        @("-m", "uvicorn", "app.main:app", "--reload", "--host", $script:BackendHost, "--port", ([string]$script:BackendPort))
-    }
+    $backendArguments += @("--host", $script:BackendHost, "--port", ([string]$script:BackendPort))
 
     $script:BackendProcess = Start-LoggedService `
         -ServiceName "backend" `
@@ -1082,11 +1315,55 @@ function Start-Services {
     }
 }
 
-function Stop-Services {
-    Stop-ProcessTree $script:FrontendProcess "frontend"
+function Stop-BackendService {
+    $script:BackendStopExpected = $true
     Stop-ProcessTree $script:BackendProcess "backend"
-    $script:FrontendProcess = $null
     $script:BackendProcess = $null
+
+    $expectedPython = Get-ExpectedBackendPython
+    $backendHealth = Get-BackendHealth
+    if ($null -eq $backendHealth) {
+        return
+    }
+
+    if (Test-BackendHealthMatchesExpected -Health $backendHealth -ExpectedPythonPath $expectedPython) {
+        Write-LauncherLog "Backend still responds after tracked stop; clearing expected backend port owners."
+        Stop-BackendPortOwners -Port $script:BackendPort -Reason "launcher stop"
+        Start-Sleep -Milliseconds 750
+        if (Test-HttpOk $script:BackendHealthUrl) {
+            Write-LauncherLog "Backend health still responds after launcher stop cleanup." "WARN"
+        }
+    }
+    else {
+        Write-LauncherLog "Backend port still responds but does not match this launcher; leaving it running." "WARN"
+    }
+}
+
+function Stop-FrontendService {
+    Stop-ProcessTree $script:FrontendProcess "frontend"
+    $script:FrontendProcess = $null
+
+    $frontendHealth = Get-FrontendHealth
+    if ($null -eq $frontendHealth) {
+        return
+    }
+
+    if (Test-FrontendHealthMatchesExpected -Health $frontendHealth) {
+        Write-LauncherLog "Frontend still responds after tracked stop; clearing expected frontend port owners."
+        Stop-FrontendPortOwners -Port $script:FrontendPort -Reason "launcher stop"
+        Start-Sleep -Milliseconds 750
+        if (Test-FrontendOk) {
+            Write-LauncherLog "Frontend health still responds after launcher stop cleanup." "WARN"
+        }
+    }
+    else {
+        Write-LauncherLog "Frontend port still responds but does not match this launcher; leaving it running." "WARN"
+    }
+}
+
+function Stop-Services {
+    Stop-FrontendService
+    Stop-BackendService
 }
 
 function Restart-Services {
@@ -1120,67 +1397,87 @@ function Open-LogsFolder {
 
 $script:NotifyIcon = New-Object System.Windows.Forms.NotifyIcon
 $script:NotifyIcon.Icon = Get-TrayIcon
-$script:NotifyIcon.Text = "OMI Launcher: starting"
+$script:NotifyIcon.Text = "$($script:AppDisplayName): starting"
 $script:NotifyIcon.Visible = $true
 
-$script:Menu = New-Object System.Windows.Forms.ContextMenuStrip
-$script:StatusItem = New-Object System.Windows.Forms.ToolStripMenuItem
+# ContextMenuStrip can be pushed behind the Windows 11 hidden-icons flyout
+# because this tray-only process has no foreground top-level window. The
+# native ContextMenu integration keeps the menu in the tray foreground.
+$script:Menu = New-Object System.Windows.Forms.ContextMenu
+$script:TitleItem = New-Object System.Windows.Forms.MenuItem
+$script:TitleItem.Text = $script:AppDisplayName
+$script:TitleItem.Enabled = $false
+
+$script:StatusItem = New-Object System.Windows.Forms.MenuItem
 $script:StatusItem.Text = "Status: starting"
 $script:StatusItem.Enabled = $false
 
-$startItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$startItem = New-Object System.Windows.Forms.MenuItem
 $startItem.Text = "Start Services"
 $startItem.add_Click({ Start-Services })
 
-$restartItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$restartItem = New-Object System.Windows.Forms.MenuItem
 $restartItem.Text = "Restart Services"
 $restartItem.add_Click({ Restart-Services })
 
-$stopItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$stopItem = New-Object System.Windows.Forms.MenuItem
 $stopItem.Text = "Stop Services"
 $stopItem.add_Click({ Stop-Services })
 
-$openDashboardItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$openDashboardItem = New-Object System.Windows.Forms.MenuItem
 $openDashboardItem.Text = "Open Dashboard"
 $openDashboardItem.add_Click({ Open-Url $script:DashboardUrl })
 
-$openApiItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$openApiItem = New-Object System.Windows.Forms.MenuItem
 $openApiItem.Text = "Open API Health"
 $openApiItem.add_Click({ Open-Url $script:BackendHealthUrl })
 
-$openLogsItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$openLogsItem = New-Object System.Windows.Forms.MenuItem
 $openLogsItem.Text = "Open Logs Folder"
 $openLogsItem.add_Click({ Open-LogsFolder })
 
-$exitItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$exitItem = New-Object System.Windows.Forms.MenuItem
 $exitItem.Text = "Exit Launcher"
 $exitItem.add_Click({
+    if ($script:IsShuttingDown) {
+        return
+    }
+
     $script:IsShuttingDown = $true
     Write-LauncherLog "Exit requested from tray menu."
-    Stop-Services
+    $script:Timer.Stop()
     $script:NotifyIcon.Visible = $false
-    [System.Windows.Forms.Application]::Exit()
+    try {
+        Stop-Services
+    }
+    catch {
+        Write-LauncherLog "Service shutdown failed during launcher exit. error=$($_.Exception.Message)" "ERROR"
+    }
+    finally {
+        [System.Windows.Forms.Application]::Exit()
+    }
 })
 
-[void]$script:Menu.Items.Add($script:StatusItem)
-[void]$script:Menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
-[void]$script:Menu.Items.Add($openDashboardItem)
-[void]$script:Menu.Items.Add($openApiItem)
-[void]$script:Menu.Items.Add($openLogsItem)
-[void]$script:Menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
-[void]$script:Menu.Items.Add($startItem)
-[void]$script:Menu.Items.Add($restartItem)
-[void]$script:Menu.Items.Add($stopItem)
-[void]$script:Menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
-[void]$script:Menu.Items.Add($exitItem)
+[void]$script:Menu.MenuItems.Add($script:TitleItem)
+[void]$script:Menu.MenuItems.Add($script:StatusItem)
+[void]$script:Menu.MenuItems.Add((New-Object System.Windows.Forms.MenuItem "-"))
+[void]$script:Menu.MenuItems.Add($openDashboardItem)
+[void]$script:Menu.MenuItems.Add($openApiItem)
+[void]$script:Menu.MenuItems.Add($openLogsItem)
+[void]$script:Menu.MenuItems.Add((New-Object System.Windows.Forms.MenuItem "-"))
+[void]$script:Menu.MenuItems.Add($startItem)
+[void]$script:Menu.MenuItems.Add($restartItem)
+[void]$script:Menu.MenuItems.Add($stopItem)
+[void]$script:Menu.MenuItems.Add((New-Object System.Windows.Forms.MenuItem "-"))
+[void]$script:Menu.MenuItems.Add($exitItem)
 
-$script:NotifyIcon.ContextMenuStrip = $script:Menu
+$script:NotifyIcon.ContextMenu = $script:Menu
 $script:NotifyIcon.add_DoubleClick({ Open-Url $script:DashboardUrl })
 
 $script:Timer = New-Object System.Windows.Forms.Timer
 $script:Timer.Interval = 5000
 $script:Timer.add_Tick({
-    $backendHttp = Test-HttpOk $script:BackendHealthUrl
+    $backendHttp = Test-HttpOk $script:BackendReadyUrl
     $frontendHttp = Test-FrontendOk
     $backendProc = Test-ProcessRunning $script:BackendProcess
     $frontendProc = Test-ProcessRunning $script:FrontendProcess
@@ -1190,10 +1487,21 @@ $script:Timer.add_Tick({
     $statusText = "$backendState; $frontendState"
 
     $script:StatusItem.Text = "Status: $statusText"
-    $script:NotifyIcon.Text = "OMI: $statusText"
+    $script:NotifyIcon.Text = "$($script:AppDisplayName): $statusText"
 
     if ($script:LastStatusText -ne $statusText) {
         Write-LauncherLog "Status changed: $statusText"
+        if ($null -ne $script:LastStatusText -and
+            $backendState -eq "API stopped" -and
+            (-not $script:BackendStopExpected) -and
+            (-not $script:LastStatusText.StartsWith("API stopped"))) {
+            $script:NotifyIcon.ShowBalloonTip(
+                5000,
+                $script:AppDisplayName,
+                "Backend recovery stopped. Open launcher logs for crash details, then use Restart Services.",
+                [System.Windows.Forms.ToolTipIcon]::Warning
+            )
+        }
         $script:LastStatusText = $statusText
     }
 
@@ -1224,6 +1532,6 @@ $script:Timer.add_Tick({
 
 Start-Services
 $script:Timer.Start()
-$script:NotifyIcon.ShowBalloonTip(3000, "Open Market Intelligence", "Launcher is running in the system tray.", [System.Windows.Forms.ToolTipIcon]::Info)
+$script:NotifyIcon.ShowBalloonTip(3000, $script:AppDisplayName, "$($script:AppDisplayName) is running in the system tray.", [System.Windows.Forms.ToolTipIcon]::Info)
 
 [System.Windows.Forms.Application]::Run()

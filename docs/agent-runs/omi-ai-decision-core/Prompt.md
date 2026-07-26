@@ -71,6 +71,11 @@
 - Regression tests for entry decision, position/risk decision, trend view, stale data, bounded external refresh, and MCP-facing `omi.ask` behavior.
 - Frontend/MCP compatibility notes only where response shape or display expectations change.
 - Updated `Progress.md` after each milestone with concrete validation evidence.
+- A canonical outward contract for `mode`, `payload_level`, and `diagnostics_level` as independent dimensions.
+- Layered readiness (`facts_ready`, `analysis_ready`, `answer_ready`, `decision_ready`) with section-level blocking.
+- A backend-owned Query Plan that declares required, optional, and excluded capabilities/readers before evidence execution.
+- MCP business failure semantics where exact target failure sets `isError=true`, while a valid zero-result query does not.
+- Request timeout semantics that distinguish the response deadline from a detached refresh job and expose a durable job reference.
 
 ## Done criteria
 
@@ -90,4 +95,7 @@
 
 - Assumption: first implementation pass should remain Taiwan-first and focus on `tw_stock`, `tw_index`, `tw_futures`, watchlist, and existing `us_stock` compatibility rather than expanding new markets.
 - Assumption: Kuro should consume OMI output only after this backend contract is stable; Kuro should not compensate for missing market logic.
-- Open question: whether to formalize a machine-readable `decision_contract` schema in addition to existing `analysis.human_answer` fields. Decide after baseline inspection.
+- Decision: `decision_contract.v1` remains the machine-readable projection for `brief`/`full`; `data_only` must not return Human Answer, action plan, or decision contract.
+- Decision: legacy request modes `auto`, `analysis`, and `report` remain accepted for compatibility. Canonical response modes are `data_only`, `brief`, and `full`.
+- Decision: deterministic derived evidence is valid in `data_only`; recommendation, action, and decision sections are not.
+- Decision: exact target lookup failure is a business failure; an empty result set from a valid search is a successful empty answer.

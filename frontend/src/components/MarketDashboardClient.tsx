@@ -1,214 +1,196 @@
 "use client";
 
 import SidebarWatchlistExplorer from "@/components/SidebarWatchlistExplorer";
-import type { MarketRegion } from "@/components/SidebarWatchlistExplorer";
+import BackendConnectionBanner from "@/components/BackendConnectionBanner";
 import CryptoMarketPanel from "@/components/CryptoMarketPanel";
 import JPMarketPanel from "@/components/JPMarketPanel";
 import JPMarketSidebar from "@/components/JPMarketSidebar";
-import { LoadingDots } from "@/components/LoadingPlaceholders";
-import OmiAskDock, { type OmiAskDockContext } from "@/components/OmiAskDock";
+import KRMarketPanel from "@/components/KRMarketPanel";
+import KRMarketSidebar from "@/components/KRMarketSidebar";
+import {
+  LoadingDots,
+  StateSurface,
+} from "@/components/LoadingPlaceholders";
+import OmiAskDock from "@/components/OmiAskDock";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
+import ResourceMarketPanel from "@/components/ResourceMarketPanel";
 import StockDetailPanel from "@/components/StockDetailPanel";
 import TaiwanFuturesDetailPanel from "@/components/TaiwanFuturesDetailPanel";
 import USStockDetailPanel from "@/components/USStockDetailPanel";
 import USWatchlistSidebar from "@/components/USWatchlistSidebar";
 import WatchlistRadarPanel from "@/components/WatchlistRadarPanel";
-import { fetchJson } from "@/lib/api";
-import { getJobResultStatus, requestBackfillJob } from "@/lib/jobs";
 import {
-  getMarketCalendarStatusSnapshot,
-  msUntilIsoTime,
-  refreshMarketCalendarStatus,
-} from "@/lib/marketCalendarStatus";
+  RankingCellSkeleton,
+  RankingLoadingRows,
+  WatchlistRankingPanel,
+  type RankingDisplayRow,
+} from "@/components/market-dashboard/WatchlistRankingPanel";
 import {
-  getRefreshExecutionSeconds,
-  useRefreshExecutionSettings,
-} from "@/lib/refreshExecutionSettings";
+  formatPct,
+  formatPrice,
+  formatRowTime,
+  formatWholeNumber,
+  valueTone,
+} from "@/components/market-dashboard/dashboardFormatters";
+import { buildOmiAskContext } from "@/components/market-dashboard/omi/buildOmiAskContext";
 import {
-  TAIWAN_INTRADAY_REFRESH_MS,
-  getTaiwanIntradayXRatio,
-  getTaiwanMarketChipRefreshState,
-  getTaiwanMarketRefreshState,
-  isTaiwanRegularSessionPoint,
-} from "@/lib/taiwanMarketTime";
+  RankingSparkline,
+  USRankingSparkline,
+  formatLots,
+  formatWatchlistFreshnessLabel,
+  rankLabel,
+  statusLabel,
+  trendClass,
+  trendLabel,
+} from "@/components/market-dashboard/ranking/rankingPresentation";
 import {
-  US_INTRADAY_REFRESH_MS,
-  getUsIntradayXRatio,
-  getUsMarketRefreshState,
-  isUsRegularSessionPoint,
-} from "@/lib/usMarketTime";
+  buildJpWatchlistRows,
+  buildKrWatchlistRows,
+  buildUsWatchlistRows,
+  buildWatchlistRows,
+  mergeJpWatchlistRows,
+  mergeKrWatchlistRows,
+  mergeUsWatchlistRows,
+  mergeWatchlistRows,
+} from "@/components/market-dashboard/watchlistRankingRows";
 import {
-  getUsPrimaryMarketIndexConfig,
-  resolveUsContextIndexConfig,
-  getUsMarketIndexConfig,
-  type USMarketIndexConfig,
-} from "@/lib/usMarketIndices";
+  useTaiwanRankingState,
+  type TaiwanRankBy,
+  type TaiwanRankingErrorKind,
+} from "@/components/market-dashboard/ranking/useTaiwanRankingState";
 import {
-  getJpMarketIndexConfig,
-  getJpPrimaryMarketIndexConfig,
-  resolveJpContextIndexConfig,
-  type JPMarketIndexConfig,
-} from "@/lib/jpMarketIndices";
+  useUsRankingState,
+  type UsRankBy,
+  type UsRankingErrorKind,
+} from "@/components/market-dashboard/ranking/useUsRankingState";
 import {
-  rankByLabel,
-  rowStatusLabel,
-  trendDirectionLabel,
-  usAssetTypeLabel,
-  useT,
-  type TranslationFunction,
-} from "@/i18n";
-import type { CryptoBaseAsset } from "@/types/cryptoMarket";
+  useJpRankingState,
+  type JpRankBy,
+  type JpRankingErrorKind,
+} from "@/components/market-dashboard/ranking/useJpRankingState";
+import {
+  useKrRankingState,
+  type KrRankBy,
+  type KrRankingErrorKind,
+} from "@/components/market-dashboard/ranking/useKrRankingState";
+import {
+  useRegionalRadarState,
+  type RegionalRadarMarket,
+} from "@/components/market-dashboard/radar/useRegionalRadarState";
+import {
+  useTaiwanRadarState,
+  type TaiwanRadarErrorKind,
+} from "@/components/market-dashboard/radar/useTaiwanRadarState";
+import { useDashboardRuntime } from "@/components/market-dashboard/runtime/useDashboardRuntime";
+import {
+  normalizeDashboardRadarMode,
+  type MarketRegion,
+} from "@/components/market-dashboard/selection/dashboardRoutes";
+import { useMarketSelection } from "@/components/market-dashboard/selection/useMarketSelection";
+import {
+  JPMarketTape,
+  KRMarketTape,
+  TaiwanMarketTape,
+  USMarketTape,
+} from "@/components/market-dashboard/tape/MarketTapePanels";
+import {
+  useTaiwanMarketTapeState,
+  type TaiwanMarketTapeErrorKind,
+} from "@/components/market-dashboard/tape/useTaiwanMarketTapeState";
+import {
+  emitDataStatusEvent,
+  type DataStatusLevel,
+  type DataStatusMarket,
+} from "@/lib/dataStatusEvents";
+import { useRefreshExecutionSettings } from "@/lib/refreshExecutionSettings";
+import { getUsMarketIndexConfig } from "@/lib/usMarketIndices";
+import { getJpMarketIndexConfig } from "@/lib/jpMarketIndices";
+import { usAssetTypeLabel, useT } from "@/i18n";
 import type {
   ChartPoint,
-  IntradayTrendResponse,
   JPStockMasterRead,
-  JPOhlcChartRead,
   JPWatchlistGroupNode,
   JPWatchlistItemRead,
   JPWatchlistRankingItemRead,
-  JPWatchlistRankingRead,
-  MarketIndexSnapshot,
+  KRStockMasterRead,
+  KRWatchlistGroupNode,
+  KRWatchlistItemRead,
+  KRWatchlistRankingItemRead,
   MarketIndexSummary,
-  RankingBatchResponse,
+  OhlcIntradayOverlay,
   RankingItem,
   RankingResponse,
   StockIndicatorPoint,
   TaiwanStockQuoteDepthPreviewMode,
   USCompanyProfileRead,
-  USOhlcChartRead,
   USWatchlistGroupNode,
   USWatchlistItemRead,
   USWatchlistRankingItemRead,
-  USWatchlistRankingRead,
   WatchlistGroupRadarRead,
   WatchlistGroupNode,
   WatchlistItemRead,
   WatchlistRadarMode,
 } from "@/types/market";
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import type { BackendConnectionIssueCode } from "@/types/runtime";
+import { useCallback, useMemo, useState } from "react";
 
 type LoadState = "idle" | "loading" | "success" | "error";
-type JPStatusMessage = { type: "success" | "warning" | "error"; text: string } | null;
-type RankBy = "none" | "change_pct" | "score" | "volume";
-type USRankBy = "none" | "change_pct" | "volume" | "close";
-type JPRankBy = "none" | "change_pct" | "volume" | "close";
-const WATCHLIST_INTRADAY_LIMIT = 30;
-const WATCHLIST_RADAR_MAX_RESULTS = 20;
-const WATCHLIST_RANKING_BATCH_SIZE = 3;
-const WATCHLIST_DAILY_RELEASE_CHECK_MIN_MS = 5_000;
-const WATCHLIST_DAILY_RELEASE_CHECK_MAX_MS = 300_000;
-const MARKET_CHIP_REFRESH_STORAGE_PREFIX = "omi:market-chip-refresh";
-const TAIWAN_INDEX_TARGET_IDS = new Set(["TAIEX", "TPEX"]);
-const WATCHLIST_ANALYSIS_PARAMS = {
-  include_children: true,
-  enabled_only: true,
-  ma_windows: "5,20,60",
-  volume_ma_windows: "5,20",
-  volume_ratio_threshold: 1.5,
-};
-type RankingDisplayRow = {
-  key: string;
-  rank: number;
-  symbol: string;
-  name: string | null;
-  meta: string | null;
-  visual: ReactNode;
-  close: string;
-  closeValue: number | null | undefined;
-  change: string;
-  changePct: number | null | undefined;
-  trend: string;
-  volume: string;
-  volumeValue: number | null | undefined;
-  selected: boolean;
-  loading?: boolean;
-  href?: string;
-  onSelect: () => void;
-};
-type TaiwanMarketRefreshState = ReturnType<typeof getTaiwanMarketRefreshState>;
+type RankBy = TaiwanRankBy;
+type USRankBy = UsRankBy;
+type JPRankBy = JpRankBy;
+type KRRankBy = KrRankBy;
 
-function shouldUseTaiwanWatchlistIntraday(marketState: TaiwanMarketRefreshState) {
-  return (
-    marketState.isPollingWindow ||
-    (marketState.isAfterClose && !marketState.isDailyPriceReleased)
-  );
+function isTaiwanMarketWideRank(rankBy: RankBy) {
+  return rankBy === "foreign_net" || rankBy === "margin_balance_change_pct";
 }
 
-function getTaiwanWatchlistDailyReleaseCheckDelay() {
-  const marketState = getTaiwanMarketRefreshState();
-  const dailyRelease =
-    getMarketCalendarStatusSnapshot("tw")?.release_windows.market_daily_price;
-  const releaseDelay = marketState.isDailyPriceReleased
-    ? msUntilIsoTime(dailyRelease?.next_release_at)
-    : msUntilIsoTime(dailyRelease?.release_at);
-  const fallbackDelay = marketState.isDailyPriceReleased
-    ? marketState.msUntilNextPollingStart
-    : 60_000;
-  const delay = releaseDelay ?? fallbackDelay;
-
-  return Math.min(
-    Math.max(delay, WATCHLIST_DAILY_RELEASE_CHECK_MIN_MS),
-    WATCHLIST_DAILY_RELEASE_CHECK_MAX_MS
-  );
+function formatTaiwanRankValue(row: RankingItem, rankBy: RankBy) {
+  if (rankBy === "foreign_net") return formatLots(row.rank_value);
+  if (rankBy === "margin_balance_change_pct") return formatPct(row.rank_value);
+  return formatLots(row.volume);
 }
 
-function marketChipRefreshStorageKey(dateKey: string) {
-  return `${MARKET_CHIP_REFRESH_STORAGE_PREFIX}:${dateKey}`;
-}
-
-function isStoredMarketChipRefreshDone(dateKey: string) {
-  try {
-    return window.localStorage.getItem(marketChipRefreshStorageKey(dateKey)) === "done";
-  } catch {
-    return false;
-  }
-}
-
-function markStoredMarketChipRefreshDone(dateKey: string) {
-  try {
-    window.localStorage.setItem(marketChipRefreshStorageKey(dateKey), "done");
-  } catch {
-    // Ignore storage failures; job dedupe still prevents active duplicates.
-  }
+function regionalRadarRouteMode(mode: WatchlistRadarMode) {
+  return mode === "action" ? null : mode;
 }
 
 function apiErrorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
 }
 
-type RankingPanelOption = {
-  value: string;
-  label: string;
-};
+type DashboardDataStatusMarket = Exclude<DataStatusMarket, "all">;
 
-function buildDashboardHref(params: {
-  market?: MarketRegion;
-  groupId?: number | null;
-  stockId?: string | null;
-  futuresSymbol?: string | null;
-  symbol?: string | null;
-  jpSymbol?: string | null;
-  radarMode?: WatchlistRadarMode | null;
-  quoteDepthPreviewMode?: TaiwanStockQuoteDepthPreviewMode | null;
+function emitDashboardDataStatus({
+  market,
+  level = "error",
+  title,
+  message,
+  source,
+  contextKey,
+  contextLabel,
+  dedupeKey,
+}: {
+  market: DashboardDataStatusMarket;
+  level?: DataStatusLevel;
+  title: string;
+  message: string;
+  source: string;
+  contextKey?: string;
+  contextLabel?: string;
+  dedupeKey?: string;
 }) {
-  const searchParams = new URLSearchParams();
-
-  if (params.market) searchParams.set("market", params.market);
-  if (params.groupId !== null && params.groupId !== undefined) {
-    searchParams.set("group_id", String(params.groupId));
-  }
-  if (params.stockId) searchParams.set("stock_id", params.stockId);
-  if (params.futuresSymbol) searchParams.set("futures", params.futuresSymbol);
-  if (params.symbol) searchParams.set("symbol", params.symbol);
-  if (params.jpSymbol) searchParams.set("jp_symbol", params.jpSymbol);
-  if (params.radarMode) searchParams.set("radar_mode", params.radarMode);
-  if (params.quoteDepthPreviewMode) {
-    searchParams.set("quote_depth_preview", params.quoteDepthPreviewMode);
-  }
-
-  const query = searchParams.toString();
-
-  return query ? `/?${query}` : "/";
+  emitDataStatusEvent({
+    market,
+    level,
+    title,
+    message,
+    source,
+    contextKey,
+    contextLabel,
+    dedupeKey:
+      dedupeKey ??
+      `${market}:${contextKey ?? contextLabel ?? source}:${title}:${level}`,
+  });
 }
 
 type Props = {
@@ -222,7 +204,9 @@ type Props = {
   initialSelectedUsSymbol: string | null;
   initialSelectedUsSecurityName: string | null;
   initialSelectedJpSymbol: string | null;
+  initialSelectedKrSymbol: string | null;
   initialChartData: ChartPoint[];
+  initialChartIntradayOverlay: OhlcIntradayOverlay | null;
   initialIndicatorData: StockIndicatorPoint[];
   initialRankingData: RankingResponse | null;
   initialRadarMode: WatchlistRadarMode;
@@ -232,47 +216,13 @@ type Props = {
   initialUsWatchlistItems: USWatchlistItemRead[];
   initialJpWatchlistTree: JPWatchlistGroupNode[];
   initialJpWatchlistItems: JPWatchlistItemRead[];
+  initialKrWatchlistTree: KRWatchlistGroupNode[];
+  initialKrWatchlistItems: KRWatchlistItemRead[];
   quoteDepthPreviewMode: TaiwanStockQuoteDepthPreviewMode | null;
+  initialBackendIssueCount: number;
+  initialBackendIssueCode: BackendConnectionIssueCode | null;
+  formBackendIssueCode: BackendConnectionIssueCode | null;
 };
-
-function RankingLoadingRows({ rows = 5 }: { rows?: number }) {
-  return (
-    <div className="border-t border-omi-border-subtle" aria-hidden="true">
-      {Array.from({ length: rows }).map((_, index) => (
-        <div
-          key={index}
-          className="omi-ranking-loading-row grid w-full grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-omi-border-subtle px-4 py-2 text-sm first:border-t-0"
-        >
-          <div className="omi-skeleton h-3 w-7" />
-          <div className="min-w-0 space-y-2">
-            <div className="omi-skeleton h-3 w-28" />
-            <div className="omi-skeleton h-2.5 w-16" />
-          </div>
-          <div className="mx-auto h-6 w-16">
-            <div className="omi-skeleton h-full w-full" />
-          </div>
-          <div className="ml-auto omi-skeleton h-3 w-14" />
-          <div className="ml-auto omi-skeleton h-3 w-12" />
-          <div className="ml-auto omi-skeleton h-6 w-12" />
-          <div className="ml-auto omi-skeleton h-3 w-16" />
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function RankingCellSkeleton({
-  className = "h-3 w-14",
-}: {
-  className?: string;
-}) {
-  return (
-    <span
-      aria-hidden="true"
-      className={`inline-block align-middle omi-skeleton ${className}`}
-    />
-  );
-}
 
 function isRankingItemPending(row: RankingItem) {
   return row.status === "pending";
@@ -286,1660 +236,8 @@ function isJpRankingItemPending(row: JPWatchlistRankingItemRead) {
   return row.status === "pending";
 }
 
-function formatWatchlistFreshnessLabel(
-  t: TranslationFunction,
-  marketLabel: string,
-  targetDate: string | null | undefined,
-  staleCount: number | null | undefined,
-  requestedCount: number | null | undefined
-) {
-  const dateText = targetDate
-    ? t("dashboard.freshness.waitingMarketDate", { targetDate, marketLabel })
-    : t("dashboard.freshness.waitingMarket", { marketLabel });
-
-  if (
-    staleCount !== null &&
-    staleCount !== undefined &&
-    requestedCount !== null &&
-    requestedCount !== undefined &&
-    requestedCount > 0
-  ) {
-    return t("dashboard.freshness.pendingBackfill", {
-      dateText,
-      staleCount,
-      requestedCount,
-    });
-  }
-
-  return dateText;
-}
-
-function formatLots(value: number | null | undefined) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "-";
-  return new Intl.NumberFormat("zh-TW").format(Math.round(value / 1000));
-}
-
-function formatWholeNumber(value: number | null | undefined) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "-";
-  return new Intl.NumberFormat("en-US").format(Math.round(value));
-}
-
-function formatPrice(value: number | null | undefined) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "-";
-
-  return value.toLocaleString("zh-TW", {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 2,
-  });
-}
-
-function formatSignedNumber(value: number | null | undefined) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "-";
-  const sign = value > 0 ? "+" : "";
-
-  return `${sign}${value.toLocaleString("zh-TW", {
-    maximumFractionDigits: 2,
-  })}`;
-}
-
-function formatPct(value: number | null | undefined) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "-";
-  const sign = value > 0 ? "+" : "";
-  return `${sign}${value.toFixed(2)}%`;
-}
-
-function formatTradeValueYi(value: number | null | undefined) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "-";
-
-  return (value / 100_000_000).toLocaleString("zh-TW", {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 1,
-  });
-}
-
-function valueTone(value: number | null | undefined) {
-  if (value === null || value === undefined) return "text-omi-text-muted";
-  if (value > 0) return "text-omi-market-up";
-  if (value < 0) return "text-omi-market-down";
-  return "text-omi-text";
-}
-
-function statusLabel(t: TranslationFunction, status: string) {
-  if (status === "pending") return "-";
-  return rowStatusLabel(t, status);
-}
-
-function rankLabel(t: TranslationFunction, rankBy: string) {
-  return rankByLabel(t, rankBy);
-}
-
-function trendLabel(
-  t: TranslationFunction,
-  value: number | null | undefined,
-  limitStatus?: RankingItem["limit_status"]
-) {
-  if (limitStatus === "limit_up") return t("statusLabels.limitUp");
-  if (limitStatus === "limit_down") return t("statusLabels.limitDown");
-  return trendDirectionLabel(t, value);
-}
-
-function trendClass(
-  value: number | null | undefined,
-  limitStatus?: RankingItem["limit_status"]
-) {
-  if (limitStatus === "limit_up") return "omi-ranking-trend-limit-up";
-  if (limitStatus === "limit_down") return "omi-ranking-trend-limit-down";
-  if (value === null || value === undefined || Number.isNaN(value)) {
-    return "omi-ranking-trend-neutral";
-  }
-  if (value > 0) return "omi-ranking-trend-up";
-  if (value < 0) return "omi-ranking-trend-down";
-  return "omi-ranking-trend-neutral";
-}
-
-function sparklineTone(
-  latestPrice: number | null,
-  previousClose: number | null,
-  selected: boolean
-) {
-  if (latestPrice === null || previousClose === null || previousClose === 0) {
-    return selected ? "stroke-omi-text-inverse-muted" : "stroke-omi-text-subtle";
-  }
-
-  if (latestPrice > previousClose) return "stroke-omi-market-up";
-  if (latestPrice < previousClose) return "stroke-omi-market-down";
-  return selected ? "stroke-omi-text-inverse-muted" : "stroke-omi-text-subtle";
-}
-
-function formatRowTime(value: string | null | undefined) {
-  if (!value) return null;
-
-  const date = new Date(value);
-
-  if (Number.isNaN(date.getTime()) || !value.includes("T")) return value;
-
-  const parts = Object.fromEntries(
-    new Intl.DateTimeFormat("en-CA", {
-      timeZone: "Asia/Taipei",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-    })
-      .formatToParts(date)
-      .map((part) => [part.type, part.value])
-  );
-
-  return `${parts.month}/${parts.day} ${parts.hour}:${parts.minute}`;
-}
-
-function formatDashboardTime(value: Date) {
-  const parts = Object.fromEntries(
-    new Intl.DateTimeFormat("en-CA", {
-      timeZone: "Asia/Taipei",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false,
-    })
-      .formatToParts(value)
-      .map((part) => [part.type, part.value])
-  );
-
-  return `${parts.year}/${parts.month}/${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
-}
-
-function buildSparklinePath(
-  points: Array<{ time: string; price: number }>,
-  previousClose: number | null,
-  getXRatio: (value: string | Date) => number = getTaiwanIntradayXRatio
-) {
-  const width = 92;
-  const height = 28;
-  const paddingX = 2;
-  const paddingY = 4;
-  const usableWidth = width - paddingX * 2;
-  const usableHeight = height - paddingY * 2;
-  const prices = [
-    ...points.map((point) => point.price),
-    ...(previousClose !== null ? [previousClose] : []),
-  ];
-  const minPrice = Math.min(...prices);
-  const maxPrice = Math.max(...prices);
-  const range = maxPrice - minPrice || Math.max(maxPrice * 0.01, 1);
-  const yMin = minPrice - range * 0.08;
-  const yMax = maxPrice + range * 0.08;
-  const yRange = yMax - yMin || 1;
-  const path = points
-    .map((point, index) => {
-      const x = paddingX + getXRatio(point.time) * usableWidth;
-      const y = paddingY + ((yMax - point.price) / yRange) * usableHeight;
-
-      return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
-    })
-    .join(" ");
-  const previousCloseY =
-    previousClose === null
-      ? null
-      : paddingY + ((yMax - previousClose) / yRange) * usableHeight;
-  const latestPoint = points[points.length - 1];
-  const latestPointX = paddingX + getXRatio(latestPoint.time) * usableWidth;
-  const latestPointY = paddingY + ((yMax - latestPoint.price) / yRange) * usableHeight;
-
-  return { path, previousCloseY, latestPointX, latestPointY, width, height };
-}
-
-function sparklinePointTone(
-  latestPrice: number | null,
-  previousClose: number | null,
-  selected: boolean
-) {
-  if (latestPrice !== null && previousClose !== null && previousClose !== 0) {
-    if (latestPrice > previousClose) {
-      return {
-        core: selected ? "fill-omi-market-up-border" : "fill-omi-market-up",
-        ring: selected ? "stroke-omi-market-up-border" : "stroke-omi-market-up",
-      };
-    }
-
-    if (latestPrice < previousClose) {
-      return {
-        core: selected ? "fill-omi-market-down-border" : "fill-omi-market-down",
-        ring: selected ? "stroke-omi-market-down-border" : "stroke-omi-market-down",
-      };
-    }
-  }
-
-  return {
-    core: selected ? "fill-omi-text-inverse-muted" : "fill-omi-text-subtle",
-    ring: selected ? "stroke-omi-text-inverse-muted" : "stroke-omi-text-inverse-muted",
-  };
-}
-
-function RankingSparkline({
-  row,
-  selected,
-}: {
-  row: RankingItem;
-  selected: boolean;
-}) {
-  const t = useT();
-  const points = (row.intraday_points ?? []).filter((point) => {
-    return (
-      point.time &&
-      point.price !== null &&
-      point.price !== undefined &&
-      !Number.isNaN(point.price) &&
-      isTaiwanRegularSessionPoint(point.time)
-    );
-  });
-
-  if (points.length < 2) {
-    return (
-      <span className="text-center text-xs text-omi-text-subtle">
-        -
-      </span>
-    );
-  }
-
-  const previousClose = row.intraday_previous_close ?? null;
-  const latestPrice = points[points.length - 1]?.price ?? null;
-  const chart = buildSparklinePath(points, previousClose);
-  const latestPoint = points[points.length - 1];
-  const pointTone = sparklinePointTone(latestPrice, previousClose, selected);
-
-  return (
-    <svg
-      viewBox={`0 0 ${chart.width} ${chart.height}`}
-      className="h-8 w-[92px]"
-      aria-label={t("dashboard.marketIndex.intradayTrend")}
-    >
-      <rect width={chart.width} height={chart.height} fill="transparent" />
-      {chart.previousCloseY !== null ? (
-        <line
-          x1="2"
-          x2={chart.width - 2}
-          y1={chart.previousCloseY}
-          y2={chart.previousCloseY}
-          className={selected ? "stroke-omi-text-inverse-subtle" : "stroke-omi-border-subtle"}
-          strokeDasharray="3 3"
-        />
-      ) : null}
-      <path
-        d={chart.path}
-        fill="none"
-        strokeWidth="1.8"
-        className={sparklineTone(latestPrice, previousClose, selected)}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <g
-        key={`${latestPoint.time}-${latestPoint.price}`}
-        className="omi-live-sparkline-point"
-        pointerEvents="none"
-      >
-        <circle
-          cx={chart.latestPointX}
-          cy={chart.latestPointY}
-          r="5.5"
-          className={`omi-live-point-ring ${pointTone.ring}`}
-        />
-        <circle
-          cx={chart.latestPointX}
-          cy={chart.latestPointY}
-          r="2.2"
-          className={`omi-live-point-core ${pointTone.core}`}
-        />
-      </g>
-    </svg>
-  );
-}
-
-function USRankingSparkline({
-  row,
-  selected,
-}: {
-  row: USWatchlistRankingItemRead;
-  selected: boolean;
-}) {
-  const t = useT();
-  const points = (row.intraday_points ?? []).filter((point) => {
-    return (
-      point.time &&
-      point.price !== null &&
-      point.price !== undefined &&
-      !Number.isNaN(point.price) &&
-      isUsRegularSessionPoint(point.time)
-    );
-  });
-
-  if (points.length < 2) {
-    return (
-      <span className="text-center text-xs text-omi-text-subtle">
-        {row.time ? t("statusLabels.intraday") : "-"}
-      </span>
-    );
-  }
-
-  const previousClose = row.intraday_previous_close ?? null;
-  const latestPrice = points[points.length - 1]?.price ?? null;
-  const chart = buildSparklinePath(points, previousClose, getUsIntradayXRatio);
-  const latestPoint = points[points.length - 1];
-  const pointTone = sparklinePointTone(latestPrice, previousClose, selected);
-
-  return (
-    <svg
-      viewBox={`0 0 ${chart.width} ${chart.height}`}
-      className="h-8 w-[92px]"
-      aria-label="US intraday trend"
-    >
-      <rect width={chart.width} height={chart.height} fill="transparent" />
-      {chart.previousCloseY !== null ? (
-        <line
-          x1="2"
-          x2={chart.width - 2}
-          y1={chart.previousCloseY}
-          y2={chart.previousCloseY}
-          className={selected ? "stroke-omi-text-inverse-subtle" : "stroke-omi-border-subtle"}
-          strokeDasharray="3 3"
-        />
-      ) : null}
-      <path
-        d={chart.path}
-        fill="none"
-        strokeWidth="1.8"
-        className={sparklineTone(latestPrice, previousClose, selected)}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <g
-        key={`${latestPoint.time}-${latestPoint.price}`}
-        className="omi-live-sparkline-point"
-        pointerEvents="none"
-      >
-        <circle
-          cx={chart.latestPointX}
-          cy={chart.latestPointY}
-          r="5.5"
-          className={`omi-live-point-ring ${pointTone.ring}`}
-        />
-        <circle
-          cx={chart.latestPointX}
-          cy={chart.latestPointY}
-          r="2.2"
-          className={`omi-live-point-core ${pointTone.core}`}
-        />
-      </g>
-    </svg>
-  );
-}
-
-function marketRegimeLabel(t: TranslationFunction, index: MarketIndexSnapshot) {
-  if (index.close === null || index.close === undefined) return t("dashboard.marketIndex.insufficient");
-  if (index.price_vs_ma20 !== null && index.price_vs_ma20 !== undefined) {
-    if (index.price_vs_ma20 > 1) return t("dashboard.marketIndex.aboveMa20");
-    if (index.price_vs_ma20 < -1) return t("dashboard.marketIndex.belowMa20");
-  }
-
-  if (index.change_pct !== null && index.change_pct !== undefined) {
-    if (index.change_pct > 0) return t("dashboard.marketIndex.bullishShort");
-    if (index.change_pct < 0) return t("dashboard.marketIndex.weakShort");
-  }
-
-  return t("dashboard.marketIndex.neutral");
-}
-
-function MarketTape({
-  summary,
-  loadState,
-}: {
-  summary: MarketIndexSummary | null;
-  loadState: LoadState;
-}) {
-  const t = useT();
-  const indices = summary?.indices ?? [];
-  const asOf = summary?.as_of ? formatDashboardTime(new Date(summary.as_of)) : null;
-
-  return (
-    <section className="mb-3 border border-omi-border-subtle bg-omi-surface">
-      <div className="grid gap-px bg-omi-surface-strong lg:grid-cols-2">
-        {indices.length > 0 ? (
-          indices.map((index) => {
-            const breadth = index.breadth;
-            const advanceRatio =
-              breadth && breadth.total_count > 0
-                ? (breadth.advance_count / breadth.total_count) * 100
-                : null;
-
-            return (
-              <div key={index.index_id} className="bg-omi-surface px-4 py-3">
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <div className="text-xs font-semibold uppercase tracking-[0.16em] text-omi-text-muted">
-                      {t("app.market")}
-                    </div>
-                    <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                      <span className="text-lg font-bold text-omi-text-strong">{index.label}</span>
-                      <span className="text-2xl font-black text-omi-text-strong">
-                        {formatPrice(index.close)}
-                      </span>
-                      <span className={`text-sm font-bold ${valueTone(index.change_pct)}`}>
-                        {formatSignedNumber(index.change)} / {formatPct(index.change_pct)}
-                      </span>
-                    </div>
-                  </div>
-                  <div className="text-right text-xs">
-                    <div className="font-semibold text-omi-text">{marketRegimeLabel(t, index)}</div>
-                    <div className={valueTone(index.price_vs_ma20)}>
-                      {formatPct(index.price_vs_ma20)} vs MA20
-                    </div>
-                  </div>
-                </div>
-
-                <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
-                  <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-                    <div className="text-omi-text-muted">{t("dashboard.marketIndex.tradeValueYi")}</div>
-                    <div className="mt-1 font-semibold text-omi-text">
-                      {formatTradeValueYi(index.trade_value)}
-                    </div>
-                  </div>
-                  <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-                    <div className="text-omi-text-muted">{t("dashboard.marketIndex.advanceDecline")}</div>
-                    <div className="mt-1 font-semibold">
-                      <span className="text-omi-market-up">{breadth?.advance_count ?? "-"}</span>
-                      <span className="px-1 text-omi-text-subtle">/</span>
-                      <span className="text-omi-market-down">{breadth?.decline_count ?? "-"}</span>
-                    </div>
-                  </div>
-                  <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-                    <div className="text-omi-text-muted">{t("dashboard.marketIndex.breadth")}</div>
-                    <div className={`mt-1 font-semibold ${valueTone((advanceRatio ?? 50) - 50)}`}>
-                      {advanceRatio === null
-                        ? "-"
-                        : t("dashboard.marketIndex.advancePct", {
-                            value: advanceRatio.toFixed(0),
-                          })}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            );
-          })
-        ) : (
-          <div className="bg-omi-surface px-4 py-3 text-sm text-omi-text-muted">
-            {loadState === "loading" ? t("dashboard.marketIndex.loading") : t("dashboard.marketIndex.empty")}
-          </div>
-        )}
-      </div>
-      <div className="border-t border-omi-border-subtle px-4 py-2 text-xs text-omi-text-muted">
-        {asOf
-          ? t("dashboard.marketIndex.updated", { asOf })
-          : t("dashboard.marketIndex.waiting")}
-      </div>
-    </section>
-  );
-}
-
-type USMarketTapeSnapshot = {
-  symbol: string;
-  displaySymbol: string;
-  name: string;
-  exchange: string;
-  note: string;
-  close: number | null;
-  change: number | null;
-  changePct: number | null;
-  priceVsMa20: number | null;
-  volume: number | null;
-  pointCount: number;
-  asOf: string | null;
-  source: "intraday" | "daily";
-};
-
-function averageLastNumbers(values: Array<number | null | undefined>, windowSize: number) {
-  const validValues = values
-    .filter((value): value is number => {
-      return value !== null && value !== undefined && !Number.isNaN(value);
-    })
-    .slice(-windowSize);
-
-  if (!validValues.length) return null;
-
-  return validValues.reduce((total, value) => total + value, 0) / validValues.length;
-}
-
-function sumUsIntradayVolume(points: IntradayTrendResponse["points"]) {
-  const regularVolumes = points
-    .filter((point) => isUsRegularSessionPoint(point.time))
-    .map((point) => point.volume)
-    .filter((value): value is number => {
-      return value !== null && value !== undefined && !Number.isNaN(value) && value > 0;
-    });
-
-  if (!regularVolumes.length) return null;
-
-  return regularVolumes.reduce((total, value) => total + value, 0);
-}
-
-function usMarketRegimeLabel(
-  t: TranslationFunction,
-  snapshot:
-    | {
-        close: number | null;
-        priceVsMa20: number | null;
-        changePct: number | null;
-      }
-    | null
-    | undefined
-) {
-  if (!snapshot || snapshot.close === null) return t("dashboard.marketIndex.insufficient");
-  if (snapshot.priceVsMa20 !== null) {
-    if (snapshot.priceVsMa20 > 1) return t("dashboard.marketIndex.aboveMa20");
-    if (snapshot.priceVsMa20 < -1) return t("dashboard.marketIndex.belowMa20");
-  }
-
-  if (snapshot.changePct !== null) {
-    if (snapshot.changePct > 0) return t("dashboard.marketIndex.bullishShort");
-    if (snapshot.changePct < 0) return t("dashboard.marketIndex.weakShort");
-  }
-
-  return t("dashboard.marketIndex.neutral");
-}
-
-async function fetchUsMarketTapeSnapshot(config: USMarketIndexConfig) {
-  const [chart, intraday] = await Promise.all([
-    fetchJson<USOhlcChartRead>(
-      `/api/us-market/ohlc/${encodeURIComponent(config.symbol)}`,
-      {
-        timeframe: "daily",
-        bars: 60,
-        ensure_history: true,
-        outputsize: "compact",
-        provider: "yahoo_chart",
-      }
-    ),
-    fetchJson<IntradayTrendResponse>(
-      `/api/us-market/intraday/${encodeURIComponent(config.symbol)}`
-    ).catch(() => null),
-  ]);
-  const chartPoints = chart.points ?? [];
-  const latestDaily = chartPoints[chartPoints.length - 1] ?? null;
-  const previousDaily = chartPoints[chartPoints.length - 2] ?? null;
-  const latestIntraday = intraday?.points[intraday.points.length - 1] ?? null;
-  const close = latestIntraday?.price ?? latestDaily?.close ?? null;
-  const previousClose =
-    latestIntraday && intraday?.previous_close !== null && intraday?.previous_close !== undefined
-      ? intraday.previous_close
-      : previousDaily?.close ?? null;
-  const change =
-    close !== null && previousClose !== null ? close - previousClose : null;
-  const changePct =
-    change !== null && previousClose !== null && previousClose !== 0
-      ? (change / previousClose) * 100
-      : null;
-  const ma20 = averageLastNumbers(
-    chartPoints.map((point) => point.close),
-    20
-  );
-  const priceVsMa20 =
-    close !== null && ma20 !== null && ma20 !== 0
-      ? ((close - ma20) / ma20) * 100
-      : null;
-
-  return {
-    symbol: config.symbol,
-    displaySymbol: config.displaySymbol,
-    name: config.name,
-    exchange: config.exchange,
-    note: config.note,
-    close,
-    change,
-    changePct,
-    priceVsMa20,
-    volume: latestIntraday
-      ? sumUsIntradayVolume(intraday?.points ?? []) ?? latestDaily?.volume ?? null
-      : latestDaily?.volume ?? null,
-    pointCount: chart.point_count,
-    asOf: latestIntraday?.time ?? latestDaily?.time ?? null,
-    source: latestIntraday ? "intraday" : "daily",
-  } satisfies USMarketTapeSnapshot;
-}
-
-function USMarketTapeCard({
-  title,
-  snapshot,
-  loadState,
-}: {
-  title: string;
-  snapshot: USMarketTapeSnapshot | null;
-  loadState: LoadState;
-}) {
-  const t = useT();
-
-  return (
-    <div className="bg-omi-surface px-4 py-3">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-omi-text-muted">
-            {title}
-          </div>
-          <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-            <span className="text-lg font-bold text-omi-text-strong">
-              {snapshot ? snapshot.name : loadState === "loading" ? t("common.loading") : "-"}
-            </span>
-            <span className="text-2xl font-black text-omi-text-strong">
-              {formatPrice(snapshot?.close)}
-            </span>
-            <span className={`text-sm font-bold ${valueTone(snapshot?.changePct)}`}>
-              {formatSignedNumber(snapshot?.change)} / {formatPct(snapshot?.changePct)}
-            </span>
-          </div>
-          <div className="mt-1 text-xs text-omi-text-muted">
-            {snapshot
-              ? `${snapshot.displaySymbol} · ${snapshot.exchange} · ${
-                  snapshot.source === "intraday"
-                    ? t("statusLabels.intraday")
-                    : t("dashboard.marketIndex.daily")
-                }`
-              : t("dashboard.marketIndex.waitingData")}
-          </div>
-        </div>
-        <div className="text-right text-xs">
-          <div className="font-semibold text-omi-text">
-            {usMarketRegimeLabel(t, snapshot)}
-          </div>
-          <div className={valueTone(snapshot?.priceVsMa20)}>
-            {formatPct(snapshot?.priceVsMa20)} vs MA20
-          </div>
-        </div>
-      </div>
-
-      <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
-        <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-          <div className="text-omi-text-muted">{t("dashboard.marketIndex.volume")}</div>
-          <div className="mt-1 font-semibold text-omi-text">
-            {formatWholeNumber(snapshot?.volume)}
-          </div>
-        </div>
-        <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-          <div className="text-omi-text-muted">{t("dashboard.marketIndex.candleCount")}</div>
-          <div className="mt-1 font-semibold text-omi-text">
-            {snapshot?.pointCount ?? "-"}
-          </div>
-        </div>
-        <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-          <div className="text-omi-text-muted">{t("common.update")}</div>
-          <div className="mt-1 truncate font-semibold text-omi-text">
-            {snapshot?.asOf ? formatRowTime(snapshot.asOf) ?? snapshot.asOf.slice(0, 10) : "-"}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function USMarketTape({
-  selectedSymbol,
-  selectedSecurityName,
-  selectedGroupName,
-  companyProfile,
-}: {
-  selectedSymbol: string | null;
-  selectedSecurityName: string | null;
-  selectedGroupName: string | null;
-  companyProfile: USCompanyProfileRead | null;
-}) {
-  const t = useT();
-  const primaryIndex = useMemo(() => getUsPrimaryMarketIndexConfig(), []);
-  const contextIndex = useMemo(
-    () =>
-      resolveUsContextIndexConfig({
-        symbol: selectedSymbol,
-        securityName: selectedSecurityName,
-        groupName: selectedGroupName,
-        profile: companyProfile,
-      }),
-    [companyProfile, selectedGroupName, selectedSecurityName, selectedSymbol]
-  );
-  const [snapshots, setSnapshots] = useState<Record<string, USMarketTapeSnapshot>>({});
-  const [loadState, setLoadState] = useState<LoadState>("idle");
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const primarySnapshot = snapshots[primaryIndex.symbol] ?? null;
-  const contextSnapshot = snapshots[contextIndex.symbol] ?? null;
-
-  useEffect(() => {
-    let cancelled = false;
-    let timer: number | undefined;
-    let requestInFlight = false;
-    const configs = [primaryIndex, contextIndex].filter(
-      (config, index, items) => {
-        return items.findIndex((item) => item.symbol === config.symbol) === index;
-      }
-    );
-
-    function clearTimer() {
-      if (timer !== undefined) {
-        window.clearTimeout(timer);
-        timer = undefined;
-      }
-    }
-
-    async function loadSnapshots(silent = false) {
-      if (requestInFlight) return;
-      requestInFlight = true;
-
-      if (!silent) {
-        setLoadState("loading");
-      }
-      setErrorMessage(null);
-
-      try {
-        const nextSnapshots = await Promise.all(
-          configs.map((config) => fetchUsMarketTapeSnapshot(config))
-        );
-
-        if (cancelled) return;
-
-        setSnapshots((current) => {
-          const updated = { ...current };
-          nextSnapshots.forEach((snapshot) => {
-            updated[snapshot.symbol] = snapshot;
-          });
-          return updated;
-        });
-        setLoadState("success");
-      } catch (error) {
-        if (cancelled) return;
-
-        setLoadState("error");
-        setErrorMessage(
-          error instanceof Error ? error.message : t("dashboard.marketIndex.usLoadError")
-        );
-      } finally {
-        requestInFlight = false;
-      }
-    }
-
-    function scheduleRefresh() {
-      if (cancelled) return;
-
-      const marketState = getUsMarketRefreshState();
-      const delay = marketState.isPollingWindow
-        ? US_INTRADAY_REFRESH_MS
-        : Math.min(marketState.msUntilNextPollingStart, 60_000);
-
-      timer = window.setTimeout(() => {
-        void loadSnapshots(true).finally(scheduleRefresh);
-      }, delay);
-    }
-
-    void loadSnapshots().finally(scheduleRefresh);
-
-    return () => {
-      cancelled = true;
-      clearTimer();
-    };
-  }, [contextIndex, primaryIndex, t]);
-
-  const asOf = [primarySnapshot?.asOf, contextSnapshot?.asOf]
-    .filter((value): value is string => Boolean(value))
-    .sort((left, right) => left.localeCompare(right))
-    .at(-1);
-
-  return (
-    <section className="mb-3 border border-omi-border-subtle bg-omi-surface">
-      <div className="grid gap-px bg-omi-surface-strong lg:grid-cols-2">
-        <USMarketTapeCard
-          title={t("dashboard.marketIndex.market")}
-          snapshot={primarySnapshot}
-          loadState={loadState}
-        />
-        <USMarketTapeCard
-          title={t("dashboard.marketIndex.context")}
-          snapshot={contextSnapshot}
-          loadState={loadState}
-        />
-      </div>
-      <div className="border-t border-omi-border-subtle px-4 py-2 text-xs text-omi-text-muted">
-        {errorMessage
-          ? errorMessage
-          : asOf
-            ? t("dashboard.marketIndex.usUpdated", {
-                asOf: formatRowTime(asOf) ?? asOf.slice(0, 10),
-              })
-            : t("dashboard.marketIndex.usWaiting")}
-      </div>
-    </section>
-  );
-}
-
-type JPMarketTapeSnapshot = {
-  symbol: string;
-  displaySymbol: string;
-  name: string;
-  exchange: string;
-  note: string;
-  close: number | null;
-  change: number | null;
-  changePct: number | null;
-  priceVsMa20: number | null;
-  volume: number | null;
-  pointCount: number;
-  asOf: string | null;
-};
-
-async function fetchJpMarketTapeSnapshot(config: JPMarketIndexConfig) {
-  const chart = await fetchJson<JPOhlcChartRead>(
-    `/api/jp-market/ohlc/${encodeURIComponent(config.symbol)}`,
-    {
-      timeframe: "daily",
-      bars: 60,
-      ensure_history: true,
-      outputsize: "compact",
-      provider: "auto",
-    }
-  );
-  const chartPoints = chart.points ?? [];
-  const latestDaily = chartPoints[chartPoints.length - 1] ?? null;
-  const previousDaily = chartPoints[chartPoints.length - 2] ?? null;
-  const close = latestDaily?.close ?? null;
-  const previousClose = previousDaily?.close ?? null;
-  const change =
-    close !== null && previousClose !== null ? close - previousClose : null;
-  const changePct =
-    change !== null && previousClose !== null && previousClose !== 0
-      ? (change / previousClose) * 100
-      : null;
-  const ma20 = averageLastNumbers(
-    chartPoints.map((point) => point.close),
-    20
-  );
-  const priceVsMa20 =
-    close !== null && ma20 !== null && ma20 !== 0
-      ? ((close - ma20) / ma20) * 100
-      : null;
-
-  return {
-    symbol: config.symbol,
-    displaySymbol: config.displaySymbol,
-    name: config.name,
-    exchange: config.exchange,
-    note: config.note,
-    close,
-    change,
-    changePct,
-    priceVsMa20,
-    volume: latestDaily?.volume ?? null,
-    pointCount: chart.point_count,
-    asOf: latestDaily?.time ?? null,
-  } satisfies JPMarketTapeSnapshot;
-}
-
-function JPMarketTapeCard({
-  title,
-  snapshot,
-  loadState,
-}: {
-  title: string;
-  snapshot: JPMarketTapeSnapshot | null;
-  loadState: LoadState;
-}) {
-  const t = useT();
-
-  return (
-    <div className="bg-omi-surface px-4 py-3">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-omi-text-muted">
-            {title}
-          </div>
-          <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-            <span className="text-lg font-bold text-omi-text-strong">
-              {snapshot ? snapshot.name : loadState === "loading" ? t("common.loading") : "-"}
-            </span>
-            <span className="text-2xl font-black text-omi-text-strong">
-              {formatPrice(snapshot?.close)}
-            </span>
-            <span className={`text-sm font-bold ${valueTone(snapshot?.changePct)}`}>
-              {formatSignedNumber(snapshot?.change)} / {formatPct(snapshot?.changePct)}
-            </span>
-          </div>
-          <div className="mt-1 text-xs text-omi-text-muted">
-            {snapshot
-              ? `${snapshot.displaySymbol} · ${snapshot.exchange} · ${t("dashboard.marketIndex.daily")}`
-              : t("dashboard.marketIndex.waitingData")}
-          </div>
-        </div>
-        <div className="text-right text-xs">
-          <div className="font-semibold text-omi-text">
-            {usMarketRegimeLabel(t, snapshot)}
-          </div>
-          <div className={valueTone(snapshot?.priceVsMa20)}>
-            {formatPct(snapshot?.priceVsMa20)} vs MA20
-          </div>
-        </div>
-      </div>
-
-      <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
-        <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-          <div className="text-omi-text-muted">{t("dashboard.marketIndex.volume")}</div>
-          <div className="mt-1 font-semibold text-omi-text">
-            {formatWholeNumber(snapshot?.volume)}
-          </div>
-        </div>
-        <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-          <div className="text-omi-text-muted">{t("dashboard.marketIndex.candleCount")}</div>
-          <div className="mt-1 font-semibold text-omi-text">
-            {snapshot?.pointCount ?? "-"}
-          </div>
-        </div>
-        <div className="border border-omi-border-subtle bg-omi-surface-subtle px-2 py-2">
-          <div className="text-omi-text-muted">{t("common.update")}</div>
-          <div className="mt-1 truncate font-semibold text-omi-text">
-            {snapshot?.asOf ? snapshot.asOf.slice(0, 10) : "-"}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function JPMarketTape({
-  selectedSymbol,
-  selectedStock,
-  selectedGroupName,
-}: {
-  selectedSymbol: string | null;
-  selectedStock: JPStockMasterRead | null;
-  selectedGroupName: string | null;
-}) {
-  const t = useT();
-  const primaryIndex = useMemo(() => getJpPrimaryMarketIndexConfig(), []);
-  const contextIndex = useMemo(
-    () =>
-      resolveJpContextIndexConfig({
-        symbol: selectedSymbol,
-        securityName: selectedStock?.security_name ?? null,
-        groupName: selectedGroupName,
-        stock: selectedStock,
-      }),
-    [selectedGroupName, selectedStock, selectedSymbol]
-  );
-  const [snapshots, setSnapshots] = useState<Record<string, JPMarketTapeSnapshot>>({});
-  const [loadState, setLoadState] = useState<LoadState>("idle");
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const primarySnapshot = snapshots[primaryIndex.symbol] ?? null;
-  const contextSnapshot = snapshots[contextIndex.symbol] ?? null;
-
-  useEffect(() => {
-    let cancelled = false;
-    let timer: number | undefined;
-    let requestInFlight = false;
-    const configs = [primaryIndex, contextIndex].filter(
-      (config, index, items) => {
-        return items.findIndex((item) => item.symbol === config.symbol) === index;
-      }
-    );
-
-    function clearTimer() {
-      if (timer !== undefined) {
-        window.clearTimeout(timer);
-        timer = undefined;
-      }
-    }
-
-    async function loadSnapshots(silent = false) {
-      if (requestInFlight) return;
-      requestInFlight = true;
-
-      if (!silent) {
-        setLoadState("loading");
-        setErrorMessage(null);
-      }
-
-      try {
-        const results = await Promise.all(
-          configs.map((config) => fetchJpMarketTapeSnapshot(config))
-        );
-
-        if (cancelled) return;
-
-        setSnapshots((current) => {
-          const next = { ...current };
-          results.forEach((snapshot) => {
-            next[snapshot.symbol] = snapshot;
-          });
-          return next;
-        });
-        setLoadState("success");
-        setErrorMessage(null);
-      } catch {
-        if (!cancelled) {
-          setLoadState("error");
-          setErrorMessage(t("dashboard.marketIndex.jpLoadError"));
-        }
-      } finally {
-        requestInFlight = false;
-      }
-    }
-
-    function scheduleRefresh() {
-      if (cancelled) return;
-
-      timer = window.setTimeout(() => {
-        void loadSnapshots(true).finally(scheduleRefresh);
-      }, 300_000);
-    }
-
-    void loadSnapshots().finally(scheduleRefresh);
-
-    return () => {
-      cancelled = true;
-      clearTimer();
-    };
-  }, [contextIndex, primaryIndex, t]);
-
-  const asOf = [primarySnapshot?.asOf, contextSnapshot?.asOf]
-    .filter((value): value is string => Boolean(value))
-    .sort((left, right) => left.localeCompare(right))
-    .at(-1);
-
-  return (
-    <section className="mb-3 border border-omi-border-subtle bg-omi-surface">
-      <div className="grid gap-px bg-omi-surface-strong lg:grid-cols-2">
-        <JPMarketTapeCard
-          title={t("dashboard.marketIndex.market")}
-          snapshot={primarySnapshot}
-          loadState={loadState}
-        />
-        <JPMarketTapeCard
-          title={t("dashboard.marketIndex.context")}
-          snapshot={contextSnapshot}
-          loadState={loadState}
-        />
-      </div>
-      <div className="border-t border-omi-border-subtle px-4 py-2 text-xs text-omi-text-muted">
-        {errorMessage
-          ? errorMessage
-          : asOf
-            ? t("dashboard.marketIndex.jpUpdated", {
-                asOf: asOf.slice(0, 10),
-              })
-            : t("dashboard.marketIndex.jpWaiting")}
-      </div>
-    </section>
-  );
-}
-
-function flattenGroups(nodes: WatchlistGroupNode[]): WatchlistGroupNode[] {
-  return nodes.flatMap((node) => [node, ...flattenGroups(node.children)]);
-}
-
-function flattenUsGroups(nodes: USWatchlistGroupNode[]): USWatchlistGroupNode[] {
-  return nodes.flatMap((node) => [node, ...flattenUsGroups(node.children)]);
-}
-
-function flattenJpGroups(nodes: JPWatchlistGroupNode[]): JPWatchlistGroupNode[] {
-  return nodes.flatMap((node) => [node, ...flattenJpGroups(node.children)]);
-}
-
-function buildWatchlistRows(
-  group: WatchlistGroupNode | null,
-  items: WatchlistItemRead[]
-): RankingItem[] {
-  if (!group) return [];
-
-  const itemsByGroupId = new Map<number, WatchlistItemRead[]>();
-  const seenStockIds = new Set<string>();
-  const rows: RankingItem[] = [];
-
-  items.forEach((item) => {
-    if (!item.enabled) return;
-
-    const groupItems = itemsByGroupId.get(item.group_id) ?? [];
-    groupItems.push(item);
-    itemsByGroupId.set(item.group_id, groupItems);
-  });
-
-  function appendGroupRows(currentGroup: WatchlistGroupNode) {
-    (itemsByGroupId.get(currentGroup.id) ?? []).forEach((item) => {
-      if (seenStockIds.has(item.stock_id)) return;
-
-      seenStockIds.add(item.stock_id);
-      rows.push({
-        rank: rows.length + 1,
-        stock_id: item.stock_id,
-        stock_name: item.stock_name,
-        time: null,
-        close: null,
-        volume: null,
-        change: null,
-        previous_close: null,
-        change_pct: null,
-        limit_status: null,
-        score: null,
-        status: "pending",
-        signal_count: 0,
-        signal_keys: [],
-        primary_signal_key: null,
-        primary_signal_label: null,
-        indicator_snapshot: {},
-        context_snapshot: {},
-        intraday_previous_close: null,
-        intraday_points: [],
-        error_message: null,
-      });
-    });
-
-    currentGroup.children.forEach(appendGroupRows);
-  }
-
-  appendGroupRows(group);
-  return rows;
-}
-
-function mergeWatchlistRows(
-  baseRows: RankingItem[],
-  ranking: RankingResponse | null
-) {
-  if (!ranking) return baseRows;
-
-  const rankingByStockId = new Map(
-    ranking.results.map((row) => [row.stock_id, row])
-  );
-
-  return baseRows.map((row, index) => ({
-    ...row,
-    ...(rankingByStockId.get(row.stock_id) ?? {}),
-    rank: index + 1,
-  }));
-}
-
-function rankingRowDateKey(value: string | null | undefined) {
-  return value?.slice(0, 10) ?? null;
-}
-
-function latestRankingTradeDate(rows: RankingItem[]) {
-  return rows.reduce<string | null>((latest, row) => {
-    const value = rankingRowDateKey(row.time);
-    if (!value) return latest;
-    return latest === null || value > latest ? value : latest;
-  }, null);
-}
-
-function mergeRankingBatchRows(
-  currentRows: RankingItem[],
-  batchRows: RankingItem[]
-) {
-  const rowsByStockId = new Map(currentRows.map((row) => [row.stock_id, row]));
-
-  batchRows.forEach((row) => {
-    rowsByStockId.set(row.stock_id, row);
-  });
-
-  return Array.from(rowsByStockId.values()).sort((a, b) => a.rank - b.rank);
-}
-
-function deferRankingTrendData(row: RankingItem): RankingItem {
-  const intradayPoints = Array.isArray(row.intraday_points) ? row.intraday_points : [];
-
-  if (intradayPoints.length === 0 && row.intraday_previous_close === null) {
-    return row;
-  }
-
-  return {
-    ...row,
-    intraday_previous_close: null,
-    intraday_points: [],
-  };
-}
-
-function buildProgressiveRankingResponse({
-  batch,
-  rows,
-  currentStockCount,
-  staleStockCount,
-  noDataCount,
-  errorCount,
-  complete,
-  deferTrendData,
-}: {
-  batch: RankingBatchResponse;
-  rows: RankingItem[];
-  currentStockCount: number;
-  staleStockCount: number;
-  noDataCount: number;
-  errorCount: number;
-  complete: boolean;
-  deferTrendData?: boolean;
-}): RankingResponse {
-  return {
-    group_id: batch.group_id,
-    include_children: batch.include_children,
-    rank_by: batch.rank_by,
-    sort_order: batch.sort_order,
-    requested_stock_count: batch.total_stock_count,
-    ranked_count: rows.length,
-    no_data_count: noDataCount,
-    error_count: errorCount,
-    trade_date: latestRankingTradeDate(rows),
-    target_trade_date: batch.target_trade_date,
-    is_current: complete ? staleStockCount === 0 : true,
-    current_stock_count: currentStockCount,
-    stale_stock_count: complete ? staleStockCount : 0,
-    results: deferTrendData ? rows.map(deferRankingTrendData) : rows,
-  };
-}
-
-function buildUsWatchlistRows(
-  group: USWatchlistGroupNode | null,
-  items: USWatchlistItemRead[]
-): USWatchlistRankingItemRead[] {
-  if (!group) return [];
-
-  const itemsByGroupId = new Map<number, USWatchlistItemRead[]>();
-  const seenSymbols = new Set<string>();
-  const rows: USWatchlistRankingItemRead[] = [];
-
-  items.forEach((item) => {
-    if (!item.enabled) return;
-
-    const groupItems = itemsByGroupId.get(item.group_id) ?? [];
-    groupItems.push(item);
-    itemsByGroupId.set(item.group_id, groupItems);
-  });
-
-  function appendGroupRows(currentGroup: USWatchlistGroupNode) {
-    (itemsByGroupId.get(currentGroup.id) ?? []).forEach((item) => {
-      const symbol = item.symbol.toUpperCase();
-      if (seenSymbols.has(symbol)) return;
-
-      seenSymbols.add(symbol);
-      rows.push({
-        rank: rows.length + 1,
-        symbol,
-        security_name: item.security_name,
-        exchange: item.exchange,
-        asset_type: item.asset_type,
-        group_id: item.group_id,
-        trade_date: null,
-        time: null,
-        close: null,
-        previous_close: null,
-        change: null,
-        change_pct: null,
-        volume: null,
-        status: "pending",
-        source: null,
-        intraday_previous_close: null,
-        intraday_points: [],
-        error_message: null,
-      });
-    });
-
-    currentGroup.children.forEach(appendGroupRows);
-  }
-
-  appendGroupRows(group);
-  return rows;
-}
-
-function mergeUsWatchlistRows(
-  baseRows: USWatchlistRankingItemRead[],
-  ranking: USWatchlistRankingRead | null
-) {
-  if (!ranking) return baseRows;
-
-  const rankingResults = Array.isArray(ranking.results) ? ranking.results : [];
-  const rankingBySymbol = new Map(
-    rankingResults.map((row) => [row.symbol, row])
-  );
-
-  return baseRows.map((row, index) => ({
-    ...row,
-    ...(rankingBySymbol.get(row.symbol) ?? {}),
-    rank: index + 1,
-  }));
-}
-
-function buildJpWatchlistRows(
-  group: JPWatchlistGroupNode | null,
-  items: JPWatchlistItemRead[]
-): JPWatchlistRankingItemRead[] {
-  if (!group) return [];
-
-  const itemsByGroupId = new Map<number, JPWatchlistItemRead[]>();
-  const seenSymbols = new Set<string>();
-  const rows: JPWatchlistRankingItemRead[] = [];
-
-  items.forEach((item) => {
-    if (!item.enabled) return;
-
-    const groupItems = itemsByGroupId.get(item.group_id) ?? [];
-    groupItems.push(item);
-    itemsByGroupId.set(item.group_id, groupItems);
-  });
-
-  function appendGroupRows(currentGroup: JPWatchlistGroupNode) {
-    (itemsByGroupId.get(currentGroup.id) ?? []).forEach((item) => {
-      const symbol = item.symbol.toUpperCase();
-      if (seenSymbols.has(symbol)) return;
-
-      seenSymbols.add(symbol);
-      rows.push({
-        rank: rows.length + 1,
-        symbol,
-        security_name: item.security_name,
-        exchange: item.exchange,
-        market_segment: item.market_segment,
-        sector_33_name: item.sector_33_name,
-        asset_type: item.asset_type,
-        group_id: item.group_id,
-        trade_date: null,
-        close: null,
-        previous_close: null,
-        change: null,
-        change_pct: null,
-        volume: null,
-        status: "pending",
-        source: null,
-        error_message: null,
-      });
-    });
-
-    currentGroup.children.forEach(appendGroupRows);
-  }
-
-  appendGroupRows(group);
-  return rows;
-}
-
-function mergeJpWatchlistRows(
-  baseRows: JPWatchlistRankingItemRead[],
-  ranking: JPWatchlistRankingRead | null
-) {
-  if (!ranking) return baseRows;
-
-  const rankingResults = Array.isArray(ranking.results) ? ranking.results : [];
-  const rankingBySymbol = new Map(
-    rankingResults.map((row) => [row.symbol, row])
-  );
-
-  return baseRows.map((row, index) => ({
-    ...row,
-    ...(rankingBySymbol.get(row.symbol) ?? {}),
-    rank: index + 1,
-  }));
-}
-
-function WatchlistRankingPanel({
-  groupName,
-  lastUpdatedAt,
-  statusLabel,
-  rankBy,
-  rankOptions,
-  onRankByChange,
-  onReload,
-  reloadDisabled,
-  secondaryAction,
-  loadState,
-  loadingLabel,
-  errorMessage,
-  rows,
-  summary,
-  volumeHeader,
-  emptyMessage,
-}: {
-  groupName: string | null;
-  lastUpdatedAt: string | null;
-  statusLabel?: string;
-  rankBy: string;
-  rankOptions: RankingPanelOption[];
-  onRankByChange: (value: string) => void;
-  onReload: () => void;
-  reloadDisabled: boolean;
-  secondaryAction?: ReactNode;
-  loadState: LoadState;
-  loadingLabel?: string;
-  errorMessage: string | null;
-  rows: RankingDisplayRow[];
-  summary: {
-    stockCount: number;
-    upCount: number;
-    downCount: number;
-  };
-  volumeHeader: string;
-  emptyMessage: string;
-}) {
-  const t = useT();
-  const hasRows = rows.length > 0;
-  const hasLoadingRows = rows.some((row) => row.loading);
-  const isLoadingRows = (loadState === "loading" && !hasRows) || hasLoadingRows;
-  const showLoadingStatus = loadState === "loading" || hasLoadingRows;
-
-  return (
-    <div className="space-y-4">
-      <section className="border border-omi-border-subtle bg-omi-surface">
-        <div className="flex flex-wrap items-start justify-between gap-4 px-5 py-4">
-          <div>
-            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-omi-text-muted">
-              {t("dashboard.ranking.selectedGroup")}
-            </div>
-            <h2 className="mt-1 text-2xl font-bold text-omi-text-strong">
-              {groupName ?? t("dashboard.ranking.selectedGroupPlaceholder")}
-            </h2>
-            <div className="mt-1 text-sm text-omi-text-muted">
-              {statusLabel ??
-                (lastUpdatedAt
-                  ? t("dashboard.ranking.updateTime", { time: lastUpdatedAt })
-                  : t("dashboard.ranking.groupDataNotLoaded"))}
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <select
-              value={rankBy}
-              onChange={(event) => onRankByChange(event.target.value)}
-              className="h-9 border border-omi-border bg-omi-surface px-3 text-sm font-semibold text-omi-text-muted outline-none focus:border-omi-accent"
-            >
-              {rankOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-            {secondaryAction}
-            <button
-              type="button"
-              onClick={onReload}
-              className="h-9 bg-omi-control px-4 text-sm font-semibold text-omi-text-inverse hover:bg-omi-control-border disabled:bg-omi-surface-strong"
-              disabled={reloadDisabled}
-            >
-              {t("common.reload")}
-            </button>
-          </div>
-        </div>
-
-        {errorMessage ? (
-          <div className="border-t border-omi-danger-border bg-omi-danger-soft px-5 py-3 text-sm text-omi-danger">
-            {errorMessage}
-          </div>
-        ) : null}
-
-        <div className="grid grid-cols-2 border-t border-omi-border-subtle md:grid-cols-4">
-          <div className="px-5 py-3">
-            <div className="text-xs text-omi-text-muted">{t("dashboard.ranking.stockCount")}</div>
-            <div className="mt-1 text-xl font-bold">{summary.stockCount}</div>
-          </div>
-          <div className="border-l border-omi-border-subtle px-5 py-3">
-            <div className="text-xs text-omi-text-muted">{t("dashboard.ranking.upCount")}</div>
-            <div className="mt-1 text-xl font-bold text-omi-market-up">
-              {isLoadingRows ? (
-                <span className="block h-6 w-8 animate-pulse bg-omi-surface-strong" />
-              ) : (
-                summary.upCount
-              )}
-            </div>
-          </div>
-          <div className="border-l border-omi-border-subtle px-5 py-3">
-            <div className="text-xs text-omi-text-muted">{t("dashboard.ranking.downCount")}</div>
-            <div className="mt-1 text-xl font-bold text-omi-market-down">
-              {isLoadingRows ? (
-                <span className="block h-6 w-8 animate-pulse bg-omi-surface-strong" />
-              ) : (
-                summary.downCount
-              )}
-            </div>
-          </div>
-          <div className="border-l border-omi-border-subtle px-5 py-3">
-            <div className="text-xs text-omi-text-muted">{t("dashboard.ranking.sort")}</div>
-            <div className="mt-1 text-xl font-bold">{rankLabel(t, rankBy)}</div>
-          </div>
-        </div>
-      </section>
-
-      <section className="border border-omi-border-subtle bg-omi-surface">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-omi-border-subtle px-5 py-3">
-          <h3 className="text-sm font-bold text-omi-text-strong">{t("dashboard.ranking.listTitle")}</h3>
-          {showLoadingStatus ? (
-            <span className="inline-flex items-center gap-2 text-xs text-omi-text-muted">
-              {loadingLabel ?? t("common.loading")}
-              <LoadingDots label={t("dashboard.ranking.loadingRanking")} />
-            </span>
-          ) : (
-            <span className="text-xs text-omi-text-muted">
-              {rankBy === "none"
-                ? t("dashboard.ranking.rowSummaryNormal", { count: rows.length })
-                : t("dashboard.ranking.rowSummaryRanked", {
-                    count: rows.length,
-                    rankLabel: rankLabel(t, rankBy),
-                  })}
-            </span>
-          )}
-        </div>
-
-        <div className="grid grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
-          <span>{t("dashboard.ranking.rank")}</span>
-          <span>{t("dashboard.ranking.stock")}</span>
-          <span className="text-center">{t("dashboard.ranking.trend")}</span>
-          <span className="text-right">{t("dashboard.ranking.close")}</span>
-          <span className="text-right">{t("dashboard.ranking.changePct")}</span>
-          <span className="text-right">{t("dashboard.ranking.status")}</span>
-          <span className="text-right">{volumeHeader}</span>
-        </div>
-        {rows.length > 0 ? (
-          rows.map((row) => (
-            <a
-              key={row.key}
-              href={row.href ?? "#"}
-              data-ranking-symbol={row.symbol}
-              onPointerUp={(event) => {
-                if (event.button !== 0) return;
-                row.onSelect();
-              }}
-              onMouseDown={(event) => {
-                if (event.button !== 0) return;
-                row.onSelect();
-              }}
-              onClick={(event) => {
-                event.preventDefault();
-                row.onSelect();
-              }}
-              className={[
-                "omi-ranking-row grid w-full grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-omi-border-subtle px-4 py-2 text-left text-sm",
-                row.selected
-                  ? "omi-ranking-row-selected relative z-10 bg-omi-surface text-omi-text ring-1 ring-omi-market-up-border"
-                  : "bg-omi-surface text-omi-text hover:bg-omi-surface-subtle",
-              ].join(" ")}
-            >
-              <span className={row.selected ? "font-semibold text-omi-market-up" : "text-omi-text-muted"}>
-                #{row.rank}
-              </span>
-              <span className="min-w-0">
-                <span className="block truncate font-semibold">
-                  {row.symbol} {row.name ?? ""}
-                </span>
-                <span className={row.selected ? "block truncate text-xs font-medium text-omi-text" : "block truncate text-xs text-omi-text-muted"}>
-                  {row.loading ? <RankingCellSkeleton className="h-2.5 w-16" /> : row.meta ?? "-"}
-                </span>
-              </span>
-              <span className="flex justify-center">
-                {row.loading ? <RankingCellSkeleton className="h-5 w-16" /> : row.visual}
-              </span>
-              <span className="text-right font-semibold">
-                {row.loading ? (
-                  <RankingCellSkeleton />
-                ) : (
-                  <PriceUpdatePulse
-                    value={row.closeValue}
-                    direction={row.changePct}
-                    resetKey={row.key}
-                    className="justify-end tabular-nums"
-                  >
-                    {row.close}
-                  </PriceUpdatePulse>
-                )}
-              </span>
-              <span className={`text-right font-semibold ${valueTone(row.changePct)}`}>
-                {row.loading ? (
-                  <RankingCellSkeleton className="h-3 w-12" />
-                ) : (
-                  <PriceUpdatePulse
-                    value={row.change}
-                    direction={row.changePct}
-                    resetKey={row.key}
-                    className="justify-end tabular-nums"
-                  >
-                    {row.change}
-                  </PriceUpdatePulse>
-                )}
-              </span>
-              <span className="text-right">
-                {row.loading ? (
-                  <RankingCellSkeleton className="h-6 w-12" />
-                ) : (
-                  <span
-                    className={[
-                      "omi-ranking-trend-chip px-2 py-1 text-xs font-semibold",
-                      row.selected
-                        ? `omi-ranking-trend-chip-selected ${trendClass(row.changePct)}`
-                        : trendClass(row.changePct),
-                    ].join(" ")}
-                  >
-                    {row.trend}
-                  </span>
-                )}
-              </span>
-              <span className="text-right">
-                {row.loading ? (
-                  <RankingCellSkeleton className="h-3 w-16" />
-                ) : (
-                  <PriceUpdatePulse
-                    value={row.volumeValue ?? row.volume}
-                    direction={null}
-                    resetKey={row.key}
-                    className="justify-end tabular-nums"
-                  >
-                    {row.volume}
-                  </PriceUpdatePulse>
-                )}
-              </span>
-            </a>
-          ))
-        ) : isLoadingRows ? (
-          <RankingLoadingRows />
-        ) : (
-          <div className="border-t border-omi-border-subtle px-5 py-10 text-center text-sm text-omi-text-muted">
-            {emptyMessage}
-          </div>
-        )}
-      </section>
-    </div>
-  );
+function isKrRankingItemPending(row: KRWatchlistRankingItemRead) {
+  return row.status === "pending";
 }
 
 export default function MarketDashboardClient({
@@ -1953,7 +251,9 @@ export default function MarketDashboardClient({
   initialSelectedUsSymbol,
   initialSelectedUsSecurityName,
   initialSelectedJpSymbol,
+  initialSelectedKrSymbol,
   initialChartData,
+  initialChartIntradayOverlay,
   initialIndicatorData,
   initialRankingData,
   initialRadarMode,
@@ -1963,207 +263,301 @@ export default function MarketDashboardClient({
   initialUsWatchlistItems,
   initialJpWatchlistTree,
   initialJpWatchlistItems,
+  initialKrWatchlistTree,
+  initialKrWatchlistItems,
   quoteDepthPreviewMode,
+  initialBackendIssueCount,
+  initialBackendIssueCode,
+  formBackendIssueCode,
 }: Props) {
   const t = useT();
   const refreshExecutionSettings = useRefreshExecutionSettings();
-  const initialSelectedGroup = useMemo(() => {
-    const groups = flattenGroups(initialTree);
-    return (
-      groups.find((group) => group.id === initialSelectedGroupId) ??
-      groups[0] ??
-      null
-    );
-  }, [initialTree, initialSelectedGroupId]);
-  const initialSelectedUsGroup = useMemo(() => {
-    const groups = flattenUsGroups(initialUsWatchlistTree);
-    return (
-      groups.find((group) => group.id === initialSelectedGroupId) ??
-      groups[0] ??
-      null
-    );
-  }, [initialUsWatchlistTree, initialSelectedGroupId]);
-  const initialSelectedJpGroup = useMemo(() => {
-    const groups = flattenJpGroups(initialJpWatchlistTree);
-    return (
-      groups.find((group) => group.id === initialSelectedGroupId) ??
-      groups[0] ??
-      null
-    );
-  }, [initialJpWatchlistTree, initialSelectedGroupId]);
-  const [selectedGroupId, setSelectedGroupId] = useState<number | null>(
-    initialSelectedGroup?.id ?? null
-  );
-  const [selectedGroup, setSelectedGroup] = useState<WatchlistGroupNode | null>(
-    initialSelectedGroup
-  );
-  const [selectedStockId, setSelectedStockId] = useState<string | null>(
-    initialSelectedStockId
-  );
-  const [selectedStockName, setSelectedStockName] = useState<string | null>(
-    initialSelectedStockName
-  );
-  const [selectedFuturesSymbol, setSelectedFuturesSymbol] = useState<string | null>(
-    initialSelectedFuturesSymbol
-  );
   const [watchlistTree, setWatchlistTree] = useState<WatchlistGroupNode[]>(initialTree);
   const [watchlistItems, setWatchlistItems] = useState<WatchlistItemRead[]>(initialItems);
-  const [activeMarket, setActiveMarket] = useState<MarketRegion>(initialMarket);
-  const [selectedCryptoBase, setSelectedCryptoBase] = useState<CryptoBaseAsset>("BTC");
-  const [selectedCryptoInstrumentKey, setSelectedCryptoInstrumentKey] = useState<string | null>(null);
-  const [twChartFocusMode, setTwChartFocusMode] = useState(false);
-  const [usChartFocusMode, setUsChartFocusMode] = useState(false);
-  const [jpChartFocusMode, setJpChartFocusMode] = useState(false);
-  const [selectedUsSymbol, setSelectedUsSymbol] = useState<string | null>(
-    initialSelectedUsSymbol
-  );
-  const [selectedUsSecurityName, setSelectedUsSecurityName] = useState<string | null>(
-    initialSelectedUsSecurityName
-  );
-  const [selectedUsCompanyProfile, setSelectedUsCompanyProfile] =
-    useState<USCompanyProfileRead | null>(null);
-  const [selectedJpSymbol, setSelectedJpSymbol] = useState<string | null>(
-    initialSelectedJpSymbol
-  );
-  const [selectedJpStock, setSelectedJpStock] = useState<JPStockMasterRead | null>(
-    null
-  );
-  const [selectedJpGroupId, setSelectedJpGroupId] = useState<number | null>(
-    initialSelectedJpGroup?.id ?? null
-  );
-  const [selectedJpGroup, setSelectedJpGroup] = useState<JPWatchlistGroupNode | null>(
-    initialSelectedJpGroup
-  );
-  const [selectedJpGroupName, setSelectedJpGroupName] = useState<string | null>(
-    initialSelectedJpGroup?.group_name ?? null
-  );
-  const [jpWatchlistTree, setJpWatchlistTree] =
-    useState<JPWatchlistGroupNode[]>(initialJpWatchlistTree);
-  const [jpWatchlistItems, setJpWatchlistItems] =
-    useState<JPWatchlistItemRead[]>(initialJpWatchlistItems);
-  const [jpDataRefreshNonce, setJpDataRefreshNonce] = useState(0);
-  const [jpRankBy, setJpRankBy] = useState<JPRankBy>("none");
-  const [jpRanking, setJpRanking] = useState<JPWatchlistRankingRead | null>(null);
-  const [jpLoadState, setJpLoadState] = useState<LoadState>("idle");
-  const [, setJpUniverseRefreshState] =
-    useState<LoadState>("idle");
-  const [jpErrorMessage, setJpErrorMessage] = useState<string | null>(null);
-  const [jpStatusMessage, setJpStatusMessage] = useState<JPStatusMessage>(null);
-  const [jpLastUpdatedAt, setJpLastUpdatedAt] = useState<string | null>(null);
-  const [selectedUsGroupId, setSelectedUsGroupId] = useState<number | null>(
-    initialSelectedUsGroup?.id ?? null
-  );
-  const [selectedUsGroup, setSelectedUsGroup] = useState<USWatchlistGroupNode | null>(
-    initialSelectedUsGroup
-  );
-  const [selectedUsGroupName, setSelectedUsGroupName] = useState<string | null>(
-    initialSelectedUsGroup?.group_name ?? null
-  );
   const [usWatchlistTree, setUsWatchlistTree] =
     useState<USWatchlistGroupNode[]>(initialUsWatchlistTree);
   const [usWatchlistItems, setUsWatchlistItems] =
     useState<USWatchlistItemRead[]>(initialUsWatchlistItems);
-  const [usWatchlistVersion, setUsWatchlistVersion] = useState(0);
-  const [rankBy, setRankBy] = useState<RankBy>("none");
-  const [ranking, setRanking] = useState<RankingResponse | null>(initialRankingData);
-  const [radarMode, setRadarMode] = useState<WatchlistRadarMode>(initialRadarMode);
-  const [radar, setRadar] = useState<WatchlistGroupRadarRead | null>(initialRadarData);
-  const [usRadarMode, setUsRadarMode] = useState<WatchlistRadarMode>(initialRadarMode);
-  const [usRadar, setUsRadar] = useState<WatchlistGroupRadarRead | null>(null);
-  const [jpRadarMode, setJpRadarMode] = useState<WatchlistRadarMode>(initialRadarMode);
-  const [jpRadar, setJpRadar] = useState<WatchlistGroupRadarRead | null>(null);
-  const [usRankBy, setUsRankBy] = useState<USRankBy>("none");
-  const [usRanking, setUsRanking] = useState<USWatchlistRankingRead | null>(null);
-  const [marketIndexSummary, setMarketIndexSummary] =
-    useState<MarketIndexSummary | null>(initialMarketIndexSummary);
-  const [marketIndexLoadState, setMarketIndexLoadState] =
-    useState<LoadState>(initialMarketIndexSummary ? "success" : "idle");
-  const [loadState, setLoadState] = useState<LoadState>(
-    initialRankingData ? "success" : "idle"
-  );
-  const [rankingTrendPending, setRankingTrendPending] = useState(false);
-  const [radarLoadState, setRadarLoadState] = useState<LoadState>(
-    initialRadarData ? "success" : "idle"
-  );
-  const [usRadarLoadState, setUsRadarLoadState] = useState<LoadState>("idle");
-  const [jpRadarLoadState, setJpRadarLoadState] = useState<LoadState>("idle");
-  const [usLoadState, setUsLoadState] = useState<LoadState>("idle");
-  const [, setUsUniverseRefreshState] =
-    useState<LoadState>("idle");
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [radarErrorMessage, setRadarErrorMessage] = useState<string | null>(null);
-  const [usRadarErrorMessage, setUsRadarErrorMessage] = useState<string | null>(null);
-  const [jpRadarErrorMessage, setJpRadarErrorMessage] = useState<string | null>(null);
-  const [usErrorMessage, setUsErrorMessage] = useState<string | null>(null);
-  const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
-  const [usLastUpdatedAt, setUsLastUpdatedAt] = useState<string | null>(null);
-  const dashboardRequestSeq = useRef(0);
-  const radarRequestSeq = useRef(0);
-  const usRadarRequestSeq = useRef(0);
-  const jpRadarRequestSeq = useRef(0);
-  const radarModeRef = useRef<WatchlistRadarMode>(radarMode);
-  const usRadarModeRef = useRef<WatchlistRadarMode>(usRadarMode);
-  const jpRadarModeRef = useRef<WatchlistRadarMode>(jpRadarMode);
-  const usDashboardRequestSeq = useRef(0);
-  const jpDashboardRequestSeq = useRef(0);
-  const marketIndexRequestSeq = useRef(0);
-  const rankingTrendTimer = useRef<number | undefined>(undefined);
-  const finalDashboardRefreshDate = useRef<string | null>(null);
-  const finalUsDashboardRefreshDate = useRef<string | null>(null);
-  const initialUsWatchlistPreloadQueued = useRef(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    let timer: number | undefined;
-
-    async function loadCalendarStatus() {
-      try {
-        await refreshMarketCalendarStatus("all");
-      } catch (error) {
-        console.warn("Market calendar status refresh failed.", error);
-      } finally {
-        if (!cancelled) {
-          timer = window.setTimeout(loadCalendarStatus, 60_000);
-        }
-      }
-    }
-
-    void loadCalendarStatus();
-
-    return () => {
-      cancelled = true;
-      if (timer !== undefined) {
-        window.clearTimeout(timer);
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      if (rankingTrendTimer.current !== undefined) {
-        window.clearTimeout(rankingTrendTimer.current);
-      }
-    };
-  }, []);
-
+  const [jpWatchlistTree, setJpWatchlistTree] =
+    useState<JPWatchlistGroupNode[]>(initialJpWatchlistTree);
+  const [jpWatchlistItems, setJpWatchlistItems] =
+    useState<JPWatchlistItemRead[]>(initialJpWatchlistItems);
+  const [krWatchlistTree, setKrWatchlistTree] =
+    useState<KRWatchlistGroupNode[]>(initialKrWatchlistTree);
+  const [krWatchlistItems, setKrWatchlistItems] =
+    useState<KRWatchlistItemRead[]>(initialKrWatchlistItems);
+  const [twChartFocusMode, setTwChartFocusMode] = useState(false);
+  const [usChartFocusMode, setUsChartFocusMode] = useState(false);
+  const [jpChartFocusMode, setJpChartFocusMode] = useState(false);
+  const [krChartFocusMode, setKrChartFocusMode] = useState(false);
+  const [selectedUsCompanyProfile, setSelectedUsCompanyProfile] =
+    useState<USCompanyProfileRead | null>(null);
+  const marketSelection = useMarketSelection({
+    initialMarket,
+    initialSelectedGroupId,
+    initialSelectedStockId,
+    initialSelectedStockName,
+    initialSelectedFuturesSymbol,
+    initialSelectedUsSymbol,
+    initialSelectedUsSecurityName,
+    initialSelectedJpSymbol,
+    initialSelectedKrSymbol,
+    quoteDepthPreviewMode,
+    taiwanTree: watchlistTree,
+    taiwanItems: watchlistItems,
+    usTree: usWatchlistTree,
+    usItems: usWatchlistItems,
+    jpTree: jpWatchlistTree,
+    jpItems: jpWatchlistItems,
+    krTree: krWatchlistTree,
+    krItems: krWatchlistItems,
+    onHistoryNavigation: (route) => {
+      if (route.market !== "tw") setTwChartFocusMode(false);
+      if (route.market !== "us") setUsChartFocusMode(false);
+      if (route.market !== "jp") setJpChartFocusMode(false);
+    },
+  });
+  const {
+    dashboardRoute,
+    activeMarket,
+    selectedGroupId,
+    selectedGroup,
+    selectedStockId,
+    selectedStockName,
+    selectedFuturesSymbol,
+    selectedUsGroupId,
+    selectedUsGroup,
+    selectedUsGroupName,
+    selectedUsSymbol,
+    selectedUsSecurityName,
+    selectedJpGroupId,
+    selectedJpGroup,
+    selectedJpGroupName,
+    selectedJpSymbol,
+    selectedJpStock,
+    selectedKrGroupId,
+    selectedKrGroup,
+    selectedKrGroupName,
+    selectedKrSymbol,
+    selectedKrStock,
+    selectedCryptoBase,
+    selectedCryptoInstrumentKey,
+    selectedResourceInstrumentKey,
+    dashboardHref,
+    pushDashboardUrl,
+  } = marketSelection;
+  useDashboardRuntime({
+    activeMarket,
+    selectedResourceInstrumentKey,
+  });
+  const {
+    state: {
+      summary: marketIndexSummary,
+      loadState: marketIndexLoadState,
+    },
+    actions: taiwanMarketTapeActions,
+  } = useTaiwanMarketTapeState({
+    active: activeMarket === "tw",
+    initialSummary: initialMarketIndexSummary,
+    onError: handleTaiwanMarketTapeError,
+  });
+  const loadMarketIndices = taiwanMarketTapeActions.load;
   const activeGroupId = selectedGroupId ?? selectedGroup?.id ?? null;
-  const activeGroupIdRef = useRef<number | null>(activeGroupId);
-  const selectedUsGroupIdRef = useRef<number | null>(selectedUsGroupId);
-  const selectedJpGroupIdRef = useRef<number | null>(selectedJpGroupId);
-  const watchlistFreshnessRequestKeys = useRef<Set<string>>(new Set());
-  const usWatchlistFreshnessRequestKeys = useRef<Set<string>>(new Set());
-  const jpWatchlistFreshnessRequestKeys = useRef<Set<string>>(new Set());
-  const marketChipRefreshRequestKeys = useRef<Set<string>>(new Set());
+  const twWatchlistContextLabel =
+    selectedGroup?.group_name ??
+    (activeGroupId !== null ? String(activeGroupId) : t("watchlist.noGroupSelected"));
+  const usWatchlistContextLabel =
+    selectedUsGroupName ??
+    (selectedUsGroupId !== null ? String(selectedUsGroupId) : t("watchlist.noGroupSelected"));
+  const jpWatchlistContextLabel =
+    selectedJpGroupName ??
+    (selectedJpGroupId !== null ? String(selectedJpGroupId) : t("watchlist.noGroupSelected"));
+  const krWatchlistContextLabel =
+    selectedKrGroupName ??
+    (selectedKrGroupId !== null ? String(selectedKrGroupId) : t("watchlist.noGroupSelected"));
+  const selectedUsIndexConfig = getUsMarketIndexConfig(selectedUsSymbol);
+  const isSelectedUsIndex = selectedUsIndexConfig !== null;
+  const selectedJpIndexConfig = getJpMarketIndexConfig(selectedJpSymbol);
+  const isSelectedJpIndex = selectedJpIndexConfig !== null;
+  const {
+    state: {
+      mode: radarMode,
+      radar,
+      loadState: radarLoadState,
+      outcomeSummary: radarOutcomeSummary,
+      outcomeLoadState: radarOutcomeLoadState,
+      outcomeHistory: radarOutcomeHistory,
+      outcomeHistoryOpen: radarOutcomeHistoryOpen,
+      outcomeHistoryLoadState: radarOutcomeHistoryLoadState,
+      outcomeDetailLoadState: radarOutcomeDetailLoadState,
+      selectedOutcomeSnapshotId: selectedRadarOutcomeSnapshotId,
+    },
+    actions: taiwanRadarActions,
+  } = useTaiwanRadarState({
+    active: activeMarket === "tw",
+    groupId: activeGroupId,
+    initialMode: initialRadarMode,
+    initialRadar: initialRadarData,
+    routeMode:
+      dashboardRoute.market === "tw"
+        ? normalizeDashboardRadarMode(dashboardRoute.radarMode)
+        : null,
+    onError: handleTaiwanRadarError,
+  });
+  const {
+    state: {
+      mode: usRadarMode,
+      radar: usRadar,
+      loadState: usRadarLoadState,
+    },
+    actions: usRadarActions,
+  } = useRegionalRadarState({
+    active: activeMarket === "us",
+    enabled: !isSelectedUsIndex,
+    market: "us",
+    groupId: selectedUsGroupId,
+    initialMode: initialRadarMode,
+    routeMode:
+      dashboardRoute.market === "us"
+        ? normalizeDashboardRadarMode(dashboardRoute.radarMode)
+        : null,
+    onError: handleUsRadarError,
+  });
+  const {
+    state: {
+      mode: jpRadarMode,
+      radar: jpRadar,
+      loadState: jpRadarLoadState,
+    },
+    actions: jpRadarActions,
+  } = useRegionalRadarState({
+    active: activeMarket === "jp",
+    enabled: !isSelectedJpIndex,
+    market: "jp",
+    groupId: selectedJpGroupId,
+    initialMode: initialRadarMode,
+    routeMode:
+      dashboardRoute.market === "jp"
+        ? normalizeDashboardRadarMode(dashboardRoute.radarMode)
+        : null,
+    onError: handleJpRadarError,
+  });
+  const {
+    state: {
+      mode: krRadarMode,
+      radar: krRadar,
+      loadState: krRadarLoadState,
+    },
+    actions: krRadarActions,
+  } = useRegionalRadarState({
+    active: activeMarket === "kr",
+    enabled: true,
+    market: "kr",
+    groupId: selectedKrGroupId,
+    initialMode: initialRadarMode,
+    routeMode:
+      dashboardRoute.market === "kr"
+        ? normalizeDashboardRadarMode(dashboardRoute.radarMode)
+        : null,
+    onError: handleKrRadarError,
+  });
+  const {
+    state: {
+      rankBy,
+      ranking,
+      loadState,
+      trendPending: rankingTrendPending,
+      lastUpdatedAt,
+    },
+    actions: taiwanRankingActions,
+  } = useTaiwanRankingState({
+    active: activeMarket === "tw",
+    groupId: activeGroupId,
+    initialRanking: initialRankingData,
+    refreshExecutionSettings,
+    prepareCompanionLoad: taiwanRadarActions.prepareCompanionLoad,
+    onError: handleTaiwanRankingError,
+  });
+  const loadDashboard = taiwanRankingActions.load;
+  const {
+    state: {
+      rankBy: usRankBy,
+      ranking: usRanking,
+      loadState: usLoadState,
+      lastUpdatedAt: usLastUpdatedAt,
+    },
+    actions: usRankingActions,
+  } = useUsRankingState({
+    active: activeMarket === "us",
+    groupId: selectedUsGroupId,
+    refreshExecutionSettings,
+    startCompanionLoad: usRadarActions.startCompanionLoad,
+    onError: handleUsRankingError,
+  });
+  const loadUsDashboard = usRankingActions.load;
+  const {
+    state: {
+      rankBy: jpRankBy,
+      ranking: jpRanking,
+      loadState: jpLoadState,
+      lastUpdatedAt: jpLastUpdatedAt,
+      dataRefreshNonce: jpDataRefreshNonce,
+    },
+    actions: jpRankingActions,
+  } = useJpRankingState({
+    active: activeMarket === "jp",
+    groupId: selectedJpGroupId,
+    refreshExecutionSettings,
+    startCompanionLoad: jpRadarActions.startCompanionLoad,
+    onError: handleJpRankingError,
+  });
+  const loadJpDashboard = jpRankingActions.load;
+  const {
+    state: {
+      rankBy: krRankBy,
+      ranking: krRanking,
+      loadState: krLoadState,
+      lastUpdatedAt: krLastUpdatedAt,
+      dataRefreshNonce: krDataRefreshNonce,
+    },
+    actions: krRankingActions,
+  } = useKrRankingState({
+    active: activeMarket === "kr",
+    groupId: selectedKrGroupId,
+    refreshExecutionSettings,
+    startCompanionLoad: krRadarActions.startCompanionLoad,
+    onError: handleKrRankingError,
+  });
+  const loadKrDashboard = krRankingActions.load;
+  const refreshTaiwanOverviewAfterDetailUpdate = useCallback(() => {
+    if (activeGroupId === null) return;
+    void loadDashboard(activeGroupId, rankBy, {
+      silent: true,
+      preferCompanionSnapshot: false,
+    });
+  }, [activeGroupId, loadDashboard, rankBy]);
+  const refreshUsOverviewAfterDetailUpdate = useCallback(() => {
+    if (selectedUsGroupId === null) return;
+    void loadUsDashboard(selectedUsGroupId, usRankBy, { silent: true });
+  }, [loadUsDashboard, selectedUsGroupId, usRankBy]);
+  const refreshJpOverviewAfterDetailUpdate = useCallback(() => {
+    if (selectedJpGroupId === null) return;
+    void loadJpDashboard(selectedJpGroupId, jpRankBy, { silent: true });
+  }, [jpRankBy, loadJpDashboard, selectedJpGroupId]);
+  const refreshKrOverviewAfterDetailUpdate = useCallback(() => {
+    if (selectedKrGroupId === null) return;
+    void loadKrDashboard(selectedKrGroupId, krRankBy, { silent: true });
+  }, [krRankBy, loadKrDashboard, selectedKrGroupId]);
   const baseRows = useMemo(
     () => buildWatchlistRows(selectedGroup, watchlistItems),
     [selectedGroup, watchlistItems]
   );
   const rows = useMemo(() => {
-    if (rankBy === "none" || ranking?.is_current === false) {
+    if (rankBy === "none") {
       return mergeWatchlistRows(baseRows, ranking);
     }
 
-    return ranking?.results ?? baseRows;
+    return Array.isArray(ranking?.results) ? ranking.results : [];
   }, [baseRows, rankBy, ranking]);
   const rankingFreshnessPending = ranking?.is_current === false;
   const displayRows = rows;
@@ -2280,1323 +674,423 @@ export default function MarketDashboardClient({
       downCount,
     };
   }, [jpBaseRows.length, jpVisibleRows]);
+  const krBaseRows = useMemo(
+    () => buildKrWatchlistRows(selectedKrGroup, krWatchlistItems),
+    [selectedKrGroup, krWatchlistItems]
+  );
+  const krRows = useMemo(() => {
+    if (krRankBy === "none" || krRanking?.is_current === false) {
+      return mergeKrWatchlistRows(krBaseRows, krRanking);
+    }
+
+    return krRanking?.results ?? krBaseRows;
+  }, [krBaseRows, krRankBy, krRanking]);
+  const krRankingFreshnessPending = krRanking?.is_current === false;
+  const krVisibleRows = krRows;
+  const krRankingLoadState: LoadState = krLoadState;
+  const krRankingPendingLabel =
+    krRankingFreshnessPending
+      ? formatWatchlistFreshnessLabel(
+          t,
+          t("dashboard.ranking.krData"),
+          krRanking?.target_trade_date,
+          krRanking?.stale_symbol_count,
+          krRanking?.requested_symbol_count
+        )
+      : t("common.loading");
+  const krSummary = useMemo(() => {
+    const upCount = krVisibleRows.filter((row) => {
+      return row.change_pct !== null && row.change_pct !== undefined && row.change_pct > 0;
+    }).length;
+    const downCount = krVisibleRows.filter((row) => {
+      return row.change_pct !== null && row.change_pct !== undefined && row.change_pct < 0;
+    }).length;
+
+    return {
+      stockCount: krBaseRows.length,
+      upCount,
+      downCount,
+    };
+  }, [krBaseRows.length, krVisibleRows]);
   const selectedUsContextProfile =
     selectedUsCompanyProfile?.symbol.toUpperCase() === selectedUsSymbol?.toUpperCase()
       ? selectedUsCompanyProfile
       : null;
 
-  function watchlistRadarParams(
-    mode: WatchlistRadarMode,
-    useIntraday: boolean
+  function handleTaiwanRadarError(
+    kind: TaiwanRadarErrorKind,
+    error: unknown,
+    groupId: number
   ) {
-    return {
-      ...WATCHLIST_ANALYSIS_PARAMS,
-      mode,
-      max_results: WATCHLIST_RADAR_MAX_RESULTS,
-      calculation_limit: 100,
-      use_intraday: useIntraday,
-      intraday_limit: WATCHLIST_INTRADAY_LIMIT,
-    };
+    const title =
+      kind === "radar"
+        ? t("radar.loadError")
+        : kind === "evaluate"
+          ? t("radar.outcome.evaluateError")
+          : t("radar.outcome.loadError");
+    const source =
+      kind === "radar"
+        ? t("radar.title")
+        : kind === "history"
+          ? t("radar.outcome.history")
+          : t("radar.outcome.title");
+    const contextSuffix =
+      kind === "radar"
+        ? "radar"
+        : kind === "history"
+          ? "radar-outcome-history"
+          : "radar-outcome";
+
+    emitDashboardDataStatus({
+      market: "tw",
+      title,
+      message: apiErrorMessage(error, title),
+      source,
+      contextKey: `tw:watchlist:${groupId}:${contextSuffix}`,
+      contextLabel: twWatchlistContextLabel,
+    });
   }
 
-  function watchlistTechnicalRadarParams(
-    mode: WatchlistRadarMode,
-    useIntraday = false
-  ) {
-    return {
-      mode,
-      max_results: WATCHLIST_RADAR_MAX_RESULTS,
-      calculation_limit: 100,
-      use_intraday: useIntraday,
-      intraday_limit: WATCHLIST_INTRADAY_LIMIT,
-    };
-  }
-
-  function clearRankingTrendTimer() {
-    if (rankingTrendTimer.current === undefined) return;
-
-    window.clearTimeout(rankingTrendTimer.current);
-    rankingTrendTimer.current = undefined;
-  }
-
-  function scheduleRankingTrendData(
-    requestSeq: number,
-    rankingData: RankingResponse
-  ) {
-    clearRankingTrendTimer();
-
-    rankingTrendTimer.current = window.setTimeout(() => {
-      rankingTrendTimer.current = undefined;
-
-      if (dashboardRequestSeq.current !== requestSeq) return;
-
-      setRanking(rankingData);
-      setRankingTrendPending(false);
-    }, 0);
-  }
-
-  async function loadWatchlistRadar(
+  function handleRegionalRadarError(
+    market: RegionalRadarMarket,
+    error: unknown,
     groupId: number,
-    options?: { mode?: WatchlistRadarMode; silent?: boolean }
+    contextLabel: string
   ) {
-    const requestSeq = radarRequestSeq.current + 1;
-    radarRequestSeq.current = requestSeq;
-    const currentMode = options?.mode ?? radarModeRef.current;
-
-    if (!options?.silent) {
-      setRadarLoadState("loading");
-      setRadarErrorMessage(null);
-      setRadar(null);
-    }
-
-    try {
-      const marketState = getTaiwanMarketRefreshState();
-      const radarData = await fetchJson<WatchlistGroupRadarRead>(
-        `/api/watchlists/groups/${groupId}/radar`,
-        watchlistRadarParams(
-          currentMode,
-          shouldUseTaiwanWatchlistIntraday(marketState)
-        )
-      );
-
-      if (radarRequestSeq.current !== requestSeq) return;
-
-      setRadar(radarData);
-      setRadarLoadState("success");
-      setRadarErrorMessage(null);
-    } catch (error) {
-      if (radarRequestSeq.current !== requestSeq) return;
-
-      if (!options?.silent) {
-        setRadar(null);
-      }
-      setRadarLoadState("error");
-      setRadarErrorMessage(apiErrorMessage(error, t("radar.loadError")));
-    }
+    const title = t("radar.loadError");
+    emitDashboardDataStatus({
+      market,
+      title,
+      message: apiErrorMessage(error, title),
+      source: t("radar.title"),
+      contextKey: `${market}:watchlist:${groupId}:radar`,
+      contextLabel,
+    });
   }
 
-  async function loadUsWatchlistRadar(
-    groupId: number,
-    options?: { mode?: WatchlistRadarMode; silent?: boolean }
+  function handleUsRadarError(error: unknown, groupId: number) {
+    handleRegionalRadarError("us", error, groupId, usWatchlistContextLabel);
+  }
+
+  function handleJpRadarError(error: unknown, groupId: number) {
+    handleRegionalRadarError("jp", error, groupId, jpWatchlistContextLabel);
+  }
+
+  function handleKrRadarError(error: unknown, groupId: number) {
+    handleRegionalRadarError("kr", error, groupId, krWatchlistContextLabel);
+  }
+
+  function handleTaiwanRankingError(
+    kind: TaiwanRankingErrorKind,
+    error: unknown,
+    groupId: number
   ) {
-    const requestSeq = usRadarRequestSeq.current + 1;
-    usRadarRequestSeq.current = requestSeq;
-    const currentMode = options?.mode ?? usRadarModeRef.current;
-
-    if (!options?.silent) {
-      setUsRadarLoadState("loading");
-      setUsRadarErrorMessage(null);
-      setUsRadar(null);
-    }
-
-    try {
-      const marketState = getUsMarketRefreshState();
-      const radarData = await fetchJson<WatchlistGroupRadarRead>(
-        `/api/us-market/watchlists/groups/${groupId}/radar`,
-        watchlistTechnicalRadarParams(currentMode, marketState.isPollingWindow)
-      );
-
-      if (usRadarRequestSeq.current !== requestSeq) return;
-
-      setUsRadar(radarData);
-      setUsRadarLoadState("success");
-      setUsRadarErrorMessage(null);
-    } catch (error) {
-      if (usRadarRequestSeq.current !== requestSeq) return;
-
-      if (!options?.silent) {
-        setUsRadar(null);
-      }
-      setUsRadarLoadState("error");
-      setUsRadarErrorMessage(apiErrorMessage(error, t("radar.loadError")));
-    }
-  }
-
-  async function loadJpWatchlistRadar(
-    groupId: number,
-    options?: { mode?: WatchlistRadarMode; silent?: boolean }
-  ) {
-    const requestSeq = jpRadarRequestSeq.current + 1;
-    jpRadarRequestSeq.current = requestSeq;
-    const currentMode = options?.mode ?? jpRadarModeRef.current;
-
-    if (!options?.silent) {
-      setJpRadarLoadState("loading");
-      setJpRadarErrorMessage(null);
-      setJpRadar(null);
-    }
-
-    try {
-      const radarData = await fetchJson<WatchlistGroupRadarRead>(
-        `/api/jp-market/watchlists/groups/${groupId}/radar`,
-        watchlistTechnicalRadarParams(currentMode)
-      );
-
-      if (jpRadarRequestSeq.current !== requestSeq) return;
-
-      setJpRadar(radarData);
-      setJpRadarLoadState("success");
-      setJpRadarErrorMessage(null);
-    } catch (error) {
-      if (jpRadarRequestSeq.current !== requestSeq) return;
-
-      if (!options?.silent) {
-        setJpRadar(null);
-      }
-      setJpRadarLoadState("error");
-      setJpRadarErrorMessage(apiErrorMessage(error, t("radar.loadError")));
-    }
-  }
-
-  async function loadDashboard(
-    groupId: number,
-    currentRankBy = rankBy,
-    options?: { silent?: boolean }
-  ) {
-    const requestSeq = dashboardRequestSeq.current + 1;
-    dashboardRequestSeq.current = requestSeq;
-    const radarSeq = radarRequestSeq.current + 1;
-    radarRequestSeq.current = radarSeq;
-
-    if (!options?.silent) {
-      setLoadState("loading");
-      setRadarLoadState("loading");
-      setErrorMessage(null);
-      setRadarErrorMessage(null);
-    }
-
-    try {
-      const marketState = getTaiwanMarketRefreshState();
-      const useIntraday = shouldUseTaiwanWatchlistIntraday(marketState);
-      const deferTrendData = !options?.silent && currentRankBy === "none" && useIntraday;
-      let radarPromise: Promise<void> | null = null;
-
-      clearRankingTrendTimer();
-      setRankingTrendPending(deferTrendData);
-
-      function queueRadarLoad() {
-        if (radarPromise) return radarPromise;
-
-        radarPromise = fetchJson<WatchlistGroupRadarRead>(
-          `/api/watchlists/groups/${groupId}/radar`,
-          watchlistRadarParams(radarModeRef.current, useIntraday)
-        )
-          .then((data) => {
-            if (radarRequestSeq.current !== radarSeq) return;
-
-            setRadar(data);
-            setRadarLoadState("success");
-            setRadarErrorMessage(null);
-          })
-          .catch((error: unknown) => {
-            if (radarRequestSeq.current !== radarSeq) return;
-
-            if (!options?.silent) {
-              setRadar(null);
-            }
-            setRadarLoadState("error");
-            setRadarErrorMessage(apiErrorMessage(error, t("radar.loadError")));
-          });
-
-        return radarPromise;
-      }
-
-      function markRadarLoadQueued() {
-        if (radarPromise) return;
-
-        void queueRadarLoad();
-      }
-
-      if (currentRankBy === "none") {
-        let offset = 0;
-        let loadedRows: RankingItem[] = [];
-        let currentStockCount = 0;
-        let staleStockCount = 0;
-        let noDataCount = 0;
-        let errorCount = 0;
-
-        while (true) {
-          const batch = await fetchJson<RankingBatchResponse>(
-            `/api/watchlists/groups/${groupId}/rankings/latest-batch`,
-            {
-              ...WATCHLIST_ANALYSIS_PARAMS,
-              rank_by: "watchlist",
-              sort_order: "asc",
-              limit: 100,
-              use_intraday: useIntraday,
-              intraday_limit: WATCHLIST_INTRADAY_LIMIT,
-              offset,
-              batch_size: WATCHLIST_RANKING_BATCH_SIZE,
-            }
-          );
-
-          if (dashboardRequestSeq.current !== requestSeq) return;
-
-          loadedRows = mergeRankingBatchRows(loadedRows, batch.results);
-          currentStockCount += batch.current_stock_count;
-          staleStockCount += batch.stale_stock_count;
-          noDataCount += batch.no_data_count;
-          errorCount += batch.error_count;
-
-          const nextRanking = buildProgressiveRankingResponse({
-            batch,
-            rows: loadedRows,
-            currentStockCount,
-            staleStockCount,
-            noDataCount,
-            errorCount,
-            complete: !batch.has_more,
-            deferTrendData,
-          });
-
-          setRanking(nextRanking);
-          markRadarLoadQueued();
-
-          if (!batch.has_more || batch.requested_stock_count === 0) {
-            setLastUpdatedAt(formatDashboardTime(new Date()));
-            setLoadState("success");
-            if (deferTrendData) {
-              scheduleRankingTrendData(
-                requestSeq,
-                buildProgressiveRankingResponse({
-                  batch,
-                  rows: loadedRows,
-                  currentStockCount,
-                  staleStockCount,
-                  noDataCount,
-                  errorCount,
-                  complete: true,
-                })
-              );
-            }
-            void radarPromise;
-            return;
-          }
-
-          offset += batch.requested_stock_count;
-        }
-      }
-
-      const rankingPromise = fetchJson<RankingResponse>(
-        `/api/watchlists/groups/${groupId}/rankings/latest`,
-        {
-          ...WATCHLIST_ANALYSIS_PARAMS,
-          rank_by: currentRankBy,
-          sort_order: "desc",
-          limit: 100,
-          use_intraday: useIntraday,
-          intraday_limit: WATCHLIST_INTRADAY_LIMIT,
-        }
-      );
-      const rankingData = await rankingPromise;
-
-      if (dashboardRequestSeq.current !== requestSeq) return;
-
-      setRanking(rankingData);
-      setRankingTrendPending(false);
-      setLastUpdatedAt(formatDashboardTime(new Date()));
-      setLoadState("success");
-      void queueRadarLoad();
-    } catch (error) {
-      if (dashboardRequestSeq.current !== requestSeq) return;
-
-      clearRankingTrendTimer();
-      setRankingTrendPending(false);
-      setLoadState("error");
-      setErrorMessage(apiErrorMessage(error, t("dashboard.ranking.readError")));
-    }
-  }
-
-  async function loadUsDashboard(
-    groupId: number,
-    currentRankBy = usRankBy,
-    options?: { silent?: boolean }
-  ): Promise<USWatchlistRankingRead | null> {
-    const requestSeq = usDashboardRequestSeq.current + 1;
-    usDashboardRequestSeq.current = requestSeq;
-
-    if (!options?.silent) {
-      setUsLoadState("loading");
-      setUsErrorMessage(null);
-    }
-
-    void loadUsWatchlistRadar(groupId, { silent: options?.silent });
-
-    try {
-      const marketState = getUsMarketRefreshState();
-      const rankingData = await fetchJson<USWatchlistRankingRead>(
-        "/api/us-market/watchlists/ranking",
-        {
-          group_id: groupId,
-          include_children: true,
-          enabled_only: true,
-          rank_by: currentRankBy,
-          sort_order: currentRankBy === "none" ? "asc" : "desc",
-          use_intraday: marketState.isPollingWindow,
-          intraday_limit: WATCHLIST_INTRADAY_LIMIT,
-        }
-      );
-
-      if (usDashboardRequestSeq.current !== requestSeq) return null;
-
-      setUsRanking(rankingData);
-      setUsLastUpdatedAt(formatDashboardTime(new Date()));
-      setUsLoadState("success");
-      return rankingData;
-    } catch (error) {
-      if (usDashboardRequestSeq.current !== requestSeq) return null;
-
-      setUsLoadState("error");
-      setUsErrorMessage(error instanceof Error ? error.message : t("dashboard.ranking.usReadError"));
-      return null;
-    }
-  }
-
-  async function loadJpDashboard(
-    groupId: number,
-    currentRankBy = jpRankBy,
-    options?: { silent?: boolean }
-  ): Promise<JPWatchlistRankingRead | null> {
-    const requestSeq = jpDashboardRequestSeq.current + 1;
-    jpDashboardRequestSeq.current = requestSeq;
-
-    if (!options?.silent) {
-      setJpLoadState("loading");
-      setJpErrorMessage(null);
-    }
-
-    void loadJpWatchlistRadar(groupId, { silent: options?.silent });
-
-    try {
-      const rankingData = await fetchJson<JPWatchlistRankingRead>(
-        "/api/jp-market/watchlists/ranking",
-        {
-          group_id: groupId,
-          include_children: true,
-          enabled_only: true,
-          rank_by: currentRankBy,
-          sort_order: currentRankBy === "none" ? "asc" : "desc",
-        }
-      );
-
-      if (jpDashboardRequestSeq.current !== requestSeq) return null;
-
-      setJpRanking(rankingData);
-      setJpLastUpdatedAt(formatDashboardTime(new Date()));
-      setJpLoadState("success");
-      return rankingData;
-    } catch (error) {
-      if (jpDashboardRequestSeq.current !== requestSeq) return null;
-
-      setJpLoadState("error");
-      setJpErrorMessage(
-        error instanceof Error ? error.message : t("dashboard.ranking.jpReadError")
-      );
-      return null;
-    }
-  }
-
-  async function loadMarketIndices(options?: { silent?: boolean }) {
-    const requestSeq = marketIndexRequestSeq.current + 1;
-    marketIndexRequestSeq.current = requestSeq;
-
-    if (!options?.silent) {
-      setMarketIndexLoadState("loading");
-    }
-
-    try {
-      const summaryData = await fetchJson<MarketIndexSummary>("/api/market/indices/summary");
-
-      if (marketIndexRequestSeq.current !== requestSeq) return;
-
-      setMarketIndexSummary(summaryData);
-      setMarketIndexLoadState("success");
-    } catch {
-      if (marketIndexRequestSeq.current !== requestSeq) return;
-
-      setMarketIndexLoadState("error");
-    }
-  }
-
-  async function refreshMarketChipsForFreshness(dateKey: string) {
-    if (isStoredMarketChipRefreshDone(dateKey)) return;
-    if (marketChipRefreshRequestKeys.current.has(dateKey)) return;
-
-    marketChipRefreshRequestKeys.current.add(dateKey);
-
-    try {
-      const job = await requestBackfillJob(
-        "/api/market/market-chips/refresh",
-        { method: "POST" },
-        {
-          include_today: true,
-          force: false,
-        },
-        {
-          intervalMs: 1500,
-          timeoutMs: 600_000,
-        }
-      );
-
-      if (getJobResultStatus(job) === "success") {
-        markStoredMarketChipRefreshDone(dateKey);
-      }
-
-      await loadMarketIndices({ silent: true });
-    } catch (error) {
-      console.warn("Market chip daily refresh failed.", error);
-    }
-  }
-
-  async function refreshWatchlistDailyPricesOnOpen(groupId: number, currentRankBy: RankBy) {
-    const marketState = getTaiwanMarketRefreshState();
-    const includeToday = marketState.isDailyPriceReleased;
-    const requestKey = `${groupId}:${marketState.dateKey}:${includeToday ? "today" : "latest"}`;
-
-    if (watchlistFreshnessRequestKeys.current.has(requestKey)) return;
-
-    watchlistFreshnessRequestKeys.current.add(requestKey);
-
-    try {
-      await requestBackfillJob(
-        `/api/watchlists/groups/${groupId}/refresh-latest`,
-        { method: "POST" },
-        {
-          lookback_days: 14,
-          include_today: includeToday,
-          include_children: true,
-          enabled_only: true,
-          sleep_seconds: getRefreshExecutionSeconds(
-            refreshExecutionSettings,
-            "tw",
-            "observed_stock_refresh_interval_seconds",
-            0.3
-          ),
-          skip_existing_months: true,
-        },
-        {
-          intervalMs: 1500,
-          timeoutMs: 600000,
-        }
-      );
-
-      if (activeGroupIdRef.current === groupId) {
-        await loadDashboard(groupId, currentRankBy, { silent: true });
-      }
-    } catch (error) {
-      watchlistFreshnessRequestKeys.current.delete(requestKey);
+    const title =
+      kind === "ranking"
+        ? t("dashboard.ranking.readError")
+        : "自選股日線補齊失敗";
+    const source =
+      kind === "ranking"
+        ? t("dashboard.ranking.listTitle")
+        : "自選股資料";
+
+    if (kind === "daily-refresh") {
       console.warn("Watchlist daily price refresh failed.", error);
     }
+
+    emitDashboardDataStatus({
+      market: "tw",
+      title,
+      message: apiErrorMessage(error, title),
+      source,
+      contextKey: `tw:watchlist:${groupId}:${kind}`,
+      contextLabel: twWatchlistContextLabel,
+    });
   }
 
-  async function refreshUsWatchlistDailyPricesForFreshness(
-    groupId: number,
-    currentRankBy: USRankBy,
-    targetTradeDate: string | null
+  function handleUsRankingError(
+    kind: UsRankingErrorKind,
+    error: unknown,
+    groupId: number
   ) {
-    const requestKey = `${groupId}:${targetTradeDate ?? "unknown"}:daily`;
-
-    if (usWatchlistFreshnessRequestKeys.current.has(requestKey)) return;
-
-    usWatchlistFreshnessRequestKeys.current.add(requestKey);
-    setUsUniverseRefreshState("loading");
-
-    try {
-      const job = await requestBackfillJob(
-        `/api/us-market/watchlists/groups/${groupId}/refresh-daily`,
-        { method: "POST" },
-        {
-          include_children: true,
-          enabled_only: true,
-          outputsize: "compact",
-          adjusted: false,
-          sleep_seconds: getRefreshExecutionSeconds(
-            refreshExecutionSettings,
-            "us",
-            "observed_stock_refresh_interval_seconds",
-            12
-          ),
-        },
-        {
-          intervalMs: 1500,
-          timeoutMs: 1_800_000,
-        }
-      );
-      const result =
-        job.result && typeof job.result === "object" && !Array.isArray(job.result)
-          ? (job.result as Record<string, unknown>)
-          : null;
-      const errors = Array.isArray(result?.errors) ? result.errors : [];
-
-      setUsUniverseRefreshState(errors.length > 0 ? "error" : "success");
-
-      if (selectedUsGroupIdRef.current === groupId) {
-        await loadUsDashboard(groupId, currentRankBy, { silent: true });
-      }
-    } catch {
-      setUsUniverseRefreshState("error");
-    }
+    const title =
+      kind === "ranking"
+        ? t("dashboard.ranking.usReadError")
+        : "美股自選日線補齊失敗";
+    emitDashboardDataStatus({
+      market: "us",
+      title,
+      message: apiErrorMessage(error, title),
+      source: kind === "ranking" ? t("dashboard.ranking.listTitle") : "美股自選資料",
+      contextKey: `us:watchlist:${groupId}:${kind}`,
+      contextLabel: usWatchlistContextLabel,
+    });
   }
 
-  async function refreshJpWatchlistDailyPricesForFreshness(
-    groupId: number,
-    currentRankBy: JPRankBy,
-    targetTradeDate: string | null
+  function handleJpRankingError(
+    kind: JpRankingErrorKind,
+    error: unknown,
+    groupId: number
   ) {
-    const requestKey = `${groupId}:${targetTradeDate ?? "missing"}:daily`;
-
-    if (jpWatchlistFreshnessRequestKeys.current.has(requestKey)) return;
-
-    jpWatchlistFreshnessRequestKeys.current.add(requestKey);
-    setJpUniverseRefreshState("loading");
-
-    try {
-      const job = await requestBackfillJob(
-        `/api/jp-market/watchlists/groups/${groupId}/refresh-daily`,
-        { method: "POST" },
-        {
-          include_children: true,
-          enabled_only: true,
-          outputsize: "compact",
-          provider: "auto",
-          sleep_seconds: getRefreshExecutionSeconds(
-            refreshExecutionSettings,
-            "jp",
-            "observed_stock_refresh_interval_seconds",
-            1
-          ),
-        },
-        {
-          intervalMs: 1500,
-          timeoutMs: 1_800_000,
-        }
-      );
-      const result =
-        job.result && typeof job.result === "object" && !Array.isArray(job.result)
-          ? (job.result as Record<string, unknown>)
-          : null;
-      const errors = Array.isArray(result?.errors) ? result.errors : [];
-
-      setJpUniverseRefreshState(errors.length > 0 ? "error" : "success");
-
-      if (selectedJpGroupIdRef.current === groupId) {
-        setJpDataRefreshNonce((value) => value + 1);
-        await loadJpDashboard(groupId, currentRankBy, { silent: true });
-      }
-    } catch {
-      setJpUniverseRefreshState("error");
-    }
+    const title =
+      kind === "ranking"
+        ? t("dashboard.ranking.jpReadError")
+        : "日股自選日線補齊失敗";
+    emitDashboardDataStatus({
+      market: "jp",
+      title,
+      message: apiErrorMessage(error, title),
+      source: kind === "ranking" ? t("dashboard.ranking.listTitle") : "日股自選資料",
+      contextKey: `jp:watchlist:${groupId}:${kind}`,
+      contextLabel: jpWatchlistContextLabel,
+    });
   }
 
-  useEffect(() => {
-    activeGroupIdRef.current = activeGroupId;
-  }, [activeGroupId]);
-
-  useEffect(() => {
-    radarModeRef.current = radarMode;
-  }, [radarMode]);
-
-  useEffect(() => {
-    usRadarModeRef.current = usRadarMode;
-  }, [usRadarMode]);
-
-  useEffect(() => {
-    jpRadarModeRef.current = jpRadarMode;
-  }, [jpRadarMode]);
-
-  useEffect(() => {
-    selectedUsGroupIdRef.current = selectedUsGroupId;
-  }, [selectedUsGroupId]);
-
-  useEffect(() => {
-    selectedJpGroupIdRef.current = selectedJpGroupId;
-  }, [selectedJpGroupId]);
-
-  useEffect(() => {
-    if (selectedUsGroupId === null) return;
-    if (activeMarket === "us") return;
-    if (initialUsWatchlistPreloadQueued.current) return;
-
-    initialUsWatchlistPreloadQueued.current = true;
-    const groupId = selectedUsGroupId;
-    const refreshTimer = window.setTimeout(() => {
-      void loadUsDashboard(groupId, usRankBy, { silent: true }).then(
-        (rankingData) => {
-          if (selectedUsGroupIdRef.current !== groupId) return;
-          if (rankingData?.is_current !== false) return;
-
-          void refreshUsWatchlistDailyPricesForFreshness(
-            groupId,
-            usRankBy,
-            rankingData.target_trade_date
-          );
-        }
-      );
-    }, 0);
-
-    return () => {
-      window.clearTimeout(refreshTimer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeMarket, selectedUsGroupId]);
-
-  useEffect(() => {
-    if (activeMarket !== "tw") return;
-
-    let disposed = false;
-    let refreshTimer: number | undefined;
-
-    function scheduleRefresh() {
-      if (disposed) return;
-
-      const marketState = getTaiwanMarketRefreshState();
-      const delay = marketState.isPollingWindow
-        ? TAIWAN_INTRADAY_REFRESH_MS
-        : Math.min(marketState.msUntilNextPollingStart, 300_000);
-
-      refreshTimer = window.setTimeout(() => {
-        void loadMarketIndices({ silent: true }).finally(scheduleRefresh);
-      }, delay);
-    }
-
-    const initialTimer = window.setTimeout(() => {
-      void loadMarketIndices().finally(scheduleRefresh);
-    }, 0);
-
-    return () => {
-      disposed = true;
-      window.clearTimeout(initialTimer);
-      if (refreshTimer !== undefined) {
-        window.clearTimeout(refreshTimer);
-      }
-    };
-  }, [activeMarket]);
-
-  useEffect(() => {
-    if (activeMarket !== "tw") return;
-
-    let disposed = false;
-    let refreshTimer: number | undefined;
-
-    function clearRefreshTimer() {
-      if (refreshTimer !== undefined) {
-        window.clearTimeout(refreshTimer);
-        refreshTimer = undefined;
-      }
-    }
-
-    function scheduleRefresh() {
-      if (disposed) return;
-
-      const state = getTaiwanMarketChipRefreshState();
-      const alreadyQueued =
-        marketChipRefreshRequestKeys.current.has(state.dateKey) ||
-        isStoredMarketChipRefreshDone(state.dateKey);
-      const delay =
-        state.shouldRefreshNow && !alreadyQueued ? 0 : state.msUntilNextRefresh;
-
-      refreshTimer = window.setTimeout(() => {
-        const nextState = getTaiwanMarketChipRefreshState();
-        const nextAlreadyQueued =
-          marketChipRefreshRequestKeys.current.has(nextState.dateKey) ||
-          isStoredMarketChipRefreshDone(nextState.dateKey);
-
-        if (nextState.shouldRefreshNow && !nextAlreadyQueued) {
-          void refreshMarketChipsForFreshness(nextState.dateKey).finally(
-            scheduleRefresh
-          );
-          return;
-        }
-
-        scheduleRefresh();
-      }, delay);
-    }
-
-    scheduleRefresh();
-
-    return () => {
-      disposed = true;
-      clearRefreshTimer();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeMarket]);
-
-  useEffect(() => {
-    if (activeMarket !== "tw") return;
-    if (activeGroupId === null) return;
-
-    const groupId = activeGroupId;
-    let disposed = false;
-    let refreshTimer: number | undefined;
-
-    function clearRefreshTimer() {
-      if (refreshTimer !== undefined) {
-        window.clearTimeout(refreshTimer);
-        refreshTimer = undefined;
-      }
-    }
-
-    function scheduleRefresh() {
-      if (disposed) return;
-
-      const marketState = getTaiwanMarketRefreshState();
-
-      if (marketState.isPollingWindow) {
-        refreshTimer = window.setTimeout(() => {
-          void loadDashboard(groupId, rankBy, { silent: true }).finally(scheduleRefresh);
-        }, TAIWAN_INTRADAY_REFRESH_MS);
-        return;
-      }
-
-      if (
-        marketState.isAfterClose &&
-        finalDashboardRefreshDate.current !== marketState.dateKey
-      ) {
-        finalDashboardRefreshDate.current = marketState.dateKey;
-        refreshTimer = window.setTimeout(() => {
-          void loadDashboard(groupId, rankBy, { silent: true }).finally(scheduleRefresh);
-        }, 0);
-        return;
-      }
-
-      refreshTimer = window.setTimeout(
-        scheduleRefresh,
-        Math.min(marketState.msUntilNextPollingStart, 60_000)
-      );
-    }
-
-    const initialTimer = window.setTimeout(() => {
-      void loadDashboard(groupId, rankBy).finally(() => {
-        const marketState = getTaiwanMarketRefreshState();
-
-        if (marketState.isAfterClose) {
-          finalDashboardRefreshDate.current = marketState.dateKey;
-        }
-
-        scheduleRefresh();
-        void refreshWatchlistDailyPricesOnOpen(groupId, rankBy);
-      });
-    }, 120);
-
-    return () => {
-      disposed = true;
-      window.clearTimeout(initialTimer);
-      clearRefreshTimer();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeGroupId, activeMarket, rankBy]);
-
-  useEffect(() => {
-    if (activeMarket !== "tw") return;
-    if (activeGroupId === null) return;
-
-    const groupId = activeGroupId;
-    let disposed = false;
-    let refreshTimer: number | undefined;
-
-    function clearRefreshTimer() {
-      if (refreshTimer !== undefined) {
-        window.clearTimeout(refreshTimer);
-        refreshTimer = undefined;
-      }
-    }
-
-    function scheduleReleaseCheck(delay = getTaiwanWatchlistDailyReleaseCheckDelay()) {
-      if (disposed) return;
-
-      refreshTimer = window.setTimeout(() => {
-        void checkDailyPriceRelease().finally(() => {
-          if (!disposed) {
-            scheduleReleaseCheck();
-          }
-        });
-      }, delay);
-    }
-
-    async function checkDailyPriceRelease() {
-      try {
-        await refreshMarketCalendarStatus("tw");
-      } catch (error) {
-        console.warn("Taiwan calendar status refresh failed.", error);
-      }
-
-      if (disposed) return;
-
-      const marketState = getTaiwanMarketRefreshState();
-
-      if (marketState.isDailyPriceReleased) {
-        await refreshWatchlistDailyPricesOnOpen(groupId, rankBy);
-      }
-    }
-
-    scheduleReleaseCheck(0);
-
-    return () => {
-      disposed = true;
-      clearRefreshTimer();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeGroupId, activeMarket, rankBy]);
-
-  useEffect(() => {
-    if (activeMarket !== "tw") return;
-    if (activeGroupId === null) return;
-    if (!rankingFreshnessPending) return;
-
-    const refreshTimer = window.setTimeout(() => {
-      void refreshWatchlistDailyPricesOnOpen(activeGroupId, rankBy);
-    }, 0);
-
-    return () => {
-      window.clearTimeout(refreshTimer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    activeGroupId,
-    activeMarket,
-    rankBy,
-    ranking?.target_trade_date,
-    rankingFreshnessPending,
-  ]);
-
-  useEffect(() => {
-    if (activeMarket !== "us") return;
-    if (selectedUsGroupId === null) return;
-
-    const groupId = selectedUsGroupId;
-    let disposed = false;
-    let refreshTimer: number | undefined;
-
-    function clearRefreshTimer() {
-      if (refreshTimer !== undefined) {
-        window.clearTimeout(refreshTimer);
-        refreshTimer = undefined;
-      }
-    }
-
-    function scheduleRefresh() {
-      if (disposed) return;
-
-      const marketState = getUsMarketRefreshState();
-
-      if (marketState.isPollingWindow) {
-        refreshTimer = window.setTimeout(() => {
-          void loadUsDashboard(groupId, usRankBy, { silent: true }).finally(scheduleRefresh);
-        }, US_INTRADAY_REFRESH_MS);
-        return;
-      }
-
-      if (
-        marketState.isAfterClose &&
-        finalUsDashboardRefreshDate.current !== marketState.dateKey
-      ) {
-        finalUsDashboardRefreshDate.current = marketState.dateKey;
-        refreshTimer = window.setTimeout(() => {
-          void loadUsDashboard(groupId, usRankBy, { silent: true }).finally(scheduleRefresh);
-        }, 0);
-        return;
-      }
-
-      refreshTimer = window.setTimeout(
-        scheduleRefresh,
-        Math.min(marketState.msUntilNextPollingStart, 60_000)
-      );
-    }
-
-    const initialTimer = window.setTimeout(() => {
-      void loadUsDashboard(groupId, usRankBy).finally(() => {
-        const marketState = getUsMarketRefreshState();
-
-        if (marketState.isAfterClose) {
-          finalUsDashboardRefreshDate.current = marketState.dateKey;
-        }
-
-        scheduleRefresh();
-      });
-    }, 120);
-
-    return () => {
-      disposed = true;
-      window.clearTimeout(initialTimer);
-      clearRefreshTimer();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeMarket, selectedUsGroupId, usRankBy, usWatchlistVersion]);
-
-  useEffect(() => {
-    if (activeMarket !== "us") return;
-    if (selectedUsGroupId === null) return;
-    if (usRanking?.is_current !== false) return;
-
-    const refreshTimer = window.setTimeout(() => {
-      void refreshUsWatchlistDailyPricesForFreshness(
-        selectedUsGroupId,
-        usRankBy,
-        usRanking.target_trade_date
-      );
-    }, 0);
-
-    return () => {
-      window.clearTimeout(refreshTimer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    activeMarket,
-    selectedUsGroupId,
-    usRankBy,
-    usRanking?.is_current,
-    usRanking?.target_trade_date,
-  ]);
-
-  useEffect(() => {
-    if (activeMarket !== "jp") return;
-    if (selectedJpGroupId === null) return;
-
-    const groupId = selectedJpGroupId;
-    const refreshTimer = window.setTimeout(() => {
-      void loadJpDashboard(groupId, jpRankBy);
-    }, 120);
-
-    return () => {
-      window.clearTimeout(refreshTimer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeMarket, selectedJpGroupId, jpRankBy, jpDataRefreshNonce]);
-
-  useEffect(() => {
-    if (activeMarket !== "jp") return;
-    if (selectedJpGroupId === null) return;
-    if (jpRanking?.is_current !== false) return;
-
-    const refreshTimer = window.setTimeout(() => {
-      void refreshJpWatchlistDailyPricesForFreshness(
-        selectedJpGroupId,
-        jpRankBy,
-        jpRanking.target_trade_date
-      );
-    }, 0);
-
-    return () => {
-      window.clearTimeout(refreshTimer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    activeMarket,
-    selectedJpGroupId,
-    jpRankBy,
-    jpRanking?.is_current,
-    jpRanking?.target_trade_date,
-  ]);
-
-  function addDashboardPreviewParam(params: Parameters<typeof buildDashboardHref>[0]) {
-    if (
-      quoteDepthPreviewMode &&
-      (params.market === "tw" || (!params.market && activeMarket === "tw"))
-    ) {
-      return { ...params, quoteDepthPreviewMode };
-    }
-
-    return params;
+  function handleKrRankingError(
+    kind: KrRankingErrorKind,
+    error: unknown,
+    groupId: number,
+  ) {
+    const title =
+      kind === "ranking"
+        ? t("dashboard.ranking.krReadError")
+        : "韓股自選日線補齊失敗";
+    emitDashboardDataStatus({
+      market: "kr",
+      title,
+      message: apiErrorMessage(error, title),
+      source: kind === "ranking" ? t("dashboard.ranking.listTitle") : "韓股自選資料",
+      contextKey: `kr:watchlist:${groupId}:${kind}`,
+      contextLabel: krWatchlistContextLabel,
+    });
   }
 
-  function dashboardHref(params: Parameters<typeof buildDashboardHref>[0]) {
-    return buildDashboardHref(addDashboardPreviewParam(params));
+  function handleTaiwanMarketTapeError(
+    kind: TaiwanMarketTapeErrorKind,
+    error: unknown,
+    context?: { dateKey: string }
+  ) {
+    const isSummaryError = kind === "summary";
+    const title = isSummaryError ? "市場指數載入失敗" : "大盤資料更新失敗";
+    emitDashboardDataStatus({
+      market: "tw",
+      title,
+      message: apiErrorMessage(error, title),
+      source: "市場環境",
+      contextKey: isSummaryError
+        ? "tw:market-index-summary"
+        : `tw:market-chip:${context?.dateKey ?? "unknown"}`,
+      contextLabel: isSummaryError ? "台股市場環境" : context?.dateKey ?? "-",
+    });
   }
 
-  function pushDashboardUrl(params: Parameters<typeof buildDashboardHref>[0]) {
-    if (typeof window === "undefined") return;
+  function handleUsMarketTapeError(error: unknown) {
+    const title = t("dashboard.marketIndex.usLoadError");
+    emitDashboardDataStatus({
+      market: "us",
+      title,
+      message: apiErrorMessage(error, title),
+      source: t("dashboard.marketIndex.market"),
+      contextKey: "us:market-index-tape",
+      contextLabel: t("dashboard.marketIndex.market"),
+    });
+  }
 
-    window.history.pushState(null, "", dashboardHref(params));
+  function handleJpMarketTapeError(error: unknown) {
+    const title = t("dashboard.marketIndex.jpLoadError");
+    emitDashboardDataStatus({
+      market: "jp",
+      title,
+      message: apiErrorMessage(error, title),
+      source: t("dashboard.marketIndex.market"),
+      contextKey: "jp:market-index-tape",
+      contextLabel: t("dashboard.marketIndex.market"),
+    });
+  }
+
+  function handleKrMarketTapeError(error: unknown) {
+    const title = t("dashboard.marketIndex.krLoadError");
+    emitDashboardDataStatus({
+      market: "kr",
+      title,
+      message: apiErrorMessage(error, title),
+      source: t("dashboard.marketIndex.market"),
+      contextKey: "kr:market-index-tape",
+      contextLabel: t("dashboard.marketIndex.market"),
+    });
   }
 
   function handleMarketChange(market: MarketRegion) {
-    setActiveMarket(market);
-    setErrorMessage(null);
-    setUsErrorMessage(null);
     setTwChartFocusMode(false);
     setUsChartFocusMode(false);
     setJpChartFocusMode(false);
-    setJpStatusMessage(null);
-
-    if (market !== "tw") {
-      setSelectedFuturesSymbol(null);
-    }
-
-    if (market === "tw") {
-      if (selectedFuturesSymbol) {
-        pushDashboardUrl({ market: "tw", futuresSymbol: selectedFuturesSymbol });
-      } else {
-        pushDashboardUrl({
-          market: "tw",
-          groupId: activeGroupId,
-          stockId: selectedStockId,
-          radarMode,
-        });
-      }
-      return;
-    }
-
-    if (market === "us") {
-      const fallbackGroup = selectedUsGroup ?? flattenUsGroups(usWatchlistTree)[0] ?? null;
-      ensureSelectedUsGroup();
-      pushDashboardUrl({
-        market: "us",
-        groupId: fallbackGroup?.id ?? null,
-        symbol: selectedUsSymbol,
-      });
-      return;
-    }
-
-    if (market === "jp") {
-      const fallbackGroup = selectedJpGroup ?? flattenJpGroups(jpWatchlistTree)[0] ?? null;
-      ensureSelectedJpGroup();
-      pushDashboardUrl({
-        market: "jp",
-        groupId: fallbackGroup?.id ?? null,
-        jpSymbol: selectedJpSymbol,
-      });
-      return;
-    }
-
-    if (market === "crypto") {
-      pushDashboardUrl({ market: "crypto" });
-    }
+    const nextRadarMode =
+      market === "tw"
+        ? radarMode
+        : market === "us"
+          ? regionalRadarRouteMode(usRadarMode)
+          : market === "jp"
+            ? regionalRadarRouteMode(jpRadarMode)
+            : market === "kr"
+              ? regionalRadarRouteMode(krRadarMode)
+              : null;
+    marketSelection.changeMarket(market, nextRadarMode);
   }
 
-  function handleSelectGroup(group: WatchlistGroupNode | null) {
-    setSelectedGroup(group);
-    setSelectedGroupId(group?.id ?? null);
-    setSelectedFuturesSymbol(null);
+  function resetTaiwanGroupAnalysis() {
+    taiwanRankingActions.reset();
+    taiwanRadarActions.reset();
+  }
+
+  function onTaiwanGroupChange(group: WatchlistGroupNode | null) {
+    marketSelection.selectTaiwanGroup(group, radarMode);
     setTwChartFocusMode(false);
+    resetTaiwanGroupAnalysis();
+  }
 
-    if (group !== null) {
-      setSelectedStockId(null);
-      setSelectedStockName(null);
-      setRanking(null);
-      setRadar(null);
-      setLoadState("idle");
-      setRadarLoadState("idle");
-      setErrorMessage(null);
-      setRadarErrorMessage(null);
-      pushDashboardUrl({ market: "tw", groupId: group.id, radarMode });
-    } else {
-      setRanking(null);
-      setRadar(null);
-      setRadarLoadState("idle");
-      setRadarErrorMessage(null);
-      pushDashboardUrl({ market: "tw" });
+  function onTaiwanStockChange(stockId: string, stockName: string | null) {
+    marketSelection.selectTaiwanStock(stockId, stockName, radarMode);
+  }
+
+  function onTaiwanFuturesChange(symbol: string) {
+    marketSelection.selectTaiwanFutures(symbol);
+    setTwChartFocusMode(false);
+  }
+
+  function onUsGroupChange(group: USWatchlistGroupNode | null) {
+    const groupChanged = (group?.id ?? null) !== selectedUsGroupId;
+
+    marketSelection.selectUsGroup(group, regionalRadarRouteMode(usRadarMode));
+    if (groupChanged) {
+      usRankingActions.reset();
+      usRadarActions.reset();
     }
-  }
-
-  function handleSelectStock(stockId: string, stockName: string | null) {
-    setSelectedStockId(stockId);
-    setSelectedStockName(stockName);
-    setSelectedFuturesSymbol(null);
-    setErrorMessage(null);
-    setTwChartFocusMode(false);
-    pushDashboardUrl({ market: "tw", groupId: activeGroupId, stockId, radarMode });
-  }
-
-  function handleSelectTaiwanFutures(symbol: string) {
-    const normalizedSymbol = symbol.trim().toUpperCase();
-
-    if (!normalizedSymbol) return;
-
-    setSelectedStockId(null);
-    setSelectedStockName(null);
-    setSelectedFuturesSymbol(normalizedSymbol);
-    setErrorMessage(null);
-    setTwChartFocusMode(false);
-    pushDashboardUrl({
-      market: "tw",
-      futuresSymbol: normalizedSymbol,
-    });
-  }
-
-  function handleSelectUsGroup(group: USWatchlistGroupNode | null) {
-    setSelectedUsGroupId(group?.id ?? null);
-    setSelectedUsGroup(group);
-    setSelectedUsGroupName(group?.group_name ?? null);
-    setSelectedUsSymbol(null);
-    setSelectedUsSecurityName(null);
-    setUsRanking(null);
-    setUsRadar(null);
-    setUsLoadState("idle");
-    setUsRadarLoadState("idle");
-    setUsErrorMessage(null);
-    setUsRadarErrorMessage(null);
     setUsChartFocusMode(false);
-    pushDashboardUrl({ market: "us", groupId: group?.id ?? null });
   }
 
-  function handleSelectUsSymbol(symbol: string, securityName: string | null) {
-    const normalizedSymbol = symbol.trim().toUpperCase();
-    if (!normalizedSymbol) return;
-
-    setSelectedUsSymbol(normalizedSymbol);
-    setSelectedUsSecurityName(securityName);
-    setUsErrorMessage(null);
-    setUsChartFocusMode(false);
-    pushDashboardUrl({ market: "us", symbol: normalizedSymbol });
-  }
-
-  function handleSelectJpGroup(group: JPWatchlistGroupNode | null) {
-    setSelectedJpGroupId(group?.id ?? null);
-    setSelectedJpGroup(group);
-    setSelectedJpGroupName(group?.group_name ?? null);
-    setSelectedJpSymbol(null);
-    setSelectedJpStock(null);
-    setJpRanking(null);
-    setJpRadar(null);
-    setJpLoadState("idle");
-    setJpRadarLoadState("idle");
-    setJpErrorMessage(null);
-    setJpRadarErrorMessage(null);
-    setJpChartFocusMode(false);
-    setJpStatusMessage(null);
-    pushDashboardUrl({ market: "jp", groupId: group?.id ?? null });
-  }
-
-  function handleSelectJpSymbol(symbol: string, securityName: string | null) {
-    const normalizedSymbol = symbol.trim().toUpperCase();
-    if (!normalizedSymbol) return;
-
-    const indexConfig = getJpMarketIndexConfig(normalizedSymbol);
-    setJpChartFocusMode(false);
-    setJpStatusMessage(null);
-    setSelectedJpSymbol(normalizedSymbol);
-    setSelectedJpStock((current) =>
-      current?.symbol === normalizedSymbol
-        ? current
-        : ({
-            id: 0,
-            symbol: normalizedSymbol,
-            local_code: null,
-            security_name: indexConfig?.name ?? securityName,
-            exchange: indexConfig?.exchange ?? null,
-            market_segment: null,
-            sector_33_code: null,
-            sector_33_name: null,
-            sector_17_code: null,
-            sector_17_name: null,
-            size_code: null,
-            size_name: null,
-            asset_type: indexConfig ? "index" : "stock",
-            listing_source: indexConfig ? "market_index_config" : "watchlist",
-            currency: "JPY",
-            exchange_timezone_name: null,
-            is_active: true,
-            first_seen_at: "",
-            last_seen_at: "",
-            created_at: "",
-            updated_at: "",
-          } satisfies JPStockMasterRead)
+  function onUsSymbolChange(symbol: string, securityName: string | null) {
+    marketSelection.selectUsSymbol(
+      symbol,
+      securityName,
+      regionalRadarRouteMode(usRadarMode)
     );
-    pushDashboardUrl({
-      market: "jp",
-      groupId: selectedJpGroupId,
-      jpSymbol: normalizedSymbol,
-    });
+    setUsChartFocusMode(false);
   }
 
-  function handleSelectJpStock(stock: JPStockMasterRead | null) {
-    setSelectedJpStock(stock);
-    setSelectedJpSymbol(stock?.symbol ?? null);
+  function onJpGroupChange(group: JPWatchlistGroupNode | null) {
+    const groupChanged = (group?.id ?? null) !== selectedJpGroupId;
+
+    marketSelection.selectJpGroup(group, regionalRadarRouteMode(jpRadarMode));
+    if (groupChanged) {
+      jpRankingActions.reset();
+      jpRadarActions.reset();
+    }
     setJpChartFocusMode(false);
-    setJpStatusMessage(null);
+  }
 
-    if (stock) {
-      pushDashboardUrl({ market: "jp", groupId: selectedJpGroupId, jpSymbol: stock.symbol });
-    } else {
-      pushDashboardUrl({ market: "jp", groupId: selectedJpGroupId });
+  function onJpSymbolChange(symbol: string, securityName: string | null) {
+    marketSelection.selectJpSymbol(
+      symbol,
+      securityName,
+      regionalRadarRouteMode(jpRadarMode)
+    );
+    setJpChartFocusMode(false);
+  }
+
+  function onJpStockChange(stock: JPStockMasterRead | null) {
+    if (!stock || stock.symbol !== selectedJpSymbol) return;
+
+    marketSelection.selectJpStock(stock);
+    setJpChartFocusMode(false);
+  }
+
+  function onKrGroupChange(group: KRWatchlistGroupNode | null) {
+    const groupChanged = (group?.id ?? null) !== selectedKrGroupId;
+
+    marketSelection.selectKrGroup(group, regionalRadarRouteMode(krRadarMode));
+    if (groupChanged) {
+      krRankingActions.reset();
+      krRadarActions.reset();
     }
   }
 
-  function ensureSelectedJpGroup() {
-    const fallbackGroup = selectedJpGroup ?? flattenJpGroups(jpWatchlistTree)[0] ?? null;
-
-    if (fallbackGroup !== selectedJpGroup) {
-      setSelectedJpGroup(fallbackGroup);
-      setSelectedJpGroupId(fallbackGroup?.id ?? null);
-      setSelectedJpGroupName(fallbackGroup?.group_name ?? null);
-    }
+  function onKrSymbolChange(symbol: string, securityName: string | null) {
+    marketSelection.selectKrSymbol(
+      symbol,
+      securityName,
+      regionalRadarRouteMode(krRadarMode)
+    );
   }
 
-  function ensureSelectedUsGroup() {
-    const fallbackGroup = selectedUsGroup ?? flattenUsGroups(usWatchlistTree)[0] ?? null;
+  function onKrStockChange(stock: KRStockMasterRead | null) {
+    if (!stock || stock.symbol !== selectedKrSymbol) return;
 
-    if (fallbackGroup !== selectedUsGroup) {
-      setSelectedUsGroup(fallbackGroup);
-      setSelectedUsGroupId(fallbackGroup?.id ?? null);
-      setSelectedUsGroupName(fallbackGroup?.group_name ?? null);
-    }
+    marketSelection.selectKrStock(stock);
   }
 
   function handleRankByChange(value: RankBy) {
-    setRankBy(value);
-    setRanking(null);
-    setLoadState("idle");
-    setErrorMessage(null);
+    taiwanRankingActions.changeRankBy(value);
   }
 
   function handleRadarModeChange(value: WatchlistRadarMode) {
-    radarModeRef.current = value;
-    setRadarMode(value);
     pushDashboardUrl({
       market: "tw",
       groupId: activeGroupId,
       stockId: selectedStockId,
       radarMode: value,
     });
-    if (activeGroupId !== null) {
-      void loadWatchlistRadar(activeGroupId, { mode: value });
-    }
+    taiwanRadarActions.changeMode(value);
   }
 
   function handleUsRadarModeChange(value: WatchlistRadarMode) {
-    usRadarModeRef.current = value;
-    setUsRadarMode(value);
     pushDashboardUrl({
       market: "us",
       groupId: selectedUsGroupId,
       symbol: selectedUsSymbol,
+      radarMode: value,
     });
-    if (selectedUsGroupId !== null) {
-      void loadUsWatchlistRadar(selectedUsGroupId, { mode: value });
-    }
+    usRadarActions.changeMode(value);
   }
 
   function handleJpRadarModeChange(value: WatchlistRadarMode) {
-    jpRadarModeRef.current = value;
-    setJpRadarMode(value);
     pushDashboardUrl({
       market: "jp",
       groupId: selectedJpGroupId,
       jpSymbol: selectedJpSymbol,
+      radarMode: value,
     });
-    if (selectedJpGroupId !== null) {
-      void loadJpWatchlistRadar(selectedJpGroupId, { mode: value });
-    }
+    jpRadarActions.changeMode(value);
+  }
+
+  function handleKrRadarModeChange(value: WatchlistRadarMode) {
+    pushDashboardUrl({
+      market: "kr",
+      groupId: selectedKrGroupId,
+      krSymbol: selectedKrSymbol,
+      radarMode: value,
+    });
+    krRadarActions.changeMode(value);
   }
 
   function handleUsRankByChange(value: string) {
-    setUsRankBy(value as USRankBy);
-    setUsRanking(null);
-    setUsLoadState("idle");
-    setUsErrorMessage(null);
+    usRankingActions.changeRankBy(value as USRankBy);
   }
 
   function handleJpRankByChange(value: string) {
-    setJpRankBy(value as JPRankBy);
-    setJpRanking(null);
-    setJpLoadState("idle");
-    setJpErrorMessage(null);
+    jpRankingActions.changeRankBy(value as JPRankBy);
+  }
+
+  function handleKrRankByChange(value: string) {
+    krRankingActions.changeRankBy(value as KRRankBy);
   }
 
   function renderRankingRow(row: RankingItem) {
     const selected = row.stock_id === selectedStockId;
     const loading = isRankingItemPending(row);
     const trendLoading = loading || rankingTrendPending;
+    const marketWideRank = isTaiwanMarketWideRank(rankBy);
+    const displayedRank = marketWideRank ? row.market_rank : row.rank;
+    const displayedMetric = marketWideRank ? row.rank_value : row.volume;
 
     return (
       <a
@@ -3609,24 +1103,28 @@ export default function MarketDashboardClient({
         data-ranking-stock-id={row.stock_id}
         onPointerUp={(event) => {
           if (event.button !== 0) return;
-          handleSelectStock(row.stock_id, row.stock_name);
+          onTaiwanStockChange(row.stock_id, row.stock_name);
         }}
         onMouseDown={(event) => {
           if (event.button !== 0) return;
-          handleSelectStock(row.stock_id, row.stock_name);
+          onTaiwanStockChange(row.stock_id, row.stock_name);
         }}
         onClick={(event) => {
           event.preventDefault();
-          handleSelectStock(row.stock_id, row.stock_name);
+          onTaiwanStockChange(row.stock_id, row.stock_name);
         }}
         className={[
-          "omi-ranking-row grid w-full grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-omi-border-subtle px-4 py-2 text-left text-sm",
+          "omi-ranking-row grid w-full grid-cols-[56px_minmax(120px,1fr)_104px_80px_82px_72px_90px] items-center border-t border-omi-border-subtle px-4 py-2 text-left text-sm",
           selected
             ? "omi-ranking-row-selected relative z-10 bg-omi-surface text-omi-text ring-1 ring-omi-market-up-border"
             : "bg-omi-surface text-omi-text hover:bg-omi-surface-subtle",
         ].join(" ")}
       >
-        <span className={selected ? "font-semibold text-omi-market-up" : "text-omi-text-muted"}>#{row.rank}</span>
+        <span className={selected ? "font-semibold text-omi-market-up" : "text-omi-text-muted"}>
+          {displayedRank === null || displayedRank === undefined
+            ? "-"
+            : `#${displayedRank}`}
+        </span>
         <span className="min-w-0">
           <span className="block truncate font-semibold">
             {row.stock_id} {row.stock_name ?? ""}
@@ -3695,12 +1193,12 @@ export default function MarketDashboardClient({
             <RankingCellSkeleton className="h-3 w-16" />
           ) : (
             <PriceUpdatePulse
-              value={row.volume}
-              direction={null}
-              resetKey={`${activeGroupId ?? "all"}:${row.stock_id}`}
+              value={displayedMetric}
+              direction={marketWideRank ? displayedMetric : null}
+              resetKey={`${activeGroupId ?? "all"}:${row.stock_id}:${rankBy}`}
               className="justify-end tabular-nums"
             >
-              {formatLots(row.volume)}
+              {formatTaiwanRankValue(row, rankBy)}
             </PriceUpdatePulse>
           )}
         </span>
@@ -3741,9 +1239,14 @@ export default function MarketDashboardClient({
             <option value="change_pct">{t("rank.changePct")}</option>
             <option value="score">{t("rank.score")}</option>
             <option value="volume">{t("rank.volume")}</option>
+            <option value="foreign_net">{t("rank.foreignNet")}</option>
+            <option value="margin_balance_change_pct">
+              {t("rank.marginBalanceChangePct")}
+            </option>
           </select>
           <button
             type="button"
+            data-testid="watchlist-ranking-reload"
             onClick={() => {
               void loadMarketIndices({ silent: true });
               if (activeGroupId !== null) void loadDashboard(activeGroupId);
@@ -3756,12 +1259,6 @@ export default function MarketDashboardClient({
         </div>
       </div>
 
-      {errorMessage ? (
-        <div className="border-t border-omi-danger-border bg-omi-danger-soft px-5 py-3 text-sm text-omi-danger">
-          {errorMessage}
-        </div>
-      ) : null}
-
       <div className="grid grid-cols-2 border-t border-omi-border-subtle md:grid-cols-4">
         <div className="px-5 py-3">
           <div className="text-xs text-omi-text-muted">{t("dashboard.ranking.stockCount")}</div>
@@ -3771,7 +1268,7 @@ export default function MarketDashboardClient({
           <div className="text-xs text-omi-text-muted">{t("dashboard.ranking.upCount")}</div>
           <div className="mt-1 text-xl font-bold text-omi-market-up">
             {rankingListLoading ? (
-              <span className="block h-6 w-8 animate-pulse bg-omi-surface-strong" />
+              <span className="omi-skeleton block h-6 w-8" />
             ) : (
               summary.upCount
             )}
@@ -3781,7 +1278,7 @@ export default function MarketDashboardClient({
           <div className="text-xs text-omi-text-muted">{t("dashboard.ranking.downCount")}</div>
           <div className="mt-1 text-xl font-bold text-omi-market-down">
             {rankingListLoading ? (
-              <span className="block h-6 w-8 animate-pulse bg-omi-surface-strong" />
+              <span className="omi-skeleton block h-6 w-8" />
             ) : (
               summary.downCount
             )}
@@ -3803,10 +1300,16 @@ export default function MarketDashboardClient({
       <WatchlistRadarPanel
         radar={radar}
         loadState={radarLoadState}
-        errorMessage={radarErrorMessage}
         mode={radarMode}
         selectedStockId={selectedStockId}
         disabled={activeGroupId === null}
+        outcomeSummary={radarOutcomeSummary}
+        outcomeLoadState={radarOutcomeLoadState}
+        outcomeHistory={radarOutcomeHistory}
+        outcomeHistoryOpen={radarOutcomeHistoryOpen}
+        outcomeHistoryLoadState={radarOutcomeHistoryLoadState}
+        outcomeDetailLoadState={radarOutcomeDetailLoadState}
+        selectedOutcomeSnapshotId={selectedRadarOutcomeSnapshotId}
         getModeHref={(nextMode) =>
           dashboardHref({
             market: "tw",
@@ -3818,10 +1321,17 @@ export default function MarketDashboardClient({
         onModeChange={handleRadarModeChange}
         onReload={() => {
           if (activeGroupId !== null) {
-            void loadWatchlistRadar(activeGroupId);
+            void taiwanRadarActions.load(activeGroupId);
           }
         }}
-        onSelectStock={handleSelectStock}
+        onOpenOutcomeHistory={taiwanRadarActions.openOutcomeHistory}
+        onCloseOutcomeHistory={taiwanRadarActions.closeOutcomeHistory}
+        onReloadOutcomeHistory={taiwanRadarActions.reloadOutcomeHistory}
+        onSelectOutcomeSnapshot={taiwanRadarActions.selectOutcomeSnapshot}
+        onEvaluateOutcomeSnapshot={(snapshotRunId) => {
+          void taiwanRadarActions.evaluateOutcome(snapshotRunId);
+        }}
+        onSelectStock={onTaiwanStockChange}
       />
       <section className="border border-omi-border-subtle bg-omi-surface">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-omi-border-subtle px-5 py-3">
@@ -3833,7 +1343,14 @@ export default function MarketDashboardClient({
             </span>
           ) : (
             <span className="text-xs text-omi-text-muted">
-              {rankBy === "none"
+              {isTaiwanMarketWideRank(rankBy) && ranking?.rank_scope === "tw_market"
+                ? t("dashboard.ranking.rowSummaryMarketRanked", {
+                    count: displayRows.length,
+                    rankLabel: rankLabel(t, ranking.rank_by),
+                    universeCount: ranking.rank_universe_count ?? 0,
+                    date: ranking.rank_trade_date ?? "-",
+                  })
+                : rankBy === "none"
                 ? t("dashboard.ranking.rowSummaryNormal", { count: displayRows.length })
                 : t("dashboard.ranking.rowSummaryRanked", {
                     count: displayRows.length,
@@ -3843,22 +1360,36 @@ export default function MarketDashboardClient({
           )}
         </div>
 
-        <div className="grid grid-cols-[46px_minmax(120px,1fr)_104px_80px_82px_72px_90px] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
-          <span>{t("dashboard.ranking.rank")}</span>
+        <div className="grid grid-cols-[56px_minmax(120px,1fr)_104px_80px_82px_72px_90px] bg-omi-surface-subtle px-4 py-2 text-xs font-bold uppercase tracking-wide text-omi-text-muted">
+          <span>
+            {isTaiwanMarketWideRank(rankBy)
+              ? t("dashboard.ranking.marketRank")
+              : t("dashboard.ranking.rank")}
+          </span>
           <span>{t("dashboard.ranking.stock")}</span>
           <span className="text-center">{t("dashboard.ranking.trend")}</span>
           <span className="text-right">{t("dashboard.ranking.close")}</span>
           <span className="text-right">{t("dashboard.ranking.changePct")}</span>
           <span className="text-right">{t("dashboard.ranking.status")}</span>
-          <span className="text-right">{t("dashboard.ranking.volumeLots")}</span>
+          <span className="text-right">
+            {rankBy === "foreign_net"
+              ? t("dashboard.ranking.foreignNetLots")
+              : rankBy === "margin_balance_change_pct"
+                ? t("dashboard.ranking.marginBalanceChangePct")
+                : t("dashboard.ranking.volumeLots")}
+          </span>
         </div>
         {displayRows.length > 0 ? (
           displayRows.map(renderRankingRow)
         ) : rankingListLoading ? (
           <RankingLoadingRows />
+        ) : rankingLoadState === "error" ? (
+          <div className="border-t border-omi-border-subtle p-3">
+            <StateSurface title={t("dashboard.ranking.readError")} tone="danger" compact />
+          </div>
         ) : (
-          <div className="border-t border-omi-border-subtle px-5 py-10 text-center text-sm text-omi-text-muted">
-            {t("dashboard.ranking.empty")}
+          <div className="border-t border-omi-border-subtle p-3">
+            <StateSurface title={t("dashboard.ranking.empty")} tone="empty" compact />
           </div>
         )}
       </section>
@@ -3894,36 +1425,37 @@ export default function MarketDashboardClient({
       selected,
       loading,
       href: dashboardHref({ market: "us", symbol: row.symbol }),
-      onSelect: () => handleSelectUsSymbol(row.symbol, row.security_name),
+      onSelect: () => onUsSymbolChange(row.symbol, row.security_name),
     };
   });
   const usRankingPanel = (
     <div className="space-y-4">
-      <WatchlistRadarPanel
-        radar={usRadar}
-        loadState={usRadarLoadState}
-        errorMessage={usRadarErrorMessage}
-        mode={usRadarMode}
-        selectedStockId={selectedUsSymbol}
-        disabled={selectedUsGroupId === null}
-        scopeLabel={t("radar.technicalOnly.usScope")}
-        notice={t("radar.technicalOnly.notice")}
-        getModeHref={(nextMode) =>
-          dashboardHref({
-            market: "us",
-            groupId: selectedUsGroupId,
-            symbol: selectedUsSymbol,
-            radarMode: nextMode,
-          })
-        }
-        onModeChange={handleUsRadarModeChange}
-        onReload={() => {
-          if (selectedUsGroupId !== null) {
-            void loadUsWatchlistRadar(selectedUsGroupId);
+      {isSelectedUsIndex ? null : (
+        <WatchlistRadarPanel
+          radar={usRadar}
+          loadState={usRadarLoadState}
+          mode={usRadarMode}
+          selectedStockId={selectedUsSymbol}
+          disabled={selectedUsGroupId === null}
+          scopeLabel={t("radar.technicalOnly.usScope")}
+          notice={t("radar.technicalOnly.notice")}
+          getModeHref={(nextMode) =>
+            dashboardHref({
+              market: "us",
+              groupId: selectedUsGroupId,
+              symbol: selectedUsSymbol,
+              radarMode: nextMode,
+            })
           }
-        }}
-        onSelectStock={handleSelectUsSymbol}
-      />
+          onModeChange={handleUsRadarModeChange}
+          onReload={() => {
+            if (selectedUsGroupId !== null) {
+              void usRadarActions.load(selectedUsGroupId);
+            }
+          }}
+          onSelectStock={onUsSymbolChange}
+        />
+      )}
       <WatchlistRankingPanel
         groupName={selectedUsGroupName}
         lastUpdatedAt={usLastUpdatedAt}
@@ -3944,7 +1476,6 @@ export default function MarketDashboardClient({
         reloadDisabled={selectedUsGroupId === null || usLoadState === "loading"}
         loadState={usRankingLoadState}
         loadingLabel={usRankingPendingLabel}
-        errorMessage={usErrorMessage}
         rows={usDisplayRows}
         summary={usSummary}
         volumeHeader={t("dashboard.ranking.volume")}
@@ -3989,36 +1520,37 @@ export default function MarketDashboardClient({
         groupId: selectedJpGroupId,
         jpSymbol: row.symbol,
       }),
-      onSelect: () => handleSelectJpSymbol(row.symbol, row.security_name),
+      onSelect: () => onJpSymbolChange(row.symbol, row.security_name),
     };
   });
   const jpRankingPanel = (
     <div className="space-y-4">
-      <WatchlistRadarPanel
-        radar={jpRadar}
-        loadState={jpRadarLoadState}
-        errorMessage={jpRadarErrorMessage}
-        mode={jpRadarMode}
-        selectedStockId={selectedJpSymbol}
-        disabled={selectedJpGroupId === null}
-        scopeLabel={t("radar.technicalOnly.jpScope")}
-        notice={t("radar.technicalOnly.notice")}
-        getModeHref={(nextMode) =>
-          dashboardHref({
-            market: "jp",
-            groupId: selectedJpGroupId,
-            jpSymbol: selectedJpSymbol,
-            radarMode: nextMode,
-          })
-        }
-        onModeChange={handleJpRadarModeChange}
-        onReload={() => {
-          if (selectedJpGroupId !== null) {
-            void loadJpWatchlistRadar(selectedJpGroupId);
+      {isSelectedJpIndex ? null : (
+        <WatchlistRadarPanel
+          radar={jpRadar}
+          loadState={jpRadarLoadState}
+          mode={jpRadarMode}
+          selectedStockId={selectedJpSymbol}
+          disabled={selectedJpGroupId === null}
+          scopeLabel={t("radar.technicalOnly.jpScope")}
+          notice={t("radar.technicalOnly.notice")}
+          getModeHref={(nextMode) =>
+            dashboardHref({
+              market: "jp",
+              groupId: selectedJpGroupId,
+              jpSymbol: selectedJpSymbol,
+              radarMode: nextMode,
+            })
           }
-        }}
-        onSelectStock={handleSelectJpSymbol}
-      />
+          onModeChange={handleJpRadarModeChange}
+          onReload={() => {
+            if (selectedJpGroupId !== null) {
+              void jpRadarActions.load(selectedJpGroupId);
+            }
+          }}
+          onSelectStock={onJpSymbolChange}
+        />
+      )}
       <WatchlistRankingPanel
         groupName={selectedJpGroupName}
         lastUpdatedAt={jpLastUpdatedAt}
@@ -4039,7 +1571,6 @@ export default function MarketDashboardClient({
         reloadDisabled={selectedJpGroupId === null || jpLoadState === "loading"}
         loadState={jpRankingLoadState}
         loadingLabel={jpRankingPendingLabel}
-        errorMessage={jpErrorMessage}
         rows={jpDisplayRows}
         summary={jpSummary}
         volumeHeader={t("dashboard.ranking.volume")}
@@ -4048,189 +1579,131 @@ export default function MarketDashboardClient({
     </div>
   );
 
-  const omiAskContext = useMemo<OmiAskDockContext>(() => {
-    if (activeMarket === "us") {
-      if (selectedUsSymbol) {
-        return {
-          market: "us",
-          label: `${selectedUsSymbol}${selectedUsSecurityName ? ` ${selectedUsSecurityName}` : ""}`,
-          target: {
-            type: "us_stock",
-            id: selectedUsSymbol,
-            label: selectedUsSecurityName ?? selectedUsSymbol,
-            market: "US",
-          },
-          uiContext: {
-            market: "us",
-            selected_symbol: selectedUsSymbol,
-            selected_security_name: selectedUsSecurityName,
-            selected_group_id: selectedUsGroupId,
-            selected_group_name: selectedUsGroupName,
-          },
-        };
-      }
-
-      return {
-        market: "us",
-        label: selectedUsGroupName
-          ? t("dashboard.ranking.usLabel", { groupName: selectedUsGroupName })
-          : t("dashboard.ranking.usMarket"),
-        target: {
-          type: "auto",
-          market: "US",
-          label: selectedUsGroupName ?? t("dashboard.ranking.usMarket"),
-        },
-        uiContext: {
-          market: "us",
-          selected_group_id: selectedUsGroupId,
-          selected_group_name: selectedUsGroupName,
-        },
-      };
-    }
-
-    if (activeMarket === "jp") {
-      if (selectedJpSymbol) {
-        const selectedJpIndexConfig = getJpMarketIndexConfig(selectedJpSymbol);
-
-        return {
-          market: "jp",
-          label: `${selectedJpSymbol}${
-            selectedJpStock?.security_name ? ` ${selectedJpStock.security_name}` : ""
-          }`,
-          target: {
-            type: selectedJpIndexConfig ? "jp_index" : "jp_stock",
-            id: selectedJpSymbol,
-            label: selectedJpIndexConfig?.name ?? selectedJpStock?.security_name ?? selectedJpSymbol,
-            market: "JP",
-          },
-          uiContext: {
-            market: "jp",
-            selected_symbol: selectedJpSymbol,
-            selected_security_name: selectedJpStock?.security_name ?? null,
-            selected_market_segment: selectedJpStock?.market_segment ?? null,
-            selected_sector: selectedJpStock?.sector_33_name ?? null,
-            selected_group_id: selectedJpGroupId,
-            selected_group_name: selectedJpGroupName,
-          },
-        };
-      }
-
-      return {
-        market: "jp",
-        label: t("jpMarket.askMarketLabel"),
-        target: {
-          type: "market",
-          market: "JP",
-          label: t("jpMarket.askMarketLabel"),
-        },
-        uiContext: {
-          market: "jp",
-          selected_group_id: selectedJpGroupId,
-          selected_group_name: selectedJpGroupName,
-        },
-      };
-    }
-
-    if (selectedFuturesSymbol) {
-      const futuresLabel = `${selectedFuturesSymbol} ${t("futures.productTitle")}`;
-
-      return {
-        market: "tw",
-        label: futuresLabel,
-        target: {
-          type: "tw_futures",
-          id: selectedFuturesSymbol,
-          label: futuresLabel,
-          market: "TW",
-        },
-        uiContext: {
-          market: "tw",
-          selected_futures_symbol: selectedFuturesSymbol,
-          selected_group_id: activeGroupId,
-          selected_group_name: selectedGroup?.group_name ?? null,
-        },
-      };
-    }
-
-    if (selectedStockId) {
-      const isIndexTarget = TAIWAN_INDEX_TARGET_IDS.has(selectedStockId);
-      return {
-        market: "tw",
-        label: `${selectedStockId}${selectedStockName ? ` ${selectedStockName}` : ""}`,
-        target: {
-          type: isIndexTarget ? "tw_index" : "tw_stock",
-          id: selectedStockId,
-          label: selectedStockName ?? selectedStockId,
-          market: "TW",
-        },
-        uiContext: {
-          market: "tw",
-          [isIndexTarget ? "selected_index_id" : "selected_stock_id"]: selectedStockId,
-          [isIndexTarget ? "selected_index_name" : "selected_stock_name"]: selectedStockName,
-          selected_group_id: activeGroupId,
-          selected_group_name: selectedGroup?.group_name ?? null,
-        },
-      };
-    }
-
-    if (activeGroupId !== null) {
-      const groupLabel = selectedGroup?.group_name ?? String(activeGroupId);
-
-      return {
-        market: "tw",
-        label: t("dashboard.ranking.twLabel", { groupName: groupLabel }),
-        target: {
-          type: "tw_watchlist",
-          id: String(activeGroupId),
-          label: groupLabel,
-          market: "TW",
-        },
-        uiContext: {
-          market: "tw",
-          selected_group_id: activeGroupId,
-          selected_group_name: selectedGroup?.group_name ?? null,
-        },
-      };
-    }
+  const krDisplayRows: RankingDisplayRow[] = krVisibleRows.map((row) => {
+    const selected = row.symbol === selectedKrSymbol;
+    const loading = isKrRankingItemPending(row);
 
     return {
-      market: activeMarket,
-      label:
-        activeMarket === "tw"
-          ? t("dashboard.ranking.twMarket")
-          : t("dashboard.ranking.genericMarket", {
-              market: activeMarket.toUpperCase(),
-            }),
-      target: {
-        type: "auto",
-        market: activeMarket.toUpperCase(),
-      },
-      uiContext: {
-        market: activeMarket,
-      },
+      key: `${row.group_id}-${row.symbol}`,
+      rank: row.rank,
+      symbol: row.symbol,
+      name: row.security_name,
+      meta:
+        [
+          row.trade_date?.slice(0, 10),
+          row.market_segment,
+          row.sector,
+          row.source,
+        ]
+          .filter(Boolean)
+          .join(" · ") || statusLabel(t, row.status),
+      visual: (
+        <span className="text-center text-xs text-omi-text-subtle">
+          -
+        </span>
+      ),
+      close: formatPrice(row.close),
+      closeValue: row.close,
+      change: formatPct(row.change_pct),
+      changePct: row.change_pct,
+      trend: trendLabel(t, row.change_pct),
+      volume: formatWholeNumber(row.volume),
+      volumeValue: row.volume,
+      selected,
+      loading,
+      href: dashboardHref({
+        market: "kr",
+        groupId: selectedKrGroupId,
+        krSymbol: row.symbol,
+      }),
+      onSelect: () => onKrSymbolChange(row.symbol, row.security_name),
     };
-  }, [
-    activeGroupId,
+  });
+  const krRankingPanel = (
+    <div className="space-y-4">
+      <WatchlistRadarPanel
+        radar={krRadar}
+        loadState={krRadarLoadState}
+        mode={krRadarMode}
+        selectedStockId={selectedKrSymbol}
+        disabled={selectedKrGroupId === null}
+        scopeLabel={t("radar.technicalOnly.krScope")}
+        notice={t("radar.technicalOnly.notice")}
+        getModeHref={(nextMode) =>
+          dashboardHref({
+            market: "kr",
+            groupId: selectedKrGroupId,
+            krSymbol: selectedKrSymbol,
+            radarMode: nextMode,
+          })
+        }
+        onModeChange={handleKrRadarModeChange}
+        onReload={() => {
+          if (selectedKrGroupId !== null) {
+            void krRadarActions.load(selectedKrGroupId);
+          }
+        }}
+        onSelectStock={onKrSymbolChange}
+      />
+      <WatchlistRankingPanel
+        groupName={selectedKrGroupName}
+        lastUpdatedAt={krLastUpdatedAt}
+        statusLabel={
+          krRanking?.is_current === false ? krRankingPendingLabel : undefined
+        }
+        rankBy={krRanking?.rank_by ?? krRankBy}
+        rankOptions={[
+          { value: "none", label: t("rank.none") },
+          { value: "change_pct", label: t("rank.changePct") },
+          { value: "volume", label: t("rank.volume") },
+          { value: "close", label: t("rank.close") },
+        ]}
+        onRankByChange={handleKrRankByChange}
+        onReload={() => {
+          if (selectedKrGroupId !== null) void loadKrDashboard(selectedKrGroupId);
+        }}
+        reloadDisabled={selectedKrGroupId === null || krLoadState === "loading"}
+        loadState={krRankingLoadState}
+        loadingLabel={krRankingPendingLabel}
+        rows={krDisplayRows}
+        summary={krSummary}
+        volumeHeader={t("dashboard.ranking.volume")}
+        emptyMessage={t("dashboard.ranking.krEmpty")}
+      />
+    </div>
+  );
+
+  const omiAskContext = buildOmiAskContext({
     activeMarket,
-    selectedGroup?.group_name,
-    selectedFuturesSymbol,
-    selectedJpGroupId,
-    selectedJpGroupName,
-    selectedJpStock,
-    selectedJpSymbol,
+    activeGroupId,
+    selectedGroupName: selectedGroup?.group_name ?? null,
     selectedStockId,
     selectedStockName,
+    selectedFuturesSymbol,
     selectedUsGroupId,
     selectedUsGroupName,
-    selectedUsSecurityName,
     selectedUsSymbol,
+    selectedUsSecurityName,
+    selectedJpGroupId,
+    selectedJpGroupName,
+    selectedJpSymbol,
+    selectedJpStock,
+    selectedKrGroupId,
+    selectedKrGroupName,
+    selectedKrSymbol,
+    selectedKrStock,
     t,
-  ]);
+  });
 
   return (
     <main className="h-screen overflow-hidden bg-omi-canvas text-omi-text-strong">
-      <div className="flex h-full min-w-[1180px] flex-col">
-        <div className="flex min-h-0 flex-1">
+      <div className="flex h-full w-full flex-col lg:min-w-[1180px]">
+        <BackendConnectionBanner
+          initialIssueCount={initialBackendIssueCount}
+          initialIssueCode={initialBackendIssueCode}
+          formIssueCode={formBackendIssueCode}
+        />
+        <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
           {activeMarket === "us" ? (
             <USWatchlistSidebar
               initialTree={usWatchlistTree}
@@ -4238,48 +1711,16 @@ export default function MarketDashboardClient({
               selectedMarket={activeMarket}
               selectedSymbol={selectedUsSymbol}
               onMarketChange={handleMarketChange}
-              onSelectGroup={handleSelectUsGroup}
-              onSelectSymbol={(symbol, securityName) => {
-                handleSelectUsSymbol(symbol, securityName);
-              }}
+              onSelectGroup={onUsGroupChange}
+              onSelectSymbol={onUsSymbolChange}
               onExplorerDataChanged={(nextTree, nextItems) => {
                 setUsWatchlistTree(nextTree);
                 setUsWatchlistItems(nextItems);
-
-                const nextSelectedGroup =
-                  flattenUsGroups(nextTree).find((group) => group.id === selectedUsGroupId) ??
-                  flattenUsGroups(nextTree)[0] ??
-                  null;
-                const rowsForNextGroup = buildUsWatchlistRows(nextSelectedGroup, nextItems);
-                const selectedSymbolKey = selectedUsSymbol?.toUpperCase() ?? null;
-                const nextSelectedRow =
-                  selectedSymbolKey === null
-                    ? null
-                    : rowsForNextGroup.find((row) => row.symbol === selectedSymbolKey) ?? null;
-                const selectedIndexConfig = getUsMarketIndexConfig(selectedUsSymbol);
-
-                setSelectedUsGroup(nextSelectedGroup);
-                setSelectedUsGroupId(nextSelectedGroup?.id ?? null);
-                setSelectedUsGroupName(nextSelectedGroup?.group_name ?? null);
-
-                if (selectedIndexConfig) {
-                  setSelectedUsSymbol(selectedIndexConfig.symbol);
-                  setSelectedUsSecurityName(selectedIndexConfig.name);
-                } else if (selectedSymbolKey !== null && nextSelectedRow === null) {
-                  setSelectedUsSymbol(null);
-                  setSelectedUsSecurityName(null);
-                } else if (
-                  nextSelectedRow !== null &&
-                  nextSelectedRow.security_name !== selectedUsSecurityName
-                ) {
-                  setSelectedUsSecurityName(nextSelectedRow.security_name);
-                }
+                marketSelection.reconcileUsExplorer(nextTree, nextItems);
               }}
               onChanged={() => {
-                setUsRadar(null);
-                setUsRadarLoadState("idle");
-                setUsRadarErrorMessage(null);
-                setUsWatchlistVersion((version) => version + 1);
+                usRadarActions.reset();
+                usRankingActions.notifyWatchlistChanged();
               }}
             />
           ) : activeMarket === "jp" ? (
@@ -4290,41 +1731,34 @@ export default function MarketDashboardClient({
               selectedGroupId={selectedJpGroupId}
               selectedSymbol={selectedJpSymbol}
               selectedStock={selectedJpStock}
-              externalStatusMessage={jpStatusMessage}
               onMarketChange={handleMarketChange}
-              onSelectGroup={handleSelectJpGroup}
-              onSelectSymbol={handleSelectJpSymbol}
+              onSelectGroup={onJpGroupChange}
+              onSelectSymbol={onJpSymbolChange}
               onExplorerDataChanged={(nextTree, nextItems) => {
                 setJpWatchlistTree(nextTree);
                 setJpWatchlistItems(nextItems);
-                setJpRadar(null);
-                setJpRadarLoadState("idle");
-                setJpRadarErrorMessage(null);
-                setJpDataRefreshNonce((value) => value + 1);
-
-                const nextSelectedGroup =
-                  flattenJpGroups(nextTree).find((group) => group.id === selectedJpGroupId) ??
-                  flattenJpGroups(nextTree)[0] ??
-                  null;
-                const selectedSymbolKey = selectedJpSymbol?.toUpperCase() ?? null;
-                const nextSelectedRow =
-                  selectedSymbolKey === null
-                    ? null
-                    : nextItems.find((item) => item.symbol === selectedSymbolKey) ?? null;
-
-                setSelectedJpGroup(nextSelectedGroup);
-                setSelectedJpGroupId(nextSelectedGroup?.id ?? null);
-                setSelectedJpGroupName(nextSelectedGroup?.group_name ?? null);
-
-                if (selectedSymbolKey !== null && nextSelectedRow === null) {
-                  setSelectedJpSymbol(null);
-                  setSelectedJpStock(null);
-                } else if (
-                  nextSelectedRow !== null &&
-                  nextSelectedRow.security_name !== selectedJpStock?.security_name
-                ) {
-                  handleSelectJpSymbol(nextSelectedRow.symbol, nextSelectedRow.security_name);
-                }
+                marketSelection.reconcileJpExplorer(nextTree, nextItems);
+                jpRadarActions.reset();
+                jpRankingActions.notifyDataChanged();
+              }}
+            />
+          ) : activeMarket === "kr" ? (
+            <KRMarketSidebar
+              initialTree={krWatchlistTree}
+              initialItems={krWatchlistItems}
+              selectedMarket={activeMarket}
+              selectedGroupId={selectedKrGroupId}
+              selectedSymbol={selectedKrSymbol}
+              selectedStock={selectedKrStock}
+              onMarketChange={handleMarketChange}
+              onSelectGroup={onKrGroupChange}
+              onSelectSymbol={onKrSymbolChange}
+              onExplorerDataChanged={(nextTree, nextItems) => {
+                setKrWatchlistTree(nextTree);
+                setKrWatchlistItems(nextItems);
+                marketSelection.reconcileKrExplorer(nextTree, nextItems);
+                krRadarActions.reset();
+                krRankingActions.notifyDataChanged();
               }}
             />
           ) : (
@@ -4339,33 +1773,30 @@ export default function MarketDashboardClient({
               selectedMarket={activeMarket}
               selectedCryptoBase={selectedCryptoBase}
               selectedCryptoInstrumentKey={selectedCryptoInstrumentKey}
+              selectedResourceInstrumentKey={selectedResourceInstrumentKey}
               onSelectGroup={(group) => {
                 if (activeMarket !== "tw") return;
-                handleSelectGroup(group);
+                onTaiwanGroupChange(group);
               }}
               onSelectStock={(stockId, stockName) => {
                 if (activeMarket !== "tw") return;
-                handleSelectStock(stockId, stockName);
+                onTaiwanStockChange(stockId, stockName);
               }}
               onSelectFutures={(symbol) => {
                 if (activeMarket !== "tw") return;
-                handleSelectTaiwanFutures(symbol);
+                onTaiwanFuturesChange(symbol);
               }}
               onSelectCryptoInstrument={(base, instrumentKey) => {
-                setSelectedCryptoBase(base);
-                setSelectedCryptoInstrumentKey(instrumentKey);
+                marketSelection.selectCryptoInstrument(base, instrumentKey);
+              }}
+              onSelectResourceInstrument={(instrument) => {
+                marketSelection.selectResourceInstrument(instrument.key);
               }}
               onMarketChange={handleMarketChange}
               onExplorerDataChanged={(nextTree, nextItems) => {
                 setWatchlistTree(nextTree);
                 setWatchlistItems(nextItems);
-
-                const nextSelectedGroup =
-                  flattenGroups(nextTree).find((group) => group.id === activeGroupId) ?? null;
-
-                if (activeMarket === "tw" && nextSelectedGroup) {
-                  setSelectedGroup(nextSelectedGroup);
-                }
+                marketSelection.reconcileTaiwanExplorer(nextTree);
               }}
               onChanged={(nextGroupId) => {
                 if (activeMarket !== "tw") return;
@@ -4374,10 +1805,7 @@ export default function MarketDashboardClient({
                 if (groupId !== null) {
                   void loadDashboard(groupId);
                 } else {
-                  setRanking(null);
-                  setRadar(null);
-                  setRadarLoadState("idle");
-                  setRadarErrorMessage(null);
+                  resetTaiwanGroupAnalysis();
                 }
               }}
             />
@@ -4387,7 +1815,10 @@ export default function MarketDashboardClient({
             {activeMarket === "tw" ? (
               <>
                 <div className={twChartFocusMode ? "hidden" : ""}>
-                  <MarketTape summary={marketIndexSummary} loadState={marketIndexLoadState} />
+                  <TaiwanMarketTape
+                    summary={marketIndexSummary}
+                    loadState={marketIndexLoadState}
+                  />
                 </div>
 
                 {selectedFuturesSymbol ? (
@@ -4401,10 +1832,12 @@ export default function MarketDashboardClient({
                     stockId={selectedStockId}
                     stockName={selectedStockName}
                     initialChartData={initialChartData}
+                    initialChartIntradayOverlay={initialChartIntradayOverlay}
                     initialIndicatorData={initialIndicatorData}
                     watchlistRankingPanel={rankingPanel}
                     marketIndexSummary={marketIndexSummary}
                     onChartFocusModeChange={setTwChartFocusMode}
+                    onDailyPricesChanged={refreshTaiwanOverviewAfterDetailUpdate}
                     quoteDepthPreviewMode={quoteDepthPreviewMode}
                   />
                 )}
@@ -4417,15 +1850,17 @@ export default function MarketDashboardClient({
                     selectedSecurityName={selectedUsSecurityName}
                     selectedGroupName={selectedUsGroupName}
                     companyProfile={selectedUsContextProfile}
+                    onError={handleUsMarketTapeError}
                   />
                 </div>
 
                 <USStockDetailPanel
                   selectedSymbol={selectedUsSymbol}
                   selectedSecurityName={selectedUsSecurityName}
-                  watchlistRankingPanel={usRankingPanel}
+                  watchlistRankingPanel={isSelectedUsIndex ? undefined : usRankingPanel}
                   onCompanyProfileChange={setSelectedUsCompanyProfile}
                   onChartFocusModeChange={setUsChartFocusMode}
+                  onDailyPricesChanged={refreshUsOverviewAfterDetailUpdate}
                 />
               </>
             ) : activeMarket === "jp" ? (
@@ -4435,17 +1870,40 @@ export default function MarketDashboardClient({
                     selectedSymbol={selectedJpSymbol}
                     selectedStock={selectedJpStock}
                     selectedGroupName={selectedJpGroupName}
+                    onError={handleJpMarketTapeError}
                   />
                 </div>
                 <JPMarketPanel
                   initialSymbol={selectedJpSymbol}
                   refreshNonce={jpDataRefreshNonce}
-                  watchlistRankingPanel={jpRankingPanel}
+                  watchlistRankingPanel={isSelectedJpIndex ? undefined : jpRankingPanel}
                   onChartFocusModeChange={setJpChartFocusMode}
-                  onSelectStock={handleSelectJpStock}
-                  onStatusMessage={setJpStatusMessage}
+                  onDailyPricesChanged={refreshJpOverviewAfterDetailUpdate}
+                  onSelectStock={onJpStockChange}
                 />
               </>
+            ) : activeMarket === "kr" ? (
+              <>
+                <div className={krChartFocusMode ? "hidden" : ""}>
+                  <KRMarketTape
+                    selectedSymbol={selectedKrSymbol}
+                    selectedStock={selectedKrStock}
+                    selectedGroupName={selectedKrGroupName}
+                    onError={handleKrMarketTapeError}
+                  />
+                </div>
+                <KRMarketPanel
+                  initialSymbol={selectedKrSymbol}
+                  selectedGroupId={selectedKrGroupId}
+                  refreshNonce={krDataRefreshNonce}
+                  watchlistRankingPanel={krRankingPanel}
+                  onChartFocusModeChange={setKrChartFocusMode}
+                  onDailyPricesChanged={refreshKrOverviewAfterDetailUpdate}
+                  onSelectStock={onKrStockChange}
+                />
+              </>
+            ) : activeMarket === "crypto" && selectedResourceInstrumentKey ? (
+              <ResourceMarketPanel selectedInstrumentKey={selectedResourceInstrumentKey} />
             ) : activeMarket === "crypto" ? (
               <CryptoMarketPanel
                 selectedBase={selectedCryptoBase}

@@ -1,4 +1,3 @@
-﻿from contextlib import asynccontextmanager
 import logging
 import time
 import uuid
@@ -10,24 +9,21 @@ from fastapi.responses import FileResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import PROJECT_ROOT
-from app.crypto_market.auto_refresh import start_crypto_auto_refresh, stop_crypto_auto_refresh
-from app.crypto_market.ws_runtime import start_crypto_realtime_collectors, stop_crypto_realtime_collectors
-from app.db.migrations import run_database_migrations
-from app.db.session import SessionLocal, init_db
 from app.errors import (
     http_exception_handler,
     unhandled_exception_handler,
     validation_exception_handler,
 )
-from app.jobs import scheduler as job_scheduler, service as job_service
 from app.routers import (
     ai,
     crypto_market,
     dispatch,
     indicators,
     jp_market,
+    kr_market,
     jobs,
     market,
+    portfolio,
     raw_results,
     reports,
     resource_market,
@@ -38,40 +34,11 @@ from app.routers import (
     us_market,
     watchlists,
 )
+from app.runtime import lifespan
 
 
 FAVICON_PATH = PROJECT_ROOT / "frontend" / "src" / "app" / "favicon.ico"
 request_logger = logging.getLogger("app.requests")
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    run_database_migrations()
-    init_db()
-    db = SessionLocal()
-
-    try:
-        interrupted_count = job_service.mark_interrupted_jobs(db)
-
-        if interrupted_count:
-            logging.getLogger(__name__).warning(
-                "Marked %s interrupted queued/running jobs as error.",
-                interrupted_count,
-            )
-    finally:
-        db.close()
-
-    scheduler = job_scheduler.start_scheduler()
-    await start_crypto_auto_refresh()
-    await start_crypto_realtime_collectors()
-
-    try:
-        yield
-    finally:
-        await stop_crypto_realtime_collectors()
-        await stop_crypto_auto_refresh()
-        job_scheduler.stop_scheduler(scheduler)
-        job_service.shutdown_job_executor(wait=False)
 
 
 app = FastAPI(
@@ -143,7 +110,9 @@ app.include_router(indicators.router, prefix="/api/market/indicators", tags=["ma
 app.include_router(stocks.router, prefix="/api/stocks", tags=["stocks"])
 app.include_router(us_market.router, prefix="/api/us-market", tags=["us-market"])
 app.include_router(jp_market.router, prefix="/api/jp-market", tags=["jp-market"])
+app.include_router(kr_market.router, prefix="/api/kr-market", tags=["kr-market"])
 app.include_router(watchlists.router, prefix="/api/watchlists", tags=["watchlists"])
+app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
 app.include_router(reports.router, prefix="/api/reports", tags=["reports"])
 
 

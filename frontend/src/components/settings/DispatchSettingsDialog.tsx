@@ -1,5 +1,6 @@
 "use client";
 
+import { StateSurface } from "@/components/LoadingPlaceholders";
 import { useT } from "@/i18n";
 import {
   createDispatchSchedule,
@@ -634,10 +635,10 @@ export default function DispatchSettingsDialog({
         {message ? (
           <div
             className={[
-              "shrink-0 border-b px-5 py-2 text-sm font-semibold",
+              "omi-feedback-strip shrink-0 border-b px-5 py-2 text-sm font-semibold",
               message.type === "error"
-                ? "border-omi-danger-border bg-omi-danger-soft text-omi-danger"
-                : "border-omi-success-border bg-omi-success-soft text-omi-success",
+                ? "omi-feedback-strip-danger"
+                : "omi-feedback-strip-success",
             ].join(" ")}
           >
             {message.text}
@@ -672,9 +673,11 @@ export default function DispatchSettingsDialog({
                   ))}
                 </div>
               ) : recipientGroups.length === 0 ? (
-                <div className="border border-omi-border-subtle bg-omi-surface px-3 py-3 text-xs text-omi-text-muted">
-                  {t("settings.dispatch.noRecipientGroups")}
-                </div>
+                <StateSurface
+                  title={t("settings.dispatch.noRecipientGroups")}
+                  tone="empty"
+                  compact
+                />
               ) : (
                 recipientGroups.map((group) => (
                   <button
@@ -1019,9 +1022,11 @@ export default function DispatchSettingsDialog({
                     )}
                   </div>
                 ) : (
-                  <div className="mt-3 flex h-[260px] items-center justify-center border border-omi-border-subtle bg-omi-surface-subtle px-4 text-center text-sm text-omi-text-muted">
-                    {t("settings.dispatch.emptyPreview")}
-                  </div>
+                  <StateSurface
+                    title={t("settings.dispatch.emptyPreview")}
+                    tone="empty"
+                    className="mt-3 h-[260px]"
+                  />
                 )}
               </section>
 
@@ -1119,9 +1124,11 @@ export default function DispatchSettingsDialog({
 
                   <div className="mt-4 grid gap-2">
                     {schedules.length === 0 ? (
-                      <div className="border border-omi-border-subtle bg-omi-surface-subtle px-3 py-3 text-xs text-omi-text-muted">
-                        {t("settings.dispatch.noSchedules")}
-                      </div>
+                      <StateSurface
+                        title={t("settings.dispatch.noSchedules")}
+                        tone="empty"
+                        compact
+                      />
                     ) : (
                       schedules.map((schedule) => (
                         <div
@@ -1214,9 +1221,11 @@ export default function DispatchSettingsDialog({
                 </div>
                 <div className="mt-3 grid gap-2">
                   {deliveries.length === 0 ? (
-                    <div className="border border-omi-border-subtle bg-omi-surface-subtle px-3 py-3 text-xs text-omi-text-muted">
-                      {t("settings.dispatch.noHistory")}
-                    </div>
+                    <StateSurface
+                      title={t("settings.dispatch.noHistory")}
+                      tone="empty"
+                      compact
+                    />
                   ) : (
                     deliveries.map((delivery) => (
                       <div

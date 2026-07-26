@@ -1,10 +1,11 @@
 "use client";
 
 import JobStatusCenter from "@/components/JobStatusCenter";
+import PortfolioHoldingsPanel from "@/components/PortfolioHoldingsPanel";
 import SettingsDock from "@/components/SettingsDock";
-import type { MarketRegion } from "@/components/SidebarWatchlistExplorer";
 import { marketLabel, useT } from "@/i18n";
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
+import type { MarketRegion } from "@/components/market-dashboard/selection/dashboardRoutes";
 import {
   JP_MARKET_INDEX_GROUP_NAME,
   JP_MARKET_INDEX_ITEMS,
@@ -26,7 +27,6 @@ type Props = {
   selectedGroupId: number | null;
   selectedSymbol: string | null;
   selectedStock: JPStockMasterRead | null;
-  externalStatusMessage?: Message;
   onMarketChange: (market: MarketRegion) => void;
   onSelectGroup?: (group: JPWatchlistGroupNode | null) => void;
   onSelectSymbol: (symbol: string, securityName: string | null) => void;
@@ -43,7 +43,7 @@ const marketOptions: Array<{
   { value: "tw", enabled: true },
   { value: "us", enabled: true },
   { value: "jp", enabled: true },
-  { value: "kr", enabled: false },
+  { value: "kr", enabled: true },
   { value: "crypto", enabled: true },
 ];
 
@@ -103,7 +103,6 @@ export default function JPMarketSidebar({
   selectedGroupId,
   selectedSymbol,
   selectedStock,
-  externalStatusMessage,
   onMarketChange,
   onSelectGroup,
   onSelectSymbol,
@@ -148,7 +147,6 @@ export default function JPMarketSidebar({
   const selectedLabel = selectedStock
     ? `${selectedStock.symbol} ${selectedStock.security_name ?? ""}`.trim()
     : selectedSymbol ?? t("jpMarket.sidebar.noSelection");
-  const statusMessage = externalStatusMessage ?? message;
 
   function countGroupItems(node: JPWatchlistGroupNode): number {
     const directCount = itemsByGroupId.get(node.id)?.length ?? 0;
@@ -188,7 +186,6 @@ export default function JPMarketSidebar({
     onExplorerDataChanged?.(treeData, itemData);
     setCurrentGroupId(nextSelected?.id ?? null);
     setRenameValue(nextSelected?.group_name ?? "");
-    onSelectGroup?.(nextSelected);
 
     return nextSelected;
   }
@@ -615,7 +612,7 @@ export default function JPMarketSidebar({
   }
 
   return (
-    <aside className="flex h-full w-[300px] shrink-0 flex-col border-r border-omi-border-subtle bg-omi-surface">
+    <aside className="flex max-h-[55vh] w-full shrink-0 flex-col border-b border-omi-border-subtle bg-omi-surface lg:h-full lg:max-h-none lg:w-[300px] lg:border-b-0 lg:border-r">
       <div className="border-b border-omi-border-subtle px-4 py-4">
         <div className="text-xs font-semibold uppercase tracking-[0.22em] text-omi-accent">
           Open Market Intelligence
@@ -679,6 +676,14 @@ export default function JPMarketSidebar({
 
       <div className="min-h-0 flex-1 overflow-y-auto py-2">
         {renderPinnedIndexGroup()}
+        <PortfolioHoldingsPanel
+          market="jp"
+          selectedSymbol={selectedSymbol}
+          defaultCurrency="JPY"
+          symbolPlaceholder={t("jpMarket.watchlist.symbolPlaceholder")}
+          normalizeSymbol={normalizeSymbolInput}
+          onSelectSymbol={onSelectSymbol}
+        />
         {tree.length > 0 ? (
           tree.map((node) => renderGroupNode(node))
         ) : (
@@ -688,22 +693,23 @@ export default function JPMarketSidebar({
         )}
       </div>
 
-      <div className="space-y-2 border-b border-omi-border-subtle px-4 py-4">
+      {message ? (
+        <div
+          className={[
+            "mx-4 mb-3 border px-3 py-2 text-xs",
+            message.type === "success"
+              ? "border-omi-market-down-border bg-omi-market-down-soft text-omi-market-down"
+              : message.type === "warning"
+                ? "border-omi-warning-border bg-omi-warning-soft text-omi-warning"
+                : "border-omi-danger-border bg-omi-danger-soft text-omi-danger",
+          ].join(" ")}
+        >
+          {message.text}
+        </div>
+      ) : null}
+
+      <div className="border-b border-omi-border-subtle px-4 py-4">
         <JobStatusCenter placement="inline" market="jp" />
-        {statusMessage ? (
-          <div
-            className={[
-              "border px-3 py-2 text-xs",
-              statusMessage.type === "success"
-                ? "border-omi-market-down-border bg-omi-market-down-soft text-omi-market-down"
-                : statusMessage.type === "warning"
-                  ? "border-omi-warning-border bg-omi-warning-soft text-omi-warning"
-                  : "border-omi-danger-border bg-omi-danger-soft text-omi-danger",
-            ].join(" ")}
-          >
-            {statusMessage.text}
-          </div>
-        ) : null}
       </div>
 
       <div className="space-y-4 p-4">

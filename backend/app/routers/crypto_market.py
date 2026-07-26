@@ -48,6 +48,7 @@ from app.crypto_market.schemas import (
     CryptoWatchlistItemCreate,
     CryptoWatchlistItemRead,
     CryptoWatchlistItemUpdate,
+    CryptoWorkspaceSummaryRead,
 )
 from app.crypto_market.service import (
     CryptoMarketError,
@@ -85,6 +86,7 @@ from app.crypto_market.auto_refresh import (
 )
 from app.crypto_market.realtime import build_crypto_realtime_stream_specs, crypto_realtime_store
 from app.crypto_market.source_health import build_crypto_source_health
+from app.crypto_market.workspace import build_crypto_workspace_summary
 from app.crypto_market import watchlist as crypto_watchlist
 from app.crypto_market.ws_runtime import (
     crypto_realtime_collector_status,
@@ -179,6 +181,11 @@ def get_crypto_source_health(
         include_events=include_events,
         max_entries=max_entries,
     )
+
+
+@router.get("/workspace-summary", response_model=CryptoWorkspaceSummaryRead)
+def get_crypto_workspace_summary(db: Session = Depends(get_db)):
+    return build_crypto_workspace_summary(db)
 
 
 @router.post("/source-health/snapshot", response_model=CryptoSourceHealthRead)

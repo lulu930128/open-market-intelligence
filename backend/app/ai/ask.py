@@ -13,16 +13,19 @@ from app.ai import (
     ask_response_support,
     ask_stages,
     decision_core,
+    decision_envelope,
     decision_engine,
     freshness,
     llm,
     orchestrator,
     pipeline_progress,
+    query_plan,
     reports,
     scope_resolution,
     tools,
 )
 from app.ai.schemas import AiAskRequest
+from app.portfolio import service as portfolio_service
 
 
 CONTRACT_VERSION = ask_response_support.CONTRACT_VERSION
@@ -227,6 +230,7 @@ _check_freshness = ask_execution._check_freshness
 _report_level = ask_response_support._report_level
 _build_next_actions = ask_response_support._build_next_actions
 _clarification_response = ask_response_support._clarification_response
+_target_error_response = ask_response_support._target_error_response
 
 
 
@@ -249,7 +253,34 @@ def ask(
         request_target_type=_request_target_type,
         resolution_target=_resolution_target,
     )
+    if resolution.error_code:
+        policy = _policy(payload, server_policy or AiAskServerPolicy())
+        progress.clarification_required()
+        response = _target_error_response(
+            payload=payload,
+            resolution=resolution,
+            requested_mode=payload.mode,
+            policy=policy,
+        )
+        progress.evidence_passport(response["evidence_passport"])
+        progress.answer_ready(answer_ready=False, report_level="blocked")
+        return decision_envelope.for_requested_contract(
+            response,
+            requested_contract_version=payload.contract_version,
+        )
     warnings: list[str] = []
+    if not payload.position_context:
+        try:
+            saved_position_context = portfolio_service.get_position_context_for_scope(
+                db,
+                scope_type=scope_type,
+                scope_id=resolution.selected_scope_id,
+            )
+        except portfolio_service.PortfolioError as exc:
+            saved_position_context = {}
+            warnings.append(f"Portfolio position context skipped: {exc}")
+        if saved_position_context:
+            payload = payload.model_copy(update={"position_context": saved_position_context})
     question_stage = ask_stages.build_question_stage(
         payload=payload,
         scope_type=scope_type,
@@ -268,23 +299,73 @@ def ask(
     question_understanding = question_stage.question_understanding
     if resolution.clarification_required:
         progress.clarification_required()
-        return _clarification_response(
+        response = _clarification_response(
             payload=payload,
             resolution=resolution,
             requested_mode=requested_mode,
             policy=policy,
         )
+        return decision_envelope.for_requested_contract(
+            response,
+            requested_contract_version=payload.contract_version,
+        )
 
     effective_mode = _effective_mode(requested_mode, scope_type, policy, warnings)
+    execution_plan = query_plan.build_query_plan(
+        payload=payload,
+        scope_type=scope_type,
+        question_intent=question_intent,
+        effective_mode=effective_mode,
+    )
+    original_market_data_params = (
+        payload.market_data_params
+        if isinstance(payload.market_data_params, dict)
+        else {}
+    )
+    explicit_domain_selection = bool(
+        payload.selection
+        or execution_plan.matched_positive_terms
+        or execution_plan.matched_negative_terms
+        or any(
+            key in original_market_data_params
+            for key in ("refresh_domains", "requested_domains", "excluded_domains")
+        )
+    )
+    payload = payload.model_copy(
+        update={
+            "market_data_params": {
+                **payload.market_data_params,
+                "payload_level": execution_plan.payload_level,
+                "reader_profile": execution_plan.reader_profile,
+                "explicit_domain_selection": explicit_domain_selection,
+                "requested_domains": list(execution_plan.requested_domains),
+                "excluded_domains": list(execution_plan.excluded_domains),
+                "requested_capabilities": [
+                    *execution_plan.selected_capabilities,
+                    *execution_plan.optional_selected_capabilities,
+                ],
+                "capability_limits": dict(execution_plan.selection.get("limits") or {}),
+                "external_fetch_allowed": bool(policy.get("can_external_fetch")),
+            }
+        }
+    )
+    query_plan_payload = execution_plan.as_dict()
+    policy["query_plan"] = query_plan_payload
     freshness_result = progress.run_freshness_check(
         scope_type=scope_type,
-        operation=lambda: _check_freshness(db, payload, scope_type),
+        operation=lambda: _check_freshness(
+            db,
+            payload,
+            scope_type,
+            question_intent=question_intent,
+        ),
     )
     tool_stage = ask_stages.execute_tool_stages(
         scope_type=scope_type,
         payload=payload,
         resolution=resolution,
         policy=policy,
+        query_plan=query_plan_payload,
         freshness_result=freshness_result,
         progress=progress,
         progress_callback=progress_callback,
@@ -301,6 +382,14 @@ def ask(
             **kwargs,
         ),
         run_tw_watchlist_tool_session=lambda **kwargs: agentic_tools.run_tw_watchlist_tool_session(
+            db=db,
+            **kwargs,
+        ),
+        run_crypto_asset_tool_session=lambda **kwargs: agentic_tools.run_crypto_asset_tool_session(
+            db=db,
+            **kwargs,
+        ),
+        run_regional_market_tool_session=lambda **kwargs: agentic_tools.run_regional_market_tool_session(
             db=db,
             **kwargs,
         ),
@@ -326,6 +415,7 @@ def ask(
         question_intent=question_intent,
         tool_runs=tool_runs,
         warnings=warnings,
+        policy=policy,
         progress=progress,
         read_data_only=_read_data_only,
         build_brief=_build_brief,
@@ -361,9 +451,10 @@ def ask(
         build_consumer_human_answer=_build_consumer_human_answer,
         build_reasoning_steps=_build_reasoning_steps,
         payload=payload,
+        query_plan=query_plan_payload,
     )
 
-    return ask_finalizer.finalize_ask_response(
+    response = ask_finalizer.finalize_ask_response(
         payload=payload,
         resolution=resolution,
         requested_mode=requested_mode,
@@ -377,4 +468,10 @@ def ask(
         tool_runs=tool_runs,
         freshness_result=freshness_result,
         progress=progress,
+        query_plan=query_plan_payload,
+    )
+    return decision_envelope.for_requested_contract(
+        response,
+        requested_contract_version=payload.contract_version,
+        canonical_result=result,
     )

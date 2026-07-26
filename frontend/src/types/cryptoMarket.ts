@@ -56,6 +56,89 @@ export type CryptoProviderContract = {
   assets?: CryptoAssetDefinition[];
   instruments?: Array<Record<string, unknown>>;
   ohlcv_intervals?: Partial<Record<CryptoProvider, string[]>>;
+  status_taxonomy?: Record<string, string>;
+  providers?: Record<
+    string,
+    {
+      role?: string;
+      resources?: string[];
+      resource_status?: Record<string, string>;
+      status?: string;
+      canonical_symbols?: string[];
+      canonical_assets?: string[];
+      ohlcv_intervals?: string[];
+    }
+  >;
+};
+
+export type CryptoWorkspaceMaturity = "ready" | "partial" | "stale" | "missing";
+
+export type CryptoWorkspaceSlotStatus =
+  | CryptoWorkspaceMaturity
+  | "event_quiet"
+  | "provider_pending"
+  | "api_key_required"
+  | "not_applicable";
+
+export type CryptoWorkspaceSlot = {
+  key: string;
+  tier: "core" | "context" | "advanced" | string;
+  status: CryptoWorkspaceSlotStatus;
+  applicable: boolean;
+  row_count: number;
+  provider_count: number;
+  ready_provider_count: number;
+  latest_fetched_at: string | null;
+  providers: Array<{
+    provider: string;
+    target: string;
+    status: string;
+    row_count: number;
+    latest_fetched_at: string | null;
+  }>;
+  reason: string;
+};
+
+export type CryptoWorkspaceAsset = {
+  asset: CryptoBaseAsset;
+  name: string;
+  priority: string;
+  default_subscription_mode: string;
+  subscription_mode: string;
+  subscription_resources: Record<string, boolean>;
+  watchlisted: boolean;
+  instrument_count: number;
+  spot_instrument_count: number;
+  derivative_instrument_count: number;
+  maturity: CryptoWorkspaceMaturity;
+  as_of: string | null;
+  core_summary: Record<string, number>;
+  context_summary: Record<string, number>;
+  advanced_summary: Record<string, number>;
+  slots: CryptoWorkspaceSlot[];
+};
+
+export type CryptoWorkspaceSummary = {
+  kind: "crypto_workspace_summary";
+  generated_at: string;
+  registry_count: number;
+  watchlist_count: number;
+  summary: {
+    asset_count: number;
+    watchlist_count: number;
+    always_on_count: number;
+    on_select_count: number;
+    ready_count: number;
+    partial_count: number;
+    stale_count: number;
+    missing_count: number;
+  };
+  runtime: {
+    realtime?: Record<string, unknown>;
+    auto_refresh?: Record<string, unknown>;
+  };
+  assets: CryptoWorkspaceAsset[];
+  warnings: string[];
 };
 
 export type CryptoKLineInstrument = {

@@ -30,6 +30,34 @@ def _technical_levels(
 
 
 class AiDecisionEngineTests(unittest.TestCase):
+    def test_position_math_prefers_canonical_compact_quote(self) -> None:
+        result = {
+            "data": {
+                "compact": {
+                    "quote": {
+                        "latest_price": 2290,
+                        "trade_date": "2026-07-17",
+                    }
+                },
+                "latest_daily": {
+                    "close_price": 2200,
+                    "trade_date": "2026-07-16",
+                },
+            }
+        }
+
+        position_math = decision_engine.build_position_math(
+            position_context={"has_position_context": True, "entry_price": 2380},
+            result=result,
+        )
+
+        self.assertEqual(position_math["latest_price"], 2290)
+        self.assertEqual(
+            position_math["latest_price_source"],
+            "data.compact.quote.latest_price",
+        )
+        self.assertAlmostEqual(position_math["unrealized_return_pct"], -3.7815, places=4)
+
     def test_technical_level_fields_and_numbers_parse_entry_and_risk_levels(self) -> None:
         levels = _technical_levels()
 
@@ -66,6 +94,47 @@ class AiDecisionEngineTests(unittest.TestCase):
         self.assertIn("追高", action_plan[0]["text"])
         self.assertIn("803-834", action_plan[1]["text"])
         self.assertIn("950", action_plan[1]["text"])
+
+    def test_bearish_trend_does_not_become_bullish_from_price_position(self) -> None:
+        levels = _technical_levels()
+        fields = decision_engine.technical_level_fields(levels)
+        numbers = decision_engine.technical_level_numbers(levels)
+
+        headline, _, action_plan, risks = decision_engine.trend_view_with_levels(
+            target_label="2303 聯電",
+            score=-3,
+            weak_evidence=False,
+            fields=fields,
+            numbers=numbers,
+        )
+
+        combined_text = " ".join(
+            [
+                headline,
+                *(item["text"] for item in action_plan),
+                *risks,
+            ]
+        )
+        self.assertIn("波段偏弱", headline)
+        self.assertNotIn("波段偏多", combined_text)
+        self.assertNotIn("方向偏多", combined_text)
+        self.assertIn("多週期分數偏弱", action_plan[0]["text"])
+
+    def test_neutral_trend_does_not_claim_bullish_above_support(self) -> None:
+        levels = _technical_levels(latest_price=850)
+        fields = decision_engine.technical_level_fields(levels)
+        numbers = decision_engine.technical_level_numbers(levels)
+
+        headline, _, action_plan, _ = decision_engine.trend_view_with_levels(
+            target_label="2303 聯電",
+            score=0,
+            weak_evidence=False,
+            fields=fields,
+            numbers=numbers,
+        )
+
+        self.assertNotIn("偏多", headline)
+        self.assertNotIn("偏多", action_plan[0]["text"])
 
     def test_build_position_decision_calculates_cost_distance_and_data_limits(self) -> None:
         result = {

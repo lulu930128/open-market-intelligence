@@ -56,6 +56,7 @@ def _settings_payload() -> RefreshExecutionSettingsWrite:
             "tw": _market_policy(observed=1.2, subresource=0.4, market=0.6),
             "us": _market_policy(observed=20.0, subresource=30.0, market=40.0),
             "jp": _market_policy(observed=2.0, subresource=15.0, market=25.0),
+            "kr": _market_policy(observed=2.5, subresource=16.0, market=26.0),
         }
     )
 
@@ -67,6 +68,7 @@ class RefreshExecutionSettingsTests(unittest.TestCase):
             patch.object(refresh_execution.settings, "scheduler_market_refresh_sleep_seconds", 0.7),
             patch.object(refresh_execution.settings, "scheduler_us_market_refresh_sleep_seconds", 21.0),
             patch.object(refresh_execution.settings, "scheduler_jp_market_refresh_sleep_seconds", 31.0),
+            patch.object(refresh_execution.settings, "scheduler_kr_market_refresh_sleep_seconds", 32.0),
         ):
             response = get_refresh_execution_settings(db=db)
 
@@ -78,6 +80,7 @@ class RefreshExecutionSettingsTests(unittest.TestCase):
         self.assertEqual(response.markets.tw.market_refresh_interval_seconds, 0.7)
         self.assertEqual(response.markets.us.market_refresh_interval_seconds, 21.0)
         self.assertEqual(response.markets.jp.market_refresh_interval_seconds, 31.0)
+        self.assertEqual(response.markets.kr.market_refresh_interval_seconds, 32.0)
 
     def test_update_refresh_execution_settings_persists_database_override(self) -> None:
         with settings_db_session() as db:
@@ -95,6 +98,7 @@ class RefreshExecutionSettingsTests(unittest.TestCase):
         self.assertEqual(stored_payload["markets"]["us"]["observed_stock_refresh_interval_seconds"], 20.0)
         self.assertEqual(reread.source, "database")
         self.assertEqual(reread.markets.jp.market_refresh_interval_seconds, 25.0)
+        self.assertEqual(reread.markets.kr.market_refresh_interval_seconds, 26.0)
 
     def test_refresh_execution_resolvers_use_explicit_value_first(self) -> None:
         with settings_db_session() as db:

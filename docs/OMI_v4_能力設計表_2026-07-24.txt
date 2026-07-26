@@ -1,0 +1,226 @@
+OMI v4 能力設計表
+日期：2026-07-24
+公開契約：omi.decision.v4
+Capability Registry：omi.capability.registry.v1
+Capability 數量：38
+
+一、總結
+
+1. OMI 的公開 AI 決策出口已收斂為 omi.decision.v4。
+2. HTTP、SSE、repo MCP、standalone OMI_search、OMI Dock 與 Kuro preflight
+   都送出或取得同一份 v4 canonical envelope。
+3. Kuro/桌寵不是另一套 OMI contract。Kuro 模型自行把 v4 evidence/decision
+   整理成可念稿、角色語氣與 TTS 內容。
+4. v2/v3 只保留在 OMI backend 私有 builder、回歸 seam，以及 Kuro 舊聊天
+   歷史的讀取相容；不能再由 public request 指定。
+5. 「單一出口」指單一 decision contract，不代表刪除所有 /api/market/*
+   data-plane routes。OMI backend 與自家 UI 仍可用專用 route 讀圖表/資料，
+   外部模型的統一入口則是 omi.ask v4。
+
+二、公開出口
+
+表面                         狀態       公開行為
+POST /api/ai/ask             可用       request/response 只允許 omi.decision.v4
+POST /api/ai/ask/stream      可用       SSE final 為相同 v4 envelope
+GET /api/ai/tools            可用       只宣告 omi.ask、v4 enum、38 capabilities
+Repo MCP omi.ask             可用       thin forward；不改寫 backend v4
+Repo MCP omi.ask_stream      可用       streaming transport；final 不改寫
+OMI_search omi.search        可用       固定 v4、read-only、原樣回傳 v4
+Frontend OMI Dock            可用       明確送 v4，直接讀 canonical sections
+Kuro 自動 OMI preflight      可用       固定 v4、64 KiB budget；朗讀稿由 Kuro 處理
+OMI backend 自身 AI/LLM      可用       是 omi.ask pipeline 的受信任可選階段
+v2/v3 public request         不可用     HTTP validation 或 MCP adapter 會拒絕
+
+三、模型可控制的 request 維度
+
+控制                         可做到                                  邊界
+target                       auto 或明確 type/id                      backend 負責解析
+intents                      最多 8 個多意圖                          不可取代 target
+mode                         auto/data_only/brief/full/analysis/report analysis/report 受 trust
+output                       evidence_only/decision/decision_with_evidence
+realtime_policy              cache_only/prefer_live/require_live       不能創造不存在的 live feed
+selection.include/required   選必要 capability                         不相容 scope 會拒絕
+selection.optional           選可缺 capability                         缺資料不阻斷必要項
+selection.exclude            排除 capability                           identity/freshness 仍保留
+selection.fields             capability 級 field allowlist             非法 field 會拒絕
+selection.limits             capability 級 row/point limit             1～500
+max_response_bytes           4 KiB～1 MiB                              超限會壓縮/省略並標示
+continuation                 選 granular fill action                   backend 重新驗證 plan/action
+payload_level                summary/compact/standard/full              舊密度別名，仍受 byte budget
+market_data_params           provider/interval/timeframe/bars 等        backend 各 reader 再限界
+allow_external_fetch         可請求 bounded refresh                    最終由 server trust 決定
+tool_budget                  calls/external fetches/seconds              不允許無界全市場抓取
+allow_llm                    可請求 OMI LLM synthesis                   需 trust、API key、budget
+allow_write                  可請求 report/memory 寫入                  需 trust；read path 不隱性寫入
+
+四、支援 target
+
+核心：
+  auto, market, data_freshness, tw_stock, tw_watchlist, tw_index,
+  tw_futures
+
+跨市場 context：
+  us_stock, jp_stock, jp_index, kr_stock, kr_index,
+  us_watchlist, jp_watchlist, kr_watchlist,
+  crypto_market, crypto_asset, resource_asset, us_macro
+
+使用者/診斷：
+  portfolio, source_health, capability_status
+
+目前沒有 public target：
+  hk_stock, hk_index, hk_watchlist，以及任意 SQL/dataset target
+
+五、38 個可選 capability
+
+Capability                     適用 scope                                  缺資料時的 bounded 動作
+target.identity                全部                                        不外抓
+quote.snapshot                 股票/指數/期貨/crypto/resource              TW/US/JP/KR/crypto 單目標補價
+intraday.bars                  股票/指數/期貨/market/crypto/resource       單目標 bounded intraday
+daily.ohlcv                    股票/指數/期貨/crypto/resource              單目標 bounded daily refresh
+technical.structure            股票/指數/期貨/crypto/resource              由既有 evidence 計算，不亂補
+chips.institutional            台股個股                                    tw.refresh_institutional
+chips.margin                   台股個股                                    tw.refresh_margin
+broker_branch.summary          台股個股                                    tw.refresh_broker_branch
+ownership.distribution         台股個股                                    tw.refresh_shareholding
+fundamentals.revenue           TW/US/JP/KR 個股                            台股可補營收；其他依既有 provider
+fundamentals.financials        TW/US/JP/KR 個股                            TW financials、US SEC facts
+cross_market.overnight         台股個股                                    使用 bounded 跨市場 context
+company.profile                US/JP/KR 個股                               讀既有 profile/cache
+corporate.actions              美股個股                                    讀既有 corporate actions
+market.short_volume            美股個股                                    讀既有 FINRA/cache
+market.breadth                 市場/TW 指數/TW 期貨/跨市場指數 context      不把 watchlist 當全市場
+market.sample_ranking          台股市場                                    OMI sample 排行，與 breadth 分開
+market.cross_market            台股市場                                    bounded overnight context
+market.chips                   台股市場                                    法人/融資與官方 market aggregate
+market.volume_state            台股市場                                    同分鐘量能；樣本不足回 partial
+derivatives.positioning        台指期                                      法人 OI/PCR/market chip trend
+derivatives.structure          台指期                                      TXO chain/large trader/term structure
+watchlist.ranking              TW/US/JP/KR watchlist                       只在群組成員內排名
+watchlist.radar                TW/US/JP/KR watchlist                       bounded radar results
+watchlist.coverage             TW/US/JP/KR watchlist                       回傳資料覆蓋與缺口
+portfolio.summary              portfolio                                   trusted local read
+portfolio.holdings             portfolio                                   最多 500 筆，敏感資料不外存
+portfolio.valuation            portfolio                                   依原幣別，不靜默跨幣別合計
+macro.series                   US macro                                    FRED series identity
+macro.observations             US macro                                    bounded observations；非即時
+resource.metadata              resource asset                              watch-only provider metadata
+crypto.order_book              crypto asset/market                         單標的 bounded order book refresh
+crypto.derivatives             crypto asset/market                         單標的 funding/OI 等 refresh
+diagnostics.capabilities       capability_status                           provider/實作能力盤點
+diagnostics.data_freshness     data_freshness                              跨市場 freshness 診斷
+diagnostics.source_health      source_health                               provider/runtime health
+source.health                  全部                                        顯示 provider failure/warnings
+data.freshness                 全部                                        強制保留日期、缺口與狀態
+
+六、目前可以做到
+
+[可以] 單一問題同時帶 target 與多個 intent，不再把「查 freshness」誤當成
+       另一個標的。
+[可以] 模型只選 quote.snapshot 的指定欄位，不必一次接收整包個股 context。
+[可以] 針對 intraday/daily/history 設筆數，並設定總 response byte budget。
+[可以] 缺 quote、intraday、daily、chips、fundamentals、crypto depth/derivatives
+       時回傳單 capability、單 target 的 fill action。
+[可以] 模型只執行選中的 fill action；backend 重新驗證 plan_id、action_id、
+       target、tool、call count、timeout 與 cache-write policy。
+[可以] 查台股個股、台股市場、自選股、指數、台指期、美股、日股、韓股、
+       Crypto、資源商品、FRED macro、portfolio、source health。
+[可以] 回傳 answer、decision、evidence、quality、manifest、limitations、
+       execution、continuation、error 的固定 v4 結構。
+[可以] 付費 OpenAI API 可作 OMI synthesis/report，但需 backend trust、
+       API key 與 budget；MCP/Kuro 不接觸 API key。
+[可以] 休市時回傳 latest_completed_session/final_snapshot，不冒充 live。
+[可以] provider 失敗時回傳 cached/stale/partial/missing/provider failure，
+       不把缺值轉成 0 或 ready。
+
+七、條件式可以做到
+
+[條件] 「即時」只有 provider 確實提供 event time、received/fetched time、
+       session、timezone、age 且門檻通過時才成立。
+[條件] require_live 可要求 live，但 provider 不連線或市場休市時會明確失敗/
+       blocked，不會偽造。
+[條件] 美股/日股/韓股 refresh 取決於 API key、provider quota、交易時段與
+       release schedule。
+[條件] Crypto 是 sampled snapshots/ohlcv/order book/derivatives，不是交易所
+       逐筆永久 archive。
+[條件] 台股市場量能同分鐘基線需要 minute history；樣本不足維持 partial。
+[條件] portfolio valuation 只能在原幣別可靠彙總；沒有顯式 FX contract 時
+       cross_currency_total 為 null。
+[條件] OMI analysis/report 可用付費 LLM，但一般 read-only caller 不會因
+       allow_llm=true 就自動取得權限。
+[條件] standalone OMI_search 與 Kuro 已改成 v4 source code；實際常駐程序仍需
+       重啟/重新載入後才會吃到新版本。
+
+八、目前不能做到
+
+[不能] 自動下單、券商帳戶操作、代替使用者執行交易。
+[不能] 保證價格、報價、深度或指標永遠即時；資料源沒有就只能回缺口。
+[不能] 用 health HTTP 200 代表資料新鮮、decision ready 或 provider 正常。
+[不能] 任意 SQL、任意 table join、任意 dataset query DSL。
+[不能] 讓 consumer 直接讀 OMI SQLite 或自己重做 freshness/market semantics。
+[不能] 讓 MCP、Frontend 或 Kuro 改寫 OMI answer/decision 成另一套市場 contract。
+[不能] 由 OMI 產出 Kuro 專用可念稿；該工作由 Kuro 模型/呈現層負責。
+[不能] 無限制全市場 refresh、無界歷史回補或不透明付費 quota 消耗。
+[不能] 把 unavailable/stale/partial 資料合成為 0、current、ready 或確定因果。
+[不能] 目前直接查港股；HK symbol master/calendar/provider/freshness contract
+       尚未完成。
+[不能] 把 ADR parity 視為自動保證正確的套利價；ratio/FX/reference time 仍需
+       版本化 metadata 與驗證。
+
+九、consumer 讀取規則
+
+1. 先看 status.readiness，不可只看 HTTP 200、SSE done 或 MCP isError。
+2. 要顯示/朗讀結論時讀 answer；要做決策條件時讀 decision。
+3. 所有資料可用性以 evidence.quality 與 evidence.manifest 為準。
+4. evidence.data 只包含選取 capability；不可假設未出現資料等於 0。
+5. limitations 與 error 必須保留。
+6. continuation.fill_plan 是建議的 bounded 補資料方式；consumer 不可直接
+   呼叫內部 refresh function。
+7. MCP include_raw 已棄用；v4 下是 no-op。縮小 payload 必須用 selection。
+
+十、本輪明確不處理
+
+P0-17：廣度 universe（ETF、權證、無成交標的等）口徑統一。
+P0-25～27：TAIEX 開盤、跳點、集合競價與欄位語意。
+P0-50：ADR ADS ratio、FX 與參考時點重算。
+P0-69：補足 fallback 成功執行證據；目前不能由「缺證據」推論完全沒執行。
+P1-74：不同市場 freshness 門檻來源與狀態語意透明化。
+
+十一、上線/執行注意
+
+1. Backend runtime 已重啟到本次 source；目前 127.0.0.1:8400 已只公開 v4
+   與 38 capabilities。
+2. Repo MCP、OMI_search tunnel/stdio 與 Kuro runtime 都需重啟或重新連線，
+   避免舊 process 繼續送 v3。
+3. 驗證時要同時證明：
+   - v4 HTTP success
+   - v3/v2 HTTP rejection
+   - SSE final v4
+   - MCP tools/list enum 只有 v4
+   - MCP success 與 structured business error
+   - Kuro preflight payload 是 v4
+   - representative TW/US/crypto/portfolio/watchlist capability projection
+
+十二、本次驗證結果
+
+[PASS] Backend targeted v4/MCP regression：70 passed，另含 18 個 subtests。
+[PASS] Backend safe validation：compileall + 980 tests passed。
+[PASS] Frontend safe validation：lint + TypeScript typecheck passed。
+[PASS] Standalone OMI_search：26 unittest + AST syntax check passed。
+[PASS] Kuro：20 unittest + tool_catalog.json parse passed。
+[PASS] Live /api/ai/tools：只有 v4，selection/registry 均為 38 capabilities。
+[PASS] Live OpenAPI：ask/stream request 為 AiAskV4Request；ask response 為
+       AiDecisionEnvelopeV4。
+[PASS] Live HTTP：v4 success；v3/v2 均 422；不存在代碼為 canonical v4
+       TARGET_NOT_FOUND。
+[PASS] Live SSE：status/evidence/delta/final/done，final contract 為 v4。
+[PASS] Live bounded payload：2330 quote response 20,472 bytes，小於 32,768
+       bytes request budget。
+[PASS] Live granular fill：DOGE crypto.order_book stale 時只產生一個
+       capability/target、limit=5、estimated_calls=1 的 action，未全抓。
+[PASS] Live MCP protocol：initialize、tools/list、success、business error 與
+       legacy rejection 全部通過。
+
+驗證限制：
+  - 本輪沒有消耗付費 LLM quota，也沒有執行大量外部 refresh。
+  - Kuro GUI 與既有 OMI_search 常駐程序沒有被本輪強制重啟；source 與測試已
+    更新，實際常駐程序需由正常啟動流程重新載入。

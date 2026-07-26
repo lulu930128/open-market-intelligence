@@ -1,6 +1,6 @@
 # Open Market Intelligence Architecture Review
 
-日期：2026-06-14
+日期：2026-07-14
 
 這份文件集中目前專案掃描後看到的不足與架構風險，供後續開發時對照。它不是一次性 TODO，而是後續拆 issue、排優先順序、驗證改善是否完成的基準。
 
@@ -11,11 +11,13 @@
 最大風險不是單一功能缺失，而是核心責任集中在少數超大型檔案：
 
 - `backend/app/ai/ask.py`：原本約 3,900 行，Phase 1 已收斂到約 400 行；目前主要保留 OMI 問答 orchestration 與相容 alias，target resolve、policy、execution 與 response support 已拆到分檔模組。
-- `backend/app/ai/tools.py`：原本約 2,600 行，Phase 1 已收斂到約 1,600 行；目前主要保留 AI tool registry、資料 envelope 與各 market reader，技術評分/價位推導已拆出。
-- `backend/app/us_market/service.py`：約 3,000 行，集中美股 master、報價、SEC、FINRA、FRED、watchlist 與 refresh。
-- `frontend/src/components/LightweightKLineChart.tsx`：約 7,800 行，集中 chart engine、drawing、indicator、projection、interaction。
-- `frontend/src/components/StockDetailPanel.tsx`：約 7,100 行，集中台股個股頁、資料 tab、refresh、專業模式、AI context。
-- `frontend/src/components/MarketDashboardClient.tsx`：約 2,800 行，集中台股/美股 dashboard selection、watchlist、ranking、refresh state。
+- `backend/app/ai/tools.py`：3,373 行；主要保留 AI tool registry、資料 envelope 與跨 market readers，仍是大型後端 façade。
+- `backend/app/us_market/service.py`：3,275 行，集中美股 master、報價、SEC、FINRA、FRED、watchlist 與 refresh。
+- `frontend/src/components/LightweightKLineChart.tsx`：4,492 行，集中 chart engine、drawing、indicator、projection、interaction。
+- `frontend/src/components/StockDetailPanel.tsx`：4,206 行，集中台股個股頁、資料 tab、refresh、專業模式、AI context。
+- `frontend/src/components/MarketDashboardClient.tsx`：5,365 行，仍集中台股/美股/日股/韓股 dashboard selection、radar 與 refresh state；watchlist ranking row projection 與共用 panel 已完成第一批抽離。
+
+2026-07-14 收斂已完成 frontend payload guard、嚴格 E2E fixtures、provider fallback telemetry、source-health snapshot age、Alembic-only startup、跨程序 background leader lock、direct dependency pins 與 CI Python/browser gates。後續大型檔案拆分採獨立批次進行；第一批已先從 dashboard ranking 的純資料與 presentation boundary 開始，避免把 runtime/contract 維護和高風險 UI 重構混在同一輪。
 
 ## P1：優先處理
 
@@ -82,23 +84,26 @@
 
 ### 4. 前端核心元件過大
 
+狀態：仍存在，但第一批已完成 dashboard ranking boundary 拆分；目前以 payload runtime guard、typecheck、production build 與 Playwright characterization 降低後續修改風險。
+
 現況：
 
 - `LightweightKLineChart.tsx` 同時處理 chart lifecycle、series、drawing、projection、indicator、keyboard/mouse interaction。
 - `StockDetailPanel.tsx` 同時處理個股頁 UI、資料 tab、intraday polling、professional mode、refresh job、AI context。
-- `MarketDashboardClient.tsx` 同時處理台股/美股 active market、selection、watchlist tree、ranking、refresh states。
+- `MarketDashboardClient.tsx` 仍處理台股、美股、日股、韓股 active market、selection、radar 與 refresh states；group flatten、pending row build、ranking merge/progressive batch 已移到 `market-dashboard/watchlistRankingRows.ts`，共用 US/JP/KR ranking layout 已移到 `WatchlistRankingPanel.tsx`。
 
 風險：
 
 - 專業模式後續加工具會越來越容易破壞既有 chart behavior。
 - OMI context 與資料 refresh 很難復用到美股或期貨。
-- 前端沒有 component/e2e 測試時，大型互動元件只能靠人工測。
+- Playwright 已新增 loaded Taiwan parent/child watchlist ranking 與 US regional panel characterization；圖表互動與 JP/KR 狀態細節仍多數需要後續案例。
 
 建議：
 
 - Chart 拆成 `ChartCanvas`、`DrawingLayer`、`IndicatorLayer`、`ProjectionLayer`、`useChartInteraction`。
 - 個股資料拆成 `useTaiwanStockData`、`useTaiwanIntradayRefresh`、`useTaiwanDataPanelRefresh`。
 - Dashboard selection 拆成 `useMarketSelection`、`useWatchlistState`、`useRankingState`。
+- 下一批優先抽 dashboard ranking load/state orchestration 或 market selection helper，不把 radar、refresh 與 routing 同時搬動。
 
 ### 5. 交易日/休市規則前後端不共用
 
@@ -201,12 +206,13 @@
 
 現況：
 
-- 後端有 unittest，且已有 AI freshness guard、US market data 等測試。
-- 前端 `package.json` 目前只有 `lint`、`build`，沒有 component/e2e test script。
+- 後端有完整 pytest regression，CI 以 Python 3.11/3.13 matrix 執行 compile、`pip check` 與測試。
+- 前端 CI 會執行 lint、TypeScript typecheck、production build 與 Playwright smoke。
+- Playwright fixtures 對未知 API 直接失敗，且 SSR 預設隔離本機 live backend；目前覆蓋 OMI dock、專業圖表 shell 與 malformed portfolio payload 的局部錯誤隔離。
 
 風險：
 
-- 專業模式、OMI dock、休市日、資料 tab refresh 這些高互動行為缺少自動化 regression。
+- 大型互動元件目前仍只有 smoke 級覆蓋；畫線拖曳、跨週期切換、休市日與 mobile layout 仍需後續案例。
 
 建議：
 
@@ -219,20 +225,20 @@
 
 ## P3：後續整理
 
-### 11. DB models 檔案過大
+### 11. DB models registry 仍大，但暫不拆檔
 
 現況：
 
-- `backend/app/db/models.py` 約 1,300 行，集中多個 domain 的 table model。
+- `backend/app/db/models.py` 目前 3,158 行，集中多個 domain 的 table model。
 
 風險：
 
-- migration、schema ownership、domain 邊界越來越模糊。
+- 直接拆檔會增加 Alembic discovery、foreign-key resolution、import set 與第二個 `Base` 的風險。
 
 建議：
 
-- 依 domain 拆成 `models_market.py`、`models_us_market.py`、`models_ai.py`、`models_jobs.py`。
-- `models.py` 可保留 re-export，降低一次性改動風險。
+- 目前保留 `models.py` 作為唯一 registry，並以 migration parity test 保護 78 張 model table 與 Alembic head 完全一致。
+- 只有在先建立完整 import/constraint/index contract 後才重新評估 domain 拆檔，不以行數單獨驅動重構。
 
 ### 12. 台股資料源健康度需要更透明
 
@@ -314,7 +320,7 @@
 - 已新增 `backend/app/ai/technical_analysis.py`，集中 technical factor score model、horizon weighted summary、technical price levels、chart/point normalization 與 synthetic technical report generation。
 - `backend/app/ai/ask.py` 主流程已改用 `ask_stages`，讓 `ask()` 更接近 request validation、scope resolution、stage orchestration、evidence passport 與 final response contract 的薄包裝。
 - `backend/app/ai/ask.py` 目前約 400 行，保留既有私有 helper 名稱與 `reports/tools/orchestrator/freshness/llm` module attributes 作為相容層，避免既有 patch-based 測試與呼叫端一次性斷裂。
-- `backend/app/ai/tools.py` 目前約 1,600 行，已把技術分析純函式搬到 `technical_analysis.py`，保留 public reader 行為與既有 private helper alias。
+- `backend/app/ai/tools.py` 目前 3,373 行，已把技術分析純函式搬到 `technical_analysis.py`，但跨市場 reader 與 registry 持續成長；本輪未進行大型拆分。
 - `backend/app/ai/ask.py` 已在問題理解、freshness、工具規劃、資料讀取、reasoning、evidence passport 與 answer_ready 階段呼叫 `OmiPipelineProgress`，避免 progress 組裝散落在 orchestration。
 - `backend/app/ai/agentic_tools.py` 的 `execute_tool_plan()` 已能回報工具 running/success/blocked/skipped/error 狀態，讓外部刷新或工具被阻擋時不再只出現在最後結果。
 - `backend/app/ai/streaming.py` 已改成背景 worker + queue，能在 `ask()` 尚未完成時即時輸出 progress status，並以 `dedupe_key` 對完成後的 response status 做去重。
@@ -392,13 +398,15 @@
 - Signals popover 仍保留在 header 狀態鈕內，不再把處理節點整段插進 answer 本體。
 - `analysis.human_answer` 有 headline 時才使用結構化回答卡；若 final response 缺少可渲染 answer，會回落到 streaming text 或空狀態提示。
 - SSE parsing 可單獨測試，後續若加 retry、timeout、heartbeat 或 reconnect，不需要再改動 dock UI 主體。
-- `LightweightKLineChart.tsx` 已把 header、選取畫線摘要卡與靜態 indicator SVG overlay 拆到 `frontend/src/components/chart/`，主檔從約 7,800 行降到約 7,400 行。
-- `npm run test:e2e` 會用 Playwright 啟動 Next dev server，並以 route mock 測 OMI SSE 與專業圖表入口，不依賴本機後端資料庫內容。
+- `LightweightKLineChart.tsx` 已把 header、選取畫線摘要卡與靜態 indicator SVG overlay 拆到 `frontend/src/components/chart/`，目前為 4,492 行。
+- `MarketDashboardClient.tsx` 已把四市場 watchlist row projection、progressive ranking merge 與共用 ranking panel 拆到 `frontend/src/components/market-dashboard/`，由 6,042 行降至 5,365 行。
+- `npm run test:e2e` 會用 Playwright 啟動隔離 backend 的 Next server，並以嚴格 route mock 測 OMI SSE、專業圖表入口、malformed payload、loaded Taiwan ranking 與 US 共用 regional panel；CI 在 production build 後以 standalone launcher 驗證正式 bundle。
 
 後續可再做：
 
 - `LightweightKLineChart.tsx` 仍是大型互動元件；可在下一輪繼續抽 `ChartCanvas`、互動畫線 layer、indicator calculation modules 與 projection helpers。
-- Playwright 目前是 smoke baseline；若後續要覆蓋畫線工具拖曳、時間週期切換、mobile layout，可再補更細的 e2e cases。
+- `MarketDashboardClient.tsx` 仍需分批抽 ranking load/state、market selection 與各市場 tape；不得同時改 URL/API contract。
+- Playwright 目前是 smoke + ranking characterization baseline；若後續要覆蓋畫線工具拖曳、時間週期切換、mobile layout，可再補更細的 e2e cases。
 
 ### Phase 4：美股 provider 與 source health
 

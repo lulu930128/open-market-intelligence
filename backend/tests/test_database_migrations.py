@@ -6,10 +6,16 @@ import shutil
 import unittest
 import uuid
 
+from alembic import command
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import Session
 
-from app.db.migrations import get_database_revision, get_head_revision, run_database_migrations
+from app.db.migrations import (
+    create_alembic_config,
+    get_database_revision,
+    get_head_revision,
+    run_database_migrations,
+)
 from app.db.models import Base, StockMaster
 
 
@@ -43,10 +49,17 @@ class DatabaseMigrationTests(unittest.TestCase):
                     resource_instrument_count = connection.execute(
                         text("SELECT COUNT(*) FROM resource_market_instrument")
                     ).scalar_one()
+                    currency_instrument_count = connection.execute(
+                        text(
+                            "SELECT COUNT(*) FROM resource_market_instrument "
+                            "WHERE root_folder = 'currency'"
+                        )
+                    ).scalar_one()
             finally:
                 engine.dispose()
 
             self.assertIn("alembic_version", table_names)
+            self.assertEqual(table_names - {"alembic_version"}, set(Base.metadata.tables))
             self.assertIn("stock_master", table_names)
             self.assertIn("us_stock_master", table_names)
             self.assertIn("us_daily_price", table_names)
@@ -60,7 +73,27 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("job_run", table_names)
             self.assertIn("broker_branch_trade_daily", table_names)
             self.assertIn("market_index_daily_stat", table_names)
+            self.assertIn("taiwan_market_minute_state", table_names)
             self.assertIn("market_chip_daily", table_names)
+            market_chip_columns = {
+                column["name"]
+                for column in inspect(engine).get_columns("market_chip_daily")
+            }
+            self.assertTrue(
+                {
+                    "put_volume",
+                    "call_volume",
+                    "put_call_volume_ratio_pct",
+                    "put_open_interest",
+                    "call_open_interest",
+                    "put_call_open_interest_ratio_pct",
+                }.issubset(market_chip_columns)
+            )
+            financial_columns = {
+                column["name"]
+                for column in inspect(engine).get_columns("financial_metric_quarterly")
+            }
+            self.assertTrue({"report_date", "released_at", "filed_at"}.issubset(financial_columns))
             self.assertIn("market_intraday_bar", table_names)
             self.assertIn("taiwan_stock_quote_snapshot", table_names)
             self.assertIn("chart_drawing_snapshot", table_names)
@@ -89,6 +122,18 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("jp_company_fundamental", table_names)
             self.assertIn("jp_watchlist_group", table_names)
             self.assertIn("jp_watchlist_item", table_names)
+            self.assertIn("kr_stock_master", table_names)
+            self.assertIn("kr_daily_price", table_names)
+            self.assertIn("kr_market_index", table_names)
+            self.assertIn("kr_index_daily_price", table_names)
+            self.assertIn("kr_company_fundamental", table_names)
+            self.assertIn("kr_investor_trade_daily", table_names)
+            self.assertIn("kr_watchlist_group", table_names)
+            self.assertIn("kr_watchlist_item", table_names)
+            self.assertIn("watchlist_radar_snapshot_run", table_names)
+            self.assertIn("watchlist_radar_snapshot_item", table_names)
+            self.assertIn("watchlist_radar_outcome", table_names)
+            self.assertIn("portfolio_holding", table_names)
             jp_master_columns = {
                 column["name"]
                 for column in inspect(engine).get_columns("jp_stock_master")
@@ -98,6 +143,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("sector_17_name", jp_master_columns)
             self.assertIn("size_name", jp_master_columns)
             self.assertGreaterEqual(resource_instrument_count, 6)
+            self.assertEqual(currency_instrument_count, 9)
             self.assertEqual(get_database_revision(database_url), get_head_revision())
 
     def test_upgrade_legacy_create_all_database_preserves_rows(self) -> None:
@@ -130,6 +176,65 @@ class DatabaseMigrationTests(unittest.TestCase):
 
             self.assertEqual(stock_name, "台積電")
             self.assertEqual(get_database_revision(database_url), get_head_revision())
+
+    def test_financial_date_migration_clears_known_fetch_date_pollution(self) -> None:
+        with migration_test_directory() as directory:
+            database_url = sqlite_url(directory / "financial_dates.db")
+            config = create_alembic_config(database_url)
+            command.upgrade(config, "head")
+            command.downgrade(config, "20260718_0036")
+
+            engine = create_engine(database_url)
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "INSERT INTO source_registry "
+                            "(id, source_name, source_type, category, enabled, priority, auth_type, reliability_level, created_at, updated_at) "
+                            "VALUES (1, 'financial-test', 'official', 'financial', 1, 100, 'none', 'official', "
+                            "'2026-07-19 00:00:00', '2026-07-19 00:00:00')"
+                        )
+                    )
+                    connection.execute(
+                        text(
+                            "INSERT INTO raw_fetch_result "
+                            "(id, source_id, fetched_at, method, parser_version) VALUES "
+                            "(1, 1, '2026-07-19 00:00:00', 'GET', 'mops-financial-metrics-history-v1'), "
+                            "(2, 1, '2026-05-15 00:00:00', 'GET', 'financial-metrics-v2')"
+                        )
+                    )
+                    connection.execute(
+                        text(
+                            "INSERT INTO financial_metric_quarterly "
+                            "(id, source_id, raw_result_id, report_date, fiscal_year, quarter, period, stock_id, created_at, updated_at) VALUES "
+                            "(1, 1, 1, '2026-07-19', 2026, 1, '2026Q1', '2330', '2026-07-19 00:00:00', '2026-07-19 00:00:00'), "
+                            "(2, 1, 2, '2026-05-15', 2026, 1, '2026Q1', '2303', '2026-05-15 00:00:00', '2026-05-15 00:00:00')"
+                        )
+                    )
+            finally:
+                engine.dispose()
+
+            command.upgrade(config, "head")
+            engine = create_engine(database_url)
+            try:
+                with engine.connect() as connection:
+                    rows = connection.execute(
+                        text(
+                            "SELECT stock_id, report_date, released_at, filed_at "
+                            "FROM financial_metric_quarterly ORDER BY stock_id"
+                        )
+                    ).mappings().all()
+            finally:
+                engine.dispose()
+
+            self.assertEqual(rows[0]["stock_id"], "2303")
+            self.assertEqual(str(rows[0]["report_date"]), "2026-05-15")
+            self.assertEqual(str(rows[0]["released_at"]), "2026-05-15")
+            self.assertIsNone(rows[0]["filed_at"])
+            self.assertEqual(rows[1]["stock_id"], "2330")
+            self.assertIsNone(rows[1]["report_date"])
+            self.assertIsNone(rows[1]["released_at"])
+            self.assertIsNone(rows[1]["filed_at"])
 
 
     def test_repair_partial_jp_master_table_at_0016(self) -> None:

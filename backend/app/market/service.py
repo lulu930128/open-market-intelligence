@@ -15,6 +15,8 @@ from app.db.models import (
 from app.market.backfill import backfill_tpex_trading_stock, backfill_twse_stock_day
 from app.market.intraday import get_intraday_trend
 from app.market.ohlc_overlay import aggregate_ohlc_points, append_intraday_overlay
+from app.market.taiwan_rules import expected_daily_price_date
+from app.market.trading_calendar import previous_taiwan_trading_day
 
 
 CHART_LOOKBACK_MULTIPLIER = {
@@ -254,20 +256,15 @@ def list_stock_ohlc_chart_data(
         raise ValueError(f"bars must be less than or equal to {MAX_CHART_BARS}.")
 
     end_date = to_date or date.today()
+    resolved_expected_data_date = (
+        previous_taiwan_trading_day(end_date, include_value=True)
+        if to_date is not None
+        else expected_daily_price_date()
+    )
     lookback_days = bars * CHART_LOOKBACK_MULTIPLIER[timeframe]
     start_date = end_date - timedelta(days=lookback_days)
 
     backfill_result = None
-
-    if ensure_history:
-        backfill_result = _ensure_stock_history(
-            db=db,
-            stock_id=stock_id,
-            start_date=start_date,
-            end_date=end_date,
-            sleep_seconds=sleep_seconds,
-        )
-
     rows = list_stock_daily_history(
         db=db,
         stock_id=stock_id,
@@ -277,6 +274,54 @@ def list_stock_ohlc_chart_data(
         ascending=True,
     )
     daily_points = [_chart_row(row) for row in rows]
+    base_points = aggregate_ohlc_points(
+        points=daily_points,
+        timeframe=timeframe,
+        sum_fields=("volume", "trade_value", "transaction_count"),
+    )[-bars:]
+    latest_data_date = rows[-1].trade_date if rows else None
+    refresh_reasons: list[str] = []
+    if len(base_points) < bars:
+        refresh_reasons.append("insufficient_history")
+    if latest_data_date is None or latest_data_date < resolved_expected_data_date:
+        refresh_reasons.append("stale_latest_date")
+
+    if ensure_history and refresh_reasons:
+        try:
+            refresh_result = _ensure_stock_history(
+                db=db,
+                stock_id=stock_id,
+                start_date=start_date,
+                end_date=resolved_expected_data_date,
+                sleep_seconds=sleep_seconds,
+            )
+            backfill_result = (
+                {**refresh_result, "refresh_reasons": refresh_reasons}
+                if refresh_result is not None
+                else None
+            )
+        except Exception as exc:
+            db.rollback()
+            if not rows:
+                raise
+            backfill_result = {
+                "status": "error",
+                "stock_id": stock_id,
+                "refresh_reasons": refresh_reasons,
+                "message": f"Taiwan daily refresh failed; using cached rows: {exc}",
+            }
+
+        rows = list_stock_daily_history(
+            db=db,
+            stock_id=stock_id,
+            from_date=start_date,
+            to_date=end_date,
+            limit=5000,
+            ascending=True,
+        )
+        daily_points = [_chart_row(row) for row in rows]
+        latest_data_date = rows[-1].trade_date if rows else None
+
     intraday_overlay = None
     if include_intraday:
         daily_points, intraday_overlay = append_intraday_overlay(
@@ -290,6 +335,15 @@ def list_stock_ohlc_chart_data(
         timeframe=timeframe,
         sum_fields=("volume", "trade_value", "transaction_count"),
     )[-bars:]
+    freshness_status = (
+        "missing"
+        if latest_data_date is None
+        else "stale"
+        if latest_data_date < resolved_expected_data_date
+        else "future"
+        if latest_data_date > resolved_expected_data_date
+        else "current"
+    )
 
     return {
         "stock_id": stock_id,
@@ -302,6 +356,11 @@ def list_stock_ohlc_chart_data(
         "points": points,
         "backfill": backfill_result,
         "intraday_overlay": intraday_overlay,
+        "latest_data_date": latest_data_date,
+        "expected_data_date": resolved_expected_data_date,
+        "freshness_status": freshness_status,
+        "is_current": freshness_status in {"current", "future"},
+        "refresh_recommended": freshness_status in {"missing", "stale"},
     }
 
 

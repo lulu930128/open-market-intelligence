@@ -50,8 +50,34 @@
 - 若 external refresh 需要超出 bounded budget、付費 quota、長時間全市場抓取或寫入 report/memory，停止並要求使用者確認。
 - 若資料 stale、partial、missing 或 provider failure 被隱藏，該 milestone 不算完成。
 
+## 2026-07-19 outward-contract continuation
+
+8. Query Plan and execution scope
+   - Acceptance: quote-only Taiwan stock requests call only target identity, latest daily quote, and quote freshness readers; excluded reader/provider calls remain zero.
+   - Validation: `backend/tests/test_ai_outward_contract.py` plus the existing freshness suite.
+
+9. Layered readiness and response dimensions
+   - Acceptance: `data_only` has no Human Answer/decision contract; safety validation blocks only unsafe sections; `payload_level` and `diagnostics_level` do not change answer semantics.
+   - Validation: readiness counterexamples in `test_ai_outward_contract.py` and updated P0 safety regressions.
+
+10. MCP and detached timeout jobs
+   - Acceptance: backend `ok=false` becomes MCP `isError=true`; successful empty results remain `isError=false`; timeout responses expose `request_status`, fallback state, cancellation detail, and a deduplicable job reference.
+   - Validation: `test_omi_mcp_server.py`, external `OMI_search/tests/test_server.py`, and P1 timeout regressions.
+
+11. Remaining answer/slot consistency
+   - Acceptance: explicit market identity survives resolution; slot availability and freshness are separate; selected score/title/summary share one aggregate model.
+   - Validation: targeted semantic and technical-analysis regressions.
+
 ## Decisions
+
+- 2026-07-19：對外 contract 採三個獨立維度：`mode=data_only|brief|full`、`payload_level=summary|compact|standard|full`、`diagnostics_level=none|basic|debug`；舊 mode 只作 request compatibility alias。
+- 2026-07-19：readiness 分層，不再由單一 `answer_ready` 同時代表資料、分析與決策可用性。
+- 2026-07-19：quote-only 是 Query Plan 的第一個硬 invariant；不相關 reader/provider call count 必須為零，不能只靠最後裁切 payload。
+- 2026-07-19：MCP `isError` 只反映 business failure；正常零結果仍是成功。
 
 - 2026-06-21：第一個長任務選 OMI AI decision core，而不是 Kuro OMI briefing。理由：Kuro 是 OMI 市場分析的下游；先穩定 backend decision contract，Kuro 後續只需呈現、語音化與任務牆整合。
 - 2026-06-21：本任務不從零重寫 AI。理由：repo 已有 `decision_core.py`、`answer_composer.py`、`ask_*` stages、freshness guard、agentic tools 與 tests；正確方向是補 contract map、regression 與缺口，而不是大改架構。
 - 2026-06-21：bounded external refresh 是 OMI 能力的一部分，但必須由 backend allowlisted tools 和 `tool_budget` 管控；MCP/Kuro 不直接打市場資料 API。
+- 2026-07-19：P0 先以獨立 checkpoint 處理 target identity、follow-up context 與 directional price invariants；未知標的和無效價位不得進入可執行 answer contract，完成驗證後先 commit 再推進 freshness/P1。
+- 2026-07-19：P1 以 additive contract 分離 availability/freshness、selected/fallback provider 與 market-cache/user-data write semantics；`max_total_seconds` 改為實際 response deadline，超時必須回傳可供 UI/MCP 判讀的 timeout/cached-fallback 狀態。
+- 2026-07-19：P2 以 answer/data semantics 收斂對外窗口：盤中證據不足改走明示日線 fallback、全市場與 OMI 樣本分開標示、MCP 提供 bounded transport projection、財報日期不得用 fetch time 代填、資訊查詢不得誤入交易建議。

@@ -10,6 +10,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "start:e2e-production": "node scripts/start-e2e-standalone.mjs",
     "lint": "eslint",
     "test:e2e": "playwright test"
   },

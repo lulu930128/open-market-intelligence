@@ -1,9 +1,15 @@
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from app.market.exchange_calendar_cache import cached_market_holiday
+
 
 US_MARKET_TIMEZONE = ZoneInfo("America/New_York")
-US_DAILY_PRICE_RELEASE_TIME = time(hour=16, minute=0)
+US_PRE_MARKET_OPEN_TIME = time(hour=4, minute=0)
+US_SESSION_OPEN_TIME = time(hour=9, minute=30)
+US_SESSION_CLOSE_TIME = time(hour=16, minute=0)
+US_POST_MARKET_CLOSE_TIME = time(hour=20, minute=0)
+US_DAILY_PRICE_RELEASE_TIME = US_SESSION_CLOSE_TIME
 
 
 def _observed_fixed_holiday(year: int, month: int, day: int) -> date:
@@ -82,11 +88,14 @@ def us_market_holiday_names(year: int) -> dict[date, str]:
 
 
 def us_market_holiday_name(value: date) -> str | None:
+    cached = cached_market_holiday("us", value)
+    if cached.covered:
+        return cached.name
     return us_market_holiday_names(value.year).get(value)
 
 
 def is_us_trading_day(value: date) -> bool:
-    return value.weekday() < 5 and value not in us_market_holidays(value.year)
+    return value.weekday() < 5 and us_market_holiday_name(value) is None
 
 
 def previous_us_trading_day(value: date, *, include_value: bool = True) -> date:
@@ -141,6 +150,10 @@ def expected_us_daily_price_date(
 __all__ = [
     "US_DAILY_PRICE_RELEASE_TIME",
     "US_MARKET_TIMEZONE",
+    "US_POST_MARKET_CLOSE_TIME",
+    "US_PRE_MARKET_OPEN_TIME",
+    "US_SESSION_CLOSE_TIME",
+    "US_SESSION_OPEN_TIME",
     "expected_us_daily_price_date",
     "is_us_trading_day",
     "next_us_trading_day",

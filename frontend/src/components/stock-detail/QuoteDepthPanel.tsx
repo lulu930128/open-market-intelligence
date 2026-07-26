@@ -7,6 +7,7 @@ import {
   formatPrice,
   valueTone,
 } from "@/components/stock-detail/StockDetailDataViews";
+import { StateSurface } from "@/components/LoadingPlaceholders";
 import type {
   TaiwanStockQuoteDepthLevel,
   TaiwanStockQuoteDepthPreviewMode,
@@ -451,9 +452,13 @@ export default function QuoteDepthPanel({
       )}
 
       {!showDepth ? (
-        <div className="mt-3 border border-omi-border-subtle bg-omi-surface-muted px-3 py-3 text-sm text-omi-text-muted">
-          <div className={isError ? "text-omi-market-down" : ""}>{message}</div>
-        </div>
+        <StateSurface
+          title={message}
+          tone={isError ? "danger" : loadState === "loading" ? "loading" : "empty"}
+          busy={loadState === "loading"}
+          compact
+          className="mt-3"
+        />
       ) : null}
 
       {displayQuoteDepth ? (

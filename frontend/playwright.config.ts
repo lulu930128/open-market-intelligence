@@ -3,6 +3,14 @@ import { defineConfig, devices } from "@playwright/test";
 const port = Number(process.env.PLAYWRIGHT_PORT ?? 3100);
 const host = process.env.PLAYWRIGHT_HOST ?? "127.0.0.1";
 const baseURL = `http://${host}:${port}`;
+const productionServer =
+  process.env.CI || process.env.PLAYWRIGHT_SERVER_MODE === "production";
+const reuseExistingServer = process.env.PLAYWRIGHT_REUSE_EXISTING_SERVER === "1";
+const serverCommand = productionServer
+  ? `npm run start:e2e-production -- --hostname ${host} --port ${port}`
+  : `npm run dev -- --hostname ${host} --port ${port}`;
+process.env.API_PROXY_TARGET =
+  process.env.PLAYWRIGHT_API_PROXY_TARGET ?? "http://127.0.0.1:9";
 
 export default defineConfig({
   testDir: "./e2e",
@@ -14,13 +22,13 @@ export default defineConfig({
   use: {
     ...devices["Desktop Chrome"],
     baseURL,
-    channel: "chrome",
+    ...(process.env.CI ? {} : { channel: "chrome" as const }),
     trace: "on-first-retry",
   },
   webServer: {
-    command: `npm run dev -- --hostname ${host} --port ${port}`,
+    command: serverCommand,
     url: baseURL,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer,
     timeout: 120_000,
   },
 });

@@ -549,6 +549,49 @@ class CryptoSourceHealthRead(BaseModel):
     entries: list[dict[str, Any]]
 
 
+class CryptoWorkspaceSlotRead(BaseModel):
+    key: str
+    tier: str
+    status: str
+    applicable: bool
+    row_count: int
+    provider_count: int
+    ready_provider_count: int
+    latest_fetched_at: str | None = None
+    providers: list[dict[str, Any]] = Field(default_factory=list)
+    reason: str
+
+
+class CryptoWorkspaceAssetRead(BaseModel):
+    asset: str
+    name: str
+    priority: str
+    default_subscription_mode: str
+    subscription_mode: str
+    subscription_resources: dict[str, bool]
+    watchlisted: bool
+    instrument_count: int
+    spot_instrument_count: int
+    derivative_instrument_count: int
+    maturity: str
+    as_of: str | None = None
+    core_summary: dict[str, int]
+    context_summary: dict[str, int]
+    advanced_summary: dict[str, int]
+    slots: list[CryptoWorkspaceSlotRead]
+
+
+class CryptoWorkspaceSummaryRead(BaseModel):
+    kind: str
+    generated_at: str
+    registry_count: int
+    watchlist_count: int
+    summary: dict[str, int]
+    runtime: dict[str, Any]
+    assets: list[CryptoWorkspaceAssetRead]
+    warnings: list[str] = Field(default_factory=list)
+
+
 class CryptoRealtimeStreamRead(BaseModel):
     provider: str
     resource: str

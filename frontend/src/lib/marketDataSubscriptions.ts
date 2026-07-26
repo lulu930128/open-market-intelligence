@@ -50,7 +50,34 @@ export type MarketDataSubscriptionSettingsWrite = {
   items: MarketDataSubscriptionItemWrite[];
 };
 
+export const MARKET_DATA_SUBSCRIPTIONS_UPDATED_EVENT =
+  "omi:market-data-subscriptions-updated";
+export const RESOURCE_SELECTED_QUOTE_SECONDS_KEY = "selected_quote_seconds";
+export const RESOURCE_BACKGROUND_QUOTE_SECONDS_KEY = "background_quote_seconds";
+export const RESOURCE_SELECTED_QUOTE_DEFAULT_SECONDS = 5;
+export const RESOURCE_BACKGROUND_QUOTE_DEFAULT_SECONDS = 300;
+export const RESOURCE_SELECTED_QUOTE_MIN_SECONDS = 1;
+export const RESOURCE_SELECTED_QUOTE_MAX_SECONDS = 60;
+export const RESOURCE_BACKGROUND_QUOTE_MIN_SECONDS = 60;
+export const RESOURCE_BACKGROUND_QUOTE_MAX_SECONDS = 300;
+
 const manualRefreshModes = new Set<MarketDataSubscriptionMode>([
+  "always_on",
+  "on_select",
+  "manual",
+]);
+
+const quotePollingModes = new Set<MarketDataSubscriptionMode>([
+  "always_on",
+  "on_select",
+]);
+
+const autoRefreshModes = new Set<MarketDataSubscriptionMode>([
+  "always_on",
+  "on_select",
+]);
+
+const missingDataRepairModes = new Set<MarketDataSubscriptionMode>([
   "always_on",
   "on_select",
   "manual",
@@ -71,7 +98,17 @@ export function saveMarketDataSubscriptionSettings(
       method: "PUT",
       body: JSON.stringify(payload),
     }
-  );
+  ).then((settings) => {
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(
+        new CustomEvent<MarketDataSubscriptionSettingsRead>(
+          MARKET_DATA_SUBSCRIPTIONS_UPDATED_EVENT,
+          { detail: settings }
+        )
+      );
+    }
+    return settings;
+  });
 }
 
 export function marketDataSubscriptionItem(
@@ -92,6 +129,95 @@ export function subscriptionModeAllowsManualRefresh(
   mode: MarketDataSubscriptionMode | null | undefined
 ) {
   return Boolean(mode && manualRefreshModes.has(mode));
+}
+
+export function resourceSubscriptionAllowsQuotePolling(
+  item: MarketDataSubscriptionItem | null | undefined
+) {
+  return Boolean(
+    item &&
+      item.market === "resource" &&
+      item.resources.quote === true &&
+      quotePollingModes.has(item.mode)
+  );
+}
+
+export function resourceSubscriptionAllowsManualRefresh(
+  item: MarketDataSubscriptionItem | null | undefined,
+  resource = "ohlcv"
+) {
+  return Boolean(
+    item &&
+      item.market === "resource" &&
+      item.resources[resource] === true &&
+      manualRefreshModes.has(item.mode)
+  );
+}
+
+export function resourceSubscriptionAllowsAutoRefresh(
+  item: MarketDataSubscriptionItem | null | undefined,
+  resource = "ohlcv"
+) {
+  return Boolean(
+    item &&
+      item.market === "resource" &&
+      item.resources[resource] === true &&
+      autoRefreshModes.has(item.mode)
+  );
+}
+
+export function resourceSubscriptionAllowsMissingDataRepair(
+  item: MarketDataSubscriptionItem | null | undefined,
+  resource = "ohlcv"
+) {
+  return Boolean(
+    item &&
+      item.market === "resource" &&
+      item.resources[resource] === true &&
+      missingDataRepairModes.has(item.mode)
+  );
+}
+
+export function subscriptionIntervalSeconds(
+  item: MarketDataSubscriptionItem | null | undefined,
+  key: string,
+  fallback: number,
+  bounds: { min?: number; max?: number } = {}
+) {
+  const value = item?.intervals[key];
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+
+  const min = bounds.min ?? 1;
+  const max = bounds.max ?? Number.MAX_SAFE_INTEGER;
+  return Math.min(Math.max(value, min), max);
+}
+
+export function resourceSelectedQuoteIntervalSeconds(
+  item: MarketDataSubscriptionItem | null | undefined
+) {
+  return subscriptionIntervalSeconds(
+    item,
+    RESOURCE_SELECTED_QUOTE_SECONDS_KEY,
+    RESOURCE_SELECTED_QUOTE_DEFAULT_SECONDS,
+    {
+      min: RESOURCE_SELECTED_QUOTE_MIN_SECONDS,
+      max: RESOURCE_SELECTED_QUOTE_MAX_SECONDS,
+    }
+  );
+}
+
+export function resourceBackgroundQuoteIntervalSeconds(
+  item: MarketDataSubscriptionItem | null | undefined
+) {
+  return subscriptionIntervalSeconds(
+    item,
+    RESOURCE_BACKGROUND_QUOTE_SECONDS_KEY,
+    RESOURCE_BACKGROUND_QUOTE_DEFAULT_SECONDS,
+    {
+      min: RESOURCE_BACKGROUND_QUOTE_MIN_SECONDS,
+      max: RESOURCE_BACKGROUND_QUOTE_MAX_SECONDS,
+    }
+  );
 }
 
 export function cryptoSubscriptionResourceEnabled(

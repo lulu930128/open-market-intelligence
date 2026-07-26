@@ -44,6 +44,7 @@ def _env_int(name: str, default: int) -> int:
 
 
 API_TIMEOUT_SECONDS = _env_int("OMI_API_TIMEOUT_SECONDS", 180)
+SCHEMA_TIMEOUT_SECONDS = _env_int("OMI_SCHEMA_TIMEOUT_SECONDS", 2)
 AI_TRUST_TOKEN = (
     os.environ.get("OMI_MCP_AI_TRUST_TOKEN")
     or os.environ.get("OMI_AI_TRUST_TOKEN")
@@ -95,33 +96,229 @@ US_DOLLAR_SYMBOL_PATTERN = re.compile(
 US_UPPER_SYMBOL_PATTERN = re.compile(
     r"(?<![A-Za-z0-9.$-])([A-Z][A-Z0-9.$-]{0,15})(?![A-Za-z0-9.$-])"
 )
+TW_INTRADAY_HINTS = (
+    "intraday",
+    "today",
+    "live",
+    "quote",
+    "realtime",
+    "real-time",
+    "1m",
+    "5m",
+    "盤中",
+    "即時",
+    "今天",
+    "今日",
+    "現在",
+    "報價",
+    "分時",
+    "分k",
+    "1分",
+    "5分",
+)
+TW_TARGET_TYPES = {"tw_stock", "tw_index", "tw_futures"}
+TW_MARKETS = {"tw", "twse", "tpex", "taiwan"}
+TW_STOCK_ID_PATTERN = re.compile(r"(?<!\d)\d{4,6}(?!\d)")
+ASK_TARGET_TYPES = [
+    "auto",
+    "market",
+    "data_freshness",
+    "tw_stock",
+    "tw_watchlist",
+    "tw_index",
+    "tw_futures",
+    "us_stock",
+    "jp_stock",
+    "jp_index",
+    "kr_stock",
+    "kr_index",
+    "crypto_market",
+    "crypto_asset",
+    "resource_asset",
+    "portfolio",
+    "us_macro",
+    "us_watchlist",
+    "jp_watchlist",
+    "kr_watchlist",
+    "source_health",
+    "capability_status",
+]
+
+PAYLOAD_LEVEL_SCHEMA: dict[str, Any] = {
+    "type": "string",
+    "enum": ["summary", "compact", "standard", "full"],
+    "default": "compact",
+    "description": "Controls bounded market-data density. Use summary for voice/quick answers, compact by default, standard/full only when detail is requested.",
+}
+
+CAPABILITY_IDS = [
+    "broker_branch.summary",
+    "chips.institutional",
+    "chips.margin",
+    "company.profile",
+    "corporate.actions",
+    "cross_market.overnight",
+    "crypto.derivatives",
+    "crypto.order_book",
+    "daily.ohlcv",
+    "data.freshness",
+    "derivatives.positioning",
+    "derivatives.structure",
+    "diagnostics.capabilities",
+    "diagnostics.data_freshness",
+    "diagnostics.source_health",
+    "fundamentals.financials",
+    "fundamentals.revenue",
+    "intraday.bars",
+    "macro.observations",
+    "macro.series",
+    "market.breadth",
+    "market.chips",
+    "market.cross_market",
+    "market.sample_ranking",
+    "market.short_volume",
+    "market.volume_state",
+    "ownership.distribution",
+    "portfolio.holdings",
+    "portfolio.summary",
+    "portfolio.valuation",
+    "quote.snapshot",
+    "resource.metadata",
+    "source.health",
+    "target.identity",
+    "technical.structure",
+    "watchlist.coverage",
+    "watchlist.radar",
+    "watchlist.ranking",
+]
+
+CAPABILITY_ID_SCHEMA: dict[str, Any] = {
+    "type": "string",
+    "enum": CAPABILITY_IDS,
+}
+
+CAPABILITY_SELECTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "Bounded OMI data selection. Choose registered capabilities, field allowlists, "
+        "row/point limits, and a response byte ceiling."
+    ),
+    "properties": {
+        "include": {"type": "array", "items": CAPABILITY_ID_SCHEMA, "uniqueItems": True},
+        "required": {"type": "array", "items": CAPABILITY_ID_SCHEMA, "uniqueItems": True},
+        "optional": {"type": "array", "items": CAPABILITY_ID_SCHEMA, "uniqueItems": True},
+        "exclude": {"type": "array", "items": CAPABILITY_ID_SCHEMA, "uniqueItems": True},
+        "fields": {
+            "type": "object",
+            "additionalProperties": {
+                "type": "array",
+                "items": {"type": "string"},
+                "uniqueItems": True,
+            },
+        },
+        "limits": {
+            "type": "object",
+            "additionalProperties": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 500,
+            },
+        },
+        "max_response_bytes": {
+            "type": "integer",
+            "minimum": 4096,
+            "maximum": 1048576,
+        },
+    },
+    "additionalProperties": False,
+}
+
+INTRADAY_LIMIT_SCHEMA: dict[str, Any] = {
+    "type": "integer",
+    "minimum": 1,
+    "maximum": 500,
+    "description": "Maximum intraday points to return per series. Backend still applies its own upper bound.",
+}
+
+INCLUDE_INTRADAY_SCHEMA: dict[str, Any] = {
+    "type": "boolean",
+    "default": False,
+    "description": "Request bounded intraday evidence when the backend trust policy allows external/cache refresh.",
+}
+
+SESSION_SCOPE_SCHEMA: dict[str, Any] = {
+    "type": "string",
+    "enum": ["regular", "extended", "all"],
+    "default": "regular",
+    "description": "US intraday session scope. Use all to include pre-market and after-hours bars.",
+}
 
 ASK_TOOL: dict[str, Any] = {
     "name": "omi.ask",
     "title": "Ask OMI",
     "description": (
-        "Open Market Intelligence v2 entry point. Send a natural-language question "
+        "Canonical Open Market Intelligence decision entry point. Send a natural-language question "
         "and optional target; OMI resolves the target, returns clarification when "
         "needed, and provides read-only evidence, brief, or trusted analysis. "
-        "For user-facing watchlist or sector answers, prefer analysis.human_answer "
-        "over raw result/missing/debug fields."
+        "All consumers should read answer, decision, evidence, limitations, and status "
+        "from the consumer-neutral omi.decision.v4 envelope."
     ),
     "inputSchema": {
         "type": "object",
         "properties": {
             "contract_version": {
                 "type": "string",
-                "default": "omi.ai.ask.v2",
-                "description": "OMI ask contract version. Use omi.ai.ask.v2.",
+                "enum": ["omi.decision.v4"],
+                "default": "omi.decision.v4",
+                "description": (
+                    "The only public OMI decision contract. It provides selective evidence, "
+                    "manifest, fill plan, and bounded response size."
+                ),
             },
             "question": {"type": "string"},
+            "intents": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {"type": "string"},
+                "description": "Optional multi-intent request; target identity remains separate.",
+            },
+            "output": {
+                "type": "string",
+                "enum": ["evidence_only", "decision", "decision_with_evidence"],
+                "description": "Requested information purpose, independent of the consumer.",
+            },
+            "realtime_policy": {
+                "type": "string",
+                "enum": ["cache_only", "prefer_live", "require_live"],
+                "default": "prefer_live",
+            },
+            "selection": CAPABILITY_SELECTION_SCHEMA,
+            "continuation": {
+                "type": "object",
+                "description": "Re-submit selected granular fill actions for backend revalidation.",
+                "properties": {
+                    "plan_id": {"type": "string"},
+                    "plan_action_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 32,
+                        "uniqueItems": True,
+                    },
+                    "selected_action_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "uniqueItems": True,
+                    },
+                },
+                "additionalProperties": False,
+            },
             "target": {
                 "type": "object",
                 "description": "Optional resolved or requested target. Use type=auto when Kuro wants OMI to resolve it.",
                 "properties": {
                     "type": {
                         "type": "string",
-                        "enum": ["auto", "market", "data_freshness", "tw_stock", "tw_watchlist", "us_stock"],
+                        "enum": ASK_TARGET_TYPES,
                         "default": "auto",
                     },
                     "id": {
@@ -135,8 +332,17 @@ ASK_TOOL: dict[str, Any] = {
             },
             "mode": {
                 "type": "string",
-                "enum": ["auto", "data_only", "brief", "analysis", "report"],
+                "enum": ["auto", "data_only", "brief", "full", "analysis", "report"],
                 "default": "auto",
+            },
+            "include_raw": {
+                "type": "boolean",
+                "default": True,
+                "description": (
+                    "Deprecated transport flag retained for caller compatibility. v4 always "
+                    "returns the canonical envelope; use selection and max_response_bytes "
+                    "to bound payload size."
+                ),
             },
             "strategy_profile": {
                 "type": "string",
@@ -158,7 +364,7 @@ ASK_TOOL: dict[str, Any] = {
             },
             "caller_profile": {
                 "type": "string",
-                "default": "kuro_readonly",
+                "default": "external_readonly",
                 "description": "Caller label for logs and responses only. The backend does not trust this field.",
             },
             "allow_llm": {
@@ -176,7 +382,7 @@ ASK_TOOL: dict[str, Any] = {
                 "default": False,
                 "description": (
                     "Allow trusted OMI backend to call configured external market APIs and update local evidence cache. "
-                    "If omitted, trusted MCP calls default this to true only for clear US stock questions; callers may set it explicitly for bounded OMI-managed refresh."
+                    "If omitted, trusted MCP calls default this to true for clear US stock questions or explicit Taiwan/Japan intraday requests; callers may set it explicitly for bounded OMI-managed refresh."
                 ),
             },
             "tool_budget": {
@@ -205,11 +411,37 @@ ASK_TOOL: dict[str, Any] = {
             "sort_order": {"type": "string", "enum": ["asc", "desc"], "default": "desc"},
             "market_limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
             "context_limit": {"type": "integer", "minimum": 20, "maximum": 500, "default": 100},
+            "include_intraday": INCLUDE_INTRADAY_SCHEMA,
+            "payload_level": PAYLOAD_LEVEL_SCHEMA,
+            "diagnostics_level": {
+                "type": "string",
+                "enum": ["none", "basic", "debug"],
+                "default": "none",
+                "description": "Independent diagnostic projection; it does not change answer mode.",
+            },
+            "intraday_limit": INTRADAY_LIMIT_SCHEMA,
+            "session_scope": SESSION_SCOPE_SCHEMA,
             "include_children": {"type": "boolean", "default": True},
             "enabled_only": {"type": "boolean", "default": True},
             "conversation_context": {
                 "type": "object",
-                "description": "Optional Kuro conversation context, including last OMI resolution for follow-up turns.",
+                "description": (
+                    "Optional conversation context. Prefer last_target for follow-up turns; "
+                    "legacy last_resolution and previous_resolution aliases remain accepted."
+                ),
+            },
+            "position_context": {
+                "type": "object",
+                "description": "Optional caller-supplied position context; backend owns decision semantics.",
+            },
+            "market_data_params": {
+                "type": "object",
+                "description": (
+                    "Optional bounded market-data parameters forwarded to OMI readers, "
+                    "for example provider, providers, symbol, symbols, instrument_type, "
+                    "interval, timeframe, bars, daily_limit, include_intraday, payload_level, "
+                    "intraday_limit, session_scope, or limit."
+                ),
             },
         },
         "required": ["question"],
@@ -228,6 +460,249 @@ ASK_STREAM_TOOL: dict[str, Any] = {
     ),
 }
 
+MARKET_DATA_PARAMS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "Optional bounded market-data parameters forwarded to OMI readers, "
+        "for example provider, providers, symbol, symbols, instrument_type, "
+        "interval, timeframe, bars, daily_limit, include_intraday, payload_level, "
+        "intraday_limit, session_scope, observations, holding_limit, health_limit, "
+        "radar_limit, market, resource, target, or limit."
+    ),
+    "properties": {
+        "include_intraday": INCLUDE_INTRADAY_SCHEMA,
+        "payload_level": PAYLOAD_LEVEL_SCHEMA,
+        "intraday_limit": INTRADAY_LIMIT_SCHEMA,
+        "session_scope": SESSION_SCOPE_SCHEMA,
+        "observations": {"type": "integer", "minimum": 1, "maximum": 240},
+        "holding_limit": {"type": "integer", "minimum": 1, "maximum": 500},
+        "health_limit": {"type": "integer", "minimum": 1, "maximum": 500},
+        "problems_only": {"type": "boolean", "default": False},
+        "include_healthy": {"type": "boolean", "default": True},
+        "status_filter": {
+            "oneOf": [
+                {"type": "string"},
+                {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "uniqueItems": True,
+                },
+            ]
+        },
+        "radar_limit": {"type": "integer", "minimum": 1, "maximum": 100},
+        "option_contract_month": {
+            "type": "string",
+            "pattern": "^[0-9A-Z]+$",
+            "description": "Optional TXO month/week bucket such as 202608 or 202607W4.",
+        },
+        "option_strike_limit": {
+            "type": "integer",
+            "minimum": 3,
+            "maximum": 25,
+            "default": 11,
+            "description": "Maximum number of TXO strikes projected around the selected expiry.",
+        },
+        "market": {"type": "string"},
+        "resource": {"type": "string"},
+        "target": {"type": "string"},
+        "provider": {"type": "string"},
+        "capability_id": {"type": "string"},
+        "status": {"type": "string"},
+    },
+    "additionalProperties": True,
+}
+
+MARKET_PAYLOAD_CONTROL_PROPERTIES: dict[str, Any] = {
+    "include_intraday": INCLUDE_INTRADAY_SCHEMA,
+    "payload_level": PAYLOAD_LEVEL_SCHEMA,
+    "intraday_limit": INTRADAY_LIMIT_SCHEMA,
+    "session_scope": SESSION_SCOPE_SCHEMA,
+    "market_data_params": MARKET_DATA_PARAMS_SCHEMA,
+}
+
+CROSS_MARKET_READER_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "omi.read_jp_stock_context",
+        "title": "Read OMI Japan Stock Context",
+        "description": "Read a Japan stock evidence pack through OMI ask; daily/resources stay local-cache and include_intraday enables a bounded provider read when trusted.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string"},
+                "market_data_params": MARKET_DATA_PARAMS_SCHEMA,
+            },
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "omi.read_jp_index_context",
+        "title": "Read OMI Japan Index Context",
+        "description": "Read an OHLC-focused Japan index evidence pack through OMI ask; include_intraday enables a bounded provider read when trusted.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "enum": ["^N225", "1306.T"]},
+                "market_data_params": MARKET_DATA_PARAMS_SCHEMA,
+            },
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "omi.read_kr_stock_context",
+        "title": "Read OMI Korea Stock Context",
+        "description": "Read a local-cache evidence pack for one Korea stock through OMI ask.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string"},
+                "market_data_params": MARKET_DATA_PARAMS_SCHEMA,
+            },
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "omi.read_kr_index_context",
+        "title": "Read OMI Korea Index Context",
+        "description": "Read a local-cache OHLC evidence pack for one Korea index through OMI ask.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "enum": ["KOSPI", "KOSDAQ", "KOSPI200"]},
+                "market_data_params": MARKET_DATA_PARAMS_SCHEMA,
+            },
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "omi.read_crypto_market_context",
+        "title": "Read OMI Crypto Market Context",
+        "description": "Read bounded local-cache crypto market evidence through OMI ask.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "market_data_params": MARKET_DATA_PARAMS_SCHEMA,
+                "context_limit": {"type": "integer", "minimum": 20, "maximum": 500, "default": 100},
+            },
+        },
+    },
+    {
+        "name": "omi.read_crypto_asset_context",
+        "title": "Read OMI Crypto Asset Context",
+        "description": "Read bounded local-cache evidence for one crypto asset through OMI ask.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "asset": {"type": "string"},
+                "market_data_params": MARKET_DATA_PARAMS_SCHEMA,
+                "context_limit": {"type": "integer", "minimum": 20, "maximum": 500, "default": 100},
+            },
+            "required": ["asset"],
+        },
+    },
+]
+
+CROSS_MARKET_BRIEF_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "omi.generate_jp_stock_brief",
+        "title": "Generate OMI Japan Stock Brief",
+        "description": "Generate a compact Japan stock brief through OMI ask.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string"},
+                "strategy_profile": {"type": "string", "default": "short_term_momentum"},
+                "market_data_params": MARKET_DATA_PARAMS_SCHEMA,
+            },
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "omi.generate_jp_index_brief",
+        "title": "Generate OMI Japan Index Brief",
+        "description": "Generate a compact Japan index brief through OMI ask.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "enum": ["^N225", "1306.T"]},
+                "strategy_profile": {"type": "string", "default": "short_term_momentum"},
+                "market_data_params": MARKET_DATA_PARAMS_SCHEMA,
+            },
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "omi.generate_kr_stock_brief",
+        "title": "Generate OMI Korea Stock Brief",
+        "description": "Generate a compact Korea stock brief through OMI ask.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string"},
+                "strategy_profile": {"type": "string", "default": "short_term_momentum"},
+                "market_data_params": MARKET_DATA_PARAMS_SCHEMA,
+            },
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "omi.generate_kr_index_brief",
+        "title": "Generate OMI Korea Index Brief",
+        "description": "Generate a compact Korea index brief through OMI ask.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "enum": ["KOSPI", "KOSDAQ", "KOSPI200"]},
+                "strategy_profile": {"type": "string", "default": "short_term_momentum"},
+                "market_data_params": MARKET_DATA_PARAMS_SCHEMA,
+            },
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "omi.generate_crypto_market_brief",
+        "title": "Generate OMI Crypto Market Brief",
+        "description": "Generate a compact crypto market brief through OMI ask.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "strategy_profile": {"type": "string", "default": "short_term_momentum"},
+                "market_data_params": MARKET_DATA_PARAMS_SCHEMA,
+                "context_limit": {"type": "integer", "minimum": 20, "maximum": 500, "default": 100},
+            },
+        },
+    },
+    {
+        "name": "omi.generate_crypto_asset_brief",
+        "title": "Generate OMI Crypto Asset Brief",
+        "description": "Generate a compact crypto asset brief through OMI ask.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "asset": {"type": "string"},
+                "strategy_profile": {"type": "string", "default": "short_term_momentum"},
+                "market_data_params": MARKET_DATA_PARAMS_SCHEMA,
+                "context_limit": {"type": "integer", "minimum": 20, "maximum": 500, "default": 100},
+            },
+            "required": ["asset"],
+        },
+    },
+]
+
+DIRECT_ASK_TOOL_TARGETS: dict[str, tuple[str, str | None, str, str]] = {
+    "omi.read_jp_stock_context": ("jp_stock", "symbol", "data_only", "Read Japan stock context"),
+    "omi.read_jp_index_context": ("jp_index", "symbol", "data_only", "Read Japan index context"),
+    "omi.read_kr_stock_context": ("kr_stock", "symbol", "data_only", "Read Korea stock context"),
+    "omi.read_kr_index_context": ("kr_index", "symbol", "data_only", "Read Korea index context"),
+    "omi.read_crypto_market_context": ("crypto_market", None, "data_only", "Read crypto market context"),
+    "omi.read_crypto_asset_context": ("crypto_asset", "asset", "data_only", "Read crypto asset context"),
+    "omi.generate_jp_stock_brief": ("jp_stock", "symbol", "brief", "Generate Japan stock brief"),
+    "omi.generate_jp_index_brief": ("jp_index", "symbol", "brief", "Generate Japan index brief"),
+    "omi.generate_kr_stock_brief": ("kr_stock", "symbol", "brief", "Generate Korea stock brief"),
+    "omi.generate_kr_index_brief": ("kr_index", "symbol", "brief", "Generate Korea index brief"),
+    "omi.generate_crypto_market_brief": ("crypto_market", None, "brief", "Generate crypto market brief"),
+    "omi.generate_crypto_asset_brief": ("crypto_asset", "asset", "brief", "Generate crypto asset brief"),
+}
+
 INTERNAL_TOOLS: list[dict[str, Any]] = [
     {
         "name": "omi.read_market_overview",
@@ -237,6 +712,7 @@ INTERNAL_TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+                **MARKET_PAYLOAD_CONTROL_PROPERTIES,
             },
         },
     },
@@ -252,7 +728,7 @@ INTERNAL_TOOLS: list[dict[str, Any]] = [
                 "bars": {"type": "integer", "minimum": 20, "maximum": 1000, "default": 120},
                 "revenue_months": {"type": "integer", "minimum": 1, "maximum": 120, "default": 12},
                 "financial_quarters": {"type": "integer", "minimum": 1, "maximum": 40, "default": 8},
-                "include_intraday": {"type": "boolean", "default": False},
+                **MARKET_PAYLOAD_CONTROL_PROPERTIES,
                 "analysis_horizon": {
                     "type": "string",
                     "enum": ["auto", "intraday", "short", "swing", "long"],
@@ -270,10 +746,12 @@ INTERNAL_TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "symbol": {"type": "string"},
+                "market_data_params": MARKET_DATA_PARAMS_SCHEMA,
             },
             "required": ["symbol"],
         },
     },
+    *CROSS_MARKET_READER_TOOLS,
     {
         "name": "omi.read_watchlist_context",
         "title": "Read OMI Watchlist Context",
@@ -303,6 +781,11 @@ INTERNAL_TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "stock_id": {"type": "string"},
+                "market": {
+                    "type": "string",
+                    "enum": ["TW", "US", "JP", "KR", "CRYPTO", "ALL"],
+                    "default": "TW",
+                },
             },
         },
     },
@@ -331,7 +814,7 @@ INTERNAL_TOOLS: list[dict[str, Any]] = [
                     "enum": ["auto", "intraday", "short", "swing", "long"],
                     "default": "auto",
                 },
-                "include_intraday": {"type": "boolean", "default": False},
+                **MARKET_PAYLOAD_CONTROL_PROPERTIES,
                 "branch_days": {"type": "integer", "minimum": 1, "maximum": 120, "default": 5},
             },
             "required": ["stock_id"],
@@ -362,10 +845,12 @@ INTERNAL_TOOLS: list[dict[str, Any]] = [
                     "enum": ["auto", "intraday", "short", "swing", "long"],
                     "default": "auto",
                 },
+                "market_data_params": MARKET_DATA_PARAMS_SCHEMA,
             },
             "required": ["symbol"],
         },
     },
+    *CROSS_MARKET_BRIEF_TOOLS,
     {
         "name": "omi.generate_watchlist_brief",
         "title": "Generate OMI Watchlist Brief",
@@ -673,7 +1158,46 @@ INTERNAL_TOOLS: list[dict[str, Any]] = [
 ]
 
 
-PUBLIC_TOOLS = [ASK_TOOL, ASK_STREAM_TOOL]
+MARKET_PAYLOAD_CONTROL_TOOL_NAMES = {
+    "omi.ask",
+    "omi.ask_stream",
+    "omi.read_market_overview",
+    "omi.read_stock_context",
+    "omi.read_us_stock_context",
+    "omi.generate_stock_brief",
+    "omi.generate_us_stock_brief",
+    *DIRECT_ASK_TOOL_TARGETS.keys(),
+}
+
+
+def _augment_market_payload_control_schema(tool: dict[str, Any]) -> dict[str, Any]:
+    if tool.get("name") not in MARKET_PAYLOAD_CONTROL_TOOL_NAMES:
+        return tool
+    schema = tool.get("inputSchema")
+    if not isinstance(schema, dict):
+        return tool
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return tool
+    for key, value in MARKET_PAYLOAD_CONTROL_PROPERTIES.items():
+        properties.setdefault(key, value)
+    market_data_params = properties.get("market_data_params")
+    if isinstance(market_data_params, dict):
+        market_data_params.setdefault("properties", {})
+        if isinstance(market_data_params["properties"], dict):
+            for key, value in (
+                ("include_intraday", INCLUDE_INTRADAY_SCHEMA),
+                ("payload_level", PAYLOAD_LEVEL_SCHEMA),
+                ("intraday_limit", INTRADAY_LIMIT_SCHEMA),
+                ("session_scope", SESSION_SCOPE_SCHEMA),
+            ):
+                market_data_params["properties"].setdefault(key, value)
+        market_data_params.setdefault("additionalProperties", True)
+    return tool
+
+
+PUBLIC_TOOLS = [_augment_market_payload_control_schema(tool) for tool in [ASK_TOOL, ASK_STREAM_TOOL]]
+INTERNAL_TOOLS = [_augment_market_payload_control_schema(tool) for tool in INTERNAL_TOOLS]
 TOOLS = [*PUBLIC_TOOLS, *INTERNAL_TOOLS] if EXPOSE_INTERNAL_TOOLS else PUBLIC_TOOLS
 
 
@@ -741,6 +1265,7 @@ def _api_request(
     path: str,
     params: dict[str, Any] | None = None,
     payload: dict[str, Any] | None = None,
+    timeout_seconds: int | None = None,
 ) -> Any:
     query = ""
     if params:
@@ -769,7 +1294,10 @@ def _api_request(
     )
 
     try:
-        with urlopen(request, timeout=API_TIMEOUT_SECONDS) as response:
+        with urlopen(
+            request,
+            timeout=timeout_seconds or API_TIMEOUT_SECONDS,
+        ) as response:
             body = response.read().decode("utf-8")
             return json.loads(body) if body else None
     except HTTPError as exc:
@@ -781,6 +1309,72 @@ def _api_request(
 
 def _api_get(path: str, params: dict[str, Any] | None = None) -> Any:
     return _api_request("GET", path, params=params)
+
+
+def _backend_public_tools() -> list[dict[str, Any]]:
+    payload = _api_request(
+        "GET",
+        "/api/ai/tools",
+        timeout_seconds=SCHEMA_TIMEOUT_SECONDS,
+    )
+    backend_tools = (
+        payload.get("tools")
+        if isinstance(payload, dict) and isinstance(payload.get("tools"), list)
+        else []
+    )
+    ask_source = next(
+        (
+            item
+            for item in backend_tools
+            if isinstance(item, dict) and item.get("name") == "omi.ask"
+        ),
+        None,
+    )
+    if ask_source is None:
+        raise RuntimeError("OMI backend tool catalog did not expose omi.ask.")
+
+    ask_tool = {
+        "name": "omi.ask",
+        "title": str(ask_source.get("title") or "Ask OMI"),
+        "description": str(ask_source.get("description") or ""),
+        "inputSchema": json.loads(
+            json.dumps(ask_source.get("input_schema") or {})
+        ),
+    }
+    properties = ask_tool["inputSchema"].setdefault("properties", {})
+    properties.setdefault(
+        "include_raw",
+        {
+            "type": "boolean",
+            "default": True,
+            "description": (
+                "Deprecated transport flag retained for caller compatibility. "
+                "v4 always returns the canonical backend envelope."
+            ),
+        },
+    )
+    ask_tool = _augment_market_payload_control_schema(ask_tool)
+    stream_tool = json.loads(json.dumps(ask_tool))
+    stream_tool.update(
+        {
+            "name": "omi.ask_stream",
+            "title": "Ask OMI Stream",
+            "description": ASK_STREAM_TOOL["description"],
+        }
+    )
+    public_tools = [ask_tool, stream_tool]
+    return (
+        [*public_tools, *INTERNAL_TOOLS]
+        if EXPOSE_INTERNAL_TOOLS
+        else public_tools
+    )
+
+
+def _tools_for_client() -> list[dict[str, Any]]:
+    try:
+        return _backend_public_tools()
+    except Exception:
+        return TOOLS
 
 
 def _api_post(
@@ -910,6 +1504,46 @@ def _bool_arg(arguments: dict[str, Any], key: str, default: bool) -> bool:
     return bool(value)
 
 
+def _dict_arg(arguments: dict[str, Any], key: str) -> dict[str, Any]:
+    value = arguments.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def _merge_market_data_params(arguments: dict[str, Any]) -> dict[str, Any]:
+    params = dict(_dict_arg(arguments, "market_data_params"))
+    if "include_intraday" in arguments and "include_intraday" not in params:
+        params["include_intraday"] = _bool_arg(arguments, "include_intraday", False)
+    analysis_horizon = str(arguments.get("analysis_horizon") or "").strip().lower()
+    if analysis_horizon == "intraday" and "include_intraday" not in params:
+        params["include_intraday"] = True
+    if "payload_level" in arguments and "payload_level" not in params:
+        level = str(arguments.get("payload_level") or "").strip().lower()
+        if level in {"summary", "compact", "standard", "full"}:
+            params["payload_level"] = level
+    if "intraday_limit" in arguments and "intraday_limit" not in params:
+        try:
+            params["intraday_limit"] = max(1, min(500, int(arguments["intraday_limit"])))
+        except (TypeError, ValueError):
+            pass
+    if "session_scope" in arguments and "session_scope" not in params:
+        session_scope = str(arguments.get("session_scope") or "").strip().lower()
+        if session_scope in {"regular", "extended", "all"}:
+            params["session_scope"] = session_scope
+    return params
+
+
+def _market_query_controls(arguments: dict[str, Any]) -> dict[str, Any]:
+    params = _merge_market_data_params(arguments)
+    query: dict[str, Any] = {}
+    if "include_intraday" in params:
+        query["include_intraday"] = bool(params["include_intraday"])
+    if "payload_level" in params:
+        query["payload_level"] = params["payload_level"]
+    if "intraday_limit" in params:
+        query["intraday_limit"] = params["intraday_limit"]
+    return query
+
+
 def _target_from_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     target = arguments.get("target")
     return target if isinstance(target, dict) else {}
@@ -942,6 +1576,43 @@ def _looks_like_us_question(arguments: dict[str, Any]) -> bool:
     return bool(US_UPPER_SYMBOL_PATTERN.search(question))
 
 
+def _looks_like_tw_intraday_question(arguments: dict[str, Any]) -> bool:
+    target = _target_from_arguments(arguments)
+    target_type = str(target.get("type") or "").strip().lower()
+    target_market = str(target.get("market") or "").strip().lower()
+    target_id = str(target.get("id") or target.get("symbol") or "").strip()
+    question = str(arguments.get("question") or "")
+    lowered_question = question.lower()
+
+    has_tw_target = (
+        target_type in TW_TARGET_TYPES
+        or target_market in TW_MARKETS
+        or target_id.isdecimal()
+        or bool(TW_STOCK_ID_PATTERN.search(question))
+    )
+    if not has_tw_target:
+        return False
+
+    requested_horizon = str(arguments.get("analysis_horizon") or "").strip().lower()
+    if requested_horizon == "intraday":
+        return True
+
+    return any(hint in lowered_question for hint in TW_INTRADAY_HINTS)
+
+
+def _looks_like_jp_intraday_request(arguments: dict[str, Any]) -> bool:
+    target = _target_from_arguments(arguments)
+    target_type = str(target.get("type") or "").strip().lower()
+    if target_type not in {"jp_stock", "jp_index"}:
+        return False
+
+    requested_horizon = str(arguments.get("analysis_horizon") or "").strip().lower()
+    if requested_horizon == "intraday":
+        return True
+
+    return bool(_merge_market_data_params(arguments).get("include_intraday"))
+
+
 def _default_allow_external_fetch(arguments: dict[str, Any]) -> bool:
     if "allow_external_fetch" in arguments:
         return _bool_arg(arguments, "allow_external_fetch", False)
@@ -949,7 +1620,11 @@ def _default_allow_external_fetch(arguments: dict[str, Any]) -> bool:
     return bool(
         AI_TRUST_TOKEN
         and TRUSTED_DEFAULT_EXTERNAL_FETCH
-        and _looks_like_us_question(arguments)
+        and (
+            _looks_like_us_question(arguments)
+            or _looks_like_tw_intraday_question(arguments)
+            or _looks_like_jp_intraday_request(arguments)
+        )
     )
 
 
@@ -962,14 +1637,31 @@ def _tool_budget_arg(arguments: dict[str, Any], *, allow_external_fetch: bool) -
     return {}
 
 
+def _public_contract_version(arguments: dict[str, Any]) -> str:
+    contract_version = str(
+        arguments.get("contract_version") or "omi.decision.v4"
+    ).strip()
+    if contract_version != "omi.decision.v4":
+        raise ValueError("contract_version must be omi.decision.v4.")
+    return contract_version
+
+
 def _ask_payload(arguments: dict[str, Any]) -> dict[str, Any]:
     allow_external_fetch = _default_allow_external_fetch(arguments)
+    market_data_params = _merge_market_data_params(arguments)
     return {
-        "contract_version": arguments.get("contract_version", "omi.ai.ask.v2"),
+        "contract_version": _public_contract_version(arguments),
         "question": _require(arguments, "question"),
         "target": arguments.get("target") or {"type": "auto"},
         "mode": arguments.get("mode", "auto"),
-        "caller_profile": arguments.get("caller_profile", "kuro_readonly"),
+        "intents": arguments.get("intents") or [],
+        "output": arguments.get("output"),
+        "realtime_policy": arguments.get("realtime_policy"),
+        "selection": arguments.get("selection") or {},
+        "continuation": arguments.get("continuation") or {},
+        "payload_level": market_data_params.get("payload_level"),
+        "diagnostics_level": arguments.get("diagnostics_level", "none"),
+        "caller_profile": arguments.get("caller_profile", "external_readonly"),
         "allow_llm": _bool_arg(arguments, "allow_llm", False),
         "allow_write": _bool_arg(arguments, "allow_write", False),
         "allow_external_fetch": allow_external_fetch,
@@ -988,19 +1680,251 @@ def _ask_payload(arguments: dict[str, Any]) -> dict[str, Any]:
         "context_limit": arguments.get("context_limit", 100),
         "include_children": _bool_arg(arguments, "include_children", True),
         "enabled_only": _bool_arg(arguments, "enabled_only", True),
+        "position_context": arguments.get("position_context") or {},
         "conversation_context": arguments.get("conversation_context") or {},
+        "market_data_params": market_data_params,
     }
+
+
+def _targeted_ask_payload(
+    arguments: dict[str, Any],
+    *,
+    target_type: str,
+    target_id: str | None = None,
+    question: str,
+    mode: str,
+) -> dict[str, Any]:
+    target = {"type": target_type}
+    if target_id:
+        target["id"] = target_id
+    if arguments.get("label"):
+        target["label"] = arguments["label"]
+    if arguments.get("market"):
+        target["market"] = arguments["market"]
+
+    ask_arguments = dict(arguments)
+    ask_arguments["question"] = arguments.get("question") or question
+    ask_arguments["target"] = target
+    ask_arguments["mode"] = mode
+    return _ask_payload(ask_arguments)
+
+
+def _post_targeted_ask(
+    arguments: dict[str, Any],
+    *,
+    target_type: str,
+    target_id: str | None = None,
+    question: str,
+    mode: str,
+) -> Any:
+    return _api_post(
+        "/api/ai/ask",
+        payload=_targeted_ask_payload(
+            arguments,
+            target_type=target_type,
+            target_id=target_id,
+            question=question,
+            mode=mode,
+        ),
+    )
+
+
+def _bounded_summary_value(value: Any, *, depth: int = 0) -> Any:
+    if depth >= 4:
+        if isinstance(value, list):
+            return {"item_count": len(value), "truncated": True}
+        if isinstance(value, dict):
+            return {"field_count": len(value), "truncated": True}
+        return value
+    if isinstance(value, list):
+        return [_bounded_summary_value(item, depth=depth + 1) for item in value[:5]]
+    if isinstance(value, dict):
+        omitted_keys = {
+            "bars",
+            "chart",
+            "components",
+            "data",
+            "detail",
+            "events",
+            "financial_history",
+            "history",
+            "points",
+            "prompt",
+            "raw",
+            "raw_response",
+            "revenue_history",
+            "rows",
+            "source_refs",
+            "technical_reports",
+        }
+        output: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in omitted_keys or len(output) >= 24:
+                continue
+            output[str(key)] = _bounded_summary_value(item, depth=depth + 1)
+        return output
+    return value
+
+
+def _summarize_ask_response(response: Any) -> Any:
+    if not isinstance(response, dict):
+        return response
+    if response.get("contract_version") == "omi.decision.v4":
+        return response
+
+    output: dict[str, Any] = {
+        "kind": "omi_ask_summary",
+        "raw_included": False,
+    }
+    for key in (
+        "contract_version",
+        "ok",
+        "mode",
+        "answer_ready",
+        "facts_ready",
+        "analysis_ready",
+        "decision_ready",
+        "blocked_sections",
+        "available_sections",
+        "request_status",
+        "fallback_used",
+        "cached_data_returned",
+        "job",
+        "cancellation",
+        "target",
+        "resolution",
+        "clarification",
+        "next_context",
+        "next_actions",
+        "error",
+    ):
+        if response.get(key) not in (None, {}, []):
+            output[key] = _bounded_summary_value(response[key])
+
+    analysis = response.get("analysis") if isinstance(response.get("analysis"), dict) else {}
+    if analysis:
+        output["analysis"] = _bounded_summary_value(
+            {
+                key: analysis[key]
+                for key in (
+                    "kind",
+                    "question_intent",
+                    "requested_horizon",
+                    "selected_horizon",
+                    "selected_timeframe",
+                    "selected_score",
+                    "selected_title",
+                    "selected_summary",
+                    "selected_confidence",
+                    "display",
+                    "human_answer",
+                    "decision_contract",
+                    "price_level_validation",
+                )
+                if key in analysis
+            }
+        )
+
+    result = response.get("result") if isinstance(response.get("result"), dict) else {}
+    result_data = result.get("data") if isinstance(result.get("data"), dict) else {}
+    compact = result_data.get("compact") if isinstance(result_data.get("compact"), dict) else {}
+    if result:
+        output["result_summary"] = _bounded_summary_value(
+            {
+                key: result[key]
+                for key in ("kind", "as_of", "status", "scope", "summary", "human_answer")
+                if key in result
+            }
+        )
+    if compact:
+        output["compact_evidence"] = _bounded_summary_value(
+            {
+                key: compact[key]
+                for key in (
+                    "kind",
+                    "version",
+                    "payload_level",
+                    "status",
+                    "target",
+                    "as_of",
+                    "quote",
+                    "technical",
+                    "breadth",
+                    "breadth_by_market",
+                    "sample_breadth",
+                    "sample_coverage",
+                    "volume_state",
+                    "sample_top_gainers",
+                    "sample_top_losers",
+                    "sample_value_leaders",
+                    "freshness_by_domain",
+                    "data_quality",
+                    "slots",
+                )
+                if key in compact
+            }
+        )
+
+    freshness = response.get("freshness")
+    if isinstance(freshness, dict) and freshness:
+        output["freshness"] = _bounded_summary_value(freshness)
+    passport = response.get("evidence_passport")
+    if isinstance(passport, dict) and passport:
+        output["evidence_passport"] = _bounded_summary_value(
+            {
+                key: passport[key]
+                for key in (
+                    "kind",
+                    "data_freshness",
+                    "coverage",
+                    "completeness",
+                    "confidence",
+                    "decision_readiness",
+                )
+                if key in passport
+            }
+        )
+    tool_runs = response.get("tool_runs") if isinstance(response.get("tool_runs"), list) else []
+    notable_runs = [
+        run
+        for run in tool_runs
+        if isinstance(run, dict)
+        and (
+            run.get("status") not in {None, "completed", "success"}
+            or run.get("fallback_used")
+            or run.get("cached_data_returned")
+        )
+    ]
+    if notable_runs:
+        output["notable_tool_runs"] = _bounded_summary_value(notable_runs)
+    for key in ("missing", "warnings"):
+        if isinstance(response.get(key), list) and response[key]:
+            output[key] = _bounded_summary_value(response[key])
+    return output
 
 
 def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
     if name == "omi.ask":
-        return _api_post("/api/ai/ask", payload=_ask_payload(arguments))
+        response = _api_post("/api/ai/ask", payload=_ask_payload(arguments))
+        if not isinstance(response, dict) or response.get("contract_version") != "omi.decision.v4":
+            raise RuntimeError("OMI backend returned a non-v4 public ask response.")
+        return response
 
     if name == "omi.ask_stream":
-        return _api_stream_post("/api/ai/ask/stream", payload=_ask_payload(arguments))
+        response = _api_stream_post("/api/ai/ask/stream", payload=_ask_payload(arguments))
+        final = response.get("final") if isinstance(response, dict) else None
+        if isinstance(final, dict) and final.get("contract_version") != "omi.decision.v4":
+            raise RuntimeError("OMI backend returned a non-v4 public stream response.")
+        return response
 
     if name == "omi.read_market_overview":
-        return _api_get("/api/ai/market-overview", {"limit": arguments.get("limit", 10)})
+        return _api_get(
+            "/api/ai/market-overview",
+            {
+                "limit": arguments.get("limit", 10),
+                **_market_query_controls(arguments),
+            },
+        )
 
     if name == "omi.read_stock_context":
         stock_id = quote(str(_require(arguments, "stock_id")), safe="")
@@ -1013,12 +1937,32 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
                 "financial_quarters": arguments.get("financial_quarters", 8),
                 "include_intraday": _bool_arg(arguments, "include_intraday", False),
                 "analysis_horizon": arguments.get("analysis_horizon", "auto"),
+                **_market_query_controls(arguments),
             },
         )
 
     if name == "omi.read_us_stock_context":
         symbol = quote(str(_require(arguments, "symbol")).upper(), safe="")
+        if _merge_market_data_params(arguments):
+            return _post_targeted_ask(
+                arguments,
+                target_type="us_stock",
+                target_id=str(_require(arguments, "symbol")).upper(),
+                question=f"Read US stock context {str(_require(arguments, 'symbol')).upper()}",
+                mode="data_only",
+            )
         return _api_get(f"/api/ai/us-stocks/{symbol}/context")
+
+    if name in DIRECT_ASK_TOOL_TARGETS:
+        target_type, id_key, mode, question_prefix = DIRECT_ASK_TOOL_TARGETS[name]
+        target_id = str(_require(arguments, id_key)).strip() if id_key else None
+        return _post_targeted_ask(
+            arguments,
+            target_type=target_type,
+            target_id=target_id,
+            question=f"{question_prefix} {target_id or ''}".strip(),
+            mode=mode,
+        )
 
     if name == "omi.read_watchlist_context":
         group_id = int(_require(arguments, "group_id"))
@@ -1034,7 +1978,13 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
         )
 
     if name == "omi.read_data_freshness":
-        return _api_get("/api/ai/data-freshness", {"stock_id": arguments.get("stock_id")})
+        return _api_get(
+            "/api/ai/data-freshness",
+            {
+                "stock_id": arguments.get("stock_id"),
+                "market": arguments.get("market", "TW"),
+            },
+        )
 
     if name == "omi.generate_stock_brief":
         stock_id = quote(str(_require(arguments, "stock_id")), safe="")
@@ -1045,11 +1995,20 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> Any:
                 "branch_days": arguments.get("branch_days", 5),
                 "include_intraday": _bool_arg(arguments, "include_intraday", False),
                 "analysis_horizon": arguments.get("analysis_horizon", "auto"),
+                **_market_query_controls(arguments),
             },
         )
 
     if name == "omi.generate_us_stock_brief":
         symbol = quote(str(_require(arguments, "symbol")).upper(), safe="")
+        if _merge_market_data_params(arguments):
+            return _post_targeted_ask(
+                arguments,
+                target_type="us_stock",
+                target_id=str(_require(arguments, "symbol")).upper(),
+                question=f"Generate US stock brief {str(_require(arguments, 'symbol')).upper()}",
+                mode="brief",
+            )
         return _api_get(
             f"/api/ai/us-stocks/{symbol}/brief",
             {
@@ -1221,7 +2180,9 @@ def _handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
                     "Use omi.ask as the public entry point, or omi.ask_stream when collected stream events are useful. "
                     "It is read-only by default; "
                     "report generation requires a server-side trusted request. Do not treat missing data as a conclusion. "
-                    "When omi.ask returns analysis.human_answer, use that concise answer first and do not expose raw dataset keys unless asked."
+                    "Read omi.decision.v4 through answer, decision, evidence, limitations, status, "
+                    "and continuation.fill_plan; "
+                    "do not reconstruct market semantics in the MCP client."
                 ),
             },
         )
@@ -1230,7 +2191,7 @@ def _handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
         return _response(request_id, {})
 
     if method == "tools/list":
-        return _response(request_id, {"tools": TOOLS})
+        return _response(request_id, {"tools": _tools_for_client()})
 
     if method == "tools/call":
         name = str(params.get("name") or "")
@@ -1243,7 +2204,11 @@ def _handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
             )
 
         try:
-            return _response(request_id, _tool_result(_call_tool(name, arguments)))
+            tool_payload = _call_tool(name, arguments)
+            return _response(
+                request_id,
+                _tool_result(tool_payload, is_error=False),
+            )
         except KeyError as exc:
             return _error(request_id, -32602, str(exc))
         except Exception as exc:

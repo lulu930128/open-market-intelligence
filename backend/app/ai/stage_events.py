@@ -340,7 +340,12 @@ def response_status_payloads(
     payloads: list[dict[str, Any]] = []
     sequence = start_sequence
 
-    evidence = response.get("evidence_passport")
+    canonical_evidence = (
+        response.get("evidence")
+        if isinstance(response.get("evidence"), dict)
+        else {}
+    )
+    evidence = response.get("evidence_passport") or canonical_evidence.get("passport")
     evidence_payload = (
         evidence_status_payload(evidence, sequence=sequence)
         if isinstance(evidence, dict)
@@ -350,18 +355,36 @@ def response_status_payloads(
         payloads.append(evidence_payload)
         sequence += 1
 
-    for tool_run in _aggregate_tool_runs(response.get("tool_runs") or []):
+    canonical_execution = (
+        response.get("execution")
+        if isinstance(response.get("execution"), dict)
+        else {}
+    )
+    tool_runs = response.get("tool_runs") or canonical_execution.get("tool_runs") or []
+    for tool_run in _aggregate_tool_runs(tool_runs):
         tool_payload = tool_status_payload(tool_run, sequence=sequence)
         if tool_payload:
             payloads.append(tool_payload)
             sequence += 1
 
     reasoning_payloads, sequence = reasoning_status_payloads(
-        response.get("reasoning_steps") or [],
+        response.get("reasoning_steps")
+        or canonical_execution.get("reasoning_steps")
+        or [],
         start_sequence=sequence,
     )
     payloads.extend(reasoning_payloads)
 
+    canonical_status = (
+        response.get("status")
+        if isinstance(response.get("status"), dict)
+        else {}
+    )
+    canonical_readiness = (
+        canonical_status.get("readiness")
+        if isinstance(canonical_status.get("readiness"), dict)
+        else {}
+    )
     payloads.append(
         status_payload(
             stage="answer_ready",
@@ -369,8 +392,14 @@ def response_status_payloads(
             sequence=sequence,
             phase="completed",
             dedupe_key="answer_ready:completed",
-            answer_ready=bool(response.get("answer_ready", True)),
-            report_level=response.get("report_level"),
+            answer_ready=bool(
+                response.get(
+                    "answer_ready",
+                    canonical_readiness.get("answer_ready", True),
+                )
+            ),
+            report_level=response.get("report_level")
+            or canonical_execution.get("report_level"),
         )
     )
     sequence += 1

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+import json
 import unittest
 from unittest.mock import patch
 
@@ -20,6 +21,7 @@ from app.crypto_market.contract import (
     BINANCE_PROVIDER,
     BITOPRO_PROVIDER,
     BYBIT_PROVIDER,
+    COINGECKO_PROVIDER,
     COINGLASS_PROVIDER,
     OKX_PROVIDER,
     OMI_LOCAL_PROVIDER,
@@ -69,6 +71,12 @@ from app.crypto_market.service import (
     upsert_crypto_long_short_ratio_history,
 )
 from app.crypto_market.source_health import build_crypto_source_health
+from app.crypto_market.workspace import (
+    CORE_SLOT_SPECS,
+    _build_slot,
+    build_crypto_workspace_summary,
+)
+from app.crypto_market.assets import get_crypto_asset
 from app.crypto_market.watchlist import (
     CryptoWatchlistAssetNotFoundError,
     CryptoWatchlistDuplicateItemError,
@@ -87,6 +95,7 @@ from app.db.models import (
     CryptoLiquidationHeatmapCell,
     CryptoLiquidityHistory,
     CryptoLongShortRatioHistory,
+    CryptoMarketCapSnapshot,
     CryptoOrderBookSnapshot,
     CryptoOhlcvBar,
     CryptoSpreadHistory,
@@ -107,6 +116,7 @@ from app.crypto_market.schemas import (
     CryptoLiquidityHistoryRead,
     CryptoLongShortRatioHistoryRead,
     CryptoRealtimeStatusRead,
+    CryptoWorkspaceSummaryRead,
     CryptoWatchlistGroupCreate,
     CryptoWatchlistItemCreate,
 )
@@ -205,12 +215,23 @@ class CryptoMarketBackendTests(unittest.TestCase):
         self.assertFalse(contract["ai_execution_enabled"])
         self.assertIn(BITOPRO_PROVIDER, contract["providers"])
         self.assertIn(COINGLASS_PROVIDER, contract["providers"])
+        self.assertIn("event_driven", contract["status_taxonomy"])
         self.assertIn("liquidation_heatmap", contract["providers"][COINGLASS_PROVIDER]["resources"])
         self.assertEqual(contract["providers"][COINGLASS_PROVIDER]["status"], "api_key_required")
+        self.assertEqual(
+            contract["providers"][COINGLASS_PROVIDER]["resource_status"]["liquidation_heatmap"],
+            "api_key_required",
+        )
         self.assertIn(OMI_LOCAL_PROVIDER, contract["providers"])
         self.assertIn("liquidation_heatmap", contract["providers"][OMI_LOCAL_PROVIDER]["resources"])
+        self.assertEqual(contract["providers"][OMI_LOCAL_PROVIDER]["status"], "local_fallback")
         self.assertIn(BYBIT_PROVIDER, contract["providers"])
         self.assertIn("long_short_ratio", contract["providers"][BYBIT_PROVIDER]["resources"])
+        self.assertEqual(
+            contract["providers"][BINANCE_PROVIDER]["resource_status"]["long_short_ratio"],
+            "rest_cache",
+        )
+        self.assertEqual(contract["providers"][BINANCE_PROVIDER]["resource_status"]["cvd"], "provider_pending")
         self.assertEqual(
             len(
                 list_provider_instruments(
@@ -733,6 +754,8 @@ class CryptoMarketBackendTests(unittest.TestCase):
         self.assertEqual(plans[("ohlcv", OKX_PROVIDER, "coverage")].symbols, ("BTC-USDT",))
         self.assertEqual(plans[("derivatives", BINANCE_PROVIDER, "default")].symbols, ("BTC-USDT",))
         self.assertEqual(plans[("derivatives", OKX_PROVIDER, "default")].symbols, ("BTC-USDT",))
+        self.assertEqual(plans[("long_short_ratio", BINANCE_PROVIDER, "default")].symbols, ("BTC-USDT",))
+        self.assertEqual(plans[("long_short_ratio", BINANCE_PROVIDER, "default")].interval_seconds, 300.0)
         self.assertEqual(plans[("market_cap", None, "default")].assets, ("BTC",))
         self.assertEqual(plans[("taiwan_spread", "binance,okx", "default")].bases, ("BTC",))
 
@@ -805,6 +828,7 @@ class CryptoMarketBackendTests(unittest.TestCase):
                             "order_book": False,
                             "ohlcv": False,
                             "derivatives": False,
+                            "long_short_ratio": False,
                             "taiwan_spread": False,
                             "market_cap": False,
                         },
@@ -927,6 +951,98 @@ class CryptoMarketBackendTests(unittest.TestCase):
 
         self.assertEqual(sol_ticker["latest_event_status"], "success")
         self.assertIsNotNone(sol_ticker["latest_event_id"])
+
+    def test_source_health_uses_registry_identity_and_omits_non_applicable_resources(self) -> None:
+        now = _utc("2026-06-24T00:00:00Z")
+        self.db.add(
+            CryptoMarketCapSnapshot(
+                provider=COINGECKO_PROVIDER,
+                coin_id="the-open-network",
+                symbol="gram",
+                name="Toncoin",
+                vs_currency="usd",
+                current_price=2.5,
+                fetched_at=now,
+            )
+        )
+        self.db.commit()
+
+        ton_report = build_crypto_source_health(self.db, base="TON", now=now)
+        ton_market_cap = next(
+            entry
+            for entry in ton_report["entries"]
+            if entry["resource"] == "crypto_market_cap"
+        )
+        sol_report = build_crypto_source_health(self.db, base="SOL", now=now)
+
+        self.assertEqual(ton_market_cap["target"], "TON")
+        self.assertEqual(ton_market_cap["latest_data_key"], "the-open-network")
+        self.assertEqual(ton_market_cap["status"], "live")
+        self.assertNotIn("crypto_spread", {entry["resource"] for entry in sol_report["entries"]})
+        self.assertNotIn(
+            "crypto_long_short_ratio",
+            {entry["resource"] for entry in ton_report["entries"]},
+        )
+
+    def test_workspace_summary_separates_registry_watchlist_and_slot_maturity(self) -> None:
+        now = _utc("2026-06-24T00:00:00Z")
+        self.db.add(
+            CryptoMarketCapSnapshot(
+                provider=COINGECKO_PROVIDER,
+                coin_id="the-open-network",
+                symbol="gram",
+                name="Toncoin",
+                vs_currency="usd",
+                current_price=2.5,
+                fetched_at=now,
+            )
+        )
+        self.db.commit()
+
+        result = build_crypto_workspace_summary(self.db, now=now)
+        assets = {row["asset"]: row for row in result["assets"]}
+        ton_slots = {slot["key"]: slot for slot in assets["TON"]["slots"]}
+        sol_slots = {slot["key"]: slot for slot in assets["SOL"]["slots"]}
+        btc_slots = {slot["key"]: slot for slot in assets["BTC"]["slots"]}
+
+        self.assertEqual(result["registry_count"], 9)
+        self.assertEqual(result["watchlist_count"], 8)
+        self.assertFalse(assets["USDT"]["watchlisted"])
+        self.assertTrue(assets["LINK"]["watchlisted"])
+        self.assertEqual(assets["BTC"]["subscription_mode"], "always_on")
+        self.assertEqual(assets["ETH"]["subscription_mode"], "on_select")
+        self.assertEqual(result["summary"]["always_on_count"], 1)
+        self.assertEqual(result["summary"]["on_select_count"], 8)
+        self.assertEqual(assets["TON"]["maturity"], "partial")
+        self.assertEqual(ton_slots["market_cap"]["status"], "ready")
+        self.assertEqual(sol_slots["taiwan_spread"]["status"], "not_applicable")
+        self.assertEqual(btc_slots["liquidation_event"]["status"], "event_quiet")
+        self.assertEqual(btc_slots["cvd"]["status"], "provider_pending")
+        CryptoWorkspaceSummaryRead.model_validate(result)
+
+    def test_workspace_ohlcv_slot_requires_minimum_cached_coverage(self) -> None:
+        btc = get_crypto_asset("BTC")
+        ohlcv_spec = next(spec for spec in CORE_SLOT_SPECS if spec.key == "ohlcv")
+
+        self.assertIsNotNone(btc)
+        slot = _build_slot(
+            btc,
+            ohlcv_spec,
+            [
+                {
+                    "resource": "crypto_ohlcv",
+                    "provider": provider,
+                    "target": "BTC-USDT" if provider != BITOPRO_PROVIDER else "BTC-TWD",
+                    "status": "live",
+                    "ok": True,
+                    "row_count": 10,
+                    "latest_fetched_at": "2026-06-24T00:00:00+00:00",
+                }
+                for provider in (BITOPRO_PROVIDER, BINANCE_PROVIDER, OKX_PROVIDER)
+            ],
+        )
+
+        self.assertEqual(slot["status"], "partial")
 
     def test_bitopro_realtime_ticker_updates_latest_store(self) -> None:
         store = CryptoRealtimeStore()
@@ -1434,6 +1550,38 @@ class CryptoMarketBackendTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(history[0].last_price, 2100100)
 
+    def test_refresh_tickers_keeps_successful_rows_when_later_symbol_fails(self) -> None:
+        btc = _ticker(
+            provider=BITOPRO_PROVIDER,
+            exchange="BitoPro",
+            symbol="BTC-TWD",
+            provider_symbol="btc_twd",
+            base_asset="BTC",
+            quote_asset="TWD",
+            last_price=2100000,
+        )
+
+        with patch.object(
+            sources,
+            "fetch_bitopro_ticker",
+            side_effect=[btc, RuntimeError("provider timeout")],
+        ):
+            result = refresh_crypto_tickers(
+                self.db,
+                providers="bitopro",
+                symbols="BTC-TWD,ETH-TWD",
+            )
+
+        rows = self.db.query(CryptoTickerSnapshot).all()
+        events = self.db.query(ProviderEvent).order_by(ProviderEvent.id.asc()).all()
+        self.assertEqual(result["status"], "partial_success")
+        self.assertEqual(result["refreshed_count"], 1)
+        self.assertEqual(result["error_count"], 1)
+        self.assertEqual(rows[0].symbol, "BTC-TWD")
+        self.assertEqual(rows[0].last_price, 2100000)
+        self.assertEqual([event.status for event in events], ["success", "error"])
+        self.assertIn("provider timeout", events[-1].error_message)
+
     def test_refresh_tickers_skips_disabled_subscription_item(self) -> None:
         update_market_data_subscription_settings(
             self.db,
@@ -1556,6 +1704,53 @@ class CryptoMarketBackendTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].symbol, "BTC-USDT")
         self.assertEqual(rows[0].close_price, 100100)
+
+    def test_refresh_ohlcv_keeps_successful_rows_when_later_symbol_fails(self) -> None:
+        bar = sources.CryptoOhlcvBarRecord(
+            provider=BINANCE_PROVIDER,
+            exchange="Binance",
+            symbol="BTC-USDT",
+            provider_symbol="BTCUSDT",
+            base_asset="BTC",
+            quote_asset="USDT",
+            instrument_type=SPOT,
+            interval="1m",
+            bar_time=_utc("2026-06-24T00:00:00Z"),
+            open_price=100000,
+            high_price=100200,
+            low_price=99900,
+            close_price=100100,
+            base_volume=10,
+            quote_volume=1001000,
+            source_url="https://example.test/klines",
+            raw_payload_hash="hash",
+            raw_payload=[1, 2, 3],
+            fetched_at=_utc("2026-06-24T00:01:00Z"),
+        )
+
+        with patch.object(
+            sources,
+            "fetch_binance_ohlcv",
+            side_effect=[[bar], RuntimeError("provider timeout")],
+        ):
+            result = refresh_crypto_ohlcv(
+                self.db,
+                providers="binance",
+                symbols="BTC-USDT,ETH-USDT",
+                interval="1m",
+                limit=10,
+            )
+
+        rows = self.db.query(CryptoOhlcvBar).all()
+        events = self.db.query(ProviderEvent).order_by(ProviderEvent.id.asc()).all()
+        self.assertEqual(result["status"], "partial_success")
+        self.assertEqual(result["refreshed_count"], 1)
+        self.assertEqual(result["error_count"], 1)
+        self.assertEqual(rows[0].symbol, "BTC-USDT")
+        self.assertEqual(rows[0].close_price, 100100)
+        self.assertEqual([event.status for event in events], ["success", "error"])
+        self.assertEqual(json.loads(events[-1].detail_json)["interval"], "1m")
+        self.assertIn("provider timeout", events[-1].error_message)
 
     def test_list_ohlcv_coverage_groups_by_provider_symbol_and_interval(self) -> None:
         self.db.add_all(
@@ -1719,6 +1914,44 @@ class CryptoMarketBackendTests(unittest.TestCase):
         self.assertEqual(bundle_refresh.call_args.kwargs["providers"], "binance")
         self.assertEqual(bundle_refresh.call_args.kwargs["symbols"], "BTC-USDT")
         self.assertEqual(bundle_refresh.call_args.kwargs["intervals"], "1m,1d")
+
+    def test_auto_refresh_long_short_ratio_plan_routes_to_ratio_refresh(self) -> None:
+        class DummySession:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return None
+
+        plan = CryptoAutoRefreshPlan(
+            resource="long_short_ratio",
+            interval_seconds=300.0,
+            providers="binance",
+            symbols=("BTC-USDT",),
+        )
+
+        with (
+            patch("app.crypto_market.auto_refresh.SessionLocal", return_value=DummySession()),
+            patch(
+                "app.crypto_market.auto_refresh.refresh_crypto_long_short_ratios",
+                return_value={
+                    "status": "success",
+                    "resource": "long_short_ratio",
+                    "requested_count": 1,
+                    "refreshed_count": 1,
+                    "error_count": 0,
+                    "skipped_count": 0,
+                    "errors": [],
+                    "skipped": [],
+                    "rows": [],
+                },
+            ) as ratio_refresh,
+        ):
+            result = _execute_auto_refresh_plan(plan)
+
+        self.assertEqual(result["resource"], "long_short_ratio")
+        self.assertEqual(ratio_refresh.call_args.kwargs["providers"], "binance")
+        self.assertEqual(ratio_refresh.call_args.kwargs["symbols"], "BTC-USDT")
 
     def test_refresh_derivatives_records_history(self) -> None:
         with patch.object(

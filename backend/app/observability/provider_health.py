@@ -1,17 +1,52 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import or_
-from sqlalchemy.orm import Session
+from sqlalchemy import case, func, or_
+from sqlalchemy.orm import Session, load_only
 
 from app.db.models import ProviderEvent, SourceHealthSnapshot, utc_now
 
 
 ERROR_STATUSES = {"error", "failed", "timeout", "rate_limited", "blocked", "partial_success"}
+DEGRADED_SOURCE_HEALTH_STATUSES = {
+    "blocked",
+    "empty",
+    "error",
+    "failed",
+    "rate_limited",
+    "stale",
+    "timeout",
+}
 DEFAULT_RECENT_WINDOW_HOURS = 24
+DEFAULT_SOURCE_HEALTH_SNAPSHOT_STALE_SECONDS = 24 * 60 * 60
+PROVIDER_EVENT_READ_COLUMNS = (
+    ProviderEvent.id,
+    ProviderEvent.market,
+    ProviderEvent.provider,
+    ProviderEvent.resource,
+    ProviderEvent.target,
+    ProviderEvent.status,
+    ProviderEvent.severity,
+    ProviderEvent.event_type,
+    ProviderEvent.event_time,
+    ProviderEvent.observed_at,
+    ProviderEvent.http_status_code,
+    ProviderEvent.rate_limited,
+    ProviderEvent.retry_after_seconds,
+    ProviderEvent.duration_ms,
+    ProviderEvent.source_url,
+    ProviderEvent.message,
+    ProviderEvent.error_message,
+    ProviderEvent.detail_json,
+    ProviderEvent.job_run_id,
+    ProviderEvent.fetch_log_id,
+    ProviderEvent.raw_result_id,
+    ProviderEvent.created_at,
+)
 
 
 def _now() -> datetime:
@@ -29,6 +64,20 @@ def _normalized_market(value: Any) -> str:
 
 def _normalized_provider(value: Any) -> str:
     return _normalized_key(value, default="all").lower()
+
+
+def _provider_candidates(value: Any) -> tuple[str, ...]:
+    normalized = _normalized_provider(value)
+    if normalized == "all":
+        return ("all",)
+    candidates = tuple(
+        dict.fromkeys(
+            part.strip()
+            for part in re.split(r"[+,]", normalized)
+            if part.strip()
+        )
+    )
+    return candidates or (normalized,)
 
 
 def _normalized_status(value: Any) -> str:
@@ -82,6 +131,13 @@ def _event_message(event: ProviderEvent | None) -> str | None:
 
 
 def provider_event_to_dict(event: ProviderEvent) -> dict[str, Any]:
+    detail = None
+    if event.detail_json:
+        try:
+            parsed = json.loads(event.detail_json)
+            detail = parsed if isinstance(parsed, dict) else None
+        except (TypeError, ValueError, json.JSONDecodeError):
+            detail = None
     return {
         "id": event.id,
         "market": event.market,
@@ -91,8 +147,16 @@ def provider_event_to_dict(event: ProviderEvent) -> dict[str, Any]:
         "status": event.status,
         "severity": event.severity,
         "event_type": event.event_type,
-        "event_time": event.event_time.isoformat() if event.event_time else None,
-        "observed_at": event.observed_at.isoformat() if event.observed_at else None,
+        "event_time": (
+            _utc_datetime(event.event_time).isoformat()
+            if event.event_time
+            else None
+        ),
+        "observed_at": (
+            _utc_datetime(event.observed_at).isoformat()
+            if event.observed_at
+            else None
+        ),
         "http_status_code": event.http_status_code,
         "rate_limited": event.rate_limited,
         "retry_after_seconds": event.retry_after_seconds,
@@ -100,14 +164,33 @@ def provider_event_to_dict(event: ProviderEvent) -> dict[str, Any]:
         "source_url": event.source_url,
         "message": event.message,
         "error_message": event.error_message,
+        "detail": detail,
         "job_run_id": event.job_run_id,
         "fetch_log_id": event.fetch_log_id,
         "raw_result_id": event.raw_result_id,
-        "created_at": event.created_at.isoformat() if event.created_at else None,
+        "created_at": (
+            _utc_datetime(event.created_at).isoformat()
+            if event.created_at
+            else None
+        ),
     }
 
 
-def source_health_snapshot_to_dict(snapshot: SourceHealthSnapshot) -> dict[str, Any]:
+def _utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def source_health_snapshot_to_dict(
+    snapshot: SourceHealthSnapshot,
+    *,
+    now: datetime | None = None,
+    stale_after_seconds: int = DEFAULT_SOURCE_HEALTH_SNAPSHOT_STALE_SECONDS,
+) -> dict[str, Any]:
+    current = _utc_datetime(now or _now())
+    checked_at = _utc_datetime(snapshot.checked_at)
+    snapshot_age_seconds = max(int((current - checked_at).total_seconds()), 0)
     return {
         "id": snapshot.id,
         "market": snapshot.market,
@@ -135,6 +218,8 @@ def source_health_snapshot_to_dict(snapshot: SourceHealthSnapshot) -> dict[str, 
         "recent_error_count": snapshot.recent_error_count,
         "consecutive_error_count": snapshot.consecutive_error_count,
         "checked_at": snapshot.checked_at.isoformat() if snapshot.checked_at else None,
+        "snapshot_age_seconds": snapshot_age_seconds,
+        "snapshot_is_stale": snapshot_age_seconds > max(stale_after_seconds, 0),
         "created_at": snapshot.created_at.isoformat() if snapshot.created_at else None,
         "updated_at": snapshot.updated_at.isoformat() if snapshot.updated_at else None,
     }
@@ -240,6 +325,7 @@ def list_provider_events(
             target=target,
             status=status,
         )
+        .options(load_only(*PROVIDER_EVENT_READ_COLUMNS))
         .order_by(ProviderEvent.event_time.desc(), ProviderEvent.id.desc())
         .limit(limit)
         .all()
@@ -255,9 +341,9 @@ def _matching_events_query(
     resource: str,
     target: str,
 ):
-    normalized_provider = _normalized_provider(provider)
-    provider_filter = True if normalized_provider == "all" else or_(
-        ProviderEvent.provider == normalized_provider,
+    provider_candidates = _provider_candidates(provider)
+    provider_filter = True if provider_candidates == ("all",) else or_(
+        ProviderEvent.provider.in_(provider_candidates),
         ProviderEvent.provider == "all",
     )
     return (
@@ -285,11 +371,34 @@ def provider_event_summary(
         resource=resource,
         target=target,
     )
-    latest_event = query.order_by(ProviderEvent.event_time.desc(), ProviderEvent.id.desc()).first()
+    latest_event = (
+        query.options(load_only(*PROVIDER_EVENT_READ_COLUMNS))
+        .order_by(ProviderEvent.event_time.desc(), ProviderEvent.id.desc())
+        .first()
+    )
     since = _now() - timedelta(hours=max(1, recent_window_hours))
-    recent_events = query.filter(ProviderEvent.event_time >= since).all()
-    recent_error_count = sum(1 for event in recent_events if event.status in ERROR_STATUSES)
-    ordered_events = query.order_by(ProviderEvent.event_time.desc(), ProviderEvent.id.desc()).limit(25).all()
+    recent_event_count, recent_error_count = (
+        query.filter(ProviderEvent.event_time >= since)
+        .with_entities(
+            func.count(ProviderEvent.id),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (ProviderEvent.status.in_(ERROR_STATUSES), 1),
+                        else_=0,
+                    )
+                ),
+                0,
+            ),
+        )
+        .one()
+    )
+    ordered_events = (
+        query.options(load_only(ProviderEvent.status))
+        .order_by(ProviderEvent.event_time.desc(), ProviderEvent.id.desc())
+        .limit(25)
+        .all()
+    )
     consecutive_error_count = 0
     for event in ordered_events:
         if event.status not in ERROR_STATUSES:
@@ -298,7 +407,7 @@ def provider_event_summary(
 
     return {
         "latest_event": provider_event_to_dict(latest_event) if latest_event else None,
-        "recent_event_count": len(recent_events),
+        "recent_event_count": recent_event_count,
         "recent_error_count": recent_error_count,
         "consecutive_error_count": consecutive_error_count,
     }
@@ -323,6 +432,18 @@ def enrich_source_health_entries(
             target=target,
         )
         latest_event = summary.get("latest_event") if isinstance(summary.get("latest_event"), dict) else None
+        latest_event_detail = (
+            latest_event.get("detail")
+            if latest_event and isinstance(latest_event.get("detail"), dict)
+            else {}
+        )
+        next_eligible_refresh_at = _parse_datetime(
+            latest_event_detail.get("next_eligible_refresh_at")
+        )
+        refresh_eligible = bool(
+            next_eligible_refresh_at is None
+            or _utc_datetime(next_eligible_refresh_at) <= _now()
+        )
         enriched_entry = dict(entry)
         enriched_entry.update(
             {
@@ -335,8 +456,15 @@ def enrich_source_health_entries(
                     if latest_event
                     else None
                 ),
-                "recent_event_count": summary["recent_event_count"],
-                "recent_error_count": summary["recent_error_count"],
+                "latest_event_detail": latest_event_detail or None,
+                "next_eligible_refresh_at": (
+                    _utc_datetime(next_eligible_refresh_at).isoformat()
+                    if next_eligible_refresh_at
+                    else None
+                ),
+                "refresh_eligible": refresh_eligible,
+                "recent_event_count": int(summary["recent_event_count"] or 0),
+                "recent_error_count": int(summary["recent_error_count"] or 0),
                 "consecutive_error_count": summary["consecutive_error_count"],
             }
         )
@@ -402,6 +530,80 @@ def sync_source_health_snapshots(
             .filter(SourceHealthSnapshot.provider == values["provider"])
             .first()
         )
+        status_changed = (
+            snapshot is None or snapshot.status != values["status"]
+        )
+        if (
+            status_changed
+            and values["status"] in DEGRADED_SOURCE_HEALTH_STATUSES
+            and not values.get("latest_event_id")
+        ):
+            event = record_provider_event(
+                db,
+                market=values["market"],
+                provider=values["provider"],
+                resource=values["resource"],
+                target=values["target"],
+                status=values["status"],
+                event_type="source_health_transition",
+                event_time=checked_at,
+                observed_at=checked_at,
+                source_url=entry.get("source_url"),
+                message=values.get("reason")
+                or (
+                    "Source health entered a degraded state: "
+                    f"{values['status']}."
+                ),
+                detail={
+                    "previous_status": snapshot.status if snapshot else None,
+                    "current_status": values["status"],
+                    "row_count": values["row_count"],
+                    "latest_data_date": entry.get("latest_data_date"),
+                    "expected_data_date": entry.get("expected_data_date"),
+                    "freshness_lag_days": entry.get("freshness_lag_days"),
+                },
+                commit=False,
+            )
+            values.update(
+                {
+                    "latest_event_id": event.id,
+                    "latest_event_at": checked_at,
+                    "latest_event_status": event.status,
+                    "latest_event_severity": event.severity,
+                    "latest_event_message": event.message,
+                    "recent_event_count": (
+                        int(snapshot.recent_event_count or 0) + 1
+                        if snapshot is not None
+                        else 1
+                    ),
+                    "recent_error_count": (
+                        int(snapshot.recent_error_count or 0)
+                        if snapshot is not None
+                        else 0
+                    )
+                    + (1 if event.status in ERROR_STATUSES else 0),
+                    "consecutive_error_count": (
+                        int(snapshot.consecutive_error_count or 0) + 1
+                        if snapshot is not None
+                        and event.status in ERROR_STATUSES
+                        else 1
+                        if event.status in ERROR_STATUSES
+                        else 0
+                    ),
+                }
+            )
+        elif snapshot is not None and not values.get("latest_event_id"):
+            for key in (
+                "latest_event_id",
+                "latest_event_at",
+                "latest_event_status",
+                "latest_event_severity",
+                "latest_event_message",
+                "recent_event_count",
+                "recent_error_count",
+                "consecutive_error_count",
+            ):
+                values[key] = getattr(snapshot, key)
         if snapshot is None:
             snapshot = SourceHealthSnapshot(created_at=checked_at, **values)
             db.add(snapshot)
@@ -446,10 +648,12 @@ def list_source_health_snapshots(
         .limit(limit)
         .all()
     )
-    return [source_health_snapshot_to_dict(snapshot) for snapshot in snapshots]
+    now = _now()
+    return [source_health_snapshot_to_dict(snapshot, now=now) for snapshot in snapshots]
 
 
 __all__ = [
+    "DEFAULT_SOURCE_HEALTH_SNAPSHOT_STALE_SECONDS",
     "enrich_source_health_entries",
     "list_provider_events",
     "list_source_health_snapshots",

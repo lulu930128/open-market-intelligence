@@ -2,20 +2,18 @@ from __future__ import annotations
 
 import hashlib
 import time
-from datetime import date, datetime
+from datetime import date
 from html.parser import HTMLParser
-from zoneinfo import ZoneInfo
 
 import requests
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import MonthlyRevenue, RawFetchResult, SourceRegistry, StockMaster
 from app.http_client import new_session
+from app.market.taiwan_rules import expected_monthly_revenue_period
 from app.parsers.twse_common import parse_float, parse_int
 
 
-TAIWAN_TZ = ZoneInfo("Asia/Taipei")
 MOPS_REVENUE_HISTORY_BASE_URL = "https://mopsov.twse.com.tw/nas/t21"
 MOPS_REVENUE_HEADERS = {
     "User-Agent": "Mozilla/5.0",
@@ -82,10 +80,6 @@ def _month_span(start_period: date, end_period: date) -> int:
     return (end_period.year - start_period.year) * 12 + end_period.month - start_period.month + 1
 
 
-def _previous_month(value: date) -> date:
-    return _add_months(_month_floor(value), -1)
-
-
 def _normalize_market(market: str | None) -> str:
     normalized = (market or "").upper()
     if normalized in {"TWSE", "TSE", "上市"}:
@@ -120,18 +114,6 @@ def _get_monthly_revenue_source(db: Session, market: str) -> SourceRegistry:
     raise ValueError(f"{market_token} monthly revenue source is not configured.")
 
 
-def _latest_known_period(db: Session, stock_id: str) -> date:
-    latest = (
-        db.query(func.max(MonthlyRevenue.period))
-        .filter(MonthlyRevenue.stock_id == stock_id)
-        .scalar()
-    )
-    if latest is not None:
-        return _month_floor(latest)
-
-    return _previous_month(datetime.now(TAIWAN_TZ).date())
-
-
 def _target_months(
     db: Session,
     stock_id: str,
@@ -139,7 +121,12 @@ def _target_months(
     to_period: date | None,
     lookback_months: int,
 ) -> list[date]:
-    end_period = _month_floor(to_period) if to_period is not None else _latest_known_period(db, stock_id)
+    del db, stock_id
+    end_period = (
+        _month_floor(to_period)
+        if to_period is not None
+        else expected_monthly_revenue_period()
+    )
     if from_period is not None:
         start_period = _month_floor(from_period)
         month_count = min(_month_span(start_period, end_period), lookback_months)

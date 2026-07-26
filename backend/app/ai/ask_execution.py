@@ -24,13 +24,42 @@ _require_scope_id = ask_policy._require_scope_id
 _require_group_id = ask_policy._require_group_id
 
 
-def _include_tw_intraday(payload: AiAskRequest) -> bool:
+def _include_tw_intraday(payload: AiAskRequest, *, policy: dict[str, Any] | None = None) -> bool:
+    can_external_fetch = (
+        bool(policy.get("can_external_fetch"))
+        if isinstance(policy, dict)
+        else bool(payload.allow_external_fetch)
+    )
+    market_data_params = payload.market_data_params if isinstance(payload.market_data_params, dict) else {}
+    if "include_intraday" in market_data_params:
+        return bool(market_data_params.get("include_intraday")) and can_external_fetch
+
     return decision_core.include_tw_intraday(
         question=payload.question,
         requested_horizon=payload.analysis_horizon,
         strategy_profile=payload.strategy_profile,
-        allow_external_fetch=payload.allow_external_fetch,
+        allow_external_fetch=can_external_fetch,
     )
+
+
+def _external_intraday_market_data_params(
+    payload: AiAskRequest,
+    *,
+    policy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    params = dict(payload.market_data_params) if isinstance(payload.market_data_params, dict) else {}
+    has_explicit_intraday = "include_intraday" in params
+    requested_intraday = bool(params.get("include_intraday")) if has_explicit_intraday else payload.analysis_horizon == "intraday"
+    if not requested_intraday or (has_explicit_intraday and not params.get("include_intraday")):
+        return params
+
+    can_external_fetch = (
+        bool(policy.get("can_external_fetch"))
+        if isinstance(policy, dict)
+        else bool(payload.allow_external_fetch)
+    )
+    params["include_intraday"] = can_external_fetch
+    return params
 
 
 def _watchlist_radar_mode(question_intent: str) -> str:
@@ -45,6 +74,43 @@ def _response_preferences(payload: AiAskRequest) -> dict[str, Any]:
     return response_preferences.build_response_preferences(payload.conversation_context)
 
 
+def _reader_profile(
+    payload: AiAskRequest,
+    *,
+    policy: dict[str, Any] | None = None,
+) -> str:
+    query_plan = (
+        policy.get("query_plan")
+        if isinstance(policy, dict) and isinstance(policy.get("query_plan"), dict)
+        else {}
+    )
+    profile = str(query_plan.get("reader_profile") or "").strip()
+    if profile:
+        return profile
+    params = (
+        payload.market_data_params
+        if isinstance(payload.market_data_params, dict)
+        else {}
+    )
+    return str(params.get("reader_profile") or "").strip()
+
+
+def _uses_reader_profile(
+    payload: AiAskRequest,
+    *,
+    expected: str,
+    question_intent: str,
+    policy: dict[str, Any] | None = None,
+) -> bool:
+    profile = _reader_profile(payload, policy=policy)
+    if profile:
+        return profile == expected
+    return question_intent == {
+        "quote_only": "quote",
+        "broker_branch_only": "broker_branch",
+    }.get(expected)
+
+
 def _read_data_only(
     db: Session,
     payload: AiAskRequest,
@@ -52,26 +118,58 @@ def _read_data_only(
     *,
     question_intent: str = "general",
     tool_runs: list[dict[str, Any]] | None = None,
+    policy: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     if scope_type == "market":
         return "omi.read_market_overview", tools.read_market_overview(
             db=db,
             limit=payload.market_limit,
+            include_intraday=_include_tw_intraday(payload, policy=policy),
+            market_data_params=payload.market_data_params,
         )
 
     if scope_type == "data_freshness":
         target_id = _request_target_id(payload)
-        stock_id = target_id if _looks_like_stock_id(target_id) else None
-        return "omi.read_data_freshness", tools.read_data_freshness(db=db, stock_id=stock_id)
+        target = payload.target if isinstance(payload.target, dict) else {}
+        market = str(target.get("market") or "TW").strip().upper()
+        return "omi.read_data_freshness", tools.read_data_freshness(
+            db=db,
+            stock_id=target_id,
+            market=market,
+        )
 
     if scope_type == "stock":
         stock_id = _require_scope_id(payload, "stock")
+        if _uses_reader_profile(
+            payload,
+            expected="quote_only",
+            question_intent=question_intent,
+            policy=policy,
+        ):
+            return "omi.read_stock_quote", tools.read_stock_quote_context(
+                db=db,
+                stock_id=stock_id,
+                market_data_params=payload.market_data_params,
+            )
+        if _uses_reader_profile(
+            payload,
+            expected="broker_branch_only",
+            question_intent=question_intent,
+            policy=policy,
+        ):
+            return "omi.read_stock_broker_branch", tools.read_stock_broker_branch_context(
+                db=db,
+                stock_id=stock_id,
+                branch_days=payload.branch_days,
+                market_data_params=payload.market_data_params,
+            )
         return "omi.read_stock_context", tools.read_stock_context(
             db=db,
             stock_id=stock_id,
             branch_days=payload.branch_days,
-            include_intraday=_include_tw_intraday(payload),
+            include_intraday=_include_tw_intraday(payload, policy=policy),
             analysis_horizon=payload.analysis_horizon,
+            market_data_params=payload.market_data_params,
         )
 
     if scope_type == "tw_index":
@@ -79,8 +177,9 @@ def _read_data_only(
         return "omi.read_tw_index_context", tools.read_tw_index_context(
             db=db,
             index_id=index_id,
-            include_intraday=_include_tw_intraday(payload),
+            include_intraday=_include_tw_intraday(payload, policy=policy),
             analysis_horizon=payload.analysis_horizon,
+            market_data_params=payload.market_data_params,
         )
 
     if scope_type == "tw_futures":
@@ -88,8 +187,9 @@ def _read_data_only(
         return "omi.read_tw_futures_context", tools.read_tw_futures_context(
             db=db,
             symbol=symbol,
-            include_intraday=_include_tw_intraday(payload),
+            include_intraday=_include_tw_intraday(payload, policy=policy),
             analysis_horizon=payload.analysis_horizon,
+            market_data_params=payload.market_data_params,
         )
 
     if scope_type == "us_stock":
@@ -98,6 +198,10 @@ def _read_data_only(
             db=db,
             symbol=symbol,
             tool_runs=tool_runs,
+            market_data_params=_external_intraday_market_data_params(
+                payload,
+                policy=policy,
+            ),
         )
 
     if scope_type in {"jp_stock", "jp_index"}:
@@ -109,6 +213,102 @@ def _read_data_only(
             symbol=symbol,
             is_index=scope_type == "jp_index",
             tool_runs=tool_runs,
+            market_data_params=_external_intraday_market_data_params(
+                payload,
+                policy=policy,
+            ),
+        )
+
+    if scope_type in {"kr_stock", "kr_index"}:
+        symbol = _require_scope_id(payload, scope_type)
+        return (
+            "omi.read_kr_index_context" if scope_type == "kr_index" else "omi.read_kr_stock_context"
+        ), agentic_tools.read_kr_stock_context(
+            db=db,
+            symbol=symbol,
+            is_index=scope_type == "kr_index",
+            tool_runs=tool_runs,
+            market_data_params=_external_intraday_market_data_params(
+                payload,
+                policy=policy,
+            ),
+        )
+
+    if scope_type in {"crypto_market", "crypto_asset"}:
+        asset = _require_scope_id(payload, "crypto_asset") if scope_type == "crypto_asset" else None
+        return (
+            "omi.read_crypto_asset_context" if scope_type == "crypto_asset" else "omi.read_crypto_market_context"
+        ), agentic_tools.read_crypto_context(
+            db=db,
+            asset=asset,
+            tool_runs=tool_runs,
+            market_data_params=payload.market_data_params,
+            context_limit=payload.context_limit,
+        )
+
+    if scope_type == "resource_asset":
+        symbol = _require_scope_id(payload, scope_type)
+        return "omi.read_resource_asset_context", agentic_tools.read_resource_asset_context(
+            db=db,
+            symbol=symbol,
+            market_data_params=payload.market_data_params,
+        )
+
+    if scope_type == "us_macro":
+        series_id = _require_scope_id(payload, scope_type)
+        return "omi.read_us_macro_context", agentic_tools.read_us_macro_context(
+            db=db,
+            series_id=series_id,
+            market_data_params=payload.market_data_params,
+        )
+
+    if scope_type == "portfolio":
+        trust_source = str((policy or {}).get("server_trust_source") or "untrusted")
+        return "omi.read_portfolio_context", agentic_tools.read_portfolio_context(
+            db=db,
+            market_data_params=payload.market_data_params,
+            trusted=trust_source != "untrusted",
+        )
+
+    if scope_type == "source_health":
+        params = dict(payload.market_data_params)
+        target_id = _request_target_id(payload)
+        if target_id and "market" not in params:
+            params["market"] = target_id
+        return "omi.read_unified_source_health_context", agentic_tools.read_unified_source_health_context(
+            db=db,
+            market_data_params=params,
+        )
+
+    if scope_type == "capability_status":
+        return "omi.read_capability_status", agentic_tools.read_capability_status(
+            capability_id=_request_target_id(payload),
+            market_data_params=payload.market_data_params,
+        )
+
+    if scope_type in {"us_watchlist", "jp_watchlist", "kr_watchlist"}:
+        group_id_text = _require_scope_id(payload, scope_type)
+        try:
+            group_id = int(group_id_text)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"target.id must be a positive integer for {scope_type}.") from exc
+        market = scope_type.split("_", 1)[0]
+        params = (
+            _external_intraday_market_data_params(payload, policy=policy)
+            if market == "us"
+            else payload.market_data_params
+        )
+        return f"omi.read_{scope_type}_context", agentic_tools.read_regional_watchlist_context(
+            db=db,
+            market=market,
+            group_id=group_id,
+            include_children=payload.include_children,
+            enabled_only=payload.enabled_only,
+            rank_by=payload.rank_by,
+            sort_order=payload.sort_order,
+            radar_mode=_watchlist_radar_mode(question_intent),
+            market_data_params=params,
+            context_limit=payload.context_limit,
         )
 
     group_id = _require_group_id(payload)
@@ -121,6 +321,7 @@ def _read_data_only(
         sort_order=payload.sort_order,
         limit=payload.context_limit,
         radar_mode=_watchlist_radar_mode(question_intent),
+        market_data_params=payload.market_data_params,
     )
 
 
@@ -131,7 +332,45 @@ def _build_brief(
     *,
     question_intent: str = "general",
     tool_runs: list[dict[str, Any]] | None = None,
+    policy: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
+    if scope_type == "stock" and _uses_reader_profile(
+        payload,
+        expected="quote_only",
+        question_intent=question_intent,
+        policy=policy,
+    ):
+        stock_id = _require_scope_id(payload, "stock")
+        return "omi.read_stock_quote", tools.read_stock_quote_context(
+            db=db,
+            stock_id=stock_id,
+            market_data_params=payload.market_data_params,
+        )
+
+    if scope_type == "stock" and _uses_reader_profile(
+        payload,
+        expected="broker_branch_only",
+        question_intent=question_intent,
+        policy=policy,
+    ):
+        stock_id = _require_scope_id(payload, "stock")
+        return "omi.read_stock_broker_branch", tools.read_stock_broker_branch_context(
+            db=db,
+            stock_id=stock_id,
+            branch_days=payload.branch_days,
+            market_data_params=payload.market_data_params,
+        )
+
+    if scope_type == "market":
+        return "omi.generate_market_brief", reports.build_market_brief(
+            db=db,
+            limit=payload.market_limit,
+            include_intraday=_include_tw_intraday(payload, policy=policy),
+            analysis_horizon=payload.analysis_horizon,
+            market_data_params=payload.market_data_params,
+            response_preferences=_response_preferences(payload),
+        )
+
     if scope_type == "stock":
         stock_id = _require_scope_id(payload, "stock")
         return "omi.generate_stock_brief", reports.build_stock_brief(
@@ -139,8 +378,9 @@ def _build_brief(
             stock_id=stock_id,
             strategy_profile=payload.strategy_profile,
             branch_days=payload.branch_days,
-            include_intraday=_include_tw_intraday(payload),
+            include_intraday=_include_tw_intraday(payload, policy=policy),
             analysis_horizon=payload.analysis_horizon,
+            market_data_params=payload.market_data_params,
             response_preferences=_response_preferences(payload),
         )
 
@@ -164,10 +404,62 @@ def _build_brief(
             strategy_profile=payload.strategy_profile,
             analysis_horizon=payload.analysis_horizon,
             tool_runs=tool_runs,
+            market_data_params=_external_intraday_market_data_params(
+                payload,
+                policy=policy,
+            ),
             response_preferences=_response_preferences(payload),
         )
 
-    return _read_data_only(db, payload, scope_type, tool_runs=tool_runs)
+    if scope_type in {"jp_stock", "jp_index"}:
+        symbol = _require_scope_id(payload, scope_type)
+        return (
+            "omi.generate_jp_index_brief" if scope_type == "jp_index" else "omi.generate_jp_stock_brief"
+        ), reports.build_jp_stock_brief(
+            db=db,
+            symbol=symbol,
+            is_index=scope_type == "jp_index",
+            strategy_profile=payload.strategy_profile,
+            tool_runs=tool_runs,
+            market_data_params=_external_intraday_market_data_params(
+                payload,
+                policy=policy,
+            ),
+            response_preferences=_response_preferences(payload),
+        )
+
+    if scope_type in {"kr_stock", "kr_index"}:
+        symbol = _require_scope_id(payload, scope_type)
+        return (
+            "omi.generate_kr_index_brief" if scope_type == "kr_index" else "omi.generate_kr_stock_brief"
+        ), reports.build_kr_stock_brief(
+            db=db,
+            symbol=symbol,
+            is_index=scope_type == "kr_index",
+            strategy_profile=payload.strategy_profile,
+            tool_runs=tool_runs,
+            market_data_params=_external_intraday_market_data_params(
+                payload,
+                policy=policy,
+            ),
+            response_preferences=_response_preferences(payload),
+        )
+
+    if scope_type in {"crypto_market", "crypto_asset"}:
+        asset = _require_scope_id(payload, "crypto_asset") if scope_type == "crypto_asset" else None
+        return (
+            "omi.generate_crypto_asset_brief" if scope_type == "crypto_asset" else "omi.generate_crypto_market_brief"
+        ), reports.build_crypto_brief(
+            db=db,
+            asset=asset,
+            strategy_profile=payload.strategy_profile,
+            tool_runs=tool_runs,
+            market_data_params=payload.market_data_params,
+            context_limit=payload.context_limit,
+            response_preferences=_response_preferences(payload),
+        )
+
+    return _read_data_only(db, payload, scope_type, tool_runs=tool_runs, policy=policy)
 
 
 def _generate_report(
@@ -177,7 +469,31 @@ def _generate_report(
     *,
     question_intent: str = "general",
     tool_runs: list[dict[str, Any]] | None = None,
+    policy: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
+    if scope_type == "stock" and (
+        _uses_reader_profile(
+            payload,
+            expected="quote_only",
+            question_intent=question_intent,
+            policy=policy,
+        )
+        or _uses_reader_profile(
+            payload,
+            expected="broker_branch_only",
+            question_intent=question_intent,
+            policy=policy,
+        )
+    ):
+        return _read_data_only(
+            db,
+            payload,
+            scope_type,
+            question_intent=question_intent,
+            tool_runs=tool_runs,
+            policy=policy,
+        )
+
     if scope_type == "stock":
         stock_id = _require_scope_id(payload, "stock")
         return "omi.generate_stock_llm_report", orchestrator.generate_stock_llm_report(
@@ -185,7 +501,7 @@ def _generate_report(
             stock_id=stock_id,
             strategy_profile=payload.strategy_profile,
             branch_days=payload.branch_days,
-            include_intraday=_include_tw_intraday(payload),
+            include_intraday=_include_tw_intraday(payload, policy=policy),
             analysis_horizon=payload.analysis_horizon,
             response_preferences=_response_preferences(payload),
         )
@@ -213,7 +529,7 @@ def _generate_report(
             response_preferences=_response_preferences(payload),
         )
 
-    return _read_data_only(db, payload, scope_type, tool_runs=tool_runs)
+    return _read_data_only(db, payload, scope_type, tool_runs=tool_runs, policy=policy)
 
 
 def _generate_analysis(
@@ -223,7 +539,31 @@ def _generate_analysis(
     *,
     question_intent: str = "general",
     tool_runs: list[dict[str, Any]] | None = None,
+    policy: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
+    if scope_type == "stock" and (
+        _uses_reader_profile(
+            payload,
+            expected="quote_only",
+            question_intent=question_intent,
+            policy=policy,
+        )
+        or _uses_reader_profile(
+            payload,
+            expected="broker_branch_only",
+            question_intent=question_intent,
+            policy=policy,
+        )
+    ):
+        return _read_data_only(
+            db,
+            payload,
+            scope_type,
+            question_intent=question_intent,
+            tool_runs=tool_runs,
+            policy=policy,
+        )
+
     if scope_type == "stock":
         stock_id = _require_scope_id(payload, "stock")
         return "omi.generate_stock_llm_analysis", orchestrator.generate_stock_llm_analysis(
@@ -231,7 +571,7 @@ def _generate_analysis(
             stock_id=stock_id,
             strategy_profile=payload.strategy_profile,
             branch_days=payload.branch_days,
-            include_intraday=_include_tw_intraday(payload),
+            include_intraday=_include_tw_intraday(payload, policy=policy),
             analysis_horizon=payload.analysis_horizon,
             response_preferences=_response_preferences(payload),
         )
@@ -259,12 +599,36 @@ def _generate_analysis(
             response_preferences=_response_preferences(payload),
         )
 
-    return _read_data_only(db, payload, scope_type, tool_runs=tool_runs)
+    return _read_data_only(db, payload, scope_type, tool_runs=tool_runs, policy=policy)
 
 
-def _check_freshness(db: Session, payload: AiAskRequest, scope_type: str) -> dict[str, Any]:
+def _check_freshness(
+    db: Session,
+    payload: AiAskRequest,
+    scope_type: str,
+    *,
+    question_intent: str = "general",
+) -> dict[str, Any]:
     if scope_type == "stock":
         stock_id = _require_scope_id(payload, "stock")
+        if _uses_reader_profile(
+            payload,
+            expected="quote_only",
+            question_intent=question_intent,
+        ):
+            return freshness.check_stock_daily_price_freshness(
+                db=db,
+                stock_id=stock_id,
+            )
+        if _uses_reader_profile(
+            payload,
+            expected="broker_branch_only",
+            question_intent=question_intent,
+        ):
+            return freshness.check_stock_broker_branch_freshness(
+                db=db,
+                stock_id=stock_id,
+            )
         stock_freshness = freshness.check_stock_data_freshness(
             db=db,
             stock_id=stock_id,
@@ -288,6 +652,15 @@ def _check_freshness(db: Session, payload: AiAskRequest, scope_type: str) -> dic
             db=db,
             symbol=_require_scope_id(payload, "us_stock"),
             question=payload.question,
+        )
+
+    if scope_type in {"jp_stock", "jp_index", "kr_stock", "kr_index"}:
+        market = "JP" if scope_type.startswith("jp_") else "KR"
+        return agentic_tools.scan_regional_market_gaps(
+            db,
+            market=market,
+            target_id=_require_scope_id(payload, scope_type),
+            is_index=scope_type.endswith("_index"),
         )
 
     return {}

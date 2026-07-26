@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import json
 import logging
 from threading import Lock
@@ -24,15 +24,26 @@ JobTask = Callable[..., None]
 SUMMARY_COUNT_KEYS = (
     "requested_count",
     "requested_stock_count",
+    "requested_symbol_count",
     "total_count",
+    "total_symbol_count",
     "symbol_count",
     "success_count",
+    "saved_count",
+    "evaluated_count",
     "current_count",
+    "refreshed_symbol_count",
+    "complete_symbol_count",
+    "partial_symbol_count",
+    "failed_symbol_count",
     "partial_success_count",
     "warning_count",
     "error_count",
     "failed_count",
     "symbol_error_count",
+    "resource_attempt_count",
+    "resource_success_count",
+    "resource_error_count",
     "inserted_count",
     "updated_count",
     "fetched_count",
@@ -43,6 +54,7 @@ FAILED_RESULT_ITEM_LIMIT = 4
 
 _executor: ThreadPoolExecutor | None = None
 _executor_lock = Lock()
+_enqueue_lock = Lock()
 
 
 class JobRunNotFoundError(Exception):
@@ -127,13 +139,39 @@ def _failed_result_items(rows: Any) -> list[dict[str, Any]]:
 
         status_value = _summary_string(row.get("status"))
         error_message = _summary_string(row.get("error_message")) or _summary_string(row.get("message"))
+        nested_failed: list[dict[str, Any]] = []
+        for key, value in row.items():
+            if not isinstance(value, dict):
+                continue
+            nested_status = _summary_string(value.get("status"))
+            nested_error_message = (
+                _summary_string(value.get("error_message")) or _summary_string(value.get("message"))
+            )
+            if nested_status not in {"error", "partial_success"} and not _summary_string(value.get("error_message")):
+                continue
+            compact_nested = _compact_result_item(
+                {
+                    **value,
+                    "symbol": value.get("symbol") or row.get("symbol"),
+                    "resource": value.get("resource") or key,
+                    "status": nested_status or value.get("status") or "error",
+                }
+            )
+            if nested_error_message and "error_message" not in compact_nested:
+                compact_nested["error_message"] = nested_error_message
+            nested_failed.append(compact_nested)
+
         if status_value not in {"error", "partial_success"} and not _summary_string(row.get("error_message")):
+            failed.extend(nested_failed[: max(FAILED_RESULT_ITEM_LIMIT - len(failed), 0)])
+            if len(failed) >= FAILED_RESULT_ITEM_LIMIT:
+                break
             continue
 
         compact = _compact_result_item(row)
         if error_message and "error_message" not in compact:
             compact["error_message"] = error_message
         failed.append(compact)
+        failed.extend(nested_failed[: max(FAILED_RESULT_ITEM_LIMIT - len(failed), 0)])
 
         if len(failed) >= FAILED_RESULT_ITEM_LIMIT:
             break
@@ -213,10 +251,24 @@ def serialize_job(job: JobRun, *, include_payload: bool = True) -> dict[str, Any
             result_json = _loaded_attr(job, "result_json")
             result = _summarize_result(_from_json(result_json)) if result_json is not None else None
 
+    result_dict = result if isinstance(result, dict) else {}
+    result_status = str(result_dict.get("status") or "").strip().lower()
+    public_status = (
+        result_status
+        if result_status in {"completed", "partial", "failed", "cancelled", "expired"}
+        else {
+            "queued": "queued",
+            "running": "running",
+            "success": "completed",
+            "error": "failed",
+        }.get(str(job.status), str(job.status))
+    )
+
     return {
         "id": job.id,
         "job_type": job.job_type,
         "status": job.status,
+        "public_status": public_status,
         "target": job.target,
         "progress_current": job.progress_current,
         "progress_total": job.progress_total,
@@ -302,6 +354,33 @@ def find_active_job(
     return query.order_by(JobRun.created_at.desc(), JobRun.id.desc()).first()
 
 
+def find_recent_successful_job(
+    db: Session,
+    job_type: str,
+    target: str | None = None,
+    request: Any = None,
+    *,
+    within_seconds: float,
+) -> JobRun | None:
+    if within_seconds <= 0:
+        return None
+
+    request_json = _to_json(request)
+    query = db.query(JobRun).filter(
+        JobRun.job_type == job_type,
+        JobRun.status == "success",
+        JobRun.target == target,
+        JobRun.ended_at.isnot(None),
+        JobRun.ended_at >= utc_now() - timedelta(seconds=within_seconds),
+    )
+    if request_json is None:
+        query = query.filter(JobRun.request_json.is_(None))
+    else:
+        query = query.filter(JobRun.request_json == request_json)
+
+    return query.order_by(JobRun.ended_at.desc(), JobRun.id.desc()).first()
+
+
 def create_job(
     db: Session,
     job_type: str,
@@ -372,28 +451,41 @@ def enqueue_job(
     task: JobTask,
     task_args: tuple[Any, ...] = (),
     dedupe_active: bool | None = None,
+    reuse_success_within_seconds: float = 0,
 ) -> tuple[JobRun, bool]:
     should_dedupe = settings.job_dedupe_active if dedupe_active is None else dedupe_active
 
-    if should_dedupe:
-        existing = find_active_job(
+    # Keep the read-then-create decision atomic inside one application process.
+    # This closes the common duplicate-submit race caused by concurrent React
+    # effects or multiple UI panels requesting the exact same refresh.
+    with _enqueue_lock:
+        if should_dedupe:
+            existing = find_active_job(
+                db=db,
+                job_type=job_type,
+                target=target,
+                request=request,
+            )
+            if existing is None:
+                existing = find_recent_successful_job(
+                    db=db,
+                    job_type=job_type,
+                    target=target,
+                    request=request,
+                    within_seconds=reuse_success_within_seconds,
+                )
+
+            if existing is not None:
+                return existing, False
+
+        job = create_job(
             db=db,
             job_type=job_type,
             target=target,
             request=request,
+            progress_total=progress_total,
+            message=message,
         )
-
-        if existing is not None:
-            return existing, False
-
-    job = create_job(
-        db=db,
-        job_type=job_type,
-        target=target,
-        request=request,
-        progress_total=progress_total,
-        message=message,
-    )
 
     try:
         submit_job_task(task, job.id, *task_args)

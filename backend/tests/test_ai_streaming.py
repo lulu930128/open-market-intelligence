@@ -133,7 +133,17 @@ class AiStreamingTests(unittest.TestCase):
             self.assertEqual(events[-2][0], "error")
             self.assertEqual(events[-2][1]["status_code"], 400)
             self.assertEqual(events[-2][1]["kind"], "bad_request")
-            self.assertEqual(events[-1], ("done", {"ok": False}))
+            self.assertEqual(
+                events[-1],
+                (
+                    "done",
+                    {
+                        "ok": False,
+                        "transport_ok": False,
+                        "request_status": "transport_error",
+                    },
+                ),
+            )
         finally:
             engine = db.get_bind()
             db.close()

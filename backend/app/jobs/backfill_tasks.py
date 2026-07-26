@@ -4,7 +4,11 @@ from sqlalchemy.orm import Session
 
 from app.jobs.service import ProgressCallback, run_tracked_job
 from app.jp_market import service as jp_market_service
+from app.kr_market import service as kr_market_service
 from app.market.backfill import backfill_tpex_trading_stock, backfill_twse_stock_day
+from app.market.broker_branch_market_refresh import (
+    refresh_taiwan_broker_branch_market,
+)
 from app.market.daily_metrics_backfill import (
     ensure_daily_metrics,
     ensure_latest_daily_metrics,
@@ -17,13 +21,20 @@ from app.market.fundamental_metrics_backfill import (
 )
 from app.market.monthly_revenue_history_backfill import ensure_stock_monthly_revenue_history
 from app.market.market_chips import refresh_market_chip_daily
+from app.market.indices import refresh_market_index_summary
+from app.market.taiwan_market_state import persist_taiwan_market_minute_state
 from app.market.shareholding_history_backfill import ensure_stock_shareholding_history
 from app.market.stock_selection_refresh import refresh_selected_stock_data
+from app.market.tw_derivatives import (
+    TaiwanDerivativesFetchError,
+    refresh_taiwan_derivatives,
+)
 from app.us_market import service as us_market_service
 from app.watchlists.backfill_service import (
     backfill_watchlist_group_twse,
     refresh_watchlist_group_daily_prices,
 )
+from app.watchlists.radar_automation import run_watchlist_radar_automation
 
 
 def run_twse_daily_price_job(
@@ -126,6 +137,84 @@ def run_market_chip_daily_refresh_job(
             include_today=include_today,
             force=force,
             progress=progress,
+        )
+
+    run_tracked_job(job_id, worker)
+
+
+def run_market_index_summary_refresh_job(job_id: int) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        progress(0, 1, "Refreshing Taiwan market index summary.")
+        payload = refresh_market_index_summary(db=db)
+        persistence = persist_taiwan_market_minute_state(db, payload=payload)
+        progress(1, 1, "Taiwan market index summary refreshed.")
+        return {
+            "status": "success",
+            "as_of": payload.get("as_of"),
+            "source": payload.get("source"),
+            "index_count": len(payload.get("indices") or []),
+            "minute_state_rows": persistence.get("inserted_count", 0)
+            + persistence.get("updated_count", 0),
+        }
+
+    run_tracked_job(job_id, worker)
+
+
+def run_taiwan_derivatives_refresh_job(
+    job_id: int,
+    expected_trade_date: date,
+) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        progress(0, 5, "Refreshing TAIFEX post-close derivatives datasets.")
+        result = refresh_taiwan_derivatives(db)
+        result["expected_trade_date"] = expected_trade_date
+        result["is_stale"] = (
+            bool(result.get("is_stale"))
+            or result.get("as_of") != expected_trade_date
+        )
+        progress(
+            int(result.get("successful_request_count") or 0),
+            5,
+            "TAIFEX post-close derivatives refresh completed provider requests.",
+        )
+
+        if result["is_stale"]:
+            raise TaiwanDerivativesFetchError(
+                "TAIFEX derivatives refresh did not reach the expected trade date: "
+                f"expected={expected_trade_date.isoformat()} "
+                f"actual={result.get('as_of') or 'missing'}."
+            )
+        if result.get("status") != "ready":
+            errors = result.get("errors") or {}
+            detail = "; ".join(f"{key}: {value}" for key, value in errors.items())
+            raise TaiwanDerivativesFetchError(
+                "TAIFEX derivatives refresh was incomplete"
+                + (f": {detail}" if detail else ".")
+            )
+
+        progress(5, 5, "TAIFEX post-close derivatives data is ready.")
+        return result
+
+    run_tracked_job(job_id, worker)
+
+
+def run_taiwan_broker_branch_market_refresh_job(
+    job_id: int,
+    trade_date: date,
+    sleep_seconds: float,
+    max_stocks: int,
+    max_runtime_seconds: int,
+) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        progress(0, 1, "Preparing Taiwan all-market broker-branch collection.")
+        return refresh_taiwan_broker_branch_market(
+            db,
+            trade_date=trade_date,
+            sleep_seconds=sleep_seconds,
+            max_stocks=max_stocks,
+            max_runtime_seconds=max_runtime_seconds,
+            progress=progress,
+            job_run_id=job_id,
         )
 
     run_tracked_job(job_id, worker)
@@ -354,6 +443,41 @@ def run_watchlist_group_refresh_latest_job(
     run_tracked_job(job_id, worker)
 
 
+def run_watchlist_radar_auto_snapshot_job(
+    job_id: int,
+    group_ids: str | list[int] | None,
+    modes: str,
+    include_children: bool,
+    enabled_only: bool,
+    max_results: int,
+    calculation_limit: int,
+    use_intraday: bool,
+    intraday_limit: int,
+    evaluate_before_date: date,
+    evaluate_lookback_days: int,
+    save_snapshots: bool,
+) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        progress(0, 1, "Running watchlist radar snapshot automation.")
+        return run_watchlist_radar_automation(
+            db=db,
+            group_ids=group_ids,
+            modes=modes,
+            include_children=include_children,
+            enabled_only=enabled_only,
+            max_results=max_results,
+            calculation_limit=calculation_limit,
+            use_intraday=use_intraday,
+            intraday_limit=intraday_limit,
+            evaluate_before_date=evaluate_before_date,
+            evaluate_lookback_days=evaluate_lookback_days,
+            save_snapshots=save_snapshots,
+            progress_callback=progress,
+        )
+
+    run_tracked_job(job_id, worker)
+
+
 def run_us_watchlist_daily_refresh_job(
     job_id: int,
     group_id: int | None,
@@ -462,6 +586,39 @@ def run_jp_watchlist_resource_refresh_job(
             outputsize=outputsize,
             provider=provider,
             sleep_seconds=sleep_seconds,
+            progress_callback=progress,
+        )
+
+    run_tracked_job(job_id, worker)
+
+
+def run_kr_watchlist_resource_refresh_job(
+    job_id: int,
+    group_id: int | None,
+    include_children: bool,
+    enabled_only: bool,
+    include_daily: bool,
+    include_investors: bool,
+    include_fundamentals: bool,
+    outputsize: str,
+    provider: str,
+    sleep_seconds: float,
+    max_symbols: int | None = None,
+) -> None:
+    def worker(db: Session, progress: ProgressCallback):
+        progress(0, 1, "Refreshing KR watchlist resources.")
+        return kr_market_service.refresh_kr_watchlist_resources(
+            db=db,
+            group_id=group_id,
+            include_children=include_children,
+            enabled_only=enabled_only,
+            include_daily=include_daily,
+            include_investors=include_investors,
+            include_fundamentals=include_fundamentals,
+            outputsize=outputsize,
+            provider=provider,
+            sleep_seconds=sleep_seconds,
+            max_symbols=max_symbols,
             progress_callback=progress,
         )
 

@@ -93,10 +93,13 @@ def _base_record(
     fiscal_year: int,
     quarter: int,
 ) -> dict:
+    released_at = parse_date(first_value(row, ["出表日期", "Date", "report_date", "released_at"]))
     return {
         "source_id": raw_result.source_id,
         "raw_result_id": raw_result.id,
-        "report_date": parse_date(first_value(row, ["出表日期", "Date", "report_date"])),
+        "report_date": released_at,
+        "released_at": released_at,
+        "filed_at": parse_date(first_value(row, ["申報日期", "公告申報日期", "filed_at"])),
         "fiscal_year": fiscal_year,
         "quarter": quarter,
         "period": f"{fiscal_year}Q{quarter}",
@@ -124,7 +127,10 @@ def _merge_if_present(record: dict, key: str, value) -> None:
 
 
 def _apply_income_fields(record: dict, row: dict) -> None:
-    _merge_if_present(record, "report_date", parse_date(first_value(row, ["出表日期", "Date"])))
+    released_at = parse_date(first_value(row, ["出表日期", "Date", "released_at"]))
+    _merge_if_present(record, "report_date", released_at)
+    _merge_if_present(record, "released_at", released_at)
+    _merge_if_present(record, "filed_at", parse_date(first_value(row, ["申報日期", "公告申報日期", "filed_at"])))
     _merge_if_present(record, "stock_name", first_value(row, ["公司名稱", "CompanyName"]))
     _merge_if_present(record, "revenue", parse_float(first_value(row, ["營業收入"])))
     _merge_if_present(
@@ -173,7 +179,10 @@ def _apply_income_fields(record: dict, row: dict) -> None:
 
 
 def _apply_balance_fields(record: dict, row: dict) -> None:
-    _merge_if_present(record, "report_date", parse_date(first_value(row, ["出表日期", "Date"])))
+    released_at = parse_date(first_value(row, ["出表日期", "Date", "released_at"]))
+    _merge_if_present(record, "report_date", released_at)
+    _merge_if_present(record, "released_at", released_at)
+    _merge_if_present(record, "filed_at", parse_date(first_value(row, ["申報日期", "公告申報日期", "filed_at"])))
     _merge_if_present(record, "stock_name", first_value(row, ["公司名稱", "CompanyName"]))
     _merge_if_present(record, "total_assets", parse_float(first_value(row, ["資產總額", "資產總計"])))
     _merge_if_present(record, "total_equity", parse_float(first_value(row, ["權益總額", "權益總計"])))
@@ -240,4 +249,3 @@ def parse_financial_metrics_raw(
                 _apply_balance_fields(record, row)
 
     return [_finalize_record(record) for record in records.values()], skipped_count
-

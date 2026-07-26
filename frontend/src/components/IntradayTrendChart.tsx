@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { StateSurface } from "@/components/LoadingPlaceholders";
 import type { IntradayTrendPoint } from "@/types/market";
 import { useT, type TranslationFunction } from "@/i18n";
 import {
@@ -22,6 +23,8 @@ type Props = {
   refreshIntervalMs?: number;
   updatedAt?: string | null;
   priceLimitEnabled?: boolean;
+  totalVolume?: number | null;
+  volumeLabel?: string;
 };
 
 type IntradayInterval = 1 | 5 | 15;
@@ -63,9 +66,9 @@ export const defaultIntradayIndicators: IntradayIndicatorSettings = {
   volume: true,
   vwap: true,
   twap: true,
-  ema: true,
-  rsi: true,
-  macd: true,
+  ema: false,
+  rsi: false,
+  macd: false,
 };
 
 export const taiwanIntradaySession: IntradaySessionConfig = {
@@ -150,6 +153,9 @@ function formatSource(t: TranslationFunction, value: string) {
   if (value === "twse_mis_snapshot") {
     return t("stockDetail.intraday.sources.twseSnapshot");
   }
+  if (value === "naver_index_time") {
+    return t("stockDetail.intraday.sources.naverIndex");
+  }
   return t("stockDetail.intraday.sources.fallback");
 }
 
@@ -206,10 +212,13 @@ function ceilToTaiwanPriceStep(value: number) {
 function getNiceAxisInterval(range: number, referencePrice: number) {
   const baseStep = getTaiwanPriceStep(referencePrice);
   const rawStep = Math.max(range / 5, baseStep);
-  const multipliers = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000];
-  const multiplier = multipliers.find((item) => item * baseStep >= rawStep) ?? 1000;
+  const magnitude = 10 ** Math.floor(Math.log10(rawStep));
+  const normalizedStep = rawStep / magnitude;
+  const niceMultiplier =
+    normalizedStep <= 1 ? 1 : normalizedStep <= 2 ? 2 : normalizedStep <= 5 ? 5 : 10;
+  const niceStep = niceMultiplier * magnitude;
 
-  return multiplier * baseStep;
+  return Math.ceil(niceStep / baseStep) * baseStep;
 }
 
 function nearlyEqual(a: number, b: number, tolerance: number) {
@@ -472,6 +481,8 @@ function aggregateIntradayPoints(
         open: first.open ?? first.price,
         high: highs.length > 0 ? Math.max(...highs) : last.price,
         low: lows.length > 0 ? Math.min(...lows) : last.price,
+        cumulative_volume: last.cumulative_volume ?? null,
+        trade_value: last.trade_value ?? null,
       };
     });
 }
@@ -657,6 +668,8 @@ export default function IntradayTrendChart({
   refreshIntervalMs,
   updatedAt,
   priceLimitEnabled = true,
+  totalVolume,
+  volumeLabel,
 }: Props) {
   const chartId = useId();
   const t = useT();
@@ -728,8 +741,12 @@ export default function IntradayTrendChart({
 
   if (data.length < 2) {
     return (
-      <div className="flex h-[420px] items-center justify-center border border-omi-border-subtle bg-omi-surface text-sm text-omi-text-muted">
-        {t("stockDetail.intraday.insufficient")}
+      <div className="border border-omi-border-subtle bg-omi-surface p-4">
+        <StateSurface
+          title={t("stockDetail.intraday.insufficient")}
+          tone="empty"
+          className="h-[388px]"
+        />
       </div>
     );
   }
@@ -798,14 +815,22 @@ export default function IntradayTrendChart({
   const cumulativeVolumes = data.reduce<number[]>((result, point, index) => {
     const previous = index > 0 ? result[index - 1] : 0;
     const volume = validNumber(point.volume) && point.volume > 0 ? point.volume : 0;
+    const providerCumulative =
+      validNumber(point.cumulative_volume) && point.cumulative_volume >= 0
+        ? point.cumulative_volume
+        : null;
 
-    result.push(previous + volume);
+    result.push(providerCumulative ?? previous + volume);
 
     return result;
   }, []);
-  const totalVolume = cumulativeVolumes[cumulativeVolumes.length - 1] ?? null;
+  const pointTotalVolume = cumulativeVolumes[cumulativeVolumes.length - 1] ?? null;
   const displayedVolume =
-    safeHoverIndex !== null ? cumulativeVolumes[safeHoverIndex] ?? null : totalVolume;
+    safeHoverIndex !== null
+      ? cumulativeVolumes[safeHoverIndex] ?? null
+      : validNumber(totalVolume)
+        ? totalVolume
+        : pointTotalVolume;
   const rangeHigh = data.reduce<{ index: number; value: number } | null>(
     (best, point, index) => {
       const value = point.high ?? point.price;
@@ -1055,7 +1080,7 @@ export default function IntradayTrendChart({
           </div>
           <div>
             <span className="text-xs text-omi-text-subtle">
-              {t("stockDetail.intraday.volumeLots")}
+              {volumeLabel ?? t("stockDetail.intraday.volumeLots")}
             </span>
             <div className="mt-1 text-base font-bold text-omi-text">
               {formatVolumeValue(displayedVolume)}
@@ -1100,7 +1125,7 @@ export default function IntradayTrendChart({
                 x2={chartAreaRight}
                 y1={y}
                 y2={y}
-                className="stroke-omi-border-subtle"
+                className="stroke-omi-border-subtle opacity-70"
               />
               <text
                 x={paddingLeft - 10}
@@ -1129,7 +1154,7 @@ export default function IntradayTrendChart({
           );
         })}
 
-        {timeTicks.map((tick) => {
+        {timeTicks.map((tick, index) => {
           const ratio =
             (tick.minutes - session.startMinutes) /
             (session.endMinutes - session.startMinutes);
@@ -1142,12 +1167,12 @@ export default function IntradayTrendChart({
                 x2={x}
                 y1={priceTop}
                 y2={volumeTop + volumeHeight}
-                className="stroke-omi-border-subtle"
+                className="stroke-omi-border-subtle opacity-65"
               />
               <text
                 x={x}
                 y={labelY}
-                textAnchor={tick.label === "09:00" ? "start" : tick.label === "13:30" ? "end" : "middle"}
+                textAnchor={index === 0 ? "start" : index === timeTicks.length - 1 ? "end" : "middle"}
                 className="fill-omi-text-muted text-[11px]"
               >
                 {tick.label}
@@ -1207,16 +1232,16 @@ export default function IntradayTrendChart({
 
         {previousCloseY !== null ? (
           <>
-            <path d={areaPath} className="fill-omi-market-up-soft opacity-80" clipPath={`url(#${clipAboveId})`} />
+            <path d={areaPath} className="fill-omi-market-up-soft opacity-50" clipPath={`url(#${clipAboveId})`} />
             <path
               d={areaPath}
-              className="fill-omi-market-down-soft opacity-80"
+              className="fill-omi-market-down-soft opacity-50"
               clipPath={`url(#${clipBelowId})`}
             />
             <path
               d={linePath}
               fill="none"
-              strokeWidth="2.4"
+              strokeWidth="2.2"
               className="stroke-omi-market-up"
               strokeLinecap="round"
               strokeLinejoin="round"
@@ -1225,7 +1250,7 @@ export default function IntradayTrendChart({
             <path
               d={linePath}
               fill="none"
-              strokeWidth="2.4"
+              strokeWidth="2.2"
               className="stroke-omi-market-down"
               strokeLinecap="round"
               strokeLinejoin="round"
@@ -1236,7 +1261,7 @@ export default function IntradayTrendChart({
           <path
             d={linePath}
             fill="none"
-            strokeWidth="2.4"
+            strokeWidth="2.2"
             className={change !== null && change < 0 ? "stroke-omi-market-down" : "stroke-omi-market-up"}
             strokeLinecap="round"
             strokeLinejoin="round"
@@ -1247,8 +1272,8 @@ export default function IntradayTrendChart({
           <path
             d={vwapPath}
             fill="none"
-            strokeWidth="1.8"
-            className="stroke-omi-chart-blue"
+            strokeWidth="1.5"
+            className="stroke-omi-chart-blue opacity-80"
             strokeLinecap="round"
             strokeLinejoin="round"
           />
@@ -1257,8 +1282,8 @@ export default function IntradayTrendChart({
           <path
             d={twapPath}
             fill="none"
-            strokeWidth="1.4"
-            className="stroke-omi-text-muted"
+            strokeWidth="1.2"
+            className="stroke-omi-text-muted opacity-70"
             strokeDasharray="5 4"
             strokeLinecap="round"
             strokeLinejoin="round"
@@ -1268,8 +1293,8 @@ export default function IntradayTrendChart({
           <path
             d={emaFastPath}
             fill="none"
-            strokeWidth="1.4"
-            className="stroke-omi-chart-cyan"
+            strokeWidth="1.15"
+            className="stroke-omi-chart-cyan opacity-70"
             strokeLinecap="round"
             strokeLinejoin="round"
           />
@@ -1278,8 +1303,8 @@ export default function IntradayTrendChart({
           <path
             d={emaSlowPath}
             fill="none"
-            strokeWidth="1.4"
-            className="stroke-omi-chart-amber"
+            strokeWidth="1.15"
+            className="stroke-omi-chart-amber opacity-70"
             strokeLinecap="round"
             strokeLinejoin="round"
           />
@@ -1360,7 +1385,7 @@ export default function IntradayTrendChart({
             cx={lastPointX}
             cy={latestPointY}
             r="8"
-            className={`omi-live-point-ring ${latestPointTone.ring}`}
+            className={`omi-live-point-ring ${latestPointTone.ring} opacity-80`}
           />
           <circle
             cx={lastPointX}
@@ -1383,7 +1408,7 @@ export default function IntradayTrendChart({
                   y={volumeY}
                   width={barWidth}
                   height={Math.max(volumeBarHeight, 1)}
-                  className="fill-omi-chart-amber-soft opacity-70"
+                  className="fill-omi-chart-blue opacity-20"
                 />
               );
             })
@@ -1395,7 +1420,7 @@ export default function IntradayTrendChart({
             x2={chartAreaRight}
             y1={volumeTop}
             y2={volumeTop}
-            className="stroke-omi-border-subtle"
+            className="stroke-omi-border-subtle opacity-65"
           />
         ) : null}
 
@@ -1406,7 +1431,7 @@ export default function IntradayTrendChart({
               x2={chartAreaRight}
               y1={rsiTop}
               y2={rsiTop}
-              className="stroke-omi-border-subtle"
+              className="stroke-omi-border-subtle opacity-65"
             />
             <text
               x={paddingLeft - 10}
@@ -1426,7 +1451,7 @@ export default function IntradayTrendChart({
                   x2={chartAreaRight}
                   y1={y}
                   y2={y}
-                  className={value === 50 ? "stroke-omi-border-subtle" : "stroke-omi-border-subtle"}
+                  className="stroke-omi-border-subtle opacity-65"
                   strokeDasharray={value === 50 ? undefined : "4 4"}
                 />
               );
@@ -1435,8 +1460,8 @@ export default function IntradayTrendChart({
               <path
                 d={rsiPath}
                 fill="none"
-                strokeWidth="1.6"
-                className="stroke-omi-chart-fuchsia"
+                strokeWidth="1.4"
+                className="stroke-omi-chart-fuchsia opacity-85"
                 strokeLinecap="round"
                 strokeLinejoin="round"
               />
@@ -1451,7 +1476,7 @@ export default function IntradayTrendChart({
               x2={chartAreaRight}
               y1={macdTop}
               y2={macdTop}
-              className="stroke-omi-border-subtle"
+              className="stroke-omi-border-subtle opacity-65"
             />
             <text
               x={paddingLeft - 10}
@@ -1466,7 +1491,7 @@ export default function IntradayTrendChart({
               x2={chartAreaRight}
               y1={getPanelY(macdTop, 0, -macdAbsMax, macdAbsMax)}
               y2={getPanelY(macdTop, 0, -macdAbsMax, macdAbsMax)}
-              className="stroke-omi-border-subtle"
+              className="stroke-omi-border-subtle opacity-65"
             />
             {data.map((point, index) => {
               if (!validNumber(point.macdHistogram)) return null;
@@ -1483,7 +1508,11 @@ export default function IntradayTrendChart({
                   y={y}
                   width={barWidth}
                   height={height}
-                  className={point.macdHistogram >= 0 ? "fill-omi-market-up-border" : "fill-omi-market-down-border"}
+                  className={
+                    point.macdHistogram >= 0
+                      ? "fill-omi-market-up-border opacity-70"
+                      : "fill-omi-market-down-border opacity-70"
+                  }
                 />
               );
             })}
@@ -1491,8 +1520,8 @@ export default function IntradayTrendChart({
               <path
                 d={macdPath}
                 fill="none"
-                strokeWidth="1.5"
-                className="stroke-omi-chart-blue"
+                strokeWidth="1.35"
+                className="stroke-omi-chart-blue opacity-85"
                 strokeLinecap="round"
                 strokeLinejoin="round"
               />
@@ -1501,8 +1530,8 @@ export default function IntradayTrendChart({
               <path
                 d={macdSignalPath}
                 fill="none"
-                strokeWidth="1.5"
-                className="stroke-omi-chart-amber"
+                strokeWidth="1.35"
+                className="stroke-omi-chart-amber opacity-85"
                 strokeLinecap="round"
                 strokeLinejoin="round"
               />

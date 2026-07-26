@@ -9,6 +9,24 @@ from app.ai.schemas import AiAskRequest
 
 
 class AiDecisionCoreTests(unittest.TestCase):
+    def test_infer_question_intents_preserves_independent_multi_intents(
+        self,
+    ) -> None:
+        intents = decision_core.infer_question_intents(
+            "2330 latest price, trend, broker branch, and freshness"
+        )
+
+        self.assertEqual(intents[0], "broker_branch")
+        self.assertIn("quote", intents)
+        self.assertIn("trend_view", intents)
+        self.assertIn("data_freshness", intents)
+
+    def test_market_breadth_intent_precedes_generic_market_analysis(self) -> None:
+        self.assertEqual(
+            decision_core.infer_question_intent("今天漲跌家數與跌停家數如何？"),
+            "market_breadth",
+        )
+
     def test_entry_question_understanding_handles_pullback_wording(self) -> None:
         understanding = decision_core.understand_question(
             question="以現在來說，2327 國巨適合買入嗎？如果要等回檔，價格大概看哪裡？",
@@ -58,6 +76,37 @@ class AiDecisionCoreTests(unittest.TestCase):
         self.assertEqual(understanding.intent, "risk_check")
         self.assertEqual(understanding.analysis_horizon, "intraday")
         self.assertEqual(understanding.analysis_horizon_source, "question_intraday_hint")
+
+    def test_analysis_with_freshness_keeps_analysis_as_primary_intent(self) -> None:
+        understanding = decision_core.understand_question(
+            question="分析台積電 2330，並告訴我各項資料日期與缺資料狀態。",
+            requested_horizon="auto",
+            strategy_profile="technical_swing",
+        )
+
+        self.assertEqual(understanding.intent, "general")
+        self.assertEqual(understanding.intents, ("general", "data_freshness"))
+        self.assertEqual(
+            understanding.as_policy_payload()["intents"],
+            ["general", "data_freshness"],
+        )
+
+    def test_pure_freshness_question_remains_freshness_primary(self) -> None:
+        understanding = decision_core.understand_question(
+            question="台積電 2330 的資料新鮮度",
+        )
+
+        self.assertEqual(understanding.intent, "data_freshness")
+        self.assertEqual(understanding.intents, ("data_freshness",))
+
+    def test_taiwan_futures_night_session_question_sets_intraday_horizon(self) -> None:
+        horizon, source = decision_core.infer_analysis_horizon(
+            question="TXF 夜盤大跌，所以外資現在一定又加空了嗎？",
+            requested_horizon="auto",
+            strategy_profile="technical_swing",
+        )
+
+        self.assertEqual((horizon, source), ("intraday", "question_intraday_hint"))
 
     def test_swing_and_long_horizon_are_inferred_from_question(self) -> None:
         swing_horizon, swing_source = decision_core.infer_analysis_horizon(
@@ -290,7 +339,9 @@ class AiDecisionCoreTests(unittest.TestCase):
                 ),
             )
 
-        self.assertEqual(response["mode"], {"requested": "analysis", "effective": "brief"})
+        self.assertEqual(response["mode"]["requested"], "analysis")
+        self.assertEqual(response["mode"]["effective"], "brief")
+        self.assertEqual(response["mode"]["response"], "brief")
         self.assertIn("Auto analysis skipped", response["warnings"][0])
         self.assertEqual(response["action"], "omi.generate_stock_brief")
 

@@ -609,6 +609,8 @@ def _build_consumer_human_answer(
     warnings: list[Any],
     position_decision: dict[str, Any] | None = None,
     response_preferences: dict[str, Any] | None = None,
+    selected_capabilities: list[str] | tuple[str, ...] | None = None,
+    requested_domains: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     return answer_composer.build_consumer_human_answer(
         question_intent=question_intent,
@@ -620,12 +622,70 @@ def _build_consumer_human_answer(
         llm_report=_llm_report_from_result(result),
         summary_limit=CONSUMER_SUMMARY_LIMIT,
         response_preferences=response_preferences,
+        selected_capabilities=selected_capabilities,
+        requested_domains=requested_domains,
     )
 
 
 def _extract_analysis_digest(result: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
     data = result.get("data")
     analysis = (data or {}).get("analysis") if isinstance(data, dict) else None
+    if result.get("kind") == "tw_futures_context" and isinstance(data, dict):
+        compact = data.get("compact") if isinstance(data.get("compact"), dict) else {}
+        quote = compact.get("quote") if isinstance(compact.get("quote"), dict) else (
+            data.get("latest_quote") if isinstance(data.get("latest_quote"), dict) else {}
+        )
+        daily_close = compact.get("daily_close") if isinstance(compact.get("daily_close"), dict) else {}
+        if not daily_close:
+            daily_bars = data.get("daily_bars") if isinstance(data.get("daily_bars"), list) else []
+            latest_daily = daily_bars[-1] if daily_bars and isinstance(daily_bars[-1], dict) else {}
+            daily_close = {
+                "trade_date": latest_daily.get("trade_date"),
+                "close_price": latest_daily.get("close_price"),
+                "change": latest_daily.get("change"),
+                "change_pct": latest_daily.get("change_pct"),
+            }
+        technical = analysis if isinstance(analysis, dict) else {}
+        target = compact.get("target") if isinstance(compact.get("target"), dict) else {}
+        label = target.get("label") or ((result.get("scope") or {}).get("symbol")) or "台指期"
+        quote_price = quote.get("last_price") or quote.get("price")
+        daily_price = daily_close.get("close_price")
+        display_parts = [str(label)]
+        if quote_price is not None:
+            display_parts.append(f"latest-session {quote_price}")
+        if daily_price is not None:
+            display_parts.append(f"daily close {daily_price}")
+        if technical.get("selected_title"):
+            display_parts.append(str(technical["selected_title"]))
+        return {
+            "kind": "tw_futures_digest",
+            "as_of": result.get("as_of"),
+            "target": target,
+            "quote": quote,
+            "quote_semantics": compact.get("quote_semantics") or {},
+            "daily_close": daily_close,
+            "institutional_position": compact.get("institutional_position")
+            if isinstance(compact.get("institutional_position"), dict)
+            else data.get("institutional_position") or {},
+            "options_sentiment": compact.get("options_sentiment")
+            if isinstance(compact.get("options_sentiment"), dict)
+            else data.get("options_sentiment") or {},
+            "market_chip_trend": compact.get("market_chip_trend")
+            if isinstance(compact.get("market_chip_trend"), dict)
+            else data.get("market_chip_trend") or {},
+            "slots": compact.get("slots") or data.get("slots") or {},
+            "requested_horizon": technical.get("requested_horizon"),
+            "selected_horizon": technical.get("selected_horizon"),
+            "selected_timeframe": technical.get("selected_timeframe"),
+            "selected_score": technical.get("selected_score"),
+            "selected_title": technical.get("selected_title"),
+            "selected_summary": technical.get("selected_summary"),
+            "selected_confidence": technical.get("selected_confidence"),
+            "scores": technical.get("scores") or {},
+            "display": "｜".join(display_parts),
+            "source_refs": result.get("source_refs") or [],
+            "source": "result.data.compact.tw_futures",
+        }
     if isinstance(analysis, dict) and analysis:
         policy_horizon = policy.get("analysis_horizon") if isinstance(policy, dict) else {}
         selected_horizon = (
@@ -698,6 +758,118 @@ def _extract_analysis_digest(result: dict[str, Any], policy: dict[str, Any]) -> 
             "source": "result.data.overview",
         }
 
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    if summary.get("kind") == "cross_market_brief_summary":
+        human_answer = (
+            summary.get("human_answer")
+            if isinstance(summary.get("human_answer"), dict)
+            else {}
+        )
+        answer_outline = human_answer.get("lines") or []
+        return {
+            "kind": "cross_market_brief_digest",
+            "as_of": result.get("as_of") or summary.get("as_of"),
+            "display": summary.get("display") or "\n".join(str(item) for item in answer_outline),
+            "answer_outline": answer_outline,
+            "human_answer": human_answer,
+            "target": summary.get("target") or {},
+            "quote": summary.get("quote") or {},
+            "resources": summary.get("resources") or {},
+            "freshness": summary.get("freshness") or {},
+            "missing": summary.get("missing") or result.get("missing") or [],
+            "warning_count": summary.get("warning_count"),
+            "source_refs": result.get("source_refs") or [],
+            "source": "result.summary",
+        }
+
+    if result.get("kind") == "market_brief" and summary:
+        human_answer = (
+            summary.get("human_answer")
+            if isinstance(summary.get("human_answer"), dict)
+            else {}
+        )
+        answer_outline = human_answer.get("lines") or summary.get("highlights") or []
+        return {
+            "kind": "market_brief_digest",
+            "as_of": result.get("as_of") or summary.get("as_of"),
+            "display": "\n".join(str(item) for item in answer_outline),
+            "answer_outline": answer_outline,
+            "market_human_answer": human_answer,
+            "breadth": summary.get("breadth") or {},
+            "distribution": summary.get("distribution") or {},
+            "top_gainers": summary.get("top_gainers") or [],
+            "top_losers": summary.get("top_losers") or [],
+            "value_leaders": summary.get("value_leaders") or [],
+            "top_industries": summary.get("top_industries") or [],
+            "weak_industries": summary.get("weak_industries") or [],
+            "source_refs": result.get("source_refs") or [],
+            "source": "result.summary",
+        }
+
+    compact = (data or {}).get("compact") if isinstance(data, dict) and isinstance((data or {}).get("compact"), dict) else {}
+    if compact:
+        target = compact.get("target") if isinstance(compact.get("target"), dict) else {}
+        slots = compact.get("slots") if isinstance(compact.get("slots"), dict) else {}
+        status_counts: dict[str, int] = {}
+        ready_slots: list[str] = []
+        problem_slots: list[dict[str, Any]] = []
+        for key, slot in slots.items():
+            if not isinstance(slot, dict):
+                continue
+            status = str(slot.get("status") or "unknown")
+            status_counts[status] = status_counts.get(status, 0) + 1
+            if status == "ready":
+                ready_slots.append(str(key))
+            elif status not in {"not_applicable", "not_requested"}:
+                problem_slots.append(
+                    {
+                        "key": str(key),
+                        "status": status,
+                        "capability": slot.get("capability"),
+                        "as_of": slot.get("as_of"),
+                        "missing": list(slot.get("missing") or []),
+                        "warnings": list(slot.get("warnings") or []),
+                        "next_fill": slot.get("next_fill"),
+                    }
+                )
+        resources = compact.get("resources") if isinstance(compact.get("resources"), dict) else {}
+        key_numbers = {
+            str(key): value
+            for key, value in resources.items()
+            if isinstance(value, (str, int, float, bool)) or value is None
+        }
+        quote = compact.get("quote") if isinstance(compact.get("quote"), dict) else {}
+        for source_key, output_key in (
+            ("price", "price"),
+            ("last_price", "price"),
+            ("quote_time", "quote_time"),
+            ("change_pct", "change_pct"),
+            ("change_pct_24h", "change_pct_24h"),
+        ):
+            if source_key in quote and output_key not in key_numbers:
+                key_numbers[output_key] = quote.get(source_key)
+        label = target.get("label") or target.get("id") or result.get("kind") or "OMI context"
+        status_text = ", ".join(f"{key}={value}" for key, value in sorted(status_counts.items())) or "no slots"
+        return {
+            "kind": "compact_context_status_digest",
+            "as_of": result.get("as_of"),
+            "target": target,
+            "display": f"{label}｜{status_text}",
+            "slot_status_counts": status_counts,
+            "ready_slots": ready_slots,
+            "problem_slots": problem_slots,
+            "key_numbers": key_numbers,
+            "selected_confidence": (
+                "low"
+                if any(item["status"] in {"failed", "blocked"} for item in problem_slots)
+                else "medium"
+                if problem_slots
+                else "high"
+            ),
+            "source_refs": result.get("source_refs") or [],
+            "source": "result.data.compact.slots",
+        }
+
     return {}
 
 
@@ -707,6 +879,9 @@ def _report_level(effective_mode: str, freshness_result: dict[str, Any]) -> str:
 
     if effective_mode == "report":
         return "full_report"
+
+    if effective_mode == "full":
+        return "full_evidence"
 
     if effective_mode == "analysis":
         return "analysis"
@@ -741,7 +916,11 @@ def _build_next_actions(
         )
         return actions
 
-    if freshness_result and freshness_result.get("refresh_recommended"):
+    if (
+        freshness_result
+        and freshness_result.get("refresh_recommended")
+        and freshness_result.get("refresh_endpoint")
+    ):
         actions.append(
             {
                 "type": "refresh_data",
@@ -818,7 +997,11 @@ def _clarification_response(
     return {
         "kind": "ai_ask",
         "contract_version": CONTRACT_VERSION,
+        "ok": True,
         "question": payload.question,
+        "selection": payload.selection,
+        "output": payload.output,
+        "realtime_policy": payload.realtime_policy,
         "target": _resolution_target(resolution),
         "mode": {
             "requested": requested_mode,
@@ -828,18 +1011,106 @@ def _clarification_response(
         "strategy_profile": payload.strategy_profile,
         "caller_profile": payload.caller_profile,
         "resolution": _scope_resolution_dict(resolution),
+        "next_context": {},
         "clarification": clarification,
         "next_actions": next_actions,
         "answer_ready": False,
+        "facts_ready": False,
+        "analysis_ready": False,
+        "decision_ready": False,
+        "blocked_sections": ["target_resolution", "human_answer", "decision_contract"],
+        "available_sections": [],
+        "request_status": "clarification_required",
+        "fallback_used": False,
+        "cached_data_returned": False,
+        "job": {},
+        "cancellation": {},
         "report_level": "clarification",
         "analysis": {},
         "policy": policy,
         "tool_plan": {},
         "tool_runs": [],
+        "query_plan": {},
+        "diagnostics": {},
         "result": result,
         "freshness": {},
         "missing": [],
         "warnings": response_warnings,
         "source_refs": [],
         "evidence_passport": evidence_passport,
+        "error": {},
+    }
+
+
+def _target_error_response(
+    *,
+    payload: AiAskRequest,
+    resolution: ScopeResolution,
+    requested_mode: str,
+    policy: dict[str, Any],
+) -> dict[str, Any]:
+    error = {
+        "code": resolution.error_code or "TARGET_INVALID",
+        "message": resolution.error_message or "The requested target is invalid.",
+        "retryable": False,
+        "target": _resolution_target(resolution),
+    }
+    evidence_passport = build_evidence_passport(
+        kind="ai_ask",
+        missing=["target_scope"],
+        warnings=[error["message"]],
+        confidence="low",
+    )
+    return {
+        "kind": "ai_ask",
+        "contract_version": CONTRACT_VERSION,
+        "ok": False,
+        "question": payload.question,
+        "selection": payload.selection,
+        "output": payload.output,
+        "realtime_policy": payload.realtime_policy,
+        "target": _resolution_target(resolution),
+        "mode": {
+            "requested": requested_mode,
+            "effective": "error",
+        },
+        "action": "omi.ask.reject",
+        "strategy_profile": payload.strategy_profile,
+        "caller_profile": payload.caller_profile,
+        "resolution": _scope_resolution_dict(resolution),
+        "next_context": {},
+        "clarification": {
+            "required": False,
+            "question": None,
+            "reason": None,
+        },
+        "next_actions": [],
+        "answer_ready": False,
+        "facts_ready": False,
+        "analysis_ready": False,
+        "decision_ready": False,
+        "blocked_sections": ["target_resolution", "human_answer", "decision_contract"],
+        "available_sections": [],
+        "request_status": "rejected",
+        "fallback_used": False,
+        "cached_data_returned": False,
+        "job": {},
+        "cancellation": {},
+        "report_level": "blocked",
+        "analysis": {},
+        "policy": policy,
+        "tool_plan": {},
+        "tool_runs": [],
+        "query_plan": {},
+        "diagnostics": {},
+        "result": {
+            "kind": "target_error",
+            "error": error,
+        },
+        "freshness": {},
+        "missing": ["target_scope"],
+        "warnings": [error["message"]],
+        "source_refs": [],
+        "evidence_passport": evidence_passport,
+        "error": error,
     }

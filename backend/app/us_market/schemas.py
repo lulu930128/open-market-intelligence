@@ -124,10 +124,16 @@ class USOhlcChartRead(BaseModel):
     points: list[USOhlcPointRead]
     backfill: dict | None = None
     intraday_overlay: dict | None = None
+    latest_data_date: date | None = None
+    expected_data_date: date | None = None
+    freshness_status: str = "missing"
+    is_current: bool = False
+    refresh_recommended: bool = True
 
 
 class USIntradayTrendPointRead(BaseModel):
     time: str
+    session: str = "regular"
     price: float
     volume: int | None = None
     open: float | None = None
@@ -135,13 +141,40 @@ class USIntradayTrendPointRead(BaseModel):
     low: float | None = None
 
 
+class USIntradaySourceStatusRead(BaseModel):
+    provider: str = "yahoo_chart"
+    status: str = "unavailable"
+    freshness_status: str = "missing"
+    market_phase: str | None = None
+    is_live_window: bool = False
+    as_of: str | None = None
+    lag_seconds: float | None = None
+    is_fallback: bool = False
+    has_usable_data: bool = False
+    message: str | None = None
+
+
 class USIntradayTrendRead(BaseModel):
     stock_id: str
     symbol: str | None = None
     source: str
+    session_scope: str = "regular"
+    session_phase: str | None = None
+    has_extended_hours: bool = False
+    regular_point_count: int = 0
+    extended_point_count: int = 0
     previous_close: float | None = None
+    previous_close_source: str | None = None
+    previous_close_trade_date: str | None = None
+    previous_close_provider: str | None = None
+    regular_session_close: float | None = None
+    regular_session_close_time: str | None = None
     point_count: int
     points: list[USIntradayTrendPointRead]
+    volume_pace: dict | None = None
+    source_status: USIntradaySourceStatusRead
+    source_url: str | None = None
+    warnings: list[str] = Field(default_factory=list)
 
 
 class USSecCompanyFactRead(BaseModel):
@@ -467,6 +500,7 @@ class USWatchlistRankingItemRead(BaseModel):
     group_id: int
     trade_date: date | None = None
     time: str | None = None
+    session: str | None = None
     close: float | None = None
     previous_close: float | None = None
     change: float | None = None
@@ -474,6 +508,7 @@ class USWatchlistRankingItemRead(BaseModel):
     volume: int | None = None
     status: str
     source: str | None = None
+    has_extended_hours: bool = False
     intraday_previous_close: float | None = None
     intraday_points: list[dict] = Field(default_factory=list)
     error_message: str | None = None

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.db.models import StockMaster
+from app.db.models import BrokerBranchTradeDaily, MarketDailyPrice, StockMaster
 from app.market.taiwan_rules import (
     TAIWAN_DATASET_BROKER_BRANCH,
     TAIWAN_DATASET_DAILY_PRICE,
@@ -15,13 +15,17 @@ from app.market.taiwan_rules import (
     TAIWAN_DATASET_INSTITUTIONAL_TRADE,
     TAIWAN_DATASET_LABELS,
     TAIWAN_DATASET_MARGIN_TRADING,
+    TAIWAN_DATASET_SHAREHOLDING_DISTRIBUTION,
     TAIWAN_DATASET_SPECS,
     TAIWAN_STOCK_MASTER_DATASET,
     TaiwanDatasetSpec,
+    expected_date_for_dataset as expected_taiwan_dataset_date,
     is_equity_only_dataset_required as _is_equity_only_dataset_required,
+    shareholding_distribution_release_window,
 )
 from app.market.calendar_status import expected_taiwan_trade_date
 from app.watchlists import service as watchlist_service
+from app.observability.provider_health import provider_event_summary
 
 
 MAX_STALE_STOCK_DETAILS = 20
@@ -69,7 +73,7 @@ def _expected_date_for_dataset(key: str) -> date | None:
     if key == TAIWAN_DATASET_BROKER_BRANCH:
         return expected_broker_branch_date()
 
-    return None
+    return expected_taiwan_dataset_date(key)
 
 
 
@@ -131,6 +135,8 @@ def _dataset_check(
     latest_value: Any,
     expected_date: date | None,
     required: bool,
+    release_window: dict[str, Any] | None = None,
+    cooldown: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     latest = _json_value(latest_value)
     expected = _json_value(expected_date)
@@ -147,6 +153,12 @@ def _dataset_check(
     else:
         status = "current"
         is_current = True
+    if (
+        spec.key == TAIWAN_DATASET_SHAREHOLDING_DISTRIBUTION
+        and (release_window or {}).get("status") == "pending"
+        and is_current
+    ):
+        status = "pending"
 
     return {
         "key": spec.key,
@@ -158,6 +170,61 @@ def _dataset_check(
         "expected": expected,
         "is_current": is_current,
         "stock_id": stock_id,
+        "release_status": (release_window or {}).get("status"),
+        "release_at": (release_window or {}).get("release_at"),
+        "next_release_at": (release_window or {}).get("next_release_at"),
+        "refresh_eligible": (cooldown or {}).get("refresh_eligible", True),
+        "next_eligible_refresh_at": (cooldown or {}).get(
+            "next_eligible_refresh_at"
+        ),
+    }
+
+
+def _shareholding_refresh_cooldown(
+    db: Session,
+    *,
+    stock_id: str,
+) -> dict[str, Any]:
+    summary = provider_event_summary(
+        db,
+        market="tw",
+        provider="tdcc",
+        resource=TAIWAN_DATASET_SHAREHOLDING_DISTRIBUTION,
+        target=stock_id,
+    )
+    latest_event = (
+        summary.get("latest_event")
+        if isinstance(summary.get("latest_event"), dict)
+        else {}
+    )
+    detail = (
+        latest_event.get("detail")
+        if isinstance(latest_event.get("detail"), dict)
+        else {}
+    )
+    raw_next = detail.get("next_eligible_refresh_at")
+    try:
+        next_eligible = (
+            datetime.fromisoformat(str(raw_next).replace("Z", "+00:00"))
+            if raw_next
+            else None
+        )
+    except ValueError:
+        next_eligible = None
+    if next_eligible is not None and next_eligible.tzinfo is None:
+        next_eligible = next_eligible.replace(tzinfo=timezone.utc)
+    refresh_eligible = bool(
+        next_eligible is None
+        or next_eligible.astimezone(timezone.utc)
+        <= datetime.now(timezone.utc)
+    )
+    return {
+        "refresh_eligible": refresh_eligible,
+        "next_eligible_refresh_at": (
+            next_eligible.astimezone(timezone.utc).isoformat()
+            if next_eligible
+            else None
+        ),
     }
 
 
@@ -177,12 +244,24 @@ def _stock_freshness_rows(
         )
         for spec in DATASET_SPECS
     }
+    shareholding_window = shareholding_distribution_release_window()
     expected_dates = {
         spec.key: _expected_date_for_dataset(spec.key)
         for spec in DATASET_SPECS
         if spec.has_expected_date
     }
     rows: list[dict[str, Any]] = []
+    cooldowns = (
+        {
+            TAIWAN_DATASET_SHAREHOLDING_DISTRIBUTION:
+                _shareholding_refresh_cooldown(
+                    db,
+                    stock_id=candidates[0].stock_id,
+                )
+        }
+        if len(candidates) == 1
+        else {}
+    )
 
     for candidate in candidates:
         stock = stock_master.get(candidate.stock_id)
@@ -198,6 +277,13 @@ def _stock_freshness_rows(
                     latest_value=latest_by_dataset[spec.key].get(candidate.stock_id),
                     expected_date=expected_dates.get(spec.key),
                     required=required,
+                    release_window=(
+                        shareholding_window
+                        if spec.key
+                        == TAIWAN_DATASET_SHAREHOLDING_DISTRIBUTION
+                        else None
+                    ),
+                    cooldown=cooldowns.get(spec.key),
                 )
             )
 
@@ -209,6 +295,10 @@ def _stock_freshness_rows(
                 "status": dataset["status"],
                 "latest": dataset["latest"],
                 "expected": dataset["expected"],
+                "refresh_eligible": dataset.get("refresh_eligible", True),
+                "next_eligible_refresh_at": dataset.get(
+                    "next_eligible_refresh_at"
+                ),
             }
             for dataset in datasets
             if dataset["required"] and not dataset["is_current"]
@@ -246,6 +336,12 @@ def _dataset_summaries(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         stale_checks = [check for check in required_checks if check["status"] == "stale"]
         missing_checks = [check for check in required_checks if check["status"] == "missing"]
         skipped_checks = [check for check in checks if check["status"] == "skipped"]
+        refreshable_checks = [
+            check
+            for check in required_checks
+            if not check["is_current"]
+            and check.get("refresh_eligible", True)
+        ]
         affected_stock_ids = [
             check["stock_id"]
             for check in required_checks
@@ -273,6 +369,7 @@ def _dataset_summaries(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "missing_stock_count": len(missing_checks),
                 "stale_stock_count": len(stale_checks),
                 "skipped_stock_count": len(skipped_checks),
+                "refreshable_stock_count": len(refreshable_checks),
                 "affected_stock_ids": affected_stock_ids,
                 "affected_stock_ids_truncated": len(affected_stock_ids)
                 < len(stale_checks) + len(missing_checks),
@@ -311,6 +408,11 @@ def _build_result(
         dataset["key"]
         for dataset in dataset_summaries
         if dataset["missing_stock_count"] or dataset["stale_stock_count"]
+    ]
+    refreshable_missing = [
+        dataset["key"]
+        for dataset in dataset_summaries
+        if dataset["refreshable_stock_count"]
     ]
     expected_dates = {
         dataset["key"]: dataset["expected"]
@@ -352,8 +454,9 @@ def _build_result(
         "stale_stocks": stale_details,
         "datasets": dataset_summaries,
         "missing": missing,
+        "refreshable_missing": refreshable_missing,
         "warnings": warnings,
-        "refresh_recommended": bool(stale_rows),
+        "refresh_recommended": bool(refreshable_missing),
         "refresh_endpoint": refresh_endpoint,
         "refresh_params": refresh_params,
     }
@@ -442,7 +545,144 @@ def check_watchlist_data_freshness(
 
 
 def check_stock_daily_price_freshness(db: Session, stock_id: str) -> dict[str, Any]:
-    return check_stock_data_freshness(db=db, stock_id=stock_id)
+    normalized_stock_id = stock_id.strip()
+    stock = (
+        db.query(StockMaster)
+        .filter(StockMaster.stock_id == normalized_stock_id)
+        .first()
+    )
+    latest = (
+        db.query(func.max(MarketDailyPrice.trade_date))
+        .filter(MarketDailyPrice.stock_id == normalized_stock_id)
+        .scalar()
+    )
+    expected = expected_daily_price_date()
+    daily_spec = next(
+        spec for spec in DATASET_SPECS if spec.key == TAIWAN_DATASET_DAILY_PRICE
+    )
+    candidate = StockCandidate(
+        stock_id=normalized_stock_id,
+        stock_name=stock.stock_name if stock is not None else None,
+    )
+    datasets = [
+        _stock_master_check(candidate, stock),
+        _dataset_check(
+            spec=daily_spec,
+            stock_id=normalized_stock_id,
+            latest_value=latest,
+            expected_date=expected,
+            required=True,
+        ),
+    ]
+    issues = [dataset for dataset in datasets if not dataset["is_current"]]
+    missing = [dataset["key"] for dataset in issues]
+    warnings = (
+        [
+            "Latest quote evidence is unavailable or stale for "
+            f"{normalized_stock_id}: {', '.join(missing)}."
+        ]
+        if issues
+        else []
+    )
+    return {
+        "kind": "ai_scope_freshness",
+        "scope_type": "stock",
+        "scope_id": normalized_stock_id,
+        "scope_profile": "quote_only",
+        "expected_trade_date": _json_value(expected),
+        "expected_dates": {
+            TAIWAN_DATASET_DAILY_PRICE: _json_value(expected),
+        },
+        "is_current": not issues,
+        "checked_stock_count": 1,
+        "stale_stock_count": 1 if issues else 0,
+        "stale_stock_ids": [normalized_stock_id] if issues else [],
+        "stale_stock_ids_truncated": False,
+        "stale_stocks": (
+            [
+                {
+                    "stock_id": normalized_stock_id,
+                    "stock_name": candidate.stock_name,
+                    "market": stock.market if stock is not None else None,
+                    "instrument_type": stock.instrument_type if stock is not None else None,
+                    "issue_count": len(issues),
+                    "issues": issues,
+                }
+            ]
+            if issues
+            else []
+        ),
+        "datasets": datasets,
+        "missing": missing,
+        "warnings": warnings,
+        "refresh_recommended": False,
+        "refresh_endpoint": None,
+        "refresh_params": {},
+    }
+
+
+def check_stock_broker_branch_freshness(db: Session, stock_id: str) -> dict[str, Any]:
+    normalized_stock_id = stock_id.strip()
+    stock = (
+        db.query(StockMaster)
+        .filter(StockMaster.stock_id == normalized_stock_id)
+        .first()
+    )
+    latest = (
+        db.query(func.max(BrokerBranchTradeDaily.trade_date))
+        .filter(BrokerBranchTradeDaily.stock_id == normalized_stock_id)
+        .scalar()
+    )
+    expected = expected_broker_branch_date()
+    branch_spec = next(
+        spec for spec in DATASET_SPECS if spec.key == TAIWAN_DATASET_BROKER_BRANCH
+    )
+    candidate = StockCandidate(
+        stock_id=normalized_stock_id,
+        stock_name=stock.stock_name if stock is not None else None,
+    )
+    datasets = [
+        _stock_master_check(candidate, stock),
+        _dataset_check(
+            spec=branch_spec,
+            stock_id=normalized_stock_id,
+            latest_value=latest,
+            expected_date=expected,
+            required=True,
+        ),
+    ]
+    issues = [dataset for dataset in datasets if not dataset["is_current"]]
+    missing = [dataset["key"] for dataset in issues]
+    warnings = (
+        [
+            "Broker branch evidence is unavailable or stale for "
+            f"{normalized_stock_id}: {', '.join(missing)}."
+        ]
+        if issues
+        else []
+    )
+    return {
+        "kind": "ai_scope_freshness",
+        "scope_type": "stock",
+        "scope_id": normalized_stock_id,
+        "scope_profile": "broker_branch_only",
+        "expected_trade_date": _json_value(expected),
+        "expected_dates": {
+            TAIWAN_DATASET_BROKER_BRANCH: _json_value(expected),
+        },
+        "is_current": not issues,
+        "checked_stock_count": 1,
+        "stale_stock_count": 1 if issues else 0,
+        "stale_stock_ids": [normalized_stock_id] if issues else [],
+        "stale_stock_ids_truncated": False,
+        "stale_stocks": [],
+        "datasets": datasets,
+        "missing": missing,
+        "warnings": warnings,
+        "refresh_recommended": False,
+        "refresh_endpoint": None,
+        "refresh_params": {},
+    }
 
 
 def check_watchlist_daily_price_freshness(

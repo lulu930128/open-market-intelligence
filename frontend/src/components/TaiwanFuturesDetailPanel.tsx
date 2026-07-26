@@ -1,6 +1,11 @@
 "use client";
 
-import { LoadingDots } from "@/components/LoadingPlaceholders";
+import { LoadingDots, StateSurface } from "@/components/LoadingPlaceholders";
+import IntradayTrendChart, {
+  defaultIntradayIndicators,
+  type IntradayIndicatorSettings,
+  type IntradaySessionConfig,
+} from "@/components/IntradayTrendChart";
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
 import ProfessionalChartPanel, {
   type ProfessionalChartStyle,
@@ -32,12 +37,16 @@ import {
   type ChartDrawingStorageState,
 } from "@/components/professionalChartDrawing";
 import { fetchJson, requestJson } from "@/lib/api";
+import { emitDataStatusEvent, type DataStatusLevel } from "@/lib/dataStatusEvents";
+import { getTaipeiMinutesOfDay } from "@/lib/taiwanMarketTime";
 import { timeframeLabel, useT, type TranslationFunction } from "@/i18n";
 import type {
   ChartDrawingSnapshotRead,
   ChartPoint,
+  IntradayTrendPoint,
   MarketIndexSummary,
   TaiwanFuturesDailyBar,
+  TaiwanFuturesDailyRefresh,
   TaiwanFuturesIntradayBar,
   TaiwanFuturesQuote,
 } from "@/types/market";
@@ -56,6 +65,91 @@ type FuturesTimeframe = "today" | "daily" | "weekly" | "monthly";
 const FUTURES_ORDER = ["TXF", "MXF", "TMF"] as const;
 const FUTURES_TIMEFRAMES: FuturesTimeframe[] = ["today", "daily", "weekly", "monthly"];
 const FUTURES_INTRADAY_REFRESH_MS = 30_000;
+const FUTURES_REGULAR_SESSION_START_MINUTES = 8 * 60 + 45;
+const FUTURES_REGULAR_SESSION_END_MINUTES = 13 * 60 + 45;
+const FUTURES_AFTER_HOURS_SESSION_START_MINUTES = 15 * 60;
+const FUTURES_AFTER_HOURS_SESSION_END_MINUTES = 24 * 60 + 5 * 60;
+
+function clampRatio(value: number) {
+  return Math.max(0, Math.min(1, value));
+}
+
+function getRegularSessionXRatio(value: string | Date) {
+  const minutes = getTaipeiMinutesOfDay(value);
+  if (minutes === null) return 0;
+
+  return clampRatio(
+    (minutes - FUTURES_REGULAR_SESSION_START_MINUTES) /
+      (FUTURES_REGULAR_SESSION_END_MINUTES - FUTURES_REGULAR_SESSION_START_MINUTES)
+  );
+}
+
+function getAfterHoursSessionMinutes(value: string | Date) {
+  const minutes = getTaipeiMinutesOfDay(value);
+  if (minutes === null) return null;
+
+  return minutes <= 5 * 60 ? minutes + 24 * 60 : minutes;
+}
+
+function getAfterHoursSessionXRatio(value: string | Date) {
+  const minutes = getAfterHoursSessionMinutes(value);
+  if (minutes === null) return 0;
+
+  return clampRatio(
+    (minutes - FUTURES_AFTER_HOURS_SESSION_START_MINUTES) /
+      (FUTURES_AFTER_HOURS_SESSION_END_MINUTES - FUTURES_AFTER_HOURS_SESSION_START_MINUTES)
+  );
+}
+
+const futuresRegularIntradaySession: IntradaySessionConfig = {
+  startMinutes: FUTURES_REGULAR_SESSION_START_MINUTES,
+  endMinutes: FUTURES_REGULAR_SESSION_END_MINUTES,
+  timeTicks: [
+    { label: "08:45", minutes: 8 * 60 + 45 },
+    { label: "09:45", minutes: 9 * 60 + 45 },
+    { label: "10:45", minutes: 10 * 60 + 45 },
+    { label: "11:45", minutes: 11 * 60 + 45 },
+    { label: "12:45", minutes: 12 * 60 + 45 },
+    { label: "13:45", minutes: 13 * 60 + 45 },
+  ],
+  getMinutesOfDay: getTaipeiMinutesOfDay,
+  getXRatio: getRegularSessionXRatio,
+  isRegularSessionPoint: (value) => {
+    const minutes = getTaipeiMinutesOfDay(value);
+    return (
+      minutes !== null &&
+      minutes >= FUTURES_REGULAR_SESSION_START_MINUTES &&
+      minutes <= FUTURES_REGULAR_SESSION_END_MINUTES
+    );
+  },
+  volumeFormatter: formatFuturesVolume,
+};
+
+const futuresAfterHoursIntradaySession: IntradaySessionConfig = {
+  startMinutes: FUTURES_AFTER_HOURS_SESSION_START_MINUTES,
+  endMinutes: FUTURES_AFTER_HOURS_SESSION_END_MINUTES,
+  timeTicks: [
+    { label: "15:00", minutes: 15 * 60 },
+    { label: "17:00", minutes: 17 * 60 },
+    { label: "19:00", minutes: 19 * 60 },
+    { label: "21:00", minutes: 21 * 60 },
+    { label: "23:00", minutes: 23 * 60 },
+    { label: "01:00", minutes: 25 * 60 },
+    { label: "03:00", minutes: 27 * 60 },
+    { label: "05:00", minutes: 29 * 60 },
+  ],
+  getMinutesOfDay: getAfterHoursSessionMinutes,
+  getXRatio: getAfterHoursSessionXRatio,
+  isRegularSessionPoint: (value) => {
+    const minutes = getAfterHoursSessionMinutes(value);
+    return (
+      minutes !== null &&
+      minutes >= FUTURES_AFTER_HOURS_SESSION_START_MINUTES &&
+      minutes <= FUTURES_AFTER_HOURS_SESSION_END_MINUTES
+    );
+  },
+  volumeFormatter: formatFuturesVolume,
+};
 
 function chartDrawingStorageKey(symbol: string | null, timeframe: FuturesTimeframe) {
   return `omi:tw-futures:chart-drawings:v1:${symbol ?? "empty"}:${timeframe}`;
@@ -113,6 +207,7 @@ function formatDateTime(value: string | null | undefined) {
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+    second: "2-digit",
     hour12: false,
   }).format(date);
 }
@@ -173,6 +268,7 @@ function formatFuturesVolume(value: number | null | undefined) {
 
 function quoteFreshnessToneClass(status: string | null | undefined) {
   if (status === "live") return "text-omi-success";
+  if (status === "closed") return "text-omi-info";
   if (status === "cached" || status === "session_mismatch" || status === "stale") {
     return "text-omi-warning";
   }
@@ -188,6 +284,7 @@ function quoteFreshnessBannerClass(status: string | null | undefined) {
 
 function quoteFreshnessLabel(t: TranslationFunction, status: string | null | undefined) {
   if (status === "live") return t("futures.freshness.live");
+  if (status === "closed") return t("futures.freshness.closed");
   if (status === "cached") return t("futures.freshness.cached");
   if (status === "session_mismatch") return t("futures.freshness.sessionMismatch");
   if (status === "stale") return t("futures.freshness.stale");
@@ -196,18 +293,10 @@ function quoteFreshnessLabel(t: TranslationFunction, status: string | null | und
 
 async function fetchLatestQuotes(symbols: readonly string[]) {
   const symbolParam = symbols.join(",");
-  const rows = await fetchJson<TaiwanFuturesQuote[]>("/api/market/tw-futures/latest", {
-    symbols: symbolParam,
-    refresh: true,
-    session: "auto",
-  });
-
-  if (rows.length > 0) return rows;
-
   return fetchJson<TaiwanFuturesQuote[]>("/api/market/tw-futures/latest", {
     symbols: symbolParam,
-    refresh: true,
-    session: "regular",
+    refresh: false,
+    session: "auto",
   });
 }
 
@@ -311,8 +400,13 @@ function aggregateChartPoints(points: ChartPoint[], mode: "weekly" | "monthly"):
 
 function EmptyChartState({ loading, message }: { loading: boolean; message: string }) {
   return (
-    <div className="flex min-h-[420px] items-center justify-center border border-omi-border-subtle bg-omi-surface text-sm text-omi-text-muted">
-      {loading ? <LoadingDots label={message} /> : message}
+    <div className="flex min-h-[420px] items-center justify-center border border-omi-border-subtle bg-omi-surface p-4">
+      <StateSurface
+        title={message}
+        tone={loading ? "loading" : "empty"}
+        busy={loading}
+        className="w-full max-w-xl"
+      />
     </div>
   );
 }
@@ -403,6 +497,12 @@ function FuturesProfessionalIndicatorMenu({
 function FuturesKLineVisual({
   chartData,
   indicators,
+  intradayIndicators,
+  intradayPoints,
+  intradayPreviousClose,
+  intradaySession,
+  intradayTotalVolume,
+  intradayUpdatedAt,
   loading,
   revealKey,
   t,
@@ -410,12 +510,37 @@ function FuturesKLineVisual({
 }: {
   chartData: ChartPoint[];
   indicators: IndicatorSettings;
+  intradayIndicators: IntradayIndicatorSettings;
+  intradayPoints: IntradayTrendPoint[];
+  intradayPreviousClose: number | null;
+  intradaySession: IntradaySessionConfig;
+  intradayTotalVolume: number | null;
+  intradayUpdatedAt: string | null;
   loading: boolean;
   revealKey: string;
   t: TranslationFunction;
   timeframe: FuturesTimeframe;
 }) {
   const label = timeframeLabel(t, timeframe);
+
+  if (timeframe === "today" && intradayPoints.length > 0) {
+    return (
+      <IntradayTrendChart
+        points={intradayPoints}
+        previousClose={intradayPreviousClose}
+        label={label}
+        source="TAIFEX MIS 1-minute chart"
+        indicators={intradayIndicators}
+        session={intradaySession}
+        revealKey={revealKey}
+        refreshIntervalMs={FUTURES_INTRADAY_REFRESH_MS}
+        updatedAt={intradayUpdatedAt}
+        priceLimitEnabled={false}
+        totalVolume={intradayTotalVolume}
+        volumeLabel={t("futures.volumeContracts")}
+      />
+    );
+  }
 
   if (chartData.length < 1) {
     return (
@@ -437,16 +562,8 @@ function FuturesKLineVisual({
       indicators={indicators}
       indicatorParameters={defaultIndicatorParameters}
       revealKey={revealKey}
-      volumePanelLabel={
-        timeframe === "today"
-          ? t("futures.cumulativeVolumeContracts")
-          : t("futures.volumeContracts")
-      }
-      volumeTooltipLabel={
-        timeframe === "today"
-          ? t("futures.cumulativeVolumeContracts")
-          : t("futures.volumeContracts")
-      }
+      volumePanelLabel={t("futures.volumeContracts")}
+      volumeTooltipLabel={t("futures.volumeContracts")}
       volumeValueFormatter={formatFuturesVolume}
     />
   );
@@ -465,7 +582,6 @@ export default function TaiwanFuturesDetailPanel({
   const [quoteState, setQuoteState] = useState<LoadState>("idle");
   const [dailyState, setDailyState] = useState<LoadState>("idle");
   const [barsState, setBarsState] = useState<LoadState>("idle");
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [chartTimeframe, setChartTimeframe] = useState<FuturesTimeframe>("daily");
   const [showChartIndicators, setShowChartIndicators] = useState(false);
   const [chartExpanded, setChartExpanded] = useState(false);
@@ -518,6 +634,41 @@ export default function TaiwanFuturesDetailPanel({
         quote?.product_name ?? t("futures.products.representative")
       )}`
     : "TXF / MXF / TMF";
+  const dataStatusContextKey = `tw:futures:${normalizedSymbol ?? "unknown"}`;
+  const dataStatusContextLabel = normalizedSymbol
+    ? `${normalizedSymbol} ${futuresProductLabel(
+        t,
+        normalizedSymbol,
+        t("futures.products.representative")
+      )}`
+    : "TXF / MXF / TMF";
+  const publishFuturesDataStatus = useCallback(
+    ({
+      level = "error",
+      title,
+      message,
+      source = "台指期",
+    }: {
+      level?: DataStatusLevel;
+      title: string;
+      message: string;
+      source?: string;
+    }) => {
+      if (!normalizedSymbol) return;
+
+      emitDataStatusEvent({
+        market: "tw",
+        level,
+        title,
+        message,
+        source,
+        contextKey: dataStatusContextKey,
+        contextLabel: dataStatusContextLabel,
+        dedupeKey: `${dataStatusContextKey}:${source}:${title}:${level}`,
+      });
+    },
+    [dataStatusContextKey, dataStatusContextLabel, normalizedSymbol]
+  );
   const chartDrawingKey = chartDrawingStorageKey(normalizedSymbol, chartTimeframe);
   const storedChartDrawings = useMemo(
     () => loadChartDrawings(chartDrawingKey),
@@ -547,27 +698,32 @@ export default function TaiwanFuturesDetailPanel({
     const symbolKey = normalizedSymbol;
     let cancelled = false;
 
-    async function loadQuotes(silent = false) {
+    async function loadQuotes(silent = false): Promise<TaiwanFuturesQuote[] | null> {
       if (!silent) {
         setQuoteState("loading");
-        setErrorMessage(null);
       }
 
       try {
         const nextQuotes = await fetchLatestQuotes(FUTURES_ORDER);
-        if (cancelled) return;
+        if (cancelled) return null;
 
         setQuotes(nextQuotes);
         setQuoteState("success");
-      } catch {
-        if (cancelled) return;
+        return nextQuotes;
+      } catch (error) {
+        if (cancelled) return null;
 
         setQuoteState("error");
-        setErrorMessage(null);
+        publishFuturesDataStatus({
+          title: "台指期報價讀取失敗",
+          message: error instanceof Error ? error.message : "台指期報價讀取失敗",
+          source: "台指期報價",
+        });
+        return null;
       }
     }
 
-    async function loadBars(silent = false) {
+    async function loadBars(silent = false, refresh = false) {
       if (!silent) {
         setBarsState("loading");
       }
@@ -575,17 +731,46 @@ export default function TaiwanFuturesDetailPanel({
       try {
         const nextBars = await fetchJson<TaiwanFuturesIntradayBar[]>(
           `/api/market/tw-futures/${encodeURIComponent(symbolKey)}/intraday`,
-          { interval: "1m", limit: 180, refresh: true }
+          { interval: "1m", limit: 900, refresh, session: "auto" }
         );
         if (cancelled) return;
 
         setBars(nextBars);
         setBarsState("success");
-      } catch {
+      } catch (error) {
         if (cancelled) return;
+
+        if (refresh) {
+          try {
+            const cachedBars = await fetchJson<TaiwanFuturesIntradayBar[]>(
+              `/api/market/tw-futures/${encodeURIComponent(symbolKey)}/intraday`,
+              { interval: "1m", limit: 900, refresh: false, session: "auto" }
+            );
+            if (cancelled) return;
+
+            if (cachedBars.length > 0) {
+              setBars(cachedBars);
+              setBarsState("success");
+              publishFuturesDataStatus({
+                level: "warning",
+                title: tRef.current("futures.errors.intradayRefreshFailed"),
+                message: error instanceof Error ? error.message : String(error),
+                source: "TAIFEX MIS 1-minute chart",
+              });
+              return;
+            }
+          } catch {
+            // Continue with the primary refresh error when no usable cache exists.
+          }
+        }
 
         setBars([]);
         setBarsState("error");
+        publishFuturesDataStatus({
+          title: "台指期盤中資料讀取失敗",
+          message: error instanceof Error ? error.message : "台指期盤中資料讀取失敗",
+          source: "台指期盤中 K 線",
+        });
       }
     }
 
@@ -603,13 +788,23 @@ export default function TaiwanFuturesDetailPanel({
           setDailyBars(cachedDailyBars);
         }
 
-        const refreshedDailyBars = await fetchJson<TaiwanFuturesDailyBar[]>(
-          `/api/market/tw-futures/${encodeURIComponent(symbolKey)}/daily`,
-          { limit: 180, refresh: true, lookback_days: 90, active_only: true }
+        const refreshResult = await requestJson<TaiwanFuturesDailyRefresh>(
+          `/api/market/tw-futures/${encodeURIComponent(symbolKey)}/daily/refresh`,
+          { method: "POST" },
+          { limit: 180, lookback_days: 90, active_only: true }
         );
         if (cancelled) return;
 
-        setDailyBars(refreshedDailyBars.length > 0 ? refreshedDailyBars : cachedDailyBars);
+        if (refreshResult.warning) {
+          publishFuturesDataStatus({
+            title: "期貨日 K 更新範圍受限",
+            message: refreshResult.warning,
+            source: "TAIFEX 日成交行情",
+            level: "warning",
+          });
+        }
+
+        setDailyBars(refreshResult.rows.length > 0 ? refreshResult.rows : cachedDailyBars);
         setDailyState("success");
       } catch (error) {
         if (cancelled) return;
@@ -631,27 +826,47 @@ export default function TaiwanFuturesDetailPanel({
         }
 
         setDailyState("error");
-        setErrorMessage(
+        const message =
           error instanceof Error
             ? error.message
-            : tRef.current("futures.errors.dailyBackfillFailed")
-        );
+            : tRef.current("futures.errors.dailyBackfillFailed");
+        publishFuturesDataStatus({
+          title: tRef.current("futures.errors.dailyBackfillFailed"),
+          message,
+          source: "台指期日 K",
+        });
       }
     }
 
-    void loadQuotes();
+    async function loadInitialData() {
+      const nextQuotes = await loadQuotes();
+      if (cancelled) return;
+
+      const selectedQuote = nextQuotes?.find((item) => item.symbol === symbolKey) ?? null;
+      const shouldRefreshIntraday =
+        selectedQuote?.freshness.market_status?.is_open ?? false;
+      await loadBars(false, shouldRefreshIntraday);
+    }
+
+    void loadInitialData();
     void loadDailyBars();
-    void loadBars();
     const liveRefreshTimer = window.setInterval(() => {
-      void loadQuotes(true);
-      void loadBars(true);
+      void (async () => {
+        const nextQuotes = await loadQuotes(true);
+        if (cancelled) return;
+
+        const selectedQuote = nextQuotes?.find((item) => item.symbol === symbolKey) ?? null;
+        if (selectedQuote?.freshness.market_status?.is_open) {
+          await loadBars(true, true);
+        }
+      })();
     }, FUTURES_INTRADAY_REFRESH_MS);
 
     return () => {
       cancelled = true;
       window.clearInterval(liveRefreshTimer);
     };
-  }, [normalizedSymbol]);
+  }, [normalizedSymbol, publishFuturesDataStatus]);
 
   const dailyChartData = useMemo(
     () => dailyBars.map(dailyBarToChartPoint).filter((point) => point.close !== null),
@@ -659,6 +874,25 @@ export default function TaiwanFuturesDetailPanel({
   );
   const intradayChartData = useMemo(
     () => bars.map(intradayBarToChartPoint).filter((point) => point.close !== null),
+    [bars]
+  );
+  const futuresIntradayPoints = useMemo<IntradayTrendPoint[]>(
+    () =>
+      bars.flatMap((bar) =>
+        bar.close_price === null
+          ? []
+          : [
+              {
+                time: bar.bar_time,
+                session: bar.session,
+                price: bar.close_price,
+                volume: bar.total_volume,
+                open: bar.open_price,
+                high: bar.high_price,
+                low: bar.low_price,
+              },
+            ]
+      ),
     [bars]
   );
   const futuresChartData = useMemo(() => {
@@ -682,14 +916,30 @@ export default function TaiwanFuturesDetailPanel({
     }),
     [showChartIndicators]
   );
+  const futuresIntradayIndicators = useMemo<IntradayIndicatorSettings>(
+    () => ({
+      ...defaultIntradayIndicators,
+      ema: showChartIndicators,
+      rsi: showChartIndicators,
+      macd: showChartIndicators,
+    }),
+    [showChartIndicators]
+  );
   const latestDailyBar = dailyBars[dailyBars.length - 1] ?? null;
   const latestIntradayBar = bars[bars.length - 1] ?? null;
+  const futuresIntradaySession =
+    (quote?.session ?? latestIntradayBar?.session) === "after_hours"
+      ? futuresAfterHoursIntradaySession
+      : futuresRegularIntradaySession;
+  const futuresIntradayPreviousClose =
+    quote?.reference_price ?? latestDailyBar?.settlement_price ?? null;
   const latestPrice =
     quote?.last_price ?? latestDailyBar?.close_price ?? latestIntradayBar?.close_price ?? null;
   const displayChange = quote?.change ?? latestDailyBar?.change ?? null;
   const displayChangePct = quote?.change_pct ?? latestDailyBar?.change_pct ?? null;
   const quoteDirection = displayChange ?? displayChangePct;
   const quoteFreshness = quote?.freshness ?? null;
+  const futuresMarketStatus = quoteFreshness?.market_status ?? null;
   const quoteFreshnessStatus =
     quoteState === "loading" ? "loading" : quoteFreshness?.status ?? null;
   const quoteFreshnessMessage =
@@ -701,6 +951,14 @@ export default function TaiwanFuturesDetailPanel({
     quoteState === "loading" ? "text-omi-info" : quoteFreshnessToneClass(quoteFreshnessStatus);
   const quoteFreshnessBanner =
     quoteFreshness && quoteFreshness.status !== "live" ? quoteFreshness : null;
+  const displaySession = futuresMarketStatus?.is_open
+    ? futuresMarketStatus.current_session
+    : null;
+  const displaySessionLabel = futuresMarketStatus
+    ? futuresMarketStatus.is_open
+      ? formatSessionLabel(t, displaySession)
+      : t("futures.sessions.closed")
+    : formatSessionLabel(t, quote?.session);
   const recentBars = useMemo(() => bars.slice(-6).reverse(), [bars]);
   const chartLoading =
     chartTimeframe === "today" ? barsState === "loading" : dailyState === "loading";
@@ -1102,13 +1360,6 @@ export default function TaiwanFuturesDetailPanel({
               setChartDrawingTool("cursor");
               setChartExpanded(false);
             }}
-            message={
-              errorMessage ? (
-                <div className="border-b border-omi-danger-border bg-omi-danger-soft px-5 py-3 text-sm text-omi-danger">
-                  {errorMessage}
-                </div>
-              ) : null
-            }
             chartReady={futuresChartData.length > 0}
             emptyState={
               <EmptyChartState
@@ -1130,11 +1381,7 @@ export default function TaiwanFuturesDetailPanel({
             showMovingAverages={professionalIndicators.ma}
             indicators={professionalIndicators}
             indicatorParameters={defaultIndicatorParameters}
-            volumePanelLabel={
-              chartTimeframe === "today"
-                ? t("futures.cumulativeVolumeContracts")
-                : t("futures.volumeContracts")
-            }
+            volumePanelLabel={t("futures.volumeContracts")}
             volumeValueKey="volume"
             drawingTool={chartDrawingTool}
             drawings={chartDrawings}
@@ -1165,7 +1412,7 @@ export default function TaiwanFuturesDetailPanel({
                 <h2 className="mt-2 text-2xl font-black text-omi-text-strong">{t("futures.productTitle")}</h2>
                 <div className="mt-2 text-sm text-omi-text-muted">
                   TAIFEX · {displayProductName} ·{" "}
-                  {formatSessionLabel(t, quote?.session)} ·{" "}
+                  {displaySessionLabel} ·{" "}
                   {quote?.contract_month ?? latestDailyBar?.contract_month ?? t("futures.frontMonth")}
                 </div>
               </div>
@@ -1250,6 +1497,13 @@ export default function TaiwanFuturesDetailPanel({
                     : quoteFreshnessLabel(t, quoteFreshnessStatus)}
                 </div>
                 <div className="mt-1 text-xs text-omi-text-muted">{quoteFreshnessMessage}</div>
+                {futuresMarketStatus?.checked_at ? (
+                  <div className="mt-1 text-xs text-omi-text-muted">
+                    {t("futures.marketCheckedAt", {
+                      time: formatDateTime(futuresMarketStatus.checked_at),
+                    })}
+                  </div>
+                ) : null}
               </div>
               <div className="px-5 py-4">
                 <div className="text-xs font-semibold text-omi-text-muted">{t("futures.dailyK")}</div>
@@ -1261,11 +1515,6 @@ export default function TaiwanFuturesDetailPanel({
               </div>
             </div>
 
-            {errorMessage ? (
-              <div className="border-b border-omi-danger-border bg-omi-danger-soft px-5 py-3 text-sm text-omi-danger">
-                {errorMessage}
-              </div>
-            ) : null}
             {quoteFreshnessBanner ? (
               <div className={quoteFreshnessBannerClass(quoteFreshnessBanner.status)}>
                 {quoteFreshnessBanner.message}
@@ -1279,6 +1528,12 @@ export default function TaiwanFuturesDetailPanel({
           <FuturesKLineVisual
             chartData={futuresChartData}
             indicators={futuresChartIndicators}
+            intradayIndicators={futuresIntradayIndicators}
+            intradayPoints={futuresIntradayPoints}
+            intradayPreviousClose={futuresIntradayPreviousClose}
+            intradaySession={futuresIntradaySession}
+            intradayTotalVolume={quote?.total_volume ?? null}
+            intradayUpdatedAt={latestIntradayBar?.updated_at ?? quote?.quote_time ?? null}
             loading={chartLoading}
             revealKey={`${normalizedSymbol}:${chartTimeframe}`}
             t={t}
@@ -1449,7 +1704,7 @@ export default function TaiwanFuturesDetailPanel({
                       <th className="px-5 py-2 text-right font-semibold">{t("futures.high")}</th>
                       <th className="px-5 py-2 text-right font-semibold">{t("futures.low")}</th>
                       <th className="px-5 py-2 text-right font-semibold">{t("futures.close")}</th>
-                      <th className="px-5 py-2 text-right font-semibold">{t("futures.cumulativeVolume")}</th>
+                      <th className="px-5 py-2 text-right font-semibold">{t("futures.volumeContracts")}</th>
                     </tr>
                   </thead>
                   <tbody>

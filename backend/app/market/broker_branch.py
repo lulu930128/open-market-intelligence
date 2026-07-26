@@ -5,7 +5,7 @@ import requests
 from sqlalchemy.orm import Session
 
 from app.db.models import BrokerBranchTradeDaily, RawFetchResult, SourceRegistry
-from app.http_client import get as http_get
+from app.market.providers import http_get
 from app.market.taiwan_rules import TAIWAN_BROKER_BRANCH_RELEASE_TIME
 from app.market.trading_calendar import latest_released_trading_day
 from app.parsers.twse_common import parse_date, parse_float, parse_int
@@ -169,6 +169,37 @@ def _parse_branch_rows(payload_data: dict) -> list[dict]:
         current["sell_avg_price"] = parse_float(row.get("賣均價"))
 
     return list(rows_by_branch.values())
+
+
+def probe_broker_branch_release(stock_id: str = "2330") -> dict:
+    """Read the provider's latest release date without mutating local storage."""
+    fetch_result = _fetch_nstock_branch_top15(stock_id=stock_id)
+    payload_data = (
+        fetch_result.payload.get("data")
+        if isinstance(fetch_result.payload, dict)
+        else None
+    )
+
+    if not isinstance(payload_data, dict):
+        raise BrokerBranchFetchError("分點資料來源回傳格式缺少 data 物件。")
+
+    fetched_trade_date = parse_date(payload_data.get("更新日期"))
+    if fetched_trade_date is None:
+        raise BrokerBranchFetchError(
+            "Broker branch payload does not contain a valid update date."
+        )
+
+    try:
+        rows = _parse_branch_rows(payload_data)
+    except ValueError as exc:
+        raise BrokerBranchFetchError(str(exc)) from exc
+
+    return {
+        "stock_id": stock_id,
+        "trade_date": fetched_trade_date,
+        "row_count": len(rows),
+        "source_url": fetch_result.url,
+    }
 
 
 def fetch_and_store_broker_branch_daily(
@@ -497,6 +528,18 @@ def get_broker_branch_trade_summary(
             "available_days": 0,
             "trade_dates": [],
             "is_partial": True,
+            "aggregation_window": {
+                "mode": "single_session" if requested_days == 1 else "multi_session_net",
+                "anchor_trade_date": None,
+                "requested_trading_days": requested_days,
+                "available_trading_days": 0,
+                "included_trade_dates": [],
+            },
+            "date_semantics": {
+                "trade_date": "market_observation_date",
+                "trade_dates": "sessions_included_in_the_aggregation",
+                "created_at": "local_ingestion_timestamp_not_market_freshness",
+            },
             "row_count": 0,
             "buy_top": [],
             "sell_top": [],
@@ -558,6 +601,18 @@ def get_broker_branch_trade_summary(
         "available_days": len(trade_dates),
         "trade_dates": trade_dates,
         "is_partial": len(trade_dates) < requested_days,
+        "aggregation_window": {
+            "mode": "single_session" if requested_days == 1 else "multi_session_net",
+            "anchor_trade_date": target_date,
+            "requested_trading_days": requested_days,
+            "available_trading_days": len(trade_dates),
+            "included_trade_dates": trade_dates,
+        },
+        "date_semantics": {
+            "trade_date": "market_observation_date",
+            "trade_dates": "sessions_included_in_the_aggregation",
+            "created_at": "local_ingestion_timestamp_not_market_freshness",
+        },
         "row_count": row_count,
         "buy_top": buy_top,
         "sell_top": sell_top,

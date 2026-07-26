@@ -2,6 +2,7 @@
 
 import PriceUpdatePulse from "@/components/PriceUpdatePulse";
 import { fetchJson } from "@/lib/api";
+import { emitDataStatusEvent } from "@/lib/dataStatusEvents";
 import {
   US_INTRADAY_REFRESH_MS,
   getUsMarketRefreshState,
@@ -81,8 +82,14 @@ function trendClass(value: number | null | undefined) {
 
 function statusLabel(t: TranslationFunction, status: string) {
   if (status === "intraday") return t("statusLabels.intraday");
+  if (status === "extended_hours") return t("usStockDetail.extendedHours.scopes.extended");
   if (status === "ready") return t("statusLabels.ready");
   return rowStatusLabel(t, status);
+}
+
+function sessionLabel(t: TranslationFunction, session: string | null | undefined) {
+  if (!session) return t("statusLabels.intraday");
+  return t(`usStockDetail.extendedHours.phases.${session}`);
 }
 
 function rankLabel(t: TranslationFunction, rankBy: string) {
@@ -100,10 +107,12 @@ export default function USWatchlistRankingPanel({
   const [rankBy, setRankBy] = useState<USRankBy>("none");
   const [ranking, setRanking] = useState<USWatchlistRankingRead | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("idle");
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
 
   const sortOrder = rankBy === "none" ? "asc" : "desc";
+  const rankingDataStatusContextKey = `us:watchlist:${selectedGroupId ?? "all"}:ranking`;
+  const rankingDataStatusContextLabel = selectedGroupName ?? t("watchlist.usHeader");
+  const rankingDataStatusSource = t("dashboard.ranking.listTitle");
   const rows = useMemo(() => ranking?.results ?? [], [ranking]);
   const summary = useMemo(() => {
     const upCount = rows.filter((row) => {
@@ -121,10 +130,29 @@ export default function USWatchlistRankingPanel({
     };
   }, [ranking?.no_data_count, ranking?.requested_symbol_count, rows]);
 
+  const publishRankingDataStatus = useCallback(
+    (title: string, message: string) => {
+      emitDataStatusEvent({
+        market: "us",
+        level: "error",
+        title,
+        message,
+        source: rankingDataStatusSource,
+        contextKey: rankingDataStatusContextKey,
+        contextLabel: rankingDataStatusContextLabel,
+        dedupeKey: `${rankingDataStatusContextKey}:${rankingDataStatusSource}:${title}:error`,
+      });
+    },
+    [
+      rankingDataStatusContextKey,
+      rankingDataStatusContextLabel,
+      rankingDataStatusSource,
+    ]
+  );
+
   const loadRanking = useCallback(async (options?: { silent?: boolean }) => {
     if (!options?.silent) {
       setLoadState("loading");
-      setErrorMessage(null);
     }
     const marketState = getUsMarketRefreshState();
 
@@ -133,8 +161,9 @@ export default function USWatchlistRankingPanel({
       enabled_only: true,
       rank_by: rankBy,
       sort_order: sortOrder,
-      use_intraday: marketState.isPollingWindow,
+      use_intraday: marketState.isLiveWindow,
       intraday_limit: WATCHLIST_INTRADAY_LIMIT,
+      intraday_session_scope: marketState.intradaySessionScope,
     };
 
     if (selectedGroupId !== null) {
@@ -152,9 +181,12 @@ export default function USWatchlistRankingPanel({
     } catch (error) {
       setRanking(null);
       setLoadState("error");
-      setErrorMessage(error instanceof Error ? error.message : t("dashboard.ranking.usReadError"));
+      publishRankingDataStatus(
+        t("dashboard.ranking.usReadError"),
+        error instanceof Error ? error.message : t("dashboard.ranking.usReadError")
+      );
     }
-  }, [rankBy, selectedGroupId, sortOrder, t]);
+  }, [publishRankingDataStatus, rankBy, selectedGroupId, sortOrder, t]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -173,7 +205,7 @@ export default function USWatchlistRankingPanel({
 
       const marketState = getUsMarketRefreshState();
 
-      if (marketState.isPollingWindow) {
+      if (marketState.isLiveWindow) {
         refreshTimer = window.setTimeout(() => {
           void loadRanking({ silent: true }).finally(scheduleRefresh);
         }, US_INTRADAY_REFRESH_MS);
@@ -216,7 +248,7 @@ export default function USWatchlistRankingPanel({
           </span>
           <span className={selected ? "block truncate text-xs text-omi-text-inverse-muted" : "block truncate text-xs text-omi-text-muted"}>
             {[
-              row.time ? formatDate(row.time) : null,
+              row.time ? `${formatDate(row.time)} ${sessionLabel(t, row.session)}` : null,
               row.exchange,
               row.asset_type ? usAssetTypeLabel(t, row.asset_type) : null,
             ]
@@ -225,7 +257,7 @@ export default function USWatchlistRankingPanel({
           </span>
         </span>
         <span className={selected ? "text-omi-text-inverse-muted" : "text-omi-text-muted"}>
-          {row.time ? t("statusLabels.intraday") : formatDate(row.trade_date)}
+          {row.time ? sessionLabel(t, row.session) : formatDate(row.trade_date)}
         </span>
         <span className="text-right font-semibold">
           <PriceUpdatePulse
@@ -310,12 +342,6 @@ export default function USWatchlistRankingPanel({
             </button>
           </div>
         </div>
-
-        {errorMessage ? (
-          <div className="border-t border-omi-danger-border bg-omi-danger-soft px-5 py-3 text-sm text-omi-danger">
-            {errorMessage}
-          </div>
-        ) : null}
 
         <div className="grid grid-cols-2 border-t border-omi-border-subtle md:grid-cols-4">
           <div className="px-5 py-3">

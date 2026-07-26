@@ -9,12 +9,17 @@ from typing import Any
 
 import requests
 from bs4 import BeautifulSoup
-from sqlalchemy import func
+from sqlalchemy import and_, case, func, or_
 from sqlalchemy.orm import Session
 
-from app.db.models import MarketChipDaily, MarketIndexDailyStat
-from app.http_client import get as http_get
+from app.db.models import (
+    MarginTradingDaily,
+    MarketChipDaily,
+    MarketIndexDailyStat,
+    SourceRegistry,
+)
 from app.market.indices import ensure_market_index_daily_stat_coverage
+from app.market.providers import http_get, http_post
 from app.market.trading_calendar import latest_released_trading_day
 from app.parsers.twse_common import (
     list_row_to_dict,
@@ -29,6 +34,7 @@ from app.parsers.twse_common import (
 TWSE_BFI82U_URL = "https://www.twse.com.tw/rwd/zh/fund/BFI82U"
 TWSE_MARGIN_TRADING_URL = "https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN"
 TAIFEX_FUT_CONTRACTS_DATE_URL = "https://www.taifex.com.tw/cht/3/futContractsDate"
+TAIFEX_PUT_CALL_RATIO_URL = "https://www.taifex.com.tw/cht/3/pcRatio"
 TPEX_3INSTI_SUMMARY_URL = "https://www.tpex.org.tw/openapi/v1/tpex_3insti_summary"
 TPEX_MARGIN_BALANCE_URL = "https://www.tpex.org.tw/www/zh-tw/margin/balance"
 MARKET_FUTURES_RELEASE_TIME = time(hour=15, minute=0)
@@ -41,6 +47,10 @@ REQUEST_HEADERS = {
     "Accept": "application/json,text/html,text/plain,*/*",
 }
 SUPPORTED_MARKET_CHIP_INDEX_IDS = {"TAIEX", "TPEX"}
+MARGIN_DAILY_SOURCE_NAMES = {
+    "TAIEX": "TWSE Margin Trading MI_MARGN",
+    "TPEX": "TPEx Margin Trading Balance",
+}
 MarketChipProgressCallback = Callable[[int | None, int | None, str | None], None]
 
 
@@ -141,6 +151,27 @@ def _fetch_text(url: str, *, params: dict[str, Any] | None = None) -> HttpPayloa
         response = http_get(
             url,
             params=params,
+            headers=REQUEST_HEADERS,
+            timeout=HTTP_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        response.encoding = "utf-8"
+    except requests.RequestException as exc:
+        raise MarketChipFetchError(f"Market chip HTML source unavailable: {exc}") from exc
+
+    return HttpPayload(
+        url=response.url,
+        status_code=response.status_code,
+        content_type=response.headers.get("content-type"),
+        payload=response.text,
+    )
+
+
+def _post_text(url: str, *, data: dict[str, Any]) -> HttpPayload:
+    try:
+        response = http_post(
+            url,
+            data=data,
             headers=REQUEST_HEADERS,
             timeout=HTTP_TIMEOUT_SECONDS,
         )
@@ -556,6 +587,47 @@ def parse_taifex_futures_institutional_html(raw_html: str) -> dict[str, Any]:
     }
 
 
+def parse_taifex_put_call_ratio_html(
+    raw_html: str,
+    *,
+    target_trade_date: date | None = None,
+) -> dict[str, Any]:
+    soup = BeautifulSoup(raw_html or "", "lxml")
+    parsed_rows: list[dict[str, Any]] = []
+
+    for table_row in soup.find_all("tr"):
+        cells = [cell for cell in _html_cells(table_row) if cell]
+        if len(cells) < 7:
+            continue
+
+        trade_date = parse_date(cells[0])
+        if trade_date is None:
+            continue
+
+        values = {
+            "trade_date": trade_date,
+            "put_volume": parse_int(cells[1]),
+            "call_volume": parse_int(cells[2]),
+            "put_call_volume_ratio_pct": parse_float(cells[3]),
+            "put_open_interest": parse_int(cells[4]),
+            "call_open_interest": parse_int(cells[5]),
+            "put_call_open_interest_ratio_pct": parse_float(cells[6]),
+        }
+        if any(values[field] is None for field in values if field != "trade_date"):
+            continue
+        parsed_rows.append(values)
+
+    if target_trade_date is not None:
+        for row in parsed_rows:
+            if row["trade_date"] == target_trade_date:
+                return row
+
+    if parsed_rows:
+        return max(parsed_rows, key=lambda row: row["trade_date"])
+
+    raise ValueError("TAIFEX Put/Call Ratio page did not contain a usable data row.")
+
+
 def _required_sum(values: Iterable[int | None]) -> int | None:
     items = list(values)
     if not items or any(value is None for value in items):
@@ -756,6 +828,41 @@ def _fetch_taiwan_market_chip_sources(
                 }
             )
 
+        try:
+            formatted_trade_date = _format_taifex_date(trade_date)
+            put_call_result = _post_text(
+                TAIFEX_PUT_CALL_RATIO_URL,
+                data={
+                    "queryStartDate": formatted_trade_date,
+                    "queryEndDate": formatted_trade_date,
+                },
+            )
+            put_call_summary = parse_taifex_put_call_ratio_html(
+                str(put_call_result.payload),
+                target_trade_date=trade_date,
+            )
+            put_call_trade_date = put_call_summary.pop("trade_date", None)
+            if put_call_trade_date != trade_date:
+                raise ValueError(
+                    f"TAIFEX returned trade_date={put_call_trade_date}; requested {trade_date}."
+                )
+            values.update(put_call_summary)
+            sources.append(
+                _source_ref(
+                    name="TAIFEX Put/Call Ratio",
+                    url=put_call_result.url,
+                    status_code=put_call_result.status_code,
+                    content_type=put_call_result.content_type,
+                )
+            )
+        except (MarketChipFetchError, ValueError) as exc:
+            warnings.append(
+                {
+                    "source": "TAIFEX Put/Call Ratio",
+                    "message": str(exc),
+                }
+            )
+
         if _is_margin_released_for_trade_date(trade_date):
             try:
                 margin_result = _fetch_json(
@@ -888,6 +995,8 @@ def _non_empty_payload(values: dict[str, Any]) -> bool:
         for key in (
             "foreign_futures_net_oi",
             "retail_futures_net_oi",
+            "put_call_volume_ratio_pct",
+            "put_call_open_interest_ratio_pct",
             "total_institutional_net_value",
             "foreign_investor_net_value",
             "investment_trust_net_value",
@@ -1057,6 +1166,14 @@ def upsert_market_chip_daily(
             payload.get("retail_futures_net_oi"),
             None if previous is None else previous.retail_futures_net_oi,
         ),
+        "put_volume": payload.get("put_volume"),
+        "call_volume": payload.get("call_volume"),
+        "put_call_volume_ratio_pct": payload.get("put_call_volume_ratio_pct"),
+        "put_open_interest": payload.get("put_open_interest"),
+        "call_open_interest": payload.get("call_open_interest"),
+        "put_call_open_interest_ratio_pct": payload.get(
+            "put_call_open_interest_ratio_pct"
+        ),
         "total_institutional_net_value": payload.get("total_institutional_net_value"),
         "foreign_investor_net_value": payload.get("foreign_investor_net_value"),
         "investment_trust_net_value": payload.get("investment_trust_net_value"),
@@ -1105,6 +1222,269 @@ def _margin_fields_expected_for_index(index_id: str) -> tuple[str, ...]:
     )
 
 
+def _margin_values_from_row(row: MarketChipDaily) -> dict[str, int | None]:
+    return {
+        "margin_balance_change_value": row.margin_balance_change_value,
+        "margin_balance_change_shares": row.margin_balance_change_shares,
+        "short_balance_change_shares": row.short_balance_change_shares,
+    }
+
+
+def _margin_source_from_row(row: MarketChipDaily) -> str:
+    source_details = _load_source_details(row) or {}
+    sources = source_details.get("sources")
+    if isinstance(sources, list):
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            name = str(source.get("name") or "")
+            if "margin" in name.lower() or "融資" in name:
+                return name
+    return "market_chip_daily"
+
+
+def _stored_margin_daily_aggregate(
+    db: Session,
+    *,
+    index_id: str,
+    trade_date: date,
+) -> dict[str, Any] | None:
+    source_name = MARGIN_DAILY_SOURCE_NAMES.get(index_id.upper())
+    if source_name is None:
+        return None
+
+    margin_usable = and_(
+        MarginTradingDaily.margin_previous_balance.is_not(None),
+        MarginTradingDaily.margin_today_balance.is_not(None),
+    )
+    short_usable = and_(
+        MarginTradingDaily.short_previous_balance.is_not(None),
+        MarginTradingDaily.short_today_balance.is_not(None),
+    )
+    fully_usable = and_(margin_usable, short_usable)
+    result = (
+        db.query(
+            func.count(MarginTradingDaily.id).label("total_count"),
+            func.sum(case((fully_usable, 1), else_=0)).label("coverage_count"),
+            func.sum(
+                case(
+                    (
+                        margin_usable,
+                        MarginTradingDaily.margin_today_balance
+                        - MarginTradingDaily.margin_previous_balance,
+                    ),
+                    else_=None,
+                )
+            ).label("margin_change_lots"),
+            func.sum(
+                case(
+                    (
+                        short_usable,
+                        MarginTradingDaily.short_today_balance
+                        - MarginTradingDaily.short_previous_balance,
+                    ),
+                    else_=None,
+                )
+            ).label("short_change_lots"),
+        )
+        .join(SourceRegistry, SourceRegistry.id == MarginTradingDaily.source_id)
+        .filter(SourceRegistry.source_name == source_name)
+        .filter(MarginTradingDaily.trade_date == trade_date)
+        .one()
+    )
+    total_count = int(result.total_count or 0)
+    if total_count == 0:
+        return None
+
+    coverage_count = int(result.coverage_count or 0)
+    margin_change_lots = result.margin_change_lots
+    short_change_lots = result.short_change_lots
+    return {
+        "values": {
+            "margin_balance_change_value": None,
+            "margin_balance_change_shares": (
+                int(margin_change_lots) * 1000
+                if margin_change_lots is not None
+                else None
+            ),
+            "short_balance_change_shares": (
+                int(short_change_lots) * 1000
+                if short_change_lots is not None
+                else None
+            ),
+        },
+        "source": "margin_trading_daily",
+        "coverage_count": coverage_count,
+        "total_count": total_count,
+    }
+
+
+def _latest_populated_margin_row(
+    db: Session,
+    *,
+    index_id: str,
+    on_or_before: date,
+) -> MarketChipDaily | None:
+    return (
+        db.query(MarketChipDaily)
+        .filter(MarketChipDaily.index_id == index_id.upper())
+        .filter(MarketChipDaily.trade_date <= on_or_before)
+        .filter(
+            or_(
+                MarketChipDaily.margin_balance_change_value.is_not(None),
+                MarketChipDaily.margin_balance_change_shares.is_not(None),
+                MarketChipDaily.short_balance_change_shares.is_not(None),
+            )
+        )
+        .order_by(MarketChipDaily.trade_date.desc())
+        .first()
+    )
+
+
+def _resolve_market_chip_margin(
+    row: MarketChipDaily,
+    *,
+    db: Session | None,
+    now: datetime | None,
+) -> tuple[dict[str, int | None], dict[str, Any]]:
+    index_id = row.index_id.upper()
+    expected_date = expected_market_margin_chip_date(now=now)
+    pending_trade_date = row.trade_date if row.trade_date > expected_date else None
+    expected_fields = _margin_fields_expected_for_index(index_id)
+    exact_row: MarketChipDaily | None = row if row.trade_date == expected_date else None
+
+    if exact_row is None and db is not None:
+        exact_row = (
+            db.query(MarketChipDaily)
+            .filter(MarketChipDaily.index_id == index_id)
+            .filter(MarketChipDaily.trade_date == expected_date)
+            .first()
+        )
+
+    values = (
+        _margin_values_from_row(exact_row)
+        if exact_row is not None
+        else {
+            "margin_balance_change_value": None,
+            "margin_balance_change_shares": None,
+            "short_balance_change_shares": None,
+        }
+    )
+    source_parts: list[str] = []
+    if exact_row is not None and any(value is not None for value in values.values()):
+        source_parts.append(_margin_source_from_row(exact_row))
+
+    aggregate = (
+        _stored_margin_daily_aggregate(
+            db,
+            index_id=index_id,
+            trade_date=expected_date,
+        )
+        if db is not None
+        else None
+    )
+    coverage_count = None
+    total_count = None
+    if aggregate is not None:
+        aggregate_values = aggregate["values"]
+        for field in (
+            "margin_balance_change_shares",
+            "short_balance_change_shares",
+        ):
+            if values.get(field) is None:
+                values[field] = aggregate_values.get(field)
+        coverage_count = aggregate.get("coverage_count")
+        total_count = aggregate.get("total_count")
+        if any(value is not None for value in aggregate_values.values()):
+            source_parts.append(str(aggregate["source"]))
+
+    available_fields = [field for field in expected_fields if values.get(field) is not None]
+    data_date: date | None = expected_date if available_fields else None
+    warnings: list[str] = []
+
+    if len(available_fields) == len(expected_fields):
+        status = "ready"
+        reason = (
+            "margin_for_current_chip_date_pending_release"
+            if pending_trade_date is not None
+            else None
+        )
+    elif available_fields:
+        status = "partial"
+        reason = "released_margin_data_incomplete"
+        warnings.append("Released margin data is incomplete.")
+    else:
+        older_row = (
+            _latest_populated_margin_row(
+                db,
+                index_id=index_id,
+                on_or_before=expected_date,
+            )
+            if db is not None
+            else None
+        )
+        if older_row is not None:
+            values = _margin_values_from_row(older_row)
+            data_date = older_row.trade_date
+            source_parts = [_margin_source_from_row(older_row)]
+            status = "stale"
+            reason = "expected_margin_data_unavailable"
+            warnings.append(
+                "Latest released margin data is unavailable; showing an older snapshot."
+            )
+        else:
+            status = "missing"
+            reason = "released_margin_data_unavailable"
+            warnings.append("Latest released margin data is unavailable.")
+
+    source = "+".join(dict.fromkeys(source_parts)) or None
+    return values, {
+        "resource": "market_chip_margin_daily",
+        "status": status,
+        "data_date": data_date,
+        "expected_data_date": expected_date,
+        "pending_trade_date": pending_trade_date,
+        "source": source,
+        "reason": reason,
+        "coverage_count": coverage_count,
+        "total_count": total_count,
+        "warnings": warnings,
+    }
+
+
+def _stored_market_chip_margin_status(
+    row: MarketChipDaily,
+) -> tuple[dict[str, int | None], dict[str, Any]]:
+    values = _margin_values_from_row(row)
+    expected_fields = _margin_fields_expected_for_index(row.index_id)
+    available_fields = [field for field in expected_fields if values.get(field) is not None]
+    if len(available_fields) == len(expected_fields):
+        status = "ready"
+        reason = None
+        warnings: list[str] = []
+    elif available_fields:
+        status = "partial"
+        reason = "stored_margin_data_incomplete"
+        warnings = ["Stored margin data is incomplete."]
+    else:
+        status = "missing"
+        reason = "stored_margin_data_unavailable"
+        warnings = ["Stored margin data is unavailable."]
+
+    return values, {
+        "resource": "market_chip_margin_daily",
+        "status": status,
+        "data_date": row.trade_date if available_fields else None,
+        "expected_data_date": row.trade_date,
+        "pending_trade_date": None,
+        "source": _margin_source_from_row(row) if available_fields else None,
+        "reason": reason,
+        "coverage_count": None,
+        "total_count": None,
+        "warnings": warnings,
+    }
+
+
 def _has_missing_released_margin_fields(row: MarketChipDaily) -> bool:
     if row.trade_date > expected_market_margin_chip_date():
         return False
@@ -1112,6 +1492,23 @@ def _has_missing_released_margin_fields(row: MarketChipDaily) -> bool:
     return any(
         getattr(row, field) is None
         for field in _margin_fields_expected_for_index(row.index_id)
+    )
+
+
+def _has_missing_released_options_fields(row: MarketChipDaily) -> bool:
+    if row.index_id.upper() != "TAIEX" or row.trade_date > expected_market_chip_date():
+        return False
+
+    return any(
+        getattr(row, field) is None
+        for field in (
+            "put_volume",
+            "call_volume",
+            "put_call_volume_ratio_pct",
+            "put_open_interest",
+            "call_open_interest",
+            "put_call_open_interest_ratio_pct",
+        )
     )
 
 
@@ -1138,6 +1535,7 @@ def ensure_market_chip_daily(
         existing is not None
         and not force
         and not _has_missing_released_margin_fields(existing)
+        and not _has_missing_released_options_fields(existing)
     ):
         return existing
 
@@ -1269,8 +1667,38 @@ def list_market_chip_daily(
     return rows
 
 
-def market_chip_daily_to_dict(row: MarketChipDaily) -> dict[str, Any]:
+def market_chip_daily_to_dict(
+    row: MarketChipDaily,
+    *,
+    db: Session | None = None,
+    now: datetime | None = None,
+    resolve_expected_margin: bool = False,
+) -> dict[str, Any]:
     source_details = _load_source_details(row)
+    if resolve_expected_margin:
+        margin_values, margin_status = _resolve_market_chip_margin(
+            row,
+            db=db,
+            now=now,
+        )
+    else:
+        margin_values, margin_status = _stored_market_chip_margin_status(row)
+    government_bank_status = {
+        "resource": "government_bank_net_value",
+        "status": "ready" if row.government_bank_net_value is not None else "not_available",
+        "data_date": row.trade_date if row.government_bank_net_value is not None else None,
+        "expected_data_date": None,
+        "pending_trade_date": None,
+        "source": "market_chip_daily" if row.government_bank_net_value is not None else None,
+        "reason": (
+            None
+            if row.government_bank_net_value is not None
+            else "government_bank_provider_not_configured"
+        ),
+        "coverage_count": None,
+        "total_count": None,
+        "warnings": [],
+    }
     return {
         "id": row.id,
         "index_id": row.index_id,
@@ -1284,6 +1712,12 @@ def market_chip_daily_to_dict(row: MarketChipDaily) -> dict[str, Any]:
         "foreign_futures_net_oi_change": row.foreign_futures_net_oi_change,
         "retail_futures_net_oi": row.retail_futures_net_oi,
         "retail_futures_net_oi_change": row.retail_futures_net_oi_change,
+        "put_volume": row.put_volume,
+        "call_volume": row.call_volume,
+        "put_call_volume_ratio_pct": row.put_call_volume_ratio_pct,
+        "put_open_interest": row.put_open_interest,
+        "call_open_interest": row.call_open_interest,
+        "put_call_open_interest_ratio_pct": row.put_call_open_interest_ratio_pct,
         "total_institutional_net_value": row.total_institutional_net_value,
         "foreign_investor_net_value": row.foreign_investor_net_value,
         "investment_trust_net_value": row.investment_trust_net_value,
@@ -1291,9 +1725,15 @@ def market_chip_daily_to_dict(row: MarketChipDaily) -> dict[str, Any]:
         "dealer_self_net_value": row.dealer_self_net_value,
         "dealer_hedge_net_value": row.dealer_hedge_net_value,
         "government_bank_net_value": row.government_bank_net_value,
-        "margin_balance_change_value": row.margin_balance_change_value,
-        "margin_balance_change_shares": row.margin_balance_change_shares,
-        "short_balance_change_shares": row.short_balance_change_shares,
+        "margin_balance_change_value": margin_values["margin_balance_change_value"],
+        "margin_balance_change_shares": margin_values[
+            "margin_balance_change_shares"
+        ],
+        "short_balance_change_shares": margin_values[
+            "short_balance_change_shares"
+        ],
+        "margin_status": margin_status,
+        "government_bank_status": government_bank_status,
         "source_grade": row.source_grade,
         "source_details": source_details,
         "created_at": row.created_at,

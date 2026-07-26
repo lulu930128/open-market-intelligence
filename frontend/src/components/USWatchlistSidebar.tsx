@@ -1,10 +1,11 @@
 "use client";
 
 import JobStatusCenter from "@/components/JobStatusCenter";
+import PortfolioHoldingsPanel from "@/components/PortfolioHoldingsPanel";
 import SettingsDock from "@/components/SettingsDock";
-import type { MarketRegion } from "@/components/SidebarWatchlistExplorer";
 import { marketLabel, usAssetTypeLabel, useT } from "@/i18n";
 import { deleteRequest, fetchJson, requestJson } from "@/lib/api";
+import type { MarketRegion } from "@/components/market-dashboard/selection/dashboardRoutes";
 import {
   US_MARKET_INDEX_GROUP_NAME,
   US_MARKET_INDEX_ITEMS,
@@ -41,7 +42,7 @@ const marketOptions: Array<{
   { value: "tw", enabled: true },
   { value: "us", enabled: true },
   { value: "jp", enabled: true },
-  { value: "kr", enabled: false },
+  { value: "kr", enabled: true },
   { value: "crypto", enabled: true },
 ];
 
@@ -177,7 +178,6 @@ export default function USWatchlistSidebar({
     onExplorerDataChanged?.(treeData, itemData);
     setSelectedGroupId(nextSelected?.id ?? null);
     setRenameValue(nextSelected?.group_name ?? "");
-    onSelectGroup?.(nextSelected);
 
     return nextSelected;
   }
@@ -604,7 +604,7 @@ export default function USWatchlistSidebar({
   }
 
   return (
-    <aside className="flex h-full w-[300px] shrink-0 flex-col border-r border-omi-border-subtle bg-omi-surface">
+    <aside className="flex max-h-[55vh] w-full shrink-0 flex-col border-b border-omi-border-subtle bg-omi-surface lg:h-full lg:max-h-none lg:w-[300px] lg:border-b-0 lg:border-r">
       <div className="border-b border-omi-border-subtle px-4 py-4">
         <div className="text-xs font-semibold uppercase tracking-[0.22em] text-omi-accent">
           Open Market Intelligence
@@ -659,6 +659,15 @@ export default function USWatchlistSidebar({
 
       <div className="min-h-0 flex-1 overflow-y-auto py-2">
         {renderPinnedIndexGroup()}
+        <PortfolioHoldingsPanel
+          market="us"
+          selectedSymbol={selectedSymbol}
+          defaultCurrency="USD"
+          symbolPlaceholder="Ticker, e.g. AAPL"
+          normalizeSymbol={normalizeTickerInput}
+          onSelectSymbol={onSelectSymbol}
+          onChanged={onChanged}
+        />
         {tree.length > 0 ? (
           tree.map((node) => renderGroupNode(node))
         ) : (

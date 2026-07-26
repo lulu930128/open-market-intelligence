@@ -56,5 +56,7 @@ class SourceHealthSnapshotRead(BaseModel):
     recent_error_count: int = 0
     consecutive_error_count: int = 0
     checked_at: datetime
+    snapshot_age_seconds: int = 0
+    snapshot_is_stale: bool = False
     created_at: datetime
     updated_at: datetime
